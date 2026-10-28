@@ -1,4 +1,15 @@
 use super::*;
+
+fn configure(spec: &mut ProjectSpec, parameters: &[UniformParameter]) -> Result<()> {
+    super::configure(spec, parameters, false)
+}
+
+fn coefficients(
+    receipt: &J, spec: &ProjectSpec, parameters: &[UniformParameter], nominal: f64, region: &str,
+) -> Result<Vec<f64>> {
+    super::coefficients(receipt, spec, parameters, nominal, region, false)
+        .map(|calibration| calibration.gradient)
+}
 use fs_project::{TransientEnthalpy, TransientPowerStep, TransientRegionPower, spec::dims};
 use fs_qty::QtyAny;
 
@@ -410,3 +421,25 @@ fn g0_enthalpy_convection_coefficients_bind_absolute_coordinates_and_complete_hi
         "a dynamic natural reservoir is not an independently prescribed reference");
 }
 
+
+#[test]
+fn g0_peak_calibration_selects_only_the_peak_report_and_preserves_material_intent() {
+    for existing in [None, Some(PEAK), Some(PEAK_MATERIAL)] {
+        let mut spec = base();
+        if let Some(name) = existing { spec.outputs.as_mut().unwrap().push(request(name)); }
+        let mut expected = spec.clone();
+        if existing.is_none() { expected.outputs.as_mut().unwrap().push(request(PEAK)); }
+        super::configure(&mut spec, &[parameter(Target::Power, "solid")], true).unwrap();
+        assert_eq!(spec, expected, "only the independent calibration report may change");
+        super::configure(&mut spec, &[parameter(Target::Power, "solid")], true).unwrap();
+        assert_eq!(spec, expected, "recovery chooses the same peak child identity");
+    }
+    for names in [vec![FINAL], vec![FINAL_MATERIAL], vec![PEAK, PEAK],
+        vec![PEAK, PEAK_MATERIAL], vec![super::super::OUTPUT]] {
+        let mut spec = base();
+        spec.outputs.as_mut().unwrap().extend(names.into_iter().map(request));
+        let original = spec.clone();
+        assert!(super::configure(&mut spec, &[], true).is_err());
+        assert_eq!(spec, original, "another objective cannot be silently relabeled");
+    }
+}

@@ -580,10 +580,14 @@ Native probability studies accept `:qoi "temperature-peak"` for a declared
 transient base. This changes the observation to the selected region's sampled
 peak including the initial state, while leaving the project, its final-state
 `temperature-max` output, requirement limit and margin intact. The canonical
-study retains that distinct choice. Steady projects and final-state nominal
-adjoint controls refuse; coordinate-secant controls remain available. The
-execution layer must validate the retained full-trajectory peak rather than
-substitute a final temperature. No between-sample temperature bound is implied.
+study retains that distinct choice. Steady projects refuse. Coordinate-secant
+and nominal-adjoint mean controls are admitted for transient peak studies; the
+execution layer must use the genuine sampled-peak derivative and bind its
+selected branch and prefix to the retained full-trajectory peak. A frozen
+active-branch coefficient is a centered mean control, including at a tied peak;
+it does not certify differentiability of the maximum. The execution layer may
+not substitute a final temperature or final-time adjoint. No between-sample
+temperature bound is implied.
 
 - An admissible `.fsim` document proves the project is well-formed and
   internally consistent. It does NOT prove the referenced geometry artifacts,

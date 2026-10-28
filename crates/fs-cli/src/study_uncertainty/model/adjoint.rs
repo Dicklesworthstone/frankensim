@@ -13,13 +13,21 @@ mod transient;
 
 const OUTPUT: &str = "temperature-max-adjoint";
 
+/// Frozen coefficients and the independently selected nominal peak branch.
+/// Branch metadata is absent for the existing final-state calibration.
+pub(crate) struct NominalCalibration {
+    pub(crate) gradient: Vec<f64>,
+    pub(crate) peak_branch: Option<String>,
+}
+
 impl Model {
     /// Construct an admitted report-only view of the SAME physical model.
     /// Cloned assets remain under the existing input envelope (memory/4 each);
     /// no second file load, source substitution or independent physical solver.
     fn nominal_view(&self) -> Result<Self> {
         let mut spec = self.base.spec.clone();
-        output::configure(&mut spec, self.bound.study().parameters())?;
+        output::configure(&mut spec, self.bound.study().parameters(),
+            self.bound.study().uses_sampled_peak())?;
         let text = fs_project::print_sexpr(&spec).map_err(project_error)?;
         let base = fs_project::parse_sexpr(&text).map_err(project_error)?;
         let bound = self.bound.study().clone().bind(&base.spec).map_err(project_error)?;
@@ -36,7 +44,7 @@ impl Model {
     /// Recover from sealed native evidence without rerunning calibration. The
     /// requested-report child has a distinct project/run identity from raw
     /// probability children, even when their physical coordinates coincide.
-    pub(crate) fn nominal_coefficients(&self, ledger: &Ledger, sample: &Sample) -> Result<Vec<f64>> {
+    pub(crate) fn nominal_calibration(&self, ledger: &Ledger, sample: &Sample) -> Result<NominalCalibration> {
         let view = self.nominal_view()?;
         view.verify_sample(ledger, sample)?;
         let sealed = crate::solve::load_completed_run(ledger, &sample.run)
@@ -54,18 +62,19 @@ impl Model {
             // Chain logarithmic/delivered controls at the actual calibration
             // point, whose marginal means can differ from the original model.
             let project = self.project(&sample.parameters)?;
-            let mut gradient = transient::coefficients(&receipt, &project.spec,
-                self.bound.study().parameters(), sample.value_k, region)?;
+            let mut calibration = transient::coefficients(&receipt, &project.spec,
+                self.bound.study().parameters(), sample.value_k, region,
+                self.bound.study().uses_sampled_peak())?;
             let report = receipt.get("transient").and_then(|value| value.get("adjoint"))
-                .ok_or_else(|| invalid("nominal calibration has no final trajectory adjoint"))?;
-            contact::convert(self, sample, report, &mut gradient)?;
-            return Ok(gradient);
+                .ok_or_else(|| invalid("nominal calibration has no selected trajectory adjoint"))?;
+            contact::convert(self, sample, report, &mut calibration.gradient)?;
+            return Ok(calibration);
         }
         let report = receipt.get("nominal_adjoint")
             .ok_or_else(|| invalid("nominal calibration did not produce its requested adjoint"))?;
         let mut gradient = coefficients(report, self.bound.study().parameters(), sample.value_k, region)?;
         contact::convert(self, sample, report, &mut gradient)?;
-        Ok(gradient)
+        Ok(NominalCalibration { gradient, peak_branch: None })
     }
 }
 

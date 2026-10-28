@@ -1,10 +1,14 @@
 //! Bind native mean controls to the existing accepted-trajectory adjoint.
 //! The probability samples still run the unchanged physical project. This
-//! adapter only selects the final-time report and converts its coordinates.
+//! adapter selects the requested final or sampled-peak report and converts its
+//! physical coordinates. Fixed peak controls may use a deterministic tied branch.
 
 use fs_project::{ConductionTransient, ProjectSpec, ThermalBoundaryCondition, spec::OutputRequest};
 
-use super::{J, Result, Target, UniformParameter, array, invalid};
+use super::{J, NominalCalibration, Result, Target, UniformParameter, array, invalid};
+
+#[path = "transient/peak.rs"]
+mod peak;
 
 const FINAL: &str = "temperature-final-adjoint";
 const FINAL_MATERIAL: &str = "temperature-final-material-adjoint";
@@ -60,8 +64,12 @@ fn admit_controls(spec: &ProjectSpec, parameters: &[UniformParameter]) -> Result
 
 /// Preserve report intent and storage physics; do not replace a peak request
 /// with a different objective or add a conflicting second adjoint.
-pub(super) fn configure(spec: &mut ProjectSpec, parameters: &[UniformParameter]) -> Result<()> {
+pub(super) fn configure(
+    spec: &mut ProjectSpec, parameters: &[UniformParameter], sampled_peak: bool,
+) -> Result<()> {
     admit_controls(spec, parameters)?;
+    let (ordinary, material) = if sampled_peak { (PEAK, PEAK_MATERIAL) }
+        else { (FINAL, FINAL_MATERIAL) };
     let needs_contacts = parameters.iter()
         .any(|parameter| parameter.target.contact_axis().is_some() && parameter.low != parameter.high);
     let outputs = spec.outputs.as_deref().unwrap_or(&[]);
@@ -84,28 +92,28 @@ pub(super) fn configure(spec: &mut ProjectSpec, parameters: &[UniformParameter])
         .collect();
     if requests.len() > 1
         || requests.first().is_some_and(|row| {
-            !matches!(row.name.as_str(), FINAL | FINAL_MATERIAL)
+            (row.name != ordinary && row.name != material)
                 || row.kind != "report"
                 || row.region.is_some()
         })
     {
         return Err(invalid(
-            "transient uncertainty calibration requires one final-time adjoint report without an output region; sampled-peak and steady objectives differ",
+            "transient uncertainty calibration requires one adjoint report for its selected final or sampled-peak objective, without an output region",
         ));
     }
     if requests.is_empty() {
         spec.outputs
             .get_or_insert_with(Vec::new)
             .push(OutputRequest {
-                name: if needs_contacts { FINAL_MATERIAL } else { FINAL }.into(),
+                name: if needs_contacts { material } else { ordinary }.into(),
                 kind: "report".into(),
                 region: None,
             });
     } else if needs_contacts {
-        // This report-only calibration view keeps the same final functional,
-        // while explicitly admitting the material contractions and their work.
+        // Keep the selected functional while explicitly admitting the
+        // material contractions and their work on the same native trajectory.
         for output in spec.outputs.iter_mut().flatten() {
-            if output.name == FINAL { output.name = FINAL_MATERIAL.into(); }
+            if output.name == ordinary { output.name = material.into(); }
         }
     }
     Ok(())
@@ -241,15 +249,17 @@ fn prescribed_boundary(
 }
 
 /// The caller first verifies the sealed run, its project and its selected QoI.
-/// These checks additionally bind the derivative to the same accepted final
-/// state, storage law and fine grid; a coincident sampled peak is insufficient.
+/// Bind the derivative to the same selected state, storage law and fine grid.
+/// A peak branch supplies fixed controls even when the maximum is not unique;
+/// its active state, vertex and tie count remain explicit calibration data.
 pub(super) fn coefficients(
     receipt: &J,
     spec: &ProjectSpec,
     parameters: &[UniformParameter],
     nominal: f64,
     region: &str,
-) -> Result<Vec<f64>> {
+    sampled_peak: bool,
+) -> Result<NominalCalibration> {
     admit_controls(spec, parameters)?;
     let time = policy(spec).ok_or_else(|| invalid("missing transient calibration policy"))?;
     let transient = family(receipt, "transient")?;
@@ -276,27 +286,36 @@ pub(super) fn coefficients(
         Some(recorded) => recorded == region,
         None => enthalpy,
     };
+    let selected = sampled_peak.then(|| peak::bind(receipt, nominal, region, fine_steps, enthalpy))
+        .transpose().map_err(invalid)?;
+    let prefix_steps = selected.as_ref().map_or(fine_steps, |selected| selected.state);
+    let selected_time = selected.as_ref().map_or(time.horizon.value, |selected| selected.time_s);
+    let output_matches = if sampled_peak {
+        matches!(report.str_field("output"), Some(PEAK | PEAK_MATERIAL))
+    } else {
+        matches!(report.str_field("output"), Some(FINAL | FINAL_MATERIAL))
+    };
     if transient.str_field("schema") != Some(time_schema)
         || transient.str_field("status") != Some("completed")
         || transient.str_field("qoi_time") != Some("final")
         || number(transient, "final_time_s")?.to_bits() != time.horizon.value.to_bits()
         || transient.f64_field("fine_steps") != Some(fine_steps as f64)
         || report.str_field("schema") != Some(schema)
-        || !matches!(report.str_field("output"), Some(FINAL | FINAL_MATERIAL))
+        || !output_matches
         || number(report, "value_k")?.to_bits() != nominal.to_bits()
-        || number(report, "time_s")?.to_bits() != time.horizon.value.to_bits()
-        || report.f64_field("state_index") != Some(fine_steps as f64)
+        || number(report, "time_s")?.to_bits() != selected_time.to_bits()
+        || report.f64_field("state_index") != Some(prefix_steps as f64)
         || report.f64_field("max_reverse_steps") != Some(fine_steps as f64)
         || number(report, "maximum_dual_relative_residual")? < 0.0
         || goal.str_field("qoi") != Some("temperature-max")
-        || number(goal, "fine_final_k")?.to_bits() != nominal.to_bits()
+        || (!sampled_peak && number(goal, "fine_final_k")?.to_bits() != nominal.to_bits())
         || !region_matches
     {
         return Err(invalid(
-            "transient adjoint storage, final state, grid, functional or residual differs from the sealed calibration",
+            "transient adjoint storage, selected state, grid, functional or residual differs from the sealed calibration",
         ));
     }
-    parameters.iter().map(|parameter| {
+    let gradient = parameters.iter().map(|parameter| {
         if parameter.low == parameter.high { return Ok(0.0); }
         let entity = parameter.entity.as_str();
         let derivative = match parameter.target {
@@ -313,7 +332,7 @@ pub(super) fn coefficients(
                 }
             }
             Target::ConvectionCoefficient | Target::ConvectionTemperature if enthalpy =>
-                enthalpy_convection(report, spec, entity, parameter.target, fine_steps)?,
+                enthalpy_convection(report, spec, entity, parameter.target, prefix_steps)?,
             Target::ConvectionCoefficient | Target::ConvectionTemperature => {
                 let row = named(report, "robin", "region", entity)?;
                 if parameter.target == Target::ConvectionTemperature {
@@ -345,7 +364,7 @@ pub(super) fn coefficients(
                 number(row, "dtemperature_dspeed_ratio_k")?
             }
             Target::FixedTemperature | Target::HeatFlux =>
-                prescribed_boundary(report, spec, entity, parameter.target, fine_steps)?,
+                prescribed_boundary(report, spec, entity, parameter.target, prefix_steps)?,
             Target::RadiationReservoirTemperature => number(named(family(report, "radiation")?,
                 "surfaces", "name", entity)?, "dtemperature_dreservoir_temperature_k_per_k")?,
             Target::ContactPressure | Target::ContactThickness | Target::ContactGap
@@ -354,8 +373,21 @@ pub(super) fn coefficients(
         if !derivative.is_finite() {
             return Err(invalid(format!("nonfinite transient nominal coefficient for {}", parameter.name)));
         }
+        // These coordinates act only on future transport. Do not extend this
+        // check to initial-state or constitutive-chart coordinates: those must
+        // retain their genuine native initial-observation contribution.
+        let future_only = matches!(parameter.target,
+            Target::Power | Target::ConvectionCoefficient | Target::ConvectionTemperature
+                | Target::AirInletTemperature | Target::FanSpeedRatio
+                | Target::NaturalConvectionAmbient | Target::RadiationReservoirTemperature
+                | Target::FixedTemperature | Target::HeatFlux | Target::ContactPressure
+                | Target::ContactThickness | Target::ContactGap | Target::ContactTorque);
+        if sampled_peak && prefix_steps == 0 && future_only && derivative != 0.0 {
+            return Err(invalid("an initial peak cannot depend on a future thermal control"));
+        }
         Ok(derivative)
-    }).collect()
+    }).collect::<Result<Vec<_>>>()?;
+    Ok(NominalCalibration { gradient, peak_branch: selected.map(|selected| selected.json()) })
 }
 
 #[cfg(test)]

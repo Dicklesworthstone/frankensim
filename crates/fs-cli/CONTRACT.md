@@ -1165,10 +1165,17 @@ minus margin. A steady base, missing/incomplete peak, wrong run/region or
 inconsistent peak endpoint refuses instead of substituting the final value.
 Monte Carlo, replicated QMC/LHS, Sobol sensitivity, Bernoulli compliance and
 coordinate-secant mean controls use the selected observable through the same
-sampling and retained recovery paths. Final-state nominal adjoint controls are
-not admitted for peak studies. Reports name the observation explicitly. Peak
-statistics remain Estimated: neither the final-field error budget nor a sampled
-maximum supplies a continuous-time or continuum upper bound.
+sampling and retained recovery paths. Nominal-adjoint mean controls request the
+native sampled-peak adjoint and bind its selected state, time, value, active
+vertex and reverse prefix to the retained forward peak. The deterministic
+active branch may be nonunique; its tie count and branch scope are explicit.
+These coefficients are frozen before independent probability observations and
+serve only as centered mean controls, without claiming a unique maximum
+derivative. Existing material and boundary chain rules use the genuine native
+coefficients. Raw temperatures, probabilities and compliance decisions remain
+unchanged. Reports name the observation explicitly. Peak statistics remain
+Estimated: neither the final-field error budget nor a sampled maximum supplies
+a continuous-time or continuum upper bound.
 
 `study <study.fsim> <ledger.db> [--budget N]` recognizes
 `fsim-uncertainty-study :version 1` and executes the

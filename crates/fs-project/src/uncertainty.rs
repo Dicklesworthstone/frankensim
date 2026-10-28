@@ -451,10 +451,6 @@ impl UncertaintyStudy {
         if !matches!(qoi.as_str(), "temperature-max" | "temperature-peak") {
             return Err(error("native temperature studies require temperature-max (final state) or temperature-peak (all accepted fine-grid states, including initial)"));
         }
-        if qoi == "temperature-peak" && mean_control.is_some_and(|policy|
-            policy.method == mean_control::MeanControlMethod::NominalAdjoint) {
-            return Err(error("temperature-peak cannot use the final-state nominal adjoint; use coordinate-secant mean controls or an uncontrolled study"));
-        }
         Ok(Self { canonical: fs_ir::sexpr::print(&root).map_err(|e| error(e.to_string()))?,
             project: text(f["project"])?, samples, seed: integer(f["seed"])?, wall_seconds, qoi,
             geometry, materials: paths(f["materials"])?, interfaces: paths(f["interfaces"])?, parameters,

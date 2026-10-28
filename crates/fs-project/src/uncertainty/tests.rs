@@ -62,7 +62,7 @@ fn sampled_peak_is_explicit_and_requires_a_transient_base() {
 }
 
 #[test]
-fn sampled_peak_supports_probability_methods_but_never_reuses_final_adjoint() {
+fn sampled_peak_supports_probability_methods_and_explicit_nominal_controls() {
     let peak = STUDY.replace("temperature-max", "temperature-peak");
     let compliance = peak.replace(":version 1", ":version 2 :compliance (bernoulli-mixture :required-probability 0.9 :alpha 0.05 :min-samples 2)");
     let secant = peak.replace(":version 1", ":version 3 :mean-control (coordinate-secant :max-solves 4)");
@@ -73,7 +73,11 @@ fn sampled_peak_supports_probability_methods_but_never_reuses_final_adjoint() {
         assert!(parsed.uses_sampled_peak());
         assert_eq!(UncertaintyStudy::parse(parsed.canonical()).unwrap(), parsed);
     }
-    assert!(UncertaintyStudy::parse(&secant.replace("coordinate-secant", "nominal-adjoint")).is_err());
+    let nominal = secant.replace("coordinate-secant :max-solves 4", "nominal-adjoint :max-solves 1");
+    let parsed = UncertaintyStudy::parse(&nominal).unwrap();
+    assert!(parsed.uses_sampled_peak());
+    assert_eq!(parsed.mean_control().unwrap().method, mean_control::MeanControlMethod::NominalAdjoint);
+    assert_eq!(UncertaintyStudy::parse(parsed.canonical()).unwrap(), parsed);
     assert!(UncertaintyStudy::parse(&peak.replace("temperature-peak", "temperature-integral")).is_err());
 }
 

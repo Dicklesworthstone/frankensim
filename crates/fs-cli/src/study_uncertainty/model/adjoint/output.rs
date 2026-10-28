@@ -8,9 +8,14 @@ pub(super) const COMBINED: &str = "temperature-max-contact-boundary-adjoint";
 
 /// Called only on the calibration clone. Probability children and original
 /// output declarations remain unchanged. Repeating the choice is idempotent.
-pub(super) fn configure(spec: &mut ProjectSpec, parameters: &[UniformParameter]) -> Result<()> {
+pub(super) fn configure(
+    spec: &mut ProjectSpec, parameters: &[UniformParameter], sampled_peak: bool,
+) -> Result<()> {
     if super::transient::policy(spec).is_some() {
-        return super::transient::configure(spec, parameters);
+        return super::transient::configure(spec, parameters, sampled_peak);
+    }
+    if sampled_peak {
+        return Err(invalid("sampled-peak calibration requires a native transient trajectory"));
     }
     let boundary = parameters.iter().any(|p| p.target == Target::FixedTemperature && p.low != p.high);
     let contact = parameters.iter().any(|p| p.target.contact_axis().is_some() && p.low != p.high);
@@ -44,6 +49,9 @@ pub(super) fn configure(spec: &mut ProjectSpec, parameters: &[UniformParameter])
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn configure(spec: &mut ProjectSpec, parameters: &[UniformParameter]) -> Result<()> {
+        super::configure(spec, parameters, false)
+    }
     fn base() -> ProjectSpec {
         fs_project::parse_sexpr_migrating(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
             "/../../examples/contact-pair/contact-pair.fsim"))).unwrap().decoded.spec

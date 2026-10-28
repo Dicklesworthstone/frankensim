@@ -109,10 +109,22 @@ state. The report names the selected observation, and either mode uses the
 original requirement limit minus margin.
 
 Peak observations also work with replicated QMC/LHS, Sobol sensitivity,
-version-2 probability decisions and coordinate-secant mean controls. Resume
-reads the same retained trajectories. A steady base or missing peak evidence
-refuses; final-state nominal adjoint controls cannot be used for a peak. The
-peak is sampled in time and remains an estimate, with no bound between samples.
+version-2 probability decisions and version-3 frozen mean controls. The
+`pulse-peak-adjoint.fsim` example calibrates from the genuine native peak
+adjoint in one nominal forward/reverse trajectory:
+
+```bash
+cargo run -p fs-cli --bin frankensim -- --json study examples/native-uncertainty/pulse-peak-adjoint.fsim pulse-peak-adjoint.db
+```
+
+Calibration records the selected time/state, active vertex, ties and reverse
+prefix, then freezes the coefficients before probability sampling. A tied
+maximum uses the native deterministic active branch as a centered mean
+control, without claiming a unique maximum derivative. Raw temperatures and
+probability/compliance statistics are unchanged. Resume reuses the retained
+calibration and trajectories. A steady base or missing/mismatched peak evidence
+refuses. The peak is sampled in time and remains an estimate, with no bound
+between samples.
 
 `fan-speed.fsim` varies the existing finned heatsink's fan speed, power and
 inlet temperature. Its three uniform laws and independence are illustrative

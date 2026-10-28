@@ -16,20 +16,22 @@ fn control_row<'a>(report: &'a J, entity: &str) -> Result<&'a J> {
             (array(report, "parameters", 256)?, "entity")
         }
         Some("fs-cli-native-transient-adjoint-v1" | "fs-cli-native-enthalpy-adjoint-v1") => {
-            if report.str_field("output") != Some("temperature-final-material-adjoint") {
-                return Err(invalid("joint-state trajectory calibration requires the final material adjoint"));
+            let peak = report.str_field("output") == Some("temperature-sampled-peak-material-adjoint");
+            if !peak && report.str_field("output") != Some("temperature-final-material-adjoint") {
+                return Err(invalid("joint-state trajectory calibration requires the selected material adjoint"));
             }
             let controls = report.get("material_controls")
                 .ok_or_else(|| invalid("transient contact calibration has no material controls"))?;
-            let steps = report.f64_field("state_index")
-                .filter(|value| value.is_finite() && *value > 0.0 && value.fract() == 0.0)
-                .ok_or_else(|| invalid("transient contact calibration has no final state index"))?;
-            if controls.f64_field("control_steps") != Some(steps)
+            let steps = report.get("state_index").and_then(J::number_raw)
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|steps| peak || *steps > 0)
+                .ok_or_else(|| invalid("transient contact calibration has no selected state index"))?;
+            if controls.f64_field("control_steps") != Some(steps as f64)
                 || controls.str_field("parameter_scope") != Some(
                     "constant-through-selected-trajectory-independent-regional-effective-conductivity-and-named-matching-resistance-multipliers")
                 || controls.str_field("units") != Some("K")
             {
-                return Err(invalid("contact controls do not span the same final trajectory in kelvin"));
+                return Err(invalid("contact controls do not span the same selected trajectory in kelvin"));
             }
             (array(controls, "contact_interfaces", 64)?, "interface")
         }
@@ -56,7 +58,7 @@ fn control_row<'a>(report: &'a J, entity: &str) -> Result<&'a J> {
     Ok(row)
 }
 
-/// The caller has already bound the full receipt to the final physical state.
+/// The caller has already bound the full receipt to the selected physical state.
 /// Return the normalized derivative; `convert` applies dR/dx at that state.
 pub(super) fn transient_coefficient(report: &J, entity: &str) -> Result<f64> {
     control_row(report, entity)?.f64_field("dtemperature_dresistance_multiplier_k")

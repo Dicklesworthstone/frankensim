@@ -18,8 +18,13 @@ pub(super) const KIND: &str = "native-uncertainty-mean-control";
 const SCHEMA: &str = "frankensim.cli.native-mean-control.v1";
 const SCOPE: &str = "Fixed coefficients from predeclared whole-model support secants, not an adjoint or a local derivative certificate. Calibration solves are not probability observations. The controlled mean estimates the same model expectation; raw responses, quantiles and compliance remain unchanged. Descriptive standard errors do not justify optional stopping or bound solver, finite-grid, transform or physical-model error. Variance reduction is measured, never guaranteed.";
 const ADJOINT_SCOPE: &str = "Coefficients from one final-field native nominal adjoint at the declared physical marginal means, fixed before sampling. A selected hottest-node functional is used even at a tie; no unique maximum derivative or derivative-error bound is claimed. Constant inputs need no coefficient solve. Calibration is not a probability observation. The centered control estimates the same model mean; raw temperatures, quantiles and compliance are unchanged. Descriptive standard errors do not justify optional stopping or bound solver, finite-grid, transform, continuum or physical-model error. Variance reduction is measured, never guaranteed.";
-fn scope(method: MeanControlMethod) -> &'static str {
-    match method { MeanControlMethod::CoordinateSecant => SCOPE, MeanControlMethod::NominalAdjoint => ADJOINT_SCOPE }
+const PEAK_ADJOINT_SCOPE: &str = "Coefficients from one native sampled-peak branch adjoint at the declared physical marginal means, frozen before random sampling. The nominal branch includes the original initial state and every accepted fine-grid state; its selected time, vertex, reverse prefix and exact ties are reported. A tied branch is a fixed control coefficient, not a unique derivative of the maximum. Centering each physical input by its declared mean preserves the sampled-peak model expectation for any such fixed coefficients, including at branch switches. An initial selected peak has zero future thermal-control coefficients. Constant inputs need no calibration solve. Raw peak observations, quantiles and compliance are unchanged. Descriptive standard errors do not justify optional stopping or bound solver, finite-grid, continuous-time, continuum or physical-model error. Variance reduction is measured, never guaranteed.";
+fn scope(method: MeanControlMethod, sampled_peak: bool) -> &'static str {
+    match method {
+        MeanControlMethod::CoordinateSecant => SCOPE,
+        MeanControlMethod::NominalAdjoint if sampled_peak => PEAK_ADJOINT_SCOPE,
+        MeanControlMethod::NominalAdjoint => ADJOINT_SCOPE,
+    }
 }
 fn policy(model: &Model) -> MeanControlPolicy {
     model.bound.study().mean_control().expect("calibration policy")
@@ -39,6 +44,8 @@ pub(super) struct Calibration {
     pub(super) failure: Option<String>,
     control: Option<Frozen>,
     method: MeanControlMethod,
+    sampled_peak: bool,
+    peak_branch: Option<String>,
 }
 fn invalid(message: impl Into<String>) -> Failure { fail("cli-uncertainty-mean-control", message) }
 fn same_bits(a: &[f64], b: &[f64]) -> bool {
@@ -65,7 +72,8 @@ impl Calibration {
             return Ok(None);
         };
         let mut state = Self { probes: Vec::new(), attempted: 0, failure: None,
-            control: None, method: policy.method };
+            control: None, method: policy.method,
+            sampled_peak: model.bound.study().uses_sampled_peak(), peak_branch: None };
         let saved = if let Some(prior) = prior {
             let bytes = linked(ledger, &prior.value, "mean_control_state", KIND)?;
             let value = parse(&bytes)?;
@@ -89,7 +97,7 @@ impl Calibration {
                     model.verify_sample(ledger, sample)?;
                 }
                 // Nominal child's report-only project and all sealed lineage
-                // are verified by nominal_coefficients in finish below.
+                // are verified by nominal_calibration in finish below.
             }
             Some(value)
         } else { None };
@@ -100,6 +108,13 @@ impl Calibration {
                 Some(gradient) if same_bits(gradient, &read_numbers(value)?) => {},
                 None if value == &J::Null => {},
                 _ => return Err(invalid("frozen coefficients differ from the sealed calibration solves")),
+            }
+            if state.sampled_peak && state.method == MeanControlMethod::NominalAdjoint {
+                let branch = state.peak_branch.as_deref().map(J::parse).transpose()
+                    .map_err(|error| invalid(error.to_string()))?.unwrap_or(J::Null);
+                if saved.get("sampled_peak_branch") != Some(&branch) {
+                    return Err(invalid("frozen peak branch differs from the sealed nominal trajectory"));
+                }
             }
             if state.failure.is_some() || (integer(&prior.expect("saved state").value, "samples_completed")? > 0 && !state.ready()) {
                 return Err(invalid("random observations precede complete successful calibration"));
@@ -113,14 +128,16 @@ impl Calibration {
         let calculated = match self.method {
             MeanControlMethod::CoordinateSecant => {
                 let values: Vec<_> = self.probes.iter().map(|p| p.value_k).collect();
-                design::coefficients(model.bound.study().parameters(), &values).map_err(|e| invalid(e.detail))
+                design::coefficients(model.bound.study().parameters(), &values)
+                    .map(|gradient| (gradient, None)).map_err(|e| invalid(e.detail))
             }
             MeanControlMethod::NominalAdjoint if self.probes.is_empty() =>
-                Ok(vec![0.0; model.bound.study().parameters().len()]),
-            MeanControlMethod::NominalAdjoint => model.nominal_coefficients(ledger, &self.probes[0]),
+                Ok((vec![0.0; model.bound.study().parameters().len()], None)),
+            MeanControlMethod::NominalAdjoint => model.nominal_calibration(ledger, &self.probes[0])
+                .map(|calibration| (calibration.gradient, calibration.peak_branch)),
         };
-        let gradient = match calculated {
-            Ok(gradient) => gradient,
+        let (gradient, peak_branch) = match calculated {
+            Ok(calibration) => calibration,
             Err(e) => { self.failure = Some(format!("calibration coefficient refused: {e}")); return Ok(()); }
         };
         let fresh = Execution::new(model)?;
@@ -132,6 +149,7 @@ impl Calibration {
             Execution::QuasiMonteCarlo(run) => Frozen::QuasiMonteCarlo(run.freeze_linear_control_variate(&gradient).map_err(|e| invalid(e.to_string()))?),
             Execution::CopulaQuasiMonteCarlo(run) => Frozen::CopulaQuasiMonteCarlo(run.freeze_linear_control_variate(&gradient).map_err(|e| invalid(e.to_string()))?),
         });
+        self.peak_branch = peak_branch;
         Ok(())
     }
 
@@ -173,10 +191,18 @@ impl Calibration {
         self.attempted += 1;
         self.failure = Some(error.to_string());
     }
+    fn peak_fragment(&self) -> String {
+        if self.sampled_peak && self.method == MeanControlMethod::NominalAdjoint {
+            format!(",\"sampled_peak_branch\":{}", self.peak_branch.as_deref().unwrap_or("null"))
+        } else {
+            String::new()
+        }
+    }
     pub(super) fn snapshot(&self, model: &Model) -> String {
         // The retained canonical study already binds the exact method. Keep the
         // secant envelope unchanged; no caller-supplied coefficient is trusted.
-        format!("{{\"schema\":{SCHEMA:?},\"model\":{},\"attempted\":{},\"probes\":{},\"failure\":{},\"gradient\":{}}}",
+        let peak = self.peak_fragment();
+        format!("{{\"schema\":{SCHEMA:?},\"model\":{},\"attempted\":{},\"probes\":{},\"failure\":{},\"gradient\":{}{peak}}}",
             quoted(&model.identity().to_hex()), self.attempted, rows_json(&self.probes),
             self.failure.as_deref().map_or_else(|| "null".into(), quoted),
             self.gradient().map_or_else(|| "null".into(), numbers))
@@ -197,19 +223,22 @@ impl Calibration {
                 .map(|a| Some(Estimate::LatinHypercube(a))).map_err(|e| invalid(e.to_string())),
             _ => Err(invalid("frozen control belongs to a different sampling method")),
         }?;
-        Ok(estimate.map(|estimate| Assessment { estimate, method: self.method }))
+        Ok(estimate.map(|estimate| Assessment {
+            estimate, method: self.method, sampled_peak: self.sampled_peak,
+        }))
     }
     pub(super) fn report(&self, model: &Model, assessment: Option<&Assessment>) -> String {
         let p = model.bound.study().parameters();
         let order = p.iter().map(|p| quoted(&p.name)).collect::<Vec<_>>().join(",");
         let units = p.iter().map(|p| quoted(p.target.unit())).collect::<Vec<_>>().join(",");
-        format!("{{\"method\":{},\"status\":{},\"probe_solves_planned\":{},\"probe_solves_allowed\":{},\"probe_solves_completed\":{},\"probe_solves_attempted\":{},\"parameter_order\":[{order}],\"parameter_units\":[{units}],\"parameter_means\":{},\"gradient\":{},\"calibration\":{},\"estimate\":{},\"scope\":{}}}",
+        let peak = self.peak_fragment();
+        format!("{{\"method\":{},\"status\":{},\"probe_solves_planned\":{},\"probe_solves_allowed\":{},\"probe_solves_completed\":{},\"probe_solves_attempted\":{},\"parameter_order\":[{order}],\"parameter_units\":[{units}],\"parameter_means\":{},\"gradient\":{},\"calibration\":{},\"estimate\":{}{peak},\"scope\":{}}}",
             quoted(self.method.tag()),
             quoted(if self.failure.is_some() { "refused" } else if self.ready() { "frozen" } else { "calibrating" }),
             policy(model).probe_count(p), policy(model).max_solves,
             self.probes.len(), self.attempted, numbers(&design::means(p)),
             self.gradient().map_or_else(|| "null".into(), numbers), self.snapshot(model),
-            assessment.map_or_else(|| "null".into(), Assessment::json), quoted(scope(self.method)))
+            assessment.map_or_else(|| "null".into(), Assessment::json), quoted(scope(self.method, self.sampled_peak)))
     }
 }
 
@@ -218,7 +247,9 @@ enum Estimate {
     QuasiMonteCarlo(QmcLinearControlEstimate),
     LatinHypercube(LhsLinearControlEstimate),
 }
-pub(super) struct Assessment { estimate: Estimate, method: MeanControlMethod }
+pub(super) struct Assessment {
+    estimate: Estimate, method: MeanControlMethod, sampled_peak: bool,
+}
 impl Assessment {
     fn summary(&self) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>, usize, &'static str) {
         match &self.estimate {
@@ -247,7 +278,7 @@ impl Assessment {
     pub(super) fn html(&self) -> String {
         let (raw, mean, raw_error, error, ratio, n, unit) = self.summary();
         format!("<h2>Frozen mean control</h2><p>{n} random responses in the mean estimate; statistical units: {unit}. Raw mean {} K; controlled mean {} K. Raw standard error {} K; controlled standard error {} K; variance ratio {}.</p><p>{}</p>",
-            optional(raw), optional(mean), optional(raw_error), optional(error), optional(ratio), scope(self.method))
+            optional(raw), optional(mean), optional(raw_error), optional(error), optional(ratio), scope(self.method, self.sampled_peak))
     }
     pub(super) fn claim(&self, result: ContentHash) -> Option<Claim> {
         let (_, mean, _, error, _, n, unit) = self.summary();
@@ -257,7 +288,7 @@ impl Assessment {
             MeanControlMethod::NominalAdjoint => "predeclared-native-nominal-adjoint-mean-control",
         };
         Some(Claim::estimated("cooling.uncertainty.controlled-mean",
-            format!("{mean} K; descriptive standard error {error} K on {n} raw native responses using {unit}. Result {}. {}", result.to_hex(), scope(self.method)),
+            format!("{mean} K; descriptive standard error {error} K on {n} raw native responses using {unit}. Result {}. {}", result.to_hex(), scope(self.method, self.sampled_peak)),
             method, error))
     }
 }

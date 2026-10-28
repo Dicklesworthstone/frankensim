@@ -221,3 +221,50 @@ fn g1_g3_g5_mixed_contact_bath_flux_calibration_matches_physics_and_resumes() {
         }
     }
 }
+
+#[test]
+fn g0_peak_contact_rows_admit_the_selected_prefix_including_initial_state() {
+    for schema in ["fs-cli-native-transient-adjoint-v1", "fs-cli-native-enthalpy-adjoint-v1"] {
+        for (state, value) in [(0, 0.0), (3, 0.4)] {
+            let source = format!(r#"{{"schema":"{schema}","output":"temperature-sampled-peak-material-adjoint","state_index":{state},"material_controls":{{"control_steps":{state},"units":"K","parameter_scope":"constant-through-selected-trajectory-independent-regional-effective-conductivity-and-named-matching-resistance-multipliers","contact_interfaces":[{{"interface":"joint","interface_card":"card","mapped":false,"face_pairs":2,"reference_value":1,"log_reference_value":0,"dtemperature_dresistance_multiplier_k":{value}}}]}}}}"#);
+            assert_eq!(transient_coefficient(&J::parse(&source).unwrap(), "joint").unwrap(), value);
+            for changed in [
+                source.replace("temperature-sampled-peak-material-adjoint", "temperature-sampled-peak-adjoint"),
+                source.replace(&format!("\"control_steps\":{state}"), "\"control_steps\":8"),
+                source.replace(&format!("\"state_index\":{state}"), &format!("\"state_index\":{state}.0")),
+            ] {
+                assert!(transient_coefficient(&J::parse(&changed).unwrap(), "joint").is_err());
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_g3_peak_contact_calibration_retains_the_original_sampled_card_chain_rule() {
+    for enthalpy in [false, true] {
+        let f = fixture(enthalpy);
+        let raw_source = SOURCE.replace(":qoi \"temperature-max\"", ":qoi \"temperature-peak\"");
+        assert!(raw_source.contains(":qoi \"temperature-peak\""));
+        let source = raw_source.replace(":version 1",
+            ":version 3 :mean-control (nominal-adjoint :max-solves 1)");
+        let (raw, raw_path) = f.run(&raw_source, "raw-peak-contact", crate::exit::SUCCESS);
+        let (result, path) = f.run(&source, "peak-contact", crate::exit::SUCCESS);
+        let raw = Fixture::report(&raw, &raw_path);
+        let report = Fixture::report(&result, &path);
+        assert_eq!(report.get("observations"), raw.get("observations"));
+        let control = report.get("mean_control").unwrap();
+        let gradient = control.get("gradient").unwrap().as_array().unwrap()[0].as_f64().unwrap();
+        assert!(gradient < 0.0, "greater pressure improves this original contact card");
+        let model = Model::load(&f.inputs.join("peak-contact.fsim")).unwrap();
+        let view = model.nominal_view().unwrap();
+        assert!(view.bound.base().outputs.as_ref().unwrap().iter()
+            .any(|row| row.name == "temperature-sampled-peak-material-adjoint"));
+        let ledger = Ledger::open(path.to_str().unwrap()).unwrap();
+        let gate = CancelGate::new_clock_free();
+        let low = model.sample(&ledger, &gate, &[899900.0, 5.0], 120.0).unwrap().unwrap();
+        let high = model.sample(&ledger, &gate, &[900100.0, 5.0], 120.0).unwrap().unwrap();
+        let difference = (high.value_k - low.value_k) / 200.0;
+        assert!((gradient - difference).abs() <= 5e-4 * difference.abs().max(1e-9),
+            "enthalpy={enthalpy}: peak contact coefficient {gradient:e}, forward FD {difference:e}");
+    }
+}

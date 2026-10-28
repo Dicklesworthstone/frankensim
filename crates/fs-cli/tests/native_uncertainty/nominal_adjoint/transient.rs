@@ -377,3 +377,6 @@ fn g1_g5_enthalpy_bath_mean_control_matches_physics_and_survives_resume() {
 #[path = "transient/convection.rs"]
 mod convection;
 
+
+#[path = "transient/peak.rs"]
+mod peak;
