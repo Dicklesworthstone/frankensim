@@ -22,6 +22,8 @@
 
 /// Explicit reflected-molecule heat on the original caloric and gas owners.
 pub mod accommodation;
+/// Finite solid inventory and fusion energy on the original equilibrium chart.
+pub mod equilibrium;
 
 /// Joint exchange of heterogeneous surfaces against one evolving gas snapshot.
 pub mod chamber;
@@ -63,7 +65,8 @@ pub struct GasSurfaceBinding {
 pub struct GasSurfaceSolve {
     pub gas: GasSpeciesBoundarySolve,
     /// Each gross withdrawal / its own initial solid or vapor inventory, in (0,1).
-    /// This controls counterflow stiffness even at zero net mass.
+    /// This controls counterflow stiffness even at zero net mass. The opt-in
+    /// equilibrium lane uses only the initially SOLID part of condensed mass.
     pub maximum_gross_inventory_fraction: f64,
     /// Absolute agreement required for h_v(T)-(h_s+offset)=L(T), at BOTH endpoints.
     /// A reference offset cannot repair incompatible temperature dependence.
@@ -260,6 +263,8 @@ struct GasSpeciesSnapshot {
 #[derive(Clone, Copy)]
 struct SurfaceSnapshot {
     solid: SolidSurfaceState,
+    /// The initially emitting phase; distinct from total condensed storage.
+    available_solid_mass_kg: f64,
     gas: GasSpeciesSnapshot,
     temperature_k: f64,
     outgoing_mass_kg: f64,
@@ -416,6 +421,7 @@ where
     };
     Ok(SurfaceSnapshot {
         solid,
+        available_solid_mass_kg: solid.mass_kg,
         gas,
         temperature_k,
         outgoing_mass_kg,
@@ -481,12 +487,33 @@ where
     L: SublimationLaw + ?Sized,
     F: Fn(f64) -> Result<f64, SublimationError> + ?Sized,
 {
+    prepare_surface_with_endpoint(binding, snapshot, controls, reflected_heat_into_gas_j, |h| {
+        let temperature = temperature_from_enthalpy(h)?;
+        let properties = phase_at(law, temperature, snapshot.gas.molar_mass)?;
+        let vapor_h = catalog.species_specific_enthalpy_j_kg(&binding.species, temperature)?;
+        compatibility(vapor_h, h, binding.solid_enthalpy_offset_j_kg,
+            properties.latent_heat_j_kg, temperature, controls.latent_compatibility_tolerance_j_kg)?;
+        Ok((temperature, properties))
+    })
+}
+
+// One original extensive mass/energy update for pure and mixed condensed stores.
+// The physical caloric owner admits the final h and its PURE SOLID properties;
+// no apparent latent heat capacity or separate fusion source is introduced.
+fn prepare_surface_with_endpoint(
+    binding: &GasSurfaceBinding,
+    snapshot: SurfaceSnapshot,
+    controls: GasSurfaceSolve,
+    reflected_heat_into_gas_j: f64,
+    endpoint: impl FnOnce(f64) -> Result<(f64, SublimationProperties), GasSurfaceError>,
+) -> Result<PreparedSurface, GasSurfaceError> {
     if !reflected_heat_into_gas_j.is_finite() {
         return Err(invalid("reflected molecular heat is unrepresentable"));
     }
     let SurfaceSnapshot {
         solid,
-        gas,
+        available_solid_mass_kg: _,
+        gas: _,
         temperature_k,
         outgoing_mass_kg,
         incoming_mass_kg,
@@ -531,18 +558,7 @@ where
             "molecular solid caloric increment is unrepresentable",
         ));
     }
-    let final_temperature = temperature_from_enthalpy(next_enthalpy)?;
-    let final_phase = phase_at(law, final_temperature, gas.molar_mass)?;
-    let final_vapor_enthalpy =
-        catalog.species_specific_enthalpy_j_kg(&binding.species, final_temperature)?;
-    compatibility(
-        final_vapor_enthalpy,
-        next_enthalpy,
-        offset,
-        final_phase.latent_heat_j_kg,
-        final_temperature,
-        controls.latent_compatibility_tolerance_j_kg,
-    )?;
+    let (final_temperature, final_phase) = endpoint(next_enthalpy)?;
     let solid_energy_change_j = next_mass * (next_enthalpy - solid.specific_enthalpy_j_kg)
         + (next_mass - solid.mass_kg) * (solid.specific_enthalpy_j_kg + offset);
     let energy_residual_j = solid_energy_change_j + energy_into_gas_j;
@@ -591,7 +607,7 @@ fn admit_surface_inventory(
         inventory_limit(
             duration_s,
             snapshot.outgoing_mass_kg,
-            snapshot.solid.mass_kg,
+            snapshot.available_solid_mass_kg,
             controls.maximum_gross_inventory_fraction,
         ),
         inventory_limit(
