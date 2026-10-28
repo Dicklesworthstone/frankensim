@@ -4430,3 +4430,32 @@ existing combined gas/wall/current/Lorentz late-refusal and retry regression now
 also checks the native clock. A nonrepresentable time origin refuses with
 unchanged populations, enthalpy and count. Native Rust execution is separate
 from source review and formatting validation.
+
+## Source rheology through phase transport and complete-melt release
+
+The phase-first material resolver can own an explicitly typed inverse-time shear
+coordinate. It samples the original pinned viscosity and conductivity sources at
+the native MAC rate; solid cells do not request liquid properties, and
+rate-dependent density or caloric storage still requires a separate owner.
+
+`MaterialFlowFeedback::release_fully_liquid_with_rheology` retains that source
+through the existing complete-melt conservation path. Each accepted MAC cell's
+enthalpy-derived temperature and actual shear rate must replay the target's
+original material identity, selected claims, context and values. The receiver is
+the original `MaterialFreeSurfaceEnthalpy3`, initialized by its native rheology
+constructor and carrying the accepted physical clock. Its existing heat,
+conduction, gas, finite-body, electrical and magnetic entry points remain usable.
+A different reference shear coordinate cannot freeze the receiving response.
+
+The shared transfer still checks mass, enthalpy, linear and angular momentum,
+and separately bounds the kinetic projection deficit. Equilibrium population
+initialization rebuilds receiving viscous stress; it does not transfer the MAC
+stress tensor. This memoryless generalized-Newtonian rung needs startup and time
+refinement and does not claim elastic memory, capillary energy, phase-conductivity
+multiplier or buoyancy transfer. Unsupported owners refuse explicitly.
+
+The integrated regression melts the specimen, drives native circulation,
+releases it and advances native free-surface motion with data-only rheology
+variants. It independently checks molecular heat against the volume sum of
+mu*gamma_dot^2*dt and face conduction against the same source k(T,gamma_dot),
+alongside the original transfer budgets, clock and refusal rollback.

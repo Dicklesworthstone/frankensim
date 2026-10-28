@@ -15,6 +15,9 @@ use fs_material::MaterialError;
 use fs_material::liquid::surface::{LiquidCapillarity, resolve_liquid_surface_state};
 use fs_material::phase::transport::ResolvedPhaseTransportState;
 
+#[path = "release/rheology.rs"]
+mod rheology;
+
 fn domain() -> VoxelDomain {
     VoxelDomain::from_fn(4, 4, 4, 1.0, |[x, y, z]| {
         if (1.0..3.0).contains(&x) && (1.0..3.0).contains(&y) && z < 2.0 {

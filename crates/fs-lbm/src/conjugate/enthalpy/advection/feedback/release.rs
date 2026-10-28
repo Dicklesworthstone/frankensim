@@ -12,6 +12,7 @@ use crate::material::free_surface::{
     MaterialFreeSurfaceDomain3, MaterialFreeSurfaceInitialCell3, MaterialFreeSurfaceScaling,
     enthalpy::{
         FreeSurfaceEnthalpyControls, FreeSurfaceEnthalpyError, MaterialFreeSurfaceEnthalpy3,
+        rheology::RheologySolve,
     },
     transfer::LiquidTransferMoments,
 };
@@ -99,8 +100,8 @@ where
     /// The caller declares the receiving stationary walls/gravity; removed
     /// constraints are not a moving-solid calculation. Old thermal contacts end
     /// here: use the receiver's original conduction API on current wet faces.
-    /// Source rheology/phase-conductivity/buoyancy extensions require their own
-    /// explicit handoff and refuse. Surface tension must be explicitly neglected:
+    /// Source rheology uses `release_fully_liquid_with_rheology`; the separate
+    /// phase-conductivity multiplier and buoyancy still refuse. Surface tension must be explicitly neglected:
     /// no surface-creation energy, residual elastic stress or latent heat is invented.
     ///
     /// MAC-to-cell averaging preserves P and angular P on this shared grid.
@@ -119,6 +120,71 @@ where
         withdrawal: StationaryConstraintRelease,
         limits: LiquidReleaseControls,
         transport: FreeSurfaceEnthalpyControls,
+        cx: &Cx<'_>,
+    ) -> Result<(MaterialFreeSurfaceEnthalpy3<'s, 'm>, LiquidReleaseReport), LiquidReleaseError>
+    {
+        self.release_liquid(
+            thermal, scaling, domain, law, caloric, withdrawal, limits, transport, None, cx,
+        )
+    }
+
+    /// Carry the original phase/native shear law into the SAME moving-liquid owner.
+    ///
+    /// The source must already own native rheology. Its accepted physical MAC
+    /// rate supplies each comparison against the target's pinned T/rate bundle;
+    /// a different table, context, rate axis or unowned coefficient refuses.
+    /// The original VOF constitutive solve then evaluates that SAME source at
+    /// its actual force-corrected native stress, including after heat/advection.
+    /// No reference shear, viscosity or temperature is frozen at the transition.
+    ///
+    /// This retains `release_fully_liquid`'s mass, h, momentum, kinetic-deficit
+    /// and clock checks. Its equilibrium population initializer rebuilds the
+    /// viscous stress on the receiving lattice; it does not transfer the MAC
+    /// stress tensor. Generalized-Newtonian response has no stored elastic
+    /// memory to erase, but the stress startup and time split require refinement.
+    /// Phase-conductivity multipliers, buoyancy and surface energy remain named
+    /// unsupported transitions, rather than disappearing from the material law.
+    #[allow(clippy::too_many_arguments)]
+    pub fn release_fully_liquid_with_rheology<'s, 'm>(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        scaling: MaterialFreeSurfaceScaling<'s>,
+        domain: MaterialFreeSurfaceDomain3<'_>,
+        law: &'m LiquidTemperatureLaw<'m>,
+        caloric: &'m EquilibriumEnthalpyPhaseCurve,
+        withdrawal: StationaryConstraintRelease,
+        limits: LiquidReleaseControls,
+        transport: FreeSurfaceEnthalpyControls,
+        rheology: RheologySolve,
+        cx: &Cx<'_>,
+    ) -> Result<(MaterialFreeSurfaceEnthalpy3<'s, 'm>, LiquidReleaseReport), LiquidReleaseError>
+    {
+        self.release_liquid(
+            thermal,
+            scaling,
+            domain,
+            law,
+            caloric,
+            withdrawal,
+            limits,
+            transport,
+            Some(rheology),
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn release_liquid<'s, 'm>(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        scaling: MaterialFreeSurfaceScaling<'s>,
+        domain: MaterialFreeSurfaceDomain3<'_>,
+        law: &'m LiquidTemperatureLaw<'m>,
+        caloric: &'m EquilibriumEnthalpyPhaseCurve,
+        withdrawal: StationaryConstraintRelease,
+        limits: LiquidReleaseControls,
+        transport: FreeSurfaceEnthalpyControls,
+        rheology: Option<RheologySolve>,
         cx: &Cx<'_>,
     ) -> Result<(MaterialFreeSurfaceEnthalpy3<'s, 'm>, LiquidReleaseReport), LiquidReleaseError>
     {
@@ -148,9 +214,6 @@ where
                 caloric as *const EquilibriumEnthalpyPhaseCurve,
             )
             || self.endpoint.len() != thermal.cells().len()
-            || self.rheology.is_some()
-            || self.buoyancy.is_some()
-            || self.phase_conduction.is_some()
             || scaling.material().capillarity() != LiquidCapillarity::Neglected
             || self.config.faces.iter().any(|face| {
                 !matches!(face,
@@ -161,6 +224,29 @@ where
                 "release needs one complete cubic liquid, stationary walls, original law and explicitly neglected capillarity",
             ));
         }
+        if self.buoyancy.is_some() || self.phase_conduction.is_some() {
+            return Err(refused(
+                "release must retain phase-conductivity and buoyancy through explicit receiving owners",
+            ));
+        }
+        let rate_axis = match (
+            self.endpoint_shear_rate_per_s(),
+            rheology,
+            scaling.material().rheology_axes(),
+        ) {
+            (None, None, None) => None,
+            (Some(rates), Some(_), Some((temperature, rate)))
+                if temperature == law.temperature_axis()
+                    && rates.len() == self.domain.cell_count() =>
+            {
+                Some(rate)
+            }
+            _ => {
+                return Err(refused(
+                    "release must retain the original native shear owner and its explicitly evolving target source",
+                ));
+            }
+        };
         let flow = self
             .unsteady_flow()
             .ok_or(refused("release needs accepted native momentum"))?;
@@ -185,9 +271,23 @@ where
                     "every original cell must be exactly liquid at its accepted enthalpy",
                 ));
             }
-            let liquid = law
-                .at_temperature(fs_qty::Temperature::new(sample.temperature_k))
-                .map_err(FreeSurfaceEnthalpyError::from)?;
+            let liquid = if let Some(axis) = rate_axis {
+                let rate = self
+                    .endpoint_shear_rate_per_s()
+                    .expect("admitted native rate")[sample.voxel];
+                let point = law
+                    .reference_point()
+                    .clone()
+                    .with(law.temperature_axis(), sample.temperature_k)
+                    .and_then(|point| point.with(axis, rate))
+                    .map_err(|_| {
+                        refused("invalid original native temperature/shear coordinates")
+                    })?;
+                law.reference_state().at_query_point(law.card(), &point)
+            } else {
+                law.at_temperature(fs_qty::Temperature::new(sample.temperature_k))
+            }
+            .map_err(FreeSurfaceEnthalpyError::from)?;
             let original = sample.material.material();
             let current = liquid.material();
             if current.card_identity() != original.card_identity()
@@ -248,17 +348,18 @@ where
         // The source's accepted native audit, including any supported capture,
         // remains authoritative; the independently summed faces checked it above.
         source.kinetic_energy_j = native.final_kinetic_energy_j;
-        let liquid = scaling
-            .free_surface3_from_cells(domain, &initial, cx)
-            .map_err(FreeSurfaceEnthalpyError::from)?
-            .with_enthalpy(
-                law,
-                caloric,
-                transport,
-                |at| enthalpy.get(&at).copied().unwrap_or(f64::NAN),
-                self.gate,
+        let initial_h = |at| enthalpy.get(&at).copied().unwrap_or(f64::NAN);
+        let liquid = if let Some(solve) = rheology {
+            scaling.free_surface3_from_cells_with_rheology(
+                domain, &initial, law, caloric, transport, solve, initial_h, cx, self.gate,
             )?
-            .with_time_origin(thermal.time_s())?;
+        } else {
+            scaling
+                .free_surface3_from_cells(domain, &initial, cx)
+                .map_err(FreeSurfaceEnthalpyError::from)?
+                .with_enthalpy(law, caloric, transport, initial_h, self.gate)?
+        }
+        .with_time_origin(thermal.time_s())?;
         let mut target = LiquidTransferMoments::default();
         for cell in &initial {
             checkpoint(cx, self.gate)?;
