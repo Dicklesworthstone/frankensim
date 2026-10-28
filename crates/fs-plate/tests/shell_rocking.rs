@@ -3,7 +3,7 @@
 use fs_plate::{ModePair,PlateSection};
 use fs_plate::shell::{ShellMesh,ShellModel,ShellSupport,assemble_shell_sections};
 use fs_plate::shell::reduction::{ShellReduction,ReductionBudget,RigidMotionLimit};
-use fs_plate::shell::reduction::rigid::mass_normalized_modes;
+use fs_plate::shell::reduction::rigid::{mass_normalized_modes,mass_normalized_modes_with_options};
 use fs_plate::shell::reduction::radiation::{ShellFace,RadiationSurfaceBudget};
 
 const MOTIONS:[[f64;6];3]=[
@@ -138,4 +138,133 @@ fn supplied_angle_cap_and_geometric_nullity_are_real_refusals() {
             RigidMotionLimit{modes:3,maximum_rotation_rad:angle}).is_err());
     }
     assert!(mass_normalized_modes(&mesh,&model,&[MOTIONS[0],MOTIONS[0]]).is_err());
+}
+
+const ALL_MOTIONS:[[f64;6];6]=[
+    [1.,0.,0.,0.,0.,0.],[0.,1.,0.,0.,0.,0.],[0.,0.,1.,0.,0.,0.],
+    [0.,0.,0.,1.,0.,0.],[0.,0.,0.,0.,1.,0.],[0.,0.,0.,0.,0.,1.],
+];
+const CONSISTENT_SECTIONS:[(f64,f64);2]=[(8607.,0.0011),(7800.,0.0009)];
+
+fn consistent_fixture()->(ShellMesh,ShellModel) {
+    let mesh=ShellMesh::new(vec![[0.01,-0.02,0.003],[0.11,0.,0.013],
+        [0.,0.10,0.022],[0.08,0.09,0.036]],vec![[0,1,3],[0,3,2]]).unwrap();
+    let n=6*mesh.nodes.len();let mut mass=fs_sparse::Coo::new(n,n);
+    // Exact P1 consistent inertia, including physical through-thickness rotary
+    // inertia. This manufactured free pencil isolates basis construction from
+    // stiffness assembly; the oracle below integrates affine velocity directly.
+    for (f,tri) in mesh.tris.iter().enumerate() {
+        let (density,h)=CONSISTENT_SECTIONS[f];let area=mesh.facet(f).unwrap().area_m2;
+        for (i,&a) in tri.iter().enumerate() {for (j,&b) in tri.iter().enumerate() {
+            let integral=area/12.*if i==j {2.} else {1.};
+            for c in 0..6 {
+                let inertia=if c<3 {density*h} else {density*h.powi(3)/12.};
+                mass.push(6*a+c,6*b+c,integral*inertia);
+            }
+        }}
+    }
+    (mesh,ShellModel{k:fs_sparse::Coo::new(n,n).assemble(),m:mass.assemble(),
+        dof_map:(0..n).map(Some).collect(),free:n})
+}
+fn rigid_nodal(mesh:&ShellMesh,motion:[f64;6])->Vec<f64> {
+    let mut nodal=vec![0.;6*mesh.nodes.len()];
+    for (node,&point) in mesh.nodes.iter().enumerate() {
+        nodal[6*node..6*node+3].copy_from_slice(&physical(motion,point));
+        nodal[6*node+3..6*node+6].copy_from_slice(&motion[3..]);
+    }
+    nodal
+}
+
+#[test]
+fn consistent_shell_inertia_preserves_rigid_continuum_work_and_cross_terms() {
+    let (mesh,model)=consistent_fixture();
+    let modes=mass_normalized_modes(&mesh,&model,&ALL_MOTIONS).unwrap();
+    let mut work=vec![0.;model.free];
+    for (i,mode) in modes.iter().enumerate() {
+        model.m.spmv(&mode.phi,&mut work);
+        for (j,other) in modes.iter().enumerate() {
+            let product=other.phi.iter().zip(&work).map(|(a,b)|a*b).sum::<f64>();
+            assert!((product-if i==j {1.} else {0.}).abs()<2e-13);
+        }
+        assert_eq!(mode.residual,0.);
+    }
+    let motion=[0.03,-0.07,0.3,-0.2,0.4,0.15];let nodal=rigid_nodal(&mesh,motion);
+    model.m.spmv(&nodal,&mut work);
+    let velocity:Vec<_>=modes.iter().map(|mode|
+        mode.phi.iter().zip(&work).map(|(a,b)|a*b).sum::<f64>()).collect();
+    for (i,&expected) in nodal.iter().enumerate() {
+        let recovered=modes.iter().zip(&velocity).map(|(mode,q)|mode.phi[i]*q).sum::<f64>();
+        assert!((recovered-expected).abs()<2e-14);
+    }
+    let mut expected=0.;
+    for (f,tri) in mesh.tris.iter().enumerate() {
+        let (density,h)=CONSISTENT_SECTIONS[f];let area=mesh.facet(f).unwrap().area_m2;
+        let velocities=tri.map(|node|physical(motion,mesh.nodes[node]));
+        let mut sum=[0.;3];let mut squared=0.;
+        for v in velocities {for c in 0..3 {sum[c]+=v[c];squared+=v[c]*v[c];}}
+        expected+=0.5*density*h*area/12.*(squared+sum.iter().map(|x|x*x).sum::<f64>())
+            +0.5*density*h.powi(3)/12.*area*motion[3..].iter().map(|x|x*x).sum::<f64>();
+    }
+    let kinetic=0.5*velocity.iter().map(|v|v*v).sum::<f64>();
+    assert!((kinetic-expected).abs()<2e-13*expected);
+    let lumped=0.5*nodal.iter().enumerate().map(|(row,v)|
+        model.m.row(row).1.iter().sum::<f64>()*v*v).sum::<f64>();
+    assert!((lumped-expected).abs()>1e-4*expected,"off-diagonal inertia is load-bearing");
+    let translation=rigid_nodal(&mesh,[0.,0.,1.,0.,0.,0.]);
+    let rotation=rigid_nodal(&mesh,[0.,0.,0.,1.,0.,0.]);
+    model.m.spmv(&rotation,&mut work);
+    let cross=translation.iter().zip(&work).map(|(a,b)|a*b).sum::<f64>();
+    assert!(cross.abs()>1e-5,"asymmetric geometry retains translation/rotation cross inertia");
+}
+
+#[test]
+fn consistent_shell_rigid_residual_uses_full_inverse_mass_and_signed_stiffness() {
+    let (mesh,mut model)=consistent_fixture();
+    // K = s M has exact generalized eigenvalue s, including a negative s.
+    // A geometric zero-frequency candidate must report |s| as its residual;
+    // using diag(M)^-1 or silently dropping the stiffness cannot pass.
+    for scale in [-7.,7.] {
+        let mut k=fs_sparse::Coo::new(model.free,model.free);
+        for row in 0..model.free {let (columns,values)=model.m.row(row);
+            for (&column,&value) in columns.iter().zip(values) {k.push(row,column,scale*value);}}
+        model.k=k.assemble();
+        let modes=mass_normalized_modes(&mesh,&model,&ALL_MOTIONS).unwrap();
+        for mode in &modes {
+            assert_eq!(mode.lambda,0.);
+            assert!((mode.residual-scale.abs()).abs()<2e-12);
+            assert_eq!(mode.interval,(-mode.residual,mode.residual));
+        }
+        let mut residual=vec![0.;model.free];model.k.spmv(&modes[0].phi,&mut residual);
+        let diagonal_norm=residual.iter().enumerate().map(|(i,r)|r*r/model.m.get(i,i)).sum::<f64>().sqrt();
+        assert!((diagonal_norm-scale.abs()).abs()>0.1*scale.abs());
+    }
+}
+
+#[test]
+fn consistent_shell_rigid_admission_refuses_nonphysical_mass_and_respects_limits() {
+    let (mesh,model)=consistent_fixture();
+    let options=fs_sparse::LdltOptions{max_factor_bytes:Some(0),..Default::default()};
+    assert!(matches!(mass_normalized_modes_with_options(&mesh,&model,&ALL_MOTIONS,&options,||false),
+        Err(fs_plate::PlateError::Modal(fs_modal::ModalError::Factor{
+            source:fs_sparse::LdltError::FactorBudget{..},..}))));
+    let mut diagonal=model.clone();let mut mass=fs_sparse::Coo::new(model.free,model.free);
+    for row in 0..model.free {mass.push(row,row,model.m.row(row).1.iter().sum());}
+    diagonal.m=mass.assemble();
+    assert!(mass_normalized_modes_with_options(&mesh,&diagonal,&ALL_MOTIONS,&options,||false).is_ok());
+
+    let options=fs_sparse::LdltOptions::default();let mut polls=0;
+    mass_normalized_modes_with_options(&mesh,&model,&ALL_MOTIONS,&options,||{polls+=1;false}).unwrap();
+    for stop in 1..=polls {
+        let mut current=0;
+        assert!(matches!(mass_normalized_modes_with_options(&mesh,&model,&ALL_MOTIONS,&options,
+            ||{current+=1;current==stop}),Err(fs_plate::PlateError::Cancelled)));
+    }
+    for (forward,reverse) in [(2.,2.),(1.,1.),(0.25,0.5),(f64::NAN,f64::NAN)] {
+        let mut mass=fs_sparse::Coo::new(model.free,model.free);
+        for i in 0..model.free {mass.push(i,i,1.);}
+        mass.push(0,6,forward);mass.push(6,0,reverse);
+        let invalid=ShellModel{m:mass.assemble(),..model.clone()};
+        assert!(mass_normalized_modes(&mesh,&invalid,&ALL_MOTIONS).is_err(),
+            "indefinite, singular, asymmetric and nonfinite inertia must refuse");
+    }
 }

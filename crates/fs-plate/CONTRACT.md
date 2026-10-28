@@ -49,6 +49,21 @@ eigensolver, and physical mode observation must use `expand`. The separate
 wrapper avoids changing the legacy public `ShellModel` layout or existing
 CST/DKT consumers.
 
+`shell::reduction::rigid::mass_normalized_modes` accepts both lumped and
+consistent symmetric positive definite shell inertia for a complete free pencil
+in global physical coordinates. It preserves all supplied translation/rotation
+cross inertia during two-pass mass orthonormalization. Consistent inertia uses
+one shared sparse AMD/LDLT factor for every candidate's true
+`sqrt((K phi)^T M^-1 (K phi))` residual; diagonal inertia keeps its direct path.
+The original signed stiffness is retained, so supported or unstable candidates
+receive their actual residual rather than a fabricated zero-frequency claim.
+`mass_normalized_modes_with_options` exposes the existing sparse factor budget
+and cancellation without publishing a partial basis. This remains a linearized
+rigid-pose preparation helper, with geometric nullity and rotation limits still
+enforced by the reduction owner. `tests/shell_rocking.rs` checks six-mode
+orthogonality and continuum affine kinetic work on asymmetric heterogeneous
+facets, signed residual oracles, and physical/budget/cancellation refusals.
+
 The third nodal rotation is a numerical drilling gauge. The physical element
 depends on `theta × director` and is blind to a node's director-axis rotation.
 One area-averaged relative membrane-spin equation per node fixes that gauge;
