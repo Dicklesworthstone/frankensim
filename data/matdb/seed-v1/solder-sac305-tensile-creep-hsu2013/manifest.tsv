@@ -1,0 +1,17 @@
+frankensim.matdb-manifest.v5
+pack_id	solder-sac305-tensile-creep-hsu2013
+redistribution	permitted	Selected attributed numerical facts and original modeling notes only; no source document, prose, figures or table layout is redistributed
+citation	Chao-Ming Hsu, Ah-Der Lin and Jao-Hwa Kuang, The Creep Parameters of SAC305 Unleaded Solders, Advances in Materials Science and Engineering (2013), article 838075, section 2.2 and table 2, DOI 10.1155/2013/838075; https://onlinelibrary.wiley.com/doi/full/10.1155/2013/838075
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	hsu2013-tensile	properties.tsv	material-tsv-v1
+property	creep_rate	secondary-tensile-creep-strain-rate	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	stress	average-tensile-stress	dimensional
+axis	load	applied-load	dimensional
+axis	specimen	source-specimen-number	dimensional
+axis	cohort	source-cohort-sac305-hsu2013-tensile	dimensional
+axis	secondary_stage	secondary-creep-stage	dimensional
+axis	table_coordinates	source-table-coordinates	dimensional
+axis	aging_known	source-aging-history-known	dimensional
+axis	cooling_known	source-cooling-history-known	dimensional
+axis	pressure_known	source-pressure-known	dimensional

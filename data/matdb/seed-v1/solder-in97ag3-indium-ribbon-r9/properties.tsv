@@ -1,0 +1,41 @@
+frankensim.matdb-source.v1
+observation	reference	Indalloy 290, 97In-3Ag by mass, ribbon/foil alloy reference	Pinned manufacturer PDF Form No. 97621 R9, page 3	Reference values only, not incoming product acceptance specifications. No matched specimen, lot, pressure, temper, aging history, strain rate or test method is supplied. Uncertainty is unstated. These are alloy ribbon/foil references, not a qualified reflowed joint, indium metal or an intermetallic interface. The PDF prints 800 psi tensile strength; this revision is retained separately from the mutable website table and no cross-version averaging is used.
+observation	phase	In97Ag3 nominal eutectic endpoints	Both printed endpoints are 143 degC	Equal solidus and liquidus become 416.15 K. They do not supply latent heat, an enthalpy reference, supercooling kinetics or a complete phase-change thermal law.
+observation	physical	In97Ag3 reference density and tensile strength	Explicit conversion of the PDF values	Density 7.38 g/cm3 becomes 7380 kg/m3. Tensile strength 800 psi uses 1 psi = 0.45359237 times 9.80665 divided by 0.0254 squared Pa. Test temperature is unknown. Electrical conductivity expressed as percent of copper is excluded because its reference conditions are not supplied; CTE convention is not inferred.
+observation	conductivity	In97Ag3 thermal conductivity at 85 degC	PDF column W/cm/degC at 85 degC	0.73 W/cm/degC becomes 73 W/m/K at 358.15 K only. This measured-temperature reference point supplies no conductivity curve or temperature extrapolation.
+scalar	solidus	reference,phase	solidus_temperature	416.15	K	constant
+uncertainty	solidus	unstated	-	-	-	-
+validity	solidus	engineering_reference_model	1	1	1
+validity	solidus	source_specimens_matched	0	0	1
+validity	solidus	source_test_temperature_known	0	0	1
+validity	solidus	source_test_method_known	0	0	1
+validity	solidus	source_alloy_in97ag3	1	1	1
+scalar	liquidus	reference,phase	liquidus_temperature	416.15	K	constant
+uncertainty	liquidus	unstated	-	-	-	-
+validity	liquidus	engineering_reference_model	1	1	1
+validity	liquidus	source_specimens_matched	0	0	1
+validity	liquidus	source_test_temperature_known	0	0	1
+validity	liquidus	source_test_method_known	0	0	1
+validity	liquidus	source_alloy_in97ag3	1	1	1
+scalar	density	reference,physical	density	7380	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_specimens_matched	0	0	1
+validity	density	source_test_temperature_known	0	0	1
+validity	density	source_test_method_known	0	0	1
+validity	density	source_alloy_in97ag3	1	1	1
+scalar	tensile-strength	reference,physical	tensile_strength	5515805.834534689	Pa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	engineering_reference_model	1	1	1
+validity	tensile-strength	source_specimens_matched	0	0	1
+validity	tensile-strength	source_test_temperature_known	0	0	1
+validity	tensile-strength	source_test_method_known	0	0	1
+validity	tensile-strength	source_alloy_in97ag3	1	1	1
+scalar	conductivity-85c	reference,conductivity	thermal_conductivity	73	W/m/K	constant
+uncertainty	conductivity-85c	unstated	-	-	-	-
+validity	conductivity-85c	engineering_reference_model	1	1	1
+validity	conductivity-85c	source_specimens_matched	0	0	1
+validity	conductivity-85c	source_test_temperature_known	1	1	1
+validity	conductivity-85c	source_test_method_known	0	0	1
+validity	conductivity-85c	source_alloy_in97ag3	1	1	1
+validity	conductivity-85c	temperature	358.15	358.15	K

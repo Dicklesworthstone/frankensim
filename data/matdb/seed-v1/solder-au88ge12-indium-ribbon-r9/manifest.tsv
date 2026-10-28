@@ -1,0 +1,17 @@
+frankensim.matdb-manifest.v3
+pack_id	solder-au88ge12-indium-ribbon-r9
+redistribution	permitted	Selected attributed numerical facts and original modeling notes only; no source document, prose or table layout is redistributed
+citation	Indium Corporation, Solder Ribbon and Foil product data sheet, Form No. 97621 R9, page 3 alloy table row Indalloy 183, 88Au/12Ge, accessed 2026-10-28; https://www.indium.com/wp-content/uploads/2025/01/Solder-Ribbon-and-Foil-PDS-97621-R9.pdf
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	indium-ribbon-r9	properties.tsv	material-tsv-v1
+property	solidus_temperature	solidus-temperature	absolute-temperature
+property	liquidus_temperature	liquidus-temperature	absolute-temperature
+property	density	density	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	tensile_strength	tensile-strength	dimensional
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	source_specimens_matched	source-specimens-matched	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_test_method_known	source-test-method-known	dimensional
+axis	source_alloy_au88ge12	source-alloy-au88ge12	dimensional
+axis	temperature	temperature	absolute-temperature

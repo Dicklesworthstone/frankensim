@@ -1,0 +1,19 @@
+frankensim.matdb-source.v2
+observation	protocol	Eight distinct shear specimens, SAC305 Sn-3.0Ag-0.5Cu solder joining two copper bars	Hsu et al. 2013 section 2.2 and table 3 secondary-creep averages	The authors joined 5 mm diameter copper bars using solder paste with an initial 3-4 mm gap, heated to melting by a torch without direct flame contact. Shear loading acts parallel to the joining surfaces. Retain each reported specimen number, load and average stress; final coupon dimensions differ. Cooling history, aging history, test pressure and measurement uncertainty are unstated. These measurements describe the reported solder-joint coupons, not pure bulk ingot, an intermetallic layer or another alloy.
+observation	table	Literal table-3 coordinates and reported rates	Sparse multi-axis measurements without a fitted creep law	Table 3 prints 405 K for specimens 2 and 6 whereas prose reports 408 K; retain 405 K and require source-table-coordinates = 1. Table 3 and section 2.2 use 7.35 N; a section-3 sentence instead prints 7.53 N. No silent correction is made. Source rates in units of 10^-6 per second are converted to s^-1. No uncertainty, stress/temperature interpolation, constant-rate lifetime extrapolation or Norton/Anand constitutive fit is supplied by this pack. The tensile measurements remain a separate property and cohort.
+sample	shear-1	protocol,table	creep_rate	5.50e-8	s^-1	temperature	393	K	stress	0.977	MPa	load	7.35	N	specimen	1	1	cohort	1	1	secondary_stage	1	1	table_coordinates	1	1	aging_known	0	1	cooling_known	0	1	pressure_known	0	1
+uncertainty	shear-1	unstated	-	-	-	-
+sample	shear-2	protocol,table	creep_rate	6.29e-8	s^-1	temperature	405	K	stress	0.711	MPa	load	7.35	N	specimen	2	1	cohort	1	1	secondary_stage	1	1	table_coordinates	1	1	aging_known	0	1	cooling_known	0	1	pressure_known	0	1
+uncertainty	shear-2	unstated	-	-	-	-
+sample	shear-3	protocol,table	creep_rate	1.54e-7	s^-1	temperature	423	K	stress	1.021	MPa	load	7.35	N	specimen	3	1	cohort	1	1	secondary_stage	1	1	table_coordinates	1	1	aging_known	0	1	cooling_known	0	1	pressure_known	0	1
+uncertainty	shear-3	unstated	-	-	-	-
+sample	shear-4	protocol,table	creep_rate	2.95e-7	s^-1	temperature	438	K	stress	1.193	MPa	load	7.35	N	specimen	4	1	cohort	1	1	secondary_stage	1	1	table_coordinates	1	1	aging_known	0	1	cooling_known	0	1	pressure_known	0	1
+uncertainty	shear-4	unstated	-	-	-	-
+sample	shear-5	protocol,table	creep_rate	3.52e-7	s^-1	temperature	393	K	stress	7.424	MPa	load	29.4	N	specimen	5	1	cohort	1	1	secondary_stage	1	1	table_coordinates	1	1	aging_known	0	1	cooling_known	0	1	pressure_known	0	1
+uncertainty	shear-5	unstated	-	-	-	-
+sample	shear-6	protocol,table	creep_rate	4.85e-7	s^-1	temperature	405	K	stress	6.282	MPa	load	29.4	N	specimen	6	1	cohort	1	1	secondary_stage	1	1	table_coordinates	1	1	aging_known	0	1	cooling_known	0	1	pressure_known	0	1
+uncertainty	shear-6	unstated	-	-	-	-
+sample	shear-7	protocol,table	creep_rate	8.69e-7	s^-1	temperature	423	K	stress	6.074	MPa	load	29.4	N	specimen	7	1	cohort	1	1	secondary_stage	1	1	table_coordinates	1	1	aging_known	0	1	cooling_known	0	1	pressure_known	0	1
+uncertainty	shear-7	unstated	-	-	-	-
+sample	shear-8	protocol,table	creep_rate	1.43e-6	s^-1	temperature	438	K	stress	5.833	MPa	load	29.4	N	specimen	8	1	cohort	1	1	secondary_stage	1	1	table_coordinates	1	1	aging_known	0	1	cooling_known	0	1	pressure_known	0	1
+uncertainty	shear-8	unstated	-	-	-	-

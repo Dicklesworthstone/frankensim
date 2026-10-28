@@ -1,0 +1,41 @@
+frankensim.matdb-source.v1
+observation	reference	Indalloy 182, 80Au-20Sn by mass, ribbon/foil alloy reference	Pinned manufacturer PDF Form No. 97621 R9, page 3	Reference values only, not incoming product acceptance specifications. No matched specimen, lot, pressure, temper, aging history, strain rate or test method is supplied. Uncertainty is unstated. These are alloy ribbon/foil references, not a qualified die-attach joint or an intermetallic interface. No values from another revision or the mutable website table are blended into this profile.
+observation	phase	Au80Sn20 nominal eutectic endpoints	Both printed endpoints are 280 degC	Equal solidus and liquidus become 553.15 K. They do not supply latent heat, an enthalpy reference, supercooling kinetics or a complete phase-change thermal law.
+observation	physical	Au80Sn20 reference density and tensile strength	Explicit conversion of the PDF values	Density 14.51 g/cm3 becomes 14510 kg/m3. Tensile strength 40000 psi uses 1 psi = 0.45359237 times 9.80665 divided by 0.0254 squared Pa. Test temperature is unknown. Bond-holding strength is excluded because its substrate and bond preparation are unspecified; CTE convention and electrical reference are not inferred.
+observation	conductivity	Au80Sn20 thermal conductivity at 85 degC	PDF column W/cm/degC at 85 degC	0.57 W/cm/degC becomes 57 W/m/K at 358.15 K only. This measured-temperature reference point supplies no conductivity curve or temperature extrapolation.
+scalar	solidus	reference,phase	solidus_temperature	553.15	K	constant
+uncertainty	solidus	unstated	-	-	-	-
+validity	solidus	engineering_reference_model	1	1	1
+validity	solidus	source_specimens_matched	0	0	1
+validity	solidus	source_test_temperature_known	0	0	1
+validity	solidus	source_test_method_known	0	0	1
+validity	solidus	source_alloy_au80sn20	1	1	1
+scalar	liquidus	reference,phase	liquidus_temperature	553.15	K	constant
+uncertainty	liquidus	unstated	-	-	-	-
+validity	liquidus	engineering_reference_model	1	1	1
+validity	liquidus	source_specimens_matched	0	0	1
+validity	liquidus	source_test_temperature_known	0	0	1
+validity	liquidus	source_test_method_known	0	0	1
+validity	liquidus	source_alloy_au80sn20	1	1	1
+scalar	density	reference,physical	density	14510	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_specimens_matched	0	0	1
+validity	density	source_test_temperature_known	0	0	1
+validity	density	source_test_method_known	0	0	1
+validity	density	source_alloy_au80sn20	1	1	1
+scalar	tensile-strength	reference,physical	tensile_strength	275790291.72673446	Pa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	engineering_reference_model	1	1	1
+validity	tensile-strength	source_specimens_matched	0	0	1
+validity	tensile-strength	source_test_temperature_known	0	0	1
+validity	tensile-strength	source_test_method_known	0	0	1
+validity	tensile-strength	source_alloy_au80sn20	1	1	1
+scalar	conductivity-85c	reference,conductivity	thermal_conductivity	57	W/m/K	constant
+uncertainty	conductivity-85c	unstated	-	-	-	-
+validity	conductivity-85c	engineering_reference_model	1	1	1
+validity	conductivity-85c	source_specimens_matched	0	0	1
+validity	conductivity-85c	source_test_temperature_known	1	1	1
+validity	conductivity-85c	source_test_method_known	0	0	1
+validity	conductivity-85c	source_alloy_au80sn20	1	1	1
+validity	conductivity-85c	temperature	358.15	358.15	K
