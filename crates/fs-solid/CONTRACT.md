@@ -2028,3 +2028,39 @@ two-coordinate history against independently solved generalized eigenvalues,
 and unchanged nodal-only behavior. The one-element first bending-frequency
 error falls from about 30% for endpoint lumping to below 0.5% with consistent
 mass; higher-mode accuracy still requires member refinement.
+
+## Signed, mass-normalized frame modes and participation
+
+`Frame2d::modal_analysis` exposes the complete signed current-tangent spectrum,
+full node-major mode shapes and horizontal/vertical uniform-base participation.
+Shapes satisfy `phi^T M phi = 1`; fixed coordinates are zero and massless
+coordinates use the original static condensation map
+`phi_r = -K_rr^-1 K_rt phi_t`. The massless stiffness must be positive definite:
+an unstable or unconstrained massless subsystem cannot silently disappear
+through condensation. Each massless and mass factor is prepared once.
+The original fs-la Cholesky and symmetric Jacobi owners supply the algebra;
+the former frame-only eigenvalue kernel is retired.
+
+With `r_x/r_y` the full unit translational influence, including supported
+coordinates, participation is `Gamma = phi^T M r` and effective mass is
+`Gamma^2`. The same reference M is used by the frame transient and body-force
+owners. Supported inertia may also contribute directly to reactions, so the
+modal sum need not equal the complete `r^T M r` inventory.
+
+Every mode retains its unmodified signed eigenvalue, a freshly recomputed
+free-pencil backward residual and a mass-whitened residual. The reported
+sign-resolution diagnostic is the latter plus
+`64*eps*n*||L^-1 K_cc L^-T||_inf`. It is a floating-point estimate, not a
+certified interval or stability theorem. Modes are explicitly oscillatory,
+unstable, or unresolved near zero; unresolved does not certify a neutral mode.
+Resolved negative eigenvalues expose their linearized exponential growth rate.
+`natural_frequencies` now requires every mode to be resolved and oscillatory;
+rigid or unstable frames must use the signed analysis instead of receiving
+clipped zero frequencies.
+
+The analysis is frozen at the current admitted material/displacement state;
+it does not locate a nonlinear buckling load or refresh during a history.
+Repeated eigenvalues define a mass-orthonormal subspace, not unique vectors.
+`tests/frame2d_modes.rs` covers exact massless beam-shape restoration and
+participation, full-mass orthogonality and reconstruction, free rigid motion,
+and an axially compressed column crossing its Euler instability.

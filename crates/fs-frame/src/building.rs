@@ -29,7 +29,7 @@
 use fs_eproc::GaussianMixtureCs;
 use fs_scenario::ensemble::StochasticEnsemble;
 use fs_solid::fiber::rc_section;
-use fs_solid::frame2d::FrameMassFormulation;
+use fs_solid::frame2d::{FrameMassFormulation, FrameModalAnalysis, FrameModeStatus};
 use fs_solid::{Frame2d, Geometry, Rayleigh, SectionModel, SolidError};
 use fs_uq::mlmc::{MlmcReport, mlmc_estimate};
 
@@ -108,6 +108,7 @@ pub struct BuildingFrame {
     /// Node ids per floor level (level 0 = base), left to right.
     floors: Vec<Vec<usize>>,
     periods: Vec<f64>,
+    modes: FrameModalAnalysis,
     damping: Rayleigh,
     gravity: Vec<f64>,
 }
@@ -224,12 +225,34 @@ impl BuildingFrame {
             .collect();
         let gravity = frame.inertial_forces(&acceleration)?;
         frame.static_load(&gravity, 4)?;
-        let w = frame.natural_frequencies()?;
-        let lateral: Vec<f64> = w.iter().copied().filter(|x| *x > 0.0).collect();
+        let modes = frame.modal_analysis()?;
+        if let Some(mode) = modes
+            .modes
+            .iter()
+            .find(|m| m.status() != FrameModeStatus::Oscillatory)
+        {
+            return Err(SolidError::InvalidInput {
+                what: format!(
+                    "gravity-loaded tangent has {:?} mode: signed eigenvalue {}, resolution {}",
+                    mode.status(),
+                    mode.eigenvalue_per_s2,
+                    mode.eigenvalue_resolution_per_s2
+                ),
+            });
+        }
+        // Uniform horizontal base motion couples through Gamma_x = phi^T M r_x.
+        // Do not fit its damping to a lower vertical or unexcited member mode.
+        let participation_floor = 256.0 * f64::EPSILON * modes.base_influence_mass_kg[0];
+        let lateral: Vec<f64> = modes
+            .modes
+            .iter()
+            .filter(|m| m.effective_mass_kg[0] > participation_floor)
+            .map(|m| m.eigenvalue_per_s2.sqrt())
+            .collect();
         let w1 = *lateral
             .first()
             .ok_or_else(|| SolidError::InternalInvariant {
-                what: "building has no positive natural frequency".into(),
+                what: "building has no resolved horizontally participating mode".into(),
             })?;
         let w2 = lateral
             .get(spec.stories.min(lateral.len()) - 1)
@@ -252,15 +275,25 @@ impl BuildingFrame {
             spec,
             floors,
             periods,
+            modes,
             damping,
             gravity,
         })
     }
 
-    /// Natural periods of the gravity-loaded frame (s), descending.
+    /// Periods of the initial gravity-loaded modes that participate in uniform
+    /// horizontal base motion (s), descending. All directions remain available
+    /// through [`Self::modal_analysis`].
     #[must_use]
     pub fn periods(&self) -> &[f64] {
         &self.periods
+    }
+
+    /// Complete signed, mass-normalized initial gravity-loaded modal analysis.
+    /// A later nonlinear time history does not refresh this initial analysis.
+    #[must_use]
+    pub fn modal_analysis(&self) -> &FrameModalAnalysis {
+        &self.modes
     }
 
     /// The fitted Rayleigh damping.

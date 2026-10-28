@@ -49,6 +49,8 @@ use crate::fiber::{Section, SectionState};
 
 mod mass;
 pub use mass::FrameMassFormulation;
+mod modes;
+pub use modes::{FrameModalAnalysis, FrameMode, FrameModeStatus};
 
 /// A section constitutive model for frame elements.
 #[derive(Debug, Clone)]
@@ -990,52 +992,6 @@ impl Frame2d {
         (massive, massless)
     }
 
-    /// Circular natural frequencies `ω` (ascending) of the current tangent,
-    /// with massless DOFs statically condensed out.
-    ///
-    /// # Errors
-    /// [`SolidError`] if the tangent cannot be formed or condensed.
-    pub fn natural_frequencies(&self) -> Result<Vec<f64>, SolidError> {
-        let n = self.ndof();
-        let (_, k, _) = self.assemble(&self.u)?;
-        let mass = self.reference_mass()?;
-        let (t, r) = self.mass_partition(&mass);
-        let (nt, nr) = (t.len(), r.len());
-        // K_cc = K_tt − K_tr K_rr⁻¹ K_rt.
-        let mut krr = vec![0.0; nr * nr];
-        for (a, &da) in r.iter().enumerate() {
-            for (b, &db) in r.iter().enumerate() {
-                krr[a * nr + b] = k[da * n + db];
-            }
-        }
-        let mut kcc = vec![0.0; nt * nt];
-        for (a, &da) in t.iter().enumerate() {
-            for (b, &db) in t.iter().enumerate() {
-                kcc[a * nt + b] = k[da * n + db];
-            }
-        }
-        if nr > 0 {
-            for (b, &db) in t.iter().enumerate() {
-                let col: Vec<f64> = r.iter().map(|&dr| k[dr * n + db]).collect();
-                let x = lu_solve(&krr, nr, &col).ok_or_else(|| SolidError::InternalInvariant {
-                    what: "singular massless block in modal condensation".into(),
-                })?;
-                for (a, &da) in t.iter().enumerate() {
-                    let s: f64 = r
-                        .iter()
-                        .enumerate()
-                        .map(|(c, &dr)| k[da * n + dr] * x[c])
-                        .sum();
-                    kcc[a * nt + b] -= s;
-                }
-            }
-        }
-        // The same generalized pencil, reduced by the admitted reference mass.
-        let mut ev = jacobi_eigenvalues(mass.modal_matrix(&kcc, &t)?);
-        ev.sort_by(f64::total_cmp);
-        Ok(ev.iter().map(|l| l.max(0.0).sqrt()).collect())
-    }
-
     /// Implicit Newmark-β (average acceleration, γ = ½, β = ¼) response to a
     /// uniform base acceleration record `ground` (sampled every `dt`) acting
     /// along the global direction `(dir_x, dir_y)`, with Rayleigh damping on
@@ -1236,51 +1192,4 @@ impl Frame2d {
         }
         Ok(hist)
     }
-}
-
-/// Eigenvalues of a small symmetric matrix by cyclic Jacobi.
-fn jacobi_eigenvalues(mut a: Vec<Vec<f64>>) -> Vec<f64> {
-    let n = a.len();
-    let scale = a
-        .iter()
-        .flat_map(|r| r.iter())
-        .fold(0.0f64, |m, v| m.max(v.abs()))
-        .max(f64::MIN_POSITIVE);
-    for _ in 0..80 {
-        let mut off = 0.0;
-        for i in 0..n {
-            for j in (i + 1)..n {
-                off += a[i][j] * a[i][j];
-            }
-        }
-        if off.sqrt() <= 1e-15 * scale {
-            break;
-        }
-        for p in 0..n {
-            for q in (p + 1)..n {
-                if a[p][q].abs() <= 1e-300 {
-                    continue;
-                }
-                let theta = (a[q][q] - a[p][p]) / (2.0 * a[p][q]);
-                let t = if theta == 0.0 {
-                    1.0
-                } else {
-                    theta.signum() / (theta.abs() + (theta * theta + 1.0).sqrt())
-                };
-                let c = 1.0 / (t * t + 1.0).sqrt();
-                let s = t * c;
-                for k in 0..n {
-                    let (akp, akq) = (a[k][p], a[k][q]);
-                    a[k][p] = c * akp - s * akq;
-                    a[k][q] = s * akp + c * akq;
-                }
-                for k in 0..n {
-                    let (apk, aqk) = (a[p][k], a[q][k]);
-                    a[p][k] = c * apk - s * aqk;
-                    a[q][k] = s * apk + c * aqk;
-                }
-            }
-        }
-    }
-    (0..n).map(|i| a[i][i]).collect()
 }

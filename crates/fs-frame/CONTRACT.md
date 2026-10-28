@@ -255,3 +255,24 @@ The original frame mechanics and model-fragility scope remain unchanged.
 `tests/building_gravity.rs` covers loaded modal shifts, retained gravity at
 rest, a forced full-mass building history and exact zero-member-mass
 compatibility, as well as invalid line-mass refusal.
+
+## Horizontal participation and gravity-tangent stability
+
+Building construction retains the complete initial
+`FrameModalAnalysis`, available through `modal_analysis()`. Any unstable or
+unresolved gravity-loaded mode refuses before fitting damping; negative
+eigenvalues can no longer be clipped and discarded as absent modes.
+
+The exposed `periods()` and Rayleigh fit now use modes that participate in
+uniform horizontal base motion, ordered by frequency. A numerical participation
+floor of `256*eps*(r_x^T M r_x)` applies to effective mass; it suppresses
+roundoff-level coupling, not a requested modal mass truncation. Full vertical,
+unexcited and higher modes remain in the stored analysis. The damping fit uses
+the first and requested story-index horizontal modes, or its original
+single-frequency mass-damping fallback.
+
+This is an initial tangent diagnosis. It does not certify stability throughout
+a later nonlinear earthquake history or identify a physical collapse load.
+The modal analysis is not refreshed by `run`.
+`tests/building_modes.rs` checks horizontal damping in the presence of a lower
+vertical member mode and refusal of a gravity-buckled slender building.

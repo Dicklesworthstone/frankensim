@@ -29,6 +29,31 @@ pub(super) enum MassMatrix {
     Consistent { n: usize, entries: Vec<f64> },
 }
 
+/// Retained mass factor for restoring all eigenvectors without refactorization.
+pub(super) enum MassBackTransform {
+    Diagonal(Vec<f64>),
+    Cholesky(Cholesky),
+}
+
+impl MassBackTransform {
+    pub(super) fn restore(&self, vector: &[f64]) -> Vec<f64> {
+        match self {
+            Self::Diagonal(roots) => vector.iter().zip(roots).map(|(v, root)| v / root).collect(),
+            Self::Cholesky(l) => {
+                let mut result = vector.to_vec();
+                for i in (0..result.len()).rev() {
+                    let mut value = result[i];
+                    for j in i + 1..result.len() {
+                        value -= l.l(j, i) * result[j];
+                    }
+                    result[i] = value / l.l(i, i);
+                }
+                result
+            }
+        }
+    }
+}
+
 impl MassMatrix {
     fn n(&self) -> usize {
         match self {
@@ -126,13 +151,12 @@ impl MassMatrix {
         Ok(acceleration)
     }
 
-    /// L^-1 K L^-T, using the existing Cholesky owner. The caller retains
-    /// its existing symmetric eigensolver and massless stiffness condensation.
+    /// L^-1 K L^-T with its retained inverse-transpose mass transform.
     pub(super) fn modal_matrix(
         &self,
         k: &[f64],
         dofs: &[usize],
-    ) -> Result<Vec<Vec<f64>>, SolidError> {
+    ) -> Result<(Vec<Vec<f64>>, MassBackTransform), SolidError> {
         let n = dofs.len();
         let mut a = vec![vec![0.0; n]; n];
         for i in 0..n {
@@ -140,13 +164,15 @@ impl MassMatrix {
                 a[i][j] = 0.5 * (k[i * n + j] + k[j * n + i]);
             }
         }
-        match self {
+        let transform = match self {
             Self::Lumped(m) => {
+                let roots: Vec<f64> = dofs.iter().map(|&d| m[d].sqrt()).collect();
                 for i in 0..n {
                     for j in 0..n {
-                        a[i][j] /= m[dofs[i]].sqrt() * m[dofs[j]].sqrt();
+                        a[i][j] /= roots[i] * roots[j];
                     }
                 }
+                MassBackTransform::Diagonal(roots)
             }
             Self::Consistent { .. } => {
                 let l = self.factor(dofs)?;
@@ -175,12 +201,13 @@ impl MassMatrix {
                         a[j][i] = symmetric;
                     }
                 }
+                MassBackTransform::Cholesky(l)
             }
-        }
+        };
         if a.iter().flatten().any(|x| !x.is_finite()) {
             return Err(invalid("nonfinite mass-reduced vibration pencil"));
         }
-        Ok(a)
+        Ok((a, transform))
     }
 }
 
