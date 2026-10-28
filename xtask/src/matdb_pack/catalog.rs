@@ -4,32 +4,40 @@
 use super::{
     CompiledPack, MAX_MANIFEST_BYTES, compile_manifest, parse_manifest, read_bounded_regular,
 };
-use fs_matdb::{ClaimSet, PropertyValue};
-use std::collections::BTreeSet;
+use fs_matdb::{ClaimSet, MaterialAnswer, PropertyValue, QueryPoint, SelectionPolicy};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-const USAGE: &str = "usage: cargo run -p xtask -- matdb-catalog [--search TEXT]... [--property NAME]... [--pack ID]\n\
+const USAGE: &str = "usage: cargo run -p xtask -- matdb-catalog [--search TEXT]... [--property NAME]... [--pack ID] [--at AXIS=VALUE]...\n\
 Search is case-insensitive across source/pack IDs, citations, specimens and properties.\n\
 All terms and required properties must match. --pack selects an exact source\n\
 directory name (internal pack IDs may repeat across sources) and prints source\n\
 conditions, SI values, quantity types and observation caveats for one exact ID.\n\
 Species/model inspection is metadata-only. Refused sources remain visible in\n\
 unfiltered listings with their error; property filters select compiled claims.\n\
-Property presence alone does not establish a common valid state or model.";
+Property presence alone does not establish a common valid state or model.\n\
+--at requires --property and evaluates every requested property at one explicit\n\
+state, using canonical SI coordinates (temperature in kelvin) and each source's\n\
+declared axis quantities. Every supplied axis must be declared by every selected\n\
+claim; missing axes, unsupported states, incompatible schemas and ambiguous\n\
+claims refuse. No extrapolation or automatic source-condition defaults.\n\
+State-filtered listings add evaluated-si and query-point columns. Values remain\n\
+Estimate-level source evaluations, not a qualified coupled material model.";
 
 #[derive(Default)]
 struct Options {
     search: Vec<String>,
     properties: BTreeSet<String>,
     pack: Option<String>,
+    at: BTreeMap<String, f64>,
 }
 
 fn options(args: &[String]) -> Result<Options, String> {
     let mut result = Options::default();
     let mut args = args.iter();
     while let Some(flag) = args.next() {
-        if !matches!(flag.as_str(), "--search" | "--property" | "--pack") {
+        if !matches!(flag.as_str(), "--search" | "--property" | "--pack" | "--at") {
             return Err(format!("unknown catalog option {flag:?}\n{USAGE}"));
         }
         let value = args
@@ -46,10 +54,115 @@ fn options(args: &[String]) -> Result<Options, String> {
                     return Err("--pack may be supplied only once".into());
                 }
             }
+            "--at" => {
+                let (axis, coordinate) = value
+                    .split_once('=')
+                    .filter(|(axis, _)| {
+                        !axis.trim().is_empty() && !axis.contains(char::is_whitespace)
+                    })
+                    .ok_or_else(|| "--at requires AXIS=VALUE in canonical SI".to_owned())?;
+                let coordinate = coordinate
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|value| value.is_finite())
+                    .ok_or_else(|| format!("--at {axis}: coordinate must be a finite SI number"))?;
+                if result.at.insert(axis.to_owned(), coordinate).is_some() {
+                    return Err(format!("--at axis {axis:?} may be supplied only once"));
+                }
+            }
             _ => unreachable!(),
         }
     }
+    if !result.at.is_empty() && result.properties.is_empty() {
+        return Err("--at requires at least one --property to evaluate".into());
+    }
     Ok(result)
+}
+
+/// Evaluate complete property keys without inventing coordinates or choosing
+/// among conflicting observations. The extra-axis check is intentionally
+/// stricter than the generic evaluator, which permits irrelevant coordinates.
+fn evaluate_state(
+    set: &ClaimSet,
+    options: &Options,
+) -> Result<(QueryPoint, Vec<MaterialAnswer>), String> {
+    let mut keys = Vec::new();
+    let mut axes = BTreeMap::new();
+    for name in &options.properties {
+        let candidates = set.claims_for(name);
+        let (_, first) = candidates
+            .first()
+            .ok_or_else(|| format!("unknown property {name:?}"))?;
+        if candidates.iter().any(|(_, claim)| claim.key != first.key) {
+            return Err(format!(
+                "{name}: incompatible property contexts; inspect exact claim keys"
+            ));
+        }
+        keys.push(first.key.clone());
+        for (_, claim) in candidates {
+            for axis in claim.validity.bounds().keys() {
+                let quantity = claim.validity.axis_quantities().get(axis).copied();
+                if let Some(previous) = axes.insert(axis.clone(), quantity)
+                    && previous != quantity
+                {
+                    return Err(format!(
+                        "axis {axis:?} has incompatible quantity declarations"
+                    ));
+                }
+            }
+        }
+    }
+    let mut point = QueryPoint::new();
+    for (axis, &coordinate) in &options.at {
+        point = match axes.get(axis) {
+            Some(Some(quantity)) => point.with_quantity(axis, *quantity, coordinate),
+            Some(None) => point.with(axis, coordinate),
+            None => {
+                return Err(format!(
+                    "requested properties do not declare state axis {axis:?}"
+                ));
+            }
+        }
+        .map_err(|error| format!("axis {axis:?}: {error}"))?;
+    }
+    let mut answers = Vec::new();
+    for key in keys {
+        let answer = set
+            .query_typed(&key, &point, SelectionPolicy::SingleClaimOnly)
+            .map_err(|error| format!("{}: {error}", key.name()))?;
+        let selected = set
+            .claim(answer.receipt.selected)
+            .expect("selected admitted claim");
+        for axis in options.at.keys() {
+            if !selected.validity.bounds().contains_key(axis) {
+                return Err(format!(
+                    "{}: selected claim does not declare state axis {axis:?}",
+                    key.name()
+                ));
+            }
+        }
+        answers.push(answer);
+    }
+    Ok((point, answers))
+}
+
+fn evaluated_cell(answers: &[MaterialAnswer]) -> String {
+    answers
+        .iter()
+        .map(|answer| {
+            let sample = &answer.evidence.value;
+            format!(
+                "{}={} [{:?}; Estimate; claim={}; {:?}; uncertainty={:?}]",
+                answer.receipt.property,
+                sample.value,
+                sample.quantity,
+                answer.receipt.selected.0,
+                answer.receipt.decision,
+                sample.uncertainty
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn claims(pack: &CompiledPack) -> Option<&ClaimSet> {
@@ -184,8 +297,12 @@ fn catalog(root: &Path, options: &Options) -> Result<(String, Vec<String>), Stri
     let mut found = false;
     if options.pack.is_none() {
         output.push_str(
-            "source-id\tpack-id\tfamily\tclaims\tproperties\tmanifest\tstatus\tdiagnostic\n",
+            "source-id\tpack-id\tfamily\tclaims\tproperties\tmanifest\tstatus\tdiagnostic",
         );
+        if !options.at.is_empty() {
+            output.push_str("\tevaluated-si\tquery-point");
+        }
+        output.push('\n');
     }
     for path in paths {
         let source_id = path
@@ -261,6 +378,22 @@ fn catalog(root: &Path, options: &Options) -> Result<(String, Vec<String>), Stri
         if !options.search.iter().all(|term| searchable.contains(term)) {
             continue;
         }
+        let evaluation = if options.at.is_empty() {
+            None
+        } else {
+            match claim_set
+                .ok_or_else(|| "source has no evaluable material claims".to_owned())
+                .and_then(|set| evaluate_state(set, options))
+            {
+                Ok(evaluation) => Some(evaluation),
+                Err(error) if options.pack.is_some() => {
+                    return Err(format!(
+                        "{source_id}: {error}; inspect --pack without --at for source conditions"
+                    ));
+                }
+                Err(_) => continue,
+            }
+        };
         found = true;
         if options.pack.is_some() {
             writeln!(
@@ -284,8 +417,12 @@ fn catalog(root: &Path, options: &Options) -> Result<(String, Vec<String>), Stri
                 output.push_str("inspection-scope\tmetadata-only; species/model parameters require their dedicated pack reader\n");
             }
             detail(&mut output, &compiled.pack);
+            if let Some((point, answers)) = &evaluation {
+                writeln!(output, "query-point\t{}", cell(&format!("{point:?}"))).unwrap();
+                writeln!(output, "evaluated-si\t{}", cell(&evaluated_cell(answers))).unwrap();
+            }
         } else {
-            writeln!(
+            write!(
                 output,
                 "{}\t{}\t{}\t{}\t{}\t{}\tcompiled\t",
                 cell(source_id),
@@ -296,6 +433,16 @@ fn catalog(root: &Path, options: &Options) -> Result<(String, Vec<String>), Stri
                 cell(&relative)
             )
             .unwrap();
+            if let Some((point, answers)) = &evaluation {
+                write!(
+                    output,
+                    "\t{}\t{}",
+                    cell(&evaluated_cell(answers)),
+                    cell(&format!("{point:?}"))
+                )
+                .unwrap();
+            }
+            output.push('\n');
         }
     }
     if !found && options.pack.is_some() {
@@ -387,9 +534,83 @@ mod tests {
             vec!["--search", "--pack"],
             vec!["--pack", "a", "--pack", "b"],
             vec!["--unknown", "x"],
+            vec!["--at", "temperature=293.15"],
+            vec!["--property", "density", "--at", "=1"],
+            vec!["--property", "density", "--at", "temperature=NaN"],
+            vec!["--property", "density", "--at", "temperature=inf"],
+            vec!["--property", "density", "--at", "temperature=20C"],
+            vec!["--property", "density", "--at", "x=1", "--at", "x=2"],
         ] {
             assert!(options(&args.into_iter().map(str::to_owned).collect::<Vec<_>>()).is_err());
         }
         assert_eq!(cell("a\tb\nc\\d\r"), "a\\tb\\nc\\\\d\\r");
+    }
+
+    #[test]
+    fn state_queries_refuse_ambiguity_disjoint_support_and_axis_kind_conflicts() {
+        use fs_evidence::ValidityDomain;
+        use fs_matdb::{
+            InterpolationPolicy, PropertyClaim, PropertyKey, Provenance, UncertaintyModel,
+        };
+        use fs_qty::{Dims, QuantitySpec};
+
+        let scalar = |name: &str, value, lo, hi| PropertyClaim {
+            key: PropertyKey::new(name, Dims::NONE),
+            value: PropertyValue::Scalar {
+                value,
+                dims: Dims::NONE,
+            },
+            validity: ValidityDomain::unconstrained().with_quantity(
+                "state",
+                QuantitySpec::dimensional(Dims::NONE),
+                lo,
+                hi,
+            ),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: Vec::new(),
+            provenance: Provenance {
+                source: "synthetic catalog regression".into(),
+                license: "internal-use".into(),
+                artifact: None,
+            },
+        };
+        let mut options = Options {
+            properties: BTreeSet::from(["a".into()]),
+            at: BTreeMap::from([("state".into(), 1.0)]),
+            ..Options::default()
+        };
+        let mut ambiguous = ClaimSet::new();
+        ambiguous.insert_claim(scalar("a", 10.0, 0.0, 1.0)).unwrap();
+        ambiguous.insert_claim(scalar("a", 20.0, 0.0, 1.0)).unwrap();
+        assert!(
+            evaluate_state(&ambiguous, &options)
+                .unwrap_err()
+                .contains("2 in-domain claims")
+        );
+
+        options.properties.insert("b".into());
+        let mut disjoint = ClaimSet::new();
+        disjoint.insert_claim(scalar("a", 10.0, 0.0, 1.0)).unwrap();
+        disjoint.insert_claim(scalar("b", 20.0, 2.0, 3.0)).unwrap();
+        assert!(evaluate_state(&disjoint, &options).is_err());
+        options.at.insert("state".into(), 2.0);
+        assert!(evaluate_state(&disjoint, &options).is_err());
+
+        let mut conflict = ClaimSet::new();
+        conflict.insert_claim(scalar("a", 10.0, 0.0, 3.0)).unwrap();
+        let mut other = scalar("b", 20.0, 0.0, 3.0);
+        other.validity = ValidityDomain::unconstrained().with_quantity(
+            "state",
+            QuantitySpec::dimensional(Dims([1, 0, 0, 0, 0, 0])),
+            0.0,
+            3.0,
+        );
+        conflict.insert_claim(other).unwrap();
+        assert!(
+            evaluate_state(&conflict, &options)
+                .unwrap_err()
+                .contains("incompatible quantity")
+        );
     }
 }

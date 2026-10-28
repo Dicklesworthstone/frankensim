@@ -527,6 +527,37 @@ of that source fails. An unrelated refused source does not hide usable materials
 Property presence is a discovery aid: consumers still need a compatible state,
 the required quantities and their own physical admission checks.
 
+### Evaluate required properties at an explicit state
+
+Repeat `--at AXIS=VALUE` to evaluate every requested property at the same
+source-supported point. Coordinates use canonical SI, including kelvin for
+absolute temperature; axis quantity types come from the source claims.
+For example, inspect density and conductivity from the NASA 316 reference:
+
+```sh
+cargo run -p xtask -- matdb-catalog --pack stainless-316-nasa-tp216435 \
+  --property density --property thermal-conductivity \
+  --at temperature=350 --at source-generic-316-identity=1 \
+  --at source-uns-designation-known=0 --at source-heat-treatment-known=0 \
+  --at source-product-form-known=0 --at source-pressure-known=0
+```
+
+This evaluates 7938.6 kg/m³ and 14.3 W/(m K) using the source's declared linear
+interpolation. Replace `--pack` with `--search` to retain only matching source
+bundles whose requested properties evaluate successfully. Output includes SI
+values, quantity types, selected claim hashes, interpolation decisions and
+uncertainty. The results remain `Estimate` evaluations.
+
+Every supplied coordinate must be declared by every selected claim. A density
+entry with an unknown test temperature cannot silently satisfy a query at a
+numerical temperature simply because the same pack has a temperature-dependent
+conductivity curve. Missing conditions, unsupported temperatures or orientations,
+discrete-knot gaps, ambiguous observations, conflicting quantity types and
+extra axes refuse; the command supplies no implicit condition defaults.
+Inspect the pack without `--at` to see its exact required axes and caveats.
+Successful samples do not establish a matched specimen or replace a physical
+consumer's additional admission checks.
+
 ## Everyday materials expansion: boards, polymers, alloys and composites
 
 This increment adds **38 source-specific packs and 195 property claims**.

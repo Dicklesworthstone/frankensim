@@ -111,3 +111,129 @@ fn invalid_options_missing_ids_and_conflicting_filters_refuse_without_partial_ou
     }
     assert!(success(&["--help"]).contains("common valid state"));
 }
+
+#[test]
+fn state_search_and_exact_inspection_sample_real_source_curves() {
+    let state = [
+        "--property",
+        "density",
+        "--property",
+        "thermal-conductivity",
+        "--at",
+        "temperature=350",
+        "--at",
+        "source-generic-316-identity=1",
+        "--at",
+        "source-uns-designation-known=0",
+        "--at",
+        "source-heat-treatment-known=0",
+        "--at",
+        "source-product-form-known=0",
+        "--at",
+        "source-pressure-known=0",
+    ];
+    let mut args = vec!["--pack", "stainless-316-nasa-tp216435"];
+    args.extend_from_slice(&state);
+    let exact = success(&args);
+    let values = exact
+        .lines()
+        .find(|line| line.starts_with("evaluated-si\t"))
+        .unwrap();
+    assert!(values.contains("density=7938.6"), "{values}");
+    assert!(values.contains("thermal-conductivity=14.3"), "{values}");
+    assert!(values.contains("Estimate; claim="));
+    assert!(values.contains("LinearInside"));
+    assert!(values.contains("uncertainty=Unstated"));
+    let point = exact
+        .lines()
+        .find(|line| line.starts_with("query-point\t"))
+        .unwrap();
+    assert!(point.contains("AbsoluteTemperature"));
+    assert_eq!(exact, success(&args));
+
+    let mut search = vec!["--search", "stainless-316-nasa-tp216435"];
+    search.extend_from_slice(&state);
+    let filtered = success(&search);
+    assert_eq!(filtered.lines().count(), 2);
+    assert!(
+        filtered
+            .lines()
+            .next()
+            .unwrap()
+            .ends_with("\tevaluated-si\tquery-point")
+    );
+    assert_eq!(filtered.lines().nth(1).unwrap().split('\t').count(), 10);
+    assert!(filtered.contains("density=7938.6"));
+    let outside = search
+        .iter()
+        .map(|value| {
+            if *value == "temperature=350" {
+                "temperature=500"
+            } else {
+                *value
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(success(&outside).lines().count(), 1);
+}
+
+#[test]
+fn state_query_never_infers_missing_conditions_or_ignores_extra_axes() {
+    for args in [
+        vec![
+            "--pack",
+            "niobium-espi-reference",
+            "--property",
+            "density",
+            "--at",
+            "temperature=293.15",
+        ],
+        vec![
+            "--pack",
+            "niobium-espi-reference",
+            "--property",
+            "density",
+            "--at",
+            "temperature=293.15",
+            "--at",
+            "engineering-reference-model=1",
+            "--at",
+            "source-temperatures-matched=0",
+            "--at",
+            "pressure=101325",
+        ],
+        vec![
+            "--pack",
+            "iridium-espi-reference",
+            "--property",
+            "density",
+            "--property",
+            "specific-heat-capacity",
+            "--at",
+            "temperature=293.15",
+            "--at",
+            "source-reference-espi-iridium=1",
+            "--at",
+            "source-temperature-known=0",
+            "--at",
+            "source-pressure-known=0",
+        ],
+        vec![
+            "--pack",
+            "iridium-espi-reference",
+            "--property",
+            "electrical-resistivity",
+            "--at",
+            "temperature=283.15",
+            "--at",
+            "source-reference-espi-iridium=1",
+            "--at",
+            "source-pressure-known=0",
+        ],
+    ] {
+        let output = run(&args);
+        assert!(!output.status.success(), "must refuse {args:?}");
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("inspect --pack"));
+    }
+}
