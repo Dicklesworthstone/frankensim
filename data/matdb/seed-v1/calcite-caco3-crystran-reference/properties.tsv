@@ -1,0 +1,27 @@
+frankensim.matdb-source.v1
+observation	engineering-reference	Calcite optical crystal, CaCO3; Iceland spar	Frozen coefficients from Crystran Product Data	The author-declared 293.15-294.15 K calculation interval requires engineering-reference-model=1 and source-temperatures-matched=0. Heat-flow-parallel-to-c is 1 along the optic c-axis and 0 perpendicular to it. Each scalar is a principal-direction conduction coefficient; intermediate angles and isotropy are unsupported. Density and heat-capacity temperatures and uncertainty are unstated; conductivity is from 273 K and frozen near 293 K only as an explicit engineering approximation. No limestone, marble, cement, aggregate porosity or crystal failure law is inferred.
+observation	density	Calcite crystal reference	Supplier density	2.71 g/cc converts to 2710 kg/m3.
+observation	heat-capacity	Calcite crystal reference	Supplier specific heat	852 J/(kg K).
+observation	conductivity	Calcite crystal reference	Supplier directional conductivity at 273 K	Parallel 5.526 and perpendicular 4.646 W/(m K), relative to the c-axis.
+scalar	density	density,engineering-reference	density	2710	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293.15	294.15	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	0	0	1
+scalar	heat-capacity	heat-capacity,engineering-reference	specific_heat_capacity	852	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	293.15	294.15	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_temperatures_matched	0	0	1
+scalar	conductivity-parallel	conductivity,engineering-reference	thermal_conductivity	5.526	W/m/K	constant
+uncertainty	conductivity-parallel	unstated	-	-	-	-
+validity	conductivity-parallel	temperature	293.15	294.15	K
+validity	conductivity-parallel	engineering_reference_model	1	1	1
+validity	conductivity-parallel	source_temperatures_matched	0	0	1
+validity	conductivity-parallel	heat_flow_parallel_to_c	1	1	1
+scalar	conductivity-perpendicular	conductivity,engineering-reference	thermal_conductivity	4.646	W/m/K	constant
+uncertainty	conductivity-perpendicular	unstated	-	-	-	-
+validity	conductivity-perpendicular	temperature	293.15	294.15	K
+validity	conductivity-perpendicular	engineering_reference_model	1	1	1
+validity	conductivity-perpendicular	source_temperatures_matched	0	0	1
+validity	conductivity-perpendicular	heat_flow_parallel_to_c	0	0	1

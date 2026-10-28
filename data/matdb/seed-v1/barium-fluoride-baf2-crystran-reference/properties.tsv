@@ -1,0 +1,20 @@
+frankensim.matdb-source.v1
+observation	engineering-reference	Barium fluoride optical crystal, cubic fluorite structure	Frozen coefficients from Crystran Product Data	The author-declared 293.15-294.15 K calculation interval is an engineering reference, not measured temperature coverage. Require engineering-reference-model=1 and source-temperatures-matched=0. No specimen, optical grade, humidity, statistical uncertainty or temperature law is supplied. Cubic symmetry permits scalar heat conduction; it does not imply isotropic elasticity. No scintillation, strength or elastic tensor is inferred.
+observation	density	Barium fluoride reference	Supplier density	4.89 g/cc converts to 4890 kg/m3; temperature unstated.
+observation	heat-capacity	Barium fluoride reference	Supplier specific heat	410 J/(kg K); temperature unstated.
+observation	conductivity	Barium fluoride reference	Supplier thermal conductivity at 286 K	11.72 W/(m K); using it near 293 K is an explicit frozen-coefficient approximation.
+scalar	density	density,engineering-reference	density	4890	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293.15	294.15	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	0	0	1
+scalar	heat-capacity	heat-capacity,engineering-reference	specific_heat_capacity	410	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	293.15	294.15	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_temperatures_matched	0	0	1
+scalar	conductivity	conductivity,engineering-reference	thermal_conductivity	11.72	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	293.15	294.15	K
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_temperatures_matched	0	0	1

@@ -1,0 +1,26 @@
+frankensim.matdb-source.v1
+observation	engineering-reference	Elemental niobium supplier reference	ESPI catalog General Properties	The author-declared 293.15-294.15 K interval requires engineering-reference-model=1 and source-temperatures-matched=0. Density temperature is unstated; Cp is at 25 C, k at 298.2 K and resistivity at 0 C. Their use here is explicitly a frozen-coefficient approximation, not a matched experiment or temperature law. No listed purity grade, product form, heat treatment, elastic law or superconducting behavior is inferred.
+observation	density	Niobium reference	Supplier density	8.57 g/cc converts to 8570 kg/m3.
+observation	heat-capacity	Niobium reference	Supplier specific heat at 25 C	Printed 0.064 Cal/(g K). Normalization explicitly interprets Cal as a gram thermochemical calorie, 4.184 J, giving 267.776 J/(kg K); the source does not identify its calorie convention or statistical uncertainty.
+observation	conductivity	Niobium reference	Supplier thermal conductivity at 298.2 K	0.537 W/(cm K) converts to 53.7 W/(m K).
+observation	resistivity	Niobium reference	Supplier electrical resistivity at 0 C	12.5 micro-ohm cm converts to 1.25e-7 Ohm m.
+scalar	density	density,engineering-reference	density	8570	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293.15	294.15	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	0	0	1
+scalar	heat-capacity	heat-capacity,engineering-reference	specific_heat_capacity	267.776	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	293.15	294.15	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_temperatures_matched	0	0	1
+scalar	conductivity	conductivity,engineering-reference	thermal_conductivity	53.7	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	293.15	294.15	K
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_temperatures_matched	0	0	1
+scalar	resistivity	resistivity,engineering-reference	electrical_resistivity	1.25e-7	Ohm*m	constant
+uncertainty	resistivity	unstated	-	-	-	-
+validity	resistivity	temperature	293.15	294.15	K
+validity	resistivity	engineering_reference_model	1	1	1
+validity	resistivity	source_temperatures_matched	0	0	1

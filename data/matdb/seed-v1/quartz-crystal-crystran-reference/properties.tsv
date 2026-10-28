@@ -1,0 +1,27 @@
+frankensim.matdb-source.v1
+observation	engineering-reference	Alpha quartz optical crystal; distinct from fused silica glass	Frozen coefficients from Crystran Product Data	The author-declared 293.15-294.15 K calculation interval requires engineering-reference-model=1 and source-temperatures-matched=0. Heat-flow-parallel-to-c is 1 along the optic c-axis and 0 perpendicular to it. These are separate principal-direction coefficients; no angular interpolation, isotropy, piezoelectric law, grain aggregate, rock or porosity is inferred. The conductivity test temperature is 323 K, so near-293 K use is explicitly a frozen-coefficient approximation. Density and heat-capacity test temperatures and uncertainty are unstated.
+observation	density	Quartz crystal reference	Supplier density	2.649 g/cc converts to 2649 kg/m3.
+observation	heat-capacity	Quartz crystal reference	Supplier specific heat	710 J/(kg K).
+observation	conductivity	Quartz crystal reference	Supplier directional conductivity at 323 K	Parallel 10.7 and perpendicular 6.2 W/(m K), relative to the c-axis.
+scalar	density	density,engineering-reference	density	2649	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293.15	294.15	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	0	0	1
+scalar	heat-capacity	heat-capacity,engineering-reference	specific_heat_capacity	710	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	293.15	294.15	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_temperatures_matched	0	0	1
+scalar	conductivity-parallel	conductivity,engineering-reference	thermal_conductivity	10.7	W/m/K	constant
+uncertainty	conductivity-parallel	unstated	-	-	-	-
+validity	conductivity-parallel	temperature	293.15	294.15	K
+validity	conductivity-parallel	engineering_reference_model	1	1	1
+validity	conductivity-parallel	source_temperatures_matched	0	0	1
+validity	conductivity-parallel	heat_flow_parallel_to_c	1	1	1
+scalar	conductivity-perpendicular	conductivity,engineering-reference	thermal_conductivity	6.2	W/m/K	constant
+uncertainty	conductivity-perpendicular	unstated	-	-	-	-
+validity	conductivity-perpendicular	temperature	293.15	294.15	K
+validity	conductivity-perpendicular	engineering_reference_model	1	1	1
+validity	conductivity-perpendicular	source_temperatures_matched	0	0	1
+validity	conductivity-perpendicular	heat_flow_parallel_to_c	0	0	1

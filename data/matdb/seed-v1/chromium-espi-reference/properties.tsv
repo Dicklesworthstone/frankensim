@@ -1,0 +1,26 @@
+frankensim.matdb-source.v1
+observation	engineering-reference	Elemental chromium engineering reference	ESPI physical properties at 20 C	All four selected source coefficients refer to 20 C. Require engineering-reference-model=1 and source-temperatures-matched=1; the author-declared 293.15-294.15 K constant-coefficient interval extends the reference by 1 K without a measured temperature-law claim. The page lists both electrolytic and aluminothermic material but does not assign these properties to one process or lot. No purity-specific, plating-layer, strength, magnetic or statistical uncertainty claim is made.
+observation	density	Chromium reference	Supplier density at 20 C	7.19 g/cm3 converts to 7190 kg/m3.
+observation	heat-capacity	Chromium reference	Supplier specific heat at 20 C	0.4598 kJ/(kg K) converts to 459.8 J/(kg K).
+observation	conductivity	Chromium reference	Supplier thermal conductivity at 20 C	67 W/(m K); higher-temperature points are not used to widen this frozen-reference profile.
+observation	resistivity	Chromium reference	Supplier electrical resistivity at 20 C	130 nOhm m converts to 1.30e-7 Ohm m.
+scalar	density	density,engineering-reference	density	7190	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293.15	294.15	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	1	1	1
+scalar	heat-capacity	heat-capacity,engineering-reference	specific_heat_capacity	459.8	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	293.15	294.15	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_temperatures_matched	1	1	1
+scalar	conductivity	conductivity,engineering-reference	thermal_conductivity	67	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	293.15	294.15	K
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_temperatures_matched	1	1	1
+scalar	resistivity	resistivity,engineering-reference	electrical_resistivity	1.30e-7	Ohm*m	constant
+uncertainty	resistivity	unstated	-	-	-	-
+validity	resistivity	temperature	293.15	294.15	K
+validity	resistivity	engineering_reference_model	1	1	1
+validity	resistivity	source_temperatures_matched	1	1	1

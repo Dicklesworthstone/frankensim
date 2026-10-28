@@ -1,0 +1,11 @@
+frankensim.matdb-manifest.v3
+pack_id	g10cr-nist-cryogenic
+redistribution	permitted	NIST material-property page is unmarked as copyrighted; NIST public-information policy permits redistribution with attribution
+citation	National Institute of Standards and Technology, Material Properties: G-10 CR (Fiberglass Epoxy), polynomial coefficients, equation ranges and fit errors, accessed 2026-10-28; https://trc.nist.gov/cryogenics/materials/G-10%20CR%20Fiberglass%20Epoxy/G10CRFiberglassEpoxy_rev.htm
+license	NIST-Public-Information-Attribution-Requested
+source	nist-cryogenic-fit	properties.tsv	material-tsv-v1
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	conductivity_direction	conductivity-direction	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional

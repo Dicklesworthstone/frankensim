@@ -1,0 +1,20 @@
+frankensim.matdb-source.v1
+observation	engineering-reference	Sapphire optical crystal, Al2O3	Frozen coefficients from Crystran Product Data	The author-declared 293.15-294.15 K calculation interval is an engineering reference, not measured temperature coverage. Require engineering-reference-model=1 and source-temperatures-matched=0. No lot, purity or uncertainty is supplied. Sapphire is anisotropic: the conductivity entry has no stated direction and is deliberately not exposed as isotropic thermal-conductivity. No scalar elasticity, fracture law or orientation-independent constitutive tensor is inferred.
+observation	density	Sapphire reference	Supplier density	3.97 g/cc converts to 3970 kg/m3; temperature unstated.
+observation	heat-capacity	Sapphire reference	Supplier specific heat at 293 K	763 J/(kg K); held constant only in the explicitly admitted engineering model.
+observation	conductivity	Sapphire reference	Supplier thermal conductivity at 300 K	27.21 W/(m K); crystal direction unspecified.
+scalar	density	density,engineering-reference	density	3970	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293.15	294.15	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	0	0	1
+scalar	heat-capacity	heat-capacity,engineering-reference	specific_heat_capacity	763	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	293.15	294.15	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_temperatures_matched	0	0	1
+scalar	conductivity	conductivity,engineering-reference	thermal_conductivity_direction_unspecified	27.21	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	293.15	294.15	K
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_temperatures_matched	0	0	1

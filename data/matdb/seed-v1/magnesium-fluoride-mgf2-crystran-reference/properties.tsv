@@ -1,0 +1,27 @@
+frankensim.matdb-source.v1
+observation	engineering-reference	Magnesium fluoride tetragonal optical crystal	Frozen coefficients from Crystran Product Data	The author-declared 293.15-294.15 K calculation interval requires engineering-reference-model=1 and source-temperatures-matched=0. These are engineering estimates, not measured temperature coverage. heat-flow-parallel-to-c=1 selects heat flow along the optic c-axis [001]; 0 selects heat flow perpendicular to it. Intermediate angles are unsupported. Each selected scalar is only a principal-direction conduction coefficient, never an isotropic crystal law. No lot, optical grade, uncertainty or elasticity is inferred.
+observation	density	Magnesium fluoride reference	Supplier density	3.18 g/cc converts to 3180 kg/m3; temperature unstated.
+observation	heat-capacity	Magnesium fluoride reference	Supplier specific heat	1003 J/(kg K); temperature unstated.
+observation	conductivity	Magnesium fluoride reference	Supplier directional thermal conductivity at 300 K	Parallel 21 and perpendicular 33.6 W/(m K), relative to the crystal c-axis.
+scalar	density	density,engineering-reference	density	3180	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293.15	294.15	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	0	0	1
+scalar	heat-capacity	heat-capacity,engineering-reference	specific_heat_capacity	1003	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	293.15	294.15	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_temperatures_matched	0	0	1
+scalar	conductivity-parallel	conductivity,engineering-reference	thermal_conductivity	21	W/m/K	constant
+uncertainty	conductivity-parallel	unstated	-	-	-	-
+validity	conductivity-parallel	temperature	293.15	294.15	K
+validity	conductivity-parallel	engineering_reference_model	1	1	1
+validity	conductivity-parallel	source_temperatures_matched	0	0	1
+validity	conductivity-parallel	heat_flow_parallel_to_c	1	1	1
+scalar	conductivity-perpendicular	conductivity,engineering-reference	thermal_conductivity	33.6	W/m/K	constant
+uncertainty	conductivity-perpendicular	unstated	-	-	-	-
+validity	conductivity-perpendicular	temperature	293.15	294.15	K
+validity	conductivity-perpendicular	engineering_reference_model	1	1	1
+validity	conductivity-perpendicular	source_temperatures_matched	0	0	1
+validity	conductivity-perpendicular	heat_flow_parallel_to_c	0	0	1

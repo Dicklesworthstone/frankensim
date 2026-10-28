@@ -1,0 +1,12 @@
+frankensim.matdb-manifest.v3
+pack_id	sapphire-al2o3-crystran-reference
+redistribution	permitted	Selected attributed numerical facts and original modeling notes only; no source document, prose or table layout is redistributed
+citation	Crystran Ltd., Sapphire Al2O3, Product Data, accessed 2026-10-28; https://www.crystran.com/optical-materials/sapphire-al2o3/
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	engineering-reference	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity_direction_unspecified	thermal-conductivity-direction-unspecified	thermal-conductivity
+axis	temperature	temperature	absolute-temperature
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	source_temperatures_matched	source-temperatures-matched	dimensional

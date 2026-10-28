@@ -1,0 +1,31 @@
+frankensim.matdb-source.v1
+observation	engineering-reference	Microcrystalline zinc selenide optical material	Frozen coefficients from Crystran Product Data	The author-declared 293.15-294.15 K calculation interval is an engineering reference, not measured temperature coverage. Require engineering-reference-model=1 and source-temperatures-matched=0. The E/nu pair is an effective isotropic model assumption for the polycrystalline product; no exact lot, texture, uncertainty, fracture limit, optical coating or single-crystal elasticity is supplied. Thermal expansion is omitted because its 273 K reference is not a measured temperature law.
+observation	density	Zinc selenide reference	Supplier density	5.27 g/cc converts to 5270 kg/m3; temperature unstated.
+observation	heat-capacity	Zinc selenide reference	Supplier specific heat	339 J/(kg K); temperature unstated.
+observation	conductivity	Zinc selenide reference	Supplier thermal conductivity at 298 K	18 W/(m K); frozen near 293 K only under the declared approximation.
+observation	elastic	Zinc selenide reference	Supplier Young modulus and Poisson ratio	E=67.2 GPa and nu=0.28; method and temperature unstated. Neither the separate bulk modulus nor a failure strength is treated as an additional elastic constraint.
+scalar	density	density,engineering-reference	density	5270	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293.15	294.15	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	0	0	1
+scalar	heat-capacity	heat-capacity,engineering-reference	specific_heat_capacity	339	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	293.15	294.15	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_temperatures_matched	0	0	1
+scalar	conductivity	conductivity,engineering-reference	thermal_conductivity	18	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	293.15	294.15	K
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_temperatures_matched	0	0	1
+scalar	young-modulus	elastic,engineering-reference	young_modulus	67.2	GPa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	temperature	293.15	294.15	K
+validity	young-modulus	engineering_reference_model	1	1	1
+validity	young-modulus	source_temperatures_matched	0	0	1
+scalar	poisson-ratio	elastic,engineering-reference	poisson_ratio	0.28	1	constant
+uncertainty	poisson-ratio	unstated	-	-	-	-
+validity	poisson-ratio	temperature	293.15	294.15	K
+validity	poisson-ratio	engineering_reference_model	1	1	1
+validity	poisson-ratio	source_temperatures_matched	0	0	1
