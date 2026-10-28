@@ -27,6 +27,7 @@ use crate::simloop::{
     SpatialWindSpec, TerminalEvent,
 };
 use fs_blake3::hash_domain;
+use fs_material::gas::GasState;
 
 /// Envelope schema id (domain-separated digest).
 pub const REPLAY_SCHEMA: &str = "org.frankensim.wf.replay-envelope.v1";
@@ -128,6 +129,38 @@ pub fn record_replay_with_distributed_spatial_wind(
     )
 }
 
+/// Record the complete material gas with CG-sampled wind. The retained scenario
+/// uses material-derived density and the initial V5 checkpoint preserves every
+/// gas coefficient, so scrub never reintroduces the authored scalar density.
+pub fn record_replay_with_material_spatial_wind(
+    spec: ScenarioSpec,
+    wind: SpatialWindSpec,
+    gas: GasState,
+    interval: u64,
+) -> Result<ReplayEnvelope, Refusal> {
+    record_initialized(
+        spec,
+        interval,
+        |scenario| SimLoop::init_with_material_spatial_wind(scenario, wind, gas),
+        true,
+    )
+}
+
+/// Record the same complete material gas with distributed strip/disk inflow.
+pub fn record_replay_with_material_distributed_spatial_wind(
+    spec: ScenarioSpec,
+    wind: SpatialWindSpec,
+    gas: GasState,
+    interval: u64,
+) -> Result<ReplayEnvelope, Refusal> {
+    record_initialized(
+        spec,
+        interval,
+        |scenario| SimLoop::init_with_material_distributed_spatial_wind(scenario, wind, gas),
+        true,
+    )
+}
+
 fn record_initialized(
     spec: ScenarioSpec,
     interval: u64,
@@ -149,6 +182,7 @@ fn record_initialized(
         });
     }
     let mut sim = initialize(spec.clone())?;
+    let spec = sim.scenario().clone();
     let tick0_digest = sim.tick0().digest.clone();
     let run_intent_id = sim.run_intent_id.clone();
     let mut checkpoints = Vec::new();
@@ -433,8 +467,7 @@ impl ReplayEnvelope {
             code: "replay-initial-state-missing",
             message: "the recorded lifecycle requires its original tick-zero checkpoint".into(),
             ranked_repairs: vec![
-                "retain the initial V3/V4 checkpoint; never replay spatial wind as legacy OU"
-                    .into(),
+                "retain the initial spatial-wind checkpoint; never replay it as legacy OU".into(),
             ],
         };
         let check_identity = |sim: &SimLoop| -> Result<(), Refusal> {

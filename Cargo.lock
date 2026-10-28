@@ -1686,6 +1686,7 @@ dependencies = [
  "fs-ga",
  "fs-geom",
  "fs-ivl",
+ "fs-material",
  "fs-math",
  "fs-mbd",
  "fs-motion",

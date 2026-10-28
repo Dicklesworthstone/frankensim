@@ -264,6 +264,33 @@ or a validation of historical turbulent flight.
 
 ### Recording and scrubbing the selected wind model
 
+Material-bound spatial constructors (`init_with_material_spatial_wind` and
+`init_with_material_distributed_spatial_wind`) admit the existing complete
+`fs-material::GasState` and replace scalar scenario density **before** trim.
+The original trim, wing/canard loads, propellers, rotor dynamics and lateral
+loads consequently share its density. `scenario()` exposes this canonical
+scenario; `sample_material_air` returns the same accepted wind and gas, with
+dynamic-pressure and Reynolds diagnostics relative to an explicit observer
+velocity. The complete thermodynamic and transport tuple remains available
+without re-evaluation or a second reference-air assumption.
+
+Material runs use V5 checkpoints, retaining the whole numerical gas and an
+explicit CG/distributed sampling mode. Every coefficient binds tick-zero and
+run identity, including properties not consumed by the current force laws.
+The material replay recorders preserve the canonical density and original
+initial checkpoint. A contradictory density at restore refuses. Historical
+V2/V3/V4 bytes are unchanged. Focused G0/G3/G5 tests in
+`simloop/spatial_wind/material/tests.rs` cover actual pressure-dependent flight,
+native force/trim equivalence, q/Re, observational noninterference and replay.
+
+The material gas is homogeneous and prescribed: no heat/composition evolution,
+altitude stratification or fluid/structure thermodynamics is introduced. The
+reference polars remain Reynolds-independent and incompressible; retaining
+viscosity, temperature and sound speed does not claim those corrections.
+Numerical checkpoints do not serialize material-source evidence or qualify a
+gas composition for historical air; that authority stays with the producing
+model. The existing flight density envelope still applies.
+
 `replayenv::{record_replay_with_spatial_wind,
 record_replay_with_distributed_spatial_wind}` retain the exact V3/V4 tick-zero
 checkpoint in the existing envelope layout. Legacy `record_replay` keeps its

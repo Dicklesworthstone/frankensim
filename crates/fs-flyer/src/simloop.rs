@@ -45,8 +45,8 @@ use fs_math::det;
 
 mod motion;
 mod spatial_wind;
-pub use spatial_wind::SpatialWindSpec;
 use spatial_wind::SpatialWindState;
+pub use spatial_wind::{MaterialAirSample, SpatialWindSpec};
 
 /// Tick cap (absurd-input guard; 10 minutes at 120 Hz).
 pub const MAX_TICKS: u64 = 72_000;
@@ -456,6 +456,13 @@ impl SimLoop {
         &self.tick0
     }
 
+    /// Accepted scenario, including density resolved from the material gas
+    /// when initialized through a material-bound spatial-wind constructor.
+    #[must_use]
+    pub fn scenario(&self) -> &ScenarioSpec {
+        &self.spec
+    }
+
     /// The envelope-exit receipt, if the run ended `EnvelopeExceeded`.
     #[must_use]
     pub fn envelope_refusal(&self) -> Option<&Refusal> {
@@ -467,6 +474,7 @@ impl SimLoop {
     /// blake3 integrity digest. The opt-in spatial-wind path emits V3,
     /// including its explicit model, both sequential OU quadratures, and
     /// inertial ground velocity. Distributed strip/disk sampling emits V4.
+    /// Material-bound wind emits V5 with its sampling mode and complete gas.
     /// Legacy V2 reconstructs its OU state by
     /// replaying the canonical prehistory through the saved tick.
     ///
@@ -483,6 +491,7 @@ impl SimLoop {
         }
         let mut b = Vec::new();
         let version = match &self.spatial_wind {
+            Some(wind) if wind.material_gas.is_some() => 5u32,
             Some(wind) if wind.distributed => 4u32,
             Some(_) => 3,
             None => 2,
@@ -538,9 +547,14 @@ impl SimLoop {
             None => b.push(0),
         }
         if let Some(wind) = &self.spatial_wind {
+            if let Some(gas) = &wind.material_gas {
+                b.push(u8::from(wind.distributed));
+                spatial_wind::material::encode_gas(gas, &mut b);
+            }
             wind.encode(&self.run_intent_id, &mut b);
         }
         let domain = match version {
+            5 => "org.frankensim.wf.checkpoint-state.v5",
             4 => "org.frankensim.wf.checkpoint-state.v4",
             3 => "org.frankensim.wf.checkpoint-state.v3",
             _ => "org.frankensim.wf.checkpoint-state.v2",
@@ -582,11 +596,13 @@ impl SimLoop {
         let digest_v2 = hash_domain("org.frankensim.wf.checkpoint-state.v2", body);
         let digest_v3 = hash_domain("org.frankensim.wf.checkpoint-state.v3", body);
         let digest_v4 = hash_domain("org.frankensim.wf.checkpoint-state.v4", body);
+        let digest_v5 = hash_domain("org.frankensim.wf.checkpoint-state.v5", body);
         let matches_v1 = digest_v1.as_bytes() == tail;
         let matches_v2 = digest_v2.as_bytes() == tail;
         let matches_v3 = digest_v3.as_bytes() == tail;
         let matches_v4 = digest_v4.as_bytes() == tail;
-        if !matches_v1 && !matches_v2 && !matches_v3 && !matches_v4 {
+        let matches_v5 = digest_v5.as_bytes() == tail;
+        if !matches_v1 && !matches_v2 && !matches_v3 && !matches_v4 && !matches_v5 {
             return Err(Refusal {
                 code: "checkpoint-tampered",
                 message: "embedded digest mismatch".into(),
@@ -598,9 +614,14 @@ impl SimLoop {
             .and_then(|v| <[u8; 4]>::try_from(v).ok())
             .map(u32::from_le_bytes)
             .ok_or_else(|| bad("missing version"))?;
-        match (version, matches_v1, matches_v2, matches_v3, matches_v4) {
-            (2, _, true, _, _) | (3, _, _, true, _) | (4, _, _, _, true) => {}
-            (1, true, _, _, _) => {
+        match (
+            version, matches_v1, matches_v2, matches_v3, matches_v4, matches_v5,
+        ) {
+            (2, _, true, _, _, _)
+            | (3, _, _, true, _, _)
+            | (4, _, _, _, true, _)
+            | (5, _, _, _, _, true) => {}
+            (1, true, _, _, _, _) => {
                 return Err(Refusal {
                     code: "checkpoint-version-unsupported",
                     message: "CheckpointStateV1 lacks lateral state and cannot exact-resume v2"
@@ -659,17 +680,42 @@ impl SimLoop {
             if tick > spec.max_ticks || !f.iter().all(|v| v.is_finite()) || f[1] < 0.0 {
                 return Err(bad("invalid spatial lifecycle state"));
             }
+            let (distributed, material_gas) = if version == 5 {
+                let mode = take(&mut pos, 1)?[0];
+                if mode > 1 {
+                    return Err(bad("unknown material wind sampling mode"));
+                }
+                let gas = spatial_wind::material::decode_gas(take(&mut pos, 96)?)?;
+                if gas.density.to_bits() != spec.rho_kg_m3.to_bits() {
+                    return Err(bad(
+                        "scenario density disagrees with the retained material gas",
+                    ));
+                }
+                (mode == 1, Some(gas))
+            } else {
+                (version == 4, None)
+            };
             let (mut wind, intent) = SpatialWindState::decode(&body[pos..], spec.seed, tick)?;
-            wind.distributed = version == 4;
+            wind.distributed = distributed;
+            wind.material_gas = material_gas;
             Some((wind, intent))
         } else {
             None
         };
         let mut sim = if let Some((wind, intent)) = &restored_wind {
-            let sim = if wind.distributed {
-                SimLoop::init_with_distributed_spatial_wind(spec, wind.spec.clone())?
-            } else {
-                SimLoop::init_with_spatial_wind(spec, wind.spec.clone())?
+            let sim = match (wind.distributed, wind.material_gas) {
+                (true, Some(gas)) => SimLoop::init_with_material_distributed_spatial_wind(
+                    spec,
+                    wind.spec.clone(),
+                    gas,
+                )?,
+                (false, Some(gas)) => {
+                    SimLoop::init_with_material_spatial_wind(spec, wind.spec.clone(), gas)?
+                }
+                (true, None) => {
+                    SimLoop::init_with_distributed_spatial_wind(spec, wind.spec.clone())?
+                }
+                (false, None) => SimLoop::init_with_spatial_wind(spec, wind.spec.clone())?,
             };
             if &sim.run_intent_id != intent {
                 return Err(bad("spatial checkpoint belongs to a different scenario"));

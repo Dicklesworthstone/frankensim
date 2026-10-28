@@ -8,7 +8,11 @@ use fs_atmo::evolving::{EvolvingTurbulenceCheckpoint, EvolvingTurbulenceField};
 use fs_atmo::ou::OuCheckpoint;
 use fs_atmo::{FlatSiteLogLaw, FlowSample, MAX_MODES, TurbulenceField};
 use fs_blake3::hash_domain;
+use fs_material::gas::GasState;
 use fs_math::det;
+
+pub(super) mod material;
+pub use material::MaterialAirSample;
 
 /// Explicit synthetic wind model for [`SimLoop::init_with_spatial_wind`].
 /// All lengths are metres, speeds m/s, and correlation times seconds. The
@@ -35,6 +39,7 @@ pub(super) struct SpatialWindState {
     pub spec: SpatialWindSpec,
     pub field: EvolvingTurbulenceField,
     pub distributed: bool,
+    pub material_gas: Option<GasState>,
     /// Ground velocity in flight-line-forward / vertical-up coordinates.
     pub ground_mps: [f64; 2],
 }
@@ -63,6 +68,7 @@ impl SpatialWindState {
             spec,
             field,
             distributed: false,
+            material_gas: None,
             ground_mps: [0.0; 2],
         })
     }
