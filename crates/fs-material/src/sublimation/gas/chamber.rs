@@ -11,6 +11,8 @@
 //! Surfaces may use different explicit species, phase laws and caloric charts.
 //! Each keeps its fixed datum offset and must satisfy latent compatibility at
 //! both endpoints. The local molecular assumptions in the parent module apply.
+//! The opt-in accommodation path adds reflected heat from the same old gas to
+//! the same solid endpoints and performs one combined gas reconstruction.
 
 /// Bounded adaptive histories using the same conservative joint interval.
 pub mod advance;
@@ -19,9 +21,10 @@ use super::{
     ClosedGasParcel, GasSpeciesBoundaryCandidate, GasSpeciesSnapshot, GasSurfaceBinding,
     GasSurfaceError, GasSurfaceSolve, PreparedSurface, SolidSurfaceState, SpeciesBoundaryTransfer,
     SpeciesId, SublimationError, SublimationLaw, ThermochemicalGasModel, invalid, inventory_limit,
-    poll, prepare_surface, snapshot_surface, species_snapshot, validate_controls,
+    poll, prepare_surface_with_heat, snapshot_surface, species_snapshot, validate_controls,
 };
 use std::collections::BTreeMap;
+use super::accommodation::{ReflectedHeatStep, ThermalAccommodation};
 
 /// One caller-owned physical surface and its original constitutive charts.
 /// Identity is explicit and stable across intervals; input order is immaterial.
@@ -79,7 +82,8 @@ impl GasChamberSurfaceStep {
     }
 }
 
-/// One volatile species account, canonicalized by the original SpeciesId.
+/// One exchanging gas species, canonicalized by the original SpeciesId.
+/// A carrier may exchange reflected heat with exactly zero phase mass streams.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GasChamberSpeciesStep {
     pub species: SpeciesId,
@@ -187,6 +191,7 @@ struct SpeciesAccount {
     solid_mass_change: Total,
     reference_energy_j_kg: f64,
     relative_energy: Total,
+    reflected_heat: Total,
     active_streams: usize,
     single_stream_energy_j: f64,
 }
@@ -200,6 +205,7 @@ impl SpeciesAccount {
             solid_mass_change: Total::default(),
             reference_energy_j_kg: gas.incoming_specific_energy_j_kg.unwrap_or(outgoing_energy),
             relative_energy: Total::default(),
+            reflected_heat: Total::default(),
             active_streams: 0,
             single_stream_energy_j: 0.0,
         }
@@ -213,6 +219,8 @@ impl SpeciesAccount {
         } else {
             self.transferred.value()? * self.reference_energy_j_kg + self.relative_energy.value()?
         };
+        let reflected = self.reflected_heat.value()?;
+        let value = if reflected == 0.0 { value } else { value + reflected };
         if value.is_finite() {
             Ok(value)
         } else {
@@ -243,8 +251,48 @@ pub fn advance_chamber_with_gas<'catalog>(
     catalog: &'catalog ThermochemicalGasModel,
     duration_s: f64,
     controls: GasChamberSolve,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<GasChamberCandidate<'catalog>, GasSurfaceError> {
+    advance_chamber(surfaces, None, gas, catalog, duration_s, controls, cancelled)
+        .map(|(candidate, _)| candidate)
+}
+
+/// Joint phase exchange and per-surface reflected molecular heat.
+///
+/// The accommodation map must cover EXACTLY the active surface identities.
+/// Supply explicit zero species coefficients for a specular surface; absent
+/// entries never become guessed thermal coefficients. All rates sample the
+/// same original gas, not successive updated gases. Each surface's reflected
+/// subaccount is included in its total energy transfer and must not be added
+/// again. Carrier heat does not consume or replenish species mass allowances.
+///
+/// Returns the original joint candidate and canonical surface reflection
+/// accounts. A failure in any surface or final gas rejects the entire interval.
+/// This explicit step still requires physical timestep refinement; the existing
+/// adaptive and heat-timeline entry points retain their specular default.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn advance_chamber_with_accommodation<'catalog>(
+    surfaces: &[GasChamberSurface<'_>],
+    accommodation: &BTreeMap<u64, ThermalAccommodation>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    duration_s: f64,
+    controls: GasChamberSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<(GasChamberCandidate<'catalog>, BTreeMap<u64, ReflectedHeatStep>), GasSurfaceError> {
+    advance_chamber(surfaces, Some(accommodation), gas, catalog, duration_s, controls, cancelled)
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn advance_chamber<'catalog>(
+    surfaces: &[GasChamberSurface<'_>],
+    accommodation: Option<&BTreeMap<u64, ThermalAccommodation>>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    duration_s: f64,
+    controls: GasChamberSolve,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<(GasChamberCandidate<'catalog>, BTreeMap<u64, ReflectedHeatStep>), GasSurfaceError> {
     poll(&mut cancelled)?;
     validate_controls(controls.surface, duration_s)?;
     if controls.maximum_surfaces == 0 || surfaces.len() > controls.maximum_surfaces {
@@ -261,6 +309,12 @@ pub fn advance_chamber_with_gas<'catalog>(
             ));
         }
     }
+    if let Some(laws) = accommodation {
+        if laws.len() != ordered.len() || ordered.keys().any(|id| !laws.contains_key(id)) {
+            return Err(invalid("thermal accommodation must cover exactly the active chamber surfaces"));
+        }
+    }
+    let mut reflections = BTreeMap::new();
     let mut species: BTreeMap<SpeciesId, SpeciesAccount> = BTreeMap::new();
     let mut snapshots = Vec::with_capacity(ordered.len());
     let mut limit = None;
@@ -318,13 +372,34 @@ pub fn advance_chamber_with_gas<'catalog>(
     let mut solid_mass_change = Total::default();
     for (surface, snapshot) in snapshots {
         poll(&mut cancelled)?;
-        let prepared = prepare_surface(
+        let mut reflected_heat = 0.0;
+        if let Some(laws) = accommodation {
+            let reflection = laws[&surface.id].evaluate(
+                surface.binding, gas, snapshot.temperature_k, surface.solid.area_m2,
+                duration_s, &mut cancelled,
+            )?;
+            reflected_heat = reflection.heat_into_gas_j;
+            for row in &reflection.species {
+                if row.heat_into_gas_j == 0.0 { continue; }
+                // Reflection transfers energy, not mass. Create only the needed
+                // carrier account, retaining the original sources and inventory.
+                if !species.contains_key(&row.species) {
+                    let context = species_snapshot(gas, catalog, &row.species)?;
+                    species.insert(row.species.clone(), SpeciesAccount::new(context, 0.0));
+                }
+                species.get_mut(&row.species).expect("original reflected species account")
+                    .reflected_heat.add(row.heat_into_gas_j)?;
+            }
+            reflections.insert(surface.id, reflection);
+        }
+        let prepared = prepare_surface_with_heat(
             surface.law,
             surface.binding,
             snapshot,
             catalog,
             surface.temperature_from_enthalpy,
             controls.surface,
+            reflected_heat,
         )?;
         let account = species
             .get_mut(&surface.binding.species)
@@ -343,9 +418,13 @@ pub fn advance_chamber_with_gas<'catalog>(
                 * (prepared.outgoing_specific_energy_j_kg - account.reference_energy_j_kg)
                 + prepared.incoming_mass_kg * difference,
         )?;
-        if prepared.transferred_mass_kg != 0.0 || prepared.energy_into_gas_j != 0.0 {
+        // Reconstruct phase-only energy directly. Subtracting reflected heat
+        // from a large total formation energy can erase its sensible increment.
+        let phase_energy = prepared.transferred_mass_kg * prepared.outgoing_specific_energy_j_kg
+            + prepared.incoming_mass_kg * difference;
+        if prepared.transferred_mass_kg != 0.0 || phase_energy != 0.0 {
             account.active_streams += 1;
-            account.single_stream_energy_j = prepared.energy_into_gas_j;
+            account.single_stream_energy_j = phase_energy;
         }
         outputs.push(GasChamberSurfaceStep::new(surface.id, prepared));
     }
@@ -414,8 +493,14 @@ pub fn advance_chamber_with_gas<'catalog>(
         });
     }
     let final_temperature = endpoint.gas().state().state().temperature;
+    if let Some(laws) = accommodation {
+        for surface in &outputs {
+            poll(&mut cancelled)?;
+            laws[&surface.id].admit_temperatures(surface.surface_temperature_k[1], final_temperature)?;
+        }
+    }
     poll(&mut cancelled)?;
-    Ok(GasChamberCandidate {
+    Ok((GasChamberCandidate {
         gas: endpoint,
         surfaces: outputs,
         step: GasChamberStep {
@@ -430,8 +515,12 @@ pub fn advance_chamber_with_gas<'catalog>(
             gas_temperature_k: [gas.state().state().temperature, final_temperature],
             species: species_reports,
         },
-    })
+    }, reflections))
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "chamber/accommodation_tests.rs"]
+mod accommodation_tests;
