@@ -2499,12 +2499,17 @@ Original convection controls are restored after the shifted-reference
 composition; emissivity partials include reflection. Existing power,
 convection, material and contact rows use the same complete dual, and the
 existing nominal-adjoint UQ mean control can consume its supported physical
-coordinates without changing probability children.
+coordinates without changing probability children. Driver 85 binds natural
+wall/film slopes and complete transported-air reference feedback into that
+same reflected-radiation tangent. Natural reservoir, air inlet and fan speed
+controls retain original convection; enclosure radiation does not enter the
+air heat ledger. Prescribed-temperature controls use the complete lift,
+including fixed vertices in radiating patch means. A shared unchanged-field
+convection binder also supplies the ambient coupled and prescribed-lift paths.
 
 Capacity-only enclosure trajectories, transient enclosure adjoints,
-transient natural/airflow coupling, steady enclosure derivatives through
-natural/airflow feedback or independently varied prescribed temperatures,
-temperature-dependent emissivity, adaptive enclosure goals and continuum
+transient natural/airflow coupling, temperature-dependent emissivity,
+adaptive enclosure goals and continuum
 mean bounds retain explicit refusals. The driver never performs a
 frozen-enclosure algebraic goal correction or presents its fixed-load linear
 roundoff calculation as an enclosure bound. Results remain Estimated.
@@ -2519,8 +2524,9 @@ finite-geometry view-factor validation. Additional regressions in
 balance, an independent latent-plateau energy oracle, event-aligned workloads,
 cached deterministic replay and shared spatial/time work limits.
 `tests/native_uncertainty/nominal_adjoint/enclosure.rs` exercises native
-max/mean physical perturbations and reuse by nominal-control probability
-studies. Shared numerical regressions check both emissivities, nonuniform
+max/mean physical perturbations, natural reservoir, multisegment air,
+nonunit fan-speed and prescribed-temperature controls, and one-probe reuse
+by nominal-control probability studies. Shared numerical regressions check both emissivities, nonuniform
 source directions, signed goals and the full nonsymmetric transpose.
 
 The runnable native declaration is

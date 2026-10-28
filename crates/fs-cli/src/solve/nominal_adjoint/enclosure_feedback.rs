@@ -1,47 +1,46 @@
-//! Native prescribed-convection enclosure goals through the shared full transpose.
-//! Every source and original boundary is retained from the accepted producer.
+//! One native enclosure derivative through the complete shared thermal dual.
+//! Fresh original convection, natural slopes and transported-air references
+//! are bound by the same owner used by ambient coupled radiation.
+use std::collections::BTreeMap;
+
 use fs_conduction::adjoint::RobinGradient;
-use fs_conduction::radiation::{ViewFactorEvidence, pullback_gray_diffuse_enclosure};
+use fs_conduction::radiation::{
+    EnclosureRadiationGradient, GrayDiffuseEnclosure, ViewFactorEvidence,
+};
 use fs_conduction::{ScalarField, ThermalBc};
 use fs_project::{EnclosureViewFactorEvidence, ThermalBoundaryCondition as B};
 
-use super::{ConductionProblem, Cx, ProjectSpec, RungSolved, SolveRefusal, bad, lower, poll, row};
+use super::{
+    ConductionProblem, Cx, ProjectSpec, RungSolved, SolveRefusal, bad,
+    convective_feedback, lower, poll, row,
+};
 
-pub(super) const SCOPE: &str = "Closed-enclosure mode differentiates the complete reflected gray-diffuse radiosity and smooth material/contact Jacobian at the unchanged final field. Every radiating patch retains its original prescribed positive convection and exact view-factor order. The full nonlocal patch tangent and its true transpose use the shared numerical owners; radiative loads are not frozen. Enclosure emissivity rows are local absolute coefficient partials at the selected immutable card query. Enclosure derivatives with natural convection, transported air, prescribed-temperature controls, transient storage, adaptive goals and continuum error bounds are not supplied.";
+pub(super) const SCOPE: &str = "Closed-enclosure mode differentiates the complete reflected gray-diffuse radiosity, smooth material/contact laws, natural convection and transported-air feedback at the unchanged final field. Only original convection heats the air; internal enclosure exchange retains its exact view-factor order. Natural-reservoir and air-inlet controls contract the same complete dual as source, convection, fan, material, contact and emissivity controls. Enclosure emissivity rows are local absolute coefficient partials at the selected immutable card query. This is a local discrete derivative at fixed geometry and view factors, not a continuum or geometric error certificate.";
 
 pub(super) struct Pullback {
     pub gradient: RobinGradient,
+    pub natural_ambient: BTreeMap<String, f64>,
+    pub air_rows: Vec<String>,
     pub radiation_rows: Vec<String>,
 }
 
-/// Refuse an incomplete state or prescribed-value derivative before solving.
 pub(super) fn admit(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
     let Some(setup) = spec.cooling.as_ref().and_then(|c| c.conduction.as_ref()) else {
         return Ok(());
     };
     if setup.enclosure_radiation.is_none() { return Ok(()); }
     if setup.radiation.is_some() || setup.transient.is_some() {
-        return Err(bad("enclosure nominal derivatives require one steady enclosure model"));
-    }
-    if setup.boundaries.iter().any(|r| matches!(r.condition,
-        B::NaturalConvection { .. } | B::AirflowConvection { .. }))
-    {
-        return Err(bad("native enclosure adjoints require prescribed convection; natural or transported-air feedback cannot be frozen"));
-    }
-    let prescribed_requested = spec.outputs.iter().flatten().any(|r| matches!(r.name.as_str(),
-        "temperature-max-boundary-adjoint" | "temperature-max-contact-boundary-adjoint"
-        | "temperature-volume-mean-adjoint"));
-    if prescribed_requested && setup.boundaries.iter().any(|r|
-        matches!(r.condition, B::FixedTemperature { .. }))
-    {
-        return Err(bad("native enclosure prescribed-temperature controls require the complete enclosure lift; use a maximum/contact adjoint with fixed prescribed temperatures"));
+        return Err(bad("steady enclosure nominal derivatives require one steady enclosure model"));
     }
     Ok(())
 }
 
-pub(super) fn pullback(
-    cx: &Cx<'_>, spec: &ProjectSpec, solved: &RungSolved, weights: &[f64],
-) -> Result<Pullback, SolveRefusal> {
+/// Bind derivative consumers to the exact authored model and physical traces.
+/// State-dependent h and air references are re-evaluated by convective_feedback;
+/// they must never be read from the radiation-shifted numerical boundary.
+pub(super) fn model<'a>(
+    cx: &Cx<'_>, spec: &ProjectSpec, solved: &'a RungSolved,
+) -> Result<&'a GrayDiffuseEnclosure, SolveRefusal> {
     poll(cx)?;
     admit(spec)?;
     let setup = spec.cooling.as_ref().and_then(|c| c.conduction.as_ref())
@@ -52,7 +51,7 @@ pub(super) fn pullback(
         .ok_or_else(|| bad("missing retained enclosure adjoint operator"))?;
     let enclosure = data.enclosure.as_ref()
         .ok_or_else(|| bad("missing retained native enclosure model"))?;
-    if !data.air_paths.is_empty() || !data.radiation_patches.is_empty()
+    if !data.radiation_patches.is_empty()
         || declaration.surfaces.len() != enclosure.surfaces().len()
         || declaration.view_factors.as_slice() != enclosure.view_factors().factors()
     {
@@ -66,8 +65,9 @@ pub(super) fn pullback(
             a == x && b == y && c == z,
         _ => false,
     };
-    if !same_evidence { return Err(bad("enclosure derivative lost its declared view-factor evidence")); }
-    let mut names = Vec::with_capacity(declaration.surfaces.len());
+    if !same_evidence {
+        return Err(bad("enclosure derivative lost its declared view-factor evidence"));
+    }
     for (declared, surface) in declaration.surfaces.iter().zip(enclosure.surfaces()) {
         poll(cx)?;
         if declared.target != surface.name()
@@ -78,9 +78,6 @@ pub(super) fn pullback(
         }
         let original = setup.boundaries.iter().find(|r| r.target == declared.target)
             .ok_or_else(|| bad("enclosure target lost its declared convection"))?;
-        let B::Convection { coefficient, reference_temperature } = &original.condition else {
-            return Err(bad("native enclosure derivative needs original prescribed convection"));
-        };
         let region = data.boundary.region_names().iter().position(|name| name == &declared.target)
             .ok_or_else(|| bad("enclosure target has no original native boundary"))?;
         let ThermalBc::Robin {
@@ -88,30 +85,68 @@ pub(super) fn pullback(
         } = &data.boundary.conditions()[region] else {
             return Err(bad("enclosure derivative needs original uniform Robin traces"));
         };
-        if *h != coefficient.value || *reference != reference_temperature.value {
-            return Err(bad("enclosure derivative cannot substitute a shifted radiative reference for original convection"));
+        if !h.is_finite() || *h <= 0.0 || !reference.is_finite() || *reference <= 0.0 {
+            return Err(bad("enclosure derivative needs positive original convection and absolute reference"));
         }
-        names.push(declared.target.as_str());
+        match &original.condition {
+            B::Convection { coefficient, reference_temperature } => {
+                if *h != coefficient.value || *reference != reference_temperature.value {
+                    return Err(bad("enclosure derivative cannot substitute a shifted radiative reference for original convection"));
+                }
+            }
+            B::NaturalConvection { ambient_temperature, .. } => {
+                if *reference != ambient_temperature.value {
+                    return Err(bad("enclosure natural convection lost its original ambient"));
+                }
+            }
+            B::AirflowConvection { .. } => {
+                if !data.air_paths.iter().any(|path|
+                    path.segments().iter().any(|segment| segment.region() == declared.target))
+                {
+                    return Err(bad("enclosure derivative lost its original transported-air path"));
+                }
+            }
+            _ => return Err(bad("enclosure patch has no supported original convection law")),
+        }
     }
-    let problem = ConductionProblem {
-        mesh: &solved.mesh, boundary: &data.boundary, material: &data.fallback,
-        element_materials: Some(&data.materials), source: &data.source,
-    };
+    poll(cx)?;
+    Ok(enclosure)
+}
+
+pub(super) fn pullback(
+    cx: &Cx<'_>, spec: &ProjectSpec, solved: &RungSolved, weights: &[f64],
+) -> Result<Pullback, SolveRefusal> {
+    let enclosure = model(cx, spec, solved)?;
+    let setup = spec.cooling.as_ref().and_then(|c| c.conduction.as_ref())
+        .ok_or_else(|| bad("missing native enclosure setup"))?;
+    let declaration = setup.enclosure_radiation.as_ref()
+        .ok_or_else(|| bad("missing native enclosure declaration"))?;
+    let data = solved.adjoint_data.as_ref()
+        .ok_or_else(|| bad("missing retained enclosure derivative operator"))?;
     let memory = spec.budgets.as_ref().map_or(0, |b| b.memory_bytes);
     let entries = usize::try_from(memory / 32).unwrap_or(usize::MAX);
-    let full = pullback_gray_diffuse_enclosure(
+    let bound = convective_feedback::bind(cx, spec, solved, entries)?;
+    let names: Vec<_> = bound.names.iter().map(String::as_str).collect();
+    let problem = ConductionProblem {
+        mesh: &solved.mesh, boundary: &bound.boundary, material: &data.fallback,
+        element_materials: Some(&data.materials), source: &data.source,
+    };
+    let full = EnclosureRadiationGradient::pullback_with_reference_feedback(
         cx, problem, data.interfaces.as_ref(), data.linear, &solved.solution.temperature,
-        &names, enclosure, declaration.heat_tolerance.value, weights, entries,
+        &names, &bound.natural.wall_slopes, &bound.feedback, enclosure,
+        declaration.heat_tolerance.value, weights, entries,
     ).map_err(|error| {
         let mut refusal = lower(error);
-        refusal.fix = "tighten the declared enclosure temperature/heat tolerances and thermal solve tolerance; fresh radiosity, the unchanged physical residual and complete transpose must all converge".into();
+        refusal.fix = "tighten physical solid/air, enclosure temperature/heat and thermal solve tolerances; fresh radiosity, the unchanged physical residual and complete transpose must all converge".into();
         refusal
     })?;
+    let natural_ambient = bound.natural_ambient(&full.convection)?;
+    let air_rows = bound.air_rows(cx, setup, solved, &full.convection)?;
     let mut rows = Vec::with_capacity(declaration.surfaces.len());
     for (i, surface) in declaration.surfaces.iter().enumerate() {
         poll(cx)?;
         rows.push(row("radiation-emissivity", &surface.name, i, "1", full.emissivities[i])?);
     }
     poll(cx)?;
-    Ok(Pullback { gradient: full.convection, radiation_rows: rows })
+    Ok(Pullback { gradient: full.convection, natural_ambient, air_rows, radiation_rows: rows })
 }

@@ -14,7 +14,8 @@ use super::{
     radiation_mesh_identity_with_poll, require_temperature,
 };
 use crate::{
-    ConductionError, ConductionProblem, LinearConfig, ScalarField, ThermalBc, ThermalInterfaces,
+    ConductionError, ConductionProblem, LinearConfig, ScalarField, ThermalBc, ThermalBoundary,
+    ThermalInterfaces,
     adjoint::{RobinGradient, RobinResponse},
 };
 
@@ -32,6 +33,11 @@ pub struct EnclosureRadiationGradient {
     /// Geometry, card selection and query temperature remain fixed. At eps=1,
     /// only feasible parameter directions have physical meaning.
     pub emissivities: Vec<f64>,
+    /// Total shared radiosity-transpose iterations, including patch Jacobian
+    /// construction and the final emissivity contraction.
+    pub radiosity_iterations: usize,
+    /// Largest true relative residual among those radiosity transposes.
+    pub radiosity_relative_residual: f64,
 }
 
 fn invalid(what: impl Into<String>) -> ConductionError {
@@ -94,27 +100,65 @@ pub fn pullback_gray_diffuse_enclosure(
     )
 }
 
-impl EnclosureRadiationGradient {
-    /// Include caller-bound smooth convection and cross-reference feedback.
+/// Complete unchanged-field Robin representation of enclosure exchange.
+///
+/// This binding exposes the same physical Jacobian used by the full enclosure
+/// dual, so prescribed-temperature lifts and other operator consumers cannot
+/// silently freeze reflected radiation. Construction verifies the exact mesh,
+/// surface coverage, fresh radiosity and coefficient budgets. Consumers must
+/// still enforce their unchanged-field residual and complete transpose gates.
+pub struct EnclosureRadiationLinearization {
+    vertex_count: usize,
+    boundary: ThermalBoundary,
+    regions: Vec<String>,
+    convective_mean_slopes: Vec<f64>,
+    local_reference_slopes: Vec<f64>,
+    feedback: Vec<f64>,
+    physical: Vec<(f64, f64)>,
+    ports: Vec<usize>,
+    outward_flux: Vec<f64>,
+    radiosity: EnclosureRadiosityLinearization,
+    radiosity_iterations: usize,
+    radiosity_relative_residual: f64,
+    radiation_regions: Vec<String>,
+    emissivities: Vec<f64>,
+}
+
+impl EnclosureRadiationLinearization {
+    /// Fresh combined numerical boundary: original h and T_c - q/h.
+    pub fn boundary(&self) -> &ThermalBoundary { &self.boundary }
+
+    /// Selected original Robin regions, in caller order.
+    pub fn regions(&self) -> &[String] { &self.regions }
+
+    /// Local derivative dh_i/d(mean_i T) of original convection.
+    pub fn convective_mean_slopes(&self) -> &[f64] { &self.convective_mean_slopes }
+
+    /// Local shifted-reference correction q_i (dh_i/dmean_i)/h_i^2.
+    /// Add this diagonal to reference_feedback, exactly as RobinResponse does.
+    pub fn local_reference_slopes(&self) -> &[f64] { &self.local_reference_slopes }
+
+    /// Complete row-major dT_c_i/dmean_j - (dq_i/dmean_j)/h_i.
+    /// It includes the incoming air-reference diagonal and all reflected
+    /// cross-patch derivatives; local_reference_slopes supplies the h term.
+    pub fn reference_feedback(&self) -> &[f64] { &self.feedback }
+
+    /// Total Krylov iterations for all patch-flux transpose rows in this binding.
+    pub fn radiosity_iterations(&self) -> usize { self.radiosity_iterations }
+
+    /// Largest true relative residual of those patch-flux transpose rows.
+    pub fn radiosity_relative_residual(&self) -> f64 { self.radiosity_relative_residual }
+
+    /// Bind physical convection and reflected exchange at one unchanged field.
     ///
-    /// convective_mean_slopes_w_m2_k2 contains dh_i/d(mean_i T).
-    /// reference_feedback is the row-major partial d(T_c_i)/d(mean_j T),
-    /// including its diagonal, in regions order. The caller must evaluate
-    /// every original h_i and T_c_i at the retained field before calling.
-    /// Only original convection belongs in an air law; enclosure radiation
-    /// stays internal. This entry point does not itself bind air transport,
-    /// natural convection, hydraulic controls or material-card selection.
-    ///
-    /// For a radiating region, the shifted reference derivative is
-    /// dT_c_i/dmean_j - (dq_i/dmean_j)/h_i, with the additional local
-    /// q_i*(dh_i/dmean_i)/h_i^2 term. The returned ln(h) partial restores
-    /// the original physical reference. Supplying a shifted reference as
-    /// the original boundary would count radiation twice and is invalid.
+    /// The supplied original boundary must already contain h and T_c evaluated
+    /// at temperature. convective_mean_slopes contains dh_i/dmean_i;
+    /// reference_feedback contains all dT_c_i/dmean_j, including its diagonal.
+    /// A radiation-shifted reference is not an original convective reference.
     #[allow(clippy::too_many_arguments)]
-    pub fn pullback_with_reference_feedback(
+    pub fn bind(
         cx: &Cx<'_>,
         problem: ConductionProblem<'_>,
-        interfaces: Option<&ThermalInterfaces>,
         linear: LinearConfig,
         temperature: &[f64],
         regions: &[&str],
@@ -122,7 +166,6 @@ impl EnclosureRadiationGradient {
         reference_feedback: &[f64],
         enclosure: &GrayDiffuseEnclosure,
         heat_tolerance_w: f64,
-        nodal_weights: &[f64],
         max_feedback_entries: usize,
     ) -> Result<Self, ConductionError> {
         poll(cx, 0)?;
@@ -135,7 +178,7 @@ impl EnclosureRadiationGradient {
         {
             return Err(invalid("enclosure derivative exceeds its factor-entry or 64-region budget"));
         }
-        if temperature.len() != n || nodal_weights.len() != n
+        if temperature.len() != n
             || convective_mean_slopes_w_m2_k2.len() != m
             || reference_feedback.len() != m * m
             || !(linear.tolerance.is_finite() && linear.tolerance > 0.0 && linear.tolerance < 1.0)
@@ -143,7 +186,7 @@ impl EnclosureRadiationGradient {
         {
             return Err(invalid("enclosure derivative needs complete fields, slopes and explicit linear limits"));
         }
-        for (i, &v) in temperature.iter().chain(nodal_weights)
+        for (i, &v) in temperature.iter()
             .chain(convective_mean_slopes_w_m2_k2).chain(reference_feedback).enumerate()
         {
             if i % 256 == 0 { poll(cx, i)?; }
@@ -222,6 +265,8 @@ impl EnclosureRadiationGradient {
         let mut feedback = reference_feedback.to_vec();
         let mut local_reference_slopes = vec![0.0; m];
         let mut replacements = Vec::with_capacity(p);
+        let mut radiosity_iterations = 0usize;
+        let mut radiosity_relative_residual = 0.0_f64;
         for (i, &port) in ports.iter().enumerate() {
             poll(cx, i)?;
             let (h, reference) = physical[port];
@@ -235,42 +280,139 @@ impl EnclosureRadiationGradient {
             let mut weights = vec![0.0; p];
             weights[i] = 1.0;
             let partials = radiosity.pullback(cx, &weights, linear.tolerance, linear.max_iterations)?;
+            radiosity_iterations = radiosity_iterations.checked_add(partials.iterations)
+                .ok_or_else(|| invalid("enclosure radiosity transpose iteration count overflow"))?;
+            radiosity_relative_residual =
+                radiosity_relative_residual.max(checked(partials.relative_residual)?);
             for (j, &other) in ports.iter().enumerate() {
                 feedback[port * m + other] =
                     checked(feedback[port * m + other] - partials.temperatures[j] / h)?;
             }
         }
         let boundary = problem.boundary.with_uniform_robin_replacements(&replacements)?;
-        let combined_problem = ConductionProblem { boundary: &boundary, ..problem };
-        let mut convection = RobinResponse::pullback_mean_robin_with_reference_feedback(
-            cx, combined_problem, interfaces, linear, temperature, regions,
-            convective_mean_slopes_w_m2_k2, &local_reference_slopes, &feedback,
-            nodal_weights, max_feedback_entries,
-        )?;
-
+        poll(cx, 0)?;
+        Ok(Self {
+            vertex_count: n,
+            boundary,
+            regions: regions.iter().map(|name| (*name).to_owned()).collect(),
+            convective_mean_slopes: convective_mean_slopes_w_m2_k2.to_vec(),
+            local_reference_slopes,
+            feedback,
+            physical,
+            ports,
+            outward_flux: fresh.net_outward_flux_w_m2,
+            radiosity,
+            radiosity_iterations,
+            radiosity_relative_residual,
+            radiation_regions: enclosure.surfaces().iter().map(|s| s.name().to_owned()).collect(),
+            emissivities: enclosure.surfaces().iter().map(|s| s.emissivity().value()).collect(),
+        })
+    }
+    /// Restore original physical convection controls and contract emissivity.
+    ///
+    /// convection must come from the complete thermal Jacobian built with this
+    /// binding's combined boundary and mean/reference feedback. A transient
+    /// caller may include its storage tangent and backward dual right-hand side;
+    /// no steady PDE solve or steady physical residual test occurs here. The
+    /// caller owns primal validity and the binding of that dual to its state.
+    /// Returned reference/log(h) bars are per unit assembled nodal load; a
+    /// transient caller supplies its time-step weighting exactly once.
+    pub fn remap_gradient(
+        &self, cx: &Cx<'_>, mut convection: RobinGradient, linear: LinearConfig,
+    ) -> Result<EnclosureRadiationGradient, ConductionError> {
+        poll(cx, 0)?;
+        if convection.references.len() != self.regions.len()
+            || convection.log_htc.len() != self.regions.len()
+            || convection.nodal_load.len() != self.vertex_count
+            || !(linear.tolerance.is_finite() && linear.tolerance > 0.0 && linear.tolerance < 1.0)
+            || linear.max_iterations == 0 || linear.restart == 0
+            || !convection.relative_residual.is_finite()
+            || convection.relative_residual < 0.0
+            || convection.relative_residual >= linear.tolerance
+            || self.radiosity_relative_residual >= linear.tolerance
+        {
+            return Err(invalid("enclosure control remapping requires the complete converged thermal dual and original trace order"));
+        }
+        for (i, &value) in convection.references.iter().chain(&convection.log_htc)
+            .chain(&convection.nodal_load).enumerate()
+        {
+            if i % 256 == 0 { poll(cx, i)?; }
+            checked(value)?;
+        }
         // Restore physical convection controls before returning. The mean
         // feedback is already in the dual and must not be applied a second time.
-        let mut flux_weights = vec![0.0; p];
-        for (i, &port) in ports.iter().enumerate() {
+        let mut flux_weights = vec![0.0; self.ports.len()];
+        for (i, &port) in self.ports.iter().enumerate() {
             poll(cx, i)?;
-            let h = physical[port].0;
-            let flux = fresh.net_outward_flux_w_m2[i];
+            let h = self.physical[port].0;
+            let flux = self.outward_flux[i];
             flux_weights[i] = checked(-convection.references[port] / h)?;
             convection.log_htc[port] =
                 checked(convection.log_htc[port] + convection.references[port] * (flux / h))?;
         }
-        let radiation = radiosity.pullback(
+        let radiation = self.radiosity.pullback(
             cx, &flux_weights, linear.tolerance, linear.max_iterations,
         )?;
-        let emissivities = radiation.log_emissivities.iter().zip(enclosure.surfaces())
-            .map(|(&value, surface)| checked(value / surface.emissivity().value()))
+        let emissivities = radiation.log_emissivities.iter().zip(&self.emissivities)
+            .map(|(&value, &emissivity)| checked(value / emissivity))
             .collect::<Result<Vec<_>, _>>()?;
         poll(cx, convection.iterations)?;
-        Ok(Self {
-            regions: regions.iter().map(|name| (*name).to_owned()).collect(),
+        Ok(EnclosureRadiationGradient {
+            regions: self.regions.clone(),
             convection,
-            radiation_regions: enclosure.surfaces().iter().map(|s| s.name().to_owned()).collect(),
+            radiation_regions: self.radiation_regions.clone(),
             emissivities,
+            radiosity_iterations: self.radiosity_iterations.checked_add(radiation.iterations)
+                .ok_or_else(|| invalid("enclosure radiosity transpose iteration count overflow"))?,
+            radiosity_relative_residual: self.radiosity_relative_residual
+                .max(checked(radiation.relative_residual)?),
         })
+    }
+
+}
+
+impl EnclosureRadiationGradient {
+    /// Include caller-bound smooth convection and cross-reference feedback.
+    ///
+    /// convective_mean_slopes_w_m2_k2 contains dh_i/d(mean_i T).
+    /// reference_feedback is the row-major partial d(T_c_i)/d(mean_j T),
+    /// including its diagonal, in regions order. The caller must evaluate
+    /// every original h_i and T_c_i at the retained field before calling.
+    /// Only original convection belongs in an air law; enclosure radiation
+    /// stays internal. This entry point does not itself bind air transport,
+    /// natural convection, hydraulic controls or material-card selection.
+    ///
+    /// For a radiating region, the shifted reference derivative is
+    /// dT_c_i/dmean_j - (dq_i/dmean_j)/h_i, with the additional local
+    /// q_i*(dh_i/dmean_i)/h_i^2 term. The returned ln(h) partial restores
+    /// the original physical reference. Supplying a shifted reference as
+    /// the original boundary would count radiation twice and is invalid.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pullback_with_reference_feedback(
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        linear: LinearConfig,
+        temperature: &[f64],
+        regions: &[&str],
+        convective_mean_slopes_w_m2_k2: &[f64],
+        reference_feedback: &[f64],
+        enclosure: &GrayDiffuseEnclosure,
+        heat_tolerance_w: f64,
+        nodal_weights: &[f64],
+        max_feedback_entries: usize,
+    ) -> Result<Self, ConductionError> {
+        let bound = EnclosureRadiationLinearization::bind(
+            cx, problem, linear, temperature, regions, convective_mean_slopes_w_m2_k2,
+            reference_feedback, enclosure, heat_tolerance_w, max_feedback_entries,
+        )?;
+        let combined_problem = ConductionProblem { boundary: bound.boundary(), ..problem };
+        let convection = RobinResponse::pullback_mean_robin_with_reference_feedback(
+            cx, combined_problem, interfaces, linear, temperature, regions,
+            bound.convective_mean_slopes(), bound.local_reference_slopes(),
+            bound.reference_feedback(), nodal_weights, max_feedback_entries,
+        )?;
+
+        bound.remap_gradient(cx, convection, linear)
     }
 }

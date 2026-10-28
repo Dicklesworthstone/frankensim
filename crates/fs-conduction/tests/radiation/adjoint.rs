@@ -3,7 +3,8 @@ use super::*;
 
 use fs_conduction::adjoint::RobinResponse;
 use fs_conduction::radiation::{
-    ConvectiveEnclosureSolution, EnclosureRadiationGradient, pullback_gray_diffuse_enclosure,
+    ConvectiveEnclosureSolution, EnclosureRadiationGradient, EnclosureRadiationLinearization,
+    pullback_gray_diffuse_enclosure,
     solve_with_convective_gray_diffuse_enclosure,
 };
 use fs_conduction::ConductivityTable;
@@ -71,11 +72,17 @@ fn direction(position: &[f64; 3]) -> f64 {
 // A spatially varying source and smooth k(T) make the full FEM tangent
 // nonsymmetric and the wall non-isothermal.
 fn physical(cx: &fs_exec::Cx<'_>, c: Controls) -> State {
+    physical_with_fixed(cx, c, 0, 400.0)
+}
+
+fn physical_with_fixed(
+    cx: &fs_exec::Cx<'_>, c: Controls, fixed_axis: usize, fixed_temperature: f64,
+) -> State {
     let (complex, positions) = box_grid([3, 2, 2], [1.0; 3]);
     let mesh = ConductionMesh::new(complex, positions).unwrap();
     let boundary = ThermalBoundaryBuilder::new(&mesh)
-        .region("fixed", |f| on_box_face(f.centroid[0], 0.0),
-            ThermalBc::dirichlet(400.0).unwrap()).unwrap()
+        .region("fixed", |f| on_box_face(f.centroid[fixed_axis], 0.0),
+            ThermalBc::dirichlet(fixed_temperature).unwrap()).unwrap()
         .region("lower", |f| on_box_face(f.centroid[0], 1.0) && f.centroid[1] < 0.5,
             ThermalBc::robin(c.h, c.reference).unwrap()).unwrap()
         .region("upper", |f| on_box_face(f.centroid[0], 1.0) && f.centroid[1] >= 0.5,
@@ -235,5 +242,45 @@ fn g0_g4_enclosure_dual_rechecks_physics_and_honors_exact_work_limits() {
             run(cancelled, &base.solved.conduction.temperature, linear(), 8 * n, &weights),
             Err(ConductionError::Cancelled { .. })
         )));
+    });
+}
+
+#[test]
+fn enclosure_prescribed_lift_includes_fixed_wall_means_and_direct_goal_terms() {
+    with_cx(|cx| {
+        // This fixed face intersects the lower radiating patch. Prescribed
+        // vertices therefore contribute to both its mean and J_FD radiation.
+        let base = physical_with_fixed(cx, nominal(), 1, 400.0);
+        let mut weights = base.weights();
+        let fixed_goal = base.mesh.positions().iter().position(|p|
+            on_box_face(p[0], 1.0) && on_box_face(p[1], 0.0)).unwrap();
+        weights[fixed_goal] += 0.7;
+        let full = base.gradient(cx, &weights);
+        let bound = EnclosureRadiationLinearization::bind(
+            cx, base.problem(), linear(), &base.solved.conduction.temperature,
+            &["lower", "upper"], &[0.0; 2], &[0.0; 4], &base.enclosure,
+            1e-7, 8 * base.mesh.vertex_count(),
+        ).unwrap();
+        let problem = ConductionProblem { boundary: bound.boundary(), ..base.problem() };
+        let lift = |feedback: &[f64]| {
+            let bars = RobinResponse::prescribed_temperature_pullback(
+                cx, problem, None, &base.solved.conduction.temperature, &weights,
+                &full.convection.nodal_load, &["lower", "upper"],
+                bound.convective_mean_slopes(), bound.local_reference_slopes(),
+                feedback, 65536,
+            ).unwrap();
+            base.boundary.dirichlet().iter().map(|&(v, _)| bars[v]).sum::<f64>()
+        };
+        let actual = lift(bound.reference_feedback());
+        let step = 0.01;
+        let evaluate = |value| {
+            let state = physical_with_fixed(cx, nominal(), 1, value);
+            weights.iter().zip(&state.solved.conduction.temperature)
+                .map(|(&w, &t)| w*t).sum::<f64>()
+        };
+        close(actual, (evaluate(400.0+step)-evaluate(400.0-step))/(2.0*step));
+        assert!((actual-lift(&[0.0; 4])).abs() > 1e-7,
+            "fixed vertices inside wall means must carry reflected-radiation feedback");
+        assert!(actual > 0.7, "the direct fixed-node objective term must be retained");
     });
 }

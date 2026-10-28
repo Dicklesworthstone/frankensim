@@ -32,6 +32,7 @@ mod air_inlet;
 mod contractions;
 mod contact_controls;
 mod coupled_thermal;
+mod convective_feedback;
 mod enclosure_feedback;
 pub(in crate::solve) mod fan_speed;
 mod material_controls;
@@ -230,6 +231,8 @@ pub(super) fn extract(
     let (lambda, residual, dual_iterations, stability_iterations, response_iterations, mode) =
     if setup.enclosure_radiation.is_some() {
         let result = enclosure_feedback::pullback(cx, spec, solved, &weights)?;
+        inlet_rows = result.air_rows;
+        natural_ambient = result.natural_ambient;
         radiation_rows = result.radiation_rows;
         (result.gradient.nodal_load, result.gradient.relative_residual, result.gradient.iterations,
             None, None, "enclosure-full-radiosity-feedback")
