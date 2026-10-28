@@ -88,3 +88,36 @@ compare the actual correlations to published reference values and their
 analytic derivatives to finite differences. These tests establish the
 declared reduced model; they are not experimental validation of a complete
 sublimating object or a general spatial Stefan solution.
+
+
+## Phase exchange on the existing heat timeline
+
+`enthalpy::sublimation` composes the surface operator with the original
+`DepositionSimulation`. `sublimate_cell` atomically changes the active cell's
+actual mass and specific enthalpy plus its vapor inventory, without advancing
+the clock. `advance_sublimating_to` performs bounded first-order heat/phase
+splitting with one total thermal work budget and one global mass/energy audit.
+It honors birth and boundary/contact times exactly, uses the exposed area from
+the start of each interval, and never sublimates a not-yet-born cell. The
+existing caloric chart remains authoritative; rejected out-of-domain trial
+points do not invalidate a successfully converged in-domain endpoint. All
+failures and cancellation preserve the original timeline and reservoir.
+
+The whole cell must remain a pure solid on its original caloric branch.
+Temperature alone cannot establish solid fraction on a melting plateau;
+mixed-phase inventories require a separately owned partition. The supplied
+finite reservoir belongs to this one surface and remains thermostated. A
+joint chamber shared by several surfaces needs a joint backpressure solve.
+Reference geometry/contact areas remain fixed and recession is reported.
+Complete cell exhaustion refuses until a consumer owns topology removal.
+There is no implied moving mesh, gas-energy solve or material calibration.
+
+Vapor energy includes the solid's original sensible-enthalpy datum plus latent
+heat; the separately reported latent account is never an additional debit.
+Ten new native integration regressions cover balances, frost growth, covered
+surfaces, birth/contact timing, nonlinear chart trials, transactional refusal,
+whole-advance budgets and first-order refinement. The combined exact-source
+thermal/material suite passed 95 tests with one existing performance test
+ignored. `cargo run -p fs-material --example sublimating_ice` demonstrates the
+real ice law with explicit illustrative calorimetry in a maintained vacuum and
+a finite chamber; both native example cases passed mass/energy assertions.

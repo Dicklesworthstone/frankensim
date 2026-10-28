@@ -35,6 +35,10 @@ pub mod backward_euler;
 #[path = "enthalpy/advection.rs"]
 pub mod advection;
 
+/// Conservative sublimation and deposition on this same thermal timeline.
+#[path = "enthalpy/sublimation.rs"]
+pub mod sublimation;
+
 /// Persistent physical cell identity; distinct from its source segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CellId(pub u64);
