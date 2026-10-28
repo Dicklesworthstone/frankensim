@@ -13,7 +13,7 @@ pub mod radiation;
 
 mod terminal;
 mod continuous;
-pub(crate) use continuous::DgTerminalTrajectory;
+pub(crate) use continuous::{DgJunctionTrajectory, DgTerminalTrajectory};
 use terminal::{TerminalCoupling, TerminalRelation};
 mod mouth;
 pub use mouth::DgDrivenMouthFrame;

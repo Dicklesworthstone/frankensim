@@ -1,6 +1,6 @@
 //! One continuous original modal/Maxwell/DG generator, cached at the fixed clock.
 use super::*;
-use crate::dg_port::{DgPortLoad, DgTerminalTrajectory, sum_terminal_work};
+use crate::dg_port::{DgJunctionTrajectory, DgPortLoad, DgTerminalTrajectory, sum_terminal_work};
 use crate::render::schedule::force::coupled::dg::{ModalDgError, ModalDgFrame};
 /// Explicit cold dimension (states + held inputs + one), bytes and work. No defaults.
 pub use fs_phs::linear_exact::DenseExponentialBudget as ExactDgBudget;
@@ -12,6 +12,8 @@ pub(crate) struct PreparedJointDg {
     duct_dimension: usize,
     inlet_pressure_integral: usize,
     terminal: Option<TerminalCache>,
+    junctions: Vec<JunctionCache>,
+    owner_loss_integrals: Vec<usize>,
     column: Vec<f64>,
     pressure_column: Vec<f64>,
     storage: Vec<f64>,
@@ -20,6 +22,10 @@ pub(crate) struct PreparedJointDg {
 }
 struct TerminalCache {
     flow_columns: Vec<Vec<f64>>,
+    work_start: usize,
+    linear_start: usize,
+}
+struct JunctionCache {
     work_start: usize,
     linear_start: usize,
 }
@@ -53,8 +59,14 @@ impl PreparedJointDg {
         gate: &CancelGate,
     ) -> Result<Self, ModalDgError> {
         poll(Some(gate))?;
-        let dg = load.continuous_ordinary_duct()?;
-        let nd = dg.dimension();
+        let nd = load.branches().iter().try_fold(
+            load.duct().continuous_operator().dimension(),
+            |dimension, branch| {
+                dimension
+                    .checked_add(branch.duct().continuous_operator().dimension())
+                    .ok_or_else(|| invalid("joint branch dimension overflow"))
+            },
+        )?;
         let count = network.mode_count();
         let nm = 2 * count + network.material_memory.len();
         let nb = nm
@@ -72,6 +84,7 @@ impl PreparedJointDg {
             .ok_or_else(|| invalid("joint DG augmented dimension overflow"))?;
         let forms = 5
             + 5 * load.terminal_ports().len()
+            + 6 * load.branches().len()
             + network
                 .connections
                 .iter()
@@ -99,6 +112,10 @@ impl PreparedJointDg {
         if network.samples_rendered() != 0
             || load.state().step_count() != 0
             || network.dt.to_bits() != load.propagator().dt().to_bits()
+            || load.branches().iter().any(|branch| {
+                branch.state().step_count() != 0
+                    || branch.propagator().dt().to_bits() != network.dt.to_bits()
+            })
             || network.radiation.is_some()
             || column.len() != count
             || column.iter().any(|b| !b.is_finite())
@@ -121,18 +138,13 @@ impl PreparedJointDg {
             network.relaxation_branches.clone(),
             gate,
         )?;
-        let pressure_column = dg
-            .ports()
-            .iter()
-            .find(|(id, _)| *id == load.inlet())
-            .ok_or_else(|| invalid("original DG inlet missing"))?
-            .1
-            .clone();
+        let dg = load.prepare_continuous_network(budget.max_dense_bytes, gate)?;
+        let pressure_column = dg.inlet_pressure_column.clone();
         let mut j = vec![0.0; nd * nd];
         let mut r = vec![0.0; nd * nd];
         let mut q = vec![0.0; nd * nd];
         let mut g = vec![0.0; nd * count];
-        let a = dg.generator_per_s();
+        let a = &dg.generator;
         for i in 0..nd {
             q[i * nd + i] = 1.0;
             for k in 0..nd {
@@ -140,7 +152,7 @@ impl PreparedJointDg {
                 r[i * nd + k] = -0.5 * (a[i * nd + k] + a[k * nd + i]);
             }
             for k in 0..count {
-                g[i * count + k] = pressure_column[i] * column[k];
+                g[i * count + k] = dg.inlet_column[i] * column[k];
             }
         }
         let duct = PortHamiltonian::new(
@@ -181,9 +193,25 @@ impl PreparedJointDg {
         let mut forms = vec![
             loss_form(embed(&base.component_r, nm, 0)),
             loss_form(embed(&base.material_r, nm, 0)),
-            loss_form(embed(&r, nd, nm)),
+            loss_form(embed(
+                &dg.owners[0].loss,
+                dg.owners[0].dimension,
+                nm + dg.owners[0].offset,
+            )),
             vec![0.0; n * n],
         ];
+        // Integrate every original owner's physical loss separately. The
+        // projected pHS resistance is used only to prepare the constrained
+        // dynamics; it must not replace the actual local wall heat reports.
+        let mut owner_loss_integrals = vec![2];
+        for owner in &dg.owners[1..] {
+            owner_loss_integrals.push(forms.len());
+            forms.push(loss_form(embed(
+                &owner.loss,
+                owner.dimension,
+                nm + owner.offset,
+            )));
+        }
         for i in 0..count {
             for k in 0..nd {
                 let value = 0.5 * column[i] * pressure_column[k];
@@ -210,17 +238,11 @@ impl PreparedJointDg {
         let mut pressure = vec![0.0; n];
         pressure[nm..nm + nd].copy_from_slice(&pressure_column);
         let mut linear_forms = vec![pressure];
-        let attachment = load.prepare_continuous_terminal(budget.max_dense_bytes, gate)?;
-        let (flow, terminal) = if let Some(attachment) = attachment {
-            let (j, r, _) = system.structure();
-            let difference: Vec<_> = j.iter().zip(r).map(|(j, r)| j - r).collect();
-            let mut generator = embed(&product(&difference, base_storage, nb), nb, 0);
-            let width = nd + nt;
-            for i in 0..width {
-                generator[(nm + i) * n + nm..(nm + i) * n + n]
-                    .copy_from_slice(&attachment.generator[i * width..(i + 1) * width]);
-            }
+        let attachment = load.prepare_continuous_terminal(&dg, budget.max_dense_bytes, gate)?;
+        let mut terminal = if let Some(attachment) = &attachment {
             let work_start = forms.len();
+            let linear_start = linear_forms.len();
+            let width = nd + nt;
             for i in 0..attachment.ports.len() {
                 let flow = &attachment.flow_columns[i];
                 for pressure in [
@@ -246,12 +268,72 @@ impl PreparedJointDg {
                     linear_forms.push(observation);
                 }
             }
-            let terminal = TerminalCache {
-                flow_columns: attachment.flow_columns,
+            Some(TerminalCache {
+                flow_columns: attachment.flow_columns.clone(),
                 work_start,
-                linear_start: forms.len() + 1,
-            };
-            let flow = PreparedQuadraticFlow::new_extended_controlled(
+                linear_start,
+            })
+        } else {
+            None
+        };
+        let mut junctions = Vec::with_capacity(dg.junctions.len());
+        for junction in &dg.junctions {
+            poll(Some(gate))?;
+            let mut flow = vec![0.0; n];
+            flow[nm..nb].copy_from_slice(&junction.flow_column);
+            for (i, &b) in column.iter().enumerate() {
+                flow[2 * i + 1] = junction.inlet_flow_factor * b;
+            }
+            if let Some(attachment) = &attachment {
+                for (factor, terminal_flow) in junction
+                    .terminal_flow_factors
+                    .iter()
+                    .zip(&attachment.flow_columns)
+                {
+                    for (value, &coefficient) in flow[nm..].iter_mut().zip(terminal_flow) {
+                        *value += factor * coefficient;
+                    }
+                }
+            }
+            let work_start = forms.len();
+            let linear_start = linear_forms.len();
+            for source in [
+                &junction.bore_pressure_column,
+                &junction.branch_pressure_column,
+            ] {
+                let mut pressure = vec![0.0; n];
+                pressure[nm..nb].copy_from_slice(source);
+                let mut form = vec![0.0; n * n];
+                for a in 0..n {
+                    for b in 0..n {
+                        form[a * n + b] = 0.5 * (pressure[a] * flow[b] + flow[a] * pressure[b]);
+                    }
+                }
+                forms.push(form);
+                linear_forms.push(pressure);
+            }
+            linear_forms.push(flow);
+            junctions.push(JunctionCache {
+                work_start,
+                linear_start,
+            });
+        }
+        if let Some(terminal) = &mut terminal {
+            terminal.linear_start += forms.len();
+        }
+        for junction in &mut junctions {
+            junction.linear_start += forms.len();
+        }
+        let flow = if let Some(attachment) = attachment {
+            let (j, r, _) = system.structure();
+            let difference: Vec<_> = j.iter().zip(r).map(|(j, r)| j - r).collect();
+            let mut generator = embed(&product(&difference, base_storage, nb), nb, 0);
+            let width = nd + nt;
+            for i in 0..width {
+                generator[(nm + i) * n + nm..(nm + i) * n + n]
+                    .copy_from_slice(&attachment.generator[i * width..(i + 1) * width]);
+            }
+            PreparedQuadraticFlow::new_extended_controlled(
                 &system,
                 &split,
                 &generator,
@@ -261,20 +343,16 @@ impl PreparedJointDg {
                 &linear_forms,
                 budget,
                 || gate.is_requested(),
-            );
-            (flow, Some(terminal))
+            )
         } else {
-            (
-                PreparedQuadraticFlow::new_controlled(
-                    &system,
-                    &split,
-                    network.dt,
-                    &forms,
-                    &linear_forms,
-                    budget,
-                    || gate.is_requested(),
-                ),
-                None,
+            PreparedQuadraticFlow::new_controlled(
+                &system,
+                &split,
+                network.dt,
+                &forms,
+                &linear_forms,
+                budget,
+                || gate.is_requested(),
             )
         };
         let flow = flow.map_err(|error| match error {
@@ -293,6 +371,8 @@ impl PreparedJointDg {
             duct_dimension: nd,
             inlet_pressure_integral: forms.len(),
             terminal,
+            junctions,
+            owner_loss_integrals,
             column,
             pressure_column,
             storage,
@@ -312,6 +392,10 @@ impl PreparedJointDg {
         if external.len() != self.column.len()
             || external.iter().any(|f| !f.is_finite())
             || network.samples_rendered() != load.state().step_count()
+            || load
+                .branches()
+                .iter()
+                .any(|branch| branch.state().step_count() != network.samples_rendered())
         {
             return Err(invalid(
                 "joint DG requires finite complete forcing and unchanged accepted clock",
@@ -320,13 +404,7 @@ impl PreparedJointDg {
         }
         let mut x = flatten(&network.models);
         x.extend_from_slice(&network.material_memory);
-        x.extend_from_slice(
-            load.continuous_ordinary_duct()?
-                .energy_coordinates(load.state())
-                .map_err(|e| {
-                    ModalDgError::Acoustic(crate::acoustic_realize::AcousticRealizeError::Duct(e))
-                })?,
-        );
+        x.extend(load.continuous_energy_coordinates()?);
         if let Some(terminal) = load.terminal() {
             x.extend(terminal.continuous_operator().real_coordinates());
         }
@@ -379,7 +457,7 @@ impl PreparedJointDg {
         } else {
             finite(det::sqrt(2.0 * h0) + network.dt * det::sqrt(input.iter().map(|f| f * f).sum()))?
         };
-        let acoustic = if let Some(terminal) = &self.terminal {
+        let (endpoint_input, observations) = if let Some(terminal) = &self.terminal {
             let endpoint_input: Vec<_> = terminal
                 .flow_columns
                 .iter()
@@ -394,29 +472,40 @@ impl PreparedJointDg {
                     load_work_j: values[terminal.work_start + 2 * i + 1],
                 })
                 .collect();
-            load.preview_continuous_terminal_trajectory(
-                result.state[nm..nb].to_vec(),
-                &result.state[nb..],
-                &endpoint_input,
-                network.dt,
-                pressure_impulse,
-                inlet_work_j,
-                &observations,
-                values[2],
-                network.config.energy_absolute_tolerance_j,
-                network.config.energy_relative_tolerance,
-            )?
+            (endpoint_input, observations)
         } else {
-            load.preview_continuous_trajectory(
-                result.state[nm..nb].to_vec(),
-                network.dt,
-                pressure_impulse,
-                inlet_work_j,
-                values[2],
-                network.config.energy_absolute_tolerance_j,
-                network.config.energy_relative_tolerance,
-            )?
+            (Vec::new(), Vec::new())
         };
+        let junctions: Vec<_> = self
+            .junctions
+            .iter()
+            .map(|junction| DgJunctionTrajectory {
+                bore_pressure_impulse_pa_s: values[junction.linear_start],
+                branch_pressure_impulse_pa_s: values[junction.linear_start + 1],
+                volume_m3: values[junction.linear_start + 2],
+                bore_work_j: values[junction.work_start],
+                branch_work_j: values[junction.work_start + 1],
+            })
+            .collect();
+        let owner_losses: Vec<_> = self
+            .owner_loss_integrals
+            .iter()
+            .map(|&index| values[index])
+            .collect();
+        let duct_loss = finite(owner_losses.iter().sum())?;
+        let acoustic = load.preview_continuous_network_trajectory(
+            &result.state[nm..nb],
+            &result.state[nb..],
+            &endpoint_input,
+            network.dt,
+            pressure_impulse,
+            inlet_work_j,
+            &observations,
+            &junctions,
+            &owner_losses,
+            network.config.energy_absolute_tolerance_j,
+            network.config.energy_relative_tolerance,
+        )?;
         let pressure_bound =
             finite(det::sqrt(self.pressure_column.iter().map(|b| b * b).sum()) * root_bound)?;
         limit(
@@ -453,7 +542,7 @@ impl PreparedJointDg {
         let stored_energy_j =
             finite(modal.total_energy_j() + acoustic.output().ledger.stored_energy_j)?;
         let storage_change_j = finite(stored_energy_j - before)?;
-        let loss = finite(modal.total_dissipation_j() + values[2])?;
+        let loss = finite(modal.total_dissipation_j() + duct_loss)?;
         let terminal_work_j = sum_terminal_work(acoustic.terminal_frames());
         let residual =
             finite(storage_change_j + loss + terminal_work_j - authored_external_work_j)?;

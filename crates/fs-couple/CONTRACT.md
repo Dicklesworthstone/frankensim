@@ -113,6 +113,32 @@ physical pressure/flow condensation, pressure-diffusion availability, separate
 loss channels, signed basis invariance and unchanged accepted histories are
 tested alongside analytic loaded resonances.
 
+### Continuous finite side-branch evolution
+
+The explicit exact downstream backend also retains every original branch state
+on its common clock. In original DG energy coordinates, junction columns are
+`H=[-B_bore,+B_branch]`; the complete normalized Gram solve constructs
+`P=I-H(H^T H)^-1 H^T`. The generator `P L P` and projected external columns
+preserve the original pressure constraints from the admitted cold state. This
+eliminates only zero-storage junction flows; it does not reduce the acoustic or
+wall-state basis. The same cached exponential and quadratic-integral owner
+evolves the coupled modal, cavity, duct and original rational terminal states.
+Instantaneous terminal D must remain nonsingular and conditioned as before.
+
+Each original duct's unprojected loss form is integrated separately. Junction
+flow includes its acoustic-state, modal-velocity and complete terminal-feedback
+terms. Both original pressure impulses, both actual integrals of `p(t) Q(t)`,
+and swept volume are independently observed. Original per-duct energy closure,
+endpoint and integrated pressure continuity, junction work, terminal work and
+whole-system budgets must pass before the existing `DgPortTrial` publishes any
+history. Terminal work remains signed external exchange because a generic
+rational realization supplies no physical storage certificate. Tests compare
+24/48/96 kHz constant-drive trajectories, reversed branch ownership, original
+wall memory, an independent physical mutual-terminal heat ladder, and late
+refusal/cancellation with identical retry. Preparation retains the existing
+256-dimensional complete-state allowance; finite gaps, driven mouths and
+singular-D time-domain constraints remain outside this backend.
+
 ### Shared cavity exterior loading
 
 `cavity_modal::shared::SharedCavity::with_exterior_radiation` connects the

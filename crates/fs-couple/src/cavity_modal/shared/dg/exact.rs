@@ -4,11 +4,12 @@ pub use crate::render::schedule::force::coupled::dg::ExactDgBudget;
 
 impl SharedCavity {
     /// Prepare one continuous full modal/Maxwell/DG exponential, including the
-    /// original rational terminal group and optional viscothermal wall states.
+    /// original finite side branches, rational terminal group and optional
+    /// viscothermal wall states on every retained duct.
     /// Every original coordinate and mutual terminal entry is retained. Ordinary
     /// closed/open/matched distal boundaries remain supported. Rational terminals
     /// require nonsingular, well-conditioned instantaneous D; a singular D needs
-    /// a descriptor treatment and is refused. Branches, gaps, driven mouths,
+    /// a descriptor treatment and is refused. Gaps, driven mouths,
     /// direct neck radiation and constant-loss connections remain unsupported.
     ///
     /// Original neck geometry and inlet gas/area/clock admissions remain binding.
@@ -23,8 +24,10 @@ impl SharedCavity {
     /// without assigning stored energy or an all-frequency passivity certificate
     /// to terminal coordinates.
     ///
-    /// Only authored forces are held. The internal pressure and flow evolve
-    /// continuously together, and their true integral p(t)Q(t) is exchanged.
+    /// Only authored forces are held. Every original branch state is retained;
+    /// pressure continuity and opposite junction flow hold continuously. The
+    /// internal pressure and flow evolve together, and their true integral
+    /// p(t)Q(t) is evaluated independently on both sides of every junction.
     /// Splitting a constant-drive interval preserves the same trajectory to
     /// numerical error; varying-drive reconstruction, spatial DG convergence and
     /// constitutive-band validity are still separate accuracy obligations.

@@ -1,91 +1,9 @@
-//! Continuous single-duct composition keeps the original source and transaction.
+//! Continuous original duct networks keep every source and transaction.
 use super::*;
 use fs_duct::dg::continuous::{DgContinuous, state::DgTrajectoryPort};
 
-impl DgPortLoad {
-    pub(crate) fn continuous_ordinary_duct(
-        &self,
-    ) -> Result<DgContinuous<'_>, AcousticRealizeError> {
-        if !self.branches.is_empty()
-            || !self.terminal_channels.is_empty()
-            || self.has_driven_mouth()
-        {
-            return Err(invalid(
-                "continuous DG requires one original duct with no branch, gap or driven mouth",
-            ));
-        }
-        let original = self.duct.continuous_operator();
-        if original.ports().len() != 1 + self.terminal_ports().len()
-            || self
-                .terminal
-                .as_ref()
-                .is_some_and(|t| t.ports() != self.terminal_ports().len())
-        {
-            return Err(invalid(
-                "continuous DG must retain every original terminal port",
-            ));
-        }
-        Ok(original)
-    }
-
-    pub(crate) fn continuous_single_duct(&self) -> Result<DgContinuous<'_>, AcousticRealizeError> {
-        if self.terminal.is_some()
-            || !self.branches.is_empty()
-            || !self.terminal_channels.is_empty()
-            || self.has_driven_mouth()
-            || self.duct.continuous_operator().ports().len() != 1
-        {
-            return Err(invalid(
-                "continuous DG composition requires one original duct and inlet, with no rational terminal, branch, gap or driven mouth",
-            ));
-        }
-        Ok(self.duct.continuous_operator())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn preview_continuous_trajectory(
-        &mut self,
-        endpoint: Vec<f64>,
-        dt: f64,
-        pressure_impulse: f64,
-        inlet_work_j: f64,
-        dissipated_j: f64,
-        absolute_tolerance_j: f64,
-        relative_tolerance: f64,
-    ) -> Result<DgPortTrial<'_>, AcousticRealizeError> {
-        let original = self.continuous_single_duct()?;
-        let (state, output) = original
-            .candidate_from_trajectory(
-                &self.state,
-                endpoint,
-                dt,
-                &[DgTrajectoryPort {
-                    id: self.inlet,
-                    pressure_impulse_pa_s: pressure_impulse,
-                    work_into_duct_j: inlet_work_j,
-                }],
-                dissipated_j,
-                absolute_tolerance_j,
-                relative_tolerance,
-            )
-            .map_err(AcousticRealizeError::Duct)?;
-        Ok(DgPortTrial {
-            owner: self,
-            state,
-            output,
-            terminal: None,
-            terminal_frame: None,
-            terminal_frames: Vec::new(),
-            inlet_work_j,
-            source_work_j: inlet_work_j,
-            driven_mouth_frame: None,
-            branch_states: Vec::new(),
-            branch_frames: Vec::new(),
-            terminal_channels: Vec::new(),
-            terminal_channel_frames: Vec::new(),
-        })
-    }
-}
+mod network;
+pub(crate) use network::DgContinuousNetwork;
 
 /// Original DG/rational ODE after eliminating an invertible instantaneous D.
 /// Terminal coordinates carry no declared storage; port work stays external.
@@ -100,10 +18,10 @@ pub(crate) struct DgContinuousTerminal {
 impl DgPortLoad {
     pub(crate) fn prepare_continuous_terminal(
         &self,
+        original: &DgContinuousNetwork,
         maximum_dense_bytes: usize,
         gate: &fs_exec::CancelGate,
     ) -> Result<Option<DgContinuousTerminal>, AcousticRealizeError> {
-        let original = self.continuous_ordinary_duct()?;
         let Some(terminal) = &self.terminal else {
             return Ok(None);
         };
@@ -111,7 +29,7 @@ impl DgPortLoad {
             return Err(AcousticRealizeError::Cancelled);
         }
         let view = terminal.continuous_operator();
-        let (nd, nt, p) = (original.dimension(), view.dimension(), terminal.ports());
+        let (nd, nt, p) = (original.dimension, view.dimension(), terminal.ports());
         let n = nd
             .checked_add(nt)
             .ok_or_else(|| invalid("continuous terminal dimension overflow"))?;
@@ -140,12 +58,7 @@ impl DgPortLoad {
         })?;
         let ports = self.terminal_ports().to_vec();
         let mut pressure_columns = Vec::with_capacity(p);
-        for id in &ports {
-            let (_, column) = original
-                .ports()
-                .iter()
-                .find(|(port, _)| port == id)
-                .ok_or_else(|| invalid("continuous terminal lost its original DG port"))?;
+        for column in &original.terminal_pressure_columns {
             let mut pressure = vec![0.0; n];
             pressure[..nd].copy_from_slice(column);
             pressure_columns.push(pressure);
@@ -171,8 +84,7 @@ impl DgPortLoad {
         }
         let mut generator = vec![0.0; n * n];
         for i in 0..nd {
-            generator[i * n..i * n + nd]
-                .copy_from_slice(&original.generator_per_s()[i * nd..(i + 1) * nd]);
+            generator[i * n..i * n + nd].copy_from_slice(&original.generator[i * nd..(i + 1) * nd]);
         }
         for i in 0..nt {
             generator[(nd + i) * n + nd..(nd + i) * n + n]
@@ -185,7 +97,7 @@ impl DgPortLoad {
             for j in 0..n {
                 for k in 0..p {
                     let input = if i < nd {
-                        -pressure_columns[k][i]
+                        -original.terminal_input_columns[k][i]
                     } else {
                         model.b[(i - nd) * p + k]
                     };
@@ -256,41 +168,62 @@ pub(crate) struct DgTerminalTrajectory {
     pub port_work_j: f64,
     pub load_work_j: f64,
 }
+
+/// Independently integrated observations of both original junction traces.
+pub(crate) struct DgJunctionTrajectory {
+    pub bore_pressure_impulse_pa_s: f64,
+    pub branch_pressure_impulse_pa_s: f64,
+    pub volume_m3: f64,
+    pub bore_work_j: f64,
+    pub branch_work_j: f64,
+}
 impl DgPortLoad {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn preview_continuous_terminal_trajectory(
+    pub(crate) fn preview_continuous_network_trajectory(
         &mut self,
-        endpoint: Vec<f64>,
+        endpoint: &[f64],
         terminal_endpoint: &[f64],
         terminal_endpoint_input: &[f64],
         dt: f64,
         pressure_impulse: f64,
         inlet_work_j: f64,
         terminals: &[DgTerminalTrajectory],
-        dissipated_j: f64,
+        junctions: &[DgJunctionTrajectory],
+        owner_losses: &[f64],
         absolute_tolerance_j: f64,
         relative_tolerance: f64,
     ) -> Result<DgPortTrial<'_>, AcousticRealizeError> {
-        let original = self.continuous_ordinary_duct()?;
-        if !dt.is_finite()
+        let dimension = self.admit_continuous_network()?;
+        if endpoint.len() != dimension
+            || endpoint.iter().any(|v| !v.is_finite())
+            || !dt.is_finite()
             || dt.to_bits() != self.propagator.dt().to_bits()
             || terminals.len() != self.terminal_ports().len()
+            || junctions.len() != self.branches.len()
+            || owner_losses.len() != self.branches.len() + 1
             || !absolute_tolerance_j.is_finite()
             || absolute_tolerance_j < 0.0
             || !relative_tolerance.is_finite()
-            || relative_tolerance < 0.0
+            || !(0.0..1.0).contains(&relative_tolerance)
         {
             return Err(invalid(
-                "continuous terminal trajectory must retain clock, ports and finite tolerances",
+                "continuous network trajectory must retain every original state, clock, port and finite tolerance",
             ));
         }
-        let terminal = self
-            .terminal
-            .as_ref()
-            .ok_or_else(|| invalid("continuous terminal owner missing"))?
-            .continuous_operator()
-            .candidate_from_coordinates(terminal_endpoint, terminal_endpoint_input)
-            .map_err(|error| invalid(error.0))?;
+        let terminal = match &self.terminal {
+            Some(original) => Some(
+                original
+                    .continuous_operator()
+                    .candidate_from_coordinates(terminal_endpoint, terminal_endpoint_input)
+                    .map_err(|error| invalid(error.0))?,
+            ),
+            None if terminal_endpoint.is_empty() && terminal_endpoint_input.is_empty() => None,
+            None => {
+                return Err(invalid(
+                    "continuous terminal coordinates have no original owner",
+                ));
+            }
+        };
         let mut ports = vec![DgTrajectoryPort {
             id: self.inlet,
             pressure_impulse_pa_s: pressure_impulse,
@@ -315,11 +248,20 @@ impl DgPortLoad {
                     "continuous original DG and rational terminal disagree on pressure or integrated work",
                 ));
             }
-            ports.push(DgTrajectoryPort {
-                id,
-                pressure_impulse_pa_s: data.pressure_impulse_pa_s,
-                work_into_duct_j: -data.port_work_j,
-            });
+            if let Some(index) = self.branches.iter().position(|branch| branch.port() == id) {
+                let junction = &junctions[index];
+                ports.push(DgTrajectoryPort {
+                    id,
+                    pressure_impulse_pa_s: junction.bore_pressure_impulse_pa_s,
+                    work_into_duct_j: -junction.bore_work_j,
+                });
+            } else {
+                ports.push(DgTrajectoryPort {
+                    id,
+                    pressure_impulse_pa_s: data.pressure_impulse_pa_s,
+                    work_into_duct_j: -data.port_work_j,
+                });
+            }
             terminal_frames.push(DgTerminalFrame {
                 port: id,
                 outward_flow_m3_s: flow,
@@ -330,17 +272,163 @@ impl DgPortLoad {
                 port_work_residual_j: residual,
             });
         }
-        let (state, output) = original
+        let original = self.duct.continuous_operator();
+        let main_dimension = original.dimension();
+        let (state, mut output) = original
             .candidate_from_trajectory(
                 &self.state,
-                endpoint,
+                endpoint[..main_dimension].to_vec(),
                 dt,
                 &ports,
-                dissipated_j,
+                owner_losses[0],
                 absolute_tolerance_j,
                 relative_tolerance,
             )
             .map_err(AcousticRealizeError::Duct)?;
+
+        let mut branch_states = Vec::with_capacity(self.branches.len());
+        let mut branch_frames = Vec::with_capacity(self.branches.len());
+        let mut offset = main_dimension;
+        for (index, (branch, junction)) in self.branches.iter().zip(junctions).enumerate() {
+            let (DgBoundary::Port(inlet), DgBoundary::Port(outlet)) =
+                (branch.duct().inlet(), branch.duct().outlet())
+            else {
+                return Err(invalid(
+                    "continuous branch lost its two original flow ports",
+                ));
+            };
+            let terminal_index = self
+                .terminal_ports()
+                .iter()
+                .position(|id| *id == branch.port())
+                .ok_or_else(|| invalid("continuous branch has no original distal terminal"))?;
+            let external = &terminals[terminal_index];
+            let view = branch.duct().continuous_operator();
+            let end = offset + view.dimension();
+            let (branch_state, branch_output) = view
+                .candidate_from_trajectory(
+                    branch.state(),
+                    endpoint[offset..end].to_vec(),
+                    dt,
+                    &[
+                        DgTrajectoryPort {
+                            id: inlet,
+                            pressure_impulse_pa_s: junction.branch_pressure_impulse_pa_s,
+                            work_into_duct_j: junction.branch_work_j,
+                        },
+                        DgTrajectoryPort {
+                            id: outlet,
+                            pressure_impulse_pa_s: external.pressure_impulse_pa_s,
+                            work_into_duct_j: -external.port_work_j,
+                        },
+                    ],
+                    owner_losses[index + 1],
+                    absolute_tolerance_j,
+                    relative_tolerance,
+                )
+                .map_err(AcousticRealizeError::Duct)?;
+            let bore_port = *output
+                .port_outputs
+                .iter()
+                .find(|port| port.id == branch.port())
+                .ok_or_else(|| invalid("continuous bore lost its original junction observation"))?;
+            let branch_inlet = *branch_output
+                .port_outputs
+                .iter()
+                .find(|port| port.id == inlet)
+                .ok_or_else(|| invalid("continuous branch lost its original inlet observation"))?;
+            let bore_trace = &original
+                .ports()
+                .iter()
+                .find(|(id, _)| *id == branch.port())
+                .ok_or_else(|| invalid("continuous bore lost its original junction trace"))?
+                .1;
+            let branch_trace = &view
+                .ports()
+                .iter()
+                .find(|(id, _)| *id == inlet)
+                .ok_or_else(|| invalid("continuous branch lost its original inlet trace"))?
+                .1;
+            // Component magnitudes give a cancellation-aware physical pressure
+            // scale at the endpoint. Mean pressure alone can be zero during a
+            // perfectly valid oscillation, so it is not a safe scale by itself.
+            let endpoint_pressure_scale = bore_trace
+                .iter()
+                .zip(&endpoint[..main_dimension])
+                .chain(branch_trace.iter().zip(&endpoint[offset..end]))
+                .map(|(b, x)| (b * x).abs())
+                .sum::<f64>();
+            let impulse_scale = junction.bore_pressure_impulse_pa_s.abs()
+                + junction.branch_pressure_impulse_pa_s.abs()
+                + dt * endpoint_pressure_scale;
+            let residual = junction.bore_work_j - junction.branch_work_j;
+            let work_scale = junction.bore_work_j.abs() + junction.branch_work_j.abs();
+            let flow = junction.volume_m3 / dt;
+            if ![
+                endpoint_pressure_scale,
+                impulse_scale,
+                residual,
+                work_scale,
+                flow,
+            ]
+            .iter()
+            .all(|value| value.is_finite())
+                || branch_output.ledger.step != output.ledger.step
+                || (bore_port.end_conjugate - branch_inlet.end_conjugate).abs()
+                    > 1e-10 * endpoint_pressure_scale.max(1e-300)
+                || (junction.bore_pressure_impulse_pa_s - junction.branch_pressure_impulse_pa_s)
+                    .abs()
+                    > 1e-10 * impulse_scale.max(1e-300)
+                || residual.abs() > absolute_tolerance_j + relative_tolerance * work_scale
+            {
+                return Err(invalid(
+                    "continuous junction violates original pressure continuity or integrated work",
+                ));
+            }
+            let distal = *branch_output
+                .port_outputs
+                .iter()
+                .find(|port| port.id == outlet)
+                .ok_or_else(|| {
+                    invalid("continuous branch omitted its original distal observation")
+                })?;
+            let external_port = output
+                .port_outputs
+                .iter_mut()
+                .find(|port| port.id == branch.port())
+                .ok_or_else(|| invalid("continuous branch lost its external channel identity"))?;
+            *external_port = fs_duct::dg::PortOutput {
+                id: branch.port(),
+                ..distal
+            };
+            let ledger = &branch_output.ledger;
+            output.ledger.stored_energy_j += ledger.stored_energy_j;
+            output.ledger.port_work_step_j += ledger.port_work_step_j;
+            output.ledger.cumulative_port_work_j += ledger.cumulative_port_work_j;
+            output.ledger.cumulative_parameter_work_j += ledger.cumulative_parameter_work_j;
+            output.ledger.cumulative_dissipated_j += ledger.cumulative_dissipated_j;
+            output.ledger.energy_balance_residual_j += ledger.energy_balance_residual_j;
+            output.ledger.balance_checked &= ledger.balance_checked;
+            branch_frames.push(DgBranchFrame {
+                port: branch.port(),
+                junction_flow_m3_s: flow,
+                bore_port,
+                branch_inlet,
+                bore_work_j: junction.bore_work_j,
+                branch_work_j: junction.branch_work_j,
+                junction_work_residual_j: residual,
+                duct: branch_output,
+            });
+            branch_states.push(branch_state);
+            offset = end;
+        }
+        if !self.branches.is_empty() {
+            output.ledger.relative_energy_drift = output.ledger.energy_balance_residual_j.abs()
+                / (output.ledger.cumulative_port_work_j.abs()
+                    + output.ledger.cumulative_parameter_work_j.abs())
+                .max(1e-300);
+            branch::validate_candidate(&state, &output, original.ports().len())?;
+        }
         let terminal_frame = match self.duct.outlet() {
             DgBoundary::Port(id) => terminal_frames.iter().find(|f| f.port == id).copied(),
             _ => None,
@@ -349,14 +437,14 @@ impl DgPortLoad {
             owner: self,
             state,
             output,
-            terminal: Some(terminal),
+            terminal,
             terminal_frame,
             terminal_frames,
             inlet_work_j,
             source_work_j: inlet_work_j,
             driven_mouth_frame: None,
-            branch_states: Vec::new(),
-            branch_frames: Vec::new(),
+            branch_states,
+            branch_frames,
             terminal_channels: Vec::new(),
             terminal_channel_frames: Vec::new(),
         })
