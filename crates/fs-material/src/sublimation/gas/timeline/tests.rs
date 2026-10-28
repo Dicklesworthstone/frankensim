@@ -605,6 +605,54 @@ fn fixed_gas_formation_reference_does_not_change_the_coupled_physics() {
 }
 
 #[test]
+fn birth_and_external_heat_accounts_survive_a_large_species_formation_datum() {
+    let reference_catalog = catalog(0.0);
+    let reference_binding = binding(0.0);
+    let charts = [chart(&reference_catalog, &reference_binding); 2];
+    let law = Phase;
+    let mut physical: Option<(f64, Vec<(f64, f64)>)> = None;
+    for reference in [0.0, 1e13] {
+        let catalog = catalog(reference);
+        let bindings = [binding(reference), binding(reference)];
+        let surfaces = selection(&law, &bindings, &charts);
+        let thermal = schedule(&charts, vec![birth(0.0, cell(1, 400.0, charts[0], 1.5)),
+            birth(0.05, cell(2, 300.0, charts[1], 1.5))], 1000);
+        let gas = gas(&catalog);
+        let mut solve = controls();
+        solve.surface.latent_compatibility_tolerance_j_kg = 0.01;
+        let result = advance_deposition_with_gas(&thermal, &surfaces, &gas, &catalog,
+            0.1, heat(0.025), solve, || Ok(())).unwrap();
+        let audit = result.audit();
+        near(audit.thermal.external_heat_j, 0.225, 1e-12);
+        near(audit.thermal.incoming_mass_kg, 0.02, 1e-14);
+        assert_eq!(audit.thermal.events, 2);
+        near(audit.energy_residual_j, 0.0, 1e-7);
+        near(audit.mass_residual_kg, 0.0, 1e-14);
+        near(audit.incoming_energy_j, 0.01 * (charts[0].h(400.0) + reference)
+            + 0.01 * (charts[1].h(300.0) + reference), 1e-4);
+        let state = (result.gas().state().state().temperature,
+            result.thermal().cells().values().map(|cell| (cell.mass_kg, cell.specific_h_j_kg)).collect::<Vec<_>>());
+        if let Some((gas_temperature, cells)) = &physical {
+            near(state.0, *gas_temperature, 2e-7);
+            for ((mass, enthalpy), (expected_mass, expected_enthalpy)) in state.1.iter().zip(cells) {
+                near(*mass, *expected_mass, 1e-12);
+                near(*enthalpy, *expected_enthalpy, charts[0].cp * 2e-7);
+            }
+            let rounded_gas = result.gas().mass_kg()
+                * (result.gas().state().specific_internal_energy_j_kg() - gas.state().specific_internal_energy_j_kg())
+                + (result.gas().mass_kg() - gas.mass_kg()) * gas.state().specific_internal_energy_j_kg();
+            let rounded_solid: f64 = result.thermal().cells().values().enumerate().map(|(i, cell)| {
+                let initial_h = charts[i].h(if i == 0 { 400.0 } else { 300.0 });
+                cell.mass_kg * (cell.specific_h_j_kg - initial_h) + (cell.mass_kg - 0.01) * (initial_h + reference)
+            }).sum();
+            assert!((rounded_solid + rounded_gas - 0.225).abs() > 1e-7);
+        } else { physical = Some(state); }
+        assert!(thermal.cells().is_empty());
+        assert_eq!(thermal.time_s(), 0.0);
+    }
+}
+
+#[test]
 fn unknown_duplicate_and_empty_selections_leave_both_owners_unchanged() {
     let catalog = catalog(0.0);
     let bindings = [binding(0.0), binding(0.0)];

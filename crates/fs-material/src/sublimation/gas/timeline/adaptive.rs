@@ -213,10 +213,12 @@ impl CellTotals {
 struct History {
     heat: HeatTotals, cells: BTreeMap<CellId, CellTotals>, outgoing: Sum, incoming: Sum,
     transferred: Sum, energy: Sum, reflected: Sum, birth_energy: Sum,
+    solid_energy: Sum, gas_energy: Sum, solid_residual: Sum, gas_residual: Sum,
     phase_steps: usize, gas_iterations: usize,
 }
 impl History {
-    fn add(&mut self, report: &GasTimelineAudit) -> Result<(), DepositionError> {
+    fn add(&mut self, candidate: &GasTimelineCandidate<'_, '_>) -> Result<(), DepositionError> {
+        let report = candidate.audit();
         self.heat.add(report.thermal)?;
         self.outgoing.add(report.outgoing_mass_kg)?;
         self.incoming.add(report.incoming_mass_kg)?;
@@ -224,14 +226,19 @@ impl History {
         self.energy.add(report.energy_into_gas_j)?;
         self.reflected.add(report.reflected_heat_into_gas_j)?;
         self.birth_energy.add(report.incoming_energy_j)?;
+        self.solid_energy.add(report.solid_energy_change_j)?;
+        self.gas_energy.add(report.gas_energy_change_j)?;
+        self.solid_residual.add(candidate.solid_stream_energy_residual_j)?;
+        self.gas_residual.add(candidate.gas_stream_energy_residual_j)?;
         self.phase_steps = self.phase_steps.checked_add(report.phase_steps).ok_or(DepositionError::Arithmetic)?;
         self.gas_iterations = self.gas_iterations.checked_add(report.gas_iterations).ok_or(DepositionError::Arithmetic)?;
         for (&id, row) in &report.cells { self.cells.entry(id).or_default().add(row)?; }
         Ok(())
     }
 
-    // Independent endpoint balance, not the sum of step residuals. Reference
-    // offsets cancel per original cell/birth before global accumulation.
+    // Check actual whole-window inventories independently. Accepted original
+    // caloric defects telescope; recomputing them from rounded absolute endpoint
+    // energies would reintroduce each species' arbitrary formation datum.
     #[allow(clippy::too_many_arguments)]
     fn finish(
         self,
@@ -252,7 +259,6 @@ impl History {
         }
         let bindings: BTreeMap<_, _> = surfaces.iter().map(|surface| (surface.cell_id, surface.binding)).collect();
         let mut solid_mass = Sum::default();
-        let mut solid_energy = Sum::default();
         let mut species_mass: BTreeMap<_, Sum> = BTreeMap::new();
         for (&id, cell) in endpoint.thermal().cells() {
             checkpoint()?;
@@ -260,9 +266,6 @@ impl History {
                 .ok_or(GasTimelineAdaptiveError::Invalid("accepted cell has no original inventory or birth"))?;
             let dm = finite(cell.mass_kg - initial.mass_kg)?;
             solid_mass.add(dm)?;
-            let offset = bindings.get(&id).map_or(0.0, |binding| binding.solid_enthalpy_offset_j_kg);
-            solid_energy.add(cell.mass_kg * (cell.specific_h_j_kg - initial.specific_h_j_kg)
-                + dm * (initial.specific_h_j_kg + offset))?;
             if let Some(binding) = bindings.get(&id) {
                 species_mass.entry(binding.species.clone()).or_default().add(dm)?;
             } else if dm != 0.0 {
@@ -270,10 +273,7 @@ impl History {
             }
         }
         let gas_mass_change = finite(endpoint.gas().mass_kg() - original_gas.mass_kg())?;
-        let initial_u = original_gas.state().specific_internal_energy_j_kg();
-        let gas_energy_change = finite(endpoint.gas().mass_kg()
-            * (endpoint.gas().state().specific_internal_energy_j_kg() - initial_u)
-            + gas_mass_change * initial_u)?;
+        let gas_energy_change = self.gas_energy.value()?;
         let mass_tolerance = phase_config.surface.gas.mass_tolerance_kg;
         let mass_residual = finite(solid_mass.value()? + gas_mass_change)?;
         for species in endpoint.catalog().thermodynamics().components() {
@@ -291,9 +291,9 @@ impl History {
         }
         let heat = self.heat.audit()?;
         let stream_energy = self.energy.value()?;
-        let energy_residual = finite(solid_energy.value()? + gas_energy_change - heat.external_heat_j)?;
-        work.gas_stream_energy_residual_j = finite(gas_energy_change - stream_energy)?;
-        work.solid_stream_energy_residual_j = finite(solid_energy.value()? - heat.external_heat_j + stream_energy)?;
+        work.gas_stream_energy_residual_j = self.gas_residual.value()?;
+        work.solid_stream_energy_residual_j = self.solid_residual.value()?;
+        let energy_residual = finite(work.solid_stream_energy_residual_j + work.gas_stream_energy_residual_j)?;
         let energy_tolerance = thermal_config.energy_tolerance_j.max(phase_config.surface.gas.energy_tolerance_j);
         for residual in [energy_residual, work.gas_stream_energy_residual_j, work.solid_stream_energy_residual_j] {
             if residual.abs() > energy_tolerance {
@@ -308,12 +308,14 @@ impl History {
             thermal: heat, cells, outgoing_mass_kg: self.outgoing.value()?,
             incoming_mass_kg: self.incoming.value()?, transferred_mass_kg: self.transferred.value()?,
             energy_into_gas_j: stream_energy, reflected_heat_into_gas_j: self.reflected.value()?,
-            solid_energy_change_j: finite(solid_energy.value()? + self.birth_energy.value()?)?,
+            solid_energy_change_j: self.solid_energy.value()?,
             gas_energy_change_j: gas_energy_change, incoming_energy_j: self.birth_energy.value()?,
             mass_residual_kg: mass_residual, energy_residual_j: energy_residual,
             phase_steps: self.phase_steps, gas_iterations: self.gas_iterations,
             last_step: endpoint.audit.last_step.take(),
         };
+        endpoint.gas_stream_energy_residual_j = work.gas_stream_energy_residual_j;
+        endpoint.solid_stream_energy_residual_j = work.solid_stream_energy_residual_j;
         Ok(())
     }
 }
@@ -390,7 +392,7 @@ fn advance<'thermal, 'catalog>(
     let mut current = advance_deposition(thermal, surfaces, accommodation, gas, catalog,
         thermal.time_s(), thermal_config, phase_config, Some(&meter), &mut checkpoint)?;
     let mut history = History::default();
-    history.add(current.audit())?;
+    history.add(&current)?;
     let mut work = GasTimelineAdaptiveAudit {
         trials: 0, rejected_trials: 0, accepted_intervals: 0, interval_evaluations: 1,
         thermal_substeps_evaluated: 0, dormant_advances: 0, maximum_accepted_error_ratio: 0.0,
@@ -407,7 +409,7 @@ fn advance<'thermal, 'catalog>(
             increment(&mut work.interval_evaluations)?;
             current = advance_deposition(current.thermal(), surfaces, accommodation, current.gas(),
                 catalog, event_stop, thermal_config, phase_config, Some(&meter), &mut checkpoint)?;
-            history.add(current.audit())?;
+            history.add(&current)?;
             increment(&mut work.dormant_advances)?;
             continue;
         }
@@ -450,8 +452,8 @@ fn advance<'thermal, 'catalog>(
             dt = smaller(span * (0.9 / fs_math::det::sqrt(error)).max(0.1), span, controls.minimum_dt_s)?;
             continue;
         }
-        history.add(first.audit())?;
-        history.add(fine.audit())?;
+        history.add(&first)?;
+        history.add(&fine)?;
         current = fine;
         increment(&mut work.accepted_intervals)?;
         work.maximum_accepted_error_ratio = work.maximum_accepted_error_ratio.max(error);

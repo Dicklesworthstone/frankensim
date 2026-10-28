@@ -80,6 +80,67 @@ fn hot_and_cold_surfaces_share_one_evolving_gas_and_are_permutation_invariant() 
 }
 
 #[test]
+fn large_datum_counterstreams_and_carrier_reflection_share_one_physical_target() {
+    let base = fixture::catalog(0.0);
+    let chart = fixture::chart(&base, &fixture::binding(0.0));
+    let caloric = |h| fixture::temperature(h, chart);
+    let phase = fixture::phase();
+    let r = super::super::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / 0.018015;
+    let ra = super::super::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / 0.02897;
+    let mut original: Option<(f64, f64, Vec<(f64, f64)>)> = None;
+    for reference in [0.0, -1e14, 1e14] {
+        let catalog = fixture::catalog(reference);
+        let binding = fixture::binding(reference);
+        let gas = fixture::gas(&catalog, 400.0, 1000.0);
+        let rows = [surface(2, &phase, &binding, fixture::solid(400.5, chart), &caloric),
+            surface(1, &phase, &binding, fixture::solid(399.75, chart), &caloric)];
+        let accommodation = ThermalAccommodation::new(&catalog, &[
+            (SpeciesId::new("A").unwrap(), 0.5), (fixture::species(), 0.6),
+        ], [200.0, 900.0]).unwrap();
+        let maps = BTreeMap::from([(1, accommodation.clone()), (2, accommodation)]);
+        let mut controls = controls();
+        controls.surface.latent_compatibility_tolerance_j_kg = 0.125;
+        let (result, reflection) = advance_chamber_with_accommodation(&rows, &maps,
+            &gas, &catalog, 0.001, controls, || false).unwrap();
+        let reversed = advance_chamber_with_accommodation(&[rows[1], rows[0]], &maps,
+            &gas, &catalog, 0.001, controls, || false).unwrap();
+        assert_eq!((&result, &reflection), (&reversed.0, &reversed.1));
+        assert!(result.surfaces()[0].transferred_mass_kg < 0.0);
+        assert!(result.surfaces()[1].transferred_mass_kg > 0.0);
+        let mut thermal = 0.0;
+        let mut solid_temperatures = Vec::new();
+        for row in result.surfaces() {
+            let ts = row.surface_temperature_k[0];
+            thermal += row.transferred_mass_kg * (r * 400.0 + 4.0 * r * (ts - 400.0) - 0.5 * r * ts)
+                + row.incoming_mass_kg * 3.5 * r * (ts - 400.0)
+                + reflection[&row.id].heat_into_gas_j;
+            let initial = rows.iter().find(|source| source.id == row.id).unwrap().solid;
+            let alignment = (catalog.species_specific_enthalpy_j_kg(&fixture::species(), ts).unwrap()
+                - (initial.specific_enthalpy_j_kg + binding.solid_enthalpy_offset_j_kg)) - 200000.0;
+            let solid_heat = row.transferred_mass_kg * (-200000.0 - alignment + 0.5 * r * ts)
+                - row.incoming_mass_kg * 3.5 * r * (ts - 400.0) - reflection[&row.id].heat_into_gas_j;
+            fixture::near(row.surface_temperature_k[1],
+                ts + solid_heat / (row.solid.mass_kg * chart.1), 2e-9);
+            solid_temperatures.push((row.surface_temperature_k[1],
+                (row.transferred_mass_kg * alignment).abs() / (row.solid.mass_kg * chart.1)));
+            assert!(row.energy_residual_j.abs() <= controls.surface.gas.energy_tolerance_j);
+        }
+        let capacity = gas.species_mass_kg(&SpeciesId::new("A").unwrap()).unwrap() * 2.5 * ra
+            + (gas.species_mass_kg(&fixture::species()).unwrap() + result.step().transferred_mass_kg) * 3.0 * r;
+        fixture::near(result.gas().state().state().temperature, 400.0 + thermal / capacity, 2e-8);
+        assert!(result.step().energy_residual_j.abs() <= controls.surface.gas.energy_tolerance_j);
+        assert!(result.step().mass_residual_kg.abs() <= controls.surface.gas.mass_tolerance_kg);
+        let state = (result.gas().state().state().temperature, result.step().transferred_mass_kg,
+            solid_temperatures);
+        if let Some(first) = &original {
+            fixture::near(state.0, first.0, 2e-8);
+            assert_eq!(state.1, first.1);
+            for (a, b) in state.2.iter().zip(&first.2) { fixture::near(a.0, b.0, 2e-9 + a.1 + b.1); }
+        } else { original = Some(state); }
+    }
+}
+
+#[test]
 fn heterogeneous_species_and_caloric_sources_preserve_each_carrier_and_species() {
     let b = SpeciesId::new("B").unwrap();
     let c = SpeciesId::new("C").unwrap();

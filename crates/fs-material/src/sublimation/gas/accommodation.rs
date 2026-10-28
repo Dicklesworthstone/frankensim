@@ -31,7 +31,7 @@ use std::sync::Arc;
 use fs_qty::Temperature;
 use super::{
     ClosedGasParcel, GasSurfaceBinding, GasSurfaceCandidate, GasSurfaceError, GasSurfaceSolve,
-    SolidSurfaceState, SpeciesBoundaryTransfer, SpeciesId, SublimationError, SublimationLaw,
+    SolidSurfaceState, SpeciesBoundaryRelativeTransfer, SpeciesId, SublimationError, SublimationLaw,
     ThermochemicalGasModel, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K, admit_surface_inventory,
     finish_surface, invalid, nonnegative, poll, positive, prepare_surface_with_heat,
     snapshot_surface, species_snapshot, validate_controls,
@@ -249,22 +249,18 @@ pub fn advance_surface_with_accommodation<'catalog, L: SublimationLaw + ?Sized>(
         &temperature_from_enthalpy, controls, reflection.heat_into_gas_j)?;
     let mut rows = BTreeMap::new();
     for reflected in &reflection.species {
-        rows.insert(reflected.species.clone(), SpeciesBoundaryTransfer {
+        rows.insert(reflected.species.clone(), SpeciesBoundaryRelativeTransfer {
             species: reflected.species.clone(), mass_into_gas_kg: 0.0,
-            energy_into_gas_j: reflected.heat_into_gas_j,
+            relative_energy_into_gas_j: reflected.heat_into_gas_j,
         });
     }
-    let difference = snapshot.incoming_specific_energy_j_kg
-        .map_or(0.0, |energy| snapshot.outgoing_specific_energy_j_kg - energy);
-    let phase_energy = snapshot.transferred_mass_kg * snapshot.outgoing_specific_energy_j_kg
-        + snapshot.incoming_mass_kg * difference;
-    let row = rows.entry(binding.species.clone()).or_insert_with(|| SpeciesBoundaryTransfer {
-        species: binding.species.clone(), mass_into_gas_kg: 0.0, energy_into_gas_j: 0.0,
+    let row = rows.entry(binding.species.clone()).or_insert_with(|| SpeciesBoundaryRelativeTransfer {
+        species: binding.species.clone(), mass_into_gas_kg: 0.0, relative_energy_into_gas_j: 0.0,
     });
     row.mass_into_gas_kg = snapshot.transferred_mass_kg;
-    row.energy_into_gas_j += phase_energy;
+    row.relative_energy_into_gas_j += prepared.phase_relative_energy_into_gas_j;
     let rows: Vec<_> = rows.into_values().collect();
-    let endpoint = gas.exchange_species_boundary(catalog, &rows, controls.gas, &mut cancelled)?;
+    let endpoint = gas.exchange_species_boundary_relative(catalog, &rows, controls.gas, &mut cancelled)?;
     accommodation.admit_temperatures(prepared.surface_temperature_k[1], endpoint.gas().state().state().temperature)?;
     let exchange = finish_surface(binding, solid, gas, gas_snapshot, prepared, endpoint, controls, cancelled)?;
     Ok(AccommodatingSurfaceCandidate { exchange, reflection })

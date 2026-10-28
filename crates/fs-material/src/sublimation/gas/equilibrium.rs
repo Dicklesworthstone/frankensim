@@ -13,7 +13,7 @@
 
 use super::{
     ClosedGasParcel, GasSurfaceBinding, GasSurfaceCandidate, GasSurfaceError,
-    GasSurfaceSolve, SolidSurfaceState, SpeciesBoundaryTransfer, SublimationError,
+    GasSurfaceSolve, SolidSurfaceState, SpeciesBoundaryRelativeTransfer, SublimationError,
     SublimationLaw, ThermochemicalGasModel, admit_surface_inventory, finish_surface,
     invalid, poll, positive, species_snapshot, validate_controls,
 };
@@ -165,24 +165,20 @@ pub fn advance_equilibrium_surface<'curve, 'catalog>(
     let mut rows = BTreeMap::new();
     if let Some(reflection) = &reflection {
         for row in &reflection.species {
-            rows.insert(row.species.clone(), SpeciesBoundaryTransfer {
+            rows.insert(row.species.clone(), SpeciesBoundaryRelativeTransfer {
                 species: row.species.clone(), mass_into_gas_kg: 0.0,
-                energy_into_gas_j: row.heat_into_gas_j,
+                relative_energy_into_gas_j: row.heat_into_gas_j,
             });
         }
     }
-    let difference = snapshot.incoming_specific_energy_j_kg
-        .map_or(0.0, |e| snapshot.outgoing_specific_energy_j_kg - e);
-    let phase_energy = snapshot.transferred_mass_kg * snapshot.outgoing_specific_energy_j_kg
-        + snapshot.incoming_mass_kg * difference;
-    let row = rows.entry(binding.species.clone()).or_insert_with(|| SpeciesBoundaryTransfer {
-        species: binding.species.clone(), mass_into_gas_kg: 0.0, energy_into_gas_j: 0.0,
+    let row = rows.entry(binding.species.clone()).or_insert_with(|| SpeciesBoundaryRelativeTransfer {
+        species: binding.species.clone(), mass_into_gas_kg: 0.0, relative_energy_into_gas_j: 0.0,
     });
     row.mass_into_gas_kg = snapshot.transferred_mass_kg;
-    row.energy_into_gas_j += phase_energy;
+    row.relative_energy_into_gas_j += prepared.phase_relative_energy_into_gas_j;
     let rows: Vec<_> = rows.into_values().collect();
     poll(&mut cancelled)?;
-    let endpoint = gas.exchange_species_boundary(catalog, &rows, controls.gas, &mut cancelled)?;
+    let endpoint = gas.exchange_species_boundary_relative(catalog, &rows, controls.gas, &mut cancelled)?;
     if let Some(accommodation) = accommodation {
         accommodation.admit_temperatures(prepared.surface_temperature_k[1], endpoint.gas().state().state().temperature)?;
     }

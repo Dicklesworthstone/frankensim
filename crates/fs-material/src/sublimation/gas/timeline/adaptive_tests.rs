@@ -165,6 +165,51 @@ fn phase_inventory_retries_and_trace_species_share_the_full_coupled_controller()
 }
 
 #[test]
+fn accepted_adaptive_timeline_preserves_heat_and_births_under_large_species_datums() {
+    let reference_catalog = fixture::catalog(0.0);
+    let chart = chart(&reference_catalog, &fixture::binding(0.0));
+    let phase = fixture::phase();
+    let mut physical: Option<([f64; 3], Vec<f64>)> = None;
+    for reference in [0.0, 1e13] {
+        let catalog = fixture::catalog(reference);
+        let binding = fixture::binding(reference);
+        let selected = selection(&phase, &binding, chart);
+        let thermal = schedule(&chart, vec![birth(0.0, cell(1, 400.0, chart, 1.0)),
+            birth(0.0, cell(2, 300.0, chart, 1.0))], 100000);
+        let gas = fixture::gas(&catalog, 350.0, 800.0);
+        let mut solve = phase_controls();
+        solve.surface.latent_compatibility_tolerance_j_kg = 0.01;
+        let accepted = advance_deposition_adaptive(&thermal, &selected, &gas, &catalog,
+            0.25, heat(0.25), solve, controls(1e-4, chart.1), || Ok(())).unwrap();
+        let result = accepted.endpoint();
+        let audit = result.audit();
+        assert!(accepted.audit().rejected_trials > 0);
+        assert_eq!(audit.phase_steps, 2 * accepted.audit().accepted_intervals);
+        assert!(accepted.audit().thermal_substeps_evaluated > audit.thermal.substeps);
+        assert_eq!(audit.thermal.events, 2);
+        fixture::near(audit.thermal.incoming_mass_kg, 0.02, 1e-14);
+        fixture::near(audit.thermal.external_heat_j, 0.5, 1e-12);
+        for residual in [audit.energy_residual_j, accepted.audit().gas_stream_energy_residual_j,
+            accepted.audit().solid_stream_energy_residual_j] {
+            fixture::near(residual, 0.0, 1e-7);
+        }
+        fixture::near(accepted.audit().maximum_species_mass_residual_kg, 0.0, 1e-14);
+        let state = (temperatures(result), result.thermal().cells().values().map(|cell| cell.mass_kg).collect::<Vec<_>>());
+        if let Some((temperature, masses)) = &physical {
+            assert!(distance(state.0, *temperature) < 2e-7);
+            for (&mass, &expected) in state.1.iter().zip(masses) { fixture::near(mass, expected, 1e-12); }
+            let rounded_solid: f64 = result.thermal().cells().values().enumerate().map(|(i, cell)| {
+                let initial_h = chart.h(if i == 0 { 400.0 } else { 300.0 });
+                cell.mass_kg * (cell.specific_h_j_kg - initial_h) + (cell.mass_kg - 0.01) * (initial_h + reference)
+            }).sum();
+            assert!((rounded_solid - 0.5 + audit.energy_into_gas_j).abs() > 1e-7);
+        } else { physical = Some(state); }
+        assert!(thermal.cells().is_empty());
+        assert_eq!(thermal.time_s(), 0.0);
+    }
+}
+
+#[test]
 fn births_and_endpoint_coverage_are_not_replayed_into_the_accepted_heat_history() {
     let catalog = fixture::catalog(0.0);
     let mut binding = fixture::binding(0.0); binding.accommodation_coefficient = 0.0;

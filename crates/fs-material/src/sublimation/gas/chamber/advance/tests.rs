@@ -132,6 +132,56 @@ fn tighter_physical_tolerances_approach_dense_reference_and_close_whole_history(
 }
 
 #[test]
+fn accepted_history_cancels_species_datums_before_the_whole_window_audit() {
+    let reference_catalog = fixture::catalog(0.0);
+    let chart = fixture::chart(&reference_catalog, &fixture::binding(0.0));
+    let law = fixture::phase();
+    let temperature = |h| fixture::temperature(h, chart);
+    let mut physical: Option<(f64, Vec<(f64, f64)>, (usize, usize, usize))> = None;
+    for reference in [0.0, 1e13] {
+        let catalog = fixture::catalog(reference);
+        let binding = fixture::binding(reference);
+        // Keep the finite caloric chart unchanged. Only its declared conversion
+        // to the gas formation datum changes; the original source still admits
+        // compatibility, including the f64 precision of that large conversion.
+        let surfaces = [row(1, &law, &binding, fixture::solid(420.0, chart), &temperature),
+            row(2, &law, &binding, fixture::solid(380.0, chart), &temperature)];
+        let gas = fixture::gas(&catalog, 400.0, 1000.0);
+        let mut solve = controls();
+        solve.maximum_dt_s = 0.25;
+        solve.absolute_temperature_tolerance_k = 1e-4;
+        solve.relative_tolerance = 0.0;
+        solve.step.surface.latent_compatibility_tolerance_j_kg = 0.01;
+        let result = advance_chamber_adaptive(&surfaces, &gas, &catalog, 0.25, solve, || false).unwrap();
+        let audit = result.audit();
+        assert!(audit.accepted_intervals > 1 && audit.rejected_trials > 0);
+        for residual in [audit.energy_residual_j, audit.gas_stream_energy_residual_j, audit.solid_stream_energy_residual_j] {
+            assert!(residual.abs() <= solve.step.surface.gas.energy_tolerance_j);
+        }
+        assert!(audit.maximum_species_mass_residual_kg <= solve.step.surface.gas.mass_tolerance_kg);
+        let state = (result.gas().state().state().temperature,
+            result.endpoint().surfaces().iter().map(|row| (row.solid.mass_kg, row.surface_temperature_k[1])).collect::<Vec<_>>(),
+            (audit.trials, audit.rejected_trials, audit.accepted_intervals));
+        if let Some((gas_temperature, solids, trials)) = &physical {
+            fixture::near(state.0, *gas_temperature, 2e-7);
+            for ((mass, temperature), (expected_mass, expected_temperature)) in state.1.iter().zip(solids) {
+                fixture::near(*mass, *expected_mass, 1e-12);
+                fixture::near(*temperature, *expected_temperature, 2e-7);
+            }
+            assert_eq!(&state.2, trials);
+        } else { physical = Some(state); }
+        if reference != 0.0 {
+            let rounded_solid: f64 = surfaces.iter().zip(result.endpoint().surfaces()).map(|(old, new)|
+                new.solid.mass_kg * (new.solid.specific_enthalpy_j_kg - old.solid.specific_enthalpy_j_kg)
+                    + (new.solid.mass_kg - old.solid.mass_kg) * (old.solid.specific_enthalpy_j_kg + reference)).sum();
+            // This was the previous outer gate: its failure is datum roundoff,
+            // despite every accepted original caloric equation closing above.
+            assert!((rounded_solid + audit.energy_into_gas_j).abs() > solve.step.surface.gas.energy_tolerance_j);
+        }
+    }
+}
+
+#[test]
 fn gross_inventory_limit_refines_without_clipping_or_spending_vapor_twice() {
     let catalog = fixture::catalog(0.0);
     let binding = fixture::binding(0.0);

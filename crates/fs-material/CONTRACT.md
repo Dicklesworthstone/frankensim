@@ -3937,3 +3937,37 @@ energy audit sums the gas and solid thermal residuals before large formation
 constants enter display reports. Source alignment and independently admitted
 binding enthalpy remain required; a reference shift cannot manufacture source
 precision or validate an empirical adsorption model.
+
+## Source-relative molecular phase exchange and histories
+
+Solid/vapor surface exchange evaluates original-source enthalpy differences
+before formation constants are rounded into stream totals. The existing
+Maxwellian molecular energy remains `h_i(T) - R_i*T/2`; its kinetic correction
+and reflected heat enter the same gas reconstruction exactly once. The shared
+solid update uses the admitted sublimation latent anchor together with the
+actual source-alignment residual. A compatibility tolerance does not turn the
+solid/vapor enthalpy gap into an exact identity or erase its integrated energy.
+Mixed solid/liquid storage contributes only bulk enthalpy minus pure-solid
+enthalpy; fusion already present in the original chart is never added again.
+The solid update checks the caloric change actually represented by its final
+stored enthalpy and independently bounds its actual mass-change roundoff.
+
+Specular, accommodating, equilibrium-phase and joint chamber callers all pass
+source-relative species energy to the original finite gas owner. Reflected
+carrier heat retains its species identity and zero net mass. Gross incoming
+and outgoing inventory limits, original source domains, latent alignment and
+explicit exposed-solid area remain required. Reference invariance is limited
+by the precision of those independently admitted sources and stored states;
+an extreme datum cannot manufacture accurate latent or binding source data.
+
+Chamber and thermal-timeline histories accumulate only accepted original
+caloric residuals and storage increments. Rejected trials and discarded coarse
+solutions contribute nothing. Combined, gas-stream and solid-stream defects
+remain subject to the declared whole-history energy tolerance; actual total
+and species mass checks remain independent. Thermal heat and incoming birth
+energy retain their original owners and explicit datum offsets. Absolute
+storage/stream reports retain reference energies, while their rounded
+subtraction is not used to reconstruct small heat or to accept the trajectory.
+These changes preserve the existing explicit kinetics, splitting, source
+support and molecular assumptions; they do not introduce a new evaporation,
+reaction, accommodation or real-gas model.

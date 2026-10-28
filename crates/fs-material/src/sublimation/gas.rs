@@ -38,7 +38,7 @@ use crate::thermochemical_gas::{
         parcel::{
             ClosedGasParcel,
             transfer::species::boundary::{
-                GasSpeciesBoundaryCandidate, GasSpeciesBoundarySolve, SpeciesBoundaryTransfer,
+                GasSpeciesBoundaryCandidate, GasSpeciesBoundarySolve, SpeciesBoundaryRelativeTransfer,
             },
         },
     },
@@ -127,9 +127,14 @@ pub struct GasSurfaceStep {
     /// Complete signed energy delivered to the gas; already includes phase energy.
     /// The accommodation extension also includes its separately reported heat.
     pub energy_into_gas_j: f64,
-    /// Actual solid energy change after applying the fixed datum offset.
+    /// Actual original-chart caloric storage plus intended transferred-mass
+    /// reference energy (including fusion storage when the chart supplies it).
+    /// Mass representation roundoff is independently admitted by its mass budget.
     pub solid_energy_change_j: f64,
     pub gas_energy_change_j: f64,
+    /// Sum of original-law solid and gas caloric residuals, with formation
+    /// constants canceled before evaluation. Absolute reports can round away
+    /// this small balance; their displayed sum is not the acceptance criterion.
     pub energy_residual_j: f64,
     pub mass_residual_kg: f64,
     /// Positive thickness loss, negative frost growth, using endpoint density.
@@ -238,7 +243,7 @@ fn compatibility(
     latent: f64,
     temperature: f64,
     tolerance: f64,
-) -> Result<(), GasSurfaceError> {
+) -> Result<f64, GasSurfaceError> {
     let residual = (vapor_enthalpy - (solid_enthalpy + offset)) - latent;
     if !residual.is_finite() || residual.abs() > tolerance {
         return Err(GasSurfaceError::CaloricMismatch {
@@ -247,7 +252,7 @@ fn compatibility(
             tolerance_j_kg: tolerance,
         });
     }
-    Ok(())
+    Ok(residual)
 }
 
 #[derive(Clone, Copy)]
@@ -267,6 +272,15 @@ struct SurfaceSnapshot {
     available_solid_mass_kg: f64,
     gas: GasSpeciesSnapshot,
     temperature_k: f64,
+    /// Admitted original phase anchor and pure-solid storage, retained when a
+    /// mixed-phase owner replaces `solid` with its complete bulk inventory.
+    latent_heat_j_kg: f64,
+    /// Actual admitted h_v-(h_s+offset)-L. A tolerance is not exact equality:
+    /// retain this correction in the solid target instead of hiding dm*delta.
+    source_alignment_residual_j_kg: f64,
+    pure_solid_enthalpy_j_kg: f64,
+    /// Original species h(T_surface)-h(T_gas), evaluated before formation terms.
+    partial_enthalpy_change_j_kg: f64,
     outgoing_mass_kg: f64,
     incoming_mass_kg: f64,
     transferred_mass_kg: f64,
@@ -284,6 +298,8 @@ struct PreparedSurface {
     outgoing_specific_energy_j_kg: f64,
     incoming_specific_energy_j_kg: Option<f64>,
     energy_into_gas_j: f64,
+    phase_relative_energy_into_gas_j: f64,
+    relative_energy_into_gas_j: f64,
     solid_energy_change_j: f64,
     energy_residual_j: f64,
     recession_m: f64,
@@ -380,7 +396,7 @@ where
     let temperature_k = temperature_from_enthalpy(solid.specific_enthalpy_j_kg)?;
     let phase = phase_at(law, temperature_k, gas.molar_mass)?;
     let vapor_enthalpy = catalog.species_specific_enthalpy_j_kg(&binding.species, temperature_k)?;
-    compatibility(
+    let source_alignment_residual_j_kg = compatibility(
         vapor_enthalpy,
         solid.specific_enthalpy_j_kg,
         binding.solid_enthalpy_offset_j_kg,
@@ -419,11 +435,22 @@ where
     } else {
         gas.incoming_specific_energy_j_kg
     };
+    let partial_enthalpy_change_j_kg = if outgoing_mass_kg == 0.0 && incoming_mass_kg == 0.0 {
+        0.0
+    } else {
+        catalog.species_specific_enthalpy_change_j_kg(
+            &binding.species, gas.temperature_k, temperature_k,
+        )?
+    };
     Ok(SurfaceSnapshot {
         solid,
         available_solid_mass_kg: solid.mass_kg,
         gas,
         temperature_k,
+        latent_heat_j_kg: phase.latent_heat_j_kg,
+        source_alignment_residual_j_kg,
+        pure_solid_enthalpy_j_kg: solid.specific_enthalpy_j_kg,
+        partial_enthalpy_change_j_kg,
         outgoing_mass_kg,
         incoming_mass_kg,
         transferred_mass_kg,
@@ -513,16 +540,26 @@ fn prepare_surface_with_endpoint(
     let SurfaceSnapshot {
         solid,
         available_solid_mass_kg: _,
-        gas: _,
+        gas,
         temperature_k,
+        latent_heat_j_kg,
+        source_alignment_residual_j_kg,
+        pure_solid_enthalpy_j_kg,
+        partial_enthalpy_change_j_kg,
         outgoing_mass_kg,
         incoming_mass_kg,
         transferred_mass_kg,
         outgoing_specific_energy_j_kg,
         incoming_specific_energy_j_kg,
     } = snapshot;
-    let difference =
-        incoming_specific_energy_j_kg.map_or(0.0, |energy| outgoing_specific_energy_j_kg - energy);
+    // Maxwellian stream differences use the original source increment. A large
+    // common formation datum must not erase sensible or effusive kinetic heat.
+    let difference = partial_enthalpy_change_j_kg
+        - 0.5 * gas.specific_gas_constant * (temperature_k - gas.temperature_k);
+    let phase_relative_energy_into_gas_j = transferred_mass_kg
+        * (partial_enthalpy_change_j_kg - 0.5 * gas.specific_gas_constant * temperature_k)
+        + incoming_mass_kg * difference;
+    let relative_energy_into_gas_j = phase_relative_energy_into_gas_j + reflected_heat_into_gas_j;
     let energy_into_gas_j =
         transferred_mass_kg * outgoing_specific_energy_j_kg + incoming_mass_kg * difference;
     let energy_into_gas_j = if reflected_heat_into_gas_j == 0.0 {
@@ -531,24 +568,28 @@ fn prepare_surface_with_endpoint(
         energy_into_gas_j + reflected_heat_into_gas_j
     };
     let next_mass = solid.mass_kg - transferred_mass_kg;
+    let mass_residual = (next_mass - solid.mass_kg) + transferred_mass_kg;
     if !energy_into_gas_j.is_finite()
+        || !relative_energy_into_gas_j.is_finite()
         || !positive(next_mass)
         || (transferred_mass_kg != 0.0 && next_mass == solid.mass_kg)
+        || !mass_residual.is_finite()
+        || mass_residual.abs() > controls.gas.mass_tolerance_kg
     {
         return Err(invalid(
             "molecular solid mass or energy increment is unrepresentable",
         ));
     }
     let offset = binding.solid_enthalpy_offset_j_kg;
+    // The phase law supplies the already-admitted latent anchor. In a mixed
+    // store only bulk-minus-pure-solid h is additional storage (fusion once).
     let caloric_change = transferred_mass_kg
-        * (solid.specific_enthalpy_j_kg + offset - outgoing_specific_energy_j_kg)
+        * (solid.specific_enthalpy_j_kg - pure_solid_enthalpy_j_kg
+            - latent_heat_j_kg - source_alignment_residual_j_kg
+            + 0.5 * gas.specific_gas_constant * temperature_k)
         - incoming_mass_kg * difference;
-    // Retain the original operation tree exactly for the specular default.
-    let specific_change = if reflected_heat_into_gas_j == 0.0 {
-        caloric_change / next_mass
-    } else {
-        (caloric_change - reflected_heat_into_gas_j) / next_mass
-    };
+    let thermal_target = caloric_change - reflected_heat_into_gas_j;
+    let specific_change = thermal_target / next_mass;
     let next_enthalpy = solid.specific_enthalpy_j_kg + specific_change;
     if !specific_change.is_finite()
         || !next_enthalpy.is_finite()
@@ -559,9 +600,10 @@ fn prepare_surface_with_endpoint(
         ));
     }
     let (final_temperature, final_phase) = endpoint(next_enthalpy)?;
-    let solid_energy_change_j = next_mass * (next_enthalpy - solid.specific_enthalpy_j_kg)
-        + (next_mass - solid.mass_kg) * (solid.specific_enthalpy_j_kg + offset);
-    let energy_residual_j = solid_energy_change_j + energy_into_gas_j;
+    let thermal_change = next_mass * (next_enthalpy - solid.specific_enthalpy_j_kg);
+    let solid_energy_change_j = thermal_change
+        - transferred_mass_kg * (solid.specific_enthalpy_j_kg + offset);
+    let energy_residual_j = thermal_change - thermal_target;
     if !solid_energy_change_j.is_finite()
         || !energy_residual_j.is_finite()
         || energy_residual_j.abs() > controls.gas.energy_tolerance_j
@@ -592,6 +634,8 @@ fn prepare_surface_with_endpoint(
         outgoing_specific_energy_j_kg,
         incoming_specific_energy_j_kg,
         energy_into_gas_j,
+        phase_relative_energy_into_gas_j,
+        relative_energy_into_gas_j,
         solid_energy_change_j,
         energy_residual_j,
         recession_m,
@@ -673,12 +717,12 @@ pub fn advance_surface_with_gas<'catalog, L: SublimationLaw + ?Sized>(
         controls,
     )?;
     poll(&mut cancelled)?;
-    let row = SpeciesBoundaryTransfer {
+    let row = SpeciesBoundaryRelativeTransfer {
         species: binding.species.clone(),
         mass_into_gas_kg: prepared.transferred_mass_kg,
-        energy_into_gas_j: prepared.energy_into_gas_j,
+        relative_energy_into_gas_j: prepared.relative_energy_into_gas_j,
     };
-    let endpoint = gas.exchange_species_boundary(catalog, &[row], controls.gas, &mut cancelled)?;
+    let endpoint = gas.exchange_species_boundary_relative(catalog, &[row], controls.gas, &mut cancelled)?;
     finish_surface(binding, solid, gas, gas_snapshot, prepared, endpoint, controls, cancelled)
 }
 
@@ -695,7 +739,7 @@ fn finish_surface<'catalog>(
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<GasSurfaceCandidate<'catalog>, GasSurfaceError> {
     let gas_change = endpoint.step().stored_energy_change_j;
-    let residual = prepared.solid_energy_change_j + gas_change;
+    let residual = prepared.energy_residual_j + endpoint.step().energy_residual_j;
     if !residual.is_finite() || residual.abs() > controls.gas.energy_tolerance_j {
         return Err(GasSurfaceError::EnergyBalance {
             residual_j: residual,

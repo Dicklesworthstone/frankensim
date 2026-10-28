@@ -209,6 +209,8 @@ pub(in crate::sublimation::gas) fn prepare(
     surface: &GasChamberSurface<'_>, caloric: SharpMeltingCaloric<'_>, mut snapshot: SurfaceSnapshot,
     catalog: &ThermochemicalGasModel, controls: GasSurfaceSolve, reflected_heat: f64,
 ) -> Result<PreparedSurface, GasSurfaceError> {
+    // Retain snapshot.pure_solid_enthalpy_j_kg and its latent anchor: the shared
+    // update uses bulk-minus-pure h so fusion storage enters exactly once.
     snapshot.solid = surface.solid;
     prepare_surface_with_endpoint(surface.binding, snapshot, controls, reflected_heat, |h| {
         let final_state = caloric.resolve(h)?;

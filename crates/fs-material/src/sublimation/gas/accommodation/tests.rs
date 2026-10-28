@@ -132,6 +132,56 @@ fn phase_and_reflected_heat_are_debited_once_at_one_endpoint() {
 }
 
 #[test]
+fn large_phase_datum_preserves_molecular_cooling_and_reflected_heat() {
+    let base = fixture::catalog(0.0);
+    let chart = fixture::chart(&base, &fixture::binding(0.0));
+    let solid = fixture::solid(400.0, chart);
+    let mut original: Option<(f64, f64, f64, f64, f64)> = None;
+    for reference in [0.0, -1e14, 1e14] {
+        let catalog = fixture::catalog(reference);
+        let binding = fixture::binding(reference);
+        let gas = fixture::gas(&catalog, 399.5, 5000.0);
+        let saved = gas.clone();
+        let law = accommodation(&catalog, 0.5, 0.6);
+        let mut controls = fixture::controls();
+        // Only the absolute source compatibility allowance reflects the datum's
+        // ULP. The physical finite-energy and mass budgets remain unchanged.
+        controls.latent_compatibility_tolerance_j_kg = 0.125;
+        let result = advance_surface_with_accommodation(&fixture::phase(), &binding,
+            solid, &gas, &catalog, |h| fixture::temperature(h, chart), &law,
+            0.001, controls, || false).unwrap();
+        let end = result.exchange();
+        let step = end.step();
+        let q = result.reflection().heat_into_gas_j;
+        let r = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / 0.018015;
+        let ra = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / 0.02897;
+        let dm = step.transferred_mass_kg;
+        let molecular_difference = 3.5 * r * (400.0 - 399.5);
+        let thermal = dm * (r * 399.5 + 4.0 * r * 0.5 - 0.5 * r * 400.0)
+            + step.incoming_mass_kg * molecular_difference + q;
+        let final_capacity = gas.species_mass_kg(&SpeciesId::new("A").unwrap()).unwrap() * 2.5 * ra
+            + (gas.species_mass_kg(&fixture::species()).unwrap() + dm) * 3.0 * r;
+        fixture::near(step.gas_temperature_k[1], 399.5 + thermal / final_capacity, 2e-8);
+        let alignment = (catalog.species_specific_enthalpy_j_kg(&fixture::species(), 400.0).unwrap()
+            - (solid.specific_enthalpy_j_kg + binding.solid_enthalpy_offset_j_kg)) - 200000.0;
+        let solid_heat = dm * (-200000.0 - alignment + 0.5 * r * 400.0)
+            - step.incoming_mass_kg * molecular_difference - q;
+        fixture::near(step.surface_temperature_k[1],
+            400.0 + solid_heat / (end.solid().mass_kg * chart.1), 2e-9);
+        assert!(q > 1e-5 && dm < 0.0);
+        assert!(step.energy_residual_j.abs() <= controls.gas.energy_tolerance_j);
+        let alignment_temperature = (dm * alignment).abs() / (end.solid().mass_kg * chart.1);
+        let state = (step.gas_temperature_k[1], step.surface_temperature_k[1], dm, q, alignment_temperature);
+        if let Some(first) = original {
+            fixture::near(state.0, first.0, 2e-8);
+            fixture::near(state.1, first.1, 2e-9 + state.4 + first.4);
+            assert_eq!((state.2, state.3), (first.2, first.3));
+        } else { original = Some(state); }
+        assert_eq!(gas, saved);
+    }
+}
+
+#[test]
 fn reflected_finite_store_trajectory_refines_toward_independent_analytic_solution() {
     let catalog = fixture::catalog(0.0);
     let mut binding = fixture::binding(0.0);

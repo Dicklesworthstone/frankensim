@@ -21,7 +21,7 @@ pub mod mixed;
 
 use super::{
     ClosedGasParcel, GasSpeciesBoundaryCandidate, GasSpeciesSnapshot, GasSurfaceBinding,
-    GasSurfaceError, GasSurfaceSolve, PreparedSurface, SolidSurfaceState, SpeciesBoundaryTransfer,
+    GasSurfaceError, GasSurfaceSolve, PreparedSurface, SolidSurfaceState, SpeciesBoundaryRelativeTransfer,
     SpeciesId, SublimationError, SublimationLaw, ThermochemicalGasModel, invalid, inventory_limit,
     poll, prepare_surface_with_heat, snapshot_surface, species_snapshot, validate_controls,
 };
@@ -60,11 +60,13 @@ pub struct GasChamberSurfaceStep {
     pub outgoing_specific_energy_j_kg: f64,
     pub incoming_specific_energy_j_kg: Option<f64>,
     pub energy_into_gas_j: f64,
-    /// Actual solid storage change in its explicitly aligned gas datum.
-    /// On the mixed path this is the COMPLETE condensed-body storage change.
+    /// Original-datum report: intended transferred-mass reference energy plus
+    /// actual represented caloric storage. Inventory rounding is independently
+    /// bounded. On the mixed path this includes the complete condensed body.
     pub solid_energy_change_j: f64,
-    /// Solid storage change plus its allocated stream energy. The actual gas
-    /// storage change is accounted for only in the joint chamber report.
+    /// Solid storage change plus its allocated stream energy, with conserved
+    /// formation references canceled before evaluation. The actual gas storage
+    /// residual is accounted for only in the joint chamber report.
     pub energy_residual_j: f64,
     /// Phase-transfer retreat only; mixed-path fusion is reported separately.
     pub recession_m: f64,
@@ -111,6 +113,8 @@ pub struct GasChamberStep {
     pub energy_into_gas_j: f64,
     pub solid_energy_change_j: f64,
     pub gas_energy_change_j: f64,
+    /// Sum of actual local thermal balance defects after conserved formation
+    /// terms cancel; subtracting the displayed absolute reports may lose heat.
     pub energy_residual_j: f64,
     pub mass_residual_kg: f64,
     pub gas_temperature_k: [f64; 2],
@@ -197,6 +201,7 @@ struct SpeciesAccount {
     solid_mass_change: Total,
     reference_energy_j_kg: f64,
     relative_energy: Total,
+    phase_relative_energy: Total,
     reflected_heat: Total,
     active_streams: usize,
     single_stream_energy_j: f64,
@@ -211,6 +216,7 @@ impl SpeciesAccount {
             solid_mass_change: Total::default(),
             reference_energy_j_kg: gas.incoming_specific_energy_j_kg.unwrap_or(outgoing_energy),
             relative_energy: Total::default(),
+            phase_relative_energy: Total::default(),
             reflected_heat: Total::default(),
             active_streams: 0,
             single_stream_energy_j: 0.0,
@@ -381,6 +387,7 @@ fn advance_chamber<'catalog>(
     }
     let mut outputs = Vec::with_capacity(snapshots.len());
     let mut solid_energy = Total::default();
+    let mut solid_residual = Total::default();
     let mut solid_mass_change = Total::default();
     for (surface, snapshot) in snapshots {
         poll(&mut cancelled)?;
@@ -423,11 +430,11 @@ fn advance_chamber<'catalog>(
         account.solid_mass_change.add(dm)?;
         solid_mass_change.add(dm)?;
         solid_energy.add(prepared.solid_energy_change_j)?;
-        let difference = prepared
-            .incoming_specific_energy_j_kg
-            .map_or(0.0, |energy| {
-                prepared.outgoing_specific_energy_j_kg - energy
-            });
+        solid_residual.add(prepared.energy_residual_j)?;
+        account.phase_relative_energy.add(prepared.phase_relative_energy_into_gas_j)?;
+        let difference = snapshot.partial_enthalpy_change_j_kg
+            - 0.5 * snapshot.gas.specific_gas_constant
+                * (snapshot.temperature_k - snapshot.gas.temperature_k);
         account.relative_energy.add(
             prepared.transferred_mass_kg
                 * (prepared.outgoing_specific_energy_j_kg - account.reference_energy_j_kg)
@@ -456,18 +463,19 @@ fn advance_chamber<'catalog>(
         total_incoming.add(account.incoming.value()?)?;
         total_transferred.add(mass)?;
         total_energy.add(energy)?;
-        rows.push(SpeciesBoundaryTransfer {
+        rows.push(SpeciesBoundaryRelativeTransfer {
             species: id.clone(),
             mass_into_gas_kg: mass,
-            energy_into_gas_j: energy,
+            relative_energy_into_gas_j: account.phase_relative_energy.value()?
+                + account.reflected_heat.value()?,
         });
     }
     // The ONLY gas reconstruction in this joint interval.
     let endpoint =
-        gas.exchange_species_boundary(catalog, &rows, controls.surface.gas, &mut cancelled)?;
+        gas.exchange_species_boundary_relative(catalog, &rows, controls.surface.gas, &mut cancelled)?;
     let solid_energy_change_j = solid_energy.value()?;
     let gas_energy_change_j = endpoint.step().stored_energy_change_j;
-    let energy_residual_j = solid_energy_change_j + gas_energy_change_j;
+    let energy_residual_j = solid_residual.value()? + endpoint.step().energy_residual_j;
     if !energy_residual_j.is_finite()
         || energy_residual_j.abs() > controls.surface.gas.energy_tolerance_j
     {

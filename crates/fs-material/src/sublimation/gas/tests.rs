@@ -319,6 +319,121 @@ fn consistent_formation_reference_shifts_preserve_both_temperatures_and_mass() {
 }
 
 #[test]
+fn molecular_latent_and_sensible_targets_remain_analytic_at_large_species_datums() {
+    let base = catalog(0.0);
+    let caloric = chart(&base, &binding(0.0));
+    let r = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / MOLAR_MASS;
+    for vapor_pressure in [500.0, 5000.0] {
+        let mut original: Option<(f64, f64, f64)> = None;
+        for reference in [0.0, -1e14, 1e14] {
+            let source = catalog(reference);
+            let alignment = binding(reference);
+            let solid = solid(400.0, caloric);
+            let gas = gas(&source, 350.0, vapor_pressure);
+            let mut solve = controls();
+            // The explicit source-alignment budget admits the ULP of the
+            // declared datum; caloric energy and mass budgets stay unchanged.
+            solve.latent_compatibility_tolerance_j_kg = 0.125;
+            let trial = advance_surface_with_gas(&phase(), &alignment, solid, &gas, &source,
+                |h| temperature(h, caloric), 0.1, solve, || false).unwrap();
+            let report = trial.step();
+            let dm = report.transferred_mass_kg;
+            let outgoing = report.outgoing_mass_kg;
+            let incoming = report.incoming_mass_kg;
+            let alignment_residual = source.species_specific_enthalpy_j_kg(&species(), 400.0).unwrap()
+                - (solid.specific_enthalpy_j_kg + alignment.solid_enthalpy_offset_j_kg) - LATENT;
+            let molecular_difference = 3.5 * r * (400.0 - 350.0);
+            let solid_heat = -dm * (LATENT + alignment_residual - 0.5 * r * 400.0)
+                - incoming * molecular_difference;
+            let expected_solid = 400.0 + solid_heat / ((solid.mass_kg - dm) * 4.0 * r);
+            let gas_relative = outgoing * 4.0 * r * (400.0 - 350.0)
+                - 0.5 * r * (outgoing * 400.0 - incoming * 350.0);
+            let carrier = gas.species_mass_kg(&SpeciesId::new("A").unwrap()).unwrap();
+            let vapor = gas.species_mass_kg(&species()).unwrap() + dm;
+            let gas_capacity = carrier * 2.5 * UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / 0.02897
+                + vapor * 3.0 * r;
+            let expected_gas = 350.0 + (dm * r * 350.0 + gas_relative) / gas_capacity;
+            near(report.surface_temperature_k[1], expected_solid, 2e-8);
+            near(report.gas_temperature_k[1], expected_gas, 2e-8);
+            near(trial.gas().state().state().pressure,
+                (carrier / 0.02897 + vapor / MOLAR_MASS) * UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K
+                    * expected_gas / gas.volume_m3(), 2e-5);
+            near(report.energy_residual_j, 0.0, 1e-7);
+            near(report.mass_residual_kg, 0.0, 1e-14);
+            let state = (report.surface_temperature_k[1], report.gas_temperature_k[1], dm);
+            if let Some(first) = original {
+                let admitted_source_precision = (dm * alignment_residual).abs()
+                    / ((solid.mass_kg - dm) * 4.0 * r);
+                near(state.0, first.0, admitted_source_precision + 1e-10);
+                near(state.1, first.1, 2e-8);
+                assert_eq!(state.2, first.2);
+            } else {
+                original = Some(state);
+            }
+        }
+    }
+}
+
+#[test]
+fn zero_net_molecular_counterflow_retains_thermal_energy_beside_large_datums() {
+    let base = catalog(0.0);
+    let caloric = chart(&base, &binding(0.0));
+    let r = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / MOLAR_MASS;
+    let law = Phase { reference_temperature_k: 800.0, ..phase() };
+    for reference in [0.0, -1e14, 1e14] {
+        let source = catalog(reference);
+        let alignment = binding(reference);
+        let solid = solid(800.0, caloric);
+        let gas = gas(&source, 200.0, 500.0);
+        let mut solve = controls();
+        solve.latent_compatibility_tolerance_j_kg = 0.125;
+        let trial = advance_surface_with_gas(&law, &alignment, solid, &gas, &source,
+            |h| temperature(h, caloric), 0.1, solve, || false).unwrap();
+        let report = trial.step();
+        assert_eq!(report.transferred_mass_kg, 0.0);
+        assert!(report.outgoing_mass_kg > 0.0 && report.incoming_mass_kg > 0.0);
+        let heat = report.incoming_mass_kg * 3.5 * r * (800.0 - 200.0);
+        near(report.energy_into_gas_j, heat, 1e-12);
+        near(report.surface_temperature_k[1], 800.0 - heat / (solid.mass_kg * 4.0 * r), 2e-8);
+        near(report.energy_residual_j, 0.0, 1e-7);
+        assert_eq!(trial.gas().mass_kg(), gas.mass_kg());
+        assert_eq!(trial.solid().mass_kg, solid.mass_kg);
+        assert!(report.gas_temperature_k[1] > 200.0);
+    }
+}
+
+#[test]
+fn admitted_latent_alignment_error_remains_in_the_actual_solid_energy_target() {
+    let source = catalog(0.0);
+    let caloric = chart(&source, &binding(0.0));
+    let alignment = binding(1.0);
+    let solid = solid(400.0, caloric);
+    let gas = gas(&source, 400.0, 0.0);
+    let mut solve = controls();
+    solve.latent_compatibility_tolerance_j_kg = 2.0;
+    let trial = advance_surface_with_gas(&phase(), &alignment, solid, &gas, &source,
+        |h| temperature(h, caloric), 1.0, solve, || false).unwrap();
+    let delta = source.species_specific_enthalpy_j_kg(&species(), 400.0).unwrap()
+        - (solid.specific_enthalpy_j_kg + alignment.solid_enthalpy_offset_j_kg) - LATENT;
+    near(delta, -1.0, 1e-8);
+    let dm = trial.step().transferred_mass_kg;
+    assert!(dm * delta.abs() > 10.0 * solve.gas.energy_tolerance_j);
+    let r = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / MOLAR_MASS;
+    let expected = 400.0 - dm * (LATENT + delta - 0.5 * r * 400.0)
+        / ((solid.mass_kg - dm) * caloric.1);
+    near(trial.step().surface_temperature_k[1], expected, 1e-10);
+    // With this small datum, independent direct endpoint bookkeeping also
+    // resolves the admitted alignment defect and must close the same first law.
+    let actual_solid = trial.solid().mass_kg
+        * (trial.solid().specific_enthalpy_j_kg + alignment.solid_enthalpy_offset_j_kg)
+        - solid.mass_kg * (solid.specific_enthalpy_j_kg + alignment.solid_enthalpy_offset_j_kg);
+    let actual_gas = trial.gas().mass_kg() * trial.gas().state().specific_internal_energy_j_kg()
+        - gas.mass_kg() * gas.state().specific_internal_energy_j_kg();
+    near(actual_solid + actual_gas, 0.0, solve.gas.energy_tolerance_j);
+    near(trial.step().energy_residual_j, 0.0, solve.gas.energy_tolerance_j);
+}
+
+#[test]
 fn physical_timestep_refinement_converges_with_evolving_backpressure() {
     let catalog = catalog(0.0);
     let binding = binding(0.0);

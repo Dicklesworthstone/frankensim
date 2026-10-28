@@ -96,14 +96,16 @@ pub struct GasTimelineAudit {
     pub energy_into_gas_j: f64,
     /// Reflected heat INCLUDED in complete stream energy, not external heat.
     pub reflected_heat_into_gas_j: f64,
-    /// All solid storage changes, including births and the fixed datum offsets.
+    /// Sum of accepted solid storage increments, including births and the fixed
+    /// datum offsets. Rounded diagnostic totals may hide small physical heat.
     pub solid_energy_change_j: f64,
     pub gas_energy_change_j: f64,
     /// Original birth energy plus selected cells' fixed datum conversions.
     pub incoming_energy_j: f64,
     /// Actual final solid/gas mass change minus incoming births.
     pub mass_residual_kg: f64,
-    /// Actual joint storage change minus births and external thermal heat.
+    /// Accepted caloric defects after canceling conserved species datums and
+    /// birth energy inside the original owners. No per-step tolerance renewal.
     pub energy_residual_j: f64,
     pub phase_steps: usize,
     pub gas_iterations: usize,
@@ -118,6 +120,10 @@ pub struct GasTimelineCandidate<'thermal, 'catalog> {
     gas: ClosedGasParcel,
     catalog: &'catalog ThermochemicalGasModel,
     audit: GasTimelineAudit,
+    // Private accepted-owner defects retained for the adaptive history. These
+    // cannot be recovered from rounded absolute stream/storage report totals.
+    gas_stream_energy_residual_j: f64,
+    solid_stream_energy_residual_j: f64,
 }
 impl<'thermal, 'catalog> GasTimelineCandidate<'thermal, 'catalog> {
     #[must_use]
@@ -406,7 +412,7 @@ fn advance_deposition<'thermal, 'catalog>(
     let mut ordered: Vec<_> = surfaces.iter().collect();
     ordered.sort_unstable_by_key(|surface| surface.cell_id);
     let mut ranges = BTreeMap::new();
-    let mut offsets = BTreeMap::new();
+    let mut bindings = BTreeMap::new();
     for (index, surface) in ordered.iter().enumerate() {
         if index % 256 == 0 {
             checkpoint()?;
@@ -424,7 +430,7 @@ fn advance_deposition<'thermal, 'catalog>(
             )
             .into());
         }
-        offsets.insert(surface.cell_id, surface.binding.solid_enthalpy_offset_j_kg);
+        bindings.insert(surface.cell_id, surface.binding);
     }
     if let Some(laws) = accommodation {
         if laws.len() != ordered.len() {
@@ -478,6 +484,10 @@ fn advance_deposition<'thermal, 'catalog>(
     let mut transferred = Sum::default();
     let mut stream_energy = Sum::default();
     let mut reflected_energy = Sum::default();
+    let mut phase_solid_energy = Sum::default();
+    let mut gas_energy = Sum::default();
+    let mut gas_stream_residual = Sum::default();
+    let mut phase_solid_residual = Sum::default();
     let mut phase_steps = 0usize;
     let mut gas_iterations = 0usize;
     let mut last_step = None;
@@ -625,12 +635,15 @@ fn advance_deposition<'thermal, 'catalog>(
         }
         let iterations = candidate.gas_exchange().step().iterations;
         next.apply_solid_exchanges(&updates, &mut checkpoint)?;
+        gas_stream_residual.add(candidate.gas_exchange().step().energy_residual_j)?;
         let (endpoints, accepted_gas, _, report) = candidate.into_parts();
         next_gas = accepted_gas;
         outgoing.add(report.outgoing_mass_kg)?;
         incoming.add(report.incoming_mass_kg)?;
         transferred.add(report.transferred_mass_kg)?;
         stream_energy.add(report.energy_into_gas_j)?;
+        phase_solid_energy.add(report.solid_energy_change_j)?;
+        gas_energy.add(report.gas_energy_change_j)?;
         phase_steps = phase_steps
             .checked_add(1)
             .ok_or(DepositionError::Arithmetic)?;
@@ -638,6 +651,7 @@ fn advance_deposition<'thermal, 'catalog>(
             .checked_add(iterations)
             .ok_or(DepositionError::Arithmetic)?;
         for endpoint in endpoints {
+            phase_solid_residual.add(endpoint.energy_residual_j)?;
             let account = accounts
                 .get_mut(&CellId(endpoint.id))
                 .expect("selected gas surface");
@@ -661,15 +675,15 @@ fn advance_deposition<'thermal, 'catalog>(
     }
     let thermal_audit = heat.audit()?;
     let mut solid_mass_without_births = Sum::default();
-    let mut solid_energy_without_births = Sum::default();
+    let mut species_mass_change: BTreeMap<_, Sum> = BTreeMap::new();
     let mut birth_offsets = Sum::default();
-    // Compare each actual endpoint to its original state or incoming birth.
-    // This retains small heat against large formation-enthalpy references.
+    // Independent actual endpoint inventories remain separate from the
+    // source-relative energy account, including original states and births.
     for (index, (&id, cell)) in next.cells().iter().enumerate() {
         if index % 256 == 0 {
             checkpoint()?;
         }
-        let offset = offsets.get(&id).copied().unwrap_or(0.0);
+        let offset = bindings.get(&id).map_or(0.0, |binding| binding.solid_enthalpy_offset_j_kg);
         let original = if let Some(original) = thermal.cells().get(&id) {
             original
         } else {
@@ -681,39 +695,55 @@ fn advance_deposition<'thermal, 'catalog>(
         };
         let dm = finite(cell.mass_kg - original.mass_kg)?;
         solid_mass_without_births.add(dm)?;
-        solid_energy_without_births.add(
-            cell.mass_kg * (cell.specific_h_j_kg - original.specific_h_j_kg)
-                + dm * (original.specific_h_j_kg + offset),
-        )?;
+        if let Some(binding) = bindings.get(&id) {
+            species_mass_change.entry(binding.species.clone()).or_default().add(dm)?;
+        } else if dm != 0.0 {
+            return Err(DepositionError::InvalidInput("unselected thermal cell changed mass").into());
+        }
     }
     let gas_mass_change = finite(next_gas.mass_kg() - gas.mass_kg())?;
-    let initial_u = gas.state().specific_internal_energy_j_kg();
-    let gas_energy_change = finite(
-        next_gas.mass_kg() * (next_gas.state().specific_internal_energy_j_kg() - initial_u)
-            + gas_mass_change * initial_u,
-    )?;
+    let gas_energy_change = gas_energy.value()?;
     let mass_residual = add(solid_mass_without_births.value()?, gas_mass_change)?;
     let mass_tolerance = phase_config.surface.gas.mass_tolerance_kg;
-    if mass_residual.abs() > mass_tolerance {
+    let mut largest_mass_residual = mass_residual.abs();
+    for source in catalog.thermodynamics().components() {
+        checkpoint()?;
+        let id = source.species();
+        let solid_change = species_mass_change.get(id).map_or(Ok(0.0), Sum::value)?;
+        let gas_change = next_gas.species_mass_kg(id).map_err(GasSurfaceError::from)?
+            - gas.species_mass_kg(id).map_err(GasSurfaceError::from)?;
+        largest_mass_residual = largest_mass_residual.max(finite(solid_change + gas_change)?.abs());
+    }
+    if largest_mass_residual > mass_tolerance {
         return Err(GasTimelineError::MassBalance {
-            residual_kg: mass_residual,
+            residual_kg: largest_mass_residual,
             tolerance_kg: mass_tolerance,
         });
     }
-    let energy_residual = finite(
-        solid_energy_without_births.value()? + gas_energy_change - thermal_audit.external_heat_j,
-    )?;
+    // Heat reports already subtract actual births and external heat. Molecular
+    // reports already cancel each transferred species datum. Their accepted
+    // physical increments telescope across the split without a fresh absolute
+    // endpoint subtraction, including heat-only and zero-duration windows.
+    let gas_stream_energy_residual_j = gas_stream_residual.value()?;
+    let solid_stream_energy_residual_j = add(thermal_audit.residual_j, phase_solid_residual.value()?)?;
+    let energy_residual = add(solid_stream_energy_residual_j, gas_stream_energy_residual_j)?;
     let energy_tolerance = thermal_config
         .energy_tolerance_j
         .max(phase_config.surface.gas.energy_tolerance_j);
-    if energy_residual.abs() > energy_tolerance {
-        return Err(GasSurfaceError::EnergyBalance {
-            residual_j: energy_residual,
-            tolerance_j: energy_tolerance,
+    for residual in [energy_residual, gas_stream_energy_residual_j, solid_stream_energy_residual_j] {
+        if residual.abs() > energy_tolerance {
+            return Err(GasSurfaceError::EnergyBalance {
+                residual_j: residual,
+                tolerance_j: energy_tolerance,
+            }
+            .into());
         }
-        .into());
     }
     let incoming_energy = add(thermal_audit.incoming_energy_j, birth_offsets.value()?)?;
+    let mut solid_energy = Sum::default();
+    solid_energy.add(thermal_audit.stored_energy_change_j)?;
+    solid_energy.add(phase_solid_energy.value()?)?;
+    solid_energy.add(birth_offsets.value()?)?;
     let audit = GasTimelineAudit {
         thermal: thermal_audit,
         cells: accounts,
@@ -722,7 +752,7 @@ fn advance_deposition<'thermal, 'catalog>(
         transferred_mass_kg: transferred.value()?,
         energy_into_gas_j: stream_energy.value()?,
         reflected_heat_into_gas_j: reflected_energy.value()?,
-        solid_energy_change_j: add(solid_energy_without_births.value()?, incoming_energy)?,
+        solid_energy_change_j: solid_energy.value()?,
         gas_energy_change_j: gas_energy_change,
         incoming_energy_j: incoming_energy,
         mass_residual_kg: mass_residual,
@@ -737,6 +767,8 @@ fn advance_deposition<'thermal, 'catalog>(
         gas: next_gas,
         catalog,
         audit,
+        gas_stream_energy_residual_j,
+        solid_stream_energy_residual_j,
     })
 }
 

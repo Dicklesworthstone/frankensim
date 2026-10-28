@@ -108,8 +108,12 @@ pub struct GasChamberAdvanceAudit {
     pub energy_into_gas_j: f64,
     /// Signed reflected heat INCLUDED in the complete stream energy above.
     pub reflected_heat_into_gas_j: f64,
+    /// Sum of original-reference storage increments on accepted half steps.
+    /// Rounded diagnostic totals need not reproduce the small residuals below.
     pub solid_energy_change_j: f64,
     pub gas_energy_change_j: f64,
+    /// Telescoping caloric defects, with conserved species datums canceled
+    /// inside each accepted physical interval before accumulation.
     pub energy_residual_j: f64,
     pub gas_stream_energy_residual_j: f64,
     pub solid_stream_energy_residual_j: f64,
@@ -157,6 +161,8 @@ struct SurfaceSums {
     incoming: Sum,
     transferred: Sum,
     energy: Sum,
+    stored: Sum,
+    residual: Sum,
     reflected: Sum,
     recession: Sum,
     initial_temperature: Option<f64>,
@@ -169,6 +175,8 @@ impl SurfaceSums {
         self.incoming.add(row.incoming_mass_kg)?;
         self.transferred.add(row.transferred_mass_kg)?;
         self.energy.add(row.energy_into_gas_j)?;
+        self.stored.add(row.solid_energy_change_j)?;
+        self.residual.add(row.energy_residual_j)?;
         if let Some(reflection) = reflection { self.reflected.add(reflection.heat_into_gas_j)?; }
         self.recession.add(row.recession_m)
     }
@@ -336,6 +344,8 @@ fn advance_history_with_calorics<'catalog>(
     if let Some(geometry) = geometry { geometry.validate(&templates)?; }
     let mut states: Vec<_> = templates.iter().map(|s| s.solid).collect();
     let mut sums: Vec<_> = (0..templates.len()).map(|_| SurfaceSums::default()).collect();
+    let mut gas_energy = Sum::default();
+    let mut gas_stream_residual = Sum::default();
     let mut endpoint: Option<GasChamberCandidate<'catalog>> = None;
     let mut elapsed = 0.0;
     // Sum accepted physical durations rather than accumulating clock roundoff
@@ -398,6 +408,13 @@ fn advance_history_with_calorics<'catalog>(
             sum.add(a, first_heat.get(&a.id))?;
             sum.add(b, second_heat.get(&b.id))?;
         }
+        // Only the two accepted physical endpoints belong to this history.
+        // Their source-relative caloric defects telescope without subtracting
+        // rounded absolute formation energies at the window endpoints.
+        for part in [&first, &second] {
+            gas_energy.add(part.step().gas_energy_change_j)?;
+            gas_stream_residual.add(part.gas_exchange().step().energy_residual_j)?;
+        }
         accepted += 1;
         maximum_error = maximum_error.max(ratio);
         for (state, row) in states.iter_mut().zip(second.surfaces()) { *state = row.solid; }
@@ -415,6 +432,7 @@ fn advance_history_with_calorics<'catalog>(
         }
     };
     let mut solid_energy = Sum::default();
+    let mut solid_stream_residual = Sum::default();
     let mut solid_mass = Sum::default();
     let mut stream_energy = Sum::default();
     let mut reflected_energy = Sum::default();
@@ -424,8 +442,8 @@ fn advance_history_with_calorics<'catalog>(
         poll(&mut cancelled)?;
         let start = original.solid;
         let end = final_row.solid;
-        solid_energy.add(end.mass_kg * (end.specific_enthalpy_j_kg - start.specific_enthalpy_j_kg)
-            + (end.mass_kg - start.mass_kg) * (start.specific_enthalpy_j_kg + original.binding.solid_enthalpy_offset_j_kg))?;
+        solid_energy.add(sum.stored.value)?;
+        solid_stream_residual.add(sum.residual.value)?;
         solid_mass.add(end.mass_kg - start.mass_kg)?;
         stream_energy.add(sum.energy.value)?;
         reflected_energy.add(sum.reflected.value)?;
@@ -437,12 +455,10 @@ fn advance_history_with_calorics<'catalog>(
             surface_temperature_k: [sum.initial_temperature.unwrap_or(final_row.surface_temperature_k[0]), final_row.surface_temperature_k[1]],
         });
     }
-    let gas_energy = endpoint.gas().mass_kg()
-        * (endpoint.gas().state().specific_internal_energy_j_kg() - gas.state().specific_internal_energy_j_kg())
-        + (endpoint.gas().mass_kg() - gas.mass_kg()) * gas.state().specific_internal_energy_j_kg();
-    let energy_residual = solid_energy.value + gas_energy;
-    let gas_stream_residual = gas_energy - stream_energy.value;
-    let solid_stream_residual = solid_energy.value + stream_energy.value;
+    let gas_energy = gas_energy.value;
+    let gas_stream_residual = gas_stream_residual.value;
+    let solid_stream_residual = solid_stream_residual.value;
+    let energy_residual = solid_stream_residual + gas_stream_residual;
     let mass_residual = solid_mass.value + (endpoint.gas().mass_kg() - gas.mass_kg());
     let mut maximum_species_mass_residual: f64 = 0.0;
     for species in catalog.thermodynamics().components() {

@@ -106,6 +106,45 @@ fn reflection_changes_phase_fraction_even_with_zero_mass_and_zero_temperature_ch
 }
 
 #[test]
+fn large_datum_mixed_sublimation_keeps_fusion_and_reflection_in_one_balance() {
+    let base = fixture::catalog(0.0);
+    let chart = curve(&base, &fixture::binding(0.0));
+    let initial = bulk(&chart, 0.5);
+    let inventory = EquilibriumSublimation::new(&chart).unwrap();
+    let mut original: Option<(f64, f64, f64, f64, f64)> = None;
+    for reference in [0.0, -1e14, 1e14] {
+        let catalog = fixture::catalog(reference);
+        let binding = fixture::binding(reference);
+        let gas = fixture::gas(&catalog, 399.5, 1000.0);
+        let coefficients = accommodation(&catalog);
+        let mut controls = fixture::controls();
+        controls.latent_compatibility_tolerance_j_kg = 0.125;
+        let result = advance_equilibrium_surface(inventory, &fixture::phase(), &binding,
+            initial, &gas, &catalog, Some(&coefficients), 0.001, controls, || false).unwrap();
+        let step = result.exchange().step();
+        let phase = result.phase();
+        let q = result.reflection().unwrap().heat_into_gas_j;
+        let r = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / 0.018015;
+        let alignment = (catalog.species_specific_enthalpy_j_kg(&fixture::species(), 400.0).unwrap()
+            - (chart.knots()[1].specific_enthalpy_j_kg + binding.solid_enthalpy_offset_j_kg)) - 200000.0;
+        let expected_frozen = (step.transferred_mass_kg * (200000.0 + alignment - 0.5 * r * 400.0)
+            + step.incoming_mass_kg * 3.5 * r * 0.5 + q) / FUSION;
+        assert!(q > 0.0 && expected_frozen > 0.0);
+        assert_eq!(phase.final_state.equilibrium.temperature_k(), 400.0);
+        fixture::near(phase.freezing_mass_kg, expected_frozen, 1e-15);
+        fixture::near(phase.fusion_energy_j, expected_frozen * FUSION, 1e-10);
+        assert!(step.energy_residual_j.abs() <= controls.gas.energy_tolerance_j);
+        let state = (step.gas_temperature_k[1], phase.final_state.liquid_mass_kg,
+            step.transferred_mass_kg, q, (step.transferred_mass_kg * alignment).abs() / FUSION);
+        if let Some(first) = original {
+            fixture::near(state.0, first.0, 2e-8);
+            fixture::near(state.1, first.1, 1e-15 + state.4 + first.4);
+            assert_eq!((state.2, state.3), (first.2, first.3));
+        } else { original = Some(state); }
+    }
+}
+
+#[test]
 fn initially_liquid_mass_cannot_fund_gross_solid_emission() {
     let catalog = fixture::catalog(0.0);
     let binding = fixture::binding(0.0);
