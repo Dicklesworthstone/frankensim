@@ -4,6 +4,35 @@ This directory retains the human-reviewable source inputs compiled by
 `xtask matdb-pack`. Generated binary packs are deliberately not committed:
 the compiler must reproduce them from the pinned manifest and source record.
 
+## Cured carbon-fiber and fiberglass epoxy laminates
+
+Nine identified Hexcel laminates add 78 claims. These describe cured composites
+with named reinforcements and resin formulations, rather than bare-fiber values
+being used as properties of a finished composite.
+
+| Resin and reinforcement | Source directories | Claims |
+| --- | --- | ---: |
+| 8552 / AS4 and IM7 unidirectional carbon | `hexcel-8552-as4-ud-2023`, `hexcel-8552-im7-ud-2023` | 22 |
+| 8552 / AS4 plain and five-harness woven carbon | `hexcel-8552-as4-agp193-pw-2023`, `hexcel-8552-as4-agp280-5h-2023` | 20 |
+| 8552 / IM7 plain and eight-harness woven carbon | `hexcel-8552-im7-spg196-p-2023`, `hexcel-8552-im7-spg370-8h-2023` | 16 |
+| 913 / 120GL and 7781GL glass fabric, S2GL glass tape | `hexcel-913-120gl-2020`, `hexcel-913-7781gl-2020`, `hexcel-913-s2gl-2020` | 20 |
+
+The primary sources are Hexcel's [8552 EU sheet, pages 2–4](https://www.hexcel.com/wp-content/uploads/2025/12/HexPly_8552_eu_DataSheet1.pdf)
+and [913 sheet, page 4](https://www.hexcel.com/wp-content/uploads/2026/01/HexPly_913_us_DataSheet.pdf).
+Claims retain nominal resin fraction, reinforcement direction and distinct
+tensile, compression, flexural and short-beam roles. The 8552 mechanical points
+are dry at 25 °C; 913 reports dry room-temperature averages without a numerical
+temperature. Nominal laminate density retains its separate unknown measurement
+conditions. A source's recommended cure cycle is not assigned to test coupons
+whose actual cure schedule is unstated. Missing shear moduli, Poisson ratios,
+thermal properties and complete orthotropic tensors remain missing.
+
+```bash
+cargo run -p xtask -- matdb-catalog --search hexcel --property composite-tensile-modulus
+cargo run -p xtask -- matdb-catalog --pack hexcel-8552-im7-ud-2023
+cargo test -p xtask --test cured_composites_expansion
+```
+
 ## Aerogel and refractory-fibre insulation
 
 Four packs add Pyrogel XTE revision 4.2 and Superwool Plus blanket at nominal

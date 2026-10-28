@@ -1,0 +1,115 @@
+frankensim.matdb-source.v1
+observation	identity	HexPly 8552 cured carbon/epoxy: AS4 12K unidirectional carbon; 134 g/m2 reinforcement; nominal prepreg resin mass fraction 0.35	Hexcel 2023 EU sheet page 2, AS4 unidirectional carbon/epoxy	Cured laminate, not neat resin or bare fiber. The 0-degree direction is fiber/warp; 90 degrees is transverse/fill in the sheet plane. Source coupon cure schedule, pressure, test rate, test methods, scatter and shared-specimen identity are unstated. Processing recommendations elsewhere in the sheet are not a coupon-cure record. No full orthotropic tensor, isotropic Young modulus, Poisson ratio, shear modulus, thermal law or design allowable is inferred. The two different SPG column spellings are retained in the citation instead of silently assigning another product.
+observation	physical	AS4 unidirectional carbon/epoxy nominal cured geometry and composition	Hexcel page 2 physical entries	Density is nominal laminate density, not fiber or resin density. Ply thickness and fiber volume fraction are nominal. These physical entries do not state measurement temperature or moisture condition. Prepreg resin mass fraction and cured fiber volume fraction are distinct quantities. No same-coupon match to the mechanical entries is supplied.
+observation	mechanical	AS4 unidirectional carbon/epoxy dry coupon results at 25 C	Hexcel page 2 metric entries	Only the explicitly printed 25 C dry rows are retained. Tensile and compression moduli remain distinct roles. Short-beam interlaminar strength is neither in-plane shear strength nor shear stiffness. Source uncertainty and statistical confidence are unstated. No measured temperature interval, interpolation, wet behavior or failure law is implied.
+scalar	density	identity,physical	density	1.58	g/cm3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	grade	1	1	1
+validity	density	resin_fraction	0.35	0.35	1
+validity	density	cure_known	0	0	1
+validity	density	matched	0	0	1
+validity	density	temperature_known	0	0	1
+validity	density	moisture_known	0	0	1
+scalar	ply-thickness	identity,physical	ply_thickness	0.13	mm	constant
+uncertainty	ply-thickness	unstated	-	-	-	-
+validity	ply-thickness	grade	1	1	1
+validity	ply-thickness	resin_fraction	0.35	0.35	1
+validity	ply-thickness	cure_known	0	0	1
+validity	ply-thickness	matched	0	0	1
+validity	ply-thickness	temperature_known	0	0	1
+validity	ply-thickness	moisture_known	0	0	1
+scalar	fiber-fraction	identity,physical	fiber_fraction	57.42	%	constant
+uncertainty	fiber-fraction	unstated	-	-	-	-
+validity	fiber-fraction	grade	1	1	1
+validity	fiber-fraction	resin_fraction	0.35	0.35	1
+validity	fiber-fraction	cure_known	0	0	1
+validity	fiber-fraction	matched	0	0	1
+validity	fiber-fraction	temperature_known	0	0	1
+validity	fiber-fraction	moisture_known	0	0	1
+scalar	tensile-modulus-0	identity,mechanical	tensile_modulus	141	GPa	constant
+uncertainty	tensile-modulus-0	unstated	-	-	-	-
+validity	tensile-modulus-0	grade	1	1	1
+validity	tensile-modulus-0	resin_fraction	0.35	0.35	1
+validity	tensile-modulus-0	cure_known	0	0	1
+validity	tensile-modulus-0	matched	0	0	1
+validity	tensile-modulus-0	temperature	298.15	298.15	K
+validity	tensile-modulus-0	dry	1	1	1
+validity	tensile-modulus-0	pressure_known	0	0	1
+validity	tensile-modulus-0	rate_known	0	0	1
+validity	tensile-modulus-0	along_zero	1	1	1
+scalar	tensile-modulus-90	identity,mechanical	tensile_modulus	10	GPa	constant
+uncertainty	tensile-modulus-90	unstated	-	-	-	-
+validity	tensile-modulus-90	grade	1	1	1
+validity	tensile-modulus-90	resin_fraction	0.35	0.35	1
+validity	tensile-modulus-90	cure_known	0	0	1
+validity	tensile-modulus-90	matched	0	0	1
+validity	tensile-modulus-90	temperature	298.15	298.15	K
+validity	tensile-modulus-90	dry	1	1	1
+validity	tensile-modulus-90	pressure_known	0	0	1
+validity	tensile-modulus-90	rate_known	0	0	1
+validity	tensile-modulus-90	along_zero	0	0	1
+scalar	tensile-strength-0	identity,mechanical	tensile_strength	2207	MPa	constant
+uncertainty	tensile-strength-0	unstated	-	-	-	-
+validity	tensile-strength-0	grade	1	1	1
+validity	tensile-strength-0	resin_fraction	0.35	0.35	1
+validity	tensile-strength-0	cure_known	0	0	1
+validity	tensile-strength-0	matched	0	0	1
+validity	tensile-strength-0	temperature	298.15	298.15	K
+validity	tensile-strength-0	dry	1	1	1
+validity	tensile-strength-0	pressure_known	0	0	1
+validity	tensile-strength-0	rate_known	0	0	1
+validity	tensile-strength-0	along_zero	1	1	1
+scalar	tensile-strength-90	identity,mechanical	tensile_strength	81	MPa	constant
+uncertainty	tensile-strength-90	unstated	-	-	-	-
+validity	tensile-strength-90	grade	1	1	1
+validity	tensile-strength-90	resin_fraction	0.35	0.35	1
+validity	tensile-strength-90	cure_known	0	0	1
+validity	tensile-strength-90	matched	0	0	1
+validity	tensile-strength-90	temperature	298.15	298.15	K
+validity	tensile-strength-90	dry	1	1	1
+validity	tensile-strength-90	pressure_known	0	0	1
+validity	tensile-strength-90	rate_known	0	0	1
+validity	tensile-strength-90	along_zero	0	0	1
+scalar	compression-modulus-0	identity,mechanical	compression_modulus	128	GPa	constant
+uncertainty	compression-modulus-0	unstated	-	-	-	-
+validity	compression-modulus-0	grade	1	1	1
+validity	compression-modulus-0	resin_fraction	0.35	0.35	1
+validity	compression-modulus-0	cure_known	0	0	1
+validity	compression-modulus-0	matched	0	0	1
+validity	compression-modulus-0	temperature	298.15	298.15	K
+validity	compression-modulus-0	dry	1	1	1
+validity	compression-modulus-0	pressure_known	0	0	1
+validity	compression-modulus-0	rate_known	0	0	1
+validity	compression-modulus-0	along_zero	1	1	1
+scalar	compression-strength-0	identity,mechanical	compression_strength	1531	MPa	constant
+uncertainty	compression-strength-0	unstated	-	-	-	-
+validity	compression-strength-0	grade	1	1	1
+validity	compression-strength-0	resin_fraction	0.35	0.35	1
+validity	compression-strength-0	cure_known	0	0	1
+validity	compression-strength-0	matched	0	0	1
+validity	compression-strength-0	temperature	298.15	298.15	K
+validity	compression-strength-0	dry	1	1	1
+validity	compression-strength-0	pressure_known	0	0	1
+validity	compression-strength-0	rate_known	0	0	1
+validity	compression-strength-0	along_zero	1	1	1
+scalar	short-beam-strength	identity,mechanical	short_beam_strength	128	MPa	constant
+uncertainty	short-beam-strength	unstated	-	-	-	-
+validity	short-beam-strength	grade	1	1	1
+validity	short-beam-strength	resin_fraction	0.35	0.35	1
+validity	short-beam-strength	cure_known	0	0	1
+validity	short-beam-strength	matched	0	0	1
+validity	short-beam-strength	temperature	298.15	298.15	K
+validity	short-beam-strength	dry	1	1	1
+validity	short-beam-strength	pressure_known	0	0	1
+validity	short-beam-strength	rate_known	0	0	1
+validity	short-beam-strength	along_zero	1	1	1
+scalar	in-plane-strength	identity,mechanical	in_plane_strength	114	MPa	constant
+uncertainty	in-plane-strength	unstated	-	-	-	-
+validity	in-plane-strength	grade	1	1	1
+validity	in-plane-strength	resin_fraction	0.35	0.35	1
+validity	in-plane-strength	cure_known	0	0	1
+validity	in-plane-strength	matched	0	0	1
+validity	in-plane-strength	temperature	298.15	298.15	K
+validity	in-plane-strength	dry	1	1	1
+validity	in-plane-strength	pressure_known	0	0	1
+validity	in-plane-strength	rate_known	0	0	1

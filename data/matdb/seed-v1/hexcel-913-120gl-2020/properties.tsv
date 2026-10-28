@@ -1,0 +1,72 @@
+frankensim.matdb-source.v1
+observation	identity	HexPly 913 cured fiberglass/epoxy: 120GL/R913; E-glass 4H satin fabric; resin mass fraction 0.37; reinforcement areal weight 105 g/m2	Hexcel FTA-317-MY20 pages 2 and 4	This is the specific page-4 laminate formulation. Other commercially available resin contents on page 2 are not substituted. The 0-degree loading direction is retained; no transverse data or complete elastic tensor is supplied. The actual property-test cure schedule, pressure, test rate, mechanical test method and matched specimens are unspecified. Recommended and alternate cure cycles are not treated as evidence of the coupon cure.
+observation	physical	120GL/913 cured laminate density	Hexcel page 4 laminate row	Cured laminate density is separate from neat resin and bare glass-fiber density. Measurement temperature and moisture condition of the physical entry are unstated. No density-temperature law or shared coupon with the mechanical table is inferred.
+observation	mechanical	120GL/913 dry room-temperature average properties	Hexcel page 4 metric entries and table footnote	Dry room-temperature average values; numerical room temperature and statistical uncertainty are not supplied. Unknown test temperature stays explicit rather than becoming 20, 23 or 25 C. Tension, compression, flexure and short-beam strength are distinct measurement roles. No thermal properties, Poisson ratio, full orthotropic tensor, wet condition, service-temperature extrapolation or design allowable is inferred.
+scalar	density	identity,physical	density	1.83	g/cm3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	grade	1	1	1
+validity	density	resin_fraction	0.37	0.37	1
+validity	density	cure_known	0	0	1
+validity	density	matched	0	0	1
+validity	density	temperature_known	0	0	1
+validity	density	moisture_known	0	0	1
+scalar	composite-tensile-modulus	identity,mechanical	tensile_modulus	21	GPa	constant
+uncertainty	composite-tensile-modulus	unstated	-	-	-	-
+validity	composite-tensile-modulus	grade	1	1	1
+validity	composite-tensile-modulus	resin_fraction	0.37	0.37	1
+validity	composite-tensile-modulus	cure_known	0	0	1
+validity	composite-tensile-modulus	matched	0	0	1
+validity	composite-tensile-modulus	temperature_known	0	0	1
+validity	composite-tensile-modulus	dry	1	1	1
+validity	composite-tensile-modulus	room_temperature	1	1	1
+validity	composite-tensile-modulus	pressure_known	0	0	1
+validity	composite-tensile-modulus	rate_known	0	0	1
+validity	composite-tensile-modulus	along_zero	1	1	1
+scalar	composite-tensile-strength	identity,mechanical	tensile_strength	489	MPa	constant
+uncertainty	composite-tensile-strength	unstated	-	-	-	-
+validity	composite-tensile-strength	grade	1	1	1
+validity	composite-tensile-strength	resin_fraction	0.37	0.37	1
+validity	composite-tensile-strength	cure_known	0	0	1
+validity	composite-tensile-strength	matched	0	0	1
+validity	composite-tensile-strength	temperature_known	0	0	1
+validity	composite-tensile-strength	dry	1	1	1
+validity	composite-tensile-strength	room_temperature	1	1	1
+validity	composite-tensile-strength	pressure_known	0	0	1
+validity	composite-tensile-strength	rate_known	0	0	1
+validity	composite-tensile-strength	along_zero	1	1	1
+scalar	composite-compression-strength	identity,mechanical	compression_strength	588	MPa	constant
+uncertainty	composite-compression-strength	unstated	-	-	-	-
+validity	composite-compression-strength	grade	1	1	1
+validity	composite-compression-strength	resin_fraction	0.37	0.37	1
+validity	composite-compression-strength	cure_known	0	0	1
+validity	composite-compression-strength	matched	0	0	1
+validity	composite-compression-strength	temperature_known	0	0	1
+validity	composite-compression-strength	dry	1	1	1
+validity	composite-compression-strength	room_temperature	1	1	1
+validity	composite-compression-strength	pressure_known	0	0	1
+validity	composite-compression-strength	rate_known	0	0	1
+validity	composite-compression-strength	along_zero	1	1	1
+scalar	interlaminar-short-beam-strength	identity,mechanical	short_beam_strength	74	MPa	constant
+uncertainty	interlaminar-short-beam-strength	unstated	-	-	-	-
+validity	interlaminar-short-beam-strength	grade	1	1	1
+validity	interlaminar-short-beam-strength	resin_fraction	0.37	0.37	1
+validity	interlaminar-short-beam-strength	cure_known	0	0	1
+validity	interlaminar-short-beam-strength	matched	0	0	1
+validity	interlaminar-short-beam-strength	temperature_known	0	0	1
+validity	interlaminar-short-beam-strength	dry	1	1	1
+validity	interlaminar-short-beam-strength	room_temperature	1	1	1
+validity	interlaminar-short-beam-strength	pressure_known	0	0	1
+validity	interlaminar-short-beam-strength	rate_known	0	0	1
+validity	interlaminar-short-beam-strength	along_zero	1	1	1
+scalar	composite-flexural-strength	identity,mechanical	flexural_strength	714	MPa	constant
+uncertainty	composite-flexural-strength	unstated	-	-	-	-
+validity	composite-flexural-strength	grade	1	1	1
+validity	composite-flexural-strength	resin_fraction	0.37	0.37	1
+validity	composite-flexural-strength	cure_known	0	0	1
+validity	composite-flexural-strength	matched	0	0	1
+validity	composite-flexural-strength	temperature_known	0	0	1
+validity	composite-flexural-strength	dry	1	1	1
+validity	composite-flexural-strength	room_temperature	1	1	1
+validity	composite-flexural-strength	pressure_known	0	0	1
+validity	composite-flexural-strength	rate_known	0	0	1
+validity	composite-flexural-strength	along_zero	1	1	1

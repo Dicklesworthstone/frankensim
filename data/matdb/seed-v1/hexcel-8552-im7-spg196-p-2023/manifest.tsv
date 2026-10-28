@@ -1,0 +1,23 @@
+frankensim.matdb-manifest.v3
+pack_id	hexcel-8552-im7-spg196-p-2023
+redistribution	permitted	Selected attributed numerical facts and original notes only; no source PDF, prose or table layout is redistributed
+citation	Hexcel, HexPly 8552 EU Product Data Sheet, 2023, page 4, SPG196-P (mechanical table: SPG196-PW) column; https://www.hexcel.com/wp-content/uploads/2025/12/HexPly_8552_eu_DataSheet1.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	hexcel-8552-im7-spg196-p-2023	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	ply_thickness	cured-ply-thickness	dimensional
+property	fiber_fraction	nominal-fiber-volume-fraction	dimensional
+property	tensile_modulus	composite-tensile-modulus	dimensional
+property	tensile_strength	composite-tensile-strength	dimensional
+property	short_beam_strength	interlaminar-short-beam-strength	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	grade	source-grade-hexcel-8552-im7-spg196-p-2023	dimensional
+axis	resin_fraction	nominal-prepreg-resin-mass-fraction	dimensional
+axis	dry	source-dry	dimensional
+axis	along_zero	load-along-0deg	dimensional
+axis	cure_known	source-cure-schedule-known	dimensional
+axis	pressure_known	source-pressure-known	dimensional
+axis	rate_known	source-test-rate-known	dimensional
+axis	matched	source-specimens-matched	dimensional
+axis	temperature_known	source-temperature-known	dimensional
+axis	moisture_known	source-moisture-condition-known	dimensional

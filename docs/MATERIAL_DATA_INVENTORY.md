@@ -1,5 +1,20 @@
 # Material data inventory
 
+## Cured-laminate expansion: 2026-10-28
+
+Nine additional identified carbon-fiber/epoxy and fiberglass/epoxy source
+profiles contain **78 property claims**: 58 for six HexPly 8552 carbon products
+and 20 for three HexPly 913 glass products. They retain reinforcement, resin
+fraction, direction, measurement role and source conditions. They supply
+directional stiffness/strength and nominal laminate density where stated;
+they do not imply a complete tensor or a common density/mechanical specimen.
+
+See the [cured-laminate catalog section](../data/matdb/seed-v1/README.md#cured-carbon-fiber-and-fiberglass-epoxy-laminates)
+for products, sources and commands. The focused
+`xtask/tests/cured_composites_expansion.rs` checks all 78 claims through the
+real compiler, canonical pack decoding and typed queries, including incompatible
+grade, resin fraction, direction, moisture and temperature refusals.
+
 ## Additional everyday-material coverage: 2026-10-28
 
 A further **38 source-specific packs add 195 property claims** across:
