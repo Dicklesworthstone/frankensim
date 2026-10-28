@@ -647,3 +647,20 @@ derives local heat capacity, diffusivity and effusivity without repeated databas
 queries. It does not fill missing density or combine incompatible source
 conditions. Panel orthotropy, complete solder creep/phase-change laws and
 matched polymer thermomechanics remain limited by the available source data.
+
+## 2026-10-28 volumetric and conditioned-material increment
+
+This increment adds **13 source profiles and 101 claims**: four named polyolefin
+films (16), one repeated polypropylene MTPS experiment (21), two cured adhesive
+TPS experiments (6), two carbon-fiber constituents (18), and four exact concrete
+or cement-mortar mixes (40). Counts include reported statistics and derived
+source values; they are not a count of independent measurements or complete
+material laws. Exact paths and applicability are in the
+[seed catalog](../data/matdb/seed-v1/README.md#volumetric-thermal-inputs-and-conditioned-materials-2026-10-28).
+
+The shared material layer now consumes direct volumetric capacity/conductivity
+without manufacturing missing density or Cp, and derives constant-mass density
+from explicitly declared engineering free-expansion sources. These use the
+existing source evaluator and preserve parent evidence and conditions. Missing
+temperature trajectories, matched specimens, full laminate tensors and complete
+cementitious constitutive laws remain separate acquisition/model gaps.

@@ -3985,3 +3985,33 @@ The native material tests cover axial and coupled rank-one nullspaces, rotated
 work, thickness scaling, coefficient scales `1e-200..1e200`, and active-tensor
 refusals. This admits declared reduced viscosity; it does not infer a bulk
 constitutive law from absent data.
+
+## Direct volumetric transport and free-expansion density
+
+`thermal::transport::volumetric::ResolvedVolumetricThermalTransport` resolves
+positive volumetric heat capacity and scalar static conductivity from one card
+at an exact typed condition, retaining original answers, uncertainty and receipts.
+It shares static-temperature/source-axis admission and factorized effusivity
+arithmetic with prepared transport. It derives k/C_vol and sqrt(k)*sqrt(C_vol)
+without inventing density, mass-specific heat or independent statistical evidence.
+Refresh pins the original claims and requires the original card and coordinate
+schema; a failed update leaves the old snapshot intact. A point observation does
+not acquire interval support or become a caloric integral.
+
+`thermal::transport::expansion::PreparedFreeExpansionDensity` admits a positive
+reference density and continuously supported engineering free length changes.
+The caller explicitly declares isotropy or fixed orthogonal principal directions,
+constant mass and unconstrained free expansion. Each length ratio is normalized
+at the density reference; the finite volume ratio is their product and current
+density is reference density divided by that product. The model retains original
+source lines and density evidence, fixed context, basis/frame, selections and
+nonzero source datum residuals. CTE, infinitesimal tensor strain and unknown
+temperature support cannot substitute for the declared source roles.
+
+The union grid includes the reference temperature. Evaluation uses one binary
+search and no allocation, hashing or source query. It derives stretches, volume
+and density from interpolated engineering strains, rather than interpolating the
+derived density. Positive stretches, volume and density must remain representable;
+an extreme interior refusal publishes no sample and leaves the path unchanged.
+There is no inferred mass transfer, constrained strain, phase law, evolving frame,
+cross-source specimen match or propagated uncertainty.

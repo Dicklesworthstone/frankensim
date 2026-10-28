@@ -3722,3 +3722,65 @@ Scalar conductivity does not establish isotropy, specific heat is not converted
 between caloric constraints, and this API does not replace enthalpy or phase-change
 owners. The NASA 316 source-pack regression demonstrates the complete compiler,
 material-card and prepared-evaluation path.
+
+## Volumetric thermal inputs and conditioned materials (2026-10-28)
+
+Thirteen additional source profiles provide 101 claims through the existing
+compiler and typed-query path:
+
+| New profiles | Claims | Usable coverage |
+| --- | ---: | --- |
+| [HDPE DR-720](hdpe-dr720-abbasgholi2022/manifest.tsv), [LLDPE 22B02](lldpe-22b02-abbasgholi2022/manifest.tsv), [LDPE 2420E02](ldpe-2420e02-abbasgholi2022/manifest.tsv), [PP ZR340R](pp-zr340r-abbasgholi2022/manifest.tsv) | 16 | Named hot-pressed films: density, calorimetry, thermal-lens diffusivity and the source's derived conductivity |
+| [Polypropylene MTPS experiment](polypropylene-mtps-thermtest-26c-reference/manifest.tsv) | 21 | Five same-specimen thermal triples at 26 C, printed means and reported standard deviations |
+| [LOCTITE AA H4500](loctite-aa-h4500-thermtest-23c/manifest.tsv), [PRIMA-SOLDER EG8020](prima-solder-eg8020-thermtest-23c/manifest.tsv) | 6 | Cured adhesive conductivity, diffusivity and volumetric heat capacity at 23 C |
+| [HexTow AS4](hexcel-hextow-as4-fiber-2023/manifest.tsv), [HexTow IM7](hexcel-hextow-im7-fiber-2023/manifest.tsv) | 18 | Carbon-fiber constituent thermal, mechanical and electrical facts with explicit direction/temperature limits |
+| [NAC concrete](concrete-nac-wc045-moreno2019/manifest.tsv), [Argex concrete](concrete-argex-wc045-moreno2019/manifest.tsv), [CA25 concrete](concrete-ca25-wc045-moreno2019/manifest.tsv), [cement mortar](cement-mortar-wc045-moreno2019/manifest.tsv) | 40 | Exact water/cement 0.45 mixes with 28-day water cure, separate wet mechanics/density, dry thermal data and connected porosity |
+
+For the named polyolefin films, density at 23 C, Cp at 25 C and unstated
+thermal-lens test temperature remain different conditions. Their conductivity
+uses `source-derived-thermal-conductivity` with its original parent observations;
+it is not an independent measurement or a generic temperature law. MTPS/TPS
+thermal triples share one instrument reduction: no independent calorimetry,
+known covariance or confidence interval is implied. Reported standard deviations
+remain named statistics rather than invented measurement uncertainty models.
+
+Fiber facts remain distinct from the cured 8552 laminate tables on the same
+Hexcel sheets. Direction-unspecified transport cannot satisfy a directional
+request. Cementitious wet/dry states remain discrete; oven drying at 80 C is
+conditioning history, not a test temperature. Source-computed Cp and wave-derived
+dynamic modulus retain their derivation roles. The concrete table's unresolved
+thermal-closure discrepancy is preserved rather than silently repaired.
+
+### Volumetric storage without fabricated mass properties
+
+`thermal::transport::volumetric::ResolvedVolumetricThermalTransport` accepts
+the exact `volumetric-heat-capacity` and `thermal-conductivity` keys, a typed
+query point and independent selections. It derives diffusivity `k/C_vol` and
+effusivity `sqrt(k)*sqrt(C_vol)`, retaining both original answers, uncertainty,
+receipts and card identity. Separate density and mass-specific Cp are not required.
+
+`at_query_point` refreshes both properties through their original pinned claims.
+A changed card/schema, unsupported condition or unavailable original source
+refuses the whole update and leaves the prior snapshot unchanged. Single-point
+experimental support does not authorize a finite temperature excursion.
+The [volumetric transport integration test](../../../xtask/tests/material_volumetric_transport.rs)
+runs the real H4500, EG8020 and PP source packs through this API and preserves the
+separately reported rounded diffusivity instead of overwriting it by closure.
+
+### Constant-mass density from source length changes
+
+`thermal::transport::expansion::PreparedFreeExpansionDensity` combines a
+positive density at an explicit reference temperature with either one explicitly
+isotropic engineering free-strain source or three fixed-principal sources and
+their frame identity. It normalizes each source by its value at that same density
+reference: `s_i(T)=(1+epsilon_i(T))/(1+epsilon_i(T_ref))`, then derives
+`J=s_1*s_2*s_3` and `rho(T)=rho_ref/J`.
+
+These inputs are dimensionless `deltaL/L_datum`, not instantaneous/mean CTE or
+an arbitrary infinitesimal tensor. Nonzero fitted datum residuals are retained.
+All original source breakpoints and the density reference enter one prepared
+grid; evaluation uses one binary search without allocation, hashing or queries.
+Only the engineering strains interpolate; volume and density are derived after
+interpolation. Original parent evidence survives without a new measured-density
+claim or fabricated uncertainty propagation. Mass loss, moisture uptake,
+constraints, rotating axes and phase change require their own physical owners.

@@ -16,6 +16,10 @@
 #[path = "transport/volumetric.rs"]
 pub mod volumetric;
 
+/// Constant-mass density from explicitly selected free length-change sources.
+#[path = "transport/expansion.rs"]
+pub mod expansion;
+
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{
     ClaimSelection, MaterialCard, PropertyKey, PropertyLineSlice, PropertySupportError, QueryPoint,
