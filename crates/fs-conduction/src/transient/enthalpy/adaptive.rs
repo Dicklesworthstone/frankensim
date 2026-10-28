@@ -18,6 +18,8 @@
 //! This full-window controller accepts directly assembled physical laws;
 //! authored boundary/source schedules keep their existing history stepper.
 
+use std::ops::ControlFlow;
+
 use fs_exec::Cx;
 
 use super::{
@@ -58,11 +60,34 @@ pub struct EnthalpyTimeError {
     pub normalized: f64,
 }
 
+/// Both fine endpoints of one accepted trial, borrowed only during observation.
+///
+/// No comparison or rejected endpoint is exposed. The initial state is available
+/// from the state accessors before advancing; it is not emitted again on resume.
+/// Consumers may inspect or stream these slices without cloning the fields or
+/// retaining a trajectory. Persisting fields is an explicit consumer decision.
+#[derive(Debug, Clone, Copy)]
+pub struct EnthalpyAcceptedTrial<'a> {
+    /// One-based accepted-trial count over the whole history, including resumes.
+    pub accepted_trial: usize,
+    pub start_time_s: f64,
+    pub midpoint_time_s: f64,
+    pub end_time_s: f64,
+    pub first_half: &'a EnthalpyStepSolution,
+    pub second_half: &'a EnthalpyStepSolution,
+    /// Full-step/two-half-step discrepancy at `end_time_s`, not an error bound
+    /// on either observed field or on the trajectory's continuous-time peak.
+    pub error: EnthalpyTimeError,
+}
+
 /// A partial trajectory is distinguishable from reaching the requested time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdaptiveEnthalpyStatus {
     ReachedEnd,
     TrialLimit,
+    /// The observer stopped after one complete accepted pair. The state and
+    /// controller are ready to continue without re-emitting that pair.
+    ObserverStop,
     MinimumStep,
 }
 
@@ -249,11 +274,36 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
         end_time_s: f64,
         max_trials: usize,
     ) -> Result<AdaptiveEnthalpyReport, EnthalpyError> {
+        self.advance_to_observed(cx, problem, interfaces, end_time_s, max_trials, |_| {
+            ControlFlow::Continue(())
+        })
+    }
+
+    /// Advance while observing both accepted fine endpoints in temporal order.
+    /// The observer runs once per complete accepted pair, after committing its
+    /// state, energy and controller. Returning `Break(())` preserves that pair
+    /// and returns `ObserverStop`, or `ReachedEnd` if it reached the event.
+    /// Cancellation requested by the observer is checked after the callback;
+    /// the published pair remains accepted even when that check returns an error.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_to_observed(
+        &mut self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        end_time_s: f64,
+        max_trials: usize,
+        observe: impl FnMut(EnthalpyAcceptedTrial<'_>) -> ControlFlow<()>,
+    ) -> Result<AdaptiveEnthalpyReport, EnthalpyError> {
         let storage = self.storage;
         let config = self.config.endpoint;
-        self.advance_with(cx, end_time_s, max_trials, |h, dt| {
-            storage.advance(cx, problem, interfaces, h, dt, config)
-        })
+        self.advance_with(
+            cx,
+            end_time_s,
+            max_trials,
+            |h, dt| storage.advance(cx, problem, interfaces, h, dt, config),
+            observe,
+        )
     }
 
     /// The same controller with local P1 fourth-power ambient radiation.
@@ -267,13 +317,36 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
         end_time_s: f64,
         max_trials: usize,
     ) -> Result<AdaptiveEnthalpyReport, EnthalpyError> {
+        self.advance_to_with_pointwise_ambient_radiation_observed(
+            cx, problem, interfaces, radiation, end_time_s, max_trials,
+            |_| ControlFlow::Continue(()),
+        )
+    }
+
+    /// Observe accepted fine pairs under the original pointwise ambient law.
+    /// Observation and stopping have the semantics of [`Self::advance_to_observed`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_to_with_pointwise_ambient_radiation_observed(
+        &mut self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        radiation: &PointwiseAmbientRadiation<'_>,
+        end_time_s: f64,
+        max_trials: usize,
+        observe: impl FnMut(EnthalpyAcceptedTrial<'_>) -> ControlFlow<()>,
+    ) -> Result<AdaptiveEnthalpyReport, EnthalpyError> {
         let storage = self.storage;
         let config = self.config.endpoint;
-        self.advance_with(cx, end_time_s, max_trials, |h, dt| {
-            storage.advance_with_pointwise_ambient_radiation(
+        self.advance_with(
+            cx,
+            end_time_s,
+            max_trials,
+            |h, dt| storage.advance_with_pointwise_ambient_radiation(
                 cx, problem, interfaces, h, dt, config, radiation,
-            )
-        })
+            ),
+            observe,
+        )
     }
 
     /// The same controller with reflected, spatially resolved enclosure radiation.
@@ -287,13 +360,36 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
         end_time_s: f64,
         max_trials: usize,
     ) -> Result<AdaptiveEnthalpyReport, EnthalpyError> {
+        self.advance_to_with_pointwise_enclosure_radiation_observed(
+            cx, problem, interfaces, radiation, end_time_s, max_trials,
+            |_| ControlFlow::Continue(()),
+        )
+    }
+
+    /// Observe accepted fine pairs under the original pointwise enclosure law.
+    /// Observation and stopping have the semantics of [`Self::advance_to_observed`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_to_with_pointwise_enclosure_radiation_observed(
+        &mut self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        radiation: &PointwiseEnclosureRadiation<'_>,
+        end_time_s: f64,
+        max_trials: usize,
+        observe: impl FnMut(EnthalpyAcceptedTrial<'_>) -> ControlFlow<()>,
+    ) -> Result<AdaptiveEnthalpyReport, EnthalpyError> {
         let storage = self.storage;
         let config = self.config.endpoint;
-        self.advance_with(cx, end_time_s, max_trials, |h, dt| {
-            storage.advance_with_pointwise_enclosure_radiation(
+        self.advance_with(
+            cx,
+            end_time_s,
+            max_trials,
+            |h, dt| storage.advance_with_pointwise_enclosure_radiation(
                 cx, problem, interfaces, h, dt, config, radiation,
-            )
-        })
+            ),
+            observe,
+        )
     }
 
     fn advance_with(
@@ -302,6 +398,7 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
         end: f64,
         max_trials: usize,
         mut advance: impl FnMut(&[f64], f64) -> Result<EnthalpyStepSolution, EnthalpyError>,
+        mut observe: impl FnMut(EnthalpyAcceptedTrial<'_>) -> ControlFlow<()>,
     ) -> Result<AdaptiveEnthalpyReport, EnthalpyError> {
         poll(cx, 0)?;
         if !end.is_finite() || end < self.time_s || !(end - self.time_s).is_finite() {
@@ -324,7 +421,8 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
             if self.time_s == end {
                 break;
             }
-            let remaining = end - self.time_s;
+            let trial_start = self.time_s;
+            let remaining = end - trial_start;
             let trial_end = if self.next_step_s >= remaining {
                 end
             } else {
@@ -350,9 +448,9 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
                 let input_first = finite(first_dt * external_heat_w(&first)?)?;
                 let input_second = finite(second_dt * external_heat_w(&fine)?)?;
                 let error = estimate(cx, self, &coarse, &fine)?;
-                Ok::<_, EnthalpyError>((fine, input_first, input_second, error))
+                Ok::<_, EnthalpyError>((first, fine, input_first, input_second, error))
             })();
-            let (fine, input_first, input_second, error) = match candidate {
+            let (first, fine, input_first, input_second, error) = match candidate {
                 Ok(candidate) => candidate,
                 Err(
                     error @ (EnthalpyError::NotConverged(_) | EnthalpyError::EnergyBalance { .. }),
@@ -417,12 +515,30 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
             self.input_sum_j = sum;
             self.input_correction_j = correction;
             self.stored_energy_change_j = stored;
-            self.endpoint = Some(fine);
+            let second_half = self.endpoint.insert(fine);
             self.time_s = trial_end;
             self.next_step_s = next;
             self.accepted += 1;
             self.last_error = Some(error);
             self.last_endpoint_refusal = None;
+            // Publish an atomic borrowed pair only after accepting ALL physical
+            // state and accounting. The first half was already computed for the
+            // comparison; keeping it alive through this callback adds no clone.
+            let stop = observe(EnthalpyAcceptedTrial {
+                accepted_trial: self.accepted,
+                start_time_s: trial_start,
+                midpoint_time_s: middle,
+                end_time_s: trial_end,
+                first_half: &first,
+                second_half,
+                error,
+            })
+            .is_break();
+            poll(cx, trial)?;
+            if stop {
+                status = AdaptiveEnthalpyStatus::ObserverStop;
+                break;
+            }
         }
         if self.time_s == end {
             status = AdaptiveEnthalpyStatus::ReachedEnd;

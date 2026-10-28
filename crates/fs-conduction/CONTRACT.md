@@ -1390,6 +1390,14 @@ authority.
   A trial budget or minimum-step stop returns a distinguishable partial
   trajectory. Cancellation and endpoint refusals preserve accepted physical
   history; continuing a bounded call retains the same controller state.
+  Observed entry points publish a borrowed `EnthalpyAcceptedTrial` only after
+  accepting a complete pair of fine half steps. The view includes both physical
+  endpoints and their actual times, so consumers can track intermediate peaks
+  without cloning fields or retaining a whole trajectory. Rejected comparison
+  work never reaches the observer. `ControlFlow::Break(())` returns the distinct
+  `ObserverStop` status after committing the accepted pair; continuation resumes
+  after that pair without duplicate observations. Direct, pointwise ambient and
+  pointwise enclosure radiation paths share this observation mechanism.
   This is an in-memory resumable trajectory with local time-error estimates,
   not a persisted checkpoint, accumulated-error certificate or timestep
   adjoint. `tests/adaptive_enthalpy.rs` checks independent spatial diffusion
