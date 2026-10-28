@@ -8,6 +8,9 @@
 //! Spatial coordinates use `[angular, linear]`; dual force coordinates use
 //! `[torque, force]`.
 
+/// Continuous unconstrained articulated motion in total momentum coordinates.
+pub mod motion;
+
 use core::fmt;
 use fs_ga::{GaError, Mat3, Mat6, Se3, Twist, Vec3, Wrench};
 

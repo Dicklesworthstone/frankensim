@@ -21,10 +21,11 @@ Canonical poses, twists, wrenches, adjoints, and coadjoints remain owned by
 parallel robot-math representation. The articulated owner now includes both a
 prescribed-base boundary and an unconstrained free-flight boundary that solves
 six unactuated base accelerations together with the scalar joint accelerations.
-Contact, impacts, loop constraints, and time integration remain dedicated owner
-boundaries and are not approximated here. Control policy is likewise a separate
-owner: this crate consumes declared efforts and external wrenches but invents
-neither.
+The dedicated `articulated::motion` owner advances continuous unconstrained
+free-flight trajectories from those native dynamics. Contact, impacts and loop
+constraints remain separate owner boundaries. Control policy is likewise a
+separate owner: this crate consumes declared efforts and external wrenches but
+invents neither.
 
 The `goddard` module also exposes a narrow museum-facing composition for US
 1,102,653. It reuses the single-body owner for torque-free primary and
@@ -563,6 +564,53 @@ restitution, friction, CCD, and time integration remain separate responsibilitie
 G0/G1/G3 `tests/articulated_mass.rs` checks the independent offset-COM body
 solution, full three-inertia coupled response, internal reaction momentum,
 world-frame covariance, impulse-work closure, and atomic admission.
+
+## Continuous free-floating articulated trajectories
+
+`articulated::motion::step_free_floating` advances an actual base pose/twist and
+all joint coordinates/rates under held internal efforts, held link-frame
+wrenches and uniform world gravity. `FreeFloatingMotionState` composes the
+canonical free-base state with the existing compact joint coordinates. Its
+accepted output is directly reusable as the next input; the function never
+mutates the caller's state or publishes a partially advanced result.
+
+The second-order explicit Lie-midpoint lane integrates total world linear
+momentum, angular momentum about the system COM, COM position, base orientation,
+and joint position/rate. Native free-base ABA supplies joint accelerations.
+O(n) shape kinematics assembles the composite locked inertia at the COM and the
+momentum due to relative joint motion. The existing fixed 6x6 physical-inertia
+solve recovers base velocity at the supplied joint rates. This is a coordinate
+inversion of the momentum map, not a velocity clamp or a solve with an
+articulated inertia that permits extra joint response. Reaction wheels and
+extending limbs therefore recoil their base without creating total momentum.
+No dense generalized mass matrix is constructed; work and storage remain O(n).
+
+The midpoint COM is `Xh = X0 + dt P0/(2 M)`, while the accepted COM uses
+`X1 = X0 + dt (P0+P1)/(2 M)` and `P1 = P0 + dt Fh`. Thus the discrete orbital
+angular change is `dt Xh cross Fh`. Advancing central spin by the midpoint COM
+moment preserves the full world-origin angular impulse of the same stage
+wrenches, up to numerical roundoff. Lever arms and inertia are assembled near
+the COM before world translation, avoiding subtraction of large orbital
+momenta. Body forces rotate with each link at the force stage; gravity acts at
+the total COM and cannot generate a spurious central moment.
+
+The receipt independently evaluates actual endpoint physical momenta and kinetic
+energy, reports the external world impulse, and separates actuator work from
+external work. Uniform gravity uses exact COM displacement work; other work is
+midpoint quadrature. Its kinetic/work residual is integration error, not physical
+dissipation. This lane is neither energy-exact nor symplectic, and does not
+supply contact, loop constraints, adaptivity or a controller. Step refinement
+remains necessary for fast internal dynamics.
+
+The lane admits at most 4096 links so each indivisible native tree pass is
+bounded. Cancellation is polled between those passes and every 64 links in new
+momentum passes, including a final poll before publication. The native fixed-root,
+physical-inertia, finite-value, and joint position/rate/effort bounds remain in
+force at the initial, midpoint and accepted states; limits are never clipped.
+`tests/articulated_motion.rs` checks analytic reaction-wheel and telescoping-mass
+trajectories, full off-center force/angular impulse, branched mixed-joint free
+momentum and COM drift, second-order convergence to the exact symmetric-top
+solution, frame covariance, distant admitted origins and atomic refusal/cancellation.
 
 ## Articulated point/plane impact response
 
