@@ -1082,7 +1082,7 @@ cubic-alias corrections (58--63). The central-moment operator uses Gaussian
 central targets; cumulant equilibria above degree2 are zero. Cumulant midpoint
 forcing changes the first cumulants as in85--87. Central-moment forcing uses
 the Gaussian source moments and grouped trapezoidal factors of Fei, Luo & Li
-(2018), doi:10.1103/PhysRevE.97.053309, equations5,18: the six mixed third
+(2018), doi:10.1103/PhysRevE.97.053309, equations5,20--21: the six mixed third
 moments receive `(1-omega3/2) cs^2 F/rho`, and the three fifth moments receive
 `(1-omega9/2) cs^4 F/rho`. The third-order pair differences have zero source;
 their separate omega4 does not set the source factor. Bit semantics v2 corrects
@@ -1090,6 +1090,17 @@ these previously omitted force terms. An explicit zero-force branch preserves
 all unforced arithmetic; BGK and cumulant collision arithmetic are unchanged.
 Finite-force flow accuracy remains a downstream qualification, separate from
 conservation and these local constitutive moment balances.
+
+Bit semantics v3 additionally matches factorized BGK forcing to
+`S = (F/rho) . d_u feq`. Cached marginal derivatives retain the full represented
+Maxwellian source tensor, including mixed third/fifth moments omitted by the
+quadratic source in a moving fluid. Quadratic BGK, every unforced BGK path,
+central-moment and cumulant arithmetic remain unchanged. The G0/G3
+`factorized_bgk_force_matches_maxwellian_moments_in_moving_frames` regression
+checks all 27 moments and independent product derivatives across densities,
+moving frames, force signs/axes and relaxation times 0.5005, 0.8 and 1.7.
+This establishes local kinetic consistency, not full Galilean invariance or
+finite-force continuum convergence. The unforced cumulant golden is unchanged.
 
 CollisionConfig27 requires model/rates or BGK tau and a Mach cap in (0,0.3].
 Tau must exceed0.5 and each rate must be strictly in (0,2). Nonfinite state,

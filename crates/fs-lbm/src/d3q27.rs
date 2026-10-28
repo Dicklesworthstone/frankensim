@@ -15,8 +15,8 @@
 use core::fmt;
 
 /// Version of tables, transforms, relaxation grouping and arithmetic order.
-/// V2 supplies the third/fifth central force moments; unforced bits are unchanged.
-pub const D3Q27_BIT_SEMANTICS_VERSION: u32 = 2;
+/// V3 matches factorized BGK forcing to its equilibrium; unforced bits are unchanged.
+pub const D3Q27_BIT_SEMANTICS_VERSION: u32 = 3;
 /// Population count.
 pub const Q27: usize = 27;
 /// Lattice sound speed squared.
@@ -394,11 +394,36 @@ fn relax(mut v: [f64; Q27], eq: [f64; Q27], u: [f64; 3], rates: Rates27) -> [f64
     v
 }
 
+/// Differentiate the selected product equilibrium, S = (F/rho).d_u feq.
+/// Each marginal has moments (1, u, cs²+u²), so its derivative has moments
+/// (0, 1, 2u). Tensor products therefore give zero central stress source,
+/// cs² F in mixed third moments and cs⁴ F in fifth moments, as for the
+/// Maxwellian source in Fei, Luo & Li (2018), equations 5 and 20--21.
+/// The quadratic Guo polynomial drops those product terms at nonzero u.
+/// Cache nine marginal values/derivatives once; no divisions by probabilities
+/// or per-cell allocation are needed.
+fn factorized_source27(u: [f64; 3], force: [f64; 3]) -> [f64; Q27] {
+    let marginals: [[(f64, f64); 3]; 3] = core::array::from_fn(|axis| {
+        let second = CS2_27 + u[axis] * u[axis];
+        [
+            (0.5 * (second - u[axis]), u[axis] - 0.5),
+            (1.0 - second, -2.0 * u[axis]),
+            (0.5 * (second + u[axis]), u[axis] + 0.5),
+        ]
+    });
+    core::array::from_fn(|q| {
+        let [x, y, z] = core::array::from_fn(|axis| marginals[axis][(E27[q][axis] + 1) as usize]);
+        force[0] * x.1 * y.0 * z.0 + force[1] * x.0 * y.1 * z.0 + force[2] * x.0 * y.0 * z.1
+    })
+}
+
 /// Collision with explicit force density in lattice units. Cumulant forcing
 /// changes the first cumulants from -F/(2rho) to +F/(2rho) in the midpoint
 /// frame (Geier85--87). Central-moment forcing also supplies the third/fifth
 /// Gaussian source moments with their own grouped trapezoidal prefactors
-/// (Fei, Luo & Li2018, PRE97:053309, equations5,18).
+/// (Fei, Luo & Li2018, PRE97:053309, equations5,20--21).
+/// BGK differentiates its selected equilibrium: quadratic uses Guo's
+/// polynomial, factorized retains the complete product source through degree6.
 /// No positivity limiter or automatic rate selection.
 /// Finite-force Navier--Stokes accuracy requires its own downstream ladder.
 pub fn collide_cell27(
@@ -411,14 +436,25 @@ pub fn collide_cell27(
     let post = match config.model {
         CollisionModel27::Bgk { tau, equilibrium } => {
             let eq = equilibrium27(rho, u, equilibrium);
-            core::array::from_fn(|q| {
-                let e = E27[q].map(f64::from);
-                let eu = (0..3).map(|a| e[a] * u[a]).sum::<f64>();
-                let source = (0..3)
-                    .map(|a| ((e[a] - u[a]) / CS2_27 + eu * e[a] / (CS2_27 * CS2_27)) * force[a])
-                    .sum::<f64>();
-                (1.0 / tau).mul_add(eq[q] - pop[q], pop[q]) + (1.0 - 0.5 / tau) * W27[q] * source
-            })
+            if equilibrium == Equilibrium27::Factorized && force.iter().any(|&f| f != 0.0) {
+                let source = factorized_source27(u, force);
+                core::array::from_fn(|q| {
+                    (1.0 / tau).mul_add(eq[q] - pop[q], pop[q]) + (1.0 - 0.5 / tau) * source[q]
+                })
+            } else {
+                // Preserve the quadratic control and every unforced BGK bit.
+                core::array::from_fn(|q| {
+                    let e = E27[q].map(f64::from);
+                    let eu = (0..3).map(|a| e[a] * u[a]).sum::<f64>();
+                    let source = (0..3)
+                        .map(|a| {
+                            ((e[a] - u[a]) / CS2_27 + eu * e[a] / (CS2_27 * CS2_27)) * force[a]
+                        })
+                        .sum::<f64>();
+                    (1.0 / tau).mul_add(eq[q] - pop[q], pop[q])
+                        + (1.0 - 0.5 / tau) * W27[q] * source
+                })
+            }
         }
         CollisionModel27::CentralMoment { rates } | CollisionModel27::Cumulant { rates } => {
             let mut tensor = [0.0; Q27];

@@ -101,7 +101,7 @@ fn conserved(f: &[f64; Q27]) -> [f64; 4] {
 
 #[test]
 fn d3q27_lattice_invariants_hold_exactly() {
-    assert_eq!(D3Q27_BIT_SEMANTICS_VERSION, 2);
+    assert_eq!(D3Q27_BIT_SEMANTICS_VERSION, 3);
     assert_eq!(W216.iter().sum::<i64>(), 216);
     for q in 0..Q27 {
         assert_eq!(W27[q].to_bits(), (W216[q] as f64 / 216.0).to_bits());
@@ -246,11 +246,82 @@ fn moment_about(f: &[f64; Q27], u: [f64; 3], powers: [usize; 3]) -> f64 {
 }
 
 #[test]
+fn factorized_bgk_force_matches_maxwellian_moments_in_moving_frames() {
+    // G0/G3: f=feq-S/2 represents a physical Maxwellian in the trapezoidal
+    // source frame. Its postcollision state is feq+S/2 at every relaxation
+    // time. A quadratic source passes mass/impulse/stress but fails the higher
+    // moments when the selected equilibrium is factorized and u is nonzero.
+    for rho in [0.8, 1.4] {
+        for u in [[0.0; 3], [0.065, -0.04, 0.025], [-0.035, 0.06, 0.045]] {
+            for tau in [0.5005, 0.8, 1.7] {
+                for direction in [
+                    [8e-4, 0.0, 0.0],
+                    [0.0, -5e-4, 0.0],
+                    [0.0, 0.0, 3e-4],
+                    [7e-4, -4e-4, 2e-4],
+                ] {
+                    for sign in [-1.0, 1.0] {
+                        let force = direction.map(|v| sign * v);
+                        let (eq, source) = factorized_force_oracle(rho, u, force);
+                        let before = core::array::from_fn(|q| eq[q] - 0.5 * source[q]);
+                        let post = collide_cell27(
+                            before,
+                            config(CollisionModel27::Bgk {
+                                tau,
+                                equilibrium: Equilibrium27::Factorized,
+                            }),
+                            force,
+                        )
+                        .unwrap();
+                        for q in 0..Q27 {
+                            let expected = eq[q] + 0.5 * source[q];
+                            assert!(
+                                (post[q] - expected).abs() < 3e-14 * rho,
+                                "population {q}: got {}, expected {expected}; u={u:?}, force={force:?}, tau={tau}",
+                                post[q]
+                            );
+                        }
+                        // Independent Gaussian moment identities exercise the
+                        // complete tensor, not only the conserved quantities.
+                        for z in 0..=2 {
+                            for y in 0..=2 {
+                                for x in 0..=2 {
+                                    let powers = [x, y, z];
+                                    let odd = powers.iter().filter(|&&p| p == 1).count();
+                                    let gaussian = powers
+                                        .iter()
+                                        .filter(|&&p| p == 2)
+                                        .fold(1.0, |v, _| v * CS2_27);
+                                    let expected = match odd {
+                                        0 => rho * gaussian,
+                                        1 => {
+                                            0.5 * force
+                                                [powers.iter().position(|&p| p == 1).unwrap()]
+                                                * gaussian
+                                        }
+                                        _ => 0.0,
+                                    };
+                                    assert!(
+                                        (moment_about(&post, u, powers) - expected).abs()
+                                            < 5e-14 * rho,
+                                        "central moment {powers:?}; u={u:?}, force={force:?}, tau={tau}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn central_moment_force_matches_factorized_equilibrium_derivative() {
     // G0/G3: the transformed population is f = feq - S/2. For an equilibrium
     // physical population, collision must give feq + S/2 for ANY grouped rates.
     // S=(F/rho).d_u feq has the Gaussian central moments in Fei et al. (2018),
-    // equations5,18: cs²F at third order and cs⁴F at fifth, with zero stress.
+    // equations5,20--21: cs²F at third order and cs⁴F at fifth, with zero stress.
     for rho in [0.8, 1.4] {
         for u in [[0.0; 3], [0.065, -0.04, 0.025]] {
             for omega in [
