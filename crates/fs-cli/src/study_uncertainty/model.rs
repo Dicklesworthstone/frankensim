@@ -19,12 +19,12 @@ use super::{Result, artifact, fail, quoted};
 mod adjoint;
 #[path = "model/prepared.rs"]
 mod prepared;
-pub(crate) use prepared::{PreparedStudy, StudyPins};
 use crate::json_read::JsonValue as J;
 use crate::{
     CardPackKind, CardPackSet, GeometryImportLimits, RawCardPack, RawGeometryLibrary,
     SOLVE_DRIVER_VERSION, SolveRunId, SolveRunStatus,
 };
+pub(crate) use prepared::{PreparedStudy, StudyPins};
 
 pub(super) const MANIFEST_KIND: &str = "native-uncertainty-model";
 const SOURCE_KIND: &str = "native-uncertainty-source";
@@ -77,6 +77,33 @@ fn array<'a>(value: &'a J, name: &str, limit: usize) -> Result<&'a [J]> {
     }
     Ok(rows)
 }
+
+/// Project the declared decision from the ordinary multi-output QoI receipt.
+/// Other requested scalars retain their own units and evidence; neither their
+/// presence nor their order changes the uncertainty study's observation.
+fn temperature_observation(
+    receipt: &J,
+    name: &str,
+    region: &str,
+    scalar_outputs: usize,
+) -> Result<f64> {
+    let rows = array(receipt, "qoi", scalar_outputs)?;
+    let mut matching = rows.iter().filter(|row| {
+        row.str_field("name") == Some(name) && row.str_field("region") == Some(region)
+    });
+    let row = matching
+        .next()
+        .ok_or_else(|| invalid("sealed sample lacks its declared temperature observation"))?;
+    if matching.next().is_some() || row.str_field("unit") != Some("kelvin") {
+        return Err(invalid(
+            "sealed sample temperature observation is ambiguous or has wrong units",
+        ));
+    }
+    row.f64_field("value")
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .ok_or_else(|| invalid("sealed sample temperature is not finite nonnegative Kelvin"))
+}
+
 fn relative(directory: &Path, name: &str) -> Result<PathBuf> {
     if Path::new(name).is_absolute() {
         return Err(invalid(
@@ -139,7 +166,10 @@ impl Model {
         input_cap: u64,
         check: impl FnOnce(&BoundStudy, &DecodedProject) -> Result<()>,
     ) -> Result<Self> {
-        let source = read(path, (fs_project::uncertainty::MAX_SOURCE_BYTES as u64).min(input_cap))?;
+        let source = read(
+            path,
+            (fs_project::uncertainty::MAX_SOURCE_BYTES as u64).min(input_cap),
+        )?;
         let study = UncertaintyStudy::parse(utf8(&source)?).map_err(project_error)?;
         let directory = path.parent().unwrap_or_else(|| Path::new("."));
         let project_path = relative(directory, study.project_path())?;
@@ -186,7 +216,9 @@ impl Model {
         // Normalization may change pack lengths. Charge the bytes actually
         // retained by the snapshot as well as bounding the original reads.
         if model.input_bytes()? > cap {
-            return Err(invalid("normalized native-study inputs exceed the declared memory envelope"));
+            return Err(invalid(
+                "normalized native-study inputs exceed the declared memory envelope",
+            ));
         }
         Ok(model)
     }
@@ -195,8 +227,12 @@ impl Model {
         let mut used = 0;
         charge(&mut used, self.bound.study().canonical().len(), u64::MAX)?;
         charge(&mut used, self.base.canonical.len(), u64::MAX)?;
-        for bytes in &self.geometry { charge(&mut used, bytes.len(), u64::MAX)?; }
-        for pack in self.cards.iter() { charge(&mut used, pack.bytes().len(), u64::MAX)?; }
+        for bytes in &self.geometry {
+            charge(&mut used, bytes.len(), u64::MAX)?;
+        }
+        for pack in self.cards.iter() {
+            charge(&mut used, pack.bytes().len(), u64::MAX)?;
+        }
         Ok(used)
     }
 
@@ -545,10 +581,6 @@ impl Model {
             .ok_or_else(|| invalid("sealed sample lacks its QoI receipt"))?;
         let bytes = artifact(ledger, qoi_receipt, "solve-stage-receipt", 4 * 1024 * 1024)?;
         let receipt = J::parse(utf8(&bytes)?).map_err(|error| invalid(error.to_string()))?;
-        let rows = array(&receipt, "qoi", 1)?;
-        let row = rows
-            .first()
-            .ok_or_else(|| invalid("sample has no temperature observation"))?;
         let region = &project
             .spec
             .requirements
@@ -558,18 +590,18 @@ impl Model {
         if receipt.str_field("run") != Some(run.as_str())
             || receipt.path(&["lineage", "project"]).and_then(J::as_str)
                 != Some(project_hash.as_str())
-            || row.str_field("name") != Some(self.bound.study().qoi())
-            || row.str_field("region") != Some(region.as_str())
-            || row.str_field("unit") != Some("kelvin")
         {
-            return Err(invalid(
-                "sealed sample QoI name, region, unit or project differs",
-            ));
+            return Err(invalid("sealed sample QoI run or project differs"));
         }
-        let value_k = row
-            .f64_field("value")
-            .filter(|value| value.is_finite() && *value >= 0.0)
-            .ok_or_else(|| invalid("sealed sample temperature is not finite nonnegative Kelvin"))?;
+        let scalar_outputs = project
+            .spec
+            .outputs
+            .iter()
+            .flatten()
+            .filter(|output| output.kind == "scalar")
+            .count();
+        let value_k =
+            temperature_observation(&receipt, self.bound.study().qoi(), region, scalar_outputs)?;
         Ok(Sample {
             run,
             project_hash,
@@ -671,5 +703,71 @@ impl Model {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+
+    const DECISION: &str =
+        r#"{"name":"temperature-max","region":"solid","unit":"kelvin","value":301}"#;
+    const PRESSURE: &str = r#"{"name":"pressure-drop","region":"air","unit":"pascal","value":80}"#;
+    const SURFACE: &str =
+        r#"{"name":"surface-mean-temperature","region":"solid","unit":"kelvin","value":299}"#;
+
+    fn receipt(rows: &str) -> J {
+        J::parse(&format!(r#"{{"qoi":[{rows}]}}"#)).unwrap()
+    }
+
+    #[test]
+    fn g0_multi_output_projection_uses_the_exact_qoi_and_region_in_any_order() {
+        for rows in [
+            format!("{DECISION},{PRESSURE},{SURFACE}"),
+            format!("{SURFACE},{PRESSURE},{DECISION}"),
+        ] {
+            assert_eq!(
+                temperature_observation(&receipt(&rows), "temperature-max", "solid", 3)
+                    .unwrap()
+                    .to_bits(),
+                301.0_f64.to_bits()
+            );
+        }
+        assert!(temperature_observation(&receipt(SURFACE), "temperature-max", "solid", 1).is_err());
+        assert!(
+            temperature_observation(&receipt(DECISION), "temperature-max", "other", 1).is_err()
+        );
+    }
+
+    #[test]
+    fn g0_projection_refuses_duplicate_wrong_unit_and_invalid_temperature_rows() {
+        for rows in [
+            format!("{DECISION},{DECISION}"),
+            DECISION.replace("kelvin", "pascal"),
+            DECISION.replace(":301", ":-1"),
+            DECISION.replace(":301", ":null"),
+            DECISION.replace("solid", "other"),
+            String::new(),
+        ] {
+            assert!(
+                temperature_observation(&receipt(&rows), "temperature-max", "solid", 2).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn g0_projection_bounds_rows_by_the_native_scalar_declarations() {
+        assert!(
+            temperature_observation(
+                &receipt(&format!("{DECISION},{PRESSURE}")),
+                "temperature-max",
+                "solid",
+                1
+            )
+            .is_err()
+        );
+        assert!(
+            temperature_observation(&receipt(DECISION), "temperature-max", "solid", 0).is_err()
+        );
     }
 }

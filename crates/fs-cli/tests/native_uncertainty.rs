@@ -3,18 +3,18 @@
 
 #[path = "native_uncertainty/compliance.rs"]
 mod compliance;
-#[path = "native_uncertainty/fan_speed.rs"]
-mod fan_speed;
-#[path = "native_uncertainty/qmc.rs"]
-mod qmc;
 #[path = "native_uncertainty/copula.rs"]
 mod copula;
-#[path = "native_uncertainty/nominal_adjoint.rs"]
-mod nominal_adjoint;
-#[path = "native_uncertainty/sensitivity.rs"]
-mod sensitivity;
+#[path = "native_uncertainty/fan_speed.rs"]
+mod fan_speed;
 #[path = "../src/json_read.rs"]
 mod json_read;
+#[path = "native_uncertainty/nominal_adjoint.rs"]
+mod nominal_adjoint;
+#[path = "native_uncertainty/qmc.rs"]
+mod qmc;
+#[path = "native_uncertainty/sensitivity.rs"]
+mod sensitivity;
 
 use json_read::JsonValue;
 use std::path::{Path, PathBuf};
@@ -187,7 +187,11 @@ impl Fixture {
         self.solve_project(ordinal, &project)
     }
 
-    fn solve_project(&self, ordinal: usize, project: &fs_project::ProjectSpec) -> (String, String, f64) {
+    fn solve_project(
+        &self,
+        ordinal: usize,
+        project: &fs_project::ProjectSpec,
+    ) -> (String, String, f64) {
         let source = fs_project::print_sexpr(project).unwrap();
         let project_hash = fs_project::parse_sexpr(&source).unwrap().hash().to_hex();
         let project_path = self.dir.join(format!("independent-{ordinal}.fsim"));
@@ -392,5 +396,125 @@ fn g4_native_child_refusal_cannot_be_counted_skipped_or_resumed_as_success() {
     assert_eq!(
         repeated, result,
         "a failed physical sample cannot be silently retried or skipped"
+    );
+}
+
+#[test]
+fn g1_g4_g5_multi_output_children_keep_the_decision_calibration_and_recovery() {
+    let fixture = || {
+        let mut fixture = Fixture::new();
+        let outputs = fixture.project.outputs.as_mut().unwrap();
+        outputs.insert(
+            0,
+            fs_project::spec::OutputRequest {
+                name: "pressure-drop".into(),
+                kind: "scalar".into(),
+                region: None,
+            },
+        );
+        outputs.push(fs_project::spec::OutputRequest {
+            name: "fan-power".into(),
+            kind: "scalar".into(),
+            region: None,
+        });
+        fixture.project.cooling.as_mut().unwrap().fan_efficiency =
+            Some(fs_project::spec::FanEfficiency {
+                total: 0.5,
+                half_width: 0.05,
+                source: "native uncertainty integration fixture".into(),
+                source_id: "native-uncertainty-fan-efficiency-v1".into(),
+            });
+        std::fs::write(
+            fixture.sources.join("cooling-reference.fsim"),
+            fs_project::print_sexpr(&fixture.project).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            fixture.sources.join("study.fsim"),
+            STUDY.replace(
+                ":version 1",
+                ":version 3 :mean-control (nominal-adjoint :max-solves 1)",
+            ),
+        )
+        .unwrap();
+        fixture
+    };
+
+    let complete = fixture();
+    let result = complete.study(None, fs_cli::exit::SUCCESS);
+    let (expected, report) = complete.report(&result);
+    let control = report.get("mean_control").unwrap();
+    assert_eq!(
+        control.f64_field("probe_solves_completed"),
+        Some(1.0),
+        "nominal calibration consumes the same multi-output child projection"
+    );
+    assert!(
+        control
+            .get("estimate")
+            .unwrap()
+            .f64_field("variance_ratio")
+            .unwrap()
+            < 1e-4
+    );
+    assert_eq!(rows(&report).len(), 4);
+    for row in rows(&report) {
+        let receipt = json_artifact(&complete.ledger, row.str_field("qoi_receipt").unwrap());
+        let children = receipt.get("qoi").unwrap().as_array().unwrap();
+        assert_eq!(
+            children.len(),
+            3,
+            "secondary engineering outputs must remain retained"
+        );
+        let temperature = children
+            .iter()
+            .find(|qoi| {
+                qoi.str_field("name") == Some("temperature-max")
+                    && qoi.str_field("region") == Some("air")
+            })
+            .unwrap();
+        assert_eq!(temperature.str_field("unit"), Some("kelvin"));
+        assert_eq!(
+            row.f64_field("value_k").unwrap().to_bits(),
+            temperature.f64_field("value").unwrap().to_bits()
+        );
+        for name in ["pressure-drop", "fan-power"] {
+            let other = children
+                .iter()
+                .find(|qoi| qoi.str_field("name") == Some(name))
+                .unwrap();
+            assert!(other.f64_field("value").unwrap() > 0.0);
+            assert_ne!(other.str_field("unit"), Some("kelvin"));
+        }
+    }
+
+    let resumed = fixture();
+    let prefix = resumed.study(Some("2"), fs_cli::exit::BUDGET);
+    let (_, prefix_report) = resumed.report(&prefix);
+    assert_eq!(
+        prefix_report.f64_field("samples_evaluated"),
+        Some(1.0),
+        "the prefix retains one calibration and one physical sample"
+    );
+    assert_eq!(rows(&prefix_report), &rows(&report)[..1]);
+    std::fs::rename(&resumed.sources, resumed.dir.join("relocated-sources")).unwrap();
+    let finished = resumed.resume(
+        prefix.str_field("run").unwrap(),
+        None,
+        fs_cli::exit::SUCCESS,
+    );
+    let (actual, _) = resumed.report(&finished);
+    assert_eq!(
+        actual, expected,
+        "recovered multi-output samples and nominal calibration reproduce the complete report"
+    );
+    assert_eq!(
+        resumed.resume(
+            finished.str_field("run").unwrap(),
+            None,
+            fs_cli::exit::SUCCESS
+        ),
+        finished,
+        "completed recovery reuses retained multi-output evidence"
     );
 }
