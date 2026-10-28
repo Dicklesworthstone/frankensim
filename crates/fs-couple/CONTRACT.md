@@ -9432,3 +9432,61 @@ and resistivity thermal feedback at the same accepted endpoint, refinement
 against independent continuous coupled equations, simultaneous bias/winding
 orientation reversal, and source/budget/cancellation rollback. Synthetic cards
 qualify this numerical/physical composition, not empirical device accuracy.
+
+
+## Atmospheric source-gas rigid flight with explicit propulsion mode
+
+`rocket_blowdown::environment::spherical::SphericalStandardAtmosphere` caches
+the original lower USSA1976 profile and an independently declared central
+gravity source. It samples geometric altitude at the actual inertial point
+and assigns local bulk air velocity `Omega cross (position-center) + wind`.
+Radius, center, gravitational parameter, rotation and background wind are
+explicit. The profile's effective hydrostatic reference gravity is not silently
+used as the vehicle gravity law. No fictitious Coriolis/centrifugal forces are
+added to inertial dynamics. Air outside the source's 0..80 km geometric domain
+refuses; central gravity remains independently usable outside that air domain.
+This spherical rigidly rotating reference is not weather, terrain, oblateness
+or a self-consistent rotating hydrostatic atmosphere.
+
+`rocket_blowdown::flight::advance_atmospheric_rocket` composes that environment
+with the original source-gas/rigid vehicle. It resolves separate actual body
+points for aerodynamic loading and nozzle ambient pressure, native angular
+velocity at the aerodynamic point, and gravity/potential at the COM. The caller's
+pure/repeatable drag-coefficient law receives actual Mach, Reynolds and body-
+relative flow; the same force supplies its matching body torque. No empirical
+coefficient, lift derivative or source extrapolation is invented.
+
+One immutable half-step predicts the midpoint environment. The full accepted
+interval then restarts from the original gas and vehicle under those midpoint
+loads; trial propellant is never subtracted twice. The original gas midpoint
+quadrature and bounded native attitude substeps retain their own controls and
+reports. Final atmosphere and coefficient-domain admission precede publication.
+The candidate retains original accepted gas/mechanical reports, midpoint loads
+and independent endpoint diagnostics. Powered and explicit closed-valve modes
+are distinct, and source/nozzle failure never silently turns into coasting.
+
+This smooth composition is second order, with physical outer timestep and
+native substep controls; it does not locate impact, cutoff, staging or source-
+domain events. The caller splits intervals at known mode changes and refines
+changing flow regimes. The underlying fixed common COM/principal axes, declared
+diagonal exhaust angular flux, ideal frozen nozzle and source-domain limits
+remain in force. General internal-flow/transverse outlet linear momentum,
+slosh, aerodynamic heating and a full exhaust/world-energy audit are not inferred.
+
+The combined native environment/rigid/flight suite passed all 19 tests, including
+rotating-air frame covariance, point-velocity drag/torque, mass and scalar-impulse
+closure, source/cancellation atomicity and measured second-order coast
+position/velocity with changing drag and gravity. Both native atmospheric
+example tests passed. The complete 2 s manufactured example ran at 0.01 s and
+0.005 s outer timesteps, with 1 s powered then 1 s closed valve. Coarse-run total
+mass residual was -1.084e-18 kg, and refined final altitude differed by about
+4.55e-5 m. Those fixture results are not calibrated vehicle performance or a
+full-workspace validation claim.
+
+`cargo run -p fs-couple --example atmospheric_rocket --
+crates/fs-material/examples/material_gas_spring/mixture-a.tsv 1000 1000000`
+exercises the complete path and writes time-labelled CSV diagnostics. Its
+README specifies manufactured Cd, spherical gravity/rotation choices, uniform
+tank-volume/inertia geometry, prescribed valve schedule, source validity and
+model boundaries. The final gas inventory is unchanged throughout closed-valve
+coast while native motion, gravity and drag continue.

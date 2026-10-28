@@ -6,6 +6,9 @@
 //! A supplied drag coefficient is an explicit caller model, not a hidden air
 //! or rocket preset. Mach/Reynolds numbers are available to its owning law.
 
+/// Spherical source-backed atmosphere, inertial rotation wind and central gravity.
+pub mod spherical;
+
 use fs_material::{MaterialError, fluid_transport::FluidTransport, gas::GasState};
 use fs_mbd::{UnitQuaternion, Vec3};
 

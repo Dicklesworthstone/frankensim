@@ -22,6 +22,10 @@ pub mod environment;
 #[path = "rocket_blowdown/rigid.rs"]
 pub mod rigid;
 
+/// Midpoint source atmosphere, aerodynamic loads and gravity on the gas/rigid vehicle.
+#[path = "rocket_blowdown/flight.rs"]
+pub mod flight;
+
 use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::blowdown::{
     GasBlowdownError, GasBlowdownStep, RocketBlowdownSolve,
