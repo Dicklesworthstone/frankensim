@@ -1,0 +1,184 @@
+frankensim.matdb-source.v1
+observation	pu65	Changchun Hongda Sponge Manufacturing flexible polyurethane seat foam; open cells, TDI/polyether chemistry, CO2 blowing; original 80 x 80 x 80 mm block	Deng et al. 2025 Table 1 density and Table 3 absolute axial Prony coefficients; Eq. 12 E(t)=E_inf+sum(E_j exp(-t/tau_j)); dynamic storage/loss fit, not a shear or normalized Prony spectrum	Density is reported as 65 kg/m3. Five relaxation times were prescribed and six axial moduli fitted to dynamic storage/loss measurements at 20 frequencies, 1..20 Hz in 1 Hz steps, with 25 percent precompression and 0.25 m/s2 peak-to-peak sinusoidal acceleration; at least 20 cycles per frequency. Sections 2.2-2.3 use engineering strain referenced to ORIGINAL 80 mm height and nominal stress referenced to ORIGINAL 80 x 80 mm area; the compressed 60 mm height is not the reference length. The Section 2.2 preconditioning compresses by 60 mm at 120 mm/min, releases at that speed, and rests 300 s; the static test then compresses to 75 percent at 120 mm/min with a 2 s hold before decompression. Temperature, moisture and pressure are unstated. The frequency coordinate records the fitting context, not a validated transient envelope. Time-domain relaxation, creep, recovery and cyclic histories from this isolated spectrum are explicit fitted-model predictions, without independent measured transient reference curves. The paper's complete finite-strain model additionally uses Hyperfoam and Rayleigh damping; those coefficients and raw loading/unloading histories are not supplied here. No nonlinear densification, permanent set, failure, air-flow dissipation, thermal or acoustic law is inferred. Parameter uncertainty is unstated, including preset relaxation times.
+scalar	density	pu65	density	65	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_sample_hongda_pu65_deng2025	1	1	1
+validity	density	source_test_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_pressure_known	0	0	1
+validity	density	source_fitted_spectrum_reference	1	1	1
+validity	density	source_time_domain_validation_known	0	0	1
+validity	density	source_precompression	0.25	0.25	1
+validity	density	source_original_height	0.08	0.08	m
+validity	density	source_original_area	0.0064	0.0064	m2
+validity	density	source_frequency	1	20	Hz
+validity	density	source_acceleration_peak_to_peak	0.25	0.25	m/s2
+validity	density	source_preconditioning_section2_2	1	1	1
+scalar	prony-branch-count	pu65	prony_branch_count	5	1	constant
+uncertainty	prony-branch-count	unstated	-	-	-	-
+validity	prony-branch-count	source_sample_hongda_pu65_deng2025	1	1	1
+validity	prony-branch-count	source_test_temperature_known	0	0	1
+validity	prony-branch-count	source_moisture_condition_known	0	0	1
+validity	prony-branch-count	source_pressure_known	0	0	1
+validity	prony-branch-count	source_fitted_spectrum_reference	1	1	1
+validity	prony-branch-count	source_time_domain_validation_known	0	0	1
+validity	prony-branch-count	source_precompression	0.25	0.25	1
+validity	prony-branch-count	source_original_height	0.08	0.08	m
+validity	prony-branch-count	source_original_area	0.0064	0.0064	m2
+validity	prony-branch-count	source_frequency	1	20	Hz
+validity	prony-branch-count	source_acceleration_peak_to_peak	0.25	0.25	m/s2
+validity	prony-branch-count	source_preconditioning_section2_2	1	1	1
+scalar	prony-equilibrium-modulus	pu65	prony_equilibrium_modulus	3.05	kPa	constant
+uncertainty	prony-equilibrium-modulus	unstated	-	-	-	-
+validity	prony-equilibrium-modulus	source_sample_hongda_pu65_deng2025	1	1	1
+validity	prony-equilibrium-modulus	source_test_temperature_known	0	0	1
+validity	prony-equilibrium-modulus	source_moisture_condition_known	0	0	1
+validity	prony-equilibrium-modulus	source_pressure_known	0	0	1
+validity	prony-equilibrium-modulus	source_fitted_spectrum_reference	1	1	1
+validity	prony-equilibrium-modulus	source_time_domain_validation_known	0	0	1
+validity	prony-equilibrium-modulus	source_precompression	0.25	0.25	1
+validity	prony-equilibrium-modulus	source_original_height	0.08	0.08	m
+validity	prony-equilibrium-modulus	source_original_area	0.0064	0.0064	m2
+validity	prony-equilibrium-modulus	source_frequency	1	20	Hz
+validity	prony-equilibrium-modulus	source_acceleration_peak_to_peak	0.25	0.25	m/s2
+validity	prony-equilibrium-modulus	source_preconditioning_section2_2	1	1	1
+scalar	prony-modulus-1	pu65	prony_modulus_1	23.9	kPa	constant
+uncertainty	prony-modulus-1	unstated	-	-	-	-
+validity	prony-modulus-1	source_sample_hongda_pu65_deng2025	1	1	1
+validity	prony-modulus-1	source_test_temperature_known	0	0	1
+validity	prony-modulus-1	source_moisture_condition_known	0	0	1
+validity	prony-modulus-1	source_pressure_known	0	0	1
+validity	prony-modulus-1	source_fitted_spectrum_reference	1	1	1
+validity	prony-modulus-1	source_time_domain_validation_known	0	0	1
+validity	prony-modulus-1	source_precompression	0.25	0.25	1
+validity	prony-modulus-1	source_original_height	0.08	0.08	m
+validity	prony-modulus-1	source_original_area	0.0064	0.0064	m2
+validity	prony-modulus-1	source_frequency	1	20	Hz
+validity	prony-modulus-1	source_acceleration_peak_to_peak	0.25	0.25	m/s2
+validity	prony-modulus-1	source_preconditioning_section2_2	1	1	1
+scalar	prony-relaxation-time-1	pu65	prony_relaxation_time_1	0.01	s	constant
+uncertainty	prony-relaxation-time-1	unstated	-	-	-	-
+validity	prony-relaxation-time-1	source_sample_hongda_pu65_deng2025	1	1	1
+validity	prony-relaxation-time-1	source_test_temperature_known	0	0	1
+validity	prony-relaxation-time-1	source_moisture_condition_known	0	0	1
+validity	prony-relaxation-time-1	source_pressure_known	0	0	1
+validity	prony-relaxation-time-1	source_fitted_spectrum_reference	1	1	1
+validity	prony-relaxation-time-1	source_time_domain_validation_known	0	0	1
+validity	prony-relaxation-time-1	source_precompression	0.25	0.25	1
+validity	prony-relaxation-time-1	source_original_height	0.08	0.08	m
+validity	prony-relaxation-time-1	source_original_area	0.0064	0.0064	m2
+validity	prony-relaxation-time-1	source_frequency	1	20	Hz
+validity	prony-relaxation-time-1	source_acceleration_peak_to_peak	0.25	0.25	m/s2
+validity	prony-relaxation-time-1	source_preconditioning_section2_2	1	1	1
+scalar	prony-modulus-2	pu65	prony_modulus_2	19.7	kPa	constant
+uncertainty	prony-modulus-2	unstated	-	-	-	-
+validity	prony-modulus-2	source_sample_hongda_pu65_deng2025	1	1	1
+validity	prony-modulus-2	source_test_temperature_known	0	0	1
+validity	prony-modulus-2	source_moisture_condition_known	0	0	1
+validity	prony-modulus-2	source_pressure_known	0	0	1
+validity	prony-modulus-2	source_fitted_spectrum_reference	1	1	1
+validity	prony-modulus-2	source_time_domain_validation_known	0	0	1
+validity	prony-modulus-2	source_precompression	0.25	0.25	1
+validity	prony-modulus-2	source_original_height	0.08	0.08	m
+validity	prony-modulus-2	source_original_area	0.0064	0.0064	m2
+validity	prony-modulus-2	source_frequency	1	20	Hz
+validity	prony-modulus-2	source_acceleration_peak_to_peak	0.25	0.25	m/s2
+validity	prony-modulus-2	source_preconditioning_section2_2	1	1	1
+scalar	prony-relaxation-time-2	pu65	prony_relaxation_time_2	0.1	s	constant
+uncertainty	prony-relaxation-time-2	unstated	-	-	-	-
+validity	prony-relaxation-time-2	source_sample_hongda_pu65_deng2025	1	1	1
+validity	prony-relaxation-time-2	source_test_temperature_known	0	0	1
+validity	prony-relaxation-time-2	source_moisture_condition_known	0	0	1
+validity	prony-relaxation-time-2	source_pressure_known	0	0	1
+validity	prony-relaxation-time-2	source_fitted_spectrum_reference	1	1	1
+validity	prony-relaxation-time-2	source_time_domain_validation_known	0	0	1
+validity	prony-relaxation-time-2	source_precompression	0.25	0.25	1
+validity	prony-relaxation-time-2	source_original_height	0.08	0.08	m
+validity	prony-relaxation-time-2	source_original_area	0.0064	0.0064	m2
+validity	prony-relaxation-time-2	source_frequency	1	20	Hz
+validity	prony-relaxation-time-2	source_acceleration_peak_to_peak	0.25	0.25	m/s2
+validity	prony-relaxation-time-2	source_preconditioning_section2_2	1	1	1
+scalar	prony-modulus-3	pu65	prony_modulus_3	8.99	kPa	constant
+uncertainty	prony-modulus-3	unstated	-	-	-	-
+validity	prony-modulus-3	source_sample_hongda_pu65_deng2025	1	1	1
+validity	prony-modulus-3	source_test_temperature_known	0	0	1
+validity	prony-modulus-3	source_moisture_condition_known	0	0	1
+validity	prony-modulus-3	source_pressure_known	0	0	1
+validity	prony-modulus-3	source_fitted_spectrum_reference	1	1	1
+validity	prony-modulus-3	source_time_domain_validation_known	0	0	1
+validity	prony-modulus-3	source_precompression	0.25	0.25	1
+validity	prony-modulus-3	source_original_height	0.08	0.08	m
+validity	prony-modulus-3	source_original_area	0.0064	0.0064	m2
+validity	prony-modulus-3	source_frequency	1	20	Hz
+validity	prony-modulus-3	source_acceleration_peak_to_peak	0.25	0.25	m/s2
+validity	prony-modulus-3	source_preconditioning_section2_2	1	1	1
+scalar	prony-relaxation-time-3	pu65	prony_relaxation_time_3	1	s	constant
+uncertainty	prony-relaxation-time-3	unstated	-	-	-	-
+validity	prony-relaxation-time-3	source_sample_hongda_pu65_deng2025	1	1	1
+validity	prony-relaxation-time-3	source_test_temperature_known	0	0	1
+validity	prony-relaxation-time-3	source_moisture_condition_known	0	0	1
+validity	prony-relaxation-time-3	source_pressure_known	0	0	1
+validity	prony-relaxation-time-3	source_fitted_spectrum_reference	1	1	1
+validity	prony-relaxation-time-3	source_time_domain_validation_known	0	0	1
+validity	prony-relaxation-time-3	source_precompression	0.25	0.25	1
+validity	prony-relaxation-time-3	source_original_height	0.08	0.08	m
+validity	prony-relaxation-time-3	source_original_area	0.0064	0.0064	m2
+validity	prony-relaxation-time-3	source_frequency	1	20	Hz
+validity	prony-relaxation-time-3	source_acceleration_peak_to_peak	0.25	0.25	m/s2
+validity	prony-relaxation-time-3	source_preconditioning_section2_2	1	1	1
+scalar	prony-modulus-4	pu65	prony_modulus_4	12.4	kPa	constant
+uncertainty	prony-modulus-4	unstated	-	-	-	-
+validity	prony-modulus-4	source_sample_hongda_pu65_deng2025	1	1	1
+validity	prony-modulus-4	source_test_temperature_known	0	0	1
+validity	prony-modulus-4	source_moisture_condition_known	0	0	1
+validity	prony-modulus-4	source_pressure_known	0	0	1
+validity	prony-modulus-4	source_fitted_spectrum_reference	1	1	1
+validity	prony-modulus-4	source_time_domain_validation_known	0	0	1
+validity	prony-modulus-4	source_precompression	0.25	0.25	1
+validity	prony-modulus-4	source_original_height	0.08	0.08	m
+validity	prony-modulus-4	source_original_area	0.0064	0.0064	m2
+validity	prony-modulus-4	source_frequency	1	20	Hz
+validity	prony-modulus-4	source_acceleration_peak_to_peak	0.25	0.25	m/s2
+validity	prony-modulus-4	source_preconditioning_section2_2	1	1	1
+scalar	prony-relaxation-time-4	pu65	prony_relaxation_time_4	10	s	constant
+uncertainty	prony-relaxation-time-4	unstated	-	-	-	-
+validity	prony-relaxation-time-4	source_sample_hongda_pu65_deng2025	1	1	1
+validity	prony-relaxation-time-4	source_test_temperature_known	0	0	1
+validity	prony-relaxation-time-4	source_moisture_condition_known	0	0	1
+validity	prony-relaxation-time-4	source_pressure_known	0	0	1
+validity	prony-relaxation-time-4	source_fitted_spectrum_reference	1	1	1
+validity	prony-relaxation-time-4	source_time_domain_validation_known	0	0	1
+validity	prony-relaxation-time-4	source_precompression	0.25	0.25	1
+validity	prony-relaxation-time-4	source_original_height	0.08	0.08	m
+validity	prony-relaxation-time-4	source_original_area	0.0064	0.0064	m2
+validity	prony-relaxation-time-4	source_frequency	1	20	Hz
+validity	prony-relaxation-time-4	source_acceleration_peak_to_peak	0.25	0.25	m/s2
+validity	prony-relaxation-time-4	source_preconditioning_section2_2	1	1	1
+scalar	prony-modulus-5	pu65	prony_modulus_5	8.14	kPa	constant
+uncertainty	prony-modulus-5	unstated	-	-	-	-
+validity	prony-modulus-5	source_sample_hongda_pu65_deng2025	1	1	1
+validity	prony-modulus-5	source_test_temperature_known	0	0	1
+validity	prony-modulus-5	source_moisture_condition_known	0	0	1
+validity	prony-modulus-5	source_pressure_known	0	0	1
+validity	prony-modulus-5	source_fitted_spectrum_reference	1	1	1
+validity	prony-modulus-5	source_time_domain_validation_known	0	0	1
+validity	prony-modulus-5	source_precompression	0.25	0.25	1
+validity	prony-modulus-5	source_original_height	0.08	0.08	m
+validity	prony-modulus-5	source_original_area	0.0064	0.0064	m2
+validity	prony-modulus-5	source_frequency	1	20	Hz
+validity	prony-modulus-5	source_acceleration_peak_to_peak	0.25	0.25	m/s2
+validity	prony-modulus-5	source_preconditioning_section2_2	1	1	1
+scalar	prony-relaxation-time-5	pu65	prony_relaxation_time_5	100	s	constant
+uncertainty	prony-relaxation-time-5	unstated	-	-	-	-
+validity	prony-relaxation-time-5	source_sample_hongda_pu65_deng2025	1	1	1
+validity	prony-relaxation-time-5	source_test_temperature_known	0	0	1
+validity	prony-relaxation-time-5	source_moisture_condition_known	0	0	1
+validity	prony-relaxation-time-5	source_pressure_known	0	0	1
+validity	prony-relaxation-time-5	source_fitted_spectrum_reference	1	1	1
+validity	prony-relaxation-time-5	source_time_domain_validation_known	0	0	1
+validity	prony-relaxation-time-5	source_precompression	0.25	0.25	1
+validity	prony-relaxation-time-5	source_original_height	0.08	0.08	m
+validity	prony-relaxation-time-5	source_original_area	0.0064	0.0064	m2
+validity	prony-relaxation-time-5	source_frequency	1	20	Hz
+validity	prony-relaxation-time-5	source_acceleration_peak_to_peak	0.25	0.25	m/s2
+validity	prony-relaxation-time-5	source_preconditioning_section2_2	1	1	1

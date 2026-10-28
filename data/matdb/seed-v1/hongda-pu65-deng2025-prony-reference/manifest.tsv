@@ -1,0 +1,31 @@
+frankensim.matdb-manifest.v3
+pack_id	hongda-pu65-deng2025-prony-reference
+redistribution	permitted	CC BY 4.0 primary research; attributed numerical facts with original scope notes and SI conversions
+citation	Deng J. et al., A Comprehensive Method with Verification for Characterizing the Visco-Hyperelastic Material Model of Polyurethane Foam of Passenger Car Seats, Materials 18(15):3526 (2025), Sections 2.1-2.3 and 3.4, Tables 1 and 3, Eq. 12; https://doi.org/10.3390/ma18153526 ; https://pmc.ncbi.nlm.nih.gov/articles/PMC12348320/ ; accessed 2026-10-28
+license	CC-BY-4.0
+source	hongda-pu65-deng2025-prony-reference	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	prony_branch_count	prony-branch-count	dimensional
+property	prony_equilibrium_modulus	prony-equilibrium-modulus	dimensional
+property	prony_modulus_1	prony-modulus-1	dimensional
+property	prony_relaxation_time_1	prony-relaxation-time-1	dimensional
+property	prony_modulus_2	prony-modulus-2	dimensional
+property	prony_relaxation_time_2	prony-relaxation-time-2	dimensional
+property	prony_modulus_3	prony-modulus-3	dimensional
+property	prony_relaxation_time_3	prony-relaxation-time-3	dimensional
+property	prony_modulus_4	prony-modulus-4	dimensional
+property	prony_relaxation_time_4	prony-relaxation-time-4	dimensional
+property	prony_modulus_5	prony-modulus-5	dimensional
+property	prony_relaxation_time_5	prony-relaxation-time-5	dimensional
+axis	source_sample_hongda_pu65_deng2025	source-sample-hongda-pu65-deng2025	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	source_fitted_spectrum_reference	source-fitted-spectrum-reference	dimensional
+axis	source_time_domain_validation_known	source-time-domain-validation-known	dimensional
+axis	source_precompression	source-precompression	dimensional
+axis	source_original_height	source-original-height	dimensional
+axis	source_original_area	source-original-area	dimensional
+axis	source_frequency	source-frequency	cyclic-frequency
+axis	source_acceleration_peak_to_peak	source-acceleration-peak-to-peak	dimensional
+axis	source_preconditioning_section2_2	source-preconditioning-section2-2	dimensional

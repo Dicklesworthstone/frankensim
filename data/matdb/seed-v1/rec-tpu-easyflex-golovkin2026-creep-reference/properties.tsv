@@ -1,0 +1,188 @@
+frankensim.matdb-source.v1
+observation	creep-fit	REC TPU EasyFlex, extrusion-printed solid 100 percent infill cylinder, 20 mm original height and 20 mm original diameter; not a cellular foam	Golovkin et al. 2026 Section 3.2 creep-fit generalized Maxwell coefficients, interpreted using the parallel spring/dashpot topology in Section 2.2.3 and its constant-strain-rate Eq. 10	Creality Ender V2; nozzle 230 C, build plate 80 C, layer 0.2 mm, printing speed 80 mm/s, 100 percent infill. These are fitted coefficients rather than independently measured axial moduli; main-text E1=7.3 MPa is retained (the supplement initial-guess table says 7.31 but its derived creep row says 7.30). E_inf=25.9 MPa, E1=7.3 MPa, E2=18.8 MPa, eta1=1291 MPa*s, eta2=53.9 MPa*s. The two relaxation times are pack-authored eta/E conversions under the explicitly selected canonical parallel-Maxwell interpretation, not additional measured relaxation times. Creep and stress-relaxation experiments lasted 6000 s at room temperature, whose numerical value is not stated for these experiments. The paper calls the levels percentages of maximum stress in Section 2.1 but percentages of strain elsewhere; no unique applied stress/strain is inferred. Density, moisture, pressure and parameter confidence bounds are absent. The printed Eq. 9 is dimensionally inconsistent and the stated initial derivatives in Eqs. 11-12 are not those of an ideal canonical stress/strain step; those equations and the separate four-term inverse-fit spectrum are not imported. The source reports time-domain experiments, but that does not independently validate this canonical implementation. No fitted coefficient averaging, generic TPU substitution, nonlinear finite-strain, permanent set, thermal, lateral-strain or failure law is supplied.
+observation	cycle-work	The same REC TPU EasyFlex printed cylinders, first 0..15 percent engineering-compression cycle, three specimens at each testing speed	Golovkin et al. 2026 Table 3 q_EXP and Eq. 14; INSTRON 5982; 23 C; crosshead speeds 0.12, 1.2, 12, 60 and 120 mm/min	Measured first-cycle stress-strain loop work per ORIGINAL volume. Printed q_EXP values [11.9,13.4,15.9,19.4,21.8] in 10^-2 mJ/mm3 convert to [119000,134000,159000,194000,218000] J/m3; energy density has pressure dimensions. The speed axis stores m/s, not strain rate. The source calls loop area dissipation, but a model can retain recoverable energy at the end of its first zero-strain cycle; this property is work, not directly measured heat. The source's approximately 20 percent GM error uses strain paths reconstructed from experimental stress-time curves with rate-dependent unloading conditions in supplementary Section 1.3, not a generic prescribed triangular strain history. Only the experimental q_EXP column is imported; model-vs-measurement residuals must be recomputed honestly. These five tabulated observations do not authorize interpolation, other cycles, temperature shifts, peak strains, loading paths or extrapolation. Measurement uncertainty is unstated.
+observation	cycle-modulus	The same REC TPU EasyFlex printed cylinders, initial loading of the first 0..15 percent engineering-compression cycle, three specimens at each testing speed	Golovkin et al. 2026 supplementary Table S1 Elastic moduli at different testing rates, Section 2.1 Samples fabrication and mechanical testing; initial engineering stress-strain slope at 23 C	The supplement explicitly describes mean and standard deviation. Ascending speeds 0.12,1.2,12,60,120 mm/min give tangent means [33.4,37.5,41.7,45.4,49.6] MPa and reported specimen SDs [1.3,1.7,1.7,0.6,1.7] MPa. SDs are retained as a separate measured scatter property, not silently converted into confidence intervals or uncertainty on fitted Maxwell parameters. Five discrete points only; no continuous rate law, isotropic elastic identity or fit is inferred.
+scalar	prony-branch-count	creep-fit	prony_branch_count	2	1	constant
+uncertainty	prony-branch-count	unstated	-	-	-	-
+validity	prony-branch-count	source_sample_rec_tpu_easyflex_golovkin2026	1	1	1
+validity	prony-branch-count	source_density_known	0	0	1
+validity	prony-branch-count	source_infill_fraction	1	1	1
+validity	prony-branch-count	source_original_height	0.02	0.02	m
+validity	prony-branch-count	source_original_diameter	0.02	0.02	m
+validity	prony-branch-count	source_moisture_condition_known	0	0	1
+validity	prony-branch-count	source_pressure_known	0	0	1
+validity	prony-branch-count	source_fitted_spectrum_reference	1	1	1
+validity	prony-branch-count	source_fit_method_creep	1	1	1
+validity	prony-branch-count	source_canonical_parallel_maxwell_interpretation	1	1	1
+validity	prony-branch-count	source_time_domain_validation_known	0	0	1
+validity	prony-branch-count	source_time_domain_experiments_reported	1	1	1
+validity	prony-branch-count	source_loading_level_definition_ambiguous	1	1	1
+validity	prony-branch-count	source_test_temperature_known	0	0	1
+validity	prony-branch-count	source_test_duration	6000	6000	s
+scalar	prony-equilibrium-modulus	creep-fit	prony_equilibrium_modulus	25.9	MPa	constant
+uncertainty	prony-equilibrium-modulus	unstated	-	-	-	-
+validity	prony-equilibrium-modulus	source_sample_rec_tpu_easyflex_golovkin2026	1	1	1
+validity	prony-equilibrium-modulus	source_density_known	0	0	1
+validity	prony-equilibrium-modulus	source_infill_fraction	1	1	1
+validity	prony-equilibrium-modulus	source_original_height	0.02	0.02	m
+validity	prony-equilibrium-modulus	source_original_diameter	0.02	0.02	m
+validity	prony-equilibrium-modulus	source_moisture_condition_known	0	0	1
+validity	prony-equilibrium-modulus	source_pressure_known	0	0	1
+validity	prony-equilibrium-modulus	source_fitted_spectrum_reference	1	1	1
+validity	prony-equilibrium-modulus	source_fit_method_creep	1	1	1
+validity	prony-equilibrium-modulus	source_canonical_parallel_maxwell_interpretation	1	1	1
+validity	prony-equilibrium-modulus	source_time_domain_validation_known	0	0	1
+validity	prony-equilibrium-modulus	source_time_domain_experiments_reported	1	1	1
+validity	prony-equilibrium-modulus	source_loading_level_definition_ambiguous	1	1	1
+validity	prony-equilibrium-modulus	source_test_temperature_known	0	0	1
+validity	prony-equilibrium-modulus	source_test_duration	6000	6000	s
+scalar	prony-modulus-1	creep-fit	prony_modulus_1	7.3	MPa	constant
+uncertainty	prony-modulus-1	unstated	-	-	-	-
+validity	prony-modulus-1	source_sample_rec_tpu_easyflex_golovkin2026	1	1	1
+validity	prony-modulus-1	source_density_known	0	0	1
+validity	prony-modulus-1	source_infill_fraction	1	1	1
+validity	prony-modulus-1	source_original_height	0.02	0.02	m
+validity	prony-modulus-1	source_original_diameter	0.02	0.02	m
+validity	prony-modulus-1	source_moisture_condition_known	0	0	1
+validity	prony-modulus-1	source_pressure_known	0	0	1
+validity	prony-modulus-1	source_fitted_spectrum_reference	1	1	1
+validity	prony-modulus-1	source_fit_method_creep	1	1	1
+validity	prony-modulus-1	source_canonical_parallel_maxwell_interpretation	1	1	1
+validity	prony-modulus-1	source_time_domain_validation_known	0	0	1
+validity	prony-modulus-1	source_time_domain_experiments_reported	1	1	1
+validity	prony-modulus-1	source_loading_level_definition_ambiguous	1	1	1
+validity	prony-modulus-1	source_test_temperature_known	0	0	1
+validity	prony-modulus-1	source_test_duration	6000	6000	s
+scalar	prony-relaxation-time-1	creep-fit	prony_relaxation_time_1	176.84931506849315	s	constant
+uncertainty	prony-relaxation-time-1	unstated	-	-	-	-
+validity	prony-relaxation-time-1	source_sample_rec_tpu_easyflex_golovkin2026	1	1	1
+validity	prony-relaxation-time-1	source_density_known	0	0	1
+validity	prony-relaxation-time-1	source_infill_fraction	1	1	1
+validity	prony-relaxation-time-1	source_original_height	0.02	0.02	m
+validity	prony-relaxation-time-1	source_original_diameter	0.02	0.02	m
+validity	prony-relaxation-time-1	source_moisture_condition_known	0	0	1
+validity	prony-relaxation-time-1	source_pressure_known	0	0	1
+validity	prony-relaxation-time-1	source_fitted_spectrum_reference	1	1	1
+validity	prony-relaxation-time-1	source_fit_method_creep	1	1	1
+validity	prony-relaxation-time-1	source_canonical_parallel_maxwell_interpretation	1	1	1
+validity	prony-relaxation-time-1	source_time_domain_validation_known	0	0	1
+validity	prony-relaxation-time-1	source_time_domain_experiments_reported	1	1	1
+validity	prony-relaxation-time-1	source_loading_level_definition_ambiguous	1	1	1
+validity	prony-relaxation-time-1	source_test_temperature_known	0	0	1
+validity	prony-relaxation-time-1	source_test_duration	6000	6000	s
+scalar	prony-modulus-2	creep-fit	prony_modulus_2	18.8	MPa	constant
+uncertainty	prony-modulus-2	unstated	-	-	-	-
+validity	prony-modulus-2	source_sample_rec_tpu_easyflex_golovkin2026	1	1	1
+validity	prony-modulus-2	source_density_known	0	0	1
+validity	prony-modulus-2	source_infill_fraction	1	1	1
+validity	prony-modulus-2	source_original_height	0.02	0.02	m
+validity	prony-modulus-2	source_original_diameter	0.02	0.02	m
+validity	prony-modulus-2	source_moisture_condition_known	0	0	1
+validity	prony-modulus-2	source_pressure_known	0	0	1
+validity	prony-modulus-2	source_fitted_spectrum_reference	1	1	1
+validity	prony-modulus-2	source_fit_method_creep	1	1	1
+validity	prony-modulus-2	source_canonical_parallel_maxwell_interpretation	1	1	1
+validity	prony-modulus-2	source_time_domain_validation_known	0	0	1
+validity	prony-modulus-2	source_time_domain_experiments_reported	1	1	1
+validity	prony-modulus-2	source_loading_level_definition_ambiguous	1	1	1
+validity	prony-modulus-2	source_test_temperature_known	0	0	1
+validity	prony-modulus-2	source_test_duration	6000	6000	s
+scalar	prony-relaxation-time-2	creep-fit	prony_relaxation_time_2	2.8670212765957446	s	constant
+uncertainty	prony-relaxation-time-2	unstated	-	-	-	-
+validity	prony-relaxation-time-2	source_sample_rec_tpu_easyflex_golovkin2026	1	1	1
+validity	prony-relaxation-time-2	source_density_known	0	0	1
+validity	prony-relaxation-time-2	source_infill_fraction	1	1	1
+validity	prony-relaxation-time-2	source_original_height	0.02	0.02	m
+validity	prony-relaxation-time-2	source_original_diameter	0.02	0.02	m
+validity	prony-relaxation-time-2	source_moisture_condition_known	0	0	1
+validity	prony-relaxation-time-2	source_pressure_known	0	0	1
+validity	prony-relaxation-time-2	source_fitted_spectrum_reference	1	1	1
+validity	prony-relaxation-time-2	source_fit_method_creep	1	1	1
+validity	prony-relaxation-time-2	source_canonical_parallel_maxwell_interpretation	1	1	1
+validity	prony-relaxation-time-2	source_time_domain_validation_known	0	0	1
+validity	prony-relaxation-time-2	source_time_domain_experiments_reported	1	1	1
+validity	prony-relaxation-time-2	source_loading_level_definition_ambiguous	1	1	1
+validity	prony-relaxation-time-2	source_test_temperature_known	0	0	1
+validity	prony-relaxation-time-2	source_test_duration	6000	6000	s
+scalar	prony-branch-viscosity-1	creep-fit	prony_branch_viscosity_1	1291	MPa*s	constant
+uncertainty	prony-branch-viscosity-1	unstated	-	-	-	-
+validity	prony-branch-viscosity-1	source_sample_rec_tpu_easyflex_golovkin2026	1	1	1
+validity	prony-branch-viscosity-1	source_density_known	0	0	1
+validity	prony-branch-viscosity-1	source_infill_fraction	1	1	1
+validity	prony-branch-viscosity-1	source_original_height	0.02	0.02	m
+validity	prony-branch-viscosity-1	source_original_diameter	0.02	0.02	m
+validity	prony-branch-viscosity-1	source_moisture_condition_known	0	0	1
+validity	prony-branch-viscosity-1	source_pressure_known	0	0	1
+validity	prony-branch-viscosity-1	source_fitted_spectrum_reference	1	1	1
+validity	prony-branch-viscosity-1	source_fit_method_creep	1	1	1
+validity	prony-branch-viscosity-1	source_canonical_parallel_maxwell_interpretation	1	1	1
+validity	prony-branch-viscosity-1	source_time_domain_validation_known	0	0	1
+validity	prony-branch-viscosity-1	source_time_domain_experiments_reported	1	1	1
+validity	prony-branch-viscosity-1	source_loading_level_definition_ambiguous	1	1	1
+validity	prony-branch-viscosity-1	source_test_temperature_known	0	0	1
+validity	prony-branch-viscosity-1	source_test_duration	6000	6000	s
+scalar	prony-branch-viscosity-2	creep-fit	prony_branch_viscosity_2	53.9	MPa*s	constant
+uncertainty	prony-branch-viscosity-2	unstated	-	-	-	-
+validity	prony-branch-viscosity-2	source_sample_rec_tpu_easyflex_golovkin2026	1	1	1
+validity	prony-branch-viscosity-2	source_density_known	0	0	1
+validity	prony-branch-viscosity-2	source_infill_fraction	1	1	1
+validity	prony-branch-viscosity-2	source_original_height	0.02	0.02	m
+validity	prony-branch-viscosity-2	source_original_diameter	0.02	0.02	m
+validity	prony-branch-viscosity-2	source_moisture_condition_known	0	0	1
+validity	prony-branch-viscosity-2	source_pressure_known	0	0	1
+validity	prony-branch-viscosity-2	source_fitted_spectrum_reference	1	1	1
+validity	prony-branch-viscosity-2	source_fit_method_creep	1	1	1
+validity	prony-branch-viscosity-2	source_canonical_parallel_maxwell_interpretation	1	1	1
+validity	prony-branch-viscosity-2	source_time_domain_validation_known	0	0	1
+validity	prony-branch-viscosity-2	source_time_domain_experiments_reported	1	1	1
+validity	prony-branch-viscosity-2	source_loading_level_definition_ambiguous	1	1	1
+validity	prony-branch-viscosity-2	source_test_temperature_known	0	0	1
+validity	prony-branch-viscosity-2	source_test_duration	6000	6000	s
+curve	first-cycle-work-density	cycle-work	first_cycle_work_density	test_speed	m/s	MPa	0.000002:0.119,0.00002:0.134,0.0002:0.159,0.001:0.194,0.002:0.218	tabulated
+uncertainty	first-cycle-work-density	unstated	-	-	-	-
+validity	first-cycle-work-density	source_sample_rec_tpu_easyflex_golovkin2026	1	1	1
+validity	first-cycle-work-density	source_density_known	0	0	1
+validity	first-cycle-work-density	source_infill_fraction	1	1	1
+validity	first-cycle-work-density	source_original_height	0.02	0.02	m
+validity	first-cycle-work-density	source_original_diameter	0.02	0.02	m
+validity	first-cycle-work-density	source_moisture_condition_known	0	0	1
+validity	first-cycle-work-density	source_pressure_known	0	0	1
+validity	first-cycle-work-density	source_fitted_spectrum_reference	0	0	1
+validity	first-cycle-work-density	source_measured_curve_summary	1	1	1
+validity	first-cycle-work-density	source_test_cycle	1	1	1
+validity	first-cycle-work-density	source_peak_compressive_strain	0.15	0.15	1
+validity	first-cycle-work-density	source_test_replicates	3	3	1
+validity	first-cycle-work-density	test_speed	0.000002	0.002	m/s
+validity	first-cycle-work-density	temperature	296.15	296.15	K
+curve	compression-tangent-modulus	cycle-modulus	compression_tangent_modulus	test_speed	m/s	MPa	0.000002:33.4,0.00002:37.5,0.0002:41.7,0.001:45.4,0.002:49.6	tabulated
+uncertainty	compression-tangent-modulus	unstated	-	-	-	-
+validity	compression-tangent-modulus	source_sample_rec_tpu_easyflex_golovkin2026	1	1	1
+validity	compression-tangent-modulus	source_density_known	0	0	1
+validity	compression-tangent-modulus	source_infill_fraction	1	1	1
+validity	compression-tangent-modulus	source_original_height	0.02	0.02	m
+validity	compression-tangent-modulus	source_original_diameter	0.02	0.02	m
+validity	compression-tangent-modulus	source_moisture_condition_known	0	0	1
+validity	compression-tangent-modulus	source_pressure_known	0	0	1
+validity	compression-tangent-modulus	source_fitted_spectrum_reference	0	0	1
+validity	compression-tangent-modulus	source_measured_curve_summary	1	1	1
+validity	compression-tangent-modulus	source_test_cycle	1	1	1
+validity	compression-tangent-modulus	source_peak_compressive_strain	0.15	0.15	1
+validity	compression-tangent-modulus	source_test_replicates	3	3	1
+validity	compression-tangent-modulus	test_speed	0.000002	0.002	m/s
+validity	compression-tangent-modulus	temperature	296.15	296.15	K
+curve	compression-tangent-modulus-reported-standard-deviation	cycle-modulus	compression_tangent_modulus_reported_standard_deviation	test_speed	m/s	MPa	0.000002:1.3,0.00002:1.7,0.0002:1.7,0.001:0.6,0.002:1.7	tabulated
+uncertainty	compression-tangent-modulus-reported-standard-deviation	unstated	-	-	-	-
+validity	compression-tangent-modulus-reported-standard-deviation	source_sample_rec_tpu_easyflex_golovkin2026	1	1	1
+validity	compression-tangent-modulus-reported-standard-deviation	source_density_known	0	0	1
+validity	compression-tangent-modulus-reported-standard-deviation	source_infill_fraction	1	1	1
+validity	compression-tangent-modulus-reported-standard-deviation	source_original_height	0.02	0.02	m
+validity	compression-tangent-modulus-reported-standard-deviation	source_original_diameter	0.02	0.02	m
+validity	compression-tangent-modulus-reported-standard-deviation	source_moisture_condition_known	0	0	1
+validity	compression-tangent-modulus-reported-standard-deviation	source_pressure_known	0	0	1
+validity	compression-tangent-modulus-reported-standard-deviation	source_fitted_spectrum_reference	0	0	1
+validity	compression-tangent-modulus-reported-standard-deviation	source_measured_curve_summary	1	1	1
+validity	compression-tangent-modulus-reported-standard-deviation	source_test_cycle	1	1	1
+validity	compression-tangent-modulus-reported-standard-deviation	source_peak_compressive_strain	0.15	0.15	1
+validity	compression-tangent-modulus-reported-standard-deviation	source_test_replicates	3	3	1
+validity	compression-tangent-modulus-reported-standard-deviation	test_speed	0.000002	0.002	m/s
+validity	compression-tangent-modulus-reported-standard-deviation	temperature	296.15	296.15	K

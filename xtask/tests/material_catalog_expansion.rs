@@ -1555,3 +1555,6 @@ mod printed_elastomers;
 
 #[path = "material_catalog_expansion/ceramics_elements.rs"]
 mod ceramics_elements;
+
+#[path = "material_catalog_expansion/viscoelastic_sources.rs"]
+mod viscoelastic_sources;

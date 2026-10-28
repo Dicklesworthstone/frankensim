@@ -1,0 +1,38 @@
+frankensim.matdb-manifest.v3
+pack_id	rec-tpu-easyflex-golovkin2026-creep-reference
+redistribution	permitted	CC BY 4.0 primary research and supplement; attributed numerical facts with original scope notes and SI conversions
+citation	Golovkin N. et al., A Hybrid Experimental-Numerical Framework for Identifying Viscoelastic Parameters of 3D-Printed Polyurethane Samples: Cyclic Tests, Creep/Relaxation and Inverse Finite Element Analysis, Computers Materials and Continua 86(3):18 (2026), Sections 2.1, 2.2.3, 2.4 and 3.2, Eq. 10, Table 3; supplementary Section 1.3 and Table S1 Elastic moduli at different testing rates; https://doi.org/10.32604/cmc.2025.073161 ; https://www.techscience.com/cmc/v86n3/65492/html ; supplement https://www.techscience.com/files/onlinefirst/2025/12.4/TSP_CMC_73161/TSP_CMC_73161-s001.zip ; accessed 2026-10-28
+license	CC-BY-4.0
+source	rec-tpu-easyflex-golovkin2026-creep-reference	properties.tsv	material-tsv-v1
+property	prony_branch_count	prony-branch-count	dimensional
+property	prony_equilibrium_modulus	prony-equilibrium-modulus	dimensional
+property	prony_modulus_1	prony-modulus-1	dimensional
+property	prony_relaxation_time_1	prony-relaxation-time-1	dimensional
+property	prony_modulus_2	prony-modulus-2	dimensional
+property	prony_relaxation_time_2	prony-relaxation-time-2	dimensional
+property	prony_branch_viscosity_1	prony-branch-viscosity-1	dimensional
+property	prony_branch_viscosity_2	prony-branch-viscosity-2	dimensional
+property	first_cycle_work_density	first-cycle-work-density	dimensional
+property	compression_tangent_modulus	compression-tangent-modulus	dimensional
+property	compression_tangent_modulus_reported_standard_deviation	compression-tangent-modulus-reported-standard-deviation	dimensional
+axis	source_sample_rec_tpu_easyflex_golovkin2026	source-sample-rec-tpu-easyflex-golovkin2026	dimensional
+axis	source_density_known	source-density-known	dimensional
+axis	source_infill_fraction	source-infill-fraction	dimensional
+axis	source_original_height	source-original-height	dimensional
+axis	source_original_diameter	source-original-diameter	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	source_fitted_spectrum_reference	source-fitted-spectrum-reference	dimensional
+axis	source_fit_method_creep	source-fit-method-creep	dimensional
+axis	source_canonical_parallel_maxwell_interpretation	source-canonical-parallel-maxwell-interpretation	dimensional
+axis	source_time_domain_validation_known	source-time-domain-validation-known	dimensional
+axis	source_time_domain_experiments_reported	source-time-domain-experiments-reported	dimensional
+axis	source_loading_level_definition_ambiguous	source-loading-level-definition-ambiguous	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_test_duration	source-test-duration	dimensional
+axis	source_measured_curve_summary	source-measured-curve-summary	dimensional
+axis	source_test_cycle	source-test-cycle	dimensional
+axis	source_peak_compressive_strain	source-peak-compressive-strain	dimensional
+axis	source_test_replicates	source-test-replicates	dimensional
+axis	test_speed	test-speed	dimensional
+axis	temperature	temperature	absolute-temperature
