@@ -119,3 +119,6 @@ pub mod wind_line;
 
 /// Canonical domain-neutral ports, relations, and accounting.
 pub use fs_ports::*;
+
+/// Driven finite gas chambers with prescribed volume and explicit pressure work.
+pub mod prescribed_gas;

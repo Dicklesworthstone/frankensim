@@ -8628,3 +8628,9 @@ with one uniform-flow coordinate per declared opening. Regression definitions
 cover uniform equivalence, local travel times, source-only gas substitutions,
 full-matrix reaction/pressure and lossless exterior-work closure. Compiler
 checks do not establish numerical convergence or instrument realism.
+
+## Prescribed-volume finite gas networks
+
+`prescribed_gas::step_candidate` composes the original same-snapshot finite-nozzle network with original NASA-9 midpoint heat/volume proposals for explicitly driven chambers and finite reservoirs. All drives and endpoint solvers cover the same parcel identities; concurrent inlet/outlet enthalpy is counted once. Gross gas `p_mid * dV` work, exterior-pressure work and net work to the prescribed drive remain separate. Actual local storage balances include transported enthalpy; the complete finite network closes `sum(dU) + sum(W_gross) - sum(Q_external) = 0` before all original owners can be returned atomically. The original graph-size, source, inventory, withdrawal and pressure-crossing limits remain active.
+
+This flow-then-motion split is first order. Prescribed-drive mechanics, timestep/event resolution, combustion and empirical valve applicability remain with callers. G0/G1/G3 tests cover independently computed constant-Cv pressure work, analytic Otto efficiency under refinement, variable-Cp compression against an entropy oracle, simultaneous inlet/outlet flow with motion, species conservation and link-order invariance, held-volume heat, and late-refusal/cancellation rollback.
