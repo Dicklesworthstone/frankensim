@@ -3,8 +3,9 @@
 //! All outlets carry their ORIGINAL donor composition and enthalpy. Combine
 //! all inlets/outlets before reconstructing each affected volume exactly once.
 //! Newly arrived species therefore cannot leave a downstream outlet in this
-//! same explicit interval. No source law, caloric inversion or transport mixing
-//! rule is duplicated: these remain the pair-transfer owner's implementations.
+//! same explicit interval. Bulk edges lower into the existing species-network
+//! caloric owner, so Cp/Cv integrals and pressure-flow work remain accurate
+//! independently of arbitrary species formation-energy datums.
 //!
 //! Fixed volumes, well-mixed ideal gases and first-order explicit transport.
 //! Prescribed transfers do not establish a pressure-flow or pumping-work law.
@@ -13,7 +14,8 @@
 
 use std::collections::BTreeMap;
 use super::{ClosedGasParcel, GasEnergyError, GasEnergySolve, GasSpeciesTransfer,
-    SpeciesId, endpoint, inventory, mixed_model_from_portions, positive, stored_change};
+    inventory, positive};
+use super::species::network::{self, SpeciesNetworkError, SpeciesNetworkSolve, SpeciesNetworkTransfer};
 
 /// Hard bound on material volumes per proposal.
 pub const MAX_SNAPSHOT_PARCELS: usize = 256;
@@ -78,9 +80,10 @@ pub struct GasSnapshotParcelStep {
     pub incoming_mass_kg: f64,
     /// Gross integrated outflow [kg].
     pub outgoing_mass_kg: f64,
-    /// Actual change in extensive internal energy [J].
+    /// Species-reference change plus original-law sensible storage [J].
+    /// Actual inventory rounding is separately bounded by the mass budgets.
     pub energy_change_j: f64,
-    /// Actual energy change minus the net upstream enthalpy flux [J].
+    /// Original-law energy change minus net enthalpy after datum cancellation [J].
     pub energy_residual_j: f64,
     /// Actual mass change minus the net prescribed mass flux [kg].
     pub mass_residual_kg: f64,
@@ -100,7 +103,8 @@ pub struct GasSnapshotStep {
     pub total_mass_residual_kg: f64,
     /// Largest global individual-species mass change [kg].
     pub maximum_species_mass_residual_kg: f64,
-    /// Sum of actual internal-energy changes [J].
+    /// Sum of local energy residuals after conserved species datums cancel [J].
+    /// Rounded absolute energy reports must not be subtracted to recover this.
     pub total_energy_residual_j: f64,
 }
 /// Publish every endpoint together only after the surrounding coupling accepts.
@@ -147,13 +151,8 @@ impl Sum {
 }
 #[derive(Default)]
 struct Budget {
-    incoming: Vec<(u64, f64)>,
     mass_in: Sum,
     mass_out: Sum,
-    energy: Sum,
-    // Sum dm*(h_upstream-u_old) avoids cancellation of formation-energy totals.
-    relative_energy: Sum,
-    species: BTreeMap<SpeciesId, Sum>,
 }
 
 /// Transfer all prescribed inlet/outlet masses from one immutable snapshot.
@@ -202,6 +201,7 @@ pub fn transfer_candidate(
     }
     let mut budgets: BTreeMap<u64, Budget> = parcels.keys().map(|&id| (id, Budget::default())).collect();
     let mut fluxes = Vec::with_capacity(grouped.len());
+    let mut species_rows = Vec::new();
     for ((donor, receiver), mass) in grouped {
         poll(&mut cancelled)?;
         let dm = mass.value;
@@ -211,18 +211,17 @@ pub fn transfer_candidate(
         let source = &parcels[&donor];
         let h = source.state().specific_enthalpy_j_kg();
         let carried = dm * h;
+        if !carried.is_finite() {
+            return Err(Error::Invalid("snapshot gross enthalpy report is unrepresentable"));
+        }
         let species = inventory(source.model(), dm).map_err(|e| material(donor, e))?;
-        for (id, sign) in [(donor, -1.0), (receiver, 1.0)] {
-            let budget = budgets.get_mut(&id).expect("validated parcel key");
-            if id == donor { budget.mass_out.add(dm)?; } else {
-                budget.mass_in.add(dm)?;
-                budget.incoming.push((donor, dm));
-            }
-            budget.energy.add(sign * carried)?;
-            budget.relative_energy.add(sign * dm * (h - parcels[&id].state().specific_internal_energy_j_kg()))?;
-            for (name, amount) in &species {
-                budget.species.entry(name.clone()).or_default().add(sign * amount)?;
-            }
+        budgets.get_mut(&donor).expect("validated donor").mass_out.add(dm)?;
+        budgets.get_mut(&receiver).expect("validated receiver").mass_in.add(dm)?;
+        for (name, &amount) in &species {
+            poll(&mut cancelled)?;
+            species_rows.push(SpeciesNetworkTransfer {
+                donor, receiver, species: name.clone(), mass_kg: amount,
+            });
         }
         fluxes.push(GasSnapshotFlux { transfer: GasSnapshotTransfer { donor, receiver, mass_kg: dm },
             enthalpy_j: carried, species: species.into_iter()
@@ -235,10 +234,9 @@ pub fn transfer_candidate(
             return Err(Error::Withdrawal { id, fraction, maximum: controls.maximum_withdrawn_fraction });
         }
     }
-    let mut next = BTreeMap::new();
-    let mut accounts = Vec::with_capacity(parcels.len());
-    let (mut total_mass, mut total_energy) = (Sum::default(), Sum::default());
-    let mut global_species = BTreeMap::<SpeciesId, Sum>::new();
+    // Keep the original bulk inventory-resolution checks before invoking the
+    // species owner. Each species leaves in its original mass fraction, so the
+    // bulk gross-outflow allowance above applies to every expanded species.
     for (&id, old) in parcels {
         poll(&mut cancelled)?;
         let budget = &budgets[&id];
@@ -251,55 +249,42 @@ pub fn transfer_candidate(
             || (outflow > 0.0 && retained == old.mass_kg()) || (inflow > 0.0 && mass == retained) {
             return Err(Error::Invalid("snapshot endpoint mass change is unresolved"));
         }
-        let (new, iterations) = if inflow == 0.0 && outflow == 0.0 {
-            (old.clone(), 0)
-        } else {
-            let model = if budget.incoming.is_empty() { old.model().clone() } else {
-                let mut portions = vec![(old.model(), retained)];
-                for &(donor, amount) in &budget.incoming { portions.push((parcels[&donor].model(), amount)); }
-                mixed_model_from_portions(&portions, mass).map_err(|e| material(id, e))?
-            };
-            endpoint(old, model, mass, budget.relative_energy.value / mass,
-                endpoints[&id], &mut cancelled).map_err(|e| material(id, e))?
-        };
-        let change = stored_change(old, &new);
-        let energy_residual = change - budget.energy.value;
-        if !change.is_finite() || !energy_residual.is_finite() || energy_residual.abs() > controls.energy_tolerance_j {
-            return Err(Error::Invalid("snapshot endpoint failed local energy balance"));
-        }
-        let before = inventory(old.model(), old.mass_kg()).map_err(|e| material(id, e))?;
-        let after = inventory(new.model(), new.mass_kg()).map_err(|e| material(id, e))?;
-        let mut keys = std::collections::BTreeSet::new();
-        keys.extend(before.keys().cloned()); keys.extend(after.keys().cloned());
-        keys.extend(budget.species.keys().cloned());
-        let mut maximum: f64 = 0.0;
-        for name in keys {
-            poll(&mut cancelled)?;
-            let actual = after.get(&name).copied().unwrap_or(0.0) - before.get(&name).copied().unwrap_or(0.0);
-            let expected = budget.species.get(&name).map_or(0.0, |s| s.value);
-            let residual = actual - expected;
-            if !residual.is_finite() || residual.abs() > controls.mass_tolerance_kg {
-                return Err(Error::Invalid("snapshot endpoint failed individual species balance"));
-            }
-            maximum = maximum.max(residual.abs());
-            global_species.entry(name).or_default().add(actual)?;
-        }
-        total_mass.add(new.mass_kg() - old.mass_kg())?;
-        total_energy.add(change)?;
-        accounts.push(GasSnapshotParcelStep { id, incoming_mass_kg: inflow, outgoing_mass_kg: outflow,
-            energy_change_j: change, energy_residual_j: energy_residual, mass_residual_kg: mass_residual,
-            maximum_species_mass_residual_kg: maximum, iterations });
-        next.insert(id, new);
     }
-    let maximum_species = global_species.values().map(|sum| sum.value.abs()).fold(0.0_f64, f64::max);
-    if total_mass.value.abs() > controls.mass_tolerance_kg || maximum_species > controls.mass_tolerance_kg
-        || total_energy.value.abs() > controls.energy_tolerance_j {
-        return Err(Error::Invalid("snapshot endpoints failed global mass, species or energy balance"));
+    let candidate = network::exchange_bulk_candidate(parcels, &species_rows, endpoints,
+        SpeciesNetworkSolve {
+            maximum_species_fraction: 1.0_f64.next_down(),
+            mass_tolerance_kg: controls.mass_tolerance_kg,
+            energy_tolerance_j: controls.energy_tolerance_j,
+        }, &mut cancelled).map_err(|error| match error {
+            SpeciesNetworkError::Cancelled => Error::Cancelled,
+            SpeciesNetworkError::Invalid(message) => Error::Invalid(message),
+            SpeciesNetworkError::Parcel { id, error } => material(id, error),
+            SpeciesNetworkError::Withdrawal { id, fraction, .. } => Error::Withdrawal {
+                id, fraction, maximum: controls.maximum_withdrawn_fraction,
+            },
+        })?;
+    let (next, report) = candidate.into_parts();
+    let mut accounts = Vec::with_capacity(report.parcels.len());
+    for account in report.parcels {
+        poll(&mut cancelled)?;
+        let budget = &budgets[&account.id];
+        let residual = (next[&account.id].mass_kg() - parcels[&account.id].mass_kg())
+            - (budget.mass_in.value - budget.mass_out.value);
+        if !residual.is_finite() || residual.abs() > controls.mass_tolerance_kg {
+            return Err(Error::Invalid("expanded species flux did not retain the prescribed bulk mass"));
+        }
+        accounts.push(GasSnapshotParcelStep {
+            id: account.id, incoming_mass_kg: budget.mass_in.value, outgoing_mass_kg: budget.mass_out.value,
+            energy_change_j: account.energy_change_j, energy_residual_j: account.energy_residual_j,
+            mass_residual_kg: residual, maximum_species_mass_residual_kg: account.maximum_species_mass_residual_kg,
+            iterations: account.iterations,
+        });
     }
     poll(&mut cancelled)?;
     Ok(GasSnapshotCandidate { parcels: next, step: GasSnapshotStep { fluxes, parcels: accounts,
-        total_mass_residual_kg: total_mass.value, maximum_species_mass_residual_kg: maximum_species,
-        total_energy_residual_j: total_energy.value } })
+        total_mass_residual_kg: report.total_mass_residual_kg,
+        maximum_species_mass_residual_kg: report.maximum_species_mass_residual_kg,
+        total_energy_residual_j: report.total_energy_residual_j } })
 }
 
 #[cfg(test)]

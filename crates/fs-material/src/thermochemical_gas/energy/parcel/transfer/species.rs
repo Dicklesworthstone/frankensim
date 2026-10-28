@@ -63,9 +63,12 @@ pub struct GasSpeciesExchangeStep {
     pub species: Vec<SpeciesEnergyTransfer>,
     pub net_mass_left_to_right_kg: f64,
     pub enthalpy_left_to_right_j: f64,
+    /// Species-reference change plus original-law sensible storage at each side.
+    /// Actual inventory rounding is separately bounded by the mass budgets.
     pub energy_change_j: [f64; 2],
     pub mass_residual_kg: f64,
     pub maximum_species_mass_residual_kg: f64,
+    /// Sum of original-caloric residuals after conserved species datums cancel.
     pub energy_residual_j: f64,
     pub iterations: usize,
 }
@@ -186,12 +189,9 @@ impl ClosedGasParcel {
         if std::ptr::eq(self, right) {
             return Err(invalid("nonzero species exchange needs two distinct physical gas owners"));
         }
-        let catalog = catalog(self, right)?;
         let before = [inventory(self.model(), self.mass_kg())?, inventory(right.model(), right.mass_kg())?];
-        let mut targets = before.clone();
-        let mut mass = Sum::default(); let mut energy = Sum::default();
-        let mut relative = [Sum::default(), Sum::default()];
-        let mut rows = Vec::with_capacity(transfers.len());
+        let mut mass = Sum::default();
+        let mut network_rows = Vec::with_capacity(transfers.len());
         for (id, &dm) in &ordered {
             poll(&mut cancelled)?;
             if dm == 0.0 { continue; }
@@ -206,60 +206,59 @@ impl ClosedGasParcel {
                 if !positive(next) || next == old {
                     return Err(invalid("selective species increment vanished or exhausted its inventory"));
                 }
-                targets[side].insert(id.clone(), next);
             }
-            let source = [self, right][donor];
-            let h = source_enthalpy(source, id)?;
-            let carried = dm * h;
-            mass.add(dm)?; energy.add(carried)?;
-            relative[0].add(-dm * (h - self.state().specific_internal_energy_j_kg()))?;
-            relative[1].add(dm * (h - right.state().specific_internal_energy_j_kg()))?;
-            rows.push(SpeciesEnergyTransfer { transfer: SpeciesMassTransfer {
-                species: id.clone(), mass_left_to_right_kg: dm }, source_enthalpy_j_kg: h,
-                enthalpy_left_to_right_j: carried });
+            mass.add(dm)?;
+            network_rows.push(network::SpeciesNetworkTransfer {
+                donor: donor as u64, receiver: (1 - donor) as u64,
+                species: id.clone(), mass_kg: dm.abs(),
+            });
         }
         let masses = [self.mass_kg() - mass.value, right.mass_kg() + mass.value];
         if masses.iter().any(|m| !positive(*m)) {
             return Err(invalid("exchanged total gas mass is unrepresentable"));
         }
-        let (left, li) = endpoint(self, model_for_inventory(&catalog, &targets[0])?, masses[0],
-            relative[0].value / masses[0], controls.gas[0], &mut cancelled)?;
-        let (next_right, ri) = endpoint(right, model_for_inventory(&catalog, &targets[1])?, masses[1],
-            relative[1].value / masses[1], controls.gas[1], &mut cancelled)?;
-        let du = [stored_change(self, &left), stored_change(right, &next_right)];
-        let er = du[0] + du[1];
-        let dm = [left.mass_kg() - self.mass_kg(), next_right.mass_kg() - right.mass_kg()];
-        let mr = dm[0] + dm[1];
-        if ![du[0], du[1], er, mr].iter().all(|v| v.is_finite())
-            || (du[0] + energy.value).abs() > controls.energy_tolerance_j
-            || (du[1] - energy.value).abs() > controls.energy_tolerance_j || er.abs() > controls.energy_tolerance_j
-            || (dm[0] + mass.value).abs() > controls.mass_tolerance_kg
-            || (dm[1] - mass.value).abs() > controls.mass_tolerance_kg || mr.abs() > controls.mass_tolerance_kg {
-            return Err(invalid("selective gas exchange failed local/global mass or energy balance"));
-        }
-        let actual = [inventory(left.model(), left.mass_kg())?, inventory(next_right.model(), next_right.mass_kg())?];
-        let mut maximum: f64 = 0.0;
-        for species in catalog.thermodynamics().components() {
-            poll(&mut cancelled)?;
-            let id = species.species();
-            let mut global = 0.0;
-            for side in 0..2 {
-                let after = actual[side].get(id).copied().unwrap_or(0.0);
-                let expected = targets[side].get(id).copied().unwrap_or(0.0);
-                maximum = maximum.max((after - expected).abs());
-                global += after - before[side].get(id).copied().unwrap_or(0.0);
+        let candidate = network::exchange_candidate(
+            &BTreeMap::from([(0, self.clone()), (1, right.clone())]), &network_rows,
+            &BTreeMap::from([(0, controls.gas[0]), (1, controls.gas[1])]),
+            network::SpeciesNetworkSolve {
+                maximum_species_fraction: controls.maximum_species_fraction,
+                mass_tolerance_kg: controls.mass_tolerance_kg,
+                energy_tolerance_j: controls.energy_tolerance_j,
+            }, &mut cancelled).map_err(|error| match error {
+                network::SpeciesNetworkError::Cancelled => GasEnergyError::Cancelled,
+                network::SpeciesNetworkError::Invalid(message) => invalid(message),
+                network::SpeciesNetworkError::Parcel { error, .. } => error,
+                network::SpeciesNetworkError::Withdrawal { .. } => invalid("selective transfer exceeds an original species inventory allowance"),
+            })?;
+        let (mut endpoints, report) = candidate.into_parts();
+        let left_account = &report.parcels[0];
+        let right_account = &report.parcels[1];
+        let maximum = report.maximum_species_mass_residual_kg
+            .max(left_account.maximum_species_mass_residual_kg)
+            .max(right_account.maximum_species_mass_residual_kg);
+        let mut rows: Vec<_> = report.fluxes.into_iter().map(|flux| {
+            let sign = if flux.transfer.donor == 0 { 1.0 } else { -1.0 };
+            SpeciesEnergyTransfer {
+                transfer: SpeciesMassTransfer { species: flux.transfer.species,
+                    mass_left_to_right_kg: sign * flux.transfer.mass_kg },
+                source_enthalpy_j_kg: flux.source_enthalpy_j_kg,
+                enthalpy_left_to_right_j: sign * flux.carried_enthalpy_j,
             }
-            if !global.is_finite() { return Err(invalid("selective species balance overflow")); }
-            maximum = maximum.max(global.abs());
-        }
-        if maximum > controls.mass_tolerance_kg {
-            return Err(invalid("selective gas endpoints did not retain individual species inventories"));
-        }
+        }).collect();
+        rows.sort_by(|a, b| a.transfer.species.cmp(&b.transfer.species));
+        let mut energy = Sum::default();
+        for row in &rows { energy.add(row.enthalpy_left_to_right_j)?; }
         poll(&mut cancelled)?;
-        Ok(GasSpeciesExchangeCandidate { left, right: next_right,
+        Ok(GasSpeciesExchangeCandidate {
+            left: endpoints.remove(&0).expect("original left endpoint"),
+            right: endpoints.remove(&1).expect("original right endpoint"),
             step: GasSpeciesExchangeStep { species: rows, net_mass_left_to_right_kg: mass.value,
-                enthalpy_left_to_right_j: energy.value, energy_change_j: du, mass_residual_kg: mr,
-                maximum_species_mass_residual_kg: maximum, energy_residual_j: er, iterations: li + ri } })
+                enthalpy_left_to_right_j: energy.value,
+                energy_change_j: [left_account.energy_change_j, right_account.energy_change_j],
+                mass_residual_kg: report.total_mass_residual_kg,
+                maximum_species_mass_residual_kg: maximum,
+                energy_residual_j: report.total_energy_residual_j,
+                iterations: left_account.iterations + right_account.iterations } })
     }
 }
 

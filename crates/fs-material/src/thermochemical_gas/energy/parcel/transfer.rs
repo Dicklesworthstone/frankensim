@@ -68,11 +68,13 @@ pub struct GasMassTransferStep {
     /// Signed energy carried into the receiver, dm*h_upstream [J].
     /// May be negative under a valid formation-energy convention.
     pub transferred_enthalpy_j: f64,
-    /// Donor actual extensive internal-energy change [J].
+    /// Donor species-reference change plus original-law sensible storage [J].
+    /// Actual inventory rounding is separately bounded by the mass budgets.
     pub donor_energy_change_j: f64,
-    /// Receiver actual extensive internal-energy change [J].
+    /// Receiver species-reference change plus original-law sensible storage [J].
     pub receiver_energy_change_j: f64,
-    /// Sum of actual internal-energy changes [J], bounded about zero.
+    /// Sum of local energy residuals after conserved species datums cancel [J].
+    /// Do not reconstruct this small residual by subtracting rounded reports.
     pub energy_residual_j: f64,
     /// Actual net mass change across the two volumes [kg].
     pub mass_residual_kg: f64,
@@ -126,15 +128,6 @@ fn inventory(model: &ThermochemicalGasModel, mass: f64) -> Result<BTreeMap<Speci
 }
 fn water(model: &ThermochemicalGasModel) -> Option<SpeciesId> {
     model.water_component.map(|i| model.thermodynamics().components()[i].species().clone())
-}
-
-// Merge existing source identities alongside extensive masses. Never choose one
-// of two different models for a shared species merely because its name matches.
-fn mixed_model(
-    receiver: &ClosedGasParcel, donor: &ClosedGasParcel, mass: f64, total_mass: f64,
-) -> Result<ThermochemicalGasModel, GasEnergyError> {
-    mixed_model_from_portions(&[(&receiver.parcel.model, receiver.mass_kg()),
-        (&donor.parcel.model, mass)], total_mass)
 }
 
 // Each portion is an extensive mass with its ORIGINAL source model. Both the
@@ -278,50 +271,48 @@ impl ClosedGasParcel {
             || ((receiver_mass-receiver.mass_kg())-mass_kg).abs() > controls.mass_tolerance_kg {
             return Err(invalid("transfer is not representable within the absolute mass tolerance"));
         }
-        let carried = mass_kg * source_h;
-        if !carried.is_finite() { return Err(invalid("transferred enthalpy overflow")); }
-        let incoming = inventory(&self.parcel.model, mass_kg)?;
-        let model = mixed_model(receiver, self, mass_kg, receiver_mass)?;
-        poll(&mut cancelled)?;
-        let (donor, di) = endpoint(self, self.parcel.model.clone(), donor_mass,
-            -(mass_kg / donor_mass) * (source_h - self.state().specific_internal_energy_j_kg()),
-            controls.donor, &mut cancelled)?;
-        let (recipient, ri) = endpoint(receiver, model, receiver_mass,
-            (mass_kg / receiver_mass) * (source_h - receiver.state().specific_internal_energy_j_kg()),
-            controls.receiver, &mut cancelled)?;
-        let donor_change = stored_change(self, &donor);
-        let receiver_change = stored_change(receiver, &recipient);
-        let residual = donor_change + receiver_change;
-        if !donor_change.is_finite() || !receiver_change.is_finite() || !residual.is_finite()
-            || (donor_change+carried).abs() > controls.energy_tolerance_j
-            || (receiver_change-carried).abs() > controls.energy_tolerance_j
-            || residual.abs() > controls.energy_tolerance_j {
-            return Err(invalid("two-volume transfer failed the absolute extensive energy balance"));
+        if std::ptr::eq(self, receiver) {
+            return Err(invalid("nonzero mass transfer needs two distinct physical gas owners"));
         }
-        let mass_residual = (donor.mass_kg()-self.mass_kg()) + (recipient.mass_kg()-receiver.mass_kg());
-        let mut maximum: f64 = 0.0;
-        for (old, new, sign) in [(self, &donor, -1.0), (receiver, &recipient, 1.0)] {
-            let before = inventory(&old.parcel.model, old.mass_kg())?;
-            let after = inventory(&new.parcel.model, new.mass_kg())?;
-            for (species, value) in after {
-                let defect = (value - before.get(&species).copied().unwrap_or(0.0))
-                    - sign * incoming.get(&species).copied().unwrap_or(0.0);
-                if !defect.is_finite() { return Err(invalid("species mass accounting overflow")); }
-                maximum = maximum.max(defect.abs());
-            }
-        }
-        if !mass_residual.is_finite() || mass_residual.abs() > controls.mass_tolerance_kg
-            || maximum > controls.mass_tolerance_kg {
-            return Err(invalid("mixed endpoint did not retain individual species inventories"));
-        }
+        // Bulk pairs and multiport flows share the species-relative caloric
+        // owner. In particular h-u is R*T, even when an arbitrary formation
+        // datum makes subtracting the absolute values lose all flow work.
+        let candidate = snapshot::transfer_candidate(
+            &BTreeMap::from([(0, self.clone()), (1, receiver.clone())]),
+            &[snapshot::GasSnapshotTransfer { donor: 0, receiver: 1, mass_kg }],
+            &BTreeMap::from([(0, controls.donor), (1, controls.receiver)]),
+            snapshot::GasSnapshotSolve {
+                maximum_withdrawn_fraction: 1.0_f64.next_down(),
+                mass_tolerance_kg: controls.mass_tolerance_kg,
+                energy_tolerance_j: controls.energy_tolerance_j,
+            },
+            &mut cancelled,
+        ).map_err(|error| match error {
+            snapshot::GasSnapshotError::Cancelled => GasEnergyError::Cancelled,
+            snapshot::GasSnapshotError::Parcel { error, .. } => error,
+            snapshot::GasSnapshotError::Invalid(message) => invalid(message),
+            snapshot::GasSnapshotError::Withdrawal { .. } => invalid("transfer exhausts its original donor"),
+        })?;
+        let (mut endpoints, report) = candidate.into_parts();
+        let donor_account = &report.parcels[0];
+        let receiver_account = &report.parcels[1];
+        let maximum = report.maximum_species_mass_residual_kg
+            .max(donor_account.maximum_species_mass_residual_kg)
+            .max(receiver_account.maximum_species_mass_residual_kg);
+        let flux = report.fluxes.into_iter().next().expect("one positive bulk transfer");
         let step = GasMassTransferStep { transferred_mass_kg: mass_kg, source_enthalpy_j_kg: source_h,
-            transferred_enthalpy_j: carried, donor_energy_change_j: donor_change,
-            receiver_energy_change_j: receiver_change, energy_residual_j: residual,
-            mass_residual_kg: mass_residual, maximum_species_mass_residual_kg: maximum,
-            species: incoming.into_iter().map(|(species, mass_kg)| GasSpeciesTransfer { species, mass_kg }).collect(),
-            iterations: di + ri };
+            transferred_enthalpy_j: flux.enthalpy_j,
+            donor_energy_change_j: donor_account.energy_change_j,
+            receiver_energy_change_j: receiver_account.energy_change_j,
+            energy_residual_j: report.total_energy_residual_j,
+            mass_residual_kg: report.total_mass_residual_kg,
+            maximum_species_mass_residual_kg: maximum,
+            species: flux.species,
+            iterations: donor_account.iterations + receiver_account.iterations };
         poll(&mut cancelled)?;
-        Ok(GasMassTransferCandidate { donor, receiver: recipient, step })
+        Ok(GasMassTransferCandidate {
+            donor: endpoints.remove(&0).expect("original donor endpoint"),
+            receiver: endpoints.remove(&1).expect("original receiver endpoint"), step })
     }
 }
 

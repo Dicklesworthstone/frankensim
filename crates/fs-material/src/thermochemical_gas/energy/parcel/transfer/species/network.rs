@@ -247,6 +247,35 @@ pub fn exchange_candidate_with_boundaries(
     boundaries: &[SpeciesNetworkBoundary<'_>],
     endpoints: &BTreeMap<u64, GasEnergySolve>,
     controls: SpeciesNetworkSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<SpeciesNetworkCandidate, Error> {
+    exchange_bounded(parcels, transfers, heat, boundaries, endpoints, controls,
+        MAX_SNAPSHOT_TRANSFERS, cancelled)
+}
+
+// A bounded bulk edge expands into at most the existing active-species bound.
+// Keep its 4096-edge capacity without relaxing the public selective API's
+// separately declared work limit. Snapshot lowering admits bulk rows first.
+pub(in crate::thermochemical_gas::energy::parcel::transfer) fn exchange_bulk_candidate(
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    transfers: &[SpeciesNetworkTransfer],
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    controls: SpeciesNetworkSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<SpeciesNetworkCandidate, Error> {
+    exchange_bounded(parcels, transfers, &[], &[], endpoints, controls,
+        MAX_SNAPSHOT_TRANSFERS * super::MAX_FROZEN_IDEAL_GAS_COMPONENTS_V1, cancelled)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn exchange_bounded(
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    transfers: &[SpeciesNetworkTransfer],
+    heat: &[SpeciesNetworkHeatTransfer],
+    boundaries: &[SpeciesNetworkBoundary<'_>],
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    controls: SpeciesNetworkSolve,
+    maximum_transfers: usize,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<SpeciesNetworkCandidate, Error> {
     check(&mut cancelled)?;
@@ -257,7 +286,7 @@ pub fn exchange_candidate_with_boundaries(
             .len()
             .checked_add(heat.len())
             .and_then(|n| n.checked_add(boundary_work))
-            .is_none_or(|n| n > MAX_SNAPSHOT_TRANSFERS)
+            .is_none_or(|n| n > maximum_transfers)
         || !parcels.keys().eq(endpoints.keys())
         || !positive(controls.maximum_species_fraction)
         || controls.maximum_species_fraction >= 1.0

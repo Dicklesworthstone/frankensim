@@ -1,7 +1,7 @@
 //! Synthetic source fixtures exercise actual material/energy consumers.
 use super::*;
 use crate::fluid_transport::FluidTransport;
-use crate::thermochemical_gas::tests::{model, point, species, transport};
+use crate::thermochemical_gas::tests::{model, point, species, species_with_energy_reference, transport};
 
 fn energy() -> GasEnergySolve {
     GasEnergySolve { minimum_temperature_k: 200.0, maximum_temperature_k: 1800.0,
@@ -24,6 +24,42 @@ fn pure(name: &str, molar_mass: f64, cp_r: f64, slope: f64, t: f64, p: f64) -> C
 }
 fn near(a: f64, b: f64, tol: f64) {
     assert!((a-b).abs() <= tol*b.abs().max(1.0), "{a} != {b}");
+}
+
+pub(super) fn reference_parcel(x: f64, slope: f64, t: f64, p: f64, reference: [f64; 2]) -> ClosedGasParcel {
+    let source = ThermochemicalGasModel::new(FrozenIdealGasMixtureModelV1::new(
+        vec![species_with_energy_reference("A", 0.028, 3.5, slope, reference[0]),
+            species_with_energy_reference("B", 0.004, 2.5, 0.0, reference[1])],
+        Composition::new(CompositionBasis::MoleFraction, vec![x, 1.0-x]).unwrap()).unwrap(),
+        vec![transport("A", 1.7e-5, 0.025), transport("B", 2e-5, 0.15)], None).unwrap();
+    ClosedGasParcel::new(source, point(t, p), 0.001).unwrap()
+}
+
+#[test]
+fn g1_bulk_filling_and_blowdown_retain_flow_work_under_arbitrary_formation_datums() {
+    let ordinary = [reference_parcel(0.75, 0.0, 500.0, 200000.0, [0.0; 2]),
+        reference_parcel(0.75, 0.0, 300.0, 100000.0, [0.0; 2])];
+    let shifted = [reference_parcel(0.75, 0.0, 500.0, 200000.0, [1e24, -2e24]),
+        reference_parcel(0.75, 0.0, 300.0, 100000.0, [1e24, -2e24])];
+    let dm = ordinary[0].mass_kg() * 0.1;
+    let expected = ordinary[0].transfer_mass_to(&ordinary[1], dm, controls(), || false).unwrap();
+    let actual = shifted[0].transfer_mass_to(&shifted[1], dm, controls(), || false).unwrap();
+    let gas = ordinary[0].state().state();
+    let cv = gas.specific_heat_cp - gas.specific_gas_constant;
+    let donor_t = 500.0 * (1.0 - dm / (ordinary[0].mass_kg() - dm) * gas.specific_gas_constant / cv);
+    let receiver_t = (ordinary[1].mass_kg() * cv * 300.0 + dm * gas.specific_heat_cp * 500.0)
+        / ((ordinary[1].mass_kg() + dm) * cv);
+    near(actual.donor().state().state().temperature, donor_t, 1e-11);
+    near(actual.receiver().state().state().temperature, receiver_t, 1e-11);
+    for (a, b) in [(actual.donor(), expected.donor()), (actual.receiver(), expected.receiver())] {
+        assert_eq!(a.state().state(), b.state().state());
+        assert_eq!(a.mass_kg(), b.mass_kg());
+    }
+    assert_eq!(actual.step().energy_residual_j, expected.step().energy_residual_j);
+    assert!(actual.step().energy_residual_j.abs() <= controls().energy_tolerance_j);
+    assert_eq!(shifted[0].state().specific_enthalpy_j_kg()
+        - shifted[0].state().specific_internal_energy_j_kg(), 0.0,
+        "the old absolute h-u path cannot resolve this physical flow work");
 }
 
 #[test]

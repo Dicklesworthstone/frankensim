@@ -30,6 +30,42 @@ fn near(a: f64, b: f64, tolerance: f64) {
 }
 
 #[test]
+fn g1_selective_counterflow_uses_partial_enthalpy_with_reference_invariant_temperatures() {
+    use super::super::tests::reference_parcel;
+    use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
+    let pair = |reference| [
+        reference_parcel(0.75, 0.0, 500.0, 100000.0, reference),
+        reference_parcel(0.25, 0.0, 350.0, 100000.0, reference),
+    ];
+    let original = pair([0.0; 2]);
+    let shifted = pair([1e24, -2e24]);
+    let rows = [row("A", 1e-5), row("B", -2e-6)];
+    let baseline = original[0].exchange_species_with(&original[1], &rows, controls(), || false).unwrap();
+    let trial = shifted[0].exchange_species_with(&shifted[1], &rows, controls(), || false).unwrap();
+    let cv = [2.5 * R / 0.028, 1.5 * R / 0.004];
+    let cp = [3.5 * R / 0.028, 2.5 * R / 0.004];
+    let flux = rows[0].mass_left_to_right_kg * cp[0] * 500.0
+        + rows[1].mass_left_to_right_kg * cp[1] * 350.0;
+    for (side, sign, actual, expected) in [
+        (0, -1.0, trial.left(), baseline.left()), (1, 1.0, trial.right(), baseline.right()),
+    ] {
+        let original_inventory = inventory(original[side].model(), original[side].mass_kg()).unwrap();
+        let a = original_inventory[&SpeciesId::new("A").unwrap()];
+        let b = original_inventory[&SpeciesId::new("B").unwrap()];
+        let initial_u = (a * cv[0] + b * cv[1]) * original[side].state().state().temperature;
+        let final_capacity = (a + sign * rows[0].mass_left_to_right_kg) * cv[0]
+            + (b + sign * rows[1].mass_left_to_right_kg) * cv[1];
+        let analytic_t = (initial_u + sign * flux) / final_capacity;
+        near(actual.state().state().temperature, analytic_t, 2e-8);
+        assert_eq!(actual.state().state(), expected.state().state());
+        assert_eq!(actual.mass_kg(), expected.mass_kg());
+    }
+    assert_eq!(trial.step().energy_residual_j, baseline.step().energy_residual_j);
+    assert!(trial.step().energy_residual_j.abs() <= controls().energy_tolerance_j);
+    assert!(trial.step().maximum_species_mass_residual_kg <= controls().mass_tolerance_kg);
+}
+
+#[test]
 fn counterflow_carries_each_original_partial_enthalpy_not_mixture_enthalpy() {
     let (a, b) = (parcel(0.75, 500.0, 0.001), parcel(0.25, 350.0, 0.001));
     let rows = [row("A", 1e-5), row("B", -2e-6)];

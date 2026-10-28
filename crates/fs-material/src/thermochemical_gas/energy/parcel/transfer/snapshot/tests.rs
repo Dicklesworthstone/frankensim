@@ -1,5 +1,6 @@
 //! Real source-resolved endpoints; fixtures are synthetic, not measured gases.
 use super::*;
+use super::super::{SpeciesId, stored_change};
 use crate::thermochemical_gas::tests::{model, point, species, transport};
 use crate::thermochemical_gas::ThermochemicalGasModel;
 use fs_thermochem::{Composition, CompositionBasis, mixture::FrozenIdealGasMixtureModelV1};
@@ -31,6 +32,50 @@ fn near(a: f64, b: f64, tolerance: f64) {
 }
 fn row(donor: u64, receiver: u64, mass_kg: f64) -> GasSnapshotTransfer {
     GasSnapshotTransfer { donor, receiver, mass_kg }
+}
+
+#[test]
+fn g3_bulk_network_preserves_nonlinear_heating_under_independent_species_datums() {
+    use super::super::tests::reference_parcel;
+    let graph = |reference| BTreeMap::from([
+        (0, reference_parcel(0.75, 0.001, 500.0, 250000.0, reference)),
+        (1, reference_parcel(0.25, 0.001, 350.0, 100000.0, reference)),
+        (2, reference_parcel(0.5, 0.001, 400.0, 150000.0, reference)),
+    ]);
+    let ordinary = graph([0.0; 2]);
+    let shifted = graph([1e24, -2e24]);
+    let dm = 0.02 * ordinary[&1].mass_kg();
+    let rows = [row(0, 1, dm), row(1, 2, dm), row(2, 0, dm)];
+    let expected = transfer_candidate(&ordinary, &rows, &solves(&ordinary), controls(), || false).unwrap();
+    let actual = transfer_candidate(&shifted, &rows, &solves(&shifted), controls(), || false).unwrap();
+    for id in [0, 1, 2] {
+        assert_eq!(actual.parcels()[&id].state().state(), expected.parcels()[&id].state().state());
+        assert_eq!(actual.parcels()[&id].mass_kg(), expected.parcels()[&id].mass_kg());
+        assert_ne!(actual.parcels()[&id].state().state().temperature,
+            shifted[&id].state().state().temperature);
+        assert!(actual.step().parcels[id as usize].energy_residual_j.abs() <= controls().energy_tolerance_j);
+    }
+    assert_eq!(actual.step().total_energy_residual_j, expected.step().total_energy_residual_j);
+    assert!(actual.step().maximum_species_mass_residual_kg <= controls().mass_tolerance_kg);
+    let mut reversed = rows; reversed.reverse();
+    assert_eq!(actual, transfer_candidate(&shifted, &reversed, &solves(&shifted), controls(), || false).unwrap());
+}
+
+#[test]
+fn bulk_edge_capacity_is_not_reduced_by_expanding_multiple_species() {
+    let source = gas(0.75, 400.0, 100000.0, 0.001);
+    let parcels: BTreeMap<_, _> = (0..65).map(|id| (id, source.clone())).collect();
+    let dm = source.mass_kg() * 1e-4;
+    let mut rows = Vec::new();
+    for donor in 0..65 {
+        for offset in 1..=33 { rows.push(row(donor, (donor + offset) % 65, dm)); }
+    }
+    assert!(rows.len() < MAX_SNAPSHOT_TRANSFERS);
+    assert!(2 * rows.len() > MAX_SNAPSHOT_TRANSFERS);
+    let candidate = transfer_candidate(&parcels, &rows, &solves(&parcels), controls(), || false).unwrap();
+    assert_eq!(candidate.parcels(), &parcels);
+    assert_eq!(candidate.step().fluxes.len(), rows.len());
+    assert!(candidate.step().parcels.iter().all(|p| p.iterations == 0));
 }
 
 #[test]
