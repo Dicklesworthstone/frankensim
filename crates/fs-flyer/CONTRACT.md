@@ -94,10 +94,15 @@ midpoint torques. Smooth coupled longitudinal/rotor dynamics are second order
 under the held inputs; this does not extend the claim to OU innovations,
 discrete controls, existing load-envelope clamps or the reduced lateral model.
 Constant force/gravity and constant angular accelerations integrate exactly.
-A refused midpoint publishes no predicted motion or warm cache. An explicitly
-detected ground crossing uses the existing held-load terminal predictor and
-GroundContact treatment, without querying below ground; that event branch has
-no smooth-order or continuous collision/localized-contact claim.
+A refused midpoint publishes no predicted motion or warm cache. A positive
+midpoint CG reaches the native force solve even when the held-load endpoint
+predictor would cross ground. Actual accepted midpoint kinematics determine
+GroundContact; the terminal state retains that midpoint velocity, pitch/rotor
+impulse and warm cache, with height placed on the wall. Distributed material
+points remain subject to native atmosphere admission: a positive CG does not
+certify that every surface is above ground. Only a nonpositive midpoint CG uses
+the bounded held-load terminal fallback without requesting loads underground.
+These event branches claim no smooth order or continuous collision/localization.
 
 The ordinary path retains body airspeed as stored state, converting through the
 steady headwind offset before and after the inertial step. Force-free attitude
@@ -108,12 +113,14 @@ gravity convention and apply vertical world gravity once, independent of angle
 of attack, pitch attitude or a gust. Focused analytic regressions live in
 `simloop/motion.rs`. Ordinary and spatial launches also share one constrained
 world-momentum step: stationary pitched aircraft have both body airspeed
-components, the rail holds vertical ground velocity at zero, and actual rotated
-non-gravity loads determine support, friction and release. Releasing support
-does not insert a velocity jump. The existing first-order rail event holds the
-constraint for the release tick and begins free flight at its endpoint; it does
-not resolve the within-tick vertical/pitch impulse after support is lost. The
-existing tow law and single rail force solve remain unchanged.
+components, the loaded rail holds vertical ground velocity at zero, and actual
+rotated non-gravity loads determine support, friction and release. If tick-start
+upward load meets or exceeds weight, the same full airborne midpoint interval
+begins immediately, including vertical/pitch/rotor and lateral evolution, with
+no preceding rail friction or tow impulse. Release introduces no velocity jump
+and advances controls/atmosphere only once. Positively loaded rail ticks retain
+the existing single-force-solve constraint/tow law; within-tick loss of support
+is not localized.
 
 Pilot member 3 retains its registered gains. Its earlier crash-class calibration
 predates these momentum/gravity corrections and is no longer a validation claim
@@ -122,10 +129,16 @@ seed-1903 Dec-17 reference reaches RailEndWithoutLift at tick 975, approximately
 18.316 m: the 18.3 m rail is too short for this currently calibrated plant.
 The battery pins that outcome rather than fabricating lift or retuning gains.
 Airborne lifecycle tests explicitly add the existing registered catapult as a
-test fixture, distinct from historical Dec-17. Member 3 then flies 12.5 s with
-five undulations and 42.80 m of travel before GroundContact at tick 1574. The
-assisted fixture and original rail shortfall both retain deterministic evidence;
-neither establishes a revised historical launch or pilot calibration.
+test fixture, distinct from historical Dec-17. With same-tick support release,
+member 3 flies 11.41 s with five undulations and 44.90 m of travel before the
+native outer coupling solver refuses midpoint residual growth at tick 1443.
+Fixed controls fly 4.99 s, reach 11.60 m forward and turn back to 4.27 m before
+the propeller station solver reaches its iteration cap at tick 673. These are
+numerical nonconvergence receipts carried by EnvelopeExceeded, not established
+physical envelope boundaries. The substantive flight duration/undulation and
+travel gates remain, along with exact terminal code/tick and replay evidence.
+Neither assisted fixture nor original rail shortfall establishes a revised
+historical launch or pilot calibration.
 
 `SimLoop::init_with_spatial_wind(scenario, SpatialWindSpec)` opts into the
 wall-compatible evolving `fs-atmo` field. The specification declares the mean

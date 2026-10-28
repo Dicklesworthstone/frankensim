@@ -471,8 +471,10 @@ impl SimLoop {
     /// pitch and rotor inertia. Control and temporal wind remain held during the
     /// tick, while spatial wind is sampled at the predicted material positions.
     /// A refused stage publishes neither predicted motion nor its warm start.
-    /// `None` is the existing terminal-ground branch, which has no smooth-order
-    /// or localized-contact claim and never queries the atmosphere underground.
+    /// `None` is the terminal fallback when the force point itself is at/below
+    /// ground. A positive midpoint always gets its native force solve, and its
+    /// accepted endpoint determines ground contact. Neither terminal branch
+    /// claims smooth order or localized contact.
     pub(super) fn advance_airborne_motion(
         &mut self,
         start_loads: &crate::aircraft::ForceBuildup,
@@ -484,28 +486,33 @@ impl SimLoop {
         let start = self.current_flight_motion();
         let initial_acceleration = self.flight_acceleration(start, start_loads, start_alpha);
         let stage = motion::midpoint_stage(start, initial_acceleration, dt);
-        let mut terminal = motion::held_load_step(
-            start.longitudinal,
-            motion::nongravity_acceleration(
-                [start_loads.force_n[0], start_loads.force_n[2]],
-                start_alpha,
-                self.design.gross_mass_kg,
-            ),
-            initial_acceleration.pitch_rad_s2,
-            motion::GRAVITY_MPS2,
-            dt,
-        );
-        let terminal_rotor = start.rotor_rad_s + dt * initial_acceleration.rotor_rad_s2;
-        if !stage.is_finite()
-            || !(motion::FlightMotion {
+        if !stage.is_finite() {
+            return Err(invalid_flight_stage());
+        }
+        if stage.longitudinal.position_m[1] <= 0.0 {
+            // Only this inadmissible force point needs the bounded held-load
+            // terminal fallback. Do not preempt a valid midpoint because an
+            // obsolete held-load endpoint would cross the ground.
+            let mut terminal = motion::held_load_step(
+                start.longitudinal,
+                motion::nongravity_acceleration(
+                    [start_loads.force_n[0], start_loads.force_n[2]],
+                    start_alpha,
+                    self.design.gross_mass_kg,
+                ),
+                initial_acceleration.pitch_rad_s2,
+                motion::GRAVITY_MPS2,
+                dt,
+            );
+            let terminal_rotor = start.rotor_rad_s + dt * initial_acceleration.rotor_rad_s2;
+            if !(motion::FlightMotion {
                 longitudinal: terminal,
                 rotor_rad_s: terminal_rotor,
             })
             .is_finite()
-        {
-            return Err(invalid_flight_stage());
-        }
-        if stage.longitudinal.position_m[1] <= 0.0 || terminal.position_m[1] <= 0.0 {
+            {
+                return Err(invalid_flight_stage());
+            }
             terminal.position_m[1] = 0.0;
             self.publish_flight_motion(motion::FlightMotion {
                 longitudinal: terminal,
@@ -542,7 +549,7 @@ impl SimLoop {
             dc,
             Some(start_loads.coupled.w_slip),
         )?;
-        let next = motion::finish_midpoint(
+        let mut next = motion::finish_midpoint(
             start,
             stage,
             self.flight_acceleration(stage, &forces, alpha_rad),
@@ -550,6 +557,10 @@ impl SimLoop {
         );
         if !next.is_finite() {
             return Err(invalid_flight_stage());
+        }
+        if next.longitudinal.position_m[1] <= 0.0 {
+            next.longitudinal.position_m[1] = 0.0;
+            self.phase = super::Phase::Ended(super::TerminalEvent::GroundContact);
         }
         self.publish_flight_motion(next);
         self.warm_slip = Some(forces.coupled.w_slip);
@@ -604,23 +615,32 @@ impl SimLoop {
         }
     }
 
-    /// One rail owner for ordinary and spatial wind. The existing discrete
-    /// constraint holds vertical ground velocity at zero through the release
-    /// tick and marks Airborne at its endpoint; this has no smooth-order or
-    /// localized-release claim. Release inserts no velocity jump or frame change.
+    /// Shared physical force projection for rail admission and constrained
+    /// motion. Gravity is removed using the force assembly's incidence frame.
+    pub(super) fn rail_world_forces(
+        &self,
+        loads: &crate::aircraft::ForceBuildup,
+        alpha: f64,
+    ) -> [f64; 2] {
+        let weight = self.design.gross_mass_kg * motion::GRAVITY_MPS2;
+        let fx = loads.force_n[0] + weight * det::sin(alpha);
+        let fz = loads.force_n[2] - weight * det::cos(alpha);
+        let (s, c) = (det::sin(self.theta), det::cos(self.theta));
+        [c * fx + s * fz, s * fx - c * fz]
+    }
+
+    /// Advance a rail that still carries positive load at the tick start.
+    /// Already-unloaded states take the ordinary airborne path before this
+    /// method is reached. Loaded ticks retain discrete constraint/tow timing;
+    /// no within-tick support-loss localization is claimed.
     pub(super) fn advance_rail_motion(
         &mut self,
         loads: &crate::aircraft::ForceBuildup,
-        alpha: f64,
+        [forward, upward]: [f64; 2],
         dt: f64,
     ) {
         let mass = self.design.gross_mass_kg;
         let weight = mass * motion::GRAVITY_MPS2;
-        let fx = loads.force_n[0] + weight * det::sin(alpha);
-        let fz = loads.force_n[2] - weight * det::cos(alpha);
-        let (s, c) = (det::sin(self.theta), det::cos(self.theta));
-        let forward = c * fx + s * fz;
-        let upward = s * fx - c * fz;
         let normal = (weight - upward).max(0.0);
         let tow = match self.spec.catapult {
             Some(tow) if self.x_m < tow.pull_length_m => tow.pull_force_n,
@@ -634,9 +654,7 @@ impl SimLoop {
         next.longitudinal.position_m[0] += dt * next.longitudinal.ground_mps[0];
         next.rotor_rad_s += dt * loads.torque_imbalance_nm / 1.6;
         self.publish_flight_motion(next);
-        if upward >= weight {
-            self.phase = super::Phase::Airborne;
-        } else if self.x_m > self.spec.rail_length_m {
+        if self.x_m > self.spec.rail_length_m {
             self.phase = super::Phase::Ended(super::TerminalEvent::RailEndWithoutLift);
         }
     }

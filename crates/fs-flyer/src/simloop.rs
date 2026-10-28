@@ -882,10 +882,20 @@ impl SimLoop {
                 return Ok(out);
             }
         };
+        // A rail already unloaded at tick start cannot supply a constraint,
+        // friction or tow impulse during this free-flight interval. Classify
+        // support before any rail mutation, then use the same airborne owner.
+        let rail_forces =
+            (self.phase == Phase::OnRail).then(|| self.rail_world_forces(&b, alpha_clamped));
+        if rail_forces
+            .is_some_and(|[_, upward]| upward >= self.design.gross_mass_kg * motion::GRAVITY_MPS2)
+        {
+            self.phase = Phase::Airborne;
+        }
         match self.phase {
             Phase::OnRail => {
                 self.warm_slip = Some(b.coupled.w_slip);
-                self.advance_rail_motion(&b, alpha_clamped, dt);
+                self.advance_rail_motion(&b, rail_forces.expect("rail loads prepared"), dt);
             }
             Phase::Airborne => {
                 match self.advance_airborne_motion(&b, alpha_clamped, dc_eff, gust_w, dt) {

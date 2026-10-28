@@ -39,51 +39,107 @@ fn ordinary_rail_initialization_is_stationary_in_the_world_frame() {
 }
 
 #[test]
-fn releasing_the_rail_reaction_adds_no_horizontal_or_vertical_impulse() {
+fn unloaded_rail_takes_one_free_flight_interval_without_tow() {
     for mode in 0..3 {
-        let spec = dec17_scenario(1903, PilotMode::FixedControls);
+        let mut spec = dec17_scenario(1903, PilotMode::Human);
+        spec.catapult = Some(crate::simloop::CATAPULT_1904_V1);
         let mut sim = match mode {
             0 => SimLoop::init(spec).unwrap(),
-            1 => SimLoop::init_with_spatial_wind(spec, wind_spec(0.0)).unwrap(),
-            _ => SimLoop::init_with_distributed_spatial_wind(spec, wind_spec(0.0)).unwrap(),
+            1 => SimLoop::init_with_spatial_wind(spec, wind_spec(0.3)).unwrap(),
+            _ => SimLoop::init_with_distributed_spatial_wind(spec, wind_spec(0.3)).unwrap(),
         };
-        let speed = 3.7;
-        if let Some(wind) = &mut sim.spatial_wind {
-            wind.ground_mps = [speed, 0.0];
-            sim.sync_spatial_air_velocity().unwrap();
+        let wind = if mode == 0 {
+            [-sim.spec.headwind_mps, 0.0]
         } else {
-            [sim.u, sim.w] =
-                motion::body_air_velocity([speed, 0.0], sim.theta, [-sim.spec.headwind_mps, 0.0]);
+            let flow = sim.sample_spatial_wind([sim.x_m, 0.0, sim.h_m]).unwrap();
+            [flow.u[0], flow.u[2]]
+        };
+        let ground = [18.0 + wind[0], 0.0];
+        if let Some(field) = &mut sim.spatial_wind {
+            field.ground_mps = ground;
         }
+        [sim.u, sim.w] = motion::body_air_velocity(ground, sim.theta, wind);
+        sim.omega += 3.0;
         let start = sim.current_flight_motion();
-        let alpha = 0.12;
-        let weight = sim.design.gross_mass_kg * motion::GRAVITY_MPS2;
-        let upward = 1.1 * weight;
-        let (s, c) = (det::sin(sim.theta), det::cos(sim.theta));
-        let mut loads = sim.tick0.trim.buildup.clone();
-        // A purely vertical prescribed non-gravity force releases the rail;
-        // it supplies no horizontal impulse during this constrained tick.
-        loads.force_n = [
-            s * upward - weight * det::sin(alpha),
-            0.0,
-            -c * upward + weight * det::cos(alpha),
-        ];
-        loads.moment_y_nm = 0.0;
-        loads.torque_imbalance_nm = 0.0;
         let dt = 1.0 / 120.0;
-        sim.advance_rail_motion(&loads, alpha, dt);
-        let next = sim.current_flight_motion();
-        assert_eq!(sim.phase, Phase::Airborne);
-        assert!((next.longitudinal.ground_mps[0] - speed).abs() < 1e-12);
-        assert!(next.longitudinal.ground_mps[1].abs() < 1e-12);
-        assert!((next.longitudinal.position_m[0] - dt * speed).abs() < 1e-12);
-        assert_eq!(
-            next.longitudinal.position_m[1],
-            start.longitudinal.position_m[1]
+        let mut expected_ou = sim.ou.clone();
+        expected_ou.advance_to(1).unwrap();
+        let gust = if mode == 0 {
+            expected_ou
+                .amplitudes()
+                .iter()
+                .enumerate()
+                .map(|(i, a)| a * 0.12 / (1.0 + i as f64))
+                .sum()
+        } else {
+            0.0
+        };
+        let speed = (sim.u * sim.u + sim.w * sim.w).sqrt();
+        let alpha = (det::atan2(sim.w, sim.u) + gust / speed).clamp(-0.55, 0.55);
+        let dc = sim
+            .mech_spec
+            .step(sim.mech, 0.0, 0.0, dt)
+            .unwrap()
+            .0
+            .delta_rad;
+        let first = sim.force_buildup_current_wind(speed, alpha, dc).unwrap();
+        let weight = sim.design.gross_mass_kg * motion::GRAVITY_MPS2;
+        let (s, c) = sim.theta.sin_cos();
+        let upward = s * (first.force_n[0] + weight * alpha.sin())
+            - c * (first.force_n[2] - weight * alpha.cos());
+        assert!(
+            upward > 1.05 * weight,
+            "native start load must release support"
         );
-        assert_eq!(next.longitudinal.theta_rad, start.longitudinal.theta_rad);
-        assert_eq!(next.longitudinal.q_rad_s, start.longitudinal.q_rad_s);
-        assert_eq!(next.rotor_rad_s, start.rotor_rad_s);
+        assert!(first.moment_y_nm.abs() > 1e-8);
+        assert!(first.torque_imbalance_nm.abs() > 1e-8);
+        let mut expected_field = sim
+            .spatial_wind
+            .as_ref()
+            .map(|w| EvolvingTurbulenceField::resume(w.field.checkpoint()).unwrap());
+        if let Some(field) = &mut expected_field {
+            field.advance_to(1).unwrap();
+        }
+        // An independently initialized free-flight twin is the release oracle.
+        // The active tow would expose any accidental preceding rail substep.
+        let checkpoint = sim.save_checkpoint().unwrap();
+        let mut free = SimLoop::restore_checkpoint(sim.spec.clone(), &checkpoint).unwrap();
+        free.phase = Phase::Airborne;
+        let input = Some(ControlInput {
+            lever_force_n: 0.0,
+            warp_cmd_rad: 0.08,
+        });
+        let released = sim.step(input).unwrap();
+        let airborne = free.step(input).unwrap();
+        assert_eq!(released, airborne);
+        assert_eq!(
+            sim.save_checkpoint().unwrap(),
+            free.save_checkpoint().unwrap()
+        );
+        assert_eq!(sim.digest_hex(), free.digest_hex());
+        assert_eq!(sim.phase, Phase::Airborne);
+        let next = sim.current_flight_motion();
+        assert!(
+            next.longitudinal.ground_mps[1] > 0.0,
+            "retain the free vertical impulse"
+        );
+        assert!(next.longitudinal.position_m[1] > start.longitudinal.position_m[1]);
+        assert_ne!(next.longitudinal.q_rad_s, start.longitudinal.q_rad_s);
+        assert_ne!(next.longitudinal.theta_rad, start.longitudinal.theta_rad);
+        assert_ne!(next.rotor_rad_s, start.rotor_rad_s);
+        assert!(
+            released.p_rad_s.abs() > 1e-10,
+            "release also advances the lateral owner"
+        );
+        assert_eq!(sim.tick, 1);
+        if mode == 0 {
+            assert_eq!(sim.ou.checkpoint(), expected_ou.checkpoint());
+        } else {
+            assert_eq!(
+                sim.spatial_wind.as_ref().unwrap().field.checkpoint(),
+                expected_field.unwrap().checkpoint()
+            );
+        }
     }
 }
 
@@ -476,6 +532,95 @@ fn refused_midpoint_keeps_motion_and_warm_start_unchanged() {
     assert_eq!(sim.warm_slip, warm);
     assert_eq!(sim.tick, 0);
     assert_eq!(sim.phase, Phase::Airborne);
+}
+
+#[test]
+fn positive_midpoint_uses_native_loads_before_deciding_ground_contact() {
+    let mut sim = airborne_fixture(0);
+    sim.h_m = 1.0;
+    sim.q = 0.5;
+    let ground = [sim.tick0.trim.v_mps - sim.spec.headwind_mps, -0.3];
+    [sim.u, sim.w] = motion::body_air_velocity(ground, sim.theta, [-sim.spec.headwind_mps, 0.0]);
+    let start = sim.current_flight_motion();
+    let speed = (sim.u * sim.u + sim.w * sim.w).sqrt();
+    let alpha = det::atan2(sim.w, sim.u);
+    let dc = sim.mech.delta_rad;
+    let first = sim.force_buildup_current_wind(speed, alpha, dc).unwrap();
+    let dt = 1.0 / 120.0;
+    let held = motion::held_load_step(
+        start.longitudinal,
+        motion::nongravity_acceleration(
+            [first.force_n[0], first.force_n[2]],
+            alpha,
+            sim.design.gross_mass_kg,
+        ),
+        first.moment_y_nm / super::super::IYY_KG_M2,
+        motion::GRAVITY_MPS2,
+        dt,
+    );
+    let checkpoint = sim.save_checkpoint().unwrap();
+    let middle = sim
+        .advance_airborne_motion(&first, alpha, dc, 0.0, dt)
+        .unwrap()
+        .unwrap();
+    let accepted = sim.current_flight_motion();
+    let held_dh = held.position_m[1] - start.longitudinal.position_m[1];
+    let actual_dh = accepted.longitudinal.position_m[1] - start.longitudinal.position_m[1];
+    let improvement = actual_dh - held_dh;
+    assert!(
+        actual_dh < 0.0 && improvement > 1e-12,
+        "native falling/pitching fixture: held={held_dh:e}, midpoint={actual_dh:e}"
+    );
+
+    // Uniform-wind native aerodynamics are invariant under vertical position
+    // translation. Shift this genuine two-solve trajectory to straddle the
+    // obsolete held endpoint while leaving the actual force point above ground.
+    for crosses in [false, true] {
+        let height = if crosses {
+            -actual_dh - 0.5 * improvement
+        } else {
+            -0.5 * (held_dh + actual_dh)
+        };
+        assert!(height > 0.0);
+        assert!(
+            height + 0.5 * dt * ground[1] > 0.0,
+            "midpoint CG must remain admitted"
+        );
+        assert!(
+            height + held_dh < 0.0,
+            "old event branch must be discriminated"
+        );
+        let mut shifted = SimLoop::restore_checkpoint(sim.spec.clone(), &checkpoint).unwrap();
+        shifted.h_m = height;
+        let loads = shifted
+            .advance_airborne_motion(&first, alpha, dc, 0.0, dt)
+            .unwrap()
+            .expect("a positive force point must use native midpoint loads");
+        assert_eq!(loads.forces.force_n, middle.forces.force_n);
+        assert_eq!(shifted.warm_slip, Some(middle.forces.coupled.w_slip));
+        let actual = shifted.current_flight_motion();
+        let mut expected = accepted;
+        expected.longitudinal.position_m[1] = (height + actual_dh).max(0.0);
+        for (value, oracle) in motion_values(actual)
+            .into_iter()
+            .zip(motion_values(expected))
+        {
+            assert!(
+                (value - oracle).abs() < 5e-13,
+                "{value:.17e} vs {oracle:.17e}"
+            );
+        }
+        if crosses {
+            assert_eq!(shifted.phase, Phase::Ended(TerminalEvent::GroundContact));
+            assert_eq!(shifted.h_m, 0.0);
+        } else {
+            assert_eq!(shifted.phase, Phase::Airborne);
+            assert!(
+                shifted.h_m > 0.0,
+                "midpoint lift reverses the held predictor's verdict"
+            );
+        }
+    }
 }
 
 #[test]
