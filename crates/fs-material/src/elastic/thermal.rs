@@ -246,3 +246,6 @@ impl ResolvedThermoelastic {
             entropy_j_k,internal_energy_j,heat_capacity_j_k})
     }
 }
+
+/// Source-derived two-temperature Hertz compliance and thermal derivatives.
+pub mod contact;

@@ -3039,3 +3039,12 @@ EOS, transport and gas-energy implementation: dry-carrier sublimation,
 deposition, zero-net-mass heat transfer, formation-reference invariance,
 timestep convergence and atomic refusal. The six existing species-boundary
 regressions also passed in the same actual-source native executable.
+
+
+### Source-derived two-surface thermal Hertz compliance
+
+`elastic::thermal::contact::ThermalHertzPair` keeps both original isotropic solid cards, complete query contexts and exact source selections. Each body has its own actual temperature. Continuous source lines admit positive affine Young's moduli and fixed Poisson ratios/yield limits; unsupported derivative jumps, hidden evolving axes and extrapolation refuse. The original `IsotropicSolidStatePoint::reduced_modulus_against` computes the harmonic compliance. Its full two-temperature gradient and Hessian are analytical; the effective modulus is not approximated as affine. Immutable source data are shared between candidate checkpoints.
+
+For a fixed-geometry native Hertz potential `psi=G(delta)*E*`, the derivatives support surface entropy `s_i=-G*dE*/dT_i`, internal energy `U=psi+sum(T_i*s_i)` and reciprocal thermal capacity. Returned source states retain their original identities and receipts. This is a constitutive capability, not a contact or thermal integrator; coupled owners must retain physical heat/work, total heat capacity, source domains and mechanical state. No geometry expansion, changing reference mass, phase change, plasticity, measured calibration or full Euler thermal closure is inferred.
+
+Focused native G1/G3 tests compare the modulus and all first/second derivatives with independent rational compliance and finite differences, check thermodynamic internal-energy derivatives, ordered surface exchange, the constant-modulus limit, and original-card/domain/non-affine-source refusal. Synthetic source fixtures establish implementation behavior only.
