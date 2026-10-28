@@ -26,8 +26,10 @@
 //! spatial Ohmic heat, including floating conductor current-return constraints.
 //! The linear midpoint induction owner still refuses permanent-magnet bias;
 //! the nonlinear backward-Euler owner includes fixed oriented recoil sources.
-//! There is no hysteresis, irreversible demagnetization, moving-conductor
-//! induction feedback or distributed magnetostriction claim.
+//! `planar::eddy::moving` adds prescribed Eulerian conductor velocity, spatial
+//! induction feedback and consistent Joule/Lorentz work on the same fixed mesh.
+//! There is no hysteresis, irreversible demagnetization, moving-geometry
+//! induction or distributed magnetostriction claim.
 //! `planar::nonlinear` combines source-bound reversible H(B), linear media and
 //! oriented recoil magnets in the same mesh, with source-integrated energy,
 //! checked operating limits and the same Hodge, gauge and transfer owners.

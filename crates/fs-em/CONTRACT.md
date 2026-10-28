@@ -1,5 +1,55 @@
 # fs-em contract
 
+## Prescribed Eulerian moving-conductor induction
+
+`PlanarEddy::step_with_eulerian_velocity_candidate` continues the original
+accepted vector potential, impressed-current history, floating electrical
+regions and clock with a prescribed continuous P1 planar velocity. It solves
+`K A_mid + P_sigma(Adot + v.grad(A_mid)) = load(J_impressed_mid)` on the same
+fixed mesh and source-bound linear material snapshots. The existing
+conductivity-weighted P1 mass/mean projection enforces zero integrated axial
+current separately in every isolated conducting region. Uniform motional EMF
+is cancelled by the floating scalar-potential gradient, without fictitious
+eddy current or Joule heating.
+
+Velocity feedback makes the operator nonsymmetric. The existing cancellable
+FGMRES owner supplies the recurrence, with a positive diffusion/storage Jacobi
+preconditioner and a correct matrix-free transpose. Full-mesh work buffers and
+cell geometry are reused during Arnoldi actions; neither the advection matrix
+nor regional projection is densified. Explicit restart/cycle/Krylov-storage
+budgets bound the solve. Acceptance recomputes the actual retained increment's
+true Euclidean residual against the larger of caller-supplied absolute [A m]
+and relative targets. A caller-declared cell magnetic Peclet limit
+`mu*sigma*max_vertex_speed*diameter/2` bounds admission of this unstabilized
+Galerkin spatial discretization; it is not an error certificate.
+
+Returned original-cell fields distinguish laboratory E from conductor-frame
+`E'=E+v cross B`, with `J=sigma E'`. The SAME stage B and P1 current supply
+`J cross B`, exact quadratic Joule heat, and exact P1 Lorentz-mechanical work.
+The accepted account is `delta W + Q_Joule + W_mechanical = W_impressed`;
+positive mechanical work is delivered by the field to prescribed motion.
+Thermal and mechanical receivers must close their own balances with these
+reported transfers. These are free-conduction-current forces, not an additional
+Maxwell-stress body load or a magnetization/interface-force model.
+
+This is a nonrelativistic, fixed-geometry, fixed-coefficient Eulerian MQS lane.
+Motion must preserve the represented material occupancy/coefficient field,
+including homogeneous through-flow with separately supplied boundary data.
+Translating finite bodies, moving material interfaces or magnetic sources,
+ALE/sliding meshes, electrical terminals, nonlinear magnetic laws, remanence,
+hysteresis and displacement current remain outside it. Prescribing velocity
+does not advance mechanical state or infer its energy supply. The stationary
+and temperature-refresh operations remain separate. Physical convention and
+fixed-domain applicability follow the official COMSOL AC/DC guide,
+[Velocity (Lorentz Term)](https://doc.comsol.com/6.4/doc/com.comsol.help.acdc/acdc_ug_magnetic_fields.08.040.html).
+
+Focused G1/G3/G4 tests compare the spatially varying-velocity field with an
+independently assembled nonsymmetric two-mode system and separate degree-two
+quadrature for heat and mechanical work. They cover source/material/depth
+substitutions, genuine field feedback, uniform-field charge cancellation,
+zero-velocity stationary continuation and work/source/velocity/cancellation
+refusals. Synthetic coefficients do not qualify an empirical material/device.
+
 ## Purpose and layer
 
 L3 material-resolved electromagnetic fields. The current owner is a linear,

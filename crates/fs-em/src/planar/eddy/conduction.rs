@@ -47,6 +47,116 @@ fn finite(value: f64) -> Result<f64, ConductionError> {
 }
 
 impl Conduction {
+    // An additional cell-local P1 field need not be continuous across magnetic
+    // material interfaces. Subtract its own regional anchor before taking the
+    // mean, just as for the original nodal potential. This also annihilates a
+    // spatially constant motional EMF without cancellation of large values.
+    fn offset_anchors(&self, offsets: &[[f64; 3]], check: &dyn Fn() -> bool) -> Option<Vec<f64>> {
+        let mut anchors = vec![None; self.regions.len()];
+        for (cell, values) in self.cells.iter().zip(offsets) {
+            if check() {
+                return None;
+            }
+            anchors[cell.group].get_or_insert(values[0]);
+        }
+        Some(anchors.into_iter().map(|v| v.unwrap_or(0.0)).collect())
+    }
+
+    fn means_with_offsets(
+        &self,
+        x: &[f64],
+        offsets: &[[f64; 3]],
+        offset_anchors: &[f64],
+        check: &dyn Fn() -> bool,
+    ) -> Option<Vec<f64>> {
+        let mut means = vec![0.0; self.regions.len()];
+        for (cell, offsets) in self.cells.iter().zip(offsets) {
+            if check() {
+                return None;
+            }
+            let anchor = x[self.anchors[cell.group]];
+            means[cell.group] += cell.sigma_volume
+                * (0..3)
+                    .map(|i| {
+                        ((x[cell.vertices[i]] - anchor) + (offsets[i] - offset_anchors[cell.group]))
+                            / 3.0
+                    })
+                    .sum::<f64>();
+        }
+        for (mean, weight) in means.iter_mut().zip(&self.weights) {
+            *mean /= weight;
+        }
+        Some(means)
+    }
+
+    /// Apply the same isolated-current projection to a nodal P1 field plus
+    /// cell-local P1 offsets. Moving induction uses the latter for v.grad(A).
+    pub fn apply_with_offsets(
+        &self,
+        x: &[f64],
+        offsets: &[[f64; 3]],
+        y: &mut [f64],
+        check: &dyn Fn() -> bool,
+    ) -> bool {
+        assert_eq!(offsets.len(), self.cells.len());
+        y.fill(0.0);
+        let Some(offset_anchors) = self.offset_anchors(offsets, check) else {
+            return false;
+        };
+        let Some(means) = self.means_with_offsets(x, offsets, &offset_anchors, check) else {
+            return false;
+        };
+        for (cell, offsets) in self.cells.iter().zip(offsets) {
+            if check() {
+                return false;
+            }
+            let anchor = x[self.anchors[cell.group]];
+            let d: [f64; 3] = std::array::from_fn(|i| {
+                ((x[cell.vertices[i]] - anchor) + (offsets[i] - offset_anchors[cell.group]))
+                    - means[cell.group]
+            });
+            let sum = d.iter().sum::<f64>();
+            for i in 0..3 {
+                y[cell.vertices[i]] += cell.sigma_volume / 12.0 * (d[i] + sum);
+            }
+        }
+        true
+    }
+
+    /// Exactly integrate the conductor-frame sigma E² for a nodal rate plus
+    /// cell-local v.grad(A), with the same projected field as the weak solve.
+    pub fn heat_with_offsets(
+        &self,
+        rate: &[f64],
+        offsets: &[[f64; 3]],
+        dt: f64,
+        thickness_m: f64,
+        current_tolerance_a: f64,
+        check: &dyn Fn() -> bool,
+    ) -> Result<JouleHeat, ConductionError> {
+        assert_eq!(offsets.len(), self.cells.len());
+        let offset_anchors = self
+            .offset_anchors(offsets, check)
+            .ok_or(ConductionError::Cancelled)?;
+        let means = self
+            .means_with_offsets(rate, offsets, &offset_anchors, check)
+            .ok_or(ConductionError::Cancelled)?;
+        self.integrate_heat(
+            dt,
+            thickness_m,
+            current_tolerance_a,
+            check,
+            |index, cell| {
+                let anchor = rate[self.anchors[cell.group]];
+                std::array::from_fn(|i| {
+                    -(((rate[cell.vertices[i]] - anchor)
+                        + (offsets[index][i] - offset_anchors[cell.group]))
+                        - means[cell.group])
+                })
+            },
+        )
+    }
+
     // Subtract a regional coordinate BEFORE summation; constant gauge values
     // cannot manufacture axial field through cancellation of large offsets.
     pub fn means(&self, x: &[f64], check: &dyn Fn() -> bool) -> Option<Vec<f64>> {
@@ -101,17 +211,31 @@ impl Conduction {
         let means = self
             .means(increments, check)
             .ok_or(ConductionError::Cancelled)?;
+        self.integrate_heat(dt, thickness_m, current_tolerance_a, check, |_, cell| {
+            let anchor = increments[self.anchors[cell.group]];
+            cell.vertices
+                .map(|v| -((increments[v] - anchor) - means[cell.group]) / dt)
+        })
+    }
+
+    // One quadrature/accounting owner serves stationary, nonlinear and moving
+    // induction. Only the constitutive-frame electric field differs.
+    fn integrate_heat(
+        &self,
+        dt: f64,
+        thickness_m: f64,
+        current_tolerance_a: f64,
+        check: &dyn Fn() -> bool,
+        electric: impl Fn(usize, &ConductionCell) -> [f64; 3],
+    ) -> Result<JouleHeat, ConductionError> {
         let mut cells = Vec::with_capacity(self.cells.len());
         let mut net_current = vec![0.0; self.regions.len()];
         let mut heat_j = 0.0;
-        for cell in &self.cells {
+        for (index, cell) in self.cells.iter().enumerate() {
             if check() {
                 return Err(ConductionError::Cancelled);
             }
-            let anchor = increments[self.anchors[cell.group]];
-            let electric_field_v_m = cell
-                .vertices
-                .map(|v| -((increments[v] - anchor) - means[cell.group]) / dt);
+            let electric_field_v_m = electric(index, cell);
             let current_density_a_m2 = electric_field_v_m.map(|e| cell.conductivity_s_m * e);
             let e_sum = electric_field_v_m.iter().sum::<f64>();
             let power_w = finite(

@@ -13,13 +13,17 @@
 //! Opposite axial currents close outside the modeled section; their end fields
 //! and end losses are excluded. Fixed A boundary traces and balanced impressed
 //! current profiles drive the represented section. There is no terminal circuit,
-//! displacement current, Hall effect, hysteresis, moving conductor or force law.
+//! displacement current, Hall effect or hysteresis. The stationary entry points
+//! have no moving-conductor or force law; [`moving`] adds prescribed Eulerian
+//! velocity and consistent free-current Lorentz work on this fixed geometry.
 //! Implicit midpoint is second order for held coefficients; thermal endpoint
 //! refresh in a composed solve generally reduces coupled accuracy to first order.
 //! A source-pinned temperature-dependent mu may rebuild the same mesh through
 //! `step_with_materials_candidate`; its signed parameter work is then explicit.
 
 mod conduction;
+/// Prescribed Eulerian conductor motion, induced-field feedback and mechanical work.
+pub mod moving;
 /// Source-defined reversible H(B) induction on the same conduction/heat owners.
 pub mod nonlinear;
 use conduction::{Conduction, ConductionCell, ConductionError};
