@@ -8992,3 +8992,21 @@ motion-dependent convection and temperature-dependent magnet strength require
 their own models. Focused tests exercise self-heating/power compression,
 constant-conductivity reduction to the original five-state cabinet, analytic
 finite-store cooling and joint refusal behavior.
+
+### Critical and overdamped acoustic radiation memory
+
+The shared `render::plate::impact::radiation::Model` admits all finite
+nonnegative pole damping ratios, including critical and overdamped acoustic
+memory, with representable stiffness and viscous resistance. The same signed
+positive-real impedance and reciprocal mechanical reaction remain in the impact,
+coupled-modal, prepared-air and piano owners. Their generic passive/exact
+propagators retain both real decay poles; no underdamped phase formula or new
+time integrator is introduced. Existing modal-frequency, coupling and work
+limits remain; a fast real decay is not treated as a Nyquist frequency.
+
+The piano regressions compare actual prepared free motion and independently
+integrated dissipation against critical and two-real-pole solutions, including
+a fast decay far above the sample rate. Three mechanical rates recover the
+analytic coupled mass/radiator response and dissipated work at second order.
+The fixed fit dictionaries and their geometric/frequency qualification are
+unchanged; admitting a pole regime alone does not validate a fitted exterior.

@@ -20,9 +20,11 @@ pub const MAX_PORTS: usize = 128;
 pub const MAX_POLES: usize = 16_384;
 
 /// One unit-mass acoustic oscillator and its signed mechanical velocity ports.
+/// Critical and overdamped memory are passive too; no resonance is required.
 #[derive(Clone, Debug)]
 pub struct Pole {
     pub omega: f64,
+    /// Finite nonnegative damping ratio, including critical and overdamped poles.
     pub zeta: f64,
     /// Generalized mechanical velocities -> acoustic modal force [1/s].
     pub coupling: Vec<f64>,
@@ -37,7 +39,8 @@ impl Model {
     pub fn validate(&self) -> Result<(), String> {
         if !(1..=MAX_PORTS).contains(&self.ports) || self.poles.is_empty() || self.poles.len()>MAX_POLES
             || self.poles.iter().any(|p| !p.omega.is_finite() || p.omega<=0.
-                || !p.zeta.is_finite() || !(0.0..1.0).contains(&p.zeta)
+                || !p.zeta.is_finite() || p.zeta<0.
+                || !p.omega.powi(2).is_finite() || !(2.*p.zeta*p.omega).is_finite()
                 || p.coupling.len()!=self.ports || p.coupling.iter().any(|x|!x.is_finite())) {
             return Err("invalid complete passive acoustic pole/port model".into());
         }

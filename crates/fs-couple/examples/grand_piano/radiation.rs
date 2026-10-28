@@ -249,9 +249,115 @@ mod tests {
     #[test]
     fn bad_or_under_resolved_models_refuse_without_changing_a_valid_model() {
         let good=model(0.2);assert!(Prepared::new(&good,192_000,3).is_err());
-        for bad in [f64::NAN,-1.,1.] {let mut m=good.clone();m.poles[0].zeta=bad;assert!(m.validate().is_err());}
+        for bad in [f64::NAN,-1.,f64::INFINITY] {let mut m=good.clone();m.poles[0].zeta=bad;assert!(m.validate().is_err());}
         let mut m=good.clone();m.poles[0].coupling[0]=1e9;
         assert!(Prepared::new(&m,192_000,2).is_err());
         let mut m=good;m.poles[0].coupling.pop();assert!(m.validate().is_err());
     }
+    // Independent real-pole impulse integrals. These do not obtain loss by
+    // subtracting endpoint energies as the runtime's free flow does.
+    fn exponential_integral(rate:f64,t:f64)->f64 { -(-rate*t).exp_m1()/rate }
+    fn free_oracle(omega:f64,zeta:f64,t:f64)->([f64;2],f64) {
+        if zeta==1. {
+            let a=omega*t;let e=(-a).exp();
+            return ([e*(1.+a),-a*e],0.5*(1.-(-2.*a).exp()*(1.+2.*a+2.*a*a)));
+        }
+        let sum=zeta+(zeta*zeta-1.).sqrt();
+        let (slow,fast)=(omega/sum,omega*sum);
+        let (a,b)=((-slow*t).exp(),(-fast*t).exp());
+        let factor=omega/(fast-slow);
+        let loss=2.*zeta*omega*factor*factor
+            *(exponential_integral(2.*slow,t)-2.*exponential_integral(slow+fast,t)
+                +exponential_integral(2.*fast,t));
+        ([(fast*a-slow*b)/(fast-slow),factor*(b-a)],loss)
+    }
+
+    #[test]
+    fn critical_and_overdamped_free_memory_match_motion_and_independent_heat() {
+        // The fastest real pole in the last case is far above the sample rate.
+        // It is a decay, not an oscillatory frequency; exact propagation keeps
+        // the physical slow tail without an artificial Nyquist refusal.
+        let (omega,rate)=(1200.,8000);
+        for zeta in [1.,2.,1e6] {
+            let m=Model {ports:1,poles:vec![Pole {omega,zeta,coupling:vec![0.]}]};
+            let mut air=Prepared::new(&m,rate,1).unwrap();
+            air.state[0]=[1.,0.];
+            let loss=air.free_half();
+            let (expected,heat)=free_oracle(omega,zeta,0.5/f64::from(rate));
+            for (a,b) in air.state[0].iter().zip(expected) {
+                assert!((a-b).abs()<2e-11,"zeta={zeta}: {a} != {b}");
+            }
+            assert!(loss>=0.);
+            assert!((loss-heat).abs()<2e-11*heat.max(1e-4),"{zeta}: {loss} != {heat}");
+        }
+    }
+
+    #[test]
+    fn nonresonant_radiation_impedance_keeps_signed_reciprocal_passivity() {
+        for zeta in [1.,2.,1000.] {
+            let m=model(zeta);
+            for w in [10.,500.,1200.,3200.,10000.] {
+                let z=m.impedance(w).unwrap();assert_eq!(z[1],z[2]);
+                let v=[C64::new(0.3,0.8),C64::new(-0.1,0.4)];
+                let power=(0..2).map(|i|(0..2)
+                    .map(|j|(v[i].conj()*z[2*i+j]*v[j]).re).sum::<f64>()).sum::<f64>();
+                let expected=m.poles.iter().map(|p| {
+                    let drive=p.coupling.iter().zip(v).fold(C64::ZERO,|s,(l,v)|s+v.scale(*l));
+                    let resistance=2.*zeta*p.omega*w*w
+                        /((p.omega*p.omega-w*w).powi(2)+(2.*zeta*p.omega*w).powi(2));
+                    drive.abs().powi(2)*resistance
+                }).sum::<f64>();
+                assert!(power>=0.);
+                assert!((power-expected).abs()<2e-13*expected.max(1e-20));
+            }
+        }
+    }
+
+    #[test]
+    fn critical_and_overdamped_reaction_converge_to_the_complete_physical_solution() {
+        let (omega,g,v0,t)=(1200.0_f64,200.0_f64,0.1,0.004);
+        let loaded=(omega*omega+g*g).sqrt();
+        for ratio in [1.,2.] {
+            let zeta=ratio*loaded/omega;
+            let force=g*v0;
+            let (q,p,heat)=if ratio==1. {
+                let a=loaded*t;let e=(-a).exp();
+                (force/(loaded*loaded)*(1.-e*(1.+a)),force*t*e,
+                    force*force/(2.*loaded*loaded)
+                        *(1.-(-2.*a).exp()*(1.+2.*a+2.*a*a)))
+            } else {
+                let sum=ratio+(ratio*ratio-1.0_f64).sqrt();
+                let (slow,fast)=(loaded/sum,loaded*sum);
+                let (a,b)=((-slow*t).exp(),(-fast*t).exp());
+                let factor=force/(fast-slow);
+                (force/(loaded*loaded)*(1.-(fast*a-slow*b)/(fast-slow)),
+                    factor*(a-b),2.*zeta*omega*factor*factor
+                        *(exponential_integral(2.*slow,t)-2.*exponential_integral(slow+fast,t)
+                            +exponential_integral(2.*fast,t)))
+            };
+            let mut previous=None;
+            for rate in [48_000,96_000,192_000] {
+                let m=Model {ports:1,poles:vec![Pole {omega,zeta,coupling:vec![g]}]};
+                let mut air=Prepared::new(&m,rate,1).unwrap();
+                let mut board=[v0];let mut loss=0.;
+                for _ in 0..(t*f64::from(rate)).round() as usize {
+                    loss+=air.before(&mut board).unwrap();
+                    loss+=air.after(&mut board).unwrap();
+                }
+                let initial=0.5*v0*v0;
+                assert!((air.energy()+0.5*board[0]*board[0]+loss-initial).abs()<2e-14);
+                assert!(loss>0.);
+                let error=((air.state[0][0]-omega*q).powi(2)
+                    +(air.state[0][1]-p).powi(2)+(board[0]-(v0-g*q)).powi(2)).sqrt()/v0
+                    +(loss-heat).abs()/initial;
+                if let Some(old)=previous {
+                    assert!((3.8..4.2).contains(&(old/error)),"zeta={zeta}, rate={rate}: {old} -> {error}");
+                }
+                eprintln!("radiation zeta={zeta:.6}, rate={rate}: response/work error={error:e}");
+                previous=Some(error);
+            }
+            assert!(previous.unwrap()<1e-5);
+        }
+    }
+
 }
