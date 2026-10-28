@@ -6,6 +6,11 @@
 //! and phase; radiation, distributed generation and storage inside the layers
 //! require their own resolved equations.
 
+/// Source-qualified preparation on an original pure-phase caloric branch.
+pub mod source;
+/// Endpoint coefficients for the original conservative thermal network.
+pub mod network;
+
 use fs_thermal::enthalpy::{DepositionError, series_contact_conductance_w_k};
 
 /// Maximum retained temperature/conductivity knots in one constitutive chart.
@@ -114,9 +119,15 @@ pub struct LayerConductionResponse {
     pub endpoint_derivative_w_k: [f64; 2],
     /// Hot-layer outgoing minus cold-layer incoming power, independent of a/b order.
     pub layer_heat_residual_w: f64,
-    /// Contact temperature-jump residual, divided by its resistance, W.
-    /// Exactly zero for perfect contact; it is never counted as stored heat.
+    /// Diagnostic temperature-jump residual divided by resistance, W. This is
+    /// ill-conditioned near perfect contact, NOT an energy defect. Acceptance
+    /// uses the Kelvin residual and explicit representation allowance below.
     pub contact_heat_residual_w: f64,
+    /// Actual (T_interface_a-T_interface_b)-R*Q/A, in K.
+    pub contact_temperature_residual_k: f64,
+    /// Floating-point representation allowance for the contact jump, K;
+    /// separate from the caller's physical heat-continuity tolerance.
+    pub contact_roundoff_allowance_k: f64,
     pub iterations: usize,
 }
 
@@ -167,7 +178,8 @@ impl<'a> TwoLayerConduction<'a> {
             checkpoint()?;
             return Ok(LayerConductionResponse { power_a_to_b_w: 0.0, conductance_w_k: g,
                 interface_temperature_k: [ta, tb], endpoint_derivative_w_k: [g, -g],
-                layer_heat_residual_w: 0.0, contact_heat_residual_w: 0.0, iterations: 0 });
+                layer_heat_residual_w: 0.0, contact_heat_residual_w: 0.0,
+                contact_temperature_residual_k: 0.0, contact_roundoff_allowance_k: 0.0, iterations: 0 });
         }
         let (hot, cold, sign) = if ta > tb { (0, 1, 1.0) } else { (1, 0, -1.0) };
         let (th, tc) = (temperatures_k[hot], temperatures_k[cold]);
@@ -194,11 +206,17 @@ impl<'a> TwoLayerConduction<'a> {
             let qh = finite(self.area_m2 * jh)?;
             let qc = finite(self.area_m2 * jc)?;
             let residual = finite(qh - qc)?;
+            let jump_residual = finite((u - v) - jump)?;
+            let jump_roundoff = finite(8.0 * f64::EPSILON * u.abs().max(v.abs()).max(jump.abs()))?;
             let contact_residual = if r == 0.0 { 0.0 }
                 else { finite(self.area_m2 * ((u - v) / r - jh))? };
             let tolerance = finite(config.absolute_heat_tolerance_w
                 + config.relative_heat_tolerance * qh.abs().max(qc.abs()))?;
-            if residual.abs() <= tolerance && contact_residual.abs() <= tolerance {
+            // Dividing a representational Kelvin error by a vanishing contact
+            // resistance would incorrectly reject the perfect-contact limit.
+            // Keep that diagnostic separate; never relax the layer heat gate.
+            let jump_tolerance = finite(jump_roundoff + (tolerance / self.area_m2) * r)?;
+            if residual.abs() <= tolerance && jump_residual.abs() <= jump_tolerance {
                 let mut interface = [0.0; 2];
                 interface[hot] = u;
                 interface[cold] = v;
@@ -215,7 +233,9 @@ impl<'a> TwoLayerConduction<'a> {
                 return Ok(LayerConductionResponse { power_a_to_b_w: sign * qh,
                     conductance_w_k: g, interface_temperature_k: interface,
                     endpoint_derivative_w_k: derivatives, layer_heat_residual_w: residual,
-                    contact_heat_residual_w: sign * contact_residual, iterations: iteration + 1 });
+                    contact_heat_residual_w: sign * contact_residual,
+                    contact_temperature_residual_k: sign * jump_residual,
+                    contact_roundoff_allowance_k: jump_roundoff, iterations: iteration + 1 });
             }
             if residual > 0.0 { lo = u; } else { hi = u; }
             let a = positive(kh.conductivity_w_m_k(u)? / dh)?;

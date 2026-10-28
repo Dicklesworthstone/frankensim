@@ -124,3 +124,19 @@ fn unsupported_sources_work_exhaustion_and_final_cancellation_return_no_response
     }),Err(DepositionError::Cancelled));
     assert_eq!(model.evaluate([600.0,300.0],config(),||Ok(())).unwrap(),expected);
 }
+
+#[test]
+fn near_perfect_contact_does_not_amplify_kelvin_roundoff_into_false_energy_loss() {
+    let k = ConductivityCurve::new(vec![[200.0,4.0],[1000.0,12.0]]).unwrap();
+    let perfect = TwoLayerConduction::new([&k;2],[0.02,0.03],0.004,0.0).unwrap()
+        .evaluate([600.0,300.0],config(),||Ok(())).unwrap();
+    for r in [1e-16,1e-14,1e-12,1e-10,1e-8] {
+        let got = TwoLayerConduction::new([&k;2],[0.02,0.03],0.004,r).unwrap()
+            .evaluate([600.0,300.0],config(),||Ok(())).unwrap();
+        assert!(got.layer_heat_residual_w.abs() <= 1e-9+1e-12*got.power_a_to_b_w.abs());
+        assert!(got.contact_temperature_residual_k.abs() <= got.contact_roundoff_allowance_k
+            +(1e-9+1e-12*got.power_a_to_b_w.abs())/0.004*r);
+        assert!(got.power_a_to_b_w <= perfect.power_a_to_b_w+1e-9);
+        close(got.power_a_to_b_w,perfect.power_a_to_b_w,30000.0*r+1e-9);
+    }
+}
