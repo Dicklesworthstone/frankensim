@@ -38,6 +38,9 @@ pub mod flash;
 /// Native rigid momenta, retained partial slip and finite heat accept together.
 pub mod rigid;
 
+/// Simultaneous friction sources on one original thermal network.
+pub mod network;
+
 fn invalid(message: &'static str) -> DepositionError {
     DepositionError::InvalidInput(message)
 }

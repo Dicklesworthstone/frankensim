@@ -6,6 +6,9 @@
 //! finite enthalpy network. Reversible storage and both numerical losses retain
 //! their own accounts; no effective mass, heat fraction or thermal store is added.
 
+/// Simultaneous native rigid contact islands with shared thermal cells.
+pub mod network;
+
 use super::{
     FrictionHeatInput, FrictionHeatReport, FrictionHeatRoute, FrictionHeatStep,
     FrictionHeatTolerances,
