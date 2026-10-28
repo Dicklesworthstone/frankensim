@@ -1368,6 +1368,35 @@ authority.
   80 axial cells, checking improving front, molten-length and temperature
   discrepancies plus energy closure. This finite comparison does not establish
   a formal spatial or temporal order, or validate liquid-flow physics.
+- `EnthalpyBackwardEuler::adaptive_state` and its heterogeneous facade provide
+  a full-window controller for directly assembled physical laws, alongside the
+  existing authored-history adaptive stepper. Each trial
+  compares one full backward-Euler step with two half steps from the same
+  accepted history. Acceptance requires componentwise enthalpy, temperature
+  and liquid-fraction discrepancies to meet their explicit tolerances; an
+  isothermal latent plateau cannot conceal different stored energy. Relative
+  scales use field changes, so a large absolute enthalpy reference does not
+  loosen accuracy. The two-half-step state is accepted without extrapolation.
+  Reference masses, nodal phase charts, temperature/phase conductivity,
+  contacts and prescribed-temperature reservoir reactions retain the endpoint
+  solver's physical meaning. Separate entry points retain the existing
+  pointwise ambient and enclosure radiation laws.
+  Only the two accepted fine endpoints contribute external heat; comparison
+  solves and rejected trials never add heat. Whole-run stored energy is
+  recomputed directly from reference masses and the original enthalpy field.
+  Its reported balance defect is measured, not bounded by one step's energy
+  tolerance. Each call lands exactly on its declared event time under fixed
+  source and boundary laws, allowing explicit workload changes between calls.
+  A trial budget or minimum-step stop returns a distinguishable partial
+  trajectory. Cancellation and endpoint refusals preserve accepted physical
+  history; continuing a bounded call retains the same controller state.
+  This is an in-memory resumable trajectory with local time-error estimates,
+  not a persisted checkpoint, accumulated-error certificate or timestep
+  adjoint. `tests/adaptive_enthalpy.rs` checks independent spatial diffusion
+  and latent-plateau solutions, analytic quartic radiative cooling,
+  tighter-tolerance convergence, phase-fraction error control,
+  event-aligned heating/cooling, accepted fine-step heat,
+  rejected work, bitwise budget/resume replay and cancellation.
 - `EnthalpyBackwardEuler::evaluate_endpoint` and its heterogeneous facade
   evaluate an arbitrary supplied enthalpy candidate under the current physical
   boundary law without advancing history or taking a solver iteration. They

@@ -288,6 +288,25 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
         self.inner.reference_nodal_masses_kg()
     }
 
+    /// Prepare adaptive time integration with the same per-node phase charts,
+    /// reference masses and phase-dependent conductivity assignments.
+    pub fn adaptive_state<'s>(
+        &'s self,
+        cx: &Cx<'_>,
+        initial_specific_h: &[f64],
+        initial_time_s: f64,
+        initial_step_s: f64,
+        config: super::adaptive::AdaptiveEnthalpyConfig,
+    ) -> Result<super::adaptive::AdaptiveEnthalpyState<'s, 'm, 'c>, EnthalpyError> {
+        self.inner.adaptive_state(
+            cx,
+            initial_specific_h,
+            initial_time_s,
+            initial_step_s,
+            config,
+        )
+    }
+
     /// Exact chart assigned to a mesh vertex; out-of-range vertices return None.
     #[must_use]
     pub fn phase_curve_at(&self, vertex: usize) -> Option<&EquilibriumEnthalpyPhaseCurve> {

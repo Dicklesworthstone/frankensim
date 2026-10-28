@@ -31,6 +31,8 @@
 
 /// Implicit endpoint derivatives through the accepted physical balance.
 pub mod adjoint;
+/// Error-controlled time integration of the same nonlinear enthalpy transport.
+pub mod adaptive;
 /// Implicit closed-enclosure radiation with complete physical enthalpy feedback.
 pub mod enclosure;
 /// Explicit heterogeneous phase charts and frozen reference densities.
