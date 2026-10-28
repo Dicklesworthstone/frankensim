@@ -58,6 +58,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         high: bool,
         state: Option<NsfOpenState>,
     ) -> Result<(), NsfError> {
+        if self.sgs.is_some() {
+            return Err(NsfError::Input("NSF SGS does not support prescribed-reservoir faces"));
+        }
         if self.open.is_some() {
             return Err(NsfError::Input(
                 "prescribed reservoir and characteristic faces are exclusive",
@@ -111,8 +114,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 f[q] += 0.5 * L::W[q] * delta / THETA0;
             }
         }
-        let sig = self.stress_field(&populations, &force, &rho, &self.theta, &self.material);
-        let history = self.flux_divergence(&self.e, &rho, &u, &self.theta, &sig, None);
+        let sig = self.stress_field(&populations, &force, &rho, &self.theta, &self.material, &[]);
+        let history = self.flux_divergence(&self.e, &rho, &u, &self.theta, &sig, &[], None);
         let (div, wall, open) = match history {
             Ok(value) => value,
             Err(error) => {

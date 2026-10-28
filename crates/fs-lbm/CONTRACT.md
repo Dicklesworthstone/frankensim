@@ -1462,6 +1462,37 @@ lattice resolves the sound speed `sqrt(gamma theta)` only while it stays below t
 temperature-ratio bounds are refusals, not tuning. The bulk-to-shear ratio is a cited input, not a module result; its
 uncertainty (0.67 to 0.84) is not propagated. No recording, graded or instrument claim.
 
+### Exploratory NSF3 subgrid momentum and heat transport
+
+`NsfGrid3::with_sgs(NsfSgsConfig)` explicitly enables the shared full-gradient
+Smagorinsky or WALE closure on the existing low-Mach NSF owner. Only the
+deviatoric relaxation receives `nu_t`; the source-owned molecular bulk rate is
+unchanged. The matching stress enters the conservative total-energy flux.
+Interior heat conduction additionally receives `rho (cp/R) nu_t / Pr_t` in
+lattice units, with explicit positive turbulent Prandtl number and current-cell
+NASA9 heat capacity when a thermochemical source is attached. The same face
+coefficient is shared by both cells. No second viscous-heating source is added.
+
+Transport is refreshed from the force-corrected velocity in the existing
+predictor and accepted endpoint. Periodic derivatives are centred; solid and
+domain-wall derivatives use actual halfway wall values, including prescribed
+wall motion. Impermeable wall heat transfer retains its molecular half-cell
+resistance, with zero modeled wall heat flux. Characteristic and prescribed
+reservoir faces refuse active SGS in either configuration order. The existing
+Mach, temperature and total-viscosity envelope remains in force; ratio-cap
+violations refuse rather than clip. Zero coefficient preserves molecular
+arithmetic, and acceptance-render use remains forbidden.
+
+`sgs_transport` exposes accepted-cell eddy viscosity and conductivity. Focused
+tests cover moving-wall gradients, independent bulk relaxation, conservative
+heat diffusion, closed energy, worker identity, exact zero control, fixed-Re
+closure refinement, NASA9 heat capacity and admission failures. These are
+algebraic low-Mach transport integrations, not a new compressible-turbulence
+qualification: no SGS kinetic-energy equation, isotropic SGS pressure,
+pressure-dilatation, shocklet closure or thermal wall function is supplied.
+The modeled shear and Prandtl heat-flux form follows NASA report 20200002378,
+equations (8)-(10), without its additional compressible terms.
+
 ### Source-owned NASA9 energy and local transport in the NSF grid
 
 `NsfSpec<G = GasSpec>` admits `ThermochemicalNsfGas` through the same

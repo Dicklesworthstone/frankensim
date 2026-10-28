@@ -146,6 +146,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// as the interior. Frozen composition and the original source support,
     /// temperature, viscosity and Mach refusals all still apply.
     pub fn with_characteristic_axis(mut self, open: NsfCharacteristicAxis) -> Result<Self, NsfError> {
+        if self.sgs.is_some() {
+            return Err(NsfError::Input("NSF SGS does not support characteristic faces"));
+        }
         if self.reservoir_faces.iter().flatten().any(Option::is_some) {
             return Err(NsfError::Input("characteristic and prescribed reservoir faces are exclusive"));
         }
@@ -278,8 +281,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 f[i][q] += 0.5 * L::W[q] * ((cf - uf) / THETA0 + cu * cf / (THETA0 * THETA0));
             }
         }
-        let sig = self.stress_field(&f, &force, &rho, &self.theta, &self.material);
-        let (div, wall, flux) = self.flux_divergence(&self.e, &rho, &u, &self.theta, &sig, faces.as_ref())?;
+        let sig = self.stress_field(&f, &force, &rho, &self.theta, &self.material, &[]);
+        let (div, wall, flux) = self.flux_divergence(&self.e, &rho, &u, &self.theta, &sig, &[], faces.as_ref())?;
         self.open = Some(open);
         self.open_faces = faces;
         self.f = f;

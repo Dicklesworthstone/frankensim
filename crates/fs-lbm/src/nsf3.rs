@@ -49,7 +49,9 @@
 //! WHAT THIS IS NOT: not Boussinesq (`thermal.rs` and `d3q19/coupled.rs` are); not a thermal-LBM with an energy
 //! population; the thermal pressure enters as a force, so the lattice resolves the sound speed `sqrt(gamma
 //! theta)` only while it stays below the lattice speed (declared Mach and temperature-ratio bounds, refused
-//! beyond); no turbulence model. The optional open-axis boundary is a separately
+//! beyond). Explicit exploratory Smagorinsky/WALE transport is available through
+//! [`NsfGrid3::with_sgs`], including conservative turbulent heat transport; it is
+//! never enabled by default. The optional open-axis boundary is a separately
 //! bounded local linear characteristic rung, not a qualified nonreflecting jet interface. Sound-speed dispersion is second order; see the
 //! battery.
 //! Prescribed reservoir ghost states are also available as a separate, mutually
@@ -62,6 +64,8 @@ use material::NsfCellMaterial;
 
 mod material;
 pub use material::{NsfGasMedium, ThermochemicalNsfGas};
+mod sgs;
+pub use sgs::{NsfSgsConfig, NsfSgsTransport};
 mod open;
 pub use open::NsfOpenState;
 mod open_boundary;
@@ -146,11 +150,13 @@ pub enum NsfError {
     },
     /// Lattice viscosity above the verified stable envelope for this dx (refine fewer cells per metre, i.e. enlarge dx).
     Viscosity {
-        /// Largest reference-table viscosity or actual source local kinematic viscosity.
+        /// Largest reference-table or actual local total kinematic viscosity.
         observed: f64,
         /// `MAX_VERIFIED_LATTICE_VISCOSITY`.
         maximum: f64,
     },
+    /// Explicit SGS controls or the local modeled/molecular viscosity ratio refused.
+    Sgs(crate::sgs3::SgsError),
     /// A non-finite state or non-positive density/absolute temperature.
     NonFinite {
         /// Offending cell index.
@@ -306,6 +312,8 @@ pub struct EnergyLedger {
     /// With prescribed reservoir faces this remainder also includes kinetic-energy
     /// transport and is not an independent viscous-heating measurement. Zero for
     /// a step with manufactured mass/momentum sources; see the unresolved account.
+    /// With SGS this remainder also includes modeled and numerical dissipation;
+    /// it is not an independent measurement of molecular viscous heating.
     pub viscous_heating_j: f64,
     /// Signed internal-energy remainder for manufactured mass/momentum sources [J].
     /// Includes physical/numerical dissipation and the unseparated mechanical
@@ -513,6 +521,9 @@ pub struct NsfGrid3<L: Lattice3<27>> {
     law: NsfLaw,
     /// Local source response only; empty for the bit-preserving GasSpec route.
     material: Vec<Option<NsfCellMaterial>>,
+    sgs: Option<NsfSgsConfig>,
+    /// Accepted-state closure; empty in the unchanged molecular route.
+    sgs_transport: Vec<NsfSgsTransport>,
     n: usize,
     solid: Vec<bool>,
     /// Pre-collision populations (first moment `sum c f = rho u - F/2`).
@@ -708,6 +719,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             material,
             n,
             solid: solid_v,
+            sgs: None,
+            sgs_transport: Vec::new(),
             f: vec![[0.0; Q]; n],
             e,
             theta,
@@ -755,8 +768,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let (rho_g, mom) = grid.macro_fields(&grid.f);
         let u = grid.velocity_field(&rho_g, &mom, &grid.force);
         grid.material = grid.material_field(&rho_g, &grid.theta)?;
-        let sig = grid.stress_field(&grid.f, &grid.force, &rho_g, &grid.theta, &grid.material);
-        let (div, wall, _) = grid.flux_divergence(&grid.e, &rho_g, &u, &grid.theta, &sig, None)?;
+        let sig = grid.stress_field(&grid.f, &grid.force, &rho_g, &grid.theta, &grid.material, &[]);
+        let (div, wall, _) = grid.flux_divergence(&grid.e, &rho_g, &u, &grid.theta, &sig, &[], None)?;
         grid.div = div;
         grid.wall_out = wall;
         Ok(grid)
@@ -849,13 +862,22 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             .any(|u| u.iter().any(|&v| v != 0.0));
         let (rho, mom) = self.macro_fields(&self.f);
         let u = self.velocity_field(&rho, &mom, &self.force);
-        let sig = self.stress_field(&self.f, &self.force, &rho, &self.theta, &self.material);
+        let transport = match self.sgs_field(&rho, &u, &self.theta, &self.material) {
+            Ok(transport) => transport,
+            Err(error) => {
+                self.edge_velocity = old_edge_velocity;
+                self.moving_walls = old_moving_walls;
+                return Err(error);
+            }
+        };
+        let sig = self.stress_field(&self.f, &self.force, &rho, &self.theta, &self.material, &transport);
         let (div, wall, open) = match self.flux_divergence(
             &self.e,
             &rho,
             &u,
             &self.theta,
             &sig,
+            &transport,
             self.open_faces.as_ref(),
         ) {
             Ok(history) => history,
@@ -865,6 +887,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 return Err(error);
             }
         };
+        self.sgs_transport = transport;
         self.div = div;
         self.wall_out = wall;
         self.open_out = open;
@@ -996,6 +1019,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         rho: &[f64],
         theta: &[f64],
         material: &[Option<NsfCellMaterial>],
+        transport: &[NsfSgsTransport],
     ) -> Vec<[f64; 6]> {
         let mut out = vec![[0.0; 6]; self.n];
         let solid = &self.solid;
@@ -1003,8 +1027,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             if solid[i] {
                 [0.0; 6]
             } else {
-                let (ws, wb) =
-                    self.rates(rho[i], theta[i], material.get(i).and_then(Option::as_ref));
+                let (ws, wb) = self.sgs_rates(
+                    rho[i], theta[i], material.get(i).and_then(Option::as_ref), transport.get(i),
+                );
                 stress::<L>(&f[i], force[i], ws, wb)
             }
         });
@@ -1019,6 +1044,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         u: &[[f64; 3]],
         theta: &[f64],
         sig: &[[f64; 6]],
+        transport: &[NsfSgsTransport],
         faces: Option<&OpenFaces>,
     ) -> Result<(Vec<f64>, f64, BoundaryFlux), NsfError> {
         let n = self.n;
@@ -1050,12 +1076,18 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             let Some(j) = self.fluid_at(x, a, 1) else {
                 return Ok(0.0);
             };
-            let kf = self.spec.gas.face_conductivity(
+            let mut kf = self.spec.gas.face_conductivity(
                 &self.law,
                 0.5 * (theta[i] + theta[j]),
                 0.5 * (self.law.pressure_pa(rho[i], theta[i])
                     + self.law.pressure_pa(rho[j], theta[j])),
             )?;
+            // One face value shared by both cells preserves the total-energy
+            // telescoping ledger. Never add modeled heat flux through an
+            // impermeable wall; its molecular half-cell law below is retained.
+            if let (Some(left), Some(right)) = (transport.get(i), transport.get(j)) {
+                kf += 0.5 * (left.turbulent_conductivity_lu + right.turbulent_conductivity_lu);
+            }
             let wide = match (self.fluid_at(x, a, -1), self.fluid_at(self.at(j), a, 1)) {
                 (Some(m), Some(p)) => Some((m, p)),
                 _ => None,
@@ -1269,10 +1301,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 if solid[i] {
                     f[i]
                 } else {
-                    let (ws, wb) = self.rates(
+                    let (ws, wb) = self.sgs_rates(
                         rho[i],
                         theta[i],
                         self.material.get(i).and_then(Option::as_ref),
+                        self.sgs_transport.get(i),
                     );
                     collide::<L>(&f[i], force[i], ws, wb)
                 }
@@ -1331,6 +1364,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             }
             let u1 = self.velocity_field(&rho1, &mom1, &f1);
             let trial_material = self.material_field(&rho1, &th1)?;
+            let trial_transport = self.sgs_field(&rho1, &u1, &th1, &trial_material)?;
             let et_trial: Vec<f64> = (0..n)
                 .map(|i| {
                     let internal = trial_material
@@ -1343,9 +1377,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                                 * (u1[i][0] * u1[i][0] + u1[i][1] * u1[i][1] + u1[i][2] * u1[i][2]))
                 })
                 .collect();
-            let sig = self.stress_field(&next, &f1, &rho1, &th1, &trial_material);
+            let sig = self.stress_field(&next, &f1, &rho1, &th1, &trial_material, &trial_transport);
             let (div1, wall1, open1) =
-                self.flux_divergence(&et_trial, &rho1, &u1, &th1, &sig, faces1.as_ref())?;
+                self.flux_divergence(&et_trial, &rho1, &u1, &th1, &sig, &trial_transport, faces1.as_ref())?;
             let mut material_new = trial_material;
             let mut e1 = self.e.clone();
             let mut th_new = th1.clone();
@@ -1412,6 +1446,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         // Admit the actual endpoint too, without replacing the common
         // predictor faces that supplied its force and conservative FV flux.
         let _ = self.resolve_open_faces(self.open.as_ref(), &rho1, &u1, &th1)?;
+        // The next collision must use the actual accepted force-corrected
+        // velocity and source state, after the final temperature corrector.
+        let transport_new = self.sgs_field(&rho1, &u1, &th1, &material_new)?;
         let unit = self.law.energy_unit_j();
         let (mut ke0, mut ke1, mut e_old, mut e_new, mut pw) = (0.0, 0.0, 0.0, 0.0, 0.0);
         for i in 0..n {
@@ -1514,6 +1551,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         self.f = next;
         self.e = e1;
         self.material = material_new;
+        self.sgs_transport = transport_new;
         if have_sources {
             self.src_now = src_next;
         }

@@ -124,6 +124,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     fn characteristic_copy(&self) -> Self {
         Self {
             spec: self.spec.clone(), law: self.law.clone(), material: self.material.clone(),
+            sgs: self.sgs, sgs_transport: self.sgs_transport.clone(),
             n: self.n, solid: self.solid.clone(), f: self.f.clone(), e: self.e.clone(),
             theta: self.theta.clone(), force: self.force.clone(), div: self.div.clone(),
             wall_out: self.wall_out, open: self.open, open_faces: self.open_faces.clone(),
