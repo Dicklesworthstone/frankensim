@@ -2706,3 +2706,39 @@ Focused regressions cover independent constitutive stress, source conditions,
 invalid pairs, conflicting claim pins, unit rescaling, and the actual tetrahedral
 mass/strain-energy and thermal-expansion identity path. This is a bounded MR11
 parameter-conversion slice, not complete derived-property or material validation.
+
+### Reversible adhesion driving equilibrium liquid wetting
+
+`liquid::surface::adhesion::resolve_young_dupre_wetting` derives the existing
+`ResolvedLiquidWettingState` from an explicit ordered interface claim
+`equilibrium-work-of-adhesion` [J/m2] and the selected liquid/gas surface
+tension [N/m]. The explicitly chosen ideal smooth, homogeneous, rigid-wall
+model obeys `W = sigma (1 + cos(theta))`; the half-angle evaluation remains
+well conditioned near zero angle. The model requires `0 < W < 2 sigma`.
+Complete wetting, film formation, complete dewetting, roughness and hysteresis
+require other physical owners and are refused rather than clipped.
+
+The angle retains both original source receipts and is identified as a
+Young--Dupre prediction, never inserted as a measured contact-angle claim.
+The boundary checks the exact liquid card, selected tension receipt, ordered
+surface roles, query point and axis semantics before the existing native LBM
+wall operator consumes it. Refresh requires the original interface and the
+original selected tension source at the same new physical point; no source
+substitution or partial refresh is accepted. This is a frozen endpoint, not a
+thermal surface-energy evolution. Directly sourced contact angles retain their
+existing resolution and refresh path.
+
+`YoungDupreLaw` also supplies the signed dry-substrate-reference surface free
+energy `sigma A_lv + (sigma-W) A_sl` and unbalanced Young force per contact-line
+length. These fixed-size evaluations allocate no memory. Reversible equilibrium
+work is distinct from fracture toughness, peel dissipation and advancing or
+receding hysteresis measurements; none are silently substituted. No droplet
+pull-off force is inferred. The relation and energy convention follow
+Nagy, Scientific Reports 14, 29991 (2024), equations (1)-(3),
+<https://doi.org/10.1038/s41598-024-81710-6>.
+
+Numerical regressions check the Young relation, force direction, independent
+fixed-volume spherical-cap energy minimization, area scaling and domain
+refusals. Native source/wall tests exercise distinct adhesion-driven capillary
+responses, mass conservation, exact paired-source refresh, substitution refusal
+and the unchanged directly sourced angle path.

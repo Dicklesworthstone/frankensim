@@ -6,6 +6,9 @@
 //! Surface tension remains conditional on that source's interface environment;
 //! this adapter supplies no gas, purity, surfactant or contact-angle defaults.
 
+/// Reversible adhesion work driving the same source-bound equilibrium wall.
+pub mod adhesion;
+
 use fs_matdb::{InterfaceSystemCard, MaterialCard, QueryPoint, SurfaceSpec, SystemContext};
 use fs_qty::{Density, Dims, Frequency, QuantitySpec};
 use fs_qty::semantic::QuantityKind;
@@ -402,6 +405,7 @@ pub struct ResolvedLiquidWettingState {
     surfaces: [SurfaceSpec; 2],
     context: SystemContext,
     contact_angle_radians: f64,
+    young_dupre: Option<adhesion::YoungDupreSource>,
 }
 
 impl ResolvedLiquidWettingState {
@@ -434,6 +438,7 @@ impl ResolvedLiquidWettingState {
             surfaces: [card.surface_a().clone(), card.surface_b().clone()],
             context: card.context().clone(),
             contact_angle_radians,
+            young_dupre: None,
         })
     }
 
@@ -445,6 +450,11 @@ impl ResolvedLiquidWettingState {
         card: &InterfaceSystemCard,
         point: &QueryPoint,
     ) -> Result<Self, MaterialStatePointError> {
+        if self.young_dupre.is_some() {
+            return Err(MaterialStatePointError::InvalidDerived {
+                quantity: "adhesion-derived angle refresh also requires the current sourced liquid tension",
+            });
+        }
         Self::try_from_resolved(card, self.resolved.at_query_point(card, point)?)
     }
 
@@ -466,7 +476,8 @@ impl ResolvedLiquidWettingState {
         &self.context
     }
 
-    /// Equilibrium angle measured through liquid, strictly between zero and pi.
+    /// Equilibrium angle through liquid, strictly between zero and pi.
+    /// `angle_origin` distinguishes a source claim from a Young--Dupre prediction.
     #[must_use]
     pub const fn contact_angle_radians(&self) -> f64 {
         self.contact_angle_radians
@@ -489,6 +500,9 @@ impl ResolvedLiquidWettingState {
             return Err(MaterialStatePointError::InvalidDerived {
                 quantity: "wetting interface and liquid material/state assignment mismatch",
             });
+        }
+        if let Some(source) = &self.young_dupre {
+            source.require_liquid(liquid)?;
         }
         Ok(())
     }

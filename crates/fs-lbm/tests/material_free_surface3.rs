@@ -26,6 +26,8 @@ use fs_material::state_point::{DENSITY_PROPERTY, MaterialPropertySelection};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Density, Dims, QuantitySpec};
 
+#[path = "material_free_surface3/adhesion.rs"]
+mod adhesion_wetting;
 #[path = "material_free_surface3/wetting.rs"]
 mod dynamic_wetting;
 
