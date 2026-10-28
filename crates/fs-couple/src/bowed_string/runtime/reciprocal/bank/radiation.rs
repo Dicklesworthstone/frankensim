@@ -21,6 +21,8 @@ pub struct MaterialBodyRadiation {
     source_body_coordinates: Vec<usize>,
     // Present only when the original material-shell producer attached this load.
     shell_bem: Option<bem::ShellBemReport>,
+    // Present only when the original retained plate produced this load.
+    plate_rayleigh: Option<rayleigh::PlateRayleighReport>,
 }
 impl MaterialBodyRadiation {
     pub const fn model(&self) -> &Model { &self.model }
@@ -36,6 +38,12 @@ impl MaterialBodyRadiation {
     /// It survives cold bank rebuilds with the original basis and gas checks.
     pub const fn material_shell_bem(&self) -> Option<&bem::ShellBemReport> {
         self.shell_bem.as_ref()
+    }
+
+    /// Original planar surface, retained basis and gas of the computed load.
+    /// A raw supplied impedance cannot stand in for this geometry binding.
+    pub const fn material_plate_rayleigh(&self) -> Option<&rayleigh::PlateRayleighReport> {
+        self.plate_rayleigh.as_ref()
     }
 }
 
@@ -189,7 +197,7 @@ impl ReciprocalStringBank {
         self.source.validate_body_memory_frequencies(&self.system, gate)?;
         self.source.validate_material_bridge_frequencies(&self.system, gate)?;
         self.source.body_radiation = Some(MaterialBodyRadiation { model, gas: self.source.gas,
-            basis_identity, maximum_poles, source_body_coordinates, shell_bem: None });
+            basis_identity, maximum_poles, source_body_coordinates, shell_bem: None, plate_rayleigh: None });
         poll(gate)?;
         Ok(self)
     }

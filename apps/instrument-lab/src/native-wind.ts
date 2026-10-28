@@ -6,11 +6,13 @@ import flueDgSource from "../../../crates/fs-couple/examples/flue-dg-baffled.per
 import materialReedSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-walls.performance?raw";
 import materialReedDgSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-dg-chimney.performance?raw";
 import stringExampleSource from "../../../crates/fs-couple/examples/material_strings/pluck-and-bow.material-strings?raw";
+import observedStringSource from "../../../crates/fs-couple/examples/material_strings/rayleigh-observed.material-strings?raw";
 import layeredStringSource from "../../../crates/fs-couple/examples/material_strings/relaxing-layered-strings.material-strings?raw";
 import shearStringSource from "../../../crates/fs-couple/examples/material_strings/shear-layer-bow.material-strings?raw";
 import { nativeWindStatus, renderNativePerformance, type NativeWindStatus, type NativeWindAttachment, type NativeWindGasSources, type NativeStringProfiles } from "./native-wind-client.mjs";
 import { el } from "./util";
 import { createNativeGasControls } from "./native-wind-gases";
+import { createNativeAtmosphereControls } from "./native-atmosphere";
 import { createNativeStringProfiles } from "./native-string-profiles";
 import { createNativeComparisonPanel } from "./native-comparison";
 import { MAX_REQUEST_BYTES, editableAttachmentText, editedAttachmentBytes, serializeNativeExperiment, validateInput } from "./native-experiment.mjs";
@@ -69,6 +71,15 @@ const EXAMPLES = [
     decimate: false,
     intro: "Starter: one material-derived string, body and cavity, with a physical preload and bow gesture. Attach wire.fsmatpk and body.fsmatpk using the source-pack instructions linked below, or open your own complete material-string performance.",
     help: "The string performer accepts the same full material cards as the reed and wall solvers, along with legacy claim packs. Replace an attached source at its declared path to change the solved material without browser coefficients. Optional profiles add body geometry, fingers/frets and contact heat. This is a numerical integration fixture, not a measured violin, cello or bass.",
+  },
+  {
+    name: "material_strings/rayleigh-observed.material-strings",
+    label: "Strings — material plate and exterior microphone",
+    renderer: "strings",
+    source: observedStringSource,
+    decimate: false,
+    intro: "Starter: a plucked material string drives a regional orthotropic plate, with reciprocal acoustic loading and a microphone at its declared position. Attach wire.fsmatpk, directional-body.fsmatpk and orthotropic.body, then select orthotropic.body as the body profile below.",
+    help: "The native observer integrates signed plate motion over source-to-microphone paths through the original gas. Change material sources or atmosphere data and render again. The body uses an infinite baffle and synthetic specimen data; this flat-plate fixture does not represent a complete measured violin, cello or bass.",
   },
   {
     name: "material_strings/relaxing-layered-strings.material-strings",
@@ -160,6 +171,10 @@ export function createNativeWindPanel(): HTMLElement {
   const attachmentIdentity = (): string => JSON.stringify(attachments.map(file => [file.path, file.sha256]));
   const gas = createNativeGasControls(() => edited());
   const profiles = createNativeStringProfiles(() => edited());
+  const atmosphere = createNativeAtmosphereControls(currentSource, next => {
+    source.value = next; loadedSource = next; loadedEditorValue = source.value;
+    edited();
+  }, () => controls());
   const file = el("input", { type: "file", accept: ".performance,.material-strings,.txt,text/plain",
     "aria-label": "Open a native physical performance" });
   file.hidden = true;
@@ -188,7 +203,8 @@ export function createNativeWindPanel(): HTMLElement {
 
   const controls = (): void => {
     const active = rendering !== null;
-    const locked = active || loadingFile || editingAttachment !== null;
+    const otherEdit = active || loadingFile || editingAttachment !== null;
+    const locked = otherEdit || atmosphere.hasDraft();
     render.disabled = locked || checking !== null || !rendererAvailable(status) || Boolean(status?.busy) || !source.value.trim();
     cancel.hidden = !active;
     check.disabled = active || checking !== null;
@@ -201,6 +217,7 @@ export function createNativeWindPanel(): HTMLElement {
     attach.disabled = locked;
     decimate.disabled = locked;
     gas.setDisabled(locked);
+    atmosphere.setDisabled(otherEdit);
     profiles.element.hidden = selectedRenderer() !== "strings";
     profiles.setDisabled(locked || selectedRenderer() !== "strings");
     attachmentList.querySelectorAll<HTMLInputElement | HTMLButtonElement>("input,button")
@@ -213,6 +230,7 @@ export function createNativeWindPanel(): HTMLElement {
     render.textContent = active ? "Rendering…" : "Render WAV";
   };
   const edited = (): void => {
+    atmosphere.refresh(currentSource());
     sourceInfo.textContent = `${sourceName} · ${new TextEncoder().encode(currentSource()).byteLength.toLocaleString()} bytes`;
     if (renderedSource !== null) {
       renderedFrom.textContent = currentSource() === renderedSource && attachmentIdentity() === renderedAttachmentIdentity && decimate.checked === renderedDecimate && gas.identity() === renderedGasIdentity && selectedRenderer() === renderedRenderer && profiles.identity() === renderedProfileIdentity
@@ -630,6 +648,7 @@ export function createNativeWindPanel(): HTMLElement {
       el("p", {}, canonical,
         " · ", el("a", {href: "https://github.com/Dicklesworthstone/frankensim/tree/main/crates/fs-couple/examples/material_strings", target: "_blank", rel: "noopener"}, "String source-pack instructions"),
         " · ", el("a", { href: "https://github.com/Dicklesworthstone/frankensim/tree/main/apps/instrument-lab#native-wind-and-string-renderer", target: "_blank", rel: "noopener" }, "Local renderer setup"))),
+    atmosphere.element,
     el("div", { class: "nw-source-head" }, el("label", { for: "native-wind-source" }, "Performance source"),
       sourceInfo),
     source, attachmentPanel, attachmentEditor, profiles.element, gas.element, decimation,

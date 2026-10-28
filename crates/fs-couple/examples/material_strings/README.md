@@ -1808,11 +1808,74 @@ The `rayleigh` and `bem` routes require the ordinary exact owner;
 `prepared-linear` is refused for them. The `skin` route also runs on
 `prepared-linear`, whose air bank carries the load. Its poles count against the prepared owner's byte and work
 budget (the `prepared-linear` record), not the exact owner's state and setup ceiling, so `MAX_POLES` may reach
-the shared pole ceiling (16384). Without the `shell_observer` selection below, the receiver remains the
+the shared pole ceiling (16384). Without a matching finite-distance observer below, the receiver remains the
 existing compact, zero-retardation pressure observation of the **loaded**
 acceleration. The Rayleigh example retains one body mode to keep the complete
 passive acoustic image small; it is an integration fixture, not a claim of
 converged instrument timbre.
+
+## Finite-distance pressure from the loaded material plate
+
+`rayleigh-observed.material-strings` sends the **same** original retained plate
+velocities through the shared piano/wind Rayleigh receiver. It preserves each
+signed modal surface field, its physical quadrature area, distance, propagation
+time and material-gas law. A cancelling mode is not replaced by an absolute
+area or a positive monopole. The physical air reaction continues in the original
+string/body solve; observing it introduces no second mechanical load.
+
+The two records follow `body-radiation rayleigh` and precede `cavity none`:
+
+```text
+plate_observer X_M Y_M Z_M MAX_HZ MAX_SURFACE_CELLS MAX_REPLAY_TERMS
+observer_gas stokes-kirchhoff MAX_PATHS MAX_FILTER_TAPS MAX_KERNEL_TERMS
+```
+
+The gas record uses the shared native propagation grammar. Classical
+Stokes–Kirchhoff transport uses the performance's complete gas state, including
+viscosity, thermal conductivity and heat capacity as well as density and sound
+speed. `lossless` is an explicit comparison. Neither choice supplies missing
+species relaxation data; other shared selections retain their original source
+and composition eligibility checks. To declare the gas's molecular law, use
+`observer_gas molecular MAX_PATHS MAX_FILTER_TAPS MAX_KERNEL_TERMS LAW`,
+where `LAW` is the shared material relaxation declaration used by wind ducts.
+The species and evaluated relaxation state bind to this performance's original
+gas record, so an unsupported mixture or incomplete collision-partner table
+refuses. Each **actual surface-to-receiver path**
+is prepared separately (only bit-identical distances share a filter), before
+the signed pressures sum. No average-distance atmospheric filter is applied
+to the final signal.
+
+The original three-point triangle quadrature serves both reaction and
+observation. `MAX_SURFACE_CELLS` bounds all its cells, without dropping any;
+`MAX_REPLAY_TERMS` bounds the actual retained convolution and derivative work.
+`MAX_HZ` covers every retained body reference mode and sets the reported
+equivalent-disc resolution diagnostic. It is a declared resolved band, not an
+output filter or proof that nonlinear excitation remains in-band. Mesh and
+structural-mode refinement still determine spatial accuracy.
+
+The plate occupies z=0 in its original chart; the microphone must be at least
+5 cm into z>0. One observed half-space produces one pressure signal even if
+the reaction load describes two independent exterior faces. Cavity mouths and
+other observers are refused here because their sound needs complete spatial
+observation. Closed shells use their own routes below. This is an infinite
+baffle problem, not an unbaffled violin exterior or a room model.
+
+All numerical derivative, interpolation and common gas padding delays are
+reported and retained, alongside the physical flight time. The native pressure
+writer receives these accepted observations on the same mechanical timeline;
+it does not normalize the signal, remove latency or append an unrequested
+ring-out. With the packs and regional profile prepared as above:
+
+```sh
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/rayleigh-observed.material-strings" "$demo/rayleigh-observed.wav" \
+  --body-profile "$demo/orthotropic.body"
+```
+
+Changing the body material, its grain or the gas therefore rebuilds the
+original mechanical response and its finite-distance microphone from data.
+This fixture verifies the connection; its synthetic sources and one retained
+body mode do not qualify a measured instrument.
 
 ## Finite-distance pressure from the loaded material shell
 

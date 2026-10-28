@@ -75,6 +75,43 @@ impl GasPropagation {
         if fields.next().is_some() { return Err("unexpected observer_gas fields"); }
         Ok(Self { law, relaxation: None, limits })
     }
+
+    /// The original native record, or `molecular MAX_PATHS MAX_FILTER_TAPS
+    /// MAX_KERNEL_TERMS LAW`. LAW is the shared material relaxation grammar.
+    /// Composition-sensitive laws bind the explicitly supplied exterior record;
+    /// they never borrow the bore composition or infer air from its name.
+    /// Rejected records leave the iterator unchanged.
+    pub fn read_record_for_gas(
+        fields: &mut std::str::SplitAsciiWhitespace<'_>,
+        gas: &fs_material::gas_species::input::GasRecord,
+    ) -> Result<Self, fs_material::MaterialError> {
+        let mut remaining = fields.clone();
+        let invalid = |what: &str| fs_material::MaterialError::Parameters { what: what.into() };
+        let selected = if remaining.clone().next() == Some("molecular") {
+            remaining.next();
+            let ceiling = GasPropagationLimits::surface_reference();
+            let mut count = |maximum| remaining.next().and_then(|s| s.parse::<usize>().ok())
+                .filter(|&n| n > 0 && n <= maximum)
+                .ok_or_else(|| invalid("observer_gas work budget is outside its positive shared ceiling"));
+            let limits = GasPropagationLimits {
+                max_unique_paths: count(ceiling.max_unique_paths)?,
+                max_filter_taps: count(ceiling.max_filter_taps)?,
+                max_kernel_terms: count(ceiling.max_kernel_terms)?,
+            };
+            let law = fs_material::relaxation::input::read_relaxation(&mut remaining)?;
+            let medium = fs_material::relaxation::input::medium_from_record(gas)?;
+            let relaxation = law.evaluate(&medium)?;
+            if remaining.next().is_some() {
+                return Err(invalid("unexpected observer_gas molecular fields"));
+            }
+            Self { law: GasAbsorptionModel::MolecularRelaxation,
+                relaxation: Some(relaxation), limits }
+        } else {
+            Self::read_record(&mut remaining).map_err(|what| invalid(what))?
+        };
+        *fields = remaining;
+        Ok(selected)
+    }
 }
 
 /// Original physical law and each source-derived path filter, before the

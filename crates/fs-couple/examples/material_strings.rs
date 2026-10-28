@@ -470,6 +470,9 @@ impl input::Spec {
         if let Some(program)=self.bow_fibers.as_ref().and_then(|fiber|fiber.support_program.as_ref()) {
             performance=performance.with_fiber_support_program(program.clone(),gate)?;
         }
+        if let Some(observer)=&self.plate_observer {
+            performance=performance.with_material_plate_observer(observer.clone(),gate)?;
+        }
         if let Some(observer)=&self.shell_observer {
             performance=performance.with_material_shell_observer_with_quadrature(
                 observer.clone(),self.shell_receiver_quadrature,gate)?;
@@ -748,6 +751,13 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
             eprintln!("two_way_load_port={port}; coordinate={coordinate}; f_Hz={}; radiation_zeta={}; added_mass_shift={}",
                 w/core::f64::consts::TAU,z.re/(2.0*w),0.5*z.im/w);
         }
+    }
+    if let Some(report)=ready.performance.material_plate_observer() {
+        eprintln!("plate_observer={:?}; specimen={}; basis={}; body_modes={}; surface_cells={}; maximum_Hz={}; minimum_disc_ppw={}; delay_support_samples={:?}; numerical_delay_samples={}; replay_terms={}; gas_law={:?}; distinct_paths={}; gas_kernel_terms={}; same signed loaded plate surface; finite-distance pressure replaces compact pressure; infinite baffle, no room or closed-shell claim",
+            report.options.position_m, report.specimen_identity, report.basis_identity,
+            report.body_modes, report.surface_cells, report.options.maximum_frequency_hz,
+            report.minimum_equivalent_disc_ppw, report.delay_samples, report.filter_delay_samples,
+            report.replay_terms, report.gas.law, report.gas.filters.len(), report.gas.kernel_terms);
     }
     if let Some(report)=ready.performance.material_shell_observer() {
         let transfer=report.transfer();

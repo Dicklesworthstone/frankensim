@@ -1,0 +1,22 @@
+frankensim-material-strings-v1
+audio 48000 4096 0.01 128
+state 293.15 1000
+gas mixture 293.15 101325 mole 2 N2 0.8 O2 0.2
+body directional-body.fsmatpk 0.4 0.3 0.001 1 1
+strings 1
+string wire.fsmatpk 0.5 0.0003 20 4 0 0.8 3000 0.1
+body-radiation rayleigh 1 5 300 65 256 10000000 48
+plate_observer 0.7 0.1 1 300 256 100000
+observer_gas stokes-kirchhoff 256 1000000 50000000
+cavity none
+friction stribeck 0.8 0.4 0.1 0
+forces preload 1 1
+port 0 0.2 centreline 0.002
+force 0 0 0
+schedule
+frankensim-gesture-schedule-v1
+control_rate_hz	700
+tracks	1
+track	bow	bow	0
+initial	bow	0e0	0e0	2e-1
+events	0

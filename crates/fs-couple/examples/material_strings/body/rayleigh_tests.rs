@@ -142,3 +142,108 @@ fn bem_on_a_missing_or_planar_profile_refuses_before_material_io() {
         }
     });
 }
+
+fn observed() -> input::Spec {
+    let text = include_str!("../rayleigh-observed.material-strings")
+        .replace("directional-body.fsmatpk", "body.fsmatpk");
+    let mut spec = input::Spec::parse(text.as_bytes()).unwrap();
+    spec.samples = 1024;
+    spec
+}
+
+#[test]
+fn material_plate_observer_keeps_loaded_motion_and_streams_physical_pcm() {
+    scoped(|cx, gate| {
+        let spec = observed();
+        let mut observed = ready(cx, gate, spec.clone(), profile());
+        let report = observed.performance.material_plate_observer().unwrap();
+        assert_eq!(report.surface_cells, 96);
+        assert_eq!(report.body_modes, 1);
+        assert_eq!(report.gas.gas, spec.gas);
+        assert_eq!(report.gas.surface_filter_indices.len(), report.surface_cells);
+        assert!(report.gas.filters.len() > 1, "surface paths were collapsed to one distance");
+        assert!(report.filter_delay_samples > 0.0);
+        assert!(report.replay_terms <= report.options.maximum_replay_terms);
+        let mut compact_spec = spec.clone();
+        compact_spec.plate_observer = None;
+        let mut compact = ready(cx, gate, compact_spec, profile());
+        let p = pressure(&mut observed, 37);
+        let q = pressure(&mut compact, 128);
+        assert!(p.iter().any(|v| v.abs() > 1e-12));
+        assert_ne!(p, q, "the finite-distance receiver left compact pressure in place");
+        for (a, b) in observed.performance.bank().system().components().iter()
+            .zip(compact.performance.bank().system().components()) {
+            assert_eq!(a.states(), b.states(), "an output observer changed accepted mechanics");
+        }
+        let frame = observed.performance.bank().system().last_frame().unwrap();
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        let mut streamed = ready(cx, gate, spec, profile());
+        let expected = fs_couple::pcm_wav::encode_pcm16_wav(&p, streamed.spec.rate, streamed.spec.full_scale).unwrap().0;
+        let (wav, summary) = streamed.write(std::io::Cursor::new(Vec::<u8>::new()), gate).unwrap();
+        assert_eq!(wav.into_inner(), expected);
+        assert_eq!(summary.samples, 1024);
+    });
+}
+
+#[test]
+fn material_plate_observer_uses_transport_and_preserves_both_mechanical_histories() {
+    scoped(|cx, gate| {
+        let a = observed();
+        let mut b = a.clone();
+        b.plate_observer.as_mut().unwrap().propagation.law = fs_couple::air_path::GasAbsorptionModel::Lossless;
+        let mut classical = ready(cx, gate, a, profile());
+        let mut lossless = ready(cx, gate, b, profile());
+        let p = pressure(&mut classical, 37);
+        let q = pressure(&mut lossless, 64);
+        let scale = p.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        assert!(scale > 0.0);
+        assert!(p.iter().zip(q).any(|(a, b)| (a-b).abs() > 1e-10*scale),
+            "the complete material gas did not reach actual pressure");
+        for (a, b) in classical.performance.bank().system().components().iter()
+            .zip(lossless.performance.bank().system().components()) {
+            assert_eq!(a.states(), b.states(), "propagation changed physical reaction or motion");
+        }
+    });
+}
+
+#[test]
+fn material_plate_observer_refuses_incomplete_or_unbounded_native_data() {
+    let text = include_str!("../rayleigh-observed.material-strings");
+    for (from, to) in [
+        ("plate_observer 0.7 0.1 1", "plate_observer 0.7 0.1 0.01"),
+        ("300 256 100000", "300 2 100000"),
+        ("300 256 100000", "300 256 0"),
+        ("stokes-kirchhoff 256", "lossless 0"),
+        ("stokes-kirchhoff 256", "molecular-relaxation 256"),
+        ("body-radiation rayleigh 1 5 300 65 256 10000000 48\n", ""),
+        ("cavity none", "cavity neck 0.01 0.015 0.008 1000 1"),
+    ] {
+        assert!(input::Spec::parse(text.replace(from, to).as_bytes()).is_err(), "accepted {to}");
+    }
+    scoped(|cx, gate| {
+        let mut spec = observed();
+        spec.plate_observer.as_mut().unwrap().maximum_surface_cells = 95;
+        assert!(spec.compile_with_body(cx, gate, Some(profile()), |name| Ok(pack(name, 1.0, None))).is_err(),
+            "the receiver silently dropped a surface quadrature point");
+        let mut spec = observed();
+        spec.plate_observer.as_mut().unwrap().maximum_replay_terms = 1;
+        assert!(spec.compile_with_body(cx, gate, Some(profile()), |name| Ok(pack(name, 1.0, None))).is_err(),
+            "the receiver ignored its declared runtime work");
+    });
+}
+
+#[test]
+fn material_plate_observer_molecular_data_binds_the_original_gas_species() {
+    let text = include_str!("../rayleigh-observed.material-strings").replace(
+        "observer_gas stokes-kirchhoff 256 1000000 50000000",
+        "observer_gas molecular 256 1000000 50000000 declared 2 N2 1 vibration 1 3390 1 power 0.02 293.15 0 280 320 O2 1 vibration 1 2270 1 power 0.01 293.15 0 280 320",
+    );
+    let spec = input::Spec::parse(text.as_bytes()).unwrap();
+    let propagation = &spec.plate_observer.as_ref().unwrap().propagation;
+    assert_eq!(propagation.law, fs_couple::air_path::GasAbsorptionModel::MolecularRelaxation);
+    let relaxation = propagation.relaxation.as_ref().unwrap();
+    assert_eq!(relaxation.gas(), &spec.gas);
+    assert_eq!(relaxation.processes().len(), 2);
+    assert!(input::Spec::parse(text.replace("N2 0.8 O2 0.2", "He 0.8 O2 0.2").as_bytes()).is_err(),
+        "a new atmosphere silently borrowed another species' molecular data");
+}

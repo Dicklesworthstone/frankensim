@@ -54,6 +54,9 @@ use crate::gas::GasState;
 use crate::iso9613::iso9613_relaxation_frequencies_hz;
 use crate::thermochemical_gas::ResolvedThermochemicalGasState;
 
+/// Bounded native declarations of the same species/reservoir laws.
+pub mod input;
+
 /// The ISO terrestrial-air admission policy, shared with
 /// [`crate::iso9613::TerrestrialAir`].
 pub use crate::iso9613::{ISO9613_DRY_AIR_RELATIVE_TOLERANCE, ISO9613_MAX_DRY_CO2};

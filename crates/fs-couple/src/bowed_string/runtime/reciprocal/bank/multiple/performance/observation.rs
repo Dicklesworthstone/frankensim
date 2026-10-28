@@ -48,6 +48,8 @@ pub enum ShellObserverError {
     Invalid(&'static str),
     Shell(ShellBemError),
     Transfer(TransferError),
+    /// Shared Rayleigh receiver or material propagation admission.
+    Plate(String),
     /// A one-way setup store's own read or write failure.
     Store(String),
     Cancelled,
@@ -140,11 +142,17 @@ impl ShellObserverReport {
 enum BoundReport {
     Loaded(ShellObserverReport),
     OneWay(Box<one_way::OneWayShellObserverReport>),
+    Plate(Box<plate::PlateObserverReport>),
+}
+
+enum BoundReceiver {
+    Shell(ObservationFir),
+    Plate(crate::baffled_pressure::BaffledPressure),
 }
 
 pub(super) struct BoundShellObserver {
     report: BoundReport,
-    observer: ObservationFir,
+    observer: BoundReceiver,
     // (original component, original coordinate, physical source scale).
     // Body columns use generalized velocity; mouths use actual volume flow.
     coordinates: Vec<(usize, usize, f64)>,
@@ -167,9 +175,12 @@ impl BoundShellObserver {
                 .ok_or_else(||render_invalid("shell observer lost its original body or mouth coordinate"))?;
             *velocity = scale*state.velocity_m_sqrt_kg_per_s;
         }
-        let output = self.observer.step(&self.velocity)
-            .map_err(|_| render_invalid("closed-shell observation failed on accepted modal velocities"))?;
-        let pressure = output[0];
+        let pressure = match &mut self.observer {
+            BoundReceiver::Shell(observer) => observer.step(&self.velocity)
+                .map_err(|_| render_invalid("closed-shell observation failed on accepted modal velocities"))?[0],
+            BoundReceiver::Plate(observer) => observer.step(&self.velocity)
+                .map_err(|_| render_invalid("material plate observation failed on accepted modal velocities"))?,
+        };
         if !pressure.is_finite() || pressure.abs() > self.maximum_abs_pressure_pa {
             return Err(render_invalid("closed-shell receiver exceeded the original pressure allowance"));
         }
@@ -315,7 +326,8 @@ impl MultiBowPerformance {
             surface_panels, quadrature, sweep_terms, replay_terms, transfer,
         };
         self.shell_observer = Some(BoundShellObserver {
-            report: BoundReport::Loaded(report), observer, coordinates, velocity: vec![0.0; source_count],
+            report: BoundReport::Loaded(report), observer: BoundReceiver::Shell(observer),
+            coordinates, velocity: vec![0.0; source_count],
             maximum_abs_pressure_pa: source.options().network.maximum_abs_pressure_pa,
             samples: 0,
         });
@@ -333,6 +345,9 @@ impl MultiBowPerformance {
 
 /// The same receiver through a declared closed skin, with no air load fed back.
 pub mod one_way;
+
+/// The original flat body through the shared material-aware Rayleigh receiver.
+pub mod plate;
 
 #[cfg(test)]
 mod tests {

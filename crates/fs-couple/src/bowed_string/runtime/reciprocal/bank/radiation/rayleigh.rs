@@ -124,17 +124,20 @@ impl ReciprocalStringBank {
     /// changes require a fresh realization and automatically rebuild the load.
     ///
     /// Scope: piecewise-linear transverse traces of a flat DKT body in one or
-    /// two independent infinite baffles. Existing output remains the compact
-    /// pressure observer, now observing the loaded acceleration. This is not a
-    /// matched broadband microphone, curved/unbaffled violin exterior, or a
+    /// two independent infinite baffles. The optional material plate observer
+    /// consumes this same signed surface basis through the shared Rayleigh
+    /// receiver. Without it, output remains compact loaded acceleration. This
+    /// is not a curved/unbaffled violin exterior or a
     /// quadrature-error certificate. Shells, prepared-only propagation, and a
     /// second half-space over a modeled cavity refuse explicitly.
     pub fn with_material_plate_rayleigh(
         self, options: PlateRayleighOptions, gate: &CancelGate,
     ) -> Result<(Self, PlateRayleighReport), PlateRayleighError> {
         let (model, report) = self.prepare_material_plate_rayleigh(options, gate)?;
-        let bank = self.with_body_radiation_load(model, options.maximum_poles, gate)
+        let mut bank = self.with_body_radiation_load(model, options.maximum_poles, gate)
             .map_err(PlateRayleighError::Bank)?;
+        bank.source.body_radiation.as_mut().ok_or(PlateRayleighError::Invalid(
+            "computed planar radiation lost its original source binding"))?.plate_rayleigh = Some(report.clone());
         poll(gate)?;
         Ok((bank, report))
     }
@@ -227,7 +230,8 @@ impl ReciprocalStringBank {
 // Three-point degree-two triangle quadrature. It integrates the P1 trace's
 // displacement/pressure products consistently with the original plate ports;
 // no normalization by signed radiating area can erase a cancelling mode.
-fn surface_samples(mesh: &PlateMesh, basis: &RetainedPlateBasis, gate: &CancelGate)
+pub(in crate::bowed_string::runtime::reciprocal::bank) fn surface_samples(
+    mesh: &PlateMesh, basis: &RetainedPlateBasis, gate: &CancelGate)
     -> Result<Vec<AreaSample>, PlateRayleighError>
 {
     if basis.dof_map.len() != 3 * mesh.nodes.len() || basis.mass_normalized_modes.is_empty() {

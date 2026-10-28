@@ -42,4 +42,8 @@
 .nw-gas-component label, .nw-gas-policy label { display: flex; flex-direction: column; gap: 5px; min-width: 0; font-size: 12px; }
 .nw-gas-policy { display: flex; flex-wrap: wrap; gap: 12px; margin: 12px 0; }
 .nw-gas-controls select, .nw-gas-controls input[type="text"] { width: 100%; background: var(--ink-1); color: var(--ivory); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); padding: 8px; font: 12px var(--font-mono); }
+.nw-atmosphere .nw-gas-policy > label { flex: 1 1 180px; }
+.nw-gas-species { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; align-items: end; gap: 10px; margin: 10px 0; }
+.nw-gas-species label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; }
 @media (max-width: 800px) { .nw-gas-component { grid-template-columns: 1fr; align-items: start; } }
+@media (max-width: 540px) { .nw-gas-species { grid-template-columns: 1fr; } }

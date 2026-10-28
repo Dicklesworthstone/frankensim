@@ -179,6 +179,31 @@ the local companion described above.
 
 ### Flute and reed atmosphere propagation
 
+**Regional atmosphere** edits the native performance's temperature (kelvin),
+absolute pressure (pascals), relative humidity or declared composition directly.
+Choose a region, change its values, then **Apply atmosphere** and render again.
+The same controls work with material strings, flute/reed bore and exterior gases,
+DG chimneys and explicit cylinder/cone/hole/duct-section gas overrides. Every
+other source record, including geometry, gestures, mechanical clock, observer
+law and pressure-to-PCM scale, is preserved. Apply or discard pending atmosphere
+edits before rendering, saving or switching performances.
+
+Add or remove species with their native IDs and explicit mole or mass fractions.
+Fractions must sum to one; changing the fraction basis changes the declaration,
+without silently converting its numbers. Choosing **Attached thermochemical
+species** retains the exact species IDs and the source associations selected
+below. Attach every required species, NASA-9 and transport pack; the native
+material owner resolves the physical state and enforces its source domains.
+Choosing a different gas model is an explicit edit to the original source.
+The browser supplies no density, sound speed, loss or pitch coefficients.
+
+For a common static-pressure comparison, select **Apply this absolute pressure
+to every editable region**. Only explicit pressure fields are changed; legacy
+segment declarations continue to inherit ambient pressure and `exterior same`
+continues to use its original alias. Pack references and spatial gas-field
+records remain untouched in the source editor. Boundary conditions requiring a
+common pressure are still enforced by the native solver.
+
 The **Flute — resolved duct and material atmosphere** starter opens the original
 `flue-dg-baffled.performance`. Its spatial duct, outlet and rectangular mouth
 use the native solver, with separate bore and exterior gases. Native decimation
@@ -217,6 +242,15 @@ give the pack-building commands and physical declarations. These are
 manufactured integration specimens, not measured clarinet or oboe models.
 
 ### Material-string performances
+
+The **Strings — material plate and exterior microphone** starter exposes the
+canonical `rayleigh-observed.material-strings` performance. Attach its original
+`wire.fsmatpk`, `directional-body.fsmatpk` and `orthotropic.body`, selecting the
+latter as the body profile. The native receiver observes signed plate motion at
+the specified microphone position and propagates each path through the declared
+gas, while the same plate retains its reciprocal acoustic load. Atmosphere
+controls edit that original gas record. This is a synthetic flat-plate specimen
+in an infinite baffle, not a measured violin-family body.
 
 Select **Strings — materials, bow/contact and shared body** in **Physical performer**,
 or choose either canonical string starter. `pluck-and-bow.material-strings` connects

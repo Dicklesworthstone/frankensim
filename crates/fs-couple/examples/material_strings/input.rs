@@ -8,6 +8,7 @@ use fs_scenario::acoustic::BendingRelaxationProperties;
 use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::rayleigh::PlateRayleighOptions;
 use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::bem::ShellBemOptions;
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::observation::ShellObserverOptions;
+use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::observation::plate::PlateObserverOptions;
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::observation::one_way::{
     OneWayRule, OneWayShellObserverOptions};
 
@@ -195,6 +196,8 @@ pub struct Spec {
     pub bending_memory: Option<bending_memory::Input>,
     pub body_radiation: Option<BodyRadiation>,
     pub shell_bem_angular_refinement: u32,
+    /// The same loaded plate surface with material gas on every receiver path.
+    pub plate_observer: Option<PlateObserverOptions>,
     pub shell_observer: Option<ShellObserverOptions>,
     pub shell_receiver_quadrature: fs_bem::near_field::Options,
     /// One-way receiver through the body profile's closed acoustic skin; nothing is fed back.
@@ -606,6 +609,22 @@ impl Spec {
             let mut row=r.row("shell_angular_refinement")?;
             let level=row.count(2)? as u32;row.end()?;level
         } else {0};
+        let plate_observer = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("plate_observer") {
+            let mut row = r.row("plate_observer")?;
+            let position_m = [row.scalar()?, row.scalar()?, row.scalar()?];
+            let maximum_frequency_hz = row.positive()?;
+            let maximum_surface_cells = row.count(4096)?;
+            let maximum_replay_terms = row.count(fs_vfit::observation::MAX_OBSERVATION_ENTRIES)?;
+            row.end()?;
+            let mut row = r.row("observer_gas")?;
+            let propagation = fs_couple::baffled_pressure::gas::GasPropagation::read_record_for_gas(
+                &mut row.words, &gas_record)?;
+            let options = PlateObserverOptions { position_m, maximum_frequency_hz,
+                maximum_surface_cells, maximum_replay_terms, propagation };
+            options.validate(rate)?;
+            Some(options)
+        } else { None };
         let shell_observer = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("shell_observer") {
             let mut row = r.row("shell_observer")?;
@@ -956,7 +975,7 @@ impl Spec {
             gas, gas_record, body, strings, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
             rotational_bridges, translational_bridges, cylinder_gas_loading, prepared_linear, residual_flexibility, geometric_stretching,
             longitudinal_waves, longitudinal_loss, axial_bearings, bending_memory, body_radiation, shell_bem_angular_refinement,
-            shell_observer, shell_receiver_quadrature, one_way_observer, cavity, friction, contact_thermal: false, bow_ribbon, bow_fibers,
+            plate_observer, shell_observer, shell_receiver_quadrature, one_way_observer, cavity, friction, contact_thermal: false, bow_ribbon, bow_fibers,
             bow_station_motion, forces, schedule };
         spec.bow_station_program(&CancelGate::new_clock_free())?;
         spec.validate_shell_observer()?;
@@ -975,6 +994,13 @@ impl Spec {
             return Err("shell angular refinement requires the original BEM owner and level 0..2".into());
         }
         self.shell_receiver_quadrature.validate()?;
+        if let Some(observer) = &self.plate_observer {
+            observer.validate(self.rate)?;
+            if !matches!(self.body_radiation, Some(BodyRadiation::Rayleigh(_)))
+                || self.cavity.is_some() || self.shell_observer.is_some() || self.one_way_observer.is_some() {
+                return Err("plate_observer requires its original body-radiation rayleigh load, no cavity mouth, and no other observer".into());
+            }
+        }
         if let Some(observer) = &self.shell_observer {
             observer.validate(self.rate)?;
             let Some(BodyRadiation::ShellBem(load)) = self.body_radiation else {

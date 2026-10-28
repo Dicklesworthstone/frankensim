@@ -867,7 +867,7 @@ impl MultiBowPerformance {
         };
         self.shell_observer = Some(BoundShellObserver {
             report: BoundReport::OneWay(Box::new(report)),
-            observer,
+            observer: super::BoundReceiver::Shell(observer),
             coordinates,
             velocity: vec![0.0; source_count],
             maximum_abs_pressure_pa: source.options().network.maximum_abs_pressure_pa,
