@@ -27,6 +27,27 @@ mechanical-to-heat conversion fraction is inferred. Five focused regressions
 cover latent/signed inputs, unchanged clocks/sources, large reference datums,
 local/aggregate loss gates and transactional refusal.
 
+### Enthalpy transported by balanced mass flow
+
+The existing upwind graph evaluates transport relative to one canonical
+start-state enthalpy per connected flow component. Fixed mass makes the common
+reference cancel analytically; its numerical value cannot create heating or
+erase a small source by subtraction of gross formation-energy powers. Component
+identities are prepared once, and the same relative fluxes feed thermal and
+optional entropy balances. Latent enthalpy still moves at equal temperature.
+The gross absolute transported-enthalpy diagnostic retains its original datum.
+
+The existing cell mass-balance admission remains 64 machine epsilons of the
+incoming/outgoing rate scale. Inside that allowance the equations enforce zero
+continuity; the time-integrated absolute cell mass residual and its
+`|h_reference * mass_residual|` energy equivalent are reported explicitly as
+roundoff diagnostics. Neither is a physical heat source, mass loss, or second
+energy debit. G1/G3 regressions cover a flowing calorimeter at large positive
+and negative reference offsets, small heating in a uniform circulating loop,
+disconnected latent-heat loops, canonical edge orientation, admitted mass
+roundoff, and matching energy/entropy reference invariance. This does not add a
+pressure, velocity, variable-mass or chemical-reaction closure.
+
 ## Sublimation and deposition
 
 `sublimation::SublimationLaw` supplies a bounded immutable saturation-pressure,

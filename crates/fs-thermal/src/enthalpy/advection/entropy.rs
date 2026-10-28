@@ -156,6 +156,7 @@ impl EntropyState {
         thermal: &DepositionSimulation<'_>,
         flows: &[MassFlow],
         boundaries: &[MassBoundary],
+        energy_reference_cells: &BTreeMap<CellId, CellId>,
         temperatures: &BTreeMap<CellId, f64>,
         dt: f64,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
@@ -185,6 +186,7 @@ impl EntropyState {
                 .get(&id)
                 .ok_or(DepositionError::Arithmetic)?;
             let h = *initial.get(&id).ok_or(DepositionError::Arithmetic)?;
+            let energy_reference = initial[energy_reference_cells.get(&id).unwrap_or(&id)];
             let reference = *references.entry(cell.material_id).or_insert(h);
             let t = temperature(temperatures, id)?;
             match *entry {
@@ -202,12 +204,12 @@ impl EntropyState {
                     boundary.add(finite(rate * incoming_s)?)?;
                     let ds = difference(thermal, material_id, h, donor_h)?;
                     mixing.add(finite(rate * finite((donor_h - h) / t - ds)?)?)?;
-                    add_power(&mut powers, id, finite(rate * donor_h)?)?;
+                    add_power(&mut powers, id, finite(rate * finite(donor_h - energy_reference)?)?)?;
                 }
                 MassBoundary::Outlet { .. } => {
                     let outgoing_s = difference(thermal, cell.material_id, reference, h)?;
                     boundary.add(-finite(rate * outgoing_s)?)?;
-                    add_power(&mut powers, id, -finite(rate * h)?)?;
+                    add_power(&mut powers, id, -finite(rate * finite(h - energy_reference)?)?)?;
                 }
             }
         }
@@ -236,7 +238,8 @@ impl EntropyState {
             let td = temperature(temperatures, down)?;
             let ds = difference(thermal, donor.material_id, hd, hu)?;
             mixing.add(finite(rate * finite((hu - hd) / td - ds)?)?)?;
-            let power = finite(rate * hu)?;
+            let energy_reference = initial[energy_reference_cells.get(&up).unwrap_or(&up)];
+            let power = finite(rate * finite(hu - energy_reference)?)?;
             add_power(&mut powers, up, -power)?;
             add_power(&mut powers, down, power)?;
         }

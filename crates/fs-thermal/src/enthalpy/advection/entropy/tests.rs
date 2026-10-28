@@ -211,6 +211,34 @@ fn steady_open_flow_uses_donor_entropy_and_keeps_source_heat_unclassified() {
 }
 
 #[test]
+fn entropy_uses_the_same_datum_safe_calorimeter_flux_as_energy() {
+    let mut reports = Vec::new();
+    for shift in [0.0, 2.0_f64.powi(52), -2.0_f64.powi(52)] {
+        let law = Law { shift };
+        let mut c = cell(0, 300.0 + shift);
+        c.boundary.source_w = 4.0 / 3.0;
+        let s = prepared(&law, vec![c]);
+        let flow = Advected::new((), vec![], 0).unwrap().with_boundaries(vec![
+            MassBoundary::Inlet { id: 10, cell: CellId(0), kg_s: 1.0 / 3.0,
+                material_id: MaterialId(1), specific_h_j_kg: 400.0 + shift },
+            MassBoundary::Outlet { id: 11, cell: CellId(0), kg_s: 1.0 / 3.0 },
+        ], 2).unwrap().with_entropy_audit();
+        let (next, observed, energy) = s.advance_observed(&flow, 0.75, cfg(2.0), || Ok(())).unwrap();
+        assert_eq!(next.temperature_k(CellId(0)).unwrap(), 326.0);
+        close(energy.external_heat_j, 26.0, 1e-13);
+        let a = observed.entropy_audit().unwrap();
+        close(a.thermal_storage_change_j_k, (326.0_f64 / 300.0).ln(), 1e-14);
+        close(a.advective_boundary_entropy_input_j_k, 0.25 * (4.0_f64 / 3.0).ln(), 1e-14);
+        close(a.other_energy_at_cell_temperature_j_k, 1.0 / 300.0, 1e-14);
+        close(a.advective_balance_residual_j_k, 0.0, 1e-14);
+        balance(a);
+        reports.push(a);
+    }
+    assert_eq!(reports[0], reports[1]);
+    assert_eq!(reports[0], reports[2]);
+}
+
+#[test]
 fn closed_loop_time_refinement_reduces_temporal_defect_without_a_spatial_claim() {
     let initial = [300.0, 600.0, 450.0];
     let s = prepared(&LAW, (0..3).map(|i| cell(i as u64, initial[i])).collect());

@@ -6,6 +6,11 @@
 //! species/caloric bindings, and balance mass at every cell,
 //! including explicit inlet/outlet reservoirs. Boundary enthalpy is external
 //! energy; interior transfers are internal and never counted as a heat source.
+//! Flux arithmetic subtracts one common enthalpy reference per connected flow
+//! component. The fixed-mass balance removes that reference analytically, so
+//! formation enthalpy cannot swamp sensible heating through cancellation of
+//! gross inlet/outlet powers. Admitted mass-balance roundoff and its reference-
+//! energy equivalent remain explicit diagnostics, never physical heat.
 //! Species mixing, density/volume changes, pressure work and phase-dependent
 //! mobility need their own models; no velocity or melt motion is inferred here.
 
@@ -97,6 +102,14 @@ pub struct AdvectionAudit {
     /// Net inlet minus outlet enthalpy [J], already included exactly once in
     /// the thermal external-input account. Do not add it to that audit again.
     pub external_enthalpy_j: f64,
+    /// Integral of the sum of absolute cell incoming-minus-outgoing mass rates
+    /// admitted by the fixed-mass roundoff test [kg]. The evolution enforces
+    /// zero continuity; this is numerical input roundoff, not stored/leaked mass.
+    pub absolute_mass_balance_roundoff_kg: f64,
+    /// Integral of sum |h_reference * (incoming-outgoing mass rate)| [J].
+    /// Reports the coordinate-dependent term removed by that zero-continuity
+    /// convention. It is not external heat or an extra energy debit.
+    pub absolute_datum_energy_roundoff_j: f64,
     /// Largest outgoing mass / stored cell mass on an accepted substep.
     pub maximum_courant: f64,
     /// Actual accepted thermal substeps carrying the prescribed flow graph.
@@ -112,6 +125,8 @@ struct Pending {
     inlet_kg_s: f64,
     outlet_kg_s: f64,
     external_power_w: f64,
+    mass_balance_roundoff_kg_s: f64,
+    datum_energy_roundoff_w: f64,
 }
 
 #[derive(Clone, Default)]
@@ -136,6 +151,9 @@ pub struct Advected<O> {
     inner: O,
     flows: Vec<MassFlow>,
     boundaries: Vec<MassBoundary>,
+    // Stable component representatives, compiled once for nonzero connections.
+    // Boundary-only cells use themselves and need no topology entry.
+    reference_cells: BTreeMap<CellId, CellId>,
     stationary_species: Option<species::StationarySpecies>,
     boundary_pending: Option<BoundaryPending>,
     pending: Option<Pending>,
@@ -147,6 +165,32 @@ fn finite(x: f64) -> Result<f64, DepositionError> {
     if x.is_finite() { Ok(x) } else { Err(DepositionError::Arithmetic) }
 }
 fn invalid(s: &'static str) -> DepositionError { DepositionError::InvalidInput(s) }
+
+fn component_references(flows: &[MassFlow]) -> BTreeMap<CellId, CellId> {
+    fn root(parents: &mut BTreeMap<CellId, CellId>, mut id: CellId) -> CellId {
+        loop {
+            let next = parents[&id];
+            if next == id { return id; }
+            let grandparent = parents[&next];
+            parents.insert(id, grandparent);
+            id = next;
+        }
+    }
+    let mut parents = BTreeMap::new();
+    for flow in flows.iter().filter(|flow| flow.kg_s != 0.0) {
+        parents.entry(flow.a).or_insert(flow.a);
+        parents.entry(flow.b).or_insert(flow.b);
+        let a = root(&mut parents, flow.a);
+        let b = root(&mut parents, flow.b);
+        parents.insert(a.max(b), a.min(b));
+    }
+    let ids: Vec<_> = parents.keys().copied().collect();
+    for id in ids {
+        let representative = root(&mut parents, id);
+        parents.insert(id, representative);
+    }
+    parents
+}
 
 impl<O> Advected<O> {
     /// Admit bounded, uniquely named connections. Sort by stable ID so input
@@ -161,7 +205,9 @@ impl<O> Advected<O> {
             }
         }
         flows.sort_by_key(|f| f.id);
-        Ok(Self { inner, flows, boundaries: Vec::new(), stationary_species: None, boundary_pending: None,
+        let reference_cells = component_references(&flows);
+        Ok(Self { inner, flows, boundaries: Vec::new(), reference_cells,
+            stationary_species: None, boundary_pending: None,
             pending: None, audit: AdvectionAudit::default(), entropy: None })
     }
     /// Replace the complete inlet/outlet data at an accepted endpoint. The
@@ -200,6 +246,13 @@ impl<O> Advected<O> {
     pub fn flows(&self) -> &[MassFlow] { &self.flows }
     /// Observations reset by begin(), on the tentative observer only.
     pub fn audit(&self) -> AdvectionAudit { self.audit }
+
+    fn reference_h(&self, thermal: &DepositionSimulation<'_>, id: CellId)
+        -> Result<f64, DepositionError> {
+        let reference = self.reference_cells.get(&id).unwrap_or(&id);
+        thermal.cells().get(reference).map(|cell| cell.specific_h_j_kg)
+            .ok_or(invalid("inactive advective reference cell"))
+    }
 }
 
 impl<O: DepositionObserver> DepositionObserver for Advected<O> {
@@ -241,7 +294,8 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
             if index % 256 == 0 { check()?; }
             let (_, id, kg_s) = boundary.identity();
             let cell = thermal.cells().get(&id).ok_or(invalid("inactive mass-flow boundary cell"))?;
-            let (power_w, side) = match *boundary {
+            let reference_h = self.reference_h(thermal, id)?;
+            let (power_w, gross_power_w, side) = match *boundary {
                 MassBoundary::Inlet { material_id, specific_h_j_kg, .. } => {
                     if material_id != cell.material_id && self.stationary_species.is_none() {
                         return Err(invalid("inlet material/datum does not match receiving cell").into());
@@ -253,17 +307,19 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
                     let t = law.temperature_k(specific_h_j_kg)?;
                     if !t.is_finite() || t <= 0.0 { return Err(DepositionError::MaterialDomain.into()); }
                     pending.inlet_kg_s = finite(pending.inlet_kg_s + kg_s)?;
-                    (finite(kg_s * specific_h_j_kg)?, 0)
+                    (finite(kg_s * finite(specific_h_j_kg - reference_h)?)?,
+                        finite(kg_s * specific_h_j_kg)?, 0)
                 }
                 MassBoundary::Outlet { .. } => {
                     pending.outlet_kg_s = finite(pending.outlet_kg_s + kg_s)?;
-                    (-finite(kg_s * cell.specific_h_j_kg)?, 1)
+                    (-finite(kg_s * finite(cell.specific_h_j_kg - reference_h)?)?,
+                        -finite(kg_s * cell.specific_h_j_kg)?, 1)
                 }
             };
             let rates = pending.rates.entry(id).or_default();
             rates[side] = finite(rates[side] + kg_s)?;
             pending.external_power_w = finite(pending.external_power_w + power_w)?;
-            pending.absolute_power_w = finite(pending.absolute_power_w + power_w.abs())?;
+            pending.absolute_power_w = finite(pending.absolute_power_w + gross_power_w.abs())?;
             if power_w != 0.0 {
                 let watts = sources.entry(id).or_default();
                 *watts = finite(*watts + power_w)?;
@@ -301,22 +357,30 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
                 return Err(invalid("advection across different material IDs requires a composition model").into());
             }
             let (up, down) = if up_id == a.id { (a, b) } else { (b, a) };
-            let power_w = finite(rate * up.specific_h_j_kg)?;
+            let reference_h = self.reference_h(thermal, up.id)?;
+            let power_w = finite(rate * finite(up.specific_h_j_kg - reference_h)?)?;
+            let gross_power_w = finite(rate * up.specific_h_j_kg)?;
             let out = rates.entry(up.id).or_default();
             out[1] = finite(out[1] + rate)?;
             let incoming = rates.entry(down.id).or_default();
             incoming[0] = finite(incoming[0] + rate)?;
             mass_kg_s = finite(mass_kg_s + rate)?;
-            absolute_power_w = finite(absolute_power_w + power_w.abs())?;
+            absolute_power_w = finite(absolute_power_w + gross_power_w.abs())?;
             transfers.push(HeatTransfer { a: up.id, b: down.id, power_w });
         }
         let mut decay_per_s: f64 = 0.0;
+        let mut mass_balance_roundoff_kg_s = 0.0;
+        let mut datum_energy_roundoff_w = 0.0;
         for (index, (&id, &[incoming, outgoing])) in rates.iter().enumerate() {
             if index % 256 == 0 { check()?; }
             let scale = incoming.max(outgoing);
             if (incoming-outgoing).abs() > 64.0*f64::EPSILON*scale {
                 return Err(invalid("fixed-mass advection requires balanced incoming and outgoing mass at every cell").into());
             }
+            let mass_roundoff = (incoming-outgoing).abs();
+            mass_balance_roundoff_kg_s = finite(mass_balance_roundoff_kg_s + mass_roundoff)?;
+            datum_energy_roundoff_w = finite(datum_energy_roundoff_w
+                + finite(self.reference_h(thermal, id)? * mass_roundoff)?.abs())?;
             let decay = finite(outgoing / thermal.cells()[&id].mass_kg)?;
             if outgoing != 0.0 && decay == 0.0 {
                 return Err(DepositionError::Arithmetic.into());
@@ -326,7 +390,8 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
         check()?;
         self.pending = Some(Pending { time_s: thermal.time_s(), decay_per_s,
             mass_kg_s, absolute_power_w, inlet_kg_s: boundary.inlet_kg_s,
-            outlet_kg_s: boundary.outlet_kg_s, external_power_w: boundary.external_power_w });
+            outlet_kg_s: boundary.outlet_kg_s, external_power_w: boundary.external_power_w,
+            mass_balance_roundoff_kg_s, datum_energy_roundoff_w });
         Ok(transfers)
     }
     fn limit_timestep_s(&mut self, thermal: &DepositionSimulation<'_>, proposed_s: f64,
@@ -372,10 +437,14 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
         self.audit.inlet_mass_kg = finite(self.audit.inlet_mass_kg + finite(dt*pending.inlet_kg_s)?)?;
         self.audit.outlet_mass_kg = finite(self.audit.outlet_mass_kg + finite(dt*pending.outlet_kg_s)?)?;
         self.audit.external_enthalpy_j = finite(self.audit.external_enthalpy_j + finite(dt*pending.external_power_w)?)?;
+        self.audit.absolute_mass_balance_roundoff_kg = finite(self.audit.absolute_mass_balance_roundoff_kg
+            + finite(dt*pending.mass_balance_roundoff_kg_s)?)?;
+        self.audit.absolute_datum_energy_roundoff_j = finite(self.audit.absolute_datum_energy_roundoff_j
+            + finite(dt*pending.datum_energy_roundoff_w)?)?;
         self.audit.maximum_courant = self.audit.maximum_courant.max(finite(dt*pending.decay_per_s)?);
         self.audit.substeps = self.audit.substeps.checked_add(1).ok_or(DepositionError::Arithmetic)?;
         if let Some(entropy) = &mut self.entropy {
-            entropy.record(thermal, &self.flows, &self.boundaries, old, dt, check)?;
+            entropy.record(thermal, &self.flows, &self.boundaries, &self.reference_cells, old, dt, check)?;
         }
         self.inner.step(start_s, dt, old, thermal, check)
     }

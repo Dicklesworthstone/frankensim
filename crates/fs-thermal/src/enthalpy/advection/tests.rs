@@ -316,3 +316,102 @@ fn boundary_identity_support_balance_and_limits_refuse_atomically() {
     assert_eq!(s.time_s(),0.0);
     close(s.cells()[&CellId(0)].specific_h_j_kg,50_000.0,0.0);
 }
+
+struct DatumShift { offset: f64 }
+impl ThermalLaw for DatumShift {
+    fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
+        LAW.temperature_k(h-self.offset)
+    }
+    fn maximum_temperature_slope(&self) -> f64 { LAW.maximum_temperature_slope() }
+}
+
+#[test]
+fn large_formation_datum_does_not_corrupt_a_flowing_calorimeter() {
+    // G1/G3: one explicit, well-mixed calorimeter step. The independent
+    // balance is dh=dt/m * (mass_rate*(h_in-h)+P), regardless of energy datum.
+    let mut reference = None;
+    for offset in [0.0, 2.0_f64.powi(52), -2.0_f64.powi(52)] {
+        let law = DatumShift { offset };
+        let s = prepared(&law,vec![cell(0,1.0,offset+100.0)],vec![]);
+        let flow = Advected::new(Witness { watts: 4.0/3.0, ..Witness::default() },vec![],0)
+            .unwrap().with_boundaries(boundaries(0,1.0/3.0,offset+200.0),2).unwrap();
+        let balance = s.power_balance_observed(&flow,||Ok(())).unwrap();
+        close(balance.net_power_w[&CellId(0)],(200.0-100.0)/3.0+4.0/3.0,1e-13);
+        let (n,o,a) = s.advance_observed(&flow,0.75,cfg(2.0),||Ok(())).unwrap();
+        assert_eq!(a.substeps,1);
+        close(n.cells()[&CellId(0)].specific_h_j_kg-offset,126.0,1e-12);
+        close(a.external_heat_j,26.0,1e-12);
+        close(o.audit().external_enthalpy_j,25.0,1e-12);
+        close(a.residual_j,0.0,1e-12);
+        assert_eq!(o.audit().absolute_mass_balance_roundoff_kg,0.0);
+        assert_eq!(o.audit().absolute_datum_energy_roundoff_j,0.0);
+        let temperature = n.temperature_k(CellId(0)).unwrap();
+        if let Some(expected) = reference { assert_eq!(temperature,expected); }
+        else { reference = Some(temperature); }
+        // The gross transported-energy diagnostic deliberately retains datum.
+        assert!(o.audit().absolute_enthalpy_transfer_j>0.0);
+    }
+}
+
+#[test]
+fn uniform_ring_retains_small_real_power_beside_large_reference_enthalpy() {
+    let law = DatumShift { offset: 2.0_f64.powi(52) };
+    let s = prepared(&law,(0..3).map(|id|cell(id,1.0,law.offset+100.0)).collect(),vec![]);
+    let flow = Advected::new(Witness { watts: 0.125, ..Witness::default() },ring(0.3),3).unwrap();
+    let balance = s.power_balance_observed(&flow,||Ok(())).unwrap();
+    assert_eq!(balance.external_power_w,0.125);
+    assert_eq!(balance.net_power_w[&CellId(0)],0.125);
+    assert_eq!(balance.net_power_w[&CellId(1)],0.0);
+    assert_eq!(balance.net_power_w[&CellId(2)],0.0);
+    let equilibrium = Advected::new((),ring(0.3),3).unwrap();
+    let (next,_,audit) = s.advance_observed(&equilibrium,1.0,cfg(1.0),||Ok(())).unwrap();
+    assert_eq!(next.cells(),s.cells());
+    assert_eq!(audit.residual_j,0.0);
+}
+
+#[test]
+fn disconnected_latent_loops_retain_local_references_and_canonical_order() {
+    let law = DatumShift { offset: 2.0_f64.powi(52) };
+    let h = [110_000.0,190_000.0,150_000.0,150_000.0];
+    let s = prepared(&law,(0..4).map(|i|cell(i,1.0,law.offset+h[i as usize])).collect(),vec![]);
+    let flows = vec![
+        MassFlow {id:0,a:CellId(0),b:CellId(1),kg_s:0.25},
+        MassFlow {id:1,a:CellId(1),b:CellId(0),kg_s:0.25},
+        MassFlow {id:2,a:CellId(2),b:CellId(3),kg_s:0.25},
+        MassFlow {id:3,a:CellId(3),b:CellId(2),kg_s:0.25},
+    ];
+    let reversed = flows.iter().rev().map(|flow| MassFlow {
+        a:flow.b,b:flow.a,kg_s:-flow.kg_s,..*flow
+    }).collect();
+    let a = Advected::new((),flows,4).unwrap();
+    let b = Advected::new((),reversed,4).unwrap();
+    let (n,_,audit) = s.advance_observed(&a,0.25,cfg(1.0),||Ok(())).unwrap();
+    let (same,_,_) = s.advance_observed(&b,0.25,cfg(1.0),||Ok(())).unwrap();
+    assert_eq!(n.cells(),same.cells());
+    for (id,expected) in [115_000.0,185_000.0,150_000.0,150_000.0].into_iter().enumerate() {
+        assert_eq!(n.cells()[&CellId(id as u64)].specific_h_j_kg-law.offset,expected);
+        assert_eq!(n.temperature_k(CellId(id as u64)).unwrap(),350.0);
+    }
+    assert_eq!(audit.external_heat_j,0.0);
+    assert_eq!(audit.residual_j,0.0);
+    assert_eq!(a.reference_cells[&CellId(0)],CellId(0));
+    assert_eq!(a.reference_cells[&CellId(3)],CellId(2));
+}
+
+#[test]
+fn admitted_mass_roundoff_has_an_explicit_datum_account() {
+    let law = DatumShift { offset: 2.0_f64.powi(52) };
+    let h = law.offset+100.0;
+    let s = prepared(&law,vec![cell(0,1.0,h)],vec![]);
+    let inlet = 0.5_f64;
+    let outlet = inlet.next_up();
+    let flow = Advected::new((),vec![],0).unwrap().with_boundaries(vec![
+        MassBoundary::Inlet {id:1,cell:CellId(0),kg_s:inlet,material_id:MaterialId(1),specific_h_j_kg:h},
+        MassBoundary::Outlet {id:2,cell:CellId(0),kg_s:outlet},
+    ],2).unwrap();
+    let (n,o,a) = s.advance_observed(&flow,0.25,cfg(1.0),||Ok(())).unwrap();
+    assert_eq!(n.cells(),s.cells());
+    assert_eq!(a.external_heat_j,0.0);
+    assert_eq!(o.audit().absolute_mass_balance_roundoff_kg,0.25*(outlet-inlet));
+    assert_eq!(o.audit().absolute_datum_energy_roundoff_j,0.25*h*(outlet-inlet));
+}
