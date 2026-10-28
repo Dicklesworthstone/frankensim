@@ -24,6 +24,8 @@ type Vector = [f64; 3];
 pub enum CapillarySurfaceError {
     /// A position contains NaN or infinity.
     NonFinitePosition,
+    /// A supplied endpoint tangent direction contains NaN or infinity.
+    NonFiniteDirection,
     /// A triangle has zero representable area.
     DegenerateTriangle,
     /// Tension must be finite and nonnegative.
@@ -192,6 +194,92 @@ pub fn triangle_surface_tension_step(
     )
 }
 
+/// Analytic action of the endpoint derivative of the work-conjugate force.
+///
+/// The initial geometry and both prescribed tensions stay fixed. `direction_m`
+/// perturbs the final positions only; the returned nodal force variation is in
+/// newtons. This differentiates the Gram formula and, when active, its symmetric
+/// area-work correction. It allocates nothing and forms no dense Jacobian.
+/// At coincident endpoints this is half the instantaneous force Jacobian, as
+/// required by a symmetric discrete gradient. Geometry admission is unchanged.
+pub fn triangle_surface_tension_step_tangent(
+    before_m: [Vector; 3],
+    after_m: [Vector; 3],
+    tension_before_n_m: f64,
+    tension_after_n_m: f64,
+    direction_m: [Vector; 3],
+) -> Result<[Vector; 3], CapillarySurfaceError> {
+    tension(tension_before_n_m)?;
+    tension(tension_after_n_m)?;
+    if direction_m.iter().flatten().any(|x| !x.is_finite()) {
+        return Err(CapillarySurfaceError::NonFiniteDirection);
+    }
+    let before = geometry(before_m)?;
+    let after = geometry(after_m)?;
+    let a = mean(before.a, after.a);
+    let b = mean(before.b, after.b);
+    let [s, t, u] = mean(before.gram, after.gram);
+    let mean_area = 0.5 * before.area + 0.5 * after.area;
+    let factor = 0.25 / mean_area;
+    let ga = core::array::from_fn(|i| product_difference(t, a[i], u, b[i]) * factor);
+    let gb = core::array::from_fn(|i| product_difference(s, b[i], u, a[i]) * factor);
+    let da = sub(direction_m[1], direction_m[0]);
+    let db = sub(direction_m[2], direction_m[0]);
+    let area_direction =
+        0.5 * (dot(cross(da, after.b), after.normal) + dot(cross(after.a, db), after.normal));
+    let [ds, dt, du] = [
+        dot(after.a, da),
+        dot(after.b, db),
+        0.5 * (dot(da, after.b) + dot(after.a, db)),
+    ];
+    let ratio = (0.5 * area_direction) / mean_area;
+    let mut dga = core::array::from_fn(|i| {
+        (dt * a[i] + 0.5 * t * da[i] - du * b[i] - 0.5 * u * db[i]) * factor - ga[i] * ratio
+    });
+    let mut dgb = core::array::from_fn(|i| {
+        (ds * b[i] + 0.5 * s * db[i] - du * a[i] - 0.5 * u * da[i]) * factor - gb[i] * ratio
+    });
+    if let Some(c) = area_work_correction(before, after, ga, gb)? {
+        let edge_change_a = sub(after.a, before.a);
+        let edge_change_b = sub(after.b, before.b);
+        let residual_direction = area_direction
+            - dot(dga, edge_change_a)
+            - dot(ga, da)
+            - dot(dgb, edge_change_b)
+            - dot(gb, db);
+        let delta_direction = [2.0 * ds, 2.0 * dt, 2.0 * du];
+        let largest = c
+            .delta
+            .iter()
+            .position(|v| v.abs() == c.magnitude)
+            .expect("nonzero finite Gram increment");
+        let magnitude_direction = c.delta[largest].signum() * delta_direction[largest];
+        let dn: Vector = core::array::from_fn(|i| {
+            (delta_direction[i] - c.normalized[i] * magnitude_direction) / c.magnitude
+        });
+        let [ns, nt, nu] = c.normalized;
+        let denominator_direction = 0.5 * (dn[0] * c.delta[0] + ns * delta_direction[0])
+            + 0.5 * (dn[1] * c.delta[1] + nt * delta_direction[1])
+            + dn[2] * c.delta[2]
+            + nu * delta_direction[2];
+        let weight_direction =
+            (residual_direction - c.weight * denominator_direction) / c.denominator;
+        for i in 0..3 {
+            let ca = ns.mul_add(a[i], nu * b[i]);
+            let cb = nt.mul_add(b[i], nu * a[i]);
+            dga[i] += weight_direction * ca
+                + c.weight * (dn[0] * a[i] + 0.5 * ns * da[i] + dn[2] * b[i] + 0.5 * nu * db[i]);
+            dgb[i] += weight_direction * cb
+                + c.weight * (dn[1] * b[i] + 0.5 * nt * db[i] + dn[2] * a[i] + 0.5 * nu * da[i]);
+        }
+    }
+    let result = nodal_forces(dga, dgb, 0.5 * tension_before_n_m + 0.5 * tension_after_n_m);
+    if result.iter().flatten().any(|x| !x.is_finite()) {
+        return Err(CapillarySurfaceError::Unrepresentable);
+    }
+    Ok(result)
+}
+
 /// Assemble a prescribed-tension surface patch at two endpoint geometries.
 ///
 /// Connectivity uses the same vertex-index triples as the existing mesh
@@ -298,6 +386,32 @@ fn correct_area_work(
     mut ga: Vector,
     mut gb: Vector,
 ) -> Result<(Vector, Vector), CapillarySurfaceError> {
+    if let Some(c) = area_work_correction(before, after, ga, gb)? {
+        let a = mean(before.a, after.a);
+        let b = mean(before.b, after.b);
+        let [s, t, u] = c.normalized;
+        for i in 0..3 {
+            ga[i] += c.weight * s.mul_add(a[i], u * b[i]);
+            gb[i] += c.weight * t.mul_add(b[i], u * a[i]);
+        }
+    }
+    Ok((ga, gb))
+}
+
+struct AreaWorkCorrection {
+    delta: Vector,
+    magnitude: f64,
+    normalized: Vector,
+    denominator: f64,
+    weight: f64,
+}
+
+fn area_work_correction(
+    before: Geometry,
+    after: Geometry,
+    ga: Vector,
+    gb: Vector,
+) -> Result<Option<AreaWorkCorrection>, CapillarySurfaceError> {
     let da = sub(after.a, before.a);
     let db = sub(after.b, before.b);
     let work = dot(ga, da) + dot(gb, db);
@@ -325,12 +439,15 @@ fn correct_area_work(
         if !correction.is_finite() {
             return Err(CapillarySurfaceError::Unrepresentable);
         }
-        for i in 0..3 {
-            ga[i] += correction * s.mul_add(a[i], u * b[i]);
-            gb[i] += correction * t.mul_add(b[i], u * a[i]);
-        }
+        return Ok(Some(AreaWorkCorrection {
+            delta: [ds, dt, du],
+            magnitude,
+            normalized: [s, t, u],
+            denominator,
+            weight: correction,
+        }));
     }
-    Ok((ga, gb))
+    Ok(None)
 }
 
 fn geometry(vertices: [Vector; 3]) -> Result<Geometry, CapillarySurfaceError> {
@@ -430,6 +547,59 @@ impl Sum {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn g1_endpoint_tangent_matches_finite_deformation_and_rotation_force_differences() {
+        let (before, deformed) = fixture();
+        let direction = [[0.3, -0.2, 0.7], [-0.4, 0.5, 0.2], [0.8, 0.1, -0.3]];
+        let rotated = before.map(|[x, y, z]| [z + 0.2, y - 0.3, -x + 0.4]);
+        for after in [before, deformed, rotated] {
+            let exact =
+                triangle_surface_tension_step_tangent(before, after, 0.7, 1.1, direction).unwrap();
+            let epsilon = 2e-6;
+            let plus = core::array::from_fn(|i| {
+                core::array::from_fn(|j| after[i][j] + epsilon * direction[i][j])
+            });
+            let minus = core::array::from_fn(|i| {
+                core::array::from_fn(|j| after[i][j] - epsilon * direction[i][j])
+            });
+            let fp = triangle_surface_tension_step(before, plus, 0.7, 1.1)
+                .unwrap()
+                .forces_n;
+            let fm = triangle_surface_tension_step(before, minus, 0.7, 1.1)
+                .unwrap()
+                .forces_n;
+            for i in 0..3 {
+                for j in 0..3 {
+                    let difference = (fp[i][j] - fm[i][j]) / (2.0 * epsilon);
+                    assert!(
+                        (difference - exact[i][j]).abs() < 2e-9,
+                        "{difference:e} != {:e}",
+                        exact[i][j]
+                    );
+                }
+            }
+            vec_close(sum(exact), [0.0; 3]);
+            let force = triangle_surface_tension_step(before, after, 0.7, 1.1)
+                .unwrap()
+                .forces_n;
+            let torque_direction: [Vector; 3] = core::array::from_fn(|i| {
+                let a = cross(scaled(direction[i], 0.5), force[i]);
+                let b = cross(mean(before[i], after[i]), exact[i]);
+                core::array::from_fn(|j| a[j] + b[j])
+            });
+            vec_close(sum(torque_direction), [0.0; 3]);
+            let translation = triangle_surface_tension_step_tangent(
+                before,
+                after,
+                0.7,
+                1.1,
+                [[0.2, -0.7, 0.4]; 3],
+            )
+            .unwrap();
+            assert_eq!(translation, [[0.0; 3]; 3]);
+        }
+    }
 
     fn close(actual: f64, expected: f64) {
         assert!(
@@ -736,6 +906,16 @@ mod tests {
                 "width={width:e}, residual={residual:e}"
             );
             balance(result, before, after);
+            // Differentiate the finite-step work identity independently using
+            // the instantaneous final force. This also exercises the active
+            // Gram work correction, without subtracting nearly equal skinny
+            // geometries in a poorly conditioned finite-difference oracle.
+            let direction = [[0.0; 3], [0.2, -0.1, 0.3], [0.2, -0.1 + 0.1 * width, 0.3]];
+            let tangent = triangle_surface_tension_step_tangent(before, after, 1.0, 1.0, direction).unwrap();
+            let endpoint = triangle_surface_tension(after, 1.0).unwrap();
+            let derivative = (0..3).map(|i| dot(tangent[i], sub(after[i], before[i]))
+                + dot(result.forces_n[i], direction[i]) - dot(endpoint.forces_n[i], direction[i])).sum::<f64>();
+            assert!(derivative.abs() < 2e-11, "width={width:e}, work derivative={derivative:e}");
         }
     }
 }
