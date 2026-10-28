@@ -64,6 +64,16 @@ pub(super) fn solve(law: &FrictionLaw, config: ModalFrictionConfig, compliance: 
         let expected = finite(mu*normal)?;
         Ok((finite(magnitude-expected)?, force_tolerance(config, magnitude, expected)?))
     };
+    if let Some(force) = law.affine_sliding_traction_n(normal, free_slip.abs(), compliance, dt)? {
+        limit("friction traction", force, config.maximum_force_n)?;
+        if force < required.abs() {
+            let (residual, tolerance) = evaluate(force)?;
+            if residual.abs() <= tolerance {
+                let traction = if force == 0.0 { 0.0 } else { sign * force };
+                return Ok((traction, ModalFrictionRegime::Sliding, 0));
+            }
+        }
+    }
     let (zero, _) = evaluate(0.0)?;
     if zero == 0.0 { return Ok((0.0, ModalFrictionRegime::Sliding, 0)); }
     let mut lo = 0.0;
@@ -156,6 +166,21 @@ mod trait_tests {
                 static_mu: 0.8,
                 kinetic_mu: 0.4,
                 characteristic_speed: 0.04,
+            },
+            FrictionLaw::VelocityDependent {
+                static_mu: 0.8,
+                mu_zero: 0.4,
+                slope_per_speed: 0.1,
+            },
+            FrictionLaw::VelocityDependent {
+                static_mu: 0.8,
+                mu_zero: 0.4,
+                slope_per_speed: -0.1,
+            },
+            FrictionLaw::VelocityDependent {
+                static_mu: 0.8,
+                mu_zero: 0.4,
+                slope_per_speed: -2.0,
             },
         ] {
             for normal in [0.0, 0.1, 1.0] {

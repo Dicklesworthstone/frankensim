@@ -181,9 +181,17 @@ fn g1_coulomb_trait_reproduces_block_on_incline() {
             dt_s: dt,
             slip_increment_m: [0.5 * free_acceleration * dt * dt, 0.0],
             compliance_m_per_n: 0.5 * dt * dt / mass,
+            solve: TangentialSolveConfig {
+                max_iterations: 1,
+                ..input().solve
+            },
             ..input()
         };
         let step = law.advance(&law.initial_state(), &x).unwrap();
+        assert_eq!(
+            step.iterations, 0,
+            "Coulomb contact has an exact affine solution"
+        );
         if theta.tan() < 0.5 {
             // det-ok: independent test oracle
             assert_eq!(step.regime, FrictionRegime::Sticking);
@@ -299,7 +307,7 @@ fn g0_force_budget_and_failed_root_refuse_without_publishing_state() {
     let mut underresolved = input();
     underresolved.solve.max_iterations = 1;
     assert!(matches!(
-        law.advance(&state, &underresolved),
+        laws()[2].advance(&state, &underresolved),
         Err(TriboError::TangentialSolve { iterations: 1, .. })
     ));
     let mut unbracketed = input();
@@ -320,6 +328,53 @@ fn g0_force_budget_and_failed_root_refuse_without_publishing_state() {
         assert!(invalid.advance(&state, &input()).is_err());
     }
     assert_eq!(state, law.initial_state());
+}
+
+/// G1: compare the affine fast path with an independent, tightly bisected
+/// force/velocity intersection, including strengthening, weakening and the
+/// zero-traction branch. No numerical stick regularization is introduced.
+#[test]
+fn g1_affine_sliding_matches_force_velocity_intersection_without_iterations() {
+    for slope in [-2.0, -0.1, 0.0, 0.1, 20.0] {
+        let law = FrictionLaw::VelocityDependent {
+            static_mu: 0.8,
+            mu_zero: 0.4,
+            slope_per_speed: slope,
+        };
+        for normal in [0.1, 1.0, 10.0] {
+            for direction in [[1.0, 0.0], [-1.0, 0.0], [0.6, 0.8]] {
+                let x = TangentialStepInput {
+                    normal_n: normal,
+                    slip_increment_m: [0.03 * direction[0], 0.03 * direction[1]],
+                    solve: TangentialSolveConfig {
+                        max_iterations: 1,
+                        ..input().solve
+                    },
+                    ..input()
+                };
+                let step = law.advance(&law.initial_state(), &x).unwrap();
+                assert_eq!(step.regime, FrictionRegime::Sliding);
+                assert_eq!(step.iterations, 0);
+                let mut lo = 0.0;
+                let mut hi = 0.03 / x.compliance_m_per_n;
+                for _ in 0..160 {
+                    let force = 0.5 * (lo + hi);
+                    let velocity = (0.03 - x.compliance_m_per_n * force) / x.dt_s;
+                    let kinetic = normal * (0.4 + slope * velocity).max(0.0);
+                    if force < kinetic {
+                        lo = force;
+                    } else {
+                        hi = force;
+                    }
+                }
+                let reference = 0.5 * (lo + hi);
+                let magnitude = fs_math::det::hypot(step.traction_n[0], step.traction_n[1]);
+                assert!((magnitude - reference).abs() <= 1e-12 * (1.0 + reference));
+                assert!(step.dissipated_j >= 0.0);
+                assert_eq!(step.closure_residual_j, 0.0);
+            }
+        }
+    }
 }
 
 #[test]

@@ -139,7 +139,7 @@ pub struct TangentialStep<S> {
     pub closure_residual_j: f64,
     /// Kinematic equation residual [m], including static projection roundoff.
     pub compatibility_residual_m: [f64; 2],
-    /// Bisections used; zero for a static reaction or endpoint root.
+    /// Bisections used; zero for a static reaction, affine solution or endpoint root.
     pub iterations: usize,
 }
 
@@ -327,6 +327,57 @@ impl TangentialLaw for DryInterfaceSystemCard {
     }
 }
 
+impl FrictionLaw {
+    /// Closed-form kinetic traction magnitude for an affine body load line.
+    ///
+    /// The caller must perform the set-valued static-friction test first and
+    /// verify its force budget and constitutive residual afterwards. For a
+    /// Coulomb law this is `mu_k * normal_n`. For a linear velocity law, solving
+    /// `F = N * max(0, mu_0 + slope * (du_free - compliance * F) / dt)`
+    /// gives the positive affine root, or zero on the clamped branch.
+    ///
+    /// Returns `None` for nonlinear laws or an ill-conditioned affine formula;
+    /// callers retain their safeguarded root solver in those cases. A candidate
+    /// is not a static reaction and does not change nonlinear branch selection.
+    pub fn affine_sliding_traction_n(
+        &self,
+        normal_n: f64,
+        free_slip_m: f64,
+        compliance_m_per_n: f64,
+        dt_s: f64,
+    ) -> Result<Option<f64>, TriboError> {
+        self.validate()?;
+        nonnegative_finite(normal_n, "normal_force")?;
+        positive_finite(free_slip_m, "free_slip_distance_m")?;
+        nonnegative_finite(compliance_m_per_n, "compliance_m_per_n")?;
+        positive_finite(dt_s, "dt_s")?;
+        match *self {
+            Self::Coulomb { kinetic_mu, .. } => {
+                Ok(Some(checked_mul(kinetic_mu, normal_n, "traction_n")?))
+            }
+            Self::VelocityDependent {
+                slope_per_speed, ..
+            } => {
+                let speed = finite(free_slip_m / dt_s, "slip_speed_mps")?;
+                let released_force = checked_mul(self.kinetic_mu(speed)?, normal_n, "traction_n")?;
+                if released_force == 0.0 {
+                    return Ok(Some(0.0));
+                }
+                let gain = normal_n * slope_per_speed * (compliance_m_per_n / dt_s);
+                let denominator = 1.0 + gain;
+                // Near a singular weakening load line, bisection preserves the
+                // declared residual tolerance without amplifying roundoff.
+                if !gain.is_finite() || denominator <= 64.0 * f64::EPSILON * (1.0 + gain.abs()) {
+                    return Ok(None);
+                }
+                let force = released_force / denominator;
+                Ok(force.is_finite().then_some(force))
+            }
+            Self::Stribeck { .. } | Self::Hyperbolic { .. } => Ok(None),
+        }
+    }
+}
+
 // Operation order, endpoint limits and stopping criterion intentionally match
 // fs-couple's modal friction scalar owner. Its in-crate comparison exercises both
 // implementations bitwise; no modal/network type enters this constitutive leaf.
@@ -370,6 +421,15 @@ fn solve_magnitude(
             x.solve.tolerance(magnitude, expected)?,
         ))
     };
+    if let Some(force) = law.affine_sliding_traction_n(x.normal_n, distance, compliance, x.dt_s)? {
+        require_force_budget(force, x.solve)?;
+        if force < required {
+            let (residual, tolerance) = evaluate(force)?;
+            if residual.abs() <= tolerance {
+                return Ok((force, FrictionRegime::Sliding, 0));
+            }
+        }
+    }
     if evaluate(0.0)?.0 == 0.0 {
         return Ok((0.0, FrictionRegime::Sliding, 0));
     }
