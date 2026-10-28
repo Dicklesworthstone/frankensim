@@ -114,7 +114,7 @@ limits are pointwise estimates, not certified continuum-error enclosures.
 
 `shell::mitc::viscosity::ShearShellViscosity` supplies independent symmetric
 membrane, bending and transverse-shear viscous resultants in physical facet
-coordinates. Each tensor is positive definite or explicitly all zero; missing
+coordinates. Each tensor is positive semidefinite, including directional-only loss and zero; missing
 couplings are not inferred. The shared strain kernel evaluates elastic and
 viscous bilinear forms with identical MITC kinematics and quadrature.
 `project_viscosity` uses the ELASTIC bubble transformation for the full
@@ -625,3 +625,14 @@ quadrature accuracy; an outside point refuses the patch rather than clipping
 its area. There is no inferred contact law, dynamic support reaction, or path
 derivative. The loading tests cover footprints spanning triangles/supports,
 independent world resultants, work/power, subdivision and late-point rollback.
+
+## Directional shell viscosity projection
+
+MITC membrane, bending and transverse-shear loss admit positive-semidefinite
+tensors through the shared material resultant owner, preserving physically
+undamped strain directions without regularization. `project_viscosity`
+evaluates each 18-by-18 element action once per retained mode and then
+projects every cross term. Its conservative per-facet work expression is
+`1_000_000 + 324*n + 18*n*n`, plus input coverage; this is an operation-count
+improvement, not a measured runtime claim. Native affine membrane-energy
+checks verify active directions, null modes and complete modal congruence.

@@ -483,16 +483,24 @@ pub struct ModalPlateViscosity {
 }
 impl ModalPlateViscosity {
     pub(crate) fn factor(matrix:Vec<f64>,n:usize,resistance:f64,gate:&CancelGate)->Result<Self,AcousticRealizeError> {
+        poll(gate)?;
+        if n == 0 || n.checked_mul(n) != Some(matrix.len())
+            || !resistance.is_finite() || resistance <= 0.0 {
+            return Err(invalid("material damping needs a matching matrix and positive resistance"));
+        }
         if matrix.iter().any(|v|!v.is_finite()) { return Err(invalid("projected material damping is not finite")); }
         if matrix.iter().all(|v|*v == 0.0) {
             return Ok(Self {matrix,columns:Vec::new(),resistance,modes:n,diagonal_zeta:None});
         }
         let scale:Vec<_> = (0..n).map(|i|matrix[n*i+i].sqrt()).collect();
         if scale.iter().any(|s|!s.is_finite() || *s <= 0.0) {
-            return Err(invalid("nonzero projected viscosity requires resolved positive-definite modal damping"));
+            return Self::from_psd_modal_matrix(matrix,n,resistance,gate);
         }
         let normalized:Vec<_> = (0..n*n).map(|k|matrix[k]/scale[k/n]/scale[k%n]).collect();
-        let root = fs_la::factor::cholesky(&normalized,n).map_err(owner)?;
+        let root = match fs_la::factor::cholesky(&normalized,n) {
+            Ok(root) => root,
+            Err(_) => return Self::from_psd_modal_matrix(matrix,n,resistance,gate),
+        };
         let r = resistance.sqrt(); let mut columns = Vec::with_capacity(n);
         for j in 0..n {
             poll(gate)?;
@@ -544,8 +552,8 @@ impl ModalPlateViscosity {
     /// Factor a symmetric positive-semidefinite (PSD) modal damping matrix $C_{\text{modal}}$ (`n × n`,
     /// row-major [1/s]) into passive dashpot channels at reference resistance `resistance` [$\text{N}\cdot\text{s/m}$].
     ///
-    /// Unlike bulk bending viscosity (where every retained elastic mode has strictly positive diagonal
-    /// damping), localized interface/glue damping may be rank-deficient or vanish on rigid-body modes.
+    /// Directional material, localized interface and glue damping may be rank-deficient
+    /// or vanish on rigid-body modes.
     /// Complete pivoted Cholesky extracts one passive channel per active rank direction and verifies
     /// that $\sum_k (\sqrt{R}\,\mathbf{b}_k)(\sqrt{R}\,\mathbf{b}_k)^T$ reconstructs $C_{\text{modal}}$ within $10^{-10}$.
     pub fn from_psd_modal_matrix(
@@ -556,7 +564,7 @@ impl ModalPlateViscosity {
     ) -> Result<Self, AcousticRealizeError> {
         poll(gate)?;
         if n == 0
-            || matrix.len() != n * n
+            || n.checked_mul(n) != Some(matrix.len())
             || !resistance.is_finite()
             || resistance <= 0.0
             || matrix.iter().any(|v| !v.is_finite())
@@ -568,12 +576,14 @@ impl ModalPlateViscosity {
         let mut max_diag = 0.0_f64;
         for i in 0..n {
             let d_ii = matrix[i * n + i];
-            if d_ii < -1e-12 {
-                return Err(invalid("PSD modal damping has a negative diagonal entry"));
-            }
             max_diag = max_diag.max(d_ii.max(0.0));
         }
         if max_diag == 0.0 {
+            // A nonzero symmetric matrix with zero diagonal is indefinite.
+            // Do not erase its cross terms (or negative diagonal) as zero loss.
+            if matrix.iter().any(|v| *v != 0.0) {
+                return Err(invalid("zero-diagonal modal damping must be exactly zero"));
+            }
             return Ok(Self {
                 matrix: vec![0.0; n * n],
                 columns: Vec::new(),
@@ -583,6 +593,9 @@ impl ModalPlateViscosity {
             });
         }
         for i in 0..n {
+            if matrix[i*n+i] < -1e-12*max_diag {
+                return Err(invalid("PSD modal damping has a negative diagonal entry"));
+            }
             for j in (i + 1)..n {
                 if (matrix[i * n + j] - matrix[j * n + i]).abs() > 1e-10 * max_diag {
                     return Err(invalid("PSD modal damping matrix is not symmetric"));
@@ -695,6 +708,47 @@ impl ModalPlateViscosity {
         poll(gate)?;
         let modal_c = tied.project_glue_damping(modes).map_err(owner)?;
         Self::from_psd_modal_matrix(modal_c, modes.len(), resistance, gate)
+    }
+}
+
+#[cfg(test)]
+mod directional_material_tests {
+    use super::*;
+
+    #[test]
+    fn material_projection_preserves_undamped_common_motion() {
+        let gate=CancelGate::new();
+        let c=vec![3.0,-3.0,0.0,-3.0,3.0,0.0,0.0,0.0,0.0];
+        let law=ModalPlateViscosity::factor(c.clone(),3,2.0,&gate).unwrap();
+        assert_eq!(law.matrix_per_s(),c);
+        assert_eq!(law.channel_count(),1);
+        // All diagonal entries may be positive while one combination is lossless.
+        let coupled=ModalPlateViscosity::factor(vec![3.0,-3.0,-3.0,3.0],2,2.0,&gate).unwrap();
+        assert_eq!(coupled.channel_count(),1);
+        for velocity in [[1.0,1.0,7.0],[2.0,-1.0,9.0]] {
+            let power:f64=law.channel_shapes().iter().map(|column| {
+                let speed:f64=column.iter().zip(velocity).map(|(a,b)|a*b).sum();
+                2.0*speed*speed
+            }).sum();
+            let expected=3.0*(velocity[0]-velocity[1]).powi(2);
+            assert!((power-expected).abs()<2e-13);
+        }
+        // A strictly positive tensor stays on its original unpivoted owner.
+        let full=ModalPlateViscosity::factor(vec![4.0,1.0,1.0,9.0],2,1.0,&gate).unwrap();
+        assert_eq!(full.channel_shapes()[0],vec![2.0,0.5]);
+    }
+
+    #[test]
+    fn zero_diagonal_cross_coupling_is_never_erased_as_zero_loss() {
+        let gate=CancelGate::new();
+        for scale in [1e-20,1.0,1e20] {
+            for c in [vec![0.0,scale,scale,0.0],vec![0.0,scale,0.0,0.0],
+                vec![-scale,0.0,0.0,0.0]] {
+                assert!(ModalPlateViscosity::from_psd_modal_matrix(c.clone(),2,1.0,&gate).is_err());
+                assert!(ModalPlateViscosity::factor(c,2,1.0,&gate).is_err());
+            }
+        }
+        assert_eq!(ModalPlateViscosity::factor(vec![0.0;4],2,1.0,&gate).unwrap().channel_count(),0);
     }
 }
 

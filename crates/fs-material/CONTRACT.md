@@ -3971,3 +3971,17 @@ subtraction is not used to reconstruct small heat or to accept the trajectory.
 These changes preserve the existing explicit kinetics, splitting, source
 support and molecular assumptions; they do not introduce a new evaporation,
 reaction, accommodation or real-gas model.
+
+## Directional passive plane-stress viscosity
+
+`PlaneStressViscosity` admits positive-semidefinite directional loss while
+retaining all six source coefficients, units, identity and frequency support.
+`factor_passive_resultant` normalizes the three-component work form and reuses
+the tensor Prony PSD owner, including its `64*EPSILON*norm` zero-eigenvalue
+roundoff allowance, with reconstruction checked at `1e-12`. Rank-deficient
+stress and power use the retained Gram factor; no positive loss floor is
+introduced. The established positive-definite path retains its arithmetic.
+The native material tests cover axial and coupled rank-one nullspaces, rotated
+work, thickness scaling, coefficient scales `1e-200..1e200`, and active-tensor
+refusals. This admits declared reduced viscosity; it does not infer a bulk
+constitutive law from absent data.

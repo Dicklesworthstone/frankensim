@@ -9954,3 +9954,15 @@ physical references, heterogeneous off-diagonal damping, larger-assembly
 work/state continuity and rejection behavior. The existing `frame_vibration`
 example now accepts manufactured density, stiffness and viscosity data and
 uses this complete shared path for its SI response and loss output.
+
+## Directional material damping in existing modal consumers
+
+The canonical `ModalPlateViscosity::factor` retains its original full-rank
+Cholesky path and falls back to the existing PSD channel owner for directional
+loss and undamped modal subspaces. Plate and both shell consumers therefore
+retain the same complete source-projected matrix without another realization.
+The zero-loss shortcut requires an exactly zero matrix: nonzero zero-diagonal,
+wholly negative and asymmetric zero-diagonal matrices refuse, and negative
+diagonal checks scale with the actual tensor. Native regressions verify a
+rank-one damper's lossless common motion, complete differential work, retained
+full-rank arithmetic and active off-diagonal refusals across coefficient scales.

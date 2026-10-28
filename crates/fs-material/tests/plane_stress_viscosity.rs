@@ -81,7 +81,7 @@ fn arbitrary_orientation_preserves_tensor_work_and_thickness_cubed() {
 fn absent_indefinite_unresolved_or_frequency_sampled_data_never_becomes_a_default() {
     let good = [4.0,9.0,16.0,1.0,0.5,-0.75];
     for values in [[-1.0,9.0,16.0,0.0,0.0,0.0],[1.0,1.0,1.0,2.0,0.0,0.0],
-        [1.0,1.0,1.0,0.0,0.0,2.0],[1.0,1.0,0.0,0.0,0.0,0.0]] {
+        [1.0,1.0,1.0,0.0,0.0,2.0],[1.0,1.0,0.0,0.0,0.5,0.0]] {
         assert!(PlaneStressViscosity::from_material(source(values,None,false,false),MaterialPlane::Axes12,KEYS).is_err());
     }
     for material in [source(good,Some(5),false,false),source(good,None,true,false),source(good,None,false,true)] {
@@ -96,4 +96,49 @@ fn absent_indefinite_unresolved_or_frequency_sampled_data_never_becomes_a_defaul
     assert!(law.rotated_matrix_pa_s(f64::NAN).is_err());
     assert!(law.bending_matrix_n_m_s(1e-200,0.0).is_err());
     assert!(law.stress_and_power([f64::MAX;3]).is_err());
+}
+
+#[test]
+fn directional_source_retains_nullspaces_cross_terms_and_rotated_work() {
+    let axial=law([4.0,0.0,0.0,0.0,0.0,0.0]);
+    assert_eq!(axial.stress_and_power([0.0,3.0,-7.0]).unwrap(),([0.0;3],0.0));
+    let coupled=law([4.0,9.0,1.0,6.0,-2.0,-3.0]); // [2,3,-1]^T [2,3,-1]
+    for rate in [[1.0,2.0,-4.0],[-3.0,2.0,0.0],[0.0,1.0,3.0]] {
+        let extension=2.0*rate[0]+3.0*rate[1]-rate[2];
+        let (stress,power)=coupled.stress_and_power(rate).unwrap();
+        assert!((power-extension*extension).abs()<2e-12);
+        for (actual,row) in stress.into_iter().zip([2.0,3.0,-1.0]) {
+            assert!((actual-row*extension).abs()<2e-12);
+        }
+    }
+    for angle in [0.17_f64,0.43,1.11] {
+        let (s,c)=angle.sin_cos(); let rate=[0.3,-0.7,1.1];
+        let local=[c*c*rate[0]+s*s*rate[1]+c*s*rate[2],
+            s*s*rate[0]+c*c*rate[1]-c*s*rate[2],
+            -2.0*c*s*rate[0]+2.0*c*s*rate[1]+(c*c-s*s)*rate[2]];
+        let expected=(2.0*local[0]+3.0*local[1]-local[2]).powi(2);
+        let matrix=coupled.rotated_matrix_pa_s(angle).unwrap();
+        let actual:f64=(0..3).flat_map(|i|(0..3).map(move |j|
+            rate[i]*matrix[3*i+j]*rate[j])).sum();
+        close(actual,expected);
+        let bending=coupled.bending_matrix_n_m_s(0.003,angle).unwrap();
+        for i in 0..9 {close(bending[i],matrix[i]*0.003_f64.powi(3)/12.0);}
+    }
+}
+
+#[test]
+fn passive_resultant_is_scale_independent_and_rejects_active_cross_coupling() {
+    use fs_material::plane_stress_viscosity::factor_passive_resultant;
+    for scale in [1e-200,1.0,1e200] {
+        let v=[4.0,6.0,-2.0,6.0,9.0,-3.0,-2.0,-3.0,1.0].map(|x|x*scale);
+        let factor=factor_passive_resultant(&v).unwrap();
+        for i in 0..3 {for j in 0..3 {
+            let actual:f64=(0..6).map(|k|factor[i][k]*factor[j][k]/scale).sum();
+            assert!((actual-v[3*i+j]/scale).abs()<2e-12);
+        }}
+        let bad=[0.0,scale,0.0,scale,0.0,0.0,0.0,0.0,0.0];
+        assert!(factor_passive_resultant(&bad).is_err());
+        let active=[1.0,1.01,0.0,1.01,1.0,0.0,0.0,0.0,0.0].map(|x|x*scale);
+        assert!(factor_passive_resultant(&active).is_err());
+    }
 }

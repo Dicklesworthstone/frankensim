@@ -2,7 +2,7 @@
 //!
 //! In the declared material plane, [sigma_11, sigma_22, sigma_12] =
 //! V [epsilon_dot_11, epsilon_dot_22, gamma_dot_12]. V is symmetric,
-//! in Pa s, and either positive definite or explicitly all zero. These are
+//! in Pa s, and positive semidefinite, including directional loss and zero. These are
 //! REDUCED in-plane coefficients, not three-dimensional bulk viscosities:
 //! independently condensing an arbitrary 3-D elastic/viscous law is generally
 //! frequency dependent and is not performed here. No elastic Poisson ratio,
@@ -46,12 +46,57 @@ pub struct PlaneStressViscosity {
     properties: [String; 6],
     plane: MaterialPlane,
     matrix: [f64; 9],
+    // Only semidefinite sources need a Gram evaluation. Keeping the established
+    // SPD path preserves its stress, power and rotation arithmetic exactly.
+    gram: Option<[[f64; 6]; 3]>,
     omega_band: (f64, f64),
 }
 
 fn invalid(what: &str) -> MaterialError {
     MaterialError::Parameters { what: what.into() }
 }
+/// Factor a passive symmetric three-component work-conjugate resultant as
+/// `V = L L^T`. This is bilinear-form admission, not a three-dimensional
+/// constitutive reduction. Zero eigenvalues and directional loss are allowed.
+///
+/// Reuses the tensor Prony owner's PSD check after normalization, including its
+/// `64*EPSILON*norm` allowance for roundoff in a zero eigenvalue. No positive
+/// loss floor is added. The six columns are the shared owner's factor layout.
+/// # Errors
+/// Nonfinite, asymmetric or active data, or an unrepresentable factor.
+pub fn factor_passive_resultant(v: &[f64; 9]) -> Result<[[f64; 6]; 3], MaterialError> {
+    if v.iter().any(|x| !x.is_finite())
+        || (0..3).any(|i| (0..3).any(|j| v[3*i+j] != v[3*j+i])) {
+        return Err(invalid("passive resultant must be finite and symmetric"));
+    }
+    for i in 0..3 {
+        if v[3*i+i] < 0.0
+            || (v[3*i+i] == 0.0 && (0..3).any(|j| v[3*i+j] != 0.0)) {
+            return Err(invalid("passive resultant has a negative diagonal or coupled zero diagonal"));
+        }
+    }
+    let scale = v.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+    if scale == 0.0 { return Ok([[0.0; 6]; 3]); }
+    let mut block = [[0.0; 6]; 6];
+    for i in 0..3 { for j in 0..3 { block[i][j] = v[3*i+j]/scale; } }
+    let factor = crate::visco::tensor::psd_factor(&block)
+        .map_err(|_| invalid("resultant viscosity must be positive semidefinite"))?;
+    let root = fs_math::det::sqrt(scale);
+    let out = core::array::from_fn(|i| factor[i].map(|x| x*root));
+    for i in 0..3 { for j in 0..3 {
+        let reconstructed: f64 = (0..6).map(|k| factor[i][k]*factor[j][k]).sum();
+        if !reconstructed.is_finite() || (reconstructed-block[i][j]).abs() > 1e-12 {
+            return Err(invalid("passive resultant factor does not reconstruct its source"));
+        }
+    } }
+    Ok(out)
+}
+
+fn admit_passive(v: &[f64; 9]) -> Result<Option<[[f64; 6]; 3]>, MaterialError> {
+    if admit_matrix(v).is_ok() { Ok(None) }
+    else { factor_passive_resultant(v).map(Some) }
+}
+
 fn admit_matrix(v: &[f64; 9]) -> Result<(), MaterialError> {
     if v.iter().any(|x| !x.is_finite()) {
         return Err(invalid("plane-stress viscosity must be finite"));
@@ -85,7 +130,8 @@ impl PlaneStressViscosity {
     /// temperature-only curves at a fixed physical temperature are admitted.
     /// Names are in 11,22,66,12,16,26 order and must be distinct/nonempty.
     ///
-    /// Nonzero rank-deficient tensors are currently refused, not regularized.
+    /// Rank-deficient tensors retain their undamped directions; no weak loss
+    /// is inserted. The original full-rank evaluation remains unchanged.
     /// Source uncertainty and provenance remain those of the original claims.
     pub fn from_material(source: ResolvedMaterialStatePoint, plane: MaterialPlane,
         properties: [&str; 6]) -> Result<Self, MaterialError>
@@ -112,8 +158,8 @@ impl PlaneStressViscosity {
         }
         let [a, b, c, d, e, f] = values;
         let matrix = [a, d, e, d, b, f, e, f, c];
-        admit_matrix(&matrix)?;
-        Ok(Self { source, plane, properties: properties.map(str::to_string), matrix, omega_band: band })
+        let gram = admit_passive(&matrix)?;
+        Ok(Self { source, plane, properties: properties.map(str::to_string), matrix, gram, omega_band: band })
     }
 
     /// Exact original material bundle, including original quantity/source records.
@@ -141,8 +187,18 @@ impl PlaneStressViscosity {
         if strain_rate.iter().any(|x| !x.is_finite()) {
             return Err(invalid("viscous strain rate must be finite"));
         }
-        let stress: [f64; 3] = std::array::from_fn(|i| (0..3).map(|j| self.matrix[3*i+j]*strain_rate[j]).sum());
-        let power = stress.iter().zip(strain_rate).map(|(s,e)| s*e).sum::<f64>();
+        let (stress, power) = if let Some(factor) = &self.gram {
+            let projected: [f64; 6] = core::array::from_fn(|k|
+                (0..3).map(|i| factor[i][k]*strain_rate[i]).sum());
+            let stress = core::array::from_fn(|i|
+                (0..6).map(|k| factor[i][k]*projected[k]).sum());
+            (stress, projected.iter().map(|x| x*x).sum())
+        } else {
+            let stress: [f64; 3] = core::array::from_fn(|i|
+                (0..3).map(|j| self.matrix[3*i+j]*strain_rate[j]).sum());
+            let power = stress.iter().zip(strain_rate).map(|(s,e)| s*e).sum::<f64>();
+            (stress, power)
+        };
         if stress.iter().any(|x| !x.is_finite()) || !power.is_finite() || power < 0.0 {
             return Err(invalid("viscous stress or dissipated power is unrepresentable"));
         }
@@ -168,7 +224,7 @@ impl PlaneStressViscosity {
             // One rounded value per symmetric pair preserves work conjugacy.
             for i in 0..=j { out[3*i+j] = column[i]; out[3*j+i] = column[i]; }
         }
-        admit_matrix(&out)?;
+        admit_passive(&out)?;
         Ok(out)
     }
 
@@ -188,7 +244,7 @@ impl PlaneStressViscosity {
         if result.iter().zip(original).any(|(r,v)| !r.is_finite() || (v != 0.0 && *r == 0.0)) {
             return Err(invalid("viscous section reduction lost a coefficient"));
         }
-        admit_matrix(&result)?;
+        admit_passive(&result)?;
         Ok(result)
     }
 }

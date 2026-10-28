@@ -18,7 +18,7 @@ pub struct ShearShellViscosity {
     shear: [f64; 3],
 }
 fn bad(what: &'static str) -> PlateError { PlateError::BadSection { what } }
-fn admit3(v: &[f64; 9]) -> Result<(), PlateError> {
+fn admit_spd3(v: &[f64; 9]) -> Result<(), PlateError> {
     if v.iter().any(|x| !x.is_finite())
         || (0..3).any(|i| (0..3).any(|j| v[3*i+j] != v[3*j+i])) {
         return Err(bad("shell viscosity must be finite and symmetric"));
@@ -39,10 +39,17 @@ fn admit3(v: &[f64; 9]) -> Result<(), PlateError> {
     }
     Ok(())
 }
+fn admit3(v: &[f64; 9]) -> Result<(), PlateError> {
+    if admit_spd3(v).is_ok() { return Ok(()); }
+    fs_material::plane_stress_viscosity::factor_passive_resultant(v)
+        .map(|_| ())
+        .map_err(|_| bad("shell viscosity must be symmetric positive semidefinite"))
+}
 impl ShearShellViscosity {
     /// Matrices already expressed in the facet strain coordinates, with
     /// engineering in-plane shear in slot three. Shear is [13,13/23,23];
     /// any physical shear-correction factor is included by the section compiler.
+    /// Directional-only loss and undamped subspaces are admitted without a floor.
     pub fn new(membrane: [f64; 9], bending: [f64; 9], shear: [f64; 3])
         -> Result<Self, PlateError>
     {
@@ -51,7 +58,7 @@ impl ShearShellViscosity {
         if shear.iter().any(|x| !x.is_finite())
             || (!shear.iter().all(|x| *x == 0.0)
                 && (a <= 0.0 || c <= 0.0 || (b/det::sqrt(a)/det::sqrt(c)).abs() >= 1.0)) {
-            return Err(bad("transverse shell viscosity must be positive definite or explicitly zero"));
+            admit3(&[a,b,0.0,b,c,0.0,0.0,0.0,0.0])?;
         }
         Ok(Self { membrane, bending, shear })
     }
@@ -70,7 +77,8 @@ impl ShearShellViscosity {
 /// This is cold computation, not a wall-clock promise.
 pub fn projection_terms(nodes: usize, triangles: usize, modes: usize) -> Option<usize> {
     triangles.checked_mul(1_000_000usize.checked_add(
-        324usize.checked_mul(modes)?.checked_mul(modes)?)?)?
+        324usize.checked_mul(modes)?)?.checked_add(
+        18usize.checked_mul(modes)?.checked_mul(modes)?)?)?
         .checked_add(6usize.checked_mul(nodes)?.checked_mul(modes)?)
 }
 
@@ -117,13 +125,23 @@ pub fn project_viscosity(
             &sections[e], &viscosity[e], &mut cancelled)?;
         let local: Vec<[f64; 18]> = modes.iter().map(|p|
             core::array::from_fn(|i| p[6*tri[i/6]+i%6])).collect();
+        // One element action per mode, followed by its Gram projection. The
+        // previous pairwise contraction repeated the 18x18 action n times.
+        let mut action = Vec::with_capacity(n);
+        for vector in &local {
+            if cancelled() { return Err(PlateError::Cancelled); }
+            let row: [f64; 18] = core::array::from_fn(|a|
+                (0..18).map(|b| c[a][b]*vector[b]).sum());
+            if row.iter().any(|v| !v.is_finite()) {
+                return Err(bad("shell viscosity element action overflow"));
+            }
+            action.push(row);
+        }
         for i in 0..n {
             if cancelled() { return Err(PlateError::Cancelled); }
             for j in i..n {
                 let mut value = 0.0;
-                for a in 0..18 { for b in 0..18 {
-                    value += local[i][a]*c[a][b]*local[j][b];
-                } }
+                for a in 0..18 { value += local[i][a]*action[j][a]; }
                 out[n*i+j] += value;
                 if !out[n*i+j].is_finite() { return Err(bad("shell modal viscosity overflow")); }
                 out[n*j+i] = out[n*i+j];
@@ -181,5 +199,28 @@ mod tests {
         let mut v=[0.0;9]; v[0]=1.0; v[4]=1.0; v[8]=1.0; v[1]=2.0; v[3]=2.0;
         assert!(ShearShellViscosity::new(v,[0.0;9],[0.0;3]).is_err());
         assert!(ShearShellViscosity::new([0.0;9],[0.0;9],[1.0,2.0,1.0]).is_err());
+    }
+
+    #[test]
+    fn directional_membrane_loss_matches_affine_channel_energy_and_keeps_null_modes() {
+        let mesh=ShellMesh::new(vec![[0.0,0.0,0.0],[1.0,0.0,0.0],
+            [0.0,1.0,0.0]],vec![[0,1,2]]).unwrap();
+        let directors=NodalDirectors::new(&mesh,vec![[0.0,0.0,1.0];3],0.9).unwrap();
+        let a=[1.0,-2.0,0.0,0.0,0.5,3.0,0.0,-1.0];
+        let modes:Vec<Vec<f64>>=a.iter().enumerate().map(|(i,slope)| {
+            mesh.nodes.iter().flat_map(|p| [slope*p[0]+i as f64*p[1]+0.25,
+                0.7*p[0]-0.3*p[1],0.0,0.0,0.0,0.0]).collect()
+        }).collect();
+        let law=ShearShellViscosity::new([4.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0],
+            [0.0;9],[0.0;3]).unwrap();
+        let projected=project_viscosity(&mesh,&directors,&[section()],&[law],&modes,
+            MitcBudget{max_nodes:3,max_triangles:1},2_000_000,||false).unwrap();
+        for i in 0..a.len() {for j in 0..a.len() {
+            // Independent affine membrane energy: area * A11 * du_i/dx * du_j/dx.
+            let expected=0.5*4.0*a[i]*a[j];
+            assert!((projected[a.len()*i+j]-expected).abs()<2e-12);
+        }}
+        assert!(ShearShellViscosity::new([0.0;9],[0.0;9],[4.0,6.0,9.0]).is_ok());
+        assert!(ShearShellViscosity::new([0.0;9],[0.0;9],[0.0,1.0,0.0]).is_err());
     }
 }
