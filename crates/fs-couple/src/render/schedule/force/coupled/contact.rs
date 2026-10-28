@@ -443,3 +443,6 @@ pub mod multiple;
 
 /// Implicit driven dry friction using this same bilateral network response.
 pub mod friction;
+
+/// Irreversible three-component cohesive debonding on the original modal network.
+pub mod cohesive;

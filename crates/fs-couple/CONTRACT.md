@@ -9563,6 +9563,47 @@ claimed by this fixed-query binding.
 Cold internal-coordinate extension preserves the same adhesive binding alongside
 existing source interfaces and nonlinear storage.
 
+## Native mixed-mode cohesive debonding
+
+`contact::cohesive::CohesiveModalSystem` explicitly bonds the current sample-zero
+modal configuration at zero local jump. Three complete work columns map opening
+and both shear components; their transposes apply the same physical forces to
+every retained body coordinate. All nine held-force compliance entries come
+from the original `CoupledModalSystem` response, including bilateral springs,
+dashpots and admitted material/acoustic memory. No diagonal compliance surrogate,
+prescribed reaction history or replacement mechanical propagator is introduced.
+The original area and fixed local frame are caller declarations. The optional
+`from_source` constructor checks the two ordered receiving material identities
+and borrows the complete original `ResolvedBilinearCohesive` and its receipts at
+fixed external conditions. Bond creation, changing texture frames, source
+refresh and rebonding after rupture are not inferred from geometry.
+
+`CohesiveLoadLine` solves the complete jump using the material owner's analytic
+three-component path mean. The native wrapper stages the original mechanics
+under those held reciprocal forces, recomputes the actual three-component jump,
+and independently reevaluates the timed material path on that motion. Separate
+jump and componentwise absolute-plus-relative force gates precede the whole
+energy gate. Network and recoverable interface storage changes plus original
+network loss, intrinsic fracture and physical surviving-bond viscous loss must
+equal authored modal-force work plus applied force dotted with prescribed jump
+motion. The original total-energy ceiling remains active. One material
+evaluation is reserved for the final actual-state audit within the supplied
+evaluation budget. Only after all gates and cancellation checks pass are native
+motion, irreversible cohesive history and the complete frame published together.
+No mechanical or source owner is cloned per step.
+
+The original common-mode or frozen-onset BK law owns initiation, irreversible
+damage, complete failure and undamaged compression on reclosure. Endpoint
+traction is reported separately from the mean force that performs body work.
+Fracture and viscosity are distinct losses; neither is silently relabeled as
+frictional heat. Local softening can admit multiple roots, so bounded Newton
+convergence does not certify uniqueness or resolve unreported intrastep path
+reversals. Physical timestep convergence and fixed-frame applicability remain
+the caller's responsibility. `tests/cohesive_modal.rs` exercises original
+six-coordinate finite bodies, three momenta and complete energy, a native
+oblique spring with off-diagonal compliance, prescribed-port work, mixed rupture
+and reclosure, source identity, and late-refusal replay.
+
 ## Material magnetostrictive rod inside a Kirchhoff RLC circuit
 
 `material_circuit::magnetostrictive::MagnetostrictiveCircuit` binds one original

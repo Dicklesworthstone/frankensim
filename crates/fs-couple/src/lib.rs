@@ -46,6 +46,8 @@ pub mod cavity_modal;
 pub mod cinematic_stem;
 /// Finite electrical storage and per-resistor heating on the shared thermal network.
 pub mod circuit_enthalpy;
+/// Full opening/shear path work coupled to the actual mechanical compliance.
+pub mod cohesive_contact;
 /// Original hereditary material history coupled to inertia and finite self-heating.
 pub mod thermovisco_dynamics;
 pub mod description;
