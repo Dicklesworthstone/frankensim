@@ -118,3 +118,89 @@ fn plane_stress_refuses_unsupported_rate_constraints_and_keeps_failed_history() 
     assert!(body.history(&[1.0],&[0.0],InitialMemory::Relaxed,&gate).is_err());
     history.advance(&[0.0],0.01,&gate).unwrap();assert_eq!(history.steps(),1);
 }
+
+
+#[test]
+fn consistent_plane_stress_matches_independent_physical_velocity_and_memory_dynamics() {
+    let gate=CancelGate::new_clock_free();
+    let point=PlaneStressPoint::new(&law(),&[[1.0,0.0,0.2],[0.0,1.0,-0.3]],
+        0.1,budget(),&gate).unwrap();
+    // Full M and anisotropic K do not share a coordinate basis.
+    let mass=vec![1.4,0.45,0.45,0.9];
+    let body=TensorMaterialBody::from_plane_stress_mass_matrix(2,mass.clone(),
+        vec![point],body_budget(),&gate).unwrap();
+    assert_eq!(body.mass_matrix_kg(),mass);
+    let point=&body.plane_stress_points()[0];
+    let determinant=mass[0]*mass[3]-mass[1]*mass[2];
+    let inverse=[mass[3]/determinant,-mass[1]/determinant,
+        -mass[2]/determinant,mass[0]/determinant];
+    for memory in [InitialMemory::Relaxed,InitialMemory::Instantaneous] {
+        let velocity=[0.003,-0.002];
+        let mut history=body.history(&[0.001,-0.002],&velocity,memory,&gate).unwrap();
+        for i in 0..2 {close(history.state()[2+i],mass[2*i]*velocity[0]+mass[2*i+1]*velocity[1],1e-15);}
+        let rest=body.history(&[0.001,-0.002],&[0.0;2],memory,&gate).unwrap();
+        close(history.stored_energy_j()-rest.stored_energy_j(),
+            0.5*(mass[0]*velocity[0]*velocity[0]+2.0*mass[1]*velocity[0]*velocity[1]
+                +mass[3]*velocity[1]*velocity[1]),1e-15);
+        // Independent RK4 in physical (u,v,a), not the pH generator, augmented
+        // with direct force power and each original branch's dissipated power.
+        let state_len=history.state().len();
+        let mut reference=history.state().to_vec();reference[2..4].copy_from_slice(&velocity);
+        reference.extend([0.0,0.0]);
+        for tick in 0..12 {
+            let force=if tick<4 {[0.03,-0.02]} else {[0.0;2]};
+            let rhs=|x:&[f64]| {
+                let mut derivative=vec![0.0;x.len()];
+                derivative[..2].copy_from_slice(&x[2..4]);
+                let local:Vec<_>=x[..2].iter().chain(&x[4..state_len]).copied().collect();
+                let d=local.len();
+                let gradient:Vec<_>=(0..d).map(|i|(0..d).map(|j|point.energy[i*d+j]*local[j]).sum::<f64>()).collect();
+                for i in 0..2 {derivative[2+i]=inverse[2*i]*(force[0]-gradient[0])
+                    +inverse[2*i+1]*(force[1]-gradient[1]);}
+                for i in 0..point.memory_coordinates() {
+                    derivative[4+i]=-point.rates[i]*gradient[2+i];
+                    derivative[state_len+1]+=point.rates[i]*gradient[2+i]*gradient[2+i];
+                }
+                derivative[state_len]=force[0]*x[2]+force[1]*x[3];
+                derivative
+            };
+            let dt=0.002;let h=dt/100.0;
+            for _ in 0..100 {
+                let k1=rhs(&reference);
+                let stage=|k:&[f64],scale:f64|reference.iter().zip(k).map(|(x,k)|x+scale*k).collect::<Vec<_>>();
+                let k2=rhs(&stage(&k1,0.5*h));let k3=rhs(&stage(&k2,0.5*h));let k4=rhs(&stage(&k3,h));
+                for i in 0..reference.len() {reference[i]+=h*(k1[i]+2.0*k2[i]+2.0*k3[i]+k4[i])/6.0;}
+            }
+            history.advance(&force,dt,&gate).unwrap();
+            for (got,want) in history.displacement_m().iter().chain(&history.velocity_m_s())
+                .chain(&history.state()[4..]).zip(&reference[..state_len]) {close(*got,*want,2e-11);}
+            close(history.supplied_work_j(),reference[state_len],2e-11);
+            close(history.dissipated_heat_j(),reference[state_len+1],2e-11);
+            close(history.balance_residual_j(),0.0,2e-11);
+            for traction in history.plane_stress_normal_stress_pa(0).unwrap() {close(traction,0.0,2e-11);}
+        }
+        assert!(history.dissipated_heat_j()>0.0);
+    }
+}
+
+#[test]
+fn full_plane_stress_inertia_preserves_diagonal_motion_and_refuses_invalid_mass() {
+    let gate=CancelGate::new_clock_free();
+    let point=PlaneStressPoint::new(&law(),&[[1.0,0.0,0.2],[0.0,1.0,-0.3]],
+        0.1,budget(),&gate).unwrap();
+    for mass in [vec![1.0],vec![1.0,1.0,1.0,1.0],vec![1.0,2.0,2.0,1.0],
+        vec![1.0,0.1,0.2,1.0],vec![1.0,0.0,0.0,f64::NAN]] {
+        assert!(TensorMaterialBody::from_plane_stress_mass_matrix(2,mass,vec![point.clone()],body_budget(),&gate).is_err());
+    }
+    let cancelled=CancelGate::new_clock_free();cancelled.request();
+    assert!(matches!(TensorMaterialBody::from_plane_stress_mass_matrix(2,vec![1.0,0.0,0.0,2.0],
+        vec![point.clone()],body_budget(),&cancelled),Err(TensorMaterialError::Cancelled)));
+    assert!(TensorMaterialBody::from_plane_stress_mass_matrix(2,vec![1.0,0.0,0.0,2.0],
+        vec![point.clone()],TensorMaterialBudget{max_state_coordinates:4,..body_budget()},&gate).is_err());
+    let a=TensorMaterialBody::from_plane_stress(vec![1.0,2.0],vec![point.clone()],body_budget(),&gate).unwrap();
+    let b=TensorMaterialBody::from_plane_stress_mass_matrix(2,vec![1.0,0.0,0.0,2.0],vec![point],body_budget(),&gate).unwrap();
+    let mut x=a.history(&[0.001,-0.002],&[0.002,0.003],InitialMemory::Relaxed,&gate).unwrap();
+    let mut y=b.history(&[0.001,-0.002],&[0.002,0.003],InitialMemory::Relaxed,&gate).unwrap();
+    x.advance(&[0.01,0.02],0.03,&gate).unwrap();y.advance(&[0.01,0.02],0.03,&gate).unwrap();
+    for (x,y) in x.state().iter().zip(y.state()) {close(*x,*y,2e-13);}
+}

@@ -3,8 +3,9 @@
 //! The original fs-plate facet owner supplies frames, areas and P1 derivatives.
 //! Each triangle has one exact constant-strain quadrature point through a
 //! homogeneous thickness, and the original plane-stress history supplies its
-//! stress/force response. Translational mass is row-sum lumped, rho*h*A/3 per
-//! vertex. No elastic stiffness is assembled a second time.
+//! stress/force response. Translational inertia can retain the exact P1 triangle
+//! mass or use explicit row-sum lumping, rho*h*A/3 per vertex. No elastic
+//! stiffness is assembled a second time.
 //!
 //! This is a MEMBRANE discretization: no bending, drilling rotations, geometric
 //! stiffness, prestress, finite deformation, or acoustic radiation is supplied.
@@ -68,7 +69,8 @@ pub struct TensorMembrane {
     body: TensorMaterialBody,
 }
 impl TensorMembrane {
-    /// Assemble on existing triangle connectivity. `fixed_dofs` lists distinct
+    /// Assemble row-sum lumped inertia on existing triangle connectivity.
+    /// `fixed_dofs` lists distinct
     /// 3*node+axis addresses (x=0,y=1,z=2), held at zero displacement/velocity.
     /// Partial supports and fully free surfaces are explicit; no rigid modes
     /// are pinned automatically. Duplicate faces and unused vertices refuse.
@@ -81,6 +83,26 @@ impl TensorMembrane {
     pub fn new(mesh: ShellMesh, materials: Vec<MembraneFacetMaterial>, fixed_dofs: &[usize],
         projection: TensorProjectionBudget, dynamics: TensorMaterialBudget,
         gate: &CancelGate) -> Result<Self>
+    {
+        Self::assemble(mesh,materials,fixed_dofs,projection,dynamics,gate,false)
+    }
+
+    /// Assemble exact consistent P1 translational inertia. Each facet contributes
+    /// rho*h*A/12 times [[2,1,1],[1,2,1],[1,1,2]] independently to each Cartesian
+    /// component. Both matrix axes are restricted to the free DOFs; constrained
+    /// neighbors do not donate their inertia to a free vertex. This retains the
+    /// cross-node velocity coupling of the consistent finite-element vibration spectrum.
+    /// Geometry, constraints, material history and budgets follow `new`.
+    pub fn new_with_consistent_mass(mesh:ShellMesh,materials:Vec<MembraneFacetMaterial>,
+        fixed_dofs:&[usize],projection:TensorProjectionBudget,dynamics:TensorMaterialBudget,
+        gate:&CancelGate)->Result<Self>
+    {
+        Self::assemble(mesh,materials,fixed_dofs,projection,dynamics,gate,true)
+    }
+
+    fn assemble(mesh:ShellMesh,materials:Vec<MembraneFacetMaterial>,fixed_dofs:&[usize],
+        projection:TensorProjectionBudget,dynamics:TensorMaterialBudget,gate:&CancelGate,
+        consistent:bool)->Result<Self>
     {
         poll(gate)?;
         let nodes = mesh.nodes.len(); let elements = mesh.tris.len();
@@ -154,10 +176,29 @@ impl TensorMembrane {
             points.push(PlaneStressPoint::new(&material.law, &columns,
                 material.thickness_m*facet.area_m2, per_point, gate).map_err(MembraneError::Dynamics)?);
         }
-        let masses: Vec<_> = dof_map.iter().enumerate()
-            .filter_map(|(dof, index)| index.map(|_| nodal_mass[dof/3])).collect();
-        let body = TensorMaterialBody::from_plane_stress(masses, points, dynamics, gate)
-            .map_err(MembraneError::Dynamics)?;
+        let body = if consistent {
+            // The same constant density/thickness used by the material quadrature
+            // makes this degree-two velocity integral exact on each P1 triangle.
+            let mut mass=vec![0.0;free*free];
+            for ((tri,facet),material) in mesh.tris.iter().zip(&facets).zip(&materials) {
+                poll(gate)?;
+                let weight=material.density_kg_m3*(material.thickness_m*facet.area_m2)/12.0;
+                for (a,&node_a) in tri.iter().enumerate() {
+                    for (b,&node_b) in tri.iter().enumerate() {
+                        for axis in 0..3 {
+                            if let (Some(i),Some(j))=(dof_map[3*node_a+axis],dof_map[3*node_b+axis]) {
+                                mass[i*free+j]+=if a==b {2.0*weight} else {weight};
+                            }
+                        }
+                    }
+                }
+            }
+            TensorMaterialBody::from_plane_stress_mass_matrix(free,mass,points,dynamics,gate)
+        } else {
+            let masses:Vec<_>=dof_map.iter().enumerate()
+                .filter_map(|(dof,index)|index.map(|_|nodal_mass[dof/3])).collect();
+            TensorMaterialBody::from_plane_stress(masses,points,dynamics,gate)
+        }.map_err(MembraneError::Dynamics)?;
         poll(gate)?;
         Ok(Self { mesh, materials, facets, dof_map, nodal_mass, body })
     }
@@ -169,7 +210,9 @@ impl TensorMembrane {
     pub fn facet_geometry(&self) -> &[FacetGeometry] { &self.facets }
     /// Full 3*node+axis to retained displacement address (None is a fixed DOF).
     pub fn dof_map(&self) -> &[Option<usize>] { &self.dof_map }
-    /// Physical mass assigned to each node, INCLUDING constrained nodes [kg].
+    /// Full-mesh row-sum mass at each node, INCLUDING constrained nodes [kg].
+    /// These weights are independent of the kinetic discretization; consistent
+    /// dynamics use `body().mass_matrix_kg()`, including off-diagonal entries.
     pub fn nodal_masses_kg(&self) -> &[f64] { &self.nodal_mass }
     /// The original exact-ZOH body; it owns all mechanics and material history.
     pub fn body(&self) -> &TensorMaterialBody { &self.body }

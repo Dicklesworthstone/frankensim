@@ -10209,3 +10209,24 @@ scalar selectors and shared `MouthLoad` API retain their existing behavior.
 The new `mm_line/flanged_tests.rs` reconstructs physical mouth pressure and
 volume flow from the complete reflected modal waves and checks their full
 matrix boundary and work, plus exterior-pressure and Nyquist admission.
+
+## Consistent inertia in exact tensor plane-stress dynamics
+
+`TensorMaterialBody::from_plane_stress_mass_matrix` uses the existing validated
+full-mass `Inertia` owner. Off-diagonal inertia participates in canonical
+momentum `p=Mv`, kinetic storage, force-driven motion, complete Maxwell memory,
+and independent work/heat accounting. Complete state capacity is checked before
+mass factorization; no inertia coupling or constitutive coordinate is removed.
+The original lumped constructor and exact plane-stress condensation remain.
+
+`TensorMembrane::new_with_consistent_mass` assembles the exact P1 triangle mass
+`rho*h*A/12 * [[2,1,1],[1,2,1],[1,1,2]]` for each Cartesian component and
+restricts both matrix axes by the original support map. Full-mesh row sums
+remain physical load weights; they do not replace the constrained kinetic
+matrix. Four new native tests cover independent physical-velocity RK4 with
+anisotropic memory and full mass, initial momentum/kinetic cross terms,
+independent source work and heat, zero normal traction, diagonal compatibility,
+invalid inertia, exact velocity quadrature and a three-rung continuum-frequency
+ladder. Existing membrane and distributed-loading tests also pass. This remains
+a linear-kinematics membrane with the original exact tensor-memory limitations;
+it does not add bending, prestress or finite deformation.

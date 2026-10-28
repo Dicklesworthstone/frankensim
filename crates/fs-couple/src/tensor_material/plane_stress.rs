@@ -189,26 +189,33 @@ impl TensorMaterialBody {
         budget:TensorMaterialBudget,gate:&CancelGate)->Result<Self>
     {
         poll(gate)?;
-        let n=masses_kg.len();
-        if n==0 || n>128 || budget.max_state_coordinates==0
-            || budget.max_state_coordinates>MAX_LINEAR_EXPONENTIAL_BLOCK_DIM
-            || budget.max_material_points==0 || budget.max_material_points>4096
-            || points.is_empty() || points.len()>budget.max_material_points
-            || masses_kg.iter().any(|m|!m.is_finite() || *m<=0.0 || !m.recip().is_finite())
-            || points.iter().any(|p|p.coordinates()!=n) {
-            return Err(bad("bounded plane-stress points and finite positive inertia required"));
-        }
-        let states=points.iter().try_fold(2*n,|s,p|s.checked_add(p.memory_coordinates()))
-            .ok_or_else(||bad("plane-stress body extent overflow"))?;
-        let block=states.checked_add(n+1).and_then(|v|v.checked_mul(2))
-            .ok_or_else(||bad("plane-stress exponential extent overflow"))?;
-        if states>budget.max_state_coordinates || block>MAX_LINEAR_EXPONENTIAL_BLOCK_DIM {
-            return Err(bad("complete plane-stress memory exceeds dense capacity; no coordinates removed"));
-        }
+        let states=plane_stress_extent(masses_kg.len(),&points,budget)?;
+        let inertia=Inertia::diagonal(masses_kg)?;
+        Self::from_plane_stress_inertia(inertia,points,states,gate)
+    }
+
+    /// Assemble exact plane-stress memory with a full symmetric positive-definite
+    /// physical mass matrix [kg], in row-major displacement-coordinate order.
+    /// Momentum is p=M*v; the kinetic energy uses the complete inverse M^-1.
+    /// Capacity is admitted before factorization and no off-diagonal inertia is
+    /// dropped. Material condensation and force ports match `from_plane_stress`.
+    pub fn from_plane_stress_mass_matrix(coordinates:usize,mass_kg:Vec<f64>,
+        points:Vec<PlaneStressPoint>,budget:TensorMaterialBudget,gate:&CancelGate)->Result<Self>
+    {
+        poll(gate)?;
+        let states=plane_stress_extent(coordinates,&points,budget)?;
+        let inertia=Inertia::consistent(coordinates,mass_kg,gate)?;
+        Self::from_plane_stress_inertia(inertia,points,states,gate)
+    }
+
+    fn from_plane_stress_inertia(inertia:Inertia,points:Vec<PlaneStressPoint>,
+        states:usize,gate:&CancelGate)->Result<Self>
+    {
+        let n=inertia.dimension();
         let mut q=vec![0.0;states*states];let mut j=vec![0.0;states*states];
         let mut r=vec![0.0;states*states];let mut g=vec![0.0;states*n];
         for i in 0..n {
-            q[(n+i)*states+n+i]=masses_kg[i].recip();
+            for k in 0..n {q[(n+i)*states+n+k]=inertia.inverse_entry(i,k);}
             j[i*states+n+i]=1.0;j[(n+i)*states+i]=-1.0;g[(n+i)*n+i]=1.0;
         }
         let mut offset=2*n;let mut offsets=Vec::with_capacity(points.len());
@@ -227,10 +234,29 @@ impl TensorMaterialBody {
         let split=split_quadratic(&system,LinearSplitBudget {max_modes:states,max_omega_dt:core::f64::consts::PI})
             .map_err(TensorMaterialError::Propagation)?;
         poll(gate)?;
-        Ok(Self {system,split,inertia:Inertia::Diagonal(masses_kg),points:Vec::new(),plane_points:points,plane_offsets:offsets})
+        Ok(Self {system,split,inertia,points:Vec::new(),plane_points:points,plane_offsets:offsets})
     }
     /// Original plane-stress contributions; empty for a full-3D body.
     pub fn plane_stress_points(&self)->&[PlaneStressPoint] {&self.plane_points}
+}
+
+// Admit the complete constitutive state before any dense mass factorization.
+fn plane_stress_extent(n:usize,points:&[PlaneStressPoint],budget:TensorMaterialBudget)->Result<usize> {
+    if n==0 || n>128 || budget.max_state_coordinates==0
+        || budget.max_state_coordinates>MAX_LINEAR_EXPONENTIAL_BLOCK_DIM
+        || budget.max_material_points==0 || budget.max_material_points>4096
+        || points.is_empty() || points.len()>budget.max_material_points
+        || points.iter().any(|p|p.coordinates()!=n) {
+        return Err(bad("bounded plane-stress points and matching inertia coordinates required"));
+    }
+    let states=points.iter().try_fold(2*n,|s,p|s.checked_add(p.memory_coordinates()))
+        .ok_or_else(||bad("plane-stress body extent overflow"))?;
+    let block=states.checked_add(n+1).and_then(|v|v.checked_mul(2))
+        .ok_or_else(||bad("plane-stress exponential extent overflow"))?;
+    if states>budget.max_state_coordinates || block>MAX_LINEAR_EXPONENTIAL_BLOCK_DIM {
+        return Err(bad("complete plane-stress memory exceeds dense capacity; no coordinates removed"));
+    }
+    Ok(states)
 }
 
 impl TensorMaterialHistory<'_> {
