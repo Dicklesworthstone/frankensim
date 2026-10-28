@@ -13,6 +13,98 @@ use fs_nlmodal::{
 };
 use fs_phs::{PortHamiltonian, Storage, step};
 
+#[test]
+fn resolved_nonlinear_force_survives_unchanged_high_energy_modes() {
+    // The second mode stores much more energy, but does no work in this
+    // increment. Subtracting total endpoint energies used to erase the
+    // first mode's resolved restoring force entirely.
+    let storage = SosModalStorage {
+        omegas: vec![1.0, 1.0e6],
+        channels: vec![StressChannel {
+            coefficient: 1.0,
+            coupling: vec![1.0, 0.0, 0.0, 0.0],
+        }],
+    };
+    let a = [1.0, 0.0, 1.0, 0.0];
+    for delta in [1.0e-2, 1.0e-6, 1.0e-10, -1.0e-6] {
+        let b = [a[0] + delta, 0.0, 1.0, 0.0];
+        let dg = fs_phs::discrete_gradient(&storage, &a, &b);
+        // Independent scalar divided difference of q^2/2 + q^4/4,
+        // factored before evaluation so no endpoint energy is subtracted.
+        let expected = 0.5 * (a[0] + b[0]) + 0.25 * (a[0] + b[0]) * (a[0] * a[0] + b[0] * b[0]);
+        assert!(
+            (dg[0] - expected).abs() < 2.0e-14 * expected.abs(),
+            "delta={delta:.3e}: force {} versus {expected}",
+            dg[0],
+        );
+        assert_eq!(dg[1], 0.0);
+        assert_eq!(dg[2], 1.0e12);
+        assert_eq!(dg[3], 0.0);
+    }
+}
+
+#[test]
+fn coupled_quartic_discrete_work_matches_independent_gauss_integral() {
+    let storage = SosModalStorage {
+        omegas: vec![2.0, 3.0, 5.0],
+        channels: vec![
+            StressChannel {
+                coefficient: 7.0,
+                coupling: vec![2.0, 0.25, -0.5, 0.25, 1.0, 0.75, -0.5, 0.75, -1.5],
+            },
+            StressChannel {
+                coefficient: 3.0,
+                coupling: vec![1.0, -0.5, 0.0, -0.5, 2.0, 0.25, 0.0, 0.25, 1.0],
+            },
+        ],
+    };
+    let a = [0.2, -0.3, -0.4, 0.7, 0.8, -0.2];
+    let b = [-0.5, 0.1, 0.6, -0.4, 0.3, 0.9];
+    let mut points = [[0.0; 6]; 2];
+    let mut gradients = [[0.0; 6]; 2];
+    // The ordinary gradient is cubic along the segment. Two Gauss nodes
+    // integrate its work exactly, independently of the discrete remainder.
+    for (point, sign) in points.iter_mut().zip([-1.0, 1.0]) {
+        for k in 0..a.len() {
+            point[k] = f64::midpoint(a[k], b[k]) + sign * (b[k] - a[k]) / (2.0 * 3.0_f64.sqrt());
+        }
+    }
+    storage.gradient(&points[0], &mut gradients[0]);
+    storage.gradient(&points[1], &mut gradients[1]);
+    let work: f64 = (0..a.len())
+        .map(|k| f64::midpoint(gradients[0][k], gradients[1][k]) * (b[k] - a[k]))
+        .sum();
+    let dg = fs_phs::discrete_gradient(&storage, &a, &b);
+    let discrete_work: f64 = (0..a.len()).map(|k| dg[k] * (b[k] - a[k])).sum();
+    assert!((discrete_work - work).abs() < 2.0e-14 * work.abs());
+    let reverse = fs_phs::discrete_gradient(&storage, &b, &a);
+    for (forward, reverse) in dg.iter().zip(reverse) {
+        assert!((forward - reverse).abs() < 2.0e-14 * (1.0 + forward.abs()));
+    }
+    let unchanged = fs_phs::discrete_gradient(&storage, &a, &a);
+    let mut ordinary = [0.0; 6];
+    storage.gradient(&a, &mut ordinary);
+    assert_eq!(unchanged, ordinary);
+}
+
+#[test]
+fn admitted_roundoff_asymmetry_preserves_discrete_work() {
+    let storage = SosModalStorage {
+        omegas: vec![2.0, 3.0],
+        channels: vec![StressChannel {
+            coefficient: 7.0,
+            coupling: vec![1.0, 0.5, 0.5 + 5.0e-11, 2.0],
+        }],
+    };
+    let a = [0.2, -0.3, -0.4, 0.7];
+    let b = [-0.5, 0.1, 0.6, -0.4];
+    let expected = storage.hamiltonian(&b) - storage.hamiltonian(&a);
+    let dg = fs_phs::discrete_gradient(&storage, &a, &b);
+    let work: f64 = dg.iter().enumerate().map(|(k, g)| g * (b[k] - a[k])).sum();
+    assert!((work - expected).abs() < 2.0e-14 * expected.abs());
+    assemble(storage, &[0.0; 2], &[0.0; 2]).expect("within the existing symmetry tolerance");
+}
+
 fn steel_plate() -> VkPlateParams {
     VkPlateParams {
         lx: 0.4,

@@ -16,6 +16,15 @@ the crash cascade with structurally exact energy accounting.
   `StressChannel`s (`c_j >= 0`, symmetric `E_j`). Gradient is the
   EXACT analytic gradient of the coded `H`; state layout matches
   fs-phs `modal_bank` (`[q, p]` interleaved).
+  Its Gonzalez midpoint energy remainder is evaluated directly as
+  `sum_j c_j/4 (d^T E_j d) (m^T E_j d)`, where `d = q1-q0` and
+  `m = (q1+q0)/2`; every quadratic term contributes exactly zero.
+  This retains small resolved restoring forces beside large stored modal
+  energy without subtracting total endpoint energies. It uses one triangle
+  traversal per symmetric stress channel and no per-evaluation allocation,
+  through the existing fs-phs residual and analytic-tangent interface.
+  Admission-sized coupling asymmetry retains its small energy-gradient
+  remainder as well.
 - `assemble(storage, zetas, strike_weights)` — the pHS: symplectic
   pair blocks, per-mode viscous damping `R = diag(0, 2 zeta w)`
   (zetas come from the caller; the visco-damping facility's per-mode
@@ -153,6 +162,12 @@ long pole (implicit Newton per step). No `Cx` integration (workspace
 None.
 
 ## Conformance tests
+
+The nonlinear modal battery also checks a resolved quartic force beside an
+unchanged high-energy mode against an independently factored scalar divided
+difference, and coupled-channel finite-step work against two-node Gauss
+integration of the ordinary cubic gradient, including time reversal and
+the zero-increment limit.
 
 `src/longitudinal_tests.rs`: independent sampled-span strain integration
 including statically eliminated channels; ordinary force versus energy

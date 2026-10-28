@@ -132,6 +132,51 @@ impl SosModalStorage {
 }
 
 impl Storage for SosModalStorage {
+    fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], midpoint: &[f64]) -> Option<f64> {
+        // The quadratic modal energies have zero midpoint remainder. For
+        // V(q) = c/4 (q^T E q)^2, write q = m +/- d/2. Factoring the
+        // endpoint difference gives exactly
+        // V(b)-V(a)-grad V(m).d = c/4 (d^T E d) (m^T E d).
+        // Evaluate these small quantities directly: subtracting total stored
+        // energies can erase one mode's force beside a much louder mode.
+        let n = self.n_modes();
+        let mut remainder = 0.0;
+        for ch in &self.channels {
+            if ch.coefficient == 0.0 {
+                continue;
+            }
+            let mut delta_form = 0.0;
+            let mut midpoint_delta_form = 0.0;
+            let mut asymmetry_work = 0.0;
+            for k in 0..n {
+                let dk = b[2 * k] - a[2 * k];
+                let diagonal = ch.coupling[k * n + k];
+                delta_form += diagonal * dk * dk;
+                midpoint_delta_form += diagonal * midpoint[2 * k] * dk;
+                for j in 0..k {
+                    let dj = b[2 * j] - a[2 * j];
+                    let forward = ch.coupling[k * n + j];
+                    let reverse = ch.coupling[j * n + k];
+                    let symmetric = f64::midpoint(forward, reverse);
+                    delta_form += 2.0 * symmetric * dk * dj;
+                    midpoint_delta_form +=
+                        symmetric * (midpoint[2 * k] * dj + midpoint[2 * j] * dk);
+                    asymmetry_work +=
+                        (forward - reverse) * (midpoint[2 * k] * dj - midpoint[2 * j] * dk);
+                }
+            }
+            remainder += 0.25 * ch.coefficient * delta_form * midpoint_delta_form;
+            // Admission allows roundoff-sized asymmetry. Account for the
+            // coded gradient's corresponding mismatch without subtracting
+            // nearly equal work terms; exactly symmetric channels skip it.
+            if asymmetry_work != 0.0 {
+                remainder +=
+                    0.5 * ch.coefficient * self.quadratic_form(ch, midpoint) * asymmetry_work;
+            }
+        }
+        Some(remainder)
+    }
+
     fn quadratic_part(&self) -> Option<fs_phs::linear_exact::QuadraticPart> {
         let n = 2 * self.n_modes();
         let mut matrix = vec![0.0; n * n];
@@ -141,7 +186,10 @@ impl Storage for SosModalStorage {
         }
         Some(fs_phs::linear_exact::QuadraticPart {
             matrix,
-            exact: self.channels.iter().all(|channel| channel.coefficient == 0.0),
+            exact: self
+                .channels
+                .iter()
+                .all(|channel| channel.coefficient == 0.0),
         })
     }
 
@@ -1018,15 +1066,25 @@ mod fd_probe {
     fn quadratic_metadata_preserves_the_live_stress_remainder() {
         let mut storage = SosModalStorage {
             omegas: vec![2.0, 3.0],
-            channels: vec![StressChannel { coefficient: 7.0, coupling: vec![1.0, 0.0, 0.0, 2.0] }],
+            channels: vec![StressChannel {
+                coefficient: 7.0,
+                coupling: vec![1.0, 0.0, 0.0, 2.0],
+            }],
         };
         let part = storage.quadratic_part().unwrap();
         assert!(!part.exact);
-        assert_eq!(part.matrix, vec![4.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0,
-            0.0,0.0,9.0,0.0, 0.0,0.0,0.0,1.0]);
+        assert_eq!(
+            part.matrix,
+            vec![
+                4.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 9.0, 0.0, 0.0, 0.0, 0.0, 1.0
+            ]
+        );
         let x = [1.0, 2.0, 3.0, 4.0];
         let linear = 0.5 * (4.0 + 4.0 + 81.0 + 16.0);
-        assert_eq!(storage.hamiltonian(&x), linear + 0.25 * 7.0 * 19.0_f64.powi(2));
+        assert_eq!(
+            storage.hamiltonian(&x),
+            linear + 0.25 * 7.0 * 19.0_f64.powi(2)
+        );
         storage.channels[0].coefficient = 0.0;
         assert!(storage.quadratic_part().unwrap().exact);
         assert_eq!(storage.hamiltonian(&x), linear);
