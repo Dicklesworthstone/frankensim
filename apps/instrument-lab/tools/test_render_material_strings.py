@@ -93,6 +93,45 @@ class MaterialPreparation(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             R.main(args)
 
+    def test_fiber_contact_and_native_decimation_keep_the_original_mechanical_clock(self):
+        root = Path(tempfile.mkdtemp())
+        executable = root / "material_strings"
+        executable.write_text("""#!/usr/bin/env python3
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+stop = Path(sys.argv[sys.argv.index('--stop-profile') + 1])
+print(json.dumps({'performance': p.read_text(), 'stop': stop.read_bytes().hex(),
+    'packs': {name: (p.parent / name).read_bytes().hex()
+              for name in ('wire.fsmatpk', 'body.fsmatpk', 'fiber.fsmatpk')},
+    'args': sys.argv[3:]}))
+Path(sys.argv[2]).write_bytes(b'render witness')
+""")
+        executable.chmod(0o755)
+        # This is the existing manufactured contact fixture, not measured hair
+        # or a claim of realistic sound. The subprocess witnesses transport only.
+        original = (EXAMPLES / "fiber-contact.material-strings").read_text().replace(
+            "audio 48000 4096 ", "audio 144000 12288 ")
+        source = root / "source.material-strings"
+        source.write_text(original)
+        stop_bytes = (EXAMPLES / "fiber-contact.stops").read_bytes().replace(b"\n", b"\r\n")
+        stops = root / "contacts.stops"
+        stops.write_bytes(stop_bytes)
+        packs = {name: ("original " + name).encode()
+                 for name in ("wire.fsmatpk", "body.fsmatpk", "fiber.fsmatpk")}
+        for name, data in packs.items():
+            (root / name).write_bytes(data)
+        self.assertEqual(R.main(["--renderer", str(executable), "--performance", str(source),
+                                 "--stop-profile", str(stops), "--decimate", "--out", str(root / "run")]), 0)
+        witness = json.loads((root / "run/render.log").read_text())
+        self.assertEqual(witness["performance"], original)
+        self.assertEqual(witness["stop"], stop_bytes.hex())
+        self.assertEqual((root / "run/stops.profile").read_bytes(), stop_bytes)
+        self.assertEqual(witness["packs"], {name: data.hex() for name, data in packs.items()})
+        self.assertEqual(witness["args"], ["--stop-profile", str(root / "run/stops.profile"), "--decimate"])
+        self.assertEqual(source.read_text(), original)
+        self.assertEqual(stops.read_bytes(), stop_bytes)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,6 +4,8 @@
 All mechanics, material admission, gas resolution and PCM encoding stay in the
 native material_strings executable. This launcher stages its original inputs;
 it neither estimates missing properties nor tunes a string after substitution.
+Contact profiles reach that same native solve. Optional native decimation changes
+only the observed audio clock, retaining the authored mechanical resolution.
 The output directory must be new. Python's standard library suffices for native
 rendering; --analysis additionally uses the existing instrgrade dependencies.
 """
@@ -134,7 +136,9 @@ def main(argv=None) -> int:
     parser.add_argument("--pack-root", type=Path)
     parser.add_argument("--pack", action="append", default=[], metavar="REFERENCED_PATH=SOURCE_PACK")
     parser.add_argument("--body-profile", type=Path)
+    parser.add_argument("--stop-profile", type=Path, help="original finger/fret or contact-loaded bow profile; native code solves its reactions")
     parser.add_argument("--contact-thermal", type=Path, help="original finite contact-heat profile; thermal properties come from the same assembly packs")
+    parser.add_argument("--decimate", action="store_true", help="use the native anti-alias pressure observer to emit 48 kHz audio from higher-rate mechanics")
     parser.add_argument("--shell-table", type=Path)
     parser.add_argument("--assembly-options", type=Path)
     parser.add_argument("--gas-record", help="exact shared gas record after 'gas', e.g. 'mixture 293.15 101325 mole 2 N2 0.8 O2 0.2'")
@@ -182,6 +186,7 @@ def main(argv=None) -> int:
         audio[3] = repr(args.full_scale_pa)
         lines[i] = " ".join(audio)
     text = "\n".join(lines) + "\nschedule\n" + schedule
+    stop_profile = args.stop_profile.read_bytes() if args.stop_profile else None
     thermal_profile = args.contact_thermal.read_bytes() if args.contact_thermal else None
     output = args.out.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -195,19 +200,26 @@ def main(argv=None) -> int:
         text = assembly_geometry(text, result.stdout)
     elif profile:
         (output / "body.profile").write_text(profile)
+    if stop_profile is not None:
+        (output / "stops.profile").write_bytes(stop_profile)
     if thermal_profile is not None:
         (output / "contact-thermal.profile").write_bytes(thermal_profile)
     # Thermal cells refer to the SAME assembly packs. Do not introduce an
     # independent thermal pack loader or bypass the native card-identity check.
-    stage_packs([text, profile], args.pack_root or args.performance.parent, args.pack, output)
+    stage_packs([text, profile, stop_profile.decode("utf-8") if stop_profile is not None else ""],
+                args.pack_root or args.performance.parent, args.pack, output)
     source = output / "performance.material-strings"
     source.write_text(text)
     wav = output / "render.wav"
     command = [renderer, str(source), str(wav)]
     if profile:
         command += ["--body-profile", str(output / "body.profile")]
+    if stop_profile is not None:
+        command += ["--stop-profile", str(output / "stops.profile")]
     if thermal_profile is not None:
         command += ["--contact-thermal", str(output / "contact-thermal.profile")]
+    if args.decimate:
+        command.append("--decimate")
     for paths in args.gas_component:
         command += ["--gas-component", *(str(Path(p).expanduser().resolve()) for p in paths)]
     for key in ("water", "phase"):
