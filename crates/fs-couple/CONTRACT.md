@@ -48,6 +48,22 @@ without conversion or duplicate types. That lower boundary depends only on
 
 ## Public types and semantics
 
+### Shared cavity exterior loading
+
+`cavity_modal::shared::SharedCavity::with_exterior_radiation` connects the
+existing passive multiport model to the original surface/cavity/neck exact
+propagator. A selected neck column is in physical pressure/volume-flow units;
+its power-preserving pullback is `Q = S/sqrt(M) q_dot`. Other selected columns
+retain the original surface modal velocities, including signed mutual coupling.
+The neck must declare `ExteriorMouth`, so exterior mass and resistance are not
+counted twice. Additional prescribed exterior pressure remains an incident
+source. `neck_exterior_pressure_pa` observes the accepted internal reaction;
+feeding that pressure back as an incident source would double-count it.
+Analytic coupled-pole motion, exact time partition, energy balance and rejected
+step preservation are tested in `cavity_modal::shared::tests`. Geometry/band
+validity of the supplied impedance remains with its producer; this composition
+does not claim a new BEM fit, distributed neck field or experimental validation.
+
 ### Accelerating material-fiber supports
 
 `MultiBowPerformance::with_fiber_support_program` supplies declared continuous

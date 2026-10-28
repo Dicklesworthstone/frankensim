@@ -6,6 +6,7 @@
 //! reference equilibrium. This is not nonlinear gas dynamics or moving geometry.
 use super::*;
 use crate::modal_acoustic_time::ModalAcousticState;
+use crate::render::plate::impact::radiation::Model as RadiationModel;
 use crate::render::schedule::force::coupled::{
     CoupledModalFrame, CoupledModalSystem, ModalColumnConnection, ModalCouplingConfig,
 };
@@ -52,6 +53,7 @@ pub struct SharedCavity {
     external: Vec<f64>,
     ports: crate::port_adoption::ModulePorts,
     old_q: Vec<f64>,
+    radiation_neck_port: Option<usize>,
 }
 impl SharedCavity {
     /// Keep every surface's states and connect their SUMMED volume displacement
@@ -144,6 +146,7 @@ impl SharedCavity {
             external: vec![0.0; count],
             ports,
             old_q: vec![0.0; count],
+            radiation_neck_port: None,
         };
         result.observe()?;
         if gate.is_requested() {return Err(ModalCouplingError::Cancelled);}
@@ -155,6 +158,69 @@ impl SharedCavity {
     pub fn network(&self)->&CoupledModalSystem {&self.system}
     /// Number of external surface forces, excluding the appended neck.
     pub fn surface_mode_count(&self)->usize {self.surface_modes}
+
+    /// Attach a reciprocal exterior load to the SAME cavity/surface time solve.
+    ///
+    /// `source_modes` selects original flattened surface coordinates and must
+    /// contain the neck coordinate, `surface_mode_count()`, exactly once. Body
+    /// columns use their existing mass-normalized velocities. The neck column
+    /// uses physical OUTWARD volume flow [m3/s], so its conjugate effort is
+    /// pressure [Pa]. Its coupling is pulled back by Q = (S/sqrt(M)) q_dot;
+    /// this preserves both cross-source reactions and instantaneous power.
+    ///
+    /// The source must use `ExteriorMouth`: the attached impedance owns the
+    /// exterior added mass and radiation loss, with no duplicated end correction.
+    /// This is a cold attachment. The existing exact propagator, cancellation,
+    /// pole/work limits and energy accounting own all acoustic states. A zero
+    /// impedance leaves the original trajectory unchanged. Geometry, bandwidth
+    /// and fit accuracy remain obligations of the supplied model's producer.
+    /// The pressure supplied to `step` is then additional INCIDENT pressure,
+    /// never the already-computed reaction returned by `neck_exterior_pressure_pa`.
+    pub fn with_exterior_radiation(mut self, model: &RadiationModel,
+        source_modes: &[usize], maximum_poles: usize, gate: &CancelGate)
+        -> Result<Self, ModalCouplingError>
+    {
+        if gate.is_requested() { return Err(ModalCouplingError::Cancelled); }
+        model.validate().map_err(|_| network_invalid("invalid complete exterior cavity load"))?;
+        if self.source.loss() != CavityNeckLoss::ExteriorMouth
+            || self.radiation_neck_port.is_some()
+            || source_modes.len() != model.ports
+            || source_modes.iter().filter(|&&i| i == self.surface_modes).count() != 1 {
+            return Err(network_invalid("exterior cavity load needs an internal-only neck and exactly one physical neck port"));
+        }
+        let neck_port = source_modes.iter().position(|&i| i == self.surface_modes)
+            .expect("one admitted neck port");
+        let projection = self.source.neck_volume_shape_m2_per_sqrt_kg();
+        let mut pulled_back = model.clone();
+        for pole in &mut pulled_back.poles {
+            if gate.is_requested() { return Err(ModalCouplingError::Cancelled); }
+            let original = pole.coupling[neck_port];
+            let scaled = original * projection;
+            if !scaled.is_finite() || (original != 0.0 && scaled == 0.0) {
+                return Err(network_invalid("exterior neck pressure/flow projection is not representable"));
+            }
+            pole.coupling[neck_port] = scaled;
+        }
+        self.system = self.system.with_radiation_load(&pulled_back, source_modes, maximum_poles, gate)?;
+        self.radiation_neck_port = Some(neck_port);
+        Ok(self)
+    }
+
+    /// Accepted exterior reaction pressure [Pa] opposing OUTWARD neck flow.
+    /// Includes the signed contribution of every retained surface source. This
+    /// is a pure observation of the joint acoustic state, not a microphone or
+    /// another force to feed back into `step`; its work is already internal.
+    pub fn neck_exterior_pressure_pa(&self) -> Result<f64, ModalCouplingError> {
+        let Some(port) = self.radiation_neck_port else { return Ok(0.0); };
+        let Some(model) = self.system.radiation_model() else { return Ok(0.0); };
+        let projection = self.source.neck_volume_shape_m2_per_sqrt_kg();
+        let mut pressure = 0.0;
+        for (pole, state) in model.poles.iter().zip(self.system.radiation_state().chunks_exact(2)) {
+            pressure += (pole.coupling[port] / projection) * state[1];
+        }
+        if !pressure.is_finite() { return Err(network_invalid("exterior neck reaction pressure overflow")); }
+        Ok(pressure)
+    }
 
     /// One simultaneous accepted step. Surface forces are flattened in input
     /// surface/mode order [N/sqrt(kg)]. Positive EXTERIOR neck pressure [Pa]

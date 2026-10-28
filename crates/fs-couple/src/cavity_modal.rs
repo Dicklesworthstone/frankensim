@@ -14,7 +14,8 @@
 //!
 //! Scope: one uniform small-signal pressure, one circular lumped neck, frozen
 //! coherent gas and fixed geometry. No internal standing waves, mean flow,
-//! thermal history, f-hole shape correction or exterior mutual radiation.
+//! thermal history or f-hole shape correction. `shared::SharedCavity` can attach
+//! a supplied passive exterior multiport to the same coupled time solve.
 
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::modal_acoustic_time::{ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel};
