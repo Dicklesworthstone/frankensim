@@ -7,7 +7,7 @@
 //! prescribed temperatures, material laws and contact resistance stay fixed.
 
 use super::*;
-use crate::adjoint::robin::RobinResponse;
+use crate::adjoint::robin::{MeanFluxFeedback, RobinResponse};
 use crate::assemble::assemble_jacobian_with_optional_interfaces;
 
 mod contact;
@@ -244,6 +244,29 @@ impl StepLinearization<'_> {
         self.response.pullback_endpoint_with_mean_feedback(
             cx, htc_wall_derivatives, reference_wall_derivatives,
             reference_feedback, nodal_weights, max_feedback_entries,
+        )
+    }
+
+    /// Compose independently named mean-flux feedback with the true C/dt+J(T)
+    /// endpoint transpose. Flux patches may be Neumann traces, and the Robin
+    /// control slices may be empty; storage supplies the transient anchor.
+    /// The endpoint boundary already contains the accepted flux values, while
+    /// flux_feedback supplies only their state derivative. Natural/air Robin
+    /// feedback and the independent flux correction enter the same solve.
+    ///
+    /// The factor budget covers 4*nodes*Robin_regions plus the flux binding's
+    /// factor_entries(). Returned load bars remain watt-coordinate multipliers;
+    /// pass them directly to history/source/capacity contractions without dt.
+    /// None has exactly the same arithmetic as pullback_with_robin_feedback.
+    pub fn pullback_with_robin_and_flux_feedback(
+        &self, cx: &Cx<'_>, htc_wall_derivatives: &[f64],
+        reference_wall_derivatives: &[f64], reference_feedback: &[f64],
+        flux_feedback: Option<&MeanFluxFeedback>, nodal_weights: &[f64],
+        max_feedback_entries: usize,
+    ) -> Result<crate::adjoint::robin::RobinGradient, ConductionError> {
+        self.response.pullback_endpoint_with_mean_and_flux_feedback(
+            cx, htc_wall_derivatives, reference_wall_derivatives,
+            reference_feedback, flux_feedback, nodal_weights, max_feedback_entries,
         )
     }
 

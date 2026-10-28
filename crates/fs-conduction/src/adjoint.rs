@@ -489,7 +489,7 @@ pub mod robin;
 // Keep the public response types beside the goal analyzers used by native
 // radiation, natural-convection and nonlinear-solid consumers. These are the
 // same types as adjoint::robin, not alternative numerical implementations.
-pub use robin::{RobinGradient, RobinResponse};
+pub use robin::{MeanFluxFeedback, RobinGradient, RobinResponse};
 
 pub use robin::goal::{
     DiscreteGoalComparison, LinearGoalAnalysis, LinearGoalAnalysisConfig, LinearGoalAnalyzer,
@@ -501,3 +501,4 @@ pub use robin::goal::{
 
 /// Retained linear thermal goals and implicit second-order design derivatives.
 pub mod second_order;
+

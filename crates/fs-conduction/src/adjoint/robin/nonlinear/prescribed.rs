@@ -2,6 +2,7 @@
 use super::{ConductionError, ConductionProblem, Cx, ThermalInterfaces,
     assemble_jacobian_with_optional_interfaces, checked, invalid, material_is_smooth, poll};
 use super::super::{RobinResponse, bind_ports, vector};
+use super::mean_feedback::{MeanFluxFeedback, admit_feedback_entries};
 
 impl RobinResponse {
     /// Contract a complete steady nodal-temperature dual with prescribed values.
@@ -40,6 +41,28 @@ impl RobinResponse {
         regions: &[&str], h_slopes: &[f64], reference_slopes: &[f64],
         reference_feedback: &[f64], max_entries: usize,
     ) -> Result<Vec<f64>, ConductionError> {
+        Self::prescribed_temperature_pullback_with_flux_feedback(
+            cx, problem, interfaces, temperature, nodal_weights, nodal_load_adjoint,
+            regions, h_slopes, reference_slopes, reference_feedback, None, max_entries,
+        )
+    }
+
+    /// Include the same full-node outward-flux factors as the thermal dual.
+    ///
+    /// In addition to the material and Robin lift, this subtracts
+    /// W_D^T (dq/dmean)^T G_F^T lambda_F at prescribed vertices. Keeping the
+    /// fixed-node mean weights is essential even when there are no Robin
+    /// regions. The full objective still contributes its direct w_D term.
+    /// The caller supplies a checked dual from the complete operator; this
+    /// contraction performs no second solve and never modifies the field.
+    /// None preserves the existing prescribed-temperature arithmetic path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prescribed_temperature_pullback_with_flux_feedback(
+        cx: &Cx<'_>, problem: ConductionProblem<'_>, interfaces: Option<&ThermalInterfaces>,
+        temperature: &[f64], nodal_weights: &[f64], nodal_load_adjoint: &[f64],
+        regions: &[&str], h_slopes: &[f64], reference_slopes: &[f64],
+        reference_feedback: &[f64], flux_feedback: Option<&MeanFluxFeedback>, max_entries: usize,
+    ) -> Result<Vec<f64>, ConductionError> {
         poll(cx, 0)?;
         let n = problem.mesh.vertex_count();
         let m = regions.len();
@@ -48,6 +71,9 @@ impl RobinResponse {
         if n > max_entries || m > 64 || m.checked_mul(m).is_none_or(|v| v > max_entries)
             || work.is_none_or(|v| v > max_entries) {
             return Err(invalid("prescribed-temperature pullback exceeds its operator/trace work allowance"));
+        }
+        if flux_feedback.is_some() {
+            admit_feedback_entries(n, m, 4, flux_feedback, max_entries)?;
         }
         vector(cx, temperature, n)?;
         vector(cx, nodal_weights, n)?;
@@ -120,6 +146,9 @@ impl RobinResponse {
                 }
             }
         }
+        if let Some(feedback) = flux_feedback {
+            feedback.add_prescribed_pullback(cx, nodal_load_adjoint, &fixed, &mut result)?;
+        }
         for (v, value) in result.iter_mut().enumerate() {
             if v % 512 == 0 { poll(cx, v)?; }
             if !fixed[v] { *value = 0.0; }
@@ -131,3 +160,4 @@ impl RobinResponse {
 
 #[cfg(test)]
 mod tests;
+

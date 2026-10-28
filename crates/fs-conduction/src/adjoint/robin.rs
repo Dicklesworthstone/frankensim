@@ -13,6 +13,7 @@
 //! retained but derivative requests refuse rather than choosing a unique slope.
 
 pub(crate) mod nonlinear;
+pub use nonlinear::MeanFluxFeedback;
 pub(super) mod goal;
 
 use std::collections::BTreeSet;
@@ -409,3 +410,4 @@ fn failed(iterations: usize, residual: f64, config: LinearConfig) -> ConductionE
 mod tests;
 #[cfg(test)]
 mod contact_tests;
+

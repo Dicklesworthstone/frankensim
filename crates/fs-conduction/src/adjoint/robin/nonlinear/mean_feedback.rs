@@ -15,12 +15,17 @@ use super::super::{
     invalid, poll, reduce, true_residual, vector,
 };
 
+mod flux;
+pub use flux::MeanFluxFeedback;
+
 struct Update { left: Vec<f64>, right: Vec<f64> }
 
 struct FeedbackOp<'a> {
     forward: &'a Csr,
     reverse: &'a Csr,
     updates: &'a [Update],
+    flux_feedback: Option<&'a MeanFluxFeedback>,
+    free: &'a [usize],
     transposed: bool,
 }
 impl FeedbackOp<'_> {
@@ -32,6 +37,9 @@ impl FeedbackOp<'_> {
                 else { (&update.left, &update.right) };
             let factor: f64 = right.iter().zip(x).map(|(a, b)| a * b).sum();
             for (value, a) in y.iter_mut().zip(left) { *value += a * factor; }
+        }
+        if let Some(feedback) = self.flux_feedback {
+            feedback.add_free_action(self.free, x, y, transposed);
         }
     }
 }
@@ -63,6 +71,20 @@ fn feedback_residual(op: &impl LinearOp, x: &[f64], rhs: &[f64])
     let residual: Vec<_> = rhs.iter().zip(&ax).map(|(b, a)| b / scale - a / scale).collect();
     let normalized: Vec<_> = rhs.iter().map(|b| b / scale).collect();
     checked(norm2(&residual) / norm2(&normalized).max(f64::MIN_POSITIVE))
+}
+
+pub(super) fn admit_feedback_entries(
+    n: usize, robin_regions: usize, robin_factors: usize,
+    flux_feedback: Option<&MeanFluxFeedback>, max_feedback_entries: usize,
+) -> Result<(), ConductionError> {
+    if let Some(feedback) = flux_feedback { feedback.check_vertices(n)?; }
+    let entries = n.checked_mul(robin_factors)
+        .and_then(|value| value.checked_mul(robin_regions))
+        .and_then(|value| value.checked_add(flux_feedback.map_or(0, MeanFluxFeedback::factor_entries)));
+    if robin_regions > 64 || entries.is_none_or(|value| value > max_feedback_entries) {
+        return Err(invalid("combined Robin/mean-flux feedback exceeds its factor-entry allowance or 64 Robin regions"));
+    }
+    Ok(())
 }
 
 impl RobinResponse {
@@ -116,7 +138,7 @@ impl RobinResponse {
         nodal_weights: &[f64], max_feedback_entries: usize,
     ) -> Result<RobinGradient, ConductionError> {
         Self::pullback_mean_robin_inner(cx, problem, interfaces, linear, temperature,
-            regions, slopes_w_m2_k2, reference_slopes, None, nodal_weights, max_feedback_entries)
+            regions, slopes_w_m2_k2, reference_slopes, None, None, nodal_weights, max_feedback_entries)
     }
 
     /// Include reference feedback between DIFFERENT mean-temperature regions.
@@ -144,7 +166,33 @@ impl RobinResponse {
     ) -> Result<RobinGradient, ConductionError> {
         Self::pullback_mean_robin_inner(cx, problem, interfaces, linear, temperature,
             regions, slopes_w_m2_k2, reference_slopes, Some(reference_feedback),
-            nodal_weights, max_feedback_entries)
+            None, nodal_weights, max_feedback_entries)
+    }
+
+    /// Add independent outward-flux feedback to the complete mean-Robin dual.
+    ///
+    /// Flux patches need not be Robin control regions. Their full G(dq/dmean)W
+    /// correction is added once to the same nonsymmetric material/contact
+    /// tangent, preserving zero fixed-node multipliers. The supplied boundary
+    /// must already contain each physical flux VALUE at the retained field so
+    /// the unchanged steady residual is checked before differentiating it.
+    /// A steady problem still needs a real prescribed or convective anchor.
+    ///
+    /// The total retained factor allowance is 4*nodes*Robin_regions plus the
+    /// flux binding's factor_entries(). None preserves the existing arithmetic
+    /// and Robin-control ordering. The caller owns the state/mesh binding of
+    /// both derivative laws; no nonlinear iteration is differentiated.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pullback_mean_robin_with_reference_and_flux_feedback(
+        cx: &Cx<'_>, problem: ConductionProblem<'_>, interfaces: Option<&ThermalInterfaces>,
+        linear: LinearConfig, temperature: &[f64], regions: &[&str],
+        slopes_w_m2_k2: &[f64], reference_slopes: &[f64], reference_feedback: &[f64],
+        flux_feedback: Option<&MeanFluxFeedback>, nodal_weights: &[f64],
+        max_feedback_entries: usize,
+    ) -> Result<RobinGradient, ConductionError> {
+        Self::pullback_mean_robin_inner(cx, problem, interfaces, linear, temperature,
+            regions, slopes_w_m2_k2, reference_slopes, Some(reference_feedback),
+            flux_feedback, nodal_weights, max_feedback_entries)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -152,16 +200,14 @@ impl RobinResponse {
         cx: &Cx<'_>, problem: ConductionProblem<'_>, interfaces: Option<&ThermalInterfaces>,
         linear: LinearConfig, temperature: &[f64], regions: &[&str],
         slopes_w_m2_k2: &[f64], reference_slopes: &[f64], reference_feedback: Option<&[f64]>,
-        nodal_weights: &[f64], max_feedback_entries: usize,
+        flux_feedback: Option<&MeanFluxFeedback>, nodal_weights: &[f64], max_feedback_entries: usize,
     ) -> Result<RobinGradient, ConductionError> {
         poll(cx, 0)?;
         admit_linear(linear)?;
         if linear.restart == 0 { return Err(invalid("mean-HTC feedback needs a positive FGMRES restart")); }
         let n = problem.mesh.vertex_count();
         let factors = if reference_feedback.is_some() { 4 } else { 2 };
-        if regions.len() > 64 || n.checked_mul(factors).and_then(|v| v.checked_mul(regions.len()))
-            .is_none_or(|v| v > max_feedback_entries)
-        { return Err(invalid("mean-HTC feedback exceeds the declared vector-entry budget or 64 regions")); }
+        admit_feedback_entries(n, regions.len(), factors, flux_feedback, max_feedback_entries)?;
         if let Some(feedback) = reference_feedback { vector(cx, feedback, regions.len()*regions.len())?; }
         vector(cx, temperature, n)?;
         vector(cx, nodal_weights, n)?;
@@ -188,7 +234,7 @@ impl RobinResponse {
         if !tangent.smooth { return Err(invalid("mean-HTC feedback cannot choose a derivative at a material kink")); }
         Self::pullback_bound_feedback(cx, &jacobian, &tangent.transpose, &dofs,
             &ports, linear, temperature, slopes_w_m2_k2, reference_slopes,
-            reference_feedback, nodal_weights)
+            reference_feedback, flux_feedback, nodal_weights)
     }
 
     /// The backward-Euler owner has already checked its physical endpoint.
@@ -198,16 +244,27 @@ impl RobinResponse {
         &self, cx: &Cx<'_>, slopes_w_m2_k2: &[f64], reference_slopes: &[f64],
         reference_feedback: &[f64], nodal_weights: &[f64], max_feedback_entries: usize,
     ) -> Result<RobinGradient, ConductionError> {
+        self.pullback_endpoint_with_mean_and_flux_feedback(
+            cx, slopes_w_m2_k2, reference_slopes, reference_feedback,
+            None, nodal_weights, max_feedback_entries,
+        )
+    }
+
+    /// Storage and its unchanged-field audit belong to the endpoint owner.
+    /// Only the independent flux factors extend the existing complete dual.
+    pub(crate) fn pullback_endpoint_with_mean_and_flux_feedback(
+        &self, cx: &Cx<'_>, slopes_w_m2_k2: &[f64], reference_slopes: &[f64],
+        reference_feedback: &[f64], flux_feedback: Option<&MeanFluxFeedback>,
+        nodal_weights: &[f64], max_feedback_entries: usize,
+    ) -> Result<RobinGradient, ConductionError> {
         poll(cx, 0)?;
         admit_linear(self.linear)?;
         let n = self.temperature.len();
         let m = self.ports.len();
-        if self.linear.restart == 0 || m > 64
-            || n.checked_mul(4).and_then(|v| v.checked_mul(m))
-                .is_none_or(|v| v > max_feedback_entries)
-        {
+        if self.linear.restart == 0 {
             return Err(invalid("endpoint Robin feedback needs a positive restart and at most 64 regions within its factor-entry budget"));
         }
+        admit_feedback_entries(n, m, 4, flux_feedback, max_feedback_entries)?;
         vector(cx, slopes_w_m2_k2, m)?;
         vector(cx, reference_slopes, m)?;
         vector(cx, reference_feedback, m*m)?;
@@ -228,7 +285,7 @@ impl RobinResponse {
         poll(cx, 0)?;
         Self::pullback_bound_feedback(cx, &self.matrix, transpose, &self.dofs,
             &self.ports, self.linear, &self.temperature, slopes_w_m2_k2,
-            reference_slopes, Some(reference_feedback), nodal_weights)
+            reference_slopes, Some(reference_feedback), flux_feedback, nodal_weights)
     }
 
     // Both checked producers use the same consistent trace factors, true
@@ -238,7 +295,8 @@ impl RobinResponse {
         cx: &Cx<'_>, jacobian: &Csr, transpose: &Csr, dofs: &DofMap,
         ports: &[RobinPort], linear: LinearConfig, temperature: &[f64],
         slopes_w_m2_k2: &[f64], reference_slopes: &[f64],
-        reference_feedback: Option<&[f64]>, nodal_weights: &[f64],
+        reference_feedback: Option<&[f64]>, flux_feedback: Option<&MeanFluxFeedback>,
+        nodal_weights: &[f64],
     ) -> Result<RobinGradient, ConductionError> {
         let n = temperature.len();
         let factors = if reference_feedback.is_some() { 4 } else { 2 };
@@ -286,7 +344,7 @@ impl RobinResponse {
             }
         }
         let op = FeedbackOp { forward: jacobian, reverse: transpose,
-            updates: &updates, transposed: true };
+            updates: &updates, flux_feedback, free: dofs.free(), transposed: true };
         let rhs = dofs.gather(nodal_weights);
         let scale = rhs.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
         let mut lambda = zeros(n)?;
@@ -349,7 +407,8 @@ mod tests {
         let at = ops::transpose(&a);
         let updates = [Update { left: vec![1.0, 2.0, -0.5], right: vec![0.2, 0.3, 0.5] },
             Update { left: vec![0.0, -0.3, 0.2], right: vec![0.0, 0.5, 0.5] }];
-        let op = FeedbackOp { forward: &a, reverse: &at, updates: &updates, transposed: false };
+        let op = FeedbackOp { forward: &a, reverse: &at, updates: &updates,
+            flux_feedback: None, free: &[], transposed: false };
         let x = [0.7, -1.0, 2.0];
         let y = [1.2, 0.4, -0.3];
         let mut ax = [0.0; 3]; let mut aty = [0.0; 3];
@@ -540,3 +599,4 @@ mod tests {
         });
     }
 }
+
