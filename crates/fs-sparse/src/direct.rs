@@ -1264,6 +1264,13 @@ impl LdltFactor {
     /// Solve A·x = b. Panics on length mismatch (programmer error).
     #[must_use]
     pub fn solve(&self, b: &[f64]) -> Vec<f64> {
+        crate::fma::direct_solve_dispatch(self, b)
+    }
+
+    // Compile the identical fixed-order solve inside the existing FMA capsule.
+    // No reassociation, pivot, gather/scatter or division changes.
+    #[inline(always)]
+    pub(crate) fn solve_body(&self, b: &[f64]) -> Vec<f64> {
         assert_eq!(b.len(), self.n, "solve: rhs length must equal n");
         // y indexed by elimination-order id.
         let mut y = vec![0.0f64; self.n];
@@ -1415,6 +1422,30 @@ mod tests {
         m
     }
 
+    #[inline(never)]
+    fn portable_solve(factor: &LdltFactor, rhs: &[f64]) -> Vec<f64> {
+        factor.solve_body(rhs)
+    }
+
+    #[test]
+    fn dispatched_solve_preserves_portable_bits_across_rhs_scales() {
+        for ordering in [DirectOrdering::Natural, DirectOrdering::Amd] {
+            let factor = factor(&tridiag(37), ordering, &LdltOptions::default());
+            for scale in [0.0, -0.0, 1e-200, 1.0, -1e150] {
+                let rhs: Vec<_> = (0..37)
+                    .map(|i| scale * ((i * 37 % 101) as f64 / 50.0 - 1.0))
+                    .collect();
+                let dispatched = factor.solve(&rhs);
+                let portable = portable_solve(&factor, &rhs);
+                assert!(dispatched.iter().all(|v| v.is_finite()));
+                assert_eq!(
+                    dispatched.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    portable.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
     /// Residual gate ‖A·x − b‖∞ ≤ tol·‖A‖·(‖x‖∞ + ‖b‖∞-ish).
     fn check_solve(a: &Csr, f: &LdltFactor, seed: u64, tol_scale: f64) {
         let n = a.nrows();
@@ -1423,6 +1454,14 @@ mod tests {
         let mut b = vec![0.0; n];
         a.spmv(&x_true, &mut b);
         let x = f.solve(&b);
+        // Compile the same solve outside the target-feature capsule. Every
+        // existing SPD/indefinite/delayed-pivot residual case also checks that
+        // runtime dispatch preserves each output bit.
+        let portable = portable_solve(f, &b);
+        assert_eq!(
+            x.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            portable.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
         let mut ax = vec![0.0; n];
         a.spmv(&x, &mut ax);
         let xin: f64 = x.iter().fold(0.0f64, |m, &v| m.max(v.abs()));
