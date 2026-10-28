@@ -124,3 +124,7 @@ pub use fs_ports::*;
 
 /// Driven finite gas chambers with prescribed volume and explicit pressure work.
 pub mod prescribed_gas;
+
+/// Source-bound large-rotation rod dynamics on the existing mechanical/time owners.
+#[cfg(feature = "rod-dynamics")]
+pub mod rod_motion;

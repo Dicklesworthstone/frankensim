@@ -82,3 +82,11 @@ fs-solver = { path = "../fs-solver" }
 fs-evidence = { path = "../fs-evidence" }
 [lints]
 workspace = true
+
+[features]
+# Frontier rod-motion composition; native conformance remains explicitly gated.
+rod-dynamics = []
+
+[[example]]
+name = "rod_motion"
+required-features = ["rod-dynamics"]
