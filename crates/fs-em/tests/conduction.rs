@@ -1,6 +1,8 @@
 //! G1/G3/G4: spatial source-defined Ohmic current, native circuit loss and heat.
 //! These are synthetic physical-law checks, not measured material qualification.
 mod common;
+#[path = "conduction/response.rs"]
+mod response;
 
 use common::{config, ends, layered, limits, near};
 use fs_em::conduction::{

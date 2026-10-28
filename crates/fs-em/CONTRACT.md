@@ -1197,3 +1197,31 @@ analytically equivalent linear-limit endpoints, frames/origins, late cancellatio
 and strict conductor/current/source collar refusals are exercised.
 This finite-mesh manufactured result is not a universal force-error bound or
 experimental device validation; field/collar refinement remains required.
+
+## Nonlinear scalar material response in the original spatial conduction solve
+
+`conduction::response::PlanarConductionResponse` closes original pinned
+conductivity/resistivity sources at the actual recovered |E| and |J| of each
+triangle. Its bounded iterations use the SAME FEEC assembly, voltage/current
+traces, field recovery and charge/terminal-work admission as
+`PlanarConduction`. The ordinary constructor keeps its static-source refusal.
+The frozen linearization is private; nonlinear response is never obtained by
+scaling a unit-voltage resistance.
+
+Accepted candidates retain both the applied material coefficients that produced
+the native fields and their complete source evaluations at those fields.
+Independent conductivity and current-density defects, plus the sum of absolute
+cell power defects, must pass alongside native algebraic/current/work gates.
+Numerical iteration defects are not Joule heat. Rejected sources, budgets,
+nonconvergence and cancellation leave the accepted owner unchanged.
+
+This fixed-geometry scalar memoryless rung accepts prescribed native voltage and
+current-density traces. A nonlinear equipotential total-current terminal needs
+its own constraint; tensor, Hall, moving-conductor, field-storage and hysteretic
+paths retain their own owners. Positive source transport does not prove Picard
+convergence, constitutive uniqueness or dynamic stability.
+
+Independent regressions exercise two-region nonlinear series continuity,
+current-driven resistivity, simultaneous E/J dependence, data-only source swaps,
+local E.J power, rotation/reversal/gauge invariance, constant-source identity,
+separate power admission, continuation and refusal rollback.

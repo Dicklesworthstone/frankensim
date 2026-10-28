@@ -4061,3 +4061,28 @@ state's `law()` reuses its exact retained chart for further heating or cooling.
 Tests include vapor creation from saturated 450 K liquid throttled to
 101325 Pa, a heating/flash/condensation chain, conservation and source-domain,
 accuracy and cancellation refusals.
+
+## Original sources at native shear and electrical operating coordinates
+
+`phase::transport::resolve_phase_transport_state_with_shear_rate` extends the
+existing phase-first material resolution with one explicitly typed inverse-time
+coordinate owned by the native flow. Temperature and phase still come from the
+original enthalpy chart. Liquid viscosity and conductivity may depend on actual
+shear; density and caloric storage may not acquire an unowned rate dependence.
+Solid endpoints retain the existing omission of liquid-only properties.
+
+`conductor::response::ScalarConductorResponse` retains one complete pinned scalar
+conductor bundle and explicitly declares at most one electric-field magnitude
+and one current-density magnitude coordinate. Native spatial consumers query
+the original source at actual |E| and |J|, including all original requirements,
+claim pins, coordinate quantities and external context. Conductivity and
+resistivity remain distinct source bases. Every original electrical response
+coordinate must be owned; frequency, strain and other unowned responses refuse.
+
+The shared multiple-owned-coordinate predicate preserves the existing static
+external-coordinate rules; it provides no evolution law itself. The electrical
+response adapter is an isotropic, passive, memoryless rung, with no tensor, Hall,
+hysteresis or field-storage claim. Ordinary phase metadata is retained; combined
+phase-fraction/E/J source admission is not established merely by that metadata.
+Actual field/current closure and finite-heat ownership belong to their original
+native consumers, not this material adapter.

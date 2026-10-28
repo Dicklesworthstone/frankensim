@@ -7,6 +7,8 @@
 
 /// Shared planar scalar/anisotropic conductivity with fixed material frames.
 pub mod planar;
+/// Pinned scalar transport at explicitly owned electric/current magnitudes.
+pub mod response;
 
 use core::fmt;
 

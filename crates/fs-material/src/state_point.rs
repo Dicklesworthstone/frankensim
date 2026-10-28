@@ -525,6 +525,21 @@ impl ResolvedScalarProperty {
         owned_axis: &str,
         owned_quantity: QuantitySpec,
     ) -> bool {
+        self.has_only_owned_coordinates_and_fixed_external_conditions(&[(
+            owned_axis,
+            owned_quantity,
+        )])
+    }
+
+    /// Admit several coordinates evolved by the SAME physical owner, retaining
+    /// the single-coordinate method's exact quantity and fixed-external policy.
+    /// Duplicate names, absent/untyped coordinates, and every unowned response
+    /// or applicability axis refuse. This supplies no evolution or closure law.
+    #[must_use]
+    pub fn has_only_owned_coordinates_and_fixed_external_conditions(
+        &self,
+        owned: &[(&str, QuantitySpec)],
+    ) -> bool {
         if self.source_axes.is_empty()
             && self.answer.receipt.decision != fs_matdb::EvaluationDecision::ConstantWithinValidity
         {
@@ -538,14 +553,16 @@ impl ResolvedScalarProperty {
                 .find(|(name, _)| name == axis)
                 .map(|(_, value)| *value)
         };
-        if receipt.axis_quantities.get(owned_axis) != Some(&owned_quantity)
-            || !value(owned_axis).is_some_and(f64::is_finite)
-        {
+        if owned.iter().enumerate().any(|(index, (axis, quantity))| {
+            receipt.axis_quantities.get(*axis) != Some(quantity)
+                || !value(axis).is_some_and(f64::is_finite)
+                || owned[..index].iter().any(|(other, _)| other == axis)
+        }) {
             return false;
         }
         let supported = |axis: &str, dims: Option<Dims>| {
-            if axis == owned_axis {
-                return dims.is_none_or(|d| d == owned_quantity.dims());
+            if let Some((_, quantity)) = owned.iter().find(|(name, _)| *name == axis) {
+                return dims.is_none_or(|d| d == quantity.dims());
             }
             let quantity = receipt.axis_quantities.get(axis).copied();
             is_fixed_external_coordinate(axis, quantity, value(axis))

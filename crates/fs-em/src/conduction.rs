@@ -16,6 +16,8 @@
 //! for prescribed in-plane velocity in an imposed normal magnetic field.
 
 pub mod motion;
+/// Memoryless source response at the actual spatial electric/current fields.
+pub mod response;
 
 use fs_feec::{
     assembly::{incidence_to_csr, stiffness},
@@ -142,6 +144,20 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
         limits: WeightedAssemblyLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, ConductionError> {
+        Self::assemble(mesh, conductors, limits, cancelled, |source| {
+            source.has_admitted_static_sources()
+        })
+    }
+
+    // The response child owns its additional source coordinates. Assembly,
+    // constitutive recovery, boundary loads and numerical gates stay here.
+    fn assemble(
+        mesh: TriComplex2,
+        conductors: Vec<C>,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+        admit: impl Fn(&C) -> bool,
+    ) -> Result<Self, ConductionError> {
         poll(cancelled)?;
         if !matches!(mesh.metric(), Metric2::Planar { .. }) {
             return Err(ConductionError::Invalid(
@@ -168,7 +184,7 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
         let mut geometry_frame = None;
         for conductor in &conductors {
             poll(cancelled)?;
-            if !conductor.has_admitted_static_sources() {
+            if !admit(conductor) {
                 return Err(ConductionError::Invalid(
                     "spatial DC conduction requires static Ohmic coefficients at fixed external or explicitly owned phase conditions",
                 ));
