@@ -114,6 +114,7 @@ pub struct ThermoplasticSolid<'a> {
     solution: SmallStrainTetSolution<J2State>,
     budget: TetAssemblyBudget,
     time_s: f64,
+    conductor_geometry: Option<electrical::geometry::ConductorGeometryBinding>,
 }
 
 impl<'a> ThermoplasticSolid<'a> {
@@ -198,6 +199,7 @@ impl<'a> ThermoplasticSolid<'a> {
             solution,
             budget,
             time_s: thermal.time_s(),
+            conductor_geometry: None,
         })
     }
 
@@ -474,6 +476,7 @@ impl<'a> ThermoplasticSolid<'a> {
             materials,
             temperatures_k,
             solution,
+            displacement_gradients: gradients,
             energy,
             heat_j,
             physical_heat_j,
@@ -693,6 +696,7 @@ struct MechanicalProposal {
     materials: Vec<ResolvedJ2Plasticity>,
     temperatures_k: Vec<f64>,
     solution: SmallStrainTetSolution<J2State>,
+    displacement_gradients: Vec<[[f64; 3]; 3]>,
     energy: Vec<EnergyIncrement>,
     heat_j: Vec<f64>,
     physical_heat_j: f64,

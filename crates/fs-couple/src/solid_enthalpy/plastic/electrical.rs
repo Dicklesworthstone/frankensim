@@ -2,6 +2,8 @@
 //! Native electrical and tetrahedral proposals always start from accepted history.
 //! Only physical plastic/Joule heat and admitted reversible exchange enter heat;
 //! hardening storage and backward-Euler loss retain their original accounts.
+/// Affine deformation of explicitly bound bulk current paths.
+pub mod geometry;
 use super::*;
 use super::contact::{ContactError, ContactSample, ThermalSupportContact};
 use std::cell::Cell;
@@ -279,9 +281,11 @@ impl<'m> ThermoplasticSolid<'m> {
     /// and reversible heat, not hardening or numerical loss. Electrical and heat
     /// routes come from the prepared network, not a separately authored mapping.
     ///
-    /// Fixed geometry, C/L, electrical paths and source conditions during this
-    /// interval; no Lorentz force, piezoresistivity, melt or circuit topology
-    /// change is inferred. Mechanical-coordinate-dependent transport refuses.
+    /// Explicit `with_deforming_conductors` bindings update bulk path length
+    /// and area from this same mechanical endpoint. Other transport geometry,
+    /// C/L, source conditions and topology stay fixed; no Lorentz force,
+    /// piezoresistivity or melt is inferred. Mechanical-coordinate-dependent
+    /// material transport laws still require their own evolving response.
     /// Split at events/load discontinuities. Target events remain pending.
     /// Endpoint thermal/mechanical rates and midpoint currents give generally
     /// first-order coupled accuracy; refine intervals independently.
@@ -312,7 +316,8 @@ impl<'m> ThermoplasticSolid<'m> {
     /// their authored electrical/thermal interfaces and radiation.
     ///
     /// Fixed whole-face prescribed supports and compressive traction only.
-    /// Geometry, reference mass and electrical topology remain fixed. Empty
+    /// Thermal/contact geometry, reference mass and electrical topology remain
+    /// fixed; explicitly bound bulk current paths follow deformation. Empty
     /// support bindings use the original powered calculation unchanged.
     #[allow(clippy::too_many_arguments)]
     pub fn advance_electrical_with_supports_candidate<'t>(
@@ -456,6 +461,8 @@ impl<'m> ThermoplasticSolid<'m> {
         self.admit_electrical_transport(thermal, &initial.bulk.source,
             &initial.bulk.resistors, &routes, cx).map_err(|error|
                 ElectricalSolidError::Coupled(CircuitEnthalpyError::Source(error)))?;
+        let conductor_geometry = geometry::prepare(self, &initial.bulk.resistors, &routes, cx)
+            .map_err(|error| ElectricalSolidError::Coupled(CircuitEnthalpyError::Source(error)))?;
         let mechanics = ThermoplasticConfig {
             // Only the energy/yield controls are consumed by the native endpoint
             // evaluator; the shared Newton owner supplies all coupling iteration.
@@ -480,6 +487,8 @@ impl<'m> ThermoplasticSolid<'m> {
                     nodal_forces_n, settings, mechanics, dt,
                     velocity_mps, cx)
                     .map_err(ElectricalSolidSourceError::Mechanical)?;
+                geometry::refresh(&conductor_geometry, &mechanical.displacement_gradients,
+                    &mut coefficients.resistors, cx)?;
                 let mut support_samples = Vec::with_capacity(support_contacts.len());
                 for (binding, &(element, normal)) in support_contacts.iter().zip(&support_routes) {
                     checkpoint()?;

@@ -52,8 +52,9 @@ impl<'m, 't> DynamicElectricalCandidate<'m, 't> {
 impl<'m> ThermoplasticDynamics<'m> {
     /// Finite charge/flux and source-resolved Joule heating on the same interval
     /// as actual nodal inertia and thermal/plastic feedback. The original
-    /// electrical and thermal geometry remains fixed under the small-strain
-    /// model; this does not add motional EMF, Lorentz force or changing C/L.
+    /// thermal geometry remains fixed under the small-strain model. Bulk paths
+    /// bound by `ThermoplasticSolid::with_deforming_conductors` follow this same
+    /// inertial endpoint; this adds no motional EMF, Lorentz force or changing C/L.
     #[allow(clippy::too_many_arguments)]
     pub fn advance_electrical_candidate<'t>(
         &self,

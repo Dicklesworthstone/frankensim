@@ -4641,6 +4641,49 @@ changes, circuit and motion continuation, physical versus numerical loss,
 pressure-dependent current and atomic source refusal. Native execution remains
 pending in the resource-constrained build environment.
 
+### Deforming bulk conductor paths on the native solid endpoint
+
+`solid_enthalpy::plastic::electrical::geometry` binds explicit
+`DeformingConductorPath` branch directions through
+`ThermoplasticSolid::with_deforming_conductors`. The prepared heat network
+supplies the sole branch-to-cell mapping and original whole-cell length/area;
+the adapter accepts no competing element, material or Joule-heat route. Each
+endpoint reuses the P1 displacement gradients already computed and admitted by
+the native mechanical owner.
+
+For reference unit direction n, the reduction forms F = I + grad(u), J = det(F)
+and lambda = |F n|, then uses L = lambda L0 and A = J A0 / lambda. Positive
+volume, the explicit gradient bound and the native material's small-strain and
+rotation domain must all hold. The relative residual of
+F^T F n = lambda^2 n must meet the declared orthogonality tolerance, so the
+deformed path stays normal to its deformed end planes. A nonprincipal sheared
+path needs a spatial conduction solve and refuses here. Directions are
+normalized once at binding; branches must be unique and counts bounded.
+
+The original `ResolvedConductorState` adopts the complete endpoint source
+bundle and lowers the changed dimensions through `into_uniform_conductor`.
+This occurs inside the existing electrical/enthalpy callback after the same
+native mechanical proposal, including its inertial variant. Reference
+dimensions always come from the prepared network, never from a previously
+stretched resistor. Material source pins, charge/flux, plastic history and
+enthalpy remain with their original owners. Original circuit Joule heat is
+deposited once; a changing purely resistive coefficient adds no separate field
+storage, parameter work or heat source.
+
+This is a bounded affine geometry correction to the existing fully solid,
+isotropic DC, small-strain uniform-path reduction. Reference inventory and
+caloric geometry, other thermal/contact transport areas, topology and C/L stay
+fixed. It does not infer piezoresistivity, motional EMF, Lorentz forces, melting
+or finite-strain constitutive mechanics. Endpoint material/mechanical evaluation
+with midpoint current retains the existing generally first-order coupled
+accuracy. Refusal publishes no partial electrical, thermal or mechanical state.
+
+Four focused synthetic regressions cover independently evaluated affine
+resistance/current/heat with unchanged inventory, native consistent-mass axial
+motion over two steps without accumulating geometric stretch, thermal-expansion
+data feeding shape and current at one endpoint, and nonprincipal or
+out-of-domain atomic refusal.
+
 ### Sourced thermal expansion in the native thermoplastic solid
 
 `ThermoplasticSolid` accepts optional source-integrated isotropic expansion
