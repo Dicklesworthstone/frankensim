@@ -1528,3 +1528,12 @@ fn g0_g3_ppsu_compression_points_do_not_create_an_interpolated_curve() {
         "two isolated test points must not become a compression constitutive curve"
     );
 }
+
+#[path = "material_catalog_expansion/alloys_minerals.rs"]
+mod alloys_minerals;
+
+#[path = "material_catalog_expansion/polymers_foams.rs"]
+mod polymers_foams;
+
+#[path = "material_catalog_expansion/adhesives.rs"]
+mod adhesives;

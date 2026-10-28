@@ -4,6 +4,131 @@ This directory retains the human-reviewable source inputs compiled by
 `xtask matdb-pack`. Generated binary packs are deliberately not committed:
 the compiler must reproduce them from the pinned manifest and source record.
 
+## Engineering grades, adhesives and building materials
+
+This expansion adds **26 source packs and 210 property claims**, including
+14 tabulated datasets with 78 source knots. All packs are discovered by
+`matdb-catalog`; there is no separate registry to update. Each manifest pins its
+producer/source edition and each claim retains typed units, source observations,
+selection conditions and unstated uncertainty where the source supplies none.
+
+| Family | New materials | Packs | Claims |
+| --- | --- | ---: | ---: |
+| Elements | Indium wire, palladium, platinum, iridium | 4 | 33 |
+| Metal alloys | MONEL 400, NILO 36, TIMETAL 6-4, aged INCONEL 718 | 4 | 16 |
+| Optical crystals | Lithium fluoride; CVD FLIR-grade zinc sulfide | 2 | 8 |
+| Engineering plastics | TECAPEEK GF30; TECATRON GF40 and SX; TECAPAI CM XP403 | 4 | 30 |
+| Structural foams | Divinycell H60, H80, H130 and H200 PVC | 4 | 56 |
+| Resins and adhesives | LOCTITE EA 9466; EpoxAcast 655/103; Resbond 940 zircon ceramic adhesive | 3 | 19 |
+| Reinforced laminate | Norplex NP509 melamine/woven glass | 1 | 11 |
+| Concrete and cement | QUIKRETE 5000; CTS CEMENT ALL | 2 | 16 |
+| Wood panels | MEDITE MR 18 mm MDF; WISA UPM007CPR 18 mm, 13-ply birch plywood | 2 | 21 |
+
+### Find an exact grade and inspect its conditions
+
+```sh
+cargo run -p xtask -- matdb-catalog --pack nilo-36-special-metals-2004
+cargo run -p xtask -- matdb-catalog --pack diab-divinycell-h80-2021
+cargo run -p xtask -- matdb-catalog --pack henkel-loctite-ea9466-seven-day-film-2025
+cargo run -p xtask -- matdb-catalog --pack norplex-np509-melamine-glass-coupons-2022
+cargo run -p xtask -- matdb-catalog --pack wisa-birch-plywood-18mm-upm007-2026
+cargo run -p xtask -- matdb-catalog --search ensinger --property tensile-modulus
+```
+
+The distinctions in these packs affect which queries are admissible:
+
+- Platinum annealed and work-hardened strength/elongation are separate states.
+  Palladium annealed-wire strength requires its own specimen selector.
+- NILO 36 expansion is an **interval mean** from a required reference temperature;
+  it is not instantaneous alpha. Alloy transport curves have explicit interpolation
+  policies and bounded support; MONEL's source-extrapolated conductivity rows
+  are excluded.
+- The LiF and ZnS thermal references use explicitly authored, narrow frozen
+  calculation intervals with `engineering-reference-model=1` and
+  `source-temperatures-matched=0`. They do not assert that the source measured
+  all properties at one temperature. ZnS scalar elasticity separately requires
+  `isotropic-engineering-model=1`.
+- Ensinger tensile and compression test speeds are actual crosshead speeds.
+  Compression stress samples remain `TabulatedOnly`; an unreported strain
+  does not become a measured or interpolated stress.
+- Divinycell nominal mechanical values and declared minima use separate keys
+  and selectors. Density/mechanics are specified at 296.15 K, whereas conductivity
+  is specified at 293.15 K. No foam heat capacity or complete crushing law is added.
+- Henkel's 295.15 K cure temperature is distinct from its unspecified test
+  temperature. EpoxAcast selects hardener 103 and the stated mass ratio; its
+  liquid-mixture gravity does not become cured density. Resbond conductivity
+  exposes its assumed Btu convention.
+- NP509 test coupon thicknesses vary between bending, tension and compression.
+  Its thermal expansion X/Y labels are preserved without inventing a mapping
+  onto the mechanical lengthwise/crosswise directions.
+- QUIKRETE's fresh-mixture density cannot be selected as hardened density.
+  Cement strengths are discrete age observations. CEMENT ALL's first-hour result
+  is explicitly measured after final set; later source-labelled ages retain their
+  unspecified zero-time definition. Its pinned 2026 PDF method takes precedence
+  over the differing live HTML method.
+- MEDITE values marked as minima remain lower-limit properties; wet-cycle
+  results require a different state. WISA's mean axial and bending moduli remain
+  distinct, with explicit face-grain direction, thickness and ply count.
+  Characteristic strengths and racking density do not become mean properties.
+
+### Run the new plastic and foam through the axial reference example
+
+These examples resolve material values from the compiled packs. Geometry,
+monotonic displacement and the 0.1% reference strain ceiling are authored
+scenario inputs. The ceiling is not a measured elasticity or failure limit.
+
+Compile the selected packs:
+
+```sh
+cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/ensinger-tecapeek-gf30-natural/manifest.tsv --out /tmp/peek-gf30.fsmatpk
+cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/diab-divinycell-h80-2021/manifest.tsv --out /tmp/divinycell-h80.fsmatpk
+```
+
+TECAPEEK GF30 tension, at the producer's tensile-modulus crosshead speed:
+
+```sh
+cargo run -p fs-material --example material_axial_reference -- \
+  /tmp/peek-gf30.fsmatpk tension density tensile-modulus 0.05 0.0001 0.001 \
+  --axis source-grade-tecapeek-gf30-natural 1 --axis source-temperature-known 0 \
+  --axis source-moisture-condition-known 0 --axis source-pressure-known 0 \
+  --axis source-orientation-known 0 --axis test-speed 1.6666666666666667e-5 \
+  --speed-axis test-speed --step 0.00005 3
+```
+
+Divinycell H80 nominal compression perpendicular to the sheet:
+
+```sh
+cargo run -p fs-material --example material_axial_reference -- \
+  /tmp/divinycell-h80.fsmatpk compression density compression-modulus 0.05 0.0001 0.001 \
+  --axis source-grade-divinycell-h80-2021 1 --axis temperature 296.15 \
+  --axis source-moisture-condition-known 0 --axis source-pressure-known 0 \
+  --axis source-test-rate-known 0 --axis normal-to-sheet 1 \
+  --axis source-is-nominal-value 1 --step -0.00005 1
+```
+
+Independent expectations for the authored linear references:
+
+| Reference | Nominal force (N) | Mass (kg) | Model loading work (J) |
+| --- | ---: | ---: | ---: |
+| TECAPEEK GF30 tension | 630 | 0.00765 | 0.01575 |
+| Divinycell H80 compression | -9 | 0.0004 | 0.000225 |
+
+The foam's one-second ramp duration is an authored choice because its source
+rate is unstated. Neither reference supplies unloading, relaxation, recoverable
+energy, fracture, crushing, Poisson ratio or full three-dimensional elasticity.
+The source unknown-orientation selector on the reinforced PEEK also remains
+explicit; it is not a laminate-direction calibration.
+
+### Focused native regressions
+
+The existing `material_catalog_expansion` integration target includes 14 added
+tests across the `engineering`, `alloys_minerals`, `polymers_foams` and
+`adhesives` child modules. They compile all 26 packs, verify canonical decoding
+and evidence receipts, check SI values and actual interpolation, and exercise
+missing/wrong grade, age, temperature, rate, direction, thickness, cure and
+source-assumption refusals. The iridium case also feeds the original bounded
+slab-resistance consumer and refuses an unsupported hotter span.
+
 ## Reinforced engineering plastics and industrial PPSU
 
 Four additional Ensinger packs contribute 36 claims for PPS, glass-filled PBT,
