@@ -8737,3 +8737,34 @@ flash-temperature closures remain outside this implementation.
 `SlidingPair::step_collinear_candidate` advances relative motion on one declared fixed tangent axis while retaining common transverse motion. It refuses transverse relative velocity/acceleration. Each sliding segment solves the original source/enthalpy feedback at midpoint slip with a bounded safeguarded secant/bisection solve of the reduced impulse. A stop is localized before the original static-capacity test admits sticking or reversal. Actual traction times sliding distance supplies friction heat; numerical kinetic loss is never deposited as heat. All segments, body momenta, original slip/work histories and finite caloric stores publish atomically after independent local and cumulative momentum/energy gates.
 
 Constant held Coulomb coefficients recover analytic stopping/reversal. Endpoint temperature/speed-dependent coefficients still require time refinement; a sign bracket proves neither uniqueness nor a continuous first-event theorem for arbitrary nonmonotone curves. Thermal weakening within an initially stuck segment is not separately localized. G0/G1/G3 tests use source-resolved masses and verify complete conversion of relative kinetic energy at a stop, same-call forced reversal, independent finite-temperature feedback, static/common transverse force work, and late-refusal rollback. The existing general planar endpoint integrator remains available.
+
+
+## Finite caloric feedback for retained partial-slip contact
+
+`tribothermal::partial_slip` closes the original loaded two-region contact
+history against the original finite enthalpy cells. Its immutable, explicitly
+declared affine stiffness `k(T_a,T_b)` remains positive throughout its admitted
+temperature rectangle. The model identity is an input; it does not establish
+measured or source-derived contact stiffness. The original caloric objects and
+transport laws retain their source domains.
+
+For both native regions, `psi = sum(k z^2/2)`, each surface entropy contribution
+is `s_i = -partial psi/partial T_i`, and contact internal energy is
+`U = psi + sum(T_i s_i)`. Each cell receives its declared share of physical
+microslip heat plus reversible exchange `-T_i,new * delta s_i`. Parameter work
+and backward-Euler numerical loss are never relabeled as heat. Native contact
+work, cell residuals, thermal balance, and the combined balance
+`delta H + delta U + D_numerical - W_wrench - Q_external = 0` pass independent
+gates before the coupled candidate can publish. Retained strains, slip
+branches, frame transport, source/caloric object identity, and the physical
+clock continue together; late failures and cancellation publish neither owner.
+
+This rung holds normal patch/load and Coulomb coefficients fixed and uses an
+explicit constant physical-heat partition. It does not claim normal work,
+expansion, wear, flash temperature, sourced stiffness admission, Euler-body
+integration, total entropy production, uniqueness, or unconditional convergence.
+Endpoint coupling is first order and needs independent timestep refinement.
+Six focused integration references cover reversible elastic cooling, stationary
+loaded heating, analytical Jenkins heat/numerical-loss separation, unequal
+surface temperatures with conduction and frame transport, and domain,
+rollback, cancellation and deterministic replay behavior.

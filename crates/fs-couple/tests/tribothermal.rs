@@ -609,3 +609,6 @@ fn final_cancellation_source_domain_and_trial_budget_leave_both_histories_unchan
     assert_eq!(contact.accumulated_distance_m(), 0.0);
     assert_eq!(contact.work().dissipated_work_j(), 0.0);
 }
+
+#[path = "tribothermal/partial_slip.rs"]
+mod partial_slip;

@@ -467,3 +467,6 @@ impl<'a> MaterialSlidingContact<'a> {
         })
     }
 }
+
+/// Finite caloric and entropy feedback for loaded native partial-slip history.
+pub mod partial_slip;
