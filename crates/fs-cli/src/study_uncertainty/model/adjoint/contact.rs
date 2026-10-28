@@ -55,6 +55,11 @@ fn control_row<'a>(report: &'a J, entity: &str) -> Result<&'a J> {
     {
         return Err(invalid("joint-state calibration needs an unmapped card-backed unit resistance control"));
     }
+    if identity == "interface" && report.f64_field("state_index") == Some(0.0)
+        && row.f64_field("dtemperature_dresistance_multiplier_k") != Some(0.0)
+    {
+        return Err(invalid("an initial sampled peak cannot have a future contact derivative"));
+    }
     Ok(row)
 }
 
@@ -90,6 +95,24 @@ pub(super) fn convert(model: &Model, sample: &Sample, report: &J, coefficients: 
         let property = resolved.properties.iter().find(|p|p.property==fs_project::CONTACT_RESISTANCE_PROPERTY)
             .ok_or_else(|| invalid("missing calibrated resistance property"))?;
         let card = library.interface(&binding.card).ok_or_else(|| invalid("missing calibrated interface card"))?;
+        let row = control_row(report, &parameter.entity)?;
+        if row.str_field("interface_card") != Some(binding.card.as_str()) {
+            return Err(invalid("joint-state calibration contact card differs from its sampled source"));
+        }
+        if report.str_field("output") == Some("temperature-sampled-peak-material-adjoint")
+            && report.f64_field("state_index") == Some(0.0)
+        {
+            // The declared initial temperature/enthalpy is independent of all
+            // future contact work. Reproduce the sampled primal card binding,
+            // but do not require dR/dx at a source knot for an identically zero
+            // composition. The full trajectory still had to admit this source.
+            if coefficients[i] != 0.0 || !property.value_lo.is_finite()
+                || property.value_lo <= 0.0 || property.value_lo.to_bits() != property.value_hi.to_bits()
+            {
+                return Err(invalid("initial contact peak lost its zero coefficient or original resistance"));
+            }
+            continue;
+        }
         let selection = match binding.claim.as_deref() {
             Some(pin) => ClaimSelection::Pinned(ClaimId(ContentHash::from_hex(pin)
                 .ok_or_else(|| invalid("invalid interface claim pin"))?)),
@@ -103,10 +126,6 @@ pub(super) fn convert(model: &Model, sample: &Sample, report: &J, coefficients: 
             || response.resistance.to_bits() != property.value_lo.to_bits()
             || property.value_lo.to_bits() != property.value_hi.to_bits()
         { return Err(invalid("joint-state derivative does not reproduce its nominal resistance and source")); }
-        let row = control_row(report, &parameter.entity)?;
-        if row.str_field("interface_card") != Some(binding.card.as_str()) {
-            return Err(invalid("joint-state calibration contact card differs from its sampled source"));
-        }
         // dT/dx = dT/ds|_{R -> sR,s=1} * (dR/dx)/R.
         coefficients[i] *= response.derivative / response.resistance;
         if !coefficients[i].is_finite() { return Err(invalid("joint-state thermal derivative is nonfinite")); }

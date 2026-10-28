@@ -20,7 +20,7 @@ mod adjoint;
 #[path = "model/prepared.rs"]
 mod prepared;
 #[path = "model/peak.rs"]
-mod peak;
+pub(super) mod peak;
 use crate::json_read::JsonValue as J;
 use crate::{
     CardPackKind, CardPackSet, GeometryImportLimits, RawCardPack, RawGeometryLibrary,

@@ -94,27 +94,11 @@ fn observe(model: &Model, ledger: &Ledger, sample: Sample) -> Result<Trial> {
         return Err(invalid("design observation belongs to another native run"));
     }
     let (temperature_k, time_s, state) = if transient(model) {
-        let time = receipt.get("transient").ok_or_else(|| invalid("missing native trajectory"))?;
-        let peak = time.get("sampled_peak").ok_or_else(|| invalid("native forward trajectory has no sampled-peak observation"))?;
         let region = &model.bound.base().requirements.as_ref().expect("bound requirement")[0].region;
-        let steps = integer(time, "fine_steps")?;
-        let samples = integer(peak, "samples")?;
-        let state = integer(peak, "state")?;
-        let horizon = time.f64_field("final_time_s").filter(|v| v.is_finite() && *v > 0.0)
-            .ok_or_else(|| invalid("invalid retained trajectory horizon"))?;
-        let at = peak.f64_field("time_s").filter(|v| v.is_finite() && *v >= 0.0 && *v <= horizon)
-            .ok_or_else(|| invalid("invalid retained peak time"))?;
-        let value = peak.f64_field("value_k").filter(|v| v.is_finite() && *v >= 0.0)
-            .ok_or_else(|| invalid("invalid retained peak temperature"))?;
-        if time.str_field("status") != Some("completed")
-            || peak.str_field("region") != Some(region.as_str())
-            || peak.get("includes_initial") != Some(&J::Bool(true))
-            || steps.checked_add(1) != Some(samples) || state >= samples
-            || (state == 0) != (at == 0.0) || value < sample.value_k
-        {
-            return Err(invalid("sampled peak does not cover this candidate's full fine trajectory and requirement region"));
-        }
-        (value, Some(at), Some(state))
+        let peak = super::model::peak::selection(
+            &receipt, &sample.run, region, sample.value_k,
+        ).map_err(invalid)?;
+        (peak.value_k, Some(peak.time_s), Some(peak.state))
     } else {
         (sample.value_k, None, None)
     };

@@ -3,11 +3,13 @@
 use super::*;
 use fs_project::{
     ConductionTransient, TransientEnthalpy, TransientEnthalpyKnot,
-    TransientInitialTemperature, TransientRegionCapacity, TransientRegionEnthalpy, spec::dims,
+    TransientInitialTemperature, TransientPowerStep, TransientRegionCapacity,
+    TransientRegionEnthalpy, TransientRegionPower, spec::dims,
 };
 use fs_qty::QtyAny;
 
 const FINAL_MATERIAL: &str = "temperature-final-material-adjoint";
+const PEAK_MATERIAL: &str = "temperature-sampled-peak-material-adjoint";
 
 fn fixture(enthalpy: bool) -> Fixture {
     let fixture = Fixture::new();
@@ -60,6 +62,47 @@ fn fixture(enthalpy: bool) -> Fixture {
 
 fn controlled() -> String {
     SOURCE.replace(":version 1", ":version 3 :mean-control (nominal-adjoint :max-solves 1)")
+}
+
+fn peak_fixture(enthalpy: bool, initial_peak: bool) -> Fixture {
+    let fixture = fixture(enthalpy);
+    let path = fixture.inputs.join("contact.fsim");
+    let mut project = fs_project::parse_sexpr(&std::fs::read_to_string(&path).unwrap())
+        .unwrap().spec;
+    let time = project.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .transient.as_mut().unwrap();
+    if initial_peak {
+        time.initial_temperature = TransientInitialTemperature::Uniform(
+            QtyAny::new(330.0, dims::TEMPERATURE));
+        if let Some(storage) = &mut time.enthalpy {
+            // The shared fixture's sensible chart is h = 5 (T - 293.15).
+            for material in &mut storage.materials {
+                material.initial_specific_enthalpy.value = 5.0 * (330.0 - 293.15);
+            }
+        }
+    } else {
+        // A complete ordinary workload heats the joint, then lets it cool.
+        // Its absolute watts override the sampled static power coordinate.
+        time.power_schedules = vec![TransientRegionPower {
+            region: "hot".into(), source: "synthetic interior-peak contact fixture".into(),
+            steps: [(0.5, 40.0), (2.0, 0.0)].into_iter().map(|(until, watts)|
+                TransientPowerStep { until: QtyAny::new(until, dims::TIME),
+                    watts: QtyAny::new(watts, dims::POWER) }).collect(),
+        }];
+    }
+    std::fs::write(path, fs_project::print_sexpr(&project).unwrap()).unwrap();
+    fixture
+}
+
+fn calibration_receipt(model: &Model, ledger: &Ledger, point: &[f64]) -> (Sample, J) {
+    let gate = CancelGate::new_clock_free();
+    let sample = model.sample_nominal_adjoint(ledger, &gate, point, 120.0).unwrap().unwrap();
+    let sealed = crate::solve::load_completed_run(ledger, &sample.run).unwrap();
+    let hash = sealed.stages.iter().find(|row| row.0 == "conduction")
+        .and_then(|row| ContentHash::from_hex(&row.2)).unwrap();
+    let bytes = ledger.get_artifact(&hash).unwrap().unwrap();
+    let receipt = J::parse(std::str::from_utf8(&bytes).unwrap()).unwrap();
+    (sample, receipt)
 }
 
 #[test]
@@ -228,6 +271,13 @@ fn g0_peak_contact_rows_admit_the_selected_prefix_including_initial_state() {
         for (state, value) in [(0, 0.0), (3, 0.4)] {
             let source = format!(r#"{{"schema":"{schema}","output":"temperature-sampled-peak-material-adjoint","state_index":{state},"material_controls":{{"control_steps":{state},"units":"K","parameter_scope":"constant-through-selected-trajectory-independent-regional-effective-conductivity-and-named-matching-resistance-multipliers","contact_interfaces":[{{"interface":"joint","interface_card":"card","mapped":false,"face_pairs":2,"reference_value":1,"log_reference_value":0,"dtemperature_dresistance_multiplier_k":{value}}}]}}}}"#);
             assert_eq!(transient_coefficient(&J::parse(&source).unwrap(), "joint").unwrap(), value);
+            if state == 0 {
+                let nonzero = source.replace("\"dtemperature_dresistance_multiplier_k\":0",
+                    "\"dtemperature_dresistance_multiplier_k\":1");
+                assert!(transient_coefficient(&J::parse(&nonzero).unwrap(), "joint").is_err());
+                let final_state = source.replace("temperature-sampled-peak-material-adjoint", FINAL_MATERIAL);
+                assert!(transient_coefficient(&J::parse(&final_state).unwrap(), "joint").is_err());
+            }
             for changed in [
                 source.replace("temperature-sampled-peak-material-adjoint", "temperature-sampled-peak-adjoint"),
                 source.replace(&format!("\"control_steps\":{state}"), "\"control_steps\":8"),
@@ -266,5 +316,122 @@ fn g1_g3_peak_contact_calibration_retains_the_original_sampled_card_chain_rule()
         let difference = (high.value_k - low.value_k) / 200.0;
         assert!((gradient - difference).abs() <= 5e-4 * difference.abs().max(1e-9),
             "enthalpy={enthalpy}: peak contact coefficient {gradient:e}, forward FD {difference:e}");
+    }
+}
+
+#[test]
+fn g1_g3_g5_contact_peak_calibration_uses_the_interior_prefix_and_resumes() {
+    for enthalpy in [false, true] {
+        let f = peak_fixture(enthalpy, false);
+        let raw_source = SOURCE.replace("\"temperature-max\"", "\"temperature-peak\"");
+        let source = raw_source.replace(":version 1",
+            ":version 3 :mean-control (nominal-adjoint :max-solves 1)");
+        let (raw, raw_path) = f.run(&raw_source, "raw-contact-peak", crate::exit::SUCCESS);
+        let (full, full_path) = f.run(&source, "contact-peak", crate::exit::SUCCESS);
+        let raw = Fixture::report(&raw, &raw_path);
+        let expected = Fixture::report(&full, &full_path);
+        assert_eq!(expected.get("observations"), raw.get("observations"));
+        assert_eq!(expected.get("statistics"), raw.get("statistics"));
+        let control = expected.get("mean_control").unwrap();
+        assert_eq!(control.f64_field("probe_solves_completed"), Some(1.0));
+        let gradient: Vec<_> = control.get("gradient").unwrap().as_array().unwrap()
+            .iter().map(|value| value.as_f64().unwrap()).collect();
+        assert!(gradient[0] < 0.0);
+        assert_eq!(gradient[1], 0.0, "the declared workload overrides static power");
+        let model = Model::load(&f.inputs.join("contact-peak.fsim")).unwrap();
+        let ledger = Ledger::open(full_path.to_str().unwrap()).unwrap();
+        let (nominal, receipt) = calibration_receipt(&model, &ledger, &[900000.0, 5.0]);
+        let time = receipt.get("transient").unwrap();
+        let peak = time.get("sampled_peak").unwrap();
+        let adjoint = time.get("adjoint").unwrap();
+        let state = peak.f64_field("state").unwrap();
+        let steps = time.f64_field("fine_steps").unwrap();
+        assert!(state > 0.0 && state < steps, "the pulse must select an interior state");
+        assert!(nominal.value_k > time.get("temporal_error").unwrap()
+            .f64_field("fine_final_k").unwrap() + 1e-4);
+        assert_eq!(adjoint.str_field("output"), Some(PEAK_MATERIAL));
+        assert_eq!(adjoint.f64_field("state_index"), Some(state));
+        assert_eq!(adjoint.f64_field("max_reverse_steps"), Some(steps));
+        assert_eq!(adjoint.get("material_controls").unwrap().f64_field("control_steps"), Some(state));
+        assert_eq!(model.nominal_calibration(&ledger, &nominal).unwrap().gradient, gradient);
+        let gate = CancelGate::new_clock_free();
+        let low = model.sample(&ledger, &gate, &[899900.0, 5.0], 120.0).unwrap().unwrap();
+        let high = model.sample(&ledger, &gate, &[900100.0, 5.0], 120.0).unwrap().unwrap();
+        let finite_difference = (high.value_k - low.value_k) / 200.0;
+        assert!((gradient[0] - finite_difference).abs()
+            <= 5e-4 * finite_difference.abs().max(1e-9),
+            "enthalpy={enthalpy}: peak adjoint={} FD={finite_difference}", gradient[0]);
+        if enthalpy {
+            let kink = source.replace("700000Pa", "1100000Pa").replace("1100000Pa)", "1300000Pa)");
+            let (failed, failed_path) = f.run(&kink, "interior-contact-peak-knot", crate::exit::REFUSED);
+            let failed = Fixture::report(&failed, &failed_path);
+            assert!(failed.get("observations").unwrap().as_array().unwrap().is_empty());
+            assert!(failed.str_field("failure").unwrap().contains("unequal-slope"));
+        }
+        if !enthalpy {
+            let path = f.inputs.join("contact-peak-split.fsim");
+            std::fs::write(&path, &source).unwrap();
+            let split = f.root.join("contact-peak-split.db");
+            let prefix = crate::study::study_path(&path, &split, Some("1"), crate::OutputMode::Json);
+            assert_eq!(prefix.exit_code, crate::exit::BUDGET, "{}", prefix.stderr);
+            let prefix = J::parse(&prefix.stdout).unwrap();
+            assert!(Fixture::report(&prefix, &split).get("observations").unwrap()
+                .as_array().unwrap().is_empty());
+            std::fs::rename(&f.inputs, f.root.join("retained-contact-peak-inputs")).unwrap();
+            let resumed = crate::study::resume_path(prefix.str_field("run").unwrap(),
+                &split, None, crate::OutputMode::Json);
+            assert_eq!(resumed.exit_code, crate::exit::SUCCESS, "{}", resumed.stderr);
+            let resumed = Fixture::report(&J::parse(&resumed.stdout).unwrap(), &split);
+            assert_eq!(resumed.get("mean_control"), expected.get("mean_control"));
+            assert_eq!(resumed.get("observations"), expected.get("observations"));
+            assert_eq!(resumed.get("statistics"), expected.get("statistics"));
+        }
+    }
+}
+
+#[test]
+fn g1_g4_initial_contact_peak_has_zero_future_controls_with_valid_source_bindings() {
+    for enthalpy in [false, true] {
+        let f = peak_fixture(enthalpy, true);
+        let source = controlled().replace("\"temperature-max\"", "\"temperature-peak\"");
+        let (full, path) = f.run(&source, "initial-contact-peak", crate::exit::SUCCESS);
+        let report = Fixture::report(&full, &path);
+        let gradient: Vec<_> = report.get("mean_control").unwrap().get("gradient").unwrap()
+            .as_array().unwrap().iter().map(|value| value.as_f64().unwrap()).collect();
+        assert_eq!(gradient, [0.0, 0.0]);
+        let model = Model::load(&f.inputs.join("initial-contact-peak.fsim")).unwrap();
+        let ledger = Ledger::open(path.to_str().unwrap()).unwrap();
+        let (nominal, receipt) = calibration_receipt(&model, &ledger, &[900000.0, 5.0]);
+        assert!((nominal.value_k - 330.0).abs() < 1e-10);
+        let time = receipt.get("transient").unwrap();
+        let adjoint = time.get("adjoint").unwrap();
+        assert_eq!(time.get("sampled_peak").unwrap().f64_field("state"), Some(0.0));
+        assert_eq!(adjoint.str_field("output"), Some(PEAK_MATERIAL));
+        assert_eq!(adjoint.f64_field("state_index"), Some(0.0));
+        assert_eq!(adjoint.get("material_controls").unwrap().f64_field("control_steps"), Some(0.0));
+        assert_eq!(transient_coefficient(adjoint, "cold-hot-joint").unwrap(), 0.0);
+        assert_eq!(model.nominal_calibration(&ledger, &nominal).unwrap().gradient, gradient);
+        let mut nonzero = [1.0, 0.0];
+        assert!(convert(&model, &nominal, adjoint, &mut nonzero).is_err(),
+            "initial peak must not hide a nonzero composed coefficient");
+        let mut different_card = adjoint.clone();
+        let J::Object(fields) = &mut different_card else { panic!("native adjoint object"); };
+        let J::Object(controls) = &mut fields.iter_mut().find(|row| row.0 == "material_controls").unwrap().1
+            else { panic!("native material controls"); };
+        let J::Array(rows) = &mut controls.iter_mut().find(|row| row.0 == "contact_interfaces").unwrap().1
+            else { panic!("native contact controls"); };
+        let J::Object(row) = rows.iter_mut().find(|row| row.str_field("interface") == Some("cold-hot-joint")).unwrap()
+            else { panic!("native contact row"); };
+        row.iter_mut().find(|field| field.0 == "interface_card").unwrap().1 = J::Str("different-source".into());
+        assert!(convert(&model, &nominal, &different_card, &mut [0.0, 0.0]).is_err(),
+            "zero influence must retain the sampled card identity");
+        {
+            let kink = source.replace("700000Pa", "1100000Pa").replace("1100000Pa)", "1300000Pa)");
+            let (at_knot, knot_path) = f.run(&kink, "initial-contact-peak-knot", crate::exit::SUCCESS);
+            let at_knot = Fixture::report(&at_knot, &knot_path);
+            assert_eq!(at_knot.get("mean_control").unwrap().get("gradient"),
+                report.get("mean_control").unwrap().get("gradient"));
+            assert_eq!(at_knot.get("observations").unwrap().as_array().unwrap().len(), 4);
+        }
     }
 }

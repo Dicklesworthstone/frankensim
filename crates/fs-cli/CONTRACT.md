@@ -1149,6 +1149,10 @@ is always the lowest-speed observed feasible project. Nonmonotone observations,
 failed native solves and exhausted budgets keep their explicit outcomes.
 Steady and transient decisions use the same final-temperature and
 fine-grid-sampled-peak rules as power sizing, including initial overheating.
+Transient sizing, probability observations and nominal calibration share one
+peak reader. Every operating case binds its own sealed child, requirement
+region, complete fine history and verified final temperature before its peak
+can establish feasibility.
 The distinct `native-cooling-fan-design-v1` producer binds recovery to the
 original fan objective and reports `fan_speed_ratio`, `fan_bank` and
 `bracket_width_ratio`. No minimum electrical power/noise, global monotonicity,
@@ -1180,6 +1184,9 @@ or second trajectory is needed. `temperature-max` retains its final-state
 meaning. Both use the base project's unchanged at-most `temperature-max` limit
 minus margin. A steady base, missing/incomplete peak, wrong run/region or
 inconsistent peak endpoint refuses instead of substituting the final value.
+Observation and calibration share one checked selection, binding the earliest
+maximizing fine state and the complete retained history to the verified final
+temperature. A missing, reordered or contradictory endpoint refuses.
 Monte Carlo, replicated QMC/LHS, Sobol sensitivity, Bernoulli compliance and
 coordinate-secant mean controls use the selected observable through the same
 sampling and retained recovery paths. Nominal-adjoint mean controls request the
@@ -1189,7 +1196,11 @@ active branch may be nonunique; its tie count and branch scope are explicit.
 These coefficients are frozen before independent probability observations and
 serve only as centered mean controls, without claiming a unique maximum
 derivative. Existing material and boundary chain rules use the genuine native
-coefficients. Raw temperatures, probabilities and compliance decisions remain
+coefficients. At an initial peak, future contact influence must be exactly zero.
+The adapter still reproduces the sampled interface, card and resistance before
+returning zero without requesting a source slope at a valid card knot. A nonempty
+reverse prefix retains ordinary source-slope admission.
+Raw temperatures, probabilities and compliance decisions remain
 unchanged. Reports name the observation explicitly. Peak statistics remain
 Estimated: neither the final-field error budget nor a sampled maximum supplies
 a continuous-time or continuum upper bound.

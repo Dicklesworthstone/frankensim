@@ -123,7 +123,10 @@ original initial state and all accepted fine-grid states. An early hot state
 therefore remains a failing numerical event even if the body cools below the
 limit by the final timestep. `temperature-max` continues to select the final
 state. The report names the selected observation, and either mode uses the
-original requirement limit minus margin.
+original requirement limit minus margin. Fan-speed and delivered-power sizing
+use the same checked peak selection for every operating case. Observation,
+calibration and sizing all require the complete accepted fine history and its
+matching final observation.
 
 Peak observations also work with replicated QMC/LHS, Sobol sensitivity,
 version-2 probability decisions and version-3 frozen mean controls. The
@@ -139,7 +142,10 @@ prefix, then freezes the coefficients before probability sampling. A tied
 maximum uses the native deterministic active branch as a centered mean
 control, without claiming a unique maximum derivative. Raw temperatures and
 probability/compliance statistics are unchanged. Resume reuses the retained
-calibration and trajectories. A steady base or missing/mismatched peak evidence
+calibration and trajectories. An initial-state peak has zero future contact
+influence: calibration still validates the sampled card and resistance, but
+needs no source slope at a valid contact-card knot. Later peaks retain the
+ordinary source-slope checks. A steady base or missing/mismatched peak evidence
 refuses. The peak is sampled in time and remains an estimate, with no bound
 between samples.
 
