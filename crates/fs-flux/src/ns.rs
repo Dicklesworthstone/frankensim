@@ -23,6 +23,8 @@ mod sparse;
 pub mod adjoint;
 /// Checked steady velocity/total-traction boundary partition.
 pub mod boundary;
+/// Consistent constitutive and convecting-velocity residual derivatives.
+pub mod linearization;
 
 fn positive_viscosity(nu: f64) -> f64 {
     assert!(

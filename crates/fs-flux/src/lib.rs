@@ -62,6 +62,10 @@ pub use ns::boundary::{
     StokesAssembly, StokesBoundary, StokesBoundaryError, StokesPressureReference, StokesSolution,
 };
 #[cfg(feature = "continuum")]
+pub use ns::linearization::{
+    FluxLinearizationError, FluxRheologyLinearization, FluxViscosityTangent,
+};
+#[cfg(feature = "continuum")]
 pub use ns::{FluxParams, FluxRheologyError, FluxRheologyStep, FluxSolution, FluxSystem};
 #[cfg(feature = "continuum")]
 pub use reduced_aero::{

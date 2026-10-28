@@ -122,8 +122,9 @@ adjoints.
   These APIs retain constant reference density and kinematic pressure; a
   dynamic material viscosity is divided by that SAME density throughout.
   They do not solve variable-density momentum, advect material interfaces,
-  supply a thermal field, or add viscoelastic memory. The nonlinear adjoint
-  of the constitutive update is not provided by the linear transpose solve.
+  supply a thermal field, or add viscoelastic memory. For a smooth supplied
+  constitutive tangent, `linearize_rheology` below supplies the state Jacobian
+  needed by the checked transpose solve.
 - `FluxSystem::bdf1_rheology_step` advances generalized-Newtonian flow with
   viscosity, symmetric viscous traction, and convection at the new time level.
   Its BDF1 mass load always uses the immutable previous velocity. The law,
@@ -369,8 +370,9 @@ geometry and must never be labelled as volts or discharge reach.
   ledgered in invariants 2 and 4.
 - Mesh-independent iteration counts, multilevel saddle preconditioning and
   production-scale throughput are not established by the sparse finite-element
-  fixtures. Full nonlinear constitutive/convection Jacobians and time-dependent
-  adjoint checkpointing are not supplied by the assembled linear adjoint API.
+  fixtures. `linearize_rheology` supplies constitutive/convection state
+  Jacobians for prescribed-velocity boundaries. Mixed-boundary nonlinear
+  Jacobians and time-dependent adjoint checkpointing remain outside that API.
 - Nonlinear/backflow and transient open-boundary conditions. Steady linear
   Stokes velocity/total-traction boundaries are provided by the API below.
 - The affine-triangle GCL receipt does not remap fields, assemble or
@@ -563,3 +565,42 @@ material coefficients require other formulations.
 
 Reference: E. W. Washburn, Physical Review 17, 273 (1921),
 https://doi.org/10.1103/PhysRev.17.273.
+
+## Consistent generalized-Newtonian residual linearization
+
+`FluxSystem::linearize_rheology` supplies the sparse state Jacobian and actual
+residual of steady or BDF1 generalized-Newtonian flow on the existing 2D BDM1/P0
+mesh with prescribed velocity on every boundary edge. The pure constitutive
+callback returns kinematic viscosity and its analytic derivative with respect
+to `gamma = sqrt(2 D:D)` at the same quadrature point. Reference density,
+previous velocity, force, boundary data, temperature and composition stay fixed.
+The callback may be queried more than once per point; it must not mutate its law.
+
+The implementation adds local sparse derivatives to the actual frozen primal
+operator: cell stress, both one-sided interface viscosities, harmonic traction
+weights and penalties, and viscosity-dependent weak boundary loads. Optional
+convection differentiates both transported and advecting velocity. Strong normal
+constraints, pressure pin, incompressibility and BDF1 history retain the primal
+rows. No dense matrix or one-global-assembly-per-column differencing is used.
+For interface delta_s=nu_s/h_s, q=delta_0 delta_1/(delta_0+delta_1), the traction
+coefficient is h_s q and dq/dnu_s=weight_s^2/h_s; this also differentiates the
+penalty 2 sigma q without multiplying disparate viscosities together.
+
+The returned Jacobian can be passed to `solve_adjoint_checked`:
+`dJ/dtheta = J_theta - lambda^T R_theta`. Parameter-dependent external fields
+and loads still belong in R_theta. The reported `nonsmooth_upwind_points` counts
+zero normal-flux sites with unequal traces. At these sites the >=0 active branch
+is a semismooth linearization, not a unique classical derivative; smooth-gradient
+claims must exclude switches or establish that admissible directions cannot
+cross them. Invalid state/tangent/load data and nonfinite assembly refuse before
+publication. A smooth radial viscosity must supply zero derivative at zero strain.
+
+Four G1/G3 regressions in `tests/rheology_linearization.rs` compare Jacobian
+products against independently perturbed primal residuals for shear-thinning
+and shear-thickening fields with a 100:1 coefficient contrast, with and without
+convection. They check a nonlinear BDF1 viscosity adjoint against independent
+nonlinear re-solves, expose the frozen-matrix gradient defect, preserve the
+Newtonian operator bits, and exercise zero-strain, upwind-switch and refusal
+semantics. This supplies a fixed-mesh state derivative; mesh/shape derivatives,
+material-temperature evolution, mixed open-boundary Jacobians and time-history
+checkpointing require their own operators and evidence.
