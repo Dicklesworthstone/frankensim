@@ -889,15 +889,102 @@ impl BoundaryGrid3 {
         core::array::from_fn(|axis| (momentum[axis] + 0.5 * force[axis]) / rho)
     }
 
-    /// Install a per-cell body force (lattice units) sampled at every fluid
-    /// cell, ADDED to the uniform force; solid cells are not sampled. Used
-    /// for Boussinesq buoyancy. Replaces any previous field.
+    /// Total held body-force density (uniform plus per-cell, in lattice
+    /// units) at a fluid cell. Physical momentum density is the first
+    /// population moment plus half this force.
+    ///
+    /// # Panics
+    /// Panics for an out-of-range or solid cell.
+    #[must_use]
+    pub fn force_density(&self, x: usize, y: usize, z: usize) -> [f64; 3] {
+        assert!(!self.is_solid(x, y, z), "solid cells have no fluid force");
+        let (tile, lane) = self.addr(x, y, z);
+        cell_force(self.force, self.force_field.as_deref(), tile, lane)
+    }
+
+    /// Select the initial per-cell body-force frame (lattice units), ADDED
+    /// to the uniform force. Samples every fluid cell, skips solids, and
+    /// replaces any previous field without changing stored populations.
+    ///
+    /// This initializer deliberately changes the interpreted physical
+    /// momentum by half the change in force. When replacing a held force
+    /// on an evolved state, use [`Self::rebind_force_field`] to preserve
+    /// physical momentum and stress instead.
     ///
     /// # Panics
     /// If the grid has an open velocity/pressure face (whose regularized
     /// reconstruction assumes a force-free fluid), the collision model does
-    /// not admit body forcing, or a sample is non-finite.
-    pub fn set_force_field(&mut self, mut force: impl FnMut([usize; 3]) -> [f64; 3]) {
+    /// not admit body forcing, or a sample or its sum with the uniform force
+    /// is non-finite. Refusal leaves the prior field and populations intact.
+    pub fn set_force_field(&mut self, force: impl FnMut([usize; 3]) -> [f64; 3]) {
+        self.force_field = Some(self.sample_force_field(force));
+    }
+
+    /// Replace a held per-cell body force without advancing time or adding
+    /// an impulse. The uniform force remains part of each cell's total force.
+    /// Use a zero field to switch off the per-cell contribution.
+    ///
+    /// Guo populations store a half-source shift: physical momentum is
+    /// `sum_q(f_q c_q) + F/2`. Rebinding applies `S(u, (F_old-F_new)/2)` at
+    /// the OLD force-corrected velocity. This preserves mass, physical
+    /// momentum, and the full force-corrected nonequilibrium stress, rather
+    /// than resetting the cell to equilibrium. It contributes no work.
+    /// The next step then applies the new force for one lattice time step.
+    ///
+    /// All samples and proposed populations are checked before publication.
+    /// The existing collision scratch holds the proposal, avoiding another
+    /// lattice-sized population allocation. Unchanged forces preserve the
+    /// corresponding population bits exactly; solids are never sampled.
+    ///
+    /// # Panics
+    /// The same field-admission failures as [`Self::set_force_field`], or
+    /// a changed cell with nonpositive/nonfinite density, nonfinite physical
+    /// velocity, or a nonfinite population-frame transform. Even a callback
+    /// panic or late-cell refusal leaves accepted populations and the held
+    /// force field intact.
+    pub fn rebind_force_field(&mut self, force: impl FnMut([usize; 3]) -> [f64; 3]) {
+        let field = self.sample_force_field(force);
+        for tile in 0..self.f[0].len() {
+            for lane in 0..TILE_CELLS {
+                let mut populations = core::array::from_fn(|q| self.f[q][tile].0[lane]);
+                if self.solid[tile] & (1u64 << lane) == 0 {
+                    let previous = cell_force(self.force, self.force_field.as_deref(), tile, lane);
+                    let next = cell_force(self.force, Some(&field), tile, lane);
+                    if previous != next {
+                        let [x, y, z] = self.coords(tile, lane);
+                        let (rho, momentum) = self.raw_moments(x, y, z);
+                        let velocity = core::array::from_fn(|axis| {
+                            (momentum[axis] + 0.5 * previous[axis]) / rho
+                        });
+                        assert!(
+                            velocity.iter().all(|value| value.is_finite()),
+                            "force rebinding requires finite physical velocity"
+                        );
+                        crate::thermal::forcing::reframe3(
+                            &mut populations,
+                            velocity,
+                            previous,
+                            next,
+                        );
+                        let density = populations.iter().sum::<f64>();
+                        assert!(
+                            populations.iter().all(|value| value.is_finite())
+                                && density.is_finite()
+                                && density > 0.0,
+                            "force rebinding produced an inadmissible population frame"
+                        );
+                    }
+                }
+                for (proposed, value) in self.post.iter_mut().zip(populations) {
+                    proposed[tile].0[lane] = value;
+                }
+            }
+        }
+        core::mem::swap(&mut self.f, &mut self.post);
+        self.force_field = Some(field);
+    }
+
+    fn sample_force_field(&self, mut force: impl FnMut([usize; 3]) -> [f64; 3]) -> Vec<[f64; 3]> {
         assert!(
             !Face3::ALL
                 .into_iter()
@@ -917,15 +1004,19 @@ impl BoundaryGrid3 {
                     }
                     let value = force([x, y, z]);
                     assert!(
-                        value.iter().all(|v| v.is_finite()),
-                        "per-cell force must be finite"
+                        value
+                            .iter()
+                            .zip(self.force)
+                            .all(|(local, uniform)| local.is_finite()
+                                && (local + uniform).is_finite()),
+                        "per-cell force and total force must be finite"
                     );
                     let (tile, lane) = self.addr(x, y, z);
                     field[tile * TILE_CELLS + lane] = value;
                 }
             }
         }
-        self.force_field = Some(field);
+        field
     }
 
     /// Population vector of a fluid cell, copied in D3Q19 direction order.

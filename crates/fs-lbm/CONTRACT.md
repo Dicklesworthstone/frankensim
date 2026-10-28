@@ -1910,13 +1910,28 @@ panic.
 
 Two-way Boussinesq coupling in a CLOSED enclosure (walls, or periodic
 lattice axes whose thermal faces are adiabatic — exact for solutions
-invariant along that axis). `BoundaryGrid3::set_force_field` installs a
-per-cell Guo force added to the uniform force for BGK, central moments, and
-reduced cumulants; open velocity/pressure faces still refuse this field.
-Without a field, the existing population arithmetic is unchanged. Each
-coupling sets the buoyancy
+invariant along that axis). `BoundaryGrid3::set_force_field` selects the
+initial per-cell Guo force frame, added to the uniform force, without changing
+stored populations. Its initial physical momentum therefore includes the
+selected half force. Evolved states instead use `rebind_force_field`: the
+existing Guo source transform preserves mass, physical momentum
+`sum(f_q c_q) + F/2`, and full force-corrected nonequilibrium stress at fixed
+physical velocity. Rebinding advances no time and adds no impulse or work;
+the next collision supplies one step of the new force. Zero per-cell force
+disables that contribution while retaining any declared uniform force.
+`force_density` exposes their total for physical-moment sampling.
+
+Both field APIs support BGK, central moments, and reduced cumulants and refuse
+open velocity/pressure faces. All fluid samples and total forces must be
+finite. Rebinding preflights every changed cell's physical velocity and new
+population frame in the existing collision scratch before publishing either
+populations or field; callback failure or late invalid-cell refusal leaves
+both accepted values intact. Solid cells are skipped and unchanged-force
+population bits are retained. No second population lattice is allocated.
+Without a field, the existing step arithmetic is unchanged. Each natural
+convection coupling rebinds the buoyancy
 `-beta (T - T_ref) g` in lattice units, advances `coupling_interval`
-pooled steps, projects the cell mass fluxes, and takes one implicit
+pooled steps, projects the physical cell mass fluxes including `F/2`, and takes one implicit
 energy step whose storage uses the fluid's volumetric heat capacity in
 every cell (solids get it as a PSEUDO capacity: it shapes the path, never
 the fixed point). Convergence is judged on the geometric extrapolation
@@ -1925,7 +1940,15 @@ until the sequence contracts), for the relative mass flux and for the
 temperature over its range. The answer is a fresh STEADY energy solve on
 the final fluxes; `coupling_residual_k` retains its distance from the last
 pseudo-time iterate. A lattice speed above `max_lattice_speed` refuses as
-`LatticeResolution`.
+`LatticeResolution`; this guard and the reported speed use the actual
+`u = (sum(f_q c_q) + F/2)/rho`, while flux projection retains `rho*u` over the
+reference density. These corrections advance `CHT_SEMANTICS_VERSION` to 3.
+
+`tests/boundary_forcing.rs` independently checks mass/momentum/full-stress
+invariance, force switch/reversal/off impulses for all three collision laws,
+finite-inertia wall balances on all three face normals, unchanged-force bits,
+and atomic field/frame refusal. The convection benchmark measurements below
+predate version 3 and have not been requalified after this correction.
 
 | Fixture | Reference | Measured |
 |---|---|---|

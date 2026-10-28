@@ -281,8 +281,9 @@ pub fn natural_convection(
         config.workers
     };
     let pool = TilePool::for_host(workers, 0);
-    let sample = |grid: &BoundaryGrid3, step: usize| -> Result<Vec<[f64; 3]>, ChtError> {
+    let sample = |grid: &BoundaryGrid3, step: usize| -> Result<(Vec<[f64; 3]>, f64), ChtError> {
         let mut velocities = vec![[0.0f64; 3]; domain.cell_count()];
+        let mut max_speed_squared = 0.0f64;
         for &c in &fluid_cells {
             let [x, y, z] = domain.coords(c);
             let mut m = [0.0f64; 4];
@@ -295,15 +296,34 @@ pub fn natural_convection(
             if !(m.iter().all(|v| v.is_finite()) && m[3] > 0.0) {
                 return Err(ChtError::FlowDiverged { step });
             }
-            velocities[c] = [m[0], m[1], m[2]];
+            // Projection consumes mass flux over reference density (rho0=1),
+            // while the low-Mach admission applies to physical velocity.
+            // Both must include the Guo half-source correction.
+            let force = grid.force_density(x, y, z);
+            let momentum = core::array::from_fn(|axis| m[axis] + 0.5 * force[axis]);
+            let velocity = momentum.map(|value| value / m[3]);
+            if !momentum
+                .iter()
+                .chain(&velocity)
+                .all(|value| value.is_finite())
+            {
+                return Err(ChtError::FlowDiverged { step });
+            }
+            max_speed_squared = max_speed_squared.max(
+                velocity
+                    .iter()
+                    .fold(0.0, |sum, value| value.mul_add(*value, sum)),
+            );
+            velocities[c] = momentum;
         }
-        Ok(velocities)
+        Ok((velocities, fs_math::det::sqrt(max_speed_squared)))
     };
     let mut steps = 0usize;
     let mut couplings = 0usize;
     let mut last_flux_change = f64::INFINITY;
     let mut last_temperature_change = f64::INFINITY;
     let mut lattice_momentum = vec![[0.0f64; 3]; domain.cell_count()];
+    let mut max_lattice_speed = 0.0f64;
     let mut remaining_flux_change = f64::INFINITY;
     let mut remaining_temperature_change = f64::INFINITY;
     // Geometric tail of a contracting sequence of per-coupling changes.
@@ -329,7 +349,7 @@ pub fn natural_convection(
                     - config.reference_temperature_k;
                 accel_per_k.map(|a| a * excess)
             };
-            grid.set_force_field(force);
+            grid.rebind_force_field(force);
             let batch = config.coupling_interval.min(config.max_steps - steps);
             for _ in 0..batch {
                 grid.step_pooled(parked, gate)
@@ -345,18 +365,15 @@ pub fn natural_convection(
                     })?;
                 steps += 1;
             }
-            let momentum = sample(&grid, steps)?;
-            let (mut diff, mut norm, mut speed) = (0.0f64, 0.0f64, 0.0f64);
+            let (momentum, speed) = sample(&grid, steps)?;
+            max_lattice_speed = speed;
+            let (mut diff, mut norm) = (0.0f64, 0.0f64);
             for (a, b) in momentum.iter().zip(&lattice_momentum) {
-                let mut s2 = 0.0;
                 for k in 0..3 {
                     diff = (a[k] - b[k]).mul_add(a[k] - b[k], diff);
                     norm = a[k].mul_add(a[k], norm);
-                    s2 = a[k].mul_add(a[k], s2);
                 }
-                speed = speed.max(s2);
             }
-            let speed = fs_math::det::sqrt(speed);
             if speed > config.max_lattice_speed {
                 return Err(ChtError::LatticeResolution {
                     tau: config.tau,
@@ -447,10 +464,6 @@ pub fn natural_convection(
         .iter()
         .zip(&temperature)
         .map(|(a, b)| (a - b).abs())
-        .fold(0.0, f64::max);
-    let max_lattice_speed = lattice_momentum
-        .iter()
-        .map(|m| fs_math::det::sqrt(m[0].mul_add(m[0], m[1].mul_add(m[1], m[2] * m[2]))))
         .fold(0.0, f64::max);
     Ok(NaturalConvection {
         field,
