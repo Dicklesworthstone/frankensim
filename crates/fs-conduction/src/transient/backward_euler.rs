@@ -23,6 +23,8 @@ mod radiation;
 pub use radiation::RadiationStepSolution;
 mod endpoint;
 pub use endpoint::EndpointEvaluation;
+mod enclosure;
+pub use enclosure::{EnclosureEndpointEvaluation, EnclosureStepSolution};
 
 use fs_exec::Cx;
 use fs_solver::{CheckedCgConfig, CheckedCgError, CsrOp, checked_cg, norm2};

@@ -107,6 +107,8 @@ impl BackwardEuler<'_> {
     /// No Krylov primal solve runs: the primal iteration count and its inner
     /// relative-residual field are zero. Those fields do not replace the
     /// independently checked absolute physical residual and energy gates.
+    /// A finite zero physical target is retained exactly and requires an
+    /// exactly zero free residual, including a fully prescribed endpoint.
     /// The returned owner borrows only this capacity engine, not the supplied
     /// candidate, boundary or law arrays.
     ///
@@ -124,8 +126,8 @@ impl BackwardEuler<'_> {
         dt_s: f64, config: StepConfig, residual_tolerance_j: f64, regions: &[&str],
     ) -> Result<StepLinearization<'a>, ConductionError> {
         poll(cx, 0)?;
-        if !residual_tolerance_j.is_finite() || residual_tolerance_j <= 0.0 {
-            return Err(invalid("retained endpoint needs a positive finite physical residual target in joules"));
+        if !residual_tolerance_j.is_finite() || residual_tolerance_j < 0.0 {
+            return Err(invalid("retained endpoint needs a nonnegative finite physical residual target in joules"));
         }
         let evaluation = self.evaluate_prescribed_endpoint(
             cx, problem, interfaces, old, candidate, dt_s, config, None,
