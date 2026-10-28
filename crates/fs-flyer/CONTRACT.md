@@ -50,6 +50,44 @@ the browser boundary remains in `fs-flyer-wasm`.
   checks exponential angular decay, its integrated angle and coupled translation,
   and a constant world-frame torque on an asymmetric rotating body (G0/G1).
 
+## Six-DOF rotor momentum and gyroscopic motion
+
+`spine::rotors::{RotorAssembly, RotorState, RotorTorques, step_held}` couples
+up to 64 independent axisymmetric rotors to the native six-DOF spine.
+`reduced_body` includes the whole assembly's mass and transverse/offset rotor
+inertia but excludes rotor axial spin inertia. Signed absolute axial momenta
+are `p = J (relative_spin + axis dot omega)`; `state_from_relative_spin`
+constructs them from physical relative speeds. This is the reaction-wheel
+reduction documented by Basilisk's `mrpSteering`, equations (2)--(6).
+
+Motor torque changes rotor momentum and produces equal/opposite carrier recoil
+without becoming external torque. Rotor aerodynamic torque changes both rotor
+momentum and total external torque. `loads.moment_nm` excludes those rotor
+aerodynamic torques, which the owner adds once. The native `fs-time` gyrostat
+map includes precession from all stored rotor momenta. Translation uses a
+world-force drift/kick/drift update, preserving its discrete orbital impulse.
+The endpoint state includes unwrapped relative rotor phases and absolute
+momenta; the receipt returns relative speeds, fixed-origin linear/angular
+impulse residuals, separate motor/external work, actual kinetic energies and
+the numerical work defect. No numerical defect is relabeled as dissipation.
+
+The successful path is allocation-free, O(rotors) plus at most five elementary
+gyrostat rotations, without a nonlinear solve. State, inertia, axes, loads,
+count and finite derived quantities are admitted before publication. G0/G1/G3
+tests in `tests/rotor_spine.rs` cover analytic motor recoil/phase/work,
+external aerodynamic braking, multiple-axis impulse balance, balanced
+counter-rotation and zero-rotor reduction, independent locked-inertia energy,
+gyroscopic response, second-order phase/work refinement, replay and refusal.
+The existing spine battery stays unchanged.
+
+This is second order for the declared held loads, fixed axes and constant
+inertia; coupled state-dependent loads need appropriate stage evaluation.
+Physical rotor inertia must not be inferred from reflected engine/gearbox
+shaft inertia. Gears, gimbals, imbalance, flexible rotors, changing mass and
+contact are outside this owner. No historical calibration, complete rotor
+checkpoint wire format or integration into the reduced longitudinal SimLoop
+is claimed by this additional six-DOF API.
+
 ## Canard hinge friction and stops
 
 `canardmech::step` solves one monotone scalar midpoint-velocity equation

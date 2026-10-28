@@ -16,6 +16,9 @@ use fs_blake3::hash_domain;
 use fs_ga::{Quat, So3, Vec3};
 use fs_time::lie::rigid_body_step;
 
+#[path = "spine/rotors.rs"]
+pub mod rotors;
+
 /// The fixed simulation tick rate [Hz] (plan §4.1).
 pub const TICK_HZ: f64 = 120.0;
 /// Admitted timestep domain [s].
