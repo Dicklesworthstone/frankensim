@@ -278,8 +278,9 @@ fn lbm3x_007_forced_rheology_recovers_physical_strain_and_viscosity() {
                             .sum();
                         // Hermite strain population and Guo half-source
                         // transform, independent of the direct tensor correction.
-                        populations[q] -= 3.0 * W3[q] * rho * tau * (quadratic - trace / 3.0)
-                            + 0.5 * W3[q] * source;
+                        populations[q] -=
+                            3.0 * W3[q] * rho * expected_tau * (quadratic - trace / 3.0)
+                                + 0.5 * W3[q] * source;
                     }
                     grid.f.fill(populations);
                     let stats = update_tau3(&mut grid, law);
@@ -296,6 +297,13 @@ fn lbm3x_007_forced_rheology_recovers_physical_strain_and_viscosity() {
                         }
                     }
                     assert_eq!((stats.floored, stats.capped), (0, 0));
+                    let applied = grid.tau.clone();
+                    let repeated = update_tau3(&mut grid, law);
+                    assert_eq!(
+                        grid.tau, applied,
+                        "unchanged stress must already satisfy the constitutive law"
+                    );
+                    assert_eq!(repeated.max_shear, stats.max_shear);
                 }
             }
         }

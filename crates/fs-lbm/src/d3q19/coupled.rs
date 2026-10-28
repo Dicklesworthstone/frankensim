@@ -29,7 +29,7 @@
 //! GOLDEN_POLICY four-quadrant ceremony, as in the 40p2 precedent).
 
 use super::{CollisionModel3, E3, OPP3, Q3, collide_cell3, equilibrium3};
-use crate::rheology::{Rheology, RheologyStats, TAU_CAP, TAU_FLOOR};
+use crate::rheology::{Rheology, RheologyStats};
 use crate::thermal::{ThermalForcingError, forcing::validate_external_forces};
 
 /// Flow-lattice sound speed squared (D3Q19).
@@ -289,10 +289,11 @@ pub(crate) fn force_corrected_shear_rate3(
 }
 
 /// Update every fluid cell's τ from its local shear rate under `law` —
-/// the SAME constitutive path, floor, cap, and ledger as the 2-D
+/// the SAME self-consistent constitutive solve, floor, cap, and ledger as the 2-D
 /// [`crate::rheology::update_tau`] (shared, not forked).
 #[must_use]
 pub fn update_tau3(grid: &mut PlatesGrid3, law: Rheology) -> RheologyStats {
+    let law = law.prepare();
     let mut stats = RheologyStats {
         floored: 0,
         capped: 0,
@@ -304,26 +305,14 @@ pub fn update_tau3(grid: &mut PlatesGrid3, law: Rheology) -> RheologyStats {
             for x in 0..grid.nx {
                 let i = grid.idx(x, y, z);
                 let (rho, u) = grid.moments3(i);
-                let gdot =
-                    force_corrected_shear_rate3(&grid.f[i], rho, u, grid.fext[i], grid.tau[i]);
-                let nu = law.viscosity(gdot);
-                assert!(
-                    nu.is_finite() && nu > 0.0,
-                    "apparent viscosity must be positive and finite"
-                );
-                let mut tau = nu / CS2_F + 0.5;
-                if tau < TAU_FLOOR {
-                    tau = TAU_FLOOR;
-                    stats.floored += 1;
-                }
-                if tau > TAU_CAP {
-                    tau = TAU_CAP;
-                    stats.capped += 1;
-                }
-                grid.tau[i] = tau;
-                stats.max_shear = stats.max_shear.max(gdot);
-                stats.tau_range.0 = stats.tau_range.0.min(tau);
-                stats.tau_range.1 = stats.tau_range.1.max(tau);
+                let numerator = force_corrected_shear_rate3(&grid.f[i], rho, u, grid.fext[i], 1.0);
+                let local = law.solve(numerator, grid.tau[i]);
+                grid.tau[i] = local.tau;
+                stats.floored += u32::from(local.floored);
+                stats.capped += u32::from(local.capped);
+                stats.max_shear = stats.max_shear.max(local.shear_rate);
+                stats.tau_range.0 = stats.tau_range.0.min(local.tau);
+                stats.tau_range.1 = stats.tau_range.1.max(local.tau);
             }
         }
     }
