@@ -1,5 +1,20 @@
 # fs-solid CONTRACT
 
+## Prepared finite-deformation reference geometry
+
+`hyper3::prepared::PreparedHyperTetProblem` retains admitted reference shape
+gradients and volumes while immutably borrowing the original mesh and material
+field. Repeated force, energy and tangent evaluations use the same native
+constitutive and assembly kernels; current displacement, positive Jacobian,
+material-domain and finite-response checks remain active. New interval dead
+loads are validated on every call and use the original reference volumes.
+Preparation takes O(elements) storage and removes repeated reference geometry
+construction; it does not change the P1 discretization or mitigate volumetric
+locking. The finite-solid dynamic adapter shares this preparation across
+candidate steps. G0/G1 checks cover changing finite stretches against closed-form
+Neo-Hookean energy/force/tangent, exact native assembly, new load admission,
+inversion, invalid dimensions, budgets and cancellation.
+
 ## Source-pack mechanical coupons and nonthermal dead loads
 
 `linear3::eigenstrain` admits explicit sorted unique dead nodal forces in

@@ -68,6 +68,9 @@ use crate::linear3::TetAssemblyBudget;
 /// Closed-boundary uniform follower pressure for the native finite-strain geometry.
 pub mod pressure;
 
+/// Immutable reference preparation for repeated finite-deformation evaluation.
+pub mod prepared;
+
 /// Newton / load-stepping controls.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HyperTetSettings {

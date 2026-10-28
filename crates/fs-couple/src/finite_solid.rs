@@ -7,6 +7,9 @@
 //! consistent tangents and stored energy; native generalized-alpha at rho_inf=1
 //! supplies implicit-midpoint motion. No constitutive law or integrator is
 //! duplicated here.
+//! Reference shape gradients and volumes are prepared once and shared across
+//! candidate steps. Current deformation and material admission still run for
+//! every trial state; changing interval loads are validated separately.
 //!
 //! This bounded path has fixed supports, held referential nodal/body loads,
 //! optional uniform pressure on the complete closed current boundary,
@@ -33,6 +36,7 @@ use fs_material::state_point::{
     ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point,
 };
 use fs_qty::Density;
+use fs_solid::hyper3::prepared::PreparedHyperTetProblem;
 use fs_solid::hyper3::pressure::ClosedTetPressureSurface;
 use fs_solid::hyper3::{HyperTetError, HyperTetProblem, HyperelasticLawField};
 use fs_solver::{FlexiblePreconditioner, SolveReport};
@@ -247,6 +251,7 @@ pub struct FiniteSolidStep {
 #[derive(Debug, Clone)]
 pub struct FiniteSolidBody<'a> {
     problem: HyperTetProblem<'a, FiniteSolidMaterial>,
+    prepared: Arc<PreparedHyperTetProblem<'a, FiniteSolidMaterial>>,
     mass: Arc<Csr>,
     free_mass: Arc<Csr>,
     free: Arc<[usize]>,
@@ -330,6 +335,7 @@ impl<'a> FiniteSolidBody<'a> {
         }
         let dofs = problem.nodes_m.len().checked_mul(3)
             .ok_or(FiniteSolidError::Invalid("DOF count overflow"))?;
+        let prepared = Arc::new(problem.prepare(cx)?);
         let densities: Vec<f64> = match problem.material {
             HyperelasticLawField::Uniform(material) =>
                 vec![material.reference_density_kg_m3(); problem.tetrahedra.len()],
@@ -372,9 +378,11 @@ impl<'a> FiniteSolidBody<'a> {
         if !reference_mass_kg.is_finite() || reference_mass_kg <= 0.0 {
             return Err(FiniteSolidError::Invalid("total reference mass is not representable"));
         }
-        problem.stored_energy_j(&u, cx)?;
+        prepared.stored_energy_j(&u, cx)?;
         if let Some(surface) = &pressure_surface { surface.volume_m3(&u, cx)?; }
-        let force = problem.external_force_n(cx)?;
+        let force = prepared.external_force_n(
+            problem.nodal_forces_n, problem.body_force_n_m3, cx,
+        )?;
         let q_free: Vec<f64> = free.iter().map(|&dof| u[dof]).collect();
         let v_free: Vec<f64> = free.iter().map(|&dof| v[dof]).collect();
         let forcing: Vec<f64> = free.iter().map(|&dof| force[dof]).collect();
@@ -385,7 +393,7 @@ impl<'a> FiniteSolidBody<'a> {
         // state and replay exactly, including the consistent initialization.
         let pressure = pressure_surface.as_deref().filter(|_| pressure_pa != 0.0)
             .map(|surface| (surface, pressure_pa));
-        let operator = DynamicOperator::new(&problem, &free_mass, &free, &fixed, pressure, cx);
+        let operator = DynamicOperator::new(&prepared, &free_mass, &free, &fixed, pressure, cx);
         let preconditioner = MassDiagonal { mass: &free_mass };
         let result = second_order_acceleration(
             &operator, &q_free, &v_free, &forcing, &preconditioner, controls.solve,
@@ -396,7 +404,7 @@ impl<'a> FiniteSolidBody<'a> {
         drop(operator);
         let state = SecondOrderState::new(time_s, &q_free, &v_free, &initial.value);
         let body = Self {
-            problem, mass: Arc::new(mass), free_mass, free, fixed,
+            problem, prepared, mass: Arc::new(mass), free_mass, free, fixed,
             pressure_surface, reference_mass_kg, initialization: initial.report, state,
         };
         body.kinetic_energy_j()?;
@@ -502,25 +510,13 @@ impl<'a> FiniteSolidBody<'a> {
         {
             return Err(FiniteSolidError::Invalid("invalid interval, controls or step budget"));
         }
-        // Reborrow into this interval: transient loads never acquire the source
-        // material's lifetime and are not retained in the accepted body.
-        let loading = HyperTetProblem {
-            nodes_m: self.problem.nodes_m,
-            tetrahedra: self.problem.tetrahedra,
-            material: self.problem.material,
-            prescribed_m: self.problem.prescribed_m,
-            nodal_forces_n,
-            body_force_n_m3,
-            budget: self.problem.budget,
-            settings: self.problem.settings,
-        };
-        let force = loading.external_force_n(cx)?;
+        let force = self.prepared.external_force_n(nodal_forces_n, body_force_n_m3, cx)?;
         let forcing: Vec<f64> = self.free.iter().map(|&dof| force[dof]).collect();
         let before_u = inflate(&self.state.q, &self.free, &self.fixed);
-        let strain_before_j = self.problem.stored_energy_j(&before_u, cx)?;
+        let strain_before_j = self.prepared.stored_energy_j(&before_u, cx)?;
         let kinetic_before_j = self.kinetic_energy_j()?;
         let operator = DynamicOperator::new(
-            &self.problem, &self.free_mass, &self.free, &self.fixed, pressure, cx,
+            &self.prepared, &self.free_mass, &self.free, &self.fixed, pressure, cx,
         );
         let integrator = OperatorGeneralizedAlpha::new(
             self.free.len(), duration_s, 1.0, controls.solve,
@@ -533,7 +529,7 @@ impl<'a> FiniteSolidBody<'a> {
         if let Some(error) = operator.error.take() { return Err(error.into()); }
         let time = result?;
         let after_u = inflate(&candidate.state.q, &self.free, &self.fixed);
-        let strain_after_j = self.problem.stored_energy_j(&after_u, cx)?;
+        let strain_after_j = self.prepared.stored_energy_j(&after_u, cx)?;
         let kinetic_after_j = candidate.kinetic_energy_j()?;
         let mut source_work_j = 0.0;
         for (dof, ((before, after), load)) in
@@ -564,7 +560,7 @@ impl<'a> FiniteSolidBody<'a> {
         }
         let midpoint: Vec<f64> = before_u.iter().zip(&after_u)
             .map(|(before, after)| 0.5 * before + 0.5 * after).collect();
-        let mut internal = self.problem.internal_force(&midpoint, cx)?;
+        let mut internal = self.prepared.internal_force(&midpoint, cx)?;
         subtract_pressure_force(&mut internal, &midpoint, pressure, cx)?;
         let mut acceleration = vec![0.0; before_u.len()];
         for ((&dof, before), after) in
@@ -659,7 +655,7 @@ impl FlexiblePreconditioner for MassDiagonal<'_> {
 
 /// Borrowed numerical adapter. All nonlinear mechanics remain in hyper3.
 struct DynamicOperator<'a, 'b, 'cx> {
-    problem: &'b HyperTetProblem<'a, FiniteSolidMaterial>,
+    problem: &'b PreparedHyperTetProblem<'a, FiniteSolidMaterial>,
     mass: &'b Csr,
     free: &'b [usize],
     fixed: &'b [f64],
@@ -673,7 +669,7 @@ struct DynamicOperator<'a, 'b, 'cx> {
 
 impl<'a, 'b, 'cx> DynamicOperator<'a, 'b, 'cx> {
     fn new(
-        problem: &'b HyperTetProblem<'a, FiniteSolidMaterial>,
+        problem: &'b PreparedHyperTetProblem<'a, FiniteSolidMaterial>,
         mass: &'b Csr,
         free: &'b [usize],
         fixed: &'b [f64],
