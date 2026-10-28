@@ -775,16 +775,71 @@ pub fn compare_mode_tables(
     Ok(result)
 }
 
-/// Exponential-window damping-bias correction: an impact-hammer
-/// window `e^{-t/tau}` ADDS `1/tau` to every modal decay rate, so
-/// `zeta_measured = zeta_true + 1/(tau * omega_n)`. Returns the
-/// corrected ratio and the (logged) delta; refuses nothing — a
-/// negative corrected value is CLAMPED to zero and flagged by the
-/// returned delta exceeding the measured value.
+/// Scalar exponential-window correction when both damping ratios are
+/// expressed against the SAME supplied reference frequency. Returns the
+/// corrected ratio and the decay contribution divided by that frequency;
+/// negative corrected damping is clamped to zero.
+///
+/// A fitted windowed pole has a different natural frequency. Use
+/// [`correct_exponential_window_pole`] for fitted poles; [`identify`] corrects
+/// both frequency and damping through that exact pole translation.
 #[must_use]
 pub fn correct_exponential_window(zeta_measured: f64, omega_n: f64, tau: f64) -> (f64, f64) {
     let delta = 1.0 / (tau * omega_n);
     ((zeta_measured - delta).max(0.0), delta)
+}
+
+fn exponential_window_rate(tau: f64) -> Result<f64, ModalIdError> {
+    if !tau.is_finite() || tau <= 0.0 || !(1.0 / tau).is_finite() {
+        return Err(ModalIdError::Shape {
+            what: "window tau must be positive and finite with a finite reciprocal",
+        });
+    }
+    Ok(1.0 / tau)
+}
+
+/// Undo a common exponential response window on an identified Laplace pole.
+///
+/// Multiplying the impulse response by `exp(-t/tau)` translates its pole
+/// from `p` to `p - 1/tau`. Undoing this shift preserves the damped angular
+/// frequency (the imaginary part), but changes BOTH the natural frequency
+/// `|p|` and the damping ratio `-Re(p)/|p|`. Residues are unchanged.
+///
+/// The measured pole must be finite and stable or lossless. If the declared
+/// window explains more decay than was measured, the corrected real part is
+/// clamped to zero, retaining the existing passive damping convention.
+/// This is not evidence that the fitted decay or declared window was exact.
+///
+/// # Errors
+/// [`ModalIdError::Shape`] for an invalid time constant or measured pole.
+pub fn correct_exponential_window_pole(measured: C64, tau: f64) -> Result<C64, ModalIdError> {
+    let rate = exponential_window_rate(tau)?;
+    if !measured.re.is_finite() || !measured.im.is_finite() || measured.re > 0.0 {
+        return Err(ModalIdError::Shape {
+            what: "window correction needs a finite stable or lossless measured pole",
+        });
+    }
+    Ok(C64::new((measured.re + rate).min(0.0), measured.im))
+}
+
+fn unwindow_parameters(wn: f64, zeta: f64, tau: Option<f64>) -> Result<(f64, f64), ModalIdError> {
+    let Some(tau) = tau else {
+        return Ok((wn, zeta));
+    };
+    if !wn.is_finite() || wn <= 0.0 || !zeta.is_finite() || !(0.0..1.0).contains(&zeta) {
+        return Err(ModalIdError::Shape {
+            what: "window correction needs a resolved finite complex modal pair",
+        });
+    }
+    let wd = wn * fs_math::det::sqrt((1.0 - zeta) * (1.0 + zeta));
+    let pole = correct_exponential_window_pole(C64::new(-zeta * wn, wd), tau)?;
+    let corrected_wn = pole.abs();
+    if !corrected_wn.is_finite() || corrected_wn <= 0.0 {
+        return Err(ModalIdError::Shape {
+            what: "corrected modal frequency is unresolved",
+        });
+    }
+    Ok((corrected_wn, -pole.re / corrected_wn))
 }
 
 /// Identification options.
@@ -801,8 +856,9 @@ pub struct IdentifyOptions {
     pub snr_floor: f64,
     /// Stabilization rule.
     pub rule: StabilizationRule,
-    /// Exponential-window time constant `tau` [s] (`None` = no window
-    /// correction).
+    /// Positive finite exponential-window time constant `tau` [s]. Corrects
+    /// natural frequency, damping, and split-sample spread by pole translation.
+    /// `None` leaves the measured parameters unchanged.
     pub window_tau: Option<f64>,
 }
 
@@ -838,7 +894,8 @@ pub struct Identification {
     /// diagram, machine-readable).
     pub diagram: Vec<Vec<(f64, f64)>>,
     /// Raw (pre-window-correction) damping ratios per accepted mode
-    /// (equal to the corrected ones when no window was declared).
+    /// (equal to the corrected ones when no window was declared), aligned
+    /// with the final corrected-frequency order of `modes`.
     pub damping_raw: Vec<f64>,
     /// Frequencies [Hz] of stabilized poles DROPPED by the residue
     /// significance gate — recorded, never silently discarded.
@@ -875,6 +932,9 @@ pub fn identify(data: &FrfData, opts: &IdentifyOptions) -> Result<Identification
         return Err(ModalIdError::Shape {
             what: "ladder needs min_order >= 1, order_step >= 1, max_order >= min_order",
         });
+    }
+    if let Some(tau) = opts.window_tau {
+        exponential_window_rate(tau)?;
     }
     let snr = estimate_snr(data);
     if snr < opts.snr_floor {
@@ -1041,26 +1101,37 @@ pub fn identify(data: &FrfData, opts: &IdentifyOptions) -> Result<Identification
     let mut damping_raw = Vec::with_capacity(accepted.len());
     for (k, &(wn, zeta)) in accepted.iter().enumerate() {
         let (f_ci, z_ci) = match (nearest(&even, wn), nearest(&odd, wn)) {
-            (Some((fe, ze)), Some((fo_, zo))) => (
-                0.5 * (fe - fo_).abs() / (2.0 * core::f64::consts::PI),
-                0.5 * (ze - zo).abs(),
-            ),
+            (Some((fe, ze)), Some((fo_, zo))) => {
+                // Match on the measured spectrum first, then transform each
+                // half-grid estimate before reporting its physical spread.
+                let (fe, ze) = unwindow_parameters(fe, ze, opts.window_tau)?;
+                let (fo_, zo) = unwindow_parameters(fo_, zo, opts.window_tau)?;
+                (
+                    0.5 * (fe - fo_).abs() / (2.0 * core::f64::consts::PI),
+                    0.5 * (ze - zo).abs(),
+                )
+            }
             // A half-grid that cannot re-find the pole means the
             // uncertainty is UNKNOWN: NaN, never zero.
             _ => (f64::NAN, f64::NAN),
         };
         damping_raw.push(zeta);
-        let (zeta_corr, _delta) = match opts.window_tau {
-            Some(tau) => correct_exponential_window(zeta, wn, tau),
-            None => (zeta, 0.0),
-        };
+        let (wn_corr, zeta_corr) = unwindow_parameters(wn, zeta, opts.window_tau)?;
         modes.push(Mode {
-            frequency_hz: wn / (2.0 * core::f64::consts::PI),
+            frequency_hz: wn_corr / (2.0 * core::f64::consts::PI),
             damping_ratio: zeta_corr,
             shape: shapes[k].clone(),
             frequency_ci_hz: f_ci,
             damping_ci: z_ci,
         });
+    }
+    if opts.window_tau.is_some() {
+        // Undoing a common decay shift can reorder natural frequencies when
+        // modes have different damping. Keep shapes and raw damping attached
+        // to their own mode, rather than retaining the windowed ordering.
+        let mut ordered: Vec<_> = modes.into_iter().zip(damping_raw).collect();
+        ordered.sort_by(|a, b| a.0.frequency_hz.total_cmp(&b.0.frequency_hz));
+        (modes, damping_raw) = ordered.into_iter().unzip();
     }
     Ok(Identification {
         modes,

@@ -60,8 +60,18 @@ measurement side of the simulate-vs-measure calibration loop.
   require positive finite frequencies, finite nonnegative damping, uniform
   shape widths per table and finite nonzero shape norms when present.
   Shapes are normalized before MAC products to remove arbitrary residue scale.
-- `correct_exponential_window` — `zeta_true = zeta_meas -
-  1/(tau*omega_n)`, clamped at zero, delta reported.
+- `correct_exponential_window_pole` — undo a declared common exponential
+  response window by translating the measured Laplace pole by `+1/tau`.
+  The damped frequency stays fixed; natural frequency and damping are
+  recomputed together. A corrected unstable real part clamps to zero under
+  the existing passive convention. Invalid time constants or measured poles
+  refuse. `identify` uses this correction for each accepted mode and each
+  matched half-grid estimate before reporting split-sample spread. Final
+  modes are sorted by corrected frequency with shapes and `damping_raw`
+  carried along; the stabilization diagram and verdicts remain measured.
+- `correct_exponential_window` retains the scalar subtraction when both
+  damping ratios are expressed against one unchanged reference frequency.
+  It does not undo the natural-frequency change of a fitted windowed pole.
 
 ## Invariants
 
@@ -116,6 +126,11 @@ on 1600 samples). No `Cx` integration (workspace `frankensim-ccmn`).
 None.
 
 ## Conformance tests
+
+`tests/window_poles.rs` checks exact pole recovery over damping and window
+strength, strongly windowed end-to-end identification, corrected split-sample
+spread, reordering with shape/raw-damping identity, and invalid-window refusal.
+These synthetic FRF checks do not establish statistical interval coverage.
 
 `tests/modalid.rs` (13): known-answer noise sweep inside intervals;
 MAC shape recovery; close-mode pair + RFP cross-check + low-order
