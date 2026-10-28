@@ -6,7 +6,7 @@
 //! [`crate::anytime`].
 //!
 //! Determinism: ground motions are synthesized by spectral
-//! representation with counter-based phases (caller-seeded LCG stream,
+//! representation with counter-based phases (caller-seeded frequency-line identities,
 //! logical identity — no thread dependence).
 
 /// The Kanai–Tajimi power spectral density: filtered white noise
@@ -21,50 +21,208 @@ pub struct KanaiTajimi {
     pub zg: f64,
 }
 
+/// Sampling and physical bandwidth of a finite-line ground-motion realization.
+///
+/// The target PSD is one-sided in angular frequency, with
+/// variance = integral S(omega) d(omega). Midpoint lines partition
+/// [0, omega_max]; each line contributes S(omega_k) * delta_omega to
+/// ensemble variance. Power outside this band is omitted, never aliased or
+/// redistributed. Increase n_freq to resolve a narrow soil resonance.
+///
+/// The frequencies and seeded phases do not depend on dt_s or n_steps.
+/// Keeping omega_max and n_freq fixed therefore preserves the same continuous
+/// excitation when changing the sample clock or extending a record.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GroundMotionSampling {
+    /// Sample interval [s].
+    pub dt_s: f64,
+    /// Number of samples; N samples span N-1 response-integration intervals.
+    pub n_steps: usize,
+    /// Number of midpoint frequency lines.
+    pub n_freq: usize,
+    /// Physical low-pass cutoff [rad/s], at most pi/dt_s.
+    pub omega_max: f64,
+}
+
+impl GroundMotionSampling {
+    #[allow(clippy::cast_precision_loss)]
+    fn validate(&self) {
+        assert!(
+            self.dt_s.is_finite() && self.dt_s > 0.0,
+            "ground-motion sample interval must be positive and finite"
+        );
+        assert!(
+            self.n_freq > 0,
+            "ground-motion frequency count must be positive"
+        );
+        assert!(
+            self.omega_max.is_finite() && self.omega_max > 0.0,
+            "ground-motion bandwidth must be positive and finite"
+        );
+        assert!(
+            self.omega_max <= std::f64::consts::PI / self.dt_s,
+            "ground-motion bandwidth exceeds the sampling Nyquist frequency"
+        );
+        let dw = self.omega_max / self.n_freq as f64;
+        assert!(
+            dw.is_finite() && dw > 0.0,
+            "ground-motion frequency spacing must be representable"
+        );
+        let final_time = self.n_steps.saturating_sub(1) as f64 * self.dt_s;
+        assert!(
+            final_time.is_finite() && (self.omega_max * final_time).is_finite(),
+            "ground-motion sample times and phases must be representable"
+        );
+    }
+}
+
 impl KanaiTajimi {
-    /// The one-sided PSD at circular frequency `w`.
+    fn validate(&self) {
+        assert!(
+            self.s0.is_finite() && self.s0 >= 0.0,
+            "ground-motion PSD intensity must be nonnegative and finite"
+        );
+        assert!(
+            self.wg.is_finite() && self.wg > 0.0,
+            "ground-filter frequency must be positive and finite"
+        );
+        assert!(
+            self.zg.is_finite() && self.zg > 0.0,
+            "stationary ground-filter damping must be positive and finite"
+        );
+    }
+
+    /// One-sided acceleration PSD per rad/s at nonnegative angular frequency w.
+    ///
+    /// Its integral over an angular-frequency band is acceleration variance;
+    /// there is no additional factor of 2*pi. A density per Hz would instead
+    /// be 2*pi*S(2*pi*f).
+    ///
+    /// # Panics
+    /// Invalid model parameters or frequency, or an unrepresentable PSD.
     #[must_use]
     pub fn psd(&self, w: f64) -> f64 {
+        self.validate();
+        assert!(
+            w.is_finite() && w >= 0.0,
+            "one-sided PSD frequency must be nonnegative and finite"
+        );
         let r = w / self.wg;
         let num = 1.0 + 4.0 * self.zg * self.zg * r * r;
         let den = (1.0 - r * r).powi(2) + 4.0 * self.zg * self.zg * r * r;
-        self.s0 * num / den
+        let value = self.s0 * num / den;
+        assert!(
+            value.is_finite() && value >= 0.0,
+            "ground-motion PSD must be representable"
+        );
+        value
     }
 
-    /// Synthesize one ground-acceleration record by spectral
-    /// representation: `a(t) = Σ √(2·S(ωk)·Δω)·cos(ωk t + φk)` with
-    /// deterministic phases from `seed`.
+    /// Return the legacy convenience API's actual sampling specification.
+    ///
+    /// The physical cutoff is min(8*wg, pi/dt). This is a sampled, band-limited
+    /// approximation to the Kanai-Tajimi process: the omitted high-frequency
+    /// power is not restored by rescaling the retained band. Use an explicit
+    /// GroundMotionSampling to keep bandwidth fixed across clock refinements.
+    ///
+    /// # Panics
+    /// Invalid model or sampling parameters.
+    #[must_use]
+    pub fn default_sampling(&self, n_freq: usize, dt: f64, n_steps: usize) -> GroundMotionSampling {
+        self.validate();
+        let sampling = GroundMotionSampling {
+            dt_s: dt,
+            n_steps,
+            n_freq,
+            omega_max: (8.0 * self.wg).min(std::f64::consts::PI / dt),
+        };
+        sampling.validate();
+        sampling
+    }
+
+    /// Synthesize a record using the documented default low-pass bandwidth.
+    ///
+    /// See [Self::default_sampling] for the actual cutoff and
+    /// [Self::synthesize_with_sampling] for explicit bandwidth control.
+    ///
+    /// # Panics
+    /// Invalid model/sampling parameters or unrepresentable arithmetic.
     #[must_use]
     pub fn synthesize(&self, seed: u64, n_freq: usize, dt: f64, n_steps: usize) -> Vec<f64> {
-        let w_max = 4.0 * self.wg.max(1.0) * 2.0;
-        #[allow(clippy::cast_precision_loss)]
-        let dw = w_max / n_freq as f64;
-        // Counter-based phases (splitmix-style hash per frequency line).
-        let phase = |k: usize| -> f64 {
-            let mut z = seed ^ (0x9e37_79b9_7f4a_7c15u64.wrapping_mul(k as u64 + 1));
+        self.synthesize_with_sampling(seed, self.default_sampling(n_freq, dt, n_steps))
+    }
+
+    /// Synthesize an explicitly band-limited ground-acceleration record.
+    ///
+    /// a(t) = sum sqrt(2*S(omega_k)*delta_omega)*cos(omega_k*t + phi_k).
+    /// Counter-addressed uniform phases make this finite random-phase
+    /// approximation reproducible, with covariance
+    /// sum S(omega_k)*delta_omega*cos(omega_k*tau). Every line lies strictly
+    /// below Nyquist; this method refuses an incompatible clock rather than
+    /// folding high-frequency excitation into lower structural modes.
+    ///
+    /// # Panics
+    /// Invalid model/sampling parameters or unrepresentable arithmetic.
+    #[must_use]
+    pub fn synthesize_with_sampling(&self, seed: u64, sampling: GroundMotionSampling) -> Vec<f64> {
+        let lines = self.spectral_lines(sampling);
+        synthesize_lines(seed, sampling, &lines)
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn spectral_lines(&self, sampling: GroundMotionSampling) -> Vec<(f64, f64)> {
+        self.validate();
+        sampling.validate();
+        let dw = sampling.omega_max / sampling.n_freq as f64;
+        let root_dw = fs_math::det::sqrt(dw);
+        (0..sampling.n_freq)
+            .map(|k| {
+                let w = (k as f64 + 0.5) * dw;
+                assert!(
+                    w.is_finite() && w > 0.0 && w * sampling.dt_s < std::f64::consts::PI,
+                    "ground-motion frequency line must lie strictly below Nyquist"
+                );
+                // Separate square roots avoid overflowing or underflowing
+                // the dimensional product S*dw before taking its square root.
+                let amp = std::f64::consts::SQRT_2 * fs_math::det::sqrt(self.psd(w)) * root_dw;
+                assert!(
+                    amp.is_finite(),
+                    "ground-motion amplitude must be representable"
+                );
+                (amp, w)
+            })
+            .collect()
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn synthesize_lines(seed: u64, sampling: GroundMotionSampling, lines: &[(f64, f64)]) -> Vec<f64> {
+    // Counter-based phases (splitmix-style hash per frequency line). Neither
+    // sample count nor clock participates in a line's random identity.
+    let phases: Vec<_> = (0..lines.len())
+        .map(|k| {
+            let mut z = seed ^ (0x9e37_79b9_7f4a_7c15u64.wrapping_mul((k as u64).wrapping_add(1)));
             z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
             z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
             z ^= z >> 31;
             (z >> 11) as f64 / (1u64 << 53) as f64 * std::f64::consts::TAU
-        };
-        let lines: Vec<(f64, f64, f64)> = (0..n_freq)
-            .map(|k| {
-                #[allow(clippy::cast_precision_loss)]
-                let w = (k as f64 + 0.5) * dw;
-                ((2.0 * self.psd(w) * dw).sqrt(), w, phase(k))
-            })
-            .collect();
-        (0..n_steps)
-            .map(|i| {
-                #[allow(clippy::cast_precision_loss)]
-                let t = i as f64 * dt;
-                lines
-                    .iter()
-                    .map(|&(amp, w, ph)| amp * fs_math::det::cos(w * t + ph))
-                    .sum()
-            })
-            .collect()
-    }
+        })
+        .collect();
+    (0..sampling.n_steps)
+        .map(|i| {
+            let t = i as f64 * sampling.dt_s;
+            let value: f64 = lines
+                .iter()
+                .zip(&phases)
+                .map(|(&(amp, w), &phase)| amp * fs_math::det::cos(w * t + phase))
+                .sum();
+            assert!(
+                value.is_finite(),
+                "ground-acceleration sample must be representable"
+            );
+            value
+        })
+        .collect()
 }
 
 /// Maximum absolute RELATIVE displacement [m] of a linear SDOF under a
@@ -319,10 +477,46 @@ pub fn ida_fragility(
     alpha: f64,
     ductility_limit: f64,
 ) -> Vec<FragilityPoint> {
-    let (dt, n_steps, n_freq) = (0.01, 1500, 96);
+    ida_fragility_with_sampling(
+        kt,
+        kt.default_sampling(96, 0.01, 1500),
+        suite_seeds,
+        im_ladder,
+        wn,
+        zeta,
+        uy,
+        alpha,
+        ductility_limit,
+    )
+}
+
+/// Incremental dynamic analysis with caller-controlled excitation sampling.
+///
+/// The same physical bandwidth and frequency lines can be retained while
+/// refining dt_s; the oscillator uses that exact sample interval. Spectral
+/// amplitudes are prepared once for the entire seeded suite, and every
+/// intensity level reuses the same realized records. The confidence machinery
+/// remains [crate::anytime::estimate_probability_anytime]'s responsibility.
+///
+/// # Panics
+/// Invalid sampling/model parameters or unrepresentable synthesis/response.
+#[must_use]
+#[allow(clippy::too_many_arguments, clippy::cast_precision_loss)]
+pub fn ida_fragility_with_sampling(
+    kt: &KanaiTajimi,
+    sampling: GroundMotionSampling,
+    suite_seeds: &[u64],
+    im_ladder: &[f64],
+    wn: f64,
+    zeta: f64,
+    uy: f64,
+    alpha: f64,
+    ductility_limit: f64,
+) -> Vec<FragilityPoint> {
+    let lines = kt.spectral_lines(sampling);
     let records: Vec<Vec<f64>> = suite_seeds
         .iter()
-        .map(|&s| kt.synthesize(s, n_freq, dt, n_steps))
+        .map(|&s| synthesize_lines(s, sampling, &lines))
         .collect();
     im_ladder
         .iter()
@@ -330,7 +524,8 @@ pub fn ida_fragility(
             let hits = records
                 .iter()
                 .filter(|r| {
-                    bilinear_peak_ductility(r, dt, wn, zeta, uy, alpha, im) > ductility_limit
+                    bilinear_peak_ductility(r, sampling.dt_s, wn, zeta, uy, alpha, im)
+                        > ductility_limit
                 })
                 .count();
             FragilityPoint {
@@ -344,7 +539,10 @@ pub fn ida_fragility(
 
 #[cfg(test)]
 mod tests {
-    use super::{bilinear_peak_ductility, cqc, sdof_peak};
+    use super::{
+        GroundMotionSampling, KanaiTajimi, bilinear_peak_ductility, cqc,
+        ida_fragility_with_sampling, sdof_peak,
+    };
 
     #[test]
     fn g0_empty_and_single_sample_records_do_not_advance_time() {
@@ -522,5 +720,221 @@ mod tests {
         );
         assert!(std::panic::catch_unwind(|| cqc(&[1.0], &[], &[0.05])).is_err());
         assert!(std::panic::catch_unwind(|| cqc(&[1.0], &[0.0], &[0.05])).is_err());
+    }
+    fn spectral_model() -> KanaiTajimi {
+        KanaiTajimi {
+            s0: 0.03,
+            wg: 15.0,
+            zg: 0.6,
+        }
+    }
+
+    #[test]
+    fn g1_sampled_spectrum_has_the_declared_one_sided_power_and_covariance() {
+        let model = spectral_model();
+        let sampling = model.default_sampling(16, 0.05, 64);
+        let tau = std::f64::consts::TAU;
+        assert_eq!(sampling.omega_max, std::f64::consts::PI / sampling.dt_s);
+        let dw = sampling.omega_max / sampling.n_freq as f64;
+        // These midpoint lines are the odd Fourier bins of a 4*n_freq
+        // sample period. Orthogonality gives an exact finite-record oracle,
+        // independent of a statistical tolerance on an ensemble of seeds.
+        for seed in [0, 7, 101] {
+            let record = model.synthesize_with_sampling(seed, sampling);
+            let n = record.len() as f64;
+            let mut expected_variance = 0.0;
+            let mut expected_covariance = 0.0;
+            for k in 0..sampling.n_freq {
+                let omega = (k as f64 + 0.5) * dw;
+                // Independent dimensional form of the target soil transfer.
+                let wg2 = model.wg * model.wg;
+                let w2 = omega * omega;
+                let damping = 4.0 * model.zg * model.zg * wg2 * w2;
+                let density = model.s0 * (wg2 * wg2 + damping) / ((wg2 - w2).powi(2) + damping);
+                let mut real = 0.0;
+                let mut imag = 0.0;
+                for (i, value) in record.iter().enumerate() {
+                    let phase = tau * (2 * k + 1) as f64 * i as f64 / n;
+                    real += value * phase.cos();
+                    imag -= value * phase.sin();
+                }
+                let line_power = 2.0 * ((real / n).powi(2) + (imag / n).powi(2));
+                // Convert the one-sided periodogram from power/bin to /Hz.
+                let density_per_hz = line_power / (dw / tau);
+                assert!(
+                    (density_per_hz - tau * density).abs() < 2e-11 * tau * density,
+                    "seed={seed}, line={k}: PSD normalization"
+                );
+                expected_variance += density * dw;
+                expected_covariance += density * dw * (3.0 * omega * sampling.dt_s).cos();
+            }
+            let mean = record.iter().sum::<f64>() / n;
+            let variance = record.iter().map(|x| x * x).sum::<f64>() / n;
+            let covariance = record
+                .iter()
+                .enumerate()
+                .map(|(i, x)| x * record[(i + 3) % record.len()])
+                .sum::<f64>()
+                / n;
+            assert!(mean.abs() < 1e-13);
+            assert!((variance - expected_variance).abs() < 2e-12 * expected_variance);
+            assert!((covariance - expected_covariance).abs() < 2e-12 * expected_variance);
+            assert_eq!(record, model.synthesize(seed, 16, 0.05, 64));
+        }
+    }
+
+    #[test]
+    fn g1_fixed_bandwidth_preserves_excitation_under_clock_refinement_and_extension() {
+        let model = spectral_model();
+        let sampling = GroundMotionSampling {
+            dt_s: 0.02,
+            n_steps: 257,
+            n_freq: 96,
+            omega_max: 100.0,
+        };
+        let coarse = model.synthesize_with_sampling(37, sampling);
+        let fine = model.synthesize_with_sampling(
+            37,
+            GroundMotionSampling {
+                dt_s: sampling.dt_s / 2.0,
+                n_steps: 2 * (sampling.n_steps - 1) + 1,
+                ..sampling
+            },
+        );
+        let extended = model.synthesize_with_sampling(
+            37,
+            GroundMotionSampling {
+                n_steps: 313,
+                ..sampling
+            },
+        );
+        for i in 0..coarse.len() {
+            assert_eq!(coarse[i].to_bits(), fine[2 * i].to_bits());
+            assert_eq!(coarse[i].to_bits(), extended[i].to_bits());
+        }
+    }
+
+    #[test]
+    fn g3_ground_motion_preserves_physical_time_frequency_and_intensity_scaling() {
+        let model = spectral_model();
+        let reference = model.synthesize(29, 48, 0.01, 97);
+        for scale in [1.0 / 64.0, 1.0 / 8.0, 8.0, 64.0] {
+            // omega -> scale*omega and t -> t/scale preserve phase.
+            // S_omega -> S_omega/scale preserves acceleration variance.
+            // In particular wg<1 must not trigger an arbitrary 1-rad/s floor.
+            let scaled_model = KanaiTajimi {
+                wg: scale * model.wg,
+                s0: model.s0 / scale,
+                ..model
+            };
+            let actual = scaled_model.synthesize(29, 48, 0.01 / scale, 97);
+            for (a, b) in actual.iter().zip(&reference) {
+                assert!(
+                    (a - b).abs() < 2e-13 * b.abs().max(1.0),
+                    "scale={scale}: {a} vs {b}"
+                );
+            }
+        }
+        let stronger = KanaiTajimi {
+            s0: 4.0 * model.s0,
+            ..model
+        };
+        let actual = stronger.synthesize(29, 48, 0.01, 97);
+        for (a, b) in actual.iter().zip(&reference) {
+            assert_eq!(a.to_bits(), (2.0 * b).to_bits());
+        }
+    }
+
+    #[test]
+    fn g0_ground_motion_refuses_aliasing_and_invalid_stationary_models() {
+        let model = spectral_model();
+        let valid = model.default_sampling(8, 0.1, 8);
+        let above_nyquist = GroundMotionSampling {
+            omega_max: 1.001 * std::f64::consts::PI / valid.dt_s,
+            ..valid
+        };
+        for invalid in [
+            above_nyquist,
+            GroundMotionSampling { dt_s: 0.0, ..valid },
+            GroundMotionSampling { n_freq: 0, ..valid },
+            GroundMotionSampling {
+                omega_max: 0.0,
+                ..valid
+            },
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| model.synthesize_with_sampling(1, invalid)).is_err()
+            );
+        }
+        for invalid in [
+            KanaiTajimi { s0: -1.0, ..model },
+            KanaiTajimi { wg: 0.0, ..model },
+            KanaiTajimi { zg: 0.0, ..model },
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| invalid.synthesize_with_sampling(1, valid)).is_err()
+            );
+        }
+        assert_eq!(
+            KanaiTajimi { s0: 0.0, ..model }.synthesize_with_sampling(1, valid),
+            vec![0.0; valid.n_steps]
+        );
+        assert!(
+            model
+                .synthesize_with_sampling(
+                    1,
+                    GroundMotionSampling {
+                        n_steps: 0,
+                        ..valid
+                    }
+                )
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn g1_ida_uses_the_requested_bandwidth_record_length_and_sample_clock() {
+        let model = spectral_model();
+        let sampling = GroundMotionSampling {
+            dt_s: 0.04,
+            n_steps: 161,
+            n_freq: 24,
+            omega_max: 60.0,
+        };
+        let seeds = [2, 7, 13, 19, 29, 31, 43, 59];
+        let records: Vec<_> = seeds
+            .iter()
+            .map(|&seed| model.synthesize_with_sampling(seed, sampling))
+            .collect();
+        let response = |record: &[f64], scale| {
+            bilinear_peak_ductility(record, sampling.dt_s, 8.0, 0.05, 0.01, 0.1, scale)
+        };
+        let mut unit_peaks: Vec<_> = records.iter().map(|r| response(r, 1.0)).collect();
+        unit_peaks.sort_by(f64::total_cmp);
+        assert!(unit_peaks[4] > unit_peaks[3]);
+        let limit = 0.5 * (unit_peaks[3] + unit_peaks[4]);
+        let intensities = [0.25, 1.0, 4.0];
+        let actual = ida_fragility_with_sampling(
+            &model,
+            sampling,
+            &seeds,
+            &intensities,
+            8.0,
+            0.05,
+            0.01,
+            0.1,
+            limit,
+        );
+        for (point, &im) in actual.iter().zip(&intensities) {
+            let hits = records.iter().filter(|r| response(r, im) > limit).count();
+            assert_eq!(point.im, im);
+            assert_eq!(point.n, seeds.len());
+            assert_eq!(point.p, hits as f64 / seeds.len() as f64);
+        }
+        assert_eq!(
+            actual[1].p, 0.5,
+            "routing comparison must include mixed outcomes"
+        );
+        assert!(actual[0].p < actual[2].p);
     }
 }

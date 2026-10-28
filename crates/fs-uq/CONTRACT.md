@@ -166,12 +166,41 @@ step solves its accepted restoring force; cyclic plastic peaks converge to an
 independent 600,000-step explicit reference. CQC checks zero damping, signed
 degeneracy, unequal damping, frequency-unit changes and extreme peak scales.
 
+### Ground-motion bandwidth and sample clock
+
+`GroundMotionSampling` fixes the physical cutoff in rad/s, midpoint frequency
+count, sample interval and record length. `synthesize_with_sampling` realizes
+the one-sided angular-frequency density: each line carries variance
+`S(omega_k)*delta_omega`, so its random-phase cosine amplitude is
+`sqrt(2*S(omega_k)*delta_omega)`. A per-Hz density is `2*pi*S(2*pi*f)`.
+Every line is strictly below the sampling Nyquist frequency. An explicit band
+that exceeds Nyquist is refused; high-frequency power is neither folded into
+lower structural modes nor renormalized into the retained band.
+
+The legacy `synthesize` convenience call uses the visible `default_sampling`
+choice `omega_max=min(8*wg,pi/dt)`. This is a finite-band approximation, not
+the full untruncated Kanai-Tajimi variance. The former dimensional `wg.max(1)`
+floor is absent. Keeping the explicit bandwidth, frequency count and seed fixed
+preserves common samples under clock refinement and preserves prefixes when
+extending a record. Frequency resolution remains a quadrature choice: narrow
+soil resonances require sufficient lines. The model requires positive finite
+ground frequency/damping and finite nonnegative intensity.
+
+`ida_fragility_with_sampling` routes this exact record clock and bandwidth into
+the existing bilinear time-history consumer, preparing spectral amplitudes once
+for the suite and reusing records across intensity levels. The original IDA
+entry point remains the 0.01-s, 1500-sample, 96-line convenience fixture.
+Regression tests independently reconstruct Fourier-line powers, finite-period
+variance/covariance and rad/s-to-Hz normalization; check fixed-band clock and
+record refinement, physical unit/intensity scaling, and the actual IDA route.
+
 ## No-claim boundaries
 
 - Newmark's linear stability does not remove temporal accuracy requirements:
   callers must resolve ground-motion bandwidth, structural periods and yield
   reversals. `ida_fragility` retains its explicit fixture clock of 0.01 s;
-  its observed monotonicity is not a theorem for every nonlinear motion suite.
+  `ida_fragility_with_sampling` accepts a caller-refined clock and fixed physical
+  bandwidth. Observed monotonicity is not a theorem for every nonlinear suite.
   The zero-damping CQC convention is the coherent/uncorrelated modal limit,
   not a finite stationary variance for undamped white-noise excitation.
 

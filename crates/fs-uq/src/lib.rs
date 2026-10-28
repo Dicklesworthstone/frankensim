@@ -50,41 +50,45 @@ pub use product_control_variate::{LinearControlEstimate, LinearControlVariate, U
 pub use product_copula::GaussianCopulaExecution;
 pub use product_copula_qmc::GaussianCopulaQmcExecution;
 pub use product_epistemic::{
-    EpistemicCompliance, EpistemicConfig, EpistemicExecution, EpistemicReport,
-    EpistemicStatus, EpistemicWitness,
+    EpistemicCompliance, EpistemicConfig, EpistemicExecution, EpistemicReport, EpistemicStatus,
+    EpistemicWitness,
 };
 pub use product_execution::UqExecution;
+pub use product_importance::proposal::execution::{
+    ImportancePilotRound, PilotImportanceConfig, PilotImportanceExecution, PilotImportanceReport,
+    PilotImportanceStage,
+};
+pub use product_importance::proposal::{
+    ImportanceFitConfig, ImportanceFitError, ImportanceProposalFit,
+};
 pub use product_importance::{
     ImportanceConfig, ImportanceEstimate, ImportanceExecution, ImportanceObservation,
     ImportanceReport,
 };
-pub use product_importance::proposal::{ImportanceFitConfig, ImportanceFitError, ImportanceProposalFit};
-pub use product_importance::proposal::execution::{
-    ImportancePilotRound, PilotImportanceConfig, PilotImportanceExecution,
-    PilotImportanceReport, PilotImportanceStage,
-};
-pub use product_lhs::{LhsEstimate, LhsExecution, LhsPlan, LhsReport};
 pub use product_lhs::mean_control::{LhsLinearControlEstimate, LhsLinearControlVariate};
+pub use product_lhs::{LhsEstimate, LhsExecution, LhsPlan, LhsReport};
 pub use product_mlmc::{MlmcEstimate, MlmcExecution, MlmcExecutionReport, MlmcLevelReport};
 pub use product_mlmc_allocation::{
-    allocate_mlmc, MlmcAllocation, MlmcAllocationError, MlmcAllocationPolicy,
+    MlmcAllocation, MlmcAllocationError, MlmcAllocationPolicy, allocate_mlmc,
 };
-pub use product_mlmc_pilot::{PilotMlmcConfig, PilotMlmcExecution, PilotMlmcReport, PilotMlmcStage};
-pub use product_multi::{MultiQoiExecution, MultiQoiReport, QoiDefinition, QoiReport};
+pub use product_mlmc_pilot::{
+    PilotMlmcConfig, PilotMlmcExecution, PilotMlmcReport, PilotMlmcStage,
+};
 pub use product_multi::{MultiQoiAssessmentError, MultiQoiCovariance};
+pub use product_multi::{MultiQoiExecution, MultiQoiReport, QoiDefinition, QoiReport};
 pub use product_pce::{PceConfig, PceExecution, PceReport, PceSummary};
 pub use product_pce_control::{
     PceControlError, PceMeanConfig, PceMeanControl, PceMeanEstimate, PceMeanExecution,
     PceMeanReport, PceMeanStage,
 };
 pub use product_pce_model::{PceBasis, ProductPceModel};
-pub use product_sensitivity::{SobolEffect, SobolEstimate, SobolExecution, SobolReport};
-pub use product_shapley::{ShapleyEffect, ShapleyEstimate, ShapleyExecution, ShapleyReport};
-pub use product_qmc::{QmcConfig, QmcEstimate, QmcExecution, QmcReport};
 pub use product_plan::{
     CorrelationModel, ParameterUncertainty, PropagationMethod, UncertaintyKind, UqPlan,
     UqPropagator, UqResult, UqStatus,
 };
+pub use product_qmc::{QmcConfig, QmcEstimate, QmcExecution, QmcReport};
+pub use product_sensitivity::{SobolEffect, SobolEstimate, SobolExecution, SobolReport};
+pub use product_shapley::{ShapleyEffect, ShapleyEstimate, ShapleyExecution, ShapleyReport};
 
 pub use adaptive::{AdaptiveReport, adaptive_mlmc};
 pub use anytime::{AnytimeEstimate, estimate_probability_anytime};
@@ -93,7 +97,8 @@ pub use kl::{CovarianceKind, KlExpansion};
 pub use mlmc::{MlmcReport, mlmc_estimate};
 pub use pce::{PceModel, fit_pce};
 pub use seismic::{
-    FragilityPoint, KanaiTajimi, bilinear_peak_ductility, cqc, ida_fragility, sdof_peak, srss,
+    FragilityPoint, GroundMotionSampling, KanaiTajimi, bilinear_peak_ductility, cqc, ida_fragility,
+    ida_fragility_with_sampling, sdof_peak, srss,
 };
 
 /// Crate version, re-exported for provenance stamping.
