@@ -436,3 +436,59 @@ silently reinterpret this boundary as transmissive.
 This estimated inviscid model assumes an ideal compact reservoir/entrance.
 It supplies neither an empirical discharge coefficient nor finite neck inertia,
 wall loss, multidimensional mixing, moving-volume work or an entropy theorem.
+
+## Synchronized finite-plenum gas networks
+
+`dynamics::network::GasNetwork1d` owns existing Euler branches, finite rigid
+`Plenum` volumes, and explicit `PlenumConnection` endpoints. Every branch
+retains its original mesh and field. All branches must share the exact frozen
+source, composition, caloric interval, energy reference and accepted clock.
+Duplicate, out-of-range and periodic endpoint connections refuse. Branch and
+plenum counts are each capped at 4096; combined cell/plenum storage shares the
+existing `MAX_EULER_CELLS` cap.
+
+Each connected port evaluates the same physical characteristic reservoir
+closure once at each stage. Its area-weighted mass and total-enthalpy exchange
+feeds the branch and plenum with opposite signs. A compact plenum stores mass
+and internal energy, without resolved bulk momentum; incoming kinetic energy
+remains in that energy account. Its fixed support receives the reported port
+impulse in the branch's axial coordinate and does no mechanical work.
+Different branch axes are not added into a fictitious scalar network momentum.
+
+One global SSPRK2 duration advances every owner. Actual branch face speeds and
+the summed port area/speed divided by plenum volume limit both stages. A small
+plenum can therefore limit the whole network timestep. Every retry restarts all
+owners; state, clock and accepted exchange/report slices commit together only
+after the final admission and cancellation check. Numerical scratch and report
+storage are allocated at construction and reused.
+
+Global reports integrate all branch and plenum mass/energy and count only
+external-end exchange. Accepted per-port exchanges are the exact negation of
+the corresponding branch-end report. Each branch also retains its full
+momentum/area-force balance. Immutable access prevents independent branch
+stepping while the network owns the common state.
+
+Ten focused native network regressions cover original isolated-Euler identity,
+tapered rest, compact-volume CFL, topology/source/clock admission, final-stage
+cancellation and failure rollback, finite-pulse splitting, direct extensive
+storage and port exchange reconstruction, orientation symmetry and bitwise
+variable-Cp formation-gauge invariance. A 64/128-cell compact-plenum acoustic
+check compares against `p'(t)/p'(0)=exp(-c*A*t/V)` before returning reflections;
+normalized errors are 2.97668e-6 and 3.61846e-6, both within the fixture's
+weak-wave tolerance. This is an independent impedance check, not an assertion
+of an asymptotic refinement order.
+
+The `fs-duct` `nonlinear_manifold` consumer uses original cylinder/cone
+geometry and a 30 mL plenum. Runs with 16 and 64 cells per branch reach 4 ms
+in 131 and 527 accepted steps. Both report zero mass residual; physical energy
+residuals are -1.421085e-14 J and zero respectively. All temperatures remain in
+the declared N2 200--1000 K source window, and both daughter passages respond.
+The full staged pure-gas native run passed 58 tests and the existing eight
+focused duct tests passed. This is not a workspace Cargo/DSR result.
+
+A finite plenum is an explicitly compact, perfectly mixed storage model, not
+a zero-volume lossless junction or a resolved three-dimensional shock/mixing
+region. Species-changing/reacting junctions, valves/discharge coefficients,
+wall heat, viscous loss, compliant volumes and entropy certificates remain
+separate models. This contributes to the open broad gas-network bead without
+claiming its complete reactive/MoC scope.

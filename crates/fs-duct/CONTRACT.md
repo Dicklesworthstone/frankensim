@@ -1657,3 +1657,32 @@ Rayleigh far-field integral, physical cylinder transfer through both original
 propagators, full field work conservation, cutoff continuity and a 1/2/4-mode
 resonance-frequency/linewidth ladder. Mode and axial refinement remain
 separate convergence axes; a single retained order is not continuum truth.
+
+## Finite-amplitude manifold consumer
+
+`NonlinearDuct::into_solver` transfers the exact original geometric mesh,
+source and accepted conservative field into the shared gas-network owner,
+without resampling. `nonlinear_manifold` connects a cylindrical feeder and
+cylindrical/conical daughters through a finite rigid 30 mL plenum, retaining
+the existing NASA-9 nitrogen source and reflecting exterior ends.
+
+Run with:
+
+```bash
+cargo run -p fs-duct --features nonlinear-euler --example nonlinear_manifold -- 64
+```
+
+The example emits branch fields and compact-volume thermodynamics as CSV,
+plus common-step and conservation diagnostics. At 64 cells per branch it
+executes 527 steps to 4 ms with maximum stage CFL 0.3627042, no halvings, and
+zero reported aggregate mass and physical-energy residuals. Its two daughter
+snapshot peak overpressures are 12.108 kPa and 7.575 kPa; temperatures range
+from 295.107 to 388.735 K. These are actual execution observations, not a
+resolution-converged or experimentally validated manifold prediction.
+
+The existing eight nonlinear duct tests and the 160-cell horn example also
+pass against the network-enabled gas source. Checks compile the complete
+gas implementation and exact production duct geometry source slice; the
+full workspace/DSR verification boundary remains explicit. The plenum is
+an acoustically compact storage assumption and introduces no empirical
+junction-loss or multidimensional-mixing claim.

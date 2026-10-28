@@ -39,5 +39,9 @@ fs-vvreg = { path = "../fs-vvreg" }
 name = "nonlinear_horn"
 required-features = ["nonlinear-euler"]
 
+[[example]]
+name = "nonlinear_manifold"
+required-features = ["nonlinear-euler"]
+
 [lints]
 workspace = true

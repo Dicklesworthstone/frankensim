@@ -265,6 +265,12 @@ impl NonlinearDuct {
         &self.solver
     }
 
+    /// Transfer the original mesh, source and accepted field into a gas network.
+    /// No geometric resampling or thermodynamic reconstruction is performed.
+    pub fn into_solver(self) -> Euler1d {
+        self.solver
+    }
+
     /// Accepted physical time.
     #[must_use]
     pub fn time(&self) -> Time {
