@@ -6,9 +6,9 @@
 //! cell taxonomy (fluid / interface / gas), the same pairwise-antisymmetric
 //! mass exchange, the same gas-side population reconstruction, the same
 //! conversion cascade with a conservation carry, and the same
-//! surface-tension reference-density port (smoothed-fill curvature with the
-//! contact-model wall ghost). The original path remains the 2-D model in
-//! three dimensions and Morton/lane order. An opt-in planar equilibrium
+//! surface-tension reference-density port. Resolved interfaces use volume-
+//! fraction height functions; incomplete stencils retain smoothed-fill
+//! curvature with the contact-model wall ghost. An opt-in planar equilibrium
 //! contact-angle boundary supplies a geometric wall ghost to that same
 //! curvature and pressure-reconstruction operator.
 //!
@@ -30,8 +30,9 @@
 //!
 //! No-claims: this layer claims mass-ledger conservation (tracked per step,
 //! worst violation exposed) and deterministic replay — not throughput, not
-//! turbulence physics, no calibrated contact-line dynamics, and no interface
-//! geometry beyond the smoothed-fill normal. The imposed equilibrium-angle
+//! turbulence physics or calibrated contact-line dynamics. Height functions
+//! require a resolved single interface; near walls and unresolved topology
+//! the smoothed-fill closure remains. The imposed equilibrium-angle
 //! closure is limited to one planar domain wall; it supplies no hysteresis,
 //! thermocapillary stress, moving substrate or surface-energy balance.
 
@@ -44,6 +45,7 @@ use super::{CollisionError3, E3, OPP3, Q3, TILE, equilibrium3};
 
 mod initial;
 pub use initial::FreeSurfaceInitialCell3;
+mod curvature;
 mod forcing;
 pub(crate) mod thermocapillary;
 pub(crate) mod transport;
@@ -299,7 +301,7 @@ fn lane_of(lx: usize, ly: usize, lz: usize) -> usize {
 }
 
 impl FreeSurface3 {
-    /// Bound used by the current smoothed-fill curvature approximation.
+    /// Bound shared by the height-function and fallback curvature estimates.
     /// This numerical clamp is not an assertion about physical interface shape.
     pub const CURVATURE_LIMIT: f64 = 1.0;
 
@@ -851,7 +853,10 @@ impl FreeSurface3 {
     /// Reference density for gas reconstruction: `1 + σκ/cs²` (2-D port;
     /// σ = 0 short-circuits to exactly 1).
     fn reference_density(&self, key: u64, lane: usize) -> f64 {
-        let sigma = self.local_sigma.as_ref().map_or(self.sigma, |field| field[&(key, lane)]);
+        let sigma = self
+            .local_sigma
+            .as_ref()
+            .map_or(self.sigma, |field| field[&(key, lane)]);
         if sigma == 0.0 {
             return 1.0;
         }
@@ -859,14 +864,39 @@ impl FreeSurface3 {
         sigma.mul_add(kappa / CS2_3, 1.0)
     }
 
-    /// Curvature of the smoothed fill at the cell: `div(n̂)` with
-    /// `n̂ = −∇φ/|∇φ|`, central differences along the three axes (the
-    /// exact 3-D analog of the 2-D construction).
+    /// Sum of principal curvatures from raw VOF height functions where a
+    /// complete single-interface stencil exists. Walls and underresolved
+    /// geometry retain `div(n̂)`, `n̂ = −∇φ/|∇φ|` of the smoothed fill,
+    /// so the contact-angle ghost remains the boundary-condition owner.
     fn curvature(&self, key: u64, lane: usize) -> f64 {
         let (cx, cy, cz) = Self::global_of(key, lane);
         let phi = |dx: i64, dy: i64, dz: i64| -> f64 {
             self.phi_or_ghost(cx + dx, cy + dy, cz + dz, (key, lane))
         };
+        // Preserve the original ghost's two-cell support. The height stencil
+        // includes its diagonal samples but spans only one transverse cell.
+        let wall_free = (0..3).all(|axis| {
+            [-2, 2].into_iter().all(|distance| {
+                let mut p = [cx, cy, cz];
+                p[axis] += distance;
+                self.grid.resolve_source(p[0], p[1], p[2]).is_some()
+            })
+        });
+        if wall_free {
+            let normal = [
+                phi(-1, 0, 0) - phi(1, 0, 0),
+                phi(0, -1, 0) - phi(0, 1, 0),
+                phi(0, 0, -1) - phi(0, 0, 1),
+            ];
+            if let Some(kappa) = curvature::height_function(normal, |offset| {
+                let (slot, sample_lane) =
+                    self.grid
+                        .resolve_source(cx + offset[0], cy + offset[1], cz + offset[2])?;
+                Some(self.fill(self.grid.active_keys()[slot], sample_lane))
+            }) {
+                return kappa.clamp(-Self::CURVATURE_LIMIT, Self::CURVATURE_LIMIT);
+            }
+        }
         let nhat = |dx: i64, dy: i64, dz: i64| -> [f64; 3] {
             let gx = (phi(dx + 1, dy, dz) - phi(dx - 1, dy, dz)) / 2.0;
             let gy = (phi(dx, dy + 1, dz) - phi(dx, dy - 1, dz)) / 2.0;
@@ -1041,9 +1071,12 @@ impl FreeSurface3 {
                     }
                 }
                 let mut new_f = [0.0f64; Q3];
+                // One geometry and boundary velocity serve every missing gas
+                // population. Interior cells never compute capillary curvature.
+                let mut gas_equilibrium = None;
+                let (cx, cy, cz) = Self::global_of(key, lane);
                 for (q, out) in new_f.iter_mut().enumerate() {
                     // Pull source lies opposite the direction of travel.
-                    let (cx, cy, cz) = Self::global_of(key, lane);
                     let sx = cx - i64::from(E3[q].0);
                     let sy = cy - i64::from(E3[q].1);
                     let sz = cz - i64::from(E3[q].2);
@@ -1053,8 +1086,9 @@ impl FreeSurface3 {
                             let src_key = self.grid.active_keys()[src_slot];
                             match self.tiles[&src_key].cells[src_lane] {
                                 Cell3::Gas => {
-                                    let rho_ref = self.reference_density(key, lane);
-                                    let eq = equilibrium3(rho_ref, u_pre);
+                                    let eq = gas_equilibrium.get_or_insert_with(|| {
+                                        equilibrium3(self.reference_density(key, lane), u_pre)
+                                    });
                                     let value = eq[q] + eq[OPP3[q]] - post[&key][lane][OPP3[q]];
                                     if self.local_force.is_some() {
                                         value
@@ -1395,6 +1429,77 @@ enum Neighbor {
 #[cfg(test)]
 mod capillary_boundary_tests {
     use super::*;
+
+    #[test]
+    fn g1_resolved_vof_cap_drives_native_laplace_pressure_and_inward_motion() {
+        let radius = 16.0_f64;
+        let sigma = 0.001;
+        let mut surface = FreeSurface3::new(
+            16,
+            16,
+            16,
+            0.8,
+            [0.0; 3],
+            sigma,
+            ContactModel3::Neutral,
+            |_, _, _| true,
+        )
+        .unwrap();
+        // Independent cell-volume quadrature of a resolved spherical cap.
+        // The populations begin at zero pressure jump, so the first response
+        // should accelerate inward; this is not a static-equilibrium claim.
+        let node = 0.5 / 3.0_f64.sqrt();
+        for (&key, tile) in &mut surface.tiles {
+            for lane in 0..TILE_CELLS {
+                let (x, y, z) = FreeSurface3::global_of(key, lane);
+                let mut fill = 0.0;
+                for du in [-node, node] {
+                    for dv in [-node, node] {
+                        let u = x as f64 - 8.0 + du;
+                        let v = y as f64 - 8.0 + dv;
+                        let height = 7.2 + (radius * radius - u * u - v * v).sqrt() - radius;
+                        fill += 0.25 * (height - z as f64 + 0.5).clamp(0.0, 1.0);
+                    }
+                }
+                tile.cells[lane] = if fill == 0.0 {
+                    Cell3::Gas
+                } else if fill == 1.0 {
+                    Cell3::Fluid
+                } else {
+                    Cell3::Interface
+                };
+                tile.mass[lane] = fill;
+            }
+        }
+        // Full cells bordering gas still need the original interface closure.
+        let mut promote = Vec::new();
+        for (&key, tile) in &surface.tiles {
+            for lane in 0..TILE_CELLS {
+                if tile.cells[lane] == Cell3::Fluid
+                    && (1..Q3).any(|q| {
+                        matches!(
+                            surface.neighbor_state(key, lane, q),
+                            Neighbor::Active(_, _, Cell3::Gas)
+                        )
+                    })
+                {
+                    promote.push((key, lane));
+                }
+            }
+        }
+        for (key, lane) in promote {
+            surface.tiles.get_mut(&key).unwrap().cells[lane] = Cell3::Interface;
+        }
+        surface.refresh_fill(&CancelGate::new_clock_free()).unwrap();
+        let (slot, lane) = surface.grid.resolve_source(8, 8, 7).unwrap();
+        let key = surface.grid.active_keys()[slot];
+        let pressure = (surface.reference_density(key, lane) - 1.0) * CS2_3;
+        assert!((pressure / (2.0 * sigma / radius) - 1.0).abs() < 0.01);
+        let mass = surface.ledger_mass();
+        surface.step().unwrap();
+        assert!((surface.ledger_mass() - mass).abs() < 1e-10);
+        assert!(surface.sample_at(8, 8, 7).unwrap().velocity[2] < 0.0);
+    }
 
     #[test]
     fn g1_planar_wall_ghost_has_the_prescribed_angle_and_zero_planar_curvature() {
