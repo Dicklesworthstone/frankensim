@@ -7,6 +7,12 @@
 //! vapor in a carrier. Fixed canonical surface order makes retry decisions
 //! independent of the input order on the same ISA.
 //!
+//! Optional per-surface thermal accommodation uses the SAME chamber kernel,
+//! error controller and accepted-state transaction. Reflected heat participates
+//! in both temperatures even when mass transfer is exactly zero. Only accepted
+//! half steps contribute to its history; coarse and rejected trials contribute
+//! neither state nor heat. Coefficient maps are borrowed, not cloned per trial.
+//!
 //! The estimate controls local temporal error, not a rigorous global bound or
 //! experimental accuracy. This driver retains the molecular owner's physical
 //! assumptions and frozen areas. It supplies no external heat, topology
@@ -15,9 +21,10 @@
 //! unsupported caloric endpoints and cancellation remain immediate failures.
 
 use super::super::{ClosedGasParcel, GasSurfaceError, SublimationError, ThermochemicalGasModel};
+use super::super::accommodation::{ReflectedHeatStep, ThermalAccommodation};
 use super::{
     GasChamberCandidate, GasChamberSolve, GasChamberSurface, GasChamberSurfaceStep,
-    advance_chamber_with_gas,
+    advance_chamber_with_accommodation, advance_chamber_with_gas,
 };
 use fs_thermal::sublimation::SolidSurfaceState;
 use std::collections::BTreeMap;
@@ -70,6 +77,9 @@ pub struct GasSurfaceHistory {
     pub incoming_mass_kg: f64,
     pub transferred_mass_kg: f64,
     pub energy_into_gas_j: f64,
+    /// Signed reflected heat INCLUDED in energy_into_gas_j, never an addend.
+    /// This sums only accepted half steps and is zero for the specular API.
+    pub reflected_heat_into_gas_j: f64,
     /// Sum of accepted mass / (accepted endpoint density * fixed area).
     pub recession_m: f64,
     pub surface_temperature_k: [f64; 2],
@@ -86,6 +96,8 @@ pub struct GasChamberAdvanceAudit {
     pub maximum_accepted_error_ratio: f64,
     pub surfaces: Vec<GasSurfaceHistory>,
     pub energy_into_gas_j: f64,
+    /// Signed reflected heat INCLUDED in the complete stream energy above.
+    pub reflected_heat_into_gas_j: f64,
     pub solid_energy_change_j: f64,
     pub gas_energy_change_j: f64,
     pub energy_residual_j: f64,
@@ -144,17 +156,25 @@ struct SurfaceSums {
     incoming: Sum,
     transferred: Sum,
     energy: Sum,
+    reflected: Sum,
     recession: Sum,
     initial_temperature: Option<f64>,
 }
 impl SurfaceSums {
-    fn add(&mut self, row: &GasChamberSurfaceStep) -> Result<(), GasChamberAdvanceError> {
+    fn add(
+        &mut self,
+        row: &GasChamberSurfaceStep,
+        reflection: Option<&ReflectedHeatStep>,
+    ) -> Result<(), GasChamberAdvanceError> {
         self.initial_temperature
             .get_or_insert(row.surface_temperature_k[0]);
         self.outgoing.add(row.outgoing_mass_kg)?;
         self.incoming.add(row.incoming_mass_kg)?;
         self.transferred.add(row.transferred_mass_kg)?;
         self.energy.add(row.energy_into_gas_j)?;
+        if let Some(reflection) = reflection {
+            self.reflected.add(reflection.heat_into_gas_j)?;
+        }
         self.recession.add(row.recession_m)
     }
 }
@@ -259,6 +279,26 @@ fn smaller_step(requested: f64, old: f64, minimum: f64) -> Result<f64, GasChambe
     }
 }
 
+// One physical kernel dispatch, shared by trial, half-step and zero-time paths.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn evaluate_interval<'catalog>(
+    surfaces: &[GasChamberSurface<'_>],
+    accommodation: Option<&BTreeMap<u64, ThermalAccommodation>>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    duration_s: f64,
+    controls: GasChamberSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<(GasChamberCandidate<'catalog>, BTreeMap<u64, ReflectedHeatStep>), GasSurfaceError> {
+    match accommodation {
+        Some(laws) => advance_chamber_with_accommodation(
+            surfaces, laws, gas, catalog, duration_s, controls, cancelled,
+        ),
+        None => advance_chamber_with_gas(surfaces, gas, catalog, duration_s, controls, cancelled)
+            .map(|endpoint| (endpoint, BTreeMap::new())),
+    }
+}
+
 /// Advance all surfaces and the gas through a complete physical duration.
 ///
 /// Temperatures and species masses set the error estimate; formation-energy
@@ -271,6 +311,45 @@ fn smaller_step(requested: f64, old: f64, minimum: f64) -> Result<f64, GasChambe
 /// stay fixed during the call. Use the thermal timeline adapter for events.
 pub fn advance_chamber_adaptive<'catalog>(
     surfaces: &[GasChamberSurface<'_>],
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    duration_s: f64,
+    controls: GasChamberAdvanceSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<GasChamberAdvanceCandidate<'catalog>, GasChamberAdvanceError> {
+    advance_history(surfaces, None, gas, catalog, duration_s, controls, cancelled)
+}
+
+/// Adaptive phase exchange AND reflected heat using one original chamber owner.
+///
+/// Coefficients must cover exactly the surface identities, including explicit
+/// zero coefficients for specular surfaces. They remain fixed through the call;
+/// original gas and surface temperatures are reevaluated on EVERY half step.
+/// No coefficient or source catalog is cloned by this driver. Reflected heat
+/// enters the existing temperature error estimates, even at zero net mass.
+/// The audit's reflection fields are subaccounts of its complete stream energy.
+///
+/// The same trial/minimum-step limits, gross inventory restrictions, source
+/// domains, cancellation and whole-window conservation gates apply. Source
+/// refusal is not reclassified as timestep error; an unsupported coarse trial
+/// still refuses. Choose max_dt_s within the admitted physical regime.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_chamber_adaptive_with_accommodation<'catalog>(
+    surfaces: &[GasChamberSurface<'_>],
+    accommodation: &BTreeMap<u64, ThermalAccommodation>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    duration_s: f64,
+    controls: GasChamberAdvanceSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<GasChamberAdvanceCandidate<'catalog>, GasChamberAdvanceError> {
+    advance_history(surfaces, Some(accommodation), gas, catalog, duration_s, controls, cancelled)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_history<'catalog>(
+    surfaces: &[GasChamberSurface<'_>],
+    accommodation: Option<&BTreeMap<u64, ThermalAccommodation>>,
     gas: &ClosedGasParcel,
     catalog: &'catalog ThermochemicalGasModel,
     duration_s: f64,
@@ -300,6 +379,17 @@ pub fn advance_chamber_adaptive<'catalog>(
         return Err(GasChamberAdvanceError::Invalid(
             "duplicate surface identity",
         ));
+    }
+    if let Some(laws) = accommodation {
+        if laws.len() != templates.len() {
+            return Err(GasChamberAdvanceError::Invalid("accommodation surface roster mismatch"));
+        }
+        for surface in &templates {
+            poll(&mut cancelled)?;
+            if !laws.contains_key(&surface.id) {
+                return Err(GasChamberAdvanceError::Invalid("missing surface accommodation"));
+            }
+        }
     }
     let mut states: Vec<_> = templates.iter().map(|s| s.solid).collect();
     let mut sums: Vec<_> = (0..templates.len())
@@ -334,16 +424,17 @@ pub fn advance_chamber_adaptive<'catalog>(
         let current_gas = endpoint.as_ref().map_or(gas, |value| value.gas());
         let mut evaluate = |rows: &[GasChamberSurface<'_>], gas: &ClosedGasParcel, duration| {
             evaluations += 1;
-            advance_chamber_with_gas(rows, gas, catalog, duration, controls.step, &mut cancelled)
+            evaluate_interval(rows, accommodation, gas, catalog, duration, controls.step, &mut cancelled)
         };
         let trial = (|| {
-            let coarse = evaluate(&before, current_gas, dt)?;
-            let first = evaluate(&before, current_gas, dt * 0.5)?;
+            // A coarse trial is an error probe, never an accepted heat history.
+            let (coarse, _) = evaluate(&before, current_gas, dt)?;
+            let (first, first_heat) = evaluate(&before, current_gas, dt * 0.5)?;
             let middle: Vec<_> = first.surfaces().iter().map(|row| row.solid).collect();
-            let second = evaluate(&with_states(&templates, &middle), first.gas(), dt * 0.5)?;
-            Ok::<_, GasSurfaceError>((coarse, first, second))
+            let (second, second_heat) = evaluate(&with_states(&templates, &middle), first.gas(), dt * 0.5)?;
+            Ok::<_, GasSurfaceError>((coarse, first, first_heat, second, second_heat))
         })();
-        let (coarse, first, second) = match trial {
+        let (coarse, first, first_heat, second, second_heat) = match trial {
             Ok(value) => value,
             Err(GasSurfaceError::InventoryLimit { maximum_duration_s }) => {
                 rejected += 1;
@@ -372,8 +463,8 @@ pub fn advance_chamber_adaptive<'catalog>(
         }
         for ((sum, a), b) in sums.iter_mut().zip(first.surfaces()).zip(second.surfaces()) {
             poll(&mut cancelled)?;
-            sum.add(a)?;
-            sum.add(b)?;
+            sum.add(a, first_heat.get(&a.id))?;
+            sum.add(b, second_heat.get(&b.id))?;
         }
         accepted += 1;
         maximum_error = maximum_error.max(ratio);
@@ -399,12 +490,13 @@ pub fn advance_chamber_adaptive<'catalog>(
         Some(endpoint) => endpoint,
         None => {
             evaluations += 1;
-            advance_chamber_with_gas(&templates, gas, catalog, 0.0, controls.step, &mut cancelled)?
+            evaluate_interval(&templates, accommodation, gas, catalog, 0.0, controls.step, &mut cancelled)?.0
         }
     };
     let mut solid_energy = Sum::default();
     let mut solid_mass = Sum::default();
     let mut stream_energy = Sum::default();
+    let mut reflected_energy = Sum::default();
     let mut species_transfers = BTreeMap::new();
     let mut histories = Vec::with_capacity(templates.len());
     for ((original, final_row), sum) in templates.iter().zip(endpoint.surfaces()).zip(sums) {
@@ -418,6 +510,7 @@ pub fn advance_chamber_adaptive<'catalog>(
         )?;
         solid_mass.add(end.mass_kg - start.mass_kg)?;
         stream_energy.add(sum.energy.value)?;
+        reflected_energy.add(sum.reflected.value)?;
         species_transfers
             .entry(original.binding.species.clone())
             .or_insert_with(Sum::default)
@@ -428,6 +521,7 @@ pub fn advance_chamber_adaptive<'catalog>(
             incoming_mass_kg: sum.incoming.value,
             transferred_mass_kg: sum.transferred.value,
             energy_into_gas_j: sum.energy.value,
+            reflected_heat_into_gas_j: sum.reflected.value,
             recession_m: sum.recession.value,
             surface_temperature_k: [
                 sum.initial_temperature
@@ -506,6 +600,7 @@ pub fn advance_chamber_adaptive<'catalog>(
             maximum_accepted_error_ratio: maximum_error,
             surfaces: histories,
             energy_into_gas_j: stream_energy.value,
+            reflected_heat_into_gas_j: reflected_energy.value,
             solid_energy_change_j: solid_energy.value,
             gas_energy_change_j: gas_energy,
             energy_residual_j: energy_residual,
@@ -519,3 +614,7 @@ pub fn advance_chamber_adaptive<'catalog>(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "advance/accommodation_tests.rs"]
+mod accommodation_tests;
