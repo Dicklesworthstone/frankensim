@@ -1,4 +1,7 @@
 //! Force-driven material contact, using the same source and finite heat fixtures.
+#[path = "dynamics/collinear.rs"]
+mod collinear;
+
 use super::*;
 use fs_ga::Vec3;
 use fs_material::phase::{HeatCapacitySourceQuery, SolidLiquidPhase};

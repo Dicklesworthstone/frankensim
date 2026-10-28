@@ -8666,3 +8666,9 @@ conduction, analytic steady temperature and three-level spatial convergence.
 This backward-Euler finite-volume route requires time and spatial refinement.
 Moving footprints, finite third-body storage, wear, thermal expansion and
 flash-temperature closures remain outside this implementation.
+
+## Physical stopping and reversal with finite thermal feedback
+
+`SlidingPair::step_collinear_candidate` advances relative motion on one declared fixed tangent axis while retaining common transverse motion. It refuses transverse relative velocity/acceleration. Each sliding segment solves the original source/enthalpy feedback at midpoint slip with a bounded safeguarded secant/bisection solve of the reduced impulse. A stop is localized before the original static-capacity test admits sticking or reversal. Actual traction times sliding distance supplies friction heat; numerical kinetic loss is never deposited as heat. All segments, body momenta, original slip/work histories and finite caloric stores publish atomically after independent local and cumulative momentum/energy gates.
+
+Constant held Coulomb coefficients recover analytic stopping/reversal. Endpoint temperature/speed-dependent coefficients still require time refinement; a sign bracket proves neither uniqueness nor a continuous first-event theorem for arbitrary nonmonotone curves. Thermal weakening within an initially stuck segment is not separately localized. G0/G1/G3 tests use source-resolved masses and verify complete conversion of relative kinetic energy at a stop, same-call forced reversal, independent finite-temperature feedback, static/common transverse force work, and late-refusal rollback. The existing general planar endpoint integrator remains available.

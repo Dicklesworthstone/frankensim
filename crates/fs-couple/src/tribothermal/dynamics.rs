@@ -24,6 +24,9 @@
 //! zero speed. No velocity floor, normal geometry update, rotation, wear or
 //! moving thermal mesh is introduced.
 
+/// Work-conjugate collinear motion with physical stopping and reversal events.
+pub mod collinear;
+
 use super::*;
 use fs_thermal::enthalpy::DepositedCell;
 use fs_mbd_material::ResolvedBody;
