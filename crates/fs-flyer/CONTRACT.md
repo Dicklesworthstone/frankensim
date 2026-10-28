@@ -41,6 +41,14 @@ the browser boundary remains in `fs-flyer-wasm`.
   representative of the rotation double cover. Zero-horizon advance and replay
   still perform body/state/timestep/group admission and return that canonical
   state without invoking the load callback.
+  The second load evaluation receives a first-order endpoint velocity predictor
+  including both halves of the initial moment impulse; smooth angular drag and
+  forces coupled to angular velocity therefore retain second-order convergence.
+  The accepted rotational update delivers the trapezoidal world angular impulse
+  `dt/2 (R_start tau_start + R_end tau_end)` to roundoff. This is a finite-step
+  balance, not an exact solution for general varying loads. The spine battery
+  checks exponential angular decay, its integrated angle and coupled translation,
+  and a constant world-frame torque on an asymmetric rotating body (G0/G1).
 
 ## Canard hinge friction and stops
 

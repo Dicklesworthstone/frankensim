@@ -110,6 +110,98 @@ fn richardson_order_is_two_on_time_varying_force() {
 }
 
 #[test]
+fn g1_angular_drag_and_cross_coupled_force_converge_at_second_order() {
+    // I_y = 2, tau_y = -4 omega_y: omega_y(t) = exp(-2t).
+    // F_x = m omega_y independently checks the endpoint angular velocity
+    // seen by the same load callback, not only the returned angular state.
+    let body = RigidBody {
+        mass_kg: 3.0,
+        inertia_kgm2: [1.5, 2.0, 2.5],
+    };
+    let mut initial = rest();
+    initial.omega_body[1] = 1.0;
+    let exact_omega = (-2.0_f64).exp();
+    let exact_velocity = 0.5 * (1.0 - exact_omega);
+    let exact_angle = exact_velocity;
+    let errors = |n: u32| {
+        let (end, _) = advance(&body, &initial, 0.0, 1.0 / f64::from(n), n, |_, s| Loads {
+            force_n: [body.mass_kg * s.omega_body[1], 0.0, 0.0],
+            moment_nm: [0.0, -4.0 * s.omega_body[1], 0.0],
+        })
+        .unwrap();
+        [
+            (end.omega_body[1] - exact_omega).abs(),
+            (end.vel_mps[0] - exact_velocity).abs(),
+            (2.0 * end.quat[2].atan2(end.quat[0]) - exact_angle).abs(),
+        ]
+    };
+    let (coarse, medium, fine) = (errors(20), errors(40), errors(80));
+    for i in 0..3 {
+        let p12 = (coarse[i] / medium[i]).log2();
+        let p23 = (medium[i] / fine[i]).log2();
+        assert!(
+            (1.8..2.2).contains(&p12) && (1.8..2.2).contains(&p23),
+            "component {i}: order {p12}/{p23}, errors {}/{}/{}",
+            coarse[i],
+            medium[i],
+            fine[i]
+        );
+    }
+}
+
+#[test]
+fn g0_spatial_torque_delivers_the_prescribed_world_angular_impulse() {
+    use fs_ga::{Quat, So3, So3Tangent, Vec3};
+
+    let body = RigidBody {
+        mass_kg: 2.0,
+        inertia_kgm2: [1.1, 1.7, 2.4],
+    };
+    let rotation = So3::exp(So3Tangent::new(Vec3::new(0.3, -0.4, 0.2))).unwrap();
+    let q = rotation.as_quat();
+    let mut state = rest();
+    state.quat = [q.w, q.x, q.y, q.z];
+    state.omega_body = [0.8, -0.5, 1.3];
+    let world_momentum = |s: &SixDofState| {
+        So3::try_from_quat(Quat {
+            w: s.quat[0],
+            x: s.quat[1],
+            y: s.quat[2],
+            z: s.quat[3],
+        })
+        .unwrap()
+        .rotate(Vec3::new(
+            body.inertia_kgm2[0] * s.omega_body[0],
+            body.inertia_kgm2[1] * s.omega_body[1],
+            body.inertia_kgm2[2] * s.omega_body[2],
+        ))
+        .unwrap()
+    };
+    let initial = world_momentum(&state);
+    let torque = Vec3::new(-0.7, 0.2, 0.4);
+    let (end, _) = advance(&body, &state, 0.0, DT, 240, |_, s| {
+        let r = So3::try_from_quat(Quat {
+            w: s.quat[0],
+            x: s.quat[1],
+            y: s.quat[2],
+            z: s.quat[3],
+        })
+        .unwrap();
+        let t = r.inverse().rotate(torque).unwrap();
+        Loads {
+            force_n: [0.0; 3],
+            moment_nm: [t.x, t.y, t.z],
+        }
+    })
+    .unwrap();
+    let residual = world_momentum(&end) - initial - torque.scale(240.0 * DT);
+    assert!(
+        residual.norm() < 2e-12,
+        "world angular impulse residual {residual:?}"
+    );
+}
+
+#[test]
 fn bit_identity_across_runs_and_digest_sensitivity() {
     let loads = |t: f64, s: &SixDofState| Loads {
         force_n: [10.0 * (3.0 * t).sin(), -2.0 * s.vel_mps[1], 3336.0],
@@ -311,10 +403,10 @@ fn trajectory_golden() {
     .unwrap();
     let last = digests.last().unwrap().clone();
     jlog("golden", &format!("\"digest\":\"{last}\""));
-    // Intentional canonical-state migration: fs-time now advances fs-ga::So3
-    // and canonicalizes the quaternion double cover at every group operation.
+    // Remeasured after correcting the angular-load endpoint predictor.
+    // Independent drag/order tests above justify this same-ISA sentinel.
     assert_eq!(
-        last, "7f7a61553e3257bf49abc90b27b528a68dea4d195aa9185201b986d7bc5a4a17",
+        last, "454fa8c879bd182d9910472eb728aa95da7ab3a9b5502afa7d379a20137e0a5a",
         "spine trajectory digest moved — determinism regression or an \
          intentional integrator change requiring the golden-bump protocol"
     );

@@ -203,8 +203,9 @@ pub fn admit_and_canonicalize_state(
 }
 
 /// One spine tick: velocity-Verlet translation (loads sampled at t and
-/// t+dt via the callback) + Strang kick–free–kick rotation with the
-/// body moment held over the tick.
+/// t+dt via the callback) + Strang kick–free–kick rotation. The endpoint
+/// predictor includes the full initial force and moment impulse, so smooth
+/// velocity-dependent loads retain second-order accuracy.
 ///
 /// The callback receives (time_s, &state) and returns the loads; it is
 /// called exactly twice per tick (begin, end-predictor) — deterministic
@@ -280,7 +281,11 @@ where
     let mut predictor = pos;
     for i in 0..3 {
         predictor.vel_mps[i] = canonical_state.vel_mps[i] + a0[i] * dt_s;
-        predictor.omega_body[i] = w_free[i];
+        // The free drift contains only the first half-kick. Complete the
+        // initial torque impulse for an O(dt²)-accurate endpoint predictor;
+        // otherwise angular drag is sampled half a kick early and its
+        // integrated momentum is only first-order accurate.
+        predictor.omega_body[i] = w_free[i] + l0.moment_nm[i] / body.inertia_kgm2[i] * half;
     }
     admit_derived_state(&predictor, "end-of-tick predictor")?;
     let l1 = admit_loads(loads(end_t_s, &predictor), "end-of-tick")?;

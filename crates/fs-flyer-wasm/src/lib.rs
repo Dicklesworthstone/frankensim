@@ -24,7 +24,7 @@
 
 use fs_blake3::hash_domain;
 use fs_ga::{Quat, So3, Vec3};
-use fs_time::lie::rigid_body_step;
+use fs_time::lie::{rigid_body_step, rigid_body_torque_step};
 
 pub mod archive;
 pub mod engine;
@@ -407,8 +407,8 @@ pub fn hello_envelope(state: &HelloState) -> String {
     )
 }
 
-/// One CG2 step with an external body torque [N·m].
-/// Split: apply `I⁻¹ τ Δt`, then the torque-free `rigid_body_step`.
+/// Second-order rotation with an external torque held in the body frame [N·m].
+/// Symmetric momentum half-kicks enclose the torque-free Lie-group drift.
 /// This is the aero kernel; `hello_spin` remains torque-free.
 ///
 /// # Errors
@@ -429,11 +429,16 @@ pub fn aero_step(
             ranked_repairs: vec!["replace NaN/inf torque with a finite body wrench".into()],
         });
     }
+    let torque = Vec3::new(torque_n_m[0], torque_n_m[1], torque_n_m[2]);
     for _ in 0..steps {
-        angular.x += torque_n_m[0] / inertia_kg_m2[0] * dt_s;
-        angular.y += torque_n_m[1] / inertia_kg_m2[1] * dt_s;
-        angular.z += torque_n_m[2] / inertia_kg_m2[2] * dt_s;
-        (rotation, angular) = canonical_rigid_body_step(rotation, angular, inertia, dt_s)?;
+        (rotation, angular) = rigid_body_torque_step(rotation, angular, inertia, torque, dt_s)
+            .map_err(|error| Refusal {
+                code: "lie-step-refused",
+                message: format!("canonical fs-time driven rigid-body step refused: {error}"),
+                ranked_repairs: vec![
+                    "reduce the step or inspect torque relative to inertia".into(),
+                ],
+            })?;
     }
     Ok(HelloState {
         quaternion: rotation_to_boundary(rotation),
@@ -747,6 +752,32 @@ mod tests {
         );
         let n2: f64 = yawed.quaternion.iter().map(|v| v * v).sum();
         assert!((n2 - 1.0).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn g1_aero_step_matches_uniform_angular_acceleration_in_angle_and_momentum() {
+        // I_y = 2 and tau_y = 4 imply alpha_y = 2. A full torque kick
+        // before the drift gets the final momentum right but over-rotates.
+        // Check the independent analytic attitude as well, even for one tick.
+        for steps in [1, 10, 120] {
+            let end = aero_step(
+                [1.5, 2.0, 2.5],
+                IDENTITY_Q,
+                [0.0, 0.3, 0.0],
+                [0.0, 4.0, 0.0],
+                DT,
+                steps,
+            )
+            .unwrap();
+            let t = f64::from(steps) * DT;
+            let exact_angle = 0.3 * t + t * t;
+            let exact = So3::exp(fs_ga::So3Tangent::new(Vec3::new(0.0, exact_angle, 0.0))).unwrap();
+            let actual = rotation_from_boundary(end.quaternion).unwrap();
+            let probe = Vec3::new(1.0, 0.0, 0.0);
+            let error = (actual.rotate(probe).unwrap() - exact.rotate(probe).unwrap()).norm();
+            assert!(error < 2e-12, "steps {steps}: attitude error {error}");
+            assert!((2.0 * (end.omega_body[1] - 0.3) - 4.0 * t).abs() < 2e-12);
+        }
     }
 
     #[test]

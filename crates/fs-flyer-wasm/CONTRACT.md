@@ -55,6 +55,14 @@ Boundary contracts, inherited by every future API entry:
 | `hello_spin` / `flyer_hello_spin` | pure / wasm | deterministic free rigid-body CG2 spin over canonical `fs_ga::So3` state (`fs_time::lie::rigid_body_step`); refuses non-finite input, non-positive inertia, orientation outside SO(3), out-of-domain dt, steps > 1,000,000 |
 | `hello_digest` / `flyer_hello_digest` | pure / wasm | full-trajectory bit-exact content digest (hex) under the versioned domain; performs the same admission, including the exact step cap, before allocation |
 | `hello_spin_json`, `refusal_envelope`, `hello_envelope` | pure | the JS envelope renderers (shared by native tests and the boundary) |
+| `aero_step` / `flyer_aero_step` | pure / wasm | second-order symmetric momentum kick–drift–kick rotation through `fs_time::lie::rigid_body_torque_step`; torque is held in the principal body frame over each tick, with the same state/step admission as `hello_spin` |
+
+The driven rotation uses half of the applied angular impulse on each side of
+the free Lie-group step. Its G1 regression checks both the analytic attitude
+and angular momentum for constant principal-axis torque, including a single
+tick. Free-spin replay is unchanged. General state-dependent aerodynamic
+torques need endpoint coupling; freezing such a load does not inherit the
+held-torque integrator's second-order claim.
 
 ### Archive-loader surface (E0.9c slice, bead guzez.1.9.3)
 
