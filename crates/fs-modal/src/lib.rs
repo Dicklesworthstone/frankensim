@@ -1137,18 +1137,21 @@ pub fn eigh_gen_dense(k: &[f64], m: &[f64], n: usize) -> Result<Vec<ModePair>, M
 // ---------------------------------------------------------------------------
 
 /// All 2n eigenvalues of the quadratic pencil `(λ²M + λC + K)·φ = 0` (dense
-/// row-major inputs, SPD M) via the companion linearization
-/// `[[0, I], [−M⁻¹K, −M⁻¹C]]` and the fs-la dense complex eigensolver.
-/// A single coordinate uses a scaled analytic quadratic and a product-of-roots
-/// recovery, so strong overdamping does not erase the slow relaxation pole.
+/// row-major inputs, SPD M). Exact power-of-two coordinate and time scales
+/// precede a Cholesky mass whitening and dimensionless companion linearization.
+/// All damping entries, including gyroscopic terms, reach the fs-la complex QR
+/// solver; no approximate diagonalization or modal decoupling is performed.
+/// Exactly diagonal pencils use the scaled analytic scalar quadratic and
+/// product-of-roots recovery, retaining each slow overdamped relaxation pole.
 /// Negative stiffness and active damping retain their unstable poles.
 /// Returns eigenvalues sorted canonically by (re, im); eigenvectors are not
 /// computed (the fs-la complex path is values-only — recorded boundary).
 ///
 /// # Errors
 /// [`ModalError::MassNotSpd`] if M fails Cholesky; [`ModalError::QuadraticEig`]
-/// if the complex QR iteration fails to converge or the scalar coefficients
-/// or resulting poles are not finite and representable.
+/// if the complex QR iteration fails to converge or coefficients, transformed
+/// entries or resulting poles are not finite and representable. Scaling does
+/// not certify accuracy of a highly separated or defective matrix spectrum.
 ///
 /// # Panics
 /// On shape mismatches (programmer error).
@@ -1167,39 +1170,116 @@ pub fn quadratic_eigenvalues(
     if n == 1 {
         return quadratic_scalar_eigenvalues(m[0], c[0], k[0]);
     }
-    let chol = cholesky(m, n).map_err(|_| ModalError::MassNotSpd { negative: 0 })?;
-    let minv_times = |b: &[f64]| -> Vec<f64> {
-        let mut x = b.to_vec();
-        chol.solve(&mut x);
-        x
+    let invalid = || ModalError::QuadraticEig {
+        detail: "quadratic pencil scaling requires finite, representable coefficients and poles".into(),
     };
-    // Companion A (2n×2n complex, row-major).
+    if m.iter().any(|v| !v.is_finite()) || (0..n).any(|i| m[i*n+i] <= 0.0) {
+        return Err(ModalError::MassNotSpd { negative: 0 });
+    }
+    if c.iter().chain(k).any(|v| !v.is_finite()) { return Err(invalid()); }
+    if (0..n).all(|i| (0..n).all(|j| i == j
+        || (m[i*n+j] == 0.0 && c[i*n+j] == 0.0 && k[i*n+j] == 0.0))) {
+        let mut poles = Vec::with_capacity(2*n);
+        for i in 0..n {
+            poles.extend(quadratic_scalar_eigenvalues(m[i*n+i],c[i*n+i],k[i*n+i])?);
+        }
+        poles.sort_by(|a,b| a.re.total_cmp(&b.re).then_with(|| a.im.total_cmp(&b.im)));
+        return Ok(poles);
+    }
+    // x_i = 2^(-e_i) y_i equilibrates the mass diagonal without rounding a
+    // square root into every coefficient. lambda = 2^t mu keeps BOTH rate
+    // and squared-rate blocks representable before any division by mass.
+    let exponents: Vec<_> = (0..n).map(|i| quadratic_fraction(m[i*n+i]).1.div_euclid(2)).collect();
+    let mut time_exponent = i32::MIN;
+    for i in 0..n { for j in 0..n {
+        let coordinate = exponents[i] + exponents[j];
+        if c[i*n+j] != 0.0 {
+            time_exponent = time_exponent.max(quadratic_fraction(c[i*n+j]).1 - coordinate);
+        }
+        if k[i*n+j] != 0.0 {
+            time_exponent = time_exponent.max((quadratic_fraction(k[i*n+j]).1 - coordinate + 1).div_euclid(2));
+        }
+    }}
+    if time_exponent == i32::MIN { time_exponent = 0; }
+    let transform = |a: &[f64], order: i32| -> Result<Vec<f64>,ModalError> {
+        a.iter().enumerate().map(|(index,&value)| {
+            let exponent = -exponents[index/n] - exponents[index%n] - order*time_exponent;
+            let scaled = quadratic_power_scale(value,exponent);
+            if !scaled.is_finite() || (value != 0.0 && scaled == 0.0) { Err(invalid()) }
+            else { Ok(scaled) }
+        }).collect()
+    };
+    let mass = transform(m,0)?;
+    let chol = cholesky(&mass,n).map_err(|_| ModalError::MassNotSpd { negative: 0 })?;
+    let mut damping = transform(c,1)?;
+    let mut stiffness = transform(k,2)?;
+    quadratic_mass_whiten(&mut damping,n,&chol);
+    quadratic_mass_whiten(&mut stiffness,n,&chol);
+    if damping.iter().chain(&stiffness).any(|v| !v.is_finite()) { return Err(invalid()); }
+    // z = L^T y gives mu^2 I + mu L^-1 C L^-T + L^-1 K L^-T.
+    // Unlike M^-1 K, the whitened symmetric blocks stay symmetric; an
+    // original antisymmetric gyroscopic block is retained with its sign.
     let dim = 2 * n;
     let mut a = vec![C64::ZERO; dim * dim];
     for i in 0..n {
         a[i * dim + (n + i)] = C64::new(1.0, 0.0);
-    }
-    // Rows n..2n: [−M⁻¹K, −M⁻¹C] built column-block by column-block.
-    let mut colbuf = vec![0.0f64; n];
-    for cidx in 0..n {
-        for (i, slot) in colbuf.iter_mut().enumerate() {
-            *slot = k[i * n + cidx];
-        }
-        let x = minv_times(&colbuf);
-        for (i, xv) in x.iter().enumerate() {
-            a[(n + i) * dim + cidx] = C64::new(-xv, 0.0);
-        }
-        for (i, slot) in colbuf.iter_mut().enumerate() {
-            *slot = c[i * n + cidx];
-        }
-        let x = minv_times(&colbuf);
-        for (i, xv) in x.iter().enumerate() {
-            a[(n + i) * dim + (n + cidx)] = C64::new(-xv, 0.0);
+        for j in 0..n {
+            a[(n+i)*dim+j] = C64::from_re(-stiffness[i*n+j]);
+            a[(n+i)*dim+n+j] = C64::from_re(-damping[i*n+j]);
         }
     }
-    complex_eig(&a, dim).map_err(|e| ModalError::QuadraticEig {
+    let mut poles = complex_eig(&a, dim).map_err(|e| ModalError::QuadraticEig {
         detail: format!("{e:?}"),
-    })
+    })?;
+    for pole in &mut poles {
+        let original = *pole;
+        pole.re = quadratic_power_scale(pole.re,time_exponent);
+        pole.im = quadratic_power_scale(pole.im,time_exponent);
+        if !pole.re.is_finite() || !pole.im.is_finite()
+            || (original != C64::ZERO && *pole == C64::ZERO) { return Err(invalid()); }
+    }
+    poles.sort_by(|a,b| a.re.total_cmp(&b.re).then_with(|| a.im.total_cmp(&b.im)));
+    Ok(poles)
+}
+
+// In-place congruence L^-1 A L^-T, retaining nonsymmetric damping too.
+fn quadratic_mass_whiten(a: &mut [f64], n: usize, l: &fs_la::factor::Cholesky) {
+    let mut column = vec![0.0;n];
+    let forward = |column: &mut [f64]| {
+        for i in 0..n {
+            for j in 0..i { column[i] = (-l.l(i,j)).mul_add(column[j],column[i]); }
+            column[i] /= l.l(i,i);
+        }
+    };
+    for j in 0..n {
+        for i in 0..n { column[i] = a[i*n+j]; }
+        forward(&mut column);
+        for i in 0..n { a[i*n+j] = column[i]; }
+    }
+    for i in 0..n {
+        column.copy_from_slice(&a[i*n..(i+1)*n]);
+        forward(&mut column);
+        a[i*n..(i+1)*n].copy_from_slice(&column);
+    }
+}
+
+// Exact binary rescaling except at a final subnormal/overflow boundary.
+// Chunking avoids constructing 2^exponent when that factor alone overflows.
+fn quadratic_power_scale(mut value: f64, mut exponent: i32) -> f64 {
+    while exponent != 0 {
+        let step = exponent.clamp(-512,512);
+        value *= f64::from_bits(((1023+step) as u64) << 52);
+        exponent -= step;
+    }
+    value
+}
+
+fn quadratic_fraction(value: f64) -> (f64,i32) {
+    let shift = if value.abs() < f64::MIN_POSITIVE { 52 } else { 0 };
+    let bits = (value.abs() * if shift == 0 { 1.0 } else { 4_503_599_627_370_496.0 }).to_bits();
+    let exponent = ((bits >> 52) & 0x7ff) as i32 - 1023 - shift;
+    let mantissa = f64::from_bits((bits & 0x000f_ffff_ffff_ffff) | (1023_u64 << 52));
+    (mantissa,exponent)
 }
 
 // Solve m lambda^2 + c lambda + k = 0 without squaring an unscaled rate or
@@ -1256,16 +1336,9 @@ fn quadratic_scalar_eigenvalues(m: f64, c: f64, k: f64) -> Result<Vec<C64>, Moda
 // instead would spuriously split exactly critical roots (e.g. 175,770,847).
 fn quadratic_scalar_discriminant(m: f64, c: f64, k: f64) -> f64 {
     if c == 0.0 { return -1.0; }
-    fn fraction(value: f64) -> (f64, i32) {
-        let shift = if value.abs() < f64::MIN_POSITIVE { 52 } else { 0 };
-        let bits = (value.abs() * if shift == 0 { 1.0 } else { 4_503_599_627_370_496.0 }).to_bits();
-        let exponent = ((bits >> 52) & 0x7ff) as i32 - 1023 - shift;
-        let mantissa = f64::from_bits((bits & 0x000f_ffff_ffff_ffff) | (1023_u64 << 52));
-        (mantissa, exponent)
-    }
-    let (mm, me) = fraction(m);
-    let (cm, ce) = fraction(c);
-    let (km, ke) = fraction(k);
+    let (mm, me) = quadratic_fraction(m);
+    let (cm, ce) = quadratic_fraction(c);
+    let (km, ke) = quadratic_fraction(k);
     let c_exponent = 2 * ce;
     let mk_exponent = me + ke + 2;
     let exponent = c_exponent.max(mk_exponent);
@@ -2004,6 +2077,85 @@ mod tests {
         // The public entry point dispatches to the same scalar implementation.
         assert_eq!(quadratic_eigenvalues(&[1.0], &[4.0e10], &[4.0], 1).unwrap(),
             quadratic_scalar_eigenvalues(1.0, 4.0e10, 4.0).unwrap());
+    }
+
+    #[test]
+    fn quadratic_matrix_scaling_preserves_nonproportional_damped_resonances() {
+        // G1: in the original coordinates M=I, K=diag(4,9), and
+        // C=[[8,sqrt(46)],[sqrt(46),12]]/5 is positive definite and
+        // nonproportional. Its determinant factors INDEPENDENTLY as
+        // (lambda^2 + lambda + 6)(lambda^2 + 3 lambda + 6).
+        // Apply the nonorthogonal physical chart T=[[1,1/2],[0,2]] before
+        // changing the time unit. Neither damping coupling may be discarded.
+        let b = 46.0_f64.sqrt() / 5.0;
+        let mass = [1.0, 0.5, 0.5, 4.25];
+        let damping = [1.6, 0.8 + 2.0*b, 0.8 + 2.0*b, 10.0 + 2.0*b];
+        let stiffness = [4.0, 2.0, 2.0, 37.0];
+        let expected = [(-1.5, -3.75_f64.sqrt()), (-1.5, 3.75_f64.sqrt()),
+            (-0.5, -5.75_f64.sqrt()), (-0.5, 5.75_f64.sqrt())];
+        for (amplitude, rate, chart) in [
+            (1.0, 1.0, [1.0, 1.0]),
+            (1.0e-200, 1.0e200, [1.0, 1.0]),
+            (1.0e200, 1.0e-200, [1.0, 1.0]),
+            (1.0e-250, 1.0, [1.0, 1.0]),
+            (1.0e250, 1.0, [1.0, 1.0]),
+            (1.0, 1.0, [1.0e100, -1.0e-100]),
+        ] {
+            let transform = |a: &[f64], factor: f64| -> Vec<f64> {
+                (0..4).map(|i| a[i] * factor * chart[i/2] * chart[i%2]).collect()
+            };
+            let m = transform(&mass, amplitude);
+            let c = transform(&damping, amplitude * rate);
+            let k = transform(&stiffness, (amplitude * rate) * rate);
+            let poles = quadratic_eigenvalues(&m, &c, &k, 2).unwrap();
+            let mut normalized: Vec<_> = poles.iter().map(|p| C64::new(p.re/rate,p.im/rate)).collect();
+            // Pair by the exact damping class and conjugate sign, independent
+            // of a last-bit real tie between members of the same pair.
+            normalized.sort_by(|a,b| a.im.total_cmp(&b.im));
+            let mut expected = expected;
+            expected.sort_by(|a,b| a.1.total_cmp(&b.1));
+            for (actual,(re,im)) in normalized.iter().zip(expected) {
+                assert!((actual.re-re).abs()<2e-12 && (actual.im-im).abs()<2e-12,
+                    "amplitude={amplitude} rate={rate} chart={chart:?}: {actual:?} expected ({re},{im})");
+            }
+        }
+    }
+
+    #[test]
+    fn quadratic_diagonal_bank_preserves_slow_critical_and_oscillatory_modes() {
+        let m = [1.0,0.0,0.0, 0.0,2.0,0.0, 0.0,0.0,3.0];
+        let c = [4e10,0.0,0.0, 0.0,0.0,0.0, 0.0,0.0,6.0];
+        let k = [4.0,0.0,0.0, 0.0,18.0,0.0, 0.0,0.0,3.0];
+        let roots = quadratic_eigenvalues(&m,&c,&k,3).unwrap();
+        let expected: [(f64,f64);6] = [(-4e10,0.0),(-1.0,0.0),(-1.0,0.0),(-1e-10,0.0),(0.0,-3.0),(0.0,3.0)];
+        for (root,(re,im)) in roots.iter().zip(expected) {
+            let scale = re.abs().max(im.abs());
+            assert!((root.re-re).abs()<=2e-14*scale && (root.im-im).abs()<=2e-14*scale,
+                "{root:?} expected ({re},{im})");
+        }
+    }
+
+    #[test]
+    fn quadratic_mass_whitening_retains_gyroscopic_frequency_splitting() {
+        // G1: M=I, K=diag(4,9), C=[[0,3],[-3,0]] is conservative
+        // gyroscopic coupling. det Q=lambda^4+22 lambda^2+36, so
+        // omega^2=11 +/- sqrt(85). Symmetrizing C would erase the split.
+        // The same nonorthogonal chart as above makes M genuinely coupled.
+        let frequencies = [(11.0-85.0_f64.sqrt()).sqrt(),(11.0+85.0_f64.sqrt()).sqrt()];
+        for rate in [1.0,1e150,1e-150] {
+            let mass: Vec<_> = [1.0,0.5,0.5,4.25].iter().map(|m|m/rate).collect();
+            let stiffness: Vec<_> = [4.0,2.0,2.0,37.0].iter().map(|k|k*rate).collect();
+            let poles = quadratic_eigenvalues(&mass,&[0.0,6.0,-6.0,0.0],&stiffness,2).unwrap();
+            let mut positive: Vec<_> = poles.iter().filter(|p|p.im>0.0).map(|p| {
+                assert!((p.re/rate).abs()<2e-12);
+                p.im/rate
+            }).collect();
+            positive.sort_by(f64::total_cmp);
+            assert_eq!(positive.len(),2);
+            for (actual,expected) in positive.iter().zip(frequencies) {
+                assert!((actual-expected).abs()<2e-12,"{actual} expected {expected}");
+            }
+        }
     }
 
     #[test]

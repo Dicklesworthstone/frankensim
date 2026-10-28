@@ -62,11 +62,14 @@ mass-normalized damped modes (`time`, moved from fs-couple under owner decision 
   4-ulp rounding term are added. Otherwise, or whenever a widened interval
   leaves the window, the linear residual is kept.
 - `quadratic_eigenvalues(m, c, k, n) -> Vec<C64>` — all 2n eigenvalues of
-  `(λ²M + λC + K)φ = 0` via companion linearization `[[0, I], [−M⁻¹K,
-  −M⁻¹C]]` and the fs-la dense complex QR path. A single coordinate instead
-  uses a scaled analytic quadratic with product-of-roots recovery, retaining
-  the slow overdamped pole, complex conjugates, free roots and unstable poles
-  from negative stiffness or active damping. Values only.
+  `(λ²M + λC + K)φ = 0`. Exact power-of-two coordinate and time scaling of
+  the original coefficients precedes Cholesky mass whitening and the fs-la
+  dimensionless companion QR path. No `M⁻¹K` with dimensional squared
+  frequencies is formed. All nonproportional and gyroscopic damping entries
+  remain coupled. Exactly diagonal original pencils instead use analytic
+  scalar quadratics with product-of-roots recovery, retaining slow overdamped
+  poles, complex conjugates, free roots and unstable poles. There is no
+  tolerance-based decoupling. Values only; canonical `(real, imaginary)` order.
 - `ModalError` — typed refusals with stable `FS-MODAL-*` display codes:
   dimension mismatch, mass-not-SPD, factorization refusal (wrapping the
   fs-sparse `FS-SPARSE-DIRECT-*` code and the shift), invalid window,
@@ -334,12 +337,17 @@ agreement gate).
   interval; it does not by itself prove interval-eigenvalue pairing when
   intervals overlap, and it says nothing about eigenVECTOR accuracy
   (Davis–Kahan-style shape bounds are not claimed).
-- `quadratic_eigenvalues` returns values only (no eigenvectors). For multiple
-  coordinates it uses dense linearization and makes no claim of
-  structure-preserving scaling for badly conditioned (M, C, K) — the
-  viscoelastic bead's light-damping regime is the tested matrix envelope.
-  The analytic scalar path additionally covers strong overdamping and large
-  coefficient scales; non-finite or unrepresentable poles refuse.
+- `quadratic_eigenvalues` returns values only (no eigenvectors or pole
+  certificates). Its matrix path removes arbitrary coordinate and time-unit
+  scales, retaining nonproportional loss and gyroscopic coupling; analytic
+  G1/G3 regressions cover rates `1e±200`, coefficient scales `1e±250`, and
+  signed coordinate scales `1e±100`. This does not cure intrinsic mass
+  ill-conditioning, defective poles or extreme separation within one coupled
+  spectrum. Exactly diagonal pencils retain the scalar strong-overdamping
+  path. Scaling refuses non-finite or erased nonzero coefficients and
+  non-finite or entirely underflowed rescaled poles. The general QR result is
+  not a certificate that every slow pole was resolved; the analytic diagonal
+  path additionally refuses an erased nonzero scalar root.
 - No LOBPCG/AMG tier for problems too large to factor: `slice_window`
   requires the sparse LDLᵀ to fit. That tier joins a follow-up bead when a
   consumer presents a pencil the direct factorization cannot hold; the
