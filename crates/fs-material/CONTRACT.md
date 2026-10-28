@@ -3017,6 +3017,34 @@ segments/loop area, minor memory, monotone subdivision, inverse histories,
 tangents, reversible limits, refusal and winding energy/heat conjugacy.
 
 
+### Isotropic vector magnetic hysteresis
+
+`field_storage::hysteresis::vector::VectorHysteresis` extends the original
+fixed-condition branch parameters to three-dimensional polarization memory.
+Each branch minimizes |z|²/(2chi) - H.z + hc|z-z_old| inside its saturation
+ball. Exact interior shrinkage and a bounded scalar multiplier solve give the
+constrained vector minimizer. Its consistent active-set dz/dH is symmetric
+positive semidefinite; the positive background permeability makes the complete
+dB/dH positive definite for the bounded, backtracked B-driven inverse.
+All trials start from the same accepted memory. Branch-state storage allocates
+only for the accepted field candidate, not for inverse trial responses.
+
+Reports distinguish physical pinning heat sum(hc|delta z|), stored-energy
+change, endpoint H_new.delta B, and nonnegative numerical dissipation. The
+numerical term is not heat; endpoint work is not an exact arbitrary rotating
+path integral. Resolve direction changes and refine the history. Original
+source/field/flux domains, constitutive and work residuals, bounded iterations
+and cancellation gate acceptance without modifying the previous state.
+
+Eight physical tests cover the scalar state/heat limit, independent spherical
+minimization, rotation covariance including tangents, an analytic rotating-loop
+loss limit and history refinement, finite-difference tangents, B-driven
+histories, reversible limits and atomic refusal. Eleven original scalar tests
+remain passing. This is an explicit fitted, fixed-temperature/stress
+quadratic-potential specialization of Prigozhin et al. (2016), not experimental
+material validation, texture anisotropy, dynamic/eddy/excess loss,
+demagnetization damage or automatic field/circuit/thermal integration.
+
 ### Compressible porous leakage and selective membrane permeation
 
 `porous::permeability` separates intrinsic permeability [m²] from gas viscosity,

@@ -25,6 +25,9 @@
 use super::FieldStorageError;
 use std::sync::Arc;
 
+/// Isotropic three-dimensional internal polarization and rotating-field memory.
+pub mod vector;
+
 /// One polarization contribution; the sum of saturation values is the total
 /// saturation polarization. No normalization or hidden branch weight is used.
 #[derive(Clone, Copy, Debug, PartialEq)]
