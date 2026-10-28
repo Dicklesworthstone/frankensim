@@ -274,11 +274,6 @@ impl Profile {
     /// constant for a missing Cp, density, conductivity or film property.
     pub fn prepare(&self, ready: &Ready, gate: &CancelGate) -> Result<Prepared> {
         poll(gate)?;
-        if ready.performance.stop_motion_program().is_some()
-            || ready.performance.stop_station_program().is_some()
-        {
-            return Err("contact-thermal cells require fixed stop and film footprints".into());
-        }
         let mut sources = Vec::with_capacity(self.cells.len());
         for cell in &self.cells {
             poll(gate)?;

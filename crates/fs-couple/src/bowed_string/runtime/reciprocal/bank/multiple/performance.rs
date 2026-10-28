@@ -245,18 +245,36 @@ impl PressureRenderer for MultiBowPerformance {
         Ok(())
     }
     fn block(&mut self, output: &mut [f64]) -> Result<(), RenderError> {
-        self.block_with_step(output, |bank, forces, drives| {
-            bank.step(forces, drives)
-                .map(|frame| frame.observer_pressure_pa).map_err(RenderError::Friction)
+        self.block_with_step(output, |bank, forces, drives, motion| {
+            let frame = if let Some(bows) = motion.bow_stations {
+                bank.step_with_bow_and_stop_stations_under_gate(forces, drives, bows,
+                    motion.stop_stations, motion.stop_offsets_m, &fs_exec::CancelGate::new_clock_free())
+            } else if let Some(stations) = motion.stop_stations {
+                bank.step_with_stop_stations(forces, drives, stations, motion.stop_offsets_m)
+            } else if let Some(offsets) = motion.stop_offsets_m {
+                bank.step_with_stop_offsets(forces, drives, offsets).map_err(RenderError::Friction)
+            } else {
+                bank.step(forces, drives).map_err(RenderError::Friction)
+            }?;
+            Ok(frame.observer_pressure_pa)
         })
     }
+}
+
+// Prepared physical endpoint controls, borrowed from the one canonical sampler.
+// Every step owner must receive them; a specialized thermal step cannot be
+// bypassed when a finger presses or migrates during the same performance.
+struct StepMotion<'a> {
+    bow_stations: Option<&'a [f64]>,
+    stop_stations: Option<&'a [f64]>,
+    stop_offsets_m: Option<&'a [f64]>,
 }
 
 impl MultiBowPerformance {
     // One schedule, force, motion and observer loop for ordinary and thermally
     // coupled rendering. A specialized step must commit the SAME bank once.
     fn block_with_step(&mut self, output: &mut [f64],
-        mut step: impl FnMut(&mut MultiBowStringBank, &[f64], &[FrictionDrive])
+        mut step: impl FnMut(&mut MultiBowStringBank, &[f64], &[FrictionDrive], StepMotion<'_>)
             -> Result<f64, RenderError>) -> Result<(), RenderError> {
         let count = u64::try_from(output.len()).map_err(|_| render_invalid("multi-bow output size exceeds its clock"))?;
         self.validate_sample_count(count)?;
@@ -295,19 +313,12 @@ impl MultiBowPerformance {
                     stops.candidate[binding.stop] = bows.candidate[binding.bow];
                 }
             }
-            let result = if let Some(bows) = &self.bow_station_motion {
-                self.bank.step_with_bow_and_stop_stations_under_gate(forces, &self.candidate,
-                    &bows.candidate, self.stop_station_motion.as_ref().map(|motion| motion.candidate.as_slice()),
-                    self.stop_motion.as_ref().map(|motion| motion.candidate.as_slice()), &fs_exec::CancelGate::new_clock_free())
-                    .map(|frame| frame.observer_pressure_pa)
-            } else if let Some(stations) = &self.stop_station_motion {
-                self.bank.step_with_stop_stations(forces, &self.candidate, &stations.candidate,
-                    self.stop_motion.as_ref().map(|motion| motion.candidate.as_slice()))
-                    .map(|frame| frame.observer_pressure_pa)
-            } else if let Some(motion) = &self.stop_motion {
-                self.bank.step_with_stop_offsets(forces, &self.candidate, &motion.candidate)
-                    .map(|frame| frame.observer_pressure_pa).map_err(RenderError::Friction)
-            } else { step(&mut self.bank, forces, &self.candidate) };
+            let motion = StepMotion {
+                bow_stations: self.bow_station_motion.as_ref().map(|motion| motion.candidate.as_slice()),
+                stop_stations: self.stop_station_motion.as_ref().map(|motion| motion.candidate.as_slice()),
+                stop_offsets_m: self.stop_motion.as_ref().map(|motion| motion.candidate.as_slice()),
+            };
+            let result = step(&mut self.bank, forces, &self.candidate, motion);
             match result {
                 Ok(compact_pressure) => {
                     *slot = if let Some(observer) = self.shell_observer.as_mut() {

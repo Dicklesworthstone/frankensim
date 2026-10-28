@@ -9,7 +9,7 @@
 //! solve starts from accepted elastic/plastic history. No trial advances time.
 //!
 //! This bounded continuation admits affine G(T), fixed reference density,
-//! unchanged geometry, retained compression and solid caloric state. Mechanical
+//! unchanged film geometry, retained compression and solid caloric state. Mechanical
 //! free energy is psi=k(T)e^2/2, entropy s=-k'e^2/2 and internal energy psi+T*s.
 //! Source knots are checked across the complete caloric interval; a kink in G
 //! refuses because its entropy jump is absent from this thermal model. The grid
@@ -18,7 +18,8 @@
 //! Affine G contributes zero fixed-strain heat-capacity correction. Endpoint
 //! thermal stepping can produce numerical entropy; it is not plastic heating.
 //! The grid is stationary; callers must justify its uniform cells and conduction.
-//! Moving footprints, layer advection, expansion, melting and flash-temperature
+//! Independent normal supports may move through the original contact-work owner.
+//! Moving film footprints, layer advection, expansion, melting and flash-temperature
 //! approximations are not supplied. Endpoint thermal feedback is first order;
 //! solver convergence is not temporal/spatial convergence or a real-rosin claim.
 
@@ -384,6 +385,39 @@ impl MultiFrictionModalSystem {
         gate: &CancelGate,
         resolve: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
     ) -> Result<LayerThermalFrame<S>, LayerThermalError<E>> {
+        self.step_with_contact_thermal_network_and_obstacles(thermal, bindings, series_heat,
+            controls, energy_guess_j, external, drives, None, None, gate, resolve)
+    }
+
+    /// Continue the same contact/enthalpy transaction with prescribed normal
+    /// support geometry and translation. Omitted controls hold their accepted
+    /// values. The original contact owner supplies the exact product-rule
+    /// geometry work and normal loss; neither is deposited as film plastic heat.
+    ///
+    /// Geometry is prepared once per sample. Every thermal/Jacobian trial starts
+    /// from the same accepted contact maps, offsets and constitutive histories.
+    /// New maps, offsets, mechanics, pressure and heat publish together only
+    /// after the complete energy balance accepts. A refusal publishes none.
+    ///
+    /// Independent finger/fret supports can migrate. A normal bound to a
+    /// tangential contact must retain its map: this entry point cannot transport
+    /// the matching tangent or film history. Film area/thickness, thermal cells
+    /// and solid-state restrictions remain those of the fixed-film owner.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_contact_thermal_network_and_obstacles<'t, S, E>(
+        &mut self,
+        thermal: &mut DepositionSimulation<'t>,
+        bindings: &[LayerThermalCell<'_>],
+        series_heat: &[SeriesDriveHeatDestination],
+        controls: LayerThermalSolve,
+        energy_guess_j: &[f64],
+        external: &[f64],
+        drives: &[FrictionDrive],
+        obstacle_geometry: Option<&[obstacles::geometry::ObstacleGeometry]>,
+        obstacle_offsets: Option<&[f64]>,
+        gate: &CancelGate,
+        resolve: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
+    ) -> Result<LayerThermalFrame<S>, LayerThermalError<E>> {
         let checkpoint = || {
             if gate.is_requested() {
                 Err(DepositionError::Cancelled)
@@ -467,7 +501,7 @@ impl MultiFrictionModalSystem {
                 .map_err(ModalFrictionError::from)?;
             thermodynamics.push((slope, initial));
         }
-        self.prepare_step(drives, None, None, false, Some(gate))?;
+        self.prepare_step(drives, obstacle_offsets, obstacle_geometry, false, Some(gate))?;
         let step = BackwardEulerStep::new(thermal, target_s, checkpoint)?;
         let dt = step.duration_s();
         let trials = Cell::new(0usize);
@@ -494,7 +528,7 @@ impl MultiFrictionModalSystem {
                     }
                     let mut system = mechanics.borrow_mut();
                     let original = std::mem::replace(&mut system.shear_layers, layers);
-                    let staged = system.stage_constitutive(external, drives, None, Some(gate));
+                    let staged = system.stage_constitutive(external, drives, obstacle_offsets, Some(gate));
                     let candidate_layers = std::mem::replace(&mut system.shear_layers, original);
                     // Accepted source/strain was restored even if mechanics refused.
                     let frame = staged?;

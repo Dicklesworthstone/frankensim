@@ -2,6 +2,8 @@
 //! No new excitation, body, observer, material defaults or rendering loop.
 
 use super::{MultiBowStringBank, ReciprocalStringError};
+use crate::acoustic_realize::AcousticRealizeError;
+use crate::render::RenderError;
 use fs_exec::CancelGate;
 use fs_material::state_point::ResolvedShearLayer;
 use fs_thermal::enthalpy::{DepositionSimulation, backward_euler::StepCoefficients};
@@ -97,6 +99,48 @@ impl MultiBowStringBank {
         }
         self.system.step_with_contact_thermal_network(thermal, bindings, series_heat,
             controls, energy_guess_j, external, drives, gate, resolve)
+    }
+
+    /// Combine finite contact heat with independent finger/fret station motion
+    /// and normal support translation on this original string/body/cavity bank.
+    ///
+    /// Positions are in original stop order; omitted controls hold accepted
+    /// geometry. Material maps are projected from the original string basis,
+    /// and the generic contact owner accounts actuator work. The source station
+    /// cursor advances only after mechanics and heat accept together. Bow/film
+    /// footprint migration still requires a transported material-history owner.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_contact_thermal_network_and_stops<'t, S, E: core::fmt::Display>(
+        &mut self,
+        thermal: &mut DepositionSimulation<'t>,
+        bindings: &[LayerThermalCell<'_>],
+        series_heat: &[SeriesDriveHeatDestination],
+        controls: LayerThermalSolve,
+        energy_guess_j: &[f64],
+        external: &[f64],
+        drives: &[FrictionDrive],
+        stations: Option<&[f64]>,
+        offsets_m: Option<&[f64]>,
+        gate: &CancelGate,
+        resolve: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
+    ) -> Result<LayerThermalFrame<S>, RenderError> {
+        if self.bow_station_motion_limits().is_some() {
+            return Err(RenderError::Control {
+                what: "contact heat requires transported bow geometry and material history",
+            });
+        }
+        let endpoints = stations.map(|s| self.prepare_stop_station_geometry(s, gate)).transpose()?;
+        let accepted = self.system.step_with_contact_thermal_network_and_obstacles(
+            thermal, bindings, series_heat, controls, energy_guess_j, external,
+            drives, endpoints.as_deref(), offsets_m, gate, resolve,
+        ).map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error.to_string())))?;
+        // The shared owner has published mechanics, normal geometry and heat.
+        // No fallible operation may separate that sample from its station cursor.
+        if let Some(stations) = stations {
+            self.stop_stations.as_mut().expect("admitted stop station state")
+                .accepted.copy_from_slice(stations);
+        }
+        Ok(accepted)
     }
 
     /// Complete original layer material and geometry, retained through

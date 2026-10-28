@@ -2,7 +2,7 @@
 
 `material_strings PERFORMANCE NEW_OUTPUT.wav --contact-thermal PROFILE`
 connects the original finite contact/enthalpy solve to the existing scheduled
-pressure and PCM writer. Add the usual `--body-profile`, fixed `--stop-profile`,
+pressure and PCM writer. Add the usual `--body-profile`, `--stop-profile`,
 observer options and `--bow-trace` as needed. A selected shell pressure observer
 still receives the same accepted mechanical step. The Instrument Lab launcher
 `apps/instrument-lab/tools/render_material_strings.py` accepts the same
@@ -102,10 +102,18 @@ explicit material source owner before this route can use it.
 
 This route retains fixed film geometry and tangent frames, positive
 compression, solid material, the original sample clock, canonical bow/force
-controls, and any selected body/cavity pressure observer. It cannot compose
-moving stop/footprint trajectories, thermal expansion or melt/recontact
-history; those require corresponding transport/work terms in the physical
-owner. Geometric stretching and retained longitudinal waves use their original
+controls, and any selected body/cavity pressure observer. Independent finger or
+fret stops can press, release and migrate along their original strings through
+the existing `motion` and `station-motion` blocks in `--stop-profile`.
+Their exact normal/attachment work enters the same mechanical and thermal
+transaction; rejected trials advance neither geometry nor heat. Changing
+callback size or enabling the trace does not switch to an isothermal step.
+
+The bow/film footprint and thermal grid remain fixed. Moving those footprints,
+thermal expansion and melt/recontact history still require corresponding
+transport/work terms in the physical owner. Stop dissipation remains in its
+original mechanical loss account; it is not relabeled as film heat.
+Geometric stretching and retained longitudinal waves use their original
 nonlinear mechanical/contact solve at every proposed thermal endpoint. Each
 trial starts from accepted string, film and drive histories, and film plastic
 heat, reversible affine-modulus exchange and explicitly routed drive loss enter

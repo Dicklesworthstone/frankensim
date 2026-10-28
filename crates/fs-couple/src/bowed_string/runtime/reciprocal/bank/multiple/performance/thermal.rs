@@ -4,7 +4,6 @@
 //! the shared bow/force/observer loop calls; it never creates another voice.
 
 use super::{MultiBowPerformance, render_invalid};
-use crate::acoustic_realize::AcousticRealizeError;
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
 use crate::render::schedule::force::coupled::ModalCouplingError;
@@ -22,8 +21,10 @@ use std::marker::PhantomData;
 /// the original body/cavity or selected shell-pressure observer.
 ///
 /// This inherits the fixed compressed-film, affine-modulus and solid-state
-/// limits of `step_with_contact_thermal_network`. Moving stops/footprints refuse
-/// because that owner does not account their thermal transport/work. Initial
+/// limits of the shared contact/enthalpy owner. Independent finger/fret supports
+/// may press, release and migrate: their actuator work joins the SAME mechanical
+/// transaction at every thermal trial. Film footprints and thermal cells stay
+/// fixed; bow/film migration still needs transported material history. Initial
 /// material matching and all per-step domains remain checked by that owner.
 pub struct ContactThermalPerformance<'p, 't, 'm, 'g, F, S, E> {
     performance: &'p mut MultiBowPerformance,
@@ -63,16 +64,14 @@ impl MultiBowPerformance {
             return Err(RenderError::Coupled(ModalCouplingError::Cancelled));
         }
         let system = &self.bank.system;
-        if self.stop_motion.is_some()
-            || self.stop_station_motion.is_some()
-            || self.bank.bow_station_motion_limits().is_some()
+        if self.bank.bow_station_motion_limits().is_some()
             || thermal.time_s() != system.samples_rendered() as f64 * system.sample_period_s()
             || thermal.cells().is_empty()
             || thermal.cells().len() > controls.maximum_cells
             || (bindings.is_empty() && series_heat.is_empty())
         {
             return Err(render_invalid(
-                "contact heat needs matching physical clocks, finite cells, explicit routes and fixed contact geometry",
+                "contact heat needs matching physical clocks, finite cells, explicit routes and fixed bow/film geometry",
             ));
         }
         let energy_guess_j = vec![0.0; thermal.cells().len()];
@@ -145,7 +144,7 @@ where
             last_frame,
             ..
         } = self;
-        performance.block_with_step(output, |bank, forces, drives| {
+        performance.block_with_step(output, |bank, forces, drives, motion| {
             if thermal.cells().len() != energy_guess_j.len() {
                 return Err(render_invalid(
                     "thermal topology changed during a fixed contact performance",
@@ -155,7 +154,7 @@ where
                 *guess = cell.mass_kg * cell.specific_h_j_kg;
             }
             let accepted = bank
-                .step_with_contact_thermal_network(
+                .step_with_contact_thermal_network_and_stops(
                     thermal,
                     bindings,
                     series_heat,
@@ -163,12 +162,11 @@ where
                     energy_guess_j,
                     forces,
                     drives,
+                    motion.stop_stations,
+                    motion.stop_offsets_m,
                     gate,
                     &*resolve,
-                )
-                .map_err(|error| {
-                    RenderError::Voice(AcousticRealizeError::Nonlinear(error.to_string()))
-                })?;
+                )?;
             let pressure = accepted.mechanics.observer_pressure_pa;
             *last_frame = Some(accepted);
             Ok(pressure)

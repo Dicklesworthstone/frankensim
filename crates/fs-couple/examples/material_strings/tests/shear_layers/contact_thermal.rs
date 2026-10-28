@@ -94,8 +94,19 @@ series 0
 links 0
 ";
 
+const FINGER: &str = "frankensim-string-stops-v1
+stop finger 0 0.43 positive fixed 0 5000 1 0.2 10 0.001
+motion 0.001 0.1 3
+knot 12 -0.000003
+knot 36 -0.000003
+knot 72 -0.000001
+station-motion 1 0.00003 1048576 1
+station-knot 128 0.4312
+";
+
 fn compiled(cx: &Cx<'_>, gate: &CancelGate, cp: f64, omit: Option<&str>) -> Result<Ready> {
-    thermal_spec().compile(cx, gate, |name| {
+    thermal_spec().compile_with_profiles(cx, gate, None,
+        Some(crate::stops::Profile::parse(FINGER.as_bytes())?), |name| {
         Ok(if name == "manufactured-shear-layer.fsmatpk" {
             thermal_pack(cp, omit, 200_000.0)
         } else {
@@ -161,6 +172,9 @@ fn cli_thermal_writer_and_trace_share_pcm_and_heat_history_and_material_cp_chang
         let mut traced = compiled(cx, gate, 10.0, None).unwrap();
         let mut high_capacity = compiled(cx, gate, 1000.0, None).unwrap();
         let physical_bytes = plain.spec.bytes.clone();
+        assert_eq!(plain.stop_profile.as_ref().unwrap().bytes, FINGER.as_bytes());
+        assert!(plain.performance.stop_motion_program().is_some());
+        assert!(plain.performance.stop_station_program().is_some());
         let original = plain.performance.bank().bow_shear_layer(0).unwrap().clone();
         let a = profile.prepare(&plain, gate).unwrap();
         let b = profile.prepare(&traced, gate).unwrap();
@@ -178,6 +192,9 @@ fn cli_thermal_writer_and_trace_share_pcm_and_heat_history_and_material_cp_chang
         assert_eq!(report.samples, 512);
         assert_eq!(traced_report.samples, 512);
         assert_eq!(String::from_utf8(trace).unwrap().lines().count(), 513);
+        assert_eq!(plain.performance.bank().stop_station_fractions(), Some([0.4312].as_slice()));
+        assert_eq!(plain.performance.bank().system().obstacle_offsets_m(), Some([-1e-6].as_slice()));
+        assert_eq!(plain.performance.bank().system().last_frame().unwrap().obstacle_work_j, 0.0);
         assert_eq!(
             plain.performance.bank().system().material_shear_state(0),
             traced.performance.bank().system().material_shear_state(0)
