@@ -1,0 +1,23 @@
+frankensim.matdb-manifest.v3
+pack_id	parker-n0674-nbr-2024
+redistribution	permitted	Selected attributed numerical facts and original notes only; neither the producer document nor its table layout is redistributed
+citation	Parker Hannifin Pradifa, Compound N0674 NBR black, author and print date 2024-05-17, Physical properties typical-value column; https://www.parker.com/content/dam/Parker-com/Literature/Praedifa/Compound_Data_Sheets/EMG_PTD_Compound-Data-Sheet_NBR_N0674_EN.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	parker-n0674	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	tensile_strength	tensile-strength	dimensional
+property	tensile_elongation_at_break	tensile-elongation-at-break	dimensional
+property	tensile_stress	tensile-stress	dimensional
+property	compression_set	compression-set	dimensional
+axis	source_grade_parker_n0674	source-grade-parker-n0674	dimensional
+axis	source_specimen_din53504_s2	source-specimen-din53504-s2	dimensional
+axis	source_method_iso815_1_b_a	source-method-iso815-1-b-a	dimensional
+axis	tensile_strain	tensile-strain	dimensional
+axis	dwell_temperature	dwell-temperature	absolute-temperature
+axis	dwell_duration	dwell-duration	dimensional
+axis	imposed_compression_strain	imposed-compression-strain	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_test_rate_known	source-test-rate-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_cure_history_known	source-cure-history-known	dimensional
+axis	source_recovery_history_known	source-recovery-history-known	dimensional

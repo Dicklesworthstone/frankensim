@@ -1,0 +1,18 @@
+frankensim.matdb-manifest.v3
+pack_id	smooth-on-vytaflex40-seven-day-2024
+redistribution	permitted	Selected attributed numerical facts and original notes only; neither the producer document nor its table layout is redistributed
+citation	Smooth-On, VytaFlex Series Technical Bulletin 061824DH, VytaFlex 40 row and seven-day footnote; https://www.smooth-on.com/tb/files/Vytaflex_Series_TB.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	vytaflex40	properties.tsv	material-tsv-v1
+property	tensile_strength	tensile-strength	dimensional
+property	tensile_stress	tensile-stress	dimensional
+property	tensile_elongation_at_break	tensile-elongation-at-break	dimensional
+property	tear_strength_die_c	tear-strength-die-c	dimensional
+axis	source_grade_vytaflex40	source-grade-vytaflex40	dimensional
+axis	part_a_to_b_volume_ratio	part-a-to-b-volume-ratio	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	cure_age	cure-age	dimensional
+axis	tensile_strain	tensile-strain	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_test_rate_known	source-test-rate-known	dimensional
+axis	source_processing_history_known	source-processing-history-known	dimensional

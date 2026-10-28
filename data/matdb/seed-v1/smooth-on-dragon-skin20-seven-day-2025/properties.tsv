@@ -1,0 +1,39 @@
+frankensim.matdb-source.v1
+observation	seven-day	Smooth-On Dragon Skin 20 platinum-cured silicone	ASTM D412 tensile; ASTM D624 Die B tear; Technical Overview	Original tensile strength 550 psi, stress at 100% elongation 49 psi, rupture elongation 620%, Die B tear 120 lbf/in. Values follow seven days at 23 C with 1:1 volume or mass mixing, not four-hour demolding or the separate 20 NV formulation. Conversion uses 6894.757293168 Pa/psi and 4.4482216152605 N/lbf. The 100% modulus is a tensile stress observation, not Young modulus. Tear geometry remains Die B. Rate, humidity, detailed processing/post-cure history and uncertainty are unstated. No cured density, thermal law, unloading or hyperelastic fit is inferred from liquid specific gravity, hardness, service range or this single stress point.
+scalar	tensile-strength	seven-day	tensile_strength	3792116.5112424	Pa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	source_grade_dragon_skin20	1	1	1
+validity	tensile-strength	part_a_to_b_volume_ratio	1	1	1
+validity	tensile-strength	temperature	296.15	296.15	K
+validity	tensile-strength	cure_age	604800	604800	s
+validity	tensile-strength	source_moisture_condition_known	0	0	1
+validity	tensile-strength	source_test_rate_known	0	0	1
+validity	tensile-strength	source_processing_history_known	0	0	1
+scalar	stress-at-unit-strain	seven-day	tensile_stress	337843.107365232	Pa	constant
+uncertainty	stress-at-unit-strain	unstated	-	-	-	-
+validity	stress-at-unit-strain	source_grade_dragon_skin20	1	1	1
+validity	stress-at-unit-strain	part_a_to_b_volume_ratio	1	1	1
+validity	stress-at-unit-strain	temperature	296.15	296.15	K
+validity	stress-at-unit-strain	cure_age	604800	604800	s
+validity	stress-at-unit-strain	tensile_strain	1	1	1
+validity	stress-at-unit-strain	source_moisture_condition_known	0	0	1
+validity	stress-at-unit-strain	source_test_rate_known	0	0	1
+validity	stress-at-unit-strain	source_processing_history_known	0	0	1
+scalar	break-elongation	seven-day	tensile_elongation_at_break	6.2	1	constant
+uncertainty	break-elongation	unstated	-	-	-	-
+validity	break-elongation	source_grade_dragon_skin20	1	1	1
+validity	break-elongation	part_a_to_b_volume_ratio	1	1	1
+validity	break-elongation	temperature	296.15	296.15	K
+validity	break-elongation	cure_age	604800	604800	s
+validity	break-elongation	source_moisture_condition_known	0	0	1
+validity	break-elongation	source_test_rate_known	0	0	1
+validity	break-elongation	source_processing_history_known	0	0	1
+scalar	tear-die-b	seven-day	tear_strength_die_b	21015.220229577164	N/m	constant
+uncertainty	tear-die-b	unstated	-	-	-	-
+validity	tear-die-b	source_grade_dragon_skin20	1	1	1
+validity	tear-die-b	part_a_to_b_volume_ratio	1	1	1
+validity	tear-die-b	temperature	296.15	296.15	K
+validity	tear-die-b	cure_age	604800	604800	s
+validity	tear-die-b	source_moisture_condition_known	0	0	1
+validity	tear-die-b	source_test_rate_known	0	0	1
+validity	tear-die-b	source_processing_history_known	0	0	1

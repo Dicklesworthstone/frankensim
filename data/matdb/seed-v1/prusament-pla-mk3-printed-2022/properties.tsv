@@ -1,0 +1,143 @@
+frankensim.matdb-source.v1
+observation	horizontal	Prusament PLA, MK3 printed horizontal coupons	ISO 527-1 tensile and ISO 178 flexural; datasheet v1.1, pp. 2-3	Profile flag identifies Original Prusa i3 MK3, Slic3r Prusa Edition 1.40.0, 0.20 mm FAST, two perimeters, no top/bottom solid layers, 100% rectilinear infill and other slicer defaults. Orientation code 0 is source horizontal; code 1 is source vertical xz, not a general through-layer Z tensile specimen. Original horizontal values are E_t=2.3+-0.1 GPa, yield=51+-3 MPa, yield elongation=2.9+-0.3%, E_f=3.1+-0.1 GPa, flexural strength=83+-6 MPa. Meaning/confidence of printed plus/minus terms is unstated; retained here, not converted to statistical bounds. Test temperature, conditioning, crosshead rate and postprocessing are unstated. No printed-part density, isotropic stiffness tensor, compression, creep or thermal profile is inferred from feedstock data.
+observation	vertical-xz	Prusament PLA, MK3 printed vertical xz coupons	ISO 527-1 tensile and ISO 178 flexural; datasheet v1.1, pp. 2-3	Same source printing profile; orientation code 1. Original values: E_t=2.4+-0.1 GPa, yield=59+-2 MPa, yield elongation=3.2+-1.0%, E_f=3.2+-0.1 GPa, flexural strength=99+-1 MPa. Plus/minus meaning and confidence are unstated. These are direction-specific printed coupons, not injection-molded PLA or arbitrary PLA Blend.
+scalar	tensile-modulus-horizontal	horizontal	tensile_modulus	2.3	GPa	constant
+uncertainty	tensile-modulus-horizontal	unstated	-	-	-	-
+validity	tensile-modulus-horizontal	source_grade_prusament_pla	1	1	1
+validity	tensile-modulus-horizontal	source_print_profile_mk3_slic3r140	1	1	1
+validity	tensile-modulus-horizontal	print_orientation	0	0	1
+validity	tensile-modulus-horizontal	layer_height	0.0002	0.0002	m
+validity	tensile-modulus-horizontal	infill_fraction	1	1	1
+validity	tensile-modulus-horizontal	nozzle_temperature	488.15	488.15	K
+validity	tensile-modulus-horizontal	bed_temperature	333.15	333.15	K
+validity	tensile-modulus-horizontal	infill_print_speed	0.2	0.2	m/s
+validity	tensile-modulus-horizontal	source_test_temperature_known	0	0	1
+validity	tensile-modulus-horizontal	source_moisture_condition_known	0	0	1
+validity	tensile-modulus-horizontal	source_test_rate_known	0	0	1
+validity	tensile-modulus-horizontal	source_postprocessing_known	0	0	1
+scalar	tensile-modulus-vertical-xz	vertical-xz	tensile_modulus	2.4	GPa	constant
+uncertainty	tensile-modulus-vertical-xz	unstated	-	-	-	-
+validity	tensile-modulus-vertical-xz	source_grade_prusament_pla	1	1	1
+validity	tensile-modulus-vertical-xz	source_print_profile_mk3_slic3r140	1	1	1
+validity	tensile-modulus-vertical-xz	print_orientation	1	1	1
+validity	tensile-modulus-vertical-xz	layer_height	0.0002	0.0002	m
+validity	tensile-modulus-vertical-xz	infill_fraction	1	1	1
+validity	tensile-modulus-vertical-xz	nozzle_temperature	488.15	488.15	K
+validity	tensile-modulus-vertical-xz	bed_temperature	333.15	333.15	K
+validity	tensile-modulus-vertical-xz	infill_print_speed	0.2	0.2	m/s
+validity	tensile-modulus-vertical-xz	source_test_temperature_known	0	0	1
+validity	tensile-modulus-vertical-xz	source_moisture_condition_known	0	0	1
+validity	tensile-modulus-vertical-xz	source_test_rate_known	0	0	1
+validity	tensile-modulus-vertical-xz	source_postprocessing_known	0	0	1
+scalar	tensile-yield-horizontal	horizontal	tensile_yield_strength	51	MPa	constant
+uncertainty	tensile-yield-horizontal	unstated	-	-	-	-
+validity	tensile-yield-horizontal	source_grade_prusament_pla	1	1	1
+validity	tensile-yield-horizontal	source_print_profile_mk3_slic3r140	1	1	1
+validity	tensile-yield-horizontal	print_orientation	0	0	1
+validity	tensile-yield-horizontal	layer_height	0.0002	0.0002	m
+validity	tensile-yield-horizontal	infill_fraction	1	1	1
+validity	tensile-yield-horizontal	nozzle_temperature	488.15	488.15	K
+validity	tensile-yield-horizontal	bed_temperature	333.15	333.15	K
+validity	tensile-yield-horizontal	infill_print_speed	0.2	0.2	m/s
+validity	tensile-yield-horizontal	source_test_temperature_known	0	0	1
+validity	tensile-yield-horizontal	source_moisture_condition_known	0	0	1
+validity	tensile-yield-horizontal	source_test_rate_known	0	0	1
+validity	tensile-yield-horizontal	source_postprocessing_known	0	0	1
+scalar	tensile-yield-vertical-xz	vertical-xz	tensile_yield_strength	59	MPa	constant
+uncertainty	tensile-yield-vertical-xz	unstated	-	-	-	-
+validity	tensile-yield-vertical-xz	source_grade_prusament_pla	1	1	1
+validity	tensile-yield-vertical-xz	source_print_profile_mk3_slic3r140	1	1	1
+validity	tensile-yield-vertical-xz	print_orientation	1	1	1
+validity	tensile-yield-vertical-xz	layer_height	0.0002	0.0002	m
+validity	tensile-yield-vertical-xz	infill_fraction	1	1	1
+validity	tensile-yield-vertical-xz	nozzle_temperature	488.15	488.15	K
+validity	tensile-yield-vertical-xz	bed_temperature	333.15	333.15	K
+validity	tensile-yield-vertical-xz	infill_print_speed	0.2	0.2	m/s
+validity	tensile-yield-vertical-xz	source_test_temperature_known	0	0	1
+validity	tensile-yield-vertical-xz	source_moisture_condition_known	0	0	1
+validity	tensile-yield-vertical-xz	source_test_rate_known	0	0	1
+validity	tensile-yield-vertical-xz	source_postprocessing_known	0	0	1
+scalar	yield-elongation-horizontal	horizontal	tensile_elongation_at_yield	0.029	1	constant
+uncertainty	yield-elongation-horizontal	unstated	-	-	-	-
+validity	yield-elongation-horizontal	source_grade_prusament_pla	1	1	1
+validity	yield-elongation-horizontal	source_print_profile_mk3_slic3r140	1	1	1
+validity	yield-elongation-horizontal	print_orientation	0	0	1
+validity	yield-elongation-horizontal	layer_height	0.0002	0.0002	m
+validity	yield-elongation-horizontal	infill_fraction	1	1	1
+validity	yield-elongation-horizontal	nozzle_temperature	488.15	488.15	K
+validity	yield-elongation-horizontal	bed_temperature	333.15	333.15	K
+validity	yield-elongation-horizontal	infill_print_speed	0.2	0.2	m/s
+validity	yield-elongation-horizontal	source_test_temperature_known	0	0	1
+validity	yield-elongation-horizontal	source_moisture_condition_known	0	0	1
+validity	yield-elongation-horizontal	source_test_rate_known	0	0	1
+validity	yield-elongation-horizontal	source_postprocessing_known	0	0	1
+scalar	yield-elongation-vertical-xz	vertical-xz	tensile_elongation_at_yield	0.032	1	constant
+uncertainty	yield-elongation-vertical-xz	unstated	-	-	-	-
+validity	yield-elongation-vertical-xz	source_grade_prusament_pla	1	1	1
+validity	yield-elongation-vertical-xz	source_print_profile_mk3_slic3r140	1	1	1
+validity	yield-elongation-vertical-xz	print_orientation	1	1	1
+validity	yield-elongation-vertical-xz	layer_height	0.0002	0.0002	m
+validity	yield-elongation-vertical-xz	infill_fraction	1	1	1
+validity	yield-elongation-vertical-xz	nozzle_temperature	488.15	488.15	K
+validity	yield-elongation-vertical-xz	bed_temperature	333.15	333.15	K
+validity	yield-elongation-vertical-xz	infill_print_speed	0.2	0.2	m/s
+validity	yield-elongation-vertical-xz	source_test_temperature_known	0	0	1
+validity	yield-elongation-vertical-xz	source_moisture_condition_known	0	0	1
+validity	yield-elongation-vertical-xz	source_test_rate_known	0	0	1
+validity	yield-elongation-vertical-xz	source_postprocessing_known	0	0	1
+scalar	flexural-modulus-horizontal	horizontal	flexural_modulus	3.1	GPa	constant
+uncertainty	flexural-modulus-horizontal	unstated	-	-	-	-
+validity	flexural-modulus-horizontal	source_grade_prusament_pla	1	1	1
+validity	flexural-modulus-horizontal	source_print_profile_mk3_slic3r140	1	1	1
+validity	flexural-modulus-horizontal	print_orientation	0	0	1
+validity	flexural-modulus-horizontal	layer_height	0.0002	0.0002	m
+validity	flexural-modulus-horizontal	infill_fraction	1	1	1
+validity	flexural-modulus-horizontal	nozzle_temperature	488.15	488.15	K
+validity	flexural-modulus-horizontal	bed_temperature	333.15	333.15	K
+validity	flexural-modulus-horizontal	infill_print_speed	0.2	0.2	m/s
+validity	flexural-modulus-horizontal	source_test_temperature_known	0	0	1
+validity	flexural-modulus-horizontal	source_moisture_condition_known	0	0	1
+validity	flexural-modulus-horizontal	source_test_rate_known	0	0	1
+validity	flexural-modulus-horizontal	source_postprocessing_known	0	0	1
+scalar	flexural-modulus-vertical-xz	vertical-xz	flexural_modulus	3.2	GPa	constant
+uncertainty	flexural-modulus-vertical-xz	unstated	-	-	-	-
+validity	flexural-modulus-vertical-xz	source_grade_prusament_pla	1	1	1
+validity	flexural-modulus-vertical-xz	source_print_profile_mk3_slic3r140	1	1	1
+validity	flexural-modulus-vertical-xz	print_orientation	1	1	1
+validity	flexural-modulus-vertical-xz	layer_height	0.0002	0.0002	m
+validity	flexural-modulus-vertical-xz	infill_fraction	1	1	1
+validity	flexural-modulus-vertical-xz	nozzle_temperature	488.15	488.15	K
+validity	flexural-modulus-vertical-xz	bed_temperature	333.15	333.15	K
+validity	flexural-modulus-vertical-xz	infill_print_speed	0.2	0.2	m/s
+validity	flexural-modulus-vertical-xz	source_test_temperature_known	0	0	1
+validity	flexural-modulus-vertical-xz	source_moisture_condition_known	0	0	1
+validity	flexural-modulus-vertical-xz	source_test_rate_known	0	0	1
+validity	flexural-modulus-vertical-xz	source_postprocessing_known	0	0	1
+scalar	flexural-strength-horizontal	horizontal	flexural_strength	83	MPa	constant
+uncertainty	flexural-strength-horizontal	unstated	-	-	-	-
+validity	flexural-strength-horizontal	source_grade_prusament_pla	1	1	1
+validity	flexural-strength-horizontal	source_print_profile_mk3_slic3r140	1	1	1
+validity	flexural-strength-horizontal	print_orientation	0	0	1
+validity	flexural-strength-horizontal	layer_height	0.0002	0.0002	m
+validity	flexural-strength-horizontal	infill_fraction	1	1	1
+validity	flexural-strength-horizontal	nozzle_temperature	488.15	488.15	K
+validity	flexural-strength-horizontal	bed_temperature	333.15	333.15	K
+validity	flexural-strength-horizontal	infill_print_speed	0.2	0.2	m/s
+validity	flexural-strength-horizontal	source_test_temperature_known	0	0	1
+validity	flexural-strength-horizontal	source_moisture_condition_known	0	0	1
+validity	flexural-strength-horizontal	source_test_rate_known	0	0	1
+validity	flexural-strength-horizontal	source_postprocessing_known	0	0	1
+scalar	flexural-strength-vertical-xz	vertical-xz	flexural_strength	99	MPa	constant
+uncertainty	flexural-strength-vertical-xz	unstated	-	-	-	-
+validity	flexural-strength-vertical-xz	source_grade_prusament_pla	1	1	1
+validity	flexural-strength-vertical-xz	source_print_profile_mk3_slic3r140	1	1	1
+validity	flexural-strength-vertical-xz	print_orientation	1	1	1
+validity	flexural-strength-vertical-xz	layer_height	0.0002	0.0002	m
+validity	flexural-strength-vertical-xz	infill_fraction	1	1	1
+validity	flexural-strength-vertical-xz	nozzle_temperature	488.15	488.15	K
+validity	flexural-strength-vertical-xz	bed_temperature	333.15	333.15	K
+validity	flexural-strength-vertical-xz	infill_print_speed	0.2	0.2	m/s
+validity	flexural-strength-vertical-xz	source_test_temperature_known	0	0	1
+validity	flexural-strength-vertical-xz	source_moisture_condition_known	0	0	1
+validity	flexural-strength-vertical-xz	source_test_rate_known	0	0	1
+validity	flexural-strength-vertical-xz	source_postprocessing_known	0	0	1

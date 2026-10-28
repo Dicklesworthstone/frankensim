@@ -1,0 +1,27 @@
+frankensim.matdb-manifest.v3
+pack_id	ultrafuse-tpu95a-mk3-printed-2022
+redistribution	permitted	Selected attributed numerical facts and original notes only; neither the source document nor its table layout is redistributed
+citation	BASF 3D Printing Solutions, Ultrafuse TPU 95A Technical Data Sheet v2.0, 2022-08-22, pp. 2-4; https://move.forward-am.com/hubfs/AES%20Documentation/Flexible%20Filaments/TPU%2095A/TDS/Ultrafuse_TPU-95A_TDS_EN_v1.0.pdf ; accessed 2026-10-28; document body is v2.0 despite the URL filename
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	ultrafuse-tpu95a-v2	properties.tsv	material-tsv-v1
+property	filament_density	filament-density	dimensional
+property	tensile_modulus	tensile-modulus	dimensional
+property	tensile_stress	tensile-stress	dimensional
+property	tensile_strength_at_break	tensile-strength-at-break	dimensional
+property	tensile_elongation_at_break	tensile-elongation-at-break	dimensional
+property	tear_strength_iso34_1a	tear-strength-iso34-1a	dimensional
+axis	source_grade_ultrafuse_tpu95a	source-grade-ultrafuse-tpu95a	dimensional
+axis	source_print_profile_mk3_tpu95a_2022	source-print-profile-mk3-tpu95a-2022	dimensional
+axis	print_orientation	print-orientation	dimensional
+axis	tensile_strain	tensile-strain	dimensional
+axis	test_speed	test-speed	dimensional
+axis	tempering_temperature	tempering-temperature	absolute-temperature
+axis	tempering_duration	tempering-duration	dimensional
+axis	conditioning_temperature	conditioning-temperature	absolute-temperature
+axis	conditioning_relative_humidity	conditioning-relative-humidity	dimensional
+axis	conditioning_duration	conditioning-duration	dimensional
+axis	source_print_infill_known	source-print-infill-known	dimensional
+axis	source_print_layer_height_known	source-print-layer-height-known	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_test_rate_known	source-test-rate-known	dimensional
+axis	source_filament_conditioning_known	source-filament-conditioning-known	dimensional

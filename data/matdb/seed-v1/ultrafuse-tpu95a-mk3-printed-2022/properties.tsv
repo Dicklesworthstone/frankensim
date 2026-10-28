@@ -1,0 +1,165 @@
+frankensim.matdb-source.v1
+observation	printed-tensile	Ultrafuse TPU 95A printed and tempered coupons	ISO 527; BASF TDS v2.0, p. 4	Profile: Prusa i3 MK3, 220 C nozzle, 40 C PEI-coated spring-sheet bed, 0.4 mm nozzle, 25 mm/s printing. Layer height and infill are unstated. Direction codes follow the source: 0=XY flat, 1=XZ on edge, 2=ZX upright. Coupons receive 20 h at 100 C, then 72 h at 23 C/50% RH; conditioning temperature is not a separately reported test temperature. Crosshead speed is 1 mm/min for modulus and 200 mm/min for other tensile results. Unknown scatter stays unstated. Stress/strain knots are isolated measurements: no interpolation, unloading law, hyperelastic fit or isotropic tensor is inferred. Filament density is not printed-part density.
+observation	printed-tear	Ultrafuse TPU 95A printed and tempered coupons	ISO 34-1 method A; BASF TDS v2.0, p. 4	Same printing/conditioning profile and orientation codes. Tear strength is force per thickness; it is not tensile stress or fracture toughness. Test speed and test temperature are unstated.
+observation	filament	Ultrafuse TPU 95A filament	ISO 1183-1; BASF TDS v2.0, p. 3	The v2.0 footnote explicitly identifies filament density. Neither printing porosity nor specimen density is supplied. Filament conditioning, measurement temperature and statistical uncertainty are unstated.
+scalar	filament-density	filament	filament_density	1149	kg/m3	constant
+uncertainty	filament-density	unstated	-	-	-	-
+validity	filament-density	source_grade_ultrafuse_tpu95a	1	1	1
+validity	filament-density	source_test_temperature_known	0	0	1
+validity	filament-density	source_filament_conditioning_known	0	0	1
+scalar	tensile-modulus-xy	printed-tensile	tensile_modulus	48.4	MPa	constant
+uncertainty	tensile-modulus-xy	unstated	-	-	-	-
+validity	tensile-modulus-xy	source_grade_ultrafuse_tpu95a	1	1	1
+validity	tensile-modulus-xy	source_print_profile_mk3_tpu95a_2022	1	1	1
+validity	tensile-modulus-xy	print_orientation	0	0	1
+validity	tensile-modulus-xy	test_speed	1.6666666666666667e-5	1.6666666666666667e-5	m/s
+validity	tensile-modulus-xy	tempering_temperature	373.15	373.15	K
+validity	tensile-modulus-xy	tempering_duration	72000	72000	s
+validity	tensile-modulus-xy	conditioning_temperature	296.15	296.15	K
+validity	tensile-modulus-xy	conditioning_relative_humidity	0.5	0.5	1
+validity	tensile-modulus-xy	conditioning_duration	259200	259200	s
+validity	tensile-modulus-xy	source_print_infill_known	0	0	1
+validity	tensile-modulus-xy	source_print_layer_height_known	0	0	1
+validity	tensile-modulus-xy	source_test_temperature_known	0	0	1
+scalar	tensile-modulus-zx	printed-tensile	tensile_modulus	46.7	MPa	constant
+uncertainty	tensile-modulus-zx	unstated	-	-	-	-
+validity	tensile-modulus-zx	source_grade_ultrafuse_tpu95a	1	1	1
+validity	tensile-modulus-zx	source_print_profile_mk3_tpu95a_2022	1	1	1
+validity	tensile-modulus-zx	print_orientation	2	2	1
+validity	tensile-modulus-zx	test_speed	1.6666666666666667e-5	1.6666666666666667e-5	m/s
+validity	tensile-modulus-zx	tempering_temperature	373.15	373.15	K
+validity	tensile-modulus-zx	tempering_duration	72000	72000	s
+validity	tensile-modulus-zx	conditioning_temperature	296.15	296.15	K
+validity	tensile-modulus-zx	conditioning_relative_humidity	0.5	0.5	1
+validity	tensile-modulus-zx	conditioning_duration	259200	259200	s
+validity	tensile-modulus-zx	source_print_infill_known	0	0	1
+validity	tensile-modulus-zx	source_print_layer_height_known	0	0	1
+validity	tensile-modulus-zx	source_test_temperature_known	0	0	1
+curve	tensile-points-xy	printed-tensile	tensile_stress	tensile_strain	1	MPa	0.5:8.3,1:10.5,3:20.3	tabulated
+uncertainty	tensile-points-xy	unstated	-	-	-	-
+validity	tensile-points-xy	tensile_strain	0.5	3	1
+validity	tensile-points-xy	source_grade_ultrafuse_tpu95a	1	1	1
+validity	tensile-points-xy	source_print_profile_mk3_tpu95a_2022	1	1	1
+validity	tensile-points-xy	print_orientation	0	0	1
+validity	tensile-points-xy	test_speed	0.0033333333333333335	0.0033333333333333335	m/s
+validity	tensile-points-xy	tempering_temperature	373.15	373.15	K
+validity	tensile-points-xy	tempering_duration	72000	72000	s
+validity	tensile-points-xy	conditioning_temperature	296.15	296.15	K
+validity	tensile-points-xy	conditioning_relative_humidity	0.5	0.5	1
+validity	tensile-points-xy	conditioning_duration	259200	259200	s
+validity	tensile-points-xy	source_print_infill_known	0	0	1
+validity	tensile-points-xy	source_print_layer_height_known	0	0	1
+validity	tensile-points-xy	source_test_temperature_known	0	0	1
+curve	tensile-points-zx	printed-tensile	tensile_stress	tensile_strain	1	MPa	0.5:7.9,1:9.9	tabulated
+uncertainty	tensile-points-zx	unstated	-	-	-	-
+validity	tensile-points-zx	tensile_strain	0.5	1	1
+validity	tensile-points-zx	source_grade_ultrafuse_tpu95a	1	1	1
+validity	tensile-points-zx	source_print_profile_mk3_tpu95a_2022	1	1	1
+validity	tensile-points-zx	print_orientation	2	2	1
+validity	tensile-points-zx	test_speed	0.0033333333333333335	0.0033333333333333335	m/s
+validity	tensile-points-zx	tempering_temperature	373.15	373.15	K
+validity	tensile-points-zx	tempering_duration	72000	72000	s
+validity	tensile-points-zx	conditioning_temperature	296.15	296.15	K
+validity	tensile-points-zx	conditioning_relative_humidity	0.5	0.5	1
+validity	tensile-points-zx	conditioning_duration	259200	259200	s
+validity	tensile-points-zx	source_print_infill_known	0	0	1
+validity	tensile-points-zx	source_print_layer_height_known	0	0	1
+validity	tensile-points-zx	source_test_temperature_known	0	0	1
+scalar	break-strength-xy	printed-tensile	tensile_strength_at_break	44.2	MPa	constant
+uncertainty	break-strength-xy	unstated	-	-	-	-
+validity	break-strength-xy	source_grade_ultrafuse_tpu95a	1	1	1
+validity	break-strength-xy	source_print_profile_mk3_tpu95a_2022	1	1	1
+validity	break-strength-xy	print_orientation	0	0	1
+validity	break-strength-xy	test_speed	0.0033333333333333335	0.0033333333333333335	m/s
+validity	break-strength-xy	tempering_temperature	373.15	373.15	K
+validity	break-strength-xy	tempering_duration	72000	72000	s
+validity	break-strength-xy	conditioning_temperature	296.15	296.15	K
+validity	break-strength-xy	conditioning_relative_humidity	0.5	0.5	1
+validity	break-strength-xy	conditioning_duration	259200	259200	s
+validity	break-strength-xy	source_print_infill_known	0	0	1
+validity	break-strength-xy	source_print_layer_height_known	0	0	1
+validity	break-strength-xy	source_test_temperature_known	0	0	1
+scalar	break-strength-zx	printed-tensile	tensile_strength_at_break	12.2	MPa	constant
+uncertainty	break-strength-zx	unstated	-	-	-	-
+validity	break-strength-zx	source_grade_ultrafuse_tpu95a	1	1	1
+validity	break-strength-zx	source_print_profile_mk3_tpu95a_2022	1	1	1
+validity	break-strength-zx	print_orientation	2	2	1
+validity	break-strength-zx	test_speed	0.0033333333333333335	0.0033333333333333335	m/s
+validity	break-strength-zx	tempering_temperature	373.15	373.15	K
+validity	break-strength-zx	tempering_duration	72000	72000	s
+validity	break-strength-zx	conditioning_temperature	296.15	296.15	K
+validity	break-strength-zx	conditioning_relative_humidity	0.5	0.5	1
+validity	break-strength-zx	conditioning_duration	259200	259200	s
+validity	break-strength-zx	source_print_infill_known	0	0	1
+validity	break-strength-zx	source_print_layer_height_known	0	0	1
+validity	break-strength-zx	source_test_temperature_known	0	0	1
+scalar	break-elongation-xy	printed-tensile	tensile_elongation_at_break	6.61	1	constant
+uncertainty	break-elongation-xy	unstated	-	-	-	-
+validity	break-elongation-xy	source_grade_ultrafuse_tpu95a	1	1	1
+validity	break-elongation-xy	source_print_profile_mk3_tpu95a_2022	1	1	1
+validity	break-elongation-xy	print_orientation	0	0	1
+validity	break-elongation-xy	test_speed	0.0033333333333333335	0.0033333333333333335	m/s
+validity	break-elongation-xy	tempering_temperature	373.15	373.15	K
+validity	break-elongation-xy	tempering_duration	72000	72000	s
+validity	break-elongation-xy	conditioning_temperature	296.15	296.15	K
+validity	break-elongation-xy	conditioning_relative_humidity	0.5	0.5	1
+validity	break-elongation-xy	conditioning_duration	259200	259200	s
+validity	break-elongation-xy	source_print_infill_known	0	0	1
+validity	break-elongation-xy	source_print_layer_height_known	0	0	1
+validity	break-elongation-xy	source_test_temperature_known	0	0	1
+scalar	break-elongation-zx	printed-tensile	tensile_elongation_at_break	1.92	1	constant
+uncertainty	break-elongation-zx	unstated	-	-	-	-
+validity	break-elongation-zx	source_grade_ultrafuse_tpu95a	1	1	1
+validity	break-elongation-zx	source_print_profile_mk3_tpu95a_2022	1	1	1
+validity	break-elongation-zx	print_orientation	2	2	1
+validity	break-elongation-zx	test_speed	0.0033333333333333335	0.0033333333333333335	m/s
+validity	break-elongation-zx	tempering_temperature	373.15	373.15	K
+validity	break-elongation-zx	tempering_duration	72000	72000	s
+validity	break-elongation-zx	conditioning_temperature	296.15	296.15	K
+validity	break-elongation-zx	conditioning_relative_humidity	0.5	0.5	1
+validity	break-elongation-zx	conditioning_duration	259200	259200	s
+validity	break-elongation-zx	source_print_infill_known	0	0	1
+validity	break-elongation-zx	source_print_layer_height_known	0	0	1
+validity	break-elongation-zx	source_test_temperature_known	0	0	1
+scalar	tear-xy	printed-tear	tear_strength_iso34_1a	90000	N/m	constant
+uncertainty	tear-xy	unstated	-	-	-	-
+validity	tear-xy	source_grade_ultrafuse_tpu95a	1	1	1
+validity	tear-xy	source_print_profile_mk3_tpu95a_2022	1	1	1
+validity	tear-xy	print_orientation	0	0	1
+validity	tear-xy	tempering_temperature	373.15	373.15	K
+validity	tear-xy	tempering_duration	72000	72000	s
+validity	tear-xy	conditioning_temperature	296.15	296.15	K
+validity	tear-xy	conditioning_relative_humidity	0.5	0.5	1
+validity	tear-xy	conditioning_duration	259200	259200	s
+validity	tear-xy	source_print_infill_known	0	0	1
+validity	tear-xy	source_print_layer_height_known	0	0	1
+validity	tear-xy	source_test_temperature_known	0	0	1
+validity	tear-xy	source_test_rate_known	0	0	1
+scalar	tear-xz	printed-tear	tear_strength_iso34_1a	8000	N/m	constant
+uncertainty	tear-xz	unstated	-	-	-	-
+validity	tear-xz	source_grade_ultrafuse_tpu95a	1	1	1
+validity	tear-xz	source_print_profile_mk3_tpu95a_2022	1	1	1
+validity	tear-xz	print_orientation	1	1	1
+validity	tear-xz	tempering_temperature	373.15	373.15	K
+validity	tear-xz	tempering_duration	72000	72000	s
+validity	tear-xz	conditioning_temperature	296.15	296.15	K
+validity	tear-xz	conditioning_relative_humidity	0.5	0.5	1
+validity	tear-xz	conditioning_duration	259200	259200	s
+validity	tear-xz	source_print_infill_known	0	0	1
+validity	tear-xz	source_print_layer_height_known	0	0	1
+validity	tear-xz	source_test_temperature_known	0	0	1
+validity	tear-xz	source_test_rate_known	0	0	1
+scalar	tear-zx	printed-tear	tear_strength_iso34_1a	14000	N/m	constant
+uncertainty	tear-zx	unstated	-	-	-	-
+validity	tear-zx	source_grade_ultrafuse_tpu95a	1	1	1
+validity	tear-zx	source_print_profile_mk3_tpu95a_2022	1	1	1
+validity	tear-zx	print_orientation	2	2	1
+validity	tear-zx	tempering_temperature	373.15	373.15	K
+validity	tear-zx	tempering_duration	72000	72000	s
+validity	tear-zx	conditioning_temperature	296.15	296.15	K
+validity	tear-zx	conditioning_relative_humidity	0.5	0.5	1
+validity	tear-zx	conditioning_duration	259200	259200	s
+validity	tear-zx	source_print_infill_known	0	0	1
+validity	tear-zx	source_print_layer_height_known	0	0	1
+validity	tear-zx	source_test_temperature_known	0	0	1
+validity	tear-zx	source_test_rate_known	0	0	1

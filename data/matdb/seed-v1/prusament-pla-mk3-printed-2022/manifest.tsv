@@ -1,0 +1,23 @@
+frankensim.matdb-manifest.v3
+pack_id	prusament-pla-mk3-printed-2022
+redistribution	permitted	Selected attributed numerical facts and original notes only; neither the source document nor its table layout is redistributed
+citation	Prusa Polymers, Prusament PLA technical datasheet v1.1, 2022-02-16, printed-specimen mechanical table and footnote 3, pp. 2-3; https://www.prusa3d.com/file/370474/prusament-pla-technical-data-sheet.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	prusa-pla-mk3	properties.tsv	material-tsv-v1
+property	tensile_modulus	tensile-modulus	dimensional
+property	tensile_yield_strength	tensile-yield-strength	dimensional
+property	tensile_elongation_at_yield	tensile-elongation-at-yield	dimensional
+property	flexural_modulus	flexural-modulus	dimensional
+property	flexural_strength	flexural-strength	dimensional
+axis	source_grade_prusament_pla	source-grade-prusament-pla	dimensional
+axis	source_print_profile_mk3_slic3r140	source-print-profile-mk3-slic3r140	dimensional
+axis	print_orientation	print-orientation	dimensional
+axis	layer_height	layer-height	dimensional
+axis	infill_fraction	infill-fraction	dimensional
+axis	nozzle_temperature	nozzle-temperature	absolute-temperature
+axis	bed_temperature	bed-temperature	absolute-temperature
+axis	infill_print_speed	infill-print-speed	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_test_rate_known	source-test-rate-known	dimensional
+axis	source_postprocessing_known	source-postprocessing-known	dimensional

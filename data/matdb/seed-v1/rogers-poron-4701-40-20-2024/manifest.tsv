@@ -1,0 +1,25 @@
+frankensim.matdb-manifest.v3
+pack_id	rogers-poron-4701-40-20-2024
+redistribution	permitted	Selected attributed numerical facts and original notes only; neither the producer document nor its table layout is redistributed
+citation	Rogers Corporation, PORON 4701-40 Soft Product Data Sheet, July 2024, publication 17-007, 320 kg/m3 column, physical and thermal properties; https://www.rogerscorp.com/-/media/project/rogerscorp/documents/elastomeric-material-solutions/poron/english/data-sheets/17-007-poron-4701-40-soft.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	poron-4701-40-20	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	compressive_stress	compressive-stress	dimensional
+property	compressive_stress_minimum	compressive-stress-minimum	dimensional
+property	compressive_stress_maximum	compressive-stress-maximum	dimensional
+property	tensile_strength_minimum	tensile-strength-minimum	dimensional
+property	tensile_elongation_minimum	tensile-elongation-minimum	dimensional
+property	tear_strength_die_c	tear-strength-die-c	dimensional
+property	tear_strength_die_c_minimum	tear-strength-die-c-minimum	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+axis	source_grade_poron4701_40	source-grade-poron4701-40	dimensional
+axis	source_nominal_density	source-nominal-density	dimensional
+axis	source_is_nominal_value	source-is-nominal-value	dimensional
+axis	compressive_strain	compressive-strain	dimensional
+axis	test_speed	test-speed	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_test_rate_known	source-test-rate-known	dimensional
+axis	source_specimen_thickness_known	source-specimen-thickness-known	dimensional
+axis	source_orientation_known	source-orientation-known	dimensional

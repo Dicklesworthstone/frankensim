@@ -1,0 +1,54 @@
+frankensim.matdb-source.v1
+observation	typical	Parker N0674 black NBR laboratory compound	DIN EN ISO 1183-1 density; DIN 53504 S2 tensile specimen	Typical-value column only: density 1.22 g/cm3, tensile strength 16.2 N/mm2, rupture elongation 331%, and stress at 100% elongation 5.4 N/mm2. Source reference values (1.23+-0.02 g/cm3, strength >=14 MPa, elongation >=250%, stress >=3 MPa) are not statistical uncertainty or the selected typical values. Modulus 100% denotes stress at unit engineering strain, not Young modulus. Exact test temperature, rate, humidity and vulcanization history are unstated. Typical laboratory means do not qualify finished seals or general NBR formulations; no hyperelastic/viscoelastic, thermal, swelling or service-life law is inferred.
+observation	compression-set	Parker N0674 black NBR laboratory compound	DIN ISO 815-1, method A, specimen B, 25% imposed deformation	Residual compression set is 14% after 70 h at 100 C and 34% after 70 h at 125 C. Dwell temperature is not recovery/test temperature. Recovery schedule, initial cure and moisture conditioning are unstated. These independent retained-set observations do not determine unloading stiffness, stress relaxation, energy dissipation or interpolation between temperatures.
+scalar	density	typical	density	1220	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade_parker_n0674	1	1	1
+validity	density	source_test_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_cure_history_known	0	0	1
+scalar	tensile-strength	typical	tensile_strength	16.2	MPa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	source_grade_parker_n0674	1	1	1
+validity	tensile-strength	source_specimen_din53504_s2	1	1	1
+validity	tensile-strength	source_test_temperature_known	0	0	1
+validity	tensile-strength	source_test_rate_known	0	0	1
+validity	tensile-strength	source_moisture_condition_known	0	0	1
+validity	tensile-strength	source_cure_history_known	0	0	1
+scalar	break-elongation	typical	tensile_elongation_at_break	3.31	1	constant
+uncertainty	break-elongation	unstated	-	-	-	-
+validity	break-elongation	source_grade_parker_n0674	1	1	1
+validity	break-elongation	source_specimen_din53504_s2	1	1	1
+validity	break-elongation	source_test_temperature_known	0	0	1
+validity	break-elongation	source_test_rate_known	0	0	1
+validity	break-elongation	source_moisture_condition_known	0	0	1
+validity	break-elongation	source_cure_history_known	0	0	1
+scalar	stress-at-unit-strain	typical	tensile_stress	5.4	MPa	constant
+uncertainty	stress-at-unit-strain	unstated	-	-	-	-
+validity	stress-at-unit-strain	source_grade_parker_n0674	1	1	1
+validity	stress-at-unit-strain	source_specimen_din53504_s2	1	1	1
+validity	stress-at-unit-strain	tensile_strain	1	1	1
+validity	stress-at-unit-strain	source_test_temperature_known	0	0	1
+validity	stress-at-unit-strain	source_test_rate_known	0	0	1
+validity	stress-at-unit-strain	source_moisture_condition_known	0	0	1
+validity	stress-at-unit-strain	source_cure_history_known	0	0	1
+scalar	compression-set-100c	compression-set	compression_set	0.14	1	constant
+uncertainty	compression-set-100c	unstated	-	-	-	-
+validity	compression-set-100c	source_grade_parker_n0674	1	1	1
+validity	compression-set-100c	source_method_iso815_1_b_a	1	1	1
+validity	compression-set-100c	dwell_temperature	373.15	373.15	K
+validity	compression-set-100c	dwell_duration	252000	252000	s
+validity	compression-set-100c	imposed_compression_strain	0.25	0.25	1
+validity	compression-set-100c	source_moisture_condition_known	0	0	1
+validity	compression-set-100c	source_cure_history_known	0	0	1
+validity	compression-set-100c	source_recovery_history_known	0	0	1
+scalar	compression-set-125c	compression-set	compression_set	0.34	1	constant
+uncertainty	compression-set-125c	unstated	-	-	-	-
+validity	compression-set-125c	source_grade_parker_n0674	1	1	1
+validity	compression-set-125c	source_method_iso815_1_b_a	1	1	1
+validity	compression-set-125c	dwell_temperature	398.15	398.15	K
+validity	compression-set-125c	dwell_duration	252000	252000	s
+validity	compression-set-125c	imposed_compression_strain	0.25	0.25	1
+validity	compression-set-125c	source_moisture_condition_known	0	0	1
+validity	compression-set-125c	source_cure_history_known	0	0	1
+validity	compression-set-125c	source_recovery_history_known	0	0	1

@@ -1,0 +1,95 @@
+frankensim.matdb-source.v1
+observation	density	PORON 4701-40 black 04 flexible polyurethane foam, nominal 480 kg/m3 (30 lb/ft3) grade	ASTM D3574-95 Test A	Source nominal SI density is retained; the printed +-10% manufacturing tolerance is not a statistical confidence interval. Commercial sheet thickness range 0.79-1.14 mm and +-20% thickness tolerance do not identify the tested specimen thickness. No actual lot density or full foam constitutive model is inferred.
+observation	compression	PORON 4701-40 black 04 flexible polyurethane foam, nominal 480 kg/m3 grade	Compression force deflection at 25% deflection, crosshead speed 0.51 cm/min	The source labels 0.51 cm/min a strain rate, but its dimensions are length/time: stored as test speed 0.000085 m/s. Typical pressure is 173 kPa. Printed 104-276 kPa limits are separate minimum/maximum properties, not uncertainty or an interpolable stress-strain curve. Temperature, moisture, exact thickness and load orientation are unstated. No loading/unloading slope, densification, relaxation or energy absorption law is inferred.
+observation	tension-tear	PORON 4701-40 black 04 flexible polyurethane foam, nominal 480 kg/m3 grade	ASTM D3574-75 Test E tensile; ASTM D264-91 Die C tear as printed	Tensile strength and elongation are source minima, not nominal measured failure values. Tear uses the printed SI kN/m values and Die C geometry; the unusual D264-91 designation is preserved as printed rather than silently corrected. Test temperature, rate, moisture, specimen thickness and orientation are unstated.
+observation	thermal	PORON 4701-40 black 04 flexible polyurethane foam, nominal 480 kg/m3 grade	ASTM C518-98	Thermal conductivity is the source single SI value; test mean temperature, moisture, thickness and orientation are unstated. The adjacent electrical-test conditioning of 22 C/50% RH does not establish thermal-test conditioning. No specific heat or temperature-dependent thermal law is inferred.
+scalar	density	density	density	480	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade_poron4701_40	1	1	1
+validity	density	source_nominal_density	480	480	kg/m3
+validity	density	source_is_nominal_value	1	1	1
+validity	density	source_test_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_specimen_thickness_known	0	0	1
+scalar	compression-typical	compression	compressive_stress	173	kPa	constant
+uncertainty	compression-typical	unstated	-	-	-	-
+validity	compression-typical	source_grade_poron4701_40	1	1	1
+validity	compression-typical	source_nominal_density	480	480	kg/m3
+validity	compression-typical	source_is_nominal_value	1	1	1
+validity	compression-typical	compressive_strain	0.25	0.25	1
+validity	compression-typical	test_speed	0.000085	0.000085	m/s
+validity	compression-typical	source_test_temperature_known	0	0	1
+validity	compression-typical	source_moisture_condition_known	0	0	1
+validity	compression-typical	source_specimen_thickness_known	0	0	1
+validity	compression-typical	source_orientation_known	0	0	1
+scalar	compression-minimum	compression	compressive_stress_minimum	104	kPa	constant
+uncertainty	compression-minimum	unstated	-	-	-	-
+validity	compression-minimum	source_grade_poron4701_40	1	1	1
+validity	compression-minimum	source_nominal_density	480	480	kg/m3
+validity	compression-minimum	source_is_nominal_value	0	0	1
+validity	compression-minimum	compressive_strain	0.25	0.25	1
+validity	compression-minimum	test_speed	0.000085	0.000085	m/s
+validity	compression-minimum	source_test_temperature_known	0	0	1
+validity	compression-minimum	source_moisture_condition_known	0	0	1
+validity	compression-minimum	source_specimen_thickness_known	0	0	1
+validity	compression-minimum	source_orientation_known	0	0	1
+scalar	compression-maximum	compression	compressive_stress_maximum	276	kPa	constant
+uncertainty	compression-maximum	unstated	-	-	-	-
+validity	compression-maximum	source_grade_poron4701_40	1	1	1
+validity	compression-maximum	source_nominal_density	480	480	kg/m3
+validity	compression-maximum	source_is_nominal_value	0	0	1
+validity	compression-maximum	compressive_strain	0.25	0.25	1
+validity	compression-maximum	test_speed	0.000085	0.000085	m/s
+validity	compression-maximum	source_test_temperature_known	0	0	1
+validity	compression-maximum	source_moisture_condition_known	0	0	1
+validity	compression-maximum	source_specimen_thickness_known	0	0	1
+validity	compression-maximum	source_orientation_known	0	0	1
+scalar	tensile-minimum	tension-tear	tensile_strength_minimum	829	kPa	constant
+uncertainty	tensile-minimum	unstated	-	-	-	-
+validity	tensile-minimum	source_grade_poron4701_40	1	1	1
+validity	tensile-minimum	source_nominal_density	480	480	kg/m3
+validity	tensile-minimum	source_is_nominal_value	0	0	1
+validity	tensile-minimum	source_test_temperature_known	0	0	1
+validity	tensile-minimum	source_moisture_condition_known	0	0	1
+validity	tensile-minimum	source_test_rate_known	0	0	1
+validity	tensile-minimum	source_specimen_thickness_known	0	0	1
+validity	tensile-minimum	source_orientation_known	0	0	1
+scalar	elongation-minimum	tension-tear	tensile_elongation_minimum	1	1	constant
+uncertainty	elongation-minimum	unstated	-	-	-	-
+validity	elongation-minimum	source_grade_poron4701_40	1	1	1
+validity	elongation-minimum	source_nominal_density	480	480	kg/m3
+validity	elongation-minimum	source_is_nominal_value	0	0	1
+validity	elongation-minimum	source_test_temperature_known	0	0	1
+validity	elongation-minimum	source_moisture_condition_known	0	0	1
+validity	elongation-minimum	source_test_rate_known	0	0	1
+validity	elongation-minimum	source_specimen_thickness_known	0	0	1
+validity	elongation-minimum	source_orientation_known	0	0	1
+scalar	tear-typical	tension-tear	tear_strength_die_c	3000	N/m	constant
+uncertainty	tear-typical	unstated	-	-	-	-
+validity	tear-typical	source_grade_poron4701_40	1	1	1
+validity	tear-typical	source_nominal_density	480	480	kg/m3
+validity	tear-typical	source_is_nominal_value	1	1	1
+validity	tear-typical	source_test_temperature_known	0	0	1
+validity	tear-typical	source_moisture_condition_known	0	0	1
+validity	tear-typical	source_test_rate_known	0	0	1
+validity	tear-typical	source_specimen_thickness_known	0	0	1
+validity	tear-typical	source_orientation_known	0	0	1
+scalar	tear-minimum	tension-tear	tear_strength_die_c_minimum	2100	N/m	constant
+uncertainty	tear-minimum	unstated	-	-	-	-
+validity	tear-minimum	source_grade_poron4701_40	1	1	1
+validity	tear-minimum	source_nominal_density	480	480	kg/m3
+validity	tear-minimum	source_is_nominal_value	0	0	1
+validity	tear-minimum	source_test_temperature_known	0	0	1
+validity	tear-minimum	source_moisture_condition_known	0	0	1
+validity	tear-minimum	source_test_rate_known	0	0	1
+validity	tear-minimum	source_specimen_thickness_known	0	0	1
+validity	tear-minimum	source_orientation_known	0	0	1
+scalar	conductivity	thermal	thermal_conductivity	0.127	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	source_grade_poron4701_40	1	1	1
+validity	conductivity	source_nominal_density	480	480	kg/m3
+validity	conductivity	source_is_nominal_value	1	1	1
+validity	conductivity	source_test_temperature_known	0	0	1
+validity	conductivity	source_moisture_condition_known	0	0	1
+validity	conductivity	source_specimen_thickness_known	0	0	1
+validity	conductivity	source_orientation_known	0	0	1

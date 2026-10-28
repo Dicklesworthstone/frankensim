@@ -1,0 +1,39 @@
+frankensim.matdb-source.v1
+observation	seven-day	Smooth-On VytaFlex 40 cured polyurethane rubber	ASTM D412 tensile; ASTM D624 Die C tear; Technical Overview	Original tensile strength 522 psi, stress at 100% elongation 100 psi, rupture elongation 660%, Die C tear 82 lbf/in. Values follow seven days at 23 C with 1:1 volume or mass mixing, not the sixteen-hour demolding age. Conversion uses 6894.757293168 Pa/psi and 4.4482216152605 N/lbf. The 100% modulus is a tensile stress observation, not Young modulus. Tear geometry remains Die C and cannot be substituted for Die B. Test rate, moisture conditioning, detailed processing history and uncertainty are unstated. No cured density, thermal law, unloading or hyperelastic fit is inferred from liquid specific gravity, hardness or this single stress point.
+scalar	tensile-strength	seven-day	tensile_strength	3599063.307033696	Pa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	source_grade_vytaflex40	1	1	1
+validity	tensile-strength	part_a_to_b_volume_ratio	1	1	1
+validity	tensile-strength	temperature	296.15	296.15	K
+validity	tensile-strength	cure_age	604800	604800	s
+validity	tensile-strength	source_moisture_condition_known	0	0	1
+validity	tensile-strength	source_test_rate_known	0	0	1
+validity	tensile-strength	source_processing_history_known	0	0	1
+scalar	stress-at-unit-strain	seven-day	tensile_stress	689475.7293168	Pa	constant
+uncertainty	stress-at-unit-strain	unstated	-	-	-	-
+validity	stress-at-unit-strain	source_grade_vytaflex40	1	1	1
+validity	stress-at-unit-strain	part_a_to_b_volume_ratio	1	1	1
+validity	stress-at-unit-strain	temperature	296.15	296.15	K
+validity	stress-at-unit-strain	cure_age	604800	604800	s
+validity	stress-at-unit-strain	tensile_strain	1	1	1
+validity	stress-at-unit-strain	source_moisture_condition_known	0	0	1
+validity	stress-at-unit-strain	source_test_rate_known	0	0	1
+validity	stress-at-unit-strain	source_processing_history_known	0	0	1
+scalar	break-elongation	seven-day	tensile_elongation_at_break	6.6	1	constant
+uncertainty	break-elongation	unstated	-	-	-	-
+validity	break-elongation	source_grade_vytaflex40	1	1	1
+validity	break-elongation	part_a_to_b_volume_ratio	1	1	1
+validity	break-elongation	temperature	296.15	296.15	K
+validity	break-elongation	cure_age	604800	604800	s
+validity	break-elongation	source_moisture_condition_known	0	0	1
+validity	break-elongation	source_test_rate_known	0	0	1
+validity	break-elongation	source_processing_history_known	0	0	1
+scalar	tear-die-c	seven-day	tear_strength_die_c	14360.400490211061	N/m	constant
+uncertainty	tear-die-c	unstated	-	-	-	-
+validity	tear-die-c	source_grade_vytaflex40	1	1	1
+validity	tear-die-c	part_a_to_b_volume_ratio	1	1	1
+validity	tear-die-c	temperature	296.15	296.15	K
+validity	tear-die-c	cure_age	604800	604800	s
+validity	tear-die-c	source_moisture_condition_known	0	0	1
+validity	tear-die-c	source_test_rate_known	0	0	1
+validity	tear-die-c	source_processing_history_known	0	0	1
