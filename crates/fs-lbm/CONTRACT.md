@@ -501,6 +501,15 @@ rollback. Their addition does not establish executed native validation.
   `2 w_i rho (c_i dot u_wall) / c_s^2` incoming-link correction.
   Velocity/pressure face-interior cells use second-order Hermite regularized
   non-equilibrium-stress reconstruction from the first interior cell.
+- `WallMomentumExchange3` and `BoundaryGrid3::{step_with_wall_momentum,
+  step_pooled_with_wall_momentum}` supply hydrodynamic impulse, three-axis
+  angular impulse, and work on any canonical subset of the existing wall
+  links. The caller can reuse the selection across steps. Loads read the same
+  post-collision populations and halfway-bounce expression as streaming;
+  the default path's population arithmetic is unchanged. Measurement costs
+  O(selected links), allocates no per-step buffer, and sums density only once
+  per selected boundary cell. Quantities use lattice units, with cell centers
+  at `(x+0.5,y+0.5,z+0.5)` and torque evaluated at the halfway intersection.
 - `plan_scaling(reynolds, char_length_lu, u_lattice) -> ScalingPlan { tau,
   viscosity, u_lattice, mach, tau_margin, stable }` — the lattice-scaling
   assistant. `ScalingPlan::color()` (verified when comfortably stable, else
@@ -724,6 +733,13 @@ rollback. Their addition does not establish executed native validation.
   perturbation or stepping.
 - Stationary planar and voxel bounce-back conserve mass to roundoff. Tangential
   moving-wall corrections sum to zero over the represented link set.
+- D3Q19 measured wall loads use the same Wen-style boundary-relative exchange
+  as D2Q9, retaining the moving-mass term so `J_wall + delta_p_fluid =
+  sum(u_wall * delta_mass)` and its three-axis angular counterpart close.
+  Body-force impulse and open-boundary momentum flux remain separate.
+  Global angular-momentum closure additionally requires accounting for
+  periodic coordinate-wrap flux; the closed-box regression uses no periodic
+  faces. This surface does not move voxel topology or integrate rigid bodies.
 - On face-interior cells, regularized velocity/pressure reconstruction
   preserves the declared zeroth and first moments and copies the independently
   measured non-equilibrium second moment from the first interior cell. Mixed
@@ -799,6 +815,13 @@ Voxelization rejects non-finite samples, an all-solid domain, an obstructed
 first-interior open-face layer, and topology mutation after initialization.
 Boundary-grid perturbation rejects non-finite amplitudes or magnitudes at least
 one before changing populations or locking topology.
+
+D3Q19 load measurement rejects non-finite origins, links outside the actual
+wall topology, inconsistent cell/tile/lane coordinates, duplicates, and
+out-of-order selections before collision. Non-finite loads are refused before
+population publication. The pooled load path returns `BoundaryStepError3`,
+polls cancellation at intervals of at most 256 measured links and before
+publication, and returns no loads or new fluid populations on refusal.
 `collide_cell3` returns typed errors rather than publishing non-finite or
 non-positive cell states. Both moment-space rungs additionally refuse rates
 outside `(0, 2)`, nonzero body forcing, or a numerically rank-deficient moment

@@ -3,7 +3,9 @@
 //! moving halfway bounce-back, closed-domain leak, lid-cavity circulation,
 //! pressure-driven duct accuracy, and a boundary-surface golden.
 
-use fs_lbm::d3q19::{CollisionModel3, D3Q19_BOUNDARY_BIT_SEMANTICS_VERSION, E3, Q3, TILE};
+use fs_lbm::d3q19::{
+    CollisionModel3, D3Q19_BOUNDARY_BIT_SEMANTICS_VERSION, E3, OPP3, Q3, TILE, W3, collide_cell3,
+};
 use fs_lbm::{
     BoundaryGrid3, BoundarySpec3, CS2, Face3, FaceBoundary3, duct_analytic, equilibrium3,
 };
@@ -894,4 +896,286 @@ fn cancelled_pooled_step_publishes_nothing() {
         error == fs_lbm::BoundaryStepError3::Cancelled && fluid_bits(&grid) == before,
         &format!("{error}"),
     );
+}
+
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+/// G0/G3: a single diagonal moving-wall link has a signed mass-transfer
+/// term, three-dimensional torque, and work. Its load must use the actual
+/// bounced population, and translating the moment origin obeys r cross J.
+#[test]
+fn wall_momentum_single_moving_link_closes_mass_torque_and_work() {
+    let velocity = [0.03, 0.0, -0.02];
+    let make_grid =
+        || BoundaryGrid3::new(8, 8, 8, 0.8, [0.0; 3], BoundarySpec3::lid_cavity(velocity));
+    let mut grid = make_grid();
+    let link = grid
+        .boundary_links()
+        .into_iter()
+        .find(|link| link.cell == [3, 7, 4] && link.direction == 9)
+        .unwrap();
+    let post = collide_cell3(grid.populations(3, 7, 4), grid.collision_model(), [0.0; 3]).unwrap();
+    let rho: f64 = post.iter().sum();
+    let q = link.direction;
+    let e = [f64::from(E3[q].0), f64::from(E3[q].1), f64::from(E3[q].2)];
+    let outgoing = post[OPP3[q]];
+    let incoming = outgoing + 2.0 * W3[q] * rho * (e[0] * velocity[0] + e[2] * velocity[2]) / CS2;
+    let mass = incoming - outgoing;
+    let wall = core::array::from_fn(|a| {
+        (-e[a] - velocity[a]) * outgoing - (e[a] - velocity[a]) * incoming
+    });
+    let origin = [0.25, -0.5, 1.75];
+    let point = [3.0, 8.0, 4.5];
+    let offset = core::array::from_fn(|a| point[a] - origin[a]);
+    let torque = cross(offset, wall);
+    let receipt = grid.step_with_wall_momentum(&[link], origin);
+    assert_eq!(receipt.measured_links, 1);
+    assert!((grid.populations(3, 7, 4)[q] - incoming).abs() < 1e-15);
+    assert!((receipt.fluid_mass_change - mass).abs() < 1e-15);
+    assert!(mass.abs() > 1e-4, "moving-mass falsifier must be active");
+    for axis in 0..3 {
+        assert!((receipt.wall_impulse[axis] - wall[axis]).abs() < 1e-15);
+        assert!((receipt.wall_angular_impulse[axis] - torque[axis]).abs() < 1e-15);
+        assert!((receipt.wall_velocity_mass_impulse[axis] - velocity[axis] * mass).abs() < 1e-15);
+        assert!(
+            (receipt.wall_impulse[axis] + receipt.fluid_population_impulse[axis]
+                - receipt.wall_velocity_mass_impulse[axis])
+                .abs()
+                < 1e-15
+        );
+        assert!(
+            (receipt.wall_angular_impulse[axis] + receipt.fluid_population_angular_impulse[axis]
+                - receipt.wall_velocity_mass_angular_impulse[axis])
+                .abs()
+                < 1e-15
+        );
+    }
+    let work = (0..3).map(|a| wall[a] * velocity[a]).sum::<f64>();
+    assert!((receipt.wall_work - work).abs() < 1e-15);
+    let shift = [0.7, -2.0, 1.3];
+    let translated = make_grid()
+        .step_with_wall_momentum(&[link], core::array::from_fn(|a| origin[a] + shift[a]));
+    let change = cross(shift, receipt.wall_impulse);
+    for axis in 0..3 {
+        assert!(
+            (translated.wall_angular_impulse[axis] - receipt.wall_angular_impulse[axis]
+                + change[axis])
+                .abs()
+                < 2e-15
+        );
+    }
+}
+
+fn population_momenta(grid: &BoundaryGrid3, origin: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+    let mut linear = [0.0; 3];
+    let mut angular = [0.0; 3];
+    let [nx, ny, nz] = grid.dimensions();
+    for z in 0..nz {
+        for y in 0..ny {
+            for x in 0..nx {
+                if grid.is_solid(x, y, z) {
+                    continue;
+                }
+                let mut momentum = [0.0; 3];
+                for (e, f) in E3.iter().zip(grid.populations(x, y, z)) {
+                    momentum[0] += f64::from(e.0) * f;
+                    momentum[1] += f64::from(e.1) * f;
+                    momentum[2] += f64::from(e.2) * f;
+                }
+                let offset = [
+                    x as f64 + 0.5 - origin[0],
+                    y as f64 + 0.5 - origin[1],
+                    z as f64 + 0.5 - origin[2],
+                ];
+                let spin = cross(offset, momentum);
+                for a in 0..3 {
+                    linear[a] += momentum[a];
+                    angular[a] += spin[a];
+                }
+            }
+        }
+    }
+    (linear, angular)
+}
+
+/// G0: independently sum the entire fluid's actual momentum before/after
+/// stepping. Wall loads close both Newton's third law and angular momentum,
+/// including moving walls, voxel obstacles, and an applied body-force torque.
+/// The box is closed: periodic coordinate wraps would carry angular flux.
+#[test]
+fn wall_momentum_balances_closed_three_dimensional_fluid() {
+    let force = [2e-6, -3e-6, 5e-6];
+    let origin = [2.25, -1.5, 6.75];
+    let mut grid = BoundaryGrid3::new(
+        8,
+        8,
+        8,
+        0.83,
+        force,
+        BoundarySpec3::lid_cavity([0.025, 0.0, -0.012]),
+    );
+    grid.voxelize_sdf(|p| {
+        (p[0] - 3.0).powi(2) + (p[1] - 3.5).powi(2) + (p[2] - 4.0).powi(2) - 1.4_f64.powi(2)
+    });
+    let mut external = [0.0; 3];
+    let mut external_torque = [0.0; 3];
+    for z in 0..8 {
+        for y in 0..8 {
+            for x in 0..8 {
+                if grid.is_solid(x, y, z) {
+                    continue;
+                }
+                let u = [0.001 * y as f64, -0.0015 * z as f64, 0.001 * x as f64];
+                grid.set_populations(x, y, z, &equilibrium3(1.0 + 0.001 * x as f64, u));
+                let offset = [
+                    x as f64 + 0.5 - origin[0],
+                    y as f64 + 0.5 - origin[1],
+                    z as f64 + 0.5 - origin[2],
+                ];
+                let torque = cross(offset, force);
+                for a in 0..3 {
+                    external[a] += force[a];
+                    external_torque[a] += torque[a];
+                }
+            }
+        }
+    }
+    let links = grid.boundary_links();
+    for _ in 0..8 {
+        let before = population_momenta(&grid, origin);
+        let mass = grid.total_mass();
+        let load = grid.step_with_wall_momentum(&links, origin);
+        let after = population_momenta(&grid, origin);
+        assert_eq!(load.measured_links, links.len());
+        assert!((grid.total_mass() - mass - load.fluid_mass_change).abs() < 3e-11);
+        for a in 0..3 {
+            let residual = after.0[a] - before.0[a] - external[a] + load.wall_impulse[a]
+                - load.wall_velocity_mass_impulse[a];
+            assert!(
+                residual.abs() < 2e-12,
+                "axis {a}: momentum residual {residual:e}"
+            );
+            let residual = after.1[a] - before.1[a] - external_torque[a]
+                + load.wall_angular_impulse[a]
+                - load.wall_velocity_mass_angular_impulse[a];
+            assert!(
+                residual.abs() < 2e-11,
+                "axis {a}: torque residual {residual:e}"
+            );
+        }
+    }
+}
+
+/// G4/G5: the opt-in load path preserves exact serial/pooled populations and
+/// loads, while cancelled or malformed selections cannot advance the grid.
+#[test]
+fn wall_momentum_pooled_replays_and_refuses_before_publication() {
+    use fs_exec::{CancelGate, TilePool};
+    let spec = BoundarySpec3::lid_cavity([0.025, 0.0, 0.01]);
+    let origin = [3.0, 1.5, -2.0];
+    for workers in [1, 3] {
+        let mut plain = pooled_fixture(spec, true);
+        let mut serial = pooled_fixture(spec, true);
+        let mut pooled = pooled_fixture(spec, true);
+        let links = serial.boundary_links();
+        let pool = TilePool::for_host(workers, 7);
+        let gate = CancelGate::new();
+        for _ in 0..3 {
+            plain.step();
+            let expected = serial.step_with_wall_momentum(&links, origin);
+            let actual = pooled
+                .step_pooled_with_wall_momentum(&pool, &gate, &links, origin)
+                .unwrap();
+            assert_eq!(expected, actual);
+            assert_eq!(fluid_bits(&plain), fluid_bits(&serial));
+            assert_eq!(fluid_bits(&serial), fluid_bits(&pooled));
+        }
+        let before = fluid_bits(&pooled);
+        let duplicate = [links[0], links[0]];
+        assert!(matches!(
+            pooled.step_pooled_with_wall_momentum(&pool, &gate, &duplicate, origin),
+            Err(fs_lbm::BoundaryStepError3::WallMomentum { .. })
+        ));
+        let mut invalid = links[0];
+        invalid.cell[0] += 1;
+        assert!(matches!(
+            pooled.step_pooled_with_wall_momentum(&pool, &gate, &[invalid], origin),
+            Err(fs_lbm::BoundaryStepError3::WallMomentum { .. })
+        ));
+        assert!(matches!(
+            pooled.step_pooled_with_wall_momentum(&pool, &gate, &links, [f64::NAN; 3]),
+            Err(fs_lbm::BoundaryStepError3::WallMomentum { .. })
+        ));
+        assert_eq!(fluid_bits(&pooled), before);
+        gate.request();
+        assert_eq!(
+            pooled.step_pooled_with_wall_momentum(&pool, &gate, &links, origin),
+            Err(fs_lbm::BoundaryStepError3::Cancelled)
+        );
+        assert_eq!(fluid_bits(&pooled), before);
+    }
+    let mut measured = pooled_fixture(spec, false);
+    let mut plain = pooled_fixture(spec, false);
+    let empty = measured.step_with_wall_momentum(&[], origin);
+    plain.step();
+    assert_eq!(empty, fs_lbm::WallMomentumExchange3::default());
+    assert_eq!(fluid_bits(&measured), fluid_bits(&plain));
+}
+
+/// G1/G3: actual wall shear agrees with the Newtonian Couette solution in
+/// two tangential directions, including a common tangential frame boost.
+#[test]
+fn wall_momentum_couette_matches_physical_shear_under_common_boost() {
+    let shear = [0.02, 0.0, -0.016];
+    let mut loads = Vec::new();
+    for boost in [0.0, 0.025] {
+        let bottom = [boost, 0.0, -0.5 * boost];
+        let top = core::array::from_fn(|a| bottom[a] + shear[a]);
+        let periodic = FaceBoundary3::Periodic;
+        let spec = BoundarySpec3::new([
+            periodic,
+            periodic,
+            FaceBoundary3::Wall { velocity: bottom },
+            FaceBoundary3::Wall { velocity: top },
+            periodic,
+            periodic,
+        ]);
+        let mut grid = BoundaryGrid3::new(4, 8, 4, 0.8, [0.0; 3], spec);
+        for z in 0..4 {
+            for y in 0..8 {
+                for x in 0..4 {
+                    let u = core::array::from_fn(|a| bottom[a] + shear[a] * (y as f64 + 0.5) / 8.0);
+                    grid.set_populations(x, y, z, &equilibrium3(1.0, u));
+                }
+            }
+        }
+        let top_links = grid
+            .boundary_links()
+            .into_iter()
+            .filter(|link| link.cell[1] == 7)
+            .collect::<Vec<_>>();
+        grid.run(800);
+        let load = grid.step_with_wall_momentum(&top_links, [2.0, 4.0, 2.0]);
+        for axis in [0, 2] {
+            let expected = -grid.viscosity() * shear[axis] / 8.0 * 16.0;
+            assert!(
+                (load.wall_impulse[axis] - expected).abs() < 1e-7,
+                "Couette axis {axis}: measured {} expected {expected}",
+                load.wall_impulse[axis]
+            );
+        }
+        loads.push(load.wall_impulse);
+    }
+    for axis in [0, 2] {
+        assert!(
+            (loads[0][axis] - loads[1][axis]).abs() < 1e-10,
+            "common-boost shear residual on axis {axis}"
+        );
+    }
 }

@@ -343,6 +343,40 @@ pub struct BoundaryLink3 {
     pub direction: usize,
 }
 
+/// Force, torque, and work transferred to selected D3Q19 wall links in one
+/// lattice step. All quantities use lattice units (`dt = dx = 1`).
+///
+/// The boundary-relative impulse is `(c_out-u_wall) f_out -
+/// (c_in-u_wall) f_in` (Wen et al., 2014,
+/// <https://arxiv.org/abs/1303.0625>). The separate population and moving-mass
+/// terms close `wall_impulse + fluid_population_impulse =
+/// wall_velocity_mass_impulse`; the same identity holds for angular impulse.
+/// Thus moving mass is not mistaken for an equal-and-opposite contact force.
+/// Torque uses the halfway intersection measured from the requested origin;
+/// cell centers have coordinates `[x+0.5, y+0.5, z+0.5]`, as in voxelization.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[must_use]
+pub struct WallMomentumExchange3 {
+    /// Hydrodynamic impulse delivered to the selected walls.
+    pub wall_impulse: [f64; 3],
+    /// Change in fluid-population momentum across the selected wall links.
+    pub fluid_population_impulse: [f64; 3],
+    /// Incoming-minus-outgoing population mass across the selected links.
+    pub fluid_mass_change: f64,
+    /// Sum of `u_wall * (f_in - f_out)` across the selected links.
+    pub wall_velocity_mass_impulse: [f64; 3],
+    /// Wall angular impulse about the requested origin.
+    pub wall_angular_impulse: [f64; 3],
+    /// Angular impulse of the fluid-population momentum change.
+    pub fluid_population_angular_impulse: [f64; 3],
+    /// Angular impulse of the moving-mass term.
+    pub wall_velocity_mass_angular_impulse: [f64; 3],
+    /// Work delivered to walls: sum of link impulse dotted with wall velocity.
+    pub wall_work: f64,
+    /// Number of measured links; each selected link is counted once.
+    pub measured_links: usize,
+}
+
 enum PullSource {
     Fluid { tile: usize, lane: usize },
     Wall { voxel: bool },
@@ -419,6 +453,11 @@ pub enum BoundaryStepError3 {
         /// Cell coordinates.
         cell: [usize; 3],
     },
+    /// Invalid wall-link selection/origin, or non-finite momentum exchange.
+    WallMomentum {
+        /// Stable refusal detail.
+        reason: &'static str,
+    },
 }
 
 impl core::fmt::Display for BoundaryStepError3 {
@@ -435,6 +474,7 @@ impl core::fmt::Display for BoundaryStepError3 {
                     "D3Q19 open-face source cell {cell:?} lost positive finite density"
                 )
             }
+            Self::WallMomentum { reason } => write!(f, "D3Q19 wall momentum refused: {reason}"),
         }
     }
 }
@@ -841,6 +881,36 @@ impl BoundaryGrid3 {
         self.apply_open_boundaries();
     }
 
+    /// Advance the existing serial step and return the hydrodynamic loads on
+    /// a selected wall or obstacle. Obtain links once from [`Self::boundary_links`]
+    /// and retain any subset in its original order; immutable topology makes
+    /// the selection reusable. Empty selections are valid.
+    ///
+    /// This reads only the selected links of the actual post-collision state,
+    /// with no full-grid momentum scan and no change to stepping arithmetic.
+    /// Open-boundary momentum flux and body forcing are separate exchanges.
+    ///
+    /// # Panics
+    /// Invalid, duplicate, or out-of-order links, a non-finite origin, collision
+    /// failure, or non-finite exchange. Invalid measurements are refused before
+    /// populations advance, including a non-finite computed exchange.
+    pub fn step_with_wall_momentum(
+        &mut self,
+        links: &[BoundaryLink3],
+        moment_origin: [f64; 3],
+    ) -> WallMomentumExchange3 {
+        self.validate_wall_measurement(links, moment_origin)
+            .expect("wall measurement requires valid ordered links and a finite origin");
+        self.topology_locked = true;
+        self.collide();
+        let exchange = self
+            .wall_momentum(links, moment_origin, None)
+            .expect("wall momentum exchange must remain finite");
+        self.stream();
+        self.apply_open_boundaries();
+        exchange
+    }
+
     /// Run a fixed number of deterministic steps.
     pub fn run(&mut self, steps: usize) {
         for _ in 0..steps {
@@ -863,6 +933,33 @@ impl BoundaryGrid3 {
         pool: &P,
         gate: &CancelGate,
     ) -> Result<(), BoundaryStepError3> {
+        self.step_pooled_inner(pool, gate, None).map(|_| ())
+    }
+
+    /// Pooled counterpart of [`Self::step_with_wall_momentum`]. Loads reduce
+    /// in the same selected-link order for every worker count. Measurement
+    /// checkpoints occur at most 256 links apart and before publication.
+    ///
+    /// # Errors
+    /// [`BoundaryStepError3`]. Invalid measurement, collision, cancellation,
+    /// and non-finite exchange publish neither a new fluid state nor loads.
+    pub fn step_pooled_with_wall_momentum<P: KernelRunner>(
+        &mut self,
+        pool: &P,
+        gate: &CancelGate,
+        links: &[BoundaryLink3],
+        moment_origin: [f64; 3],
+    ) -> Result<WallMomentumExchange3, BoundaryStepError3> {
+        self.validate_wall_measurement(links, moment_origin)?;
+        self.step_pooled_inner(pool, gate, Some((links, moment_origin)))
+    }
+
+    fn step_pooled_inner<P: KernelRunner>(
+        &mut self,
+        pool: &P,
+        gate: &CancelGate,
+        measurement: Option<(&[BoundaryLink3], [f64; 3])>,
+    ) -> Result<WallMomentumExchange3, BoundaryStepError3> {
         self.topology_locked = true;
         {
             let kernel = CollidePass {
@@ -883,6 +980,10 @@ impl BoundaryGrid3 {
                 }
             }
         }
+        let exchange = match measurement {
+            Some((links, origin)) => self.wall_momentum(links, origin, Some(gate))?,
+            None => WallMomentumExchange3::default(),
+        };
         let mut next = self.next.take().unwrap_or_else(|| self.f.clone());
         let outcome = {
             let kernel = StreamPass {
@@ -920,10 +1021,14 @@ impl BoundaryGrid3 {
                 }
             }
         }
+        if measurement.is_some() && gate.is_requested() {
+            self.next = Some(next);
+            return Err(BoundaryStepError3::Cancelled);
+        }
         core::mem::swap(&mut self.f, &mut next);
         self.next = Some(next);
         self.apply_open_boundaries();
-        Ok(())
+        Ok(exchange)
     }
 
     /// Velocity component over one z section, row-major in `(y, x)`.
@@ -942,6 +1047,124 @@ impl BoundaryGrid3 {
             }
         }
         section
+    }
+
+    fn validate_wall_measurement(
+        &self,
+        links: &[BoundaryLink3],
+        origin: [f64; 3],
+    ) -> Result<(), BoundaryStepError3> {
+        if !origin.into_iter().all(f64::is_finite) {
+            return Err(BoundaryStepError3::WallMomentum {
+                reason: "moment origin must be finite",
+            });
+        }
+        let mut previous = None;
+        for link in links {
+            let key = (link.tile, link.lane, link.direction);
+            if previous.is_some_and(|previous| previous >= key) {
+                return Err(BoundaryStepError3::WallMomentum {
+                    reason: "wall links must be unique and in canonical order",
+                });
+            }
+            if link.tile >= self.link_masks.len()
+                || link.lane >= TILE_CELLS
+                || link.direction == 0
+                || link.direction >= Q3
+                || self.coords(link.tile, link.lane) != link.cell
+                || self.link_masks[link.tile].0[link.lane] & (1u32 << link.direction) == 0
+            {
+                return Err(BoundaryStepError3::WallMomentum {
+                    reason: "selection contains a link outside the grid's wall topology",
+                });
+            }
+            previous = Some(key);
+        }
+        Ok(())
+    }
+
+    fn wall_momentum(
+        &self,
+        links: &[BoundaryLink3],
+        origin: [f64; 3],
+        gate: Option<&CancelGate>,
+    ) -> Result<WallMomentumExchange3, BoundaryStepError3> {
+        let mut exchange = WallMomentumExchange3::default();
+        let mut previous_cell = None;
+        let mut rho = 0.0;
+        let mut exterior_velocity = [0.0; 3];
+        for (index, link) in links.iter().enumerate() {
+            if index.is_multiple_of(256) && gate.is_some_and(CancelGate::is_requested) {
+                return Err(BoundaryStepError3::Cancelled);
+            }
+            let cell = (link.tile, link.lane);
+            if previous_cell != Some(cell) {
+                rho = (0..Q3).map(|q| self.post[q][link.tile].0[link.lane]).sum();
+                exterior_velocity = effective_wall_velocity(
+                    self.boundaries,
+                    [self.nx, self.ny, self.nz],
+                    link.cell,
+                );
+                previous_cell = Some(cell);
+            }
+            let velocity = if self.stationary_link_masks[link.tile].0[link.lane]
+                & (1u32 << link.direction)
+                != 0
+            {
+                [0.0; 3]
+            } else {
+                exterior_velocity
+            };
+            let q = link.direction;
+            let e = [f64::from(E3[q].0), f64::from(E3[q].1), f64::from(E3[q].2)];
+            let outgoing = self.post[OPP3[q]][link.tile].0[link.lane];
+            let incoming = wall_population(outgoing, rho, q, velocity);
+            let mass_change = incoming - outgoing;
+            let fluid = e.map(|component| component * (outgoing + incoming));
+            let moving_mass = velocity.map(|component| component * mass_change);
+            let wall = core::array::from_fn::<_, 3, _>(|axis| {
+                (-e[axis] - velocity[axis]) * outgoing - (e[axis] - velocity[axis]) * incoming
+            });
+            let offset = core::array::from_fn::<_, 3, _>(|axis| {
+                link.cell[axis] as f64 + 0.5 - 0.5 * e[axis] - origin[axis]
+            });
+            for axis in 0..3 {
+                let b = (axis + 1) % 3;
+                let c = (axis + 2) % 3;
+                exchange.wall_impulse[axis] += wall[axis];
+                exchange.fluid_population_impulse[axis] += fluid[axis];
+                exchange.wall_velocity_mass_impulse[axis] += moving_mass[axis];
+                exchange.wall_angular_impulse[axis] += offset[b] * wall[c] - offset[c] * wall[b];
+                exchange.fluid_population_angular_impulse[axis] +=
+                    offset[b] * fluid[c] - offset[c] * fluid[b];
+                exchange.wall_velocity_mass_angular_impulse[axis] +=
+                    offset[b] * moving_mass[c] - offset[c] * moving_mass[b];
+                exchange.wall_work += wall[axis] * velocity[axis];
+            }
+            exchange.fluid_mass_change += mass_change;
+            exchange.measured_links += 1;
+        }
+        if gate.is_some_and(CancelGate::is_requested) {
+            return Err(BoundaryStepError3::Cancelled);
+        }
+        if ![
+            exchange.wall_impulse,
+            exchange.fluid_population_impulse,
+            exchange.wall_velocity_mass_impulse,
+            exchange.wall_angular_impulse,
+            exchange.fluid_population_angular_impulse,
+            exchange.wall_velocity_mass_angular_impulse,
+        ]
+        .into_iter()
+        .flatten()
+        .chain([exchange.fluid_mass_change, exchange.wall_work])
+        .all(f64::is_finite)
+        {
+            return Err(BoundaryStepError3::WallMomentum {
+                reason: "wall momentum exchange is non-finite",
+            });
+        }
+        Ok(exchange)
     }
 
     fn addr(&self, x: usize, y: usize, z: usize) -> (usize, usize) {
@@ -1386,6 +1609,17 @@ struct StreamView<'a> {
     dims: [usize; 3],
 }
 
+// One operation tree for the actual incoming population and its measured
+// momentum exchange. Keep the existing streaming arithmetic bit-for-bit.
+fn wall_population(outgoing: f64, rho: f64, q: usize, velocity: [f64; 3]) -> f64 {
+    let e = E3[q];
+    let eu_wall = f64::from(e.0).mul_add(
+        velocity[0],
+        f64::from(e.1).mul_add(velocity[1], f64::from(e.2) * velocity[2]),
+    );
+    outgoing + 2.0 * W3[q] * rho * eu_wall / CS2
+}
+
 impl StreamView<'_> {
     /// Post-stream populations of one fluid cell before open-face
     /// reconstruction.
@@ -1414,12 +1648,7 @@ impl StreamView<'_> {
                         tile_lane_coords(self.dims, tile, lane),
                     )
                 };
-                let e = E3[q];
-                let eu_wall = f64::from(e.0).mul_add(
-                    velocity[0],
-                    f64::from(e.1).mul_add(velocity[1], f64::from(e.2) * velocity[2]),
-                );
-                post[OPP3[q]][tile].0[lane] + 2.0 * W3[q] * rho_post * eu_wall / CS2
+                wall_population(post[OPP3[q]][tile].0[lane], rho_post, q, velocity)
             } else if open_mask & bit != 0 {
                 // Every population on an open face-interior cell is replaced
                 // by the regularized pass that follows streaming.
