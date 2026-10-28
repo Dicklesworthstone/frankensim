@@ -1,0 +1,15 @@
+; Illustrative bounded startup-pulse sizing, not a continuous-time safety bound.
+(fsim-native-design-study
+  :version 1 :project "../heatsink-fan/heatsink-fan-pulse.fsim"
+  :evaluations 64 :seed 29 :wall-time 240s :qoi "temperature-max"
+  :geometry ((mesh :role "heatsink" :path "../heatsink-fan/heatsink.stl"
+    :unit "m" :max-hole-edges 0))
+  :materials ("../../data/reference-project/aa6061.fsmcdpk") :interfaces ()
+  :control (power-schedule-scale :entity "metal" :minimum 0 :maximum 3 :tolerance 0.001)
+  :temperature-tolerance 0.01K
+  :assumption nondecreasing-temperature-with-schedule-scale
+  :operating-cases (
+    (case :name "cool-intake" :inputs (
+      (air-inlet-temperature :entity "metal" :value 293.15K)))
+    (case :name "warm-intake" :inputs (
+      (air-inlet-temperature :entity "metal" :value 303.15K)))))

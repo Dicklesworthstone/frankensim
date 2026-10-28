@@ -45,8 +45,9 @@ pub(super) fn parse(node: &Node, control: &UniformParameter)
                 return Err(error("an operating case cannot overwrite the design control"));
             }
             let value = quantity(f["value"], target.dims())?;
-            if (target == Target::Power && value < 0.0)
-                || (target != Target::Power && target != Target::HeatFlux && value <= 0.0)
+            let nonnegative = matches!(target, Target::Power | Target::PowerScheduleScale);
+            if (nonnegative && value < 0.0)
+                || (!nonnegative && target != Target::HeatFlux && value <= 0.0)
             {
                 return Err(error("invalid operating-case physical value"));
             }

@@ -179,4 +179,66 @@ mod tests {
             .power_schedules[0].steps[0].watts.value = -1.0;
         assert!(UncertaintyStudy::parse(&SOURCE.replace(":high 2", ":high 0")).unwrap().bind(&original).is_err());
     }
+    fn design_source() -> &'static str {
+        r#"(fsim-native-design-study :version 1 :project "cooling-reference.fsim"
+          :evaluations 32 :seed 29 :wall-time 120s :qoi "temperature-max"
+          :geometry ((mesh :role "enclosure" :path "plate.stl" :unit "m" :max-hole-edges 0))
+          :materials ("aa6061.fsmcdpk") :interfaces ()
+          :control (power-schedule-scale :entity "air" :minimum 0 :maximum 2 :tolerance 0.001)
+          :temperature-tolerance 0.01K :assumption nondecreasing-temperature-with-schedule-scale)"#
+    }
+
+    #[test]
+    fn g0_design_amplitude_has_explicit_units_assumption_and_nonzero_original_workload() {
+        use crate::uncertainty::DesignControl;
+        let parsed = UncertaintyStudy::parse(design_source()).unwrap();
+        assert_eq!(parsed.design().unwrap().control, DesignControl::PowerScheduleScale { tolerance: 0.001 });
+        assert_eq!(UncertaintyStudy::parse(parsed.canonical()).unwrap(), parsed);
+        for (from, to) in [(":minimum 0", ":minimum -1"), (":maximum 2", ":maximum 2W"),
+            (":tolerance 0.001", ":tolerance 0.001W"),
+            ("nondecreasing-temperature-with-schedule-scale", "nondecreasing-temperature-with-power")] {
+            assert!(UncertaintyStudy::parse(&design_source().replace(from, to)).is_err());
+        }
+        let mut zero = base();
+        for step in &mut zero.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+            .transient.as_mut().unwrap().power_schedules[0].steps { step.watts.value = 0.0; }
+        assert!(parsed.bind(&zero).is_err(), "an all-zero schedule is not a workload sizing coordinate");
+    }
+
+    #[test]
+    fn g1_design_cases_share_the_original_schedule_and_do_not_reapply_duty() {
+        let original = base();
+        let source = design_source().trim_end_matches(')').to_owned() + r#"
+          :operating-cases (
+            (case :name "cool" :inputs ((convection-temperature :entity "air" :value 295K)))
+            (case :name "hot" :inputs ((convection-temperature :entity "air" :value 303K)))))"#;
+        let bound = UncertaintyStudy::parse(&source).unwrap().bind(&original).unwrap();
+        for (amplitude, temperature) in [(2.0, 303.0), (0.0, 295.0), (1.0, 303.0), (2.0, 303.0)] {
+            let candidate = bound.sample_project(&[amplitude, temperature]).unwrap();
+            assert_eq!(candidate.power, original.power);
+            assert_eq!(schedule(&candidate).steps[0].watts.value, 8.0 * amplitude);
+            assert_eq!(schedule(&candidate).steps[1].watts.value, 0.0);
+            assert_eq!(schedule(&candidate).steps[2].watts.value, 2.0 * amplitude);
+            assert_eq!(bound.base(), &original);
+        }
+        assert!(bound.sample_project(&[1.0, 299.0]).is_err(), "no unauthored intermediate case");
+    }
+
+    #[test]
+    fn g0_operating_case_can_disable_a_schedule_without_overwriting_the_search_control() {
+        let source = design_source().replace(
+            "power-schedule-scale :entity \"air\" :minimum 0 :maximum 2 :tolerance 0.001",
+            "fan-speed-ratio :entity \"fixture-bank\" :minimum 0.6 :maximum 1.4 :tolerance 0.001")
+            .replace("nondecreasing-temperature-with-schedule-scale", "nonincreasing-temperature-with-fan-speed");
+        let source = source.trim_end_matches(')').to_owned() + r#"
+          :operating-cases (
+            (case :name "off" :inputs ((power-schedule-scale :entity "air" :value 0)))
+            (case :name "on" :inputs ((power-schedule-scale :entity "air" :value 2)))))"#;
+        let parsed = UncertaintyStudy::parse(&source).unwrap();
+        assert_eq!(parsed.operating_cases()[0].values, [0.0]);
+        assert_eq!(parsed.operating_cases()[1].values, [2.0]);
+        let bad = source.replace(":value 0", ":value -1");
+        assert!(UncertaintyStudy::parse(&bad).is_err());
+    }
+
 }

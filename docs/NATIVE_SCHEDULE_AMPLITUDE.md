@@ -42,3 +42,42 @@ The example's probability laws, capacity and fan data are illustrative.
 Schedule scaling does not assert that real workload statistics are uniform,
 that temperature is monotone in amplitude, or that a sampled peak bounds
 continuous-time temperature. No material/source authority is added.
+
+## Size the pulse against the full transient
+
+The same coordinate is an explicit native design control:
+
+```lisp
+:control (power-schedule-scale :entity "metal" :minimum 0 :maximum 3 :tolerance 0.001)
+:temperature-tolerance 0.01K
+:assumption nondecreasing-temperature-with-schedule-scale
+```
+
+The native sizing driver checks the minimum-amplitude baseline, then the
+upper bound, and retains a measured feasible endpoint while bisecting the
+bracket. It maximizes amplitude, not static authored watts or pulse duration.
+The original schedule must contain nonzero heating. Even zero amplitude
+cannot cure an initial state already above the temperature limit.
+
+Every candidate runs the ordinary complete native trajectory. Its decision
+uses the maximum over the original initial state and accepted fine-grid
+states; the cooled final temperature is reported separately. Optional finite
+`operating-cases` evaluate that entire trajectory under every authored case.
+Only a completed group can establish feasibility. Cases can prescribe another
+region's schedule amplitude, including zero; they cannot overwrite the search
+coordinate. These finite conditions are not a probability law or an interval
+robustness guarantee.
+
+```bash
+cargo run -p fs-cli --bin frankensim -- --json study examples/native-uncertainty/pulse-design.fsim pulse-design.db --budget 2
+```
+
+The ordinary `study --resume`, `report` and `package` routes retain the original
+schedule and all completed physical observations. Budgets count actual native
+case evaluations. Reports use `power_schedule_scale`, `schedule_region`,
+`schedule_scale_tolerance` and `bracket_width_scale`; they never label this
+multiplier as watts or fan speed. The selected exported project contains the
+actually evaluated scaled watt history at its governing operating case.
+Completion requires both coordinate and temperature tolerances, or a passing
+upper bound. Measured nonmonotonicity refuses; global monotonicity remains the
+explicit caller assumption.

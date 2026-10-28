@@ -8,9 +8,14 @@ use std::fmt::Write as _;
 use fs_project::uncertainty::{DesignControl, DesignPolicy, UniformParameter};
 
 mod cases;
+mod coordinate;
+#[cfg(test)]
+mod schedule_tests;
 
 pub(super) const DRIVER: &str = "native-cooling-power-design-v1";
 pub(super) const FAN_DRIVER: &str = "native-cooling-fan-design-v1";
+const SCHEDULE_DRIVER: &str = "native-cooling-schedule-design-v1";
+const SCHEDULE_CASE_DRIVER: &str = "native-cooling-schedule-case-design-v1";
 const POWER_CASE_DRIVER: &str = "native-cooling-power-case-design-v1";
 const FAN_CASE_DRIVER: &str = "native-cooling-fan-case-design-v1";
 const OBSERVATIONS: &str = "native-power-design-observations";
@@ -20,7 +25,8 @@ const SCOPE: &str = "Maximize one region's delivered watts over the declared int
 const FAN_SCOPE: &str = "Minimize one named fan bank's absolute speed ratio over its declared interval under the explicit nonincreasing-temperature-with-fan-speed assumption. Every candidate recomputes the native hydraulic operating point and conjugate cooling response with the original fan curves, other banks, power, materials and geometry. Every feasibility decision uses a completed native solve and the unchanged requirement limit minus margin. Transient decisions use the accepted fine-grid sampled peak including the original initial state; final native QoI is retained separately. The selected project is the lowest-speed observed feasible candidate. No global monotonicity proof, minimum electrical power or acoustic noise, continuous-time or continuum temperature bound, probability statement, physical validation or compliance signoff is supplied.";
 
 pub(super) fn is_driver(value: Option<&str>) -> bool {
-    matches!(value, Some(DRIVER | FAN_DRIVER | POWER_CASE_DRIVER | FAN_CASE_DRIVER))
+    matches!(value, Some(DRIVER | FAN_DRIVER | POWER_CASE_DRIVER | FAN_CASE_DRIVER
+        | SCHEDULE_DRIVER | SCHEDULE_CASE_DRIVER))
 }
 
 fn fan(policy: DesignPolicy) -> bool {
@@ -28,16 +34,26 @@ fn fan(policy: DesignPolicy) -> bool {
 }
 
 fn driver(policy: DesignPolicy) -> &'static str {
-    if fan(policy) { FAN_DRIVER } else { DRIVER }
+    match policy.control {
+        DesignControl::DeliveredPower { .. } => DRIVER,
+        DesignControl::FanSpeedRatio { .. } => FAN_DRIVER,
+        DesignControl::PowerScheduleScale { .. } => SCHEDULE_DRIVER,
+    }
 }
 
 fn study_driver(study: &fs_project::uncertainty::UncertaintyStudy, policy: DesignPolicy) -> &'static str {
     if study.operating_cases().is_empty() { driver(policy) }
-    else if fan(policy) { FAN_CASE_DRIVER } else { POWER_CASE_DRIVER }
+    else { match policy.control {
+        DesignControl::DeliveredPower { .. } => POWER_CASE_DRIVER,
+        DesignControl::FanSpeedRatio { .. } => FAN_CASE_DRIVER,
+        DesignControl::PowerScheduleScale { .. } => SCHEDULE_CASE_DRIVER,
+    } }
 }
 
 fn observations_kind(driver: &str) -> &'static str {
     match driver {
+        SCHEDULE_DRIVER => "native-schedule-design-observations",
+        SCHEDULE_CASE_DRIVER => "native-schedule-case-design-observations",
         FAN_CASE_DRIVER => "native-fan-case-design-observations",
         POWER_CASE_DRIVER => "native-power-case-design-observations",
         FAN_DRIVER => FAN_OBSERVATIONS,
@@ -57,7 +73,7 @@ struct Trial {
 impl Trial {
     fn coordinate(&self) -> f64 { self.sample.parameters[0] }
     fn json(&self, policy: DesignPolicy) -> String {
-        let coordinate = if fan(policy) { "fan_speed_ratio" } else { "power_w" };
+        let coordinate = coordinate::presentation(policy).coordinate;
         format!(
             "{{{coordinate:?}:{},\"temperature_k\":{},\"final_temperature_k\":{},\"time_s\":{},\"state\":{},\"run\":{},\"project_hash\":{},\"qoi_receipt\":{},\"conduction_receipt\":{}}}",
             self.coordinate(), self.temperature_k, self.sample.value_k, optional(self.time_s),
@@ -132,7 +148,7 @@ fn next(control: &UniformParameter, policy: DesignPolicy, limit: f64, rows: &[Tr
     let minimize = fan(policy);
     if rows.is_empty() { return Next::Evaluate(if minimize { control.high } else { control.low }); }
     if rows[0].temperature_k > limit {
-        return Next::Refuse(if minimize { "maximum-fan-speed-infeasible" } else { "minimum-power-infeasible" });
+        return Next::Refuse(coordinate::presentation(policy).baseline_refusal);
     }
     // This detects a violated assumption in measured candidates, without
     // claiming that an unobserved nonmonotone branch has been excluded.
@@ -160,7 +176,7 @@ fn next(control: &UniformParameter, policy: DesignPolicy, limit: f64, rows: &[Tr
     }
     let candidate = low + 0.5 * width;
     if !(candidate > low && candidate < high) {
-        return Next::Refuse(if minimize { "fan-speed-resolution-exhausted" } else { "power-resolution-exhausted" });
+        return Next::Refuse(coordinate::presentation(policy).resolution_refusal);
     }
     Next::Evaluate(candidate)
 }
@@ -176,9 +192,9 @@ fn persist(
 ) -> Result<Outcome> {
     let study = model.bound.study();
     let policy = study.design().ok_or_else(|| invalid("missing deterministic design policy"))?;
-    let fan = fan(policy);
+    let presentation = coordinate::presentation(policy);
     let driver = study_driver(study, policy);
-    let scope = cases::scope(study, if fan { FAN_SCOPE } else { SCOPE });
+    let scope = cases::scope(study, presentation.scope);
     let observations_kind = observations_kind(driver);
     let control = &study.parameters()[0];
     let limit = model.bound.threshold_k();
@@ -196,26 +212,22 @@ fn persist(
     let failure_json = failure.map_or_else(|| "null".into(), quoted);
     let observation = if transient(model) { "fine-grid-sampled-peak-including-initial" } else { "steady" };
     let region = &model.bound.base().requirements.as_ref().expect("bound requirement")[0].region;
-    let schema = match (fan, study.operating_cases().is_empty()) {
-        (true, true) => "frankensim.cli.native-fan-design-result.v1",
-        (false, true) => "frankensim.cli.native-power-design-result.v1",
-        (true, false) => "frankensim.cli.native-fan-case-design-result.v1",
-        (false, false) => "frankensim.cli.native-power-case-design-result.v1",
-    };
-    let objective = if fan { "minimize-fan-speed-ratio" } else { "maximize-delivered-regional-power" };
-    let entity = if fan { "fan_bank" } else { "power_region" };
-    let tolerance = if fan { "fan_speed_ratio_tolerance" } else { "power_tolerance_w" };
-    let bracket_width = if fan { "bracket_width_ratio" } else { "bracket_width_w" };
+    let schema = if study.operating_cases().is_empty() { presentation.schema }
+        else { presentation.case_schema };
+    let objective = presentation.objective;
+    let entity = presentation.entity;
+    let tolerance = presentation.tolerance;
+    let bracket_width = presentation.bracket_width;
     let summary = format!(
         "{{\"schema\":{schema:?},\"driver\":{driver:?},\"study_id\":{},\"status\":{},\"termination\":{},\"objective\":{objective:?},{entity:?}:{},\"temperature_region\":{},\"temperature_observation\":{observation:?},\"temperature_limit_k\":{limit},{tolerance:?}:{},\"temperature_tolerance_k\":{},\"evaluations_completed\":{n},\"evaluations_planned\":{},\"selected\":{chosen_json},{bracket_width:?}:{},\"history\":[{history}],\"failure\":{failure_json}{case_json},\"authority\":\"Estimated\",\"no_claim\":{}}}",
         quoted(&id.to_hex()), quoted(status), quoted(termination), quoted(&control.entity),
         quoted(region), policy.control.tolerance(), policy.temperature_tolerance_k, study.samples(),
         optional(width), quoted(&scope)
     );
-    let label = if fan { "fan speed ratio" } else { "delivered power" };
-    let unit = if fan { " (absolute ratio)" } else { " W" };
-    let title = if fan { "Native fan design" } else { "Native power design" };
-    let column = if fan { "Fan speed ratio" } else { "Delivered W" };
+    let label = presentation.label;
+    let unit = presentation.unit;
+    let title = presentation.title;
+    let column = presentation.column;
     let chosen_html = chosen.map_or_else(|| "No evaluated feasible design yet.".into(), |row|
         format!("Selected {label}: {}{unit}; evaluated temperature: {} K; final native QoI: {} K; child run: {}.",
             row.coordinate(), row.temperature_k, row.sample.value_k, row.sample.run));
@@ -247,11 +259,7 @@ fn persist(
     let result = (|| {
         let op = ledger.begin_op(Some(id.as_bytes()), &ir(driver, id, n), &FiveExplicits {
             seed: &seed, versions: &versions, budget: &budgets,
-            capability: if fan {
-                "{\"ops\":[\"native-fan-speed-design\"],\"physical_ops\":\"inherited-from-retained-base-project\"}"
-            } else {
-                "{\"ops\":[\"native-delivered-power-design\"],\"physical_ops\":\"inherited-from-retained-base-project\"}"
-            },
+            capability: presentation.capability,
         }, 0)?;
         if model.retain(ledger, op)? != id { return Err(invalid("retained native model identity differs")); }
         if let Some(previous) = predecessor { ledger.link(op, &previous, EdgeRole::In)?; }

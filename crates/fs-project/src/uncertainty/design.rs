@@ -14,6 +14,12 @@ pub enum DesignControl {
         /// Maximum passing/failing delivered-power bracket width, W.
         tolerance_w: f64,
     },
+    /// Maximize one region's original delivered-watt schedule amplitude.
+    /// Event times and other scheduled regions remain fixed.
+    PowerScheduleScale {
+        /// Maximum passing/failing dimensionless amplitude bracket width.
+        tolerance: f64,
+    },
     /// Minimize one bank's absolute source-curve speed ratio under an explicitly
     /// assumed nonincreasing temperature law. Other banks remain unchanged.
     FanSpeedRatio {
@@ -28,7 +34,7 @@ impl DesignControl {
     pub const fn tolerance(self) -> f64 {
         match self {
             Self::DeliveredPower { tolerance_w } => tolerance_w,
-            Self::FanSpeedRatio { tolerance } => tolerance,
+            Self::FanSpeedRatio { tolerance } | Self::PowerScheduleScale { tolerance } => tolerance,
         }
     }
 }
@@ -70,10 +76,12 @@ pub(super) fn parse(root: &Node) -> Result<UncertaintyStudy> {
     let target = match &kind.kind {
         NodeKind::Symbol(name) if name == "regional-power" => Target::Power,
         NodeKind::Symbol(name) if name == "fan-speed-ratio" => Target::FanSpeedRatio,
-        _ => return Err(error("design control must be regional-power or fan-speed-ratio")),
+        NodeKind::Symbol(name) if name == "power-schedule-scale" => Target::PowerScheduleScale,
+        _ => return Err(error("design control must be regional-power, power-schedule-scale or fan-speed-ratio")),
     };
     symbol(f["assumption"], match target {
         Target::Power => "nondecreasing-temperature-with-power",
+        Target::PowerScheduleScale => "nondecreasing-temperature-with-schedule-scale",
         _ => "nonincreasing-temperature-with-fan-speed",
     })?;
     let c = fields(&control[1..], &["entity", "minimum", "maximum", "tolerance"])?;
@@ -90,6 +98,7 @@ pub(super) fn parse(root: &Node) -> Result<UncertaintyStudy> {
     }
     let control = match target {
         Target::Power => DesignControl::DeliveredPower { tolerance_w: tolerance },
+        Target::PowerScheduleScale => DesignControl::PowerScheduleScale { tolerance },
         _ => DesignControl::FanSpeedRatio { tolerance },
     };
     let geometry_nodes = list(f["geometry"])?;
@@ -114,7 +123,11 @@ pub(super) fn parse(root: &Node) -> Result<UncertaintyStudy> {
         geometry.push(MeshSource { role, path: text(m["path"])?, unit: text(m["unit"])?, max_hole_edges });
     }
     let coordinate = UniformParameter {
-        name: if target == Target::Power { "delivered-power" } else { "fan-speed" }.into(),
+        name: match target {
+            Target::Power => "delivered-power",
+            Target::PowerScheduleScale => "schedule-amplitude",
+            _ => "fan-speed",
+        }.into(),
         target, entity: text(c["entity"])?, low, high,
     };
     let (mut operating_parameters, operating_cases) = f.get("operating-cases")
@@ -148,6 +161,15 @@ pub(super) fn admit(study: &UncertaintyStudy, base: &ProjectSpec) -> Result<()> 
             return Err(error("fan-speed design requires an airflow-convection boundary so the native thermal solve recomputes fan-driven cooling"));
         }
     }
+    if matches!(policy.control, DesignControl::PowerScheduleScale { .. }) {
+        let region = &study.parameters[0].entity;
+        if !setup.transient.as_ref().and_then(|time|
+            time.power_schedules.iter().find(|schedule| &schedule.region == region))
+            .is_some_and(|schedule| schedule.steps.iter().any(|step| step.watts.value > 0.0))
+        {
+            return Err(error("schedule-amplitude design requires an original schedule with nonzero delivered heating"));
+        }
+    }
     // Operating-case power is delivered watts too. A time schedule must not
     // silently replace either the search control or an authored operating case.
     for parameter in study.parameters.iter().filter(|p| p.target == Target::Power) {
@@ -161,7 +183,7 @@ pub(super) fn admit(study: &UncertaintyStudy, base: &ProjectSpec) -> Result<()> 
         }
         if setup.transient.as_ref().is_some_and(|time|
             time.power_schedules.iter().any(|schedule| schedule.region == parameter.entity)) {
-            return Err(error("a transient power schedule overrides this static regional-power control; select an unscheduled region"));
+            return Err(error("a transient power schedule overrides this static regional-power control; select an unscheduled region or explicitly use power-schedule-scale"));
         }
     }
     Ok(())
