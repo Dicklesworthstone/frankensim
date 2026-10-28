@@ -492,3 +492,38 @@ region. Species-changing/reacting junctions, valves/discharge coefficients,
 wall heat, viscous loss, compliant volumes and entropy certificates remain
 separate models. This contributes to the open broad gas-network bead without
 claiming its complete reactive/MoC scope.
+
+## Physical reflecting walls for evolving mixtures
+
+Reflecting multicomponent boundaries solve the one-sided stopped shock or
+isentropic rarefaction with the incident trace's current species composition.
+They share the thermally perfect wall kernel with frozen Euler instead of
+retaining the momentum component of a mirrored HLLC/HLL ghost flux. Every
+species mass flux and the stationary adiabatic wall energy flux are exactly
+zero; the physical wave speed enters the existing stage CFL calculation.
+
+The borrowed local caloric law uses the admitted original species models,
+temperature-dependent Cp/Cv, molar masses, energy/entropy differences and
+source seams. Composition is fixed across each local inviscid wall wave but
+may change between faces and accepted steps, including through the existing
+reactive transport owner. Successful wall evaluation allocates no heap storage
+and constructs no replacement gas/source owner. Source failures remain typed;
+unsupported hot/cold wave paths and numerical budgets refuse without
+extrapolation or clipping.
+
+Five focused regressions compare arbitrary constant-Cp compositions against
+analytic shock/rarefaction pressures, variable-Cp compression against independent
+mass/momentum/energy jumps and entropy production, and expansion against a
+separate Simpson integral. They also check orientation and independent species
+formation-reference invariance, actual finite-volume wall wiring, and evolving
+species/energy conservation with wall impulse accounting. In the retreating
+manufactured fixture, the previous mirrored flux gives -0.722497216 Pa traction;
+the physical wall pressure is +0.0110814482 Pa.
+
+The complete integrated pure-gas native run passes 67 tests, including existing
+reacting flow, characteristic reservoirs and finite-plenum networks. Eight
+existing nonlinear duct tests pass against the refactored kernel, and the
+64-cell-per-branch manifold still reaches 4 ms in 527 steps with zero reported
+mass and physical-energy residuals. These are focused production-code checks,
+not a workspace Cargo/DSR result or experimental validation. Reactive/catalytic
+surface kinetics, wall heat transfer and moving-wall work remain separate models.

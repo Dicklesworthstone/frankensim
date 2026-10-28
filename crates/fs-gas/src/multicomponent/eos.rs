@@ -86,6 +86,9 @@ impl MixtureGas {
     pub fn energy_references(&self) -> &[f64] {
         &self.references
     }
+    pub(super) fn inverse_molar_masses(&self) -> &[f64] {
+        &self.inverse_masses
+    }
     /// Construct a conservative state from partial mass densities, velocity and pressure.
     pub fn conserved(
         &self,
@@ -126,7 +129,7 @@ impl MixtureGas {
         }
         Ok(energy)
     }
-    fn admit_densities(&self, densities: &[f64]) -> Result<(f64, f64), Error> {
+    pub(super) fn admit_densities(&self, densities: &[f64]) -> Result<(f64, f64), Error> {
         if densities.len() != self.species_count()
             || densities.iter().any(|x| !x.is_finite() || *x < 0.0)
         {
@@ -230,14 +233,18 @@ impl MixtureGas {
     }
     pub(super) fn admissible(&self, values: &[f64]) -> bool {
         let n = self.species_count();
-        if values.len() != n + 2 || !values.iter().all(|x| x.is_finite()) {
+        values.len() == n + 2 && self.admissible_cell(cell(values, n))
+    }
+    pub(super) fn admissible_cell(&self, state: Cell<'_>) -> bool {
+        if !state.momentum.is_finite() || !state.energy.is_finite() {
             return false;
         }
-        let Ok((rho, _)) = self.admit_densities(&values[..n]) else {
+        let Ok((rho, _)) = self.admit_densities(state.partial_densities) else {
             return false;
         };
-        let thermal = values[n + 1] - 0.5 * values[n] * (values[n] / rho);
-        let upper = sum(values[..n]
+        let thermal = state.energy - 0.5 * state.momentum * (state.momentum / rho);
+        let upper = sum(state
+            .partial_densities
             .iter()
             .zip(&self.maximum_energies)
             .map(|(a, b)| a * b));

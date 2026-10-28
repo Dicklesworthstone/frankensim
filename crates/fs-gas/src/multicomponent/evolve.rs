@@ -645,21 +645,7 @@ fn operator(
                     let inner = reconstruct(i, sign, &mut left[..m])?;
                     right[..m].copy_from_slice(&left[..m]);
                     let wall = if face == 0 { lb } else { rb } == Boundary::Reflecting;
-                    let mut ghost = inner;
-                    if wall {
-                        ghost.velocity = -ghost.velocity;
-                    }
-                    if face == 0 {
-                        if wall {
-                            left[n] = -left[n];
-                        }
-                        (ghost, inner, wall)
-                    } else {
-                        if wall {
-                            right[n] = -right[n];
-                        }
-                        (inner, ghost, wall)
-                    }
+                    (inner, inner, wall)
                 }
             }
         } else {
@@ -670,11 +656,17 @@ fn operator(
             )
         };
         let flux = &mut faces[face * m..(face + 1) * m];
-        let data = gas.interface(&left[..m], pl, &right[..m], pr, flux, cancelled)?;
-        if wall {
-            flux[..n].fill(0.0);
-            flux[n + 1] = 0.0;
-        }
+        let data = if wall {
+            gas.wall_flux(
+                cell(&left[..m], n),
+                pl,
+                if face == 0 { -1.0 } else { 1.0 },
+                flux,
+                cancelled,
+            )?
+        } else {
+            gas.interface(&left[..m], pl, &right[..m], pr, flux, cancelled)?
+        };
         fallbacks += usize::from(data.used_hll_fallback);
         face_data[face] = data;
     }

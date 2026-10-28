@@ -15,6 +15,7 @@
 mod eos;
 mod evolve;
 mod flux;
+mod wall;
 
 /// Atomic finite-rate chemistry coupled to conservative species transport.
 pub mod reactive;
@@ -79,6 +80,8 @@ pub enum Error {
     Thermochemistry(ThermochemErrorV1),
     /// The original shared positive-Cv/path admission refused the source.
     CaloricPath(KineticsErrorV1),
+    /// A reflected wave leaves the admitted source path or numerical budget.
+    WallCaloricPath(&'static str),
     /// Physical mesh admission refused.
     Geometry(crate::dynamics::Error),
     /// Sensible energy falls outside the source temperature interval.
@@ -146,3 +149,6 @@ fn cell(values: &[f64], species: usize) -> Cell<'_> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod wall_tests;
