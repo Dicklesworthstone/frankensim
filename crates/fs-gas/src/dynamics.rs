@@ -11,10 +11,12 @@
 mod eos;
 mod evolve;
 mod flux;
+mod geometry;
 
 pub use eos::{CaloricDomain, FrozenGas};
 pub use evolve::{Boundaries, Boundary, Euler1d, Reconstruction, StepControl, StepReport, Totals};
 pub use flux::FaceFlux;
+pub use geometry::Mesh1d;
 
 use fs_thermochem::mixture::FrozenIdealGasMixtureErrorV1;
 

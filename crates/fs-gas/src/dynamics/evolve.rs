@@ -1,9 +1,7 @@
-use super::{
-    Conserved, Error, FaceFlux, FrozenGas, MAX_EULER_CELLS, Primitive, allocated, poll, positive,
-};
+use super::{Conserved, Error, FaceFlux, FrozenGas, Mesh1d, Primitive, allocated, poll, positive};
 use fs_qty::{Length, Time};
 
-/// Physical boundary on one end of a fixed-area interval.
+/// Physical boundary on one end of a stationary interval.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Boundary {
     /// Zero-gradient ghost state. This is not a nonreflecting subsonic outlet.
@@ -103,7 +101,9 @@ pub struct StepReport {
     pub after: Totals,
     /// Area- and time-integrated left inflow minus right outflow, using both RK stages.
     pub boundary_change: Totals,
-    /// `after - before - boundary_change` in the same physical units.
+    /// Integrated p*dA/dx force on the gas [kg m/s]. Stationary walls do no work.
+    pub area_momentum_impulse: f64,
+    /// `after - before - boundary_change - area momentum impulse`.
     pub conservation_residual: Totals,
 }
 
@@ -115,7 +115,7 @@ struct Workspace {
     candidate: Vec<Conserved>,
 }
 
-/// Uniform one-dimensional finite-volume field of one frozen source-owned mixture.
+/// Quasi-one-dimensional finite-volume field of one frozen source-owned mixture.
 ///
 /// Evolution conserves mass, axial momentum and total energy through shared face
 /// fluxes. Spatial reconstruction is MUSCL; time integration is SSP RK2. Accepted
@@ -125,8 +125,7 @@ struct Workspace {
 pub struct Euler1d {
     gas: FrozenGas,
     states: Vec<Conserved>,
-    cell_width: f64,
-    cross_section: f64,
+    mesh: Mesh1d,
     boundaries: Boundaries,
     time: f64,
     work: Workspace,
@@ -144,14 +143,29 @@ impl Euler1d {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, Error> {
         poll(&mut cancelled)?;
+        let mesh = Mesh1d::uniform(states.len(), cell_width, cross_section)?;
+        Self::new_on_mesh(gas, mesh, states, boundaries, cancelled)
+    }
+
+    /// Construct on a stationary, possibly nonuniform and tapered mesh.
+    /// Face areas and integrated cell volumes enter the same conservative
+    /// operator; periodic ends must have identical physical area.
+    pub fn new_on_mesh(
+        gas: FrozenGas,
+        mesh: Mesh1d,
+        states: Vec<Conserved>,
+        boundaries: Boundaries,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        poll(&mut cancelled)?;
         let n = states.len();
-        if !(2..=MAX_EULER_CELLS).contains(&n)
-            || !positive(cell_width.value())
-            || !positive(cross_section)
-            || !positive(cell_width.value() * cross_section)
-            || !(cell_width.value() * n as f64).is_finite()
-        {
-            return Err(Error::Invalid("mesh size, cell width or cross section"));
+        if n != mesh.cell_count() {
+            return Err(Error::Invalid("state count differs from physical mesh"));
+        }
+        if boundaries == Boundaries::Periodic && mesh.face_areas()[0] != mesh.face_areas()[n] {
+            return Err(Error::Invalid(
+                "periodic end faces must have identical physical area",
+            ));
         }
         let mut primitive = allocated(n, Primitive::default())?;
         for (i, &state) in states.iter().enumerate() {
@@ -168,8 +182,7 @@ impl Euler1d {
         Ok(Self {
             gas,
             states,
-            cell_width: cell_width.value(),
-            cross_section,
+            mesh,
             boundaries,
             time: 0.0,
             work,
@@ -187,17 +200,22 @@ impl Euler1d {
     pub fn time(&self) -> Time {
         Time::new(self.time)
     }
-    /// Mesh cell width [m].
-    pub fn cell_width(&self) -> Length {
-        Length::new(self.cell_width)
+    /// Complete stationary geometry and integrated physical volumes.
+    pub const fn mesh(&self) -> &Mesh1d {
+        &self.mesh
     }
-    /// Uniform cross-sectional area [m²].
-    pub const fn cross_section(&self) -> f64 {
-        self.cross_section
+    /// Uniform mesh cell width [m], or None on a nonuniform mesh.
+    pub fn cell_width(&self) -> Option<Length> {
+        self.mesh.uniform_cell_width()
+    }
+    /// Uniform cross-sectional area [m²], or None in a variable-area mesh.
+    pub const fn cross_section(&self) -> Option<f64> {
+        self.mesh.uniform_cross_section()
     }
     /// Extensive conserved state, accumulated in canonical cell order with compensation.
     pub fn totals(&self) -> Totals {
-        totals(&self.states, self.cell_width * self.cross_section)
+        totals(&self.states, self.mesh.volumes(), &mut || false)
+            .expect("an infallible cancellation callback cannot refuse")
     }
 
     /// Advance by one accepted step no greater than `maximum_duration`.
@@ -220,7 +238,7 @@ impl Euler1d {
         {
             return Err(Error::Invalid("time step, CFL or retry controls"));
         }
-        let mut speed = 0.0_f64;
+        let mut signal_rate = 0.0_f64;
         for (i, &state) in self.states.iter().enumerate() {
             let p = self.gas.decode(
                 state,
@@ -228,14 +246,16 @@ impl Euler1d {
                 &mut cancelled,
             )?;
             self.work.primitive[i] = p;
-            speed = speed.max(p.velocity.abs() + p.sound_speed);
+            let area = 0.5 * self.mesh.face_areas()[i] + 0.5 * self.mesh.face_areas()[i + 1];
+            let rate = (p.velocity.abs() + p.sound_speed) * (area / self.mesh.volumes()[i]);
+            signal_rate = signal_rate.max(rate);
         }
         // Reserve ten percent for reconstructed/stage signal-speed growth;
         // the actual face CFL still decides admission at both stages.
         let mut dt = maximum_duration
             .value()
-            .min((0.9 * controls.cfl * self.cell_width) / speed);
-        let before = self.totals();
+            .min((0.9 * controls.cfl) / signal_rate);
+        let before = totals(&self.states, self.mesh.volumes(), &mut cancelled)?;
         let mut last = Error::Invalid("no admissible time increment");
         let mut first_order_retry = false;
         for halvings in 0..=controls.maximum_halvings {
@@ -256,7 +276,7 @@ impl Euler1d {
             match attempt(
                 &self.gas,
                 &self.states,
-                self.cell_width,
+                &self.mesh,
                 self.boundaries,
                 dt,
                 controls.cfl,
@@ -265,15 +285,21 @@ impl Euler1d {
                 &mut cancelled,
             ) {
                 Ok((a, b)) => {
-                    let after = totals(&self.work.candidate, self.cell_width * self.cross_section);
-                    let factor = 0.5 * dt * self.cross_section;
+                    let after = totals(&self.work.candidate, self.mesh.volumes(), &mut cancelled)?;
+                    let factor = 0.5 * dt;
+                    let left_area = self.mesh.face_areas()[0];
+                    let right_area = self.mesh.face_areas()[self.states.len()];
                     let boundary = Totals::from_array(core::array::from_fn(|k| {
                         factor
-                            * ((a.left.array()[k] - a.right.array()[k])
-                                + (b.left.array()[k] - b.right.array()[k]))
+                            * (left_area * (a.left.array()[k] + b.left.array()[k])
+                                - right_area * (a.right.array()[k] + b.right.array()[k]))
                     }));
+                    let area_momentum_impulse = factor * (a.area_force + b.area_force);
                     let residual = Totals::from_array(core::array::from_fn(|k| {
-                        after.array()[k] - before.array()[k] - boundary.array()[k]
+                        after.array()[k]
+                            - before.array()[k]
+                            - boundary.array()[k]
+                            - if k == 1 { area_momentum_impulse } else { 0.0 }
                     }));
                     if !after
                         .array()
@@ -289,7 +315,7 @@ impl Euler1d {
                     self.time += dt;
                     return Ok(StepReport {
                         elapsed: Time::new(dt),
-                        maximum_cfl: a.speed.max(b.speed) * dt / self.cell_width,
+                        maximum_cfl: a.signal_rate.max(b.signal_rate) * dt,
                         halvings,
                         hll_fallback_faces: a.fallbacks + b.fallbacks,
                         limited_cells: a.limited + b.limited,
@@ -298,6 +324,7 @@ impl Euler1d {
                         before,
                         after,
                         boundary_change: boundary,
+                        area_momentum_impulse,
                         conservation_residual: residual,
                     });
                 }
@@ -324,7 +351,8 @@ impl Euler1d {
 struct Stage {
     left: FaceFlux,
     right: FaceFlux,
-    speed: f64,
+    signal_rate: f64,
+    area_force: f64,
     fallbacks: usize,
     limited: usize,
 }
@@ -333,7 +361,7 @@ struct Stage {
 fn attempt(
     gas: &FrozenGas,
     states: &[Conserved],
-    dx: f64,
+    mesh: &Mesh1d,
     boundaries: Boundaries,
     dt: f64,
     cfl: f64,
@@ -344,6 +372,7 @@ fn attempt(
     let a = operator(
         gas,
         states,
+        mesh,
         boundaries,
         reconstruction,
         &mut work.primitive,
@@ -351,18 +380,15 @@ fn attempt(
         &mut work.faces,
         cancelled,
     )?;
-    let ratio = dt / dx;
-    if a.speed * ratio > cfl * (1.0 + 64.0 * f64::EPSILON) {
+    if a.signal_rate * dt > cfl * (1.0 + 64.0 * f64::EPSILON) {
         return Err(Error::CflExceeded {
-            observed: a.speed * ratio,
+            observed: a.signal_rate * dt,
             maximum: cfl,
         });
     }
     for (i, &q) in states.iter().enumerate() {
         poll(cancelled)?;
-        work.stage[i] = Conserved::from_array(core::array::from_fn(|k| {
-            q.array()[k] - ratio * (work.faces[i + 1].array()[k] - work.faces[i].array()[k])
-        }));
+        work.stage[i] = forward(q, i, dt, mesh, &work.primitive, &work.faces);
         if !gas.admissible_state(work.stage[i]) {
             return Err(Error::Invalid("first RK stage outside source domain"));
         }
@@ -370,6 +396,7 @@ fn attempt(
     let b = operator(
         gas,
         &work.stage,
+        mesh,
         boundaries,
         reconstruction,
         &mut work.primitive,
@@ -377,17 +404,15 @@ fn attempt(
         &mut work.faces,
         cancelled,
     )?;
-    if b.speed * ratio > cfl * (1.0 + 64.0 * f64::EPSILON) {
+    if b.signal_rate * dt > cfl * (1.0 + 64.0 * f64::EPSILON) {
         return Err(Error::CflExceeded {
-            observed: b.speed * ratio,
+            observed: b.signal_rate * dt,
             maximum: cfl,
         });
     }
     for (i, &q) in work.stage.iter().enumerate() {
         poll(cancelled)?;
-        let second = Conserved::from_array(core::array::from_fn(|k| {
-            q.array()[k] - ratio * (work.faces[i + 1].array()[k] - work.faces[i].array()[k])
-        }));
+        let second = forward(q, i, dt, mesh, &work.primitive, &work.faces);
         if !gas.admissible_state(second) {
             return Err(Error::Invalid("second RK stage outside source domain"));
         }
@@ -405,6 +430,7 @@ fn attempt(
 fn operator(
     gas: &FrozenGas,
     states: &[Conserved],
+    mesh: &Mesh1d,
     boundaries: Boundaries,
     reconstruction: Reconstruction,
     primitive: &mut [Primitive],
@@ -437,11 +463,16 @@ fn operator(
             values(primitive[next]),
         );
         let slope = core::array::from_fn(|k| {
+            let x = mesh.center(i);
+            let length = mesh.positions()[n] - mesh.positions()[0];
+            let xl = mesh.center(prev) - if i == 0 { length } else { 0.0 };
+            let xr = mesh.center(next) + if i + 1 == n { length } else { 0.0 };
+            let width = mesh.width(i);
             minmod(
-                2.0 * (b[k] - a[k]),
-                0.5 * (c[k] - a[k]),
-                2.0 * (c[k] - b[k]),
-            )
+                2.0 * (b[k] - a[k]) / (x - xl),
+                (c[k] - a[k]) / (xr - xl),
+                2.0 * (c[k] - b[k]) / (xr - x),
+            ) * width
         });
         let mut scale = 1.0;
         for reduction in 0..=12 {
@@ -477,7 +508,6 @@ fn operator(
             p[2] + sign * slopes[i][2],
         )
     };
-    let mut speed = 0.0_f64;
     let mut fallbacks = 0;
     for face in 0..=n {
         poll(cancelled)?;
@@ -515,14 +545,32 @@ fn operator(
             flux.mass = 0.0;
             flux.energy = 0.0;
         }
-        speed = speed.max(flux.signal_speed);
         fallbacks += usize::from(flux.used_hll_fallback);
         faces[face] = flux;
+    }
+    let mut signal_rate = 0.0_f64;
+    let mut area_force = 0.0;
+    let mut compensation = 0.0;
+    for i in 0..n {
+        poll(cancelled)?;
+        let rate = (0.5 * mesh.face_areas()[i] * faces[i].signal_speed
+            + 0.5 * mesh.face_areas()[i + 1] * faces[i + 1].signal_speed)
+            / mesh.volumes()[i];
+        if !positive(rate) {
+            return Err(Error::Invalid("unrepresentable geometric face CFL"));
+        }
+        signal_rate = signal_rate.max(rate);
+        let term = primitive[i].pressure * (mesh.face_areas()[i + 1] - mesh.face_areas()[i]);
+        let y = term - compensation;
+        let next = area_force + y;
+        compensation = (next - area_force) - y;
+        area_force = next;
     }
     Ok(Stage {
         left: faces[0],
         right: faces[n],
-        speed,
+        signal_rate,
+        area_force,
         fallbacks,
         limited,
     })
@@ -537,10 +585,37 @@ fn minmod(a: f64, b: f64, c: f64) -> f64 {
         0.0
     }
 }
-fn totals(states: &[Conserved], volume: f64) -> Totals {
+fn forward(
+    q: Conserved,
+    i: usize,
+    dt: f64,
+    mesh: &Mesh1d,
+    primitive: &[Primitive],
+    faces: &[FaceFlux],
+) -> Conserved {
+    let left = faces[i].array();
+    let right = faces[i + 1].array();
+    let al = mesh.face_areas()[i];
+    let ar = mesh.face_areas()[i + 1];
+    let ratio = dt / mesh.volumes()[i];
+    Conserved::from_array(core::array::from_fn(|k| {
+        // Pair pressure traction with the geometric source before multiplying
+        // by area: a uniform-pressure resting state then cancels exactly.
+        let pressure = if k == 1 { primitive[i].pressure } else { 0.0 };
+        q.array()[k] + ratio * (al * (left[k] - pressure) - ar * (right[k] - pressure))
+    }))
+}
+fn totals(
+    states: &[Conserved],
+    volumes: &[f64],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Totals, Error> {
     let mut sum = [0.0; 3];
     let mut compensation = [0.0; 3];
-    for q in states {
+    for (i, (q, &volume)) in states.iter().zip(volumes).enumerate() {
+        if i % 64 == 0 {
+            poll(cancelled)?;
+        }
         for k in 0..3 {
             let y = q.array()[k] * volume - compensation[k];
             let next = sum[k] + y;
@@ -548,5 +623,5 @@ fn totals(states: &[Conserved], volume: f64) -> Totals {
             sum[k] = next;
         }
     }
-    Totals::from_array(sum)
+    Ok(Totals::from_array(sum))
 }

@@ -7,7 +7,7 @@ caloric model. Production dependencies remain pure Rust and Franken-owned.
 ## Experimental frozen-composition Euler flow
 
 Feature `experimental-euler` exposes `dynamics::{FrozenGas, Euler1d}`. It is an
-Estimated engineering baseline for one-dimensional, inviscid, fixed-area flow
+Estimated engineering baseline for one-dimensional, inviscid, stationary variable-area flow
 of a single frozen ideal-gas mixture. It advances actual compressible waves,
 contacts, shocks and rarefactions without the low-Mach lattice assumption.
 It does not grant the separate entropy/invariant-domain lane's theorem claim.
@@ -108,7 +108,7 @@ nitrogen shock-tube experiment.
 
 ### Scope boundary
 
-No evolving species transport, chemistry/flow splitting, area variation,
+No evolving species transport, chemistry/flow splitting,
 junctions, valves, viscous stresses, heat conduction, moving mesh, vacuum state,
 real-gas EOS, multidimensional flow, adjoint, entropy certificate or experimental
 validation is supplied by this Euler slice. A source-domain refusal is an actual
@@ -117,3 +117,41 @@ refusal and does not extend a NASA fit to hotter or colder shocked gas.
 References: Toro, Spruce and Speares, *Shock Waves* 4 (1994), 25–34,
 DOI 10.1007/BF01414629; Ketcheson, LeVeque and del Razo, *Riemann Problems and
 Jupyter Solutions* (2020), Euler and approximate-Euler chapters.
+
+## Stationary area and nonuniform-mesh extension
+
+`Mesh1d` retains ordered physical face positions, positive face areas, and
+integrated cell volumes. `Euler1d::new_on_mesh` consumes that geometry without
+resampling or substituting a midpoint volume. The uniform constructor remains
+available. `cell_width()` and `cross_section()` return `Option` so a nonuniform
+or tapered field cannot advertise a nonexistent uniform dimension.
+
+MUSCL slopes use the actual distances between cell centres. Each physical face
+flux is multiplied by its area exactly once and shared between neighbouring
+volumes. The pressure-area momentum source is paired algebraically with the
+pressure traction, preserving a resting uniform-pressure state even across
+density contacts in a taper. Stationary area changes do no energy work.
+
+Both stages enforce a local area/volume-scaled face CFL, including any HLL
+wave-speed expansion. `StepReport::area_momentum_impulse` records the geometric
+force integral. The residual subtracts both boundary transfer and this impulse.
+Periodic boundaries require equal end areas; they share the same flux bits.
+
+Conservative state construction also checks that stored momentum and energy
+retain the requested sensible energy within the existing caloric tolerance.
+Finite values alone do not admit a state whose kinetic energy has rounded away
+its thermal energy.
+
+Fifteen focused native gas tests pass, including the original eight tests and:
+nonuniform-taper rest with density contacts; finite-amplitude tapered pulse
+mass/energy/momentum closure; mesh and periodic-boundary refusals; cancellation;
+caloric-round-trip refusal; and a moving variable-Cp Mach-3 shock whose field and
+reports are bitwise invariant under a +1e18 formation-reference shift.
+The latter checks front position against independent Rankine-Hugoniot motion
+and checks shock heating and entropy increase from the original source.
+
+For smooth periodic contact advection on a stretched mesh, density L1 error
+falls from 1.66346e-4 at 40 cells to 3.67860e-5 at 80 cells (4.52-fold).
+This is a manufactured convergence result, not a throughput benchmark.
+Source geometry/quadrature accuracy and the quasi-one-dimensional smooth-area
+model remain explicit assumptions; abrupt junction losses are not supplied.

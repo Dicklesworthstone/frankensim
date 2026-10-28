@@ -175,6 +175,19 @@ impl FrozenGas {
         if !q.finite() {
             return Err(Error::Invalid("unrepresentable conservative state"));
         }
+        // The cached primitive and the stored conserved state must describe
+        // the same caloric state. At high kinetic/sensible-energy ratios a
+        // finite addition can erase the heat entirely, so finiteness alone
+        // would admit a state that decodes to a different temperature.
+        let recovered_velocity = q.momentum / q.density;
+        let recovered_energy = q.energy / q.density - 0.5 * recovered_velocity * recovered_velocity;
+        let tolerance =
+            self.domain.absolute_energy_tolerance + self.domain.relative_energy_tolerance * e.abs();
+        if !self.admissible_state(q) || (recovered_energy - e).abs() > tolerance {
+            return Err(Error::Invalid(
+                "conservative state cannot retain the declared caloric precision",
+            ));
+        }
         Ok((q, primitive))
     }
 
@@ -398,3 +411,7 @@ fn positive_cv(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "eos_regression_tests.rs"]
+mod eos_regression_tests;
