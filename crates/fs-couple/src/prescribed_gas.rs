@@ -24,6 +24,9 @@ use fs_material::thermochemical_gas::energy::parcel::transfer::snapshot::{
 use fs_material::thermochemical_gas::energy::{GasEnergyError, GasEnergySolve};
 use std::collections::BTreeMap;
 
+/// Declared chemistry in open chambers with prescribed mechanical drives.
+pub mod reactive;
+
 /// Explicit volume and external heat for one chamber over the common interval.
 /// Held reservoirs use their current volume. Zero heat is adiabatic.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -53,6 +56,13 @@ pub enum PrescribedGasError {
     Invalid(&'static str),
     /// The original same-snapshot nozzle/transport owner refused the interval.
     Flow(SnapshotNozzleError),
+    /// A selected chamber's original chemical owner refused its mixed state.
+    Reaction {
+        id: u64,
+        error: crate::cavity_phs::piston::reactive::GasReactionError,
+    },
+    /// Actual whole-network species change disagrees with chemical stoichiometry.
+    SpeciesBalance { maximum_residual_mol: f64 },
     /// The original caloric/EOS/transport or heat-volume owner refused a chamber.
     Parcel { id: u64, error: GasEnergyError },
     /// An actual endpoint fails its complete open-volume energy balance.
@@ -115,8 +125,9 @@ pub struct PrescribedGasStep {
     pub net_drive_work_j: f64,
     /// Independently measured net mass change across final physical owners [kg].
     pub total_mass_residual_kg: f64,
-    /// Original shared-flow species residual [kg]. The following frozen-composition
-    /// heat/volume operation changes neither species inventory nor total mass.
+    /// Original shared-flow species residual [kg]. The heat/volume operation
+    /// changes no species. The opt-in reaction path separately audits its
+    /// stoichiometric changes over the complete interval.
     pub maximum_species_mass_residual_kg: f64,
     /// Actual dU_gases + gross gas work - external heat [J].
     pub total_energy_residual_j: f64,
@@ -220,8 +231,34 @@ pub fn step_candidate(
     endpoints: &BTreeMap<u64, GasEnergySolve>,
     drives: &BTreeMap<u64, PrescribedGasDrive>,
     controls: PrescribedGasSolve,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<PrescribedGasCandidate, Error> {
+    staged_candidate(
+        parcels,
+        links,
+        duration_s,
+        endpoints,
+        drives,
+        controls,
+        |_, _| Ok(()),
+        cancelled,
+    )
+    .map(|(candidate, ())| candidate)
+}
+
+// The optional chemical stage shares every original flow, heat/volume and
+// original-to-final balance. It cannot advance a second mechanical clock.
+#[allow(clippy::too_many_arguments)]
+fn staged_candidate<R, C: FnMut() -> bool>(
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    links: &[SnapshotNozzleLink],
+    duration_s: f64,
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    drives: &BTreeMap<u64, PrescribedGasDrive>,
+    controls: PrescribedGasSolve,
+    stage: impl FnOnce(&mut BTreeMap<u64, ClosedGasParcel>, &mut C) -> Result<R, Error>,
+    mut cancelled: C,
+) -> Result<(PrescribedGasCandidate, R), Error> {
     poll(&mut cancelled)?;
     if parcels.is_empty()
         || parcels.len() > MAX_SNAPSHOT_PARCELS
@@ -264,7 +301,8 @@ pub fn step_candidate(
             Error::Flow(error)
         }
     })?;
-    let (post_flow, flow) = flow.into_parts();
+    let (mut post_flow, flow) = flow.into_parts();
+    let staged = stage(&mut post_flow, &mut cancelled)?;
     let mut enthalpy: BTreeMap<u64, Sum> = parcels.keys().map(|&id| (id, Sum::default())).collect();
     for flux in &flow.exchange.fluxes {
         poll(&mut cancelled)?;
@@ -349,22 +387,25 @@ pub fn step_candidate(
     }
     let maximum_species_mass_residual_kg = flow.exchange.maximum_species_mass_residual_kg;
     poll(&mut cancelled)?;
-    Ok(PrescribedGasCandidate {
-        parcels: next,
-        step: PrescribedGasStep {
-            duration_s,
-            flow,
-            parcels: reports,
-            gas_energy_change_j: energy.value,
-            supplied_heat_j: heat.value,
-            gross_gas_work_j: gross.value,
-            exterior_pressure_work_j: outside.value,
-            net_drive_work_j: net.value,
-            total_mass_residual_kg: mass.value,
-            maximum_species_mass_residual_kg,
-            total_energy_residual_j: balance.value,
+    Ok((
+        PrescribedGasCandidate {
+            parcels: next,
+            step: PrescribedGasStep {
+                duration_s,
+                flow,
+                parcels: reports,
+                gas_energy_change_j: energy.value,
+                supplied_heat_j: heat.value,
+                gross_gas_work_j: gross.value,
+                exterior_pressure_work_j: outside.value,
+                net_drive_work_j: net.value,
+                total_mass_residual_kg: mass.value,
+                maximum_species_mass_residual_kg,
+                total_energy_residual_j: balance.value,
+            },
         },
-    })
+        staged,
+    ))
 }
 
 #[cfg(test)]

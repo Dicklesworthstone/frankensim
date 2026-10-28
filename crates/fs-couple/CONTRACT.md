@@ -8824,3 +8824,37 @@ Three resolved spatial rungs give maximum relative temperature-rise errors
 equivalence are also checked. These are numerical model comparisons with
 synthetic analytical materials, not experimental qualification or a validity
 claim at arbitrary moving-source Peclet number.
+
+### Reacting chambers with prescribed volume
+
+`prescribed_gas::reactive::step_candidate` composes the original shared-snapshot
+nozzle transport, `GasReaction::parcel_candidate`, and midpoint heat/volume
+owners over one physical interval. Incoming species react in the actual mixed
+chamber before prescribed boundary motion. Held reservoirs may also react.
+Reaction catalogs retain the original caloric/transport/rate source identities,
+exact stoichiometric conservation certificates, reverse equilibrium closure,
+consumption and entropy admission, and selected explicit, implicit or chemical
+subcycling policy. There is no duplicated chemical inventory, EOS or heat law.
+
+All chamber endpoints publish atomically. Original-to-final local and complete
+network balances include total species formation internal energy, transported
+upstream enthalpy, external heat, and actual midpoint pressure work. Chemical
+formation energy and enthalpy transport receive no second heat credit. Exterior
+pressure work and net work to the prescribed drive remain separately reported;
+the mechanical consumer must accept the reciprocal drive work. An independent
+network molar audit measures each actual species change minus its summed
+stoichiometric production across all chambers and every reaction channel.
+
+This flow/chemistry/motion split is first order even if the chemical substep is
+implicit or adaptively refined. Whole-step refinement is required; chemistry-only
+refinement does not bound splitting error. Products leave in the next flow
+interval. No simultaneous chemical/mechanical endpoint, resolved flame, ignition
+time accuracy, engine efficiency validation, phase change or measured reaction
+mechanism is claimed. The original nonreacting API retains its exact path.
+
+G1/G3 tests in `cavity_phs::piston::reactive::tests::prescribed` independently
+reconstruct formation-energy-driven expansion, simultaneous inlet/outlet
+enthalpy and live mixed-state kinetic scales, backward-Euler reaction extent,
+and the adiabatic reversible-isomer solution under complete-interval refinement.
+They also check exact empty-chemistry equivalence, deterministic link reordering,
+late source/identity failures, cancellation and replay without partial state.

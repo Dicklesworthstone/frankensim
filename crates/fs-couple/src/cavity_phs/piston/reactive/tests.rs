@@ -7,6 +7,7 @@ mod arrhenius;
 mod collider;
 mod third_body;
 mod coupled;
+mod prescribed;
 
 use super::*;
 use crate::cavity_phs::piston::material::MaterialGasPiston;
