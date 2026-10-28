@@ -16,6 +16,10 @@
 //! endpoint velocity; resolving transitions and intrastep reversals requires
 //! the enclosing integrator's time refinement.
 
+/// Two-axis retained shear with the complete articulated contact compliance.
+#[path = "tangential/planar.rs"]
+pub mod planar;
+
 use super::{
     ArticulatedContactError, ArticulatedContactSystem, ContactCounterpart, EventResponse,
     EventWorkspace, LinkContactPoint, Prepared, finite, magnitude, poll, prepare_point,

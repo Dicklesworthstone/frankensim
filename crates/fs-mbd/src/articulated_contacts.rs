@@ -125,6 +125,8 @@ pub enum ArticulatedContactError {
     FrictionLaw(FrictionalContactError),
     /// Shared stateful tangential constitutive law refused.
     TangentialLaw(TriboError),
+    /// Shared two-axis constitutive/body-compliance solve refused.
+    TangentialMatrix(fs_tribo::tangential::matrix::MatrixTangentialError),
     /// Redundant impulses do not determine work between independently moving
     /// supports. A common support translation has determined total work.
     UnresolvedSupportWork,
@@ -151,6 +153,7 @@ impl fmt::Display for ArticulatedContactError {
             Self::ContactLaw(error) => write!(f, "simultaneous contact: {error}"),
             Self::FrictionLaw(error) => write!(f, "simultaneous frictional contact: {error}"),
             Self::TangentialLaw(error) => write!(f, "stateful tangential contact: {error}"),
+            Self::TangentialMatrix(error) => write!(f, "two-axis tangential contact: {error}"),
             Self::UnresolvedSupportWork => {
                 f.write_str("redundant impulses do not determine moving-support work")
             }
@@ -188,6 +191,18 @@ impl From<FrictionalContactError> for ArticulatedContactError {
 impl From<TriboError> for ArticulatedContactError {
     fn from(error: TriboError) -> Self {
         Self::TangentialLaw(error)
+    }
+}
+impl From<fs_tribo::tangential::matrix::MatrixTangentialError> for ArticulatedContactError {
+    fn from(error: fs_tribo::tangential::matrix::MatrixTangentialError) -> Self {
+        if matches!(
+            error,
+            fs_tribo::tangential::matrix::MatrixTangentialError::Cancelled
+        ) {
+            Self::Cancelled
+        } else {
+            Self::TangentialMatrix(error)
+        }
     }
 }
 

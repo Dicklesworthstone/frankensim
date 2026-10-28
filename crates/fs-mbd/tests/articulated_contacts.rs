@@ -16,6 +16,9 @@ mod friction;
 
 #[path = "articulated_contacts/tangential.rs"]
 mod tangential;
+
+#[path = "articulated_contacts/planar.rs"]
+mod planar;
 #[path = "articulated_contacts/momentum.rs"]
 mod momentum;
 

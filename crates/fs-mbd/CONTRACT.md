@@ -758,6 +758,36 @@ normal/Coulomb groups pass natively using the original mechanics, contact and
 numerical solver bodies. This focused source-selected validation excludes
 unrelated runtime consumers and does not establish a full Cargo/DSR gate.
 
+### Two-axis stateful articulated shear
+
+`articulated_contacts::tangential::planar::advance_articulated_planar_tangential`
+extends retained shear to both axes of the existing validated `TangentFrame`.
+The original ABA assembles the full two-by-two `J M^-1 J^T`, including both
+cross terms, and the shared `fs-tribo` matrix embedding resolves the original
+constitutive law against `dt^2 W / 2`. Both impulses are accumulated before one
+native mechanical update. Dynamic counterpart and same-tree joint recoil stay
+in that response; a transverse stored force is neither dropped nor separately
+integrated. No generalized mass matrix is assembled.
+
+The original endpoint velocities independently reconstruct both actual slip
+components. One audit closes contact storage, physical heat, total articulated
+kinetic energy, prescribed-support work and world linear/angular momentum.
+The bounded matrix solve polls cancellation at constitutive evaluations, and
+the caller receives body responses and retained history only as one complete
+candidate. Original material-law refusals and structured matrix-solve failures
+remain visible. The caller must keep the physical frame/history association;
+this operation does not invent frame transport, normal evolution, a pose step,
+multiple-contact coupling or finite-patch rolling/spin. Scalar Mindlin retains
+its transverse-motion refusal. Dry sticking remains a midpoint-slip condition.
+
+Eight G1/G3/G4 groups in `tests/articulated_contacts/planar.rs` cover independent
+off-centre two-axis load lines, elastic preload release, nonproportional layer
+plasticity, moving support work, dynamic-pair covariance, an independent
+Coulomb multiplier oracle, rank-one internal-joint mobility, frictionless
+motion and unchanged retry after late refusal/cancellation.
+All eight and the nineteen prior contact groups pass in the focused native
+original-source build; this does not establish a full Cargo/DSR gate.
+
 ## Native rigid-body finite-patch tangential impulses
 
 `tangential_friction::apply_rigid_friction` binds supplied positive normal
