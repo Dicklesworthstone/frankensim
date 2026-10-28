@@ -9001,9 +9001,10 @@ with both returned constitutive increments. Reversible shear storage, physical
 friction heat, original network losses, external work and driver work close
 together before the network, history and sample clock publish. Source refusal,
 nonconvergence and cancellation leave all accepted state unchanged. Response
-columns and force workspace are retained between samples. Normal load and
-temperature remain explicit; this owner exports heat and does not evolve the
-normal geometry, tangent frame or thermal state.
+columns and force workspace are retained between samples. Mechanical-only
+steps take explicit normal load and temperature and export heat. The optional
+`planar::heat` composition solves temperature with the original finite thermal
+network; normal geometry and tangent-frame evolution remain caller-owned.
 
 `tests/modal_planar_tangential.rs` checks an independent coupled elastic matrix
 solution, nonproportional two-axis viscoplastic histories, basis covariance,
@@ -10425,3 +10426,44 @@ and a heterogeneous two-DOF consistent-mass physical reference, with four
 unequal-temperature/alpha layers and simultaneous E(T)/eta(T). Both native
 backends, actual continued motion, off-diagonal stiffness, layer U/S, caloric
 closure, and nonzero-prefix refusal/retry are covered.
+
+## Two-axis modal shear and same-step finite-body thermal feedback
+
+`friction::tangential::planar::heat` connects the original
+`PlanarTangentialModalSystem<L>` to its original `FrictionHeatRoute` and finite
+`DepositionSimulation`. The existing enthalpy/Newton owner solves original
+cell-energy increments and a common interface temperature. At each trial,
+that temperature reaches the same retained constitutive law and its accepted
+two-axis history. Both force components use the full original 2-by-2 modal
+response, including cross-axis compliance; one complete network proposal
+provides both actual displacements and the mechanical energy account.
+
+Only native irreversible friction work enters the original caloric cells.
+Reversible shear energy in both directions stays mechanical, and original
+network damping remains in its own loss account. Geometry and actual endpoint
+conductivity determine signed heat flows, including ordinary hot-to-cold
+conduction at exactly zero slip. No heat fraction, replacement thermal store or
+extra friction deposition is introduced. Friction transfer cancels once in the
+combined mechanical/caloric balance.
+
+The final nonlinear root is restaged after finite-difference probes. Original
+mechanical compatibility, constitutive work, thermal balances, source admission
+and cancellation checks all precede publication of bodies, shear history,
+sample clock and caloric state. Source callbacks may return transport receipts
+but cannot replace the law or publish trial history. Frozen-temperature elastic
+sources retain their refusal; variable elastic free energy requires an explicit
+reversible heat/entropy port and is not inferred by this dissipative adapter.
+
+Five focused groups in `tests/modal_planar_tangential/heat.rs` check independent
+analytic thermal softening with rotated anisotropic inertia, both force axes
+and both bodies' recoil, transverse elastic storage and return work without
+heat, conduction at zero slip, loaded-history late refusal/cancellation/retry,
+and refusal to rebind a frozen elastic source. The analytic free-body fixture
+retains a nonzero off-diagonal response and finite thermal capacities, so an
+isotropic mass replacement or prescribed-temperature friction cannot satisfy
+its reference. Validation uses the original source/dependency implementations.
+
+Scope: one fixed tangent frame and prescribed normal load, original held-effort
+modal mechanics and backward-Euler conduction. Both time integrations require
+refinement. No moving footprint, evolving normal geometry, temperature-dependent
+elastic entropy closure, measured calibration or full workspace build is claimed.

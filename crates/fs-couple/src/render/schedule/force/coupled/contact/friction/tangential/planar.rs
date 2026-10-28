@@ -6,8 +6,9 @@
 //! The shared matrix adapter queries that same law and accepted history. One
 //! combined force then advances the existing network, whose actual displacement
 //! and work must agree before either mechanics or contact state is published.
-//! Normal load is prescribed. Frame transport, normal evolution and temperature
-//! evolution require their own owners; heat is exported without a new reservoir.
+//! Normal load is prescribed. Frame transport and normal evolution require
+//! their own owners. The optional heat child couples the original finite-body
+//! thermal network without adding a reservoir or replacing retained shear.
 
 use super::super::super::network_response;
 use super::super::{
@@ -20,6 +21,10 @@ use fs_tribo::tangential::matrix::{
     MatrixTangentialConfig, MatrixTangentialError, advance_with_matrix_compliance,
 };
 use fs_tribo::{FrictionRegime, TangentialLaw, TangentialSolveConfig, TangentialStepInput};
+
+/// Both contact directions and original finite-body heat accept together.
+#[path = "planar/heat.rs"]
+pub mod heat;
 
 /// Held driver motion in the same two physical axes as the attachment shapes.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -103,6 +108,11 @@ pub struct PlanarTangentialModalSystem<L: TangentialLaw> {
     compliance: [[f64; 2]; 2],
     forces: Vec<f64>,
     last: Option<PlanarTangentialModalFrame>,
+}
+
+struct PlanarTangentialModalCandidate<S> {
+    frame: PlanarTangentialModalFrame,
+    state: S,
 }
 
 impl<L: TangentialLaw> PlanarTangentialModalSystem<L> {
@@ -211,6 +221,16 @@ impl<L: TangentialLaw> PlanarTangentialModalSystem<L> {
         drive: PlanarTangentialModalDrive,
         gate: Option<&CancelGate>,
     ) -> Result<&PlanarTangentialModalFrame, PlanarTangentialModalError> {
+        let candidate = self.stage_candidate(external, drive, gate)?;
+        Ok(self.publish_candidate(candidate))
+    }
+
+    fn stage_candidate(
+        &mut self,
+        external: &[f64],
+        drive: PlanarTangentialModalDrive,
+        gate: Option<&CancelGate>,
+    ) -> Result<PlanarTangentialModalCandidate<L::State>, PlanarTangentialModalError> {
         poll(gate)?;
         if drive.speed_m_s.iter().any(|v| !v.is_finite())
             || !drive.normal_force_n.is_finite()
@@ -356,8 +376,18 @@ impl<L: TangentialLaw> PlanarTangentialModalSystem<L> {
             law_evaluations: result.law_evaluations,
         };
         poll(gate)?;
+        Ok(PlanarTangentialModalCandidate {
+            frame: accepted,
+            state: step.state,
+        })
+    }
+
+    fn publish_candidate(
+        &mut self,
+        candidate: PlanarTangentialModalCandidate<L::State>,
+    ) -> &PlanarTangentialModalFrame {
         self.network.publish_staged();
-        self.state = step.state;
-        Ok(self.last.insert(accepted))
+        self.state = candidate.state;
+        self.last.insert(candidate.frame)
     }
 }
