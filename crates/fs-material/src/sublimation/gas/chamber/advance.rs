@@ -13,12 +13,18 @@
 //! half steps contribute to its history; coarse and rejected trials contribute
 //! neither state nor heat. Coefficient maps are borrowed, not cloned per trial.
 //!
+//! The moving-front entry point refreshes mass-owned geometry on every trial
+//! and half step and also controls radius/thickness error. Existing entry points
+//! retain fixed areas and their original physical update.
+//!
 //! The estimate controls local temporal error, not a rigorous global bound or
-//! experimental accuracy. This driver retains the molecular owner's physical
-//! assumptions and frozen areas. It supplies no external heat, topology
-//! change, mixed-phase partition, gas-flow model or thermal event scheduling.
+//! experimental accuracy. It supplies no external heat, topology change,
+//! mixed-phase partition, gas-flow model or thermal event scheduling.
 //! Inventory-limit refusals alone are retryable. Invalid constitutive data,
 //! unsupported caloric endpoints and cancellation remain immediate failures.
+
+/// Mass-owned changing area on this same adaptive, conservative history owner.
+pub mod moving;
 
 use super::super::{ClosedGasParcel, GasSurfaceError, SublimationError, ThermochemicalGasModel};
 use super::super::accommodation::{ReflectedHeatStep, ThermalAccommodation};
@@ -49,13 +55,8 @@ pub struct GasChamberAdvanceSolve {
 pub enum GasChamberAdvanceError {
     Invalid(&'static str),
     Surface(GasSurfaceError),
-    TrialBudget {
-        maximum_trials: usize,
-    },
-    MinimumStep {
-        requested_dt_s: f64,
-        minimum_dt_s: f64,
-    },
+    TrialBudget { maximum_trials: usize },
+    MinimumStep { requested_dt_s: f64, minimum_dt_s: f64 },
 }
 impl core::fmt::Display for GasChamberAdvanceError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -64,9 +65,7 @@ impl core::fmt::Display for GasChamberAdvanceError {
 }
 impl std::error::Error for GasChamberAdvanceError {}
 impl From<GasSurfaceError> for GasChamberAdvanceError {
-    fn from(value: GasSurfaceError) -> Self {
-        Self::Surface(value)
-    }
+    fn from(value: GasSurfaceError) -> Self { Self::Surface(value) }
 }
 
 /// Integrated streams along the accepted history, in canonical surface order.
@@ -80,7 +79,8 @@ pub struct GasSurfaceHistory {
     /// Signed reflected heat INCLUDED in energy_into_gas_j, never an addend.
     /// This sums only accepted half steps and is zero for the specular API.
     pub reflected_heat_into_gas_j: f64,
-    /// Sum of accepted mass / (accepted endpoint density * fixed area).
+    /// Sum of accepted normal retreat. Fixed-area paths use dm/(rho*A);
+    /// the moving path uses the geometry's actual shell displacement.
     pub recession_m: f64,
     pub surface_temperature_k: [f64; 2],
 }
@@ -116,17 +116,11 @@ pub struct GasChamberAdvanceCandidate<'catalog> {
 impl<'catalog> GasChamberAdvanceCandidate<'catalog> {
     /// Endpoint physical states; the endpoint's step report is ONLY its last half step.
     #[must_use]
-    pub const fn endpoint(&self) -> &GasChamberCandidate<'catalog> {
-        &self.endpoint
-    }
+    pub const fn endpoint(&self) -> &GasChamberCandidate<'catalog> { &self.endpoint }
     #[must_use]
-    pub const fn gas(&self) -> &ClosedGasParcel {
-        self.endpoint.gas()
-    }
+    pub const fn gas(&self) -> &ClosedGasParcel { self.endpoint.gas() }
     #[must_use]
-    pub const fn audit(&self) -> &GasChamberAdvanceAudit {
-        &self.audit
-    }
+    pub const fn audit(&self) -> &GasChamberAdvanceAudit { &self.audit }
     #[must_use]
     pub fn into_parts(self) -> (GasChamberCandidate<'catalog>, GasChamberAdvanceAudit) {
         (self.endpoint, self.audit)
@@ -134,10 +128,7 @@ impl<'catalog> GasChamberAdvanceCandidate<'catalog> {
 }
 
 #[derive(Clone, Copy, Default)]
-struct Sum {
-    value: f64,
-    correction: f64,
-}
+struct Sum { value: f64, correction: f64 }
 impl Sum {
     fn add(&mut self, value: f64) -> Result<(), GasChamberAdvanceError> {
         let adjusted = value - self.correction;
@@ -161,142 +152,80 @@ struct SurfaceSums {
     initial_temperature: Option<f64>,
 }
 impl SurfaceSums {
-    fn add(
-        &mut self,
-        row: &GasChamberSurfaceStep,
-        reflection: Option<&ReflectedHeatStep>,
-    ) -> Result<(), GasChamberAdvanceError> {
-        self.initial_temperature
-            .get_or_insert(row.surface_temperature_k[0]);
+    fn add(&mut self, row: &GasChamberSurfaceStep, reflection: Option<&ReflectedHeatStep>)
+        -> Result<(), GasChamberAdvanceError> {
+        self.initial_temperature.get_or_insert(row.surface_temperature_k[0]);
         self.outgoing.add(row.outgoing_mass_kg)?;
         self.incoming.add(row.incoming_mass_kg)?;
         self.transferred.add(row.transferred_mass_kg)?;
         self.energy.add(row.energy_into_gas_j)?;
-        if let Some(reflection) = reflection {
-            self.reflected.add(reflection.heat_into_gas_j)?;
-        }
+        if let Some(reflection) = reflection { self.reflected.add(reflection.heat_into_gas_j)?; }
         self.recession.add(row.recession_m)
     }
 }
 
-fn positive(x: f64) -> bool {
-    x.is_finite() && x > 0.0
-}
+fn positive(x: f64) -> bool { x.is_finite() && x > 0.0 }
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), GasChamberAdvanceError> {
-    if cancelled() {
-        Err(GasSurfaceError::Surface(SublimationError::Cancelled).into())
-    } else {
-        Ok(())
-    }
+    if cancelled() { Err(GasSurfaceError::Surface(SublimationError::Cancelled).into()) } else { Ok(()) }
 }
-fn with_states<'a>(
-    templates: &[GasChamberSurface<'a>],
-    states: &[SolidSurfaceState],
-) -> Vec<GasChamberSurface<'a>> {
-    templates
-        .iter()
-        .zip(states)
-        .map(|(template, &solid)| GasChamberSurface { solid, ..*template })
-        .collect()
+fn with_states<'a>(templates: &[GasChamberSurface<'a>], states: &[SolidSurfaceState]) -> Vec<GasChamberSurface<'a>> {
+    templates.iter().zip(states).map(|(template, &solid)| GasChamberSurface { solid, ..*template }).collect()
 }
-fn error_ratio(
-    a: f64,
-    b: f64,
-    initial: f64,
-    absolute: f64,
-    relative: f64,
-) -> Result<f64, GasChamberAdvanceError> {
+fn error_ratio(a: f64, b: f64, initial: f64, absolute: f64, relative: f64) -> Result<f64, GasChamberAdvanceError> {
     let scale = absolute + relative * initial.abs().max(a.abs()).max(b.abs());
     let ratio = (a - b).abs() / scale;
     if !positive(scale) || !ratio.is_finite() {
-        Err(GasChamberAdvanceError::Invalid(
-            "unrepresentable local error scale",
-        ))
-    } else {
-        Ok(ratio)
-    }
+        Err(GasChamberAdvanceError::Invalid("unrepresentable local error scale"))
+    } else { Ok(ratio) }
 }
 fn compare(
-    before: &[GasChamberSurface<'_>],
-    gas: &ClosedGasParcel,
-    catalog: &ThermochemicalGasModel,
-    coarse: &GasChamberCandidate<'_>,
-    fine: &GasChamberCandidate<'_>,
-    controls: GasChamberAdvanceSolve,
+    before: &[GasChamberSurface<'_>], gas: &ClosedGasParcel, catalog: &ThermochemicalGasModel,
+    coarse: &GasChamberCandidate<'_>, fine: &GasChamberCandidate<'_>, controls: GasChamberAdvanceSolve,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64, GasChamberAdvanceError> {
-    let mut maximum = error_ratio(
-        coarse.gas().state().state().temperature,
-        fine.gas().state().state().temperature,
-        gas.state().state().temperature,
-        controls.absolute_temperature_tolerance_k,
-        controls.relative_tolerance,
-    )?;
+    let mut maximum = error_ratio(coarse.gas().state().state().temperature,
+        fine.gas().state().state().temperature, gas.state().state().temperature,
+        controls.absolute_temperature_tolerance_k, controls.relative_tolerance)?;
     for ((original, a), b) in before.iter().zip(coarse.surfaces()).zip(fine.surfaces()) {
         poll(cancelled)?;
-        maximum = maximum.max(error_ratio(
-            a.solid.mass_kg,
-            b.solid.mass_kg,
-            original.solid.mass_kg,
-            controls.absolute_mass_tolerance_kg,
-            controls.relative_tolerance,
-        )?);
-        maximum = maximum.max(error_ratio(
-            a.surface_temperature_k[1],
-            b.surface_temperature_k[1],
-            a.surface_temperature_k[0],
-            controls.absolute_temperature_tolerance_k,
-            controls.relative_tolerance,
-        )?);
+        maximum = maximum.max(error_ratio(a.solid.mass_kg, b.solid.mass_kg, original.solid.mass_kg,
+            controls.absolute_mass_tolerance_kg, controls.relative_tolerance)?);
+        maximum = maximum.max(error_ratio(a.surface_temperature_k[1], b.surface_temperature_k[1],
+            a.surface_temperature_k[0], controls.absolute_temperature_tolerance_k, controls.relative_tolerance)?);
     }
     for species in catalog.thermodynamics().components() {
         poll(cancelled)?;
         let id = species.species();
-        maximum = maximum.max(error_ratio(
-            coarse
-                .gas()
-                .species_mass_kg(id)
-                .map_err(GasSurfaceError::from)?,
-            fine.gas()
-                .species_mass_kg(id)
-                .map_err(GasSurfaceError::from)?,
+        maximum = maximum.max(error_ratio(coarse.gas().species_mass_kg(id).map_err(GasSurfaceError::from)?,
+            fine.gas().species_mass_kg(id).map_err(GasSurfaceError::from)?,
             gas.species_mass_kg(id).map_err(GasSurfaceError::from)?,
-            controls.absolute_mass_tolerance_kg,
-            controls.relative_tolerance,
-        )?);
+            controls.absolute_mass_tolerance_kg, controls.relative_tolerance)?);
     }
     Ok(maximum)
 }
 fn smaller_step(requested: f64, old: f64, minimum: f64) -> Result<f64, GasChamberAdvanceError> {
     let dt = requested.min(0.5 * old);
     if !positive(dt) || dt < minimum {
-        Err(GasChamberAdvanceError::MinimumStep {
-            requested_dt_s: dt,
-            minimum_dt_s: minimum,
-        })
-    } else {
-        Ok(dt)
-    }
+        Err(GasChamberAdvanceError::MinimumStep { requested_dt_s: dt, minimum_dt_s: minimum })
+    } else { Ok(dt) }
 }
 
 // One physical kernel dispatch, shared by trial, half-step and zero-time paths.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn evaluate_interval<'catalog>(
-    surfaces: &[GasChamberSurface<'_>],
-    accommodation: Option<&BTreeMap<u64, ThermalAccommodation>>,
-    gas: &ClosedGasParcel,
-    catalog: &'catalog ThermochemicalGasModel,
-    duration_s: f64,
-    controls: GasChamberSolve,
-    cancelled: impl FnMut() -> bool,
+    surfaces: &[GasChamberSurface<'_>], accommodation: Option<&BTreeMap<u64, ThermalAccommodation>>,
+    geometry: Option<&moving::MovingChamberGeometry>, gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel, duration_s: f64, controls: GasChamberSolve,
+    mut cancelled: impl FnMut() -> bool,
 ) -> Result<(GasChamberCandidate<'catalog>, BTreeMap<u64, ReflectedHeatStep>), GasSurfaceError> {
-    match accommodation {
-        Some(laws) => advance_chamber_with_accommodation(
-            surfaces, laws, gas, catalog, duration_s, controls, cancelled,
-        ),
-        None => advance_chamber_with_gas(surfaces, gas, catalog, duration_s, controls, cancelled)
+    if let Some(geometry) = geometry { geometry.admit_interval(surfaces, gas, &mut cancelled)?; }
+    let mut result = match accommodation {
+        Some(laws) => advance_chamber_with_accommodation(surfaces, laws, gas, catalog, duration_s, controls, &mut cancelled),
+        None => advance_chamber_with_gas(surfaces, gas, catalog, duration_s, controls, &mut cancelled)
             .map(|endpoint| (endpoint, BTreeMap::new())),
-    }
+    }?;
+    if let Some(geometry) = geometry { geometry.refresh_endpoint(surfaces, &mut result.0, &mut cancelled)?; }
+    Ok(result)
 }
 
 /// Advance all surfaces and the gas through a complete physical duration.
@@ -310,14 +239,11 @@ fn evaluate_interval<'catalog>(
 /// needed further reduction refuses. All models, bindings and exposed areas
 /// stay fixed during the call. Use the thermal timeline adapter for events.
 pub fn advance_chamber_adaptive<'catalog>(
-    surfaces: &[GasChamberSurface<'_>],
-    gas: &ClosedGasParcel,
-    catalog: &'catalog ThermochemicalGasModel,
-    duration_s: f64,
-    controls: GasChamberAdvanceSolve,
+    surfaces: &[GasChamberSurface<'_>], gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel, duration_s: f64, controls: GasChamberAdvanceSolve,
     cancelled: impl FnMut() -> bool,
 ) -> Result<GasChamberAdvanceCandidate<'catalog>, GasChamberAdvanceError> {
-    advance_history(surfaces, None, gas, catalog, duration_s, controls, cancelled)
+    advance_history(surfaces, None, None, gas, catalog, duration_s, controls, cancelled)
 }
 
 /// Adaptive phase exchange AND reflected heat using one original chamber owner.
@@ -335,96 +261,71 @@ pub fn advance_chamber_adaptive<'catalog>(
 /// still refuses. Choose max_dt_s within the admitted physical regime.
 #[allow(clippy::too_many_arguments)]
 pub fn advance_chamber_adaptive_with_accommodation<'catalog>(
-    surfaces: &[GasChamberSurface<'_>],
-    accommodation: &BTreeMap<u64, ThermalAccommodation>,
-    gas: &ClosedGasParcel,
-    catalog: &'catalog ThermochemicalGasModel,
-    duration_s: f64,
-    controls: GasChamberAdvanceSolve,
-    cancelled: impl FnMut() -> bool,
+    surfaces: &[GasChamberSurface<'_>], accommodation: &BTreeMap<u64, ThermalAccommodation>,
+    gas: &ClosedGasParcel, catalog: &'catalog ThermochemicalGasModel, duration_s: f64,
+    controls: GasChamberAdvanceSolve, cancelled: impl FnMut() -> bool,
 ) -> Result<GasChamberAdvanceCandidate<'catalog>, GasChamberAdvanceError> {
-    advance_history(surfaces, Some(accommodation), gas, catalog, duration_s, controls, cancelled)
+    advance_history(surfaces, Some(accommodation), None, gas, catalog, duration_s, controls, cancelled)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn advance_history<'catalog>(
-    surfaces: &[GasChamberSurface<'_>],
-    accommodation: Option<&BTreeMap<u64, ThermalAccommodation>>,
-    gas: &ClosedGasParcel,
-    catalog: &'catalog ThermochemicalGasModel,
-    duration_s: f64,
-    controls: GasChamberAdvanceSolve,
+    surfaces: &[GasChamberSurface<'_>], accommodation: Option<&BTreeMap<u64, ThermalAccommodation>>,
+    geometry: Option<&moving::MovingChamberGeometry>, gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel, duration_s: f64, controls: GasChamberAdvanceSolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<GasChamberAdvanceCandidate<'catalog>, GasChamberAdvanceError> {
     poll(&mut cancelled)?;
-    if !duration_s.is_finite()
-        || duration_s < 0.0
-        || !positive(controls.absolute_mass_tolerance_kg)
-        || !positive(controls.absolute_temperature_tolerance_k)
-        || !controls.relative_tolerance.is_finite()
-        || controls.relative_tolerance < 0.0
-        || !positive(controls.minimum_dt_s)
-        || !positive(controls.maximum_dt_s)
-        || controls.minimum_dt_s > controls.maximum_dt_s
-        || controls.maximum_trials == 0
-        || surfaces.len() > controls.step.maximum_surfaces
-    {
-        return Err(GasChamberAdvanceError::Invalid(
-            "finite nonnegative duration and bounded positive error/work controls required",
-        ));
+    if !duration_s.is_finite() || duration_s < 0.0
+        || !positive(controls.absolute_mass_tolerance_kg) || !positive(controls.absolute_temperature_tolerance_k)
+        || !controls.relative_tolerance.is_finite() || controls.relative_tolerance < 0.0
+        || !positive(controls.minimum_dt_s) || !positive(controls.maximum_dt_s)
+        || controls.minimum_dt_s > controls.maximum_dt_s || controls.maximum_trials == 0
+        || surfaces.len() > controls.step.maximum_surfaces {
+        return Err(GasChamberAdvanceError::Invalid("finite nonnegative duration and bounded positive error/work controls required"));
     }
     let mut templates = surfaces.to_vec();
     templates.sort_by_key(|surface| surface.id);
     if templates.windows(2).any(|pair| pair[0].id == pair[1].id) {
-        return Err(GasChamberAdvanceError::Invalid(
-            "duplicate surface identity",
-        ));
+        return Err(GasChamberAdvanceError::Invalid("duplicate surface identity"));
     }
     if let Some(laws) = accommodation {
-        if laws.len() != templates.len() {
-            return Err(GasChamberAdvanceError::Invalid("accommodation surface roster mismatch"));
-        }
+        if laws.len() != templates.len() { return Err(GasChamberAdvanceError::Invalid("accommodation surface roster mismatch")); }
         for surface in &templates {
             poll(&mut cancelled)?;
-            if !laws.contains_key(&surface.id) {
-                return Err(GasChamberAdvanceError::Invalid("missing surface accommodation"));
-            }
+            if !laws.contains_key(&surface.id) { return Err(GasChamberAdvanceError::Invalid("missing surface accommodation")); }
         }
     }
+    if let Some(geometry) = geometry { geometry.validate(&templates)?; }
     let mut states: Vec<_> = templates.iter().map(|s| s.solid).collect();
-    let mut sums: Vec<_> = (0..templates.len())
-        .map(|_| SurfaceSums::default())
-        .collect();
+    let mut sums: Vec<_> = (0..templates.len()).map(|_| SurfaceSums::default()).collect();
     let mut endpoint: Option<GasChamberCandidate<'catalog>> = None;
     let mut elapsed = 0.0;
+    // Sum accepted physical durations rather than accumulating clock roundoff
+    // into an artificial final interval whose mass transfer cannot be represented.
+    let mut elapsed_sum = Sum::default();
     let mut dt = controls.maximum_dt_s.min(duration_s);
     let mut trials = 0;
     let mut rejected = 0;
     let mut accepted = 0;
     let mut evaluations = 0;
     let mut maximum_error: f64 = 0.0;
-
     while elapsed < duration_s {
         poll(&mut cancelled)?;
         if trials == controls.maximum_trials {
-            return Err(GasChamberAdvanceError::TrialBudget {
-                maximum_trials: controls.maximum_trials,
-            });
+            return Err(GasChamberAdvanceError::TrialBudget { maximum_trials: controls.maximum_trials });
         }
         trials += 1;
         let remaining = duration_s - elapsed;
         dt = dt.min(remaining);
         if !positive(dt) || elapsed + dt == elapsed || dt * 0.5 == 0.0 {
-            return Err(GasChamberAdvanceError::MinimumStep {
-                requested_dt_s: dt,
-                minimum_dt_s: controls.minimum_dt_s,
-            });
+            return Err(GasChamberAdvanceError::MinimumStep { requested_dt_s: dt, minimum_dt_s: controls.minimum_dt_s });
         }
         let before = with_states(&templates, &states);
         let current_gas = endpoint.as_ref().map_or(gas, |value| value.gas());
         let mut evaluate = |rows: &[GasChamberSurface<'_>], gas: &ClosedGasParcel, duration| {
             evaluations += 1;
-            evaluate_interval(rows, accommodation, gas, catalog, duration, controls.step, &mut cancelled)
+            evaluate_interval(rows, accommodation, geometry, gas, catalog, duration, controls.step, &mut cancelled)
         };
         let trial = (|| {
             // A coarse trial is an error probe, never an accepted heat history.
@@ -443,22 +344,13 @@ fn advance_history<'catalog>(
             }
             Err(error) => return Err(error.into()),
         };
-        let ratio = compare(
-            &before,
-            current_gas,
-            catalog,
-            &coarse,
-            &second,
-            controls,
-            &mut cancelled,
-        )?;
+        let mut ratio = compare(&before, current_gas, catalog, &coarse, &second, controls, &mut cancelled)?;
+        if let Some(geometry) = geometry {
+            ratio = ratio.max(geometry.compare(&before, &coarse, &second, controls.relative_tolerance, &mut cancelled)?);
+        }
         if ratio > 1.0 {
             rejected += 1;
-            dt = smaller_step(
-                dt * 0.8 / fs_math::det::sqrt(ratio),
-                dt,
-                controls.minimum_dt_s,
-            )?;
+            dt = smaller_step(dt * 0.8 / fs_math::det::sqrt(ratio), dt, controls.minimum_dt_s)?;
             continue;
         }
         for ((sum, a), b) in sums.iter_mut().zip(first.surfaces()).zip(second.surfaces()) {
@@ -468,29 +360,18 @@ fn advance_history<'catalog>(
         }
         accepted += 1;
         maximum_error = maximum_error.max(ratio);
-        for (state, row) in states.iter_mut().zip(second.surfaces()) {
-            *state = row.solid;
-        }
+        for (state, row) in states.iter_mut().zip(second.surfaces()) { *state = row.solid; }
         endpoint = Some(second);
-        elapsed = if dt == remaining {
-            duration_s
-        } else {
-            elapsed + dt
-        };
-        let factor = if ratio == 0.0 {
-            2.0
-        } else {
-            (0.8 / fs_math::det::sqrt(ratio)).clamp(0.5, 2.0)
-        };
-        dt = (dt * factor)
-            .min(controls.maximum_dt_s)
-            .max(controls.minimum_dt_s);
+        elapsed_sum.add(dt)?;
+        elapsed = if dt == remaining { duration_s } else { elapsed_sum.value };
+        let factor = if ratio == 0.0 { 2.0 } else { (0.8 / fs_math::det::sqrt(ratio)).clamp(0.5, 2.0) };
+        dt = (dt * factor).min(controls.maximum_dt_s).max(controls.minimum_dt_s);
     }
     let endpoint = match endpoint {
         Some(endpoint) => endpoint,
         None => {
             evaluations += 1;
-            evaluate_interval(&templates, accommodation, gas, catalog, 0.0, controls.step, &mut cancelled)?.0
+            evaluate_interval(&templates, accommodation, geometry, gas, catalog, 0.0, controls.step, &mut cancelled)?.0
         }
     };
     let mut solid_energy = Sum::default();
@@ -503,36 +384,21 @@ fn advance_history<'catalog>(
         poll(&mut cancelled)?;
         let start = original.solid;
         let end = final_row.solid;
-        solid_energy.add(
-            end.mass_kg * (end.specific_enthalpy_j_kg - start.specific_enthalpy_j_kg)
-                + (end.mass_kg - start.mass_kg)
-                    * (start.specific_enthalpy_j_kg + original.binding.solid_enthalpy_offset_j_kg),
-        )?;
+        solid_energy.add(end.mass_kg * (end.specific_enthalpy_j_kg - start.specific_enthalpy_j_kg)
+            + (end.mass_kg - start.mass_kg) * (start.specific_enthalpy_j_kg + original.binding.solid_enthalpy_offset_j_kg))?;
         solid_mass.add(end.mass_kg - start.mass_kg)?;
         stream_energy.add(sum.energy.value)?;
         reflected_energy.add(sum.reflected.value)?;
-        species_transfers
-            .entry(original.binding.species.clone())
-            .or_insert_with(Sum::default)
-            .add(sum.transferred.value)?;
+        species_transfers.entry(original.binding.species.clone()).or_insert_with(Sum::default).add(sum.transferred.value)?;
         histories.push(GasSurfaceHistory {
-            id: original.id,
-            outgoing_mass_kg: sum.outgoing.value,
-            incoming_mass_kg: sum.incoming.value,
-            transferred_mass_kg: sum.transferred.value,
-            energy_into_gas_j: sum.energy.value,
-            reflected_heat_into_gas_j: sum.reflected.value,
-            recession_m: sum.recession.value,
-            surface_temperature_k: [
-                sum.initial_temperature
-                    .unwrap_or(final_row.surface_temperature_k[0]),
-                final_row.surface_temperature_k[1],
-            ],
+            id: original.id, outgoing_mass_kg: sum.outgoing.value, incoming_mass_kg: sum.incoming.value,
+            transferred_mass_kg: sum.transferred.value, energy_into_gas_j: sum.energy.value,
+            reflected_heat_into_gas_j: sum.reflected.value, recession_m: sum.recession.value,
+            surface_temperature_k: [sum.initial_temperature.unwrap_or(final_row.surface_temperature_k[0]), final_row.surface_temperature_k[1]],
         });
     }
     let gas_energy = endpoint.gas().mass_kg()
-        * (endpoint.gas().state().specific_internal_energy_j_kg()
-            - gas.state().specific_internal_energy_j_kg())
+        * (endpoint.gas().state().specific_internal_energy_j_kg() - gas.state().specific_internal_energy_j_kg())
         + (endpoint.gas().mass_kg() - gas.mass_kg()) * gas.state().specific_internal_energy_j_kg();
     let energy_residual = solid_energy.value + gas_energy;
     let gas_stream_residual = gas_energy - stream_energy.value;
@@ -542,74 +408,35 @@ fn advance_history<'catalog>(
     for species in catalog.thermodynamics().components() {
         poll(&mut cancelled)?;
         let id = species.species();
-        let change = endpoint
-            .gas()
-            .species_mass_kg(id)
-            .map_err(GasSurfaceError::from)?
+        let change = endpoint.gas().species_mass_kg(id).map_err(GasSurfaceError::from)?
             - gas.species_mass_kg(id).map_err(GasSurfaceError::from)?;
         let transported = species_transfers.get(id).map_or(0.0, |sum| sum.value);
         let residual = change - transported;
-        if !residual.is_finite() {
-            return Err(GasChamberAdvanceError::Invalid(
-                "whole-history species balance overflow",
-            ));
-        }
+        if !residual.is_finite() { return Err(GasChamberAdvanceError::Invalid("whole-history species balance overflow")); }
         maximum_species_mass_residual = maximum_species_mass_residual.max(residual.abs());
     }
     let energy_tolerance = controls.step.surface.gas.energy_tolerance_j;
-    if ![
-        gas_energy,
-        energy_residual,
-        gas_stream_residual,
-        solid_stream_residual,
-    ]
-    .iter()
-    .all(|x| x.is_finite())
-        || energy_residual
-            .abs()
-            .max(gas_stream_residual.abs())
-            .max(solid_stream_residual.abs())
-            > energy_tolerance
-    {
+    if ![gas_energy, energy_residual, gas_stream_residual, solid_stream_residual].iter().all(|x| x.is_finite())
+        || energy_residual.abs().max(gas_stream_residual.abs()).max(solid_stream_residual.abs()) > energy_tolerance {
         return Err(GasSurfaceError::EnergyBalance {
-            residual_j: energy_residual
-                .abs()
-                .max(gas_stream_residual.abs())
-                .max(solid_stream_residual.abs()),
+            residual_j: energy_residual.abs().max(gas_stream_residual.abs()).max(solid_stream_residual.abs()),
             tolerance_j: energy_tolerance,
-        }
-        .into());
+        }.into());
     }
-    if !mass_residual.is_finite()
-        || mass_residual.abs() > controls.step.surface.gas.mass_tolerance_kg
-        || maximum_species_mass_residual > controls.step.surface.gas.mass_tolerance_kg
-    {
-        return Err(GasChamberAdvanceError::Invalid(
-            "whole-history solid/gas mass balance failed",
-        ));
+    if !mass_residual.is_finite() || mass_residual.abs() > controls.step.surface.gas.mass_tolerance_kg
+        || maximum_species_mass_residual > controls.step.surface.gas.mass_tolerance_kg {
+        return Err(GasChamberAdvanceError::Invalid("whole-history solid/gas mass balance failed"));
     }
     poll(&mut cancelled)?;
-    Ok(GasChamberAdvanceCandidate {
-        endpoint,
-        audit: GasChamberAdvanceAudit {
-            elapsed_s: elapsed,
-            trials,
-            rejected_trials: rejected,
-            accepted_intervals: accepted,
-            kernel_evaluations: evaluations,
-            maximum_accepted_error_ratio: maximum_error,
-            surfaces: histories,
-            energy_into_gas_j: stream_energy.value,
-            reflected_heat_into_gas_j: reflected_energy.value,
-            solid_energy_change_j: solid_energy.value,
-            gas_energy_change_j: gas_energy,
-            energy_residual_j: energy_residual,
-            gas_stream_energy_residual_j: gas_stream_residual,
-            solid_stream_energy_residual_j: solid_stream_residual,
-            mass_residual_kg: mass_residual,
-            maximum_species_mass_residual_kg: maximum_species_mass_residual,
-        },
-    })
+    Ok(GasChamberAdvanceCandidate { endpoint, audit: GasChamberAdvanceAudit {
+        elapsed_s: elapsed, trials, rejected_trials: rejected, accepted_intervals: accepted,
+        kernel_evaluations: evaluations, maximum_accepted_error_ratio: maximum_error, surfaces: histories,
+        energy_into_gas_j: stream_energy.value, reflected_heat_into_gas_j: reflected_energy.value,
+        solid_energy_change_j: solid_energy.value, gas_energy_change_j: gas_energy,
+        energy_residual_j: energy_residual, gas_stream_energy_residual_j: gas_stream_residual,
+        solid_stream_energy_residual_j: solid_stream_residual, mass_residual_kg: mass_residual,
+        maximum_species_mass_residual_kg: maximum_species_mass_residual,
+    } })
 }
 
 #[cfg(test)]
