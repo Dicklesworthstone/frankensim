@@ -989,6 +989,83 @@ fn g0_log_bulk_split_and_parameter_derived_admissibility() {
     close(iso.isochoric_energy(&f), 0., C10, 1e-14);
 }
 
+#[test]
+fn g0_basic_hyperelastic_moduli_are_finite_and_representable() {
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+        for model in [
+            HyperelasticModel::NeoHookean {
+                mu: bad,
+                lambda: 5.0,
+            },
+            HyperelasticModel::NeoHookean {
+                mu: 2.0,
+                lambda: bad,
+            },
+            HyperelasticModel::MooneyRivlin {
+                c10: bad,
+                c01: 0.2,
+                kappa: 7.0,
+            },
+            HyperelasticModel::MooneyRivlin {
+                c10: 0.8,
+                c01: bad,
+                kappa: 7.0,
+            },
+            HyperelasticModel::MooneyRivlin {
+                c10: 0.8,
+                c01: 0.2,
+                kappa: bad,
+            },
+        ] {
+            assert!(matches!(
+                Hyperelastic::new(model, 3.0),
+                Err(MaterialError::Parameters { .. })
+            ));
+        }
+    }
+    for model in [
+        HyperelasticModel::NeoHookean {
+            mu: f64::MAX,
+            lambda: 0.0,
+        },
+        HyperelasticModel::MooneyRivlin {
+            c10: f64::MAX,
+            c01: f64::MAX,
+            kappa: 1.0,
+        },
+        HyperelasticModel::MooneyRivlin {
+            c10: 1.0e307,
+            c01: 0.0,
+            kappa: f64::MAX,
+        },
+    ] {
+        assert!(matches!(
+            Hyperelastic::new(model, 3.0),
+            Err(MaterialError::Parameters { .. })
+        ));
+    }
+    for model in [
+        HyperelasticModel::NeoHookean {
+            mu: 2.0,
+            lambda: 0.0,
+        },
+        HyperelasticModel::MooneyRivlin {
+            c10: 0.0,
+            c01: 0.2,
+            kappa: 7.0,
+        },
+        HyperelasticModel::MooneyRivlin {
+            c10: 0.8,
+            c01: 0.0,
+            kappa: 7.0,
+        },
+    ] {
+        let law = Hyperelastic::new(model, 3.0).unwrap();
+        assert!(law.piola(&I).is_ok());
+        assert!(law.tangent(&I).is_ok());
+    }
+}
+
 fn model_card(hgo_model: bool) -> fs_matdb::ConstitutiveModelCard {
     use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, Provenance};
     use fs_qty::Dims;
@@ -1067,6 +1144,43 @@ fn model_card(hgo_model: bool) -> fs_matdb::ConstitutiveModelCard {
     }
 }
 
+fn isotropic_model_card(mooney_rivlin: bool) -> fs_matdb::ConstitutiveModelCard {
+    use fs_matdb::{LawId, LawParameter};
+    use fs_qty::Dims;
+    let pa = Dims([-1, 1, -2, 0, 0, 0]);
+    let mut card = model_card(false);
+    card.law = LawId(
+        if mooney_rivlin {
+            "mooney-rivlin-decoupled"
+        } else {
+            "neo-hookean-log"
+        }
+        .into(),
+    );
+    let values = if mooney_rivlin {
+        vec![("c10", 1.1e5), ("c01", 0.4e5), ("kappa", 8.0e5)]
+    } else {
+        vec![("mu", 3.0e5), ("lambda", 8.0e5)]
+    };
+    card.parameters = values
+        .into_iter()
+        .map(|(name, value)| (name.into(), LawParameter { value, dims: pa }))
+        .collect();
+    card.parameters.insert(
+        "stretch_limit".into(),
+        LawParameter {
+            value: 5.0,
+            dims: Dims::NONE,
+        },
+    );
+    let source =
+        fs_blake3::hash_bytes(format!("synthetic {} source-card fixture", card.law.0).as_bytes());
+    card.sources = vec![source];
+    card.provenance.artifact = Some(source);
+    card.provenance.source = "synthetic native isotropic law-card fixture".into();
+    card
+}
+
 #[test]
 fn g0_dimensioned_model_pack_reaches_real_hyperelastic_registry() {
     use fs_matdb::{
@@ -1077,8 +1191,13 @@ fn g0_dimensioned_model_pack_reaches_real_hyperelastic_registry() {
         LawRegistry, check_consistent_tangent, check_free_energy_consistency,
     };
     use fs_material::hyper::cards::register_hyperelastic_laws;
-    for is_hgo in [false, true] {
-        let card = model_card(is_hgo);
+    for card in [
+        model_card(false),
+        model_card(true),
+        isotropic_model_card(false),
+        isotropic_model_card(true),
+    ] {
+        let is_hgo = card.law.0 == "hgo-dispersed";
         let source = card.provenance.artifact.unwrap();
         let receipts = card
             .parameters
@@ -1118,6 +1237,14 @@ fn g0_dimensioned_model_pack_reaches_real_hyperelastic_registry() {
         let mut registry = LawRegistry::new();
         register_hyperelastic_laws(&mut registry);
         let node = registry.instantiate("solid/material", transported).unwrap();
+        assert_eq!(
+            node.declaration().differentiability,
+            if is_hgo {
+                fs_material::graph::Differentiability::PiecewiseSmooth
+            } else {
+                fs_material::graph::Differentiability::Smooth
+            }
+        );
         let f = [1.2, 0.1, 0., 0., 0.9, 0.04, 0., 0., 1.05];
         let h: Vec<_> = f.iter().zip(I).map(|(a, b)| a - b).collect();
         let output = node.evaluate(&[], &h).unwrap();
@@ -1130,10 +1257,15 @@ fn g0_dimensioned_model_pack_reaches_real_hyperelastic_registry() {
         assert!(node.evaluate(&[0.], &h).is_err());
         assert!(node.evaluate(&[], &[-2.; 9]).is_err());
         let mut wrong = card.clone();
-        wrong.parameters.get_mut("kappa").unwrap().dims = fs_qty::Dims([0; 6]);
+        let (modulus, required) = match card.law.0.as_str() {
+            "neo-hookean-log" => ("mu", "lambda"),
+            "mooney-rivlin-decoupled" => ("kappa", "c01"),
+            _ => ("kappa", "volumetric_kind"),
+        };
+        wrong.parameters.get_mut(modulus).unwrap().dims = fs_qty::Dims([0; 6]);
         assert!(Hyperelastic::from_model_card(&wrong).is_err());
         wrong = card.clone();
-        wrong.parameters.remove("volumetric_kind");
+        wrong.parameters.remove(required);
         assert!(Hyperelastic::from_model_card(&wrong).is_err());
         wrong = card.clone();
         wrong.parameters.insert(
@@ -1148,11 +1280,18 @@ fn g0_dimensioned_model_pack_reaches_real_hyperelastic_registry() {
         wrong.law_version = 2;
         assert!(Hyperelastic::from_model_card(&wrong).is_err());
         wrong = card.clone();
-        wrong
-            .parameters
-            .get_mut(if is_hgo { "fibre_count" } else { "term_count" })
-            .unwrap()
-            .value = 1.5;
-        assert!(Hyperelastic::from_model_card(&wrong).is_err());
+        if let Some(count) =
+            wrong
+                .parameters
+                .get_mut(if is_hgo { "fibre_count" } else { "term_count" })
+        {
+            count.value = 1.5;
+            assert!(Hyperelastic::from_model_card(&wrong).is_err());
+        }
+        for value in [f64::NAN, f64::INFINITY, -1.0] {
+            wrong = card.clone();
+            wrong.parameters.get_mut(modulus).unwrap().value = value;
+            assert!(Hyperelastic::from_model_card(&wrong).is_err());
+        }
     }
 }

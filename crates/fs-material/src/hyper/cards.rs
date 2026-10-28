@@ -1,7 +1,9 @@
-//! The existing FSMODPK v1 parameter block is sufficient for these laws.
-//! Required dimensionless selectors are explicit: `volumetric_kind` (0 =
-//! quadratic, 1 = log squared), and HGO `fibre_invariants` (0 = isochoric,
-//! 1 = full). No tissue properties or fallback parameters are inferred.
+//! Strict source cards for the native hyperelastic energy models.
+//! Neo-Hookean retains its coupled logarithmic volume convention;
+//! Mooney–Rivlin retains its decoupled quadratic bulk energy. Only Ogden
+//! and HGO select `volumetric_kind` (0 = quadratic, 1 = log squared).
+//! HGO also selects `fibre_invariants` (0 = isochoric, 1 = full).
+//! FSMODPK v1 is unchanged; no material properties or defaults are inferred.
 //! Graph inputs are H=F-I, so the graph's zero-input admission probe is the
 //! stress-free reference state. Outputs are work-conjugate Piola components.
 
@@ -41,10 +43,7 @@ pub trait HyperelasticMaterial {
     }
 
     /// Exact derivative of first Piola stress in the same reference frame.
-    fn consistent_tangent(
-        &self,
-        deformation: &[f64; 9],
-    ) -> Result<[[f64; 9]; 9], MaterialError> {
+    fn consistent_tangent(&self, deformation: &[f64; 9]) -> Result<[[f64; 9]; 9], MaterialError> {
         self.hyperelastic().tangent(deformation)
     }
 }
@@ -171,12 +170,25 @@ impl Parameters<'_> {
         }
         Ok(value as usize)
     }
+
+    fn volumetric(&mut self) -> Result<Volumetric, MaterialError> {
+        let kappa = self.get("kappa", PA)?;
+        Ok(match self.count("volumetric_kind", 1)? {
+            0 => Volumetric::Quadratic { kappa },
+            _ => Volumetric::LogSquared { kappa },
+        })
+    }
 }
 
 impl Hyperelastic {
-    /// Instantiate a strict version-1 Ogden/HGO parameter block. Counts and
-    /// selectors must be dimensionless, moduli Pa, directions dimensionless.
-    /// Ogden uses `mu_0, alpha_0, ...`; HGO `fibre_0_x/y/z, ...`.
+    /// Instantiate one strict version-1 native energy model. Every model
+    /// requires dimensionless `stretch_limit`. `neo-hookean-log` requires
+    /// `mu` and Lamé `lambda` in Pa; `mooney-rivlin-decoupled` requires
+    /// `c10`, `c01` and `kappa` in Pa and uses quadratic bulk energy.
+    /// Neither model accepts an unused `volumetric_kind` selector.
+    /// Ogden/HGO retain explicit bulk selectors, dimensionless counts,
+    /// exponents and directions, and Pa moduli. Ogden uses `mu_0, alpha_0,
+    /// ...`; HGO uses `fibre_0_x/y/z, ...`.
     /// Unknown parameters refuse rather than silently changing card meaning.
     pub fn from_model_card(card: &ConstitutiveModelCard) -> Result<Self, MaterialError> {
         card.validate().map_err(|e| refusal(e.to_string()))?;
@@ -193,13 +205,18 @@ impl Hyperelastic {
             consumed: BTreeSet::new(),
         };
         let limit = p.get("stretch_limit", ONE)?;
-        let kappa = p.get("kappa", PA)?;
-        let volumetric = match p.count("volumetric_kind", 1)? {
-            0 => Volumetric::Quadratic { kappa },
-            _ => Volumetric::LogSquared { kappa },
-        };
         let model = match card.law.0.as_str() {
+            "neo-hookean-log" => HyperelasticModel::NeoHookean {
+                mu: p.get("mu", PA)?,
+                lambda: p.get("lambda", PA)?,
+            },
+            "mooney-rivlin-decoupled" => HyperelasticModel::MooneyRivlin {
+                c10: p.get("c10", PA)?,
+                c01: p.get("c01", PA)?,
+                kappa: p.get("kappa", PA)?,
+            },
             "ogden-decoupled" => {
+                let volumetric = p.volumetric()?;
                 let count = p.count("term_count", super::MAX_OGDEN_TERMS)?;
                 let mut terms = Vec::with_capacity(count);
                 for i in 0..count {
@@ -211,6 +228,7 @@ impl Hyperelastic {
                 HyperelasticModel::Ogden { terms, volumetric }
             }
             "hgo-dispersed" => {
+                let volumetric = p.volumetric()?;
                 let c10 = p.get("c10", PA)?;
                 let k1 = p.get("k1", PA)?;
                 let k2 = p.get("k2", ONE)?;
@@ -283,10 +301,13 @@ impl HyperelasticNode {
                 state_slots: Vec::new(),
                 state_schema_version: 1,
                 calibration: card.validity.clone(),
-                differentiability: if matches!(&material.model, HyperelasticModel::Ogden { .. }) {
-                    Differentiability::Smooth
-                } else {
+                differentiability: if matches!(
+                    &material.model,
+                    HyperelasticModel::HolzapfelGasserOgden { .. }
+                ) {
                     Differentiability::PiecewiseSmooth
+                } else {
+                    Differentiability::Smooth
                 },
                 energy: EnergyBehavior::FreeEnergyStorage,
                 tangent_claimed: true,
@@ -357,9 +378,14 @@ impl LawNode for HyperelasticNode {
     }
 }
 
-/// Add the two shipped (law,version) factories to an existing registry.
+/// Add the four native (law,version) factories to an existing registry.
 pub fn register_hyperelastic_laws(registry: &mut LawRegistry) {
-    for name in ["ogden-decoupled", "hgo-dispersed"] {
+    for name in [
+        "neo-hookean-log",
+        "mooney-rivlin-decoupled",
+        "ogden-decoupled",
+        "hgo-dispersed",
+    ] {
         registry.register(&LawId(name.to_string()), 1, HyperelasticNode::from_card);
     }
 }

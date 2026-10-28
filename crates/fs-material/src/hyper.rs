@@ -169,9 +169,23 @@ impl Hyperelastic {
             });
         }
         let ok = match &model {
-            HyperelasticModel::NeoHookean { mu, lambda } => *mu > 0.0 && *lambda >= 0.0,
+            HyperelasticModel::NeoHookean { mu, lambda } => {
+                mu.is_finite()
+                    && lambda.is_finite()
+                    && *mu > 0.0
+                    && *lambda >= 0.0
+                    && (2.0 * *mu + *lambda).is_finite()
+            }
             HyperelasticModel::MooneyRivlin { c10, c01, kappa } => {
-                *c10 >= 0.0 && *c01 >= 0.0 && *kappa > 0.0 && *c10 + *c01 > 0.0
+                let shear = 2.0 * (*c10 + *c01);
+                [*c10, *c01, *kappa, shear]
+                    .iter()
+                    .all(|value| value.is_finite())
+                    && *c10 >= 0.0
+                    && *c01 >= 0.0
+                    && *kappa > 0.0
+                    && shear > 0.0
+                    && (*kappa + (4.0 / 3.0) * shear).is_finite()
             }
             HyperelasticModel::Ogden { terms, volumetric } => {
                 !terms.is_empty()

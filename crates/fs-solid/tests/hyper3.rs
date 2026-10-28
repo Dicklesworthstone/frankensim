@@ -701,6 +701,143 @@ fn source_fields_preserve_uniform_results_and_each_elements_domain() {
 }
 
 #[test]
+fn mixed_isotropic_source_cards_drive_actual_layer_displacement_and_force() {
+    use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, Provenance};
+    use fs_material::hyper::cards::ResolvedHyperelastic;
+    use fs_qty::Dims;
+    let make_card = |name: &str, moduli: &[(&str, f64)]| {
+        let source = fs_blake3::hash_bytes(
+            format!("synthetic two-layer {name} fixture: {moduli:?}").as_bytes(),
+        );
+        let mut parameters: std::collections::BTreeMap<String, LawParameter> = moduli
+            .iter()
+            .map(|&(name, value)| {
+                (
+                    name.into(),
+                    LawParameter {
+                        value,
+                        dims: Dims([-1, 1, -2, 0, 0, 0]),
+                    },
+                )
+            })
+            .collect();
+        parameters.insert(
+            "stretch_limit".into(),
+            LawParameter {
+                value: 5.0,
+                dims: Dims::NONE,
+            },
+        );
+        ConstitutiveModelCard {
+            law: LawId(name.into()),
+            law_version: 1,
+            parameters,
+            state_schema_version: 1,
+            initial_state: InitialStatePolicy::ZeroInternalState,
+            validity: fs_evidence::ValidityDomain::unconstrained(),
+            sources: vec![source],
+            provenance: Provenance {
+                source: "manufactured isotropic two-layer fixture; not measured data".into(),
+                license: "test-only".into(),
+                artifact: Some(source),
+            },
+        }
+    };
+    let (nodes, tets) = box_mesh([2, 1, 1], [2.0, 1.0, 1.0]);
+    let extension = 0.4;
+    let prescribed = layered_constraints(&nodes, extension);
+    // Independent one-dimensional derivatives at F=diag(s,1,1), with
+    // transverse rollers. The left layer is coupled-log Neo-Hookean;
+    // the right is decoupled Mooney–Rivlin with quadratic bulk energy.
+    let left_stress = |s: f64| 3.0 * (s - 1.0 / s) + 8.0 * s.ln() / s;
+    let left_energy = |s: f64| 1.5 * (s * s - 1.0) - 3.0 * s.ln() + 4.0 * s.ln().powi(2);
+    let right_stress = |s: f64, scale: f64| {
+        scale
+            * ((4.0 / 3.0)
+                * (1.1 * (s.powf(1.0 / 3.0) - s.powf(-5.0 / 3.0))
+                    + 0.4 * (s.powf(-1.0 / 3.0) - s.powf(-7.0 / 3.0)))
+                + 8.0 * (s - 1.0))
+    };
+    let right_energy = |s: f64, scale: f64| {
+        scale
+            * (1.1 * (s.powf(4.0 / 3.0) + 2.0 * s.powf(-2.0 / 3.0) - 3.0)
+                + 0.4 * (2.0 * s.powf(2.0 / 3.0) + s.powf(-4.0 / 3.0) - 3.0)
+                + 4.0 * (s - 1.0).powi(2))
+    };
+    let (mut previous_displacement, mut previous_force) = (0.0, 0.0);
+    for right_scale in [2.0, 5.0] {
+        let cards = [
+            make_card("neo-hookean-log", &[("mu", 3.0), ("lambda", 8.0)]),
+            make_card(
+                "mooney-rivlin-decoupled",
+                &[
+                    ("c10", 1.1 * right_scale),
+                    ("c01", 0.4 * right_scale),
+                    ("kappa", 8.0 * right_scale),
+                ],
+            ),
+        ];
+        let sources: Vec<_> = tets
+            .iter()
+            .map(|tet| {
+                let x = tet.iter().map(|&node| nodes[node][0]).sum::<f64>() / 4.0;
+                ResolvedHyperelastic::try_from_model_card(&cards[usize::from(x > 1.0)]).unwrap()
+            })
+            .collect();
+        let problem = HyperTetProblem {
+            nodes_m: &nodes,
+            tetrahedra: &tets,
+            material: HyperelasticLawField::PerElement(&sources),
+            prescribed_m: &prescribed,
+            nodal_forces_n: &[],
+            body_force_n_m3: [0.0; 3],
+            budget: TetAssemblyBudget::standard(),
+            settings: HyperTetSettings {
+                load_steps: 4,
+                ..HyperTetSettings::default()
+            },
+        };
+        let solved = with_cx(|cx| problem.solve(cx)).unwrap();
+        // Unit-length/unit-area layers have equal nominal traction and
+        // s_left+s_right=2+extension. Solve that independent scalar equation.
+        let (mut low, mut high) = (0.0, extension);
+        for _ in 0..100 {
+            let mid = 0.5 * (low + high);
+            if left_stress(1.0 + mid) > right_stress(1.0 + extension - mid, right_scale) {
+                high = mid;
+            } else {
+                low = mid;
+            }
+        }
+        let interface = 0.5 * (low + high);
+        for (node, x) in nodes.iter().enumerate().filter(|(_, x)| x[0] == 1.0) {
+            assert!(
+                (solved.displacement_m[node][0] - interface).abs() < 1e-9,
+                "interface at {x:?}: {:?}, expected {interface}",
+                solved.displacement_m[node]
+            );
+        }
+        let force: f64 = solved
+            .reactions_n
+            .iter()
+            .filter(|(dof, _)| dof % 3 == 0 && nodes[dof / 3][0] == 2.0)
+            .map(|(_, force)| force)
+            .sum();
+        assert!((force - left_stress(1.0 + interface)).abs() < 1e-9);
+        let expected_energy =
+            left_energy(1.0 + interface) + right_energy(1.0 + extension - interface, right_scale);
+        assert!((solved.strain_energy_j - expected_energy).abs() < 1e-9);
+        assert!(interface > previous_displacement && force > previous_force);
+        previous_displacement = interface;
+        previous_force = force;
+        for (tet, source) in tets.iter().zip(&sources) {
+            let x = tet.iter().map(|&node| nodes[node][0]).sum::<f64>() / 4.0;
+            assert_eq!(source.model_card(), &cards[usize::from(x > 1.0)]);
+        }
+    }
+}
+
+#[test]
 fn source_context_requires_supported_fixed_conditions_inside_the_exact_domain() {
     use fs_matdb::QueryPoint;
     use fs_material::hyper::cards::ResolvedHyperelastic;

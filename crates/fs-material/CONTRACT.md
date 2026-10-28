@@ -559,12 +559,21 @@ homogenization, the P2 milestone.
   bulk energies and separate distortional/bulk accessors. Full-invariant
   HGO's fibre accessor intentionally retains volume dependence.
 - `hyper::cards` instantiates strict, dimensioned `ConstitutiveModelCard`s
-  for `ogden-decoupled` v1 and `hgo-dispersed` v1 and registers the real
+  for `neo-hookean-log`, `mooney-rivlin-decoupled`, `ogden-decoupled` and
+  `hgo-dispersed` v1 and registers the real
   stress/tangent/energy factories in `graph::LawRegistry`. Graph inputs are
   H=F-I, outputs P, so the zero-input admission probe is the reference state.
   Moduli require Pa, exponents/directions/counts/selectors are dimensionless;
   missing/extra parameters, fractional counts, versions and undeclared
   invariant selectors refuse. FSMODPK v1 remains unchanged.
+  Neo-Hookean supplies `mu` and Lamé `lambda` in Pa for the native
+  `mu/2 (I1-3) - mu ln(J) + lambda/2 ln(J)^2` energy. Mooney–Rivlin
+  supplies `c10`, `c01` and `kappa` in Pa for its native isochoric-invariant
+  energy plus `kappa/2 (J-1)^2`. Both require dimensionless `stretch_limit`;
+  neither accepts an unused bulk selector. Native admission requires finite
+  coefficients and representable reference shear/longitudinal stiffness.
+  All four laws traverse the existing model-pack decode and registry test;
+  the isotropic laws and Ogden declare smooth nodes, HGO piecewise smooth.
   `hyper::cards::ResolvedHyperelastic` retains the exact source model card and
   admitted `QueryPoint` beside its native law. `try_from_model_card_at` requires
   the typed source domain to contain that fixed query; bounded conditions
@@ -579,7 +588,7 @@ homogenization, the P2 milestone.
   model/law/state/initialization/validity declarations and dimensioned
   parameter/validity rows, normalizes through fs-qty, retains each transform
   receipt, and self-decodes the existing runtime model pack. Its compiler
-  tests transport both laws into the real registry. A generic profile does
+  tests transport the Ogden/HGO laws into the real registry. A generic profile does
   not certify any law's physical parameters or infer a tissue identity.
   Polyconvexity is parameter-derived: Ogden sufficient exponents are
   alpha>=3/2 (F power perspective) or alpha<=-3 (cof F perspective), with
