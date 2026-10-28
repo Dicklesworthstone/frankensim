@@ -16,6 +16,8 @@ the crash cascade with structurally exact energy accounting.
   `StressChannel`s (`c_j >= 0`, symmetric `E_j`). Gradient is the
   EXACT analytic gradient of the coded `H`; state layout matches
   fs-phs `modal_bank` (`[q, p]` interleaved).
+  `validate()` owns frequency/channel admission for `assemble` and
+  consumers that retain this storage inside multiport/full-viscosity systems.
   Its Gonzalez midpoint energy remainder is evaluated directly as
   `sum_j c_j/4 (d^T E_j d) (m^T E_j d)`, where `d = q1-q0` and
   `m = (q1+q0)/2`; every quadratic term contributes exactly zero.
@@ -33,6 +35,17 @@ the crash cascade with structurally exact energy accounting.
   coefficients/damping, non-positive/non-finite frequencies, and
   non-finite couplings by name (NaN-proof negated comparisons);
   duplicate modes in either constructor list are refused.
+- `assemble_storage_with_damping` retains the full symmetric positive-
+  semidefinite modal viscosity C [1/s] in the momentum block of R, using
+  the same storage, signed force ports and fs-phs stepping as the diagonal
+  `assemble_storage` path. All supplied coordinates must use the same
+  mass-normalized basis. The full matrix owns all selected viscous loss;
+  no separate damping ratios are added. Off-diagonal terms, exact zero rows
+  and coupled lossless directions remain intact, without jitter, eigenvalue
+  clipping or modal decoupling. Finite entries and port projections are
+  admitted here; symmetry and PSD admission use the existing fs-phs owner
+  and its numerical tolerances. Hereditary material loss still requires
+  explicit constitutive states and is not represented by this fixed C.
 - `von_karman_ss_plate` — simply-supported rectangle with ANALYTIC
   sine modes for displacement (mass-normalized) and Airy stress
   (unit-normalized; both are biharmonic eigenfunctions on the SS
@@ -162,6 +175,17 @@ long pole (implicit Newton per step). No `Cx` integration (workspace
 None.
 
 ## Conformance tests
+
+`tests/nlmodal.rs::full_viscous_operator_preserves_local_damper_nullspace_and_forced_response`
+checks an independent common/differential analytic oscillator solution,
+rank-one damping's lossless direction and physical port work to 3e-12.
+`full_damping_diagonal_limit_is_the_same_system` pins identical state and
+work for the old diagonal image. `full_damping_nonlinear_trajectory_converges_and_closes_work`
+checks the coupled quartic trajectory against independent RK4 on three time
+rungs (second-order refinement; finest state error <3e-5) with total
+work/energy closure <2e-10. Active, asymmetric and nonfinite operators
+refuse; zero loss remains exactly zero. These are G0/G1/G3 numerical model
+checks, not experimental material-damping validation.
 
 The nonlinear modal battery also checks a resolved quartic force beside an
 unchanged high-energy mode against an independently factored scalar divided

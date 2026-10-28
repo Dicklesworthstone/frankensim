@@ -116,6 +116,60 @@ impl SosModalStorage {
         self.omegas.len()
     }
 
+    /// Admit the public frequency and quartic-channel data before wrapping
+    /// this storage in a multiport or full-viscosity system. This is the same
+    /// storage admission used by [`assemble`]; it changes no coefficients.
+    ///
+    /// # Errors
+    /// Empty/nonfinite/nonpositive frequencies, malformed or nonfinite
+    /// channels, negative quartic weights, or an asymmetric coupling matrix.
+    pub fn validate(&self) -> Result<(), NlModalError> {
+        let n = self.n_modes();
+        let Some(square) = n.checked_mul(n) else {
+            return Err(NlModalError::Parameter {
+                what: "coupling matrix size overflow",
+            });
+        };
+        if n == 0 || self.omegas.iter().any(|w| !w.is_finite() || *w <= 0.0) {
+            return Err(NlModalError::Parameter {
+                what: "modal frequency must be positive and finite",
+            });
+        }
+        for ch in &self.channels {
+            if ch.coefficient < 0.0 || !ch.coefficient.is_finite() {
+                return Err(NlModalError::Parameter {
+                    what: "channel coefficient must be non-negative and finite",
+                });
+            }
+            if ch.coupling.iter().any(|v| !v.is_finite()) {
+                return Err(NlModalError::Parameter {
+                    what: "coupling entries must be finite",
+                });
+            }
+            if ch.coupling.len() != square {
+                return Err(NlModalError::Parameter {
+                    what: "coupling matrix size",
+                });
+            }
+            let scale = ch
+                .coupling
+                .iter()
+                .fold(f64::MIN_POSITIVE, |a, &v| a.max(v.abs()));
+            let mut worst = 0.0f64;
+            for p in 0..n {
+                for q in 0..p {
+                    worst = worst.max((ch.coupling[p * n + q] - ch.coupling[q * n + p]).abs());
+                }
+            }
+            if worst > SYM_TOL * scale {
+                return Err(NlModalError::AsymmetricCoupling {
+                    residual: worst / scale,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// `q^T E q` for channel `ch` given the interleaved state.
     fn quadratic_form(&self, ch: &StressChannel, x: &[f64]) -> f64 {
         let n = self.n_modes();
@@ -249,51 +303,11 @@ pub fn assemble(
             what: "zetas/strike_weights length vs mode count",
         });
     }
-    // Negated-positive comparisons so NaN REFUSES instead of slipping
-    // through `<= 0.0` (review finding: NaN passed every gate).
-    for &w in &storage.omegas {
-        if w.is_nan() || w <= 0.0 || !w.is_finite() {
-            return Err(NlModalError::Parameter {
-                what: "modal frequency must be positive and finite",
-            });
-        }
-    }
+    storage.validate()?;
     for &z in zetas {
         if z.is_nan() || z < 0.0 {
             return Err(NlModalError::Parameter {
                 what: "damping ratio must be non-negative",
-            });
-        }
-    }
-    for ch in &storage.channels {
-        if ch.coefficient.is_nan() || ch.coefficient < 0.0 || !ch.coefficient.is_finite() {
-            return Err(NlModalError::Parameter {
-                what: "channel coefficient must be non-negative and finite",
-            });
-        }
-        if ch.coupling.iter().any(|v| !v.is_finite()) {
-            return Err(NlModalError::Parameter {
-                what: "coupling entries must be finite",
-            });
-        }
-        if ch.coupling.len() != n * n {
-            return Err(NlModalError::Parameter {
-                what: "coupling matrix size",
-            });
-        }
-        let scale = ch
-            .coupling
-            .iter()
-            .fold(f64::MIN_POSITIVE, |a, &v| a.max(v.abs()));
-        let mut worst = 0.0f64;
-        for p in 0..n {
-            for q in 0..p {
-                worst = worst.max((ch.coupling[p * n + q] - ch.coupling[q * n + p]).abs());
-            }
-        }
-        if worst > SYM_TOL * scale {
-            return Err(NlModalError::AsymmetricCoupling {
-                residual: worst / scale,
             });
         }
     }
@@ -322,38 +336,141 @@ pub fn assemble_storage(
     g: Vec<f64>,
     storage: Box<dyn Storage>,
 ) -> Result<PortHamiltonian, NlModalError> {
-    if omegas.len() != n_modes || zetas.len() != n_modes {
+    assemble_storage_damping(
+        n_modes,
+        omegas,
+        ModalDamping::Ratios(zetas),
+        m_ports,
+        g,
+        storage,
+    )
+}
+
+/// Assemble a modal pHS with the complete projected viscous operator.
+///
+/// `modal_damping_per_s` is the symmetric positive-semidefinite, row-major
+/// `n_modes × n_modes` matrix `C` in the SAME mass-normalized basis as
+/// `storage`, `omegas` and `g`. The equations are `q_dot = p` and
+/// `p_dot = -dV/dq - C p + G_p u`, with instantaneous viscous power
+/// `p^T C p`. Local material or attachment loss generally couples modes,
+/// including modes with nearly equal frequencies; replacing C by its
+/// diagonal changes both the transient and the undamped motions.
+///
+/// Every supplied entry is retained in the momentum block of R. Rank-deficient
+/// damping, zero rows and coupled lossless directions require no artificial
+/// loss floor. The existing fs-phs owner performs its symmetry/PSD admission
+/// and time integration. C already contains ALL caller-owned viscous loss;
+/// no extra per-mode ratios are added here. Constitutive memory still belongs
+/// to an explicit relaxation-state model, not this instantaneous operator.
+///
+/// # Errors
+/// [`NlModalError`] for malformed/nonfinite input, nonpositive frequencies,
+/// or the existing pHS symmetry/positive-semidefiniteness refusal.
+pub fn assemble_storage_with_damping(
+    n_modes: usize,
+    omegas: &[f64],
+    modal_damping_per_s: &[f64],
+    m_ports: usize,
+    g: Vec<f64>,
+    storage: Box<dyn Storage>,
+) -> Result<PortHamiltonian, NlModalError> {
+    assemble_storage_damping(
+        n_modes,
+        omegas,
+        ModalDamping::Matrix(modal_damping_per_s),
+        m_ports,
+        g,
+        storage,
+    )
+}
+
+enum ModalDamping<'a> {
+    Ratios(&'a [f64]),
+    Matrix(&'a [f64]),
+}
+
+fn assemble_storage_damping(
+    n_modes: usize,
+    omegas: &[f64],
+    damping: ModalDamping<'_>,
+    m_ports: usize,
+    g: Vec<f64>,
+    storage: Box<dyn Storage>,
+) -> Result<PortHamiltonian, NlModalError> {
+    let Some(dim) = n_modes.checked_mul(2) else {
         return Err(NlModalError::Parameter {
-            what: "omegas/zetas length vs mode count",
+            what: "modal state dimension overflow",
+        });
+    };
+    let Some(square) = dim.checked_mul(dim) else {
+        return Err(NlModalError::Parameter {
+            what: "modal matrix dimension overflow",
+        });
+    };
+    if n_modes == 0 || omegas.len() != n_modes {
+        return Err(NlModalError::Parameter {
+            what: "positive mode count and matching omegas required",
         });
     }
-    if m_ports == 0 || g.len() != (2 * n_modes) * m_ports {
+    if m_ports == 0 || dim.checked_mul(m_ports) != Some(g.len()) {
         return Err(NlModalError::Parameter {
             what: "G shape vs (2 n_modes) × m_ports",
         });
     }
+    if g.iter().any(|value| !value.is_finite()) {
+        return Err(NlModalError::Parameter {
+            what: "port projections must be finite",
+        });
+    }
     for &w in omegas {
-        if w.is_nan() || w <= 0.0 || !w.is_finite() {
+        if w <= 0.0 || !w.is_finite() {
             return Err(NlModalError::Parameter {
                 what: "modal frequency must be positive and finite",
             });
         }
     }
-    for &z in zetas {
-        if z.is_nan() || z < 0.0 {
-            return Err(NlModalError::Parameter {
-                what: "damping ratio must be non-negative",
-            });
+    match damping {
+        ModalDamping::Ratios(zetas) => {
+            if zetas.len() != n_modes {
+                return Err(NlModalError::Parameter {
+                    what: "zetas length vs mode count",
+                });
+            }
+            if zetas.iter().zip(omegas).any(|(&zeta, &omega)| {
+                zeta < 0.0 || !zeta.is_finite() || !(2.0 * zeta * omega).is_finite()
+            }) {
+                return Err(NlModalError::Parameter {
+                    what: "damping ratios and rates must be non-negative and finite",
+                });
+            }
+        }
+        ModalDamping::Matrix(matrix) => {
+            if matrix.len() != n_modes * n_modes {
+                return Err(NlModalError::Parameter {
+                    what: "damping matrix size vs mode count",
+                });
+            }
+            if matrix.iter().any(|value| !value.is_finite()) {
+                return Err(NlModalError::Parameter {
+                    what: "damping matrix entries must be finite",
+                });
+            }
         }
     }
-    let dim = 2 * n_modes;
-    let mut j = vec![0.0; dim * dim];
-    let mut r = vec![0.0; dim * dim];
+    let mut j = vec![0.0; square];
+    let mut r = vec![0.0; square];
     for k in 0..n_modes {
         let (qi, pi) = (2 * k, 2 * k + 1);
         j[qi * dim + pi] = 1.0;
         j[pi * dim + qi] = -1.0;
-        r[pi * dim + pi] = 2.0 * zetas[k] * omegas[k];
+        match damping {
+            ModalDamping::Ratios(zetas) => r[pi * dim + pi] = 2.0 * zetas[k] * omegas[k],
+            ModalDamping::Matrix(matrix) => {
+                for l in 0..n_modes {
+                    r[pi * dim + 2 * l + 1] = matrix[k * n_modes + l];
+                }
+            }
+        }
     }
     PortHamiltonian::new(dim, m_ports, j, r, g, storage).map_err(NlModalError::Phs)
 }

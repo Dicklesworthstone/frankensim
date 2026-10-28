@@ -8,10 +8,239 @@
 
 use fs_nlmodal::{
     KcStringParams, NlModalError, SampledPlateMode, SineMode, SosModalStorage, StressChannel,
-    VkPlateParams, assemble, duffing_backbone, kirchhoff_carrier_moving_end,
-    kirchhoff_carrier_string, single_mode_beta, von_karman_sampled_plate, von_karman_ss_plate,
+    VkPlateParams, assemble, assemble_storage, assemble_storage_with_damping, duffing_backbone,
+    kirchhoff_carrier_moving_end, kirchhoff_carrier_string, single_mode_beta,
+    von_karman_sampled_plate, von_karman_ss_plate,
 };
 use fs_phs::{PortHamiltonian, Storage, step};
+
+#[test]
+fn full_viscous_operator_preserves_local_damper_nullspace_and_forced_response() {
+    // A single physical damper on y=q1-q2 gives C=c*[1,-1]^T*[1,-1].
+    // Equal-frequency common motion is lossless; differential motion has
+    // decay rate c. A diagonal-only projection destroys this distinction.
+    let omega: f64 = 8.0;
+    let c: f64 = 1.2;
+    let storage = || SosModalStorage {
+        omegas: vec![omega, omega],
+        channels: vec![],
+    };
+    let sys = assemble_storage_with_damping(
+        2,
+        &[omega, omega],
+        &[c, -c, -c, c],
+        1,
+        vec![0.0, 1.0, 0.0, -1.0],
+        Box::new(storage()),
+    )
+    .unwrap();
+    let split = fs_phs::linear_exact::split_quadratic(
+        &sys,
+        fs_phs::linear_exact::LinearSplitBudget {
+            max_modes: 4,
+            max_omega_dt: 3.0,
+        },
+    )
+    .unwrap();
+    let dt: f64 = 0.3;
+    let common =
+        fs_phs::linear_exact::step_render(&sys, &split, &[0.4, 0.2, 0.4, 0.2], &[0.0], dt).unwrap();
+    let q_common = 0.4 * (omega * dt).cos() + 0.2 / omega * (omega * dt).sin();
+    let v_common = 0.2 * (omega * dt).cos() - 0.4 * omega * (omega * dt).sin();
+    for (actual, expected) in common
+        .x
+        .iter()
+        .zip([q_common, v_common, q_common, v_common])
+    {
+        assert!((actual - expected).abs() < 2.0e-12);
+    }
+    assert!(common.dissipated.abs() < 2.0e-12);
+
+    let initial = [1.1, 0.1, -0.3, 0.3]; // q+ = .4, q- = .7, v+ = .2, v- = -.1
+    let force: f64 = 0.6; // conjugate to y=q1-q2, so differential acceleration is F
+    let forced = fs_phs::linear_exact::step_render(&sys, &split, &initial, &[force], dt).unwrap();
+    let equilibrium = force / omega.powi(2);
+    let shifted_q = 0.7 - equilibrium;
+    let wd = (omega.powi(2) - c.powi(2)).sqrt();
+    let decay = (-c * dt).exp();
+    let q_diff = equilibrium
+        + decay * (shifted_q * (wd * dt).cos() + (-0.1 + c * shifted_q) / wd * (wd * dt).sin());
+    let v_diff = decay
+        * (-0.1 * (wd * dt).cos() - (-0.1 * c + omega.powi(2) * shifted_q) / wd * (wd * dt).sin());
+    for (actual, expected) in forced.x.iter().zip([
+        q_common + q_diff,
+        v_common + v_diff,
+        q_common - q_diff,
+        v_common - v_diff,
+    ]) {
+        assert!(
+            (actual - expected).abs() < 3.0e-12,
+            "{actual} vs {expected}"
+        );
+    }
+    let work = force * ((forced.x[0] - forced.x[2]) - (initial[0] - initial[2]));
+    assert!((forced.supplied - work).abs() < 2.0e-12);
+    assert!(forced.dissipated > 0.0);
+    assert!(
+        forced.balance_residual().abs() < 3.0e-12,
+        "defect={}, delta_h={}, loss={}, work={}",
+        forced.balance_residual(),
+        forced.delta_h,
+        forced.dissipated,
+        forced.supplied
+    );
+
+    let diagonal = assemble_storage(
+        2,
+        &[omega, omega],
+        &[c / (2.0 * omega); 2],
+        1,
+        vec![0.0, 1.0, 0.0, -1.0],
+        Box::new(storage()),
+    )
+    .unwrap();
+    let diagonal_split = fs_phs::linear_exact::split_quadratic(
+        &diagonal,
+        fs_phs::linear_exact::LinearSplitBudget {
+            max_modes: 4,
+            max_omega_dt: 3.0,
+        },
+    )
+    .unwrap();
+    let wrong = fs_phs::linear_exact::step_render(
+        &diagonal,
+        &diagonal_split,
+        &[0.4, 0.2, 0.4, 0.2],
+        &[0.0],
+        dt,
+    )
+    .unwrap();
+    assert!(
+        wrong.dissipated > 0.1,
+        "diagonalization must visibly damp common motion"
+    );
+}
+
+#[test]
+fn full_damping_diagonal_limit_is_the_same_system() {
+    let storage = || SosModalStorage {
+        omegas: vec![2.0, 5.0],
+        channels: vec![StressChannel {
+            coefficient: 0.8,
+            coupling: vec![1.0, 0.3, 0.3, 2.0],
+        }],
+    };
+    let g = vec![0.0, 0.0, 1.0, -0.2, 0.0, 0.0, -0.4, 0.8];
+    let original = assemble_storage(
+        2,
+        &[2.0, 5.0],
+        &[0.1, 0.03],
+        2,
+        g.clone(),
+        Box::new(storage()),
+    )
+    .unwrap();
+    let full = assemble_storage_with_damping(
+        2,
+        &[2.0, 5.0],
+        &[0.4, 0.0, 0.0, 0.3],
+        2,
+        g,
+        Box::new(storage()),
+    )
+    .unwrap();
+    assert_eq!(original.structure(), full.structure());
+    let initial = [0.3, 0.2, -0.1, 0.4];
+    let a = step(&original, &initial, &[0.7, -0.5], 0.01).unwrap();
+    let b = step(&full, &initial, &[0.7, -0.5], 0.01).unwrap();
+    assert_eq!(a.x, b.x);
+    assert_eq!(a.dissipated.to_bits(), b.dissipated.to_bits());
+    assert_eq!(a.supplied.to_bits(), b.supplied.to_bits());
+}
+
+#[test]
+fn full_damping_nonlinear_trajectory_converges_and_closes_work() {
+    let storage = || SosModalStorage {
+        omegas: vec![2.0, 5.0],
+        channels: vec![StressChannel {
+            coefficient: 0.8,
+            coupling: vec![1.0, 0.3, 0.3, 2.0],
+        }],
+    };
+    let damping = [0.6, 0.2, 0.2, 0.1];
+    let sys = assemble_storage_with_damping(
+        2,
+        &[2.0, 5.0],
+        &damping,
+        1,
+        vec![0.0, 1.0, 0.0, -0.4],
+        Box::new(storage()),
+    )
+    .unwrap();
+    let initial = vec![0.3, 0.2, -0.1, 0.4];
+    let reference = rk4_run_damped(&storage(), initial.clone(), 0.0001, 4000, &damping);
+    let mut errors = Vec::new();
+    for steps in [40, 80, 160] {
+        let dt = 0.4 / steps as f64;
+        let mut x = initial.clone();
+        let mut loss = 0.0;
+        for _ in 0..steps {
+            let rec = step(&sys, &x, &[0.0], dt).unwrap();
+            assert!(rec.dissipated >= 0.0);
+            assert!(
+                rec.balance_residual().abs() < 2.0e-11,
+                "steps={steps}, defect={}, residual={}",
+                rec.balance_residual(),
+                rec.solver_residual
+            );
+            loss += rec.dissipated;
+            x = rec.x;
+        }
+        assert!(loss > 0.0);
+        assert!((sys.hamiltonian(&x) + loss - sys.hamiltonian(&initial)).abs() < 2.0e-10);
+        errors.push(
+            x.iter()
+                .zip(&reference)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0, f64::max),
+        );
+    }
+    assert!(
+        errors[0] > 3.5 * errors[1] && errors[1] > 3.5 * errors[2],
+        "{errors:?}"
+    );
+    assert!(errors[2] < 3.0e-5, "{errors:?}");
+}
+
+#[test]
+fn full_damping_refuses_active_asymmetric_and_nonfinite_operators() {
+    let make = |matrix: &[f64], g: Vec<f64>| {
+        assemble_storage_with_damping(
+            2,
+            &[2.0, 3.0],
+            matrix,
+            1,
+            g,
+            Box::new(SosModalStorage {
+                omegas: vec![2.0, 3.0],
+                channels: vec![],
+            }),
+        )
+    };
+    for matrix in [
+        vec![1.0, 2.0, 2.0, 1.0], // one active eigenvector despite positive diagonal
+        vec![1.0, 0.5, 0.0, 1.0],
+        vec![1.0, f64::NAN, f64::NAN, 1.0],
+        vec![f64::INFINITY, 0.0, 0.0, 1.0],
+        vec![1.0],
+    ] {
+        assert!(make(&matrix, vec![0.0, 1.0, 0.0, -1.0]).is_err());
+    }
+    assert!(make(&[0.0; 4], vec![0.0, f64::NAN, 0.0, 0.0]).is_err());
+    // Zero loss remains an actual undamped system; no regularization is added.
+    let lossless = make(&[0.0; 4], vec![0.0, 1.0, 0.0, 0.0]).unwrap();
+    assert_eq!(lossless.structure().1, &[0.0; 16]);
+}
 
 #[test]
 fn resolved_nonlinear_force_survives_unchanged_high_energy_modes() {
@@ -502,7 +731,17 @@ fn amplitude_scaling_covariance_in_weak_limit() {
 
 /// Independent in-test RK4 on the same Hamiltonian vector field —
 /// the cross-check route for the mode-coupling trajectory.
-fn rk4_run(storage: &SosModalStorage, mut x: Vec<f64>, dt: f64, steps: usize) -> Vec<f64> {
+fn rk4_run(storage: &SosModalStorage, x: Vec<f64>, dt: f64, steps: usize) -> Vec<f64> {
+    rk4_run_damped(storage, x, dt, steps, &[])
+}
+
+fn rk4_run_damped(
+    storage: &SosModalStorage,
+    mut x: Vec<f64>,
+    dt: f64,
+    steps: usize,
+    damping: &[f64],
+) -> Vec<f64> {
     let n2 = x.len();
     let deriv = |x: &[f64]| -> Vec<f64> {
         let mut g = vec![0.0; n2];
@@ -512,6 +751,11 @@ fn rk4_run(storage: &SosModalStorage, mut x: Vec<f64>, dt: f64, steps: usize) ->
         for k in 0..n2 / 2 {
             d[2 * k] = g[2 * k + 1];
             d[2 * k + 1] = -g[2 * k];
+            if !damping.is_empty() {
+                for j in 0..n2 / 2 {
+                    d[2 * k + 1] -= damping[k * (n2 / 2) + j] * x[2 * j + 1];
+                }
+            }
         }
         d
     };
