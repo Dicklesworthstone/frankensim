@@ -302,7 +302,8 @@ pub struct EnergyAudit {
     pub incoming_mass_kg: f64,
     /// Energy carried by activated births, J.
     pub incoming_energy_j: f64,
-    /// Integrated ambient/reservoir/source input, J, positive inward.
+    /// Integrated ambient/reservoir/source input, including endpoint heat
+    /// impulses, J, positive inward.
     pub external_heat_j: f64,
     /// Actual change in stored `sum(m*h)`, J.
     pub stored_energy_change_j: f64,

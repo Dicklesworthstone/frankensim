@@ -1,5 +1,110 @@
 use super::*;
 
+#[test]
+fn g1_heat_impulses_use_original_latent_storage_without_aging_or_recounting_sources() {
+    let law = ReferencedPhase { datum: 0.0 };
+    let initial = prepare(&law, vec![birth(1, 0.0, 80.0, 7.0), birth(2, 0.0, 140.0, 3.0)]);
+    let heat = BTreeMap::from([(CellId(1), 24.0), (CellId(2), -24.0)]);
+    let (next, audit) = initial.apply_heat_j(&heat, 0.0, 0.0, || Ok(())).unwrap();
+    assert_eq!(next.cells()[&CellId(1)].specific_h_j_kg, 104.0);
+    assert_eq!(next.cells()[&CellId(2)].specific_h_j_kg, 116.0);
+    assert_eq!(next.temperature_k(CellId(1)).unwrap(), 364.0);
+    assert_eq!(next.temperature_k(CellId(2)).unwrap(), 364.0);
+    assert_eq!(audit.external_heat_j, 0.0);
+    assert_eq!(audit.stored_energy_change_j, 0.0);
+    assert_eq!(audit.residual_j, 0.0);
+    assert_eq!((audit.events, audit.substeps), (0, 0));
+    assert_eq!((next.time_s, next.cursor), (initial.time_s, initial.cursor));
+    for id in [CellId(1), CellId(2)] {
+        let mut expected = initial.cells()[&id].clone();
+        expected.specific_h_j_kg = next.cells()[&id].specific_h_j_kg;
+        assert_eq!(next.cells()[&id], expected);
+    }
+    // Authored watts remain active only when physical time subsequently advances.
+    let (_, later) = next.advance_to(1.0, config(), || Ok(())).unwrap();
+    assert_eq!(later.external_heat_j, 10.0);
+    assert_eq!(initial.cells()[&CellId(1)].specific_h_j_kg, 80.0);
+}
+
+#[test]
+fn g0_heat_impulse_balance_resolves_cell_changes_below_aggregate_energy_precision() {
+    let datum = 2.0_f64.powi(26);
+    let quantum_j = 2.0_f64.powi(-26);
+    let law = ReferencedPhase { datum };
+    let initial = prepare(&law, vec![
+        birth(1, 0.0, datum + 80.0, 0.0), birth(2, 0.0, datum + 80.0, 0.0),
+    ]);
+    let (next, audit) = initial.apply_heat_j(
+        &BTreeMap::from([(CellId(1), quantum_j)]), 0.0, 0.0, || Ok(()),
+    ).unwrap();
+    assert_eq!(next.energy_j(), initial.energy_j());
+    assert_eq!(audit.external_heat_j, quantum_j);
+    assert_eq!(audit.stored_energy_change_j, quantum_j);
+    assert_eq!(audit.residual_j, 0.0);
+    assert_eq!(next.temperature_k(CellId(1)).unwrap(), 364.0);
+}
+
+#[test]
+fn g0_heat_impulses_gate_local_and_aggregate_absolute_storage_errors() {
+    let datum = 2.0_f64.powi(26);
+    let lost_j = 2.0_f64.powi(-28);
+    let law = ReferencedPhase { datum };
+    let initial = prepare(&law, vec![
+        birth(1, 0.0, datum + 80.0, 0.0), birth(2, 0.0, datum + 80.0, 0.0),
+    ]);
+    let heat = BTreeMap::from([(CellId(1), lost_j), (CellId(2), -lost_j)]);
+    // Both signs disappear from h. Zero global signed error cannot excuse them.
+    assert!(matches!(initial.apply_heat_j(&heat, lost_j, lost_j, || Ok(())),
+        Err(DepositionError::EnergyBalance(_))));
+    assert!(matches!(initial.apply_heat_j(&heat, 0.5 * lost_j, 8.0 * lost_j, || Ok(())),
+        Err(DepositionError::EnergyBalance(_))));
+    let (next, audit) = initial.apply_heat_j(&heat, lost_j, 2.0 * lost_j, || Ok(())).unwrap();
+    assert_eq!(next.cells(), initial.cells());
+    assert_eq!(audit.residual_j, 0.0);
+}
+
+#[test]
+fn g4_heat_impulses_refuse_domain_errors_unknown_cells_and_late_cancellation_atomically() {
+    let law = ReferencedPhase { datum: 0.0 };
+    let initial = prepare(&law, vec![birth(1, 0.0, 80.0, 0.0), birth(2, 0.0, 80.0, 0.0)]);
+    for heat in [
+        BTreeMap::from([(CellId(1), 2.0), (CellId(2), 200.0)]),
+        BTreeMap::from([(CellId(9), 0.0)]),
+        BTreeMap::from([(CellId(1), f64::INFINITY)]),
+    ] {
+        assert!(initial.apply_heat_j(&heat, 0.0, 0.0, || Ok(())).is_err());
+    }
+    let heat = BTreeMap::from([(CellId(1), 2.0)]);
+    for allowed in [0, 1, 2] {
+        let mut calls = 0;
+        assert!(matches!(initial.apply_heat_j(&heat, 0.0, 0.0, || {
+            calls += 1;
+            if calls > allowed { Err(DepositionError::Cancelled) } else { Ok(()) }
+        }), Err(DepositionError::Cancelled)));
+    }
+    for tolerance in [-1.0, f64::NAN, f64::INFINITY] {
+        assert!(initial.apply_heat_j(&heat, tolerance, 0.0, || Ok(())).is_err());
+        assert!(initial.apply_heat_j(&heat, 0.0, tolerance, || Ok(())).is_err());
+    }
+    assert_eq!(initial.cells()[&CellId(1)].specific_h_j_kg, 80.0);
+    assert_eq!(initial.cells()[&CellId(2)].specific_h_j_kg, 80.0);
+    let (same, audit) = initial.apply_heat_j(&BTreeMap::new(), 0.0, 0.0, || Ok(())).unwrap();
+    assert_eq!(same.cells(), initial.cells());
+    assert_eq!(audit.external_heat_j, 0.0);
+}
+
+#[test]
+fn g0_heat_impulses_require_same_time_births_and_boundary_events_to_be_processed_first() {
+    let law = ReferencedPhase { datum: 0.0 };
+    let prepared = prepare(&law, vec![birth(1, 0.0, 80.0, 0.0)]);
+    let pending = DepositionSimulation::new(
+        vec![birth(1, 0.0, 80.0, 0.0)], &[(MaterialId(1), &law)], prepared.budget,
+    ).unwrap();
+    assert!(matches!(pending.apply_heat_j(&BTreeMap::new(), 0.0, 0.0, || Ok(())),
+        Err(DepositionError::InvalidInput(_))));
+    assert_eq!(pending.cursor, 0);
+}
+
 struct ReferencedPhase {
     datum: f64,
 }

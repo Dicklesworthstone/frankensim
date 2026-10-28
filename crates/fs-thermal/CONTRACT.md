@@ -12,6 +12,21 @@ specific enthalpy. Every material chart in one balance uses a compatible energy
 datum. The shared timeline is re-exported by fs-conduction; consumers must not
 implement independent copies of its storage update.
 
+`DepositionSimulation::apply_heat_j` adds signed endpoint heat to those same
+cells without advancing time or re-integrating sources and contacts. The
+original material law resolves `h_new = h_old + Q/m`, including latent storage.
+Same-time scheduled events must be processed first. The method checks actual
+cell-relative stored energy against the supplied joules, with separate local
+and aggregate absolute-error tolerances; opposite lost increments cannot hide
+behind zero net heat. Compensated sums preserve small changes beside large
+caloric reference energies. Domain, arithmetic and cancellation failures return
+no candidate. The energy audit identifies the input as external to the thermal
+subsystem; a coupling owner must account for the corresponding upstream debit.
+No mass, geometry, boundary, event cursor or accepted time changes, and no
+mechanical-to-heat conversion fraction is inferred. Five focused regressions
+cover latent/signed inputs, unchanged clocks/sources, large reference datums,
+local/aggregate loss gates and transactional refusal.
+
 ## Sublimation and deposition
 
 `sublimation::SublimationLaw` supplies a bounded immutable saturation-pressure,

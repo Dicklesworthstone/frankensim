@@ -439,6 +439,78 @@ pub struct ContactUpdate {
 }
 
 impl DepositionSimulation<'_> {
+    /// Apply signed endpoint heat [J] through the original enthalpy owner.
+    ///
+    /// This operation does not advance time, re-integrate sources or contacts,
+    /// consume events, or change mass and geometry. Process due events first.
+    /// The original caloric law resolves temperature, including latent storage.
+    /// Both the local error and the sum of absolute cell-storage errors must
+    /// fit the explicit joule allowances; opposite lost increments cannot cancel.
+    /// The returned heat is external to this thermal subsystem. Its coupling
+    /// owner must account for the corresponding upstream physical energy debit.
+    /// All changes remain on a candidate until validation and cancellation pass.
+    pub fn apply_heat_j(
+        &self,
+        heat_by_cell_j: &BTreeMap<CellId, f64>,
+        cell_energy_tolerance_j: f64,
+        energy_tolerance_j: f64,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, EnergyAudit), DepositionError> {
+        checkpoint()?;
+        if !nonnegative(cell_energy_tolerance_j) || !nonnegative(energy_tolerance_j) {
+            return Err(DepositionError::InvalidInput("finite nonnegative heat-impulse tolerances required"));
+        }
+        if heat_by_cell_j.len() > self.cells.len() {
+            return Err(DepositionError::InvalidInput("too many heat-impulse cells"));
+        }
+        if self.schedule.get(self.cursor).is_some_and(|e| e.time_s <= self.time_s) {
+            return Err(DepositionError::InvalidInput("process due scheduled events before heat impulses"));
+        }
+        let mut next = self.clone();
+        let mut supplied = EnergySum::default();
+        let mut stored = EnergySum::default();
+        let mut residual = EnergySum::default();
+        let mut absolute_residual = EnergySum::default();
+        for (index, (&id, &heat)) in heat_by_cell_j.iter().enumerate() {
+            if index % 256 == 0 { checkpoint()?; }
+            finite(heat)?;
+            let cell = next.cells.get_mut(&id)
+                .ok_or(DepositionError::InvalidInput("inactive heat-impulse cell"))?;
+            if heat == 0.0 { continue; }
+            let old_h = cell.specific_h_j_kg;
+            let new_h = finite(old_h + finite(heat / cell.mass_kg)?)?;
+            let temperature = next.materials[&cell.material_id].temperature_k(new_h)?;
+            if !positive(temperature) { return Err(DepositionError::MaterialDomain); }
+            finite(cell.mass_kg * new_h)?;
+            let change = finite(cell.mass_kg * finite(new_h - old_h)?)?;
+            let defect = finite(change - heat)?;
+            if defect.abs() > cell_energy_tolerance_j {
+                return Err(DepositionError::EnergyBalance(defect));
+            }
+            supplied.add(heat)?;
+            stored.add(change)?;
+            residual.add(defect)?;
+            absolute_residual.add(defect.abs())?;
+            cell.specific_h_j_kg = new_h;
+        }
+        let absolute_residual = absolute_residual.value()?;
+        if absolute_residual > energy_tolerance_j {
+            return Err(DepositionError::EnergyBalance(absolute_residual));
+        }
+        finite(next.energy_j())?;
+        let audit = EnergyAudit {
+            incoming_mass_kg: 0.0,
+            incoming_energy_j: 0.0,
+            external_heat_j: supplied.value()?,
+            stored_energy_change_j: stored.value()?,
+            residual_j: residual.value()?,
+            substeps: 0,
+            events: 0,
+        };
+        checkpoint()?;
+        Ok((next, audit))
+    }
+
     /// Apply a complete same-time contact change without advancing heat or
     /// consuming scheduled events. Process events due now with `advance_to`
     /// first. All expected contacts are checked against the original state;
