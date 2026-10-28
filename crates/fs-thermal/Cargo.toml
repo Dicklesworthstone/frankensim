@@ -12,6 +12,7 @@ layer = "L3"
 
 [dependencies]
 fs-la = { path = "../fs-la" }
+fs-math = { path = "../fs-math" }
 
 [lints]
 workspace = true

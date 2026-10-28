@@ -12,6 +12,8 @@
 
 pub mod enthalpy;
 pub mod observers;
+/// Conservative solid/vapor exchange and implicit latent-energy feedback.
+pub mod sublimation;
 
 /// Compatibility path for the original conduction-owned timeline. This is a
 /// re-export, not a second implementation or a conversion between state types.

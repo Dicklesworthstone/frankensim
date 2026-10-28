@@ -2801,6 +2801,7 @@ name = "fs-thermal"
 version = "0.0.1"
 dependencies = [
  "fs-la",
+ "fs-math",
 ]
 
 [[package]]
