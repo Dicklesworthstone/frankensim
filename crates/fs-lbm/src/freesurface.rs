@@ -310,7 +310,8 @@ pub struct FreeSurface {
     pub sigma: f64,
     /// Contact-line model (curvature ghost at walls).
     pub contact: ContactModel,
-    /// Conversion-conservation carry (mass awaiting redistribution).
+    /// Unresolved conversion mass with no adjacent interface recipient.
+    /// It remains in the ledger; no location is available to redistribute it.
     pub carry: f64,
     /// Cell-conversion statistics (cumulative).
     pub conversions: ConversionStats,
@@ -645,7 +646,7 @@ impl FreeSurface {
     fn apply_conversions(&mut self) {
         let (nx, ny) = (self.grid.nx, self.grid.ny);
         // Fluid mass is Σf; interface mass tracked. Conversions:
-        let mut excess_pool = std::mem::take(&mut self.carry);
+        let mut excess = Vec::new();
         let mut to_fluid = Vec::new();
         let mut to_gas = Vec::new();
         for i in 0..nx * ny {
@@ -659,11 +660,11 @@ impl FreeSurface {
                 to_gas.push(i);
             }
         }
-        // Interface → fluid: excess to the pool; gas neighbors become
+        // Interface → fluid: retain each local excess; gas neighbors become
         // interface (closure).
         for &i in &to_fluid {
             let rho: f64 = self.grid.f[i].iter().sum();
-            excess_pool += self.mass[i] - rho;
+            excess.push((i, self.mass[i] - rho));
             self.grid.flags[i] = Cell::Fluid;
             self.mass[i] = rho;
             self.conversions.to_fluid += 1;
@@ -702,13 +703,13 @@ impl FreeSurface {
                 }
             }
         }
-        // Interface → gas: deficit to the pool; fluid neighbors become
+        // Interface → gas: retain each local deficit; fluid neighbors become
         // interface (their Σf IS their mass — ledger unchanged).
         for &i in &to_gas {
             if self.grid.flags[i] != Cell::Interface {
                 continue; // may have been re-flagged by the cascade
             }
-            excess_pool += self.mass[i];
+            excess.push((i, self.mass[i]));
             self.grid.flags[i] = Cell::Gas;
             self.mass[i] = 0.0;
             self.conversions.to_gas += 1;
@@ -723,16 +724,38 @@ impl FreeSurface {
                 }
             }
         }
-        // Conservative redistribution of the pool over interface cells.
-        let interfaces: Vec<usize> = (0..nx * ny)
-            .filter(|&i| self.grid.flags[i] == Cell::Interface)
-            .collect();
-        if interfaces.is_empty() {
-            self.carry = excess_pool;
-        } else {
-            let share = excess_pool / interfaces.len() as f64;
-            for &i in &interfaces {
-                self.mass[i] += share;
+        // Redistribute after the flag cascade, only beside each converted
+        // cell. A global pool would change distant droplets' capillary pressure
+        // and exchange their heat even though no physical link joins them.
+        for (i, amount) in excess {
+            if amount == 0.0 {
+                continue;
+            }
+            let (x, y) = (i % nx, i / nx);
+            let mut recipients = [0; Q - 1];
+            let mut count = 0;
+            for q in 1..Q {
+                if let Some(nb) = neighbor(&self.grid, x, y, q)
+                    && self.grid.flags[nb] == Cell::Interface
+                    && !recipients[..count].contains(&nb)
+                {
+                    // Small periodic domains can map several links to one cell.
+                    recipients[count] = nb;
+                    count += 1;
+                }
+            }
+            if count == 0 {
+                // This scalar ledger has no spatial provenance. Retain an
+                // orphan excess/debt instead of feeding a disconnected drop.
+                self.carry += amount;
+                continue;
+            }
+            let share = amount / count as f64;
+            let mut remaining = amount;
+            for (j, &recipient) in recipients[..count].iter().enumerate() {
+                let transfer = if j + 1 == count { remaining } else { share };
+                self.mass[recipient] += transfer;
+                remaining -= transfer;
             }
         }
     }
@@ -835,6 +858,74 @@ pub fn surge_front(fs: &FreeSurface) -> usize {
 #[cfg(test)]
 mod capillary_tests {
     use super::*;
+
+    fn separated_drops() -> FreeSurface {
+        let mut grid = Grid::uniform(24, 12, 0.8);
+        grid.periodic_x = false;
+        grid.periodic_y = false;
+        for y in 0..12 {
+            for x in 0..24 {
+                let i = grid.idx(x, y);
+                grid.flags[i] =
+                    if (3..8).contains(&y) && ((3..8).contains(&x) || (16..21).contains(&x)) {
+                        Cell::Fluid
+                    } else {
+                        Cell::Gas
+                    };
+            }
+        }
+        FreeSurface::new(grid, 0.002, ContactModel::Neutral)
+    }
+
+    #[test]
+    fn g0_conversion_excess_and_debt_stay_with_their_drop() {
+        for amount in [0.25, -0.25] {
+            let mut sim = separated_drops();
+            let donor = sim.grid.idx(7, 5);
+            assert_eq!(sim.grid.flags[donor], Cell::Interface);
+            let rho = sim.grid.f[donor].iter().sum::<f64>();
+            sim.mass[donor] = if amount > 0.0 { rho + amount } else { amount };
+            let mass = sim.ledger_mass();
+            let distant: Vec<_> = (0..sim.mass.len())
+                .filter(|&i| i % sim.grid.nx >= 14)
+                .map(|i| (i, sim.mass[i].to_bits(), sim.grid.flags[i], sim.grid.f[i]))
+                .collect();
+            sim.apply_conversions();
+            assert!((sim.ledger_mass() - mass).abs() < 1e-12);
+            assert_eq!(sim.carry, 0.0);
+            assert_eq!(
+                sim.grid.flags[donor],
+                if amount > 0.0 { Cell::Fluid } else { Cell::Gas }
+            );
+            for (i, mass_bits, flag, populations) in distant {
+                assert_eq!(sim.mass[i].to_bits(), mass_bits);
+                assert_eq!(sim.grid.flags[i], flag);
+                assert_eq!(sim.grid.f[i], populations);
+            }
+        }
+    }
+
+    #[test]
+    fn g0_unlocated_carry_does_not_feed_a_disconnected_interface() {
+        let mut sim = separated_drops();
+        let donor = sim.grid.idx(11, 5);
+        sim.grid.flags[donor] = Cell::Interface;
+        sim.mass[donor] = -0.25;
+        let distant = sim.mass.clone();
+        let mass = sim.ledger_mass();
+        sim.apply_conversions();
+        assert_eq!(sim.carry, -0.25);
+        assert!((sim.ledger_mass() - mass).abs() < 1e-12);
+        for (i, &before) in distant.iter().enumerate() {
+            if i != donor {
+                assert_eq!(sim.mass[i].to_bits(), before.to_bits());
+            }
+        }
+        let retained = sim.mass.clone();
+        sim.apply_conversions();
+        assert_eq!(sim.carry, -0.25);
+        assert_eq!(sim.mass, retained);
+    }
 
     fn planar_wall_fixture() -> FreeSurface {
         let mut grid = Grid::uniform(12, 12, 0.8);

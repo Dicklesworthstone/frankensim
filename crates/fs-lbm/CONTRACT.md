@@ -112,9 +112,9 @@ stationary walls and explicitly neglected capillarity. Negative accepted native
 interface/carry mass refuses. Phase conversion, volume change, conduction,
 viscous heating, pressure work and surface-energy evolution remain separate
 missing closures. `h` is enthalpy and is never described as internal or total
-energy. Implicit transport and native global conversion redistribution introduce
-numerical mixing; no physical thermal-diffusion or mechanical-energy claim is
-made. The focused `material_free_surface_enthalpy` tests exercise actual
+energy. Implicit donor transport and local conversion redistribution introduce
+numerical mixing within neighboring liquid cells; no physical thermal-diffusion
+or mechanical-energy claim is made. The focused `material_free_surface_enthalpy` tests exercise actual
 interface conversion, material-only viscosity changes, heat conservation and
 atomic physical/source-domain refusals.
 
@@ -509,7 +509,7 @@ rollback. Their addition does not establish executed native validation.
   rollback.
 - `freesurface::FreeSurface`, `ContactModel`, `dam_break`, and `surge_front`
   — dense-grid VOF-style mass tracking with interface/gas/fluid conversion
-  bookkeeping, conservative carry redistribution, contact-model bracketing,
+  bookkeeping, conservative neighbor-local redistribution, contact-model bracketing,
   and qualitative dam-break / jet-fragment fixtures.
 - `freesurface::query_dynamic_wetting2`, `DynamicWettingAnswer2`,
   `ContactLineRegime2`, and `DynamicWettingError2` — a read-only adapter from
@@ -3889,6 +3889,38 @@ query stays outside the fixture's explicitly declared low-rate regularization.
 Pooled wrappers reuse the same preparation and existing pool owner, but pooled
 execution was not included in this qualification; no cross-ISA or throughput
 claim is added.
+
+### Local capillary-interface conversion preserves detached drops
+
+Both dense D2Q9 and sparse D3Q19 free surfaces redistribute each converted
+cell's signed excess only to adjacent surviving interface cells after the full
+flag cascade. A conversion no longer changes every distant drop's fill and
+Laplace pressure through a global pool. Recipients follow fixed lattice-link
+order, use fixed-size neighbor storage and take the final rounding remainder
+locally. The redistribution cost depends on converted cells and their stencil,
+without another whole-domain interface scan.
+
+New D3Q19 constructors select `ConversionRedistribution3::Local`.
+`with_conversion_redistribution(LegacyGlobal)` explicitly reproduces historical
+version-1 trajectories, including their nonlocal pooling. The frozen pour
+sentinel selects this replay mode and retains its original four-quadrant hash;
+new locality and thermal regressions exercise the corrected default. The
+independent `FREE_SURFACE3_BIT_SEMANTICS_VERSION` is 2 for the new default,
+leaving the unchanged D3Q19 core, boundary and sparse goldens untouched.
+
+D3Q19 records direct donor/recipient mass routes, including reversed routes for
+conversion debt. The original extensive enthalpy transport consumes these same
+routes, avoiding temperature mixing through a shared zero-storage pool. Excess
+or debt with no adjacent recipient remains explicit unregioned carry; without
+spatial provenance it is not injected into another component on a later step.
+This preserves the total numerical mass ledger but does not claim resolved
+geometry for orphan carry, momentum conservation during cell conversion or a
+conservative capillary surface-energy discretization.
+
+Focused G0 tests cover both conversion signs, disconnected-drop locality,
+per-node mass-route balances, orphan carry retention and scalar D3Q19 tension
+admission. The G1 enthalpy regression compares two independent conversion
+components and reverse-debt cycles against analytic local energy balances.
 
 ### Finite-slope thermocapillary height graphs
 

@@ -124,6 +124,101 @@ mod tests {
     use crate::d3q19::freesurface3::transport::MassRoute3;
 
     #[test]
+    fn g1_local_conversion_routes_preserve_disconnected_drop_enthalpy() {
+        let a = MassLocation3::Cell(0, 0);
+        let b = MassLocation3::Cell(0, 1);
+        let c = MassLocation3::Cell(64, 0);
+        let d = MassLocation3::Cell(64, 1);
+        let carry = MassLocation3::Carry;
+        let gate = CancelGate::new_clock_free();
+        let controls = FreeSurfaceEnthalpyControls::default();
+        // Two drops have independent temperatures and simultaneous conversion
+        // excess. A shared zero-storage pool would mix their outgoing enthalpy.
+        // The unlocated old carry is real storage, but has no physical route.
+        let mut trace = MassTransport3::new(
+            BTreeMap::from([(a, 2.0), (b, 1.0), (c, 2.0), (d, 1.0), (carry, 0.5)]),
+            8,
+        );
+        trace.after = BTreeMap::from([(a, 1.0), (b, 2.0), (c, 1.0), (d, 2.0), (carry, 0.5)]);
+        trace.routes = vec![
+            MassRoute3 {
+                from: a,
+                to: b,
+                mass: 1.0,
+            },
+            MassRoute3 {
+                from: c,
+                to: d,
+                mass: 1.0,
+            },
+        ];
+        let old_h = BTreeMap::from([
+            (a, 10.0),
+            (b, 40.0),
+            (c, 100.0),
+            (d, 400.0),
+            (carry, 1000.0),
+        ]);
+        let (h, _) = advect(&trace, &old_h, controls, &gate).unwrap();
+        for (key, expected) in [
+            (a, 10.0),
+            (b, 25.0),
+            (c, 100.0),
+            (d, 250.0),
+            (carry, 1000.0),
+        ] {
+            assert!((h[&key] - expected).abs() < 1e-10, "{key:?}: {}", h[&key]);
+        }
+        assert!((total(&trace.after, &h, 1.0).unwrap() - 1160.0).abs() < 1e-10);
+
+        // A disappearing cell oversends mass and its adjacent recipient
+        // supplies the conversion debt. Each local implicit cycle is anchored
+        // by its own old storage, with no cross-drop equilibration.
+        trace.before = BTreeMap::from([(a, 1.0), (b, 2.0), (c, 1.0), (d, 2.0), (carry, 0.5)]);
+        trace.after = BTreeMap::from([(a, 0.0), (b, 3.0), (c, 0.0), (d, 3.0), (carry, 0.5)]);
+        trace.routes = vec![
+            MassRoute3 {
+                from: a,
+                to: b,
+                mass: 2.0,
+            },
+            MassRoute3 {
+                from: b,
+                to: a,
+                mass: 1.0,
+            },
+            MassRoute3 {
+                from: c,
+                to: d,
+                mass: 2.0,
+            },
+            MassRoute3 {
+                from: d,
+                to: c,
+                mass: 1.0,
+            },
+        ];
+        let old_h = BTreeMap::from([
+            (a, 40.0),
+            (b, 10.0),
+            (c, 400.0),
+            (d, 100.0),
+            (carry, 1000.0),
+        ]);
+        let (h, _) = advect(&trace, &old_h, controls, &gate).unwrap();
+        for (key, expected) in [
+            (a, 30.0),
+            (b, 20.0),
+            (c, 300.0),
+            (d, 200.0),
+            (carry, 1000.0),
+        ] {
+            assert!((h[&key] - expected).abs() < 1e-10, "{key:?}: {}", h[&key]);
+        }
+        assert!((total(&trace.after, &h, 1.0).unwrap() - 1160.0).abs() < 1e-10);
+    }
+
+    #[test]
     fn g1_exact_conversion_pool_and_reverse_debt_transport() {
         let a = MassLocation3::Cell(0, 0);
         let b = MassLocation3::Cell(0, 1);

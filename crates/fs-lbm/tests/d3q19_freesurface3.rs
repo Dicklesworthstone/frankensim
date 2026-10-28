@@ -4,7 +4,9 @@
 //! deterministic replay, and gas-tile retirement. Gauntlet tiers: G0
 //! (ledger algebra), G5 (replay determinism).
 
-use fs_lbm::d3q19::freesurface3::{Cell3, ContactModel3, FreeSurface3, FreeSurfaceError3};
+use fs_lbm::d3q19::freesurface3::{
+    Cell3, ContactModel3, ConversionRedistribution3, FreeSurface3, FreeSurfaceError3,
+};
 use fs_lbm::d3q19::sparse::morton3;
 
 /// A fluid column occupying `[0..cx) × [0..cy) × [0..cz)` cells.
@@ -453,7 +455,11 @@ fn lbm3_106_minimal_pour() {
         &solid,
         fluid,
     )
-    .expect("pour fixture admissible");
+    .expect("pour fixture admissible")
+    // This frozen version-1 sentinel deliberately reproduces its historical
+    // global conversion rule. New simulations use local redistribution, whose
+    // independent mass/locality/enthalpy regressions exercise the default.
+    .with_conversion_redistribution(ConversionRedistribution3::LegacyGlobal);
 
     // Tank region (cells): the footprint column from the floor disc up.
     let tank_region = |x: usize, y: usize, z: usize| {

@@ -1,8 +1,12 @@
 //! Exact native mass routes for a conservative extensive companion field.
 //!
 //! These records are emitted by collision/streaming and conversion themselves.
-//! They do not reconstruct a second flux from cell velocities. The carry is a
-//! real node because native conversion redistributes mass through that pool.
+//! They do not reconstruct a second flux from cell velocities. Conversion
+//! transfers in the default Local mode go directly to adjacent surviving
+//! interfaces. The carry remains
+//! a real node only for excess or debt without a local geometric recipient;
+//! its missing position is never used to mix disconnected liquid components.
+//! Explicit LegacyGlobal replay retains the historical shared-pool routes.
 
 use super::*;
 

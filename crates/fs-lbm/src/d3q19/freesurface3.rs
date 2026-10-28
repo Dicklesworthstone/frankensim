@@ -52,6 +52,23 @@ pub(crate) mod transport;
 pub(crate) mod wetting;
 use transport::{MassLocation3, MassTransport3};
 
+/// Free-surface mass/geometry semantics, independent of the D3Q19 core.
+/// Version 2 replaces the legacy global conversion pool with neighbor-local
+/// transfers. This intentionally changes evolving fill, pressure and pour bits;
+/// the core collision/streaming surface and its goldens are unchanged.
+pub const FREE_SURFACE3_BIT_SEMANTICS_VERSION: u32 = 2;
+
+/// Conversion semantics for new simulations versus historical trajectory replay.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ConversionRedistribution3 {
+    /// Transfer excess and debt only to surviving neighboring interface cells.
+    #[default]
+    Local,
+    /// Reproduce version-1 global pooling, including its nonlocal mass and heat
+    /// mixing between disconnected drops. Intended only for historical replay.
+    LegacyGlobal,
+}
+
 /// D3Q19 lattice speed of sound squared.
 const CS2_3: f64 = 1.0 / 3.0;
 
@@ -261,10 +278,12 @@ pub struct FreeSurface3 {
     /// Source-evolved coefficients on the current wet cells. The original
     /// scalar path remains unchanged when all coefficients equal `sigma`.
     local_sigma: Option<BTreeMap<(u64, usize), f64>>,
+    redistribution: ConversionRedistribution3,
     contact: ContactModel3,
     planar_contact: Option<PlanarContactAngle3>,
     planar_contact_field: Option<wetting::PlanarContactField3>,
-    /// Conversion-conservation carry (mass awaiting redistribution).
+    /// In Local mode, unresolved mass with no adjacent interface recipient.
+    /// It remains in the ledger; no location is available to redistribute it.
     carry: f64,
     conversions: ConversionStats3,
     /// Worst single-step relative ledger violation observed so far —
@@ -282,6 +301,7 @@ impl core::fmt::Debug for FreeSurface3 {
         f.debug_struct("FreeSurface3")
             .field("active_tiles", &self.tiles.len())
             .field("sigma", &self.sigma)
+            .field("redistribution", &self.redistribution)
             .field("contact", &self.contact)
             .field("planar_contact", &self.planar_contact)
             .field("carry", &self.carry)
@@ -364,8 +384,9 @@ impl FreeSurface3 {
     /// walls for streaming, exchange, and the fill-field ghost alike.
     ///
     /// # Errors
-    /// As [`FreeSurface3::new`]; additionally refuses via
-    /// [`FreeSurfaceError3::Grid`] if a solid tile lies out of domain.
+    /// As [`FreeSurface3::new`]; also refuses nonfinite/negative tension or a
+    /// coefficient that can make the clamped capillary boundary density
+    /// nonpositive via [`FreeSurfaceError3::InvalidInitialState`].
     ///
     /// # Panics
     /// If interface insertion fails to separate fluid from gas, or if a
@@ -382,6 +403,12 @@ impl FreeSurface3 {
         solid_tiles: &[(u32, u32, u32)],
         fluid: impl Fn(usize, usize, usize) -> bool,
     ) -> Result<FreeSurface3, FreeSurfaceError3> {
+        if !sigma.is_finite() || sigma < 0.0 || sigma * Self::CURVATURE_LIMIT / CS2_3 >= 1.0 {
+            return Err(FreeSurfaceError3::InvalidInitialState {
+                coordinates: None,
+                reason: "capillary boundary density can be nonpositive",
+            });
+        }
         let mut grid = SparseGrid3::new(nx, ny, nz, tau, gravity)?;
         let solid: std::collections::BTreeSet<u64> = solid_tiles
             .iter()
@@ -465,6 +492,7 @@ impl FreeSurface3 {
             solid,
             sigma,
             local_sigma: None,
+            redistribution: ConversionRedistribution3::Local,
             contact,
             planar_contact: None,
             planar_contact_field: None,
@@ -598,10 +626,20 @@ impl FreeSurface3 {
         total
     }
 
-    /// The conversion-conservation carry (global, unregioned).
+    /// The conversion-conservation carry (global, unregioned). Orphan mass or
+    /// debt stays here in Local mode, without redistribution along unknown routes.
     #[must_use]
     pub fn carry(&self) -> f64 {
         self.carry
+    }
+
+    /// Select conversion semantics explicitly. Constructors use [`ConversionRedistribution3::Local`].
+    /// The legacy choice exists to replay previously frozen version-1 results;
+    /// it does not provide spatially local drop or thermal transport.
+    #[must_use]
+    pub fn with_conversion_redistribution(mut self, model: ConversionRedistribution3) -> Self {
+        self.redistribution = model;
+        self
     }
 
     /// Cumulative conversion statistics.
@@ -1133,13 +1171,13 @@ impl FreeSurface3 {
         Ok(())
     }
 
-    /// Conversion cascade with conservative redistribution (2-D port),
+    /// Conversion cascade with conservative neighbor-local redistribution,
     /// activating inactive in-domain tiles when fluid advances into them.
     fn apply_conversions(
         &mut self,
         mut transport: Option<&mut MassTransport3>,
     ) -> Result<(), FreeSurfaceError3> {
-        let mut excess_pool = std::mem::take(&mut self.carry);
+        let mut excess = Vec::new();
         let keys: Vec<u64> = self.tiles.keys().copied().collect();
         let mut to_fluid: Vec<(u64, usize)> = Vec::new();
         let mut to_gas: Vec<(u64, usize)> = Vec::new();
@@ -1166,14 +1204,7 @@ impl FreeSurface3 {
             let rho: f64 = self.grid.populations(slot, lane).iter().sum();
             {
                 let tile = self.tiles.get_mut(&key).expect("active");
-                if let Some(trace) = transport.as_deref_mut() {
-                    trace.exchange(
-                        MassLocation3::Cell(key, lane),
-                        MassLocation3::Carry,
-                        tile.mass[lane] - rho,
-                    )?;
-                }
-                excess_pool += tile.mass[lane] - rho;
+                excess.push((key, lane, tile.mass[lane] - rho));
                 tile.cells[lane] = Cell3::Fluid;
                 tile.mass[lane] = rho;
             }
@@ -1270,14 +1301,7 @@ impl FreeSurface3 {
             }
             {
                 let tile = self.tiles.get_mut(&key).expect("active");
-                if let Some(trace) = transport.as_deref_mut() {
-                    trace.exchange(
-                        MassLocation3::Cell(key, lane),
-                        MassLocation3::Carry,
-                        tile.mass[lane],
-                    )?;
-                }
-                excess_pool += tile.mass[lane];
+                excess.push((key, lane, tile.mass[lane]));
                 tile.cells[lane] = Cell3::Gas;
                 tile.mass[lane] = 0.0;
             }
@@ -1300,33 +1324,88 @@ impl FreeSurface3 {
             }
         }
 
-        // Conservative redistribution over interface cells (2-D port).
-        let mut interface_count = 0usize;
-        for tile in self.tiles.values() {
-            interface_count += tile
-                .cells
-                .iter()
-                .filter(|c| **c == Cell3::Interface)
-                .count();
-        }
-        if interface_count == 0 {
-            self.carry = excess_pool;
-        } else {
-            #[allow(clippy::cast_precision_loss)]
-            let share = excess_pool / interface_count as f64;
-            for (&key, tile) in &mut self.tiles {
-                for lane in 0..TILE_CELLS {
-                    if tile.cells[lane] == Cell3::Interface {
-                        if let Some(trace) = transport.as_deref_mut() {
-                            trace.exchange(
-                                MassLocation3::Carry,
-                                MassLocation3::Cell(key, lane),
-                                share,
-                            )?;
+        if self.redistribution == ConversionRedistribution3::LegacyGlobal {
+            // Keep the historical operation tree only for explicit version-1
+            // replay. Its global pooling is intentionally absent by default.
+            let mut pool = std::mem::take(&mut self.carry);
+            for (key, lane, amount) in excess {
+                if let Some(trace) = transport.as_deref_mut() {
+                    trace.exchange(MassLocation3::Cell(key, lane), MassLocation3::Carry, amount)?;
+                }
+                pool += amount;
+            }
+            let count = self
+                .tiles
+                .values()
+                .map(|tile| {
+                    tile.cells
+                        .iter()
+                        .filter(|&&cell| cell == Cell3::Interface)
+                        .count()
+                })
+                .sum::<usize>();
+            if count == 0 {
+                self.carry = pool;
+            } else {
+                let share = pool / count as f64;
+                for (&key, tile) in &mut self.tiles {
+                    for lane in 0..TILE_CELLS {
+                        if tile.cells[lane] == Cell3::Interface {
+                            if let Some(trace) = transport.as_deref_mut() {
+                                trace.exchange(
+                                    MassLocation3::Carry,
+                                    MassLocation3::Cell(key, lane),
+                                    share,
+                                )?;
+                            }
+                            tile.mass[lane] += share;
                         }
-                        tile.mass[lane] += share;
                     }
                 }
+            }
+            return Ok(());
+        }
+
+        // Finish the complete flag cascade before finding local recipients.
+        // Direct routes preserve each drop's mass AND extensive companions;
+        // a shared zero-storage Carry node would spuriously mix their heat.
+        // Fixed-size neighbor storage avoids a whole-domain redistribution pass.
+        for (key, lane, amount) in excess {
+            if amount == 0.0 {
+                continue;
+            }
+            let mut recipients = [(0, 0); Q3 - 1];
+            let mut count = 0;
+            for q in 1..Q3 {
+                if let Neighbor::Active(nb_key, nb_lane, Cell3::Interface) =
+                    self.neighbor_state(key, lane, q)
+                {
+                    recipients[count] = (nb_key, nb_lane);
+                    count += 1;
+                }
+            }
+            if count == 0 {
+                // A scalar carry has no position. Keep orphan excess/debt
+                // explicitly unresolved rather than injecting it elsewhere.
+                if let Some(trace) = transport.as_deref_mut() {
+                    trace.exchange(MassLocation3::Cell(key, lane), MassLocation3::Carry, amount)?;
+                }
+                self.carry += amount;
+                continue;
+            }
+            let share = amount / count as f64;
+            let mut remaining = amount;
+            for (j, &(nb_key, nb_lane)) in recipients[..count].iter().enumerate() {
+                let transfer = if j + 1 == count { remaining } else { share };
+                if let Some(trace) = transport.as_deref_mut() {
+                    trace.exchange(
+                        MassLocation3::Cell(key, lane),
+                        MassLocation3::Cell(nb_key, nb_lane),
+                        transfer,
+                    )?;
+                }
+                self.tiles.get_mut(&nb_key).expect("active recipient").mass[nb_lane] += transfer;
+                remaining -= transfer;
             }
         }
         Ok(())
@@ -1429,6 +1508,119 @@ enum Neighbor {
 #[cfg(test)]
 mod capillary_boundary_tests {
     use super::*;
+
+    fn separated_drops() -> FreeSurface3 {
+        FreeSurface3::new(
+            24,
+            12,
+            12,
+            0.8,
+            [0.0; 3],
+            0.002,
+            ContactModel3::Neutral,
+            |x, y, z| {
+                (2..7).contains(&y)
+                    && (2..7).contains(&z)
+                    && ((2..7).contains(&x) || (17..22).contains(&x))
+            },
+        )
+        .unwrap()
+    }
+
+    fn assert_route_balance(trace: &MassTransport3) {
+        let mut balance = trace.before.clone();
+        for route in &trace.routes {
+            *balance.entry(route.from).or_default() -= route.mass;
+            *balance.entry(route.to).or_default() += route.mass;
+        }
+        for (&key, &mass) in &trace.after {
+            *balance.entry(key).or_default() -= mass;
+        }
+        for (key, residual) in balance {
+            assert!(residual.abs() < 2e-14, "{key:?}: {residual}");
+        }
+    }
+
+    #[test]
+    fn g0_conversion_excess_and_debt_use_local_mass_routes() {
+        for amount in [0.25, -0.25] {
+            let mut sim = separated_drops();
+            let (slot, lane) = sim.grid.resolve_source(6, 4, 4).unwrap();
+            let key = sim.grid.active_keys()[slot];
+            assert_eq!(sim.tiles[&key].cells[lane], Cell3::Interface);
+            let rho = sim.grid.populations(slot, lane).iter().sum::<f64>();
+            sim.tiles.get_mut(&key).unwrap().mass[lane] =
+                if amount > 0.0 { rho + amount } else { amount };
+            let before = sim.mass_snapshot();
+            let mass = sim.ledger_mass();
+            let distant: Vec<_> = before
+                .keys()
+                .filter_map(|&location| {
+                    let p = FreeSurface3::transport_coordinates(location)?;
+                    (p[0] >= 14).then_some((location, before[&location].to_bits()))
+                })
+                .collect();
+            let mut trace = MassTransport3::new(before, 1000);
+            sim.apply_conversions(Some(&mut trace)).unwrap();
+            trace.after = sim.mass_snapshot();
+            assert_route_balance(&trace);
+            assert!((sim.ledger_mass() - mass).abs() < 1e-11);
+            assert_eq!(sim.carry, 0.0);
+            assert!(!trace.routes.is_empty());
+            for route in &trace.routes {
+                let from = FreeSurface3::transport_coordinates(route.from).unwrap();
+                let to = FreeSurface3::transport_coordinates(route.to).unwrap();
+                assert!(from[0] < 14 && to[0] < 14);
+                assert!((0..3).all(|d| from[d].abs_diff(to[d]) <= 1));
+                assert_eq!(
+                    if amount > 0.0 { route.from } else { route.to },
+                    MassLocation3::Cell(key, lane)
+                );
+            }
+            for (location, bits) in distant {
+                assert_eq!(trace.after[&location].to_bits(), bits);
+            }
+        }
+    }
+
+    #[test]
+    fn g0_orphan_conversion_debt_stays_in_carry_without_remote_injection() {
+        let mut sim = separated_drops();
+        let (slot, lane) = sim.grid.resolve_source(11, 4, 4).unwrap();
+        let key = sim.grid.active_keys()[slot];
+        sim.tiles.get_mut(&key).unwrap().cells[lane] = Cell3::Interface;
+        sim.tiles.get_mut(&key).unwrap().mass[lane] = -0.25;
+        let mut trace = MassTransport3::new(sim.mass_snapshot(), 1000);
+        sim.apply_conversions(Some(&mut trace)).unwrap();
+        trace.after = sim.mass_snapshot();
+        assert_route_balance(&trace);
+        assert_eq!(trace.routes.len(), 1);
+        assert_eq!(trace.routes[0].from, MassLocation3::Carry);
+        assert_eq!(trace.routes[0].to, MassLocation3::Cell(key, lane));
+        assert_eq!(sim.carry, -0.25);
+        let retained = trace.after;
+        sim.apply_conversions(None).unwrap();
+        assert_eq!(sim.mass_snapshot(), retained);
+    }
+
+    #[test]
+    fn g0_scalar_capillarity_refuses_nonphysical_boundary_densities() {
+        for sigma in [-0.01, f64::NAN, f64::INFINITY, CS2_3, 1.0] {
+            assert!(matches!(
+                FreeSurface3::new(
+                    8,
+                    8,
+                    8,
+                    0.8,
+                    [0.0; 3],
+                    sigma,
+                    ContactModel3::Neutral,
+                    |_, _, _| panic!("invalid sigma must refuse before geometry"),
+                ),
+                Err(FreeSurfaceError3::InvalidInitialState { .. })
+            ));
+        }
+    }
 
     #[test]
     fn g1_resolved_vof_cap_drives_native_laplace_pressure_and_inward_motion() {

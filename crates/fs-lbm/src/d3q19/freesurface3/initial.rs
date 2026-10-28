@@ -202,6 +202,7 @@ impl FreeSurface3 {
             solid,
             sigma,
             local_sigma: None,
+            redistribution: ConversionRedistribution3::Local,
             contact,
             planar_contact: None,
             planar_contact_field: None,
