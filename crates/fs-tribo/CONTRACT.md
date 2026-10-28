@@ -130,6 +130,46 @@ a new friction law or a nonproportional Hertz--Mindlin solution. Nonmonotone
 laws retain their disclosed native branch selection; uniqueness, contact-frame
 transport and simultaneous multiple-contact convergence are not implied.
 
+### Simultaneous retained tangential contacts
+
+`tangential::multiple::PreparedTangentialContacts` admits and caches the full
+row-major `2N`-by-`2N` mechanical compliance, including every cross-contact
+block. Complete-pivot positive-semidefinite admission checks the full matrix;
+positive diagonal blocks alone are insufficient. A range factor and its Gram
+factor supply a supported minimum-norm zero-slip reaction, so duplicate contact
+rows do not arbitrarily assign all static force to the first site. These factors
+are numerical admission/initialization only: physical matrix entries remain
+unchanged and all accepted work uses the original full response.
+
+Borrowed per-contact law instances, accepted histories and inputs permit
+different source parameters while keeping one held interval and caller contact
+order. Deterministic block Gauss--Seidel supplies each existing two-axis matrix
+solver with the latest other-contact recoil. Every evaluation starts from the
+same accepted history; sweeps never advance time, discard preload or deposit
+heat. Each complete sweep independently reconstructs every contact's actual
+displacement, reversible storage and physical heat through the full matrix,
+checks local work, and checks their summed energy balance before returning all
+candidate states together. Source, force, cancellation or convergence refusal
+publishes none. Original static priority is tried through the global supported
+reaction; nonunique cone feasibility and universal convergence are not claimed.
+
+Contact count, matrix terms, complete sweeps, original-law calls, per-contact
+compatibility/work and collective work all have explicit ceilings. The prepared
+owner retains at most three dense arrays and O(N) metadata; preparation uses one
+additional dense scratch array. Reuse avoids repeated O(N^3) PSD admission.
+Each sweep costs O(N^2) matrix work plus the bounded original constitutive calls;
+no numerical regularization, source replacement or extra storage is introduced.
+Caller order discloses the block/root selection when the physical problem has
+multiple solutions. Changing geometry/frames, normal contact and body stepping
+remain with their mechanical owners.
+
+Six G1/G3 groups in `tests/tangential_multiple.rs` compare complete elastic
+equilibrium against independent Gaussian elimination and multisite plastic
+history against an independent global Newton equation. They exercise full
+cross-contact recoil, globally feasible static reactions with kinetic rivals,
+mixed branches, separate tangent rotations/contact permutations, minimum-norm
+redundant rows, incompatible drives, full PSD refusal and atomic bounded retry.
+
 ### Exact Hertz sliding and spin wrench
 
 `sliding_patch::HertzSlidingPatch` evaluates the actual surface integral of

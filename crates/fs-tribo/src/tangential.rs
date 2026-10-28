@@ -17,6 +17,9 @@ use fs_math::det;
 /// Full two-axis body compliance around the original constitutive owner.
 pub mod matrix;
 
+/// Simultaneous retained tangential contacts sharing one full body response.
+pub mod multiple;
+
 fn finite(value: f64, field: &'static str) -> Result<f64, TriboError> {
     crate::finite(value, field)?;
     Ok(value)
