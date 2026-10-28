@@ -5,6 +5,8 @@
 
 /// Solver-independent finite-patch tangential partial-slip rung.
 pub mod partial_slip;
+/// Real-contact-area shear strength for adhesive contacts, including zero net load.
+pub mod adhesive;
 /// Solver-independent reciprocal Reynolds resistance of deforming thin films.
 pub mod resistive_film;
 /// Solver-independent rolling and contour-deformation loss candidates.

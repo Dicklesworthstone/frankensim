@@ -349,7 +349,7 @@ not admit a law.
 This crate does not mint material admission, calibration, the upstream
 `fs-matdb::InterfaceSystemCard` query receipt, a flash-temperature error bound
 or thermal-port solution, a roughness measurement or statistical roughness
-model, adhesion, general three-dimensional plasticity, finite-patch partial
+model, normal adhesion or adhesion-induced contact-area evolution, general three-dimensional plasticity, finite-patch partial
 slip as a resolved contact field, general lubrication/EHL, contact geometry evolution,
 wear geometry updates, stop time, Euler-disc ranking, one-millimetre optimum,
 sound pressure, loudness, or experimental/video correspondence. The surface
@@ -389,3 +389,26 @@ semi-infinite boundary assumptions and finite-size limitations follow A. Jain,
 *International Journal of Heat and Mass Transfer* 202 (2023), 123721,
 <https://doi.org/10.1016/j.ijheatmasstransfer.2022.123721>. This is numerical
 verification of a selected model, not experimental material qualification.
+
+## Adhesive junction shear
+
+`adhesive::AdhesiveFrictionLaw` retains shear resistance of an attached junction
+at zero or tensile net normal force. Its static and sliding capacities are
+`tau * A + mu * N_rep`, with independently supplied real contact area, junction
+shear strengths, and the nonnegative repulsive contribution to normal force.
+The signed net adhesive force must not be substituted for `N_rep`. Setting the
+junction strengths to zero recovers the existing pressure law; setting its
+coefficients to zero selects constant junction shear strength. Calibrations
+must avoid counting the same junction resistance in both terms.
+
+The leaf borrows the original interface provenance, allocates nothing during
+evaluation, opposes sliding, and reports nonnegative frictional power. The
+scalar regularization ramps the complete capacity continuously near zero slip.
+`tests/adhesive.rs` checks finite zero-load friction, detachment, pressure-law
+recovery, extensive scaling, vector power, reversal, regularization, input
+refusals, and subnormal velocities. Contact geometry, partial slip, shear-induced
+peeling, bond aging and measured strength admission remain the caller's concern.
+No strength is inferred from adhesion energy or bulk material names. The
+area-proportional term follows the measured single-asperity relation in Carpick
+et al., *Langmuir* 12 (1996), <https://doi.org/10.1021/la9509007>; the optional
+pressure term is an explicit uncoupled model choice, not a universal fit.
