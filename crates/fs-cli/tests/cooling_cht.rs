@@ -10,6 +10,9 @@ use json::JsonValue as J;
 use std::path::PathBuf;
 use std::process::Command;
 
+#[path = "cooling_cht/sgs.rs"]
+mod sgs;
+
 fn scratch(name: &str, scene: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("fs-cooling-cht-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

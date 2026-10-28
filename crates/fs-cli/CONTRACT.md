@@ -5,6 +5,31 @@ The stable command-line membrane for the Cooling 0.1 product workflow (bead
 the package is `fs-cli` so the workspace retains its flat `fs-*` crate
 convention.
 
+## Exploratory SGS cooling scenes
+
+The file-driven `cooling-cht` command accepts an explicit `solver.sgs` object:
+required model (`smagorinsky` or `wale`), coefficient, filter-width factor,
+maximum eddy/molecular viscosity ratio and `usage: "exploration"`. Unknown
+SGS fields, invalid controls and acceptance use refuse. Admission requires
+the full unsteady coupled march: steady and frozen flow, steady energy on
+mean flow, simultaneous LVEL and evolving material transport refuse. The
+existing ordinary scene paths never enable SGS by default.
+
+Dispatch uses `fs_lbm::conjugate::march_conjugate_with_sgs`; there is no CLI
+closure implementation. The same per-step modeled viscosity enters complete
+symmetric momentum stress and thermal conductivity at `Pr_t=0.9`. Results
+retain all declared SGS controls, the physical filter range, and final
+maximum/volume-mean viscosity and conductivity diagnostics. Unsteady probes
+and requested VTK exports use the final flow and temperature; SGS exports
+include viscosity and turbulent conductivity fields. Exact-zero coefficient
+scenes recover the existing laminar trajectory.
+
+`examples/cooling-cht/sgs-heated-obstacle.json` is a complete short startup
+scene, with real-binary dispatch/refusal/zero-control tests under
+`tests/cooling_cht/sgs.rs`. It is exploration at one coarse resolution, not a
+developed-turbulence benchmark, thermal wall-model calibration, turbulent DNS,
+or instrument acceptance render. No SGS dissipation heating is inferred.
+
 ## Purpose and layer
 
 Layer L6 (HELM). `fs-cli` turns command-line arguments and project bytes into

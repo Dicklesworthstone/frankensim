@@ -1,9 +1,10 @@
 # cooling-cht: voxel conjugate heat transfer from a JSON scene
 
-`frankensim [--json] cooling-cht <scene.json>` solves steady laminar airflow
+`frankensim [--json] cooling-cht <scene.json>` solves steady or unsteady airflow
 by finite-volume SIMPLEC on a voxel grid (forced convection, or natural and
 mixed convection with the Boussinesq force when `gravity_m_s2` is declared)
-and one conservative energy equation over fluid and solid cells. It reports
+and one conservative energy equation over fluid and solid cells. Transient
+scenes can explicitly select Smagorinsky or WALE turbulence exploration. It reports
 per-material and per-source temperatures, the hottest solid voxel, flow and
 energy residuals, and the energy balance.
 
@@ -157,7 +158,60 @@ Scene (`frankensim.cooling-cht.v1`):
   and the result reports `components[].junction_temperature_k`, `case_w`
   and `board_w`. Steady scenes only.
 
-Examples:
+## Transient turbulence exploration
+
+Run the complete heated-obstacle scene with WALE momentum and heat transport:
+
+```bash
+cargo run --release -p fs-cli --bin frankensim -- \
+  --json cooling-cht examples/cooling-cht/sgs-heated-obstacle.json
+```
+
+The scene contains a 0.5 W aluminium obstacle in a 24 × 12 × 8 mm duct.
+It ramps the inlet to 2 m/s and advances 40 coupled steps of 0.5 ms on a
+288-cell grid. This short, coarse startup demonstrates the workflow; it
+does not resolve a developed turbulent spectrum or establish a cooling
+prediction's convergence. The final fields are written to `sgs-fields.vtr`
+beside the scene, including `eddy_viscosity_m2_s` and
+`turbulent_conductivity_w_m_k`; the two probes report the obstacle and wake.
+
+The selector is deliberate, with all five controls required:
+
+```json
+"solver": {
+  "sgs": {
+    "model": "wale",
+    "coefficient": 0.5,
+    "filter_width_factor": 1.0,
+    "maximum_eddy_to_molecular": 50.0,
+    "usage": "exploration"
+  }
+}
+```
+
+`model` accepts `wale` or `smagorinsky`; `coefficient` is respectively
+`Cw` or `Cs`. These are declared model parameters, not fitted cooling data.
+The physical filter width is `filter_width_factor * cell_volume^(1/3)`,
+including on a graded grid. The maximum viscosity ratio is a refusal limit:
+exceeding it stops the solve rather than clipping the model. A coefficient
+of zero runs the exact ordinary laminar trajectory and reports zero SGS.
+
+SGS requires `transient.flow: "unsteady"` and `transient.energy: "march"`
+(the latter is also the default). It refuses steady or frozen-flow solves,
+`steady-on-mean-flow`, LVEL, evolving fluid material properties and acceptance
+use. Each step's projected flow supplies the same closure to momentum and
+thermal conductivity, with `Pr_t = 0.9`. No equilibrium thermal wall law or
+SGS dissipation heating is added.
+
+JSON reports the selected model under `flow.turbulence`, the complete controls
+and physical filter range under `flow.sgs`, and the final maximum and
+fluid-volume-mean eddy viscosity ratios and maximum turbulent conductivity.
+These are final-field diagnostics, not time-averaged turbulence statistics.
+Use the existing mesh refinement controls and smaller time steps to examine
+the output's sensitivity; the displayed energy closure is a conservation
+check, not a validation of the turbulence model.
+
+## Examples
 
 - `heatsink-duct.json`: the ducted plate-fin heatsink of
   `crates/fs-lbm/examples/heatsink_cht.rs` at 1 mm voxels (2 W chip,
@@ -199,9 +253,9 @@ Examples:
   `<u' T'>` correlation bound what this shows: a usable mean answer where
   the steady path has none, not a validated temperature.
 
-Results are Estimated numerical evidence at one resolution: turbulence only
-through the algebraic LVEL closure (its friction runs 13-16 % above
-turbulent channel correlations; see `crates/fs-lbm/CONTRACT.md`), radiation
+Results are Estimated numerical evidence at one resolution: turbulence through
+optional equilibrium LVEL or explicit transient Smagorinsky/WALE, with the
+scope and validation limits in `crates/fs-lbm/CONTRACT.md`; radiation
 only to the surroundings, no temperature-dependent properties; staircase
 geometry; not a ledger-backed `.fsim` run. Refine `voxel_m` to measure resolution
 sensitivity.

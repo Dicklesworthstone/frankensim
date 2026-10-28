@@ -10,6 +10,7 @@
 
 mod convergence;
 mod material;
+mod sgs;
 mod study;
 
 use std::ffi::OsString;
@@ -18,6 +19,7 @@ use std::fs::File;
 use std::io::Read;
 use std::time::{Duration, Instant};
 
+use crate::material_state_input::JsonValue as J;
 use fs_cli::{CommandOutput, exit};
 use fs_exec::CancelGate;
 use fs_geom::Point3;
@@ -26,20 +28,19 @@ use fs_lbm::Face3;
 use fs_lbm::conjugate::{
     Boussinesq, ChtError, CompactComponent, ContactResistance, EnergyConfig, EnergySolution,
     FacePatch, FanCurve, FanInlet, FlowResistance, FluidProperties, FvBoundary, FvBuoyancyConfig,
-    FvFlow, InternalFan, RadiationConfig, SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup,
-    TimeScheme, TransientConfig, Turbulence, UnsteadyConfig, Voxel, VoxelDomain,
-    fv_natural_convection, march_conjugate, march_energy, simple_flow, simple_unsteady,
-    solve_energy, solve_energy_radiating,
+    FvFlow, FvSgsConfig, InternalFan, RadiationConfig, SimpleConfig, SolidMaterial, ThermalFace,
+    ThermalSetup, TimeScheme, TransientConfig, Turbulence, UnsteadyConfig, Voxel, VoxelDomain,
+    fv_natural_convection, march_conjugate, march_conjugate_with_sgs, march_energy, simple_flow,
+    simple_unsteady, solve_energy, solve_energy_radiating,
 };
 use fs_rep_mesh::{Soup, WindingOctree, winding_exact};
-use crate::material_state_input::JsonValue as J;
 
 const MAX_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_CELLS: usize = 4_000_000;
 const MAX_STL_BYTES: u64 = 256 * 1024 * 1024;
 const SCHEMA: &str = "frankensim.cooling-cht.v1";
 const RESULT_SCHEMA: &str = "frankensim.cooling-cht.result.v1";
-const NO_CLAIM: &str = "constant-property incompressible flow (steady, or marched when declared) on a staircase voxel grid, uniform or graded, at one declared resolution (no mesh-convergence claim; a grid_convergence block measures one); Boussinesq buoyancy only when gravity is declared; turbulence only through the optional LVEL algebraic eddy viscosity (no transport, separation or transition physics); temperature dependence only through declared solid conductivity tables (fluid properties constant); radiation only between gray diffuse exposed solid faces and to the surroundings seen through openings, inlets and fans (Monte Carlo exchange factors on face patches; walls and non-emitting solids reflect perfectly; transparent air); power-law convection is first order at high cell Peclet numbers; Estimated numerical evidence, not validated hardware or a ledger-backed .fsim run";
+const NO_CLAIM: &str = "constant-property incompressible flow (steady, or marched when declared) on a staircase voxel grid, uniform or graded, at one declared resolution (no mesh-convergence claim; a grid_convergence block measures one); Boussinesq buoyancy only when gravity is declared; turbulence through optional equilibrium LVEL or explicit transient Smagorinsky/WALE (exploration only; no resolved turbulent spectrum, transition or turbulent DNS qualification); temperature dependence only through declared solid conductivity tables (fluid properties constant); radiation only between gray diffuse exposed solid faces and to the surroundings seen through openings, inlets and fans (Monte Carlo exchange factors on face patches; walls and non-emitting solids reflect perfectly; transparent air); power-law convection is first order at high cell Peclet numbers; Estimated numerical evidence, not validated hardware or a ledger-backed .fsim run";
 const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials (isotropic k or [kx, ky, kz]), contacts (interface\nresistance_m2_k_w between two materials), solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nfan (curve [[flow_m3_s, pressure_pa], ...], temperature_k; the flow is the\noperating point against the system), opening (ambient_k; pressure zero, flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nMissing faces are adiabatic walls. A material emissivity enables gray\nsurface radiation between emitting faces and to the surroundings seen\nthrough openings, inlets and fans (Monte Carlo exchange factors; walls\nand non-emitting solids reflect; radiation {rays_per_face, seed,\nsurface_exchange (default true), patch_size (default 4)}).\nsolver.turbulence \"lvel\" adds the LVEL algebraic eddy viscosity (and its\nturbulent conductivity) for transitional/turbulent fan-driven flow.\ninternal_fans (axis, at_m on an interior voxel face, direction \"+\"/\"-\",\nmin_m/max_m transverse extent, curve) raise the pressure across a plane;\nresistances are grilles (axis, at_m, min_m/max_m, loss_coefficient or\nfree_area_ratio) or porous blocks (min_m/max_m, permeability_m2 and\ninertial_per_m, scalar or per axis).\nA solid may be a plate-fin heatsink (heatsink {base_min_m, base_size_m,\nfin_count, fin_thickness_m, fin_height_m, fins_along}). A study block\n(parameters [{name, path, values}], objective {minimize}, constraints\n[{quantity, min, max}]) evaluates every combination of the values and ranks\nthe variants; quantities are max_solid_temperature_k, source:<name>,\ncomponent:<name>, internal_fan:<name>, fan_flow_m3_s and inflow_m3_s.\nA grid_convergence block {splits: [a, b, c]} solves the scene with every\ncell split a, b and c ways per axis and reports each quantity's observed\norder, Richardson extrapolation and GCI band.\ncomponents are JEDEC two-resistor compact models (min_m/max_m box,\nboard_side, power_w, junction_to_case_k_w, junction_to_board_k_w): the box\nblocks flow and the junction reaches the case top and the board through\nthe two resistors (steady scenes only).\nOptional transient (time_step_s, steps,\npower_schedule [[time_s, scale], ...], initial_temperature_k) marches the\nenergy equation over the steady forced flow (materials then need\nvolumetric_heat_capacity_j_m3_k); with flow \"unsteady\" (scheme \"bdf2\" or\n\"backward-euler\", inner_iterations, inner_tolerance, inlet_schedule) the\nflow marches with it from rest, buoyant when gravity is declared; energy\n\"steady-on-mean-flow\" instead solves the steady energy equation (with any\nradiation) on the march's time-averaged fluxes. Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
 
 type Result<T> = std::result::Result<T, Failure>;
@@ -687,6 +688,8 @@ struct Scene {
     reference: Option<f64>,
     tolerance: f64,
     turbulence: Turbulence,
+    /// Explicit transient resolved-gradient closure; never a steady default.
+    sgs: Option<FvSgsConfig>,
     /// Named fans inside the domain.
     internal_fans: Vec<(String, InternalFan)>,
     /// Grilles and porous blocks.
@@ -863,7 +866,9 @@ const COMPACT_MATERIAL: &str = "compact-model";
 
 impl Scene {
     fn temperature_dependent(&self) -> bool {
-        self.fluid_source.as_ref().is_some_and(material::FluidSource::temperature_dependent)
+        self.fluid_source
+            .as_ref()
+            .is_some_and(material::FluidSource::temperature_dependent)
     }
 
     fn append_material_inputs(&self, out: &mut String) {
@@ -1356,24 +1361,40 @@ impl Scene {
         let lengths = [0, 1, 2].map(|a| grid.length(a));
         let mut reference = optional_number(&root, "reference_temperature_k", "scene")?;
         let mut expansion = optional_number(&root, "expansion_per_k", "scene")?;
-        let evolving = fluid_source.as_ref().is_some_and(material::FluidSource::temperature_dependent)
-            || solid_sources.iter().any(material::SolidSource::temperature_dependent);
+        let evolving = fluid_source
+            .as_ref()
+            .is_some_and(material::FluidSource::temperature_dependent)
+            || solid_sources
+                .iter()
+                .any(material::SolidSource::temperature_dependent);
         if evolving {
-            if !fluid_source.as_ref().is_some_and(material::FluidSource::temperature_dependent) {
-                return Err(bad("temperature-dependent CHT requires a source-backed liquid in temperature-dependent mode"));
+            if !fluid_source
+                .as_ref()
+                .is_some_and(material::FluidSource::temperature_dependent)
+            {
+                return Err(bad(
+                    "temperature-dependent CHT requires a source-backed liquid in temperature-dependent mode",
+                ));
             }
             if !components.is_empty() {
-                return Err(bad("temperature-dependent CHT does not support compact components"));
+                return Err(bad(
+                    "temperature-dependent CHT does not support compact components",
+                ));
             }
             if solid_sources.len() != materials.len()
-                || solid_sources.iter().enumerate().any(|(index, source)| {
-                    source.index != index || !source.temperature_dependent()
-                })
+                || solid_sources
+                    .iter()
+                    .enumerate()
+                    .any(|(index, source)| source.index != index || !source.temperature_dependent())
             {
-                return Err(bad("temperature-dependent CHT requires every solid material in temperature-dependent source mode; frozen or authored solid coefficients cannot be mixed"));
+                return Err(bad(
+                    "temperature-dependent CHT requires every solid material in temperature-dependent source mode; frozen or authored solid coefficients cannot be mixed",
+                ));
             }
             if root.get("transient").is_some() {
-                return Err(bad("temperature-dependent CHT is steady; transient storage needs its own enthalpy owner"));
+                return Err(bad(
+                    "temperature-dependent CHT is steady; transient storage needs its own enthalpy owner",
+                ));
             }
             if turbulence != Turbulence::Laminar {
                 return Err(bad("temperature-dependent CHT requires laminar flow"));
@@ -1382,13 +1403,18 @@ impl Scene {
                 return Err(bad("temperature-dependent CHT does not support radiation"));
             }
             if expansion.is_some() {
-                return Err(bad("temperature-dependent liquid density owns buoyancy; expansion_per_k cannot override it"));
+                return Err(bad(
+                    "temperature-dependent liquid density owns buoyancy; expansion_per_k cannot override it",
+                ));
             }
-            let temperature = fluid_source.as_ref()
+            let temperature = fluid_source
+                .as_ref()
                 .and_then(material::FluidSource::evolving_reference_temperature)
                 .expect("evolving liquid was admitted");
             if reference.is_some_and(|value| value != temperature) {
-                return Err(bad("reference_temperature_k conflicts with the original liquid source state"));
+                return Err(bad(
+                    "reference_temperature_k conflicts with the original liquid source state",
+                ));
             }
             reference = Some(temperature);
         }
@@ -1416,6 +1442,13 @@ impl Scene {
                 "a source-backed liquid with buoyancy requires expansion_per_k and reference_temperature_k; ideal-gas 1/T does not describe a liquid",
             ));
         }
+        let transient = root.get("transient").map(Transient::parse).transpose()?;
+        let sgs = sgs::parse(
+            solver.and_then(|s| s.get("sgs")),
+            turbulence,
+            transient.as_ref(),
+            evolving,
+        )?;
         Ok(Self {
             dx,
             grid,
@@ -1432,12 +1465,13 @@ impl Scene {
             reference,
             tolerance,
             turbulence,
+            sgs,
             internal_fans,
             resistances,
             components,
             max_iterations: max_iterations as usize,
             wall_seconds,
-            transient: root.get("transient").map(Transient::parse).transpose()?,
+            transient,
             emissivity: emissivities,
             surface_exchange: match root
                 .get("radiation")
@@ -1511,6 +1545,7 @@ fn write_vtk(
     temperature: &[f64],
     velocity: &[[f64; 3]],
     pressure: &[f64],
+    turbulent: Option<(&[f64], &[f64])>,
 ) -> Result<()> {
     let [nx, ny, nz] = grid.dims();
     let mut out = String::with_capacity(64 * domain.cell_count());
@@ -1531,6 +1566,20 @@ fn write_vtk(
     );
     for p in pressure {
         let _ = writeln!(out, "{p}");
+    }
+    if let Some((viscosity, conductivity)) = turbulent {
+        for (name, field) in [
+            ("eddy_viscosity_m2_s", viscosity),
+            ("turbulent_conductivity_w_m_k", conductivity),
+        ] {
+            let _ = writeln!(
+                out,
+                "</DataArray>\n<DataArray type=\"Float64\" Name=\"{name}\" format=\"ascii\">"
+            );
+            for value in field {
+                let _ = writeln!(out, "{value}");
+            }
+        }
     }
     out.push_str("</DataArray>\n<DataArray type=\"Int32\" Name=\"material\" format=\"ascii\">\n");
     for c in 0..domain.cell_count() {
@@ -1648,21 +1697,40 @@ fn execute_unsteady(
     unsteady.inner_iterations = options.inner_iterations;
     unsteady.inner_tolerance = options.inner_tolerance;
     let started = Instant::now();
-    let run = march_conjugate(
-        domain,
-        &scene.fluid,
-        &scene.materials,
-        setup,
-        flow_config,
-        &unsteady,
-        buoyancy.as_ref(),
-        &vec![initial; domain.cell_count()],
-        |t| interpolate(&options.inlet_schedule, t),
-        |t| transient.scale(t),
-        &EnergyConfig::default(),
-        radiation,
-        gate,
-    )
+    let initial_temperature = vec![initial; domain.cell_count()];
+    let run = match scene.sgs {
+        Some(sgs) => march_conjugate_with_sgs(
+            domain,
+            &scene.fluid,
+            &scene.materials,
+            setup,
+            flow_config,
+            &unsteady,
+            sgs,
+            buoyancy.as_ref(),
+            &initial_temperature,
+            |t| interpolate(&options.inlet_schedule, t),
+            |t| transient.scale(t),
+            &EnergyConfig::default(),
+            radiation,
+            gate,
+        ),
+        None => march_conjugate(
+            domain,
+            &scene.fluid,
+            &scene.materials,
+            setup,
+            flow_config,
+            &unsteady,
+            buoyancy.as_ref(),
+            &initial_temperature,
+            |t| interpolate(&options.inlet_schedule, t),
+            |t| transient.scale(t),
+            &EnergyConfig::default(),
+            radiation,
+            gate,
+        ),
+    }
     .map_err(|e| solver_failure(&e))?;
     let wall_s = started.elapsed().as_secs_f64();
     let records = &run.energy_records;
@@ -1677,6 +1745,26 @@ fn execute_unsteady(
     let max_step_sweeps = steps.iter().map(|r| r.inner_iterations).max().unwrap_or(0);
     let last = steps.last().copied();
     let report = &run.flow.flow.report;
+    let sgs = sgs::Summary::new(scene, domain, &run.flow.flow);
+    let probes = read_probes(scene, domain, &run.temperature, &run.flow.flow.velocity_m_s);
+    if let Some(path) = &scene.vtk {
+        let conductivity = run.flow.flow.eddy_conductivity(&scene.fluid);
+        let turbulent = scene.sgs.map(|_| {
+            (
+                run.flow.flow.eddy_viscosity_m2_s.as_slice(),
+                conductivity.as_slice(),
+            )
+        });
+        write_vtk(
+            path,
+            domain,
+            &scene.grid,
+            &run.temperature,
+            &run.flow.flow.velocity_m_s,
+            &run.flow.flow.pressure_pa,
+            turbulent,
+        )?;
+    }
     let tie = 1e-6 * scene.dx;
     let solids_max = |field: &[f64]| {
         (0..domain.cell_count())
@@ -1709,7 +1797,11 @@ fn execute_unsteady(
             )
         })
         .collect();
-    let solver_name = if buoyancy.is_some() {
+    let solver_name = if scene.sgs.is_some() && buoyancy.is_some() {
+        "fv-simplec-unsteady-sgs-boussinesq"
+    } else if scene.sgs.is_some() {
+        "fv-simplec-unsteady-sgs"
+    } else if buoyancy.is_some() {
         "fv-simplec-unsteady-boussinesq"
     } else {
         "fv-simplec-unsteady"
@@ -1731,7 +1823,7 @@ fn execute_unsteady(
         scene.append_material_inputs(&mut out);
         let _ = write!(
             out,
-            ",\"flow\":{{\"steps\":{},\"sweeps\":{sweeps},\"max_step_sweeps\":{max_step_sweeps},\"final_mass_residual\":{},\"final_momentum_residual\":{},\"inflow_m3_s\":{},\"outflow_m3_s\":{},\"final_kinetic_energy_j\":{}}}",
+            ",\"flow\":{{\"steps\":{},\"sweeps\":{sweeps},\"max_step_sweeps\":{max_step_sweeps},\"final_mass_residual\":{},\"final_momentum_residual\":{},\"inflow_m3_s\":{},\"outflow_m3_s\":{},\"final_kinetic_energy_j\":{}",
             steps.len(),
             num(last.map_or(0.0, |r| r.mass_residual))?,
             num(last.map_or(0.0, |r| r.momentum_residual))?,
@@ -1739,6 +1831,10 @@ fn execute_unsteady(
             num(report.outflow_m3_s)?,
             num(last.map_or(0.0, |r| r.kinetic_energy_j))?
         );
+        if let Some(sgs) = &sgs {
+            sgs.json(&mut out)?;
+        }
+        out.push('}');
         let every = records.len().div_ceil(200).max(1);
         let _ = write!(
             out,
@@ -1784,9 +1880,14 @@ fn execute_unsteady(
                 num(*mean_max)?
             );
         }
+        out.push(']');
+        out.push_str(&probes_json(&probes)?);
+        if let Some(path) = &scene.vtk {
+            let _ = write!(out, ",\"vtk\":{}", quote(&path.display().to_string()));
+        }
         let _ = writeln!(
             out,
-            "],\"max_solid_temperature_k\":{},\"wall_s\":{},\"evidence\":\"Estimated\",\"no_claim\":{}}}",
+            ",\"max_solid_temperature_k\":{},\"wall_s\":{},\"evidence\":\"Estimated\",\"no_claim\":{}}}",
             num_or_null(solids_max(&run.temperature)),
             num(wall_s)?,
             quote(NO_CLAIM)
@@ -1800,11 +1901,24 @@ fn execute_unsteady(
             records.len(),
             solids_max(&run.temperature)
         );
+        if let Some(sgs) = &sgs {
+            sgs.text(&mut out);
+        }
         for (name, power, last_max, mean_max) in &source_rows {
             let _ = writeln!(
                 out,
                 "source={name} power_w={power} final_max_temperature_k={last_max:.4} mean_max_temperature_k={mean_max:.4}"
             );
+        }
+        for (name, t, v, _) in &probes {
+            let _ = writeln!(
+                out,
+                "probe={name} temperature_k={t:.4} velocity_m_s=({:e},{:e},{:e})",
+                v[0], v[1], v[2]
+            );
+        }
+        if let Some(path) = &scene.vtk {
+            let _ = writeln!(out, "vtk={}", path.display());
         }
         let _ = writeln!(
             out,
@@ -1946,9 +2060,8 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
     let mut material_feedback = None;
     let (flow, energy, couplings): (FvFlow, EnergySolution, Option<usize>) =
         if scene.temperature_dependent() {
-            let (flow, energy, passes, evidence) = material::solve(
-                scene, &domain, &flow_config, &setup, gate,
-            )?;
+            let (flow, energy, passes, evidence) =
+                material::solve(scene, &domain, &flow_config, &setup, gate)?;
             material_feedback = Some(evidence);
             (flow, energy, Some(passes))
         } else if let Some(gravity) = buoyant {
@@ -2095,6 +2208,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             temperature,
             &flow.velocity_m_s,
             &flow.pressure_pa,
+            None,
         )?;
     }
     // Per-material and per-source temperatures.
@@ -2477,9 +2591,10 @@ fn execute_within_budget(scene: &Scene, json_mode: bool) -> Result<String> {
 
 pub(super) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
-        let help = format!(
+        let mut help = format!(
             "{HELP}\nSource-backed materials: fluid may declare {{mode: \"frozen\", gas: <shared gas record>}}\nor {{mode: \"frozen\", pack, state, viscosity: \"dynamic\"|\"kinematic\"}}.\nA solid material may declare source: {{mode: \"frozen\", pack, state}}.\nUse mode \"temperature-dependent\" and an explicit temperature_axis on the\nliquid and every solid source to close steady laminar temperature feedback;\nliquid density owns buoyancy and no expansion_per_k override is allowed.\nCanonical packs and typed state coordinates are shared with the material\nlibraries; source coefficients cannot be overridden. See docs/COOLING_CHT_MATERIALS.md.\n"
         );
+        help.push_str(sgs::HELP);
         return CommandOutput {
             exit_code: exit::SUCCESS,
             stdout: if json_mode {
