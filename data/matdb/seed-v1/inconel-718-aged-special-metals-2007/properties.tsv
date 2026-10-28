@@ -1,0 +1,27 @@
+frankensim.matdb-source.v1
+observation	alloy-reference	INCONEL 718, UNS N07718, annealed-and-aged engineering reference	SMC-045 physical and transport properties	Requires engineering-reference-model=1 and source-specimens-matched=0. Density and Cp are nominal physical constants, not proved to share the transport specimens. Kelvin temperatures use the Fahrenheit coordinate exactly; 70 F is 294.2611111111111 K and is not silently replaced by the rounded 21 C label. Curves interpolate linearly without extrapolation. These are typical estimates, not allowables, phase-transition laws or service-temperature qualifications.
+observation	density	INCONEL 718 annealed and aged	Table 2 density	Source 0.297 lb/in3 is converted using exact international pound and inch definitions. Test temperature is unstated; the value is frozen only at the author-selected 70 F reference.
+observation	heat-capacity	INCONEL 718 nominal alloy	Table 2 specific heat at 70 F	Retains the printed SI value 435 J/(kg K). The original 0.104 Btu/(lb F) and 21 C equivalents are rounded; no false extra significant figures or particular heat treatment is inferred.
+observation	aged-transport	INCONEL 718 annealed 1800 F for 1 h, then aged	Table 5 annealed-plus-aged columns and footnote a	Aging is 1325 F for 8 h, furnace cooling at 20 F/h to 1150 F, then holding to total aging time 18 h. Conductivity was calculated from resistivity, so these are not independent measurements. k conversion uses Btu_IT=1055.05585262 J and exact inch, foot, hour and temperature-difference definitions; resistivity converts ohm circular mil/ft using area pi*(25.4e-6 m)^2/4 divided by 0.3048 m. No joint covariance is supplied.
+scalar	density	density,alloy-reference	density	8220.93169893033	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	294.2611111111111	294.2611111111111	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_specimens_matched	0	0	1
+scalar	heat-capacity	heat-capacity,alloy-reference	specific_heat_capacity	435	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	294.2611111111111	294.2611111111111	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_specimens_matched	0	0	1
+curve	conductivity	aged-transport,alloy-reference	thermal_conductivity	temperature	K	W/m/K	294.2611111111111:11.3940032202783,366.4833333333333:12.5478263311926,477.5944444444444:14.4227888864283,588.7055555555555:16.1535235527996,699.8166666666666:17.8842582191710,810.9277777777778:19.6149928855424,922.0388888888889:21.3457275519138,1033.150000000000:23.2206901071495,1144.261111111111:24.9514247735209,1255.372222222222:26.8263873287566,1366.483333333333:28.7013498839922	linear
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	294.2611111111111	1366.483333333333	K
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_specimens_matched	0	0	1
+validity	conductivity	annealed_1800f_aged	1	1	1
+curve	resistivity	aged-transport,alloy-reference	electrical_resistivity	temperature	K	Ohm*m	294.2611111111111:0.00000120525893158033,366.4833333333333:0.00000121855834048053,477.5944444444444:0.00000125513171495607,588.7055555555555:0.00000127674325441889,699.8166666666666:0.00000128838023720656,810.9277777777778:0.00000130999177666938,922.0388888888889:0.00000131996633334453,1033.150000000000:0.00000132495361168211,1144.261111111111:0.00000132329118556958,1255.372222222222:0.00000132994089001968,1366.483333333333:0.00000132329118556958	linear
+uncertainty	resistivity	unstated	-	-	-	-
+validity	resistivity	temperature	294.2611111111111	1366.483333333333	K
+validity	resistivity	engineering_reference_model	1	1	1
+validity	resistivity	source_specimens_matched	0	0	1
+validity	resistivity	annealed_1800f_aged	1	1	1

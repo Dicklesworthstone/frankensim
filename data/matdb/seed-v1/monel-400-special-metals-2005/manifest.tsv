@@ -1,0 +1,14 @@
+frankensim.matdb-manifest.v3
+pack_id	monel-400-special-metals-2005
+redistribution	permitted	Selected attributed numerical facts and original modeling notes only; no source document, prose or table layout is redistributed
+citation	Special Metals Corporation, MONEL alloy 400, SMC-053, February 2005, Tables 2-3 and footnotes, pages 1-2; https://www.specialmetals.com/documents/technical-bulletins/monel-alloy-400.pdf
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	supplier-reference	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	electrical_resistivity	electrical-resistivity	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	source_specimens_matched	source-specimens-matched	dimensional
+axis	annealed_material	annealed-material	dimensional

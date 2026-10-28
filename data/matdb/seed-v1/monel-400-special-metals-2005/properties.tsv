@@ -1,0 +1,26 @@
+frankensim.matdb-source.v1
+observation	alloy-reference	MONEL 400 nickel-copper alloy, UNS N04400	Grade-level engineering reference from SMC-053	Requires engineering-reference-model=1 and source-specimens-matched=0. This joins nominal physical data without assuming a shared coupon, lot, covariance or processing state. Kelvin knots follow the printed Celsius column, not an attempted reconciliation with its independently rounded Fahrenheit column. Linear interpolation is an author-declared approximation. Source-extrapolated conductivity rows at 800 and 900 C are excluded. No strength, creep, corrosion-rate, magnetic-state or service qualification is implied.
+observation	density	MONEL 400 nominal alloy	Table 2 density	8.80 g/cm3 is converted to 8800 kg/m3. Test temperature and heat treatment are unstated; 294.15 K is a calculation reference, not a measured temperature or a thermal-density law.
+observation	thermal	MONEL 400 nominal alloy	Table 3 specific heat and thermal conductivity	Cp and k use the printed SI columns. Heat treatment, repeat specimens and statistical uncertainty are unspecified. Cp is retained only from 21 through 300 C; k from 21 through 700 C.
+observation	resistivity	MONEL 400 annealed material	Table 3 electrical resistivity, footnote c	Printed micro-ohm metre values are multiplied by 1e-6. The annealed state is required; its precise schedule is not stated. No extension to cold-worked stock is admitted.
+scalar	density	density,alloy-reference	density	8800	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	294.15	294.15	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_specimens_matched	0	0	1
+curve	heat-capacity	thermal,alloy-reference	specific_heat_capacity	temperature	K	J/kg/K	294.15:427,373.15:445,473.15:459,573.15:470	linear
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	294.15	573.15	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_specimens_matched	0	0	1
+curve	conductivity	thermal,alloy-reference	thermal_conductivity	temperature	K	W/m/K	294.15:22.0,373.15:24.0,473.15:26.9,573.15:30.1,673.15:33.4,773.15:36.5,873.15:39.4,973.15:42.4	linear
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	294.15	973.15	K
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_specimens_matched	0	0	1
+curve	resistivity	resistivity,alloy-reference	electrical_resistivity	temperature	K	Ohm*m	294.15:5.11e-7,373.15:5.37e-7,473.15:5.59e-7,573.15:5.74e-7,673.15:5.87e-7,773.15:6.03e-7,873.15:6.20e-7,973.15:6.39e-7	linear
+uncertainty	resistivity	unstated	-	-	-	-
+validity	resistivity	temperature	294.15	973.15	K
+validity	resistivity	engineering_reference_model	1	1	1
+validity	resistivity	source_specimens_matched	0	0	1
+validity	resistivity	annealed_material	1	1	1

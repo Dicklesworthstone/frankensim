@@ -1,0 +1,27 @@
+frankensim.matdb-source.v1
+observation	alloy-reference	NILO alloy 36, nominal Fe-36Ni, UNS K93600/K93601	Supplier controlled-expansion-alloy reference	Requires engineering-reference-model=1 and source-specimens-matched=0. Test specimens, full processing histories, joint statistics and uncertainty are unknown. Curves linearly interpolate published knots as an engineering approximation and refuse extrapolation. This is not permission to substitute any Invar-branded product or infer heat capacity, stiffness, strength or long-term dimensional stability.
+observation	density	NILO alloy 36 nominal alloy	Table 2 density	8.11 g/cm3 converts to 8110 kg/m3. The source gives no test temperature; use is limited to an author-selected 293.15 K reference.
+observation	conductivity	NILO alloy 36 nominal alloy	Table 4 conductivity at 20 C	10.0 W/(m K) is retained only at 293.15 K; no temperature law is inferred.
+observation	resistivity	NILO alloy 36 nominal alloy	Table 6 electrical resistivity	Micro-ohm cm values are multiplied by 1e-8. The supplied temperature sequence is retained from 20 to 600 C; no heat treatment is assigned.
+observation	mean-expansion	NILO alloy 36 nominal alloy	Table 7 interval-mean linear expansion from 20 C	The endpoint temperature is the curve coordinate; every value averages expansion from reference-temperature=293.15 K to that endpoint. This property is deliberately distinct from instantaneous linear-thermal-expansion-coefficient and must not be integrated as instantaneous alpha. The source does not identify the processing state for these values.
+scalar	density	density,alloy-reference	density	8110	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293.15	293.15	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_specimens_matched	0	0	1
+scalar	conductivity	conductivity,alloy-reference	thermal_conductivity	10.0	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	293.15	293.15	K
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_specimens_matched	0	0	1
+curve	resistivity	resistivity,alloy-reference	electrical_resistivity	temperature	K	Ohm*m	293.15:8.0e-7,373.15:8.6e-7,473.15:9.7e-7,573.15:1.05e-6,673.15:1.11e-6,773.15:1.17e-6,873.15:1.21e-6	linear
+uncertainty	resistivity	unstated	-	-	-	-
+validity	resistivity	temperature	293.15	873.15	K
+validity	resistivity	engineering_reference_model	1	1	1
+validity	resistivity	source_specimens_matched	0	0	1
+curve	mean-expansion	mean-expansion,alloy-reference	mean_linear_thermal_expansion_coefficient	temperature	K	K-1	373.15:1.5e-6,423.15:2.0e-6,473.15:2.6e-6,523.15:3.5e-6,573.15:5.5e-6,623.15:7.2e-6,673.15:8.4e-6,723.15:9.3e-6,773.15:10.1e-6	linear
+uncertainty	mean-expansion	unstated	-	-	-	-
+validity	mean-expansion	temperature	373.15	773.15	K
+validity	mean-expansion	reference_temperature	293.15	293.15	K
+validity	mean-expansion	engineering_reference_model	1	1	1
+validity	mean-expansion	source_specimens_matched	0	0	1

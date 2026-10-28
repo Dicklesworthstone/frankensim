@@ -1,0 +1,27 @@
+frankensim.matdb-source.v1
+observation	alloy-reference	TIMETAL 6-4, Ti-6Al-4V, ASTM Grade 5	TMC-0150 Table 2 engineering physical-property reference	Requires engineering-reference-model=1 and source-specimens-matched=0. This pack selects standard Grade 5, not the ELI Grade 23 or Ru-bearing Grade 29 variants. Source Celsius temperatures are used as printed. The sparse linear curves are calculation approximations, not interpolation-error bounds. Texture-dependent elastic ranges are not collapsed into a fictitious modulus. No strength, creep, fatigue, implant qualification or thermal-density law is claimed.
+observation	density	TIMETAL 6-4 nominal alloy	Table 2 density at 22 C	4.42 g/cm3 converts to 4420 kg/m3 at 295.15 K. A common coupon, lot and uncertainty are not supplied.
+observation	conductivity	TIMETAL 6-4 mill-annealed material	Table 2 thermal conductivity	Conductivity is explicitly mill annealed. Knots are 20, 315 and 650 C. The exact mill-anneal schedule is not specified.
+observation	heat-capacity	TIMETAL 6-4 nominal alloy	Table 2 specific heat	Printed J/(g K) values are multiplied by 1000. The source does not explicitly extend the conductivity's mill-annealed label to this separate property.
+observation	resistivity	TIMETAL 6-4 nominal alloy	Table 2 electrical resistivity	Printed micro-ohm metre values are multiplied by 1e-6. The source does not assign a heat-treatment schedule to this property.
+scalar	density	density,alloy-reference	density	4420	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	295.15	295.15	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_specimens_matched	0	0	1
+curve	conductivity	conductivity,alloy-reference	thermal_conductivity	temperature	K	W/m/K	293.15:6.6,588.15:10.6,923.15:17.5	linear
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	293.15	923.15	K
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_specimens_matched	0	0	1
+validity	conductivity	mill_annealed	1	1	1
+curve	heat-capacity	heat-capacity,alloy-reference	specific_heat_capacity	temperature	K	J/kg/K	293.15:580,698.15:670,1143.15:930	linear
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	293.15	1143.15	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_specimens_matched	0	0	1
+curve	resistivity	resistivity,alloy-reference	electrical_resistivity	temperature	K	Ohm*m	273.15:1.68e-6,588.15:1.86e-6,923.15:1.89e-6	linear
+uncertainty	resistivity	unstated	-	-	-	-
+validity	resistivity	temperature	273.15	923.15	K
+validity	resistivity	engineering_reference_model	1	1	1
+validity	resistivity	source_specimens_matched	0	0	1

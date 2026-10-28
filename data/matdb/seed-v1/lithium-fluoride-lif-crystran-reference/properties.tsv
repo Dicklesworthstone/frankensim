@@ -1,0 +1,20 @@
+frankensim.matdb-source.v1
+observation	engineering-reference	Lithium fluoride optical crystal, LiF	Frozen Crystran thermal reference	The 314-315 K calculation interval is author-declared, not a measured temperature range. Requires engineering-reference-model=1 and source-temperatures-matched=0. Density and Cp source temperatures are unknown; k is reported at 314 K. Values are held constant over this narrow interval as an explicit approximation. No pressure response, hydration, lot identity, irradiation response, elastic tensor or qualification is supplied. Cubic thermal symmetry does not imply isotropic elasticity.
+observation	density	LiF optical material	Crystran Product Data, density	2.639 g/cc converts to 2639 kg/m3. Statistical uncertainty is not supplied.
+observation	heat-capacity	LiF optical material	Crystran Product Data, specific heat capacity	Retains 1562 J/(kg K); no source test temperature or uncertainty is stated.
+observation	conductivity	LiF optical material	Crystran Product Data, conductivity at 314 K	Retains 11.3 W/(m K). No measured temperature curve, directional elasticity or confidence bound is inferred.
+scalar	density	density,engineering-reference	density	2639	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	314	315	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	0	0	1
+scalar	heat-capacity	heat-capacity,engineering-reference	specific_heat_capacity	1562	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	314	315	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_temperatures_matched	0	0	1
+scalar	conductivity	conductivity,engineering-reference	thermal_conductivity	11.3	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	314	315	K
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_temperatures_matched	0	0	1

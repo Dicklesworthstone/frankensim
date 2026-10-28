@@ -1,0 +1,14 @@
+frankensim.matdb-manifest.v3
+pack_id	timetal-6-4-timet-2000
+redistribution	permitted	Selected attributed numerical facts and original modeling notes only; no source document, prose or table layout is redistributed
+citation	Titanium Metals Corporation, TIMETAL 6-4, 6-4 ELI and 6-4-.1Ru, TMC-0150, 2000, Table 2 physical properties; this pack selects TIMETAL 6-4 / ASTM Grade 5; https://www.timet.com/documents/datasheets/alpha-and-beta-alloys/timetal-6-4.pdf
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	supplier-reference	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	electrical_resistivity	electrical-resistivity	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	source_specimens_matched	source-specimens-matched	dimensional
+axis	mill_annealed	mill-annealed	dimensional

@@ -1,0 +1,33 @@
+frankensim.matdb-source.v1
+observation	engineering-reference	CVD zinc sulfide, as-deposited FLIR grade polycrystalline ZnS	Frozen Crystran physical-property reference	The 296-297 K interval is an author-declared calculation domain, not measured temperature coverage. Requires engineering-reference-model=1 and source-temperatures-matched=0. The density, Cp and elastic source temperatures are unknown; k is stated at 296 K. No common coupon or covariance is inferred. This does not describe hot-isostatically-pressed multispectral ZnS, geological sphalerite, a single crystal, porosity evolution or elevated-temperature behavior.
+observation	density	ZnS FLIR grade	Crystran Product Data, density	4.08 g/cc converts to 4080 kg/m3; held constant only over the declared narrow model interval.
+observation	heat-capacity	ZnS FLIR grade	Crystran Product Data, specific heat capacity	Retains 469 J/(kg K); source temperature and uncertainty are not supplied.
+observation	conductivity	ZnS FLIR grade	Crystran Product Data, conductivity at 296 K	Retains 16.7 W/(m K); holding it over one kelvin is an explicit approximation, not a measured curve.
+observation	elastic-reference	ZnS FLIR grade polycrystalline material	Crystran Product Data, Young modulus and Poisson ratio	Uses 74.5 GPa and 0.29 only under isotropic-engineering-model=1. The two source values are nominal engineering inputs, not measured isotropy, a verified joint specimen, strength or a fracture model.
+scalar	density	density,engineering-reference	density	4080	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	296	297	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	0	0	1
+scalar	heat-capacity	heat-capacity,engineering-reference	specific_heat_capacity	469	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	296	297	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_temperatures_matched	0	0	1
+scalar	conductivity	conductivity,engineering-reference	thermal_conductivity	16.7	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	296	297	K
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_temperatures_matched	0	0	1
+scalar	young-modulus	elastic-reference,engineering-reference	young_modulus	74.5	GPa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	temperature	296	297	K
+validity	young-modulus	engineering_reference_model	1	1	1
+validity	young-modulus	source_temperatures_matched	0	0	1
+validity	young-modulus	isotropic_engineering_model	1	1	1
+scalar	poisson-ratio	elastic-reference,engineering-reference	poisson_ratio	0.29	1	constant
+uncertainty	poisson-ratio	unstated	-	-	-	-
+validity	poisson-ratio	temperature	296	297	K
+validity	poisson-ratio	engineering_reference_model	1	1	1
+validity	poisson-ratio	source_temperatures_matched	0	0	1
+validity	poisson-ratio	isotropic_engineering_model	1	1	1

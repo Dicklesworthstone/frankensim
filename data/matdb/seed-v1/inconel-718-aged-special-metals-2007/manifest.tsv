@@ -1,0 +1,14 @@
+frankensim.matdb-manifest.v3
+pack_id	inconel-718-aged-special-metals-2007
+redistribution	permitted	Selected attributed numerical facts and original modeling notes only; no source document, prose or table layout is redistributed
+citation	Special Metals Corporation, INCONEL alloy 718, SMC-045, September 2007, Tables 2 and 5 with footnote a, pages 1-2; https://www.specialmetals.com/documents/technical-bulletins/inconel/inconel-alloy-718.pdf
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	supplier-reference	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	electrical_resistivity	electrical-resistivity	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	source_specimens_matched	source-specimens-matched	dimensional
+axis	annealed_1800f_aged	annealed-1800f-aged	dimensional
