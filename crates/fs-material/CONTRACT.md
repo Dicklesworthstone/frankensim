@@ -2842,3 +2842,23 @@ regressions check published pressure anchors, analytic derivatives, units,
 latent-heat behavior, explicit domains and representability refusals. These
 laws supply constitutive data; phase inventory, transport and energy evolution
 remain with their physical consumers.
+
+
+## Explicit ice-relative humidity
+
+`gas::HumidityReference` and `try_new_moist_air_with_reference` select liquid
+water or ice as the relative-humidity pressure reference. Ice uses the same
+bounded IAPWS curve as the sublimation law. Existing moist-air entry points
+retain their liquid-water reference, including below freezing; zero humidity
+retains the original dry-gas domain. Actual vapor mole fraction flows through
+the original ideal-mixture, Wilke and WMS evaluator, so acoustic and transport
+consumers see the same physical composition. The existing RH [0,1] and dilute
+water-mole-fraction ceiling remain in force.
+
+`resolve_moist_air_state_with_reference` retains the reference alongside both
+original component source bundles. Ice pressure does not relax either card's
+applicability or qualify cold transport fits. These APIs prescribe a gas state;
+they do not evolve condensation or change a downstream acoustic standard's
+humidity convention. Seven native shared-mixture regressions passed, including
+four new reference/domain cases. The source-resolution wrapper was syntax
+checked and reviewed, but was outside that native numerical closure.

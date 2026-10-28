@@ -81,8 +81,14 @@
 //! phase no-claim is structural at this constructor's input; the
 //! plain [`GasState::try_new`] window no-claim above still stands.
 //!
-//! Determinism: pure `f64` arithmetic with `fs_math::det` for the
-//! non-IEEE transcendentals; repeat evaluations are bitwise identical.
+//! [`GasState::try_new_moist_air_with_reference`] also accepts an explicit
+//! ice reference. It uses the shared IAPWS ice-Ih pressure on [50, 273.16] K;
+//! no temperature silently changes an existing liquid-relative humidity.
+//! Selecting this pressure curve does not validate the cold gas transport fits.
+//!
+//! Determinism: the original liquid-relative path uses `fs_math::det` for
+//! non-IEEE transcendentals. Ice pressure follows the shared sublimation law's
+//! same-ISA/toolchain repeatability; neither path asserts cross-ISA equality.
 
 use fs_math::det;
 
@@ -310,6 +316,17 @@ pub fn resolve_sutherland_gas_state(
     })
 }
 
+/// Condensed phase against which the caller expresses relative humidity.
+/// This is a pressure reference, not a request to create or equilibrate a phase.
+/// The legacy moist-air APIs always use `LiquidWater`, including below freezing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HumidityReference {
+    /// Buck liquid-water pressure on [253.15, 323.15] K.
+    LiquidWater,
+    /// Shared IAPWS ice-Ih sublimation pressure on [50, 273.16] K.
+    Ice,
+}
+
 /// Saturation vapor pressure of water over the LIQUID phase [Pa] —
 /// the Buck 1996 fit `e_s = 611.21 exp((18.678 - t/234.5) t /
 /// (257.14 + t))` with `t` in Celsius, quoted for −20..+50 °C
@@ -331,6 +348,29 @@ pub fn saturation_pressure_water_pa(temperature: f64) -> Result<f64, MaterialErr
     }
     let t = temperature - 273.15;
     Ok(611.21 * det::exp((18.678 - t / 234.5) * t / (257.14 + t)))
+}
+
+/// Pure-phase saturation pressure [Pa] on an explicitly chosen humidity basis.
+///
+/// The liquid branch retains the existing Buck evaluator; the ice branch uses
+/// the same IAPWS correlation as the sublimation/latent-heat material law.
+/// Neither branch applies the moist-air enhancement factor.
+///
+/// # Errors
+/// Refuses nonfinite temperatures and extrapolation beyond the chosen branch.
+pub fn saturation_pressure_water_pa_with_reference(
+    temperature: f64,
+    reference: HumidityReference,
+) -> Result<f64, MaterialError> {
+    match reference {
+        HumidityReference::LiquidWater => saturation_pressure_water_pa(temperature),
+        HumidityReference::Ice => crate::sublimation::WaterIceSublimation::saturation_pressure_pa(
+            temperature,
+        )
+        .map_err(|error| MaterialError::Parameters {
+            what: format!("ice-reference saturation pressure: {error:?}"),
+        }),
+    }
 }
 
 /// The complete derived ambient state of a gas at (T, p): everything a
@@ -480,6 +520,33 @@ impl GasState {
         mix_moist_air(dry_state, vapor_state, relative_humidity)
     }
 
+    /// Moist air with an explicit liquid-water or ice-relative humidity.
+    ///
+    /// `x_water = RH * p_sat(reference, T) / p_total`; the resulting state uses
+    /// the SAME ideal-mixture, Wilke and WMS owner as ordinary humid air.
+    /// Ice permits cold vapor states down to 50 K, but does not extend the
+    /// accuracy or phase-validity claims of the component gas/transport models.
+    /// Zero humidity retains the full original dry-air domain, without
+    /// evaluating an irrelevant saturation curve.
+    ///
+    /// # Errors
+    /// Refuses RH outside [0, 1], positive humidity outside the selected
+    /// pressure curve's range, incompatible gas states, or a water mole
+    /// fraction above the existing dilute-mixture ceiling of 0.15.
+    pub fn try_new_moist_air_with_reference(
+        temperature: f64,
+        pressure: f64,
+        relative_humidity: f64,
+        reference: HumidityReference,
+    ) -> Result<Self, MaterialError> {
+        if reference == HumidityReference::LiquidWater || relative_humidity == 0.0 {
+            return Self::try_new_moist_air(temperature, pressure, relative_humidity);
+        }
+        let dry = Self::try_new(&GasSpec::dry_air_ussa1976(), temperature, pressure)?;
+        let vapor = Self::try_new(&GasSpec::water_vapor_nist(), temperature, pressure)?;
+        mix_moist_air_with_reference(dry, vapor, relative_humidity, reference)
+    }
+
     /// Classical Stokes–Kirchhoff absorption coefficient [1/m].
     ///
     /// `α = ω² / (2 ρ c³) · [4μ/3 + (γ−1) κ / c_p]`. This is the
@@ -535,6 +602,23 @@ pub(crate) fn mix_moist_air(
     vapor: GasState,
     relative_humidity: f64,
 ) -> Result<GasState, MaterialError> {
+    mix_moist_air_with_reference(
+        dry,
+        vapor,
+        relative_humidity,
+        HumidityReference::LiquidWater,
+    )
+}
+
+/// The same source-component mixer with an explicit condensed-phase pressure
+/// reference. Validation precedes the dry limit so incompatible source cards
+/// cannot be admitted merely by selecting zero humidity.
+pub(crate) fn mix_moist_air_with_reference(
+    dry: GasState,
+    vapor: GasState,
+    relative_humidity: f64,
+    reference: HumidityReference,
+) -> Result<GasState, MaterialError> {
     if !(relative_humidity.is_finite() && (0.0..=1.0).contains(&relative_humidity)) {
         return Err(MaterialError::Parameters {
             what: format!("relative humidity {relative_humidity} outside [0, 1]"),
@@ -545,7 +629,9 @@ pub(crate) fn mix_moist_air(
         return Ok(dry);
     }
 
-    let x_vapor = relative_humidity * saturation_pressure_water_pa(dry.temperature)? / dry.pressure;
+    let x_vapor = relative_humidity
+        * saturation_pressure_water_pa_with_reference(dry.temperature, reference)?
+        / dry.pressure;
     if !(x_vapor > 0.0 && x_vapor <= 0.15 && x_vapor.is_finite()) {
         return Err(MaterialError::Parameters {
             what: format!(

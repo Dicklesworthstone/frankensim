@@ -3,25 +3,31 @@
 //! Component query points describe the dry carrier and the dilute water-vapor
 //! model at a common temperature and total mixture pressure. They do not assert
 //! that pure water vapor is a stable phase at that total pressure. Relative
-//! humidity is an explicit mixture input, separate from either component card.
+//! humidity and its liquid-water or ice reference are explicit mixture inputs,
+//! separate from either component card. Selecting ice does not relax a source
+//! card's temperature or phase applicability.
 
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::{Dims, QuantitySpec};
 
-use crate::gas::{ConductivityModel, GasState, ResolvedGasState, resolve_sutherland_gas_state};
+use crate::gas::{
+    ConductivityModel, GasState, HumidityReference, ResolvedGasState, resolve_sutherland_gas_state,
+};
 use crate::state_point::{MaterialPropertySelection, MaterialStatePointError};
 
 /// A humid gas state together with both source-resolved component bundles.
 ///
 /// The two parameter identities retain their own source receipts. Neither one
-/// alone identifies the mixture: relative humidity and the explicit fixed
-/// USSA/Eucken/Wilke/WMS model choices also determine the returned state.
+/// alone identifies the mixture: relative humidity, its condensed-phase
+/// reference, and the explicit fixed USSA/Eucken/Wilke/WMS model choices also
+/// determine the returned state.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedMoistAirState {
     state: GasState,
     dry_air: ResolvedGasState,
     water_vapor: ResolvedGasState,
     relative_humidity: f64,
+    humidity_reference: HumidityReference,
     water_mass_fraction: f64,
 }
 
@@ -44,10 +50,16 @@ impl ResolvedMoistAirState {
         &self.water_vapor
     }
 
-    /// Relative humidity as a fraction, using the Buck liquid-water basis.
+    /// Relative humidity as a fraction against the retained condensed-phase reference.
     #[must_use]
     pub const fn relative_humidity(&self) -> f64 {
         self.relative_humidity
+    }
+
+    /// Pressure reference used to turn RH into vapor mole fraction.
+    #[must_use]
+    pub const fn humidity_reference(&self) -> HumidityReference {
+        self.humidity_reference
     }
 
     /// Water mass divided by total gas mass, distinct from RH and mole fraction.
@@ -57,7 +69,8 @@ impl ResolvedMoistAirState {
     }
 }
 
-/// Resolve the declared dry-air and water-vapor component models, then mix them.
+/// Resolve the declared dry-air and water-vapor component models, then mix them
+/// using the legacy liquid-water relative-humidity reference.
 ///
 /// Each component keeps its complete query and selection plan. The dry query
 /// must explicitly select `source-composition-ussa1976 = 1`; the vapor query
@@ -85,6 +98,40 @@ pub fn resolve_moist_air_state(
     vapor_selection: MaterialPropertySelection,
     relative_humidity: f64,
 ) -> Result<ResolvedMoistAirState, MaterialStatePointError> {
+    resolve_moist_air_state_with_reference(
+        dry_card,
+        dry_point,
+        dry_selection,
+        vapor_card,
+        vapor_point,
+        vapor_selection,
+        relative_humidity,
+        HumidityReference::LiquidWater,
+    )
+}
+
+/// Source-resolved moist air with an explicit liquid-water or ice RH reference.
+///
+/// Retains both original component receipts AND the pressure reference. All
+/// component identity flags, query axes, and source applicability checks are
+/// identical to [`resolve_moist_air_state`]. The ice branch uses the shared
+/// sublimation law, without inferring a phase from temperature or substituting
+/// an unsourced cold-gas model for a component outside its admitted domain.
+///
+/// # Errors
+/// Propagates source resolution and shared mixture refusals, including positive
+/// humidity outside the selected saturation curve's validity range.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_moist_air_state_with_reference(
+    dry_card: &MaterialCard,
+    dry_point: &QueryPoint,
+    dry_selection: MaterialPropertySelection,
+    vapor_card: &MaterialCard,
+    vapor_point: &QueryPoint,
+    vapor_selection: MaterialPropertySelection,
+    relative_humidity: f64,
+    humidity_reference: HumidityReference,
+) -> Result<ResolvedMoistAirState, MaterialStatePointError> {
     for (point, flag) in [
         (dry_point, "source-composition-ussa1976"),
         (vapor_point, "source-component-water-vapor"),
@@ -110,11 +157,15 @@ pub fn resolve_moist_air_state(
         ConductivityModel::Eucken,
         vapor_selection,
     )?;
-    let state =
-        crate::gas::mix_moist_air(*dry_air.state(), *water_vapor.state(), relative_humidity)
-            .map_err(|_| MaterialStatePointError::InvalidDerived {
-                quantity: "humid-air component states, relative humidity or mixture model domain",
-            })?;
+    let state = crate::gas::mix_moist_air_with_reference(
+        *dry_air.state(),
+        *water_vapor.state(),
+        relative_humidity,
+        humidity_reference,
+    )
+    .map_err(|_| MaterialStatePointError::InvalidDerived {
+        quantity: "humid-air component states, humidity reference or mixture model domain",
+    })?;
     // w = x M_water / M_mix; M = R_universal / R_specific.
     let water_mass_fraction = state.water_mole_fraction * state.specific_gas_constant
         / water_vapor.state().specific_gas_constant;
@@ -123,6 +174,7 @@ pub fn resolve_moist_air_state(
         dry_air,
         water_vapor,
         relative_humidity,
+        humidity_reference,
         water_mass_fraction,
     })
 }
