@@ -4,7 +4,9 @@
 //! with fs-solver's Newton--Krylov/globalization owner. The original entry has
 //! U1=U0 and V1=V0; heat/work entries use U1=U0+Q-W. A trial reconstructs
 //! ONE original gas state; all channels then query its actual T, pressure and
-//! composition. Formation energy remains in the original total-U chart.
+//! composition. The isobaric selector instead closes H1=H0+Q at p1=p0
+//! and derives V1 from that same source-resolved endpoint. Formation energy
+//! remains in the selected original total-U or total-H chart.
 //!
 //! The finite-difference Jacobian is an approximation used only to find the
 //! root. Physical acceptance independently checks every molar residual, exact
@@ -14,6 +16,9 @@
 //! References: Cantera's ideal-gas control-volume equations and SUNDIALS CVODE
 //! mathematics, nonlinear equation F = y - h f(y) - y0. Neither is a runtime
 //! dependency, and this implementation does not claim CVODE's order/adaptivity.
+
+/// Constant-pressure chemistry through this same coupled nonlinear owner.
+pub mod isobaric;
 
 use super::super::*;
 use fs_solver::{NewtonKrylovConfig, NewtonKrylovState, NewtonReport, NonlinearProblem};
@@ -186,7 +191,7 @@ struct Problem<'a, C> {
     scales: Vec<f64>,
     bounds: Vec<[f64; 2]>,
     duration_s: f64,
-    boundary: boundary::GasReactionBoundary,
+    constraint: isobaric::Constraint,
     controls: GasReactionSolve,
     policy: &'a ImplicitMechanismSolve,
     cancelled: RefCell<&'a mut C>,
@@ -313,11 +318,10 @@ impl<C: FnMut() -> bool> Problem<'_, C> {
         self.evaluations.set(spent + 1);
         let extents = self.extents(x)?;
         let inventory = self.inventory(&extents)?;
-        let (gas, energy_iterations) = self.law.reconstruct_inventory_at_boundary(
-            self.gas,
+        let (gas, energy_iterations) = self.constraint.reconstruct(
+            self.law, self.gas,
             &inventory.changes,
             &inventory.amounts,
-            self.boundary,
             self.controls,
             &mut || self.stop(),
         )?;
@@ -673,8 +677,23 @@ pub(in crate::cavity_phs::piston::reactive) fn candidate_at_boundary(
     policy: &ImplicitMechanismSolve,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<GasReactionCandidate, GasReactionError> {
+    candidate_with_constraint(law, gas, duration_s,
+        isobaric::Constraint::Boundary(boundary), admit_entropy, controls, policy, cancelled)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn candidate_with_constraint(
+    law: &GasReaction,
+    gas: &ClosedGasParcel,
+    duration_s: f64,
+    constraint: isobaric::Constraint,
+    admit_entropy: bool,
+    controls: GasReactionSolve,
+    policy: &ImplicitMechanismSolve,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<GasReactionCandidate, GasReactionError> {
     poll(cancelled)?;
-    boundary.validate()?;
+    constraint.validate()?;
     policy.validate(law)?;
     let initial = law.inventory(gas)?;
     let components = law.catalog.thermodynamics().components();
@@ -743,7 +762,7 @@ pub(in crate::cavity_phs::piston::reactive) fn candidate_at_boundary(
         scales,
         bounds,
         duration_s,
-        boundary,
+        constraint,
         controls,
         policy,
         cancelled: RefCell::new(cancelled),
@@ -825,6 +844,7 @@ pub(in crate::cavity_phs::piston::reactive) fn candidate_at_boundary(
             residual_mol: accepted.residual_mol[j],
         })
         .collect();
+    let boundary = constraint.boundary(gas, &accepted.gas)?;
     let mut result = law.admit_progress_at_boundary(
         gas,
         &problem.initial,
