@@ -8634,3 +8634,35 @@ checks do not establish numerical convergence or instrument realism.
 `prescribed_gas::step_candidate` composes the original same-snapshot finite-nozzle network with original NASA-9 midpoint heat/volume proposals for explicitly driven chambers and finite reservoirs. All drives and endpoint solvers cover the same parcel identities; concurrent inlet/outlet enthalpy is counted once. Gross gas `p_mid * dV` work, exterior-pressure work and net work to the prescribed drive remain separate. Actual local storage balances include transported enthalpy; the complete finite network closes `sum(dU) + sum(W_gross) - sum(Q_external) = 0` before all original owners can be returned atomically. The original graph-size, source, inventory, withdrawal and pressure-crossing limits remain active.
 
 This flow-then-motion split is first order. Prescribed-drive mechanics, timestep/event resolution, combustion and empirical valve applicability remain with callers. G0/G1/G3 tests cover independently computed constant-Cv pressure work, analytic Otto efficiency under refinement, variable-Cp compression against an entropy oracle, simultaneous inlet/outlet flow with motion, species conservation and link-order invariance, held-volume heat, and late-refusal/cancellation rollback.
+
+## Shared finite-network friction heating
+
+`friction_heat::FrictionHeatRoute` binds an existing perfect-contact link between
+adjoining orthogonal, uniform prismatic cells. Its massless common-temperature
+interface derives each conductance from the original face area, that body's
+half-cell distance and its endpoint material conductivity. The old direct link
+is suppressed only in the thermal residual while surface coverage is retained.
+Signed body heat includes ordinary hot-to-cold exchange; only the sum equals
+physical friction work. Original cell storage, other sources and the thermal
+energy account remain authoritative. No prescribed heat fraction or extra heat
+store is introduced.
+
+`FrictionModalSystem::step_with_friction_heat` solves the original scalar modal
+friction proposal and this thermal interface in the same bounded Newton
+transaction. Every temperature trial repeats mechanics from accepted history,
+including existing nonlinear storage, and regenerates a temperature-specific
+Stribeck load line. Retained dry-interface cards preserve their original law and
+applicability; unbound laws retain explicit caller authority. Original physical
+friction work enters caloric cells once. Independent cell, interface, thermal
+and combined energy gates pass before either owner publishes. Source refusal,
+iteration budget, cancellation or mismatched clocks preserve accepted motion,
+law, branch history and thermal state.
+
+Focused G1/G3 tests cover an independent two-free-body/finite-capacity solution
+with temperature-dependent friction, equal mechanical loss and thermal gain,
+the original Stribeck root at the solved temperature, rollback and exact retry.
+General thermal tests additionally cover unequal half cells, ordinary
+conduction, analytic steady temperature and three-level spatial convergence.
+This backward-Euler finite-volume route requires time and spatial refinement.
+Moving footprints, finite third-body storage, wear, thermal expansion and
+flash-temperature closures remain outside this implementation.

@@ -390,20 +390,35 @@ impl FrictionModalSystem {
     fn step_inner(&mut self, external: &[f64], drive: FrictionDrive, gate: Option<&CancelGate>)
         -> Result<&FrictionModalFrame, ModalFrictionError>
     {
+        let (accepted, nonlinear_frame) = self.stage_candidate(external, drive, gate)?;
+        poll(gate)?;
+        Ok(self.publish_candidate(accepted, nonlinear_frame))
+    }
+
+    // Thermal coupling repeats this same physical proposal at endpoint
+    // temperatures. Accepted mechanics and constitutive history stay untouched.
+    fn stage_candidate(&mut self, external: &[f64], drive: FrictionDrive, gate: Option<&CancelGate>)
+        -> Result<(FrictionModalFrame, Option<nonlinear::NonlinearFrictionFrame>), ModalFrictionError>
+    {
         let (accepted, nonlinear_frame) = if let Some(mut state) = self.nonlinear.take() {
             let trial = state.stage(self, external, drive, gate);
             self.nonlinear = Some(state);
             let frame = trial?;
             (frame.friction, Some(frame))
         } else { (self.stage_inner(external, drive, gate)?, None) };
-        poll(gate)?;
+        Ok((accepted, nonlinear_frame))
+    }
+
+    fn publish_candidate(&mut self, accepted: FrictionModalFrame,
+        nonlinear_frame: Option<nonlinear::NonlinearFrictionFrame>) -> &FrictionModalFrame
+    {
         self.network.staged_frame.observer_pressure_pa = accepted.observer_pressure_pa;
         self.network.publish_staged();
         self.branch = self.staged_branch;
         if let (Some(state), Some(frame)) = (&mut self.nonlinear, nonlinear_frame) {
             state.publish(frame);
         }
-        Ok(self.last.insert(accepted))
+        self.last.insert(accepted)
     }
 
     // The nonlinear storage adapter may repeat this SAME held-force/friction
@@ -508,3 +523,6 @@ pub mod interface;
 
 /// Additive nonlinear storage on the original exact linear/friction network.
 pub mod nonlinear;
+
+/// Same-step friction, common-interface temperature and finite-body thermal evolution.
+pub mod heat;
