@@ -12,6 +12,9 @@
 //! chart. This is a first-order reduced surface model, not a spatial Stefan
 //! solver or moving mesh. Transcendentals use the shared deterministic math
 //! owner; this module's executed repeatability evidence is same-ISA only.
+/// Joint phase exchange between several surfaces and one finite vapor chamber.
+pub mod chamber;
+
 use core::fmt;
 
 /// Molar gas constant [J/(mol K)] from the exact SI defining constants.

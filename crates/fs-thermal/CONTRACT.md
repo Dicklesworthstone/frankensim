@@ -121,3 +121,31 @@ thermal/material suite passed 95 tests with one existing performance test
 ignored. `cargo run -p fs-material --example sublimating_ice` demonstrates the
 real ice law with explicit illustrative calorimetry in a maintained vacuum and
 a finite chamber; both native example cases passed mass/energy assertions.
+
+
+## Several surfaces sharing one vapor chamber
+
+`sublimation::chamber::advance_chamber` solves one shared endpoint vapor
+pressure together with the original conservative surface enthalpy operators.
+Its backward-Euler mass balance admits warm-to-cold redistribution, including
+condensation of vapor emitted during the same interval into an initially empty
+chamber. Depositing surfaces never receive independent copies of the original
+vapor inventory. One volatile species with constant molar mass, pure-solid
+caloric branches and compatible enthalpy references are required. Gas volume
+and temperature stay prescribed.
+
+A frozen-temperature predictor and safeguarded scalar pressure interpolation
+avoid a dense coupled matrix; each trial costs O(surfaces), with explicit
+surface, local-iteration and total pressure-trial ceilings. Unsupported outer
+trial bounds are backed away from. The same accepted transfers reconstruct
+final vapor mass and drive every solid mass, latent/sensible-energy and
+recession account. The nonlinear pressure/mass closure residual is reported
+separately from actual published mass conservation. Refining time controls the
+first-order integration error; the residual does not certify model accuracy.
+
+Eight new native regressions check independent simultaneous algebra, transient
+refinement, stationary-pressure circulation, initially empty chambers, shared
+inventory, area partition/order, refusal and finite-capacity energy closure.
+The combined thermal/material suite passed 113 tests with one existing benchmark
+ignored. Thermally evolving gas, molecular heat accommodation, mixed phases and
+mesh/topology changes remain separate physical owners.
