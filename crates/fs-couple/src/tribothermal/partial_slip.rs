@@ -7,7 +7,8 @@
 //! and U_contact = psi + Ta*sa + Tb*sb. The caloric network receives physical
 //! microslip heat and reversible exchange -Ci-d(Ti*si), never numerical loss.
 //!
-//! Fixed normal patch/load and declared heat split. Coulomb coefficients are
+//! Fixed normal patch/load and an explicit prescribed or conduction-resolved
+//! heat route. Coulomb coefficients are
 //! fixed or re-queried through the original pinned material sliding binding.
 //! no normal work, expansion, wear, adhesion, flash-temperature or resolved
 //! traction-field claim. The existing caloric objects and transport sources
@@ -35,6 +36,16 @@ use super::{
     MaterialSlidingContact, SlidingError, SlidingHeatPartition, SlidingInterface,
     SlidingMaterialSample,
 };
+
+/// A common thermal interface partitions physical loss through the original
+/// body network while retaining each body's own reversible entropy exchange.
+pub mod resolved;
+
+#[derive(Clone)]
+enum CaloricHeatRouting {
+    Prescribed(HeatPartition),
+    Resolved(crate::friction_heat::FrictionHeatRoute),
+}
 
 /// Derivatives of the two complete-patch stiffnesses with respect to ONE
 /// surface temperature, holding the other temperature and elastic strains fixed.
@@ -195,7 +206,7 @@ pub struct CaloricPartialSlip<'a> {
     checkpoint: PartialSlipCheckpoint,
     curves: [&'a EquilibriumEnthalpyPhaseCurve; 2],
     cells: [CellId; 2],
-    partition: HeatPartition,
+    routing: CaloricHeatRouting,
     temperature_k: [f64; 2],
     thermodynamics: ContactThermodynamics,
     time_s: f64,
@@ -275,6 +286,15 @@ pub struct CaloricContactCandidate<'a, 't, S> {
     contact: CaloricPartialSlip<'a>,
     report: CaloricContactReport<S>,
 }
+
+struct MechanicalEndpoint {
+    contact: PartialSlipStep,
+    material: Option<SlidingMaterialSample>,
+    thermodynamics: ContactThermodynamics,
+    temperature_k: [f64; 2],
+    internal_change: f64,
+    reversible_heat_j: [f64; 2],
+}
 impl<'a, 't, S> CaloricContactCandidate<'a, 't, S> {
     pub const fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
@@ -312,6 +332,29 @@ impl<'a> CaloricPartialSlip<'a> {
                 "two distinct finite caloric destinations required",
             ));
         }
+        Self::from_checkpoint(
+            thermal,
+            model,
+            checkpoint,
+            curves,
+            cells,
+            CaloricHeatRouting::Prescribed(partition),
+        )
+    }
+
+    fn from_checkpoint(
+        thermal: &DepositionSimulation<'_>,
+        model: AffineContactStiffness,
+        checkpoint: PartialSlipCheckpoint,
+        curves: [&'a EquilibriumEnthalpyPhaseCurve; 2],
+        cells: [CellId; 2],
+        routing: CaloricHeatRouting,
+    ) -> Result<Self, CaloricContactError> {
+        if cells[0] == cells[1] {
+            return Err(CaloricContactError::Invalid(
+                "two distinct finite caloric destinations required",
+            ));
+        }
         let temperature_k = temperatures(thermal, curves, cells)?;
         if model.law_at::<Infallible>(temperature_k)? != *checkpoint.law() {
             return Err(CaloricContactError::Invalid(
@@ -332,7 +375,7 @@ impl<'a> CaloricPartialSlip<'a> {
             checkpoint,
             curves,
             cells,
-            partition,
+            routing,
             temperature_k,
             thermodynamics,
             time_s: thermal.time_s(),
@@ -343,8 +386,10 @@ impl<'a> CaloricPartialSlip<'a> {
     /// Attach the ORIGINAL pinned Coulomb source resolver without resetting
     /// loaded strains, kinetic branches or the affine free-energy model.
     ///
-    /// Ordered interface/history/source identities, caloric objects, cells and
-    /// the declared heat split must match. The source's initial coefficients
+    /// Ordered interface/history/source identities, caloric objects and cells
+    /// must match. Prescribed routing also requires the original heat split;
+    /// resolved routing derives its split from the actual interface conductance
+    /// and does not use the binding's legacy partition metadata. The source's initial coefficients
     /// must match the accepted native law; changing them requires a real step.
     /// Rebinding an existing source is refused. The stiffness model's identity
     /// and the friction claim identities remain distinct.
@@ -370,11 +415,15 @@ impl<'a> CaloricPartialSlip<'a> {
             || data.cells != self.cells
             || (0..2).any(|i| !std::ptr::eq(data.caloric[i], self.curves[i]))
             || data.accumulated_distance_axis.is_some()
-            || !matches!(&data.partition, SlidingHeatPartition::Prescribed(p) if *p == self.partition)
+            || !matches!(&data.partition, SlidingHeatPartition::Prescribed(p)
+            if p.other() == 0.0 && match &self.routing {
+                CaloricHeatRouting::Prescribed(original) => p == original,
+                CaloricHeatRouting::Resolved(_) => true,
+            })
             || self.checkpoint.state().region_elastic_twist_rad() != [0.0; 2]
         {
             return Err(CaloricContactError::Invalid(
-                "material contact needs original ordered cells/curves, fixed heat split and translational history",
+                "material contact needs original ordered cells/curves, compatible heat ownership and translational history",
             ));
         }
         let source = MaterialSlidingContact::new(
@@ -437,6 +486,106 @@ impl<'a> CaloricPartialSlip<'a> {
         self.time_s
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn mechanical_endpoint<E>(
+        &self,
+        state: &DepositionSimulation<'_>,
+        frame: TangentFrame,
+        kinematics: PartialSlipKinematics,
+        ownership: &GeneralizedWorkOwnership,
+        controls: CaloricContactSolve,
+    ) -> Result<MechanicalEndpoint, CaloricContactError<E>> {
+        let dt = kinematics.dt_s;
+        let temperature_k = temperatures(state, self.curves, self.cells)?;
+        let mut law = self.model.law_at(temperature_k)?;
+        let material = self
+            .material_friction
+            .as_ref()
+            .map(|source| {
+                let vx = finite(kinematics.creepage[0] * kinematics.rolling_speed_mps)?;
+                let vy = finite(kinematics.creepage[1] * kinematics.rolling_speed_mps)?;
+                let speed = finite(det::hypot(vx, vy))?;
+                let distance = finite(speed * dt)?;
+                let accumulated = finite(source.distance_m + distance)?;
+                if distance > 0.0 && accumulated == source.distance_m {
+                    return Err(CaloricContactError::Invalid(
+                        "material contact travel is unrepresentable",
+                    ));
+                }
+                source
+                    .sample(
+                        state,
+                        self.checkpoint.normal_patch().normal_load_n(),
+                        speed,
+                        accumulated,
+                    )
+                    .map_err(CaloricContactError::Material)
+            })
+            .transpose()?;
+        if let Some(sample) = &material {
+            let [static_mu, kinetic_mu] = coulomb(sample)?;
+            let mut parameters = law.parameters();
+            parameters.static_mu = static_mu;
+            parameters.kinetic_mu = kinetic_mu;
+            law = PartialSlipLaw::new(law.model_id(), law.source_id(), parameters)
+                .map_err(CaloricContactError::Contact)?;
+        }
+        let contact = law
+            .advance_with_coefficients(
+                self.checkpoint.normal_patch(),
+                self.checkpoint.interface(),
+                frame,
+                kinematics,
+                ownership,
+                &self.checkpoint,
+            )
+            .map_err(CaloricContactError::Contact)?;
+        let thermodynamics = self
+            .model
+            .thermodynamics(&contact.next_state, temperature_k)?;
+        let internal_change =
+            finite(thermodynamics.internal_energy_j - self.thermodynamics.internal_energy_j)?;
+        if contact.dissipation.heat_j < 0.0
+            || contact.generalized_work.numerical_dissipation_j < 0.0
+            || contact.generalized_work.closure_residual_j.abs() > controls.total_energy_tolerance_j
+            || finite(thermodynamics.free_energy_j - contact.stored_energy_j)?.abs()
+                > controls.total_energy_tolerance_j
+        {
+            return Err(CaloricContactError::Invalid(
+                "native contact free energy or work failed closure",
+            ));
+        }
+        let mut reversible_heat_j = [0.0; 2];
+        for i in 0..2 {
+            // Retain each body's original -Ti*dsi exchange. It is neither
+            // inter-body conduction nor irreversible microslip heating.
+            reversible_heat_j[i] = finite(
+                -temperature_k[i]
+                    * finite(thermodynamics.entropy_j_k[i] - self.thermodynamics.entropy_j_k[i])?,
+            )?;
+        }
+        let defect = finite(
+            internal_change
+                + contact.dissipation.heat_j
+                + reversible_heat_j[0]
+                + reversible_heat_j[1]
+                + contact.generalized_work.numerical_dissipation_j
+                - contact.generalized_work.work_into_interface_j,
+        )?;
+        if defect.abs() > controls.total_energy_tolerance_j {
+            return Err(CaloricContactError::Invalid(
+                "contact internal energy and reversible caloric exchange do not close",
+            ));
+        }
+        Ok(MechanicalEndpoint {
+            contact,
+            material,
+            thermodynamics,
+            temperature_k,
+            internal_change,
+            reversible_heat_j,
+        })
+    }
     /// Solve prescribed relative motion and both actual surface temperatures in
     /// one original finite thermal network. The normal patch/load remains fixed.
     /// Callback supplies only OTHER sources and conductances, evaluated at this
@@ -455,6 +604,11 @@ impl<'a> CaloricPartialSlip<'a> {
         resolve: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<CaloricContactCandidate<'a, 't, S>, CaloricContactError<E>> {
+        let CaloricHeatRouting::Prescribed(partition) = &self.routing else {
+            return Err(CaloricContactError::Invalid(
+                "use the resolved-interface step for this contact heat owner",
+            ));
+        };
         let cancel = RefCell::new(cancelled);
         let poll = || {
             if (*cancel.borrow_mut())() {
@@ -511,86 +665,22 @@ impl<'a> CaloricPartialSlip<'a> {
                         return Err(CaloricContactError::TrialBudget);
                     }
                     trials.set(trials.get() + 1);
-                    let temperature_k = temperatures(state, self.curves, self.cells)?;
-                    let mut law = self.model.law_at(temperature_k)?;
-                    let material = self
-                        .material_friction
-                        .as_ref()
-                        .map(|source| {
-                            let vx = finite(kinematics.creepage[0] * kinematics.rolling_speed_mps)?;
-                            let vy = finite(kinematics.creepage[1] * kinematics.rolling_speed_mps)?;
-                            let speed = finite(det::hypot(vx, vy))?;
-                            let distance = finite(speed * dt)?;
-                            let accumulated = finite(source.distance_m + distance)?;
-                            if distance > 0.0 && accumulated == source.distance_m {
-                                return Err(CaloricContactError::Invalid(
-                                    "material contact travel is unrepresentable",
-                                ));
-                            }
-                            source
-                                .sample(
-                                    state,
-                                    self.checkpoint.normal_patch().normal_load_n(),
-                                    speed,
-                                    accumulated,
-                                )
-                                .map_err(CaloricContactError::Material)
-                        })
-                        .transpose()?;
-                    if let Some(sample) = &material {
-                        let [static_mu, kinetic_mu] = coulomb(sample)?;
-                        let mut parameters = law.parameters();
-                        parameters.static_mu = static_mu;
-                        parameters.kinetic_mu = kinetic_mu;
-                        law = PartialSlipLaw::new(law.model_id(), law.source_id(), parameters)
-                            .map_err(CaloricContactError::Contact)?;
-                    }
-                    let contact = law
-                        .advance_with_coefficients(
-                            self.checkpoint.normal_patch(),
-                            self.checkpoint.interface(),
-                            frame,
-                            kinematics,
-                            ownership,
-                            &self.checkpoint,
-                        )
-                        .map_err(CaloricContactError::Contact)?;
-                    let thermodynamics = self
-                        .model
-                        .thermodynamics(&contact.next_state, temperature_k)?;
-                    let internal_change = finite(
-                        thermodynamics.internal_energy_j - self.thermodynamics.internal_energy_j,
-                    )?;
-                    if contact.dissipation.heat_j < 0.0
-                        || contact.generalized_work.numerical_dissipation_j < 0.0
-                        || contact.generalized_work.closure_residual_j.abs()
-                            > controls.total_energy_tolerance_j
-                        || finite(thermodynamics.free_energy_j - contact.stored_energy_j)?.abs()
-                            > controls.total_energy_tolerance_j
-                    {
-                        return Err(CaloricContactError::Invalid(
-                            "native contact free energy or work failed closure",
-                        ));
-                    }
+                    let MechanicalEndpoint {
+                        contact,
+                        material,
+                        thermodynamics,
+                        temperature_k,
+                        internal_change,
+                        reversible_heat_j,
+                    } = self.mechanical_endpoint(state, frame, kinematics, ownership, controls)?;
                     let physical_heat_j = [
-                        finite(self.partition.surface_a() * contact.dissipation.heat_j)?,
-                        finite(self.partition.surface_b() * contact.dissipation.heat_j)?,
+                        finite(partition.surface_a() * contact.dissipation.heat_j)?,
+                        finite(partition.surface_b() * contact.dissipation.heat_j)?,
                     ];
-                    let mut reversible_heat_j = [0.0; 2];
-                    let mut deposited_heat_j = [0.0; 2];
-                    for i in 0..2 {
-                        // For affine k, Ci=-si_old*dTi. Thus -Ci-d(Ti*si)
-                        // equals -Ti_new*(si_new-si_old), avoiding cancellation
-                        // between large coefficient-work and entropy-energy terms.
-                        reversible_heat_j[i] = finite(
-                            -temperature_k[i]
-                                * finite(
-                                    thermodynamics.entropy_j_k[i]
-                                        - self.thermodynamics.entropy_j_k[i],
-                                )?,
-                        )?;
-                        deposited_heat_j[i] = finite(physical_heat_j[i] + reversible_heat_j[i])?;
-                    }
+                    let deposited_heat_j = [
+                        finite(physical_heat_j[0] + reversible_heat_j[0])?,
+                        finite(physical_heat_j[1] + reversible_heat_j[1])?,
+                    ];
                     let coupled_defect = finite(
                         internal_change
                             + deposited_heat_j[0]

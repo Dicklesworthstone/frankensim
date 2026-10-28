@@ -2,6 +2,8 @@
 //! sources; these are implementation checks, not measured contact calibration.
 #[path = "partial_slip/material.rs"]
 mod material;
+#[path = "partial_slip/resolved.rs"]
+mod resolved;
 
 use super::common;
 use fs_couple::tribothermal::partial_slip::*;

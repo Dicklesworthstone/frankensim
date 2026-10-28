@@ -9067,3 +9067,37 @@ more suitable physical model, not per-edge flux clipping. Added real-fixture
 regressions exercise porous transport in the moving assembly and selective
 membrane transport through continuing acoustic owners, including immutable
 preview, atomic publication and enclosing species/energy accounts.
+
+## Conduction-derived heat for retained thermoelastic partial slip
+
+`tribothermal::partial_slip::resolved` adds an explicit resolved-interface
+route to the original `CaloricPartialSlip` owner. Its constructor needs no
+prescribed body heat fraction. Existing loaded material-bound contacts can
+upgrade their routing without resetting regional strains, sliding branches,
+accepted time or pinned friction claims. The original prescribed route remains
+available; a resolved route cannot accidentally use that route's step.
+
+The existing finite thermal contact supplies matching orthogonal geometry and
+half-cell distances. Same-endpoint original body conductivities determine a
+common massless interface temperature and signed heat flows. Only the native
+contact's physical microslip loss enters that node. Each body separately retains
+its reversible thermoelastic exchange `-T_i Delta s_i` from the original
+two-temperature affine free-energy model. Numerical return-map loss stays
+outside heat. Reports distinguish conductivity-derived generated-heat
+allocation, signed ordinary conduction, reversible exchange and the independent
+thermal/interface/whole-system residuals.
+
+Pinned material queries retain their declared body-temperature axes, pressure,
+actual translational speed, source domains and loaded memory. The common node
+does not fabricate a different temperature axis for an existing claim. Legacy
+partition metadata in an upgraded material binding is ignored for heat routing
+and replaced by the derived allocation in accepted reports.
+
+Six new native physical tests and nine original retained-contact/material
+regressions pass. Independent references cover two-capacity conduction,
+reversible entropy/enthalpy exchange, zero-slip hot-to-cold transfer, and
+temperature-dependent Coulomb feedback. Source-domain, competing heat-owner,
+cancellation and other refused trials leave accepted contact/thermal histories
+unchanged. Scope remains a fixed normal patch/load, prescribed relative motion,
+matching finite-volume geometry, negligible interface resistance/storage and
+first-order endpoint coupling.

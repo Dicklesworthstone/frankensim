@@ -369,3 +369,6 @@ fn original_source_domain_failure_rolls_back_loaded_and_thermal_histories() {
         "already-pinned source must not be rebound"
     );
 }
+
+#[path = "resolved_material.rs"]
+mod resolved;
