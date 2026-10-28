@@ -9,7 +9,9 @@ use super::*;
 pub mod harmonic;
 pub use harmonic::SharedCavityDgHarmonicResponse;
 use crate::dg_port::DgPortLoad;
-use crate::render::schedule::force::coupled::dg::PreparedModalDg;
+use crate::render::schedule::force::coupled::dg::{PreparedModalDg, PreparedJointDg};
+pub mod exact;
+pub use exact::ExactDgBudget;
 pub use crate::render::schedule::force::coupled::dg::{
     ModalDgError as SharedCavityDgError, ModalDgFrame as SharedCavityDgFrame,
 };
@@ -19,9 +21,10 @@ pub use crate::render::schedule::force::coupled::dg::{
 pub struct SharedCavityDg {
     cavity: SharedCavity,
     load: DgPortLoad,
-    bridge: PreparedModalDg,
+    evolution: Evolution,
     frame: Option<SharedCavityDgFrame>,
 }
+enum Evolution { Mean(PreparedModalDg), Exact(PreparedJointDg) }
 impl SharedCavity {
     /// Attach an ADDITIONAL downstream duct to the existing neck's outward flow.
     /// Requires `ExteriorMouth`, an ordinary DG inlet, the same inlet gas/area,
@@ -49,12 +52,23 @@ impl SharedCavity {
         load: DgPortLoad,
         gate: &CancelGate,
     ) -> Result<SharedCavityDg, SharedCavityDgError> {
+        let column = self.downstream_duct_column(&load, gate)?;
+        let bridge = PreparedModalDg::new(&self.system, &load, column, gate)?;
+        Ok(SharedCavityDg { cavity: self, load, evolution: Evolution::Mean(bridge), frame: None })
+    }
+
+    fn downstream_duct_column(&self, load: &DgPortLoad, gate: &CancelGate)
+        -> Result<Vec<f64>, SharedCavityDgError>
+    {
         if gate.is_requested() {
             return Err(ModalCouplingError::Cancelled.into());
         }
         let area = self.source.neck_area_m2();
         if self.source.loss() != CavityNeckLoss::ExteriorMouth
             || self.radiation_neck_port.is_some()
+            || self.system.samples_rendered() != 0 || load.state().step_count() != 0
+            || self.system.sample_period_s().to_bits() != load.propagator().dt().to_bits()
+            || load.has_driven_mouth()
             || self.source.gas() != load.duct().inlet_gas()
             || (area - load.duct().inlet_area_m2()).abs() > 8.0 * f64::EPSILON * area
         {
@@ -62,13 +76,7 @@ impl SharedCavity {
         }
         let mut column = vec![0.0; self.system.mode_count()];
         column[self.surface_modes] = self.source.neck_volume_shape_m2_per_sqrt_kg();
-        let bridge = PreparedModalDg::new(&self.system, &load, column, gate)?;
-        Ok(SharedCavityDg {
-            cavity: self,
-            load,
-            bridge,
-            frame: None,
-        })
+        Ok(column)
     }
 }
 impl SharedCavityDg {
@@ -104,16 +112,19 @@ impl SharedCavityDg {
         let before =
             self.cavity
                 .prepare_external_step(surface_force, incident_neck_pressure_pa, gate)?;
-        let frame = self.bridge.step(
-            &mut self.cavity.system,
-            &mut self.load,
-            &self.cavity.external,
-            gate,
-        )?;
-        self.cavity
-            .external
-            .copy_from_slice(self.bridge.applied_forces());
-        self.cavity.record_accepted_step(before);
+        let (frame, additional_neck_work) = match &mut self.evolution {
+            Evolution::Mean(bridge) => {
+                let frame = bridge.step(&mut self.cavity.system, &mut self.load, &self.cavity.external, gate)?;
+                self.cavity.external.copy_from_slice(bridge.applied_forces());
+                (frame, 0.0)
+            }
+            Evolution::Exact(bridge) => {
+                let frame = bridge.step(&mut self.cavity.system, &mut self.load, &self.cavity.external, gate)?;
+                let work = -frame.inlet_work_j;
+                (frame, work)
+            }
+        };
+        self.cavity.record_accepted_step_with_neck_work(before, additional_neck_work);
         self.frame = Some(frame);
         Ok(self.frame.as_ref().expect("joint step accepted"))
     }

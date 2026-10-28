@@ -4,6 +4,8 @@
 //! Peak phasors use exp(-i omega t). This is the frozen linear spatial model;
 //! its spatial and constitutive-band errors remain separate from solve residuals.
 use super::*;
+/// Transactional source-bound adoption after a complete coupled trajectory.
+pub mod state;
 use fs_la::eigen_complex::{LuComplexError, lu_complex_with_cancel};
 use fs_math::c64::C64;
 

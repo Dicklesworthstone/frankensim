@@ -174,7 +174,8 @@ pub struct EnergyLedgerRow {
     pub step: u64,
     /// Stored acoustic and any viscothermal memory energy $E(t_n)$ [J].
     pub stored_energy_j: f64,
-    /// Exact work $\sum_{\text{ports}} e \cdot \Delta x$ [J] injected by ports during this step.
+    /// Exact port work [J], `sum(e * delta_x)` for held flow; a composed
+    /// continuous trajectory instead supplies its actual `sum(integral p Q dt)`.
     pub port_work_step_j: f64,
     /// Cumulative work [J] injected by ports since initialization.
     pub cumulative_port_work_j: f64,
@@ -182,15 +183,16 @@ pub struct EnergyLedgerRow {
     /// changes. This is separate from port work and irreversible heat.
     pub cumulative_parameter_work_j: f64,
     /// Cumulative energy [J] absorbed by `Matched` boundaries and any wall memory,
-    /// inferred from the stored-energy deficit (zero for the fully lossless image).
+    /// The standalone path infers this from the energy deficit; a composed exact
+    /// trajectory supplies independently integrated loss (zero when lossless).
     pub cumulative_dissipated_j: f64,
     /// Signed residual $E(t_n) - E(0) - W_{\text{port}} - W_{\text{parameter}} + D$ [J].
     pub energy_balance_residual_j: f64,
     /// Absolute residual divided by initial energy plus the magnitudes of
     /// accumulated port and parameter work (with a 1e-300 J floor).
     pub relative_energy_drift: f64,
-    /// True for the lossless image with lossless boundaries. False when boundary
-    /// absorption or wall dissipation is inferred from the deficit.
+    /// True for the lossless image or an independently integrated composed
+    /// trajectory. False when boundary/wall loss is inferred from the deficit.
     pub balance_checked: bool,
 }
 

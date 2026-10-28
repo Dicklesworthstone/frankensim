@@ -421,6 +421,12 @@ impl SharedCavity {
 
     // Infallible physical port publication after all participating owners accept.
     fn record_accepted_step(&mut self, before: f64) {
+        self.record_accepted_step_with_neck_work(before, 0.0);
+    }
+
+    // A continuous DG reaction contributes its actual integral, not a held
+    // endpoint/mean pressure times the neck's swept volume.
+    fn record_accepted_step_with_neck_work(&mut self, before: f64, additional_neck_work_j: f64) {
         let (sample, after, loss, tolerance) = {
             let frame = self.system.last_frame().expect("step accepted");
             (
@@ -451,7 +457,8 @@ impl SharedCavity {
                 .enumerate()
                 .map(|(i, state)| {
                     crate::port_adoption::PortTransfer::work(
-                        external[i] * (state.displacement_m_sqrt_kg - old_q[i]),
+                        external[i] * (state.displacement_m_sqrt_kg - old_q[i])
+                            + if i == self.surface_modes { additional_neck_work_j } else { 0.0 },
                         true,
                     )
                 }),

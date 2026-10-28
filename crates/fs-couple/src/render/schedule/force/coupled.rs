@@ -188,7 +188,9 @@ pub struct CoupledModalFrame {
     pub material_energy_j: f64,
     /// Independent acoustic storage of the attached exterior load [J].
     pub radiation_energy_j: f64,
-    /// Work of the externally held generalized forces only [J].
+    /// Work through this modal subsystem's external force ports [J]. Ordinary
+    /// stepping holds those forces; exact DG composition also includes the
+    /// independently integrated continuous acoustic reaction at its boundary.
     pub external_work_j: f64,
     /// Independent time integral of all original component viscous losses [J].
     pub component_dissipation_j: f64,

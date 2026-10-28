@@ -12,6 +12,7 @@ pub mod input;
 pub mod radiation;
 
 mod terminal;
+mod continuous;
 use terminal::{TerminalCoupling, TerminalRelation};
 mod mouth;
 pub use mouth::DgDrivenMouthFrame;

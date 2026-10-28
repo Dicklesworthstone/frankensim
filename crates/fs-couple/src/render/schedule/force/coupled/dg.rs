@@ -13,6 +13,8 @@ use crate::acoustic_realize::AcousticRealizeError;
 use crate::dg_port::{DgPortLoad, sum_terminal_work};
 use fs_duct::dg::DgStepOutput;
 use fs_exec::CancelGate;
+pub use super::exact::dg::ExactDgBudget;
+pub(crate) use super::exact::dg::PreparedJointDg;
 
 /// A refusal from either original owner or their shared pressure/work admission.
 #[derive(Debug)]
@@ -52,6 +54,11 @@ impl std::error::Error for ModalDgError {
 /// One accepted coupled step. Internal inlet work cancels in the joint account.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModalDgFrame {
+    /// True when one continuous modal/DG exponential advances all coordinates.
+    pub exact_joint_evolution: bool,
+    /// Actual integrated inlet work [J]. For exact joint evolution this is
+    /// integral p(t) Q(t) dt, generally different from the product of means.
+    pub inlet_work_j: f64,
     /// Original modal frame. Its external work includes the opposing DG effort;
     /// use `authored_external_work_j` for the external work of the joint system.
     pub modal: CoupledModalFrame,
@@ -68,7 +75,8 @@ pub struct ModalDgFrame {
     pub storage_change_j: f64,
     /// Authored generalized force work only; internal duct reaction cancels [J].
     pub authored_external_work_j: f64,
-    /// Original modal loss plus inferred DG loss [J]. When the DG ledger has
+    /// Original modal loss plus DG loss [J], independently integrated on the
+    /// exact joint backend and inferred on the dense mean-port backend. When the DG ledger has
     /// `balance_checked == false`, this is not an independent wall heat integral.
     pub inferred_total_dissipation_j: f64,
     /// Signed work into retained rational terminals, excluding stored gap work.
@@ -211,7 +219,8 @@ impl PreparedModalDg {
                     - acoustic.previous_cumulative_dissipated_j()),
         )?;
         let terminal_work_j = finite(sum_terminal_work(acoustic.terminal_frames()))?;
-        let port_work_residual_j = finite(acoustic.inlet_work_j() - pressure * volume)?;
+        let inlet_work_j = acoustic.inlet_work_j();
+        let port_work_residual_j = finite(inlet_work_j - pressure * volume)?;
         let balance_residual_j = finite(
             storage_change_j + inferred_total_dissipation_j + terminal_work_j
                 - authored_external_work_j,
@@ -247,6 +256,8 @@ impl PreparedModalDg {
         let duct = acoustic.accept();
         network.publish_staged();
         Ok(ModalDgFrame {
+            exact_joint_evolution: false,
+            inlet_work_j,
             modal,
             duct,
             mean_flow_m3_s: actual_flow,

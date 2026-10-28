@@ -8,6 +8,7 @@ use fs_phs::linear_exact::{
 use fs_phs::{PortHamiltonian, QuadraticStorage, StepRecord};
 
 pub(super) mod prepared;
+pub(super) mod dg;
 
 pub(super) struct ExactNetwork {
     blocks: Vec<(Vec<usize>, ExactBlock)>,
@@ -730,11 +731,6 @@ pub(super) fn stage(
     gate: Option<&CancelGate>,
 ) -> Result<(), ModalCouplingError> {
     poll(gate)?;
-    let sample = network
-        .frame
-        .sample
-        .checked_add(1)
-        .ok_or_else(|| invalid("coupled sample clock overflow"))?;
     let before = network.total_energy_j()?;
     let (rec_x, x, u, component_loss, connection_loss, material_loss, radiation_loss, h_x) = if let Some(exact) = &network.exact {
         let (rec, x, u) = exact.advance(&network.models, &network.material_memory,
@@ -775,9 +771,33 @@ pub(super) fn stage(
         }
         (rec_x, x, u, comp_loss, 0.0, 0.0, 0.0, before)
     };
+    stage_candidate(network, external, PropagatedCandidate {
+        endpoint: rec_x, start: x, input: u,
+        losses: [component_loss, connection_loss, material_loss, radiation_loss],
+        initial_bound_energy: h_x, external_work: None, connection_transfers: None,
+    }, gate)
+}
+
+// The original endpoint/material/budget/accounting gates also admit complete
+// joint trajectories. A varying boundary effort supplies its actual integrated
+// work and original connection integrals, never endpoint pressure times travel.
+struct PropagatedCandidate {
+    endpoint: Vec<f64>, start: Vec<f64>, input: Vec<f64>, losses: [f64; 4],
+    initial_bound_energy: f64, external_work: Option<f64>,
+    connection_transfers: Option<Vec<crate::port_adoption::PortTransfer>>,
+}
+fn stage_candidate(network: &mut CoupledModalSystem, external: &[f64], candidate: PropagatedCandidate,
+    gate: Option<&CancelGate>) -> Result<(), ModalCouplingError>
+{
+    poll(gate)?;
+    let sample=network.frame.sample.checked_add(1).ok_or_else(||invalid("coupled sample clock overflow"))?;
+    let before=network.total_energy_j()?;
+    let PropagatedCandidate { endpoint: rec_x, start: x, input: u,
+        losses: [component_loss,connection_loss,material_loss,radiation_loss],
+        initial_bound_energy: h_x, external_work, connection_transfers }=candidate;
     let mut pressure = 0.0;
     let mut modal_after = 0.0;
-    let mut work = 0.0;
+    let mut work = external_work.unwrap_or(0.0);
     for i in 0..network.models.len() {
         poll(gate)?;
         let range = network.offsets[i]..network.offsets[i + 1];
@@ -798,7 +818,7 @@ pub(super) fn stage(
         for ((k, mode), state) in range.zip(network.models[i].modes()).zip(&states) {
             network.old_q[k] = x[2 * k];
             network.free_delta[k] = finite(rec_x[2 * k] - x[2 * k])?;
-            work = finite(work + external[k] * network.free_delta[k])?;
+            if external_work.is_none() { work = finite(work + external[k] * network.free_delta[k])?; }
             modal_after = finite(
                 modal_after
                     + 0.5
@@ -920,6 +940,10 @@ pub(super) fn stage(
         tolerance_j: Some(tolerance),
         unavailable: None,
     };
+    if let Some(transfers)=connection_transfers {
+        network.staged_ports.accept(account, transfers);
+        return Ok(());
+    }
     // The prepared owner's per-port ledger is a sweep over every dense link Gramian: it is kept as this step's inputs and
     // evaluated only if an observer asks for the window's transfers (`PreparedNetwork::pending_ledger`). Its refusal, if any,
     // is the same independent observation refusal as below.

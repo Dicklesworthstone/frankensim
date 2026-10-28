@@ -22,6 +22,8 @@ use fs_math::det;
 
 mod gramian;
 use gramian::{accumulate, identity, product};
+/// Cold caching of the same complete quadratic trajectory and its integrals.
+pub mod prepared;
 
 /// Conservative midpoint angular-rate band. For a damped oscillatory pole
 /// with |lambda|*dt <= 0.04, Cayley-map phase error is below one cent even in
