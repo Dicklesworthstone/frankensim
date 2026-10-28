@@ -251,6 +251,9 @@ pub struct StepConfig {
     /// Maximum thermal step, s. CFL may reduce it further.
     pub max_dt_s: f64,
     /// Maximum stored-minus-incoming-minus-external defect, J.
+    /// Also bounds the cumulative absolute local work too small to change a
+    /// cell's enthalpy coordinate during an explicit advance. Opposing losses
+    /// count separately, so a zero global residual cannot conceal them.
     pub energy_tolerance_j: f64,
 }
 
@@ -290,6 +293,9 @@ pub struct EnergyAudit {
     /// Actual change in stored `sum(m*h)`, J.
     pub stored_energy_change_j: f64,
     /// Stored change minus incoming enthalpy minus external input, J.
+    /// Evaluated from compensated per-cell initial/birth-relative changes.
+    /// Recomputing it from the rounded aggregate report fields can lose small
+    /// heat increments against large formation-enthalpy reference energies.
     pub residual_j: f64,
     /// Number of accepted thermal steps (explicit substeps or implicit intervals).
     pub substeps: usize,
@@ -577,6 +583,7 @@ impl<'a> DepositionSimulation<'a> {
         &mut self,
         rates: HeatRates,
         audit: &mut EnergyAudit,
+        unrepresented_heat_j: &mut f64,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(f64, BTreeMap<CellId, f64>), DepositionError> {
         let HeatRates { temperatures, watts: rates, external_w, explicit_dt_s: dt } =
@@ -585,8 +592,16 @@ impl<'a> DepositionSimulation<'a> {
             if i % 256 == 0 {
                 checkpoint()?;
             }
-            cell.specific_h_j_kg =
-                finite(cell.specific_h_j_kg + finite(dt * rates[&id] / cell.mass_kg)?)?;
+            let old_h = cell.specific_h_j_kg;
+            let next_h = finite(old_h + finite(dt * rates[&id] / cell.mass_kg)?)?;
+            // Bound local work that disappears on the enthalpy coordinate.
+            // Both sides of an internal exchange count; cancellation cannot
+            // conceal loss. The caller applies its absolute joule tolerance.
+            if rates[&id] != 0.0 && next_h == old_h {
+                let lost = finite(dt * rates[&id])?.abs();
+                *unrepresented_heat_j = finite((*unrepresented_heat_j + lost).next_up())?;
+            }
+            cell.specific_h_j_kg = next_h;
             let t = self.materials[&cell.material_id].temperature_k(cell.specific_h_j_kg)?;
             if !positive(t) {
                 return Err(DepositionError::MaterialDomain);

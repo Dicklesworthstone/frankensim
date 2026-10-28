@@ -283,10 +283,11 @@ impl<'a> DepositionSimulation<'a> {
             || !nonnegative(config.energy_tolerance_j) {
             return Err(DepositionError::InvalidInput("invalid target, timestep or joule tolerance").into());
         }
-        let initial_energy = finite(self.energy_j())?;
+        finite(self.energy_j())?;
         let mut next = self.clone();
         let mut observer = observer.clone();
         observer.begin()?;
+        let mut unrepresented_heat_j = 0.0;
         let mut audit = EnergyAudit { incoming_mass_kg: 0.0, incoming_energy_j: 0.0,
             external_heat_j: 0.0, stored_energy_change_j: 0.0, residual_j: 0.0,
             substeps: 0, events: 0 };
@@ -332,7 +333,12 @@ impl<'a> DepositionSimulation<'a> {
                     &next, start_s, rates.explicit_dt_s, end_s, &mut checkpoint,
                 )?;
                 next.add_interval_sources(&mut rates, &interval_sources, &mut checkpoint)?;
-                let (dt, old_temperatures) = next.thermal_step(rates, &mut audit, &mut checkpoint)?;
+                let (dt, old_temperatures) = next.thermal_step(
+                    rates, &mut audit, &mut unrepresented_heat_j, &mut checkpoint,
+                )?;
+                if unrepresented_heat_j > config.energy_tolerance_j {
+                    return Err(DepositionError::Arithmetic.into());
+                }
                 Ok((dt, end_s, old_temperatures))
             })();
             // Restore even on thermal refusal. Observations/events see authored
@@ -349,15 +355,76 @@ impl<'a> DepositionSimulation<'a> {
             observer.step(start_s, dt, &old_temperatures, &next, &mut checkpoint)?;
             checkpoint()?;
         }
-        audit.stored_energy_change_j = finite(next.energy_j()-initial_energy)?;
+        // Subtract each cell's original enthalpy before reducing. Two large
+        // absolute totals can lose a representable heat increment; subtracting
+        // incoming birth energy afterwards repeats that cancellation.
+        let mut birth_enthalpies = BTreeMap::new();
+        let mut incoming = EnergySum::default();
+        for (index, event) in next.schedule[self.cursor..next.cursor].iter().enumerate() {
+            if index % 256 == 0 { checkpoint()?; }
+            if let Event::Birth(cell) = &event.event {
+                birth_enthalpies.insert(cell.id, cell.specific_h_j_kg);
+                incoming.add(finite(cell.mass_kg * cell.specific_h_j_kg)?)?;
+            }
+        }
+        let mut thermal_change = EnergySum::default();
+        let mut stored_change = EnergySum::default();
+        let mut originals = self.cells.iter().peekable();
+        for (index, (&id, cell)) in next.cells.iter().enumerate() {
+            if index % 256 == 0 { checkpoint()?; }
+            let original = if originals.peek().is_some_and(|(old_id, _)| **old_id == id) {
+                originals.next().map(|(_, cell)| cell)
+            } else {
+                None
+            };
+            let baseline_h = match original {
+                Some(old) => old.specific_h_j_kg,
+                None => *birth_enthalpies.get(&id).ok_or(DepositionError::Arithmetic)?,
+            };
+            let change = finite(cell.mass_kg * finite(cell.specific_h_j_kg - baseline_h)?)?;
+            thermal_change.add(change)?;
+            stored_change.add(if original.is_some() {
+                change
+            } else {
+                finite(cell.mass_kg * cell.specific_h_j_kg)?
+            })?;
+        }
+        if originals.next().is_some() { return Err(DepositionError::Arithmetic.into()); }
+        finite(next.energy_j())?;
+        audit.incoming_energy_j = incoming.value()?;
+        audit.stored_energy_change_j = stored_change.value()?;
         finite(next.mass_kg())?;
-        audit.residual_j = finite(audit.stored_energy_change_j
-            - audit.incoming_energy_j - audit.external_heat_j)?;
+        audit.residual_j = finite(thermal_change.value()? - audit.external_heat_j)?;
         if audit.residual_j.abs() > config.energy_tolerance_j {
             return Err(DepositionError::EnergyBalance(audit.residual_j).into());
         }
         checkpoint()?;
         Ok((next, observer, audit))
+    }
+}
+
+// Fixed cell order and Neumaier correction retain small terms of either sign.
+// The sum contains physical changes, not arbitrary formation-energy datums.
+#[derive(Default)]
+struct EnergySum {
+    sum: f64,
+    correction: f64,
+}
+impl EnergySum {
+    fn add(&mut self, value: f64) -> Result<(), DepositionError> {
+        finite(value)?;
+        let next = finite(self.sum + value)?;
+        let lost = if self.sum.abs() >= value.abs() {
+            (self.sum - next) + value
+        } else {
+            (value - next) + self.sum
+        };
+        self.correction = finite(self.correction + lost)?;
+        self.sum = next;
+        Ok(())
+    }
+    fn value(self) -> Result<f64, DepositionError> {
+        finite(self.sum + self.correction)
     }
 }
 
@@ -406,3 +473,7 @@ impl DepositionSimulation<'_> {
         self.replace_contact_patches(&patches, checkpoint)
     }
 }
+
+#[cfg(test)]
+#[path = "observe/energy_tests.rs"]
+mod energy_tests;

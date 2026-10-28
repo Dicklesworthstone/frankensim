@@ -376,4 +376,5 @@ impl DepositionSimulation<'_> {
 }
 
 #[cfg(test)]
+#[path = "sublimation/tests.rs"]
 mod tests;
