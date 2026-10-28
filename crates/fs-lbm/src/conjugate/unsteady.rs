@@ -28,9 +28,11 @@
 //!
 //! # No-claim boundaries
 //!
-//! The SIMPLEC no-claims apply (staircase walls, power-law convection, LVEL
-//! as the only turbulence closure: an LVEL "transient" is an unsteady
-//! eddy-viscosity solution, not a turbulence-resolving simulation). The
+//! The SIMPLEC no-claims apply (staircase walls, power-law convection). An
+//! LVEL transient remains an equilibrium eddy-viscosity solution. The
+//! explicit `*_with_sgs` entries instead compute Smagorinsky/WALE from each
+//! iterate's full velocity gradient, for exploration only; they do not
+//! establish resolved turbulent spectra or thermal wall resolution. The
 //! energy coupling is first order in time and lags buoyancy by one step.
 //! Face fans and compact components are steady models and refuse here; use
 //! internal fans.
@@ -46,6 +48,7 @@ use super::domain::{FluidProperties, SolidMaterial, VoxelDomain};
 use super::energy::{EnergyConfig, ThermalSetup};
 use super::flow::FlowField;
 use super::radiation::{RadiationConfig, Radiators};
+use super::simple::sgs::FvSgsConfig;
 use super::simple::{FvFlow, SimpleConfig, Solver, TimeScheme, Turbulence, admit};
 use super::transient::{TransientRecord, energy_step, heat_capacity};
 use super::turbulence::TURBULENT_PRANDTL;
@@ -252,6 +255,7 @@ impl<'a> Marcher<'a> {
         self.solver.scale_inlets(inflow);
         let (inner, residuals) = converge_step(&mut self.solver, self.unsteady, step, gate)?;
         self.solver.project(gate)?;
+        self.solver.update_sgs(gate)?;
         self.sweeps += inner;
         self.residuals = residuals;
         let mut kinetic = 0.0;
@@ -342,9 +346,56 @@ pub fn simple_unsteady(
     inlet_schedule: impl Fn(f64) -> f64,
     gate: &CancelGate,
 ) -> Result<UnsteadyFlow, ChtError> {
+    simple_unsteady_inner(domain, fluid, config, unsteady, None, inlet_schedule, gate)
+}
+
+/// March transient flow with an explicitly selected Smagorinsky/WALE closure.
+///
+/// The filter width is `filter_width_factor * volume^(1/3)`. The closure is
+/// refreshed from the latest resolved velocity at each nonlinear sweep and
+/// after each step's pressure projection. It never enables itself through
+/// [`SimpleConfig`], and a zero coefficient exactly recovers [`simple_unsteady`].
+/// This is an exploration entry; turbulent DNS and wall resolution require
+/// independent spatial and temporal convergence evidence.
+///
+/// # Errors
+/// The refusals of [`simple_unsteady`], invalid SGS controls, acceptance use,
+/// an eddy/molecular ratio above the declared cap, or simultaneous LVEL.
+pub fn simple_unsteady_with_sgs(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    config: &SimpleConfig,
+    unsteady: &UnsteadyConfig,
+    sgs: FvSgsConfig,
+    inlet_schedule: impl Fn(f64) -> f64,
+    gate: &CancelGate,
+) -> Result<UnsteadyFlow, ChtError> {
+    simple_unsteady_inner(
+        domain,
+        fluid,
+        config,
+        unsteady,
+        Some(sgs),
+        inlet_schedule,
+        gate,
+    )
+}
+
+fn simple_unsteady_inner(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    config: &SimpleConfig,
+    unsteady: &UnsteadyConfig,
+    sgs: Option<FvSgsConfig>,
+    inlet_schedule: impl Fn(f64) -> f64,
+    gate: &CancelGate,
+) -> Result<UnsteadyFlow, ChtError> {
     admit(domain, fluid, config)?;
     admit_unsteady(domain, config, unsteady)?;
     let mut marcher = Marcher::new(domain, fluid, config, unsteady);
+    if let Some(sgs) = sgs {
+        marcher.solver.enable_sgs(sgs, gate)?;
+    }
     for step in 1..=unsteady.steps {
         poll(gate)?;
         marcher.step(
@@ -382,8 +433,100 @@ pub fn march_conjugate(
     radiation: Option<&RadiationConfig>,
     gate: &CancelGate,
 ) -> Result<ConjugateMarch, ChtError> {
+    march_conjugate_inner(
+        domain,
+        fluid,
+        solids,
+        setup,
+        config,
+        unsteady,
+        None,
+        buoyancy,
+        initial_temperature,
+        inlet_schedule,
+        power_schedule,
+        energy,
+        radiation,
+        gate,
+    )
+}
+
+/// March flow and heat with explicit transient Smagorinsky/WALE transport.
+///
+/// The same SGS viscosity enters complete symmetric momentum stress and
+/// fluid thermal conductivity `rho * cp * nu_t / Pr_t`, with `Pr_t = 0.9`.
+/// Conductivity is refreshed from the projected flow before every energy
+/// solve. This gradient-diffusion model adds neither SGS dissipation heating
+/// nor an equilibrium wall heat-transfer law. Caller-authored additional
+/// eddy conductivity refuses so that two thermal closures cannot be combined
+/// or silently overwritten. Otherwise coupling follows [`march_conjugate`].
+///
+/// # Errors
+/// The refusals of [`march_conjugate`] and [`simple_unsteady_with_sgs`], or a
+/// supplied nonzero eddy-conductivity field.
+#[allow(clippy::too_many_arguments)] // same physics inputs + explicit closure
+pub fn march_conjugate_with_sgs(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    solids: &[SolidMaterial],
+    setup: &ThermalSetup,
+    config: &SimpleConfig,
+    unsteady: &UnsteadyConfig,
+    sgs: FvSgsConfig,
+    buoyancy: Option<&Boussinesq>,
+    initial_temperature: &[f64],
+    inlet_schedule: impl Fn(f64) -> f64,
+    power_schedule: impl Fn(f64) -> f64,
+    energy: &EnergyConfig,
+    radiation: Option<&RadiationConfig>,
+    gate: &CancelGate,
+) -> Result<ConjugateMarch, ChtError> {
+    march_conjugate_inner(
+        domain,
+        fluid,
+        solids,
+        setup,
+        config,
+        unsteady,
+        Some(sgs),
+        buoyancy,
+        initial_temperature,
+        inlet_schedule,
+        power_schedule,
+        energy,
+        radiation,
+        gate,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // one owner for both transient entry paths
+fn march_conjugate_inner(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    solids: &[SolidMaterial],
+    setup: &ThermalSetup,
+    config: &SimpleConfig,
+    unsteady: &UnsteadyConfig,
+    sgs: Option<FvSgsConfig>,
+    buoyancy: Option<&Boussinesq>,
+    initial_temperature: &[f64],
+    inlet_schedule: impl Fn(f64) -> f64,
+    power_schedule: impl Fn(f64) -> f64,
+    energy: &EnergyConfig,
+    radiation: Option<&RadiationConfig>,
+    gate: &CancelGate,
+) -> Result<ConjugateMarch, ChtError> {
     admit(domain, fluid, config)?;
     admit_unsteady(domain, config, unsteady)?;
+    if let Some(sgs) = sgs {
+        sgs.validate()?;
+        if setup.eddy_conductivity_w_m_k.iter().any(|&k| k != 0.0) {
+            return Err(ChtError::InvalidInput {
+                field: "thermal.eddy_conductivity_w_m_k",
+                reason: "explicit SGS supplies the fluid eddy conductivity; a second field cannot be combined".into(),
+            });
+        }
+    }
     let cells = domain.cell_count();
     if initial_temperature.len() != cells {
         return Err(ChtError::InvalidInput {
@@ -423,6 +566,9 @@ pub fn march_conjugate(
         None => None,
     };
     let mut marcher = Marcher::new(domain, fluid, config, unsteady);
+    if let Some(sgs) = sgs {
+        marcher.solver.enable_sgs(sgs, gate)?;
+    }
     let mut temperature = initial_temperature.to_vec();
     let mut mean_temperature = vec![0.0; cells];
     let mut energy_records = Vec::with_capacity(unsteady.steps);
@@ -459,7 +605,7 @@ pub fn march_conjugate(
                 .cell_sinks
                 .extend(radiators.sinks(domain, &temperature));
         }
-        if config.turbulence != Turbulence::Laminar {
+        if config.turbulence != Turbulence::Laminar || marcher.solver.has_sgs() {
             stepped.eddy_conductivity_w_m_k = marcher
                 .solver
                 .heat_eddy_viscosity()

@@ -1081,6 +1081,43 @@ developed turbulent TGV dissipation histories, a channel DNS profile, jet
 physics or finest-rung acoustic equivalence. Those full M3.2-W5/G2 campaigns
 remain open. Neither SGS nor LVEL is a resolved-turbulence acceptance render.
 
+### Transient finite-volume momentum and heat
+
+`conjugate::simple_unsteady_with_sgs` and `march_conjugate_with_sgs` select the
+same full-gradient Smagorinsky/WALE kernel through explicit `FvSgsConfig`.
+The physical filter width is the declared factor times `cell_volume^(1/3)`;
+neither `SimpleConfig` nor existing march entry points enable SGS. Acceptance
+use and simultaneous equilibrium LVEL refuse. A zero coefficient keeps the
+ordinary laminar arithmetic and empty closure state. These entries currently
+use the declared constant molecular viscosity, not a material-viscosity field.
+
+One reusable velocity workspace freezes the gradient field before each
+nonlinear momentum sweep. Normal derivatives use the owning staggered faces;
+off-diagonal derivatives use quadratic nonuniform centred stencils. Domain
+walls/inlets supply their actual prescribed velocity at the face, voxel solids
+supply stationary no-slip values, and symmetry/outlet faces impose zero
+tangential derivative at the face rather than at the adjacent cell centre.
+The closure supplies the existing complete symmetric stress and is refreshed
+again after the step's pressure projection. Invalid gradients or an exceeded
+eddy/molecular ratio cap refuse; no clipping or silent laminar fallback occurs.
+The filter widths are cached once; gradient/closure sweeps allocate no buffers
+and poll cancellation every 64 cells.
+
+Every coupled energy step consumes `rho cp nu_t / Pr_t`, with fixed `Pr_t=0.9`,
+from that step's projected flow. Returned eddy fields expose the same closure.
+A caller-supplied nonzero eddy-conductivity field refuses instead of being
+combined or overwritten. No SGS dissipation heating, turbulent scalar-variance
+equation, equilibrium thermal wall law, calibrated turbulent channel profile,
+or resolved turbulent spectrum is claimed. The existing first-order thermal
+coupling and power-law/upwind convection limits still apply; the caller must
+establish temporal and spatial convergence for the intended exploration.
+
+Focused `conjugate::simple::sgs` tests cover graded Couette and voxel walls,
+quadratic Neumann gradients, native MAC normal derivatives, WALE's pure-shear
+zero, physical Smagorinsky viscosity, exact disabled flow identity, admission
+and cap refusals, and a moving-wall flow/heat step compared against an
+independently supplied turbulent-conductivity energy solve.
+
 ## Compressible Navier-Stokes-Fourier hybrid (IRP M3.2-W3a, `nsf3`)
 
 `nsf3::NsfGrid3<L: Lattice3<27>>` advances density, momentum and total energy of an ideal gas on the D3Q27 lattice.
@@ -1787,7 +1824,23 @@ number by 43 % at Re_Dh 2e4). Both are under-relaxed by one half per sweep.
 the same closure. The cooling-cht scene selects it with
 `solver.turbulence: "lvel"`.
 
-Verification is against the continuum LVEL model itself (the developed
+The varying effective viscosity enters the complete symmetric momentum stress,
+`div(mu_eff (grad(u) + grad(u)^T))`, including normal and reciprocal shear terms.
+Both reciprocal components share one positive coefficient at each staggered
+shear edge: harmonic transmission for molecular material jumps, and the native
+arithmetic interpolation for smooth eddy fields. Shear edges and wall secants
+use actual half-cell area weights on graded grids. The isotropic Reynolds
+stress is part of the pressure; this algebraic closure does not resolve
+turbulent kinetic energy. This is the incompressible Boussinesq stress
+convention described by the
+[Turbulence Modeling Resource](https://tmbwg.github.io/turbmodels/noteonrunning.html).
+G1/G3 tests in `simple/turbulence_tests.rs` check a three-grid manufactured
+variable-eddy shear balance and equality of reciprocal stress coefficients.
+LVEL admission refuses domains with no no-slip wall or solid: an infinite wall
+distance is outside this wall model, not a licence to invent a finite length.
+
+The historical channel verification below used the earlier scalar
+eddy-viscosity diffusion operator. It compares against the continuum LVEL model itself (the developed
 half-channel ODE `rho nu (1 + nu_t/nu) du/dy = tau_w (1 - y/h)`, solved in
 the test), validation against Dean's channel friction and Gnielinski's Nu
 (a pipe correlation on `D_h = 4h`, Pr 0.71). Half-channel, wall at y-,

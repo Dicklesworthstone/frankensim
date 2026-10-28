@@ -129,6 +129,7 @@ pub use radiation::{
     ExposedFace, RadiationConfig, RadiationReport, STEFAN_BOLTZMANN, SurfaceExchange,
     escape_factors, radiated_power, radiative_sinks, solve_energy_radiating,
 };
+pub use simple::sgs::FvSgsConfig;
 #[cfg(feature = "enthalpy-coupling")]
 pub use simple::viscous_heat::{UnsteadyHeatingAudit, UnsteadyMechanicalStep};
 pub use simple::viscous_heat::{
@@ -144,7 +145,7 @@ pub use simple::{
 pub use transient::{TransientConfig, TransientRecord, TransientSolution, march_energy};
 pub use unsteady::{
     Boussinesq, ConjugateMarch, FlowStepRecord, UnsteadyConfig, UnsteadyFlow, march_conjugate,
-    simple_unsteady,
+    march_conjugate_with_sgs, simple_unsteady, simple_unsteady_with_sgs,
 };
 
 /// Semantics version of the conjugate pipeline: covers voxel indexing, face

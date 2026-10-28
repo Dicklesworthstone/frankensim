@@ -65,6 +65,11 @@
 //! drivers set; staircase voxel walls; power-law convection (first order at
 //! high cell Péclet numbers: numerical diffusion is not bounded here). One
 //! run makes no mesh-convergence claim.
+//!
+//! With spatially varying molecular or eddy viscosity, momentum uses the
+//! complete symmetric stress `div(mu_eff (grad(u) + grad(u)^T))`. The isotropic
+//! Reynolds stress is absorbed into the incompressible pressure; LVEL does not
+//! supply a separately resolved turbulent kinetic energy.
 
 use fs_exec::CancelGate;
 use fs_sparse::Coo;
@@ -78,6 +83,7 @@ use super::turbulence::{TURBULENT_PRANDTL, law_of_the_wall_ratios, wall_distance
 use super::{ChtError, finite, finite_positive, poll};
 use crate::d3q19::Face3;
 
+pub mod sgs;
 pub mod viscous_heat;
 
 /// Flow rule on one domain face.
@@ -443,8 +449,8 @@ pub struct FvFlow {
     /// Eddy viscosity per cell, m^2/s (zeros when laminar).
     pub eddy_viscosity_m2_s: Vec<f64>,
     /// The eddy viscosity the energy equation should use per cell, m^2/s:
-    /// the law-of-the-wall secant value in wall-adjacent cells, the LVEL
-    /// value elsewhere (zeros when laminar).
+    /// LVEL uses its wall-law secant value in wall-adjacent cells. Explicit
+    /// transient SGS uses its resolved-gradient value (zeros when laminar).
     pub heat_eddy_viscosity_m2_s: Vec<f64>,
     /// Run evidence.
     pub report: SimpleReport,
@@ -540,8 +546,8 @@ pub(super) struct Solver<'a> {
     n: [usize; 3],
     rho: f64,
     mu: f64,
-    /// Admitted laminar molecular viscosity per cell. Nonempty selects the
-    /// complete symmetric Newtonian stress, including cross-component shear.
+    /// Admitted laminar molecular viscosity per cell. Either a molecular field
+    /// or an eddy field selects the complete symmetric stress.
     molecular_viscosity: Vec<f64>,
     /// Explicit Stokes reduction; all ordinary SIMPLE entries keep convection.
     creeping: bool,
@@ -571,6 +577,8 @@ pub(super) struct Solver<'a> {
     eddy_viscosity: Vec<f64>,
     wall_ratio: Vec<f64>,
     wall_adjacent: Vec<bool>,
+    /// Explicit transient SGS closure and reusable gradient workspace.
+    sgs: Option<sgs::State>,
     /// Planar loss coefficient per face and component (empty: none).
     planar_loss: [Vec<f64>; 3],
     /// Porous `(mu / kappa, rho C / 2)` per cell and axis (empty: none).
@@ -620,7 +628,11 @@ impl MomentumState {
                 if index % 256 == 0 {
                     poll(gate)?;
                 }
-                let plus = [index % dims[0], (index / dims[0]) % dims[1], index / (dims[0] * dims[1])];
+                let plus = [
+                    index % dims[0],
+                    (index / dims[0]) % dims[1],
+                    index / (dims[0] * dims[1]),
+                ];
                 let along = plus[axis];
                 let constrained = if along == 0 || along == n[axis] {
                     true
@@ -905,6 +917,7 @@ impl<'a> Solver<'a> {
             internal_fans,
             momentum_rms: [0.0; 3],
             time: None,
+            sgs: None,
             fan: config.fan.map(|fan| {
                 let side = fan.face as usize;
                 let axis = side / 2;
@@ -944,6 +957,12 @@ impl<'a> Solver<'a> {
         }
     }
 
+    /// `div(mu grad(u)^T)` vanishes only for constant viscosity and a
+    /// divergence-free velocity. Eddy viscosity is a spatial field too.
+    fn symmetric_stress(&self) -> bool {
+        !self.molecular_viscosity.is_empty() || !self.eddy_viscosity.is_empty()
+    }
+
     /// Wall viscosity of the half cell between `minus`/`plus` and a wall:
     /// the law-of-the-wall secant (molecular when laminar).
     fn wall_mu(&self, minus: [usize; 3], plus: [usize; 3]) -> f64 {
@@ -959,8 +978,15 @@ impl<'a> Solver<'a> {
         if self.wall_ratio.is_empty() {
             return self.mu;
         }
-        let ratio = 0.5
-            * (self.wall_ratio[cell_of(self.n, minus)] + self.wall_ratio[cell_of(self.n, plus)]);
+        let rm = self.wall_ratio[cell_of(self.n, minus)];
+        let rp = self.wall_ratio[cell_of(self.n, plus)];
+        let ratio = if let Some(a) = (0..3).find(|&a| minus[a] != plus[a]) {
+            let wm = self.domain.width(a, minus[a]);
+            let wp = self.domain.width(a, plus[a]);
+            (wm / (wm + wp)) * rm + (wp / (wm + wp)) * rp
+        } else {
+            rm
+        };
         self.mu * ratio
     }
 
@@ -985,10 +1011,11 @@ impl<'a> Solver<'a> {
     /// `plus` across direction `d` (`up`: toward +d): the fluid cells among
     /// the two and their neighbours across the edge.
     fn edge_mu(&self, minus: [usize; 3], plus: [usize; 3], d: usize, up: bool) -> f64 {
-        if !self.molecular_viscosity.is_empty() {
-            // A single positive harmonic coefficient at the MAC shear edge,
-            // shared by tau_ad and tau_da. Area weights handle graded cells;
-            // a row-wise viscosity jump uses the two half-cell resistances.
+        if self.symmetric_stress() {
+            // One positive coefficient at the MAC shear edge, shared by
+            // tau_ad and tau_da. Material jumps use harmonic transmission;
+            // smooth eddy fields retain the native arithmetic interpolation.
+            // The same area weights also handle graded cells.
             let a = (0..3).find(|&a| minus[a] != plus[a]).unwrap_or((d + 1) % 3);
             let mut weights = [(0usize, 0.0, 1.0); 4];
             let mut count = 0;
@@ -1017,6 +1044,12 @@ impl<'a> Solver<'a> {
             // same four source cells in the same order, including roundoff.
             weights[..count].sort_unstable_by_key(|(cell, _, _)| *cell);
             let area: f64 = weights[..count].iter().map(|(_, w, _)| w).sum();
+            if self.molecular_viscosity.is_empty() {
+                return weights[..count]
+                    .iter()
+                    .map(|(_, w, mu)| (w / area) * mu)
+                    .sum();
+            }
             let minimum = weights[..count]
                 .iter()
                 .map(|(_, _, mu)| *mu)
@@ -1027,38 +1060,13 @@ impl<'a> Solver<'a> {
                 .sum();
             return minimum / inverse;
         }
-        if self.eddy_viscosity.is_empty() && self.molecular_viscosity.is_empty() {
-            return self.mu;
-        }
-        let (mut sum, mut count) = (self.mu_eff(minus) + self.mu_eff(plus), 2.0);
-        for c in [minus, plus] {
-            let across = if up {
-                (c[d] + 1 < self.n[d]).then(|| {
-                    let mut g = c;
-                    g[d] += 1;
-                    g
-                })
-            } else {
-                (c[d] > 0).then(|| {
-                    let mut g = c;
-                    g[d] -= 1;
-                    g
-                })
-            };
-            if let Some(g) = across
-                && self.domain.is_fluid(cell_of(self.n, g))
-            {
-                sum += self.mu_eff(g);
-                count += 1.0;
-            }
-        }
-        sum / count
+        self.mu
     }
 
     /// LVEL: refresh the eddy viscosity from the current cell-centred
     /// speeds (under-relaxed by one half after the first sweep).
     fn update_turbulence(&mut self) {
-        if self.eddy_viscosity.is_empty() {
+        if self.config.turbulence != Turbulence::Lvel {
             return;
         }
         let nu = self.mu / self.rho;
@@ -1075,7 +1083,7 @@ impl<'a> Solver<'a> {
                         + self.vel[a][self.cell_face(a, at, true)]);
                 speed2 += v * v;
             }
-            let reynolds = fs_math::det::sqrt(speed2) * self.wall_distance[c].min(1e6) / nu;
+            let reynolds = fs_math::det::sqrt(speed2) * self.wall_distance[c] / nu;
             let (tangent, secant) = law_of_the_wall_ratios(reynolds);
             let target = tangent * nu;
             if first {
@@ -1098,11 +1106,15 @@ impl<'a> Solver<'a> {
     }
 
     /// The eddy viscosity the energy equation uses per cell, m^2/s: the
-    /// law-of-the-wall secant `nu (y+/u+ - 1)` in wall-adjacent cells (their
-    /// conduction to the wall spans the half cell), LVEL's value elsewhere.
+    /// law-of-the-wall secant `nu (y+/u+ - 1)` in LVEL wall-adjacent cells
+    /// (their conduction spans the half cell), LVEL's value elsewhere. SGS
+    /// uses its own resolved-gradient viscosity without a wall-law overlay.
     pub(super) fn heat_eddy_viscosity(&self) -> Vec<f64> {
         if self.eddy_viscosity.is_empty() {
             return vec![0.0; self.domain.cell_count()];
+        }
+        if self.sgs.is_some() {
+            return self.eddy_viscosity.clone();
         }
         let nu = self.mu / self.rho;
         (0..self.domain.cell_count())
@@ -1217,6 +1229,7 @@ impl<'a> Solver<'a> {
     pub(super) fn sweep(&mut self, gate: &CancelGate) -> Result<(f64, f64), ChtError> {
         self.sweeps += 1;
         self.update_turbulence();
+        self.update_sgs(gate)?;
         for fan in &mut self.internal_fans {
             let sum: f64 = fan
                 .faces
@@ -1262,7 +1275,11 @@ impl<'a> Solver<'a> {
     #[cfg(feature = "enthalpy-coupling")]
     pub(super) fn restore_momentum(&mut self, state: &MomentumState) -> Result<(), ChtError> {
         if self.pressure.len() != state.pressure.len()
-            || self.vel.iter().zip(&state.velocity).any(|(a, b)| a.len() != b.len())
+            || self
+                .vel
+                .iter()
+                .zip(&state.velocity)
+                .any(|(a, b)| a.len() != b.len())
         {
             return Err(ChtError::InvalidInput {
                 field: "simple.momentum_state",
@@ -1448,20 +1465,19 @@ impl<'a> Solver<'a> {
                             }
                             comp.index(g)
                         };
-                        let flux =
-                            s * advective_density * face_area * 0.5 * (self.vel[a][index] + self.vel[a][nf]);
+                        let flux = s
+                            * advective_density
+                            * face_area
+                            * 0.5
+                            * (self.vel[a][index] + self.vel[a][nf]);
                         net_out += flux;
                         // Diffusion across the cell between the two faces.
                         let side_cell = if plus { plus_cell } else { minus_cell };
-                        // A variable molecular viscosity requires the FULL
-                        // Newtonian stress: normal stress is 2 mu du_a/dx_a.
+                        // A variable molecular OR eddy viscosity requires the
+                        // full stress: normal stress is 2 mu_eff du_a/dx_a.
                         // The legacy constant-viscosity Laplacian keeps its
                         // arithmetic; div(grad(u)^T)=0 for incompressible flow.
-                        let normal = if self.molecular_viscosity.is_empty() {
-                            1.0
-                        } else {
-                            2.0
-                        };
+                        let normal = if self.symmetric_stress() { 2.0 } else { 1.0 };
                         let diff =
                             normal * self.mu_eff(side_cell) * face_area / width(a, side_cell[a]);
                         let coef = diff.mul_add(self.weight(flux / diff), (-flux).max(0.0));
@@ -1506,12 +1522,12 @@ impl<'a> Solver<'a> {
                     // give a scalar diffusion model for a variable-mu fluid.
                     // This term is iterated with the original coupled velocity
                     // solve; it is not an externally supplied body force.
-                    let cross_shear = if self.molecular_viscosity.is_empty() {
-                        0.0
-                    } else {
+                    let cross_shear = if self.symmetric_stress() {
                         let vm = self.vel[d][self.cell_face(d, minus_cell, plus)];
                         let vp = self.vel[d][self.cell_face(d, plus_cell, plus)];
                         s * edge_mu * w3 * (vp - vm)
+                    } else {
+                        0.0
                     };
                     if outside {
                         match self.faces[2 * d + usize::from(plus)] {
@@ -1878,6 +1894,18 @@ pub(super) fn admit(
     config: &SimpleConfig,
 ) -> Result<(), ChtError> {
     fluid.validate()?;
+    if config.turbulence == Turbulence::Lvel
+        && domain.fluid_count() == domain.cell_count()
+        && !config
+            .faces
+            .iter()
+            .any(|face| matches!(face, FvBoundary::Wall { .. }))
+    {
+        return Err(ChtError::InvalidInput {
+            field: "simple.turbulence",
+            reason: "LVEL requires a no-slip wall or solid voxel; open and symmetry faces do not define a wall distance".into(),
+        });
+    }
     // SIMPLEC's d = A / (a_P / alpha - sum a_nb) degenerates at alpha = 1.
     if !(config.velocity_relaxation > 0.0 && config.velocity_relaxation < 1.0) {
         return Err(ChtError::InvalidInput {
@@ -2005,6 +2033,7 @@ impl Solver<'_> {
         // bounded by the converged imbalance, so the flow is unchanged to
         // tolerance).
         self.correct(1e-8, gate)?;
+        self.update_sgs(gate)?;
         Ok(self.finish_projected(fluid, iterations, (mass_residual, momentum_residual)))
     }
 
@@ -2221,8 +2250,15 @@ fn material_flow(
     config: &SimpleConfig,
     gate: &CancelGate,
 ) -> Result<FvFlow, ChtError> {
-    let solver = material_solver(domain, fluid, dynamic_viscosity_pa_s,
-        force_density_n_m3, drag_pa_s_m2, config, gate)?;
+    let solver = material_solver(
+        domain,
+        fluid,
+        dynamic_viscosity_pa_s,
+        force_density_n_m3,
+        drag_pa_s_m2,
+        config,
+        gate,
+    )?;
     solve_steady(solver, fluid, config, gate)
 }
 
@@ -2349,3 +2385,7 @@ fn solve_steady(
 #[cfg(test)]
 #[path = "simple/material_viscosity_tests.rs"]
 mod material_viscosity_tests;
+
+#[cfg(test)]
+#[path = "simple/turbulence_tests.rs"]
+mod turbulence_tests;
