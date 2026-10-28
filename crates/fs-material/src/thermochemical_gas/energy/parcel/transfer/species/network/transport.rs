@@ -16,6 +16,8 @@ pub mod porous;
 pub mod membrane;
 /// Coupled molecular, Knudsen and viscous transport through one porous path.
 pub mod dusty_gas;
+/// Finite gas inventories linked by independently authored porous throats.
+pub mod pore_domain;
 
 use std::collections::BTreeMap;
 use super::{ClosedGasParcel, GasEnergySolve, SpeciesNetworkError, SpeciesNetworkSolve,

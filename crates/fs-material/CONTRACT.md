@@ -3440,3 +3440,35 @@ The nine standalone wet-law tests passed natively. At this commit the expanded
 actual-source native run remains blocked by unavailable dependency metadata and
 full executor filesystems; these eight integration tests are not yet claimed as
 executed.
+
+
+### Transient heterogeneous pore-body gas storage
+
+`network::transport::pore_domain` retains finite reservoirs and an ordered set
+of actual gas inventories. Each pore body's gas volume is its authored gas-filled
+porosity times bulk area times thickness. Initialization uses the original EOS;
+provided inventories must already match that volume. Independently authored
+homogeneous throats retain their own length, area, material and dusty-gas closure.
+No averaged heterogeneous interface law or continuous laminate profile is inferred.
+
+Each accepted substep samples every throat from one unchanged gas snapshot and
+uses the existing joint species/enthalpy reconstruction. Incoming gas cannot fund
+another withdrawal within that snapshot. Typed inventory and caloric-solve
+refusals trigger bounded timestep halving; invalid sources and domains propagate.
+A failed late substep or cancellation discards the complete requested window.
+Whole-window mass, individual species, energy and entropy are rechecked from the
+actual initial and final inventories using the original absolute budgets.
+
+Reports aggregate directional species and donor-enthalpy throughput, pore uptake,
+work counts and whole-window balances. Only the last substep's detailed source
+report is retained. The total omitted throat void volume is measured against
+stored pore-body volume and must fit an explicitly declared geometric bound.
+This first-order fixed-volume model needs temporal refinement. Moving porosity,
+solid heat, sorption and a resolved nonlinear throat profile are separate owners.
+
+Five focused regressions cover delayed forwarding, first-order convergence
+against the independent three-volume diffusion eigenmodes, heterogeneous
+storage/throat coefficients, bounded adaptive withdrawal and atomic refusal.
+New files passed Rustfmt parsing. The selected actual-source test typecheck
+reached metadata emission without source/type errors; executor storage prevented
+completion and native execution. These five tests are not claimed as run.
