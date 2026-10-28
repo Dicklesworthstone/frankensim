@@ -32,6 +32,7 @@ pub struct ReversibleMagneticMaterial {
     material: ResolvedMaterialStatePoint,
     path: PropertyLineSlice,
     energy_at_knots_j_m3: Vec<f64>,
+    coenergy_at_knots_j_m3: Vec<f64>,
     slopes_a_m_t: Vec<f64>,
 }
 
@@ -143,16 +144,19 @@ impl ReversibleMagneticMaterial {
         before_flux_density_t: [f64; 2],
         after_flux_density_t: [f64; 2],
     ) -> Result<f64, FieldStorageError> {
-        self.evaluate(before_flux_density_t[0].hypot(before_flux_density_t[1]))?;
-        let after = self.evaluate(after_flux_density_t[0].hypot(after_flux_density_t[1]))?;
+        let before_magnitude = before_flux_density_t[0].hypot(before_flux_density_t[1]);
+        let after_magnitude = after_flux_density_t[0].hypot(after_flux_density_t[1]);
+        self.evaluate(before_magnitude)?;
+        let after = self.evaluate(after_magnitude)?;
+        let first = self.segment_at_flux_density(before_magnitude.min(after_magnitude));
+        let last = self.segment_at_flux_density(before_magnitude.max(after_magnitude));
         convexity::bregman_density(
             before_flux_density_t,
             after_flux_density_t,
             after.field_strength_a_m,
-            self.path
-                .knots
+            self.path.knots[first..=last + 1]
                 .windows(2)
-                .zip(&self.slopes_a_m_t)
+                .zip(&self.slopes_a_m_t[first..=last])
                 .map(|(pair, &slope)| (pair[0].0, pair[1].0, slope)),
         )
         .ok_or(FieldStorageError::Invalid(
@@ -172,7 +176,8 @@ pub struct ReversibleMagneticResponse {
     pub differential_reluctivity_m_h: f64,
     /// Magnetic energy integral_0^B H(b) db [J/m³], relative to B=0.
     pub energy_density_j_m3: f64,
-    /// Legendre dual B*H-energy [J/m³], relative to H=0.
+    /// Legendre dual integral_0^H B(h) dh [J/m³], relative to H=0.
+    /// Evaluated directly to avoid cancellation in the equivalent B*H-energy.
     pub coenergy_density_j_m3: f64,
 }
 
@@ -285,6 +290,7 @@ impl ReversibleMagneticMaterial {
             ));
         }
         let mut energy_at_knots_j_m3 = vec![0.0];
+        let mut coenergy_at_knots_j_m3 = vec![0.0];
         let mut slopes_a_m_t = Vec::with_capacity(path.knots.len() - 1);
         for pair in path.knots.windows(2) {
             let width = pair[1].0 - pair[0].0;
@@ -293,6 +299,11 @@ impl ReversibleMagneticMaterial {
             let slope = (b - a) / width;
             let increment = (0.5 * a + 0.5 * b) * width;
             let energy = energy_at_knots_j_m3.last().copied().unwrap_or(0.0) + increment;
+            // Integrate B dH directly. Subtracting energy from B*H loses the
+            // entire coenergy of nearly flat, high-susceptibility H(B) spans.
+            let coenergy_increment = (0.5 * pair[0].0 + 0.5 * pair[1].0) * (b - a);
+            let coenergy =
+                coenergy_at_knots_j_m3.last().copied().unwrap_or(0.0) + coenergy_increment;
             if !width.is_finite()
                 || width <= 0.0
                 || !slope.is_finite()
@@ -300,6 +311,9 @@ impl ReversibleMagneticMaterial {
                 || !increment.is_finite()
                 || increment <= 0.0
                 || !energy.is_finite()
+                || !coenergy_increment.is_finite()
+                || coenergy_increment <= 0.0
+                || !coenergy.is_finite()
             {
                 return Err(invalid(
                     "reversible magnetic source must have representably positive differential reluctivity and finite energy",
@@ -307,12 +321,14 @@ impl ReversibleMagneticMaterial {
             }
             slopes_a_m_t.push(slope);
             energy_at_knots_j_m3.push(energy);
+            coenergy_at_knots_j_m3.push(coenergy);
         }
         Ok(Self {
             card: card.clone(),
             material,
             path,
             energy_at_knots_j_m3,
+            coenergy_at_knots_j_m3,
             slopes_a_m_t,
         })
     }
@@ -330,8 +346,62 @@ impl ReversibleMagneticMaterial {
         self.path.knots.last().unwrap().0
     }
 
-    /// Evaluate the pinned canonical property and its exact piecewise-linear
-    /// derivative/integral. No independent permeability fit is introduced.
+    /// Maximum admitted field-strength magnitude [A/m] on the same source path.
+    pub fn maximum_field_strength_a_m(&self) -> f64 {
+        self.path.knots.last().unwrap().1.evidence.value.value
+    }
+
+    /// Invert the SAME strictly increasing source curve, returning |B| [T] for
+    /// |H| [A/m]. This is a segment solve, not an independently fitted B(H) law.
+    /// Neither end of the original field/source range is extrapolated.
+    pub fn flux_density_at_field_strength(
+        &self,
+        field_strength_a_m: f64,
+    ) -> Result<f64, FieldStorageError> {
+        if !field_strength_a_m.is_finite()
+            || field_strength_a_m < 0.0
+            || field_strength_a_m > self.maximum_field_strength_a_m()
+        {
+            return Err(FieldStorageError::Invalid(
+                "magnetic field strength leaves the source-backed reversible range",
+            ));
+        }
+        if field_strength_a_m == self.maximum_field_strength_a_m() {
+            return Ok(self.maximum_flux_density_t());
+        }
+        let segment = self
+            .path
+            .knots
+            .partition_point(|(_, answer)| answer.evidence.value.value <= field_strength_a_m)
+            .saturating_sub(1)
+            .min(self.slopes_a_m_t.len() - 1);
+        let (b0, ref answer) = self.path.knots[segment];
+        let b =
+            (field_strength_a_m - answer.evidence.value.value) / self.slopes_a_m_t[segment] + b0;
+        if !b.is_finite() || (field_strength_a_m > 0.0 && b <= 0.0) {
+            return Err(FieldStorageError::Invalid(
+                "inverse reversible magnetic response is unrepresentable",
+            ));
+        }
+        // The admitted H is inside this exact segment. Limit only rounding of
+        // the affine inverse at its endpoints, never an out-of-domain input.
+        Ok(b.clamp(b0, self.path.knots[segment + 1].0))
+    }
+
+    fn segment_at_flux_density(&self, flux_density_t: f64) -> usize {
+        self.path
+            .knots
+            .partition_point(|(b, _)| *b <= flux_density_t)
+            .saturating_sub(1)
+            .min(self.slopes_a_m_t.len() - 1)
+    }
+
+    /// Evaluate the compiled pinned source path and its piecewise-linear
+    /// derivative/integrals without querying or allocating in the field loop.
+    /// The canonical line admission already proves continuous support and
+    /// retains every source breakpoint, including fixed-context surface cuts.
+    /// Binary search costs O(log knots); no independent permeability fit or
+    /// approximation to the admitted piecewise-affine law is introduced.
     pub fn evaluate(
         &self,
         flux_density_t: f64,
@@ -345,33 +415,32 @@ impl ReversibleMagneticMaterial {
                 "magnetic flux density leaves the source-backed reversible range",
             ));
         }
-        let query = self
-            .material
-            .query()
-            .with(&self.path.axis, flux_density_t)
-            .map_err(|_| invalid("magnetic field query is unrepresentable"))?;
-        let material = self.material.at_query_point(&self.card, &query)?;
-        let h = material
-            .property(REVERSIBLE_FIELD_STRENGTH_PROPERTY)
-            .ok_or(invalid("reversible field source is missing"))?
-            .value_si();
-        let segment = self
-            .path
-            .knots
-            .partition_point(|(b, _)| *b <= flux_density_t)
-            .saturating_sub(1)
-            .min(self.slopes_a_m_t.len() - 1);
+        let segment = self.segment_at_flux_density(flux_density_t);
         let (b0, ref answer) = self.path.knots[segment];
         let h0 = answer.evidence.value.value;
         let slope = self.slopes_a_m_t[segment];
+        let width = flux_density_t - b0;
+        let (h, energy, coenergy) = if flux_density_t == self.maximum_flux_density_t() {
+            // Preserve canonical endpoint values and the prepared integrals.
+            (
+                self.maximum_field_strength_a_m(),
+                *self.energy_at_knots_j_m3.last().unwrap(),
+                *self.coenergy_at_knots_j_m3.last().unwrap(),
+            )
+        } else {
+            let h = slope.mul_add(width, h0);
+            let energy = (0.5 * h0 + 0.5 * h).mul_add(width, self.energy_at_knots_j_m3[segment]);
+            // Use slope*width rather than H-H0: a small positive dH can round
+            // away in the total H while its work against an existing B matters.
+            let coenergy =
+                (b0 + 0.5 * width).mul_add(slope * width, self.coenergy_at_knots_j_m3[segment]);
+            (h, energy, coenergy)
+        };
         let secant = if flux_density_t == 0.0 {
             slope
         } else {
             h / flux_density_t
         };
-        let energy =
-            (0.5 * h0 + 0.5 * h).mul_add(flux_density_t - b0, self.energy_at_knots_j_m3[segment]);
-        let coenergy = flux_density_t.mul_add(h, -energy);
         if !h.is_finite()
             || !secant.is_finite()
             || secant <= 0.0

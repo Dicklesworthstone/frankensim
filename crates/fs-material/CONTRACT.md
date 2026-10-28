@@ -2222,11 +2222,21 @@ coercivity and material names are not alternative ingress paths.
 Admission requires H(0)=0 and finite strictly positive segment slopes. Other
 source axes and applicability bounds must be fixed external thermodynamic
 conditions. Discrete-only spans, gaps, source switching, nonmonotone response
-and extrapolation refuse. Runtime H uses the canonical pinned query. The same
-piecewise-affine path supplies H/B, dH/dB, exact segment-integrated energy
-`psi(B)=integral_0^B H(b) db` and coenergy `B H-psi`. The tangent at zero uses
-the first segment; an interior knot uses its right derivative. These are
-floating-point model evaluations, not uncertainty propagation or enclosures.
+and extrapolation refuse. Runtime H evaluates the compiled canonical source
+path without rebuilding material queries in each field/solver iteration.
+Binary search selects the original segment in O(log knots), with no allocation
+or independent permeability fit. The same piecewise-affine path supplies H/B,
+dH/dB, exact segment-integrated energy `psi(B)=integral_0^B H(b) db` and
+coenergy `integral_0^H B(h) dh`. Both integrals are accumulated directly so
+small positive coenergy survives cancellation in `B H-psi`.
+`flux_density_at_field_strength` inverts this same curve and its original
+supported range; it does not introduce a separately interpolated inverse law.
+The tangent at zero uses the first segment; an interior knot uses its right
+derivative. Bregman loss visits only the original segments crossed by the two
+field magnitudes. These are floating-point model evaluations, not uncertainty
+propagation or enclosures. Focused material regressions compare compiled
+curves and fixed-temperature surface slices to canonical source queries, check
+inverse and Legendre derivatives, and preserve domain refusals.
 
 The law is reversible, isotropic and without remanence. A hysteresis loop or
 initial magnetization branch does not establish that physical model. Static
