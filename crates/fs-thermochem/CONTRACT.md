@@ -1021,3 +1021,39 @@ fully discrete entropy theorem remain outside this algebra. Pair coefficients
 and their thermodynamic-state support remain caller-owned source data.
 Primary formulation:
 <https://doc.comsol.com/6.4/doc/com.comsol.help.chem/chem_ug_chemsptrans.08.257.html>.
+
+
+## Source-bound dilute-gas collision transport
+
+`transport::kinetic::KineticGasTransportV1` retains the exact original NASA
+species bank, explicit model ID/version, canonical Lennard-Jones diameters and
+well depths, and an authored T/p domain. Molecular masses come exclusively from
+the original species sources. First Chapman-Enskog viscosity and binary
+diffusion use exact SI Boltzmann/Avogadro constants, Lorentz-Berthelot pair
+combining rules, and the complete Neufeld-Janzen-Aziz collision-integral fits.
+The declared domain must remain within 0.3 <= T* <= 100 for every pure/pair
+collision law. No dense-gas or polar correction is silently inferred.
+
+Pair molecular factors are precomputed. A reusable workspace provides the
+symmetric canonical binary-diffusion matrix (zero diagonal), pure viscosities,
+pure conductivities, mixed viscosity and thermal conductivity without
+successful-evaluation allocation. Only Omega11 is evaluated in the quadratic
+binary-diffusion loop. Mixture viscosity follows Wilke and is checked against
+the existing shared Wilke owner.
+
+Conductivity is explicitly the Eucken estimate
+`lambda_i = mu_i [Cp_i(T)+5R/4]/M_i`, with Cp from the original NASA law, followed
+by the arithmetic/harmonic mixture rule. It recovers monatomic Pr=2/3 without
+imposing a constant polyatomic Prandtl number. Polyatomic internal relaxation,
+Soret/Dufour transport, polar interactions and experimental validation are not
+claimed by this estimate.
+
+Seven native tests pass on actual source: independent SI prefactors; complete
+collision-correlation values and admitted domain; monatomic Prandtl/Schmidt
+relations; pure/trace/Wilke limits; pressure, diameter and temperature scaling;
+original variable-Cp conductivity; and source identity, canonicalization,
+cancellation and workspace reuse.
+References: Neufeld, Janzen and Aziz, J. Chem. Phys.57,1100-1102(1972),
+<https://doi.org/10.1063/1.1678363>;
+<https://cantera.org/3.2/cxx/d5/de4/GasTransport_8cpp_source.html>;
+<https://cantera.org/3.2/cxx/dd/d16/MixTransport_8cpp_source.html>.

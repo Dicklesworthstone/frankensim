@@ -8,6 +8,9 @@
 /// Bounded molecular diffusion algebra in the mass-averaged gas frame.
 pub mod maxwell_stefan;
 
+/// Source-bound dilute-gas collision properties with explicit kinetic assumptions.
+pub mod kinetic;
+
 use core::fmt;
 
 use fs_qty::semantic::{Composition, CompositionBasis, SemanticError};
