@@ -244,3 +244,104 @@ fn unsupported_late_fluid_temperature_returns_no_partial_march() {
 
 #[path = "liquid_enthalpy_flow/coupled.rs"]
 mod coupled;
+
+fn heating_resistance(factor: f64) -> fs_airflow::graph::thermal::medium::series::hydraulic::MaterialFlowResistance {
+    fs_airflow::graph::thermal::medium::series::hydraulic::MaterialFlowResistance::try_new(
+        factor, 0.0, Area::new(1e-4), Length::new(0.01), (0.0, 2300.0),
+    ).unwrap()
+}
+
+#[test]
+fn hydraulic_power_heats_the_liquid_while_the_original_wall_receives_rejected_heat() {
+    let card = card(false,"dissipative");
+    let liquid = liquid(&card,1.0);
+    let source = caloric(&card,1.0,SolidLiquidPhase::Liquid);
+    let path = FrozenFlowMedium::Liquid(&liquid).channel_series(VolumetricFlowRate::new(1e-6),
+        Temperature::new(300.0), &[section("wall",0.008)]).unwrap();
+    with_cx(|cx| {
+        let result = path.march_liquid_enthalpy_with_dissipation(cx,&source,"T",&[300.0],
+            &[heating_resistance(2e16)]).unwrap();
+        let ua = path.path().segments()[0].htc_w_per_m2_k()*0.008;
+        let expected = 300.0 + 20.0/ua*(1.0-(-ua/2.0).exp());
+        close(result.outlet().temperature_k(),expected);
+        close(result.hydraulic_heat_rate_w(),20.0);
+        close(result.enthalpy_gain_w(),2.0*(expected-300.0));
+        close(result.balance_residual_w(),0.0);
+        assert!(result.total_heat_rate_w()<0.0);
+        let region = &result.regions()[0];
+        close(ua*(300.0-region.reference_temperature_k()),result.total_heat_rate_w());
+        close(region.hydraulic_loss().unwrap().dissipated_power_w,20.0);
+        close(region.hydraulic_heat_rate_w(),20.0);
+        let legacy = path.march_liquid_enthalpy(cx,&source,"T",&[300.0]).unwrap();
+        assert_eq!(legacy.total_heat_rate_w(),0.0);
+        assert_eq!(legacy.hydraulic_heat_rate_w(),0.0);
+    });
+}
+
+#[test]
+fn distributed_hydraulic_heating_preserves_variable_cp_energy_under_subdivision() {
+    let card = card(true,"dissipative-refinement");
+    let liquid = liquid(&card,1.0);
+    let source = caloric(&card,1.0,SolidLiquidPhase::Liquid);
+    with_cx(|cx| {
+        let mut expected = None;
+        for count in [1,2,8] {
+            let names:Vec<_> = (0..count).map(|i| format!("heated-{i}")).collect();
+            let sections:Vec<_> = names.iter().map(|name| section(name,0.008/count as f64)).collect();
+            let path = FrozenFlowMedium::Liquid(&liquid).channel_series(VolumetricFlowRate::new(1e-6),
+                Temperature::new(300.0),&sections).unwrap();
+            let result = path.march_liquid_enthalpy_with_dissipation(cx,&source,"T",&vec![320.0;count],
+                &vec![heating_resistance(2e16/count as f64);count]).unwrap();
+            close(result.hydraulic_heat_rate_w(),20.0);
+            close(result.enthalpy_gain_w(),result.mass_flow_kg_per_s()*
+                (result.outlet().specific_enthalpy_j_kg()-result.regions()[0].inlet().specific_enthalpy_j_kg()));
+            close(result.balance_residual_w(),0.0);
+            if let Some((temperature,wall_heat)) = expected {
+                close(result.outlet().temperature_k(),temperature);
+                close(result.total_heat_rate_w(),wall_heat);
+            } else { expected = Some((result.outlet().temperature_k(),result.total_heat_rate_w())); }
+        }
+    });
+}
+
+#[test]
+fn hydraulic_heating_rejects_geometry_reynolds_and_caloric_domain_mismatches() {
+    use fs_airflow::graph::thermal::medium::series::hydraulic::MaterialFlowResistance;
+    let card = card(false,"dissipative-refusal");
+    let liquid = liquid(&card,1.0);
+    let source = caloric(&card,1.0,SolidLiquidPhase::Liquid);
+    let path = FrozenFlowMedium::Liquid(&liquid).channel_series(VolumetricFlowRate::new(1e-6),
+        Temperature::new(300.0), &[section("wall",0.008)]).unwrap();
+    with_cx(|cx| {
+        assert!(path.march_liquid_enthalpy_with_dissipation(cx,&source,"T",&[300.0],&[]).is_err());
+        for loss in [
+            MaterialFlowResistance::try_new(2e16,0.0,Area::new(2e-4),Length::new(0.01),(0.0,2300.0)).unwrap(),
+            MaterialFlowResistance::try_new(2e16,0.0,Area::new(1e-4),Length::new(0.01),(0.0,1.0)).unwrap(),
+            heating_resistance(1e20),
+        ] {
+            assert!(path.march_liquid_enthalpy_with_dissipation(cx,&source,"T",&[300.0],&[loss]).is_err());
+        }
+        assert_eq!(path.path().inlet_temperature_k(),300.0);
+    });
+}
+
+#[test]
+fn advected_energy_remains_independent_of_large_cancelling_heat_reports() {
+    let card = card(false,"cancelling-heat");
+    let liquid = liquid(&card,1.0);
+    let source = caloric(&card,1.0,SolidLiquidPhase::Liquid);
+    let loss = heating_resistance(2.0_f64.powi(60)/1e-15);
+    let power = loss.evaluate(&liquid,fs_qty::MassFlowRate::new(0.001)).unwrap().dissipated_power_w;
+    let htc = 3.66*0.6/0.01;
+    let path = FrozenFlowMedium::Liquid(&liquid).channel_series(VolumetricFlowRate::new(1e-6),
+        Temperature::new(299.999999), &[section("wall",power/(50.0*htc))]).unwrap();
+    with_cx(|cx| {
+        let report = path.march_liquid_enthalpy_with_dissipation(cx,&source,"T",&[250.0],&[loss]).unwrap();
+        let actual = report.mass_flow_kg_per_s()*(report.outlet().specific_enthalpy_j_kg()
+            - report.regions()[0].inlet().specific_enthalpy_j_kg());
+        assert!(actual>1e-7);
+        assert_eq!(report.total_heat_rate_w()+report.hydraulic_heat_rate_w(),0.0);
+        assert_eq!(report.enthalpy_gain_w(),actual);
+        assert_eq!(report.balance_residual_w(),actual);
+    });
+}

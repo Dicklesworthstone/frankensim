@@ -20,10 +20,11 @@ use fs_material::phase::{
 };
 use fs_material::state_point::{DENSITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_PROPERTY};
 use fs_math::det;
-use fs_qty::Temperature;
+use fs_qty::{MassFlowRate, Temperature};
 
 use crate::conjugate::{AirPath, AirSegment};
 use super::{MaterialFlowPath, MaterialHeatExchange};
+use super::hydraulic::{MaterialFlowResistance, ResistanceError, ResistanceEvaluation};
 use super::super::{FrozenFlowMedium, MediumFlowError};
 
 /// Source mismatch, unsupported thermal trajectory, or original owner refusal.
@@ -35,6 +36,8 @@ pub enum LiquidEnthalpyError {
     Phase(PhaseStateError),
     /// Original channel/correlation refusal.
     Flow(MediumFlowError),
+    /// Original pressure-loss owner refused this region.
+    Resistance { region: String, source: ResistanceError },
     /// Cancellation publishes no partial march or boundary rows.
     Cancelled,
 }
@@ -60,6 +63,7 @@ pub struct LiquidEnthalpyRegion<'a> {
     heat_rate_w: f64,
     reference_temperature_k: f64,
     exchange: MaterialHeatExchange<'a>,
+    hydraulic_loss: Option<ResistanceEvaluation>,
 }
 impl<'a> LiquidEnthalpyRegion<'a> {
     /// Original solid trace name.
@@ -71,9 +75,17 @@ impl<'a> LiquidEnthalpyRegion<'a> {
     /// Source-bound leaving state.
     #[must_use]
     pub const fn outlet(&self) -> EquilibriumPhaseState { self.outlet }
-    /// Signed sensible heat received by this fluid, W.
+    /// Signed heat received from this wall, W; hydraulic heat is separate.
     #[must_use]
     pub const fn heat_rate_w(&self) -> f64 { self.heat_rate_w }
+    /// Original hydraulic evaluation when pressure-loss heating was requested.
+    #[must_use]
+    pub const fn hydraulic_loss(&self) -> Option<&ResistanceEvaluation> { self.hydraulic_loss.as_ref() }
+    /// Pressure work converted to fluid heat in this region, W.
+    #[must_use]
+    pub fn hydraulic_heat_rate_w(&self) -> f64 {
+        self.hydraulic_loss.as_ref().map_or(0.0, |loss| loss.dissipated_power_w)
+    }
     /// Effective Robin reference reproducing this region's actual heat, K.
     #[must_use]
     pub const fn reference_temperature_k(&self) -> f64 { self.reference_temperature_k }
@@ -94,6 +106,9 @@ pub struct LiquidEnthalpyMarch<'a, 'c> {
     regions: Vec<LiquidEnthalpyRegion<'a>>,
     mass_flow_kg_per_s: f64,
     total_heat_rate_w: f64,
+    hydraulic_heat_rate_w: f64,
+    enthalpy_gain_w: f64,
+    balance_residual_w: f64,
 }
 impl<'a, 'c> LiquidEnthalpyMarch<'a, 'c> {
     /// Cp/density source and every receipt used to build the caloric chart.
@@ -105,9 +120,20 @@ impl<'a, 'c> LiquidEnthalpyMarch<'a, 'c> {
     /// One conserved mass-flow rate through every region, kg/s.
     #[must_use]
     pub const fn mass_flow_kg_per_s(&self) -> f64 { self.mass_flow_kg_per_s }
-    /// Sum of signed regional enthalpy transfers, W.
+    /// Sum of signed wall heat transfers, W.
     #[must_use]
     pub const fn total_heat_rate_w(&self) -> f64 { self.total_heat_rate_w }
+    /// Total original pressure-loss power deposited in the fluid, W.
+    #[must_use]
+    pub const fn hydraulic_heat_rate_w(&self) -> f64 { self.hydraulic_heat_rate_w }
+    /// Actual `mdot*(h_out-h_in)` from the source-backed endpoint states, W.
+    /// This independent observation is not reconstructed from heat inputs.
+    #[must_use]
+    pub const fn enthalpy_gain_w(&self) -> f64 { self.enthalpy_gain_w }
+    /// Actual advected enthalpy minus reported wall and hydraulic heat, W.
+    /// This exposes representation/reduction error; it is not physical heat.
+    #[must_use]
+    pub const fn balance_residual_w(&self) -> f64 { self.balance_residual_w }
     /// Source-bound final fluid state.
     #[must_use]
     pub fn outlet(&self) -> EquilibriumPhaseState {
@@ -132,8 +158,51 @@ impl<'a> MaterialFlowPath<'a> {
         &self, cx: &Cx<'_>, source: &'c ResolvedHeatCapacityCurve,
         temperature_axis: &str, wall_temperatures_k: &[f64],
     ) -> Result<LiquidEnthalpyMarch<'a, 'c>, LiquidEnthalpyError> {
+        self.march_liquid_enthalpy_inner(cx, source, temperature_axis, wall_temperatures_k, None)
+    }
+
+    /// Include the original `dp*Q` loss as uniformly distributed fluid heat.
+    ///
+    /// Choosing this reduced model declares equal elevation, equal flow areas,
+    /// unchanged bulk kinetic energy, constant source density, and complete local
+    /// conversion of each declared pressure loss into fluid heat. It does not
+    /// model gas throttling, pump efficiency or heat retained by a porous skeleton.
+    /// Resistance and convection remain at the original frozen material query.
+    ///
+    /// Within each caloric piece, the same exact wall march integrates
+    /// `mdot dh/dA = htc*(Twall-T(h)) + P_loss/A_region` by shifting its driving
+    /// temperature. Hydraulic heat is never charged to the wall's Robin row.
+    ///
+    /// # Errors
+    /// Original source/correlation/Reynolds refusals, incompatible geometry,
+    /// nonconstant density, unsupported caloric trajectory, or cancellation.
+    pub fn march_liquid_enthalpy_with_dissipation<'c>(
+        &self, cx: &Cx<'_>, source: &'c ResolvedHeatCapacityCurve,
+        temperature_axis: &str, wall_temperatures_k: &[f64],
+        resistances: &[MaterialFlowResistance],
+    ) -> Result<LiquidEnthalpyMarch<'a, 'c>, LiquidEnthalpyError> {
+        self.march_liquid_enthalpy_inner(cx, source, temperature_axis,
+            wall_temperatures_k, Some(resistances))
+    }
+
+    fn march_liquid_enthalpy_inner<'c>(
+        &self, cx: &Cx<'_>, source: &'c ResolvedHeatCapacityCurve,
+        temperature_axis: &str, wall_temperatures_k: &[f64],
+        resistances: Option<&[MaterialFlowResistance]>,
+    ) -> Result<LiquidEnthalpyMarch<'a, 'c>, LiquidEnthalpyError> {
         checkpoint(cx)?;
         self.admit_caloric_source(cx, source, temperature_axis)?;
+        if let Some(resistances) = resistances {
+            let FrozenFlowMedium::Liquid(liquid) = self.medium else { unreachable!("admitted liquid") };
+            admit_dissipative_density(source, liquid.density_kg_m3())?;
+            let area = self.exchanges[0].geometry.flow_area;
+            if resistances.len() != self.exchanges.len()
+                || resistances.iter().zip(&self.exchanges).any(|(r, e)|
+                    r.flow_area() != e.geometry.flow_area || e.geometry.flow_area != area)
+            {
+                return Err(LiquidEnthalpyError::Invalid("dissipative liquid heat requires one resistance per region and equal flow areas"));
+            }
+        }
         if wall_temperatures_k.len() != self.path.segments().len()
             || wall_temperatures_k.iter().any(|&t| !positive(t))
         {
@@ -141,26 +210,45 @@ impl<'a> MaterialFlowPath<'a> {
         }
         let curve = source.curve();
         let mut state = state_at_temperature(curve, self.path.inlet_temperature_k())?;
+        let initial_enthalpy = state.specific_enthalpy_j_kg();
         let mut regions = Vec::with_capacity(self.exchanges.len());
         let mut total = 0.0;
-        for ((segment, exchange), &wall) in self.path.segments().iter().zip(&self.exchanges).zip(wall_temperatures_k) {
+        let mut hydraulic_total = 0.0;
+        for (index, ((segment, exchange), &wall)) in self.path.segments().iter().zip(&self.exchanges).zip(wall_temperatures_k).enumerate() {
             checkpoint(cx)?;
-            let outlet = march_region(cx, curve, state, self.mass_flow_kg_per_s, segment, wall)?;
-            let heat = self.mass_flow_kg_per_s
+            let hydraulic_loss = if let Some(resistances) = resistances {
+                Some(resistances[index].evaluate(&self.medium, MassFlowRate::new(self.mass_flow_kg_per_s))
+                    .map_err(|source| LiquidEnthalpyError::Resistance { region: segment.region().to_owned(), source })?)
+            } else { None };
+            let power = hydraulic_loss.as_ref().map_or(0.0, |loss| loss.dissipated_power_w);
+            let outlet = march_region_with_heat(cx, curve, state, self.mass_flow_kg_per_s, segment, wall, power)?;
+            let enthalpy_gain = self.mass_flow_kg_per_s
                 * (outlet.specific_enthalpy_j_kg() - state.specific_enthalpy_j_kg());
+            let heat = enthalpy_gain - power;
             let reference = wall - heat / (segment.htc_w_per_m2_k() * segment.area_m2());
             total += heat;
-            if !heat.is_finite() || !total.is_finite() || !positive(reference) {
+            hydraulic_total += power;
+            if !heat.is_finite() || !total.is_finite() || !hydraulic_total.is_finite()
+                || !(total + hydraulic_total).is_finite() || !positive(reference) {
                 return Err(LiquidEnthalpyError::Invalid("enthalpy transfer or effective Robin reference is unrepresentable"));
             }
             regions.push(LiquidEnthalpyRegion {
                 region: segment.region().to_owned(), inlet: state, outlet,
-                heat_rate_w: heat, reference_temperature_k: reference, exchange: exchange.clone(),
+                heat_rate_w: heat, reference_temperature_k: reference, exchange: exchange.clone(), hydraulic_loss,
             });
             state = outlet;
         }
         checkpoint(cx)?;
-        Ok(LiquidEnthalpyMarch { source, regions, mass_flow_kg_per_s: self.mass_flow_kg_per_s, total_heat_rate_w: total })
+        let enthalpy_gain_w = self.mass_flow_kg_per_s * (state.specific_enthalpy_j_kg() - initial_enthalpy);
+        let (partial, first_tail) = fs_math::eft::two_sum(enthalpy_gain_w, -total);
+        let (rounded, second_tail) = fs_math::eft::two_sum(partial, -hydraulic_total);
+        let balance_residual_w = rounded + (first_tail + second_tail);
+        if !enthalpy_gain_w.is_finite() || !balance_residual_w.is_finite() {
+            return Err(LiquidEnthalpyError::Invalid("advected enthalpy or heat balance is unrepresentable"));
+        }
+        Ok(LiquidEnthalpyMarch { source, regions, mass_flow_kg_per_s: self.mass_flow_kg_per_s,
+            total_heat_rate_w: total, hydraulic_heat_rate_w: hydraulic_total,
+            enthalpy_gain_w, balance_residual_w })
     }
 
     fn admit_caloric_source(
@@ -203,6 +291,27 @@ fn checkpoint(cx: &Cx<'_>) -> Result<(), LiquidEnthalpyError> {
     cx.checkpoint().map_err(|_| LiquidEnthalpyError::Cancelled)
 }
 fn positive(value: f64) -> bool { value.is_finite() && value > 0.0 }
+
+fn admit_dissipative_density(source: &ResolvedHeatCapacityCurve, density: f64) -> Result<(), LiquidEnthalpyError> {
+    if source.curve().knots().iter().any(|k| k.bulk_density_kg_m3 != density) {
+        return Err(LiquidEnthalpyError::Invalid("hydraulic heating requires constant source density over the caloric span"));
+    }
+    Ok(())
+}
+
+fn march_region_with_heat(
+    cx: &Cx<'_>, curve: &EquilibriumEnthalpyPhaseCurve, state: EquilibriumPhaseState,
+    mass_flow: f64, segment: &AirSegment, wall: f64, hydraulic_power_w: f64,
+) -> Result<EquilibriumPhaseState, LiquidEnthalpyError> {
+    if !hydraulic_power_w.is_finite() || hydraulic_power_w < 0.0 {
+        return Err(LiquidEnthalpyError::Invalid("hydraulic heat must be finite and nonnegative"));
+    }
+    let driving = wall + hydraulic_power_w / (segment.htc_w_per_m2_k() * segment.area_m2());
+    if !positive(driving) {
+        return Err(LiquidEnthalpyError::Invalid("hydraulic-heating driving temperature is unrepresentable"));
+    }
+    march_region(cx, curve, state, mass_flow, segment, driving)
+}
 
 fn state_at_temperature(
     curve: &EquilibriumEnthalpyPhaseCurve, temperature: f64,

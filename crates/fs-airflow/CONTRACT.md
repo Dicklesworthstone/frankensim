@@ -1,5 +1,20 @@
 # CONTRACT: fs-airflow
 
+`MaterialFlowPath::march_liquid_enthalpy_with_dissipation` integrates the original
+resistance owner's `dp*Q` as uniformly distributed fluid heat in each region,
+using the existing piecewise caloric exponential march. It requires constant
+source density and equal flow areas; choosing it declares equal elevation,
+unchanged bulk kinetic energy and complete local conversion of the specified
+pressure loss. The source Cp chart remains authoritative. Actual wall heat is
+`mdot*(h_out-h_in) - P_loss`, and only that wall heat enters the original Robin
+row. The report separately retains hydraulic evaluations, hydraulic heat and
+actual endpoint advected enthalpy gain; a compensated balance residual exposes
+reporting error instead of defining the enthalpy gain by closure. It does not
+model gas throttling, pump inefficiency or a
+porous skeleton's share of dissipation. Unsupported source/Reynolds/geometry
+states and cancellation return no partial trajectory. Analytic constant-Cp,
+variable-Cp subdivision and original-owner refusal tests cover this opt-in path.
+
 > Status: ACTIVE for beads `frankensim-extreal-program-f85xj.5.5` and
 > `frankensim-extreal-program-f85xj.5.7` (conjugate coupling).
 
