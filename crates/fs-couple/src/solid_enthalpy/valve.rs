@@ -12,8 +12,9 @@
 /// Finite spatial heating and continuing native modal motion on one clock.
 pub mod motion;
 
+use fs_blake3::ContentHash;
 use fs_exec::Cx;
-use fs_solid::linear3::{TetMaterialField, TetStaticSolveConfig};
+use fs_solid::linear3::{TetLinearElasticProblem, TetStaticSolveConfig, TetThermalStrainField};
 use fs_solid::reduce::thermal::{
     ThermalPressureLoadedValve, ThermalValveControls, reduce_pressure_loaded_valve,
 };
@@ -94,29 +95,51 @@ impl SolidEnthalpyState<'_> {
         input: &HeatedValveReduction<'_>,
         cx: &Cx<'_>,
     ) -> Result<ThermalPressureLoadedValve, HeatedValveError> {
+        input.reduce_state(
+            &self.problem(input.fixed_dofs),
+            self.thermal_strains(),
+            self.mesh_frame,
+            self.maximum_absolute_mandel_strain,
+            cx,
+        )
+    }
+}
+
+impl HeatedValveReduction<'_> {
+    // Both finite-cell and nodal-enthalpy consumers lower their original solid
+    // fields here. There is one definition of the support, pressure and modal
+    // boundary; a different thermal discretization cannot change it.
+    pub(super) fn reduce_state(
+        &self,
+        problem: &TetLinearElasticProblem<'_>,
+        thermal: TetThermalStrainField<'_>,
+        mesh_frame: ContentHash,
+        maximum_absolute_mandel_strain: f64,
+        cx: &Cx<'_>,
+    ) -> Result<ThermalPressureLoadedValve, HeatedValveError> {
         poll(cx)?;
         let request = ValveCardRequest {
-            nodes_m: self.nodes_m,
-            tetrahedra: self.tetrahedra,
+            nodes_m: problem.nodes_m,
+            tetrahedra: problem.tetrahedra,
             element_order: ValveElementOrder::Tet4,
-            fixed_dofs: input.fixed_dofs,
-            material: TetMaterialField::PerElement(&self.materials),
-            orifice: input.orifice.clone(),
-            window_hz: input.window_hz,
-            retained_compliance_floor: input.retained_compliance_floor,
-            loss_factor: input.loss_factor,
-            source_id: input.source_id,
+            fixed_dofs: problem.fixed_dofs,
+            material: problem.materials,
+            orifice: self.orifice.clone(),
+            window_hz: self.window_hz,
+            retained_compliance_floor: self.retained_compliance_floor,
+            loss_factor: self.loss_factor,
+            source_id: self.source_id,
         };
         let valve = reduce_pressure_loaded_valve(
             &request,
-            self.thermal_strains(),
-            input.equilibrium_nodal_forces_n,
-            input.nodal_load_per_pa_m2,
+            thermal,
+            self.equilibrium_nodal_forces_n,
+            self.nodal_load_per_pa_m2,
             ThermalValveControls {
-                solve: input.static_solve,
-                mesh_frame: self.mesh_frame,
-                maximum_absolute_mandel_strain: self.maximum_absolute_mandel_strain,
-                maximum_nodal_displacement_m: input.maximum_nodal_displacement_m,
+                solve: self.static_solve,
+                mesh_frame,
+                maximum_absolute_mandel_strain,
+                maximum_nodal_displacement_m: self.maximum_nodal_displacement_m,
             },
             cx,
         )?;

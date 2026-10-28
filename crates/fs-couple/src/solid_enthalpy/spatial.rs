@@ -18,6 +18,8 @@
 //! the native caloric audit. Mechanical work is not silently converted into
 //! heat, and deformation does not silently change the transport geometry.
 
+/// Native nodal heat and continuing pressure-driven modal motion.
+pub mod motion;
 mod source;
 
 use fs_blake3::ContentHash;
@@ -392,21 +394,14 @@ impl<'a, 'm: 'a, 'c: 'a> SpatialSolidEnthalpy<'a, 'm, 'c> {
         solve: SolidEquilibriumConfig,
         cx: &Cx<'_>,
     ) -> Result<SpatialSolidCandidate<'_>, SpatialSolidEnthalpyError> {
-        self.resolve(old_specific_h, cx)?;
-        let problem = ConductionProblem {
-            mesh: self.thermal.mesh(),
-            boundary,
-            material: self.conductivity.model_for(0)?,
-            element_materials: Some(&self.conductivity),
-            source,
-        };
-        let thermal = self.thermal.advance(
-            cx,
-            problem,
-            interfaces,
+        let thermal = self.advance_thermal(
             old_specific_h,
             dt_s,
+            boundary,
+            interfaces,
+            source,
             thermal_config,
+            cx,
         )?;
         let state = self.resolve(&thermal.specific_enthalpy_j_kg, cx)?;
         let equilibrium = state.solve(loads, fixed_dofs, solve, cx)?;
@@ -416,6 +411,37 @@ impl<'a, 'm: 'a, 'c: 'a> SpatialSolidEnthalpy<'a, 'm, 'c> {
             state,
             equilibrium,
         })
+    }
+
+    // Shared by the quasistatic and continuing-modal consumers. Neither can
+    // substitute an independent conductivity or a second thermal inventory.
+    #[allow(clippy::too_many_arguments)]
+    fn advance_thermal(
+        &self,
+        old_specific_h: &[f64],
+        dt_s: f64,
+        boundary: &ThermalBoundary,
+        interfaces: Option<&ThermalInterfaces>,
+        source: &ScalarField,
+        thermal_config: EnthalpyStepConfig,
+        cx: &Cx<'_>,
+    ) -> Result<EnthalpyStepSolution, SpatialSolidEnthalpyError> {
+        self.resolve(old_specific_h, cx)?;
+        let problem = ConductionProblem {
+            mesh: self.thermal.mesh(),
+            boundary,
+            material: self.conductivity.model_for(0)?,
+            element_materials: Some(&self.conductivity),
+            source,
+        };
+        Ok(self.thermal.advance(
+            cx,
+            problem,
+            interfaces,
+            old_specific_h,
+            dt_s,
+            thermal_config,
+        )?)
     }
 }
 

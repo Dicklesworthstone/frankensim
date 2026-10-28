@@ -5795,6 +5795,35 @@ example regressions check finite-energy temperature, fixed reference mass,
 data-only heat-capacity changes reaching actual microphone pressure,
 deterministic replay and refusal without a sound comparison.
 
+### Native nodal heat on the same continuing modal trajectory
+
+`solid_enthalpy::spatial::motion::SpatialHeatedValveMotion` joins the native
+heterogeneous P1 enthalpy owner to the same `HeatedValveReduction`,
+`ThermalValveModalMotion` and `fs-modal` physical state transfer used by the
+finite-cell path. The shared reduction helper preserves the original support,
+initial-stress, aperture, pressure-compliance and modal admissions. Local
+enthalpies remain on the original heat mesh, and every vertex is admitted
+before the existing enthalpy-centroid mechanical quadrature. Reference mass
+does not change with the queried hot density.
+
+Each interval advances held-pressure motion, native backward-Euler heat,
+source-dependent equilibrium/tangent, shape-based displacement/momentum
+transfer and the new basis's pressure observer. Heat and motion publish
+together only after all admissions and a final cancellation poll. Late source,
+reduction, observation, transfer or budget refusal retains the accepted heat
+field, vibration and sample clock. No independent conductivity, thermal store,
+modal integrator or mode-number state matching is introduced.
+
+This is a first-order one-way thermal composition on fixed reference geometry,
+supports and pressure footprint. Signed parameter work and discarded modal
+state are reported separately; neither becomes heat. Spatial/time/modal
+convergence, reciprocal thermoelastic heat, moving geometry, melting and
+radiation back-reaction remain separate obligations. Focused manufactured
+tests in `spatial_solid_enthalpy::motion` compare an independent affine-tet
+oscillator, unchanged-temperature continuation, heat-capacity sensitivity,
+and late refusal with exact retry. These are implementation checks, not
+measured material or instrument validation.
+
 ## Native continuously heated string and finite-gas journey
 
 The `finite_gas_string` binary and example share one implementation. A bounded
