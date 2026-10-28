@@ -2,8 +2,8 @@
 //! Numerical iteration remains in fs-solver; geometry, integration and material
 //! admission remain in the existing isoparametric owners.
 use super::super::{
-    TetAssemblyBudget, TetElasticError, TetMaterialField, TetStaticSolveConfig,
-    TetThermalStrainField, add_nodal_forces_to_thermal_load, euclidean_norm, hash_usize,
+    QuadraticThermalStrainField, TetAssemblyBudget, TetElasticError, TetMaterialField,
+    TetStaticSolveConfig, add_nodal_forces_to_thermal_load, euclidean_norm, hash_usize,
     validate_rigid_mode_constraints,
 };
 use super::{Point, assemble, mandel_b, thermal_load};
@@ -154,7 +154,7 @@ pub(in crate::linear3) fn solve<const N: usize, const D: usize, R: Copy>(
     nodes_m: &[[f64; 3]],
     elements: &[[usize; N]],
     materials: TetMaterialField<'_>,
-    thermal: TetThermalStrainField<'_>,
+    thermal: QuadraticThermalStrainField<'_>,
     nodal_forces_n: Option<&[(usize, f64)]>,
     fixed_dofs: &[usize],
     budget: TetAssemblyBudget,
@@ -290,7 +290,7 @@ pub(in crate::linear3) fn solve<const N: usize, const D: usize, R: Copy>(
                 connectivity,
                 &displacement_m,
                 &material.stiffness_mandel_pa,
-                &thermal.at(element).free_strain_mandel,
+                &thermal.at(element, point).free_strain_mandel,
                 maximum_absolute_mandel_strain,
             )?;
             let dv = weight * p.determinant;

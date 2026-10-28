@@ -2,12 +2,14 @@
 //! Local upper triangles, Mandel arithmetic and COO insertion retain the
 //! original TET10 operation order. Geometry and reference rules are inputs.
 use super::{
-    TetAssemblyBudget, TetElasticAssembly, TetElasticError, TetMaterialField, TetThermalLoad,
-    TetThermalStrainField, free_dof_map, hash_usize,
+    QuadraticThermalStrainField, TetAssemblyBudget, TetElasticAssembly, TetElasticError,
+    TetMaterialField, TetThermalLoad, free_dof_map, hash_usize,
 };
 use fs_blake3::DomainHasher;
 use fs_exec::Cx;
 use fs_sparse::Coo;
+
+pub(super) mod thermal_field;
 
 pub(super) struct Point<const N: usize> {
     pub shapes: [f64; N],
@@ -159,13 +161,14 @@ pub(super) fn mandel_b<const N: usize, const D: usize>(gradients: [[f64; 3]; N])
 
 /// The same reference geometry and Mandel weak form as elastic assembly:
 /// `f_th = integral B^T C epsilon_free dV`, hence `K u = f_ext + f_th`.
-/// Material and integrated eigenstrain are constant per element. Full rows
+/// Material is constant per element; integrated eigenstrain can vary over the
+/// stiffness quadrature. Full rows
 /// include constrained DOFs so downstream support reactions are not discarded.
 pub(super) fn thermal_load<const N: usize, const D: usize, R: Copy>(
     nodes_m: &[[f64; 3]],
     elements: &[[usize; N]],
     materials: TetMaterialField<'_>,
-    thermal_strains: TetThermalStrainField<'_>,
+    thermal_strains: QuadraticThermalStrainField<'_>,
     fixed_dofs: &[usize],
     budget: TetAssemblyBudget,
     stiffness_rule: &[(R, f64)],
@@ -175,7 +178,7 @@ pub(super) fn thermal_load<const N: usize, const D: usize, R: Copy>(
 ) -> Result<TetThermalLoad, TetElasticError> {
     debug_assert_eq!(D, 3 * N);
     cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
-    thermal_strains.validate(elements.len())?;
+    thermal_strains.validate(elements.len(), stiffness_rule.len())?;
     let (free_dofs, _) = free_dof_map(nodes_m.len(), fixed_dofs, budget.maximum_free_dofs)?;
     let full_dofs = nodes_m
         .len()
@@ -210,7 +213,7 @@ pub(super) fn thermal_load<const N: usize, const D: usize, R: Copy>(
     for (element, connectivity) in elements.iter().enumerate() {
         cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
         let material = materials.at(element);
-        let thermal = thermal_strains.at(element);
+        let thermal = thermal_strains.at(element, 0);
         if thermal.elastic_material_state_identity != material.material_state_identity {
             return Err(TetElasticError::ThermalElasticStateMismatch { element });
         }
@@ -219,6 +222,11 @@ pub(super) fn thermal_load<const N: usize, const D: usize, R: Copy>(
         }
         identity.update(&material.material_state_identity);
         identity.update(thermal.identity.as_bytes());
+        if !thermal_strains.is_elementwise() {
+            // Distinguish pointwise input while retaining the original identity
+            // and arithmetic for all element-constant callers.
+            identity.update(b"quadrature-thermal-strain-v1");
+        }
         for coefficient in material.stiffness_mandel_pa.iter().flatten() {
             identity.update(&coefficient.to_bits().to_le_bytes());
         }
@@ -239,6 +247,26 @@ pub(super) fn thermal_load<const N: usize, const D: usize, R: Copy>(
         let mut local_force = [0.0; D];
         for (point, &(reference, weight)) in stiffness_rule.iter().enumerate() {
             cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+            if !thermal_strains.is_elementwise() {
+                let sample = thermal_strains.at(element, point);
+                if sample.elastic_material_state_identity != material.material_state_identity {
+                    return Err(TetElasticError::ThermalElasticStateMismatch { element });
+                }
+                identity.update(sample.identity.as_bytes());
+                free_stress.fill(0.0);
+                for (row, stress) in free_stress.iter_mut().enumerate() {
+                    for column in 0..6 {
+                        *stress += material.stiffness_mandel_pa[row][column]
+                            * sample.free_strain_mandel[column];
+                    }
+                }
+                if free_stress.iter().any(|value| !value.is_finite()) {
+                    return Err(TetElasticError::NonFiniteThermalLoad {
+                        element,
+                        local_dof: None,
+                    });
+                }
+            }
             let p = evaluate(nodes, reference, element, point)?;
             let b = mandel_b::<N, D>(p.gradients);
             let dv = weight * p.determinant;

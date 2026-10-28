@@ -13,9 +13,9 @@ use fs_exec::Cx;
 use fs_feec::highorder::simplex::duffy_quadrature;
 
 use super::{
-    TetAssemblyBudget, TetElasticAssembly, TetElasticError, TetMaterialField, TetThermalLoad,
-    TetThermalStrainField, determinant3, inverse3, maximum_edge_length, signed_tet_determinant,
-    validate_connectivity,
+    QuadraticThermalStrainField, TetAssemblyBudget, TetElasticAssembly, TetElasticError,
+    TetMaterialField, TetThermalLoad, determinant3, inverse3, maximum_edge_length,
+    signed_tet_determinant, validate_connectivity,
 };
 
 /// `v0..v3`, then `(0,1),(1,2),(0,2),(0,3),(1,3),(2,3)`.
@@ -298,8 +298,9 @@ impl QuadraticTetProblem<'_> {
 
     /// Integrate `B^T C epsilon_free` on the same quadratic geometry and
     /// stiffness quadrature as [`Self::assemble`]. Eigenstrain is an already
-    /// integrated, source-bound thermal state, constant per element; no
-    /// temperature interpolation or expansion coefficient is inferred.
+    /// integrated, source-bound thermal state, constant per element or supplied
+    /// at each stiffness quadrature point. No temperature interpolation or
+    /// expansion coefficient is inferred.
     ///
     /// The result is directly usable with the existing stiffness and solver
     /// owners: `K u = f_external + reduced_force_n`. Full force rows retain
@@ -308,9 +309,9 @@ impl QuadraticTetProblem<'_> {
     /// and a refusal/cancellation publishes no partial load. Quadratic response
     /// is available through solve_thermal_response; geometric prestress remains
     /// a separate capability.
-    pub fn assemble_thermal_load(
+    pub fn assemble_thermal_load<'t>(
         &self,
-        thermal_strains: TetThermalStrainField<'_>,
+        thermal_strains: impl Into<QuadraticThermalStrainField<'t>>,
         cx: &Cx<'_>,
     ) -> Result<TetThermalLoad, TetElasticError> {
         self.validate(false, cx)?;
@@ -318,7 +319,7 @@ impl QuadraticTetProblem<'_> {
             self.nodes_m,
             self.elements,
             self.materials,
-            thermal_strains,
+            thermal_strains.into(),
             self.fixed_dofs,
             self.budget,
             &duffy_quadrature(self.quadrature.stiffness_points_per_dir),
@@ -347,9 +348,9 @@ impl QuadraticTetProblem<'_> {
     ///
     /// Forces are strictly increasing, unique full node-major xyz DOFs paired
     /// with newtons. Loads at fixed DOFs are retained for support reactions.
-    pub fn assemble_thermal_load_with_nodal_forces(
+    pub fn assemble_thermal_load_with_nodal_forces<'t>(
         &self,
-        thermal_strains: TetThermalStrainField<'_>,
+        thermal_strains: impl Into<QuadraticThermalStrainField<'t>>,
         nodal_forces_n: &[(usize, f64)],
         cx: &Cx<'_>,
     ) -> Result<TetThermalLoad, TetElasticError> {
@@ -371,16 +372,16 @@ impl QuadraticTetProblem<'_> {
     /// ceiling at every stiffness quadrature point. Reported element stresses
     /// are volume averages; no pointwise or peak-stress accuracy is implied.
     /// The geometry, density and material state remain fixed through the solve.
-    pub fn solve_thermal_response(
+    pub fn solve_thermal_response<'t>(
         &self,
-        thermal_strains: TetThermalStrainField<'_>,
+        thermal_strains: impl Into<QuadraticThermalStrainField<'t>>,
         config: super::TetStaticSolveConfig,
         mesh_frame: fs_blake3::ContentHash,
         maximum_absolute_mandel_strain: f64,
         cx: &Cx<'_>,
     ) -> Result<super::QuadraticThermalResponse, TetElasticError> {
         self.solve_thermal_response_impl(
-            thermal_strains,
+            thermal_strains.into(),
             None,
             config,
             mesh_frame,
@@ -396,9 +397,9 @@ impl QuadraticTetProblem<'_> {
     /// artificial displacement. The response preserves actual internal forces
     /// and separately reports internal minus applied force: support reactions
     /// on fixed DOFs and unmodified equilibrium residuals on free DOFs.
-    pub fn solve_thermal_response_with_nodal_forces(
+    pub fn solve_thermal_response_with_nodal_forces<'t>(
         &self,
-        thermal_strains: TetThermalStrainField<'_>,
+        thermal_strains: impl Into<QuadraticThermalStrainField<'t>>,
         nodal_forces_n: &[(usize, f64)],
         config: super::TetStaticSolveConfig,
         mesh_frame: fs_blake3::ContentHash,
@@ -406,7 +407,7 @@ impl QuadraticTetProblem<'_> {
         cx: &Cx<'_>,
     ) -> Result<super::QuadraticThermalResponse, TetElasticError> {
         self.solve_thermal_response_impl(
-            thermal_strains,
+            thermal_strains.into(),
             Some(nodal_forces_n),
             config,
             mesh_frame,
@@ -424,16 +425,16 @@ impl QuadraticTetProblem<'_> {
     /// This is the conservative initial-stress approximation, not a finite-strain
     /// tangent, follower-load model, stability certificate or live mode transfer.
     /// Fully fixed systems refuse because no vibration DOFs remain.
-    pub fn solve_thermal_tangent(
+    pub fn solve_thermal_tangent<'t>(
         &self,
-        thermal_strains: TetThermalStrainField<'_>,
+        thermal_strains: impl Into<QuadraticThermalStrainField<'t>>,
         config: super::TetStaticSolveConfig,
         mesh_frame: fs_blake3::ContentHash,
         maximum_absolute_mandel_strain: f64,
         cx: &Cx<'_>,
     ) -> Result<super::QuadraticPrestressedAssembly, TetElasticError> {
         self.solve_thermal_tangent_impl(
-            thermal_strains,
+            thermal_strains.into(),
             None,
             config,
             mesh_frame,
@@ -448,9 +449,9 @@ impl QuadraticTetProblem<'_> {
     /// an old response or independently authored stress cannot enter the pencil.
     /// Fixed-DOF forces retain their reaction semantics and add no follower-load
     /// stiffness. All material, strain, geometry and solve checks remain active.
-    pub fn solve_thermal_tangent_with_nodal_forces(
+    pub fn solve_thermal_tangent_with_nodal_forces<'t>(
         &self,
-        thermal_strains: TetThermalStrainField<'_>,
+        thermal_strains: impl Into<QuadraticThermalStrainField<'t>>,
         nodal_forces_n: &[(usize, f64)],
         config: super::TetStaticSolveConfig,
         mesh_frame: fs_blake3::ContentHash,
@@ -458,7 +459,7 @@ impl QuadraticTetProblem<'_> {
         cx: &Cx<'_>,
     ) -> Result<super::QuadraticPrestressedAssembly, TetElasticError> {
         self.solve_thermal_tangent_impl(
-            thermal_strains,
+            thermal_strains.into(),
             Some(nodal_forces_n),
             config,
             mesh_frame,
@@ -469,7 +470,7 @@ impl QuadraticTetProblem<'_> {
 
     fn solve_thermal_tangent_impl(
         &self,
-        thermal_strains: TetThermalStrainField<'_>,
+        thermal_strains: QuadraticThermalStrainField<'_>,
         nodal_forces_n: Option<&[(usize, f64)]>,
         config: super::TetStaticSolveConfig,
         mesh_frame: fs_blake3::ContentHash,
@@ -516,7 +517,7 @@ impl QuadraticTetProblem<'_> {
 
     fn solve_thermal_response_impl(
         &self,
-        thermal_strains: TetThermalStrainField<'_>,
+        thermal_strains: QuadraticThermalStrainField<'_>,
         nodal_forces_n: Option<&[(usize, f64)]>,
         config: super::TetStaticSolveConfig,
         mesh_frame: fs_blake3::ContentHash,

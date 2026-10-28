@@ -53,6 +53,25 @@ checks uniform anisotropic eigenstrain including Mandel shear, resultant/moment
 balance, thermal work, actual free-expansion solves on all three element families,
 source/state mismatch and constrained loads against analytic references.
 
+The same quadratic APIs also accept `QuadraticThermalStrainField::AtQuadrature`.
+Each element supplies one source-integrated Mandel eigenstrain at each of its
+original stiffness quadrature points, in explicit element-major/rule order.
+The field checks both the points-per-element value and complete sample count;
+every sample must bind the exact element elastic material identity. The
+elementwise input path retains its original arithmetic, load identity and
+one-constitutive-contraction-per-element behavior. No temperature interpolation,
+constant-alpha approximation or averaging of nonlinear expansion is inserted.
+Elastic tensors remain frozen per element. Changing quadrature requires new
+samples, and source-data and quadrature error remain the caller's obligations.
+
+Pointwise thermal loading is shared by equilibrium, stress/energy recovery and
+the initial-stress vibration pencil. A zero mean strain does not erase stored
+energy or the correlation between stress and shape gradients. G1 tests in
+`tests/quadratic_thermal_gradient.rs` verify exact compatible thermal-gradient
+bending on TET10/HEX20/HEX27, the analytic restrained energy of a zero-mean
+through-thickness gradient, and its signed geometric-stiffness quadratic form.
+Count/rule and late source mismatches refuse without publishing a partial load.
+
 The same TET10/HEX20/HEX27 problems expose `solve_thermal_response` for source-bound
 thermal equilibrium on a frozen reference mesh. The existing `fs-solver::CgState`
 and Jacobi preconditioner solve the assembled stiffness with bounded

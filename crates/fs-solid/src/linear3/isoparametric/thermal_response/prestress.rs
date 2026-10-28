@@ -13,7 +13,7 @@
 use super::super::{Point, mandel_b};
 use super::{QuadraticThermalResponse, elastic_response_at};
 use crate::linear3::{
-    TetElasticAssembly, TetElasticError, TetMaterialField, TetThermalStrainField, hash_usize,
+    QuadraticThermalStrainField, TetElasticAssembly, TetElasticError, TetMaterialField, hash_usize,
 };
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
@@ -74,7 +74,7 @@ pub(in crate::linear3) fn assemble<const N: usize, const D: usize, R: Copy>(
     nodes_m: &[[f64; 3]],
     elements: &[[usize; N]],
     materials: TetMaterialField<'_>,
-    thermal: TetThermalStrainField<'_>,
+    thermal: QuadraticThermalStrainField<'_>,
     mut pencil: TetElasticAssembly,
     response: QuadraticThermalResponse,
     stiffness_rule: &[(R, f64)],
@@ -103,7 +103,6 @@ pub(in crate::linear3) fn assemble<const N: usize, const D: usize, R: Copy>(
         checkpoint(cx)?;
         let nodes = connectivity.map(|node| nodes_m[node]);
         let material = materials.at(element);
-        let free = thermal.at(element);
         let mut local = [[0.0; N]; N];
         for (point, &(reference, weight)) in stiffness_rule.iter().enumerate() {
             checkpoint(cx)?;
@@ -114,7 +113,7 @@ pub(in crate::linear3) fn assemble<const N: usize, const D: usize, R: Copy>(
                 connectivity,
                 response.displacement_m(),
                 &material.stiffness_mandel_pa,
-                &free.free_strain_mandel,
+                &thermal.at(element, point).free_strain_mandel,
                 maximum_absolute_mandel_strain,
             )?;
             let h = core::f64::consts::FRAC_1_SQRT_2;

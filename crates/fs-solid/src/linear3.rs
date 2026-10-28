@@ -54,6 +54,7 @@ use fs_sparse::{Coo, Csr};
 /// Fully integrated quadratic hexahedra using the shared quadratic assembler.
 pub mod hex;
 mod isoparametric;
+pub use isoparametric::thermal_field::QuadraticThermalStrainField;
 pub use isoparametric::thermal_response::prestress::QuadraticPrestressedAssembly;
 pub use isoparametric::thermal_response::{
     QuadraticElementThermalResponse, QuadraticThermalResponse,
