@@ -562,7 +562,28 @@ The existing native study binder also admits the explicit `fsim-native-design-st
 
 Binding requires one matching static power row with positive duty and refuses a transient schedule overriding that region. Candidate projects preserve duty and all unrelated fields while setting authored watts to delivered watts divided by duty; every candidate is independently validated. The unchanged single at-most `temperature-max` requirement supplies its limit minus margin. The execution layer owns actual steady or sampled-trajectory temperature evaluation, feasibility, search and recovery. Admission proves neither monotonicity nor physical or numerical safety.
 
+The same declaration admits `:control (fan-speed-ratio :entity "bank-id"
+:minimum 0.6 :maximum 1.2 :tolerance 0.001)` with the explicit assumption
+`nonincreasing-temperature-with-fan-speed`. Bounds and tolerance are
+dimensionless; the minimum is strictly positive and the closed interval must
+stay inside the named bank's original speed domain. Binding requires a native
+fan system and an airflow-convection boundary. Candidates set that one bank's
+absolute source-curve ratio, preserving every other bank, fan curve, duty,
+power schedule, material, geometry and requirement. No delivered-watt scaling
+is applied to fan coordinates. `DesignControl` distinguishes the two physical
+objectives and their tolerance units; the execution layer recomputes hydraulics
+and coupled thermal physics and minimizes observed feasible speed.
+
 ## No-claim boundaries
+
+Native probability studies accept `:qoi "temperature-peak"` for a declared
+transient base. This changes the observation to the selected region's sampled
+peak including the initial state, while leaving the project, its final-state
+`temperature-max` output, requirement limit and margin intact. The canonical
+study retains that distinct choice. Steady projects and final-state nominal
+adjoint controls refuse; coordinate-secant controls remain available. The
+execution layer must validate the retained full-trajectory peak rather than
+substitute a final temperature. No between-sample temperature bound is implied.
 
 - An admissible `.fsim` document proves the project is well-formed and
   internally consistent. It does NOT prove the referenced geometry artifacts,

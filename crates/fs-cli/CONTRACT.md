@@ -1129,7 +1129,46 @@ The `native-cooling-power-design-v1` result retains every actual child run, proj
 
 `--budget N` limits additional candidates in one invocation; zero retains the model without solving. `study --resume study-<receipt-hash> design.db` restores the original model, assets and deterministic bracket without reopening source paths or re-solving accepted candidates. Original lifetime evaluation and wall limits persist. `report <study-run> design.db` exports JSON, HTML and the actual selected `.fsim` project when one is feasible; `package` uses the existing retained-artifact export. The package introduces no optimality or physical-error certificate.
 
+### Native fan-speed design
+
+`study examples/native-uncertainty/fan-design.fsim design.db` sizes one named
+fan bank through the same ordinary native solve, retained recovery and project
+export path. The `fan-speed-ratio` control declares positive dimensionless
+bounds and tolerance and the explicit
+`nonincreasing-temperature-with-fan-speed` assumption. Each candidate sets an
+absolute ratio relative to the unchanged source curve and recomputes its
+hydraulic operating point, correlation and conjugate thermal response. Other
+banks, power, duties, materials, initial conditions and the requirement remain
+unchanged.
+
+The search first evaluates the maximum-speed baseline and refuses if even that
+candidate violates the limit minus margin. It then evaluates the minimum
+speed, accepting it if feasible, or bisects the infeasible/feasible interval.
+Completion requires both ratio and kelvin tolerances; the retained incumbent
+is always the lowest-speed observed feasible project. Nonmonotone observations,
+failed native solves and exhausted budgets keep their explicit outcomes.
+Steady and transient decisions use the same final-temperature and
+fine-grid-sampled-peak rules as power sizing, including initial overheating.
+The distinct `native-cooling-fan-design-v1` producer binds recovery to the
+original fan objective and reports `fan_speed_ratio`, `fan_bank` and
+`bracket_width_ratio`. No minimum electrical power/noise, global monotonicity,
+continuous-time temperature or physical-safety claim is inferred.
+
 ### Native cooling probability study
+
+`:qoi "temperature-peak"` selects the requirement region's maximum over the
+original initial state and every accepted fine-grid transient state. It reuses
+the ordinary native solve and its sealed `sampled_peak` observation; no adjoint
+or second trajectory is needed. `temperature-max` retains its final-state
+meaning. Both use the base project's unchanged at-most `temperature-max` limit
+minus margin. A steady base, missing/incomplete peak, wrong run/region or
+inconsistent peak endpoint refuses instead of substituting the final value.
+Monte Carlo, replicated QMC/LHS, Sobol sensitivity, Bernoulli compliance and
+coordinate-secant mean controls use the selected observable through the same
+sampling and retained recovery paths. Final-state nominal adjoint controls are
+not admitted for peak studies. Reports name the observation explicitly. Peak
+statistics remain Estimated: neither the final-field error budget nor a sampled
+maximum supplies a continuous-time or continuum upper bound.
 
 `study <study.fsim> <ledger.db> [--budget N]` recognizes
 `fsim-uncertainty-study :version 1` and executes the

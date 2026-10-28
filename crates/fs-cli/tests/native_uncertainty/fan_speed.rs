@@ -3,7 +3,7 @@
 
 use super::*;
 
-fn fixture() -> Fixture {
+pub(super) fn fixture() -> Fixture {
     let mut fixture = Fixture::new();
     let cooling = fixture.project.cooling.as_mut().unwrap();
     // A nonunit baseline distinguishes setting the source-curve ratio from

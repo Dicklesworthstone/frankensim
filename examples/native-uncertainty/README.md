@@ -91,6 +91,29 @@ still apply to every sample.
 
 ## Fan speed through the native coupled cooling model
 
+### Peak temperature during a transient
+
+Use `:qoi "temperature-peak"` to study overheating during a run. The
+`pulse-peak.fsim` example varies the existing heatsink's fan speed and inlet
+temperature during its declared startup power pulse:
+
+```bash
+cargo run -p fs-cli --bin frankensim -- --json study examples/native-uncertainty/pulse-peak.fsim pulse-peak.db
+```
+
+Each observation is the selected region's highest temperature among the
+original initial state and all accepted fine-grid states. An early hot state
+therefore remains a failing numerical event even if the body cools below the
+limit by the final timestep. `temperature-max` continues to select the final
+state. The report names the selected observation, and either mode uses the
+original requirement limit minus margin.
+
+Peak observations also work with replicated QMC/LHS, Sobol sensitivity,
+version-2 probability decisions and coordinate-secant mean controls. Resume
+reads the same retained trajectories. A steady base or missing peak evidence
+refuses; final-state nominal adjoint controls cannot be used for a peak. The
+peak is sampled in time and remains an estimate, with no bound between samples.
+
 `fan-speed.fsim` varies the existing finned heatsink's fan speed, power and
 inlet temperature. Its three uniform laws and independence are illustrative
 study declarations, not measured manufacturing distributions. Run it with:

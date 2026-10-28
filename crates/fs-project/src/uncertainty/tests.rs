@@ -28,6 +28,56 @@ fn probability_study_roundtrips_through_existing_typed_ast() {
 }
 
 #[test]
+fn sampled_peak_is_explicit_and_requires_a_transient_base() {
+    let source = STUDY.replace("temperature-max", "temperature-peak");
+    let study = UncertaintyStudy::parse(&source).unwrap();
+    assert!(study.uses_sampled_peak());
+    assert_eq!(study.qoi(), "temperature-peak");
+    assert_eq!(UncertaintyStudy::parse(study.canonical()).unwrap(), study);
+    assert!(study.clone().bind(&base()).is_err());
+    assert!(!UncertaintyStudy::parse(STUDY).unwrap().uses_sampled_peak());
+
+    let mut project = base();
+    let setup = project.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+    setup.transient = Some(crate::ConductionTransient {
+        initial_temperature: crate::TransientInitialTemperature::Uniform(
+            QtyAny::new(330.0, crate::spec::dims::TEMPERATURE)),
+        horizon: QtyAny::new(2.0, crate::spec::dims::TIME),
+        max_step: QtyAny::new(0.5, crate::spec::dims::TIME),
+        max_steps: 12,
+        energy_tolerance: QtyAny::new(1e-6, crate::spec::dims::ENERGY),
+        capacities: setup.regions.iter().map(|row| crate::TransientRegionCapacity {
+            region: row.region.clone(),
+            volumetric_heat_capacity: QtyAny::new(100.0, crate::spec::dims::VOLUMETRIC_HEAT_CAPACITY),
+            source: "synthetic storage for sampled-peak admission".into(),
+        }).collect(),
+        enthalpy: None, power_schedules: Vec::new(),
+    });
+    let bound = study.bind(&project).unwrap();
+    assert_eq!(bound.base(), &project);
+    let final_study = UncertaintyStudy::parse(STUDY).unwrap().bind(&project).unwrap();
+    assert_eq!(bound.sample_project(&[5.0, 297.0]).unwrap(),
+        final_study.sample_project(&[5.0, 297.0]).unwrap(),
+        "changing the observation must not change the numerical model");
+}
+
+#[test]
+fn sampled_peak_supports_probability_methods_but_never_reuses_final_adjoint() {
+    let peak = STUDY.replace("temperature-max", "temperature-peak");
+    let compliance = peak.replace(":version 1", ":version 2 :compliance (bernoulli-mixture :required-probability 0.9 :alpha 0.05 :min-samples 2)");
+    let secant = peak.replace(":version 1", ":version 3 :mean-control (coordinate-secant :max-solves 4)");
+    let qmc = peak.replace("monte-carlo", "quasi-monte-carlo :qmc (owen-scrambled-sobol :replicates 2 :samples-per-replicate 4)");
+    let sensitivity = peak.replace("monte-carlo", "sobol-sensitivity");
+    for source in [&peak, &compliance, &secant, &qmc, &sensitivity] {
+        let parsed = UncertaintyStudy::parse(source).unwrap();
+        assert!(parsed.uses_sampled_peak());
+        assert_eq!(UncertaintyStudy::parse(parsed.canonical()).unwrap(), parsed);
+    }
+    assert!(UncertaintyStudy::parse(&secant.replace("coordinate-secant", "nominal-adjoint")).is_err());
+    assert!(UncertaintyStudy::parse(&peak.replace("temperature-peak", "temperature-integral")).is_err());
+}
+
+#[test]
 fn unknown_repeated_implicit_and_out_of_range_declarations_refuse() {
     for (from, to) in [
         (":version 1", ":version 3"),

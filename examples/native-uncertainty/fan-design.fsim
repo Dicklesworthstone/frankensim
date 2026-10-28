@@ -1,0 +1,20 @@
+; Minimize one fan bank's absolute source-curve speed ratio while preserving
+; the existing heatsink project's thermal requirement, margin and materials.
+; Every trial recomputes the real operating point and coupled thermal solve.
+(fsim-native-design-study
+  :version 1
+  :project "../heatsink-fan/heatsink-fan.fsim"
+  :evaluations 32
+  :seed 29
+  :wall-time 600s
+  :qoi "temperature-max"
+  :geometry (
+    (mesh :role "heatsink"
+      :path "../heatsink-fan/heatsink.stl"
+      :unit "m" :max-hole-edges 0))
+  :materials ("../../data/reference-project/aa6061.fsmcdpk")
+  :interfaces ()
+  :control (fan-speed-ratio :entity "heatsink-bank"
+    :minimum 0.6 :maximum 0.8 :tolerance 0.001)
+  :temperature-tolerance 0.01K
+  :assumption nonincreasing-temperature-with-fan-speed)

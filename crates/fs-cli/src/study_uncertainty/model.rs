@@ -19,6 +19,8 @@ use super::{Result, artifact, fail, quoted};
 mod adjoint;
 #[path = "model/prepared.rs"]
 mod prepared;
+#[path = "model/peak.rs"]
+mod peak;
 use crate::json_read::JsonValue as J;
 use crate::{
     CardPackKind, CardPackSet, GeometryImportLimits, RawCardPack, RawGeometryLibrary,
@@ -600,8 +602,20 @@ impl Model {
             .flatten()
             .filter(|output| output.kind == "scalar")
             .count();
-        let value_k =
-            temperature_observation(&receipt, self.bound.study().qoi(), region, scalar_outputs)?;
+        // Both studies retain the native final-state temperature-max receipt.
+        // The peak study separately projects its declared event from the SAME
+        // run's complete transient, never from another solve or the final QoI.
+        let final_k = temperature_observation(&receipt, "temperature-max", region, scalar_outputs)?;
+        let value_k = if self.bound.study().uses_sampled_peak() {
+            let conduction = sealed.stages.iter().find(|row| row.0 == "conduction")
+                .and_then(|row| ContentHash::from_hex(&row.2))
+                .ok_or_else(|| invalid("peak sample lacks its sealed conduction receipt"))?;
+            let bytes = artifact(ledger, conduction, "solve-stage-receipt", 4 * 1024 * 1024)?;
+            let transient = J::parse(utf8(&bytes)?).map_err(|error| invalid(error.to_string()))?;
+            peak::temperature(&transient, &run, region, final_k).map_err(invalid)?
+        } else {
+            final_k
+        };
         Ok(Sample {
             run,
             project_hash,

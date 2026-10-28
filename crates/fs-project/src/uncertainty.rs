@@ -28,7 +28,7 @@ use crate::{ConsequenceClass, DecisionGate, ProjectError, ProjectSpec,
 
 mod contact_inputs;
 mod design;
-pub use design::DesignPolicy;
+pub use design::{DesignControl, DesignPolicy};
 mod lhs;
 pub use lhs::LhsLayout;
 pub mod mean_control;
@@ -448,7 +448,13 @@ impl UncertaintyStudy {
         }
         let mean_control = f.get("mean-control").map(|node| mean_control::parse(node, &parameters)).transpose()?;
         let qoi = text(f["qoi"])?;
-        if qoi != "temperature-max" { return Err(error("this native lane requires temperature-max")); }
+        if !matches!(qoi.as_str(), "temperature-max" | "temperature-peak") {
+            return Err(error("native temperature studies require temperature-max (final state) or temperature-peak (all accepted fine-grid states, including initial)"));
+        }
+        if qoi == "temperature-peak" && mean_control.is_some_and(|policy|
+            policy.method == mean_control::MeanControlMethod::NominalAdjoint) {
+            return Err(error("temperature-peak cannot use the final-state nominal adjoint; use coordinate-secant mean controls or an uncontrolled study"));
+        }
         Ok(Self { canonical: fs_ir::sexpr::print(&root).map_err(|e| error(e.to_string()))?,
             project: text(f["project"])?, samples, seed: integer(f["seed"])?, wall_seconds, qoi,
             geometry, materials: paths(f["materials"])?, interfaces: paths(f["interfaces"])?, parameters,
@@ -467,6 +473,9 @@ impl UncertaintyStudy {
     #[must_use] pub const fn wall_seconds(&self) -> f64 { self.wall_seconds }
     /// Exact native observable.
     #[must_use] pub fn qoi(&self) -> &str { &self.qoi }
+    /// Observe the selected region over the accepted fine time grid, including
+    /// its original initial state. This is not a continuous-time upper bound.
+    #[must_use] pub fn uses_sampled_peak(&self) -> bool { self.qoi == "temperature-peak" }
     /// Ordered probability laws.
     #[must_use] pub fn parameters(&self) -> &[UniformParameter] { &self.parameters }
     /// Gaussian-copula correlation of latent standard normals, in parameter
@@ -487,7 +496,7 @@ impl UncertaintyStudy {
     #[must_use] pub const fn sobol_sensitivity(&self) -> bool { self.sobol_sensitivity }
     /// Explicit whole-model mean calibration; absent in versions 1 and 2.
     #[must_use] pub const fn mean_control(&self) -> Option<MeanControlPolicy> { self.mean_control }
-    /// Deterministic delivered-power sizing policy. Its coordinate bounds are
+    /// Deterministic cooling design policy. Its coordinate bounds are
     /// search bounds, never a probability law; no statistical executor applies.
     #[must_use] pub const fn design(&self) -> Option<DesignPolicy> { self.design }
     /// Geometry sources, matched by role, not by path order.
@@ -512,9 +521,14 @@ impl UncertaintyStudy {
             return Err(error("empirical native UQ is advisory scoping, not a compliance signoff"));
         }
         let requirements = base.requirements.as_deref().unwrap_or(&[]);
-        if requirements.len() != 1 || requirements[0].qoi != self.qoi
+        if requirements.len() != 1 || requirements[0].qoi != "temperature-max"
             || requirements[0].direction != RequirementDirection::AtMost {
             return Err(error("declare one matching at-most temperature-max requirement"));
+        }
+        if self.uses_sampled_peak() && base.cooling.as_ref()
+            .and_then(|cooling| cooling.conduction.as_ref())
+            .and_then(|setup| setup.transient.as_ref()).is_none() {
+            return Err(error("temperature-peak requires a declared native transient trajectory; a steady or final-state observation is not a substitute"));
         }
         let envelope = base.envelope.as_ref().ok_or_else(|| error("missing operating envelope"))?;
         for parameter in &self.parameters {
@@ -568,7 +582,7 @@ impl BoundStudy {
         let mut project = self.base.clone();
         for (parameter, &value) in self.study.parameters.iter().zip(values) {
             if !value.is_finite() || value < parameter.low || value > parameter.high { return Err(error("sample outside declared probability support")); }
-            let authored_value = if self.study.design.is_some() {
+            let authored_value = if self.study.design.is_some() && parameter.target == Target::Power {
                 let duty = self.base.power.iter().flatten().find(|row| row.region == parameter.entity)
                     .ok_or_else(|| error("missing delivered-power design row"))?.duty;
                 let authored = value / duty;

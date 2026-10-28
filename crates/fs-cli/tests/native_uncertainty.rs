@@ -17,6 +17,8 @@ mod nominal_adjoint;
 mod qmc;
 #[path = "native_uncertainty/sensitivity.rs"]
 mod sensitivity;
+#[path = "native_uncertainty/peak.rs"]
+mod peak;
 
 use json_read::JsonValue;
 use std::path::{Path, PathBuf};

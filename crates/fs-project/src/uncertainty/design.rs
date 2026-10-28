@@ -1,15 +1,42 @@
-//! Deterministic delivered-power sizing of the existing native cooling model.
+//! Deterministic power and fan sizing of the existing native cooling model.
 //! This reuses coordinate/asset binding, never a probability law or sampler.
 
 use super::*;
 
-/// Bracket tolerances for one explicitly monotone delivered-power coordinate.
+/// The physical coordinate and direction of a native cooling design search.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DesignControl {
+    /// Maximize delivered regional watts under a nondecreasing temperature law.
+    DeliveredPower {
+        /// Maximum passing/failing delivered-power bracket width, W.
+        tolerance_w: f64,
+    },
+    /// Minimize one bank's absolute source-curve speed ratio under an explicitly
+    /// assumed nonincreasing temperature law. Other banks remain unchanged.
+    FanSpeedRatio {
+        /// Maximum passing/failing absolute speed-ratio bracket width.
+        tolerance: f64,
+    },
+}
+
+impl DesignControl {
+    /// Bracket tolerance in the selected physical coordinate's coherent units.
+    #[must_use]
+    pub const fn tolerance(self) -> f64 {
+        match self {
+            Self::DeliveredPower { tolerance_w } => tolerance_w,
+            Self::FanSpeedRatio { tolerance } => tolerance,
+        }
+    }
+}
+
+/// Bracket tolerances for one explicitly monotone physical coordinate.
 /// Feasibility always comes from an evaluated native temperature, not a model
 /// prediction. These tolerances provide no continuous-time or continuum bound.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DesignPolicy {
-    /// Maximum passing/failing delivered-power bracket width, W.
-    pub power_tolerance_w: f64,
+    /// Typed design coordinate, optimization direction and coordinate tolerance.
+    pub control: DesignControl,
     /// Maximum temperature slack at a bracketed passing endpoint, K.
     pub temperature_tolerance_k: f64,
 }
@@ -20,9 +47,8 @@ pub(super) fn parse(root: &Node) -> Result<UncertaintyStudy> {
         "qoi", "geometry", "materials", "interfaces", "control", "temperature-tolerance",
         "assumption"])?;
     if integer(f["version"])? != 1 {
-        return Err(error("native delivered-power design requires version 1"));
+        return Err(error("native cooling design requires version 1"));
     }
-    symbol(f["assumption"], "nondecreasing-temperature-with-power")?;
     let samples = usize::try_from(integer(f["evaluations"])? )
         .map_err(|_| error("design evaluation count overflow"))?;
     if !(2..=MAX_SAMPLES).contains(&samples) {
@@ -34,19 +60,35 @@ pub(super) fn parse(root: &Node) -> Result<UncertaintyStudy> {
     }
     let qoi = text(f["qoi"])?;
     if qoi != "temperature-max" {
-        return Err(error("native delivered-power design requires temperature-max"));
+        return Err(error("native cooling design requires temperature-max"));
     }
     let control = list(f["control"])?;
-    symbol(control.first().ok_or_else(|| error("empty design control"))?, "regional-power")?;
+    let kind = control.first().ok_or_else(|| error("empty design control"))?;
+    let target = match &kind.kind {
+        NodeKind::Symbol(name) if name == "regional-power" => Target::Power,
+        NodeKind::Symbol(name) if name == "fan-speed-ratio" => Target::FanSpeedRatio,
+        _ => return Err(error("design control must be regional-power or fan-speed-ratio")),
+    };
+    symbol(f["assumption"], match target {
+        Target::Power => "nondecreasing-temperature-with-power",
+        _ => "nonincreasing-temperature-with-fan-speed",
+    })?;
     let c = fields(&control[1..], &["entity", "minimum", "maximum", "tolerance"])?;
-    let low = quantity(c["minimum"], crate::spec::dims::POWER)?;
-    let high = quantity(c["maximum"], crate::spec::dims::POWER)?;
-    let power_tolerance_w = quantity(c["tolerance"], crate::spec::dims::POWER)?;
+    let low = quantity(c["minimum"], target.dims())?;
+    let high = quantity(c["maximum"], target.dims())?;
+    let tolerance = quantity(c["tolerance"], target.dims())?;
     let temperature_tolerance_k = quantity(f["temperature-tolerance"], crate::spec::dims::TEMPERATURE)?;
-    if !(low >= 0.0 && high > low && power_tolerance_w > 0.0
+    if !(low >= 0.0 && high > low && tolerance > 0.0
         && temperature_tolerance_k > 0.0 && (high - low).is_finite()) {
-        return Err(error("design requires 0 <= minimum < maximum and positive power/temperature tolerances"));
+        return Err(error("design requires 0 <= minimum < maximum and positive coordinate/temperature tolerances"));
     }
+    if target == Target::FanSpeedRatio && low == 0.0 {
+        return Err(error("fan design requires a strictly positive minimum speed ratio"));
+    }
+    let control = match target {
+        Target::Power => DesignControl::DeliveredPower { tolerance_w: tolerance },
+        _ => DesignControl::FanSpeedRatio { tolerance },
+    };
     let geometry_nodes = list(f["geometry"])?;
     if geometry_nodes.is_empty() || geometry_nodes.len() > 32 {
         return Err(error("declare 1..=32 mesh sources"));
@@ -74,20 +116,31 @@ pub(super) fn parse(root: &Node) -> Result<UncertaintyStudy> {
         geometry, materials: paths(f["materials"])?, interfaces: paths(f["interfaces"])? ,
         // The existing physical-coordinate binder owns field mutation. On this
         // deterministic path these are search bounds, not a uniform input law.
-        parameters: vec![UniformParameter { name: "delivered-power".into(),
-            target: Target::Power, entity: text(c["entity"])?, low, high }],
+        parameters: vec![UniformParameter {
+            name: if target == Target::Power { "delivered-power" } else { "fan-speed" }.into(),
+            target, entity: text(c["entity"])?, low, high }],
         latent_correlation: None, compliance: None, qmc: None, lhs: None,
         sobol_sensitivity: false, mean_control: None,
-        design: Some(DesignPolicy { power_tolerance_w, temperature_tolerance_k }),
+        design: Some(DesignPolicy { control, temperature_tolerance_k }),
     })
 }
 
 /// A schedule must never silently override the coordinate being optimized.
 pub(super) fn admit(study: &UncertaintyStudy, base: &ProjectSpec) -> Result<()> {
-    if study.design.is_none() { return Ok(()); }
+    let Some(policy) = study.design else { return Ok(()); };
     let control = &study.parameters[0];
     let setup = base.cooling.as_ref().and_then(|c| c.conduction.as_ref())
-        .ok_or_else(|| error("native power design requires declared conduction"))?;
+        .ok_or_else(|| error("native cooling design requires declared conduction"))?;
+    if matches!(policy.control, DesignControl::FanSpeedRatio { .. }) {
+        // A fan that never participates in the physical thermal model cannot
+        // be sized by a declared convection coefficient unrelated to its flow.
+        // Exact bank/domain admission remains owned by the existing binder.
+        if !setup.boundaries.iter().any(|boundary|
+            matches!(boundary.condition, ThermalBoundaryCondition::AirflowConvection { .. })) {
+            return Err(error("fan-speed design requires an airflow-convection boundary so the native thermal solve recomputes fan-driven cooling"));
+        }
+        return Ok(());
+    }
     if !setup.regions.iter().any(|region| region.region == control.entity) {
         return Err(error("regional-power design must name a volumetric conduction region"));
     }
@@ -124,7 +177,7 @@ mod tests {
         let study = UncertaintyStudy::parse(SOURCE).unwrap();
         assert_eq!(UncertaintyStudy::parse(study.canonical()).unwrap(), study);
         assert_eq!(study.samples(), 24);
-        assert_eq!(study.design().unwrap().power_tolerance_w, 0.01);
+        assert_eq!(study.design().unwrap().control, DesignControl::DeliveredPower { tolerance_w: 0.01 });
         assert!(study.compliance().is_none());
         assert!(study.mean_control().is_none());
         for (from, to) in [
@@ -184,5 +237,85 @@ mod tests {
         assert!(UncertaintyStudy::parse(SOURCE).unwrap().bind(&base).is_err());
         assert!(UncertaintyStudy::parse(&SOURCE.replace(":entity \"air\"", ":entity \"missing\""))
             .unwrap().bind(bound.base()).is_err());
+    }
+
+    fn fan_source() -> String {
+        SOURCE.replace("regional-power :entity \"air\" :minimum 0W :maximum 20W :tolerance 0.01W",
+            "fan-speed-ratio :entity \"fixture-bank\" :minimum 0.6 :maximum 1.4 :tolerance 0.001")
+            .replace("nondecreasing-temperature-with-power", "nonincreasing-temperature-with-fan-speed")
+    }
+
+    fn fan_base() -> ProjectSpec {
+        let mut project = base();
+        let cooling = project.cooling.as_mut().unwrap();
+        cooling.fan_system.as_mut().unwrap().banks[0].speed_ratio = 0.8;
+        cooling.conduction.as_mut().unwrap().boundaries[0].condition =
+            ThermalBoundaryCondition::AirflowConvection {
+                branch: "air".into(), order: 0,
+                inlet_temperature: QtyAny::new(295.0, crate::spec::dims::TEMPERATURE),
+                hydraulic_diameter: QtyAny::new(0.02, crate::spec::dims::LENGTH),
+                flow_area: QtyAny::new(0.004, crate::spec::dims::AREA),
+                channel_length: QtyAny::new(0.3, crate::spec::dims::LENGTH),
+                correlation: "convection.gnielinski".into(),
+            };
+        project
+    }
+
+    #[test]
+    fn g0_fan_design_requires_dimensionless_speed_and_its_own_monotonicity_assumption() {
+        let source = fan_source();
+        let study = UncertaintyStudy::parse(&source).unwrap();
+        assert_eq!(UncertaintyStudy::parse(study.canonical()).unwrap(), study);
+        assert_eq!(study.parameters()[0].target, Target::FanSpeedRatio);
+        assert_eq!(study.design().unwrap().control, DesignControl::FanSpeedRatio { tolerance: 0.001 });
+        for (from, to) in [
+            (":minimum 0.6", ":minimum 0"),
+            (":minimum 0.6", ":minimum 0.6W"),
+            (":maximum 1.4", ":maximum 0.6"),
+            (":tolerance 0.001", ":tolerance 0.001W"),
+            (":tolerance 0.001", ":tolerance 0"),
+            ("nonincreasing-temperature-with-fan-speed", "nondecreasing-temperature-with-power"),
+            ("fan-speed-ratio", "fan-electrical-power"),
+        ] {
+            assert!(UncertaintyStudy::parse(&source.replace(from, to)).is_err(), "{to}");
+        }
+    }
+
+    #[test]
+    fn g1_fan_design_changes_only_the_absolute_named_bank_ratio() {
+        let mut base = fan_base();
+        base.power.as_mut().unwrap()[0].duty = 0.25;
+        let system = base.cooling.as_mut().unwrap().fan_system.as_mut().unwrap();
+        let mut other = system.banks[0].clone();
+        other.bank_id = "fixed-bank".into();
+        other.speed_ratio = 1.2;
+        system.banks.push(other);
+        system.topology = crate::fansystem::FanSystemTopology::Series(
+            vec!["fixture-bank".into(), "fixed-bank".into()]);
+        let bound = UncertaintyStudy::parse(&fan_source()).unwrap().bind(&base).unwrap();
+        for ratio in [0.6, 1.0, 1.4, 0.6] {
+            let candidate = bound.sample_project(&[ratio]).unwrap();
+            let mut expected = base.clone();
+            expected.cooling.as_mut().unwrap().fan_system.as_mut().unwrap().banks[0].speed_ratio = ratio;
+            assert_eq!(candidate, expected, "power, duty, curves, other banks and geometry stay unchanged");
+        }
+        assert_eq!(bound.base(), &base);
+    }
+
+    #[test]
+    fn g0_fan_design_cannot_expand_domains_or_size_disconnected_cooling() {
+        let source = fan_source();
+        assert!(UncertaintyStudy::parse(&source).unwrap().bind(&base()).is_err(),
+            "a scalar convection coefficient does not connect a fan to thermal physics");
+        for (from, to) in [
+            (":minimum 0.6", ":minimum 0.49"),
+            (":maximum 1.4", ":maximum 2.01"),
+            (":entity \"fixture-bank\"", ":entity \"missing\""),
+        ] {
+            assert!(UncertaintyStudy::parse(&source.replace(from, to)).unwrap().bind(&fan_base()).is_err(), "{to}");
+        }
+        let mut base = fan_base();
+        base.cooling.as_mut().unwrap().fan_system = None;
+        assert!(UncertaintyStudy::parse(&source).unwrap().bind(&base).is_err());
     }
 }

@@ -363,7 +363,7 @@ fn persist(
     let lhs_report = execution.lhs_report();
     let sensitivity_report = execution.sensitivity_report();
     let compliance = execution.compliance(model)?;
-    let scope = if sensitivity_report.is_some() {
+    let mut scope = if sensitivity_report.is_some() {
         sensitivity::SCOPE.to_string()
     } else if compliance.is_some() {
         compliance::scope(model)
@@ -373,6 +373,12 @@ fn persist(
         lhs::scope(model)
     } else {
         fixed_scope(model)
+    };
+    let observation = if model.bound.study().uses_sampled_peak() {
+        scope.push_str(" The temperature event uses the selected region's maximum over every accepted fine-grid state and the original initial state. It is a sampled numerical peak, not a continuous-time temperature bound; the final-field error budget does not bound this peak.");
+        "fine-grid-sampled-peak-including-initial"
+    } else {
+        "native-final-state"
     };
     let compliance_field = compliance.as_ref().map_or_else(String::new, |assessment| {
         format!(",\"compliance\":{}", assessment.json())
@@ -417,10 +423,11 @@ fn persist(
         .as_deref()
         .map_or_else(|| "null".into(), quoted);
     let summary = format!(
-        "{{\"schema\":{REPORT_SCHEMA:?},\"driver\":{DRIVER:?},\"study_id\":{},\"status\":{},\"termination\":{},\"qoi\":\"temperature-max\",\"unit\":\"K\",\"authority\":\"Estimated\",\"method\":{method:?},\"correlation\":{correlation:?},\"seed\":{},\"samples_evaluated\":{n},\"samples_planned\":{},\"evaluations_attempted\":{},\"temperature_limit_k\":{},\"observations\":{samples},\"statistics\":{statistics},\"failure\":{failure}{compliance_field}{qmc_field}{lhs_field}{sensitivity_field}{dependence_field}{control_field},\"no_claim\":{}}}",
+        "{{\"schema\":{REPORT_SCHEMA:?},\"driver\":{DRIVER:?},\"study_id\":{},\"status\":{},\"termination\":{},\"qoi\":{},\"temperature_observation\":{observation:?},\"unit\":\"K\",\"authority\":\"Estimated\",\"method\":{method:?},\"correlation\":{correlation:?},\"seed\":{},\"samples_evaluated\":{n},\"samples_planned\":{},\"evaluations_attempted\":{},\"temperature_limit_k\":{},\"observations\":{samples},\"statistics\":{statistics},\"failure\":{failure}{compliance_field}{qmc_field}{lhs_field}{sensitivity_field}{dependence_field}{control_field},\"no_claim\":{}}}",
         quoted(&id.to_hex()),
         quoted(status),
         quoted(termination),
+        quoted(model.bound.study().qoi()),
         quoted(&model.bound.study().seed().to_string()),
         model.bound.study().samples(),
         execution.evaluations_attempted(),
@@ -454,7 +461,7 @@ fn persist(
             complete.map_or_else(|| "unavailable".into(), |report| optional(report.probability_of_compliance)))
     };
     let html = format!(
-        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Native cooling uncertainty</title><body><h1>Native cooling uncertainty</h1><p>Status: {status}; {n}/{} completed samples. Estimated.</p>{statistics_html}{compliance_html}{control_html}<p>{scope}</p><table><tr><th>Sample</th><th>Maximum temperature (K)</th><th>Retained solve</th></tr>{table}</table></body></html>",
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Native cooling uncertainty</title><body><h1>Native cooling uncertainty</h1><p>Status: {status}; {n}/{} completed samples. Estimated.</p><p>Temperature observation: {observation}.</p>{statistics_html}{compliance_html}{control_html}<p>{scope}</p><table><tr><th>Sample</th><th>Observed maximum temperature (K)</th><th>Retained solve</th></tr>{table}</table></body></html>",
         model.bound.study().samples()
     );
     let mut package = EvidencePackage::new(Provenance::new(
@@ -607,7 +614,7 @@ fn load(ledger: &Ledger, pointer: &str) -> Result<Loaded> {
         })?;
     let bytes = artifact(ledger, hash, RECEIPT_KIND, MAX_ARTIFACT_BYTES)?;
     let value = parse(&bytes)?;
-    if value.str_field("driver") == Some(design::DRIVER) {
+    if design::is_driver(value.str_field("driver")) {
         return design::validate_loaded(ledger, hash, value, bytes);
     }
     if value.str_field("schema") != Some(STUDY_RUN_RECEIPT_SCHEMA)
@@ -892,7 +899,8 @@ pub(crate) fn owns_run(pointer: &str, path: &Path) -> bool {
     };
     artifact(&ledger, hash, RECEIPT_KIND, MAX_ARTIFACT_BYTES)
         .and_then(|bytes| parse(&bytes))
-        .is_ok_and(|value| matches!(value.str_field("driver"), Some(DRIVER | design::DRIVER)))
+        .is_ok_and(|value| value.str_field("driver") == Some(DRIVER)
+            || design::is_driver(value.str_field("driver")))
 }
 pub(crate) fn study_path(
     path: &Path,
@@ -961,7 +969,7 @@ pub(crate) fn resume_path(
                 receipt: String::from_utf8(old.bytes)
                     .map_err(|e| fail("cli-uncertainty-run", e.to_string()))?,
                 status: status.into(),
-                authority: if old.value.str_field("driver") == Some(design::DRIVER) {
+                authority: if design::is_driver(old.value.str_field("driver")) {
                     "estimated-native-design"
                 } else { "estimated-native-model-sampling" },
             });
@@ -1008,7 +1016,7 @@ pub(crate) fn export(
                 ("report_html", "study-report-html", "html"),
             ]
         };
-        if command != "package" && old.value.str_field("driver") == Some(design::DRIVER)
+        if command != "package" && design::is_driver(old.value.str_field("driver"))
             && old.value.str_field("selected_project").is_some() {
             fields.push(("selected_project", "solve-project-source", "fsim"));
         }

@@ -1,16 +1,35 @@
-//! Native delivered-power sizing through the ordinary retained cooling solver.
+//! Native power and fan sizing through the ordinary retained cooling solver.
 //! Every decision uses a completed physical candidate. The one-coordinate
-//! bracket assumes nondecreasing temperature with delivered power; neither a
+//! bracket uses an explicitly declared monotone temperature response; neither a
 //! small bracket nor an accepted sampled peak proves global/continuum safety.
 
 use super::*;
 use std::fmt::Write as _;
-use fs_project::uncertainty::{DesignPolicy, UniformParameter};
+use fs_project::uncertainty::{DesignControl, DesignPolicy, UniformParameter};
 
 pub(super) const DRIVER: &str = "native-cooling-power-design-v1";
+pub(super) const FAN_DRIVER: &str = "native-cooling-fan-design-v1";
 const OBSERVATIONS: &str = "native-power-design-observations";
+const FAN_OBSERVATIONS: &str = "native-fan-design-observations";
 const PROJECT: &str = "solve-project-source";
 const SCOPE: &str = "Maximize one region's delivered watts over the declared interval under the explicit nondecreasing-temperature-with-power assumption. Every feasibility decision uses a completed native solve and the unchanged requirement limit minus margin. Transient decisions use the accepted fine-grid sampled peak including the original initial state; final native QoI is retained separately. The selected project is the highest-power observed feasible candidate. No global monotonicity proof, continuous-time or continuum temperature bound, probability statement, physical validation or compliance signoff is supplied.";
+const FAN_SCOPE: &str = "Minimize one named fan bank's absolute speed ratio over its declared interval under the explicit nonincreasing-temperature-with-fan-speed assumption. Every candidate recomputes the native hydraulic operating point and conjugate cooling response with the original fan curves, other banks, power, materials and geometry. Every feasibility decision uses a completed native solve and the unchanged requirement limit minus margin. Transient decisions use the accepted fine-grid sampled peak including the original initial state; final native QoI is retained separately. The selected project is the lowest-speed observed feasible candidate. No global monotonicity proof, minimum electrical power or acoustic noise, continuous-time or continuum temperature bound, probability statement, physical validation or compliance signoff is supplied.";
+
+pub(super) fn is_driver(value: Option<&str>) -> bool {
+    matches!(value, Some(DRIVER | FAN_DRIVER))
+}
+
+fn fan(policy: DesignPolicy) -> bool {
+    matches!(policy.control, DesignControl::FanSpeedRatio { .. })
+}
+
+fn driver(policy: DesignPolicy) -> &'static str {
+    if fan(policy) { FAN_DRIVER } else { DRIVER }
+}
+
+fn observations_kind(driver: &str) -> &'static str {
+    if driver == FAN_DRIVER { FAN_OBSERVATIONS } else { OBSERVATIONS }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 struct Trial {
@@ -22,11 +41,12 @@ struct Trial {
 }
 
 impl Trial {
-    fn power(&self) -> f64 { self.sample.parameters[0] }
-    fn json(&self) -> String {
+    fn coordinate(&self) -> f64 { self.sample.parameters[0] }
+    fn json(&self, policy: DesignPolicy) -> String {
+        let coordinate = if fan(policy) { "fan_speed_ratio" } else { "power_w" };
         format!(
-            "{{\"power_w\":{},\"temperature_k\":{},\"final_temperature_k\":{},\"time_s\":{},\"state\":{},\"run\":{},\"project_hash\":{},\"qoi_receipt\":{},\"conduction_receipt\":{}}}",
-            self.power(), self.temperature_k, self.sample.value_k, optional(self.time_s),
+            "{{{coordinate:?}:{},\"temperature_k\":{},\"final_temperature_k\":{},\"time_s\":{},\"state\":{},\"run\":{},\"project_hash\":{},\"qoi_receipt\":{},\"conduction_receipt\":{}}}",
+            self.coordinate(), self.temperature_k, self.sample.value_k, optional(self.time_s),
             self.state.map_or_else(|| "null".into(), |v| v.to_string()),
             quoted(&self.sample.run), quoted(&self.sample.project_hash),
             quoted(&self.sample.qoi_receipt.to_hex()), quoted(&self.conduction.to_hex())
@@ -92,48 +112,61 @@ enum Next {
     Refuse(&'static str),
 }
 
-fn selected(rows: &[Trial], limit: f64) -> Option<&Trial> {
+fn selected(rows: &[Trial], policy: DesignPolicy, limit: f64) -> Option<&Trial> {
     rows.iter().filter(|row| row.temperature_k <= limit)
-        .max_by(|a, b| a.power().total_cmp(&b.power()))
+        .max_by(|a, b| if fan(policy) { b.coordinate().total_cmp(&a.coordinate()) }
+            else { a.coordinate().total_cmp(&b.coordinate()) })
 }
 
-fn bracket(rows: &[Trial], limit: f64) -> Option<(&Trial, &Trial)> {
-    let passing = selected(rows, limit)?;
-    let failing = rows.iter().filter(|row| row.temperature_k > limit && row.power() > passing.power())
-        .min_by(|a, b| a.power().total_cmp(&b.power()))?;
+fn bracket(rows: &[Trial], policy: DesignPolicy, limit: f64) -> Option<(&Trial, &Trial)> {
+    let passing = selected(rows, policy, limit)?;
+    let failing = rows.iter().filter(|row| row.temperature_k > limit &&
+        if fan(policy) { row.coordinate() < passing.coordinate() }
+        else { row.coordinate() > passing.coordinate() })
+        .min_by(|a, b| if fan(policy) { b.coordinate().total_cmp(&a.coordinate()) }
+            else { a.coordinate().total_cmp(&b.coordinate()) })?;
     Some((passing, failing))
 }
 
 fn next(control: &UniformParameter, policy: DesignPolicy, limit: f64, rows: &[Trial]) -> Next {
-    if rows.is_empty() { return Next::Evaluate(control.low); }
-    if rows[0].temperature_k > limit { return Next::Refuse("minimum-power-infeasible"); }
+    let minimize = fan(policy);
+    if rows.is_empty() { return Next::Evaluate(if minimize { control.high } else { control.low }); }
+    if rows[0].temperature_k > limit {
+        return Next::Refuse(if minimize { "maximum-fan-speed-infeasible" } else { "minimum-power-infeasible" });
+    }
     // This detects a violated assumption in measured candidates, without
     // claiming that an unobserved nonmonotone branch has been excluded.
     for a in rows {
         for b in rows {
-            if a.power() < b.power() && a.temperature_k - b.temperature_k > policy.temperature_tolerance_k {
+            let increase = if minimize { b.temperature_k - a.temperature_k }
+                else { a.temperature_k - b.temperature_k };
+            if a.coordinate() < b.coordinate() && increase > policy.temperature_tolerance_k {
                 return Next::Refuse("nonmonotone-response");
             }
         }
     }
-    if rows.len() == 1 { return Next::Evaluate(control.high); }
-    if rows[1].temperature_k <= limit { return Next::Complete("maximum-feasible"); }
-    let Some((passing, failing)) = bracket(rows, limit) else {
+    if rows.len() == 1 { return Next::Evaluate(if minimize { control.low } else { control.high }); }
+    if rows[1].temperature_k <= limit {
+        return Next::Complete(if minimize { "minimum-feasible" } else { "maximum-feasible" });
+    }
+    let Some((passing, failing)) = bracket(rows, policy, limit) else {
         return Next::Refuse("missing-feasible-bracket");
     };
-    let width = failing.power() - passing.power();
-    if width <= policy.power_tolerance_w && limit - passing.temperature_k <= policy.temperature_tolerance_k {
+    let (low, high) = if minimize { (failing.coordinate(), passing.coordinate()) }
+        else { (passing.coordinate(), failing.coordinate()) };
+    let width = high - low;
+    if width <= policy.control.tolerance() && limit - passing.temperature_k <= policy.temperature_tolerance_k {
         return Next::Complete("target-bracketed");
     }
-    let candidate = passing.power() + 0.5 * width;
-    if !(candidate > passing.power() && candidate < failing.power()) {
-        return Next::Refuse("power-resolution-exhausted");
+    let candidate = low + 0.5 * width;
+    if !(candidate > low && candidate < high) {
+        return Next::Refuse(if minimize { "fan-speed-resolution-exhausted" } else { "power-resolution-exhausted" });
     }
     Next::Evaluate(candidate)
 }
 
-fn ir(id: ContentHash, n: usize) -> String {
-    format!("{{\"driver\":{DRIVER:?},\"model\":{},\"evaluations_completed\":{n}}}", quoted(&id.to_hex()))
+fn ir(driver: &str, id: ContentHash, n: usize) -> String {
+    format!("{{\"driver\":{driver:?},\"model\":{},\"evaluations_completed\":{n}}}", quoted(&id.to_hex()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -143,56 +176,74 @@ fn persist(
 ) -> Result<Outcome> {
     let study = model.bound.study();
     let policy = study.design().ok_or_else(|| invalid("missing deterministic design policy"))?;
+    let fan = fan(policy);
+    let driver = driver(policy);
+    let scope = if fan { FAN_SCOPE } else { SCOPE };
+    let observations_kind = observations_kind(driver);
     let control = &study.parameters()[0];
     let limit = model.bound.threshold_k();
-    let chosen = selected(rows, limit);
+    let chosen = selected(rows, policy, limit);
     if status == "completed" && chosen.is_none() {
         return Err(invalid("a completed design must retain an evaluated feasible project"));
     }
     let id = model.identity();
     let n = rows.len();
-    let history = rows.iter().map(Trial::json).collect::<Vec<_>>().join(",");
-    let chosen_json = chosen.map_or_else(|| "null".into(), Trial::json);
-    let width = bracket(rows, limit).map(|(a, b)| b.power() - a.power());
+    let history = rows.iter().map(|row| row.json(policy)).collect::<Vec<_>>().join(",");
+    let chosen_json = chosen.map_or_else(|| "null".into(), |row| row.json(policy));
+    let width = bracket(rows, policy, limit).map(|(a, b)| (b.coordinate() - a.coordinate()).abs());
     let failure_json = failure.map_or_else(|| "null".into(), quoted);
     let observation = if transient(model) { "fine-grid-sampled-peak-including-initial" } else { "steady" };
     let region = &model.bound.base().requirements.as_ref().expect("bound requirement")[0].region;
+    let schema = if fan { "frankensim.cli.native-fan-design-result.v1" }
+        else { "frankensim.cli.native-power-design-result.v1" };
+    let objective = if fan { "minimize-fan-speed-ratio" } else { "maximize-delivered-regional-power" };
+    let entity = if fan { "fan_bank" } else { "power_region" };
+    let tolerance = if fan { "fan_speed_ratio_tolerance" } else { "power_tolerance_w" };
+    let bracket_width = if fan { "bracket_width_ratio" } else { "bracket_width_w" };
     let summary = format!(
-        "{{\"schema\":\"frankensim.cli.native-power-design-result.v1\",\"driver\":{DRIVER:?},\"study_id\":{},\"status\":{},\"termination\":{},\"objective\":\"maximize-delivered-regional-power\",\"power_region\":{},\"temperature_region\":{},\"temperature_observation\":{observation:?},\"temperature_limit_k\":{limit},\"power_tolerance_w\":{},\"temperature_tolerance_k\":{},\"evaluations_completed\":{n},\"evaluations_planned\":{},\"selected\":{chosen_json},\"bracket_width_w\":{},\"history\":[{history}],\"failure\":{failure_json},\"authority\":\"Estimated\",\"no_claim\":{}}}",
+        "{{\"schema\":{schema:?},\"driver\":{driver:?},\"study_id\":{},\"status\":{},\"termination\":{},\"objective\":{objective:?},{entity:?}:{},\"temperature_region\":{},\"temperature_observation\":{observation:?},\"temperature_limit_k\":{limit},{tolerance:?}:{},\"temperature_tolerance_k\":{},\"evaluations_completed\":{n},\"evaluations_planned\":{},\"selected\":{chosen_json},{bracket_width:?}:{},\"history\":[{history}],\"failure\":{failure_json},\"authority\":\"Estimated\",\"no_claim\":{}}}",
         quoted(&id.to_hex()), quoted(status), quoted(termination), quoted(&control.entity),
-        quoted(region), policy.power_tolerance_w, policy.temperature_tolerance_k, study.samples(),
-        optional(width), quoted(SCOPE)
+        quoted(region), policy.control.tolerance(), policy.temperature_tolerance_k, study.samples(),
+        optional(width), quoted(scope)
     );
+    let label = if fan { "fan speed ratio" } else { "delivered power" };
+    let unit = if fan { " (absolute ratio)" } else { " W" };
+    let title = if fan { "Native fan design" } else { "Native power design" };
+    let column = if fan { "Fan speed ratio" } else { "Delivered W" };
     let chosen_html = chosen.map_or_else(|| "No evaluated feasible design yet.".into(), |row|
-        format!("Selected delivered power: {} W; evaluated temperature: {} K; final native QoI: {} K; child run: {}.",
-            row.power(), row.temperature_k, row.sample.value_k, row.sample.run));
+        format!("Selected {label}: {}{unit}; evaluated temperature: {} K; final native QoI: {} K; child run: {}.",
+            row.coordinate(), row.temperature_k, row.sample.value_k, row.sample.run));
     let mut table = String::new();
     for row in rows {
         let _ = write!(table, "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
-            row.power(), row.temperature_k, row.sample.value_k, row.sample.run);
+            row.coordinate(), row.temperature_k, row.sample.value_k, row.sample.run);
     }
-    let html = format!("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Native power design</title><body><h1>Native power design</h1><p>Status: {status}; termination: {termination}; {n} completed candidates.</p><p>{chosen_html}</p><p>Temperature limit after margin: {limit} K. Observation: {observation}.</p><table><tr><th>Delivered W</th><th>Decision K</th><th>Final QoI K</th><th>Native run</th></tr>{table}</table><p>{SCOPE}</p></body></html>");
+    let html = format!("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>{title}</title><body><h1>{title}</h1><p>Status: {status}; termination: {termination}; {n} completed candidates.</p><p>{chosen_html}</p><p>Temperature limit after margin: {limit} K. Observation: {observation}.</p><table><tr><th>{column}</th><th>Decision K</th><th>Final QoI K</th><th>Native run</th></tr>{table}</table><p>{scope}</p></body></html>");
     // A retained feasible numerical result is useful, but no certified optimum
     // or physical-temperature error bound has been established by this search.
     let package = EvidencePackage::new(Provenance::new(
-        format!("fs-cli/{}+{DRIVER}", env!("CARGO_PKG_VERSION")), id.to_hex()))
+        format!("fs-cli/{}+{driver}", env!("CARGO_PKG_VERSION")), id.to_hex()))
         .to_json().map_err(|e| invalid(e.to_string()))?;
     let samples = rows_json(&rows.iter().map(|row| row.sample.clone()).collect::<Vec<_>>());
-    let observations = format!("{{\"driver\":{DRIVER:?},\"evaluations\":{samples}}}");
-    let project = chosen.map(|row| model.project(&[row.power()])).transpose()?;
+    let observations = format!("{{\"driver\":{driver:?},\"evaluations\":{samples}}}");
+    let project = chosen.map(|row| model.project(&[row.coordinate()])).transpose()?;
     if project.as_ref().zip(chosen).is_some_and(|(project, row)|
         project.hash().to_hex() != row.sample.project_hash) {
         return Err(invalid("selected export differs from the evaluated native project"));
     }
     let seed = study.seed().to_le_bytes();
-    let versions = format!("{{\"driver\":{DRIVER:?},\"solve_driver\":{}}}", crate::SOLVE_DRIVER_VERSION);
+    let versions = format!("{{\"driver\":{driver:?},\"solve_driver\":{}}}", crate::SOLVE_DRIVER_VERSION);
     let budgets = format!("{{\"evaluations\":{},\"wall_s\":{},\"consumed_wall_s\":{used_wall}}}",
         study.samples(), study.wall_seconds());
     ledger.begin()?;
     let result = (|| {
-        let op = ledger.begin_op(Some(id.as_bytes()), &ir(id, n), &FiveExplicits {
+        let op = ledger.begin_op(Some(id.as_bytes()), &ir(driver, id, n), &FiveExplicits {
             seed: &seed, versions: &versions, budget: &budgets,
-            capability: "{\"ops\":[\"native-delivered-power-design\"],\"physical_ops\":\"inherited-from-retained-base-project\"}",
+            capability: if fan {
+                "{\"ops\":[\"native-fan-speed-design\"],\"physical_ops\":\"inherited-from-retained-base-project\"}"
+            } else {
+                "{\"ops\":[\"native-delivered-power-design\"],\"physical_ops\":\"inherited-from-retained-base-project\"}"
+            },
         }, 0)?;
         if model.retain(ledger, op)? != id { return Err(invalid("retained native model identity differs")); }
         if let Some(previous) = predecessor { ledger.link(op, &previous, EdgeRole::In)?; }
@@ -204,7 +255,7 @@ fn persist(
         }
         let mut refs = String::new();
         for (key, kind, bytes) in [
-            ("observations", OBSERVATIONS, observations.as_bytes()),
+            ("observations", observations_kind, observations.as_bytes()),
             ("report_json", "study-report-json", summary.as_bytes()),
             ("report_html", "study-report-html", html.as_bytes()),
             ("package", "study-package", package.as_bytes()),
@@ -219,7 +270,7 @@ fn persist(
             quoted(&a.hash.to_hex())
         } else { "null".into() };
         let receipt = format!(
-            "{{\"schema\":{STUDY_RUN_RECEIPT_SCHEMA:?},\"driver\":{DRIVER:?},\"study_id\":{},\"model\":{},\"status\":{},\"termination\":{},\"evaluations_completed\":{n},\"evaluations_planned\":{},\"consumed_wall_s\":{used_wall},\"selected_project\":{selected_project},\"failure\":{failure_json},\"predecessor\":{}{refs}}}",
+            "{{\"schema\":{STUDY_RUN_RECEIPT_SCHEMA:?},\"driver\":{driver:?},\"study_id\":{},\"model\":{},\"status\":{},\"termination\":{},\"evaluations_completed\":{n},\"evaluations_planned\":{},\"consumed_wall_s\":{used_wall},\"selected_project\":{selected_project},\"failure\":{failure_json},\"predecessor\":{}{refs}}}",
             quoted(&id.to_hex()), quoted(&id.to_hex()), quoted(status), quoted(termination),
             study.samples(), predecessor.map_or_else(|| "null".into(), |h| quoted(&h.to_hex()))
         );
@@ -240,6 +291,9 @@ fn persist(
 }
 
 pub(super) fn validate_loaded(ledger: &Ledger, hash: ContentHash, value: J, bytes: Vec<u8>) -> Result<Loaded> {
+    let driver = value.str_field("driver").filter(|value| is_driver(Some(value)))
+        .ok_or_else(|| invalid("unknown native design producer"))?;
+    let observations = observations_kind(driver);
     let id = hash_field(&value, "study_id")?;
     let n = integer(&value, "evaluations_completed")?;
     let op_id = ledger.artifact_output_seal(&hash)?.ok_or_else(|| invalid("unsealed design receipt"))?;
@@ -247,14 +301,14 @@ pub(super) fn validate_loaded(ledger: &Ledger, hash: ContentHash, value: J, byte
     if value.str_field("schema") != Some(STUDY_RUN_RECEIPT_SCHEMA)
         || hash_field(&value, "model")? != id || n > fs_project::uncertainty::MAX_SAMPLES
         || op.session.as_deref() != Some(id.as_bytes().as_slice())
-        || op.ir != ir(id, n) || op.outcome.as_deref() != Some("ok")
+        || op.ir != ir(driver, id, n) || op.outcome.as_deref() != Some("ok")
         || !ledger.edge_exists(op_id, &hash, EdgeRole::Out)?
     {
         return Err(invalid("design receipt differs from its completed producing operation"));
     }
     for (key, kind, role) in [
         ("model", model::MANIFEST_KIND, EdgeRole::In),
-        ("observations", OBSERVATIONS, EdgeRole::Out),
+        ("observations", observations, EdgeRole::Out),
         ("report_json", "study-report-json", EdgeRole::Out),
         ("report_html", "study-report-html", EdgeRole::Out),
         ("package", "study-package", EdgeRole::Out),
@@ -277,15 +331,18 @@ pub(super) fn drive(
 ) -> Result<Outcome> {
     let study = model.bound.study();
     let policy = study.design().ok_or_else(|| invalid("missing deterministic design policy"))?;
+    let driver = driver(policy);
+    let observations = observations_kind(driver);
     let control = &study.parameters()[0];
     let limit = model.bound.threshold_k();
     let mut rows = Vec::new();
     let used_before = if let Some(old) = prior {
-        if hash_field(&old.value, "model")? != model.identity() {
-            return Err(invalid("retained design model changed"));
+        if hash_field(&old.value, "model")? != model.identity()
+            || old.value.str_field("driver") != Some(driver) {
+            return Err(invalid("retained design model or objective changed"));
         }
-        let observations = parse(&linked(ledger, &old.value, "observations", OBSERVATIONS)?)?;
-        if observations.str_field("driver") != Some(DRIVER) {
+        let observations = parse(&linked(ledger, &old.value, "observations", observations)?)?;
+        if observations.str_field("driver") != Some(driver) {
             return Err(invalid("retained observations belong to another study producer"));
         }
         let samples = read_rows_value(observations.get("evaluations")
@@ -333,9 +390,9 @@ pub(super) fn drive(
         let out = persist(model, ledger, &rows, status, termination, failure.as_deref(), used, predecessor)?;
         if status != "running" { return Ok(out); }
         predecessor = ContentHash::from_hex(out.pointer.trim_start_matches("study-"));
-        let Next::Evaluate(power) = decision else { return Err(invalid("missing next design coordinate")); };
+        let Next::Evaluate(coordinate) = decision else { return Err(invalid("missing next design coordinate")); };
         let remaining = (study.wall_seconds() - used_before - started.elapsed().as_secs_f64()).max(0.0);
-        match model.sample(ledger, gate, &[power], remaining) {
+        match model.sample(ledger, gate, &[coordinate], remaining) {
             Ok(Some(sample)) => match observe(model, ledger, sample) {
                 Ok(trial) => rows.push(trial),
                 Err(error) => failure = Some(error.to_string()),
@@ -355,7 +412,7 @@ mod tests {
             entity: "chip".into(), low: 0.0, high: 16.0 }
     }
     fn policy() -> DesignPolicy {
-        DesignPolicy { power_tolerance_w: 0.01, temperature_tolerance_k: 0.01 }
+        DesignPolicy { control: DesignControl::DeliveredPower { tolerance_w: 0.01 }, temperature_tolerance_k: 0.01 }
     }
     fn trial(power: f64, temperature: f64) -> Trial {
         Trial { sample: Sample { run: String::new(), project_hash: String::new(),
@@ -370,9 +427,9 @@ mod tests {
                 Next::Evaluate(power) => rows.push(trial(power, 300.0 + 2.0 * power)),
                 Next::Complete(reason) => {
                     assert_eq!(reason, "target-bracketed");
-                    let chosen = selected(&rows, 305.0).unwrap();
+                    let chosen = selected(&rows, policy(), 305.0).unwrap();
                     assert!(chosen.temperature_k <= 305.0);
-                    assert!((chosen.power() - 2.5).abs() <= 0.01);
+                    assert!((chosen.coordinate() - 2.5).abs() <= 0.01);
                     return;
                 },
                 Next::Refuse(reason) => panic!("{reason}"),
@@ -388,5 +445,70 @@ mod tests {
             Next::Refuse("nonmonotone-response"));
         assert_eq!(next(&control(), policy(), 305.0, &[trial(0.0, 300.0), trial(16.0, 304.0)]),
             Next::Complete("maximum-feasible"));
+    }
+
+    fn fan_control() -> UniformParameter {
+        UniformParameter { name: "fan-speed".into(), target: Target::FanSpeedRatio,
+            entity: "bank".into(), low: 0.5, high: 1.5 }
+    }
+
+    fn fan_policy() -> DesignPolicy {
+        DesignPolicy { control: DesignControl::FanSpeedRatio { tolerance: 0.001 }, temperature_tolerance_k: 0.01 }
+    }
+
+    #[test]
+    fn g1_fan_bracket_minimizes_speed_from_a_measured_feasible_baseline() {
+        let mut rows = Vec::new();
+        assert_eq!(next(&fan_control(), fan_policy(), 305.0, &rows), Next::Evaluate(1.5));
+        for _ in 0..32 {
+            match next(&fan_control(), fan_policy(), 305.0, &rows) {
+                Next::Evaluate(speed) => {
+                    // Nonlinear cooling with an independently known threshold.
+                    rows.push(trial(speed, 300.0 + 4.0 / (speed * speed)));
+                    let chosen = selected(&rows, fan_policy(), 305.0).unwrap();
+                    assert!(chosen.temperature_k <= 305.0);
+                },
+                Next::Complete(reason) => {
+                    assert_eq!(reason, "target-bracketed");
+                    let chosen = selected(&rows, fan_policy(), 305.0).unwrap();
+                    assert!((chosen.coordinate() - 0.8_f64.sqrt()).abs() <= 0.001);
+                    assert!(chosen.coordinate() >= 0.8_f64.sqrt());
+                    let (passing, failing) = bracket(&rows, fan_policy(), 305.0).unwrap();
+                    assert!(passing.coordinate() - failing.coordinate() <= 0.001);
+                    assert!(failing.temperature_k > 305.0);
+                    return;
+                },
+                Next::Refuse(reason) => panic!("{reason}"),
+            }
+        }
+        panic!("nonlinear cooling response failed to bracket");
+    }
+
+    #[test]
+    fn g0_fan_boundary_and_reversed_monotonicity_outcomes_are_explicit() {
+        assert_eq!(next(&fan_control(), fan_policy(), 305.0, &[trial(1.5, 306.0)]),
+            Next::Refuse("maximum-fan-speed-infeasible"));
+        assert_eq!(next(&fan_control(), fan_policy(), 305.0, &[trial(1.5, 300.0)]),
+            Next::Evaluate(0.5));
+        let feasible = [trial(1.5, 300.0), trial(0.5, 305.0)];
+        assert_eq!(next(&fan_control(), fan_policy(), 305.0, &feasible),
+            Next::Complete("minimum-feasible"));
+        assert_eq!(selected(&feasible, fan_policy(), 305.0).unwrap().coordinate(), 0.5);
+        assert_eq!(next(&fan_control(), fan_policy(), 305.0,
+            &[trial(1.5, 304.0), trial(0.5, 303.0)]), Next::Refuse("nonmonotone-response"));
+    }
+
+    #[test]
+    fn g0_fan_history_uses_speed_units_and_a_distinct_producer() {
+        let row = trial(0.8, 304.0);
+        let fan_json = J::parse(&row.json(fan_policy())).unwrap();
+        assert_eq!(fan_json.f64_field("fan_speed_ratio"), Some(0.8));
+        assert!(fan_json.get("power_w").is_none());
+        assert_eq!(driver(fan_policy()), FAN_DRIVER);
+        assert_eq!(observations_kind(FAN_DRIVER), FAN_OBSERVATIONS);
+        assert_ne!(ir(FAN_DRIVER, hash_bytes(b"model"), 1), ir(DRIVER, hash_bytes(b"model"), 1));
+        assert!(is_driver(Some(FAN_DRIVER)));
+        assert!(is_driver(Some(DRIVER)));
+        assert!(!is_driver(Some("other-design")));
     }
 }

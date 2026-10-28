@@ -139,3 +139,116 @@ fn g1_transient_design_refuses_initial_overheating_even_when_the_final_field_pas
     assert_eq!(row.f64_field("state"), Some(0.0));
     assert!(row.f64_field("final_temperature_k").unwrap() < 320.0);
 }
+
+fn fan_source() -> String {
+    DESIGN.replace("regional-power :entity \"air\" :minimum 0W :maximum 16W :tolerance 0.05W",
+        "fan-speed-ratio :entity \"fixture-bank\" :minimum 0.8 :maximum 1.2 :tolerance 0.001")
+        .replace("nondecreasing-temperature-with-power", "nonincreasing-temperature-with-fan-speed")
+}
+
+fn fan_fixture(transient: bool) -> Fixture {
+    let mut fixture = super::fan_speed::fixture();
+    fixture.project.solver.as_mut().unwrap().tolerance_rel = 1e-10;
+    if transient { add_transient(&mut fixture, 294.0); }
+    // Independently set the absolute bank ratio rather than using the new
+    // design coordinate binder or its bracketing implementation.
+    let mut oracle = fixture.project.clone();
+    oracle.cooling.as_mut().unwrap().fan_system.as_mut().unwrap().banks[0].speed_ratio = 1.0;
+    let (_, _, target) = fixture.solve_project(800, &oracle);
+    let requirement = &mut fixture.project.requirements.as_mut().unwrap()[0];
+    requirement.limit.value = target + 1.0;
+    requirement.margin.value = 1.0;
+    write(&fixture);
+    std::fs::write(fixture.sources.join("study.fsim"), fan_source()).unwrap();
+    fixture
+}
+
+fn fan_report(fixture: &Fixture, result: &JsonValue) -> JsonValue {
+    let receipt = result.get("receipt").unwrap();
+    assert_eq!(receipt.str_field("driver"), Some("native-cooling-fan-design-v1"));
+    let report = json_artifact(&fixture.ledger, receipt.str_field("report_json").unwrap());
+    assert_eq!(report.str_field("objective"), Some("minimize-fan-speed-ratio"));
+    assert_eq!(report.str_field("fan_bank"), Some("fixture-bank"));
+    report
+}
+
+#[test]
+fn g1_g3_native_fan_design_selects_the_minimum_feasible_speed_and_exports_its_actual_project() {
+    for transient in [false, true] {
+        let fixture = fan_fixture(transient);
+        let result = fixture.study(None, fs_cli::exit::SUCCESS);
+        let report = fan_report(&fixture, &result);
+        assert_eq!(report.str_field("termination"), Some("target-bracketed"));
+        assert_eq!(report.str_field("temperature_observation"),
+            Some(if transient { "fine-grid-sampled-peak-including-initial" } else { "steady" }));
+        let selected = report.get("selected").unwrap();
+        let speed = selected.f64_field("fan_speed_ratio").unwrap();
+        assert!((1.0 - 1e-12..=1.001).contains(&speed), "selected absolute ratio {speed}");
+        assert!(report.f64_field("bracket_width_ratio").unwrap() <= 0.001);
+        let limit = report.f64_field("temperature_limit_k").unwrap();
+        assert!(selected.f64_field("temperature_k").unwrap() <= limit);
+        let history = report.get("history").unwrap().as_array().unwrap();
+        assert_eq!(history[0].f64_field("fan_speed_ratio"), Some(1.2), "start with a measured feasible baseline");
+        assert_eq!(history[1].f64_field("fan_speed_ratio"), Some(0.8));
+        for row in history {
+            if row.f64_field("fan_speed_ratio").unwrap() < speed {
+                assert!(row.f64_field("temperature_k").unwrap() > limit,
+                    "the selected project must be the lowest-speed observed feasible candidate");
+            }
+        }
+        let bytes = artifact(&fixture.ledger,
+            result.path(&["receipt", "selected_project"]).unwrap().as_str().unwrap());
+        let exported = fs_project::parse_sexpr(std::str::from_utf8(&bytes).unwrap()).unwrap();
+        let mut expected = fixture.project.clone();
+        expected.cooling.as_mut().unwrap().fan_system.as_mut().unwrap().banks[0].speed_ratio = speed;
+        assert_eq!(exported.spec, expected, "only the chosen bank ratio may change");
+        let (hash, run, final_temperature) = fixture.solve_project(801, &expected);
+        assert_eq!(selected.str_field("project_hash"), Some(hash.as_str()));
+        assert_eq!(selected.str_field("run"), Some(run.as_str()));
+        assert_eq!(selected.f64_field("final_temperature_k").unwrap().to_bits(), final_temperature.to_bits());
+        assert!(selected.f64_field("temperature_k").unwrap() >= final_temperature);
+        let paths = command(&["--json", "report", result.str_field("run").unwrap(),
+            fixture.ledger.to_str().unwrap()], fs_cli::exit::SUCCESS);
+        assert_eq!(std::fs::read(paths.str_field("selected_project").unwrap()).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn g4_g5_native_fan_design_retains_safe_speed_and_resumes_from_original_sources() {
+    let whole = fan_fixture(false);
+    let complete = whole.study(None, fs_cli::exit::SUCCESS);
+    let expected = fan_report(&whole, &complete);
+    let split = fan_fixture(false);
+    let partial = split.study(Some("2"), fs_cli::exit::BUDGET);
+    let before = fan_report(&split, &partial);
+    assert_eq!(before.str_field("termination"), Some("invocation-evaluation-budget"));
+    assert_eq!(before.path(&["selected", "fan_speed_ratio"]).unwrap().as_f64(), Some(1.2));
+    std::fs::rename(&split.sources, split.dir.join("relocated-fan-design-inputs")).unwrap();
+    let result = split.resume(partial.str_field("run").unwrap(), None, fs_cli::exit::SUCCESS);
+    assert_eq!(fan_report(&split, &result), expected);
+    // Terminal recovery must route the fan producer without returning a
+    // probability-study authority label or spending more evaluations.
+    let again = split.resume(result.str_field("run").unwrap(), None, fs_cli::exit::SUCCESS);
+    assert_eq!(again, result);
+}
+
+#[test]
+fn g1_native_fan_design_refuses_initial_overheating_at_maximum_speed() {
+    let mut fixture = super::fan_speed::fixture();
+    fixture.project.solver.as_mut().unwrap().tolerance_rel = 1e-10;
+    add_transient(&mut fixture, 330.0);
+    let requirement = &mut fixture.project.requirements.as_mut().unwrap()[0];
+    requirement.limit.value = 321.0;
+    requirement.margin.value = 1.0;
+    write(&fixture);
+    std::fs::write(fixture.sources.join("study.fsim"), fan_source()).unwrap();
+    let result = fixture.study(None, fs_cli::exit::REFUSED);
+    let report = fan_report(&fixture, &result);
+    assert_eq!(report.str_field("termination"), Some("maximum-fan-speed-infeasible"));
+    assert_eq!(report.get("selected"), Some(&JsonValue::Null));
+    let row = &report.get("history").unwrap().as_array().unwrap()[0];
+    assert_eq!(row.f64_field("fan_speed_ratio"), Some(1.2));
+    assert_eq!(row.f64_field("temperature_k"), Some(330.0));
+    assert_eq!(row.f64_field("time_s"), Some(0.0));
+    assert!(row.f64_field("final_temperature_k").unwrap() < 320.0);
+}
