@@ -13,6 +13,8 @@ pub mod temperature;
 pub mod adhesive_shear;
 /// Material-derived Cattaneo--Mindlin compliance on the original Hertz patch.
 pub mod mindlin;
+/// Source-pinned Coulomb coefficients refreshed at the solved contact temperature.
+pub mod thermal_friction;
 
 use core::fmt;
 use std::collections::BTreeMap;

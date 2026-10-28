@@ -123,6 +123,30 @@ partition remain owned by their mechanical and thermal consumers.
 material/interface/geometry substitutions, complete source retention and
 loaded-history, foreign-source and operating-domain refusals.
 
+### Source-backed temperature-dependent Coulomb friction
+
+`interface_binding::thermal_friction::SourceThermalCoulomb` implements the
+shared `TangentialLaw` with explicit static and kinetic coefficient requirements
+from one original ordered dry interface card. Every candidate evaluates those
+same selected claims at its supplied contact temperature and, when explicitly
+mapped, nominal pressure. Other admitted external coordinates remain fixed.
+Property-use receipts, uncertainty, original selection and authority remain
+available; no fitted material-name coefficients or silent source substitution
+are introduced. Static pressure needs its quantity semantics, and rate, slip,
+area, strain and history restrictions refuse even for constant-valued claims.
+
+The native set-valued Coulomb solver owns traction, sticking, sliding and body
+compliance. Temperature and pressure refreshes retain its accumulated slip.
+There is no reversible contact potential: coefficient evolution changes the
+dissipative law without introducing unreported elastic parameter work. Accepted
+states bind the original card, fixed query, selected sources, coefficient roles,
+axis mapping and authority. Foreign history, missing/out-of-support conditions,
+wrong units, negative coefficients or kinetic friction above static friction
+refuse the whole candidate. The mechanical and thermal consumers own normal
+load/pressure generation, temperature evolution and heat partition.
+`tests/source_thermal_friction.rs` checks the actual temperature/pressure force
+and heat response, static breakaway, pinned source support and atomic retry.
+
 ### Source-backed Hertz--Mindlin normal loading and recontact
 
 `interface_binding::mindlin::loading::SourceHertzMindlinContact` reuses an
