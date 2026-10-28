@@ -11,6 +11,8 @@
 pub mod temperature;
 /// Source-bound junction shear on the same ordered interface as normal adhesion.
 pub mod adhesive_shear;
+/// Material-derived Cattaneo--Mindlin compliance on the original Hertz patch.
+pub mod mindlin;
 
 use core::fmt;
 use std::collections::BTreeMap;

@@ -63,6 +63,38 @@ nonadhesion applicability ratios. `ConstraintBarrierReceipt` is deliberately a
 different type with no force, patch, or energy fields, so IPC/barrier output
 cannot masquerade as physical compliance.
 
+### Source-backed Hertz--Mindlin tangential contact
+
+`interface_binding::mindlin::SourceMindlinContact` implements the shared
+`fs_tribo::TangentialLaw` using an original `SourcePointContact`, both admitted
+bulk elastic states and an explicitly selected scalar property from the same
+ordered interface card. It obtains the circular patch radius and normal load
+from the original Hertz evaluator and derives each shear modulus from its
+source E and nu. The coefficient is never inferred from a material name or
+copied from the normal model. Original property-use receipts, uncertainty,
+authority and the normal operating envelope remain accessible.
+`SourceMindlinState` additionally retains the exact original normal-model and
+resolved-friction identities. Numerically equal coefficients from a different
+ordered interface, specimen history, query or selected claim cannot import
+retained shear. Its native constitutive state is exposed read-only.
+
+The caller explicitly selects the classical decoupled, isotropic, constant-load
+Mindlin approximation with one local Coulomb coefficient. It does not combine
+unequal static/kinetic coefficients. Missing properties, wrong units, rate- or
+history-restricted sources, noncircular geometry, nonelastic normal models and
+zero-area contact refuse. Stepping retains the original source temperature and
+normal load; a nominal-pressure refresh, transverse motion, foreign mechanical
+or source checkpoint or excessive step duration refuses before publishing history.
+Thermal coefficient changes and changing normal load need a separate physical
+history-transfer model; a newly unloaded contact is not such a transfer.
+
+The generic modal tangential consumer can use this source owner directly.
+`tests/source_mindlin.rs` covers the independent `8 a G*` stiffness and Hertz
+backbone, distinct material/interface substitutions, original receipt retention,
+frictionless data, domain refusals and exact retry from retained preload. These
+synthetic G1/G3 checks establish numerical/source integration, not calibration
+against a measured specimen.
+
 ### Generic normal-patch embedding (bead `frankensim-b8bxd.5.2`)
 
 `normal_patch::embed` maps public constitutive requests into a generic contact
