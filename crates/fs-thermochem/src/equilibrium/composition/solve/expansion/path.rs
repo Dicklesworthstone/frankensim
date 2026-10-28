@@ -204,3 +204,129 @@ impl<'a> EquilibriumIsentropeV1<'a> {
         Ok(state)
     }
 }
+
+/// Density inversion on this same source-bound reacting isentrope.
+pub mod density {
+use super::*;
+
+/// Positive pressure interval and density/root tolerances.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EquilibriumDensitySolveV1 {
+    /// Inclusive lower pressure [Pa].
+    pub minimum_pressure_pa: f64,
+    /// Inclusive upper pressure [Pa], greater than the lower pressure.
+    pub maximum_pressure_pa: f64,
+    /// Allowed absolute rho/target-1, in (0,0.01).
+    pub relative_density_tolerance: f64,
+    /// At most 256 pressure queries; each retains the original SP work bounds.
+    pub maximum_pressure_iterations: usize,
+}
+/// A failed density query cannot leave a publishable stale endpoint.
+#[derive(Clone, Debug, PartialEq)]
+pub enum EquilibriumDensityErrorV1 {
+    /// Original source, composition, entropy or cancellation refusal.
+    Thermochemistry(EquilibriumExpansionErrorV1),
+    /// Invalid target, pressure interval or work controls.
+    Invalid(&'static str),
+    /// The pressure interval/work budget did not close density.
+    NoConvergence { pressure_queries: usize, relative_density_residual: f64 },
+}
+impl From<EquilibriumExpansionErrorV1> for EquilibriumDensityErrorV1 {
+    fn from(value: EquilibriumExpansionErrorV1) -> Self { Self::Thermochemistry(value) }
+}
+impl core::fmt::Display for EquilibriumDensityErrorV1 {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "equilibrium isentrope density: {self:?}")
+    }
+}
+impl std::error::Error for EquilibriumDensityErrorV1 {}
+/// Accepted isentrope sample and actual accumulated work, not certified error bounds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EquilibriumDensityQueryV1 {
+    /// Same source-relative enthalpy, entropy and reacting response as sample(p).
+    pub sample: EquilibriumIsentropeSampleV1,
+    /// Actual (rho-target)/target.
+    pub relative_density_residual: f64,
+    /// Number of pressure queries, zero for an already closed retained endpoint.
+    pub pressure_queries: usize,
+    /// Sum over all queries, not only the accepted sample.
+    pub composition_iterations: usize,
+    /// Sum over all queries, not only the accepted sample.
+    pub temperature_iterations: usize,
+}
+impl EquilibriumIsentropeV1<'_> {
+    /// Last accepted scalar sample; None follows a failed/cancelled query.
+    pub const fn current_sample(&self) -> Option<EquilibriumIsentropeSampleV1> { self.current }
+
+    /// Solve rho(p,s,elements)=target using the original reacting response.
+    /// Positive compressibility supplies dln(rho)/dln(p)=1/Gamma_s.
+    /// Safeguarded log-pressure Newton uses this derivative and the previous
+    /// endpoint as predictor. No new receipt or workspace is allocated. Every
+    /// evaluated state retains original source/entropy admission. Interval ends
+    /// are not evaluated just to initialize a good interior predictor. An
+    /// out-of-interval target still cannot pass the actual density-residual gate.
+    pub fn sample_density(&mut self, target: f64, controls: EquilibriumDensitySolveV1,
+        mut cancelled: impl FnMut() -> bool) -> Result<EquilibriumDensityQueryV1, EquilibriumDensityErrorV1> {
+        let result = self.density_candidate(target, controls, &mut cancelled);
+        if result.is_err() { self.current = None; }
+        result
+    }
+    fn density_candidate(&mut self, target: f64, c: EquilibriumDensitySolveV1,
+        cancelled: &mut impl FnMut() -> bool) -> Result<EquilibriumDensityQueryV1, EquilibriumDensityErrorV1> {
+        poll(cancelled).map_err(EquilibriumExpansionErrorV1::from)?;
+        if !target.is_finite() || target <= 0.0
+            || !c.minimum_pressure_pa.is_finite() || c.minimum_pressure_pa <= 0.0
+            || !c.maximum_pressure_pa.is_finite() || c.maximum_pressure_pa <= c.minimum_pressure_pa
+            || !c.relative_density_tolerance.is_finite() || c.relative_density_tolerance <= 0.0
+            || c.relative_density_tolerance >= 0.01 || !(1..=256).contains(&c.maximum_pressure_iterations) {
+            return Err(EquilibriumDensityErrorV1::Invalid("invalid density, pressure bounds or root controls"));
+        }
+        let (mut low, mut high) = (ln(c.minimum_pressure_pa), ln(c.maximum_pressure_pa));
+        let mut x = low + 0.5 * (high - low);
+        if let Some(previous) = self.current {
+            let residual = (previous.response.density_kg_m3 - target) / target;
+            if (c.minimum_pressure_pa..=c.maximum_pressure_pa).contains(&previous.pressure.value())
+                && residual.abs() <= c.relative_density_tolerance {
+                poll(cancelled).map_err(EquilibriumExpansionErrorV1::from)?;
+                return Ok(EquilibriumDensityQueryV1 { sample: previous, relative_density_residual: residual,
+                    pressure_queries: 0, composition_iterations: 0, temperature_iterations: 0 });
+            }
+            let prediction = ln(previous.pressure.value()) + previous.response.isentropic_pressure_exponent
+                * crate::entropy::log_ratio(target, previous.response.density_kg_m3);
+            if prediction.is_finite() && prediction >= low && prediction <= high { x = prediction; }
+        }
+        let mut composition_iterations = 0;
+        let mut temperature_iterations = 0;
+        let mut residual = f64::INFINITY;
+        let mut queries = 0;
+        for query in 1..=c.maximum_pressure_iterations {
+            queries = query;
+            let pressure = if x == low && low == ln(c.minimum_pressure_pa) { c.minimum_pressure_pa }
+                else if x == high && high == ln(c.maximum_pressure_pa) { c.maximum_pressure_pa } else { exp(x) };
+            if !pressure.is_finite() || pressure < c.minimum_pressure_pa || pressure > c.maximum_pressure_pa {
+                return Err(EquilibriumDensityErrorV1::Invalid("unrepresentable pressure iterate"));
+            }
+            let sample = self.sample(Pressure::new(pressure), &mut *cancelled)?;
+            composition_iterations += sample.composition_iterations;
+            temperature_iterations += sample.temperature_iterations;
+            residual = (sample.response.density_kg_m3 - target) / target;
+            if residual.is_finite() && residual.abs() <= c.relative_density_tolerance {
+                poll(cancelled).map_err(EquilibriumExpansionErrorV1::from)?;
+                return Ok(EquilibriumDensityQueryV1 { sample, relative_density_residual: residual,
+                    pressure_queries: query, composition_iterations, temperature_iterations });
+            }
+            if !residual.is_finite() { break; }
+            if residual < 0.0 { low = x; } else { high = x; }
+            let next = x - sample.response.isentropic_pressure_exponent
+                * crate::entropy::log_ratio(sample.response.density_kg_m3, target);
+            let midpoint = low + 0.5 * (high - low);
+            let candidate = if next.is_finite() && next > low && next < high { next } else { midpoint };
+            if candidate == x || candidate == low || candidate == high { break; }
+            x = candidate;
+        }
+        Err(EquilibriumDensityErrorV1::NoConvergence {
+            pressure_queries: queries, relative_density_residual: residual,
+        })
+    }
+}
+}
