@@ -27,6 +27,7 @@
 //! not a time-error or entropy certificate; refine the physical timestep.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use fs_qty::Temperature;
 use super::{
     ClosedGasParcel, GasSurfaceBinding, GasSurfaceCandidate, GasSurfaceError, GasSurfaceSolve,
@@ -38,9 +39,12 @@ use super::{
 
 /// Explicit per-species thermal accommodation on one fixed surface condition.
 /// This is distinct from the volatile's mass/sticking accommodation.
+/// Clones share the admitted immutable table, avoiding species-string and tree
+/// allocations during active-cell setup and adaptive retries. Construction
+/// still copies caller inputs once; no mutable coefficient view is exposed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThermalAccommodation {
-    coefficients: BTreeMap<SpeciesId, f64>,
+    coefficients: Arc<BTreeMap<SpeciesId, f64>>,
     temperature_range_k: [f64; 2],
 }
 impl ThermalAccommodation {
@@ -67,12 +71,12 @@ impl ThermalAccommodation {
                 return Err(invalid("unique retained species and thermal accommodation in [0,1] required"));
             }
         }
-        Ok(Self { coefficients: ordered, temperature_range_k })
+        Ok(Self { coefficients: Arc::new(ordered), temperature_range_k })
     }
 
     /// Original explicitly supplied species coefficients; no mixture averaging.
     #[must_use]
-    pub fn coefficients(&self) -> &BTreeMap<SpeciesId, f64> { &self.coefficients }
+    pub fn coefficients(&self) -> &BTreeMap<SpeciesId, f64> { self.coefficients.as_ref() }
 
     /// Both incident-gas and wall temperatures must remain in this interval.
     #[must_use]
@@ -268,3 +272,60 @@ pub fn advance_surface_with_accommodation<'catalog, L: SublimationLaw + ?Sized>(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod sharing_tests {
+    use super::*;
+    use crate::sublimation::gas::tests as fixture;
+
+    #[test]
+    fn admitted_tables_are_shared_immutable_owned_and_thread_safe() {
+        fn send_sync<T: Send + Sync>() {}
+        send_sync::<ThermalAccommodation>();
+        let catalog = fixture::catalog(0.0);
+        let carrier = SpeciesId::new("A").unwrap();
+        let vapor = fixture::species();
+        let mut input = vec![(carrier.clone(), 0.5), (vapor.clone(), 0.6)];
+        let original = ThermalAccommodation::new(&catalog, &input, [200.0, 900.0]).unwrap();
+        let independent = ThermalAccommodation::new(&catalog, &input, [200.0, 900.0]).unwrap();
+        let handles: Vec<_> = (0..32).map(|_| original.clone()).collect();
+        assert_eq!(original, independent);
+        assert!(!std::ptr::eq(original.coefficients(), independent.coefficients()));
+        for handle in &handles {
+            assert!(std::ptr::eq(original.coefficients(), handle.coefficients()));
+            assert_eq!(handle.temperature_range_k(), [200.0, 900.0]);
+        }
+        input[0].1 = 0.0;
+        drop(original);
+        for handle in handles {
+            assert_eq!(handle.coefficients()[&carrier], 0.5);
+            assert_eq!(handle.coefficients()[&vapor], 0.6);
+            assert_eq!(handle, independent);
+        }
+    }
+
+    #[test]
+    fn shared_coefficients_preserve_original_phase_and_reflection_endpoints() {
+        let catalog = fixture::catalog(0.0);
+        let binding = fixture::binding(0.0);
+        let chart = fixture::chart(&catalog, &binding);
+        let solid = fixture::solid(400.0, chart);
+        let gas = fixture::gas(&catalog, 350.0, 800.0);
+        let original = ThermalAccommodation::new(&catalog, &[
+            (SpeciesId::new("A").unwrap(), 0.5), (fixture::species(), 0.6),
+        ], [200.0, 900.0]).unwrap();
+        let shared = original.clone();
+        let run = |accommodation: &ThermalAccommodation| {
+            advance_surface_with_accommodation(&fixture::phase(), &binding, solid, &gas,
+                &catalog, |h| fixture::temperature(h, chart), accommodation, 0.001,
+                fixture::controls(), || false).unwrap()
+        };
+        let expected = run(&original);
+        drop(original);
+        let accepted = run(&shared);
+        assert_eq!(accepted, expected);
+        assert!(accepted.reflection().heat_into_gas_j > 0.0);
+        fixture::near(accepted.exchange().step().energy_residual_j, 0.0, 1e-7);
+        fixture::near(accepted.exchange().step().mass_residual_kg, 0.0, 1e-14);
+    }
+}
