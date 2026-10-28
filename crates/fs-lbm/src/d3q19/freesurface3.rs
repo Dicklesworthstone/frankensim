@@ -47,6 +47,7 @@ mod initial;
 pub use initial::FreeSurfaceInitialCell3;
 mod curvature;
 mod forcing;
+mod geometry;
 pub(crate) mod thermocapillary;
 pub(crate) mod transport;
 pub(crate) mod wetting;
@@ -1175,7 +1176,18 @@ impl FreeSurface3 {
     /// activating inactive in-domain tiles when fluid advances into them.
     fn apply_conversions(
         &mut self,
+        transport: Option<&mut MassTransport3>,
+    ) -> Result<(), FreeSurfaceError3> {
+        self.apply_conversions_with_tolerance(transport, EPS)
+    }
+
+    // The ordinary trajectory retains its original hysteresis. Resolved
+    // surface geometry can explicitly finish an otherwise unsupported
+    // conversion with zero tolerance on its private material candidate.
+    fn apply_conversions_with_tolerance(
+        &mut self,
         mut transport: Option<&mut MassTransport3>,
+        tolerance: f64,
     ) -> Result<(), FreeSurfaceError3> {
         let mut excess = Vec::new();
         let keys: Vec<u64> = self.tiles.keys().copied().collect();
@@ -1189,9 +1201,9 @@ impl FreeSurface3 {
                 }
                 let rho: f64 = self.grid.populations(slot, lane).iter().sum();
                 let mass = self.tiles[&key].mass[lane];
-                if mass > (1.0 + EPS) * rho {
+                if mass > (1.0 + tolerance) * rho {
                     to_fluid.push((key, lane));
-                } else if mass < -EPS * rho {
+                } else if mass < -tolerance * rho {
                     to_gas.push((key, lane));
                 }
             }

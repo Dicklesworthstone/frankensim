@@ -599,12 +599,18 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             lattice.rebind_surface_tensions(surface_tensions, gate)?;
         }
         let prepared_wetting = self.prepare_wetting(&mut lattice, &resolved.states, gate)?;
-        let trace = lattice.step_with_mass_transport(
+        let mut trace = lattice.step_with_mass_transport(
             gate,
             &resolved.tau,
             resolved.forces,
             self.controls.max_mass_routes,
         )?;
+        if self.thermocapillary.is_some() {
+            // Resolve native conversion hysteresis through the SAME mass
+            // routes before reconstructing geometry or advecting enthalpy.
+            // The candidate stays private until all endpoint gates pass.
+            lattice.resolve_interface_fills(&mut trace, gate)?;
+        }
         admit_masses(&trace.after, self.controls.max_cells)?;
         let (mut h, outcome) = transport::advect(&trace, &heated, self.controls, gate)?;
         h.retain(|key, _| trace.after.contains_key(key));

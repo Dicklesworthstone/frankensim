@@ -3977,9 +3977,10 @@ unchanged. A dense column buffer and two bounded cell passes avoid a global
 surface solve or per-cell allocation.
 
 Source/geometry/slope/carry/cancellation refusal discards the entire candidate.
-Raw interface fractions must remain monotone and in [0,1]. The original native
-conversion hysteresis may retain over/underfilled cells; these candidates
-refuse the graph reduction even when the native VOF solver could retain them.
+Raw interface fractions must remain monotone and in [0,1]. Before endpoint
+geometry, the material candidate resolves native conversion hysteresis through
+actual adjacent-interface mass routes. The original enthalpy transport solve
+uses these same routes; geometric clipping supplies neither mass nor heat.
 This remains a resolved height-graph reduction with held-force time splitting;
 it does not admit overhangs, detached drops, internal solid walls, dynamic
 contact lines, surfactants or a conservative surface-energy closure. The curved
@@ -4050,3 +4051,27 @@ the corrected exposed-area budget with five internal contacts, shared source
 sigma/pressure/traction, mass and heat conservation, and transactional malformed
 patch refusal for both variable and constant sigma. Existing planar solved-T
 and finite-gas atomicity regressions remain unchanged and pass.
+
+### Conservative completion of resolved interface fills
+
+Material thermocapillary candidates call `resolve_interface_fills` after native
+streaming/conversion and before enthalpy advection. Excess or missing interface
+mass is shared across adjacent interface capacities using bounded D3Q19 local
+storage. If that first ring is insufficient, the original conversion cascade
+exposes another layer at an exact threshold. Every transfer enters the original
+mass trace and consumes its route budget; unresolved carry or lack of progress
+refuses the private candidate. The initial mass snapshot is retained, and the
+updated endpoint snapshot and complete trace drive the original implicit
+enthalpy transport solve.
+
+This completes physical fills rather than clipping their geometric appearance.
+The ordinary native trajectory retains its original conversion hysteresis and
+LegacyGlobal behavior. Resolved thermocapillary trajectories still enforce
+their slope, stencil, minimum-volume and material-source envelopes. Conversion
+does not gain a new momentum-conservation or capillary-energy claim.
+
+Regressions exercise overfill and underfill, disconnected-drop locality,
+interface-front expansion, bounded work and cancellation, and advancing curved
+graphs of both curvature signs crossing lattice layers. A separate regression
+passes the amended trace through the actual enthalpy transport solver and
+compares extensive heat and local temperatures with an analytic two-cell case.

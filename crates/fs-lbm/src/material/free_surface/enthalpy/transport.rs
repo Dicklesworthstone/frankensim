@@ -124,6 +124,56 @@ mod tests {
     use crate::d3q19::freesurface3::transport::MassRoute3;
 
     #[test]
+    fn g1_resolved_native_fills_advect_their_real_correction_routes_without_heat_creation() {
+        let (mut lattice, mut trace, a, b) = FreeSurface3::fill_projection_fixture(1000);
+        let before = trace.before.clone();
+        let old_h: BTreeMap<_, _> = before
+            .keys()
+            .filter_map(|&location| {
+                let p = FreeSurface3::transport_coordinates(location)?;
+                Some((
+                    location,
+                    if p[0] >= 14 {
+                        100.0
+                    } else if location == b {
+                        20.0
+                    } else {
+                        10.0
+                    },
+                ))
+            })
+            .collect();
+        let energy_before = total(&before, &old_h, 1.0).unwrap();
+        let gate = CancelGate::new_clock_free();
+        lattice.resolve_interface_fills(&mut trace, &gate).unwrap();
+        assert_eq!(trace.before, before);
+        assert_eq!(trace.routes.len(), 2);
+        let (h, outcome) = advect(
+            &trace,
+            &old_h,
+            FreeSurfaceEnthalpyControls::default(),
+            &gate,
+        )
+        .unwrap();
+        assert!(outcome.relative_residual < 1e-11);
+        assert!((h[&a] - 15.0).abs() < 1e-10);
+        let returned = trace.routes[1].mass;
+        let expected_b = (before[&b] * 20.0 + returned * 15.0) / trace.routes[0].mass;
+        assert!((h[&b] - expected_b).abs() < 1e-10);
+        assert_eq!(trace.after[&b], 0.0);
+        for (&location, &value) in &h {
+            if FreeSurface3::transport_coordinates(location).is_some_and(|p| p[0] >= 14) {
+                assert!((value - 100.0).abs() < 1e-10);
+                assert_eq!(
+                    trace.after[&location].to_bits(),
+                    before[&location].to_bits()
+                );
+            }
+        }
+        assert!((total(&trace.after, &h, 1.0).unwrap() - energy_before).abs() < 1e-9);
+    }
+
+    #[test]
     fn g1_local_conversion_routes_preserve_disconnected_drop_enthalpy() {
         let a = MassLocation3::Cell(0, 0);
         let b = MassLocation3::Cell(0, 1);
