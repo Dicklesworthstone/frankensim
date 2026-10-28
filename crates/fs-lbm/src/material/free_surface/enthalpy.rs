@@ -251,6 +251,7 @@ type Error = FreeSurfaceEnthalpyError;
 /// ghosts; only `m*h` contributes storage. Unconnected zero-mass ghosts receive
 /// a mass-weighted one-ring temperature extension, without moving any energy.
 /// A zero-mass carry has no assigned enthalpy unless it participates in a route.
+#[derive(Clone)]
 pub struct MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     flow: MaterialFreeSurface3<'s>,
     law: &'m LiquidTemperatureLaw<'m>,

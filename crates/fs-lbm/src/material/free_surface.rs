@@ -89,6 +89,7 @@ pub struct MaterialFreeSurfaceSample3 {
 /// error semantics are retained. Source coefficients and geometry units cannot
 /// drift through this wrapper. A different source point starts a different
 /// frozen scenario; it is not an energy-accounted runtime replacement.
+#[derive(Clone)]
 pub struct MaterialFreeSurface3<'a> {
     /// Existing solver, with no alternate collision or free-surface integrator.
     lattice: FreeSurface3,

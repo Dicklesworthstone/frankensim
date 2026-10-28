@@ -61,6 +61,8 @@ pub mod flue_loop;
 pub mod gesture_path;
 pub mod glottis;
 pub mod iqn_ils;
+/// Declared gas chemistry, finite atmospheric heat and native moving liquid.
+pub mod liquid_gas;
 pub mod material_assembly;
 /// Material-resolved branch heat and finite charge/flux storage on Kirchhoff circuits.
 pub mod material_circuit;

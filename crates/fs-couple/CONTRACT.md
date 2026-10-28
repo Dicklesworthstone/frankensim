@@ -21,6 +21,36 @@ lossless interface relation, explicit storage/dissipation/source primitives,
 a complete stream-flux bundle, and evidence-bound closed-window physical
 accounting without false passivity.
 
+## Reacting atmosphere on the native moving-liquid timeline
+
+`GasReaction::liquid_candidate` in `liquid_gas` composes the original closed gas
+reaction owner with `fs-lbm`'s finite-atmosphere/VOF enthalpy owner. The native
+liquid timestep supplies one interval to chemistry, thermal exchange and flow.
+The reaction changes composition at conserved total internal energy, retaining
+species formation references. Its accepted original gas sources then supply
+film conductivity, caloric inversion and pressure during heat exchange. The
+same liquid source laws feed native viscosity, buoyancy, conductivity and any
+attached current/heat response. Subsequent calls use the actual cooled gas and
+remaining species inventory.
+
+The candidate clones native populations, carry, source/contact histories and
+finite walls; no caller-owned state changes on source, thermal, reaction,
+combined-energy or cancellation refusal. An independent final account measures
+gas internal energy, post-advection liquid enthalpy and finite wall enthalpy
+against authored/electrical/physical viscous heat. Interfacial heat cancels once;
+formation energy is not credited again and numerical kinetic losses are not
+thermal sources. Cancellation is checked at existing source and solver stages
+and immediately before candidate publication.
+
+This is a first-order reaction/thermal/flow split, with well-mixed fixed-volume
+gas, the original constant-density liquid approximation and explicitly exposed
+film geometry. It adds no gas traction, flame or shock propagation, evaporation,
+phase conversion, moving wall or global mechanical/entropy theorem. Time and
+space refinement remain necessary. `tests/reactive_liquid_gas.rs` supplies G1
+independent isomer/finite-capacity balances, G3 data-only changes that reach
+native VOF populations, continuation and G4 rollback checks; synthetic fixtures
+do not constitute empirical combustion or liquid validation.
+
 ## Assembled shell adhesive dissipation
 
 `shear_shell::assembly::MaterialShellAssembly::reduce` projects the original
@@ -7558,9 +7588,23 @@ routes refuse. Initial source snapshots and electrical/thermal clocks must agree
 Cancellation or any late refusal leaves all accepted fields, charges, fluxes,
 source selections, and thermal stores unchanged.
 
+`ConductionCircuit::new_with_material_resistors` also binds complete material
+conductors to every nonspatial resistor slot. Their geometry and source basis
+come from the original `ResolvedConductor`; placeholder graph resistances do not
+enter the calculation. `step_material_circuit_candidate` uses the existing
+`PreparedMaterialNetwork` to re-evaluate these same sources at every proposed
+thermal endpoint, alongside the spatial conductivity and heat-transport links.
+Conductivity and resistivity remain distinct source bases. The accepted branch
+reports retain complete conductor snapshots and their original Joule-power law.
+Each material resistor occupies its whole caloric cell; it cannot also represent
+the spatial body's already covered volume. Its initial geometry, complete source
+bundle and state must agree with the accepted electrical model. The ideal-resistor
+step refuses material-bound circuits rather than freezing their coefficients.
+
 This rung represents one heterogeneous two-electrode body in a bounded graph.
-It holds geometry, solid density, circuit topology, C/L values, other graph
-resistances, and source-port inputs fixed over the interval. Electrical midpoint
+It holds geometry, solid density, circuit topology, C/L values, explicitly ideal
+graph resistances, and source-port inputs fixed over the interval. Source-bound
+graph resistances evolve through the same material/thermal residual. Electrical midpoint
 stepping with endpoint material coefficients and backward-Euler heat is generally
 first-order as a coupled method; energy admission is not a discretization-error
 bound. It does not add conductor induction/displacement current, moving geometry,
@@ -7569,7 +7613,11 @@ phase transitions, contact resistance, or thermoelectric transport.
 The added `tests/conduction_enthalpy/circuit.rs` regressions use independent RC
 and RL decay formulae, layered local heating, a nonlinear scalar temperature/
 resistance balance, an external source with another heat-producing resistor,
-source/charge continuation, and refusal/retry checks (G1/G3/G4). These tests were
+source/charge continuation, and refusal/retry checks (G1/G3/G4). Its material-load
+regressions additionally compare closed-form current-driven heating for both
+source bases, an independent RC/thermal balance after a data-only material swap,
+continuing charge/temperature feedback, whole-volume overlap and source-geometry
+refusals, and late cancellation without partial publication. These tests were
 authored and source-reviewed; Rust parsing/format checks passed. They were not
 executed in the implementation environment because the workspace disk was full
 and DSR/RCH were unavailable. No runtime conformance or empirical calibration
@@ -9086,6 +9134,18 @@ caloric and thermal-transport sources. Endpoint R(T), discrete-gradient magnetic
 and mechanical motion, and native thermal backward Euler are solved jointly
 through `cell_driver_candidate`. Every trial starts from the same accepted
 magnetic and thermal history, with matching clocks and source snapshots.
+
+`ThermalMagneticTsDriver::from_material` builds a new specimen from the same
+whole-cell conductor and caloric source: its initial resistance and coil mass
+are resolved together. `SpeakerMechanics` supplies only non-coil moving mass,
+suspension, mechanical loss, piston area and travel; the original magnetic
+profile supplies Bl and Le, and the native gas load remains separate. A data-only
+electrical or density substitution therefore reaches native current, motion,
+pressure and heating without a duplicated resistance or total-mass card.
+Construction starts at rest at the actual thermal clock; `bind` preserves an
+existing driver's state. Accepted coil mass remains fixed and is checked during
+continuation. Source-swap, conductivity-equivalence, retained-state, advanced-clock
+and changed-inventory regressions exercise this path.
 
 Only the native coil-current I²R loss enters the coil cell. Suspension, compact
 radiation and panel dissipation remain separately reported external losses.
