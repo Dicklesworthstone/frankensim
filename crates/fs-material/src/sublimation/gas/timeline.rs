@@ -18,7 +18,11 @@
 //! Reflected heat is included once in stream energy and separately reported as
 //! a subaccount. Reference geometry is retained, with recession per surface.
 
-use std::cell::RefCell;
+/// Adaptive control of the complete heat/phase split using these same owners.
+#[path = "timeline/adaptive.rs"]
+pub mod adaptive;
+
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::accommodation::ThermalAccommodation;
@@ -218,11 +222,32 @@ impl HeatTotals {
     }
 }
 
-#[derive(Clone)]
-struct SolidBranchGuard {
-    ranges: BTreeMap<CellId, [f64; 2]>,
+// Ephemeral execution accounting, NOT physical observer state. Coarse and
+// rejected trials spend real work; their physical state remains transactional.
+// This counter is local to one adaptive request and never changes user state.
+struct ThermalWork {
+    limit: usize,
+    used: Cell<usize>,
 }
-impl SolidBranchGuard {
+impl ThermalWork {
+    fn new(limit: usize) -> Self { Self { limit, used: Cell::new(0) } }
+    fn used(&self) -> usize { self.used.get() }
+    fn remaining(&self) -> usize { self.limit - self.used.get() }
+    fn charge(&self) -> Result<(), DepositionError> {
+        if self.used.get() >= self.limit {
+            return Err(DepositionError::Budget("adaptive coupled thermal work"));
+        }
+        self.used.set(self.used.get() + 1);
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct SolidBranchGuard<'a> {
+    ranges: BTreeMap<CellId, [f64; 2]>,
+    work: Option<&'a ThermalWork>,
+}
+impl SolidBranchGuard<'_> {
     fn check(&self, cell: &DepositedCell) -> Result<(), DepositionError> {
         if let Some(&[lo, hi]) = self.ranges.get(&cell.id) {
             if !(lo..=hi).contains(&cell.specific_h_j_kg) {
@@ -247,7 +272,7 @@ impl SolidBranchGuard {
         Ok(())
     }
 }
-impl DepositionObserver for SolidBranchGuard {
+impl DepositionObserver for SolidBranchGuard<'_> {
     type Error = DepositionError;
     fn event(&mut self, event: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
         if let Event::Birth(cell) = event {
@@ -263,6 +288,7 @@ impl DepositionObserver for SolidBranchGuard {
         thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), Self::Error> {
+        if let Some(work) = self.work { work.charge()?; }
         self.check_all(thermal, checkpoint)
     }
 }
@@ -291,7 +317,7 @@ pub fn advance_deposition_with_gas<'thermal, 'catalog>(
     checkpoint: impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<GasTimelineCandidate<'thermal, 'catalog>, GasTimelineError> {
     advance_deposition(thermal, surfaces, None, gas, catalog, target_s,
-        thermal_config, phase_config, checkpoint)
+        thermal_config, phase_config, None, checkpoint)
 }
 
 /// Original heat timeline with jointly evolving phase exchange and reflected heat.
@@ -309,8 +335,8 @@ pub fn advance_deposition_with_gas<'thermal, 'catalog>(
 ///
 /// This uses the existing event-clipped, first-order heat/phase splitting and
 /// fixed maximum physical timestep. Refine max_dt_s for both coupling and
-/// molecular accuracy; the standalone adaptive chamber does not estimate this
-/// timeline's splitting error. All original branch, work and rollback gates hold.
+/// molecular accuracy, or use `adaptive` to estimate the complete split error.
+/// All original branch, work and rollback gates hold.
 #[allow(clippy::too_many_arguments)]
 pub fn advance_deposition_with_accommodation<'thermal, 'catalog>(
     thermal: &DepositionSimulation<'thermal>,
@@ -324,7 +350,7 @@ pub fn advance_deposition_with_accommodation<'thermal, 'catalog>(
     checkpoint: impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<GasTimelineCandidate<'thermal, 'catalog>, GasTimelineError> {
     advance_deposition(thermal, surfaces, Some(accommodation), gas, catalog, target_s,
-        thermal_config, phase_config, checkpoint)
+        thermal_config, phase_config, None, checkpoint)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -337,6 +363,7 @@ fn advance_deposition<'thermal, 'catalog>(
     target_s: f64,
     thermal_config: StepConfig,
     phase_config: GasChamberSolve,
+    work: Option<&ThermalWork>,
     mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<GasTimelineCandidate<'thermal, 'catalog>, GasTimelineError> {
     checkpoint()?;
@@ -410,7 +437,7 @@ fn advance_deposition<'thermal, 'catalog>(
             }
         }
     }
-    let guard = SolidBranchGuard { ranges };
+    let guard = SolidBranchGuard { ranges, work };
     guard.check_all(thermal, &mut checkpoint)?;
     // Validate original gas/catalog/controls even for a zero-duration window or
     // when all selected cells are scheduled strictly after the target.
@@ -433,7 +460,7 @@ fn advance_deposition<'thermal, 'catalog>(
         &guard,
         thermal.time_s(),
         thermal_config,
-        budget.max_substeps,
+        work.map_or(budget.max_substeps, |meter| meter.remaining().min(budget.max_substeps)),
         &mut checkpoint,
     )?;
     let mut heat = HeatTotals::default();
@@ -487,6 +514,7 @@ fn advance_deposition<'thermal, 'catalog>(
             .max_substeps
             .checked_sub(heat.substeps)
             .ok_or(DepositionError::Budget("evolving-gas thermal substeps"))?;
+        let remaining = work.map_or(remaining, |meter| meter.remaining().min(remaining));
         let (heated, _, report) = next.advance_observed_limited(
             &guard,
             stop_s,
