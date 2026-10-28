@@ -7,18 +7,26 @@ use fs_contact::normal_patch::source::{PointContactEnvelope, PointContactGeometr
 use fs_contact::normal_patch::source::state::PointContactMaterialCards;
 use fs_matdb::{InterfaceSystemCard, NormalizedModelPack};
 use fs_tribo::InputAuthority;
+use fs_couple::bowed_string::runtime::reciprocal::bank::shell::MaterialShellPoint;
+
+#[derive(Clone, Debug)]
+enum ReceiverMaterial {
+    Pack(String),
+    Body,
+}
 
 #[derive(Clone, Debug)]
 pub(super) struct Declaration {
     pub(super) gap_m: f64,
-    receiver: String,
+    receiver: ReceiverMaterial,
     interface: String,
     model: String,
     geometry: PointContactGeometry,
     envelope: PointContactEnvelope,
 }
 impl Declaration {
-    pub(super) fn parse(values: &[&str], gap_m: f64, maximum_indentation_m: f64) -> Result<Self> {
+    pub(super) fn parse(values: &[&str], gap_m: f64, maximum_indentation_m: f64,
+        receiver: Receiver) -> Result<Self> {
         let path = |word: &str| -> Result<String> {
             if word.is_empty() || word.len() > 512 || !Path::new(word).components()
                 .all(|p| matches!(p, std::path::Component::Normal(_))) {
@@ -46,7 +54,12 @@ impl Declaration {
                 envelope.uncertainty.load_relative].iter().any(|u| *u < 0.0) {
             return Err("material-stop requires positive relative curvatures/depths and nonnegative rate/uncertainties".into());
         }
-        Ok(Self { gap_m, receiver: path(values[2])?, interface: path(values[3])?,
+        let receiver = match receiver {
+            Receiver::Shell(_) if values[2] == "@receiver" => ReceiverMaterial::Body,
+            Receiver::Fixed if values[2] != "@receiver" => ReceiverMaterial::Pack(path(values[2])?),
+            _ => return Err("shell material-stop requires @receiver; fixed contact requires an explicit bulk pack".into()),
+        };
+        Ok(Self { gap_m, receiver, interface: path(values[3])?,
             model: path(values[4])?,
             geometry: PointContactGeometry::EllipticParaboloid {
                 maximum_curvature_m_inverse, minimum_curvature_m_inverse }, envelope })
@@ -107,7 +120,8 @@ impl Profile {
 }
 
 impl Sources {
-    pub(super) fn resolve(&self, entries: &[Entry], spec: &input::Spec, catalog: &mut Catalog,
+    pub(super) fn resolve(&self, entries: &[Entry], shell_points: &[MaterialShellPoint<'_>],
+        spec: &input::Spec, catalog: &mut Catalog,
         loader: &mut impl FnMut(&str) -> Result<MaterialPack>, gate: &CancelGate)
         -> Result<Vec<(usize, SourcePointContact)>> {
         let mut sources = Vec::new();
@@ -130,10 +144,38 @@ impl Sources {
             if d.envelope.layer_thickness_m > depth || d.envelope.half_space_depth_m > depth {
                 return Err("material-stop half-space/layer depth exceeds the string's actual outer constituent".into());
             }
-            load_pack(&d.receiver, catalog, loader)?;
+            let receiver = match &d.receiver {
+                ReceiverMaterial::Pack(path) => { load_pack(path, catalog, loader)?; None },
+                ReceiverMaterial::Body => {
+                    let Receiver::Shell(part) = entry.receiver else {
+                        return Err("source receiver lost its original shell geometry".into());
+                    };
+                    let point = shell_points.get(part).ok_or("source receiver names an absent shell point")?;
+                    if d.envelope.layer_thickness_m > point.thickness_m
+                        || d.envelope.half_space_depth_m > point.thickness_m {
+                        return Err("material-stop half-space/layer depth exceeds the receiver's actual section thickness".into());
+                    }
+                    // The current point owner is isotropic. Merely finding a
+                    // similarly named isotropic property elsewhere on an
+                    // orthotropic card cannot replace its actual body model.
+                    if !point.isotropic_elasticity || ["density", "young_modulus", "poisson_ratio"].iter()
+                        .any(|name| point.material.property(name).is_none()) {
+                        return Err("source point contact requires the receiver's actual isotropic elastic state".into());
+                    }
+                    Some(point.material)
+                },
+            };
             let a = &catalog.get(outer).ok_or("outer string material is absent from the catalog")?.card;
-            let b = &catalog[&d.receiver].card;
+            let b = match &d.receiver {
+                ReceiverMaterial::Pack(path) => &catalog[path].card,
+                ReceiverMaterial::Body => {
+                    let actual = receiver.ok_or("source receiver lost its original material")?;
+                    &catalog.values().find(|pack| pack.card.content_hash() == actual.card_identity())
+                        .ok_or("receiver's original immutable material card is absent from the catalog")?.card
+                },
+            };
             let point = material_inputs::query(a, spec.temperature, spec.omega)?;
+            let receiver_point = receiver.map_or_else(|| point.clone(), |state| state.query());
             let interface = self.interfaces.get(&d.interface).ok_or("material stop interface pack is not loaded")?;
             let models = self.models.get(&d.model).ok_or("material stop model pack is not loaded")?;
             // This explicit record associates two existing normalized artifacts;
@@ -149,8 +191,22 @@ impl Sources {
                 interface_selection: Pick::SingleClaimOnly,
                 model_selection: NormalContactModelSelection::SingleSupported,
                 authority: InputAuthority::CallerDeclared,
-            }.resolve(&point, d.geometry, PointContactEnvelope {
+            }.resolve_at_temperatures([&point, &receiver_point], &point, d.geometry, PointContactEnvelope {
                 maximum_step_s: 1.0/f64::from(spec.rate), ..d.envelope })?;
+            if let Some(actual) = receiver {
+                let contact = source.model().normal_state().elastic().surface_b_state().resolved();
+                if contact.card_identity() != actual.card_identity()
+                    || contact.query_point() != actual.query_point()
+                    || contact.axis_quantities() != actual.axis_quantities()
+                    || ["density", "young_modulus", "poisson_ratio"].iter().any(|name| {
+                        match (actual.property(name), contact.property(name)) {
+                            (Some(body), Some(patch)) => body.answer() != patch.answer(),
+                            _ => true,
+                        }
+                    }) {
+                    return Err("normal contact must retain the receiver body's exact elastic source receipts and state".into());
+                }
+            }
             sources.push((index, source));
         }
         poll(gate)?;

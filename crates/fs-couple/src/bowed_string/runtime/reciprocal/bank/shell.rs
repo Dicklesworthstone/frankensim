@@ -15,6 +15,9 @@ use crate::shear_shell::assembly::{MaterialShellAssembly, ShellAssemblyForcePort
     ShellAssemblyReductionOptions};
 use fs_plate::shell::mitc::{MitcBudget, NodalDirectors, ShellConstraint, ShellMass};
 
+mod point;
+pub use point::{MaterialShellPoint, ShellPointGeometry};
+
 /// Complete source-bound curved body and physical connection geometry.
 #[derive(Clone, Debug)]
 pub struct SharedMaterialShellBody {

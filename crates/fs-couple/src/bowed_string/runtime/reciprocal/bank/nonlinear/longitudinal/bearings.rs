@@ -5,7 +5,7 @@
 
 use super::*;
 use super::super::super::interfaces::{
-    MaterialBridgeInterface, footprint, outer_material, validate_frequencies,
+    MaterialBridgeInterface, outer_material, validate_frequencies,
     validate_surface_states,
 };
 use crate::render::schedule::force::coupled::{
@@ -13,6 +13,7 @@ use crate::render::schedule::force::coupled::{
 };
 use crate::render::schedule::force::coupled::contact::friction::FrictionModalSystem;
 use fs_material::state_point::ResolvedLinearInterface;
+use super::super::super::shell::ShellPointGeometry;
 
 /// Cold connection capacity, independent of instrument and physical coefficients.
 pub const MAX_AXIAL_BEARINGS: usize = 16;
@@ -49,15 +50,15 @@ impl AxialBearingGeometry {
 
     /// Physical force/moment per unit axial force: [t, r cross t]. Its dot
     /// product with [U, Theta] is t dot (U + Theta cross r), including its sign.
+    #[cfg(test)]
     fn nodal_row(&self) -> Result<[f64; 6], ImpactError> {
         self.validate()?;
-        let [x, y, z] = self.string_axis;
-        let [rx, ry, rz] = self.contact_arm_m;
-        let row = [x, y, z, ry*z-rz*y, rz*x-rx*z, rx*y-ry*x];
-        if row.iter().any(|x| !x.is_finite()) {
-            return Err(invalid("axial bearing moment arm overflow"));
-        }
-        Ok(row)
+        self.shell_geometry().nodal_row().map_err(|e| ImpactError::Owner(e.to_string()))
+    }
+
+    fn shell_geometry(&self) -> ShellPointGeometry {
+        ShellPointGeometry { shell_component: self.shell_component, node: self.node,
+            direction: self.string_axis, arm_m: self.contact_arm_m }
     }
 }
 
@@ -73,46 +74,10 @@ pub struct MaterialAxialBearing {
 fn receiver<'a>(
     source: &'a MaterialStringBankSource, geometry: &AxialBearingGeometry, gate: &CancelGate,
 ) -> Result<(Vec<f64>, &'a ResolvedMaterialStatePoint), ImpactError> {
-    let (specimen, modes) = if let Some(body) = &source.material_shell_assembly {
-        let part = body.specimen.components.get(geometry.shell_component)
-            .ok_or_else(|| invalid("axial bearing names an absent shell assembly part"))?;
-        let image = source.material_shell_assembly_image()
-            .ok_or_else(|| invalid("axial bearing lost the assembled shell basis"))?;
-        let modes = image.physical_modes().get(geometry.shell_component)
-            .ok_or_else(|| invalid("axial bearing lost its original shell part basis"))?;
-        (&part.specimen, modes.as_slice())
-    } else if let Some(body) = &source.material_shell {
-        if geometry.shell_component != 0 {
-            return Err(invalid("single-shell axial bearing requires component zero"));
-        }
-        let image = source.material_shell_image()
-            .ok_or_else(|| invalid("axial bearing lost the original shell basis"))?;
-        (&body.specimen, image.physical_modes())
-    } else {
-        return Err(invalid("axial bearing requires a sourced shell or assembled-shell body"));
-    };
-    let mesh = specimen.mesh();
-    if geometry.node >= mesh.nodes.len() {
-        return Err(invalid("axial bearing names an absent physical shell node"));
-    }
-    let size = mesh.nodes.len().checked_mul(6).ok_or_else(|| invalid("axial bearing footprint overflow"))?;
-    let start = geometry.node * 6;
-    let row = geometry.nodal_row()?;
-    let mut footprint_row = vec![0.0; size];
-    footprint_row[start..start+6].copy_from_slice(&row);
-    let mut material = None;
-    footprint(mesh.nodes.len(), &mesh.tris, &footprint_row, 6,
-        |element| specimen.material_at_element(element), &mut material, Some(gate))
+    geometry.validate()?;
+    let point = source.shell_point(&geometry.shell_geometry(), gate)
         .map_err(|e| ImpactError::Owner(e.to_string()))?;
-    let material = material.ok_or_else(|| invalid("axial bearing node has no actual material surface"))?;
-    let shapes = modes.iter().map(|mode| {
-        let nodal = mode.get(start..start+6)
-            .ok_or_else(|| invalid("axial bearing basis lost its physical node"))?;
-        let shape = nodal.iter().zip(row).map(|(q, f)| q*f).sum::<f64>();
-        if !shape.is_finite() { return Err(invalid("axial bearing body projection overflow")); }
-        Ok(shape)
-    }).collect::<Result<Vec<_>, ImpactError>>()?;
-    Ok((shapes, material))
+    Ok((point.body.shapes, point.material))
 }
 
 pub(super) fn lower(

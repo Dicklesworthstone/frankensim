@@ -973,7 +973,34 @@ The record belongs under the existing `frankensim-string-stops-v1` header.
 `SIDE` is `positive`, `negative`, or `normal NX NY`; station and optional
 normal/station-motion programs use the existing physical controls. `GAP_M`
 is signed unloaded surface clearance, so negative values explicitly preload
-the contact. The first native source path supports a prescribed fixed receiver.
+the contact. `fixed` selects a prescribed receiver. A moving receiver can instead
+be an actual node of the retained material shell or shell assembly:
+
+```text
+shell-receiver ID SHELL_PART NODE NX NY NZ RX_M RY_M RZ_M
+material-stop ID STRING STATION SIDE shell:ID GAP_M @receiver INTERFACE_PACK MODEL_PACK KAPPA_MAX_PER_M KAPPA_MIN_PER_M MAX_RATE_M_S HALFSPACE_DEPTH_M LAYER_THICKNESS_M RADIUS_REL_UNCERT MODULUS_REL_UNCERT LOAD_REL_UNCERT MAX_FORCE_N MAX_INDENT_M
+```
+
+Declare each named receiver before its contacts and before the motion blocks.
+`SHELL_PART` is the original assembly component index, or zero for a single
+shell. `NODE` addresses that part's original physical mesh. The finite unit
+vector `N` and node-to-contact arm `R` are in the body's global XYZ frame.
+The exact map is `N · (U + Theta × R)`, so the reaction includes both force
+and the moment `R × (force N)`. The string-side normal and this body direction
+must describe the same physical direction in their respective declared frames;
+the adapter does not infer a string-to-body orientation. `negative` reverses
+both sides together. An authored `stop` can also use `shell:ID` with its existing
+explicit constitutive coefficients.
+
+For a `material-stop`, `@receiver` is mandatory with `shell:ID`: the actual
+incident body material supplies the original immutable bulk card, physical
+state and elastic source receipts. A separate receiver pack cannot override
+them. All elements touching the node must have the same resolved material
+state; interfaces between different materials require their own physical patch
+description and refuse here. Assembly parts share the original assembled body
+basis while retaining their own material identities. Body motion reacts in
+the same simultaneous normal/friction solve as string, bridge and cavity
+motion; no new body mass, delayed force or prescribed-motion surrogate is added.
 
 `INTERFACE_PACK` is an existing `NormalizedInterfacePack`, ordered string
 surface A then receiver surface B. `MODEL_PACK` is an existing
@@ -992,7 +1019,11 @@ patch; a zero curvature/line-contact geometry is unsupported by this input.
 Depth, layer thickness, uncertainty and rate bounds must be explicitly supplied.
 The declared depth and layer thickness cannot exceed the actual contacting
 string constituent: radius for a homogeneous string, winding-wire radius for
-a close-wound string, or outer-sleeve thickness for a bonded string. The
+a close-wound string, or outer-sleeve thickness for a bonded string. A shell
+receiver additionally bounds both depths by the smallest actual thickness of
+its incident sections. The current point law requires the receiver's actual
+isotropic elastic body state; an orthotropic-only body does not become an
+isotropic contact merely because its pack also contains scalar modulus data. The
 original finite-patch owner additionally checks patch size, strain, pressure,
 yield and rate applicability. This does not infer a tissue model, treat a whole
 winding as homogeneous bulk, or certify a measured instrument.

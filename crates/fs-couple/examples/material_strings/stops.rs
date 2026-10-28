@@ -16,6 +16,7 @@ use fs_couple::render::schedule::force::coupled::contact::friction::multiple::ob
 use fs_dcontact::Obstacle;
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::contact_load::BowContactLoad;
 use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::TransverseDirection;
+use fs_couple::bowed_string::runtime::reciprocal::bank::shell::ShellPointGeometry;
 
 pub const MAX_BYTES: usize = 16_384;
 const MAX_STOPS: usize = 32;
@@ -39,6 +40,7 @@ enum Receiver {
     Fixed,
     Bridge(usize),
     Fiber(usize),
+    Shell(usize),
 }
 #[derive(Clone, Debug)]
 enum Law {
@@ -76,6 +78,11 @@ struct BowSurface {
     receiver_bridge: usize,
 }
 #[derive(Clone, Debug)]
+struct ShellReceiver {
+    name: String,
+    geometry: ShellPointGeometry,
+}
+#[derive(Clone, Debug)]
 pub struct Profile {
     pub bytes: Vec<u8>,
     entries: Vec<Entry>,
@@ -83,6 +90,7 @@ pub struct Profile {
     station_motion: Option<StopStationProgram>,
     bow_contacts: Vec<BowContactLoad>,
     bow_surfaces: Vec<BowSurface>,
+    shell_receivers: Vec<ShellReceiver>,
     sources: material::Sources,
 }
 
@@ -114,6 +122,7 @@ impl Profile {
         let mut station_motion = None;
         let mut bow_contacts: Vec<BowContactLoad> = Vec::new();
         let mut bow_surfaces: Vec<BowSurface> = Vec::new();
+        let mut shell_receivers: Vec<ShellReceiver> = Vec::new();
         while let Some(line) = lines.next() {
             let fields: Vec<_> = line.split_ascii_whitespace().collect();
             if fields.first() == Some(&"motion") {
@@ -128,6 +137,24 @@ impl Profile {
             }
             if motion.is_some() || station_motion.is_some() {
                 return Err("stop, bow-contact and bow-surface declarations must precede the geometry motion blocks".into());
+            }
+            if fields.first() == Some(&"shell-receiver") {
+                if fields.len() != 10 {
+                    return Err("expected shell-receiver ID PART NODE NX NY NZ RX_M RY_M RZ_M".into());
+                }
+                let name = fields[1];
+                if shell_receivers.len() == MAX_STOPS || name.len() > 64
+                    || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+                    || shell_receivers.iter().any(|receiver| receiver.name == name) {
+                    return Err("shell receivers require at most 32 unique short ASCII identities".into());
+                }
+                let geometry = ShellPointGeometry { shell_component: fields[2].parse()?,
+                    node: fields[3].parse()?,
+                    direction: [scalar(fields[4])?, scalar(fields[5])?, scalar(fields[6])?],
+                    arm_m: [scalar(fields[7])?, scalar(fields[8])?, scalar(fields[9])?] };
+                geometry.validate()?;
+                shell_receivers.push(ShellReceiver { name: name.into(), geometry });
+                continue;
             }
             if fields.first() == Some(&"bow-surface") {
                 if fields.len() != 3 { return Err("expected bow-surface BOW_INDEX bridge:STRING".into()); }
@@ -180,8 +207,11 @@ impl Profile {
                     Receiver::Bridge(index.parse()?)
                 } else if let Some(index) = values[0].strip_prefix("fiber:") {
                     Receiver::Fiber(index.parse()?)
+                } else if let Some(name) = values[0].strip_prefix("shell:") {
+                    Receiver::Shell(shell_receivers.iter().position(|receiver| receiver.name == name)
+                        .ok_or("shell receiver must name a preceding shell-receiver declaration")?)
                 } else {
-                    return Err("receiver must be fixed, bridge:STRING or fiber:CELL".into());
+                    return Err("receiver must be fixed, bridge:STRING, fiber:CELL or shell:ID".into());
                 };
             let gap = scalar(values[1])?;
             let max_force = scalar(values[values.len()-2])?;
@@ -193,10 +223,10 @@ impl Profile {
                 return Err("stop geometry and physical limits are invalid".into());
             }
             let law = if material {
-                if !matches!(receiver, Receiver::Fixed) {
-                    return Err("material-stop currently requires an explicit fixed prescribed receiver".into());
+                if !matches!(receiver, Receiver::Fixed | Receiver::Shell(_)) {
+                    return Err("material-stop requires an explicit fixed or actual shell receiver".into());
                 }
-                Law::Material(material::Declaration::parse(values, gap, max_penetration)?)
+                Law::Material(material::Declaration::parse(values, gap, max_penetration, receiver)?)
             } else {
                 let stiffness = scalar(values[2])?;
                 let alpha = scalar(values[3])?;
@@ -217,7 +247,7 @@ impl Profile {
         if entries.is_empty() && bow_surfaces.is_empty() {
             return Err("stop profile must declare at least one contact or bow surface".into());
         }
-        Ok(Self { bytes: bytes.to_vec(), entries, motion, station_motion, bow_contacts, bow_surfaces,
+        Ok(Self { bytes: bytes.to_vec(), entries, motion, station_motion, bow_contacts, bow_surfaces, shell_receivers,
             sources: material::Sources::default() })
     }
 
@@ -353,7 +383,10 @@ impl Profile {
         poll(gate)?;
         // Resolve all card/model/geometry associations before binding any runtime
         // contact. A sourced record has no independently authored K/alpha/loss.
-        let sources = self.sources.resolve(&self.entries, spec, catalog, loader, gate)?;
+        let shell_points = self.shell_receivers.iter().map(|receiver|
+            bank.source().bank().shell_point(&receiver.geometry, gate))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let sources = self.sources.resolve(&self.entries, &shell_points, spec, catalog, loader, gate)?;
         let strings = bank.source().bank().strings();
         self.validate_members(strings.len())?;
         if bank.source().ribbon().is_some() && !self.bow_surfaces.is_empty() {
@@ -386,6 +419,7 @@ impl Profile {
             poll(gate)?;
             let body = match entry.receiver {
                 Receiver::Fixed => None,
+                Receiver::Shell(i) => Some(shell_points[i].body.clone()),
                 Receiver::Bridge(i) => {
                 let links = &strings[i].connections;
                 if links.len() != 1 { return Err("receiver bridge must have exactly one actual body footprint".into()); }

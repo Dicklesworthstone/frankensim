@@ -5,6 +5,8 @@ use fs_matdb::{MODEL_PACK_TARGET_BASIS, ModelNormalizationReceipt, ModelNormaliz
     NormalizedModelPack, SurfaceSpec, SystemContext, ValidityBoundSide};
 #[path = "../../../../fs-contact/tests/source_point/common.rs"]
 mod source_fixture;
+#[path = "normal_sources/shell.rs"]
+mod shell;
 
 fn provenance() -> Provenance {
     Provenance { source: "synthetic native normal-contact test".into(),

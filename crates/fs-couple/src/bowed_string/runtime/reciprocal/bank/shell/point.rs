@@ -1,0 +1,172 @@
+//! One physical shell point for reciprocal axial, normal and other force ports.
+use super::*;
+use fs_material::state_point::ResolvedMaterialStatePoint;
+
+/// Geometry in the original shell mesh's global XYZ frame.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShellPointGeometry {
+    /// Original assembly part; zero for a single material shell.
+    pub shell_component: usize,
+    /// Original physical mesh node within that part.
+    pub node: usize,
+    /// Positive displacement/force direction, a finite unit vector.
+    pub direction: [f64; 3],
+    /// Vector [m] from the shell node to the physical contact point.
+    pub arm_m: [f64; 3],
+}
+
+impl ShellPointGeometry {
+    /// Admit explicit geometry without normalizing or inventing an orientation.
+    pub fn validate(&self) -> Result<(), ReciprocalStringError> {
+        self.nodal_row().map(|_| ())
+    }
+
+    /// Work-conjugate force and moment [d, r cross d]. Its dot product with
+    /// [U, Theta] equals d dot (U + Theta cross r).
+    pub(crate) fn nodal_row(&self) -> Result<[f64; 6], ReciprocalStringError> {
+        let norm2 = self.direction.iter().map(|x| x * x).sum::<f64>();
+        if !norm2.is_finite()
+            || (norm2 - 1.0).abs() > 1e-12
+            || self.arm_m.iter().any(|x| !x.is_finite())
+        {
+            return Err(invalid(
+                "shell point requires a finite unit direction and finite moment arm",
+            ));
+        }
+        let [x, y, z] = self.direction;
+        let [rx, ry, rz] = self.arm_m;
+        let row = [x, y, z, ry * z - rz * y, rz * x - rx * z, rx * y - ry * x];
+        if row.iter().any(|x| !x.is_finite()) {
+            return Err(invalid("shell point moment arm overflow"));
+        }
+        Ok(row)
+    }
+}
+
+/// Actual original-body map and physical material at one retained shell node.
+/// This does not certify a particular contact law or infer a surface coating.
+#[derive(Clone, Debug)]
+pub struct MaterialShellPoint<'a> {
+    /// Original supplied-body component zero, before the string prefix.
+    pub body: ModalAttachment,
+    /// Same complete source state on EVERY element incident to the node.
+    pub material: &'a ResolvedMaterialStatePoint,
+    /// Minimum physical section thickness over those incident elements [m].
+    pub thickness_m: f64,
+    /// Every incident section was actually compiled with isotropic elasticity.
+    /// Extra isotropic answers on an orthotropic card do not establish this.
+    pub isotropic_elasticity: bool,
+}
+
+impl MaterialStringBankSource {
+    /// Project a force at an actual shell/assembly node into the original common
+    /// body basis. Reactions use its transpose in the existing coupled owner.
+    /// Different incident material states, absent nodes and non-shell receivers
+    /// refuse; an assembly seam never borrows another part's material identity.
+    pub fn shell_point(
+        &self,
+        geometry: &ShellPointGeometry,
+        gate: &CancelGate,
+    ) -> Result<MaterialShellPoint<'_>, ReciprocalStringError> {
+        poll(gate)?;
+        let row = geometry.nodal_row()?;
+        let (specimen, modes) = if let Some(body) = &self.material_shell_assembly {
+            let part = body
+                .specimen
+                .components
+                .get(geometry.shell_component)
+                .ok_or_else(|| invalid("shell point names an absent assembly part"))?;
+            let image = self
+                .material_shell_assembly_image()
+                .ok_or_else(|| invalid("shell point lost the assembled body basis"))?;
+            let modes = image
+                .physical_modes()
+                .get(geometry.shell_component)
+                .ok_or_else(|| invalid("shell point lost its original part basis"))?;
+            (&part.specimen, modes.as_slice())
+        } else if let Some(body) = &self.material_shell {
+            if geometry.shell_component != 0 {
+                return Err(invalid("single-shell point requires component zero"));
+            }
+            let image = self
+                .material_shell_image()
+                .ok_or_else(|| invalid("shell point lost the original body basis"))?;
+            (&body.specimen, image.physical_modes())
+        } else {
+            return Err(invalid(
+                "physical shell point requires a sourced shell or assembled-shell body",
+            ));
+        };
+        let mesh = specimen.mesh();
+        if geometry.node >= mesh.nodes.len() {
+            return Err(invalid("shell point names an absent physical node"));
+        }
+        let size = mesh
+            .nodes
+            .len()
+            .checked_mul(6)
+            .ok_or_else(|| invalid("shell point footprint overflow"))?;
+        let start = geometry.node * 6;
+        let mut footprint_row = vec![0.0; size];
+        footprint_row[start..start + 6].copy_from_slice(&row);
+        let mut material = None;
+        super::super::interfaces::footprint(
+            mesh.nodes.len(),
+            &mesh.tris,
+            &footprint_row,
+            6,
+            |element| specimen.material_at_element(element),
+            &mut material,
+            Some(gate),
+        )?;
+        let material =
+            material.ok_or_else(|| invalid("shell point has no actual material surface"))?;
+        let mut thickness_m = f64::INFINITY;
+        let mut isotropic_elasticity = true;
+        for region in specimen.regions() {
+            poll(gate)?;
+            if region
+                .input()
+                .region
+                .region
+                .triangle_indices
+                .iter()
+                .any(|&element| mesh.tris[element].contains(&geometry.node))
+            {
+                thickness_m = thickness_m.min(region.thickness_m());
+                isotropic_elasticity &= matches!(
+                    region.input().region.model,
+                    crate::thin_plate::PlateMaterialModel::Isotropic
+                );
+            }
+        }
+        if !thickness_m.is_finite() || thickness_m <= 0.0 {
+            return Err(invalid(
+                "shell point has no positive physical section thickness",
+            ));
+        }
+        let shapes = modes
+            .iter()
+            .map(|mode| {
+                poll(gate)?;
+                let nodal = mode
+                    .get(start..start + 6)
+                    .ok_or_else(|| invalid("shell point basis lost its physical node"))?;
+                let shape = nodal.iter().zip(row).map(|(q, f)| q * f).sum::<f64>();
+                if !shape.is_finite() {
+                    return Err(invalid("shell point body projection overflow"));
+                }
+                Ok(shape)
+            })
+            .collect::<Result<Vec<_>, ReciprocalStringError>>()?;
+        Ok(MaterialShellPoint {
+            body: ModalAttachment {
+                component: 0,
+                shapes,
+            },
+            material,
+            thickness_m,
+            isotropic_elasticity,
+        })
+    }
+}
