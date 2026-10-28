@@ -4,6 +4,22 @@ This directory retains the human-reviewable source inputs compiled by
 `xtask matdb-pack`. Generated binary packs are deliberately not committed:
 the compiler must reproduce them from the pinned manifest and source record.
 
+## Cured electronics-potting resins: MG Chemicals 2026
+
+Five producer grades add 34 claims for cured thermosets: 834HTC and 832TC thermally conductive epoxies, 832C translucent epoxy, 832FX flexible epoxy, and 8810 rigid polyurethane. Each pack contains cured density, thermal conductivity, specific heat capacity, independently reported thermal diffusivity, tensile strength, and electrical resistivity. Four also contain compressive strength; 832FX does not report it.
+
+| Pack | Claims | Producer sheet |
+| --- | ---: | --- |
+| `mg-chemicals-834htc-cured-2026` | 7 | [834HTC, 23 January 2026, Ver. 6.4](https://mgchemicals.com/downloads/tds/tds-834htc-2parts.pdf) |
+| `mg-chemicals-832tc-cured-2026` | 7 | [832TC, 04 February 2026, Ver. 4.3](https://mgchemicals.com/downloads/tds/tds-832tc-2parts.pdf) |
+| `mg-chemicals-832c-cured-2026` | 7 | [832C, 20 February 2026, Ver. 4.2](https://mgchemicals.com/downloads/tds/tds-832c-2parts.pdf) |
+| `mg-chemicals-832fx-cured-2026` | 6 | [832FX, 23 January 2026, Ver. 4.3](https://mgchemicals.com/downloads/tds/tds-832fx-2parts.pdf) |
+| `mg-chemicals-8810-cured-2026` | 7 | [8810, 23 January 2026, Ver. 5.2](https://mgchemicals.com/downloads/tds/tds-8810-2parts.pdf) |
+
+The three thermal properties have point validity at **298.15 K**. Cured density is explicitly separate from liquid-mixture density and retains an unknown measurement-temperature flag. The sources specify product mix ratios and several possible cure schedules; the actual cure used for the retained property tests is unstated. Grade, cured state, specified mass mix ratio, unknown cure schedule, moisture condition, pressure, and specimen matching remain typed validity conditions. Unknown test temperatures, measurement directions, and loading rates remain explicit where relevant. Every imported claim has unstated uncertainty. Service-temperature ratings and curing temperatures do not extend thermal validity.
+
+The source diffusivity remains an independent observation. Rounded source conductivity, density, and heat capacity do not exactly reproduce it, particularly for 832C and 8810. Consumers must identify a diffusivity computed from `k/(rho*Cp)` as a derived value and preserve its source dependencies; it must not overwrite the reported claim or imply matched specimens. These packs provide measured strength roles without inventing elastic moduli, Poisson ratios, viscoelasticity, curing kinetics, or properties over an operating-temperature window.
+
 ## Printed polymers, compliant materials, ordinary steels and ceramics
 
 This expansion adds **23 source packs and 193 property claims**, including

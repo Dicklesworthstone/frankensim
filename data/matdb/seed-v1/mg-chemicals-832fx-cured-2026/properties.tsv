@@ -1,0 +1,71 @@
+frankensim.matdb-source.v1
+observation	cured-grade	MG Chemicals 832FX cured flexible two-part epoxy	Producer TDS Ver. 4.3; cured-property rows	Product instructions specify A:B 1.22:1 mass or 1:1 volume. Cure alternatives are 48 h at unspecified room temperature, 5 h at 45 C, 2 h at 65 C, 1 h at 80 C, or 30 min at 100 C. The table does not identify the specimen cure, moisture, pressure or shared specimens. Flags zero mean unstated, not physical zero. Service-temperature limits do not define these claims' validity.
+observation	cured-density	MG Chemicals 832FX cured flexible two-part epoxy	Hydrostatic weighing	Cured density 1.1 g/mL becomes 1100 kg/m3. Density test temperature is unstated; this is not the separately listed liquid density.
+observation	thermal-point	MG Chemicals 832FX cured flexible two-part epoxy	ASTM E1461; 25 C	Conductivity, heat capacity and diffusivity have a single source temperature. J/(g K) becomes J/(kg K) by 1000; mm2/s becomes m2/s by 1e-6. Reported diffusivity is retained independently and is not replaced by k/(rho Cp). Rounded source values and unknown specimen matching do not establish exact thermophysical closure or any temperature law.
+observation	strength	MG Chemicals 832FX cured flexible two-part epoxy	ASTM D638 tension	N/mm2 equals MPa. Test temperature, rate and geometry are unstated. Tensile strength supplies neither elasticity nor a viscoelastic law; no compression strength is reported.
+observation	electrical	MG Chemicals 832FX cured flexible two-part epoxy	ASTM D257	Resistivity 5.8e12 ohm cm becomes 5.8e10 ohm m. Electrical test temperature is unstated.
+scalar	density	cured-grade,cured-density	density	1100	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade	1	1	1
+validity	density	cured_material	1	1	1
+validity	density	specified_mass_mix_ratio	1.22	1.22	1
+validity	density	source_cure_schedule_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_pressure_known	0	0	1
+validity	density	source_specimens_matched	0	0	1
+validity	density	source_density_temperature_known	0	0	1
+scalar	thermal-conductivity	cured-grade,thermal-point	thermal_conductivity	0.3	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_grade	1	1	1
+validity	thermal-conductivity	cured_material	1	1	1
+validity	thermal-conductivity	specified_mass_mix_ratio	1.22	1.22	1
+validity	thermal-conductivity	source_cure_schedule_known	0	0	1
+validity	thermal-conductivity	source_moisture_condition_known	0	0	1
+validity	thermal-conductivity	source_pressure_known	0	0	1
+validity	thermal-conductivity	source_specimens_matched	0	0	1
+validity	thermal-conductivity	temperature	298.15	298.15	K
+validity	thermal-conductivity	source_measurement_direction_known	0	0	1
+scalar	specific-heat-capacity	cured-grade,thermal-point	specific_heat_capacity	2700	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	source_grade	1	1	1
+validity	specific-heat-capacity	cured_material	1	1	1
+validity	specific-heat-capacity	specified_mass_mix_ratio	1.22	1.22	1
+validity	specific-heat-capacity	source_cure_schedule_known	0	0	1
+validity	specific-heat-capacity	source_moisture_condition_known	0	0	1
+validity	specific-heat-capacity	source_pressure_known	0	0	1
+validity	specific-heat-capacity	source_specimens_matched	0	0	1
+validity	specific-heat-capacity	temperature	298.15	298.15	K
+scalar	thermal-diffusivity	cured-grade,thermal-point	thermal_diffusivity	1e-7	m2/s	constant
+uncertainty	thermal-diffusivity	unstated	-	-	-	-
+validity	thermal-diffusivity	source_grade	1	1	1
+validity	thermal-diffusivity	cured_material	1	1	1
+validity	thermal-diffusivity	specified_mass_mix_ratio	1.22	1.22	1
+validity	thermal-diffusivity	source_cure_schedule_known	0	0	1
+validity	thermal-diffusivity	source_moisture_condition_known	0	0	1
+validity	thermal-diffusivity	source_pressure_known	0	0	1
+validity	thermal-diffusivity	source_specimens_matched	0	0	1
+validity	thermal-diffusivity	temperature	298.15	298.15	K
+validity	thermal-diffusivity	source_measurement_direction_known	0	0	1
+scalar	tensile-strength	cured-grade,strength	tensile_strength	9.6	MPa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	source_grade	1	1	1
+validity	tensile-strength	cured_material	1	1	1
+validity	tensile-strength	specified_mass_mix_ratio	1.22	1.22	1
+validity	tensile-strength	source_cure_schedule_known	0	0	1
+validity	tensile-strength	source_moisture_condition_known	0	0	1
+validity	tensile-strength	source_pressure_known	0	0	1
+validity	tensile-strength	source_specimens_matched	0	0	1
+validity	tensile-strength	source_mechanical_temperature_known	0	0	1
+validity	tensile-strength	source_measurement_direction_known	0	0	1
+validity	tensile-strength	source_test_rate_known	0	0	1
+scalar	electrical-resistivity	cured-grade,electrical	electrical_resistivity	5.8e10	Ohm*m	constant
+uncertainty	electrical-resistivity	unstated	-	-	-	-
+validity	electrical-resistivity	source_grade	1	1	1
+validity	electrical-resistivity	cured_material	1	1	1
+validity	electrical-resistivity	specified_mass_mix_ratio	1.22	1.22	1
+validity	electrical-resistivity	source_cure_schedule_known	0	0	1
+validity	electrical-resistivity	source_moisture_condition_known	0	0	1
+validity	electrical-resistivity	source_pressure_known	0	0	1
+validity	electrical-resistivity	source_specimens_matched	0	0	1
+validity	electrical-resistivity	source_electrical_temperature_known	0	0	1
+validity	electrical-resistivity	source_measurement_direction_known	0	0	1

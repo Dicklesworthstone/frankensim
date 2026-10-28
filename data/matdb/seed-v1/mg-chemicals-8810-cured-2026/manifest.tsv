@@ -1,0 +1,26 @@
+frankensim.matdb-manifest.v3
+pack_id	mg-chemicals-8810-cured-2026
+redistribution	permitted	Selected attributed numerical facts and original notes only; no source document or table layout is redistributed
+citation	MG Chemicals, 8810 Technical Data Sheet, 23 January 2026, Ver. 5.2, pp. 1-3, cure instructions and cured-property tables; https://mgchemicals.com/downloads/tds/tds-8810-2parts.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	mg-8810-cured	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_diffusivity	thermal-diffusivity	dimensional
+property	tensile_strength	tensile-strength	dimensional
+property	compressive_strength	compressive-strength	dimensional
+property	electrical_resistivity	electrical-resistivity	dimensional
+axis	source_grade	source-grade-mg-8810	dimensional
+axis	cured_material	cured-material	dimensional
+axis	specified_mass_mix_ratio	specified-resin-to-hardener-mass-ratio	dimensional
+axis	source_cure_schedule_known	source-cure-schedule-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	source_specimens_matched	source-specimens-matched	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	source_density_temperature_known	source-density-temperature-known	dimensional
+axis	source_measurement_direction_known	source-measurement-direction-known	dimensional
+axis	source_mechanical_temperature_known	source-mechanical-temperature-known	dimensional
+axis	source_test_rate_known	source-test-rate-known	dimensional
+axis	source_electrical_temperature_known	source-electrical-temperature-known	dimensional
