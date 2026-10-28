@@ -672,3 +672,30 @@ complete the general Moreau-Jean multicontact stepper. Oblique applied forces,
 anisotropic bodies, finite-mass plane recoil, rolling/torsional resistance,
 arbitrary-shape certified CCD, material calibration and contact adjoints remain
 outside its scope.
+
+## Native rigid-body simultaneous frictional impacts
+
+`frictional_impact::apply_rigid_frictional_impacts` binds the simultaneous
+normal/Coulomb owner to original rigid-body states. Actual masses, principal
+inertias, orientations and COM-relative contact arms determine the full
+normal/tangent Delassus matrix. Assembly contracts only shared-body influence
+blocks, avoiding products over unrelated body coordinates. Stable contact IDs
+also canonicalize native impulse accumulation.
+
+Dynamic pairs receive equal/opposite original point impulses; translating
+prescribed planes supply an explicit external impulse, angular impulse and
+signed support work. Independently reconstructed native endpoint velocities,
+kinetic/midpoint work, total linear/angular momentum and whole-event energy
+must agree before any body is published. Initial penetration, unresolved
+contact or any late balance failure leaves all bodies unchanged. Distinct
+dynamic witnesses are not silently moved to a fabricated common point; a
+tangential couple due to an admitted finite gap can still fail angular balance.
+
+Four native physical tests cover off-center rotated anisotropic inertia with
+independently derived normal/tangent cross-coupling, sticking/restitution and
+moving-support work, a simultaneous three-body chain with exact input-order
+invariance, and penetration/redundancy/cancellation/late angular refusal.
+The contact core's SPD and determined-response scope remains in force.
+This point-impact phase holds poses fixed, requires supplied geometry and
+coefficients, and makes no automatic finite-patch preload, torsional-friction,
+collision-discovery or impact-to-heat allocation claim.

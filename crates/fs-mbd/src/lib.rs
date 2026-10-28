@@ -25,6 +25,8 @@ pub mod articulated_contacts;
 pub mod articulated_impact;
 /// Coupled finite-patch friction on native rigid-body momenta.
 pub mod tangential_friction;
+/// Coupled normal/Coulomb events on native rigid-body momenta.
+pub mod frictional_impact;
 pub mod daimler;
 pub mod davinci;
 pub mod goddard;
