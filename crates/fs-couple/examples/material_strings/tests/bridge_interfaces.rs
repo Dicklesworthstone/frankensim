@@ -3,7 +3,7 @@ use super::*;
 use fs_matdb::{SurfaceSpec, SystemContext};
 use fs_material::state_point::{interface_stiffness_per_area_dims, interface_viscosity_per_area_dims};
 
-fn interface(k: f64, c: f64, outer: &str, body: &str, band: f64) -> NormalizedInterfacePack {
+pub(crate) fn interface(k: f64, c: f64, outer: &str, body: &str, band: f64) -> NormalizedInterfacePack {
     let artifact = fs_blake3::ContentHash([17; 32]);
     let provenance = Provenance { source: "synthetic bridge interface".into(),
         license: "CC0-1.0".into(), artifact: Some(artifact) };

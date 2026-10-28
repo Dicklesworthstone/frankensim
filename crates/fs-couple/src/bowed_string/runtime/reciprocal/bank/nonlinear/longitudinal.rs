@@ -23,6 +23,8 @@ use fs_phs::Storage;
 
 mod loss;
 pub use loss::LongitudinalMaterialLoss;
+pub mod bearings;
+pub use bearings::{AxialBearingGeometry, MaterialAxialBearing};
 
 /// Explicit retained physics and constitutive domain, independent of instrument.
 #[derive(Clone, Debug, PartialEq)]
@@ -151,6 +153,7 @@ pub struct LongitudinalStringObservation {
 pub struct StringBankLongitudinal {
     strings: Vec<MaterialLongitudinalString>,
     config: NonlinearModalConfig,
+    bearings: Vec<MaterialAxialBearing>,
 }
 impl StringBankLongitudinal {
     /// Original material-string declaration order.
@@ -159,6 +162,10 @@ impl StringBankLongitudinal {
     }
     pub const fn config(&self) -> NonlinearModalConfig {
         self.config
+    }
+    /// Original axial bearing geometry and complete resolved surface laws.
+    pub fn bearings(&self) -> &[MaterialAxialBearing] {
+        &self.bearings
     }
 }
 impl MaterialStringBankSource {
@@ -331,9 +338,33 @@ impl ReciprocalStringBank {
     /// creep, heat evolution and interlayer slip are not modeled. Source bands
     /// screen retained linear axial frequencies, not all nonlinear harmonics.
     pub fn with_longitudinal_waves_and_loss(
+        self,
+        resolutions: Vec<LongitudinalStringResolution>,
+        loss: LongitudinalMaterialLoss,
+        config: NonlinearModalConfig,
+        gate: &CancelGate,
+    ) -> Result<Self, ImpactError> {
+        self.with_longitudinal_waves_and_bearings(resolutions, loss, Vec::new(), config, gate)
+    }
+
+    /// Add source-bound INTERIOR axial bearings while preparing the original
+    /// longitudinal modes. The full supported string may include afterlength;
+    /// its fixed endpoints do not move. Every body row is derived from the
+    /// actual material shell node, global string axis and contact arm:
+    /// t dot (U + Theta cross r). The same signed row applies the reciprocal
+    /// force, so axial strain energy can excite the original radiating body.
+    ///
+    /// Every interface must match the real outer string and all incident body
+    /// surface states, frozen temperatures and complete coupled frequency band.
+    /// Constant-loss interfaces use the existing prepared propagation owner.
+    /// All original modes, source identities, material memory, gas, radiation
+    /// and nonlinear coordinate indices survive. No new propagator, output
+    /// gain, endpoint mass approximation or inferred joint coefficient exists.
+    pub fn with_longitudinal_waves_and_bearings(
         mut self,
         resolutions: Vec<LongitudinalStringResolution>,
         loss: LongitudinalMaterialLoss,
+        bearings: Vec<MaterialAxialBearing>,
         config: NonlinearModalConfig,
         gate: &CancelGate,
     ) -> Result<Self, ImpactError> {
@@ -468,14 +499,21 @@ impl ReciprocalStringBank {
             });
             strings.push(law);
         }
+        let (connections, anchors) = bearings::lower(
+            &self.source, &strings, self.system.components(), &bearings, gate)?;
         self.system = self
             .system
-            .with_internal_components(components, gate)
+            .with_internal_components_and_connections(components, connections, &anchors, gate)
             .and_then(|system| system.with_mapped_nonlinear_potentials(bindings, config, gate))
             .map_err(|e| ImpactError::Owner(e.to_string()))?;
-        self.source.longitudinal_waves = Some(StringBankLongitudinal { strings, config });
+        bearings::validate_bands(&self.source, &strings, &bearings, &self.system, gate)?;
         self.source.validate_body_memory_frequencies(&self.system, gate)
             .map_err(|e| ImpactError::Owner(e.to_string()))?;
+        if !bearings.is_empty() {
+            self.source.validate_material_bridge_frequencies(&self.system, gate)
+                .map_err(|e| ImpactError::Owner(e.to_string()))?;
+        }
+        self.source.longitudinal_waves = Some(StringBankLongitudinal { strings, config, bearings });
         if gate.is_requested() {
             return Err(ImpactError::Cancelled);
         }

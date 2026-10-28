@@ -16,6 +16,8 @@ mod shear_layers;
 mod contact_thermal;
 #[path = "material_strings/bridge_interfaces.rs"]
 mod bridge_interfaces;
+#[path = "material_strings/axial_bearings.rs"]
+mod axial_bearings;
 #[path = "material_strings/translational_bridges.rs"]
 mod translational_bridges;
 #[path = "material_strings/bending_memory.rs"]
@@ -285,11 +287,14 @@ impl input::Spec {
             settings.network.max_setup_terms = terms;
         }
         let bridge_interface_bytes = self.bridge_interfaces.pack_bytes()?;
+        let axial_bearing_bytes = self.axial_bearings.pack_bytes()?;
+        let axial_bearings = self.axial_bearings.bindings(self.temperature, self.omega)?.to_vec();
         let normal_source_bytes = stop_profile.as_ref().map(stops::Profile::source_pack_bytes)
             .transpose()?.unwrap_or(0);
         let interface_bytes = profile.as_ref().map(body::Profile::interface_pack_bytes)
             .transpose()?.unwrap_or(0).checked_add(self.friction.pack_bytes()?)
             .and_then(|bytes| bytes.checked_add(bridge_interface_bytes))
+            .and_then(|bytes| bytes.checked_add(axial_bearing_bytes))
             .and_then(|bytes| bytes.checked_add(normal_source_bytes))
             .ok_or("combined interface pack byte count overflow")?;
         self.bridge_interfaces.apply(self.temperature, self.omega, &mut self.strings)?;
@@ -375,8 +380,8 @@ impl input::Spec {
             bank.with_geometric_stretching(slope, config, gate)?
         } else { bank };
         let bank = if let Some((resolution, config)) = &self.longitudinal_waves {
-            bank.with_longitudinal_waves_and_loss(vec![resolution.clone(); self.strings.len()],
-                self.longitudinal_loss.clone(), *config, gate)?
+            bank.with_longitudinal_waves_and_bearings(vec![resolution.clone(); self.strings.len()],
+                self.longitudinal_loss.clone(), axial_bearings, *config, gate)?
         } else { bank };
         let bank = if profile.as_ref().is_some_and(body::Profile::has_thermal_cavity) {
             bank // The source material prefix was bound before thermal air memory.
@@ -662,6 +667,11 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
         remaining=remaining.checked_sub(bytes.len()).ok_or("combined source pack byte budget exceeded")?;
         Ok(NormalizedInterfacePack::from_bytes(&bytes)?)
     })?;
+    spec.axial_bearings.load(spec.temperature, spec.omega, &gate, |name| {
+        let bytes=sources.read_relative(name,input::MAX_PACK_BYTES.min(remaining))?;
+        remaining=remaining.checked_sub(bytes.len()).ok_or("combined source pack byte budget exceeded")?;
+        Ok(NormalizedInterfacePack::from_bytes(&bytes)?)
+    })?;
     if let Some(stops) = &mut stop_profile {
         stops.load_sources(&gate, |name| {
             let bytes=sources.read_relative(name,input::MAX_PACK_BYTES.min(remaining))?;
@@ -705,6 +715,9 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     }
     if !ready.spec.bridge_interfaces.bindings().is_empty() {
         eprintln!("bridge_interfaces={:?}",ready.spec.bridge_interfaces);
+    }
+    if ready.spec.axial_bearings.len() != 0 {
+        eprintln!("axial_bearings={:?}",ready.spec.axial_bearings);
     }
     if let Some(ribbon)=ready.performance.bank().source().ribbon() { eprintln!("bow_ribbon={ribbon:?}"); }
     if let Some(fibers)=ready.performance.bank().source().fiber_ribbon() {

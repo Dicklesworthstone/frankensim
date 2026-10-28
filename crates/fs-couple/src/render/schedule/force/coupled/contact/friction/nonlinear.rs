@@ -338,6 +338,21 @@ impl FrictionModalSystem {
     pub(crate) fn with_internal_components(
         self, additional: Vec<ModalAcousticTimeModel>, gate: &CancelGate,
     ) -> Result<Self, ModalFrictionError> {
+        self.with_internal_components_and_connections(additional, Vec::new(), &[], gate)
+    }
+
+    /// Append cold internal coordinates and their reciprocal laws to the SAME
+    /// full operator. Columns use the complete extended coordinate order;
+    /// constant-loss indices address only the additional connection list.
+    /// Existing physical columns and all original source/history indices stay
+    /// unchanged. This is preparation, never a reset of a playing network.
+    pub(crate) fn with_internal_components_and_connections(
+        self,
+        additional: Vec<ModalAcousticTimeModel>,
+        connections: Vec<super::super::super::ModalColumnConnection>,
+        anchors: &[super::super::super::ConstantLossConnection],
+        gate: &CancelGate,
+    ) -> Result<Self, ModalFrictionError> {
         poll(Some(gate))?;
         if self.samples_rendered() != 0 || additional.is_empty() {
             return Err(invalid("internal coordinates require cold nonempty preparation").into());
@@ -348,9 +363,17 @@ impl FrictionModalSystem {
         if count > self.network.config.max_modes {
             return Err(invalid("internal coordinates exceed the original complete-network mode budget").into());
         }
+        let original_links = self.network.columns.len();
+        let link_count = original_links.checked_add(connections.len())
+            .ok_or_else(|| invalid("internal connection count overflow"))?;
+        if anchors.iter().any(|anchor| anchor.connection >= connections.len()) {
+            return Err(invalid("internal constant-loss anchor names an absent new connection").into());
+        }
         let mut models = self.network.models.clone();
         models.extend(additional);
-        let mut columns = Vec::with_capacity(self.network.columns.len());
+        // Admit complete connection work BEFORE allocating the enlarged columns.
+        super::super::super::connection_layout(&models, link_count, self.network.config, gate)?;
+        let mut columns = Vec::with_capacity(link_count);
         for (column, law) in self.network.columns.iter().zip(&self.network.connections) {
             poll(Some(gate))?;
             let mut column = column.clone();
@@ -360,12 +383,19 @@ impl FrictionModalSystem {
                 damping_n_s_m: law.damping_n_s_m, rest_extension_m: law.rest_extension_m,
             });
         }
-        // Constant-loss anchors stay on their connections; the appended coordinates join the coupled basis they act in.
-        let constant_loss = self.network.constant_loss_connections();
+        columns.extend(connections);
+        // Original anchors keep their indices; new laws join the same coupled
+        // constant-loss basis, without reinterpreting Kelvin--Voigt dashpots.
+        let mut constant_loss = self.network.constant_loss_connections();
+        constant_loss.extend(anchors.iter().map(|anchor| super::super::super::ConstantLossConnection {
+            connection: original_links + anchor.connection,
+            reference_omega_rad_s: anchor.reference_omega_rad_s,
+        }));
         let network = match self.network.prepared_budget() {
             Some(budget) => CoupledModalSystem::new_with_columns_inner(models, columns, self.network.config, Some(budget),
                 &constant_loss, gate),
-            None => CoupledModalSystem::new_with_columns(models, columns, self.network.config, gate),
+            None if constant_loss.is_empty() => CoupledModalSystem::new_with_columns(models, columns, self.network.config, gate),
+            None => return Err(invalid("constant-loss internal connections require prepared propagation").into()),
         }?;
         let network = if self.network.relaxation_branches.is_empty() { network } else {
             let mut branches = self.network.relaxation_branches.clone();

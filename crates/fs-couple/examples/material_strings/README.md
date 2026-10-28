@@ -1547,6 +1547,46 @@ attaching stretching. Axial wave
 inertia, winding slip, evolving temperature and measured instrument qualification
 remain outside this composition.
 
+## Source-bound axial bearings on the full string span
+
+The retained longitudinal waves can now drive the actual material shell body
+through an interior axial bearing. Select `longitudinal-waves`, then place the
+optional bearing records after `longitudinal-loss` (or directly after
+`longitudinal-waves` when no axial-loss record is present), before bending
+memory or cavity records:
+
+```text
+axial-bearings COUNT
+axial-bearing STRING STATION SHELL_PART NODE TX TY TZ RX_M RY_M RZ_M REST_M interface PACK.fsintpk AREA_M2 STIFFNESS_PROPERTY VISCOSITY_PROPERTY
+```
+
+`STATION` is strictly inside the complete supported string span, including any
+afterlength. `TX TY TZ` is its positive unit axial direction in the body's global
+coordinates. `RX_M RY_M RZ_M` is the arm from the actual shell node to the
+bearing point. The body displacement is `t dot (U + Theta cross r)`; the same
+geometry applies the equal-and-opposite force and its `r cross t` moment. Shell
+assembly parts address their original physical nodes while sharing one common
+modal body. This requires a sourced shell or assembled-shell `--body-profile`.
+
+The interface pack supplies stiffness and viscosity per area through the same
+resolver as ordinary material bridges. Its ordered surfaces must match the
+actual outer string material and every incident material state at the selected
+body node. Original source identities, frozen temperature, applicability bands,
+area, property choices and geometry remain attached to the rendered instrument.
+A declared constant-loss anchor uses the existing prepared propagation owner.
+Changing the section material changes the axial inertia, stiffness and
+displacement projection; changing the interface changes the reciprocal bearing
+reaction. Both affect the original body pressure through the same coupled solve.
+
+Every bearing is counted in the complete connection/work budget. The new and
+existing bridge laws, plus axial elasticity and explicit axial loss, must cover
+the conservative retained linear frequency interval after coupling. This can
+refuse a source whose band is too narrow; it does not certify nonlinear
+harmonics or omitted modes. These are interior bearings on a fixed-end model,
+not moving-end inertia, inferred break-angle prestress or a validated instrument
+specimen. Supply actual geometry and interface measurements for the intended
+instrument; no violin, cello or bass coefficients are invented.
+
 ## Moving finger/stop stations in the same material instrument
 
 `migrating-finger.material-strings` and `migrating-finger.stops` combine a fixed

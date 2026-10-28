@@ -272,20 +272,7 @@ impl ReciprocalStringBank {
             let [first, second] = self
                 .source
                 .bridge_surface_states(binding.string, Some(gate))?;
-            law.require_surface_materials(first.material(), second.material())
-                .map_err(|_| invalid("material bridge interface does not match its actual ordered surface states"))?;
-            let source = law.resolved();
-            if let Some(t) = temperature(source.query_point(), source.axis_quantities())? {
-                for material in [first, second] {
-                    if temperature(material.query_point(), material.axis_quantities())?
-                        .is_some_and(|actual| actual.to_bits() != t.to_bits())
-                    {
-                        return Err(invalid(
-                            "material bridge interface and receiving surfaces have different frozen temperatures",
-                        ));
-                    }
-                }
-            }
+            validate_surface_states(law, first, second)?;
         }
         validate_frequencies(
             self.source.strings.len() + 1 + usize::from(self.source.material_cavity.is_some())
@@ -325,7 +312,7 @@ fn bridge_anchors(
         .collect()
 }
 
-fn outer_material(
+pub(super) fn outer_material(
     source: &MaterialStringSource,
 ) -> Result<&ResolvedMaterialStatePoint, ReciprocalStringError> {
     match source {
@@ -348,8 +335,31 @@ fn outer_material(
     }
 }
 
+/// Shared admission for any physical string/body interface. The caller selects
+/// both actual source surfaces from its physical footprint, never from the law.
+pub(super) fn validate_surface_states(
+    law: &ResolvedLinearInterface,
+    first: &ResolvedMaterialStatePoint,
+    second: &ResolvedMaterialStatePoint,
+) -> Result<(), ReciprocalStringError> {
+    law.require_surface_materials(first.material(), second.material())
+        .map_err(|_| invalid("material bridge interface does not match its actual ordered surface states"))?;
+    let source = law.resolved();
+    if let Some(t) = temperature(source.query_point(), source.axis_quantities())? {
+        for material in [first, second] {
+            if temperature(material.query_point(), material.axis_quantities())?
+                .is_some_and(|actual| actual.to_bits() != t.to_bits()) {
+                return Err(invalid(
+                    "material bridge interface and receiving surfaces have different frozen temperatures",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
-fn footprint<'a>(
+pub(super) fn footprint<'a>(
     nodes: usize,
     triangles: &[[usize; 3]],
     row: &[f64],
@@ -403,7 +413,7 @@ fn footprint<'a>(
     Ok(())
 }
 
-fn validate_frequencies(
+pub(super) fn validate_frequencies(
     physical_components: usize,
     bindings: &[MaterialBridgeInterface],
     system: &FrictionModalSystem,

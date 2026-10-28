@@ -191,6 +191,7 @@ pub struct Spec {
     pub geometric_stretching: Option<(f64, NonlinearModalConfig)>,
     pub longitudinal_waves: Option<(LongitudinalStringResolution, NonlinearModalConfig)>,
     pub longitudinal_loss: LongitudinalMaterialLoss,
+    pub axial_bearings: axial_bearings::Inputs,
     pub bending_memory: Option<bending_memory::Input>,
     pub body_radiation: Option<BodyRadiation>,
     pub shell_bem_angular_refinement: u32,
@@ -496,6 +497,38 @@ impl Spec {
             row.end()?;
             loss
         } else { LongitudinalMaterialLoss::Elastic };
+        let mut axial_declarations = Vec::new();
+        if r.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next()) == Some("axial-bearings") {
+            use fs_couple::bowed_string::runtime::reciprocal::bank::nonlinear::longitudinal::{
+                AxialBearingGeometry, bearings::MAX_AXIAL_BEARINGS,
+            };
+            if longitudinal_waves.is_none() {
+                return Err("axial bearings require explicit longitudinal-waves".into());
+            }
+            let mut row = r.row("axial-bearings")?;
+            let bearings = row.count(MAX_AXIAL_BEARINGS)?; row.end()?;
+            for _ in 0..bearings {
+                let mut row = r.row("axial-bearing")?;
+                let geometry = AxialBearingGeometry {
+                    string: row.count(count-1)?, station_fraction: row.scalar()?,
+                    shell_component: row.count(63)?, node: row.count(3071)?,
+                    string_axis: [row.scalar()?, row.scalar()?, row.scalar()?],
+                    contact_arm_m: [row.scalar()?, row.scalar()?, row.scalar()?],
+                    rest_extension_m: row.scalar()?,
+                };
+                geometry.validate()?;
+                if row.word()? != "interface" {
+                    return Err("axial bearing requires an explicit sourced interface".into());
+                }
+                let source = bridge_interfaces::Declaration {
+                    string: geometry.string, pack: row.path()?, area_m2: row.positive()?,
+                    stiffness_property: row.word()?.into(), viscosity_property: row.word()?.into(),
+                };
+                row.end()?;
+                axial_declarations.push(axial_bearings::Declaration { geometry, source });
+            }
+        }
+        let axial_bearings = axial_bearings::Inputs::new(axial_declarations)?;
         let bending_memory = if r.lines.clone().next()
             .and_then(|line|line.split_ascii_whitespace().next()) == Some("bending-memory") {
             let mut row=r.row("bending-memory")?;
@@ -922,7 +955,7 @@ impl Spec {
         let spec = Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
             gas, gas_record, body, strings, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
             rotational_bridges, translational_bridges, cylinder_gas_loading, prepared_linear, residual_flexibility, geometric_stretching,
-            longitudinal_waves, longitudinal_loss, bending_memory, body_radiation, shell_bem_angular_refinement,
+            longitudinal_waves, longitudinal_loss, axial_bearings, bending_memory, body_radiation, shell_bem_angular_refinement,
             shell_observer, shell_receiver_quadrature, one_way_observer, cavity, friction, contact_thermal: false, bow_ribbon, bow_fibers,
             bow_station_motion, forces, schedule };
         spec.bow_station_program(&CancelGate::new_clock_free())?;
@@ -1059,6 +1092,7 @@ impl Spec {
             1 + usize::from(c.cavity.neck_resistance_n_s_m() != 0.0));
         let mut links = self.strings.len().checked_add(self.rotational_bridges.len())
             .and_then(|n| n.checked_add(self.translational_bridges.len()))
+            .and_then(|n| n.checked_add(self.axial_bearings.len()))
             .and_then(|n| n.checked_add(cavity_links))
             .and_then(|n| n.checked_add(if tensor_body { self.body.modes } else { 0 }))
             .and_then(|n| n.checked_add(additional_body_connections))
@@ -1069,6 +1103,9 @@ impl Spec {
                 .ok_or("fluid memory dimension overflow")?;
             modes = modes.checked_add(memory).ok_or("complete fluid mode count overflow")?;
             links = links.checked_add(memory).ok_or("complete fluid connection count overflow")?;
+        }
+        if self.axial_bearings.len() != 0 && self.longitudinal_waves.is_none() {
+            return Err("axial bearings require explicit longitudinal-waves".into());
         }
         if let Some((resolution, config)) = &self.longitudinal_waves {
             resolution.validate()?;

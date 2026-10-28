@@ -16,6 +16,38 @@ pub struct Declaration {
     pub viscosity_property: String,
 }
 
+impl Declaration {
+    pub fn validate(&self) -> Result<()> {
+        if !self.area_m2.is_finite() || self.area_m2 <= 0.0
+            || self.stiffness_property == self.viscosity_property
+            || [&self.stiffness_property, &self.viscosity_property].iter()
+                .any(|name| name.is_empty() || name.len() > 128) {
+            return Err("bridge interfaces need distinct properties and positive physical area".into());
+        }
+        Ok(())
+    }
+}
+
+/// One coefficient resolver for ordinary bridges and axial bearings alike.
+pub(super) fn resolve(
+    declaration: &Declaration, pack: &NormalizedInterfacePack, query: &QueryPoint, omega: f64,
+) -> Result<ResolvedLinearInterface> {
+    declaration.validate()?;
+    let mut requirements = vec![
+        Requirement::try_new(&declaration.stiffness_property, interface_stiffness_per_area_dims(), Admit::NonNegative)?,
+        Requirement::try_new(&declaration.viscosity_property, interface_viscosity_per_area_dims(), Admit::NonNegative)?,
+    ];
+    if !pack.card().claims_for(LINEAR_INTERFACE_CONSTANT_LOSS_REFERENCE_OMEGA).is_empty() {
+        requirements.push(Requirement::try_new(LINEAR_INTERFACE_CONSTANT_LOSS_REFERENCE_OMEGA,
+            constant_loss_reference_omega_dims(), Admit::StrictlyPositive)?);
+    }
+    let state = resolve_interface_state_point(pack.card(), query, &requirements, Pick::SingleClaimOnly)?;
+    let interface = ResolvedLinearInterface::new(state, &declaration.stiffness_property,
+        &declaration.viscosity_property, declaration.area_m2)?;
+    interface.require_angular_frequency_rad_s(omega)?;
+    Ok(interface)
+}
+
 #[derive(Clone, Default)]
 pub struct Inputs {
     declarations: Vec<Declaration>,
@@ -36,12 +68,9 @@ impl core::fmt::Debug for Inputs {
 impl Inputs {
     pub fn new(declarations: Vec<Declaration>) -> Result<Self> {
         for (i, d) in declarations.iter().enumerate() {
-            if !d.area_m2.is_finite() || d.area_m2 <= 0.0
-                || declarations[..i].iter().any(|p| p.string == d.string)
-                || d.stiffness_property == d.viscosity_property
-                || [&d.stiffness_property, &d.viscosity_property].iter()
-                    .any(|name| name.is_empty() || name.len() > 128) {
-                return Err("bridge interfaces need unique strings, distinct properties and positive physical area".into());
+            d.validate()?;
+            if declarations[..i].iter().any(|p| p.string == d.string) {
+                return Err("bridge interfaces need unique strings".into());
             }
         }
         Ok(Self { declarations, ..Self::default() })
@@ -68,20 +97,7 @@ impl Inputs {
                 remaining -= size;
                 packs.insert(d.pack.clone(), pack);
             }
-            let mut requirements = vec![
-                Requirement::try_new(&d.stiffness_property, interface_stiffness_per_area_dims(), Admit::NonNegative)?,
-                Requirement::try_new(&d.viscosity_property, interface_viscosity_per_area_dims(), Admit::NonNegative)?,
-            ];
-            // A source that states its constant-loss anchor has it read; without one the joint is Kelvin-Voigt.
-            if !packs[&d.pack].card().claims_for(LINEAR_INTERFACE_CONSTANT_LOSS_REFERENCE_OMEGA).is_empty() {
-                requirements.push(Requirement::try_new(LINEAR_INTERFACE_CONSTANT_LOSS_REFERENCE_OMEGA,
-                    constant_loss_reference_omega_dims(), Admit::StrictlyPositive)?);
-            }
-            let state = resolve_interface_state_point(packs[&d.pack].card(), &query,
-                &requirements, Pick::SingleClaimOnly)?;
-            let interface = ResolvedLinearInterface::new(state, &d.stiffness_property,
-                &d.viscosity_property, d.area_m2)?;
-            interface.require_angular_frequency_rad_s(omega)?;
+            let interface = resolve(d, &packs[&d.pack], &query, omega)?;
             bindings.push(MaterialBridgeInterface { string: d.string, interface });
         }
         poll(gate)?;

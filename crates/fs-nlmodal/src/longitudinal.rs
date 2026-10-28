@@ -60,6 +60,7 @@ pub struct LongitudinalString {
     axial_modes: Vec<usize>,
     axial_omegas: Vec<f64>,
     axial_slope_scales: Vec<f64>,
+    axial_displacement_scale: f64,
     mean_energy_coefficient: f64,
 }
 
@@ -133,6 +134,7 @@ impl LongitudinalString {
             axial_modes: axial_modes.to_vec(),
             axial_omegas,
             axial_slope_scales,
+            axial_displacement_scale: normalization,
             mean_energy_coefficient,
         })
     }
@@ -159,6 +161,26 @@ impl LongitudinalString {
     #[must_use]
     pub fn axial_slope_scales(&self) -> &[f64] {
         &self.axial_slope_scales
+    }
+
+    /// Work-conjugate axial displacement/force row [1/sqrt(kg)] at a physical
+    /// fraction of the complete fixed-end span. Uses the SAME solid-mass
+    /// normalization and retained mode order as strain and kinetic energy.
+    /// Endpoints return exact zeros; this does not supply moving-end inertia.
+    ///
+    /// # Errors
+    /// Refuses nonfinite fractions or positions outside the closed span.
+    pub fn axial_displacement_shapes(&self, fraction: f64) -> Result<Vec<f64>, NlModalError> {
+        if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+            return Err(invalid("axial displacement needs a physical station on the complete span"));
+        }
+        if fraction == 0.0 || fraction == 1.0 {
+            return Ok(vec![0.0; self.axial_modes.len()]);
+        }
+        Ok(self.axial_modes.iter().map(|&mode| {
+            self.axial_displacement_scale
+                * det::sin(mode as f64 * core::f64::consts::PI * fraction)
+        }).collect())
     }
 
     fn validate_state(&self, slopes: &[f64], axial: &[f64]) -> Result<(), NlModalError> {

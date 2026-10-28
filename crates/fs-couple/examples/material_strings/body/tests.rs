@@ -281,6 +281,9 @@ mod fluid;
 #[path = "shell/tests.rs"]
 mod shell_input;
 
+#[path = "shell/axial_bearing_tests.rs"]
+mod axial_bearing_tests;
+
 #[path = "shell/assembly_tests.rs"]
 mod assembly_input;
 
