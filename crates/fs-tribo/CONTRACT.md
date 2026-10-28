@@ -49,8 +49,9 @@ reactions, and residual embedding.
   (1 through 128 bisections); unresolved or unbracketed roots refuse. Candidate
   state is immutable until the consuming solver publishes it. The card impl
   requires temperature and pressure without defaults, and checks the solved
-  speed against its closed applicability interval. Anisotropic body response,
-  thermal transport and pHS network wrappers belong to their respective owners.
+  speed against its closed applicability interval. The matrix adapter below
+  admits anisotropic body response; the mechanics owner supplies that matrix.
+  Thermal transport and pHS network wrappers retain their respective owners.
 - `layer_contact::ThirdBodyLayerContact` implements the same seam with retained
   elastic and plastic shear. The midpoint radial return solves the full
   isotropic body load line in two tangent axes. Reversible energy is
@@ -91,6 +92,43 @@ reactions, and residual embedding.
   `Phi(q) proportional to q^-(2 H + 1)` and whose Fourier coefficients are
   normalized to an explicit RMS height. Its seed selects spatial phase only;
   it creates no temporal/audio spectrum or apparatus-specific frequency.
+
+### Full two-axis tangential body compliance
+
+`tangential::matrix::advance_with_matrix_compliance` couples the original
+`TangentialLaw` to `du = du_free - C F` with the full symmetric positive
+semidefinite 2-by-2 body matrix. The mechanical owner derives C; no effective
+isotropic mass replaces its off-diagonal or unequal-axis response. A zero
+scalar compliance in the input avoids two independent body-response owners.
+Exactly isotropic and zero matrices delegate to the native law in one call.
+
+General matrices use bounded inverse-secant iterations around that same law's
+scalar-compliance solve. The full matrix's zero-slip reaction is tried through
+the original law first, including the minimum-norm reaction for rank-one
+response. This preserves a feasible static reaction's priority over a separate
+kinetic root, and a refused static force budget cannot silently become sliding.
+Every probe starts from the original accepted state,
+and scalar probe compliance changes only the numerical equation. The smallest
+positive matrix eigenvalue preserves the native static/kinetic selection;
+rank-one null motion bounds the probe through the explicit force budget.
+Backtracking retains native source/domain refusals. The returned candidate must
+close the original full-matrix displacement equation, original reversible
+storage, native dissipated work and actual body work under explicit tolerances.
+No residual is relabeled as heat, and no candidate is published on refusal or
+cancellation. Arithmetic symmetry/PSD admission never rewrites physical matrix
+entries. Original-law calls are explicitly bounded (1 through 4096), with a
+cancellation poll before and after every call; the adapter allocates no solver
+workspace beyond the original law's candidate state.
+
+G1/G3 groups in `tests/tangential_matrix.rs` compare static and sliding Coulomb
+against an independent matrix/KKT multiplier solve, and retained two-axis layer
+elasticity/plasticity against an independent flow-multiplier solve. They cover
+off-diagonal response, unequal static/kinetic limits, release of retained shear,
+nonproportional paths, tangent rotations, singular/free limits, actual heat and
+atomic refusal/retry. This is a numerical embedding of each original law, not
+a new friction law or a nonproportional Hertz--Mindlin solution. Nonmonotone
+laws retain their disclosed native branch selection; uniqueness, contact-frame
+transport and simultaneous multiple-contact convergence are not implied.
 
 ### Exact Hertz sliding and spin wrench
 

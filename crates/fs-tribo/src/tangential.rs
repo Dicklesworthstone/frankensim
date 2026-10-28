@@ -14,6 +14,9 @@ use crate::{
 };
 use fs_math::det;
 
+/// Full two-axis body compliance around the original constitutive owner.
+pub mod matrix;
+
 fn finite(value: f64, field: &'static str) -> Result<f64, TriboError> {
     crate::finite(value, field)?;
     Ok(value)
