@@ -30,6 +30,8 @@ pub mod field_storage;
 pub mod magnetic;
 /// Retained spatial induction and Joule heat on the original enthalpy timeline.
 pub mod eddy;
+/// Three-dimensional retained induction with source-backed magnetic thermal feedback.
+pub mod spatial_induction;
 /// Piezoelectric motion, electrical load and finite resistor heating.
 pub mod piezoelectric;
 

@@ -9547,3 +9547,44 @@ The report retains total shear force and its distributed moment about the strip 
 Six focused G0/G1/G3/G4/G5 groups in `tests/friction_heat_moving_partial_slip.rs` verify exact preload transport/outflow, swept-cell heat deposition, common translation including distributed moment, independent nonlinear local temperature feedback, 16/32/64 brush-integral refinement, and late refusal with exact retry. A 0.011 J preload retains 0.00825 J and exports 0.00275 J with no fictitious heat. A sliding case deposits 0.00625 J of physical work once. Finest force/storage/heat errors are 0.00761719 N, 5.37618e-5 J and 3.90625e-6 J. Force, storage and history transport are first order. The integrated heat's second-order envelope is limited to the constant-coefficient fixture.
 
 Scope: prescribed planar translation, fixed uniform pressure, fixed reference stiffness, surface A brush memory, longitudinal imposed slip and original finite thermal cells. No torsional/spatial pressure-field law, native body dynamics, evolving normal load, recirculated outflow memory, curved surfaces, large rotations, continuum thermal convergence, calibration, Cargo/DSR workspace validation or blanket bead closure is claimed.
+
+## Finite-temperature three-dimensional magnetic induction
+
+`circuit_enthalpy::spatial_induction::SpatialMagneticThermalNetwork::step_candidate`
+composes the original retained Whitney A–phi induction state with the original
+finite-enthalpy Newton owner. Every temperature trial starts from the same
+accepted field and thermal histories, resolving the same pinned conductivity
+and permeability sources at the proposed local temperatures. Immutable geometry,
+incidence and Whitney basis allocations are shared across material refreshes.
+
+Complete original tetrahedron-to-thermal correspondence routes actual native
+Ohmic heat to each whole-volume solid receiver exactly once. Original
+conductivity/resistivity basis and claim identities, constant density, common
+clocks, supported temperature/B envelopes and positive combined caloric plus
+magnetic heat capacity are required. The shared original magnetic caloric owner
+now accepts two- or three-component fields and physical cell volumes; planar
+entry points retain their existing behavior.
+
+Signed reversible heat Q_rev=-P-delta(T*S_field) is separate from Joule heat.
+The independent physical balance is
+delta(U_field)+delta(H_caloric)+W_mechanical-W_impressed-Q_external=0,
+using magnetic internal energy rather than duplicating free-energy storage.
+Prescribed motion keeps explicit external Lorentz work. The accepted thermal and
+field histories are returned together; source, time, volume, work-budget or
+cancellation refusal returns neither. Already deposited heat must not be added
+again by a caller.
+
+Five new physical tests compare same-step field/temperature solutions with
+independent scalar elimination across both electrical source bases and both
+permeability-slope signs, six distinct unordered local receivers, independently
+derived motion work, and first-order time refinement against continuous
+equations. Atomic refusal covers capacity, source/domain, physical volume,
+clock/event, actual trial budget and late cancellation. Six existing planar
+eddy/enthalpy tests also pass; their thermal fixtures explicitly declare the
+absolute-temperature source type required by the original entropy owner.
+These are manufactured equation/discretization checks, not measured devices.
+
+The thermal path admits scalar conductivity and induced-linear globally affine
+source-backed mu(T), fixed geometry and prescribed velocity. Recoil, saturation,
+hysteresis, thermal expansion, moving interfaces and mechanical integration
+require compatible additional physical owners; they are not inferred here.

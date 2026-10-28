@@ -56,9 +56,9 @@ pub struct MagneticCaloricExchange {
 
 /// A view of the ORIGINAL field owner's per-triangle energy receipt.
 /// The ordered endpoints and signed P retain that owner's time discretization.
-pub(in crate::circuit_enthalpy) struct MagneticEnergyCell {
+pub(in crate::circuit_enthalpy) struct MagneticEnergyCell<const D: usize = 2> {
     pub triangle: usize,
-    pub flux_density_t: [[f64; 2]; 2],
+    pub flux_density_t: [[f64; D]; 2],
     pub free_energy_j: [f64; 2],
     pub parameter_work_j: f64,
 }
@@ -81,8 +81,8 @@ pub(in crate::circuit_enthalpy) struct PreparedMagneticCaloric<'a> {
 fn field_error(error: FieldStorageError) -> Error {
     CircuitEnthalpyError::Source(MagneticThermalError::Magnetic(error))
 }
-fn magnitude(b: [f64; 2]) -> f64 {
-    b[0].hypot(b[1])
+fn magnitude<const D: usize>(b: [f64; D]) -> f64 {
+    b.into_iter().fold(0.0_f64, f64::hypot)
 }
 
 impl<'a> PreparedMagneticCaloric<'a> {
@@ -98,7 +98,43 @@ impl<'a> PreparedMagneticCaloric<'a> {
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<Self, Error> {
         check(cancel)?;
-        let triangle_count = mesh.faces().len();
+        let volumes = (0..mesh.faces().len())
+            .map(|cell| {
+                check(cancel)?;
+                mesh.face_measure(cell)
+                    .ok_or_else(|| invalid("missing original magnetic volume"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::new_for_volumes(
+            network,
+            thermal,
+            &volumes,
+            materials,
+            flux_density_t,
+            bindings,
+            routes,
+            cancel,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::circuit_enthalpy) fn new_for_volumes<const D: usize>(
+        network: &MagneticThermalNetwork<'_>,
+        thermal: &DepositionSimulation<'_>,
+        volumes_m3: &[f64],
+        materials: &[&ResolvedMaterialStatePoint],
+        flux_density_t: &[[f64; D]],
+        bindings: &'a [MagneticThermalLaw],
+        routes: &MagneticRoutes,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<Self, Error> {
+        check(cancel)?;
+        if D != 2 && D != 3 {
+            return Err(invalid(
+                "magnetic caloric owner requires planar or spatial vectors",
+            ));
+        }
+        let triangle_count = volumes_m3.len();
         let expected = routes.magnetic.values().filter(|c| c.is_some()).count();
         if bindings.len() != expected
             || materials.len() != triangle_count
@@ -162,9 +198,10 @@ impl<'a> PreparedMagneticCaloric<'a> {
                     "magnetic field, derivative law and actual caloric context must use the same original source bundle",
                 ));
             }
-            let volume = mesh
-                .face_measure(triangle)
-                .ok_or_else(|| invalid("missing original magnetic volume"))?;
+            let volume = volumes_m3[triangle];
+            if !volume.is_finite() || volume <= 0.0 {
+                return Err(invalid("original magnetic volume must be finite positive"));
+            }
             let b = magnitude(flux_density_t[triangle]);
             if !b.is_finite() || b > binding.maximum_flux_density_t {
                 return Err(invalid(
@@ -315,10 +352,10 @@ impl<'a> PreparedMagneticCaloric<'a> {
     /// Add only signed reversible heat; callers separately route native Joule
     /// heat. `sources_w` belongs to the private trial and is discarded on error.
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::circuit_enthalpy) fn deposit(
+    pub(in crate::circuit_enthalpy) fn deposit<const D: usize>(
         &self,
         thermal: &DepositionSimulation<'_>,
-        cells: impl IntoIterator<Item = MagneticEnergyCell>,
+        cells: impl IntoIterator<Item = MagneticEnergyCell<D>>,
         sources_w: &mut BTreeMap<CellId, f64>,
         dt: f64,
         energy_tolerance_j: f64,

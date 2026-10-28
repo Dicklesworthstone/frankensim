@@ -87,6 +87,20 @@ pub fn affine_magnetic_card(rho:f64, alpha:f64, mu:f64, slope:f64,
         dims:MAGNETIC_PERMEABILITY_DIMS,
     },basis)
 }
+/// Explicit absolute-temperature source domain for thermodynamic entropy tests.
+/// Dimensional-kelvin transport fixtures remain separately authored above.
+pub fn absolute_affine_magnetic_card(rho:f64, alpha:f64, mu:f64, slope:f64,
+    basis:ElectricalPropertyBasis)->MaterialCard {
+    let original=affine_magnetic_card(rho,alpha,mu,slope,basis);
+    let mut claims=ClaimSet::new();
+    for (_,source) in original.claims().claims_ordered() {
+        let mut claim=source.clone();
+        claim.validity=claim.validity.with_quantity("T",QuantitySpec::semantic(
+            SemanticType::new(QuantityKind::AbsoluteTemperature,ValueForm::Static)),200.0,2000.0);
+        claims.insert_claim(claim).unwrap();
+    }
+    MaterialCard::assemble(original.id().clone(),claims,vec![]).unwrap()
+}
 pub fn absolute_point(t:f64)->QueryPoint {
     QueryPoint::new().with_quantity("T",QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature,ValueForm::Static)),t).unwrap()

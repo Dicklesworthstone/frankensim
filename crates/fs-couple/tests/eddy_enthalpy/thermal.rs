@@ -2,8 +2,40 @@ use super::*;
 use fs_couple::circuit_enthalpy::eddy::thermal::MagneticThermalLaw;
 use fs_material::field_storage::thermal::magnetic::ThermalMagneticMaterial;
 
+fn thermal_curves(cards: &[MaterialCard; 2]) -> [ResolvedHeatCapacityCurve; 2] {
+    use fs_material::phase::{HeatCapacitySourceQuery, SolidLiquidPhase};
+    use fs_material::state_point::SPECIFIC_HEAT_CAPACITY_DIMS;
+    use fs_qty::Density;
+    cards.each_ref().map(|card| {
+        ResolvedHeatCapacityCurve::try_new(
+            card,
+            HeatCapacitySourceQuery {
+                heat_capacity: &PropertyKey::new(
+                    "specific_heat_capacity",
+                    SPECIFIC_HEAT_CAPACITY_DIMS,
+                ),
+                density: &PropertyKey::new("density", Density::DIMS),
+                temperature_axis: "T",
+                lower: &field::absolute_point(200.0),
+                upper: &field::absolute_point(2000.0),
+                selection: fs_matdb::SelectionPolicy::SingleClaimOnly,
+            },
+            SolidLiquidPhase::Solid,
+            0.0,
+            1e-6,
+        )
+        .unwrap()
+    })
+}
+
 fn problem(card: &MaterialCard) -> PlanarMagnetostatics {
-    let mesh = super::square(card, 1.0).mesh().clone();
+    let mesh = TriComplex2::from_indexed_triangles(
+        "eddy-enthalpy-absolute-temperature-mode",
+        vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.5, 0.5]],
+        vec![[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]],
+        Metric2::planar(1.0).unwrap(),
+    )
+    .unwrap();
     PlanarMagnetostatics::new(
         mesh,
         vec![
@@ -38,8 +70,8 @@ fn permeability_entropy_and_spatial_joule_heat_share_one_actual_temperature() {
     let dt = 0.1;
     let mut temperatures = Vec::new();
     for slope in [-0.001, 0.0, 0.001] {
-        let card = field::affine_magnetic_card(1.0 / 18.0, 0.0, 1.0, slope, basis);
-        let curves = common::curves(&[card.clone(), card.clone()]);
+        let card = field::absolute_affine_magnetic_card(1.0 / 18.0, 0.0, 1.0, slope, basis);
+        let curves = thermal_curves(&[card.clone(), card.clone()]);
         let thermal = single_thermal(&curves[0], 1.0);
         let problem = problem(&card);
         let state = initial_field(&problem, 1.0);
@@ -165,8 +197,8 @@ fn permeability_entropy_and_spatial_joule_heat_share_one_actual_temperature() {
 #[test]
 fn all_field_capacity_contributions_and_exact_source_bindings_are_required() {
     let basis = ElectricalPropertyBasis::Resistivity;
-    let card = field::affine_magnetic_card(1.0 / 18.0, 0.0, 1.0, 0.001, basis);
-    let curves = common::curves(&[card.clone(), card.clone()]);
+    let card = field::absolute_affine_magnetic_card(1.0 / 18.0, 0.0, 1.0, 0.001, basis);
+    let curves = thermal_curves(&[card.clone(), card.clone()]);
     let thermal = single_thermal(&curves[0], 1.0);
     let problem = problem(&card);
     let state = initial_field(&problem, 1.0);
@@ -217,7 +249,7 @@ fn all_field_capacity_contributions_and_exact_source_bindings_are_required() {
         b.maximum_flux_density_t = 200.0;
     }
     assert!(run(&changed, common::config()).is_err());
-    let foreign = field::affine_magnetic_card(1.0 / 18.0, 0.0, 1.0, 0.002, basis);
+    let foreign = field::absolute_affine_magnetic_card(1.0 / 18.0, 0.0, 1.0, 0.002, basis);
     let foreign_problem = self::problem(&foreign);
     let foreign_laws = laws(&foreign, &foreign_problem);
     assert!(run(&foreign_laws, common::config()).is_err());
@@ -256,17 +288,25 @@ fn spatial_temperatures_rebuild_local_permeability_without_averaging_the_body() 
     let slopes = [0.001, -0.001, 0.002, 0.0];
     let sigma = [18.0, 9.0, 36.0, 3.0];
     let cards: Vec<_> = (0..4)
-        .map(|i| field::affine_magnetic_card(1.0 / sigma[i], 0.0, mu[i], mu[i] * slopes[i], basis))
+        .map(|i| {
+            field::absolute_affine_magnetic_card(
+                1.0 / sigma[i],
+                0.0,
+                mu[i],
+                mu[i] * slopes[i],
+                basis,
+            )
+        })
         .collect();
     let curves: Vec<_> = cards
         .iter()
         .map(|c| {
-            let [first, _] = common::curves(&[c.clone(), c.clone()]);
+            let [first, _] = thermal_curves(&[c.clone(), c.clone()]);
             first
         })
         .collect();
     let context = field::absolute_point(300.0);
-    let mesh = super::square(&cards[0], 1.0).mesh().clone();
+    let mesh = problem(&cards[0]).mesh().clone();
     let problem = PlanarMagnetostatics::new(
         mesh,
         cards

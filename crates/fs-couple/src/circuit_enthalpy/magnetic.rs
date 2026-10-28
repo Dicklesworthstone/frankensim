@@ -63,6 +63,7 @@ pub enum MagneticThermalError {
     Winding(OhmicWindingError),
     NonlinearWinding(fs_em::winding::nonlinear::NonlinearWindingError),
     Induction(EddyError),
+    SpatialInduction(fs_em::spatial::SpatialMagneticError),
     NonlinearInduction(NonlinearEddyError),
     Magnetic(FieldStorageError),
     Invalid(&'static str),
@@ -125,9 +126,28 @@ impl MagneticThermalNetwork<'_> {
         conducting_triangles: &[usize],
         cancelled: &RefCell<impl FnMut() -> bool>,
     ) -> Result<MagneticRoutes, Error> {
+        let volumes = (0..mesh.faces().len())
+            .map(|cell| {
+                check(cancelled)?;
+                mesh.face_measure(cell)
+                    .ok_or_else(|| invalid("missing original magnetic triangle geometry"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.routes_for_volumes(thermal, &volumes, conducting_triangles, cancelled)
+    }
+
+    // Original cell indices and physical volumes are sufficient for thermal
+    // routing; planar and tetrahedral owners supply their own admitted geometry.
+    pub(super) fn routes_for_volumes(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        cell_volumes_m3: &[f64],
+        conducting_triangles: &[usize],
+        cancelled: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<MagneticRoutes, Error> {
         if !self.volume_tolerance_m3.is_finite()
             || self.volume_tolerance_m3 < 0.0
-            || self.magnetic_regions.len() != mesh.faces().len()
+            || self.magnetic_regions.len() != cell_volumes_m3.len()
         {
             return Err(invalid(
                 "every magnetic triangle needs an explicit thermal/fixed region and a finite volume tolerance",
@@ -142,7 +162,7 @@ impl MagneticThermalNetwork<'_> {
                 MagneticRegion::Cell { cell, .. } => Some(cell),
                 MagneticRegion::Fixed { .. } => None,
             };
-            if triangle >= mesh.faces().len()
+            if triangle >= cell_volumes_m3.len()
                 || cell.is_some_and(|id| !thermal.cells().contains_key(&id))
                 || magnetic.insert(triangle, cell).is_some()
             {
@@ -151,9 +171,12 @@ impl MagneticThermalNetwork<'_> {
                 ));
             }
             if let Some(cell) = cell {
-                let volume = mesh
-                    .face_measure(triangle)
-                    .ok_or_else(|| invalid("missing original magnetic triangle geometry"))?;
+                let volume = cell_volumes_m3[triangle];
+                if !volume.is_finite() || volume <= 0.0 {
+                    return Err(invalid(
+                        "original magnetic cell volume must be finite positive",
+                    ));
+                }
                 let sum = volumes.entry(cell).or_insert(0.0);
                 *sum = finite(*sum + volume)?;
             }
@@ -358,8 +381,9 @@ impl MagneticThermalNetwork<'_> {
                 original.clone()
             };
             if let Some(source) = source {
-                let conductor = source.with_material(snapshot.clone())
-                .map_err(|e| CircuitEnthalpyError::Source(MagneticThermalError::Conductor(e)))?;
+                let conductor = source.with_material(snapshot.clone()).map_err(|e| {
+                    CircuitEnthalpyError::Source(MagneticThermalError::Conductor(e))
+                })?;
                 result.push((triangle, conductor));
             }
             magnetic.push(MagneticThermalSample {
