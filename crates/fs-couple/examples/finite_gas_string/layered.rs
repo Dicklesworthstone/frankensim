@@ -5,6 +5,7 @@ use fs_couple::acoustic_realize::concentric::{
     finite_gas::ConcentricFiniteGasSolve,
 };
 use fs_material::conductor::ElectricalPropertyBasis;
+use fs_couple::acoustic_realize::finite_gas::flow::FiniteGasStringFlowDirection;
 use fs_material::section::{ConcentricElasticSection, ConcentricMaterialLayer};
 use fs_material::section_temperature::{
     ConcentricSectionTemperatureLaw, thermoelastic::ConcentricThermoelasticLaw,
@@ -51,8 +52,19 @@ fn coefficients(
 
 pub(super) fn simulate(
     cx: &Cx<'_>, spec: &input::Spec, cards: &[MaterialCard], mut gas: IsochoricGasParcel,
+    mut reservoir: Option<ClosedGasParcel>,
 ) -> Result<History> {
     spec.validate()?;
+    let valid_reservoir = match (&spec.nozzle, &reservoir) {
+        (None, None) => true,
+        (Some(nozzle), Some(parcel)) => parcel.volume_m3().to_bits() == nozzle.reservoir_volume_m3.to_bits()
+            && (spec.gas_solve.minimum_temperature_k..=spec.gas_solve.maximum_temperature_k)
+                .contains(&parcel.state().state().temperature),
+        _ => false,
+    };
+    if !valid_reservoir {
+        return Err("nozzle data requires its original finite reservoir and admitted initial temperature".into());
+    }
     let bonded = spec.bonded.as_ref().ok_or("bonded string geometry is required")?;
     let count = bonded.sleeves.len()+1;
     if cards.len() != count
@@ -162,7 +174,14 @@ pub(super) fn simulate(
             gas.volume_m3(), thermochemical::provenance(&[GasRecord::Thermochemical(gas.state().clone())])),
         pressure_pa: Vec::with_capacity(spec.samples), records: Vec::with_capacity(spec.samples),
         layer_temperatures: Vec::with_capacity(spec.samples),
+        gas_flow: reservoir.as_ref().map(|parcel| flow::History::new(&gas, parcel, spec.samples)),
     };
+    if let (Some(nozzle), Some(parcel)) = (&spec.nozzle, &reservoir) {
+        history.description.push_str(&format!(
+            "; nozzle={:?}, reservoir_volume_m3={:e}; first-order heat-then-flow, finite well-mixed volumes, no jet momentum or chamber load; reservoir{}",
+            nozzle.geometry, parcel.volume_m3(),
+            thermochemical::provenance(&[GasRecord::Thermochemical(parcel.state().clone())])));
+    }
     let (mut material_heat, mut drag_heat, mut exchange_heat, mut joule_heat) = (0.0, 0.0, 0.0, 0.0);
     let (mut solid_heat, mut gas_heat, mut work, mut other_loss, mut allowance) = (0.0, 0.0, 0.0, 0.0, 0.0);
     let (mut reversible, mut axial, mut entropy) = (0.0, 0.0, 0.0);
@@ -175,9 +194,23 @@ pub(super) fn simulate(
             let conductor = live.section().elastic().thermal_transport()?.with_ohmic_transport(spec.length_m)?;
             (conductor.evaluate(drive, 0.0)?.current_a, 1.0/conductor.conductance_s())
         } else { (0.0, 0.0) };
-        let frame = live.step_with_isochoric_gas_conduction(cx, &mut thermal, &mut gas,
-            controls, &energy_guess, &forces, spec.gas_power_w*dt, spec.drive, &transfer,
-            |endpoint| coefficients(endpoint, &temperature_law, bonded, spec.solid_power_w))?;
+        let (frame, flux) = if let (Some(nozzle), Some(parcel)) = (&spec.nozzle, reservoir.as_mut()) {
+            let report = live.step_with_isochoric_gas_nozzle_conduction(cx, &mut thermal, &mut gas,
+                parcel, controls, &energy_guess, &forces, spec.gas_power_w*dt, spec.drive,
+                &transfer, nozzle.geometry, nozzle.controls(spec.gas_solve),
+                |endpoint| coefficients(endpoint, &temperature_law, bonded, spec.solid_power_w))?;
+            let sign = match report.direction {
+                FiniteGasStringFlowDirection::IntoSurroundings => 1.0,
+                FiniteGasStringFlowDirection::OutOfSurroundings => -1.0,
+            };
+            let flux = (sign*report.flow.mass_flow_kg_s, sign*report.transfer.transferred_mass_kg,
+                sign*report.transfer.transferred_enthalpy_j, report.energy_tolerance_j);
+            (report.thermal, Some(flux))
+        } else {
+            (live.step_with_isochoric_gas_conduction(cx, &mut thermal, &mut gas,
+                controls, &energy_guess, &forces, spec.gas_power_w*dt, spec.drive, &transfer,
+                |endpoint| coefficients(endpoint, &temperature_law, bonded, spec.solid_power_w))?, None)
+        };
         for ((guess, before), cell) in energy_guess.iter_mut().zip(before_energy).zip(thermal.cells().values()) {
             *guess = cell.mass_kg*cell.specific_h_j_kg-before;
         }
@@ -194,19 +227,29 @@ pub(super) fn simulate(
         gas_heat += spec.gas_power_w*dt;
         work += vibration.acoustic.input_work_j;
         other_loss += vibration.dissipation.authored_loss_j+vibration.dissipation.roundoff_residual_j;
-        allowance += frame.energy_tolerance_j;
+        allowance += flux.as_ref().map_or(frame.energy_tolerance_j, |flux| flux.3);
         for layer in &frame.string.layers {
             reversible += layer.reversible_heat_j;
             axial += layer.axial_free_energy_change_j;
             entropy += layer.mechanical_entropy_energy_change_j;
         }
-        let stored = live.mechanical_internal_energy_j(cx)?-initial_mechanical
+        let mut stored = live.mechanical_internal_energy_j(cx)?-initial_mechanical
             +thermal.energy_j()-initial_thermal
             +gas_mass*(gas.state().specific_internal_energy_j_kg()-initial_gas);
+        let mut gas_reference_scale = 0.0;
+        if let (Some(gas_flow), Some(parcel)) = (&history.gas_flow, &reservoir) {
+            let changes = gas_flow.energy_changes(&gas, parcel);
+            stored = live.mechanical_internal_energy_j(cx)?-initial_mechanical
+                +thermal.energy_j()-initial_thermal+changes[0]+changes[1];
+            gas_reference_scale = gas_flow.reference_energy_scale(&gas, parcel);
+        }
         let defect = stored+other_loss-work-joule_heat-solid_heat-gas_heat;
-        let tolerance = allowance+64.0*f64::EPSILON*(sample+1) as f64
+        let mut tolerance = allowance+64.0*f64::EPSILON*(sample+1) as f64
             *(stored.abs()+other_loss.abs()+work.abs()+joule_heat.abs()+solid_heat.abs()
                 +gas_heat.abs()+initial_mechanical.abs()+initial_thermal.abs());
+        if history.gas_flow.is_some() {
+            tolerance += 64.0*f64::EPSILON*(sample+1) as f64*gas_reference_scale;
+        }
         if !defect.is_finite() || !tolerance.is_finite() || defect.abs() > tolerance
             || vibration.epoch != live.accepted_samples()
             || live.accepted_samples() != (sample+1) as u64 || live.gas() != gas.state().state()
@@ -227,6 +270,9 @@ pub(super) fn simulate(
         if row.iter().chain(&temperatures).any(|v| !v.is_finite()) {
             return Err("nonfinite layered trajectory observation".into());
         }
+        if let (Some(gas_flow), Some(parcel), Some(flux)) =
+            (&mut history.gas_flow, &reservoir, flux)
+        { gas_flow.record(&gas, parcel, flux.0, flux.1, flux.2)?; }
         history.records.push(row);
         history.pressure_pa.push(pressure);
         history.layer_temperatures.push(temperatures);

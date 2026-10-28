@@ -9,6 +9,8 @@
 mod input;
 #[path = "finite_gas_string/layered.rs"]
 mod layered;
+#[path = "finite_gas_string/flow.rs"]
+mod flow;
 #[allow(dead_code)]
 #[path = "../src/bin/music_render/json.rs"]
 mod json;
@@ -33,6 +35,7 @@ use fs_matdb::{
 };
 use fs_material::conductor::{ELECTRICAL_RESISTIVITY_DIMS, ELECTRICAL_RESISTIVITY_PROPERTY};
 use fs_material::gas_species::input::{GasRecord, read_isochoric_parcel};
+use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 use fs_material::phase::{HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, SolidLiquidPhase};
 use fs_material::state_point::{
     MaterialPropertySelection, SPECIFIC_HEAT_CAPACITY_DIMS, ScalarAdmissibility,
@@ -72,23 +75,30 @@ fn material(pack: &NormalizedPack) -> Result<MaterialCard> {
     )?)
 }
 
-fn load_gas(options: &thermochemical::Options, volume_m3: f64) -> Result<IsochoricGasParcel> {
-    let loaded = options.load()?;
+fn load_gas(
+    options: &thermochemical::Options, spec: &input::Spec, directory: &Path,
+    mut read: impl FnMut(&Path, usize) -> Result<Vec<u8>>,
+) -> Result<(IsochoricGasParcel, Option<ClosedGasParcel>)> {
+    spec.validate()?;
+    let loaded = options.load_with(|path| read(path, 16 << 20).map_err(|e| e.to_string()))?;
     let bindings = loaded.bindings();
     let registry = loaded.registry(&bindings).ok_or(
         "finite gas requires explicit component packs, water identity and frozen phase policy",
     )?;
-    let path = options
-        .record
-        .as_deref()
-        .ok_or("--gas-record is required")?;
-    let bytes = bounded_read(path, 1 << 20)?;
-    let mut fields = std::str::from_utf8(&bytes)?.split_ascii_whitespace();
-    let gas = read_isochoric_parcel(&mut fields, &registry, volume_m3)?;
-    if fields.next().is_some() {
-        return Err("gas record contains trailing fields".into());
-    }
-    Ok(gas)
+    let mut parcel = |path: &Path, volume_m3| -> Result<IsochoricGasParcel> {
+        let bytes = read(path, 1 << 20)?;
+        if bytes.len() > 1 << 20 { return Err("gas record exceeds 1 MiB".into()); }
+        let mut fields = std::str::from_utf8(&bytes)?.split_ascii_whitespace();
+        let gas = read_isochoric_parcel(&mut fields, &registry, volume_m3)?;
+        if fields.next().is_some() { return Err("gas record contains trailing fields".into()); }
+        Ok(gas)
+    };
+    let gas = parcel(options.record.as_deref().ok_or("--gas-record is required")?,
+        spec.gas_volume_m3)?;
+    let reservoir = spec.nozzle.as_ref().map(|nozzle|
+        parcel(&directory.join(&nozzle.reservoir_record), nozzle.reservoir_volume_m3)
+            .map(ClosedGasParcel::from_isochoric)).transpose()?;
+    Ok((gas, reservoir))
 }
 
 fn context(temperature_k: f64, omega_rad_s: f64) -> Result<QueryPoint> {
@@ -229,6 +239,7 @@ struct History {
     pressure_pa: Vec<f64>,
     records: Vec<[f64; 27]>,
     layer_temperatures: Vec<Vec<f64>>,
+    gas_flow: Option<flow::History>,
 }
 
 fn simulate(
@@ -431,6 +442,7 @@ fn simulate(
         pressure_pa,
         records,
         layer_temperatures: Vec::new(),
+        gas_flow: None,
     })
 }
 
@@ -443,14 +455,14 @@ fn run(args: &[String]) -> Result<()> {
     let spec = input::parse(std::str::from_utf8(&bytes)?)?;
     let pack = NormalizedPack::from_bytes(&bounded_read(Path::new(&args[1]), 16 << 20)?)?;
     let mut cards = vec![material(&pack)?];
+    let directory = Path::new(&args[0]).parent().unwrap_or_else(|| Path::new("."));
     if let Some(bonded) = &spec.bonded {
-        let directory = Path::new(&args[0]).parent().unwrap_or_else(|| Path::new("."));
         for sleeve in &bonded.sleeves {
             let bytes = bounded_read(&directory.join(&sleeve.pack), 16 << 20)?;
             cards.push(material(&NormalizedPack::from_bytes(&bytes)?)?);
         }
     }
-    let gas = load_gas(&gas_options, spec.gas_volume_m3)?;
+    let (gas, reservoir) = load_gas(&gas_options, &spec, directory, bounded_read)?;
     let gate = CancelGate::new();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     let history = pool.scope(|arena| {
@@ -467,7 +479,7 @@ fn run(args: &[String]) -> Result<()> {
             ExecMode::Deterministic,
         );
         if spec.bonded.is_some() {
-            layered::simulate(&cx, &spec, &cards, gas)
+            layered::simulate(&cx, &spec, &cards, gas, reservoir)
         } else {
             simulate(&cx, &spec, &cards[0], gas)
         }
@@ -499,6 +511,13 @@ fn run(args: &[String]) -> Result<()> {
             write!(output, ",layer_{layer}_temperature_k")?;
         }
     }
+    if let Some(gas_flow) = &history.gas_flow {
+        for name in flow::COLUMNS { write!(output, ",{name}")?; }
+        for species in &gas_flow.species {
+            let escaped = species.replace('"', "\"\"");
+            write!(output, ",\"gas_mole_fraction_{escaped}\",\"reservoir_mole_fraction_{escaped}\"")?;
+        }
+    }
     writeln!(output)?;
     for (sample, record) in history.records.iter().enumerate() {
         for (i, value) in record.iter().enumerate() {
@@ -509,6 +528,9 @@ fn run(args: &[String]) -> Result<()> {
         }
         if let Some(temperatures) = history.layer_temperatures.get(sample) {
             for temperature in temperatures { write!(output, ",{temperature:.17e}")?; }
+        }
+        if let Some(gas_flow) = &history.gas_flow {
+            for value in &gas_flow.records[sample] { write!(output, ",{value:.17e}")?; }
         }
         writeln!(output)?;
     }

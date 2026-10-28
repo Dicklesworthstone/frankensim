@@ -9,7 +9,8 @@ use super::{
     ConcentricFiniteGasFrame, ConcentricFiniteGasSolve, ConcentricGasContact,
     ConcentricStringError, ConductanceSample, DepositionSimulation, EquilibriumPhaseState,
     OhmicDrive, ResolvedThermochemicalGasState, StepCoefficients, ThermalConcentricStringRuntime,
-    checkpoint, finite, invalid,
+    LayerConductionError, MaterialConductionLayers, ResolvedMaterialStatePoint,
+    checkpoint, finite, finite_gas_conductance, invalid,
 };
 use crate::acoustic_realize::finite_gas::flow::FiniteGasStringFlowDirection;
 use fs_exec::Cx;
@@ -43,6 +44,29 @@ pub struct ConcentricFiniteGasFlowFrame<S, R> {
 }
 
 impl ThermalConcentricStringRuntime<'_> {
+    /// The same nozzle transaction with the original outer-material Fourier
+    /// contact, conductivity source pin and lumped Biot admission. Heating and
+    /// flow share one sample; no layer/bath source is replaced by this adapter.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_isochoric_gas_nozzle_conduction<'t, S, E>(
+        &mut self, cx: &Cx<'_>, thermal: &mut DepositionSimulation<'t>,
+        gas: &mut IsochoricGasParcel, reservoir: &mut ClosedGasParcel,
+        controls: ConcentricFiniteGasSolve, energy_guess_j: &[f64], forces: &[f64],
+        gas_heat_j: f64, drive: Option<OhmicDrive>, layers: &MaterialConductionLayers<'_>,
+        nozzle: GasNozzle, flow_controls: GasNozzleStepSolve,
+        resolve_thermal: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
+    ) -> Result<ConcentricFiniteGasFlowFrame<S, ResolvedMaterialStatePoint>, ConcentricStringError<E>>
+    where E: From<LayerConductionError>
+    {
+        checkpoint(cx)?;
+        let binding = self.admit_finite_gas_conduction::<E>(layers)?;
+        self.step_with_isochoric_gas_nozzle(cx, thermal, gas, reservoir, controls,
+            energy_guess_j, forces, gas_heat_j, drive,
+            ConcentricGasContact { area_m2: layers.area_m2 }, nozzle, flow_controls,
+            resolve_thermal, |gas_end, solid_end|
+                finite_gas_conductance(layers, binding, gas_end, solid_end))
+    }
+
     /// Advance unequal-temperature material layers, optional electrical drive,
     /// reciprocal surface heat and pressure-driven atmospheric species exchange.
     ///
@@ -50,7 +74,8 @@ impl ThermalConcentricStringRuntime<'_> {
     /// transaction solves its material/thermal endpoint at fixed gas inventory;
     /// then the higher-pressure finite parcel supplies the existing nozzle for
     /// the same interval. Its source-law join conserves each species and total
-    /// enthalpy, retaining formation-energy references and original transport
+    /// internal energy through matched enthalpy transfers, retaining original
+    /// formation-energy references and transport
     /// data. Conflicting source models, over-withdrawal and pressure reversal
     /// retain the native refusal. No second jet-kinetic or flow-work heat is added.
     ///

@@ -360,9 +360,10 @@ tension, unsupported resolution, incompatible solve settings, nonlinear static
 preload and a failed joint solve refuse. Viscosity remains the original
 small-strain operator; finite-slope viscous coupling is not supplied.
 
-Changing support speed still refuses because its frame-acceleration forces are
-not supplied by the frozen-station model. It does not model a flexible bow stick,
-contact migration, inter-hair rubbing or thermal rosin. Axial and normal mode
+Without `bow_fiber_motion`, changing support speed still refuses. The optional
+motion record supplies frame-acceleration forces and the moving material crossing
+described above. Neither path models a flexible bow stick, inter-hair rubbing or
+transported thermal rosin histories. Axial and normal mode
 counts, ribbon cells and physical sample rate are
 independent refinement axes. A selected mode outside source validity or the
 clock's Nyquist guard is refused, never discarded.

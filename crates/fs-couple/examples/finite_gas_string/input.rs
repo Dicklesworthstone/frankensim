@@ -6,6 +6,8 @@ use fs_material::conductor::OhmicDrive;
 use fs_material::thermochemical_gas::energy::GasEnergySolve;
 use fs_couple::acoustic_realize::concentric::ConcentricStringThermalSolve;
 use fs_solver::NewtonKrylovConfig;
+use fs_material::thermochemical_gas::energy::parcel::transfer::{GasMassTransferSolve,
+    nozzle::{GasNozzle, GasNozzleStepSolve}};
 
 pub const MAX_INPUT_BYTES: usize = 8192;
 pub const MAX_SAMPLES: usize = 262_144;
@@ -42,6 +44,25 @@ pub struct Bonded {
     pub solve: ConcentricStringThermalSolve,
 }
 
+/// Authored restriction and a second finite inventory, never an infinite bath.
+#[derive(Clone, Debug)]
+pub struct Nozzle {
+    pub reservoir_record: String,
+    pub reservoir_volume_m3: f64,
+    pub geometry: GasNozzle,
+    pub mass_tolerance_kg: f64,
+    pub energy_tolerance_j: f64,
+    pub maximum_donor_fraction: f64,
+}
+impl Nozzle {
+    pub fn controls(&self, gas: GasEnergySolve) -> GasNozzleStepSolve {
+        GasNozzleStepSolve { nozzle: gas, transfer: GasMassTransferSolve {
+            donor: gas, receiver: gas, mass_tolerance_kg: self.mass_tolerance_kg,
+            energy_tolerance_j: self.energy_tolerance_j,
+        }, maximum_donor_fraction: self.maximum_donor_fraction }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Spec {
     pub sample_rate_hz: u32,
@@ -64,6 +85,7 @@ pub struct Spec {
     pub gas_volume_m3: f64,
     pub gas_solve: GasEnergySolve,
     pub maximum_gas_increment_k: f64,
+    pub nozzle: Option<Nozzle>,
     pub transfer_area_m2: f64,
     pub gas_distance_m: f64,
     pub solid_distance_m: f64,
@@ -149,6 +171,18 @@ pub fn parse(text: &str) -> super::Result<Spec> {
         maximum_iterations: f.value("gas iterations")?,
     };
     let maximum_gas_increment_k = f.value("gas temperature step limit")?;
+    let nozzle = if f.0.clone().next() == Some("nozzle") {
+        f.keyword("nozzle")?;
+        Some(Nozzle {
+            reservoir_record: f.0.next().ok_or("missing reservoir gas record")?.to_owned(),
+            reservoir_volume_m3: f.value("reservoir volume")?,
+            geometry: GasNozzle { area_m2: f.value("nozzle area")?,
+                discharge_coefficient: f.value("nozzle discharge coefficient")? },
+            mass_tolerance_kg: f.value("gas transfer mass tolerance")?,
+            energy_tolerance_j: f.value("gas transfer energy tolerance")?,
+            maximum_donor_fraction: f.value("maximum donor fraction")?,
+        })
+    } else { None };
     f.keyword("conduction")?;
     let (transfer_area_m2, gas_distance_m, solid_distance_m) = (
         f.value("transfer area")?,
@@ -249,6 +283,7 @@ pub fn parse(text: &str) -> super::Result<Spec> {
         gas_volume_m3,
         gas_solve,
         maximum_gas_increment_k,
+        nozzle,
         transfer_area_m2,
         gas_distance_m,
         solid_distance_m,
@@ -266,6 +301,22 @@ pub fn parse(text: &str) -> super::Result<Spec> {
 impl Spec {
     pub fn validate(&self) -> super::Result<()> {
         self.gas_solve.validate()?;
+        if let Some(nozzle) = &self.nozzle {
+            if self.bonded.is_none() {
+                return Err("nozzle exchange requires the bonded layered thermal path".into());
+            }
+            if nozzle.reservoir_record.is_empty() || nozzle.reservoir_record.len() > 512
+                || !std::path::Path::new(&nozzle.reservoir_record).components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_)))
+                || [nozzle.reservoir_volume_m3, nozzle.mass_tolerance_kg,
+                    nozzle.energy_tolerance_j, nozzle.maximum_donor_fraction]
+                    .iter().any(|v| !v.is_finite() || *v <= 0.0)
+                || nozzle.maximum_donor_fraction >= 1.0
+                || !nozzle.geometry.area_m2.is_finite() || nozzle.geometry.area_m2 < 0.0
+                || !nozzle.geometry.discharge_coefficient.is_finite()
+                || !(0.0..=1.0).contains(&nozzle.geometry.discharge_coefficient)
+            { return Err("nozzle requires a relative gas record, finite volume/area, coefficient in [0,1], positive transfer tolerances and donor fraction in (0,1)".into()); }
+        }
         if !(8000..=192_000).contains(&self.sample_rate_hz)
             || !(1..=MAX_SAMPLES).contains(&self.samples)
             || !(1..=32).contains(&self.modes)

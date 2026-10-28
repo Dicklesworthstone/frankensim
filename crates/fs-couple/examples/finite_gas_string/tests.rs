@@ -438,8 +438,8 @@ fn bonded_cards_drive_layer_heat_parallel_current_pitch_and_continuing_pressure(
         spec.modes = 1;
         let cards = [source_law(1.0, Some(2e-5)), source_law(2.0, Some(4e-5))];
         let gas = parcel("surroundings", 0.028, 3.5, spec.gas_volume_m3);
-        let a = layered::simulate(cx, &spec, &cards, gas.clone()).unwrap();
-        let b = layered::simulate(cx, &spec, &cards, gas.clone()).unwrap();
+        let a = layered::simulate(cx, &spec, &cards, gas.clone(), None).unwrap();
+        let b = layered::simulate(cx, &spec, &cards, gas.clone(), None).unwrap();
         assert_eq!(a.records, b.records);
         assert_eq!(a.pressure_pa, b.pressure_pa);
         assert_eq!(a.layer_temperatures, b.layer_temperatures);
@@ -478,24 +478,26 @@ fn bonded_cards_drive_layer_heat_parallel_current_pitch_and_continuing_pressure(
         assert!(a.layer_temperatures.iter().any(|t| t[0] != t[1]));
         assert!(a.pressure_pa[spec.release_sample..].iter().any(|p| p.abs() > 1e-12));
         let swapped = [cards[0].clone(), source_law(4.0, Some(0.0))];
-        let other = layered::simulate(cx, &spec, &swapped, gas.clone()).unwrap();
+        let other = layered::simulate(cx, &spec, &swapped, gas.clone(), None).unwrap();
         assert_ne!(a.pressure_pa, other.pressure_pa);
         assert_ne!(a.records.last().unwrap()[22], other.records.last().unwrap()[22]);
         let other_gas = layered::simulate(cx, &spec, &cards,
-            parcel("light-source", 0.004, 2.5, spec.gas_volume_m3)).unwrap();
+            parcel("light-source", 0.004, 2.5, spec.gas_volume_m3), None).unwrap();
         assert_ne!(a.pressure_pa, other_gas.pressure_pa);
         let mut cold = spec.clone();
         cold.drive = None;
         cold.solid_power_w = 0.0;
-        let unpowered = layered::simulate(cx, &cold, &cards, gas.clone()).unwrap();
+        let unpowered = layered::simulate(cx, &cold, &cards, gas.clone(), None).unwrap();
         assert!(unpowered.records.iter().all(|row| row[10] == 0.0));
         assert!(a.records.last().unwrap()[4] > unpowered.records.last().unwrap()[4]);
-        assert!(layered::simulate(cx, &spec, &cards[..1], gas.clone()).is_err());
-        assert!(layered::simulate(cx, &spec, &[source(1.0), cards[1].clone()], gas.clone()).is_err());
+        assert!(layered::simulate(cx, &spec, &cards[..1], gas.clone(), None).is_err());
+        assert!(layered::simulate(cx, &spec, &[source(1.0), cards[1].clone()], gas.clone(), None).is_err());
         let mut excess = spec.clone();
         excess.solid_power_w = 1e12;
-        assert!(layered::simulate(cx, &excess, &cards, gas.clone()).is_err());
+        assert!(layered::simulate(cx, &excess, &cards, gas.clone(), None).is_err());
         gate.request();
-        assert!(layered::simulate(cx, &spec, &cards, gas).is_err());
+        assert!(layered::simulate(cx, &spec, &cards, gas, None).is_err());
     });
 }
+
+mod flow;

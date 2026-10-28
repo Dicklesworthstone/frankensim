@@ -99,6 +99,29 @@ struct Candidate<'a, 't, S, R> {
     trials: usize,
 }
 
+// Shared by heat-only and conservative species-flow compositions. Keep the
+// original outer material pin and lumped-domain check in one physical owner.
+fn finite_gas_conductance<E: From<LayerConductionError>>(
+    layers: &MaterialConductionLayers<'_>, binding: (fs_matdb::ClaimId, f64),
+    gas: &ResolvedThermochemicalGasState, solid: EquilibriumPhaseState,
+) -> Result<ConductanceSample<ResolvedMaterialStatePoint>, E> {
+    let (selected, volume) = binding;
+    let sample = layers.resolve(gas, solid).map_err(E::from)?;
+    let property = sample.source.property_by_key(layers.conductivity)
+        .ok_or_else(|| E::from(LayerConductionError::Invalid("resolved outer conductivity is absent")))?;
+    if property.answer().receipt.selected != selected {
+        return Err(E::from(LayerConductionError::Invalid("surface conductivity changed its original layer source pin")));
+    }
+    let biot = if sample.conductance_w_k == 0.0 { 0.0 }
+        else { sample.conductance_w_k*(volume/layers.area_m2)
+            /layers.area_m2/property.value_si() };
+    if !biot.is_finite() || biot > fs_conduction::lumped::LUMPED_BIOT_CEILING {
+        return Err(E::from(LayerConductionError::Invalid(
+            "outer annulus exceeds the lumped Biot limit; use spatial thermal transport")));
+    }
+    Ok(sample)
+}
+
 impl<'a> ThermalConcentricStringRuntime<'a> {
     /// Continue unequal-temperature layers, optional DC drive and a finite
     /// source atmosphere in ONE transaction, preserving modal/observer history.
@@ -319,6 +342,16 @@ impl<'a> ThermalConcentricStringRuntime<'a> {
     where E: From<LayerConductionError>
     {
         checkpoint(cx)?;
+        let binding = self.admit_finite_gas_conduction::<E>(layers)?;
+        self.step_with_isochoric_gas_exchange(cx, thermal, gas, controls, energy_guess_j,
+            forces, gas_heat_j, drive, ConcentricGasContact { area_m2: layers.area_m2 },
+            resolve_thermal, |gas_end, solid_end|
+                finite_gas_conductance(layers, binding, gas_end, solid_end))
+    }
+
+    fn admit_finite_gas_conduction<E>(&self, layers: &MaterialConductionLayers<'_>)
+        -> Result<(fs_matdb::ClaimId, f64), ConcentricStringError<E>>
+    {
         let section = self.source.section.section();
         let outer = section.layers().last().ok_or(invalid("missing outer material"))?;
         let same_conditions = layers.context.axes().iter().filter(|(axis, _)| axis.as_str() != "T")
@@ -335,24 +368,7 @@ impl<'a> ThermalConcentricStringRuntime<'a> {
             .answer().receipt.selected;
         let volume = section.layer_integrals().last().ok_or(invalid("missing outer annular geometry"))?
             .area_m2()*self.string.length_m;
-        self.step_with_isochoric_gas_exchange(cx, thermal, gas, controls, energy_guess_j,
-            forces, gas_heat_j, drive, ConcentricGasContact { area_m2: layers.area_m2 },
-            resolve_thermal, |gas_end, solid_end| {
-                let sample = layers.resolve(gas_end, solid_end).map_err(E::from)?;
-                let property = sample.source.property_by_key(layers.conductivity)
-                    .ok_or_else(|| E::from(LayerConductionError::Invalid("resolved outer conductivity is absent")))?;
-                if property.answer().receipt.selected != selected {
-                    return Err(E::from(LayerConductionError::Invalid("surface conductivity changed its original layer source pin")));
-                }
-                let biot = if sample.conductance_w_k == 0.0 { 0.0 }
-                    else { sample.conductance_w_k*(volume/layers.area_m2)
-                        /layers.area_m2/property.value_si() };
-                if !biot.is_finite() || biot > fs_conduction::lumped::LUMPED_BIOT_CEILING {
-                    return Err(E::from(LayerConductionError::Invalid(
-                        "outer annulus exceeds the lumped Biot limit; use spatial thermal transport")));
-                }
-                Ok(sample)
-            })
+        Ok((selected, volume))
     }
 
     // A candidate may contain a discarded heat-stage observation. Always use
