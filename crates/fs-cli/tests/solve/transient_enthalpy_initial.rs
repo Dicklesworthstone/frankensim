@@ -142,6 +142,14 @@ fn g1_regional_initial_enthalpy_exchanges_contact_heat_and_replays_deterministic
     );
     assert_eq!(transient.get("initial_temperature_k"), Some(&J::Null));
     close(n(transient, "final_time_s"), 2.0, 0.0);
+    let peak = transient.get("sampled_peak").unwrap();
+    assert_eq!(peak.str_field("region"), Some("hot"));
+    close(n(peak, "value_k"), HOT_K, 1e-12);
+    close(n(peak, "time_s"), 0.0, 0.0);
+    close(n(peak, "state"), 0.0, 0.0);
+    close(n(peak, "samples"), n(transient, "fine_steps") + 1.0, 0.0);
+    assert_eq!(peak.get("includes_initial"), Some(&J::Bool(true)));
+    assert!(transient.get("adjoint").is_none());
     let materials = transient.get("materials").unwrap().as_array().unwrap();
     assert_eq!(materials.len(), 2);
     for (region, density, initial_temperature) in [
@@ -256,4 +264,38 @@ fn g0_explicit_uniform_temperature_still_rejects_inconsistent_regional_enthalpy(
     assert_eq!(refusal.code, "cli-solve-project-invalid");
     assert!(refusal.run.is_none());
     assert!(refusal.stage.is_none());
+}
+
+#[test]
+fn g1_regional_enthalpy_peak_uses_the_selected_regions_original_chart_temperature() {
+    let mut spec = isolated_contact_project();
+    spec.requirements.as_mut().unwrap()[0].region = "cold".into();
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_multi_region_contact(&ledger, &spec);
+    let (_, qoi, conduction, _) =
+        run_conjugate_to_completion(&ledger, &decode(&spec), &contact_cards());
+    let conduction = J::parse(&conduction).unwrap();
+    let transient = conduction.get("transient").unwrap();
+    let peak = transient.get("sampled_peak").unwrap();
+    let rows = transient.get("fine").unwrap().as_array().unwrap();
+    let mut expected = (COLD_K, 0.0, 0_usize);
+    for (index, row) in rows.iter().enumerate() {
+        let temperature = n(row, "final_region_max_k");
+        if temperature > expected.0 {
+            expected = (temperature, n(row, "time_s"), index + 1);
+        }
+    }
+    assert_eq!(peak.str_field("region"), Some("cold"));
+    close(n(peak, "value_k"), expected.0, 1e-12);
+    close(n(peak, "time_s"), expected.1, 0.0);
+    close(n(peak, "state"), expected.2 as f64, 0.0);
+    close(n(peak, "samples"), (rows.len() + 1) as f64, 0.0);
+    assert!(n(peak, "value_k") > COLD_K + 1e-6);
+    assert!(n(peak, "value_k") < HOT_K - 1e-6,
+        "the hotter neighboring body's initial temperature is outside this QoI region");
+    close(receipt_number_field(&qoi, "value"),
+        n(rows.last().unwrap(), "final_region_max_k"), 0.0);
+    assert_eq!(peak.get("includes_initial"), Some(&J::Bool(true)));
+    assert_eq!(peak.get("continuous_time_bound"), Some(&J::Bool(false)));
+    assert!(transient.get("adjoint").is_none());
 }

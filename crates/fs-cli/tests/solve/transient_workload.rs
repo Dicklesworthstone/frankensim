@@ -221,6 +221,23 @@ fn g3_native_workload_equal_energy_early_and_late_heating_have_different_final_t
     let early = run(&early);
     let late = run(&late);
     for history in [&early, &late] {
+        let peak = history.transient().get("sampled_peak").unwrap();
+        let mut expected = (INITIAL_K, 0.0, 0_usize);
+        for (index, row) in history.grid("fine").iter().enumerate() {
+            let temperature = n(row, "final_region_max_k");
+            if temperature > expected.0 {
+                expected = (temperature, n(row, "time_s"), index + 1);
+            }
+        }
+        assert_eq!(peak.str_field("region"), Some("air"));
+        assert_eq!(peak.str_field("time_scope"), Some("accepted-fine-grid"));
+        close(n(peak, "value_k"), expected.0, 0.0);
+        close(n(peak, "time_s"), expected.1, 0.0);
+        close(n(peak, "state"), expected.2 as f64, 0.0);
+        close(n(peak, "samples"), (history.grid("fine").len() + 1) as f64, 0.0);
+        assert_eq!(peak.get("includes_initial"), Some(&J::Bool(true)));
+        assert_eq!(peak.get("continuous_time_bound"), Some(&J::Bool(false)));
+        assert!(history.transient().get("adjoint").is_none());
         close(delivered_source_j(history.grid("fine")), 10.0, 2e-10);
         assert!(history.final_k() > INITIAL_K);
         assert!(
@@ -230,6 +247,10 @@ fn g3_native_workload_equal_energy_early_and_late_heating_have_different_final_t
             ) <= 1e-6
         );
     }
+    let early_peak = early.transient().get("sampled_peak").unwrap();
+    assert!(n(early_peak, "value_k") > early.final_k() + 1e-3,
+        "a cooled endpoint must not erase the earlier overheating");
+    assert!(n(early_peak, "time_s") < 2.0);
     assert!(
         late.final_k() > early.final_k() + 1e-3,
         "a Robin-cooled body must retain more of the later equal-energy input"

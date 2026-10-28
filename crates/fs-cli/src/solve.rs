@@ -241,7 +241,7 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// Version 82 connects native closed gray-diffuse enclosure radiation to the
 /// shared coupled solver, original convective air exchange and retained reports.
 /// Frozen-enclosure derivative and algebraic-bound claims remain refused.
-pub const SOLVE_DRIVER_VERSION: u32 = 82;
+pub const SOLVE_DRIVER_VERSION: u32 = 83;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

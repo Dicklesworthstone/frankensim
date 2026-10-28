@@ -113,6 +113,15 @@ fn g1_native_transient_uniform_heating_respects_storage_time_and_capacity() {
         );
         let expected = 293.15 + 5.0 * horizon / (capacity / 6.0);
         close(receipt_number_field(&qoi, "value"), expected, 2e-10);
+        let peak = transient.get("sampled_peak").expect("forward peak retained");
+        assert_eq!(peak.str_field("region"), Some("air"));
+        close(n(peak, "value_k"), expected, 2e-10);
+        close(n(peak, "time_s"), horizon, 0.0);
+        close(n(peak, "state"), n(transient, "fine_steps"), 0.0);
+        close(n(peak, "samples"), n(transient, "fine_steps") + 1.0, 0.0);
+        assert_eq!(peak.get("includes_initial"), Some(&J::Bool(true)));
+        assert_eq!(peak.get("continuous_time_bound"), Some(&J::Bool(false)));
+        assert!(transient.get("adjoint").is_none());
         let field = J::parse(&solution).unwrap();
         for value in field.get("temperature").unwrap().as_array().unwrap() {
             close(value.as_f64().unwrap(), expected, 2e-10);

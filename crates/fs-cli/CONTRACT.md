@@ -2485,3 +2485,27 @@ existing `aa6061.fsmcdpk` and `gray-surface.fsmcdpk` packs through the ordinary
 validate/import/solve commands. Its two equal-area patches use a deliberately
 manufactured matrix; this example demonstrates the native coupling and does
 not supply measured geometry or material validation.
+
+### Forward sampled thermal peak in native transient solves
+
+Every completed native constant-capacity or total-enthalpy transient retains
+`transient.sampled_peak` for the same declared temperature-maximum region as
+the final-time QoI. Sample zero is the original physical initial state; later
+samples are every accepted fine-grid endpoint. Regional initial enthalpy is
+mapped through that region's own phase chart before the first boundary update.
+The receipt records the value in kelvin, time in seconds, zero-based state
+index, sample count, region and `includes_initial: true`. Exact ties retain
+the earliest state. It requires no adjoint, additional solve or stored field
+trajectory. A late cooled state therefore cannot conceal an earlier measured
+overheating event from a design study.
+
+This observation has `Estimated` authority and
+`time_scope: "accepted-fine-grid"`; `continuous_time_bound: false` is explicit.
+It is not a bound between endpoints, a temporal error estimate for the peak or
+a certified design margin. The ordinary final-time QoI and its temporal
+comparison remain final-time quantities. Solve driver version 83 separates
+retained trajectories with this observation from older cached runs.
+
+Product regressions cover monotonic storage heating, equal-energy early/late
+pulses followed by cooling, an initially hot body cooling through contact and
+the distinct initial temperature of its initially cold neighbor.

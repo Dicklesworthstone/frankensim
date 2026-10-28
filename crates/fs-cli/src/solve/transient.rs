@@ -34,11 +34,13 @@ mod adjoint;
 mod conjugate;
 mod enthalpy;
 mod natural;
+mod sampled_peak;
+use sampled_peak::SampledPeak;
 pub(super) mod spatial;
 mod workload;
 use workload::{TimeGrids, Workload};
 
-pub(super) const NO_CLAIM: &str = "Estimated finite-mesh final-time temperature from backward Euler with declared temperature-independent regional heat capacity and the bound conductivity evaluated at each endpoint. Temperature-dependent conductivity uses residual-gated Newton/FGMRES with the full k'(T) tangent and immutable physical history. Explicit regional power histories replace delivered watts on their named volume regions; both grids land on every workload switch. The nested-grid final-maximum difference estimates temporal error at assumed order one; it is not a spatial error bound, observed-order proof, continuum or continuous-time maximum bound, validated heat capacity, or compliance certificate. Prescribed temperatures are endpoint data, including their discrete boundary-node storage reaction. Declared ambient radiation uses the shared area-mean gray-patch model with an independent endpoint residual and energy gate; every coupling trial retains the same physical history. Declared airflow uses quasi-steady branch transport at the retained flow-network operating point, with solid storage, a full nodal residual gate at actual marched references and a separate actual-air energy gate. Declared natural convection evaluates its admitted card at each endpoint and checks the full physical free residual and energy balance; exact equilibrium and out-of-domain Rayleigh states remain refused. Natural reservoirs and forced-air paths on distinct patches compose through the same stored solid: every natural update encloses a complete air solve, and the outer endpoint is independently checked under actual natural coefficients and actual air-law references with a separate air-enthalpy energy gate. The final air row describes its last natural iteration; natural and trajectory counters include all nested responses without advancing physical history. No airflow storage, time-varying fan dynamics, enclosure radiation, latent heat or transient adjoint is inferred. Endpoint heat storage is reported separately from numerical energy closure; transient energy_residual_j is the checked storage-minus-net-input balance.";
+pub(super) const NO_CLAIM: &str = "Estimated finite-mesh final-time temperature from backward Euler with declared temperature-independent regional heat capacity and the bound conductivity evaluated at each endpoint. Temperature-dependent conductivity uses residual-gated Newton/FGMRES with the full k'(T) tangent and immutable physical history. Explicit regional power histories replace delivered watts on their named volume regions; both grids land on every workload switch. A forward sampled peak covers the original initial field and every accepted fine endpoint in the requirement region, retaining the earliest exact tie. It is a sampled-time observation and does not bound unsampled temperatures. The nested-grid final-maximum difference estimates temporal error at assumed order one; it is not a spatial error bound, observed-order proof, continuum or continuous-time maximum bound, validated heat capacity, or compliance certificate. Prescribed temperatures are endpoint data, including their discrete boundary-node storage reaction. Declared ambient radiation uses the shared area-mean gray-patch model with an independent endpoint residual and energy gate; every coupling trial retains the same physical history. Declared airflow uses quasi-steady branch transport at the retained flow-network operating point, with solid storage, a full nodal residual gate at actual marched references and a separate actual-air energy gate. Declared natural convection evaluates its admitted card at each endpoint and checks the full physical free residual and energy balance; exact equilibrium and out-of-domain Rayleigh states remain refused. Natural reservoirs and forced-air paths on distinct patches compose through the same stored solid: every natural update encloses a complete air solve, and the outer endpoint is independently checked under actual natural coefficients and actual air-law references with a separate air-enthalpy energy gate. The final air row describes its last natural iteration; natural and trajectory counters include all nested responses without advancing physical history. No airflow storage, time-varying fan dynamics, enclosure radiation, latent heat or transient adjoint is inferred. Endpoint heat storage is reported separately from numerical energy closure; transient energy_residual_j is the checked storage-minus-net-input balance.";
 
 pub(super) struct NativeTransientResult {
     pub(super) solution: radiation::SolidSolution,
@@ -174,6 +176,7 @@ struct GridResult {
     endpoint: StepSolution,
     endpoint_dt_s: f64,
     rows: String,
+    sampled_peak: SampledPeak,
     /// Present only on an explicitly requested fine-grid derivative path.
     tape: Option<adjoint::Tape>,
     linear: Vec<LinearSolveEvidence>,
@@ -332,6 +335,9 @@ fn march(
 ) -> Result<GridResult, SolveRefusal> {
     let steps = ends_s.len();
     let mut old = vec![uniform_initial_temperature(policy)?; problem.mesh.vertex_count()];
+    let mut sampled_peak = SampledPeak::new(ladder_functional(
+        labels, &problem.mesh.complex().tets, &old, goal_region,
+    ))?;
     let mut tape = if retain_adjoint {
         Some(adjoint::Tape::new(cx, &old, steps, deadline)?)
     } else { None };
@@ -518,6 +524,7 @@ fn march(
             &endpoint.temperature,
             goal_region,
         );
+        sampled_peak.record(end, qoi)?;
         let net_w = endpoint.source_w + endpoint.dirichlet_in_w
             - endpoint.neumann_out_w
             - endpoint.robin_out_w;
@@ -576,6 +583,7 @@ fn march(
         endpoint: last.ok_or_else(|| bad("the transient grid has no steps"))?,
         endpoint_dt_s,
         rows: rows.join(","),
+        sampled_peak,
         tape,
         linear: evidence,
         stored_j,
@@ -820,6 +828,10 @@ pub(super) fn solve(
             "transient final-time error comparison needs the declared temperature-maximum requirement region",
         ));
     }
+    let goal_region_name = spec.requirements.iter().flatten()
+        .find(|row| region_ids.get(&row.region).copied() == goal_region)
+        .map(|row| row.region.as_str())
+        .ok_or_else(|| bad("transient trajectory lost its declared requirement region"))?;
     // Either convection owner bounds interface evaluations, radiation bounds
     // repeated solid responses, and the linear allowance includes all
     // corrections in one response. Check complete both-grid products first.
@@ -1013,8 +1025,11 @@ pub(super) fn solve(
             Ok("null".to_string())
         }
     };
+    let sampled_peak_receipt = fine.sampled_peak.receipt(
+        goal_region_name, fine_steps, policy.horizon.value,
+    )?;
     let receipt = format!(
-        "{{\"schema\":\"fs-cli-transient-conduction-v1\",\"method\":\"backward-euler\",\"status\":\"completed\",\"qoi_time\":\"final\",\"initial_temperature_k\":{},\"final_time_s\":{},\"coarse_steps\":{coarse_steps},\"fine_steps\":{fine_steps},\"total_steps\":{total_steps},\"max_steps\":{},\"coarse_step_s\":{},\"fine_step_s\":{},\"coarse_max_step_s\":{coarse_max_step},\"fine_max_step_s\":{fine_max_step},\"workload\":{workload_receipt},\"energy_tolerance_j\":{},\"capacities\":[{}],\"nonlinear\":{nonlinear_receipt},\"radiation\":{radiation_receipt},\"conjugate\":{airflow_receipt},\"natural\":{natural_receipt},\"coarse\":[{}],\"fine\":[{}],\"temporal_error\":{{\"status\":{},\"qoi\":\"temperature-max\",\"region\":{},\"coarse_final_k\":{},\"fine_final_k\":{},\"absolute_difference_k\":{},\"assumed_order\":1,\"safety_factor\":1.25,\"estimated_half_width_k\":{estimate},\"spatial_error_measured\":false}},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{},\"maximum_step_residual_j\":{}}},\"authority\":\"Estimated\",\"no_claim\":{}{adjoint_fragment}}}",
+        "{{\"schema\":\"fs-cli-transient-conduction-v1\",\"method\":\"backward-euler\",\"status\":\"completed\",\"qoi_time\":\"final\",\"initial_temperature_k\":{},\"final_time_s\":{},\"coarse_steps\":{coarse_steps},\"fine_steps\":{fine_steps},\"total_steps\":{total_steps},\"max_steps\":{},\"coarse_step_s\":{},\"fine_step_s\":{},\"coarse_max_step_s\":{coarse_max_step},\"fine_max_step_s\":{fine_max_step},\"workload\":{workload_receipt},\"energy_tolerance_j\":{},\"capacities\":[{}],\"nonlinear\":{nonlinear_receipt},\"radiation\":{radiation_receipt},\"conjugate\":{airflow_receipt},\"natural\":{natural_receipt},\"coarse\":[{}],\"fine\":[{}],\"sampled_peak\":{sampled_peak_receipt},\"temporal_error\":{{\"status\":{},\"qoi\":\"temperature-max\",\"region\":{},\"coarse_final_k\":{},\"fine_final_k\":{},\"absolute_difference_k\":{},\"assumed_order\":1,\"safety_factor\":1.25,\"estimated_half_width_k\":{estimate},\"spatial_error_measured\":false}},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{},\"maximum_step_residual_j\":{}}},\"authority\":\"Estimated\",\"no_claim\":{}{adjoint_fragment}}}",
         number(initial_temperature)?,
         number(policy.horizon.value)?,
         policy.max_steps,
@@ -1025,13 +1040,7 @@ pub(super) fn solve(
         coarse.rows,
         fine.rows,
         json_string(temporal_status),
-        json_string(
-            spec.requirements
-                .iter()
-                .flatten()
-                .find(|row| region_ids.get(&row.region).copied() == goal_region)
-                .map_or("", |row| row.region.as_str())
-        ),
+        json_string(goal_region_name),
         number(coarse_qoi)?,
         number(fine_qoi)?,
         number(difference)?,
