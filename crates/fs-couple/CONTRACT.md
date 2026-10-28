@@ -8967,3 +8967,28 @@ relaxation, and pinned-source/domain/unsupported-motion behavior. Together with
 the six fixed-mode references, all nine focused tests pass. These use declared
 synthetic material claims, not measured friction validation. The fixed normal
 patch and first-order endpoint/parameter-update limits remain in force.
+
+### Material voice-coil self-heating and power compression
+
+`speaker::thermal::ThermalMagneticTsDriver` binds one whole, wholly solid,
+fixed-density coil cell and a sourced cooling network to the original nonlinear
+magnetic speaker. The existing `MaterialNetwork` retains pinned electrical,
+caloric and thermal-transport sources. Endpoint R(T), discrete-gradient magnetic
+and mechanical motion, and native thermal backward Euler are solved jointly
+through `cell_driver_candidate`. Every trial starts from the same accepted
+magnetic and thermal history, with matching clocks and source snapshots.
+
+Only the native coil-current I²R loss enters the coil cell. Suspension, compact
+radiation and panel dissipation remain separately reported external losses.
+Electrical work plus external heat therefore balances magnetic/mechanical
+storage, finite thermal storage and the mechanical/acoustic sink without
+depositing any loss twice. Source/domain refusal, cancellation, work exhaustion,
+excursion failure and balance failure preserve both accepted histories.
+
+Magnetic profiles and mechanical geometry remain fixed. General thermal coupling
+is first order and requires timestep refinement. No copper coefficient, heat
+capacity or cooling constant is inferred; melting, expansion, skin/eddy losses,
+motion-dependent convection and temperature-dependent magnet strength require
+their own models. Focused tests exercise self-heating/power compression,
+constant-conductivity reduction to the original five-state cabinet, analytic
+finite-store cooling and joint refusal behavior.

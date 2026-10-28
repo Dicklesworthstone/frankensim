@@ -37,6 +37,7 @@ use fs_phs::{PhsError, PortHamiltonian, QuadraticStorage, StepRecord};
 
 mod magnetic;
 pub use magnetic::{MagneticCoilSample, MagneticTsDriver, VoiceCoilMagnetics};
+pub use magnetic::thermal;
 
 /// Thiele–Small parameter card (datasheet-class, with provenance).
 #[derive(Debug, Clone, Copy, PartialEq)]

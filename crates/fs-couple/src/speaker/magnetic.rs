@@ -12,6 +12,9 @@
 //! Its other current-dependent, thermal and lossy motor terms are not supplied
 //! by this displacement-only profile.
 
+/// Source-bound voice-coil heating on the shared finite enthalpy timeline.
+pub mod thermal;
+
 use super::{DriverAssembly, PanelMode, SpeakerError, TsCard, assemble_driver, declared_air};
 use fs_material::gas::GasState;
 use fs_phs::{DescriptorPortHamiltonian, QuadraticStorage, StepRecord, Storage, step_descriptor};
@@ -138,6 +141,7 @@ impl VoiceCoilMagnetics {
     }
 }
 
+#[derive(Clone)]
 struct CoilStorage {
     mechanical: QuadraticStorage,
     profile: VoiceCoilMagnetics,
@@ -219,12 +223,14 @@ impl Storage for CoilStorage {
 /// refinement. This small dense reference owner is not an audio callback.
 pub struct MagneticTsDriver {
     phs: DescriptorPortHamiltonian,
+    storage: CoilStorage,
     profile: VoiceCoilMagnetics,
     x: Vec<f64>,
     card: TsCard,
     rho: f64,
     moving_mass_kg: f64,
     has_panel: bool,
+    time_s: f64,
 }
 
 impl MagneticTsDriver {
@@ -289,15 +295,17 @@ impl MagneticTsDriver {
             profile,
             exact_q,
         };
-        let phs = DescriptorPortHamiltonian::new(n, n, 1, j, r, g, Box::new(storage))?;
+        let phs = DescriptorPortHamiltonian::new(n, n, 1, j, r, g, Box::new(storage.clone()))?;
         Ok(Self {
             phs,
+            storage,
             profile,
             x: vec![0.0; n],
             card,
             rho: gas.density,
             moving_mass_kg,
             has_panel: panel.is_some(),
+            time_s: 0.0,
         })
     }
 
@@ -310,6 +318,12 @@ impl MagneticTsDriver {
         voltage_v: f64,
         duration_s: f64,
     ) -> Result<(StepRecord, f64), SpeakerError> {
+        let target_s = self.time_s + duration_s;
+        if !target_s.is_finite() || (duration_s > 0.0 && target_s <= self.time_s) {
+            return Err(invalid(
+                "magnetic speaker clock increment is unrepresentable",
+            ));
+        }
         let record = step_descriptor(&self.phs, &self.x, &[voltage_v], duration_s)?;
         self.profile.sample(record.x[1])?;
         if record.x[1].abs() > self.card.x_max_m {
@@ -328,7 +342,54 @@ impl MagneticTsDriver {
             return Err(invalid("magnetic speaker pressure is unrepresentable"));
         }
         self.x.clone_from(&record.x);
+        self.time_s = target_s;
         Ok((record, pressure))
+    }
+
+    // A thermal trial changes only the coil's dissipative stamp. It does not
+    // reinitialize linkage, reinterpret stored energy or alter Bl/L/mechanics.
+    // The accepted driver is immutable until the joint thermal candidate is
+    // published. At most five states are copied for this reference owner.
+    fn with_coil_resistance(&self, resistance_ohm: f64) -> Result<Self, SpeakerError> {
+        if !resistance_ohm.is_finite() || resistance_ohm <= 0.0 {
+            return Err(invalid("finite positive voice-coil resistance required"));
+        }
+        let n = self.phs.state_dim();
+        let (j, old_r, g) = self.phs.structure();
+        let mut r = old_r.to_vec();
+        r[0] = resistance_ohm;
+        let phs = DescriptorPortHamiltonian::new(
+            n,
+            n,
+            1,
+            j.to_vec(),
+            r,
+            g.to_vec(),
+            Box::new(self.storage.clone()),
+        )?;
+        Ok(Self {
+            phs,
+            storage: self.storage.clone(),
+            profile: self.profile,
+            x: self.x.clone(),
+            card: self.card,
+            rho: self.rho,
+            moving_mass_kg: self.moving_mass_kg,
+            has_panel: self.has_panel,
+            time_s: self.time_s,
+        })
+    }
+
+    /// Accepted physical clock [s]. A refused step leaves this unchanged.
+    pub const fn time_s(&self) -> f64 {
+        self.time_s
+    }
+
+    /// Resistance used by the accepted electrical model [ohm]. The thermal
+    /// adapter refreshes it from the actual material temperature after every
+    /// jointly accepted step; standalone stepping holds it fixed.
+    pub fn coil_resistance_ohm(&self) -> f64 {
+        self.phs.structure().1[0]
     }
 
     /// Instantaneous physical voice-coil current [A].
