@@ -5,7 +5,8 @@
 > frozen-composition ideal-gas mixture evaluation, plus a positive-state
 > mechanical ideal-gas EOS rung and a bounded Wilke dilute-gas viscosity
 > mixing closure, plus bounded standard-state ideal-gas reaction equilibrium
-> and a caller-declared single-reaction stoichiometric mass-action closure.
+> and a caller-declared single-reaction stoichiometric mass-action closure,
+> plus bounded neutral ideal-gas TP/HP composition equilibrium.
 > Central batch compilation and test execution for the newest slice are
 > pending; the parent thermochemistry bead remains in progress.
 
@@ -35,9 +36,10 @@ and supplies positive dimensionless ideal-gas activities.
 Direct runtime dependencies are L1 or lower: `fs-qty`, `fs-matdb`, and
 `fs-math`. The direct `fs-evidence` edge is development-only so conformance
 fixtures construct the same validity type that reaches runtime transitively
-inside `fs-matdb` cards. The crate has no L2-L6 dependency and owns no solver,
-transport protocol, evolving state, session, persistence, or orchestration
-behavior.
+inside `fs-matdb` cards. The crate has no L2-L6 dependency. Its bounded
+composition-equilibrium solver is an immutable local thermodynamic closure;
+it owns no transport solver/protocol, evolving state, session, persistence,
+or orchestration behavior.
 
 ### Trial-state caloric evaluation
 
@@ -723,13 +725,14 @@ This slice does **not** claim:
   in particular, a condensed-species card mislabeled as gas is not detected by
   this schema and must not be treated as authority for `u = h - R T`;
 - an external numerical-oracle match or any evidence-color promotion;
-- reacting/equilibrium composition derivatives, chemical potentials,
-  activities beyond the retained ideal-gas `p_i/p0` standard-state convention,
-  fugacity, departure functions, cubic/tabular real-gas or multiphase EOS
-  behavior;
+- reacting/equilibrium composition derivatives beyond the optional neutral
+  ideal-gas fixed-pressure equilibrium heat capacity described below,
+  activities or chemical potentials beyond the retained ideal-gas `p_i/p0`
+  standard-state convention, fugacity, departure functions, cubic/tabular
+  real-gas or multiphase EOS behavior;
 - a physical phase-stability verdict from the positive ideal-gas model-domain
-  check, flash calculations, equilibrium-composition solves,
-  source-authenticated reaction rates, mechanism evolution or kinetics
+  check, flash calculations, ionized or multiphase equilibrium-composition
+  solves, source-authenticated reaction rates, mechanism evolution or kinetics
   integration, thermal conductivity, diffusion coefficients, or transport
   solves;
 - chemical meaningfulness, reversibility, kinetic accessibility, detailed
@@ -786,3 +789,46 @@ activities, range loss and invalid-factor/source refusal.
 Construction walks outward from the anchor and admits constant h/s offsets only when every cumulative per-region correction fits its declared bound and adjacent endpoint evaluations agree. Source gaps, nonfinite corrections, exceeded bounds, and unrepresentable endpoint agreement refuse. These bounds describe the permitted reference adjustment; they are not estimates of source-data uncertainty. Cp may retain a source-fit jump at a region boundary. Continuity admission does not establish positive Cp or Cv.
 
 Corrected evaluation derives u = h − RT and g = h − Ts from the same h/s owner. Corrected relative enthalpy and entropy integrate the retained Cp and Cp/T curves over each crossed region, avoiding subtraction of large absolute references or independently rounded seam corrections. Absolute and relative evaluations agree within floating-point rounding. Raw models retain their original region references, source jumps, and evaluator version 1. Explicitly corrected models use evaluator version 2 and bind the anchor, bounds, original card identities, and exact offset bits in immutable policy metadata shared by the model and accepted receipts. Construction and cross-region changes are bounded by the existing 16-region admission limit; successful property-only evaluation adds no allocation.
+
+
+## Neutral ideal-gas composition and adiabatic chamber equilibrium
+
+`equilibrium::composition::IdealGasEquilibriumV1` binds the original typed
+`ElementalMatrix`, neutral `ChargeVector` and canonically ordered NASA-9 models.
+It minimizes ideal-gas Gibbs energy at fixed temperature and pressure subject
+to the actual feed elemental inventory. Its HP closure solves the same
+composition problem inside an explicit temperature bracket and closes total
+enthalpy. A caller may supply a common inlet temperature or the sum of the
+original enthalpies of separate inlet streams. Source formation enthalpy enters
+once; there is no additional heat-release term.
+
+Damped log-amount Newton steps retain positive species and distinguish a
+structurally absent feed element from a representable logarithmic trace whose
+direct fraction underflows. The ordinary element-space system has at most 17
+unknowns. A bounded full KKT fallback, allocated lazily once, avoids squaring
+trace-species conditioning when the reduced system loses rank. Scratch buffers
+are reused across iterations and warm-started HP temperature trials. Species,
+elements, Newton/backtracking steps and temperature work all have explicit
+bounds; cancellation is polled before result publication.
+
+Results retain accepted original-source receipts, element and chemical-potential
+residuals, independent mass closure, amounts, logarithmic mole fractions,
+enthalpy and iteration counts. The optional equilibrium heat capacity includes
+composition response through a nonnegative Gibbs-Hessian quadratic form; it is
+not the frozen-composition heat capacity and does not imply `cv = cp - R` for
+reacting products. The material freeze boundary must handle its own exact-one
+floating-point composition convention and must not silently erase an
+underflowed positive trace.
+
+This closure is neutral ideal gas only. It does not infer a chemical mechanism,
+authenticate a source-to-species declaration, determine phase stability, or
+implement ions, condensed phases, finite-rate combustion or a real-gas EOS.
+Residual tolerances bound the equations, not relative errors of arbitrarily
+tiny trace species. Manufactured analytic fixtures are not a CEA oracle match.
+
+Native verification with the repository-pinned compiler ran the complete
+`fs-thermochem` library: 89 tests passed, including 12 new composition/HP tests.
+They cover analytic pressure-dependent dissociation, minor-element balance,
+strong-product KKT fallback, trace underflow, independent adiabatic energy
+closure, distinct inlet temperatures, equilibrium heat-capacity derivatives,
+feed/reference invariance, source and work-budget refusals, and cancellation.

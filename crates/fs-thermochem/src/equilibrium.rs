@@ -9,6 +9,9 @@
 //! establish empirical kinetic orders, integrate kinetics, or prove that a
 //! named reaction is physically meaningful.
 
+/// Neutral ideal-gas composition equilibrium and adiabatic chamber closure.
+pub mod composition;
+
 use core::fmt;
 
 use fs_qty::{Dimensionless, Qty, Temperature};

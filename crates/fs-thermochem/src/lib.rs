@@ -10,9 +10,10 @@
 //! viscosity mixing closure, plus bounded ideal-gas standard-state reaction
 //! equilibrium and a caller-declared single-reaction stoichiometric
 //! mass-action closure. Derived identities remain scoped to explicit
-//! ideal-gas conventions. This crate owns no transport solver, evolving state,
-//! composition-equilibrium solve, mechanism evolution, kinetics integrator,
-//! or L3 protocol.
+//! ideal-gas conventions. Neutral gas composition equilibrium and adiabatic
+//! chamber closure minimize the same source-bearing Gibbs energy subject to
+//! elemental inventory. This crate owns no transport solver, evolving state,
+//! mechanism evolution, kinetics integrator, or L3 protocol.
 
 mod caloric;
 mod enthalpy;
