@@ -825,3 +825,32 @@ None.
 - Fan power means input power under the declared total efficiency,
   `Delta p * Q / eta_total`. Motor/controller transients, reactive power,
   acoustic power, and installation effects are outside this slice.
+
+
+### Porous Darcy and mixed passive pressure graphs
+
+`graph::LossGraph::new_mixed` admits typed linear Darcy loss, existing quadratic
+loss, and an explicitly authored sum `dp = A Q + B Q |Q|`. The series/parallel
+quadratic API keeps its original meaning. `graph::porous::LinearLossElement`
+can bind the shared material barrier and coherent gas viscosity; layer resistance
+is compiled once and graph iterations use numeric coefficients. A sealed path
+is omitted, and an inertial/Forchheimer coefficient is never inferred from k.
+
+Material edges share one coherent frozen gas state. Its absolute pressure is
+the common reference at graph gauge pressure zero. Actual endpoint absolute
+pressures and their excursions from that reference must remain inside source
+support and the caller's constant-density allowance; superficial speed is
+checked at the accepted solution. The compressible finite-volume material
+transport owner remains the path for substantial density change or gas-specific
+slip. This graph does not resolve membrane diffusion, rarefied pores or storage.
+
+Mixed fan intersections solve the actual pressure graph at each trial instead
+of applying quadratic homogeneity. Numerical brackets may leave a material's
+operating domain, but final acceptance cannot. Tangents and adjoints use
+`dQ/ddp = 1/(A + 2 B |Q|)`; a branch's resistance-scale derivative scales both
+coefficients together. Linear stagnant edges have their finite physical
+derivative; pure quadratic stagnation retains its existing refusal. Analytic
+and manufactured-network regressions cover reversal, extreme coefficients,
+series/parallel/loop balances, gas substitution, source admission, fan operating
+points and sensitivity agreement. These remain nominal model estimates, with
+source uncertainty retained rather than promoted to a numerical certificate.

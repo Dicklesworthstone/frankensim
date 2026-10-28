@@ -102,6 +102,8 @@ impl LossGraph {
     /// pressure scaling is at most one, so it cannot amplify the reference
     /// graph's absolute conservation tolerance. Final flows, conservation, and
     /// fan mismatch are nevertheless recomputed and checked before returning.
+    /// Graphs containing linear Darcy drag instead solve the actual pressure
+    /// graph at each bracketed trial: quadratic homogeneity does not apply.
     ///
     /// This numerical reduction is NOT a certified equivalent resistance or
     /// uncertainty enclosure. It cannot be used to mint `OperatingPoint`'s
@@ -134,6 +136,10 @@ impl LossGraph {
             }
             let network = self.solve(&[fixed(inlet, 0.0), fixed(outlet, 0.0)], graph_config, cx)?;
             return checked_operating_point(network, inlet, outlet, fan, 0.0, 0, fan_config, cx);
+        }
+        if self.has_linear_losses() {
+            return self.solve_mixed_with_fan(inlet, outlet, fan, graph_config, fan_config,
+                minimum, maximum, peak, cx);
         }
         let reference = self.solve(&[fixed(inlet, peak), fixed(outlet, 0.0)], graph_config, cx)?;
         let reference_flow = reference.node_outflows[inlet].value();
@@ -194,6 +200,74 @@ impl LossGraph {
         }
         let network = self.finish(pressures, &boundaries, state, reference.sweeps, cx)?;
         checked_operating_point(network, inlet, outlet, fan, flow, iterations, fan_config, cx)
+    }
+
+    // Pressure increases graph flow monotonically; the retained fan curve is
+    // nonincreasing in flow. Bracket in pressure and solve the native graph at
+    // every trial, retaining the quadratic-only fast path above unchanged.
+    #[allow(clippy::too_many_arguments)]
+    fn solve_mixed_with_fan(
+        &self, inlet: usize, outlet: usize, fan: &FanBank,
+        graph_config: GraphSolveConfig, fan_config: GraphFanConfig,
+        minimum: f64, maximum: f64, peak: f64, cx: &Cx<'_>,
+    ) -> Result<GraphOperatingPoint, GraphFanError> {
+        let mut low = fan.pressure_at(VolumetricFlowRate::new(maximum))?.value();
+        let mut high = peak;
+        let lower = self.solve_numerical(&[fixed(inlet, low), fixed(outlet, 0.0)], graph_config, cx)?;
+        let upper = self.solve_numerical(&[fixed(inlet, high), fixed(outlet, 0.0)], graph_config, cx)?;
+        let mut low_flow = lower.node_outflows[inlet].value();
+        let mut high_flow = upper.node_outflows[inlet].value();
+        if low_flow > maximum || high_flow < minimum {
+            return Err(GraphFanError::OutsideFanDomain(
+                "mixed graph has no intersection inside the retained fan flow domain"));
+        }
+        for network in [lower, upper] {
+            let flow = network.node_outflows[inlet].value();
+            if flow >= minimum && flow <= maximum {
+                let residual = fan.pressure_at(VolumetricFlowRate::new(flow))?.value()
+                    - network.pressures[inlet].value();
+                if residual == 0.0 {
+                    self.admit_material(&network, cx)?;
+                    return checked_operating_point(network, inlet, outlet, fan, flow, 0, fan_config, cx);
+                }
+            }
+        }
+        let mut last_residual = peak;
+        let mut completed = 0;
+        for iteration in 1..=fan_config.max_iterations {
+            checkpoint(cx)?;
+            completed = iteration;
+            let pressure = 0.5 * low + 0.5 * high;
+            let network = self.solve_numerical(
+                &[fixed(inlet, pressure), fixed(outlet, 0.0)], graph_config, cx)?;
+            let flow = network.node_outflows[inlet].value();
+            // Outside the source's fan-flow domain only the monotone sign is
+            // used for bracketing. No extrapolated fan point can be published.
+            let admitted_flow = flow >= minimum && flow <= maximum;
+            let residual = finite(fan.pressure_at(
+                VolumetricFlowRate::new(flow.clamp(minimum, maximum)))?.value() - pressure,
+                "mixed fan/system mismatch")?;
+            last_residual = residual;
+            if admitted_flow && (residual == 0.0
+                || (high_flow - low_flow <= fan_config.absolute_flow_tolerance.value()
+                    && residual.abs() <= fan_config.absolute_pressure_tolerance.value()))
+            {
+                self.admit_material(&network, cx)?;
+                return checked_operating_point(network, inlet, outlet, fan, flow,
+                    iteration, fan_config, cx);
+            }
+            if pressure <= low || pressure >= high { break; }
+            if flow < minimum || (flow <= maximum && residual > 0.0) {
+                low = pressure;
+                low_flow = flow;
+            } else {
+                high = pressure;
+                high_flow = flow;
+            }
+        }
+        Err(GraphFanError::DidNotConverge {
+            iterations: completed, pressure_residual: Pressure::new(last_residual),
+        })
     }
 
     fn check_fan_terminals(&self, inlet: usize, outlet: usize, cx: &Cx<'_>) -> Result<(), GraphFanError> {

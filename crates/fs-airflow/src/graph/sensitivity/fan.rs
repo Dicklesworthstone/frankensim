@@ -73,7 +73,8 @@ pub struct GraphFanTangent {
 /// Gradient of a dimensionless objective at the moving operating point.
 #[derive(Debug, Clone)]
 pub struct GraphFanGradient {
-    /// `dJ/d(log R)` in original branch order, including fan feedback.
+    /// Common resistance-scale derivative in edge order, including fan feedback.
+    /// A mixed edge scales both its linear and quadratic coefficients together.
     pub log_resistances: Vec<f64>,
     /// `dJ/d(log speed_ratio)`; divide by the speed ratio for `dJ/dspeed_ratio`.
     pub log_speed_ratio: f64,

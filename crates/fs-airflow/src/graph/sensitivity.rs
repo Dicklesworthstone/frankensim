@@ -1,15 +1,19 @@
 //! Implicit tangents and adjoints of a converged passive loss graph.
 //!
-//! For `dp = R q |q|`, at nonzero flow, `dq = g d(dp) - q/2 d(log R)`
-//! with `g = 1/(2 R |q|)`. Eliminating fixed pressures gives the symmetric
+//! For `dp = A q + B q |q|`, `g = 1/(A + 2 B |q|)` and a common
+//! coefficient scale gives `dq = g d(dp) - g dp d(log scale)`. This reduces
+//! to the original `q/2` response for quadratic edges and to `q` for Darcy
+//! edges. Eliminating fixed pressures gives the symmetric
 //! positive-definite, grounded weighted graph Laplacian. We solve that system,
 //! not a differentiation of the primal iteration history. Storage is O(V+E).
 //!
-//! These are local derivatives of the declared nominal quadratic model, not
+//! These are local derivatives of the declared nominal passive model, not
 //! interval certificates, uncertainty propagation, or coupled thermal adjoints.
 //! Fan-driven derivatives are available through `solve_with_fan_linearized`.
-//! Zero-flow branches are explicitly refused; no
-//! epsilon resistance or artificial derivative regularization is introduced.
+//! Zero-flow quadratic branches are explicitly refused. A positive linear
+//! coefficient supplies its true finite zero-flow slope without regularization.
+//! Mixed-edge coefficient directions scale both coefficients together; separate
+//! linear/quadratic parameter directions are not represented by this API.
 
 use core::fmt;
 use std::cell::RefCell;
@@ -37,7 +41,7 @@ pub type FlowWeight = Qty<-3, 0, 1, 0, 0, 0>;
 #[derive(Debug, Clone, Copy)]
 pub struct GraphSensitivityConfig {
     /// Refuse branches at or below this nonnegative absolute flow (m^3/s).
-    /// Zero admits every representable nonzero flow, but never stagnant flow.
+    /// Zero also admits stagnant branches with a positive linear coefficient.
     pub minimum_absolute_flow: VolumetricFlowRate,
     /// Shared iteration budget and recomputed-residual target for each solve.
     pub linear: CheckedCgConfig,
@@ -107,7 +111,8 @@ pub struct GraphTangent {
 /// Gradient of a dimensionless scalar objective, from one transposed solve.
 #[derive(Debug, Clone)]
 pub struct GraphGradient {
-    /// `dJ/d(log R_e)` in original branch order. Divide by R for `dJ/dR`.
+    /// Derivative for a common multiplicative resistance scale on each edge.
+    /// For a pure law this is `dJ/d(log R)`; on mixed edges both A and B scale.
     pub log_resistances: Vec<f64>,
     /// `dJ/dp_boundary` in the original boundary-input order (1/Pa).
     pub boundary_pressures: Vec<PressureWeight>,
@@ -126,6 +131,7 @@ pub struct GraphLinearization<'g> {
     free_nodes: Vec<usize>,
     free_index: Vec<Option<usize>>,
     conductance: Vec<f64>,
+    resistance_response: Vec<f64>,
     inverse_diagonal: Vec<f64>,
     config: GraphSensitivityConfig,
 }
@@ -135,7 +141,8 @@ impl LossGraph {
     ///
     /// Each component is grounded by the primal boundary validation. Positive
     /// finite conductances then make the free-node Laplacian SPD. Admission
-    /// refuses stagnant/near-stagnant branches and unrepresentable coefficients.
+    /// refuses non-differentiable quadratic stagnation, caller-excluded low
+    /// flows, and unrepresentable coefficients.
     pub fn solve_linearized(
         &self,
         boundaries: &[FixedPressure],
@@ -172,23 +179,37 @@ impl LossGraph {
             }
         }
         let mut conductance = Vec::with_capacity(self.branches.len());
+        let mut resistance_response = Vec::with_capacity(self.branches.len());
         let mut diagonal = vec![Sum::default(); free_nodes.len()];
         for (edge, branch) in solution.branches.iter().enumerate() {
             periodic_checkpoint(edge, cx)?;
             let q = branch.flow.value();
-            if q.abs() <= sensitivity.minimum_absolute_flow.value() {
+            let linear = self.linear_resistance[edge];
+            if q.abs() <= sensitivity.minimum_absolute_flow.value()
+                && (linear == 0.0 || sensitivity.minimum_absolute_flow.value() > 0.0)
+            {
                 return Err(GraphSensitivityError::NonDifferentiableBranch {
                     branch: edge, flow: branch.flow,
                 });
             }
-            // Separate roots avoid forming R*|q| or dp/R, which can overflow
-            // even when both the primal flow and its conductance are finite.
-            let g = finite((0.5 / self.sqrt_resistance[edge])
-                / det::sqrt(branch.pressure_drop.value().abs()), "branch conductance")?;
-            if g <= 0.0 || 0.5 * q == 0.0 {
+            let g = if linear == 0.0 {
+                // Preserve the original separate-root quadratic evaluation.
+                finite((0.5 / self.sqrt_resistance[edge])
+                    / det::sqrt(branch.pressure_drop.value().abs()), "branch conductance")?
+            } else {
+                let quadratic = finite(branch.loss.resistance.value() * q.abs(),
+                    "quadratic derivative coefficient")?;
+                let scale = linear.max(quadratic);
+                finite((1.0 / (linear / scale + 2.0 * (quadratic / scale))) / scale,
+                    "mixed branch conductance")?
+            };
+            let response = if linear == 0.0 { 0.5 * q }
+                else { finite(g * branch.pressure_drop.value(), "resistance scale response")? };
+            if g <= 0.0 || (q != 0.0 && response == 0.0) {
                 return Err(GraphError::NonFinite("branch derivative underflowed").into());
             }
             conductance.push(g);
+            resistance_response.push(response);
             for node in [branch.from, branch.to] {
                 if let Some(index) = free_index[node] { diagonal[index].add(g)?; }
             }
@@ -205,7 +226,7 @@ impl LossGraph {
         checkpoint(cx)?;
         Ok(GraphLinearization {
             graph: self, solution, free_nodes, free_index, conductance,
-            inverse_diagonal, config: sensitivity,
+            resistance_response, inverse_diagonal, config: sensitivity,
         })
     }
 }
@@ -217,8 +238,11 @@ impl GraphLinearization<'_> {
 
     /// Jacobian-vector product for logarithmic resistances and fixed pressures.
     ///
-    /// `log_resistance_direction[e]` is `(dR_e/dt)/R_e`; boundary directions
-    /// use the original boundary-input order. The parameter `t` is dimensionless.
+    /// Each direction scales all nonzero resistance coefficients of that edge:
+    /// `dA/dt = A direction`, `dB/dt = B direction`. On a Darcy-only edge,
+    /// negative log-permeability direction gives the log-resistance direction
+    /// when viscosity and geometry are fixed. Boundary directions retain their
+    /// original input order; the parameter `t` is dimensionless.
     pub fn tangent(
         &self,
         log_resistance_direction: &[f64],
@@ -244,7 +268,7 @@ impl GraphLinearization<'_> {
             let direction = finite(log_resistance_direction[edge], "log-resistance direction")?;
             let imposed = finite(self.conductance[edge]
                 * (pressures[branch.from] - pressures[branch.to])
-                - (0.5 * branch.flow.value()) * direction, "imposed tangent flow")?;
+                - self.resistance_response[edge] * direction, "imposed tangent flow")?;
             if let Some(index) = self.free_index[branch.from] { rhs[index].add(-imposed)?; }
             if let Some(index) = self.free_index[branch.to] { rhs[index].add(imposed)?; }
         }
@@ -259,7 +283,7 @@ impl GraphLinearization<'_> {
             periodic_checkpoint(edge, cx)?;
             let flow = finite(self.conductance[edge]
                 * (pressures[branch.from] - pressures[branch.to])
-                - (0.5 * branch.flow.value()) * log_resistance_direction[edge], "tangent flow")?;
+                - self.resistance_response[edge] * log_resistance_direction[edge], "tangent flow")?;
             flows.push(VolumetricFlowRate::new(flow));
             outflows[branch.from].add(flow)?;
             outflows[branch.to].add(-flow)?;
@@ -336,7 +360,7 @@ impl GraphLinearization<'_> {
             periodic_checkpoint(edge, cx)?;
             let corrected = finite(flow_weights[edge].value()
                 - (lambda[branch.from] - lambda[branch.to]), "adjoint edge weight")?;
-            log_resistances.push(finite(-(0.5 * branch.flow.value()) * corrected,
+            log_resistances.push(finite(-self.resistance_response[edge] * corrected,
                 "log-resistance gradient")?);
             let value = finite(self.conductance[edge] * corrected, "boundary pressure gradient")?;
             boundary_gradient[branch.from].add(value)?;

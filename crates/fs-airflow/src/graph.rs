@@ -1,6 +1,6 @@
-//! Steady passive quadratic-loss networks with arbitrary graph topology.
+//! Steady passive linear/quadratic-loss networks with arbitrary graph topology.
 //!
-//! An edge directed from `u` to `v` obeys `p[u] - p[v] = R Q |Q|`.
+//! An edge directed from `u` to `v` obeys `p[u] - p[v] = A Q + B Q |Q|`.
 //! The direction is bookkeeping: negative flow is permitted. Free nodes obey
 //! volume conservation; every connected component needs a prescribed pressure.
 //! Node-wise bracketed equilibration avoids dividing by a zero-flow derivative.
@@ -16,6 +16,7 @@
 
 use core::fmt;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use fs_exec::Cx;
 use fs_math::det;
@@ -27,6 +28,8 @@ mod fan;
 pub use fan::{GraphFanConfig, GraphFanError, GraphOperatingPoint};
 pub mod sensitivity;
 pub mod thermal;
+pub mod porous;
+pub use porous::{LinearLossElement, LinearLossResistance, PassiveBranch};
 
 /// An oriented passive branch; its orientation does not constrain flow sign.
 #[derive(Debug, Clone, PartialEq)]
@@ -39,7 +42,9 @@ pub struct GraphBranch {
     pub loss: LossElement,
 }
 
-/// A prescribed nodal pressure in Pa, relative to any common reference.
+/// A prescribed nodal pressure in Pa, relative to a common reference.
+/// Material-bound Darcy edges fix that absolute reference through their common
+/// frozen gas state's pressure.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FixedPressure {
     /// Node index.
@@ -94,8 +99,10 @@ pub struct GraphBranchFlow {
     pub from: usize,
     /// Positive-flow destination.
     pub to: usize,
-    /// Original coefficient and its unpromoted physical metadata.
+    /// Original quadratic coefficient and metadata; zero for a pure Darcy edge.
     pub loss: LossElement,
+    /// Additional linear loss and its original physical metadata, when present.
+    pub linear_loss: Option<Arc<LinearLossElement>>,
     /// Signed `pressure[from] - pressure[to]` in Pa.
     pub pressure_drop: Pressure,
     /// Signed nominal flow in m^3/s.
@@ -105,7 +112,8 @@ pub struct GraphBranchFlow {
 /// Residual-bearing nominal solution, not a certified enclosure.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GraphSolution {
-    /// Pressures in node-index order.
+    /// Pressures in node-index order. For material-bound Darcy edges these
+    /// are gauge pressures relative to the common frozen gas state's pressure.
     pub pressures: Vec<Pressure>,
     /// Branches in input order, including zero and reverse flows.
     pub branches: Vec<GraphBranchFlow>,
@@ -137,6 +145,8 @@ pub enum GraphError {
     UnreferencedNode(usize),
     /// A context checkpoint refused further work.
     Interrupted,
+    /// The source material refused its gas state, geometry or constitutive regime.
+    Material(fs_material::MaterialError),
     /// Floating-point arithmetic could not represent the requested operation.
     NonFinite(&'static str),
     /// The iteration budget ended without meeting conservation tolerances.
@@ -158,22 +168,49 @@ impl fmt::Display for GraphError {
 
 impl std::error::Error for GraphError {}
 
-/// Validated reciprocal quadratic-loss topology. Parallel edges are allowed.
+/// Validated reciprocal passive-loss topology. Parallel edges are allowed.
 #[derive(Debug, Clone)]
 pub struct LossGraph {
     branches: Vec<GraphBranch>,
     adjacency: Vec<Vec<usize>>,
     sqrt_resistance: Vec<f64>,
+    linear_resistance: Vec<f64>,
+    linear_losses: Vec<Option<Arc<LinearLossElement>>>,
 }
 
 impl LossGraph {
     /// Validate topology and retain the original loss data without promotion.
     pub fn new(node_count: usize, branches: Vec<GraphBranch>) -> Result<Self, GraphError> {
+        let linear_losses = vec![None; branches.len()];
+        Self::from_parts(node_count, branches, linear_losses)
+    }
+
+    /// Build a graph containing Darcy, quadratic, or combined passive losses.
+    ///
+    /// Each edge obeys `dp = A Q + B Q |Q|`, with nonnegative coefficients
+    /// and at least one positive coefficient. Flow remains a signed volume
+    /// flow at one frozen density; this is not a compressible mass-flow solve.
+    /// All material-bound Darcy edges must retain the identical coherent gas
+    /// snapshot. Quadratic-only coefficients remain caller-declared.
+    pub fn new_mixed(node_count: usize, branches: Vec<PassiveBranch>) -> Result<Self, GraphError> {
+        let (branches, linear_losses) = branches.into_iter().map(|branch| {
+            let (branch, linear) = branch.into_parts();
+            (branch, linear.map(Arc::new))
+        }).unzip();
+        Self::from_parts(node_count, branches, linear_losses)
+    }
+
+    fn from_parts(
+        node_count: usize, branches: Vec<GraphBranch>,
+        linear_losses: Vec<Option<Arc<LinearLossElement>>>,
+    ) -> Result<Self, GraphError> {
         if node_count == 0 {
             return Err(GraphError::InvalidInput("node count must be positive"));
         }
         let mut names = BTreeSet::new();
         let mut sqrt_resistance = Vec::with_capacity(branches.len());
+        let mut linear_resistance = Vec::with_capacity(branches.len());
+        let mut common_gas: Option<fs_material::gas::GasState> = None;
         for (index, branch) in branches.iter().enumerate() {
             let invalid = |reason| GraphError::InvalidBranch { branch: index, reason };
             if branch.from >= node_count || branch.to >= node_count || branch.from == branch.to {
@@ -183,15 +220,26 @@ impl LossGraph {
                 return Err(invalid("branch names must be nonblank and unique"));
             }
             let resistance = branch.loss.resistance.value();
-            if !(resistance.is_finite() && resistance > 0.0) {
-                return Err(invalid("resistance must be finite and positive"));
+            let linear = linear_losses[index].as_ref();
+            if let Some(loss) = linear { loss.validate().map_err(invalid)?; }
+            if let Some(binding) = linear.and_then(|loss| loss.material()) {
+                if common_gas.is_some_and(|gas| gas != binding.gas) {
+                    return Err(invalid("Darcy edges require one identical frozen gas snapshot"));
+                }
+                common_gas = Some(binding.gas);
+            }
+            linear_resistance.push(linear.map_or(0.0, |loss| loss.resistance.value()));
+            if !(resistance.is_finite() && resistance >= 0.0
+                && (resistance > 0.0 || linear.is_some()))
+            {
+                return Err(invalid("nonnegative quadratic and positive total resistance required"));
             }
             let uncertainty = branch.loss.uncertainty_rel;
             if !(uncertainty.is_finite() && (0.0..1.0).contains(&uncertainty)) {
                 return Err(invalid("resistance uncertainty must be in [0, 1)"));
             }
             let root = det::sqrt(resistance);
-            if !(root.is_finite() && root > 0.0) {
+            if !(root.is_finite() && (root > 0.0 || linear.is_some())) {
                 return Err(invalid("resistance square root is not representable"));
             }
             sqrt_resistance.push(root);
@@ -201,7 +249,7 @@ impl LossGraph {
             adjacency[branch.from].push(index);
             adjacency[branch.to].push(index);
         }
-        Ok(Self { branches, adjacency, sqrt_resistance })
+        Ok(Self { branches, adjacency, sqrt_resistance, linear_resistance, linear_losses })
     }
 
     /// Number of nodes, including explicit isolated nodes.
@@ -210,11 +258,20 @@ impl LossGraph {
         self.adjacency.len()
     }
 
-    /// Immutable input edges, preserving all physical metadata.
+    /// Input endpoints and quadratic metadata in edge order.
+    ///
+    /// The quadratic coefficient is zero for a pure Darcy edge; its actual
+    /// positive resistance is retained by [`Self::linear_losses`].
     #[must_use]
     pub fn branches(&self) -> &[GraphBranch] {
         &self.branches
     }
+
+    /// Linear component and retained material binding in the same edge order.
+    #[must_use]
+    pub fn linear_losses(&self) -> &[Option<Arc<LinearLossElement>>] { &self.linear_losses }
+
+    fn has_linear_losses(&self) -> bool { self.linear_losses.iter().any(Option::is_some) }
 
     /// Solve arbitrary looped or disconnected-but-anchored pressure networks.
     ///
@@ -227,6 +284,16 @@ impl LossGraph {
         boundaries: &[FixedPressure],
         config: GraphSolveConfig,
         cx: &Cx<'_>,
+    ) -> Result<GraphSolution, GraphError> {
+        let solution = self.solve_numerical(boundaries, config, cx)?;
+        self.admit_material(&solution, cx)?;
+        Ok(solution)
+    }
+
+    // The fan bracket may use numerical trials outside a material's operating
+    // support. Only an accepted final state may cross the public boundary.
+    fn solve_numerical(
+        &self, boundaries: &[FixedPressure], config: GraphSolveConfig, cx: &Cx<'_>,
     ) -> Result<GraphSolution, GraphError> {
         checkpoint(cx)?;
         config.validate()?;
@@ -253,6 +320,18 @@ impl LossGraph {
             self.relax_flat_components(&mut pressures, &fixed, config.max_node_iterations, cx)?;
         }
         unreachable!("inclusive sweep range always returns at its limit")
+    }
+
+    fn admit_material(&self, solution: &GraphSolution, cx: &Cx<'_>) -> Result<(), GraphError> {
+        for (edge, branch) in solution.branches.iter().enumerate() {
+            periodic_checkpoint(edge, cx)?;
+            if let Some(loss) = &self.linear_losses[edge] {
+                loss.admit_flow(solution.pressures[branch.from].value(),
+                    solution.pressures[branch.to].value(), branch.flow.value())
+                    .map_err(|reason| GraphError::InvalidBranch { branch: edge, reason })?;
+            }
+        }
+        checkpoint(cx)
     }
 
     fn fixed_pressures(
@@ -305,9 +384,30 @@ impl LossGraph {
         if difference == 0.0 {
             return Ok(0.0);
         }
-        // Taking the roots separately also admits dp/R outside the f64 range
-        // when its square root is still representable.
-        let magnitude = finite(det::sqrt(difference.abs()) / self.sqrt_resistance[edge], "branch flow")?;
+        let magnitude = if self.linear_resistance[edge] > 0.0 {
+            let linear_flow = difference.abs() / self.linear_resistance[edge];
+            if self.sqrt_resistance[edge] == 0.0 {
+                finite(linear_flow, "Darcy branch flow")?
+            } else {
+                // Scale by the smaller single-term solution. This rationalized
+                // quadratic root avoids subtracting nearly equal numbers and
+                // avoids squaring dimensional coefficients or pressures.
+                let quadratic_flow = det::sqrt(difference.abs()) / self.sqrt_resistance[edge];
+                if linear_flow <= quadratic_flow {
+                    let ratio = linear_flow / quadratic_flow;
+                    finite(linear_flow / (0.5 + 0.5 * det::sqrt(1.0 + 4.0 * ratio * ratio)),
+                        "mixed branch flow")?
+                } else {
+                    let ratio = quadratic_flow / linear_flow;
+                    finite(quadratic_flow / (0.5 * ratio + det::sqrt(1.0 + 0.25 * ratio * ratio)),
+                        "mixed branch flow")?
+                }
+            }
+        } else {
+            // Separate roots admit dp/B outside the f64 range when Q remains
+            // representable, and preserve the original quadratic evaluation.
+            finite(det::sqrt(difference.abs()) / self.sqrt_resistance[edge], "branch flow")?
+        };
         if magnitude == 0.0 {
             return Err(GraphError::NonFinite("nonzero branch flow underflowed"));
         }
@@ -499,6 +599,7 @@ impl LossGraph {
                 from: branch.from,
                 to: branch.to,
                 loss: branch.loss.clone(),
+                linear_loss: self.linear_losses[edge].clone(),
                 pressure_drop: Pressure::new(pressures[branch.from] - pressures[branch.to]),
                 flow: VolumetricFlowRate::new(state.flows[edge]),
             });
