@@ -33,6 +33,10 @@ use fs_modal::{
 };
 use fs_sparse::Csr;
 
+/// Complete source-bound modal images, retaining nonproportional loss.
+pub mod modal;
+pub use modal::{MaterialModalValve, ModalStaticCompliance, reduce_modal_pressure_loaded_valve};
+
 /// Explicit finite-dimensional accuracy and allocation policies. No default
 /// chooses a material reference frequency or promotes a decay model to truth.
 #[derive(Clone, Copy, Debug)]
@@ -52,8 +56,8 @@ pub struct Controls {
     pub maximum_loss_sample_error: f64,
     /// Largest admitted frozen-image modal loss factor 2*zeta, in (0, 1).
     pub maximum_modal_loss_factor: f64,
-    /// Existing retained-matrix pole accuracy policy. Any required full block
-    /// refuses because the existing valve runtime exports independent modes.
+    /// Existing retained-matrix pole accuracy policy. The legacy MaterialValve
+    /// refuses a required full block; the complete material image retains it.
     pub damping: ModalDampingBudget,
 }
 
@@ -65,6 +69,9 @@ pub struct Approximation {
     pub modal_omega_rad_s: Vec<f64>,
     /// Diagonal entries of the projected mass-normalized C [1/s].
     pub modal_damping_per_s: Vec<f64>,
+    /// Complete symmetric mass-normalized viscosity C [1/s], row-major in
+    /// modal_omega_rad_s order. Off-diagonal entries are never replaced by fits.
+    pub modal_viscosity_per_s: Vec<f64>,
     /// Largest symmetric row-norm bound at the retained modal frequencies.
     pub maximum_storage_sample_error: f64,
     pub maximum_loss_sample_error: f64,
@@ -130,6 +137,28 @@ pub fn reduce_pressure_loaded_valve<'a>(
     controls: &Controls,
     cx: &Cx<'_>,
 ) -> Result<MaterialValve<'a>, ReduceError> {
+    let (_, mut reduced) = reduce_material(
+        request, nodal_load_per_pa_m2, controls, false, cx,
+    )?;
+    let approximation = reduced
+        .material_loss
+        .take()
+        .ok_or_else(|| invalid("material valve reduction did not retain its damping admission"))?;
+    let valve = super::pressure_loaded_from_reduction(reduced, nodal_load_per_pa_m2)?;
+    Ok(MaterialValve {
+        valve,
+        materials: request.material,
+        approximation,
+    })
+}
+
+fn reduce_material(
+    request: &ValveCardRequest<'_, TetViscoField<'_>>,
+    nodal_load_per_pa_m2: &[[f64; 3]],
+    controls: &Controls,
+    complete_basis: bool,
+    cx: &Cx<'_>,
+) -> Result<(ViscoElements, super::ReducedValve), ReduceError> {
     controls.validate()?;
     if request.loss_factor != 0.0 {
         return Err(invalid(
@@ -179,8 +208,9 @@ pub fn reduce_pressure_loaded_valve<'a>(
         system: &system,
         reference: &reference,
         controls,
+        complete_basis,
     };
-    let mut reduced = super::reduce_valve_impl(
+    let reduced = super::reduce_valve_impl(
         request,
         None,
         field_identity(
@@ -198,16 +228,7 @@ pub fn reduce_pressure_loaded_valve<'a>(
             material_loss: Some(&projection),
         }),
     )?;
-    let approximation = reduced
-        .material_loss
-        .take()
-        .ok_or_else(|| invalid("material valve reduction did not retain its damping admission"))?;
-    let valve = super::pressure_loaded_from_reduction(reduced, nodal_load_per_pa_m2)?;
-    Ok(MaterialValve {
-        valve,
-        materials: request.material,
-        approximation,
-    })
+    Ok((system, reduced))
 }
 
 fn invalid(what: &'static str) -> ReduceError {
@@ -249,6 +270,7 @@ pub(super) struct Projection<'a> {
     system: &'a ViscoElements,
     reference: &'a ComplexStiffness,
     controls: &'a Controls,
+    pub(super) complete_basis: bool,
 }
 impl Projection<'_> {
     pub(super) fn project(
@@ -282,7 +304,7 @@ impl Projection<'_> {
         // This is the existing coupled-pole certificate, not an independently
         // invented small-zeta or eigenvalue-gap heuristic.
         let certificate = certify_modal_damping(&omega, &damping, &self.controls.damping)?;
-        if certificate
+        if !self.complete_basis && certificate
             .blocks
             .iter()
             .any(|b| matches!(b, ModalDampingBlock::Full { .. }))
@@ -330,6 +352,7 @@ impl Projection<'_> {
             reference_omega_rad_s: self.reference.omega_rad_s,
             modal_omega_rad_s: omega,
             modal_damping_per_s: diag,
+            modal_viscosity_per_s: damping,
             maximum_storage_sample_error: storage_error,
             maximum_loss_sample_error: loss_error,
             damping: certificate,

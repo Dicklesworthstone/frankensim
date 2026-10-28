@@ -1862,8 +1862,8 @@ independent damping constant is inserted.
 This is an explicitly admitted frozen-frequency reduction:
 K = K'(omega_ref), C = K''(omega_ref)/omega_ref. All modes share ONE storage
 pencil and its mass-orthogonal basis. The existing fs-modal damping certifier
-examines the full projected symmetric C; a required coupled block refuses
-instead of being exported as independent decay rates. Full retained storage
+examines the full projected symmetric C; the legacy `MaterialValve` refuses
+a required coupled block instead of exporting independent decay rates. Full retained storage
 and loss matrices are also compared with the frozen model at EVERY retained
 modal frequency. Controls explicitly bound the resulting storage-energy and
 absolute loss-factor operator errors, the modal loss factor and allocation.
@@ -1873,8 +1873,8 @@ or a thermally coupled constitutive history.
 
 The static opening and pressure comparisons still use the source EQUILIBRIUM
 stiffness, not K'(omega_ref). Thus even a complete retained frozen model must
-disclose any lost equilibrium compliance and pass the existing playing-mode
-admission. Every law must admit DC, the reference frequency and each modal
+disclose any lost equilibrium compliance. Conversion to the legacy one-mode
+playing image must additionally pass its existing playing-mode admission. Every law must admit DC, the reference frequency and each modal
 sample. The wrapper retains the original field and approximation report;
 identities bind constitutive tensors, branch times, density, source identities,
 field ordering and the selected reference frequency.
@@ -1893,6 +1893,30 @@ port-Hamiltonian decay, Prony changes to frequency and damping, equilibrium
 compliance disclosure, codec-to-reed continuity, uniform/per-element identity,
 and refusal of incompatible bands, double-counted loss, excessive dispersion
 or modal loss requiring a coupled runtime.
+
+### Complete selected material valve modes
+
+`reduce::visco::reduce_modal_pressure_loaded_valve` explicitly exports a
+`MaterialModalValve` for a coupled runtime. It reuses the same source assembly,
+modal window, frozen-frequency dispersion checks and equilibrium comparators,
+retains the original `ViscoElements`, every selected mass-normalized mode and
+the complete projected viscosity, and permits the certifier's full blocks.
+A mode with zero mean opening remains available to carry pressure work,
+external force or coupled material loss. The legacy card and one-mode path
+retain their refusal; no independent-mode conversion is exposed by this owner.
+
+Signed mean-opening and pressure projections stay separate. Nodal force
+projection and nodal displacement/velocity expansion use the same original
+shapes and support map. Static diagnostics include all selected modes while
+preserving the original equilibrium reference. Identity binds the complete
+basis, full viscosity and signed ports. This is still an admitted frozen K/C
+image, with no claim to broadband hereditary, omitted-mode, contact or
+large-strain accuracy.
+
+The added `visco_valve` regressions exercise an exactly zero-opening,
+pressure-carrying mode in an anisotropic two-coordinate tetrahedron, full-C
+work against the original element assembly, virtual-work reciprocity, legacy
+refusal, source-dispersion admission and cancellation.
 
 ## Source tetrahedra projected into full-memory structural dynamics
 

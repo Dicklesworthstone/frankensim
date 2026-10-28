@@ -545,6 +545,9 @@ struct ReducedValve {
     mass_normalized_pressure_load: Vec<f64>,
     pressure_compliance: Option<PressureCompliance>,
     material_loss: Option<visco::Approximation>,
+    // Only the explicit complete material image owns all selected modes,
+    // including modes orthogonal to the mean opening observation.
+    complete_material_modes: Option<Vec<fs_modal::ModePair>>,
 }
 
 fn reduce_valve_impl<M>(
@@ -645,6 +648,7 @@ fn reduce_valve_impl<M>(
         });
     }
 
+    let retain_complete_material_basis = material_loss.is_some_and(|p| p.complete_basis);
     let material_loss = material_loss
         .map(|projection| projection.project(&report.modes, cx))
         .transpose()?;
@@ -868,6 +872,7 @@ fn reduce_valve_impl<M>(
         mass_normalized_pressure_load,
         pressure_compliance,
         material_loss,
+        complete_material_modes: retain_complete_material_basis.then(|| report.modes.clone()),
     })
 }
 

@@ -34,6 +34,8 @@ pub mod wetted;
 /// Source-bound proportional Maxwell memory in the original modal basis.
 pub mod relaxation;
 mod viscosity;
+/// Complete tetrahedral material images in the original coupled modal owner.
+pub mod solid;
 
 /// One fixed-basis mode, in a physical metre-valued coordinate.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -109,6 +111,7 @@ pub struct ModalAperture {
     closure: Option<closure::ModalPlateClosure>,
     samples: u64,
     material_plates: Vec<material::MaterialModalPlate>,
+    material_solid: Option<solid::MaterialModalSolid>,
     pressure_ports: [Option<pressure::MaterialPressurePort>; 2],
     material_gas: Option<fs_material::gas::GasState>,
     viscous_slit: Option<super::viscous::ViscousSlit>,
@@ -246,6 +249,7 @@ impl ModalAperture {
             closure: None,
             samples: 0,
             material_plates: Vec::new(),
+            material_solid: None,
             pressure_ports: [None, None],
             material_gas: None,
             viscous_slit: None,

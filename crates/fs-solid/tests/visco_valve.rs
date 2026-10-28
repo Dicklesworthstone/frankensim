@@ -305,3 +305,101 @@ fn nonproportional_near_degenerate_material_loss_cannot_be_exported_as_independe
         assert!(reduce_pressure_loaded_valve(&req, &pressure, &controls(), cx).is_ok());
     })
 }
+
+
+#[test]
+fn complete_image_retains_dark_pressure_mode_and_original_material_cross_loss() {
+    use fs_modal::ModalDampingBlock;
+    use fs_solid::reduce::visco::reduce_modal_pressure_loaded_valve;
+    with_cx(|cx| {
+        let mut m = material(0.001, 0.0, 1.0);
+        let mut viscosity = diagonal([0.08, 0.1, 0.1, 0.04, 0.045, 0.05]);
+        viscosity[1][2] = 0.09;
+        viscosity[2][1] = 0.09;
+        m.law = TensorProny::new(*m.law.c_eq(), Some(viscosity), vec![], (0.0, 10_000.0)).unwrap();
+        let fixed: Vec<_> = (0..12).filter(|&d| d != 7 && d != 11).collect();
+        let mut req = request(TetViscoField::Uniform(&m));
+        req.fixed_dofs = &fixed;
+        // Mean opening observes node 3's z coordinate. Pressure acts solely
+        // on node 2's y coordinate, which the compatibility card would omit.
+        let pressure = [[0.0; 3], [0.0; 3], [0.0, 0.002, 0.0], [0.0; 3]];
+        assert!(reduce_pressure_loaded_valve(&req, &pressure, &controls(), cx).is_err());
+        let image = reduce_modal_pressure_loaded_valve(&req, &pressure, &controls(), cx).unwrap();
+        assert_eq!(image.modes().len(), 2);
+        assert!(image.approximation().damping.blocks.iter()
+            .any(|block| matches!(block, ModalDampingBlock::Full { .. })));
+        let dark = image.opening_projection_per_sqrt_kg().iter()
+            .position(|g| *g == 0.0).expect("exact zero-opening mode retained");
+        assert_ne!(image.pressure_projection_m2_per_sqrt_kg()[dark], 0.0);
+        close(image.compliance().retained_volume_m3_per_pa,
+            image.compliance().exact_volume_m3_per_pa, 1e-12);
+        close(image.compliance().retained_opening_force_m_per_n,
+            image.compliance().exact_opening_force_m_per_n, 1e-12);
+        assert_eq!(image.compliance().retained_opening_m_per_pa, 0.0);
+        let c = &image.approximation().modal_viscosity_per_s;
+        close(c[1].abs(), 0.9, 1e-12);
+        assert_eq!(c[1], c[2]);
+
+        let gate = fs_exec::CancelGate::new_clock_free();
+        let q = [0.03, -0.04];
+        let nodal = image.expand_nodal(&q, &gate).unwrap();
+        let force = [[0.0; 3], [0.0; 3], [0.0, 0.7, 0.0], [0.0, 0.0, -0.2]];
+        let projected = image.project_nodal_force(&force, &gate).unwrap();
+        let nodal_work: f64 = nodal.iter().flatten().zip(force.iter().flatten())
+            .map(|(x, f)| x * f).sum();
+        let modal_work: f64 = q.iter().zip(&projected).map(|(x, f)| x * f).sum();
+        close(modal_work, nodal_work, 1e-13);
+        assert_eq!(image.project_nodal_force(&pressure, &gate).unwrap(),
+            image.pressure_projection_m2_per_sqrt_kg());
+
+        // Compare to the actual element owner's assembled source viscosity,
+        // not a second copy of the modal projection formula.
+        let reference = image.source().complex_stiffness(controls().reference_omega_rad_s, cx).unwrap();
+        let free_velocity: Vec<_> = image.source().equilibrium().free_dofs.iter()
+            .map(|&d| nodal[d / 3][d % 3]).collect();
+        let mut source_force = vec![0.0; free_velocity.len()];
+        reference.imag.spmv(&free_velocity, &mut source_force);
+        let source_power: f64 = free_velocity.iter().zip(&source_force)
+            .map(|(v, f)| v * f / reference.omega_rad_s).sum();
+        let modal_power: f64 = (0..2).map(|i| (0..2)
+            .map(|j| q[i] * c[2*i+j] * q[j]).sum::<f64>()).sum();
+        close(modal_power, source_power, 1e-12);
+        assert!(modal_power > 0.0);
+        assert!(image.project_nodal_force(&force[..3], &gate).is_err());
+        assert!(image.expand_nodal(&[0.0], &gate).is_err());
+        gate.request();
+        assert!(image.expand_nodal(&q, &gate).is_err());
+    });
+}
+
+#[test]
+fn complete_material_image_keeps_source_admission_and_legacy_identity() {
+    use fs_solid::reduce::visco::reduce_modal_pressure_loaded_valve;
+    with_cx(|cx| {
+        let m = material(0.001, 0.05, 0.02);
+        let mut req = request(TetViscoField::Uniform(&m));
+        let image = reduce_modal_pressure_loaded_valve(&req, &PRESSURE, &controls(), cx).unwrap();
+        let legacy = reduce_pressure_loaded_valve(&req, &PRESSURE, &controls(), cx).unwrap();
+        assert_eq!(image.modes().len(), legacy.valve().source_modes().len());
+        for (complete, compatible) in image.modes().iter().zip(legacy.valve().source_modes()) {
+            assert_eq!(complete.lambda, compatible.lambda);
+            assert_eq!(complete.phi, compatible.phi);
+        }
+        assert_eq!(image.approximation(), legacy.approximation());
+        let first_identity = image.identity();
+        assert_eq!(first_identity,
+            reduce_modal_pressure_loaded_valve(&req, &PRESSURE, &controls(), cx).unwrap().identity());
+        req.loss_factor = 0.1;
+        assert!(reduce_modal_pressure_loaded_valve(&req, &PRESSURE, &controls(), cx).is_err());
+        req.loss_factor = 0.0;
+        let mut strict = controls();
+        strict.maximum_storage_sample_error = 1e-5;
+        assert!(reduce_modal_pressure_loaded_valve(&req, &PRESSURE, &strict, cx).is_err());
+        strict = controls();
+        strict.maximum_loss_sample_error = 1e-5;
+        assert!(reduce_modal_pressure_loaded_valve(&req, &PRESSURE, &strict, cx).is_err());
+        let changed = [[0.0; 3], [0.0; 3], [0.0; 3], [0.0, 0.0, 0.004]];
+        assert_ne!(first_identity,
+            reduce_modal_pressure_loaded_valve(&req, &changed, &controls(), cx).unwrap().identity());
+    });
+}

@@ -4251,6 +4251,28 @@ model checks, not experimental actuator or ferromagnetic-material validation.
 Native execution is pending; source review and independent numerical oracles
 are not a Rust test pass.
 
+### Complete tetrahedral material valve resonance
+
+`ModalAperture::from_material_solid` consumes the complete source-owned
+`fs_solid::reduce::visco::MaterialModalValve` through the original full-C
+`ExactZoh` pressure/contact/swept-volume solve. It returns the ordinary
+`ModalAperture`, so existing two-sided and duct couplings use the same runtime.
+No selected mode is removed, including modes orthogonal to mean slit opening.
+
+The explicit coordinate map is `q = sqrt(total_mass_kg) x`, where q is the
+source mass-normalized coordinate and x is metre-valued. Mass, stiffness,
+complete viscosity, pressure, optional nodal-force patterns and nodal
+observations all use this same congruence. No mode divides by its opening.
+The source, full shapes, approximation report and gas remain attached; authored
+diagonal damping is zero and the source viscosity is counted once.
+
+`material_modal_valve` regressions cover pressure/force virtual work, complete
+matrix scaling, source retention, material-driven excitation of a dark mode,
+free-decay energy closure and time-step subdivision, and incomplete-state and
+cancellation refusal. The reduction remains a frozen material image with one
+effective mean slit; this does not add spatial solid contact, evolving material
+memory or broadband accuracy beyond its original admission.
+
 ### Semidefinite modal reed viscosity
 
 `ModalAperture::with_viscosity` admits passive relative-motion losses with a
