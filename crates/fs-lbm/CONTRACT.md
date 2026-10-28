@@ -3746,3 +3746,24 @@ dielectric charging, displacement current, arcing, changing material occupancy o
 self-induced magnetic storage. The original `electric_isolated_motion` and
 `electrical_open_faces` targets cover slit opening/reclosing, independent
 laminations, reversed motion, coupled power balance and input refusals.
+
+### Insulating faces in coupled magnetic midpoint flow
+
+`MaterialSlab<ThermalLbm>` and `MaterialSlab<ThermalLbm3>` expose
+`step_magnetothermal_midpoint_with_open_faces` and
+`step_magnetothermal_midpoint_isolated_with_open_faces`. Explicit adjacent
+cell pairs interrupt electrical current while retaining the original fluid
+momentum, material volume and thermal transport. The same face topology enters
+every nonlinear trial and independent final source recheck. Isolated components
+receive separate numerical gauges; gauge cells retain their resistance, Lorentz
+force and heat. Wired components retain the existing voltage-reference
+requirement. Empty openings preserve existing entry-point behavior.
+
+Topology and thermal transport coefficients remain fixed during a call; bulk
+resistivity is re-evaluated at the proposed temperature. Existing imposed-field,
+low-Mach, source-work and transactional-refusal boundaries apply. The actual slab
+regression opens a four-edge current loop into a zero-current tree, compares its
+flow and heat with the unforced slab, and checks independently gauged 3D
+conducting sheets against four-resistor motional-EMF power balances at the
+accepted midpoint velocities. Explicit and local material-transport entry points
+retain their prior topology behavior.

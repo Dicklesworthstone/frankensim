@@ -162,7 +162,7 @@ fn source_residual(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn solve<S: MovingSlab<D, Q>, const D: usize, const Q: usize>(
     slab: &mut MaterialSlab<S>, domain: VoxelDomain, plane: usize,
-    input: ElectricHeatInput<'_>, field: &[[f64; 3]], external: &[[f64; D]],
+    input: ElectricHeatInput<'_>, open_faces: &[[usize; 2]], field: &[[f64; 3]], external: &[[f64; D]],
     options: MagneticMidpointOptions, isolated_current_tolerance_a: Option<f64>, gate: &CancelGate,
     mut resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<Option<f64>, ChtError>,
     mut step: impl FnMut(&mut MaterialSlab<S>, &[f64], &[[f64; D]], HeatSourceLimits) -> Result<HeatBalance, ThermalSourceError>,
@@ -172,8 +172,8 @@ pub(super) fn solve<S: MovingSlab<D, Q>, const D: usize, const Q: usize>(
     let result = solve_prepared::<S, (), (), MagneticMidpointError, D, Q>(
         slab, &domain, plane, input, field, external, options, gate,
         |_, _| Ok(()),
-        |temperature, velocity, _| Ok(source_at(
-            &domain, plane, input, field, temperature, velocity,
+        |temperature, velocity, _| Ok(source_at_with_open_faces(
+            &domain, plane, input, open_faces, field, temperature, velocity,
             &transport, dt, isolated_current_tolerance_a, gate, &mut resolve,
         )?),
         |old, power, force, _| {
@@ -306,6 +306,23 @@ impl MaterialSlab<ThermalLbm> {
         gate: &CancelGate,
         resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<Option<f64>, ChtError>,
     ) -> Result<MagneticMidpointStep, MagneticMidpointError> {
+        self.step_magnetothermal_midpoint_with_open_faces(
+            input, &[], field_t, external_n_m3, depth_m, options, gate, resolve,
+        )
+    }
+
+    /// The same coupled step with explicitly insulating internal electrical faces.
+    /// `open_faces` names adjacent full-grid cell pairs, including the wall-row
+    /// indexing. It is fixed through every trial and final source recheck.
+    /// Electrical separation does not cut fluid momentum or thermal transport;
+    /// each wired conducting component still needs a voltage reference.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_magnetothermal_midpoint_with_open_faces(
+        &mut self, input: ElectricHeatInput<'_>, open_faces: &[[usize; 2]], field_t: &[[f64; 3]],
+        external_n_m3: &[[f64; 2]], depth_m: f64, options: MagneticMidpointOptions,
+        gate: &CancelGate,
+        resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<Option<f64>, ChtError>,
+    ) -> Result<MagneticMidpointStep, MagneticMidpointError> {
         options.admit()?;
         let (_, plane) = admit::<ThermalLbm, 2, 5>(self, input, external_n_m3, 1, self.lattice.grid.ny, gate)?;
         let dx = self.force_units.cell_size_m;
@@ -313,7 +330,7 @@ impl MaterialSlab<ThermalLbm> {
         let domain = VoxelDomain::graded([
             vec![dx; self.lattice.grid.nx], vec![dx; self.lattice.grid.ny], vec![depth_m],
         ]).map_err(ElectricHeatError::from)?;
-        solve::<ThermalLbm, 2, 5>(self, domain, plane, input, field_t, external_n_m3, options, None, gate, resolve,
+        solve::<ThermalLbm, 2, 5>(self, domain, plane, input, open_faces, field_t, external_n_m3, options, None, gate, resolve,
             |s,p,f,limits| s.step_with_power_density(p,f,depth_m,limits))
     }
 }
@@ -328,13 +345,28 @@ impl MaterialSlab<ThermalLbm3> {
         external_n_m3: &[[f64; 3]], options: MagneticMidpointOptions, gate: &CancelGate,
         resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<Option<f64>, ChtError>,
     ) -> Result<MagneticMidpointStep, MagneticMidpointError> {
+        self.step_magnetothermal_midpoint_with_open_faces(
+            input, &[], field_t, external_n_m3, options, gate, resolve,
+        )
+    }
+
+    /// Three-dimensional electrical-face topology in the same midpoint solve.
+    /// Open faces carry no current, motional work, contact loss or Lorentz
+    /// transfer. Material volume, fluid connectivity and heat transport remain
+    /// those of the original slab; topology is held fixed over this step.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_magnetothermal_midpoint_with_open_faces(
+        &mut self, input: ElectricHeatInput<'_>, open_faces: &[[usize; 2]], field_t: &[[f64; 3]],
+        external_n_m3: &[[f64; 3]], options: MagneticMidpointOptions, gate: &CancelGate,
+        resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<Option<f64>, ChtError>,
+    ) -> Result<MagneticMidpointStep, MagneticMidpointError> {
         options.admit()?;
         let (_, plane) = admit::<ThermalLbm3, 3, 7>(self, input, external_n_m3, 2, self.lattice.grid.nz, gate)?;
         let g = &self.lattice.grid;
         let dx = self.force_units.cell_size_m;
         if !positive((dx * dx) * dx) { return Err(invalid("invalid represented 3D cell volume").into()); }
         let domain = VoxelDomain::new(g.nx, g.ny, g.nz, dx).map_err(ElectricHeatError::from)?;
-        solve::<ThermalLbm3, 3, 7>(self, domain, plane, input, field_t, external_n_m3, options, None, gate, resolve,
+        solve::<ThermalLbm3, 3, 7>(self, domain, plane, input, open_faces, field_t, external_n_m3, options, None, gate, resolve,
             |s,p,f,limits| s.step_with_power_density(p,f,limits))
     }
 }

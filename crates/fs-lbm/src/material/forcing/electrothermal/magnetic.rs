@@ -101,6 +101,17 @@ fn source_at(
     transport: &FluidTransportState, dt: f64, isolated_current_tolerance_a: Option<f64>, gate: &CancelGate,
     resolve: &mut impl FnMut(usize, f64, &FluidTransportState) -> Result<Option<f64>, ChtError>,
 ) -> Result<MagneticSource, ElectricHeatError> {
+    source_at_with_open_faces(domain, plane, input, &[], field_t, temperature, velocity,
+        transport, dt, isolated_current_tolerance_a, gate, resolve)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn source_at_with_open_faces(
+    domain: &VoxelDomain, plane: usize, input: ElectricHeatInput<'_>, open_faces: &[[usize; 2]],
+    field_t: &[[f64; 3]], temperature: &[f64], velocity: &[[f64; 3]],
+    transport: &FluidTransportState, dt: f64, isolated_current_tolerance_a: Option<f64>, gate: &CancelGate,
+    resolve: &mut impl FnMut(usize, f64, &FluidTransportState) -> Result<Option<f64>, ChtError>,
+) -> Result<MagneticSource, ElectricHeatError> {
     poll(gate)?;
     let cells = domain.cell_count();
     let tolerance_w = input.limits.coupling_tolerance_j / dt;
@@ -116,12 +127,12 @@ fn source_at(
         else { resolve(cell, t, transport) }
     };
     let motion = if let Some(tolerance_a) = isolated_current_tolerance_a {
-        input.setup.solve_isolated_cell_motion(
-            domain, temperature, input.contacts, motion_input, tolerance_a, law, gate,
+        input.setup.solve_isolated_cell_motion_topology(
+            domain, temperature, input.contacts, open_faces, motion_input, tolerance_a, law, gate,
         )?
     } else {
-        input.setup.solve_with_cell_motion(
-            domain, temperature, input.contacts, motion_input, law, gate,
+        input.setup.solve_with_cell_motion_topology(
+            domain, temperature, input.contacts, open_faces, motion_input, law, gate,
         )?
     };
     let (power, joule_energy_j) = deposited_power(domain, plane, &motion.electric.joule_w, dt, gate)?;
