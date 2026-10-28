@@ -724,6 +724,38 @@ reports its actual numerical entropy change without asserting exact adiabatic
 reversibility. Iterative entropy and nozzle trial states use allocation-free
 caloric properties; accepted states retain complete source receipts.
 
+The converging `nozzle_flow_to` closure accepts vacuum back pressure without
+querying an EOS at zero pressure. Sonic and kinetic-energy residuals use the
+thermochemical owner's direct enthalpy differences; common formation offsets
+cannot erase available nozzle energy.
+
+`nozzle::rocket` adds ideal converging-diverging propulsion using the same
+frozen NASA-9 composition. A bounded sonic solve determines mass flow from
+chamber state and throat area, then a bounded supersonic temperature solve
+closes exit mass flux using source enthalpy and entropy differences. Trial
+caloric evaluations allocate no material receipts; accepted throat and exit
+states retain full source and transport resolution. Explicit mass, energy and
+entropy residuals are checked before publication. Outputs include exit Mach,
+momentum and pressure thrust, total thrust, effective exhaust velocity,
+characteristic velocity and specific impulse. The latter uses standard
+gravity only as a unit convention. This ordinary continuous gas branch admits
+vacuum, pressure-matched and underexpanded operation; overexpansion refuses
+pending a shock/separation model. It does not supply combustion equilibrium,
+real-gas validity, nozzle losses, adjoints or resolved multidimensional flow.
+
+`nozzle::blowdown` removes finite mass from a frozen, well-mixed, adiabatic
+fixed-volume reservoir on the original density/entropy path: `d(mu)=h dm`
+implies `ds=0` for the remaining gas even with temperature-dependent heat
+capacity. It exports actual `U0-U1` once, retaining formation conventions and
+every species. `rocket_blowdown` closes `dm=dt*mdot(m0-dm/2)` by bounded
+implicit midpoint iteration and reports midpoint thrust impulse. Initial,
+midpoint and endpoint nozzle/source domains and the donor-fraction limit are
+checked transactionally. Smooth time accuracy is second order, as checked
+against analytic perfect-gas mass, pressure and impulse refinement; a mass
+fraction limit does not certify time error. No wall heat, moving tank,
+combustion, resolved chamber/jet dynamics or double-counted exhaust kinetic
+energy is supplied by this lane.
+
 Source-backed gas temperature and pressure support comes from the selected
 NASA-9 regions and every pure-transport claim, not from the legacy USSA/Sutherland
 air constructor's 50..2000 K and 100 bar bounds. `GasState::validate_coherence`

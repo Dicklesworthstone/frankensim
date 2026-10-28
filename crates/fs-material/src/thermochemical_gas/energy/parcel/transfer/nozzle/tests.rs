@@ -129,7 +129,7 @@ fn source_limits_oversized_steps_and_late_cancellation_refuse_without_half_updat
     let a = gas(0.75, 0.001, 500.0, 300000.0);
     let b = gas(0.25, 0.001, 400.0, 100000.0);
     let old = (a.clone(), b.clone());
-    for p in [0.0, -1.0, f64::NAN, f64::INFINITY, 400000.0] {
+    for p in [-1.0, f64::NAN, f64::INFINITY, 400000.0] {
         assert!(a.nozzle_flow_to(p, nozzle(), energy(), || false).is_err());
     }
     assert!(a.through_nozzle_to(&b, nozzle(), 1000.0, controls(), || false).is_err());
@@ -151,5 +151,44 @@ fn source_limits_oversized_steps_and_late_cancellation_refuse_without_half_updat
         let mut count = 0;
         assert!(a.through_nozzle_to(&b, nozzle(), 0.0002, controls(), || { count += 1; count == stop }).is_err());
         assert_eq!((&a, &b), (&old.0, &old.1));
+    }
+}
+
+#[test]
+fn vacuum_back_pressure_chokes_without_querying_a_zero_pressure_material_state() {
+    let upstream = gas(0.75, 0.002, 800.0, 300000.0);
+    let vacuum = upstream.nozzle_flow_to(0.0, nozzle(), energy(), || false).unwrap();
+    let low = upstream.nozzle_flow_to(30000.0, nozzle(), energy(), || false).unwrap();
+    assert!(vacuum.choked);
+    assert!(vacuum.throat().state().pressure > 0.0);
+    near(vacuum.mach_number, 1.0, 1e-9);
+    assert_eq!(vacuum.throat(), low.throat());
+    assert_eq!(vacuum.mass_flow_kg_s, low.mass_flow_kg_s);
+}
+
+#[test]
+fn formation_reference_does_not_change_nozzle_speed_or_choking() {
+    use crate::thermochemical_gas::{ThermochemicalGasModel,
+        tests::{species_with_energy_reference, transport}};
+    use fs_thermochem::{mixture::FrozenIdealGasMixtureModelV1, Composition, CompositionBasis};
+    let parcel = |reference| {
+        let thermodynamics = FrozenIdealGasMixtureModelV1::new(
+            vec![species_with_energy_reference("A", 0.028, 3.5, 0.002, reference),
+                species_with_energy_reference("B", 0.004, 2.5, 0.0, reference)],
+            Composition::new(CompositionBasis::MoleFraction, vec![0.75, 0.25]).unwrap()).unwrap();
+        let model = ThermochemicalGasModel::new(thermodynamics,
+            vec![transport("A", 1.7e-5, 0.025), transport("B", 2.0e-5, 0.15)], None).unwrap();
+        ClosedGasParcel::new(model, point(800.0, 300000.0), 0.001).unwrap()
+    };
+    let ordinary = parcel(0.0);
+    let shifted = parcel(1e24);
+    for back in [0.0, 40000.0, 240000.0, 299999.0] {
+        let a = ordinary.nozzle_flow_to(back, nozzle(), energy(), || false).unwrap();
+        let b = shifted.nozzle_flow_to(back, nozzle(), energy(), || false).unwrap();
+        assert_eq!(a.throat().state(), b.throat().state());
+        assert_eq!(a.velocity_m_s, b.velocity_m_s);
+        assert_eq!(a.mass_flow_kg_s, b.mass_flow_kg_s);
+        assert_eq!(a.choked, b.choked);
+        assert_ne!(a.upstream_enthalpy_j_kg, b.upstream_enthalpy_j_kg);
     }
 }

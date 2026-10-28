@@ -18,6 +18,10 @@
 
 /// Conservative pressure-driven exchange on a graph of existing gas parcels.
 pub mod network;
+/// Frozen-composition supersonic expansion and physical rocket thrust.
+pub mod rocket;
+/// Conservative finite-reservoir exhaust and physical-time blowdown.
+pub mod blowdown;
 
 use super::{ClosedGasParcel, GasEnergyError, GasEnergySolve, GasMassTransferCandidate,
     GasMassTransferSolve, invalid, poll, positive, source_error, updated_point};
@@ -92,7 +96,9 @@ impl Sample {
 
 impl ClosedGasParcel {
     /// Resolve an ideal converging-nozzle flow at the unchanged upstream state.
-    /// Supply an explicit lower-pressure boundary and geometry. Reverse flow
+    /// Supply an explicit lower-pressure boundary and geometry. Vacuum is a
+    /// valid back-pressure boundary; the actual sonic throat stays positive.
+    /// Reverse flow
     /// requires swapping donor/receiver, not extrapolating this upwind law.
     ///
     /// The root is min(T0*(s(T,p0)-s0-R*ln(pb/p0)), h(T)-h0+c(T)^2/2).
@@ -114,9 +120,9 @@ impl ClosedGasParcel {
         poll(&mut cancelled)?;
         let gas = self.state().state();
         let (t0, p0, r) = (gas.temperature, gas.pressure, gas.specific_gas_constant);
-        if !positive(back_pressure_pa) || back_pressure_pa > p0
+        if !back_pressure_pa.is_finite() || back_pressure_pa < 0.0 || back_pressure_pa > p0
             || t0 < controls.minimum_temperature_k || t0 > controls.maximum_temperature_k {
-            return Err(invalid("nozzle requires positive downstream pressure no higher than upstream and an admitted upstream temperature"));
+            return Err(invalid("nozzle requires nonnegative finite downstream pressure no higher than upstream and an admitted upstream temperature"));
         }
         let h0 = self.state().specific_enthalpy_j_kg();
         if back_pressure_pa == p0 || nozzle.area_m2 == 0.0 || nozzle.discharge_coefficient == 0.0 {
@@ -128,10 +134,14 @@ impl ClosedGasParcel {
         let thermodynamics = self.parcel.model.thermodynamics();
         // Entropy references and ideal mixing cancel BEFORE rounding. This also
         // preserves the pressure signal for very small reservoir pressure drops.
-        let log_back = -thermodynamics.specific_entropy_change(
-            Temperature::new(t0), Pressure::new(p0),
-            Temperature::new(t0), Pressure::new(back_pressure_pa))
-            .map_err(source_error)?.value()/r;
+        // Vacuum is a boundary condition, never an EOS query at p=0. It can
+        // only reach the sonic constraint in a converging nozzle.
+        let log_back = if back_pressure_pa == 0.0 { None } else {
+            Some(-thermodynamics.specific_entropy_change(
+                Temperature::new(t0), Pressure::new(p0),
+                Temperature::new(t0), Pressure::new(back_pressure_pa))
+                .map_err(source_error)?.value()/r)
+        };
         let sample = |t: f64| -> Result<Sample, GasEnergyError> {
             let properties = thermodynamics.evaluate_properties(Temperature::new(t), Pressure::new(p0))
                 .map_err(source_error)?;
@@ -142,14 +152,17 @@ impl ClosedGasParcel {
                 || gamma <= 1.0 || gamma > 5.0/3.0+1e-9 {
                 return Err(invalid("nozzle caloric sample has inadmissible heat capacities"));
             }
-            let mass = properties.molar_mass().value();
             let entropy_shift = thermodynamics.specific_entropy_change(
                 Temperature::new(t0), Pressure::new(p0),
                 Temperature::new(t), Pressure::new(p0))
                 .map_err(source_error)?.value()/r;
-            let sonic_residual = properties.h().value()/mass-h0+0.5*gamma*r*t;
-            let pressure_residual = r*t0*(entropy_shift-log_back);
-            if !entropy_shift.is_finite() || !sonic_residual.is_finite() || !pressure_residual.is_finite() {
+            let enthalpy_change = thermodynamics.specific_enthalpy_change(
+                Temperature::new(t0), Temperature::new(t))
+                .map_err(source_error)?.value();
+            let sonic_residual = enthalpy_change+0.5*gamma*r*t;
+            let pressure_residual = log_back.map_or(f64::INFINITY, |back| r*t0*(entropy_shift-back));
+            if !entropy_shift.is_finite() || !sonic_residual.is_finite()
+                || (log_back.is_some() && !pressure_residual.is_finite()) {
                 return Err(invalid("nozzle thermal residual is unrepresentable"));
             }
             Ok(Sample { pressure_residual, sonic_residual, entropy_shift })
@@ -186,7 +199,11 @@ impl ClosedGasParcel {
         let pressure = if choked { p0*det::exp(value.entropy_shift) } else { back_pressure_pa };
         poll(&mut cancelled)?;
         let throat = self.parcel.model.evaluate(&updated_point(self.point(), temperature, pressure)?)?;
-        let speed_squared = 2.0*(h0-throat.specific_enthalpy_j_kg());
+        // Formation references cancel in the shared caloric owner BEFORE
+        // rounding, just as for entropy. No reference energy accelerates a jet.
+        let speed_squared = -2.0*thermodynamics.specific_enthalpy_change(
+            Temperature::new(t0), Temperature::new(temperature))
+            .map_err(source_error)?.value();
         let c = throat.state().sound_speed;
         let sonic = 0.5*(c*c-speed_squared);
         let entropy_residual = t0*thermodynamics.specific_entropy_change(
