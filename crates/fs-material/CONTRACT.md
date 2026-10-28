@@ -3334,3 +3334,31 @@ melting, extinction, moving geometry and gas flow are not inferred. Ten new
 actual-source native integration tests passed for physical heat/gas feedback,
 order, births/datum shifts, exposure events, work limits, solid-branch refusal,
 conservation and rollback.
+
+## Sourced sharp solid/liquid melting
+
+`phase::melting::ResolvedMeltingCurve` joins two continuously supported source
+Cp/density branches and independently sourced melting temperature/fusion
+enthalpy into the original `EquilibriumEnthalpyPhaseCurve`. The caller explicitly
+declares one sharp equilibrium transition. Solid support must end, liquid
+support must start, and the transition query must lie exactly at the sourced
+melting temperature. Every query carries an explicitly typed absolute
+temperature. Pressure, composition and other external context, including quantity
+descriptors, must be identical throughout; an optional typed categorical source
+selector is zero for solid, one for liquid, and absent from the transition query.
+The constructor refuses missing density/Cp/fusion data, disconnected or discrete
+support, incompatible context, nonpositive fusion energy, unrepresentable energy
+increments and combined charts exceeding the original generated-knot limit.
+
+The existing heat-capacity owner integrates sensible heat on both branches. One
+fusion increment separates the solid/liquid endpoint enthalpies at the exact
+same temperature; independently tabulated assigned enthalpy is not also added.
+The resulting chart, its states and relative entropy remain consumable by the
+original enthalpy owners. Density retains branch-specific values and the original
+additive-specific-volume coexistence rule; specimen mass stays invariant and the
+consumer must account for the resulting volume change. Every selected Cp,
+density, melting-temperature and fusion-energy receipt is retained and bound
+into the curve identity. The declared sensible interpolation allowance is not a
+source-uncertainty claim. This admission does not infer a phase diagram, nucleation,
+kinetics, supercooling, hysteresis, moving geometry or a fixed-volume transport
+closure.

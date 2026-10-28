@@ -16,6 +16,8 @@ pub mod mushy;
 pub mod conductivity;
 /// Phase-first thermal/electrical sources and optional mobile fluid transport.
 pub mod transport;
+/// Source-backed solid/liquid Cp branches joined by one sharp fusion plateau.
+pub mod melting;
 
 // Relative equilibrium entropy uses this same admitted h -> T chart.
 mod entropy;
