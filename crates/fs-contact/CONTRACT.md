@@ -365,3 +365,7 @@ through-shot's sphere-entry window survives as Retained).
   the motion versor defect is REPORTED (`BroadPhaseReport::max_defect`,
   `CcdReport::max_defect`), not folded into the boxes; the fold is
   still open in this bead's staging plan.
+
+## Evolving partial-slip coefficients
+
+`SmoothTangentialAdapter::prepare_with_coefficients` consumes the original partial-slip changing-coefficient continuation without resetting regional history. Actual force, slip, heat, and the successor law use the new coefficients; signed `generalized_work.coefficient_work_j` remains an independent parameter-work port. The coupled caller must balance that port and publish its coefficient driver together with the contact candidate. It is not caloric heat. Existing commit, rollback, restart and work-key deduplication remain active, and ordinary prepare/restore remain coefficient-exact. The smooth-contact regression checks changed reaction, rollback/retry, new-law restart, and duplicate-work refusal through the real adapter.

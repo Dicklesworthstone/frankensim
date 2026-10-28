@@ -543,3 +543,99 @@ fn authority_policy_and_checkpoint_identity_refuse_without_promotion() {
         })
     ));
 }
+
+#[test]
+fn coefficient_continuation_changes_actual_reaction_and_preserves_transactional_history() {
+    let adapter = adapter(1.0e-4);
+    let patch = patch(NormalPatchAuthority::SyntheticFixture);
+    let interface = interface(NormalPatchAuthority::SyntheticFixture);
+    let initial = state(&adapter);
+    let preload = adapter
+        .prepare(
+            &law(),
+            &patch,
+            &interface,
+            &initial,
+            &query(0, "coefficient-preload", [0.01, -0.02], 0.01),
+        )
+        .unwrap();
+    let old = adapter.commit(&initial, &preload).unwrap();
+    let mut p = law().parameters();
+    p.tangential_stiffness_n_per_m *= 2.0;
+    p.torsional_stiffness_nm_per_rad *= 3.0;
+    let next_law = PartialSlipLaw::new(law().model_id(), law().source_id(), p).unwrap();
+    let held = query(1, "coefficient-switch", [0.0; 2], 0.0);
+    assert!(
+        adapter
+            .prepare(&next_law, &patch, &interface, &old, &held)
+            .is_err()
+    );
+    assert!(
+        adapter
+            .restore_checkpoint(&next_law, &patch, &interface, old.checkpoint())
+            .is_err()
+    );
+    let candidate = adapter
+        .prepare_with_coefficients(&next_law, &patch, &interface, &old, &held)
+        .unwrap();
+    let step = &candidate.partial_slip_step;
+    assert!(step.generalized_work.coefficient_work_j > 0.0);
+    close(
+        step.storage_change_j,
+        step.generalized_work.coefficient_work_j,
+    );
+    assert_eq!(step.dissipation.heat_j, 0.0);
+    assert_eq!(step.generalized_work.numerical_dissipation_j, 0.0);
+    close(
+        candidate.residual.tangent_force_n[0],
+        2.0 * preload.residual.tangent_force_n[0],
+    );
+    close(
+        candidate.residual.torsional_moment_nm,
+        3.0 * preload.residual.torsional_moment_nm,
+    );
+    close(candidate.residual.energy_closure_residual_j, 0.0);
+    assert_eq!(adapter.rollback(&candidate).unwrap(), old);
+    assert_eq!(
+        adapter
+            .prepare_with_coefficients(&next_law, &patch, &interface, &old, &held)
+            .unwrap(),
+        candidate
+    );
+    let next = adapter.commit(&old, &candidate).unwrap();
+    assert_eq!(next.committed_version(), 2);
+    assert_eq!(next.checkpoint().law_checkpoint().law(), &next_law);
+    assert_eq!(
+        next.checkpoint()
+            .law_checkpoint()
+            .state()
+            .region_elastic_displacement_m(),
+        old.checkpoint()
+            .law_checkpoint()
+            .state()
+            .region_elastic_displacement_m()
+    );
+    assert!(
+        adapter
+            .restore_checkpoint(&law(), &patch, &interface, next.checkpoint())
+            .is_err()
+    );
+    assert_eq!(
+        adapter
+            .restore_checkpoint(&next_law, &patch, &interface, next.checkpoint())
+            .unwrap(),
+        next
+    );
+    let mut repeated = held;
+    repeated.expected_state_version = 2;
+    assert!(matches!(
+        adapter.prepare_with_coefficients(&next_law, &patch, &interface, &next, &repeated),
+        Err(SmoothTangentialError::DuplicateWorkKey)
+    ));
+    let following = query(2, "after-coefficient-switch", [0.002, 0.0], 0.0);
+    assert!(
+        adapter
+            .prepare(&next_law, &patch, &interface, &next, &following)
+            .is_ok()
+    );
+}

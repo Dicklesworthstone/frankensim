@@ -14,6 +14,9 @@
 //! Retained shear follows the contact normal's minimum rotation and the supplied
 //! common material spin; tangent-gauge changes only re-express its coordinates.
 
+// Explicit parameter-work continuation; ordinary restart remains coefficient-exact.
+mod coefficients;
+
 use core::fmt;
 
 use fs_math::det;
@@ -701,6 +704,7 @@ impl PartialSlipLaw {
             generalized_work: GeneralizedWork {
                 ownership: ownership.clone(),
                 work_into_interface_j,
+                coefficient_work_j: 0.0,
                 reconstructed_body_power_w,
                 endpoint_body_power_w,
                 numerical_dissipation_j,
@@ -1223,10 +1227,17 @@ pub struct GeneralizedWork {
     /// The unique patch/interval/generalized-coordinate owner.
     pub ownership: GeneralizedWorkOwnership,
     /// Actual endpoint-wrench work into the interface, `-F·du - M dtheta` [J].
-    /// Equals storage change + heat + numerical dissipation, up to roundoff.
+    /// Equals storage change + heat + numerical dissipation minus explicit
+    /// coefficient work, up to roundoff.
     /// This is backward-Euler interval work, not an independently resolved
     /// continuous-time work integral.
     pub work_into_interface_j: f64,
+    /// Signed work supplied by an explicit coefficient change at the OLD
+    /// elastic history [J]. Zero for [`PartialSlipLaw::advance`]. This is an
+    /// independent parameter-work port, not friction heat or wrench work.
+    /// Temperature-dependent stiffness additionally requires the mechanical
+    /// entropy/internal-energy account; this scalar alone is not caloric heat.
+    pub coefficient_work_j: f64,
     /// `-work_into_interface_j / dt_s`, W; negative means body energy is dissipated/stored.
     pub reconstructed_body_power_w: f64,
     /// Endpoint wrench power `F·v + M·ω`, W, retained separately from discrete closure.
@@ -1235,7 +1246,8 @@ pub struct GeneralizedWork {
     /// This vanishes under refinement on smooth fixed-branch histories;
     /// a static-to-kinetic jump needs event resolution for that claim.
     pub numerical_dissipation_j: f64,
-    /// Storage change + physical heat + numerical loss - endpoint-wrench work [J].
+    /// Storage change + physical heat + numerical loss - endpoint-wrench work
+    /// - coefficient work [J].
     pub closure_residual_j: f64,
 }
 

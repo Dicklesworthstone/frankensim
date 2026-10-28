@@ -425,3 +425,9 @@ No strength is inferred from adhesion energy or bulk material names. The
 area-proportional term follows the measured single-asperity relation in Carpick
 et al., *Langmuir* 12 (1996), <https://doi.org/10.1021/la9509007>; the optional
 pressure term is an explicit uncoupled model choice, not a universal fit.
+
+## Changing-coefficient partial-slip continuation
+
+`PartialSlipLaw::advance_with_coefficients` continues the same contact/source model with changed Coulomb coefficients or translational/torsional stiffness. It retains both regions' elastic strains and kinetic branches and runs the original return map; regional stiffness/capacity fractions and the torsional capacity factor remain fixed. Its independent parameter-work port supplies `C = psi(new coefficients, old history) - psi(old coefficients, old history)` before motion. Returned storage change refers to the actual old law, so `delta(psi) + physical slip heat + numerical loss = wrench work + C`. Softening can export parameter work; reduced yield strength can relax stored strains even at zero imposed motion. Ordinary restore remains coefficient-exact.
+
+The coupled owner must accept the coefficient driver and contact history together and balance the signed parameter port. This first-order parameter-then-motion split supplies no temperature-dependent material data or caloric closure: temperature-dependent spring free energy requires mechanical internal energy `U = psi - T d(psi)/dT`, so parameter work alone is not heat. Numerical dissipation also remains nonthermal. G0/G3 tests in `tests/partial_slip_coefficients.rs` cover signed stiffness work, independent mixed shear/spin energy, retained preload and normal-load changes, zero-motion relaxation, unchanged-law identity, and strict source/decomposition refusal.

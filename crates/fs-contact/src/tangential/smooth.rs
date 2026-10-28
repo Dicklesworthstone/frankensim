@@ -234,6 +234,75 @@ impl SmoothTangentialAdapter {
         })
     }
 
+    /// Prepare an explicitly changing-coefficient contact without resetting history.
+    ///
+    /// The original accepted law validates the old checkpoint; the new law's
+    /// source/model and regional decomposition must match it. The native return
+    /// map supplies the actual new wrench and physical heat, plus a signed
+    /// `partial_slip_step.generalized_work.coefficient_work_j` parameter port.
+    /// The coupled owner must balance that port before committing this candidate
+    /// together with its coefficient driver. It is not a caloric heat source.
+    /// Existing rollback, work-key deduplication, and atomic commit apply. The
+    /// ordinary prepare/restore methods still refuse changed coefficients.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_with_coefficients(
+        &self,
+        law: &PartialSlipLaw,
+        patch: &NormalPatchView,
+        interface: &PartialSlipInterface,
+        state: &SmoothTangentialState,
+        query: &SmoothTangentialQuery,
+    ) -> Result<SmoothTangentialReceipt, SmoothTangentialError> {
+        self.validate_state(
+            state.checkpoint.law_checkpoint.law(),
+            patch,
+            interface,
+            state,
+        )?;
+        self.validate_query(state, query, true)?;
+        let regularized_kinematics = self.regularize_kinematics(query.kinematics)?;
+        let step = law.advance_with_coefficients(
+            patch,
+            interface,
+            query.frame,
+            regularized_kinematics,
+            &query.work_ownership,
+            &state.checkpoint.law_checkpoint,
+        )?;
+        let next_checkpoint = SmoothTangentialCheckpoint {
+            adapter_id: self.adapter_id.clone(),
+            adapter_source_id: self.source_id.clone(),
+            regularization: self.regularization,
+            authority_policy: self.authority_policy,
+            law_checkpoint: step.checkpoint.clone(),
+            committed_version: state.checkpoint.committed_version.checked_add(1).ok_or(
+                SmoothTangentialError::InvalidDerived {
+                    field: "committed_version overflow",
+                },
+            )?,
+            committed_work_keys: state.checkpoint.committed_work_keys.clone(),
+            max_committed_work_keys: state.checkpoint.max_committed_work_keys,
+        };
+        Ok(SmoothTangentialReceipt {
+            query_id: query.query_id.clone(),
+            parent_version: state.checkpoint.committed_version,
+            branch: step.state,
+            regularized_kinematics,
+            action_reaction: ActionReactionWrench::from_action(step.wrench),
+            residual: SmoothResidual {
+                tangent_force_n: step.tangent_force_n,
+                torsional_moment_nm: step.torsional_moment_nm,
+                endpoint_relative_power_w: step.generalized_work.endpoint_body_power_w,
+                reconstructed_body_power_w: step.generalized_work.reconstructed_body_power_w,
+                numerical_dissipation_j: step.generalized_work.numerical_dissipation_j,
+                energy_closure_residual_j: step.generalized_work.closure_residual_j,
+            },
+            partial_slip_step: step,
+            prior_state: state.clone(),
+            next_checkpoint,
+        })
+    }
+
     /// Returns a central finite-difference tangent only within one law branch,
     /// holding the contact frame and physical common spin fixed.
     ///
@@ -600,7 +669,8 @@ pub struct SmoothResidual {
     pub reconstructed_body_power_w: f64,
     /// Non-negative algorithmic energy loss, J; separate from physical heat.
     pub numerical_dissipation_j: f64,
-    /// Storage + physical heat + numerical loss - applied wrench work, J.
+    /// Storage + physical heat + numerical loss - applied wrench work
+    /// - explicit coefficient work, J.
     pub energy_closure_residual_j: f64,
 }
 
