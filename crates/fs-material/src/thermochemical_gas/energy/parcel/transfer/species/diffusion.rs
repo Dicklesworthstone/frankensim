@@ -15,6 +15,8 @@
 
 /// All diffusion faces consume one unchanged material-network snapshot.
 pub mod network;
+/// Molecular friction, Knudsen wall transport and Darcy flow in one porous path.
+pub mod dusty_gas;
 
 use super::{ClosedGasParcel, GasEnergyError, GasSpeciesExchangeCandidate,
     GasSpeciesExchangeSolve, SpeciesId, SpeciesMassTransfer, Sum, catalog, invalid, poll, positive, source_error};

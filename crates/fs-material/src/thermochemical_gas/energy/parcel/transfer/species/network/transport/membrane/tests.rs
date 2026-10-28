@@ -149,7 +149,7 @@ fn combined_owner_conserves_selective_mass_species_and_partial_enthalpy() {
     let (a,b,q)=(card(2e-14),card(5e-14),point(400.0,100000.0));
     let mats=bindings([&a,&b],&q);let links=[link(&mats)];let dt=0.01;
     let candidate=step_candidate_with_paths(&parcels,GasTransportPaths {nozzles:&[],
-        diffusion:&[],porous:&[],membranes:&links},dt,&endpoints,solve(),||false).unwrap();
+        diffusion:&[],porous:&[],membranes:&links,..Default::default()},dt,&endpoints,solve(),||false).unwrap();
     let step=candidate.step();
     assert_eq!(step.exchange.fluxes.len(),2);
     assert!(step.exchange.total_mass_residual_kg.abs()<1e-13);
@@ -183,11 +183,11 @@ fn membrane_and_nozzle_cannot_jointly_spend_an_original_species_allowance() {
     let rate=parcels[&0].nozzle_flow_to(50000.0,nozzle.nozzle,energy(),||false).unwrap().mass_flow_kg_s;
     nozzle.nozzle.area_m2*=0.06*parcels[&0].mass_kg()/(rate*dt);
     step_candidate_with_paths(&parcels,GasTransportPaths {nozzles:&[nozzle],
-        diffusion:&[],porous:&[],membranes:&[]},dt,&endpoints,solve(),||false).unwrap();
+        diffusion:&[],porous:&[],membranes:&[],..Default::default()},dt,&endpoints,solve(),||false).unwrap();
     step_candidate_with_paths(&parcels,GasTransportPaths {nozzles:&[],
-        diffusion:&[],porous:&[],membranes:&[film.clone()]},dt,&endpoints,solve(),||false).unwrap();
+        diffusion:&[],porous:&[],membranes:&[film.clone()],..Default::default()},dt,&endpoints,solve(),||false).unwrap();
     assert!(matches!(step_candidate_with_paths(&parcels,GasTransportPaths {nozzles:&[nozzle],
-        diffusion:&[],porous:&[],membranes:&[film]},dt,&endpoints,solve(),||false),
+        diffusion:&[],porous:&[],membranes:&[film],..Default::default()},dt,&endpoints,solve(),||false),
         Err(GasTransportError::Exchange(SpeciesNetworkError::Withdrawal {id:0,..}))));
 }
 

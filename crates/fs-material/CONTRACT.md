@@ -3200,3 +3200,59 @@ certificate. Six focused adaptive tests passed, including convergence toward a
 2048-step reference, shared-inventory retries, trace-species refinement, exact
 order invariance, work limits and late cancellation. The combined native
 adaptive/joint/scalar/boundary suite passed 24 tests with no failures.
+
+
+### Coupled molecular, Knudsen and viscous transport in porous gas paths
+
+`thermochemical_gas::energy::parcel::transfer::species::diffusion::dusty_gas`
+implements the isothermal ideal-gas dusty-gas equations in the stationary-solid
+frame. One homogeneous dry pore path couples all selected binary molecular
+frictions, explicit Knudsen wall frictions and the original no-slip Darcy owner.
+There is no zero-molar or zero-mass-flux constraint: unequal counterdiffusion and
+uphill individual-species flux can follow from the coupled molecular friction.
+A separate Darcy/nozzle/diffusion edge must not count that same pore area again.
+
+The immutable medium retains the original intrinsic-permeability barrier and
+explicit pore radius, gas-filled porosity, transport tortuosity and provenance.
+Effective molecular diffusivity is porosity/tortuosity times the source value;
+Knudsen diffusivity uses the actual thermochemical species molar mass. The
+transport tortuosity is the declared coefficient in that equation, not an
+inferred squared path ratio or the acoustic high-frequency tortuosity. Added
+Klinkenberg slip and heterogeneous pore layers refuse to prevent overlapping
+rarefaction models or an invented unresolved interface composition.
+
+The face composition is concentration weighted at the declared mean temperature.
+Original selected binary source laws are sampled at the face and admitted at
+both endpoints, including pressure-dependent diffusivity. The shared material
+owner supplies mixture viscosity and thermochemistry. A symmetric positive
+friction system uses the existing dense Cholesky owner, retains every species
+row and rechecks the original equations after total flux assembly. Work is
+bounded to 32 species; loops poll cancellation. Reports retain source states,
+individual Knudsen/diffusive/viscous rates and nonnegative local dissipation.
+Nonrepresentable nonzero forces refuse instead of becoming false equilibrium.
+
+`network::transport::GasTransportPaths::dusty_gas` samples every face from the
+unchanged network snapshot. Its signed species transfers share one gross
+withdrawal allowance, original donor partial enthalpies, material reconstruction
+and final conserved-species entropy admission with every other mechanism.
+Counterflow does not replenish an outgoing allowance. Local dissipation is a
+diagnostic and is never added again as gas heat. Zero area queries no inactive
+sources and returns no invented face state; zero intrinsic Darcy permeability
+suppresses only viscous flow when explicit conducting pore diffusivities remain.
+
+This is a bounded central face approximation, requiring spatial and physical
+time refinement. It does not resolve thermal transpiration, Soret effects,
+adsorption/surface diffusion, water saturation, changing pore geometry,
+pore storage, pore-size distributions, inertial Forchheimer flow or a nonlinear
+steady composition profile through a finite heterogeneous laminate. Source and
+geometry applicability must be supplied for the actual material.
+
+Before an executor restart, a native executable of the actual owners passed 89
+distinct focused tests, including nine new dusty-gas regressions: pure-gas
+Knudsen plus compressible Darcy limits, Graham counterdiffusion, an independent
+ternary uphill-flux reference, concentration weighting, source/units/closed-path
+refusals, absent-side species, finite mass/energy conservation, shared nozzle
+withdrawal and constitutive admission. An additional extreme-range underflow
+regression and the merge onto the concurrently improved entropy API were
+source-reviewed after recovery; full native rerun and workspace validation
+remain unverified because the restart removed the dependency caches.
