@@ -158,33 +158,33 @@ pub(super) struct ExecutionOutput {
 }
 
 // Preserve the original two-argument caller and its no-partial-output behavior.
-pub(super) fn execute(base_text: &str, uq_text: &str) -> Result<String> {
-    execute_with_options(base_text, uq_text, &Options::default()).map(|output| output.stdout)
+pub(super) fn execute(worker: &Path, base_text: &str, uq_text: &str) -> Result<String> {
+    execute_with_options(worker, base_text, uq_text, &Options::default()).map(|output| output.stdout)
 }
 
-pub(super) fn execute_with_options(base_text: &str, uq_text: &str, options: &Options) -> Result<ExecutionOutput> {
+pub(super) fn execute_with_options(worker: &Path, base_text: &str, uq_text: &str, options: &Options) -> Result<ExecutionOutput> {
     let base = J::parse(base_text).map_err(|error| bad(format!("invalid base JSON: {error}")))?;
     let config = Config::parse(uq_text, &base)?;
     if let Some(workers) = options.workers {
-        return parallel::execute(base_text, &base, &config, options, workers);
+        return parallel::execute(worker, base_text, &base, &config, options, workers);
     }
     if let Some(settings) = &options.importance {
-        return importance::execute(base_text, &base, &config, options, settings);
+        return importance::execute(worker, base_text, &base, &config, options, settings);
     }
     if let Some(settings) = options.polynomial {
-        return polynomial::execute(&base, &config, settings);
+        return polynomial::execute(worker, &base, &config, settings);
     }
     if options.sobol_sensitivity {
-        return sensitivity::execute(base_text, &base, &config, options);
+        return sensitivity::execute(worker, base_text, &base, &config, options);
     }
     if options.shapley_sensitivity {
-        return shapley::execute(base_text, &base, &config, options);
+        return shapley::execute(worker, base_text, &base, &config, options);
     }
     if let Some(replicates) = options.qmc_replicates {
-        return qmc::execute(base_text, &base, &config, options, replicates);
+        return qmc::execute(worker, base_text, &base, &config, options, replicates);
     }
     if let Some(grid) = &options.design {
-        return design::execute(base_text,&base,&config,options,grid);
+        return design::execute(worker,base_text,&base,&config,options,grid);
     }
     let plan = config.plan();
     if let Some(policy) = options.compliance {
@@ -194,7 +194,7 @@ pub(super) fn execute_with_options(base_text: &str, uq_text: &str, options: &Opt
     if options.adjoint_mean_control { mean_control::validate(&base, &config)?; }
     let mut mean_control = None;
     let identity = if options.checkpoint.is_some() || options.resume.is_some() {
-        Some(checkpoint::model_identity(base_text, &options.checkpoint_binding(&config)?)?)
+        Some(checkpoint::model_identity(worker, base_text, &options.checkpoint_binding(&config)?)?)
     } else { None };
     if let Some(path) = &options.resume {
         if options.adjoint_mean_control {
@@ -216,7 +216,7 @@ pub(super) fn execute_with_options(base_text: &str, uq_text: &str, options: &Opt
         .then(|| Instant::now() + Duration::from_secs_f64(config.wall_seconds));
     if let Some(deadline) = control_deadline {
         if mean_control.is_none() {
-            mean_control = Some(mean_control::prepare(&base, &config, &execution, deadline)?);
+            mean_control = Some(mean_control::prepare(worker, &base, &config, &execution, deadline)?);
         }
     }
     // Retain the paid nominal even at ordinal zero, before any random sample.
@@ -242,8 +242,8 @@ pub(super) fn execute_with_options(base_text: &str, uq_text: &str, options: &Opt
             // One observation is one COMPLETED model evaluation. A transient
             // may contain many accepted steps, but contributes only its peak.
             let evaluated = match config.qoi {
-                Qoi::Steady => evaluate_sample(&request, deadline),
-                qoi => evaluate_sample_for(&request, deadline, qoi),
+                Qoi::Steady => evaluate_sample(worker, &request, deadline),
+                qoi => evaluate_sample_for(worker, &request, deadline, qoi),
             };
             match evaluated {
                 Ok(value) => Ok(Some(value)),

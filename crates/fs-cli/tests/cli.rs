@@ -267,6 +267,71 @@ fn g0_argument_grammar_and_json_flag_are_stable() {
 }
 
 #[test]
+fn g0_coupled_commands_share_help_flags_and_producer_refusals() {
+    let global = run(args(&["--json", "help"]));
+    for verb in ["cooling-cht", "electrothermal", "cooling-network",
+        "cooling-network-uq", "cooling-component-design"] {
+        assert!(global.stdout.contains(verb), "global help omits {verb}");
+        let help = run(args(&[verb, "--help"]));
+        assert_eq!(help.exit_code, exit::SUCCESS, "{verb}: {}", help.stderr);
+        assert!(help.stdout.contains(verb));
+        let binary = std::process::Command::new(env!("CARGO_BIN_EXE_frankensim"))
+            .args([verb, "--help"]).output().unwrap();
+        assert_eq!(binary.status.code(), Some(i32::from(help.exit_code)));
+        assert_eq!(binary.stdout, help.stdout.as_bytes());
+        assert_eq!(binary.stderr, help.stderr.as_bytes());
+
+        let duplicate = run(args(&[verb, "--json", "--help", "--json"]));
+        assert_eq!(duplicate.exit_code, exit::USAGE);
+        assert!(duplicate.stderr.contains("cli-duplicate-flag"));
+    }
+    for (verb, code) in [
+        ("cooling-cht", "cooling-cht-input"),
+        ("electrothermal", "electrothermal-usage"),
+        ("cooling-network", "cooling-network-input"),
+        ("cooling-network-uq", "cooling-network-uq-input"),
+        ("cooling-component-design", "cooling-network-uq-input"),
+    ] {
+        let before = run(args(&["--json", verb]));
+        let after = run(args(&[verb, "--json"]));
+        assert_eq!(before, after, "global flag position changed {verb}");
+        assert_eq!(before.exit_code, exit::USAGE);
+        assert!(before.stderr.contains(code), "{}", before.stderr);
+        assert!(before.stderr.starts_with('{'));
+    }
+}
+
+#[test]
+fn g0_embedded_child_workflows_require_an_explicit_worker_before_io() {
+    for verb in ["cooling-network-uq", "cooling-component-design"] {
+        let arguments = args(&["--json", verb, "missing-model.json", "missing-plan.json"]);
+        let output = run(arguments.clone());
+        assert_eq!(output.exit_code, exit::UNAVAILABLE);
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.contains("cooling-worker-required"));
+        let relative = fs_cli::run_with_context(arguments, fs_cli::CommandContext {
+            cooling_worker: Some(std::path::Path::new("frankensim")),
+        });
+        assert_eq!(relative.exit_code, exit::INPUT);
+        assert!(relative.stderr.contains("cooling-worker-path"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn g0_encoding_refusals_keep_the_requested_json_mode() {
+    use std::os::unix::ffi::OsStringExt;
+    let output = fs_cli::run_os([
+        "validate".into(),
+        std::ffi::OsString::from_vec(vec![b'p', 0xff]),
+        "--json".into(),
+    ]);
+    assert_eq!(output.exit_code, exit::USAGE);
+    assert!(output.stderr.starts_with('{'));
+    assert!(output.stderr.contains("cli-argument-encoding"));
+}
+
+#[test]
 fn g0_report_and_package_refuse_an_unknown_run_without_writing_anything() {
     // The export verbs read only what a completed solve retained. A ledger
     // that never saw the run must yield the solve loader's own refusal code,

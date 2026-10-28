@@ -1,7 +1,6 @@
 use super::*;
 use model::Qoi;
 use std::io::{Read, Write};
-use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -18,15 +17,6 @@ impl fmt::Display for EvaluationError {
     }
 }
 
-/// On Linux this names the running image even if an installation replaces its
-/// pathname during a long study. Hashing and launch use the same image.
-pub(super) fn executable_path() -> std::io::Result<PathBuf> {
-    #[cfg(target_os = "linux")]
-    { Ok(PathBuf::from("/proc/self/exe")) }
-    #[cfg(not(target_os = "linux"))]
-    { std::env::current_exe() }
-}
-
 struct RunningChild(Child);
 impl Drop for RunningChild {
     fn drop(&mut self) {
@@ -35,26 +25,25 @@ impl Drop for RunningChild {
     }
 }
 
-fn cooling_command() -> std::result::Result<Command, EvaluationError> {
-    let executable = executable_path().map_err(|error| EvaluationError::Child(format!("cannot locate frankensim executable: {error}")))?;
-    let mut command = Command::new(executable);
+fn cooling_command(worker: &Path) -> Command {
+    let mut command = Command::new(worker);
     command.arg("--json").arg("cooling-network").arg("/dev/stdin");
-    Ok(command)
+    command
 }
 
-pub(super) fn evaluate_sample(request: &str, deadline: Instant) -> std::result::Result<f64, EvaluationError> {
-    evaluate_sample_for(request, deadline, Qoi::Steady)
+pub(super) fn evaluate_sample(worker: &Path, request: &str, deadline: Instant) -> std::result::Result<f64, EvaluationError> {
+    evaluate_sample_for(worker, request, deadline, Qoi::Steady)
 }
 
-pub(super) fn evaluate_sample_for(request: &str, deadline: Instant, qoi: Qoi) -> std::result::Result<f64, EvaluationError> {
-    evaluate_process(cooling_command()?, request, deadline, qoi)
+pub(super) fn evaluate_sample_for(worker: &Path, request: &str, deadline: Instant, qoi: Qoi) -> std::result::Result<f64, EvaluationError> {
+    evaluate_process(cooling_command(worker), request, deadline, qoi)
 }
 
 /// Complete same-binary output for consumers that need controls or a retained
 /// selected trajectory. This is the SAME watchdog and output cap as scalar UQ;
 /// each consumer must validate its own expected result schema and observable.
-pub(super) fn evaluate_document(request: &str, deadline: Instant) -> std::result::Result<J, EvaluationError> {
-    evaluate_document_process(cooling_command()?, request, deadline)
+pub(super) fn evaluate_document(worker: &Path, request: &str, deadline: Instant) -> std::result::Result<J, EvaluationError> {
+    evaluate_document_process(cooling_command(worker), request, deadline)
 }
 
 fn evaluate_process(command: Command, request: &str, deadline: Instant, qoi: Qoi) -> std::result::Result<f64, EvaluationError> {

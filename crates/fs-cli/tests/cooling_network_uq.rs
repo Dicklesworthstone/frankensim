@@ -47,6 +47,57 @@ fn actual_binary_uq_runs_real_cooling_samples() {
 }
 
 #[test]
+fn embedded_uq_and_binary_share_worker_identity_and_resume() {
+    let dir = scratch("shared-dispatch");
+    let base = example("mixed-slab.json");
+    let request = compliance_request(&dir, "plan.json", 2, None, 60.0);
+    let worker = Path::new(env!("CARGO_BIN_EXE_frankensim"));
+    let context = fs_cli::CommandContext { cooling_worker: Some(worker) };
+    let full_path = dir.join("full.bin");
+    let arguments = |checkpoint: &Path, resume: Option<&Path>| {
+        let mut args: Vec<std::ffi::OsString> = vec!["--json".into(),
+            "cooling-network-uq".into(), base.clone().into_os_string(),
+            request.clone().into_os_string(), "--checkpoint".into(),
+            checkpoint.as_os_str().to_owned()];
+        if let Some(resume) = resume {
+            args.extend(["--resume".into(), resume.as_os_str().to_owned()]);
+        }
+        args
+    };
+    let full = fs_cli::run_os_with_context(arguments(&full_path, None), context);
+    assert_eq!(full.exit_code, fs_cli::exit::SUCCESS, "{}", full.stderr);
+    assert!(full.stdout.contains("\"samples_evaluated\":2"));
+
+    let prefix_path = dir.join("prefix.bin");
+    let prefix = uq(&base, &request).arg("--checkpoint").arg(&prefix_path)
+        .args(["--max-new-samples", "1"]).output().unwrap();
+    assert_progress(&prefix, 1);
+    let retained = fs::read(&prefix_path).unwrap();
+
+    // A different supplied image cannot inherit a saved model identity. This
+    // refuses before trying to launch it or reserving another checkpoint.
+    let changed_worker = dir.join("different-worker");
+    fs::write(&changed_worker, b"different evaluator bytes").unwrap();
+    let refused_path = dir.join("must-not-exist.bin");
+    let refused = fs_cli::run_os_with_context(
+        arguments(&refused_path, Some(&prefix_path)),
+        fs_cli::CommandContext { cooling_worker: Some(&changed_worker) },
+    );
+    assert_eq!(refused.exit_code, fs_cli::exit::REFUSED);
+    assert!(refused.stderr.contains("identity differs"), "{}", refused.stderr);
+    assert!(!refused_path.exists());
+
+    let resumed_path = dir.join("resumed.bin");
+    let resumed = fs_cli::run_os_with_context(
+        arguments(&resumed_path, Some(&prefix_path)), context,
+    );
+    assert_eq!(resumed.exit_code, fs_cli::exit::SUCCESS, "{}", resumed.stderr);
+    assert_eq!(resumed.stdout, full.stdout);
+    assert_eq!(fs::read(&resumed_path).unwrap(), fs::read(&full_path).unwrap());
+    assert_eq!(fs::read(&prefix_path).unwrap(), retained);
+}
+
+#[test]
 fn unknown_multivariate_dependence_refuses_before_sampling() {
     let output = uq(&example("fan-correlated-hotspot.json"), &example("uq-unknown-dependence.json"))
         .output().expect("run UQ negative case");

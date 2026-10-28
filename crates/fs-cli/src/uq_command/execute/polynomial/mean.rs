@@ -2,7 +2,7 @@
 use super::*;
 use fs_uq::{PceMeanConfig, PceMeanExecution, PceMeanReport};
 
-pub(super) fn execute(base: &J, config: &Config, settings: Settings, fit_samples: usize)
+pub(super) fn execute(worker: &Path, base: &J, config: &Config, settings: Settings, fit_samples: usize)
     -> Result<ExecutionOutput>
 {
     let deadline = Instant::now() + Duration::from_secs_f64(config.wall_seconds);
@@ -16,7 +16,7 @@ pub(super) fn execute(base: &J, config: &Config, settings: Settings, fit_samples
     let mut execution = PceMeanExecution::new(&config.plan(), policy).map_err(bad)?;
     let report = execution.advance_interruptible(config.samples,
         || Instant::now() >= deadline,
-        |values| evaluate(config, base, values, deadline));
+        |values| evaluate(worker, config, base, values, deadline));
     complete(report.status, report.rejection_reason.as_deref(), report.model_calls_evaluated, deadline)?;
     let stdout = render_mean(config, base, &execution, &report)?;
     complete(report.status, None, report.model_calls_evaluated, deadline)?;

@@ -7,7 +7,7 @@ fn failure(message: impl Into<String>) -> Failure {
 }
 
 pub(super) fn execute(
-    base_text: &str, base: &J, config: &Config, options: &Options, proposal: &ImportanceConfig,
+    worker: &Path, base_text: &str, base: &J, config: &Config, options: &Options, proposal: &ImportanceConfig,
 ) -> Result<ExecutionOutput> {
     let plan = config.plan();
     if let Some(policy) = options.compliance { policy.validate_plan(&plan)?; }
@@ -16,7 +16,7 @@ pub(super) fn execute(
         let parameters = config.render_parameters()?;
         let binding = options.compliance.map_or_else(|| parameters.clone(),
             |policy| decision::binding(policy, &parameters));
-        Some(checkpoint::model_identity(base_text, &binding)?)
+        Some(checkpoint::model_identity(worker, base_text, &binding)?)
     } else { None };
     if let Some(path) = &options.resume {
         // Importance records retain QoI AND scaled weight. Keep the existing
@@ -48,7 +48,7 @@ pub(super) fn execute(
     for _ in 0..allowance {
         if assessment.as_ref().is_some_and(decision::Assessment::reached) { break; }
         let report = execution.advance_interruptible(1, || Instant::now() >= deadline,
-            |values| evaluate(base, config, values, deadline));
+            |values| evaluate(worker, base, config, values, deadline));
         if report.status == UqStatus::Refused {
             let refusal = model_failure(report.rejection_reason.unwrap_or_else(|| "importance physical solve refused".into()));
             if let Some(output) = &output {

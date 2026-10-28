@@ -21,21 +21,21 @@ fn recovery_error(message: impl Into<String>) -> Failure {
 }
 
 pub(super) fn execute(
-    base_text: &str, base: &J, config: &Config, options: &Options, workers: usize,
+    worker: &Path, base_text: &str, base: &J, config: &Config, options: &Options, workers: usize,
 ) -> Result<ExecutionOutput> {
     if options.shapley_sensitivity {
-        return shapley::execute(base_text, base, config, options, workers);
+        return shapley::execute(worker, base_text, base, config, options, workers);
     }
     if options.sobol_sensitivity {
-        return sobol::execute(base_text, base, config, options, workers);
+        return sobol::execute(worker, base_text, base, config, options, workers);
     }
     if let Some(replicates) = options.qmc_replicates {
-        return qmc::execute(base_text, base, config, options, workers, replicates);
+        return qmc::execute(worker, base_text, base, config, options, workers, replicates);
     }
     let plan = config.plan();
     let mut run = UqBatchExecution::new(&plan).map_err(bad)?;
     let identity = if options.checkpoint.is_some() || options.resume.is_some() {
-        Some(checkpoint::model_identity(base_text, &config.render_parameters()?)?)
+        Some(checkpoint::model_identity(worker, base_text, &config.render_parameters()?)?)
     } else { None };
     if let Some(path) = &options.resume {
         let cap = 4096 + 8 * MAX_PRODUCT_SAMPLES as u64;
@@ -64,7 +64,7 @@ pub(super) fn execute(
     while report.status != UqStatus::Complete && run.evaluations_attempted() - initial < allowance {
         let width = workers.min(allowance - (run.evaluations_attempted() - initial));
         report = run.advance_batch::<String>(width, || Instant::now() >= deadline, |jobs, slots| {
-            drain_wave(jobs, slots, &|job| evaluate_job(base, config, job, deadline));
+            drain_wave(jobs, slots, &|job| evaluate_job(worker, base, config, job, deadline));
         }).map_err(bad)?;
         // All workers and child watchdogs have drained here. Genuine failures
         // win over timeout; never save a resumable prefix past a failed sample.
@@ -100,13 +100,13 @@ pub(super) fn execute(
 }
 
 fn evaluate_job(
-    base: &J, config: &Config, job: &UqBatchInput, deadline: Instant,
+    worker: &Path, base: &J, config: &Config, job: &UqBatchInput, deadline: Instant,
 ) -> std::result::Result<Option<f64>, String> {
     if Instant::now() >= deadline { return Ok(None); }
     let request = config.sample_request(base, &job.parameters).map_err(|e| e.to_string())?;
     let result = match config.qoi {
-        Qoi::Steady => evaluate_sample(&request, deadline),
-        qoi => evaluate_sample_for(&request, deadline, qoi),
+        Qoi::Steady => evaluate_sample(worker, &request, deadline),
+        qoi => evaluate_sample_for(worker, &request, deadline, qoi),
     };
     match result {
         Ok(value) => Ok(Some(value)),

@@ -20,7 +20,7 @@ use std::fmt::Write as _;
 use std::io::Read as _;
 use std::path::Path;
 
-use fs_cli::{CommandOutput, exit};
+use crate::{CommandOutput, exit};
 use fs_exec::CancelGate;
 use fs_lbm::conjugate::material_coupling::MaterialCouplingConfig;
 use fs_lbm::conjugate::{

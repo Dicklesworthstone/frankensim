@@ -20,7 +20,7 @@ use std::io::Read;
 use std::time::{Duration, Instant};
 
 use crate::material_state_input::JsonValue as J;
-use fs_cli::{CommandOutput, exit};
+use crate::{CommandOutput, exit};
 use fs_exec::CancelGate;
 use fs_geom::Point3;
 use fs_io::stl::read_stl;

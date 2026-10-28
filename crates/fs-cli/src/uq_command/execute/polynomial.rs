@@ -49,9 +49,9 @@ pub(super) fn validate_options(options: &Options) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn execute(base: &J, config: &Config, settings: Settings) -> Result<ExecutionOutput> {
+pub(super) fn execute(worker: &Path, base: &J, config: &Config, settings: Settings) -> Result<ExecutionOutput> {
     if let Some(fit_samples) = settings.fit_samples {
-        return mean::execute(base, config, settings, fit_samples);
+        return mean::execute(worker, base, config, settings, fit_samples);
     }
     // Include design setup and fitting in the same soft wall allowance as all
     // child solves. Bounded synchronous library reductions are not preemptible.
@@ -61,7 +61,7 @@ pub(super) fn execute(base: &J, config: &Config, settings: Settings) -> Result<E
     let mut execution = PceExecution::new(&plan, settings.regression()).map_err(bad)?;
     let report = execution.advance_interruptible(config.samples,
         || Instant::now() >= deadline,
-        |values| evaluate(config, base, values, deadline));
+        |values| evaluate(worker, config, base, values, deadline));
     complete(report.status, report.rejection_reason.as_deref(), report.samples_evaluated, deadline)?;
     let model = execution.model().ok_or_else(|| model_failure("completed PCE has no model"))?;
     let stdout = render(config, base, &report, model)?;
@@ -70,11 +70,11 @@ pub(super) fn execute(base: &J, config: &Config, settings: Settings) -> Result<E
     Ok(ExecutionOutput { stdout, exit_code: exit::SUCCESS })
 }
 
-fn evaluate(config: &Config, base: &J, values: &[f64], deadline: Instant) -> Result<Option<f64>> {
+fn evaluate(worker: &Path, config: &Config, base: &J, values: &[f64], deadline: Instant) -> Result<Option<f64>> {
     let request = config.sample_request(base, values)?;
     let result = match config.qoi {
-        Qoi::Steady => evaluate_sample(&request, deadline),
-        qoi => evaluate_sample_for(&request, deadline, qoi),
+        Qoi::Steady => evaluate_sample(worker, &request, deadline),
+        qoi => evaluate_sample_for(worker, &request, deadline, qoi),
     };
     match result {
         Ok(value) => Ok(Some(value)),

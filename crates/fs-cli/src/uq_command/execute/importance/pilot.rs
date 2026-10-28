@@ -83,10 +83,10 @@ impl Settings {
 }
 
 pub(super) fn execute(
-    base_text: &str, base: &J, config: &Config, options: &Options, settings: Settings,
+    worker: &Path, base_text: &str, base: &J, config: &Config, options: &Options, settings: Settings,
 ) -> Result<ExecutionOutput> {
     if options.checkpoint.is_some() || options.resume.is_some() || options.compliance.is_some() {
-        return recovery::execute(base_text, base, config, options, settings);
+        return recovery::execute(worker, base_text, base, config, options, settings);
     }
     // Setup, every pilot, production, fitting and publication share ONE allowance.
     let deadline = Instant::now() + Duration::from_secs_f64(config.wall_seconds);
@@ -97,7 +97,7 @@ pub(super) fn execute(
     let report = execution.advance_interruptible(
         config.samples,
         || Instant::now() >= deadline,
-        |values| super::evaluate(base, config, values, deadline),
+        |values| super::evaluate(worker, base, config, values, deadline),
     );
     if report.status == UqStatus::Refused {
         return Err(model_failure(report.rejection_reason.clone()

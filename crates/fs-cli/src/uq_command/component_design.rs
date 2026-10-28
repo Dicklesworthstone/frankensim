@@ -12,13 +12,17 @@ use input::Plan;
 const DESIGN_SCHEMA: &str = "frankensim.cooling-component-design.result.v1";
 const DESIGN_HELP: &str = "Usage: frankensim [--json] cooling-component-design <base-request.json> <allocation.json>\n\nAllocate absolute component watts in declared priority order. Each control names\none base interval and affects every occurrence in its fixed repeated schedule.\nEvery candidate runs the real cooling-network command from the original initial\nfield. A requested sampled-peak component adjoint may guide safeguarded trials;\nwithout one, bisection performs no hidden reverse solves. Bounds, thermal slack\nand watt-bracket tolerances are explicit. Optional thermal_constraints add named\ncomponent-footprint or existing temperature objectives, each with its OWN limit.\nEvery limit must pass. The worst signed temperature excess guides the bracket,\nnot the largest absolute temperature. Each objective reruns the same full model\nand its own requested adjoint; every run consumes the cumulative step budget.\nEvaluation, cumulative trajectory-step and wall budgets cover ALL priorities.\nBudget exhaustion after a passing baseline returns that accepted allocation with\nstatus=budget-exhausted and exit 6, never a completed search. Model failures refuse.\nThe result retains cooling_result and resolved_request for ordinary exact replay.\nThis is not a global optimum or continuous-time temperature certificate.\nSee examples/cooling-network/COMPONENT_POWER_ALLOCATION.md and MULTI_LIMIT_ALLOCATION.md.\n";
 
-pub(in crate) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
+pub(in crate) fn run(args: &[OsString], json_mode: bool, worker: Option<&Path>) -> CommandOutput {
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
         return CommandOutput { exit_code: exit::SUCCESS, stdout: if json_mode {
             format!("{{\"schema\":{},\"help\":{}}}\n", quote(DESIGN_SCHEMA), quote(DESIGN_HELP))
         } else { DESIGN_HELP.into() }, stderr: String::new() };
     }
     if args.len() != 2 { return failure(exit::USAGE, bad(DESIGN_HELP), json_mode); }
+    let worker = match admit_worker(worker) {
+        Ok(worker) => worker,
+        Err((class, error)) => return failure(class, error, json_mode),
+    };
     if !cfg!(unix) { return failure(exit::REFUSED, bad("component allocation currently requires a Unix cooling child"), json_mode); }
     let result = (|| -> Result<(u8,String)> {
         let base = J::parse(&read(&args[0], MAX_BASE_BYTES)?).map_err(|e| bad(e.to_string()))?;
@@ -28,7 +32,7 @@ pub(in crate) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
             .ok_or_else(|| bad("allocation wall deadline is not representable"))?;
         let criteria = constraints.len() + 1;
         let mut result = search::allocate_with_work(&plan, deadline, criteria, |values, work|
-            constraint_execution::evaluate(&plan, &constraints, values, deadline, work))?;
+            constraint_execution::evaluate(worker, &plan, &constraints, values, deadline, work))?;
         let resolved = plan.request(&result.values)?;
         let selected = plan.axes.iter().zip(&result.values).map(|(axis,&value)| Ok(J::Object(vec![
             ("component".into(),J::Str(axis.component.clone())), ("interval".into(),usize_value(axis.interval)),

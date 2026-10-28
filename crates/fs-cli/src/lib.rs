@@ -8,16 +8,21 @@
 //! physics; a CLI-shaped mock is not substituted for an integrated workflow.
 
 mod cards;
+mod cht_command;
 mod cinematic;
 mod compare;
 mod discover;
+mod electrothermal_command;
 mod frankenscript;
 mod import;
 mod json_read;
+mod material_state_input;
+mod network_command;
 mod package;
 mod report;
 mod solve;
 mod study;
+mod uq_command;
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
@@ -75,6 +80,8 @@ const VALIDATION_NO_CLAIM: &str =
     "does not prove artifact existence, capability availability, solvability, or physical validity";
 const USAGE: &str = "frankensim [--json] validate <project.fsim|project.json> | discover <request.json> <pack>... | import <project> <source>... <ledger.db> --unit <unit> (--max-hole-edges <n> | --step-root <id> --target-h <spacing>) | solve <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | solve --resume <run-id> <ledger.db> | report <run-id> [<ledger.db>] | package <run-id> [<ledger.db>] | run <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | run <program.fs|program.fs.json> <ledger.db> | compare <left-run> <right-run> [<ledger.db>] | study <study.fsim|study.json> <ledger.db> [--budget <N>] | study --resume <study-run-id> <ledger.db> [--budget <N>] | cinematic <mode> <config.fscine> <trajectory-source> [cinematic options] (verify/mux require --trajectory <artifact>; other cinematic modes also allow --run-reduced)";
 
+const COUPLED_USAGE: &str = "Experimental coupled workflows:\n  cooling-cht <scene.json>\n  electrothermal <scene.json> [--transient <time.json>]\n  cooling-network <request.json>\n  cooling-network-uq <base-request.json> <uq-request.json> [options]\n  cooling-component-design <base-request.json> <allocation.json>\nUse each command's --help for its file-driven interface. These workflows retain their own numerical scope and do not produce ledger-backed .fsim runs. Embedded UQ and component design require an explicit CommandContext cooling worker.\n";
+
 /// Captured command output. Final result records are on stdout; diagnostics
 /// are on stderr.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +94,17 @@ pub struct CommandOutput {
     pub stderr: String,
 }
 
+/// Host resources needed by commands that isolate numerical evaluations in
+/// child processes. Ordinary project and single-solve commands need none.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CommandContext<'a> {
+    /// Absolute path to a trusted `frankensim` executable for cooling UQ and
+    /// component-allocation workers. The same file is launched and hashed for
+    /// checkpoint identity; the caller must keep it unchanged during the run.
+    /// A library call never assumes that its host executable is FrankenSim.
+    pub cooling_worker: Option<&'a Path>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutputMode {
     Text,
@@ -96,6 +114,11 @@ enum OutputMode {
 #[derive(Debug, Clone, PartialEq)]
 enum Command {
     Help,
+    CoolingCht(Vec<OsString>),
+    Electrothermal(Vec<OsString>),
+    CoolingNetwork(Vec<OsString>),
+    CoolingNetworkUq(Vec<OsString>),
+    CoolingComponentDesign(Vec<OsString>),
     Cinematic(Vec<String>),
     Validate(PathBuf),
     Discover {
@@ -200,16 +223,38 @@ impl Diagnostic {
 /// Run the CLI from UTF-8 arguments excluding the executable name.
 #[must_use]
 pub fn run(args: impl IntoIterator<Item = String>) -> CommandOutput {
-    let (mode, command) = match parse_args(args) {
-        Ok(parsed) => parsed,
-        Err((mode, diagnostic)) => {
-            let class = resource_cap_exit_class(&diagnostic.code).unwrap_or(exit::USAGE);
-            return refusal(mode, class, &diagnostic, None);
-        }
-    };
+    run_with_context(args, CommandContext::default())
+}
 
+/// Run the canonical command surface with explicit host resources.
+/// UQ and component allocation require `context.cooling_worker`; their help
+/// and argument admission remain available without launching a worker.
+#[must_use]
+pub fn run_with_context(
+    args: impl IntoIterator<Item = String>,
+    context: CommandContext<'_>,
+) -> CommandOutput {
+    run_os_with_context(args.into_iter().map(OsString::from), context)
+}
+
+fn dispatch(command: Command, mode: OutputMode, context: CommandContext<'_>) -> CommandOutput {
     match command {
         Command::Help => help(mode),
+        Command::CoolingCht(arguments) => cht_command::run(&arguments, mode == OutputMode::Json),
+        Command::Electrothermal(arguments) => {
+            electrothermal_command::run(&arguments, mode == OutputMode::Json)
+        }
+        Command::CoolingNetwork(arguments) => {
+            network_command::run(&arguments, mode == OutputMode::Json)
+        }
+        Command::CoolingNetworkUq(arguments) => {
+            uq_command::run(&arguments, mode == OutputMode::Json, context.cooling_worker)
+        }
+        Command::CoolingComponentDesign(arguments) => uq_command::component_design::run(
+            &arguments,
+            mode == OutputMode::Json,
+            context.cooling_worker,
+        ),
         Command::Cinematic(arguments) => cinematic::run(arguments, mode == OutputMode::Json),
         Command::Validate(path) => validate_path(&path, mode),
         Command::Discover { request, packs } => discover_paths(
@@ -270,29 +315,27 @@ pub fn run(args: impl IntoIterator<Item = String>) -> CommandOutput {
 }
 
 /// Run the CLI from platform arguments excluding the executable name.
-/// Non-UTF-8 arguments are a stable usage refusal rather than a panic.
+/// File-driven coupled commands retain native path operands. Commands with a
+/// UTF-8 grammar return a structured encoding refusal for non-UTF-8 arguments.
 #[must_use]
 pub fn run_os(args: impl IntoIterator<Item = OsString>) -> CommandOutput {
-    let mut utf8 = Vec::new();
-    for argument in args {
-        match argument.into_string() {
-            Ok(argument) => utf8.push(argument),
-            Err(_) => {
-                return refusal(
-                    OutputMode::Text,
-                    exit::USAGE,
-                    &Diagnostic::new(
-                        "arguments",
-                        "cli-argument-encoding",
-                        "an argument is not valid UTF-8",
-                        "pass UTF-8 command names, paths, and run identifiers",
-                    ),
-                    None,
-                );
-            }
+    run_os_with_context(args, CommandContext::default())
+}
+
+/// Platform-argument counterpart of [`run_with_context`], retaining the path
+/// and encoding semantics of [`run_os`].
+#[must_use]
+pub fn run_os_with_context(
+    args: impl IntoIterator<Item = OsString>,
+    context: CommandContext<'_>,
+) -> CommandOutput {
+    match parse_args(args) {
+        Ok((mode, command)) => dispatch(command, mode, context),
+        Err((mode, diagnostic)) => {
+            let class = resource_cap_exit_class(&diagnostic.code).unwrap_or(exit::USAGE);
+            refusal(mode, class, &diagnostic, None)
         }
     }
-    run(utf8)
 }
 
 /// Validate already-loaded project bytes. This is the pure validation seam
@@ -332,7 +375,7 @@ fn resource_cap_exit_class(code: &str) -> Option<u8> {
 }
 
 fn parse_args(
-    args: impl IntoIterator<Item = String>,
+    args: impl IntoIterator<Item = OsString>,
 ) -> Result<(OutputMode, Command), (OutputMode, Diagnostic)> {
     let mut mode = OutputMode::Text;
     let mut saw_json = false;
@@ -357,6 +400,38 @@ fn parse_args(
         }
     }
 
+    // Preserve opaque path operands for the workflows that already accept
+    // them; only the project/IR grammar below requires UTF-8 strings.
+    let native = match positional.as_slice() {
+        [verb, rest @ ..] if verb == "cooling-cht" => {
+            Some(Command::CoolingCht(rest.to_vec()))
+        }
+        [verb, rest @ ..] if verb == "electrothermal" => {
+            Some(Command::Electrothermal(rest.to_vec()))
+        }
+        [verb, rest @ ..] if verb == "cooling-network" => {
+            Some(Command::CoolingNetwork(rest.to_vec()))
+        }
+        [verb, rest @ ..] if verb == "cooling-network-uq" => {
+            Some(Command::CoolingNetworkUq(rest.to_vec()))
+        }
+        [verb, rest @ ..] if verb == "cooling-component-design" => {
+            Some(Command::CoolingComponentDesign(rest.to_vec()))
+        }
+        _ => None,
+    };
+    if let Some(command) = native {
+        return Ok((mode, command));
+    }
+    let positional = positional.into_iter().map(|argument| argument.into_string().map_err(|_| (
+        mode,
+        Diagnostic::new(
+            "arguments",
+            "cli-argument-encoding",
+            "an argument is not valid UTF-8",
+            "pass UTF-8 command names, paths, and run identifiers for this command",
+        ),
+    ))).collect::<Result<Vec<_>, _>>()?;
     let command = match positional.as_slice() {
         [flag] if flag == "--help" || flag == "help" => Command::Help,
         [verb, rest @ ..] if verb == "cinematic" => Command::Cinematic(rest.to_vec()),
@@ -638,12 +713,12 @@ fn is_operand(value: &str) -> bool {
 
 fn help(mode: OutputMode) -> CommandOutput {
     let stdout = match mode {
-        OutputMode::Text => format!("{USAGE}\n"),
+        OutputMode::Text => format!("{USAGE}\n\n{COUPLED_USAGE}"),
         OutputMode::Json => {
             let mut out = String::from("{\"schema\":");
             push_json_string(&mut out, RESULT_SCHEMA);
             out.push_str(",\"command\":\"help\",\"status\":\"ok\",\"usage\":");
-            push_json_string(&mut out, USAGE);
+            push_json_string(&mut out, &format!("{USAGE}\n\n{COUPLED_USAGE}"));
             out.push_str("}\n");
             out
         }

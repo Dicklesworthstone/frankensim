@@ -51,19 +51,19 @@ pub(super) fn validate_options(options: &Options) -> Result<()> {
 }
 
 pub(super) fn execute(
-    base_text: &str, base: &J, config: &Config, options: &Options, settings: &Settings,
+    worker: &Path, base_text: &str, base: &J, config: &Config, options: &Options, settings: &Settings,
 ) -> Result<ExecutionOutput> {
     let proposal = match settings {
         Settings::Fixed(proposal) => proposal,
-        Settings::Pilot(settings) => return pilot::execute(base_text, base, config, options, *settings),
+        Settings::Pilot(settings) => return pilot::execute(worker, base_text, base, config, options, *settings),
     };
     if options.checkpoint.is_some() || options.resume.is_some() || options.compliance.is_some() {
-        return recovery::execute(base_text, base, config, options, proposal);
+        return recovery::execute(worker, base_text, base, config, options, proposal);
     }
     let deadline = Instant::now() + Duration::from_secs_f64(config.wall_seconds);
     let mut execution = ImportanceExecution::new(&config.plan(), proposal.clone()).map_err(bad)?;
     let report = execution.advance_interruptible(config.samples, || Instant::now() >= deadline,
-        |values| evaluate(base, config, values, deadline));
+        |values| evaluate(worker, base, config, values, deadline));
     complete(report.status, report.rejection_reason.as_deref(), report.evaluations_attempted, deadline)?;
     let stdout = render(base, config, proposal, &report)?;
     complete(report.status, None, report.evaluations_attempted, deadline)?;
@@ -79,11 +79,11 @@ fn render(base: &J, config: &Config, proposal: &ImportanceConfig, report: &Impor
     ))
 }
 
-fn evaluate(base: &J, config: &Config, values: &[f64], deadline: Instant) -> Result<Option<f64>> {
+fn evaluate(worker: &Path, base: &J, config: &Config, values: &[f64], deadline: Instant) -> Result<Option<f64>> {
     let request = config.sample_request(base, values)?;
     let result = match config.qoi {
-        Qoi::Steady => evaluate_sample(&request, deadline),
-        qoi => evaluate_sample_for(&request, deadline, qoi),
+        Qoi::Steady => evaluate_sample(worker, &request, deadline),
+        qoi => evaluate_sample_for(worker, &request, deadline, qoi),
     };
     match result {
         Ok(value) => Ok(Some(value)),

@@ -54,6 +54,32 @@ budget-exceeded/stage-gap terminals.
 
 ## Public types and semantics
 
+`run` and `run_os` share the same parser and dispatcher as the `frankensim`
+binary, including `cooling-cht`, `electrothermal`, `cooling-network`,
+`cooling-network-uq`, and `cooling-component-design`. The experimental
+workflows keep their existing request/result schemas, numerical limits and
+exit classes; dispatch does not turn them into ledger-backed `.fsim` solves.
+All commands recognize one global `--json` flag, at any position, and reject
+duplicates before doing work. The file-driven coupled commands retain native
+OS path operands. Project/IR commands keep their UTF-8 grammar, with encoding
+refusals rendered in the requested output mode. Both forms of global help
+include the experimental workflows and their execution boundary.
+
+`run_with_context` and `run_os_with_context` accept `CommandContext` for host
+resources. Cooling UQ and component allocation require an explicit absolute
+`cooling_worker` path; help and argument admission require no worker. Without
+one, execution returns `cooling-worker-required` and exit 5 before reading
+inputs or reserving checkpoints. Relative worker paths return
+`cooling-worker-path` and exit 3. The library never relaunches an embedding
+host by inferring that it is FrankenSim. The binary supplies its running
+image (`/proc/self/exe` on Linux); embedders supply a trusted FrankenSim image
+that remains unchanged for the invocation. Child-process watchdogs, output
+caps and drain behavior are unchanged. Every sampling/design variant launches
+that same worker, and resumable UQ hashes its bytes into the existing model
+identity. Checkpoints therefore transfer between the binary and embedded
+dispatcher only when they use the same worker bytes, model and sampling plan.
+No new checkpoint format or executable-authenticity claim is introduced.
+
 The v0 grammar is intentionally small:
 
 ```text
@@ -2343,6 +2369,16 @@ refusal, JSON escaping/line discipline, import-policy conflict/numeric
 refusals, routing of both admitted import policy shapes into bounded project
 I/O, the exact producer-Bead refusal for report/package, and the solve
 grammar's ledger-operand requirement.
+
+The shared-dispatch regressions in `tests/cli.rs` cover coupled-command help,
+native producer refusals, global JSON flags and missing-worker admission.
+`tests/cooling_network.rs` compares actual embedded and binary thermal solves,
+including Unix paths that cannot be represented as UTF-8.
+`tests/cooling_network_uq.rs` executes actual embedded UQ with an explicitly
+selected worker, resumes a binary-produced prefix, and compares completed
+results and checkpoint bytes. A changed worker identity refuses before a new
+checkpoint is reserved. These are G0/G3/G5 integration checks, not physical
+validation or a cross-ISA result claim.
 
 `tests/import.rs` supplies a closed reference tetrahedron and covers G0 retained
 lineage, repair of deterministic duplicate/degenerate STL facets, strict

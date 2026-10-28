@@ -4,12 +4,12 @@ use super::*;
 use fs_uq::{ShapleyExecution, ShapleyReport};
 
 pub(super) fn execute(
-    base_text: &str, base: &J, config: &Config, options: &Options,
+    worker: &Path, base_text: &str, base: &J, config: &Config, options: &Options,
 ) -> Result<ExecutionOutput> {
     let plan = config.plan();
     let mut execution = ShapleyExecution::new(&plan).map_err(bad)?;
     let identity = if options.checkpoint.is_some() || options.resume.is_some() {
-        Some(checkpoint::model_identity(base_text, &config.render_parameters()?)?)
+        Some(checkpoint::model_identity(worker, base_text, &config.render_parameters()?)?)
     } else { None };
     if let Some(path) = &options.resume {
         execution = checkpoint::restore_shapley(path, &plan, identity.expect("resume identity"))?;
@@ -27,8 +27,8 @@ pub(super) fn execute(
         let report = execution.advance_interruptible(1, || Instant::now() >= deadline, |values| {
             let request = config.sample_request(base, values)?;
             let evaluated = match config.qoi {
-                Qoi::Steady => evaluate_sample(&request, deadline),
-                qoi => evaluate_sample_for(&request, deadline, qoi),
+                Qoi::Steady => evaluate_sample(worker, &request, deadline),
+                qoi => evaluate_sample_for(worker, &request, deadline, qoi),
             };
             match evaluated {
                 Ok(value) => Ok(Some(value)),

@@ -2,8 +2,7 @@
 //! request, not a .fsim migration or a ledger-backed `solve` result. The binary
 //! adapter reuses the CLI's single JSON reader and existing numerical producers.
 
-#[path = "json_read.rs"]
-mod json;
+use crate::json_read as json;
 mod design;
 mod solid_data;
 mod objective;
@@ -33,7 +32,7 @@ use fs_airflow::graph::thermal::transport::{BranchThermalModel, TransportAir, Tr
 use fs_airflow::graph::{FixedPressure, GraphBranch, GraphSolution, GraphSolveConfig, LossGraph};
 use fs_airflow::{AirflowError, LossElement, LossResistance, SourceProvenance, ToleranceBasis};
 use fs_alloc::{ArenaConfig, ArenaPool};
-use fs_cli::{CommandOutput, exit};
+use crate::{CommandOutput, exit};
 use fs_conduction::adjoint::robin::RobinLinearization;
 use fs_conduction::{ConductionMesh, ConductionProblem, InitialGuess, ScalarField, SolveConfig, ThermalBc, ThermalBoundary, ThermalBoundaryBuilder};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};

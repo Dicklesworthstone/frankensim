@@ -5,7 +5,7 @@ use fs_uq::QmcConfig;
 use std::io::Read as _;
 
 pub(super) fn execute(
-    base_text: &str, base: &J, config: &Config, options: &Options,
+    worker: &Path, base_text: &str, base: &J, config: &Config, options: &Options,
     workers: usize, replicates: usize,
 ) -> Result<ExecutionOutput> {
     if replicates == 0 || config.samples % replicates != 0 {
@@ -16,7 +16,7 @@ pub(super) fn execute(
     plan.method = PropagationMethod::QuasiMonteCarlo;
     let mut run = QmcBatchExecution::new(&plan, layout).map_err(bad)?;
     let identity = if options.checkpoint.is_some() || options.resume.is_some() {
-        Some(checkpoint::model_identity(base_text, &config.render_parameters()?)?)
+        Some(checkpoint::model_identity(worker, base_text, &config.render_parameters()?)?)
     } else { None };
     if let Some(path) = &options.resume {
         let cap = 4096 + 8 * MAX_PRODUCT_SAMPLES as u64;
@@ -44,7 +44,7 @@ pub(super) fn execute(
     while report.status != UqStatus::Complete && run.evaluations_attempted() - initial < allowance {
         let width = workers.min(allowance - (run.evaluations_attempted() - initial));
         report = run.advance_batch::<String>(width, || Instant::now() >= deadline, |jobs, slots| {
-            super::drain_wave(jobs, slots, &|job| super::evaluate_job(base, config, job, deadline));
+            super::drain_wave(jobs, slots, &|job| super::evaluate_job(worker, base, config, job, deadline));
         }).map_err(bad)?;
         if report.status == UqStatus::Refused {
             let refusal = model_failure(report.rejection_reason.clone()

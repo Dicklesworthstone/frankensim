@@ -2,10 +2,7 @@
 //! Units and semantic kinds survive admission into the canonical QueryPoint;
 //! neither a command name nor a material name selects their interpretation.
 
-#[path = "json_read.rs"]
-#[allow(dead_code)]
-mod json;
-pub(crate) use json::JsonValue;
+pub(crate) use crate::json_read::JsonValue;
 
 use fs_matdb::QueryPoint;
 use fs_qty::parse::parse_qty;

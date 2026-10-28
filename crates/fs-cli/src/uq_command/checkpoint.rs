@@ -21,10 +21,8 @@ fn failure(message: impl Into<String>) -> Failure {
 /// Bind fixed inputs and target lowering to the exact executable used for the
 /// child solves. The library additionally binds EVERY UqPlan field. Per-run
 /// wall time and chunk length are resource controls, not sampling semantics.
-pub(super) fn model_identity(base_text: &str, bindings: &str) -> Result<ContentHash> {
-    let executable = super::child::executable_path()
-        .map_err(|error| failure(format!("cannot locate evaluator: {error}")))?;
-    let mut file = File::open(&executable)
+pub(super) fn model_identity(worker: &Path, base_text: &str, bindings: &str) -> Result<ContentHash> {
+    let mut file = File::open(worker)
         .map_err(|error| failure(format!("cannot read evaluator identity: {error}")))?;
     let mut binary = DomainHasher::new("org.frankensim.cooling-uq.executable.v1");
     let mut buffer = [0_u8; 65_536];

@@ -278,7 +278,7 @@ mod tests {
         std::fs::write(&path, scene).unwrap();
         let run = crate::electrothermal_command::run;
         let result = run(&[path.as_os_str().to_owned()], true);
-        assert_eq!(result.exit_code, fs_cli::exit::SUCCESS, "{}", result.stderr);
+        assert_eq!(result.exit_code, crate::exit::SUCCESS, "{}", result.stderr);
         let value = J::parse(&result.stdout).unwrap();
         assert!((value.f64_field("total_joule_w").unwrap() - 4.5).abs() < 1e-8);
         assert!(value.get("fluid_reference").unwrap().str_field("material_state").is_some());
@@ -288,7 +288,7 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("fluid.fsmcdpk")).unwrap(), bytes);
         let refusal = run(&[path.as_os_str().to_owned(), "--transient".into(),
             dir.join("not-read.json").into_os_string()], true);
-        assert_eq!(refusal.exit_code, fs_cli::exit::INPUT);
+        assert_eq!(refusal.exit_code, crate::exit::INPUT);
         assert!(refusal.stdout.is_empty());
         assert!(refusal.stderr.contains("solid-only transient"));
     }

@@ -49,7 +49,7 @@ fn binding(grid: &DesignGrid, family: Policy, config: &Config) -> Result<String>
         quote(grid.label()),multipliers,family.checkpoint_binding(&config.render_parameters()?)))
 }
 
-pub(super) fn execute(base_text: &str, base: &J, config: &Config, options: &Options,
+pub(super) fn execute(worker: &Path, base_text: &str, base: &J, config: &Config, options: &Options,
     grid: &DesignGrid) -> Result<ExecutionOutput> {
     grid.validate(base, config.samples)?;
     let family = options.compliance.ok_or_else(|| bad("candidate selection requires the complete compliance policy"))?;
@@ -57,7 +57,7 @@ pub(super) fn execute(base_text: &str, base: &J, config: &Config, options: &Opti
     let plan = config.plan();
     policy.validate_plan(&plan)?;
     let identity = if options.resume.is_some() || options.checkpoint.is_some() {
-        Some(checkpoint::model_identity(base_text,&binding(grid,family,config)?)?)
+        Some(checkpoint::model_identity(worker,base_text,&binding(grid,family,config)?)?)
     } else { None };
     let mut executions = match &options.resume {
         Some(path) => restore(path,&plan,identity.expect("resume identity"),grid.multipliers.len())?,
@@ -80,7 +80,7 @@ pub(super) fn execute(base_text: &str, base: &J, config: &Config, options: &Opti
             let report = executions[index].advance_interruptible(1,
                 || Instant::now() >= deadline, |values| {
                     let request = config.sample_candidate_request(base,values,grid.control,grid.multipliers[index])?;
-                    match evaluate_sample_for(&request,deadline,config.qoi) {
+                    match evaluate_sample_for(worker,&request,deadline,config.qoi) {
                         Ok(value) => Ok(Some(value)),
                         Err(EvaluationError::Budget) => Ok(None),
                         Err(EvaluationError::Child(message)) => Err(model_failure(message)),

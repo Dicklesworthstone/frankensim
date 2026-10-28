@@ -20,11 +20,11 @@ pub(super) struct MeanControl {
     adjoint_residual: f64,
 }
 
-pub(super) fn prepare(base: &J, config: &Config, execution: &UqExecution,
+pub(super) fn prepare(worker: &Path, base: &J, config: &Config, execution: &UqExecution,
     deadline: Instant) -> Result<MeanControl>
 {
     prepare_with(base, config, execution, |request| {
-        child::evaluate_document(request, deadline).map_err(|error| match error {
+        child::evaluate_document(worker, request, deadline).map_err(|error| match error {
             EvaluationError::Budget => budget("shared UQ wall allowance expired during the nominal forward/adjoint"),
             EvaluationError::Child(message) => model_failure(message),
         })

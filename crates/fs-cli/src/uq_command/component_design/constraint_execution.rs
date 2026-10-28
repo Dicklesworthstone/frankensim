@@ -26,16 +26,16 @@ impl Work {
     }
 }
 
-pub(super) fn evaluate(plan: &Plan, constraints: &[Constraint], values: &[f64],
+pub(super) fn evaluate(worker: &Path, plan: &Plan, constraints: &[Constraint], values: &[f64],
     deadline: Instant, work: &mut Work) -> Result<Evaluation> {
     let base = plan.request(values)?;
-    let mut primary = evaluate_one(plan, values, &base, deadline, work)?;
+    let mut primary = evaluate_one(worker, plan, values, &base, deadline, work)?;
     if constraints.is_empty() { return Ok(primary); }
     let mut rows = vec![Assessment { constraint: Constraint::primary(&base, plan.limit)?,
         peak: primary.peak, time: primary.peak_time, slopes: primary.slopes.clone() }];
     for constraint in constraints {
         let request = constraint.request(&base)?;
-        let result = evaluate_one(plan, values, &request, deadline, work)?;
+        let result = evaluate_one(worker, plan, values, &request, deadline, work)?;
         same_forward(&primary.document, &result.document)?;
         primary.steps = primary.steps.checked_add(result.steps).ok_or_else(|| budget("candidate-set step count overflow"))?;
         primary.solves = primary.solves.checked_add(result.solves).ok_or_else(|| budget("candidate-set solve count overflow"))?;
@@ -50,13 +50,13 @@ pub(super) fn evaluate(plan: &Plan, constraints: &[Constraint], values: &[f64],
     Ok(primary)
 }
 
-fn evaluate_one(plan: &Plan, values: &[f64], request: &J,
+fn evaluate_one(worker: &Path, plan: &Plan, values: &[f64], request: &J,
     deadline: Instant, work: &mut Work) -> Result<Evaluation> {
     let encoded = serialize(request)?;
     if encoded.len() as u64 > MAX_BASE_BYTES { return Err(bad("expanded allocation request exceeds the cooling input byte cap")); }
     if Instant::now() >= deadline { return Err(budget("allocation deadline exhausted before the next thermal constraint")); }
     work.begin()?;
-    let document = child::evaluate_document(&encoded, deadline).map_err(|e| match e {
+    let document = child::evaluate_document(worker, &encoded, deadline).map_err(|e| match e {
         child::EvaluationError::Budget => budget("allocation deadline interrupted a thermal constraint; incomplete candidate set not used"),
         child::EvaluationError::Child(message) => model_failure(message),
     })?;

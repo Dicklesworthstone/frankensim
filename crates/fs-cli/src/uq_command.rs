@@ -3,18 +3,17 @@
 //! stopping using the existing UQ confidence sequence.
 //!
 //! Every sample is serialized as a complete cooling request and executed by a
-//! child invocation of this same `frankensim` binary. This deliberately pays
+//! child invocation of the explicitly supplied `frankensim` worker. This pays
 //! process-launch overhead to keep one parser/physics/product boundary instead
 //! of maintaining a second cooling implementation inside UQ.
 
-#[path = "json_read.rs"]
-mod json;
+use crate::json_read as json;
 mod child;
 mod execute;
 mod model;
 pub(super) mod component_design;
 
-use fs_cli::{CommandOutput, exit};
+use crate::{CommandOutput, exit};
 use fs_uq::{
     CorrelationModel, ParameterUncertainty, PropagationMethod, UqExecution, UqPlan, UqStatus,
 };
@@ -23,6 +22,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::File;
 use std::io::Read as _;
+use std::path::Path;
 
 const SCHEMA: &str = "frankensim.cooling-network-uq.v1";
 const RESULT_SCHEMA: &str = "frankensim.cooling-network-uq.result.v1";
@@ -54,7 +54,7 @@ fn model_failure(message: impl Into<String>) -> Failure {
     Failure { code: "cooling-network-uq-model", message: message.into() }
 }
 
-pub(super) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
+pub(super) fn run(args: &[OsString], json_mode: bool, worker: Option<&Path>) -> CommandOutput {
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
         let help = format!("{HELP}\nCorrelated physical-input variance sensitivity:\n\
 --sensitivity shapley supports 1..8 varying Gaussian/uniform inputs under\n\
@@ -108,6 +108,10 @@ mean controls and sequential decisions conflict. See PARALLEL_UQ.md.\n");
         Ok(options) => options,
         Err(error) => return diagnostic(exit::USAGE, error, json_mode),
     };
+    let worker = match admit_worker(worker) {
+        Ok(worker) => worker,
+        Err((class, error)) => return diagnostic(class, error, json_mode),
+    };
     let base = match read(&args[0], MAX_BASE_BYTES) {
         Ok(value) => value,
         Err(error) => return diagnostic(exit::INPUT, error, json_mode),
@@ -117,11 +121,11 @@ mean controls and sequential decisions conflict. See PARALLEL_UQ.md.\n");
         Err(error) => return diagnostic(exit::INPUT, error, json_mode),
     };
     let result = if args.len() == 2 {
-        execute::execute(&base, &uq).map(|stdout| execute::ExecutionOutput {
+        execute::execute(worker, &base, &uq).map(|stdout| execute::ExecutionOutput {
             stdout, exit_code: exit::SUCCESS,
         })
     } else {
-        execute::execute_with_options(&base, &uq, &options)
+        execute::execute_with_options(worker, &base, &uq, &options)
     };
     match result {
         Ok(output) => CommandOutput { exit_code: output.exit_code, stdout: output.stdout, stderr: String::new() },
@@ -134,6 +138,20 @@ mean controls and sequential decisions conflict. See PARALLEL_UQ.md.\n");
             diagnostic(class, error, json_mode)
         }
     }
+}
+
+fn admit_worker(worker: Option<&Path>) -> std::result::Result<&Path, (u8, Failure)> {
+    let worker = worker.ok_or_else(|| (exit::UNAVAILABLE, Failure {
+        code: "cooling-worker-required",
+        message: "this workflow needs an explicit frankensim worker; supply CommandContext.cooling_worker to run_with_context or run_os_with_context".into(),
+    }))?;
+    if !worker.is_absolute() {
+        return Err((exit::INPUT, Failure {
+            code: "cooling-worker-path",
+            message: "the cooling worker must be an absolute path to a trusted frankensim executable".into(),
+        }));
+    }
+    Ok(worker)
 }
 
 fn diagnostic(code: u8, failure: Failure, json_mode: bool) -> CommandOutput {
