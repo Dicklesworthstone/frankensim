@@ -1,8 +1,8 @@
 //! Shell transient integration, passive dissipation, and checkpoint battery (bead `frankensim-b8bxd.9.2`).
 
 use fs_solid::shell_time::{
-    DynamicState, SHELL_TIME_INTEGRATOR_SCHEMA_V1, ShellTimeCheckpoint, ShellTimeConfig,
-    ShellTimeError, step_newmark,
+    DynamicState, PreparedNewmark, SHELL_TIME_INTEGRATOR_SCHEMA_V1, ShellTimeCheckpoint,
+    ShellTimeConfig, ShellTimeError, step_newmark,
 };
 
 fn sample_system() -> (usize, Vec<f64>, Vec<f64>, Vec<f64>) {
@@ -460,4 +460,149 @@ fn newmark_refuses_invalid_dynamics_without_panicking_or_publishing() {
             .velocity,
         state.velocity
     );
+}
+
+fn scalar_state(u: f64, v: f64, a: f64) -> DynamicState {
+    DynamicState {
+        time_s: 0.0,
+        step: 0,
+        displacement: vec![u],
+        velocity: vec![v],
+        acceleration: vec![a],
+        kinetic_energy_j: 0.0,
+        strain_energy_j: 0.0,
+        total_energy_j: 0.0,
+    }
+}
+
+fn action_2d(matrix: &[f64; 4], x: &[f64]) -> [f64; 2] {
+    [
+        matrix[0] * x[0] + matrix[1] * x[1],
+        matrix[2] * x[0] + matrix[3] * x[1],
+    ]
+}
+
+fn dot_2d(x: &[f64], y: &[f64]) -> f64 {
+    x[0] * y[0] + x[1] * y[1]
+}
+
+#[test]
+fn shell_time_full_matrices_balance_forcing_work_and_damping_loss() {
+    let mass = [2.0, 0.25, 0.25, 1.0];
+    let stiffness = [6.0, -2.0, -2.0, 4.0];
+    // Positive definite and not a linear combination of M and K.
+    let damping = [0.4, 0.1, 0.1, 0.3];
+    let config = ShellTimeConfig {
+        dt_s: 0.01,
+        ..Default::default()
+    };
+    let mut prepared = PreparedNewmark::new(2, &mass, Some(&damping), &stiffness, &config).unwrap();
+    let force = |t: f64| [0.75 * (1.7 * t).cos(), -0.4 * (0.8 * t).sin()];
+    let u = vec![0.3, -0.2];
+    let v = vec![-0.1, 0.4];
+    let ku = action_2d(&stiffness, &u);
+    let cv = action_2d(&damping, &v);
+    let f0 = force(0.0);
+    let rhs = [f0[0] - ku[0] - cv[0], f0[1] - ku[1] - cv[1]];
+    let det = mass[0] * mass[3] - mass[1] * mass[2];
+    let a = vec![
+        (mass[3] * rhs[0] - mass[1] * rhs[1]) / det,
+        (mass[0] * rhs[1] - mass[2] * rhs[0]) / det,
+    ];
+    let kinetic = 0.5 * dot_2d(&v, &action_2d(&mass, &v));
+    let strain = 0.5 * dot_2d(&u, &ku);
+    let mut state = DynamicState {
+        time_s: 0.0,
+        step: 0,
+        displacement: u,
+        velocity: v,
+        acceleration: a,
+        kinetic_energy_j: kinetic,
+        strain_energy_j: strain,
+        total_energy_j: kinetic + strain,
+    };
+    for _ in 0..500 {
+        let f_prev = force(state.time_s);
+        let f_next = force(state.time_s + config.dt_s);
+        let next = prepared.step(&state, &f_next).unwrap();
+        assert_eq!(
+            next,
+            step_newmark(
+                2,
+                &mass,
+                Some(&damping),
+                &stiffness,
+                &state,
+                &f_next,
+                &config
+            )
+            .unwrap()
+        );
+        let mean_v = [
+            0.5 * (state.velocity[0] + next.velocity[0]),
+            0.5 * (state.velocity[1] + next.velocity[1]),
+        ];
+        let mean_f = [0.5 * (f_prev[0] + f_next[0]), 0.5 * (f_prev[1] + f_next[1])];
+        let work = config.dt_s * dot_2d(&mean_f, &mean_v);
+        let loss = config.dt_s * dot_2d(&mean_v, &action_2d(&damping, &mean_v));
+        let balance = next.total_energy_j - state.total_energy_j - work + loss;
+        assert!(balance.abs() < 2.0e-14, "step {}: {balance:e}", next.step);
+        let ma = action_2d(&mass, &next.acceleration);
+        let cv = action_2d(&damping, &next.velocity);
+        let ku = action_2d(&stiffness, &next.displacement);
+        for i in 0..2 {
+            assert!((ma[i] + cv[i] + ku[i] - f_next[i]).abs() < 3.0e-14);
+        }
+        if next.step == 250 {
+            let checkpoint = ShellTimeCheckpoint::new(&next);
+            checkpoint.verify().unwrap();
+            let restored = DynamicState {
+                time_s: checkpoint.time_s,
+                step: checkpoint.step,
+                displacement: checkpoint.u,
+                velocity: checkpoint.v,
+                acceleration: checkpoint.a,
+                kinetic_energy_j: 0.0,
+                strain_energy_j: 0.0,
+                total_energy_j: 0.0,
+            };
+            let mut rebuilt =
+                PreparedNewmark::new(2, &mass, Some(&damping), &stiffness, &config).unwrap();
+            let following_force = force(next.time_s + config.dt_s);
+            assert_eq!(
+                prepared.step(&next, &following_force).unwrap(),
+                rebuilt.step(&restored, &following_force).unwrap()
+            );
+        }
+        state = next;
+    }
+}
+
+#[test]
+fn shell_time_forced_response_converges_at_second_order() {
+    // Manufactured exact motion u=sin(2t), v=2cos(2t), a=-4sin(2t).
+    // M=2, C=0.7, K=13 imply f=5sin(2t)+1.4cos(2t).
+    let error = |steps: usize| {
+        let config = ShellTimeConfig {
+            dt_s: 1.0 / steps as f64,
+            ..Default::default()
+        };
+        let mut prepared = PreparedNewmark::new(1, &[2.0], Some(&[0.7]), &[13.0], &config).unwrap();
+        let mut state = scalar_state(0.0, 2.0, 0.0);
+        for _ in 0..steps {
+            let phase = 2.0 * (state.time_s + config.dt_s);
+            state = prepared
+                .step(&state, &[5.0 * phase.sin() + 1.4 * phase.cos()])
+                .unwrap();
+        }
+        (state.displacement[0] - 2.0_f64.sin()).abs()
+            + (state.velocity[0] - 2.0 * 2.0_f64.cos()).abs()
+    };
+    let coarse = error(50);
+    let fine = error(100);
+    assert!(
+        (3.8..4.2).contains(&(coarse / fine)),
+        "errors {coarse:e}, {fine:e}"
+    );
+    assert!(fine < 5.0e-4, "fine-step error {fine:e}");
 }

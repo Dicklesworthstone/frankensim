@@ -14,6 +14,18 @@ parameters do not inherit those conservation or unconditional stability claims.
 The G0/G3 `shell_time` tests cover free drift, applied impulses, off-diagonal
 mass, internal spring/damper reactions, work and physical coefficient scaling.
 
+`shell_time::PreparedNewmark` borrows fixed operators and factors the effective
+mass once through the same `fs-la::LuWorkspace` owner. Repeated steps reuse that
+factorization with quadratic-cost matrix-vector products and triangular solves;
+the one-shot API shares its complete-increment advancement and admission rules.
+The prepared system must be rebuilt when operators, timestep or Newmark
+parameters change. It can continue a restored checkpoint or another trajectory
+without refactoring, with bit-identical results to fresh one-shot solves.
+Additional `shell_time` tests exercise full nonproportional damping with
+force-work balance, prepared/fresh equality over a forced trajectory, exact
+checkpoint continuation after rebuilding factors, and second-order convergence
+to a manufactured forced response.
+
 ## Purpose and layer
 
 Layer: L3 (FLUX). The elasticity core (plan §8.2, bead tfz.13):
