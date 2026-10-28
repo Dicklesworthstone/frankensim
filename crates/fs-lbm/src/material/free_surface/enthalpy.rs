@@ -277,6 +277,8 @@ pub struct MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     law: &'m LiquidTemperatureLaw<'m>,
     caloric: &'m EquilibriumEnthalpyPhaseCurve,
     controls: FreeSurfaceEnthalpyControls,
+    time_origin_s: f64,
+    accepted_steps: u64,
     h: BTreeMap<MassLocation3, f64>,
     states: BTreeMap<MassLocation3, ResolvedLiquidState>,
     buoyancy: Option<BoussinesqLiquid>,
@@ -424,6 +426,8 @@ impl<'s> MaterialFreeSurface3<'s> {
             law,
             caloric,
             controls,
+            time_origin_s: 0.0,
+            accepted_steps: 0,
             h,
             states: BTreeMap::new(),
             buoyancy,
@@ -450,6 +454,28 @@ impl<'s> MaterialFreeSurface3<'s> {
 }
 
 impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
+    /// Set the physical time at which this thermal/native trajectory was bound.
+    /// Populations, mass, material state and enthalpy are unchanged. A trajectory
+    /// that has already advanced cannot have its physical clock reset.
+    pub fn with_time_origin(mut self, time_origin_s: f64) -> Result<Self, Error> {
+        if !time_origin_s.is_finite() || time_origin_s < 0.0 || self.accepted_steps != 0 {
+            return Err(Error::Invalid("time origin requires an unadvanced liquid and finite nonnegative time"));
+        }
+        self.time_origin_s = time_origin_s;
+        Ok(self)
+    }
+
+    /// Actual accepted VOF/enthalpy intervals since the original binding.
+    /// Thermal subcycles and rejected candidates do not increment this count.
+    pub const fn accepted_steps(&self) -> u64 {
+        self.accepted_steps
+    }
+
+    /// Physical time retained by every original heat, gas, wall and electrical API.
+    pub fn physical_time_s(&self) -> f64 {
+        (self.accepted_steps as f64).mul_add(self.flow.scaling.timestep_s(), self.time_origin_s)
+    }
+
     /// Original flow solver and physical scaling, available read-only.
     #[must_use]
     pub const fn flow(&self) -> &MaterialFreeSurface3<'_> {
@@ -581,6 +607,13 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         gate: &CancelGate,
     ) -> Result<FreeSurfaceEnthalpyReport, Error> {
         poll(gate)?;
+        let next_step = self.accepted_steps.checked_add(1)
+            .filter(|count| *count <= (1_u64 << 53))
+            .ok_or(Error::Invalid("native liquid clock exhausted"))?;
+        let next_time = (next_step as f64).mul_add(self.flow.scaling.timestep_s(), self.time_origin_s);
+        if !next_time.is_finite() || next_time <= self.physical_time_s() {
+            return Err(Error::Invalid("native liquid time must advance representably"));
+        }
         if self.surface_temperature_forces && surface.is_none() {
             return Err(Error::Invalid(
                 "surface-temperature stress requires its complete solved heat boundary",
@@ -724,6 +757,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         self.rheology_samples = endpoint.rheology;
         self.wetting = accepted_wetting;
         self.surface_temperature_forces |= uses_surface_temperature;
+        self.accepted_steps = next_step;
         Ok(report)
     }
 

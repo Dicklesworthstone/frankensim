@@ -20,6 +20,9 @@ mod continuity;
 #[path = "mushy/occupancy.rs"]
 mod occupancy;
 
+#[path = "mushy/release.rs"]
+mod release;
+
 #[path = "mushy/unsteady.rs"]
 mod unsteady;
 

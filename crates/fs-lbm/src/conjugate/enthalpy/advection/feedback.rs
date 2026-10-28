@@ -53,6 +53,9 @@ use crate::conjugate::unsteady::MaterialMomentum;
 /// Opt-in inelastic freezing into an explicitly stationary support.
 pub mod locking;
 
+/// Conservative complete-melt release into the existing moving free surface.
+pub mod release;
+
 /// Exact stationary solid constraints on the same material/enthalpy owner.
 pub mod phase;
 pub use phase::{FlowTransportSnapshot, PhaseFlowTransport};

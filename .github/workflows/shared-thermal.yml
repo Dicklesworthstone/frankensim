@@ -32,6 +32,10 @@ on:
       - 'crates/fs-lbm/src/conjugate/unsteady/material.rs'
       - 'crates/fs-lbm/tests/liquid_flow_enthalpy*'
       - 'crates/fs-lbm/tests/liquid_flow_enthalpy/**'
+      - 'crates/fs-lbm/src/material/free_surface/enthalpy*'
+      - 'crates/fs-lbm/src/material/free_surface/enthalpy/**'
+      - 'crates/fs-lbm/tests/material_free_surface_enthalpy*'
+      - 'crates/fs-lbm/tests/material_free_surface_enthalpy/**'
       - 'crates/fs-lbm/tests/joule_enthalpy*'
       - 'crates/fs-lbm/src/conjugate/material_coupling/interfaces.rs'
       - 'crates/fs-lbm/examples/joule_phase_change*'
@@ -149,7 +153,7 @@ jobs:
       - name: Native phase flow and supported freezing
         if: ${{ !cancelled() }}
         run: |
-          cargo test -p fs-lbm --features enthalpy-coupling --test liquid_flow_enthalpy -- --test-threads=1
+          cargo test -p fs-lbm --features enthalpy-coupling --test liquid_flow_enthalpy --test material_free_surface_enthalpy -- --test-threads=1
           cargo test -p fs-lbm --features enthalpy-coupling --lib phase_capture -- --test-threads=1
       - name: Heated layer expansion and fixed-end acoustic response
         if: ${{ !cancelled() }}

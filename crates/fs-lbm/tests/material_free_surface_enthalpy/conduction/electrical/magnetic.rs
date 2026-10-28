@@ -126,7 +126,8 @@ fn g4_late_magnetic_velocity_refusal_rolls_back_populations_wall_and_gas() {
     let chart = body::wall_chart(&solid);
     let context = point(450.0);
     with_unbound(&card, basis, false, |liquid, gate| {
-        let mut liquid = liquid.with_electrical_core(current(0.002), gate).unwrap()
+        let mut liquid = liquid.with_time_origin(7.0).unwrap()
+            .with_electrical_core(current(0.002), gate).unwrap()
             .with_imposed_magnetic_field(field(10.0, 1e-12)).unwrap();
         let mut atmosphere = gas(100.0);
         let mut bodies = [body::wall(&solid, &chart, &context, 450.0)];
@@ -149,6 +150,8 @@ fn g4_late_magnetic_velocity_refusal_rolls_back_populations_wall_and_gas() {
             assert_eq!(atmosphere.state(), &gas_before);
             assert_eq!(bodies[0].specific_enthalpy_j_kg(), wall_before);
             assert_eq!(bodies[0].material(), &wall_source);
+            assert_eq!(liquid.accepted_steps(), 0);
+            assert_eq!(liquid.physical_time_s(), 7.0);
         }
         // Loosening the declared split gate makes this exact initial state
         // retryable; no current or impulse history survived the failed candidate.
@@ -159,5 +162,8 @@ fn g4_late_magnetic_velocity_refusal_rolls_back_populations_wall_and_gas() {
         ).unwrap().conduction;
         assert!(accepted.flow.magnetic_motion.unwrap().maximum_velocity_change_m_s > 1e-12);
         assert!(accepted.electrical.unwrap().joule_heat_j > 0.0);
+        assert_eq!(liquid.accepted_steps(), 1);
+        assert_eq!(liquid.physical_time_s(), 7.0 + liquid.flow().scaling().timestep_s());
+        assert!(liquid.clone().with_time_origin(0.0).is_err());
     });
 }

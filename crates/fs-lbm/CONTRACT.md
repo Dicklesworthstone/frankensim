@@ -4376,3 +4376,57 @@ The `liquid_flow_enthalpy::mushy::occupancy::locking` regressions and native
 `phase_capture` unit test specify independent energy/torque references,
 graded half-cell transfers, data-only viscosity/latent changes, freeze/remelt
 continuation, preserved separate flow, and deterministic refused retries.
+
+## Complete melting into the original moving liquid owner
+
+`MaterialFlowFeedback<ResolvedPhaseTransportState, _, (), PhaseFlowTransport>
+::release_fully_liquid` transfers an accepted, completely molten fixed-grid body
+into the ORIGINAL `MaterialFreeSurfaceEnthalpy3`. It takes no independent
+temperature or velocity seed. The original registered caloric object, selected
+transport claims, physical query context, whole-cell mass, specific enthalpy
+and accepted native face motion determine the receiver. Release returns that
+native owner plus a transfer report, so every existing finite-wall, finite-gas,
+electrical, magnetic, surface and thermal method remains directly accessible.
+No parallel liquid integrator or restricted forwarding wrapper is introduced.
+
+This boundary requires the same uniform cubic grid and original fixed density,
+every mapped material cell exactly liquid, original retained unsteady momentum
+and kinetic audit, and no extra finite thermal bodies or observer history.
+`StationaryConstraintRelease::Withdraw` explicitly retires stationary support,
+its old boundary schedule and thermal contacts at the accepted time. Receiving
+permanent walls and gravity are declared for the new domain. Old source
+rheology, phase-conductivity and buoyancy extensions require an explicit separate
+handoff and refuse here. Surface tension must be explicitly neglected because
+this rung has no owned surface-creation-energy account. Partial melting,
+moving-mould work and residual solid stress are not silently discarded.
+
+MAC face-to-cell projection on this shared grid preserves linear and angular
+momentum. Source momentum is independently integrated over the original
+half-cell face masses; source kinetic energy is checked against the original
+native audit. Target quantities use ACTUAL force-corrected initialized native
+samples and mass ledgers, not an authored velocity claim. The gate checks mass,
+total caloric enthalpy, both momenta and a separately declared maximum kinetic
+projection deficit. This representation loss is reported and bounded; it never
+becomes physical heat or external work. Initial numerical pressure is zero,
+not an equilibrated free surface or a pressure-projection solve. Grid/time
+refinement and an appropriate representation allowance remain necessary.
+
+The physical clock lives in `MaterialFreeSurfaceEnthalpy3` itself.
+`with_time_origin` may assign a finite nonnegative origin only before the
+thermal/native owner advances. `accepted_steps` and `physical_time_s` follow
+every original stepping API. The existing sole native acceptance point checks
+integer overflow and representable forward time before any publication, then
+increments exactly once with accepted populations, enthalpy, material state and
+wetting after the final cancellation check. Thermal subcycles, failed source
+queries, force refusals and rejected candidates never advance this clock.
+Gas, finite-body, current/Lorentz and heat paths use that same acceptance point.
+
+New regressions exercise actual latent heating followed by gravity-driven native
+VOF, a nonzero circulating MAC field with independent linear/angular-momentum
+and kinetic-projection formulas, viscosity-only material substitution in
+continued motion, molecular heat without double-counting projection loss,
+original source/caloric/geometry/phase/clock refusal and cancellation. The
+existing combined gas/wall/current/Lorentz late-refusal and retry regression now
+also checks the native clock. A nonrepresentable time origin refuses with
+unchanged populations, enthalpy and count. Native Rust execution is separate
+from source review and formatting validation.
