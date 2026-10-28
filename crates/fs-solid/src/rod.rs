@@ -7,7 +7,7 @@
 //! exactly zero strain (the objectivity battery checks the energy is
 //! invariant, not just small).
 //!
-//! Statics: total-energy formulation with finite-difference residual
+//! Statics: finite-difference internal residual with exact dead tip loads
 //! (body/right rotational perturbations — `R <- R Exp(delta)`, never
 //! component nudging) and FD
 //! tangent, dense-LU Newton with load stepping. Fixture-scale by
@@ -159,20 +159,9 @@ impl Rod {
         Ok(())
     }
 
-    /// Potential Π = E_int − F·r_tip (dead force; the dead tip moment
-    /// enters the residual directly — it has no global potential under
-    /// multiplicative updates).
-    fn potential<E>(
-        &self, load: &TipLoad, factor: f64,
-        energy: &impl Fn(&Self) -> Result<f64, E>,
-    ) -> Result<f64, E> {
-        let tip = self.positions[self.positions.len() - 1];
-        Ok(energy(self)?
-            - factor * (load.force[0] * tip[0] + load.force[1] * tip[1] + load.force[2] * tip[2]))
-    }
-
-    /// FD residual in body/right perturbation coordinates: ∂Π/∂dof,
-    /// minus the body-frame tip moment on the last node's rotational DOFs.
+    /// FD internal residual in body/right perturbation coordinates, with
+    /// exact subtraction of the applied tip force and body-frame tip moment.
+    /// The energy callback may also contain distributed-load potentials.
     fn residual<E: From<SolidError>>(
         &self, load: &TipLoad, factor: f64,
         energy: &impl Fn(&Self) -> Result<f64, E>,
@@ -192,16 +181,19 @@ impl Rod {
             d[k] = eps;
             probe.clone_from(self);
             probe.apply_increment(&d, 1.0)?;
-            let ep = probe.potential(load, factor, energy)?;
+            let ep = energy(&probe)?;
             probe.clone_from(self);
             probe.apply_increment(&d, -1.0)?;
-            let em = probe.potential(load, factor, energy)?;
+            let em = energy(&probe)?;
             r[k] = (ep - em) / (2.0 * eps);
         }
-        let tipk = n - 3;
-        r[tipk] -= factor * load.moment[0];
-        r[tipk + 1] -= factor * load.moment[1];
-        r[tipk + 2] -= factor * load.moment[2];
+        // Differencing the external potential against a much larger stored
+        // energy can erase a real load. These derivatives are known exactly.
+        let tipk = n - 6;
+        for c in 0..3 {
+            r[tipk + c] -= factor * load.force[c];
+            r[tipk + 3 + c] -= factor * load.moment[c];
+        }
         Ok(r)
     }
 
@@ -617,4 +609,52 @@ mod tests {
             "tip {got} vs beam theory {want}; residual history {hist:?}"
         );
     }
+
+    #[test]
+    fn small_dead_tip_load_is_not_lost_against_large_stored_energy() {
+        let mut rod = Rod::straight(
+            1.0,
+            2,
+            RodSection {
+                ea: 1e18,
+                ga: 1e18,
+                gj: 1e15,
+                ei: 1e15,
+            },
+        );
+        for position in &mut rod.positions {
+            position[0] *= 1.01;
+        }
+        assert!(rod.energy().unwrap() > 1e12);
+
+        let load = TipLoad {
+            force: [0.0, 0.0, 1e-3],
+            moment: [0.0; 3],
+        };
+        let factor = 0.25;
+        let unloaded = rod
+            .residual(
+                &TipLoad::default(),
+                factor,
+                &Rod::energy,
+                &|| Ok(()),
+                1.0,
+            )
+            .unwrap();
+        let loaded = rod
+            .residual(&load, factor, &Rod::energy, &|| Ok(()), 1.0)
+            .unwrap();
+        let tip_z = rod.ndof() - 4;
+
+        // Reflection symmetry makes this internal force exactly zero. The old
+        // total-potential stencil rounds away F * eps beside the axial energy.
+        assert_eq!(unloaded[tip_z], 0.0);
+        assert_eq!(loaded[tip_z], -factor * load.force[2]);
+        for k in 0..rod.ndof() {
+            if k != tip_z {
+                assert_eq!(loaded[k], unloaded[k]);
+            }
+        }
+    }
+
 }
