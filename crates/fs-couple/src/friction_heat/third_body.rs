@@ -27,6 +27,9 @@ use fs_thermal::enthalpy::{
 };
 use std::cell::RefCell;
 
+/// Work-conjugate finite-thickness shear on the original rigid bodies.
+pub mod rigid;
+
 /// Original two-body/layer topology and finite material storage.
 #[derive(Clone, Debug)]
 pub struct ThirdBodyHeatRoute {
