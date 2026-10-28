@@ -19,6 +19,7 @@ fs-ivl = { path = "../fs-ivl" }
 fs-la = { path = "../fs-la" }
 fs-material = { path = "../fs-material" }
 fs-matdb = { path = "../fs-matdb" }
+fs-math = { path = "../fs-math" }
 fs-motion = { path = "../fs-motion" }
 fs-qty = { path = "../fs-qty" }
 fs-query = { path = "../fs-query" }

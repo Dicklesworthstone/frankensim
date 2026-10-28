@@ -569,3 +569,29 @@ independent full-energy stability Hessian, energy gradients and condensed
 tangents, stiffness limits, next-representable values near the two folds,
 ports and refusal/history behavior. A complete cycle is compared against an
 independent radius-coordinate work integral, including both jump energies.
+
+## Ballistic contact timing and isotropic Coulomb impulses
+
+`ballistic::first_ballistic_contact` finds the earliest closing (or isolated
+grazing) zero of a nonpenetrating constant-acceleration scalar gap over an
+inclusive finite horizon. It includes an initially departing body's return,
+uses a scaled stable quadratic evaluation, and refuses unresolved numeric
+ranges. This is an analytic floating-point query, not interval-certified CCD
+for arbitrary shapes, motion tubes, or persistent-contact response.
+
+`tangential::impact::solve_isotropic_coulomb_impulse` consumes the existing
+`fs-tribo::FrictionLaw`. For equal static/kinetic Coulomb coefficients, a supplied
+normal impulse, and positive scalar tangent inverse mass, it returns the exact
+two-dimensional maximum-dissipation disk projection. The inverse mass must
+include spin, and normal/tangent response must decouple. The normal impulse is
+unchanged. Actual endpoint velocity, capacity, nonnegative relative-mode loss,
+and independent velocity/impulse-work residuals are checked before acceptance.
+
+Both operations use constant work and storage. G0/G1 tests cover exact impact
+and slip responses, spin-aware inertia, grazing/returning trajectories and
+missed-endpoint collisions; G3 tests cover tangent rotation and unit scaling.
+The mechanics owner supplies geometry, state application, moving-surface work,
+and any slip-arrest event splitting. No finite-patch storage, heat partition,
+unequal static/kinetic coefficients, general anisotropic or multicontact
+friction, calibrated material authority, or certified nonintersection is
+claimed by these two primitives.

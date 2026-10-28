@@ -28,6 +28,8 @@ use fs_query::{ConvexSeparation, ConvexSupportMap, QueryError, convex_separation
 
 /// Solver-independent finite-patch normal laws and their generic port embedding.
 pub mod normal_patch;
+/// Analytic constant-acceleration contact timing for scalar plane gaps.
+pub mod ballistic;
 
 /// Frictionless single-contact impulse laws with explicit admissibility and work.
 pub mod impact;
