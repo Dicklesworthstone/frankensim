@@ -1,5 +1,45 @@
 # CONTRACT: fs-conduction
 
+## Source-paired spatial sensible-enthalpy transport
+
+`transient::enthalpy::material::MaterialEnthalpyTransport::from_isotropic_card`
+binds Cp(T), rho(T) and scalar k(T) from one immutable material card at fixed
+typed non-temperature conditions. The constructor explicitly declares an
+isotropic transport model; source quantity dimensions alone do not establish
+isotropy. All three properties must have explicit temperature validity over
+the requested path. Missing-temperature producer scalars therefore cannot
+silently become heating curves.
+
+The adapter retains the original Cp/density chart, conductivity receipts and
+a separately queried reference-density answer. Reference temperature must lie
+inside the admitted span with identical other conditions, and its selected
+density claim must match the caloric chart. Reference mass stays frozen as
+temperature evolves. The caller explicitly selects phase, enthalpy datum and
+caloric interpolation-error budget; source uncertainty is not propagated or
+replaced by this numerical budget.
+
+`prepare_uniform` uses the existing `EnthalpyBackwardEuler`.
+`reference_material` supplies the existing heterogeneous owner with the same
+chart and frozen density. Distinct material interfaces retain separate nodes
+and explicit contact resistance; no mixed-node enthalpy law is invented.
+
+The `material_transient` example accepts compiled NASA 316, first-heating
+AA2024-T3 or NASA PEEK model packs, one/two layer thicknesses, mesh/time bounds
+and optional contact resistance. Its declared experiment uses 300 K initial
+and reference states, 360/300 K convective reservoirs, 1000 W/(m² K) end films
+and a 20×20 mm cross-section with insulated sides. It emits accepted temperature profiles,
+separate reservoir/contact heat rates and step/cumulative energy balances.
+Geometry, mass and source conditions stay fixed; expansion, phase change and
+microstructure evolution remain outside this experiment.
+
+Four focused regressions cover source/reference pairing and refusal, the
+independent variable-Cp heating balance, frozen mass, and nonuniform
+equilibration with doubled k(T) without net heat creation.
+
+```sh
+cargo test -p fs-conduction --test material_enthalpy
+```
+
 ## Sourced planar layered steady conduction
 
 `layered::LayeredWall` solves an ordered equal-area planar stack from the existing

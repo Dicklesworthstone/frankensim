@@ -35,6 +35,8 @@ pub mod adjoint;
 pub mod enclosure;
 /// Explicit heterogeneous phase charts and frozen reference densities.
 pub mod heterogeneous;
+/// Paired source caloric storage and explicitly isotropic conductivity.
+pub mod material;
 /// Growing-cell deposition adapters for existing enthalpy charts and Cx.
 pub mod deposition;
 /// Implicit ambient radiation with immutable enthalpy history and joule gates.

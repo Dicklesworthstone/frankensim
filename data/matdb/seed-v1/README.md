@@ -4,6 +4,46 @@ This directory retains the human-reviewable source inputs compiled by
 `xtask matdb-pack`. Generated binary packs are deliberately not committed:
 the compiler must reproduce them from the pinned manifest and source record.
 
+## Run spatial transient heating from catalog curves
+
+The `material_transient` example connects source Cp(T), rho(T) and k(T)
+to the existing spatial enthalpy solver. It accepts one material or two layers
+with a declared finite contact resistance. Every material retains its source
+conditions and receipts, and mass uses density frozen at an explicit 300 K
+reference state.
+
+Compile the desired source packs:
+
+```sh
+cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/stainless-316-nasa-tp216435/manifest.tsv --out /tmp/nasa316.fsmatpk
+cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/aluminum-2024-t3-first-heating-km2024/manifest.tsv --out /tmp/aa2024.fsmatpk
+cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/peek-nasa-thermic-plate-linearized-model/manifest.tsv --out /tmp/nasapeek.fsmatpk
+```
+
+Then run steel, the newly added PEEK model, or an aluminum/steel stack:
+
+```sh
+cargo run -p fs-conduction --example material_transient -- nasa316 /tmp/nasa316.fsmatpk 0.01 8 120 120
+cargo run -p fs-conduction --example material_transient -- nasapeek /tmp/nasapeek.fsmatpk 0.01 8 1200 600
+cargo run -p fs-conduction --example material_transient -- aa2024 /tmp/aa2024.fsmatpk 0.01 8 120 120 nasa316 /tmp/nasa316.fsmatpk 0.01 0.0001
+```
+
+Arguments are profile, pack, thickness in metres, cells per layer, duration in
+seconds and time steps, optionally followed by a second profile, pack,
+thickness and area-specific contact resistance in m² K/W. The experiment
+declares a 20×20 mm section, 300 K initial temperature, 360/300 K end reservoirs,
+1000 W/(m² K) end-film coefficients and insulated sides. Each accepted step
+prints spatial temperature profiles, reservoir/contact heat rates and a joule
+balance. The final report compares total stored-energy change with accumulated
+external heat.
+
+The constructor explicitly selects isotropic scalar transport. The source
+must support the whole 300–360 K path: the AA2024 profile retains first-heating
+conditions, and PEEK explicitly selects the NASA constant-density model.
+Unknown-temperature scalar packs do not acquire a thermal trajectory through
+this adapter. Reference geometry and mass remain fixed; this calculation does
+not supply thermal expansion, phase change or material aging.
+
 ## Search and inspect the material catalog
 
 `matdb-catalog` searches the shipped source bundles using the actual offline
