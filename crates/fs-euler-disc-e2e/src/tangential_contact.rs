@@ -4,7 +4,7 @@
 //! It refuses unresolved finite-slip creepage and pre-constitutive patch states, then
 //! delegates the actual return map to `fs-tribo` (or the `fs-contact` smooth
 //! transaction wrapper).  The emitted receipt keeps the generic discrete work
-//! work and its numerical dissipation distinct from physical microslip heat.
+//! and its numerical dissipation distinct from physical microslip heat.
 //! Endpoint forces are not silently replaced by step-average forces.
 
 use core::fmt;
@@ -364,6 +364,10 @@ impl EulerTangentialContactAdapter {
             "irreversible_loss_j",
         )?;
         nonnegative(step.dissipation.heat_j, "heat_j")?;
+        nonnegative(
+            step.generalized_work.numerical_dissipation_j,
+            "numerical_dissipation_j",
+        )?;
         Ok(TangentialContactReceipt {
             request_id: request.request_id.clone(),
             parent_version: prior_state.committed_version(),

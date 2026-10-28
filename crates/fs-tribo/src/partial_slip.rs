@@ -5,15 +5,12 @@
 //! evolve patch geometry, or admit a material card.  The caller supplies all
 //! such data with named identities and an authority ceiling.
 //!
-//! The law is a bounded Cattaneo--Mindlin-style *return-mapping rung*, not a
-//! resolved pressure/traction field.  It represents a reversible tangential
-//! spring core plus a plastic microslip remainder.  `PartialSlip` means that
-//! remainder is nonzero in this lumped law; it is **not** a claimed resolved
-//! slipping-area fraction.  Rolling-deformation loss is deliberately absent:
-//! its energy channel is always zero and must be composed separately.
-//! The endpoint return map is backward Euler: changing elastic strain also
-//! removes numerical energy. That defect is reported separately from physical
-//! microslip heat, and interval work is measured from the returned wrench.
+//! The law is a two-region Jenkins/Iwan *return-mapping rung*, not a resolved
+//! Cattaneo--Mindlin pressure/traction field. Each parallel region retains its
+//! own elastic shear and slip branch. `PartialSlip` means one region yields;
+//! it is **not** a resolved slipping-area fraction. Backward-Euler work uses
+//! the actual endpoint wrench. Its numerical dissipation is reported separately
+//! from friction heat. Rolling-deformation loss belongs to another law.
 
 use core::fmt;
 
@@ -22,7 +19,7 @@ use fs_math::det;
 const EPSILON: f64 = 128.0 * f64::EPSILON;
 
 /// Stable identity for this bounded constitutive rung.
-pub const PARTIAL_SLIP_MODEL_ID: &str = "fs-tribo/cattaneo-mindlin-style-return-map-v1";
+pub const PARTIAL_SLIP_MODEL_ID: &str = "fs-tribo/two-region-iwan-return-map-v2";
 
 /// Caller-declared ceiling on a normal-patch receipt.
 ///
@@ -320,9 +317,11 @@ pub struct PartialSlipParameters {
     pub torsional_stiffness_nm_per_rad: f64,
     /// Dimensionless torsional capacity factor in `(0, 1]` multiplying `mu N sqrt(moment)`.
     pub torsional_capacity_factor: f64,
-    /// Dimensionless onset of this lumped partial-slip rung in `(0, 1)`.
+    /// First region's yield displacement divided by `mu_s N / k`, in `(0, 1)`.
     pub partial_slip_onset_fraction: f64,
-    /// Dimensionless retained hardening fraction in `[0, 1)` during partial slip.
+    /// Stiffness fraction of the harder region, in `(0, 1)`. The two
+    /// regions' capacities sum to the full Coulomb capacity; after the
+    /// weaker region yields, this is the remaining elastic slope fraction.
     pub partial_slip_hardening_fraction: f64,
 }
 
@@ -358,7 +357,7 @@ impl PartialSlipParameters {
                 field: "partial_slip_onset_fraction >= 1",
             });
         }
-        nonnegative(
+        positive(
             self.partial_slip_hardening_fraction,
             "partial_slip_hardening_fraction",
         )?;
@@ -380,7 +379,7 @@ pub struct PartialSlipLaw {
 }
 
 impl PartialSlipLaw {
-    /// Creates a named generic Cattaneo--Mindlin-style return-mapping law.
+    /// Creates a named two-region Jenkins/Iwan return-mapping law.
     pub fn new(
         model_id: impl Into<String>,
         source_id: impl Into<String>,
@@ -439,62 +438,99 @@ impl PartialSlipLaw {
             kinematics.dt_s,
             "torsional_displacement",
         )?;
-        let trial_displacement = add2(
-            state.elastic_displacement_m,
-            delta_displacement,
-            "trial_displacement",
-        )?;
-        let trial_twist = checked_add(state.elastic_twist_rad, delta_twist, "trial_twist")?;
-        let trial_force = scale2(
-            trial_displacement,
-            -self.parameters.tangential_stiffness_n_per_m,
-            "trial_force",
-        )?;
-        let trial_torque = checked_mul(
-            -self.parameters.torsional_stiffness_nm_per_rad,
-            trial_twist,
-            "trial_torque",
-        )?;
         let capacity = CoulombCapacity::from_patch(patch, self.parameters)?;
-        let trial_utilization = capacity.utilization(trial_force, trial_torque)?;
-
-        let (state_kind, retained_utilization, slip_fraction) = if trial_utilization == 0.0 {
-            (PartialSlipStateKind::Sticking, 0.0, 0.0)
-        } else if trial_utilization <= self.parameters.partial_slip_onset_fraction {
-            (PartialSlipStateKind::Sticking, trial_utilization, 0.0)
-        } else if trial_utilization < 1.0 {
-            let retained = self.parameters.partial_slip_onset_fraction
-                + (trial_utilization - self.parameters.partial_slip_onset_fraction)
-                    * self.parameters.partial_slip_hardening_fraction;
-            let fraction = (trial_utilization - self.parameters.partial_slip_onset_fraction)
-                / (1.0 - self.parameters.partial_slip_onset_fraction);
-            (PartialSlipStateKind::PartialSlip, retained, fraction)
-        } else {
-            (
-                PartialSlipStateKind::GrossSlide,
+        let hard = self.parameters.partial_slip_hardening_fraction;
+        let weights = [1.0 - hard, hard];
+        // k_weak / k = 1-h, C_weak / C = a(1-h), so first yield
+        // occurs at a C/k. The remaining region retains tangent h k.
+        let weak_capacity = self.parameters.partial_slip_onset_fraction * weights[0];
+        let capacity_fractions = [weak_capacity, 1.0 - weak_capacity];
+        let increment = [delta_displacement[0], delta_displacement[1], delta_twist];
+        let mut next_state = state.clone();
+        let mut force_tangent = [0.0; 2];
+        let mut torsional_moment_nm = 0.0;
+        let mut old_storage = 0.0;
+        let mut new_storage = 0.0;
+        let mut dissipation_j = 0.0;
+        let mut numerical_dissipation_j = 0.0;
+        let mut slip_fraction = 0.0;
+        let mut yielding_regions = 0;
+        for region in 0..2 {
+            let old = [
+                state.region_elastic_displacement_m[region][0],
+                state.region_elastic_displacement_m[region][1],
+                state.region_elastic_twist_rad[region],
+            ];
+            let stiffness = [
+                self.parameters.tangential_stiffness_n_per_m * weights[region],
+                self.parameters.tangential_stiffness_n_per_m * weights[region],
+                self.parameters.torsional_stiffness_nm_per_rad * weights[region],
+            ];
+            let limits = [
+                capacity.static_force_n * capacity_fractions[region],
+                capacity.static_force_n * capacity_fractions[region],
+                capacity.static_torque_nm * capacity_fractions[region],
+            ];
+            let result = advance_region(
+                old,
+                increment,
+                stiffness,
+                limits,
                 self.parameters.kinetic_mu / self.parameters.static_mu,
-                1.0,
-            )
+                state.sliding_regions[region],
+            )?;
+            next_state.region_elastic_displacement_m[region] =
+                [result.elastic[0], result.elastic[1]];
+            next_state.region_elastic_twist_rad[region] = result.elastic[2];
+            next_state.sliding_regions[region] = result.kinetic_branch;
+            for i in 0..2 {
+                force_tangent[i] =
+                    checked_add(force_tangent[i], -result.effort[i], "tangential_force")?;
+            }
+            torsional_moment_nm =
+                checked_add(torsional_moment_nm, -result.effort[2], "torsional_moment")?;
+            for i in 0..3 {
+                let delta_elastic = result.elastic[i] - old[i];
+                old_storage = checked_add(
+                    old_storage,
+                    checked_mul(0.5 * stiffness[i] * old[i], old[i], "old_storage")?,
+                    "old_storage",
+                )?;
+                new_storage = checked_add(
+                    new_storage,
+                    checked_mul(
+                        0.5 * stiffness[i] * result.elastic[i],
+                        result.elastic[i],
+                        "new_storage",
+                    )?,
+                    "new_storage",
+                )?;
+                dissipation_j = checked_add(
+                    dissipation_j,
+                    checked_mul(result.effort[i], result.plastic[i], "plastic_work")?,
+                    "plastic_work",
+                )?;
+                // The backward-Euler spring defect is not frictional heat.
+                numerical_dissipation_j = checked_add(
+                    numerical_dissipation_j,
+                    checked_mul(
+                        0.5 * stiffness[i] * delta_elastic,
+                        delta_elastic,
+                        "numerical_dissipation",
+                    )?,
+                    "numerical_dissipation",
+                )?;
+            }
+            if result.yielded {
+                yielding_regions += 1;
+                slip_fraction += capacity_fractions[region];
+            }
+        }
+        let state_kind = match yielding_regions {
+            0 => PartialSlipStateKind::Sticking,
+            1 => PartialSlipStateKind::PartialSlip,
+            _ => PartialSlipStateKind::GrossSlide,
         };
-        finite(retained_utilization, "retained_utilization")?;
-        let retained_scale = if trial_utilization == 0.0 {
-            1.0
-        } else {
-            retained_utilization / trial_utilization
-        };
-        finite(retained_scale, "retained_scale")?;
-        let next_displacement = scale2(trial_displacement, retained_scale, "next_displacement")?;
-        let next_twist = checked_mul(trial_twist, retained_scale, "next_twist")?;
-        let force_tangent = scale2(
-            next_displacement,
-            -self.parameters.tangential_stiffness_n_per_m,
-            "tangential_force",
-        )?;
-        let torsional_moment_nm = checked_mul(
-            -self.parameters.torsional_stiffness_nm_per_rad,
-            next_twist,
-            "torsional_moment",
-        )?;
         let output_utilization = capacity.utilization(force_tangent, torsional_moment_nm)?;
         if output_utilization > 1.0 + EPSILON {
             return Err(PartialSlipError::InvalidDerived {
@@ -502,52 +538,13 @@ impl PartialSlipLaw {
             });
         }
 
-        let plastic_displacement = sub2(
-            trial_displacement,
-            next_displacement,
-            "plastic_displacement",
-        )?;
-        let plastic_twist = checked_add(-next_twist, trial_twist, "plastic_twist")?;
-        let dissipation_j = nonnegative_sum(
-            &[
-                -dot2(
-                    force_tangent,
-                    plastic_displacement,
-                    "tangential_plastic_work",
-                )?,
-                -checked_mul(torsional_moment_nm, plastic_twist, "torsional_plastic_work")?,
-            ],
-            "microslip_dissipation_j",
-        )?;
-        let old_storage = stored_energy(
-            self.parameters,
-            state.elastic_displacement_m,
-            state.elastic_twist_rad,
-        )?;
-        let new_storage = stored_energy(self.parameters, next_displacement, next_twist)?;
+        nonnegative(dissipation_j, "microslip_dissipation_j")?;
+        nonnegative(numerical_dissipation_j, "numerical_dissipation_j")?;
         let storage_change_j = checked_add(new_storage, -old_storage, "storage_change_j")?;
-        // The endpoint force does work on the TOTAL slip, not just its plastic
-        // part. For the quadratic spring, backward Euler contributes
-        // D_num = (Delta e)^T K (Delta e) / 2 in addition to physical slip heat:
-        // -F_end . Delta u = Delta H + D_physical + D_num.
-        // Computing work from the wrench avoids a tautological energy audit.
-        let numerical_dissipation_j = stored_energy(
-            self.parameters,
-            sub2(
-                next_displacement,
-                state.elastic_displacement_m,
-                "elastic_displacement_change",
-            )?,
-            checked_add(next_twist, -state.elastic_twist_rad, "elastic_twist_change")?,
-        )?;
         let work_into_interface_j = -checked_add(
-            dot2(
-                force_tangent,
-                delta_displacement,
-                "tangential_interval_work",
-            )?,
-            checked_mul(torsional_moment_nm, delta_twist, "torsional_interval_work")?,
-            "interval_body_work",
+            dot2(force_tangent, delta_displacement, "tangential_work")?,
+            checked_mul(torsional_moment_nm, delta_twist, "torsional_work")?,
+            "interface_work",
         )?;
         let closure_residual_j = checked_add(
             checked_add(
@@ -577,15 +574,13 @@ impl PartialSlipLaw {
             )?,
             "endpoint_body_power",
         )?;
-        let next_state = PartialSlipState {
-            elastic_displacement_m: next_displacement,
-            elastic_twist_rad: next_twist,
-            accepted_steps: state.accepted_steps.checked_add(1).ok_or(
-                PartialSlipError::InvalidDerived {
+        next_state.accepted_steps =
+            state
+                .accepted_steps
+                .checked_add(1)
+                .ok_or(PartialSlipError::InvalidDerived {
                     field: "accepted_steps overflow",
-                },
-            )?,
-        };
+                })?;
         next_state.validate()?;
         let checkpoint = PartialSlipCheckpoint::new(
             patch.clone(),
@@ -613,14 +608,14 @@ impl PartialSlipLaw {
             generalized_work: GeneralizedWork {
                 ownership: ownership.clone(),
                 work_into_interface_j,
-                numerical_dissipation_j,
-                closure_residual_j,
                 reconstructed_body_power_w,
                 endpoint_body_power_w,
+                numerical_dissipation_j,
+                closure_residual_j,
             },
             next_state,
             checkpoint,
-            applicability: PartialSlipApplicability::CattaneoMindlinStyleLumpedReturnMap,
+            applicability: PartialSlipApplicability::TwoRegionIwanReturnMap,
             normal_patch_authority: patch.authority,
             interface_authority: interface.authority,
         })
@@ -716,19 +711,20 @@ impl PartialSlipLaw {
 /// Explicit contact state emitted by the tangential law.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PartialSlipStateKind {
-    /// Entire lumped spring increment is reversible.
+    /// Both regions remain elastic over this increment.
     Sticking,
-    /// A nonzero lumped microslip remainder was dissipated while capacity remains below static limit.
+    /// One region slips while the other remains elastic.
     PartialSlip,
-    /// The combined force/torsion resultant is projected to kinetic Coulomb capacity.
+    /// Both regions slip at their respective kinetic Coulomb capacities.
     GrossSlide,
 }
 
 /// Reversible internal state suitable for checkpointing and deterministic replay.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PartialSlipState {
-    elastic_displacement_m: [f64; 2],
-    elastic_twist_rad: f64,
+    region_elastic_displacement_m: [[f64; 2]; 2],
+    region_elastic_twist_rad: [f64; 2],
+    sliding_regions: [bool; 2],
     accepted_steps: u64,
 }
 
@@ -737,37 +733,60 @@ impl PartialSlipState {
     #[must_use]
     pub const fn zero() -> Self {
         Self {
-            elastic_displacement_m: [0.0; 2],
-            elastic_twist_rad: 0.0,
+            region_elastic_displacement_m: [[0.0; 2]; 2],
+            region_elastic_twist_rad: [0.0; 2],
+            sliding_regions: [false; 2],
             accepted_steps: 0,
         }
     }
 
-    /// Reconstructs validated reversible state from a checkpoint decoder.
-    pub fn from_checkpoint(
-        elastic_displacement_m: [f64; 2],
-        elastic_twist_rad: f64,
+    /// Reconstructs both regions' complete history, ordered weaker then harder.
+    /// A single aggregate displacement cannot reconstruct partial-slip memory.
+    pub fn from_region_checkpoint(
+        region_elastic_displacement_m: [[f64; 2]; 2],
+        region_elastic_twist_rad: [f64; 2],
+        sliding_regions: [bool; 2],
         accepted_steps: u64,
     ) -> Result<Self, PartialSlipError> {
         let value = Self {
-            elastic_displacement_m,
-            elastic_twist_rad,
+            region_elastic_displacement_m,
+            region_elastic_twist_rad,
+            sliding_regions,
             accepted_steps,
         };
         value.validate()?;
         Ok(value)
     }
 
-    /// Elastic tangent displacement in m.
+    /// Elastic tangent displacement of the harder region in m.
+    /// Use [`Self::region_elastic_displacement_m`] for the complete checkpoint.
     #[must_use]
     pub const fn elastic_displacement_m(&self) -> [f64; 2] {
-        self.elastic_displacement_m
+        self.region_elastic_displacement_m[1]
     }
 
-    /// Elastic torsional displacement in rad.
+    /// Elastic torsional displacement of the harder region in rad.
     #[must_use]
     pub const fn elastic_twist_rad(&self) -> f64 {
-        self.elastic_twist_rad
+        self.region_elastic_twist_rad[1]
+    }
+
+    /// Elastic tangent displacement of both regions, weaker then harder [m].
+    #[must_use]
+    pub const fn region_elastic_displacement_m(&self) -> [[f64; 2]; 2] {
+        self.region_elastic_displacement_m
+    }
+
+    /// Elastic twist of both regions, weaker then harder [rad].
+    #[must_use]
+    pub const fn region_elastic_twist_rad(&self) -> [f64; 2] {
+        self.region_elastic_twist_rad
+    }
+
+    /// Retained kinetic branches, including a stationary pause during sliding.
+    #[must_use]
+    pub const fn sliding_regions(&self) -> [bool; 2] {
+        self.sliding_regions
     }
 
     /// Number of accepted interval updates.
@@ -777,8 +796,14 @@ impl PartialSlipState {
     }
 
     fn validate(&self) -> Result<(), PartialSlipError> {
-        finite_vec2(self.elastic_displacement_m, "elastic_displacement_m")?;
-        finite(self.elastic_twist_rad, "elastic_twist_rad")
+        for region in 0..2 {
+            finite_vec2(
+                self.region_elastic_displacement_m[region],
+                "elastic_displacement_m",
+            )?;
+            finite(self.region_elastic_twist_rad[region], "elastic_twist_rad")?;
+        }
+        Ok(())
     }
 }
 
@@ -1075,26 +1100,28 @@ pub struct DissipationAndHeat {
 pub struct GeneralizedWork {
     /// The unique patch/interval/generalized-coordinate owner.
     pub ownership: GeneralizedWorkOwnership,
-    /// Work entering the interface from the endpoint wrench contracted with
-    /// the total relative displacement and twist, in J. This is backward-Euler
-    /// interval work, not a time integral of an independently resolved trajectory.
+    /// Actual endpoint-wrench work into the interface, `-F·du - M dtheta` [J].
+    /// Equals storage change + heat + numerical dissipation, up to roundoff.
+    /// This is backward-Euler interval work, not an independently resolved
+    /// continuous-time work integral.
     pub work_into_interface_j: f64,
-    /// Non-negative backward-Euler defect `Delta e^T K Delta e / 2`, in J.
-    /// It is numerical dissipation and MUST NOT enter a physical heat port.
-    pub numerical_dissipation_j: f64,
-    /// `Delta H + physical heat + numerical dissipation - wrench work`, in J.
-    pub closure_residual_j: f64,
     /// `-work_into_interface_j / dt_s`, W; negative means body energy is dissipated/stored.
     pub reconstructed_body_power_w: f64,
     /// Endpoint wrench power `F·v + M·ω`, W, retained separately from discrete closure.
     pub endpoint_body_power_w: f64,
+    /// Backward-Euler elastic integration loss [J], never exported as heat.
+    /// This vanishes under refinement on smooth fixed-branch histories;
+    /// a static-to-kinetic jump needs event resolution for that claim.
+    pub numerical_dissipation_j: f64,
+    /// Storage change + physical heat + numerical loss - endpoint-wrench work [J].
+    pub closure_residual_j: f64,
 }
 
 /// Applicability identity for this generic rung.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PartialSlipApplicability {
-    /// Dry elastic finite patch; caller supplied load, moment, coefficients, and frame.
-    CattaneoMindlinStyleLumpedReturnMap,
+    /// Two parallel elastic/Coulomb regions; no resolved Hertz traction field.
+    TwoRegionIwanReturnMap,
 }
 
 /// One accepted constitutive interval.
@@ -1177,22 +1204,151 @@ impl fmt::Display for PartialSlipError {
 
 impl std::error::Error for PartialSlipError {}
 
-fn stored_energy(
-    parameters: PartialSlipParameters,
-    displacement: [f64; 2],
-    twist: f64,
-) -> Result<f64, PartialSlipError> {
-    let translation = checked_mul(
-        0.5 * parameters.tangential_stiffness_n_per_m,
-        dot2(displacement, displacement, "stored_translation")?,
-        "stored_translation",
-    )?;
-    let torsion = checked_mul(
-        0.5 * parameters.torsional_stiffness_nm_per_rad,
-        checked_mul(twist, twist, "stored_torsion")?,
-        "stored_torsion",
-    )?;
-    nonnegative_sum(&[translation, torsion], "stored_energy")
+struct RegionStep {
+    elastic: [f64; 3],
+    plastic: [f64; 3],
+    effort: [f64; 3],
+    kinetic_branch: bool,
+    yielded: bool,
+}
+
+// Backward-Euler elastic/Coulomb update of one Jenkins region. The return is
+// the maximum-dissipation projection in the elastic compliance metric, not a
+// radial force clipping (which is incorrect when torsion and shear have
+// different stiffness/capacity ratios).
+fn advance_region(
+    old: [f64; 3],
+    increment: [f64; 3],
+    stiffness: [f64; 3],
+    limits: [f64; 3],
+    kinetic_ratio: f64,
+    was_sliding: bool,
+) -> Result<RegionStep, PartialSlipError> {
+    let mut trial = [0.0; 3];
+    let mut effort = [0.0; 3];
+    let mut normalized = [0.0; 3];
+    let mut loading_work = 0.0;
+    for i in 0..3 {
+        positive(stiffness[i], "region_stiffness")?;
+        positive(limits[i], "region_capacity")?;
+        trial[i] = checked_add(old[i], increment[i], "region_trial_displacement")?;
+        effort[i] = checked_mul(stiffness[i], trial[i], "region_trial_effort")?;
+        normalized[i] = effort[i] / limits[i];
+        finite(normalized[i], "region_trial_utilization")?;
+        loading_work = checked_add(
+            loading_work,
+            checked_mul(stiffness[i] * old[i], increment[i], "region_loading_work")?,
+            "region_loading_work",
+        )?;
+    }
+    // A pause preserves the kinetic branch. Reversal unloads the springs
+    // elastically before the opposite static capacity can be mobilized.
+    let continuing = was_sliding && loading_work >= 0.0;
+    let bound = if continuing { kinetic_ratio } else { 1.0 };
+    let utilization = norm3(normalized)?;
+    if utilization <= bound * (1.0 + EPSILON) {
+        return Ok(RegionStep {
+            elastic: trial,
+            plastic: [0.0; 3],
+            effort,
+            kinetic_branch: continuing,
+            yielded: false,
+        });
+    }
+    effort = return_to_ellipse(effort, stiffness, limits, kinetic_ratio)?;
+    let mut elastic = [0.0; 3];
+    let mut plastic = [0.0; 3];
+    for i in 0..3 {
+        elastic[i] = effort[i] / stiffness[i];
+        finite(elastic[i], "region_elastic_displacement")?;
+        plastic[i] = checked_add(trial[i], -elastic[i], "region_plastic_displacement")?;
+    }
+    Ok(RegionStep {
+        elastic,
+        plastic,
+        effort,
+        kinetic_branch: true,
+        yielded: true,
+    })
+}
+
+fn norm3(value: [f64; 3]) -> Result<f64, PartialSlipError> {
+    let norm = det::hypot(det::hypot(value[0], value[1]), value[2]);
+    finite(norm, "generalized_norm")?;
+    Ok(norm)
+}
+
+fn return_to_ellipse(
+    trial: [f64; 3],
+    stiffness: [f64; 3],
+    limits: [f64; 3],
+    kinetic_ratio: f64,
+) -> Result<[f64; 3], PartialSlipError> {
+    let mut normalized = [0.0; 3];
+    for i in 0..3 {
+        let capacity = limits[i] * kinetic_ratio;
+        positive(capacity, "region_kinetic_capacity")?;
+        normalized[i] = trial[i] / capacity;
+        finite(normalized[i], "region_kinetic_utilization")?;
+    }
+    let norm = norm3(normalized)?;
+    // The common pure-shear and pure-spin paths require no iteration.
+    if trial[2] == 0.0 || (trial[0] == 0.0 && trial[1] == 0.0) {
+        return Ok([trial[0] / norm, trial[1] / norm, trial[2] / norm]);
+    }
+    let mut rates = [0.0; 3];
+    for i in 0..3 {
+        rates[i] = stiffness[i] / limits[i] / limits[i];
+        positive(rates[i], "region_projection_rate")?;
+    }
+    let scale = rates.iter().copied().fold(0.0_f64, f64::max);
+    for rate in &mut rates {
+        *rate /= scale;
+        positive(*rate, "normalized_projection_rate")?;
+    }
+    // The KKT multiplier is the unique nonnegative root of
+    // ||q_trial_i / (C_i (1 + lambda k_i/C_i^2))|| = 1.
+    // Scale lambda so all rates <= 1, then use bracketed Newton steps.
+    let mut lo = 0.0;
+    let mut hi = (norm - 1.0) / rates.iter().copied().fold(1.0_f64, f64::min);
+    positive(hi, "region_projection_bracket")?;
+    let mut multiplier = norm - 1.0;
+    for _ in 0..80 {
+        let mut point = [0.0; 3];
+        let mut denominators = [0.0; 3];
+        for i in 0..3 {
+            denominators[i] = 1.0 + multiplier * rates[i];
+            finite(denominators[i], "region_projection_denominator")?;
+            point[i] = normalized[i] / denominators[i];
+        }
+        let magnitude = norm3(point)?;
+        if (magnitude - 1.0).abs() <= EPSILON {
+            return Ok([
+                trial[0] / denominators[0],
+                trial[1] / denominators[1],
+                trial[2] / denominators[2],
+            ]);
+        }
+        if magnitude > 1.0 {
+            lo = multiplier;
+        } else {
+            hi = multiplier;
+        }
+        let mut derivative = 0.0;
+        for i in 0..3 {
+            let direction = point[i] / magnitude;
+            derivative -= magnitude * direction * direction * rates[i] / denominators[i];
+        }
+        let proposed = multiplier - (magnitude - 1.0) / derivative;
+        multiplier = if proposed.is_finite() && proposed > lo && proposed < hi {
+            proposed
+        } else {
+            f64::midpoint(lo, hi)
+        };
+    }
+    Err(PartialSlipError::InvalidDerived {
+        field: "region_projection_not_converged",
+    })
 }
 
 fn nonblank(value: &str, field: &'static str) -> Result<(), PartialSlipError> {
@@ -1254,28 +1410,6 @@ fn scale2(value: [f64; 2], scale: f64, field: &'static str) -> Result<[f64; 2], 
     Ok([
         checked_mul(value[0], scale, field)?,
         checked_mul(value[1], scale, field)?,
-    ])
-}
-
-fn add2(
-    left: [f64; 2],
-    right: [f64; 2],
-    field: &'static str,
-) -> Result<[f64; 2], PartialSlipError> {
-    Ok([
-        checked_add(left[0], right[0], field)?,
-        checked_add(left[1], right[1], field)?,
-    ])
-}
-
-fn sub2(
-    left: [f64; 2],
-    right: [f64; 2],
-    field: &'static str,
-) -> Result<[f64; 2], PartialSlipError> {
-    Ok([
-        checked_add(left[0], -right[0], field)?,
-        checked_add(left[1], -right[1], field)?,
     ])
 }
 
@@ -1357,15 +1491,6 @@ fn normalize(value: [f64; 3], field: &'static str) -> Result<[f64; 3], PartialSl
     let magnitude = det::hypot(det::hypot(value[0], value[1]), value[2]);
     positive(magnitude, field)?;
     scale3(value, 1.0 / magnitude, field)
-}
-
-fn nonnegative_sum(values: &[f64], field: &'static str) -> Result<f64, PartialSlipError> {
-    let mut total = 0.0;
-    for &value in values {
-        nonnegative(value, field)?;
-        total = checked_add(total, value, field)?;
-    }
-    Ok(total)
 }
 
 #[cfg(test)]
@@ -1543,7 +1668,7 @@ mod tests {
         assert_eq!(response.dissipation.rolling_deformation_loss_j, 0.0);
     }
 
-    /// G0: independently measured wrench work closes storage, heat and numerical loss.
+    /// G0: independently computed wrench work closes with heat and numerical loss.
     #[test]
     fn work_heat_and_storage_close_exactly() {
         let response = step(frame(), &PartialSlipState::zero(), [6.0, 2.0], 2.0);
@@ -1561,10 +1686,14 @@ mod tests {
                     + response.tangent_force_n[1] * 2.0
                     + response.torsional_moment_nm * 2.0),
         );
-        close(response.generalized_work.closure_residual_j, 0.0);
         close(
             response.generalized_work.reconstructed_body_power_w,
             -response.generalized_work.work_into_interface_j / 0.001,
+        );
+        close(response.generalized_work.closure_residual_j, 0.0);
+        close(
+            response.generalized_work.endpoint_body_power_w,
+            response.generalized_work.reconstructed_body_power_w,
         );
         assert_eq!(
             response.dissipation.heat_j.to_bits(),
@@ -1626,7 +1755,9 @@ mod tests {
                     state = response.next_state;
                 }
             }
-            close(state.elastic_displacement_m[0], 0.0);
+            for regional_displacement in state.region_elastic_displacement_m() {
+                close(regional_displacement[0], 0.0);
+            }
             close(work, numerical);
             (work, numerical)
         }
@@ -1693,11 +1824,152 @@ mod tests {
         close(steady.generalized_work.closure_residual_j, 0.0);
     }
 
+    /// G1: rate-independent partial slip cannot relax or heat a held contact.
+    #[test]
+    fn loaded_partial_contact_holds_without_relaxation_or_heat() {
+        let first = step(frame(), &PartialSlipState::zero(), [6.0, 0.0], 0.0);
+        assert_eq!(first.state, PartialSlipStateKind::PartialSlip);
+        let mut state = first.next_state.clone();
+        for _ in 0..32 {
+            let held = step(frame(), &state, [0.0; 2], 0.0);
+            assert_eq!(
+                held.next_state.region_elastic_displacement_m(),
+                first.next_state.region_elastic_displacement_m()
+            );
+            assert_eq!(
+                held.next_state.region_elastic_twist_rad(),
+                first.next_state.region_elastic_twist_rad()
+            );
+            close(held.tangent_force_n[0], first.tangent_force_n[0]);
+            close(held.stored_energy_j, first.stored_energy_j);
+            assert_eq!(held.dissipation.heat_j, 0.0);
+            assert_eq!(held.generalized_work.work_into_interface_j, 0.0);
+            assert_eq!(held.generalized_work.numerical_dissipation_j, 0.0);
+            state = held.next_state;
+        }
+        // Resuming the same direction must retain sliding in the weak region;
+        // a pause cannot spuriously restore its static force ramp.
+        let resumed = step(frame(), &state, [0.01, 0.0], 0.0);
+        close(resumed.tangent_force_n[0] - first.tangent_force_n[0], -0.04);
+        assert_eq!(resumed.state, PartialSlipStateKind::PartialSlip);
+    }
+
+    /// G1: reversal first unloads both retained springs elastically.
+    #[test]
+    fn partial_slip_reversal_recovers_storage_before_opposite_sliding() {
+        let first = step(frame(), &PartialSlipState::zero(), [6.0, 0.0], 0.0);
+        let reverse = step(frame(), &first.next_state, [-0.1, 0.0], 0.0);
+        assert_eq!(reverse.state, PartialSlipStateKind::Sticking);
+        close(reverse.tangent_force_n[0] - first.tangent_force_n[0], 1.0);
+        assert_eq!(reverse.dissipation.heat_j, 0.0);
+        assert!(reverse.storage_change_j < 0.0);
+        assert!(reverse.generalized_work.work_into_interface_j < 0.0);
+        close(reverse.generalized_work.closure_residual_j, 0.0);
+    }
+
+    /// G1: the elliptic return satisfies maximum-dissipation normality with
+    /// unequal translational/torsional compliance, rather than radial clipping.
+    #[test]
+    fn mixed_spin_and_translation_return_in_the_compliance_metric() {
+        let response = step(frame(), &PartialSlipState::zero(), [20.0, 10.0], 10.0);
+        assert_eq!(response.state, PartialSlipStateKind::GrossSlide);
+        let weights = [0.6, 0.4];
+        let fractions = [0.3, 0.7];
+        for region in 0..2 {
+            let e = response.next_state.region_elastic_displacement_m()[region];
+            let twist = response.next_state.region_elastic_twist_rad()[region];
+            let force = 10_000.0 * weights[region] * e[0];
+            let torque = 100.0 * weights[region] * twist;
+            let force_cap = response.capacity.kinetic_force_n * fractions[region];
+            let torque_cap = response.capacity.kinetic_torque_nm * fractions[region];
+            close(
+                (0.02 - e[0]) * force_cap * force_cap / force,
+                (0.01 - twist) * torque_cap * torque_cap / torque,
+            );
+        }
+        assert!(response.dissipation.heat_j > 0.0);
+        close(response.generalized_work.closure_residual_j, 0.0);
+    }
+
+    /// G1/G3: monotone dry sliding has analytic slider heat; the numerical
+    /// spring loss decreases under time refinement and never becomes heat.
+    #[test]
+    fn slider_heat_and_force_are_path_consistent_under_time_refinement() {
+        let law = PartialSlipLaw::new(
+            PARTIAL_SLIP_MODEL_ID,
+            "synthetic/equal-coulomb",
+            PartialSlipParameters {
+                kinetic_mu: 0.8,
+                ..law().parameters()
+            },
+        )
+        .unwrap();
+        let mut numerical = Vec::new();
+        for steps in [32, 64, 128] {
+            let mut state = PartialSlipState::zero();
+            let mut heat = 0.0;
+            let mut work = 0.0;
+            let mut loss = 0.0;
+            let mut energy = 0.0;
+            for _ in 0..steps {
+                let response = law
+                    .advance(
+                        &patch(),
+                        &interface(),
+                        frame(),
+                        PartialSlipKinematics {
+                            creepage: [0.02, 0.0],
+                            rolling_speed_mps: 1.0,
+                            torsional_spin_rad_per_s: 0.0,
+                            dt_s: 1.0 / f64::from(steps),
+                        },
+                        &ownership(),
+                        &state,
+                    )
+                    .unwrap();
+                heat += response.dissipation.heat_j;
+                work += response.generalized_work.work_into_interface_j;
+                loss += response.generalized_work.numerical_dissipation_j;
+                energy = response.stored_energy_j;
+                state = response.next_state;
+            }
+            // Parallel sliders: (k,C) = (6000,24), (4000,56).
+            close(
+                heat,
+                24.0 * (0.02 - 24.0 / 6000.0) + 56.0 * (0.02 - 56.0 / 4000.0),
+            );
+            close(energy, 0.5 * (24.0 * 24.0 / 6000.0 + 56.0 * 56.0 / 4000.0));
+            close(work, energy + heat + loss);
+            numerical.push(loss);
+        }
+        assert!(numerical[1] < 0.6 * numerical[0]);
+        assert!(numerical[2] < 0.6 * numerical[1]);
+    }
+
+    /// G5: both regional strains and kinetic branches survive serialization.
+    #[test]
+    fn regional_checkpoint_preserves_partial_slip_memory() {
+        let first = step(frame(), &PartialSlipState::zero(), [6.0, 0.0], 0.0);
+        let state = &first.next_state;
+        let restored = PartialSlipState::from_region_checkpoint(
+            state.region_elastic_displacement_m(),
+            state.region_elastic_twist_rad(),
+            state.sliding_regions(),
+            state.accepted_steps(),
+        )
+        .unwrap();
+        assert_eq!(&restored, state);
+        assert_eq!(
+            step(frame(), &restored, [0.1, 0.2], 0.1),
+            step(frame(), state, [0.1, 0.2], 0.1)
+        );
+    }
+
     /// G3 reversal is deterministic and changes the gross-slide force direction.
     #[test]
     fn reversal_preserves_history_then_reverses_resistance() {
         let first = step(frame(), &PartialSlipState::zero(), [20.0, 0.0], 0.0);
-        let reversed = step(frame(), &first.next_state, [-20.0, 0.0], 0.0);
+        let reversed = step(frame(), &first.next_state, [-30.0, 0.0], 0.0);
         assert_eq!(first.state, PartialSlipStateKind::GrossSlide);
         assert_eq!(reversed.state, PartialSlipStateKind::GrossSlide);
         assert!(first.tangent_force_n[0] < 0.0);
@@ -2042,7 +2314,9 @@ mod tests {
             ),
             Err(PartialSlipError::WorkOwnershipMismatch)
         );
-        let exhausted = PartialSlipState::from_checkpoint([0.0; 2], 0.0, u64::MAX).expect("state");
+        let exhausted =
+            PartialSlipState::from_region_checkpoint([[0.0; 2]; 2], [0.0; 2], [false; 2], u64::MAX)
+                .expect("state");
         assert_eq!(
             law().advance(
                 &patch(),

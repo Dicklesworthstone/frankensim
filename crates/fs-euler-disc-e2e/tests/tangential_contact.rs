@@ -262,7 +262,7 @@ fn stick_partial_slip_and_gross_slide_keep_mode_work_and_loss_explicit() {
         ),
         (
             "gross",
-            1.2,
+            1.8,
             fs_tribo::partial_slip::PartialSlipStateKind::GrossSlide,
         ),
     ];
@@ -447,6 +447,7 @@ fn smooth_lane_preserves_checkpoint_recontact_and_exact_work_identity() {
         .expect("recontact b");
     assert_eq!(replay_a, replay_b);
     assert!(replay_a.irreversible_loss_j >= 0.0);
+    assert!(replay_a.numerical_dissipation_j >= 0.0);
     close(
         replay_a.exact_relative_body_work_j,
         -replay_a.signed_storage_change_j

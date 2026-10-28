@@ -94,30 +94,35 @@ reactions, and residual embedding.
 
 ### Partial-slip return-map rung
 
-`partial_slip` is a solver-independent, finite-patch Cattaneo--Mindlin-style
-*return-map* rung. `NormalPatchView`, `PartialSlipInterface`, and
+`partial_slip` is a solver-independent, two-region Jenkins/Iwan
+*return-map* rung (`two-region-iwan-return-map-v2`). `NormalPatchView`, `PartialSlipInterface`, and
 `GeneralizedWorkOwnership` retain the caller's named normal-patch, ordered
 interface/history, and work-owner inputs; their authority remains explicitly
 caller-declared. `PartialSlipLaw::advance` has no `fs-contact` dependency and
 cannot solve normal contact, evolve patch geometry, or admit a material card.
-It yields a reversible tangential/torsional spring core plus a lumped
-microslip remainder. Its `PartialSlip` state is not a resolved slipping-area
-fraction, pressure field, or traction field. Checkpoints bind all law,
-patch, interface, and state data for deterministic replay; equality of those
-inputs is not external physical validation. Rolling-deformation loss remains
-a separate, zero channel in this rung.
+Two parallel regions retain independent elastic shear/twist and kinetic-branch
+history. Their stiffness fractions are `1-h` and `h`, their Coulomb-capacity
+fractions are `a(1-h)` and `1-a(1-h)`, and `0<a,h<1`. Holding the displacement
+preserves preload without relaxation or heat; reversal first unloads elastically.
+One yielding region means partial slip, both means gross slide. The mixed
+translation/spin return satisfies maximum-dissipation normality in the elastic
+compliance metric; pure translation or spin uses a closed-form return.
+This finite two-region approximation is not a resolved Cattaneo--Mindlin
+pressure/traction field or a measured slipping-area fraction.
 
-The returned wrench remains the **endpoint** spring force and torsional moment.
-Its backward-Euler interval work is computed independently as
-`-F_end dot Delta u - M_end Delta theta`. The quadratic storage identity is
-`work = Delta H + physical microslip heat + D_num`, where
-`D_num = k |Delta e|² / 2 + k_t (Delta theta_elastic)² / 2`.
-`GeneralizedWork` exposes this nonnegative numerical dissipation and the
-independently reconstructed closure residual. Numerical loss is never sent to
-the physical heat channels. In particular, a purely elastic load/unload cycle
-produces no frictional heat but retains first-order integration loss, which
-decreases under timestep refinement. This is discrete endpoint work, not a
-resolved continuous-time integral or an energy-conserving midpoint update.
+Work is independently computed as `-F dot du - M dtheta`. The balance separates
+reversible storage, physical plastic-slip heat, and the backward-Euler spring
+loss `sum(k_i |Delta e_i|^2 / 2)`. Numerical loss is never thermalized. Its
+refinement claim applies to smooth fixed-branch histories; unresolved
+static-to-kinetic jumps require event resolution and have no such claim.
+The endpoint wrench is unchanged by energy bookkeeping. The work is a discrete
+endpoint contraction, not an exact continuous-time integral or midpoint work.
+Purely elastic closed cycles generate no physical heat, while their numerical
+loss decreases at first order as the interval is refined.
+Checkpoints contain both regional strains and kinetic branches, plus all law,
+patch and interface identities. A single aggregate-strain checkpoint is
+insufficient. Equality of those inputs is not external physical validation.
+Rolling-deformation loss remains a separate, zero channel in this rung.
 
 ### Rolling and contour-deformation loss rungs
 

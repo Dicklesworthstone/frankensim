@@ -239,7 +239,7 @@ fn transition_neighborhoods_are_explicit_and_branch_derivatives_refuse() {
     let inputs = [
         ([0.2, 0.0], PartialSlipStateKind::Sticking),
         ([0.6, 0.0], PartialSlipStateKind::PartialSlip),
-        ([1.2, 0.0], PartialSlipStateKind::GrossSlide),
+        ([1.8, 0.0], PartialSlipStateKind::GrossSlide),
     ];
     for (creepage, branch) in inputs {
         assert_eq!(
