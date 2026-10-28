@@ -19,7 +19,7 @@ use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::network::
 use fs_material::thermochemical_gas::energy::parcel::transfer::{
     nozzle::network::snapshot::SnapshotNozzleLink,
     species::{diffusion::network::DiffusionNetworkLink,
-        network::transport::{GasTransportSolve, GasTransportStep}},
+        network::transport::{GasTransportPaths, GasTransportSolve, GasTransportStep}},
 };
 
 /// Constitutive choice for a disjoint physical patch, not an object preset.
@@ -248,9 +248,33 @@ pub fn transport_step_candidate<'m>(
     transport_controls: GasTransportSolve, controls: NetworkSolve, guess_j: &[f64],
 ) -> Result<(MaterialExchangeState<'m>, MaterialFlowAdvance<GasTransportStep, GasHeatSample>),
     MaterialGasLawFlowError<GasHeatError>> {
+    transport_paths_step_candidate(state, prepared, cx, target_s, ports, drives,
+        reactions, patches, GasTransportPaths {
+            nozzles, diffusion, ..GasTransportPaths::default()
+        }, transport_controls, controls, guess_j)
+}
+
+/// Preview nozzle, porous, molecular and membrane transport before the same
+/// reacting assembly and mixed heat laws. Every path spends one shared original
+/// species allowance; changed composition supplies the actual thermal trial gas.
+///
+/// Darcy and membrane constitutive domains remain explicit. Paths describe
+/// separately authored exposed areas. Neither porous drag nor carried species
+/// enthalpy is added again as wall heat. Final driving-force admission encloses
+/// the thermal/mechanical step.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn transport_paths_step_candidate<'m>(
+    state: &MaterialExchangeState<'m>,
+    prepared: &PreparedMaterialExchangeNetwork<'_, '_>, cx: &Cx<'_>,
+    target_s: f64, ports: &[f64], drives: &[ChamberDrive],
+    reactions: &[ChamberReaction<'_>], patches: &[ExchangeContact],
+    paths: GasTransportPaths<'_>, transport_controls: GasTransportSolve,
+    controls: NetworkSolve, guess_j: &[f64],
+) -> Result<(MaterialExchangeState<'m>, MaterialFlowAdvance<GasTransportStep, GasHeatSample>),
+    MaterialGasLawFlowError<GasHeatError>> {
     let (mapped, surfaces) = flow_patches(cx, patches, controls)?;
-    state.transport_step_with_gas_law_candidate(prepared, cx, target_s, ports,
-        drives, reactions, &surfaces, nozzles, diffusion, transport_controls,
+    state.transport_paths_step_with_gas_law_candidate(prepared, cx, target_s, ports,
+        drives, reactions, &surfaces, paths, transport_controls,
         controls, guess_j, |contact, thermal, source, gas|
             mapped[&contact.id].law.resolve(prepared, contact, thermal, source, gas))
 }
@@ -269,6 +293,26 @@ pub fn advance_with_transport<'m>(
     MaterialGasLawFlowError<GasHeatError>> {
     let (next, report) = transport_step_candidate(state, prepared, cx, target_s,
         ports, drives, reactions, patches, nozzles, diffusion, transport_controls,
+        controls, guess_j)?;
+    cx.checkpoint().map_err(|_| MaterialGasLawFlowError::Cancelled)?;
+    *state = next;
+    Ok(report)
+}
+
+/// Publish all gas transport and the complete reacting/thermal/mechanical owner
+/// together. Any late refusal leaves every original state and history unchanged.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_with_transport_paths<'m>(
+    state: &mut MaterialExchangeState<'m>,
+    prepared: &PreparedMaterialExchangeNetwork<'_, '_>, cx: &Cx<'_>,
+    target_s: f64, ports: &[f64], drives: &[ChamberDrive],
+    reactions: &[ChamberReaction<'_>], patches: &[ExchangeContact],
+    paths: GasTransportPaths<'_>, transport_controls: GasTransportSolve,
+    controls: NetworkSolve, guess_j: &[f64],
+) -> Result<MaterialFlowAdvance<GasTransportStep, GasHeatSample>,
+    MaterialGasLawFlowError<GasHeatError>> {
+    let (next, report) = transport_paths_step_candidate(state, prepared, cx,
+        target_s, ports, drives, reactions, patches, paths, transport_controls,
         controls, guess_j)?;
     cx.checkpoint().map_err(|_| MaterialGasLawFlowError::Cancelled)?;
     *state = next;

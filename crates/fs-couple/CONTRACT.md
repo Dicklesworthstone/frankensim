@@ -9036,3 +9036,34 @@ and exact retry. The supported phase has one supplied loaded patch, frozen
 poses/geometry and a uniform common interface. Normal/impact admission, pose
 advance, moving footprints and variable-stiffness thermodynamics remain separate
 owners; no instantaneous impact loss is automatically reclassified as heat.
+
+
+### Permeability paths in continuing finite-gas assemblies
+
+`MaterialExchangeState::transport_paths_step_candidate` and
+`transport_paths_step_with_gas_law_candidate` accept the material owner's
+`GasTransportPaths`: nozzles, molecular diffusion, porous Darcy leakage and
+selective dense-membrane permeation. The original shared species/enthalpy stage
+runs once before reaction and the complete electrical/thermal/moving-wall solve.
+The transported composition supplies each actual gas heat-law trial. Final
+transport driving-force order is checked again after heat, reaction and piston
+work. The corresponding `advance_with_transport_paths` methods publish all
+physical owners and histories atomically. Existing nozzle/diffusion entry points
+delegate with empty additional paths and receive the same final endpoint gate.
+
+`bernoulli_aperture::wall::material::finite_gas_dg_transport_candidate_with_paths`
+previews those same paths through the existing uniform/regional source-wall
+acoustic owners. Its candidate retains the complete gas and acoustic endpoint
+maps plus the shared energy account; `advance_finite_gas_dg_transport_with_paths`
+publishes them together. Original species enthalpy, gas-to-wave parameter work
+and declared losses remain owned exactly once. All active total/partial-pressure
+orders are rechecked on the final heated/acoustic endpoint. Separate finite
+ducts do not acquire an invented common pressure field, acoustic continuity,
+jet force or loss-to-wall heat partition.
+
+These adapters retain each constitutive source domain and the original explicit
+first-order split. A rejected final ordering requires a smaller interval or a
+more suitable physical model, not per-edge flux clipping. Added real-fixture
+regressions exercise porous transport in the moving assembly and selective
+membrane transport through continuing acoustic owners, including immutable
+preview, atomic publication and enclosing species/energy accounts.

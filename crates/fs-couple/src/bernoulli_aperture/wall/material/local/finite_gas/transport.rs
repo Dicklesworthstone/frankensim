@@ -2,7 +2,7 @@
 //!
 //! Each duct remains a separate, uniform, finite gas volume. No common-pressure
 //! axial field, acoustic continuity across a restriction, or jet force is invented.
-//! Original nozzle and molecular-diffusion laws run once before any endpoint
+//! Original nozzle, diffusion, porous and membrane laws run once before any endpoint
 //! work feedback. Every acoustic owner retains its native state and source wall.
 
 use super::{
@@ -18,7 +18,7 @@ use fs_material::thermochemical_gas::energy::parcel::transfer::{
     snapshot::MAX_SNAPSHOT_PARCELS,
     species::{
         diffusion::network::DiffusionNetworkLink,
-        network::transport::{self as material, GasTransportError, GasTransportSolve, GasTransportStep},
+        network::transport::{self as material, GasTransportError, GasTransportPaths, GasTransportSolve, GasTransportStep},
     },
 };
 use std::collections::BTreeMap;
@@ -109,6 +109,28 @@ pub struct FiniteGasDgTransportStep {
     pub combined_energy_residual_j: f64,
 }
 
+/// Complete immutable preview of all gas and native acoustic endpoints.
+/// No accepted source binding, acoustic history or gas parcel changes until the
+/// corresponding advance API publishes this candidate's complete endpoint set.
+#[derive(Debug)]
+pub struct FiniteGasDgTransportCandidate {
+    parcels: BTreeMap<u64, ClosedGasParcel>,
+    nodes: BTreeMap<u64, FiniteGasDgNode>,
+    step: FiniteGasDgTransportStep,
+}
+impl FiniteGasDgTransportCandidate {
+    /// Proposed original gas parcels, keyed by their existing identities.
+    pub fn parcels(&self) -> &BTreeMap<u64, ClosedGasParcel> { &self.parcels }
+    /// Proposed original source bindings, states and propagators.
+    pub fn nodes(&self) -> &BTreeMap<u64, FiniteGasDgNode> { &self.nodes }
+    /// Original-owner reports and complete energy/mass account.
+    pub fn step(&self) -> &FiniteGasDgTransportStep { &self.step }
+    /// Consume the complete preview without advancing any external owner.
+    pub fn into_parts(self) -> (
+        BTreeMap<u64, ClosedGasParcel>, BTreeMap<u64, FiniteGasDgNode>, FiniteGasDgTransportStep,
+    ) { (self.parcels, self.nodes, self.step) }
+}
+
 use FiniteGasDgTransportError as Error;
 fn check(cancelled: &mut impl FnMut() -> bool) -> Result<(), Error> {
     if cancelled() { Err(Error::Cancelled) } else { Ok(()) }
@@ -151,8 +173,8 @@ impl Sum {
 /// Each duct then uses the existing finite-gas acoustic transaction: its native
 /// sample starts from the original medium, and its scalar parameter-work feedback
 /// reconstructs the transported parcel with external heat minus gas-to-wave work.
-/// Unbound reservoirs use the original caloric heat owner. Every active nozzle's
-/// original pressure-order gate is reapplied after ALL endpoint heating/work.
+/// Unbound reservoirs use the original caloric heat owner. Every active path's
+/// original driving-force gate is reapplied after ALL endpoint heating/work.
 /// Final-source, history, clock, work, energy or cancellation refusal publishes
 /// none of the parcel map, source bindings, states or propagators.
 ///
@@ -175,6 +197,50 @@ pub fn advance_finite_gas_dg_transport<C: FnMut() -> bool>(
     controls: FiniteGasDgTransportSolve,
     cancelled: &mut C,
 ) -> Result<FiniteGasDgTransportStep, Error> {
+    advance_finite_gas_dg_transport_with_paths(parcels, nodes, inputs,
+        GasTransportPaths { nozzles, diffusion, ..Default::default() },
+        duration_s, controls, cancelled)
+}
+
+/// Atomically advance all declared gas mechanisms and the existing acoustic
+/// owners. Porous and membrane paths use the same snapshot, species inventory,
+/// partial-enthalpy exchange and endpoint gates as nozzle/diffusion paths.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_finite_gas_dg_transport_with_paths<C: FnMut() -> bool>(
+    parcels: &mut BTreeMap<u64, ClosedGasParcel>,
+    nodes: &mut BTreeMap<u64, FiniteGasDgNode>,
+    inputs: &BTreeMap<u64, FiniteGasDgTransportInput>,
+    paths: GasTransportPaths<'_>,
+    duration_s: f64,
+    controls: FiniteGasDgTransportSolve,
+    cancelled: &mut C,
+) -> Result<FiniteGasDgTransportStep, Error> {
+    let candidate = finite_gas_dg_transport_candidate_with_paths(
+        parcels, nodes, inputs, paths, duration_s, controls, cancelled)?;
+    check(cancelled)?;
+    let (next_parcels, next_nodes, report) = candidate.into_parts();
+    *parcels = next_parcels;
+    *nodes = next_nodes;
+    Ok(report)
+}
+
+/// Preview the complete transport, heat and acoustic-work transaction without
+/// advancing any accepted parcel, source binding, state or propagator.
+///
+/// Source-backed porous and membrane rates enter the same original-snapshot
+/// transport stage exactly once. Every final total/partial-pressure ordering is
+/// checked again after heating and acoustic parameter work. The existing
+/// first-order split, fixed-volume acoustic and source-domain limits apply.
+#[allow(clippy::too_many_arguments)]
+pub fn finite_gas_dg_transport_candidate_with_paths<C: FnMut() -> bool>(
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    nodes: &BTreeMap<u64, FiniteGasDgNode>,
+    inputs: &BTreeMap<u64, FiniteGasDgTransportInput>,
+    paths: GasTransportPaths<'_>,
+    duration_s: f64,
+    controls: FiniteGasDgTransportSolve,
+    cancelled: &mut C,
+) -> Result<FiniteGasDgTransportCandidate, Error> {
     check(cancelled)?;
     if parcels.is_empty() || parcels.len() > MAX_SNAPSHOT_PARCELS || nodes.is_empty()
         || !parcels.keys().eq(inputs.keys()) || nodes.keys().any(|id| !parcels.contains_key(id))
@@ -210,8 +276,8 @@ pub fn advance_finite_gas_dg_transport<C: FnMut() -> bool>(
         node.binding.duct().port_pressures(&sample)
             .map_err(|error| acoustic_error(id, super::native(error)))?;
     }
-    let (transported, transport) = material::step_candidate(
-        parcels, nozzles, diffusion, duration_s, &endpoints, controls.transport, &mut *cancelled,
+    let (transported, transport) = material::step_candidate_with_paths(
+        parcels, paths, duration_s, &endpoints, controls.transport, &mut *cancelled,
     ).map_err(transport_error)?.into_parts();
     let mut next_parcels = transported.clone();
     let mut next_nodes = nodes.clone();
@@ -265,7 +331,7 @@ pub fn advance_finite_gas_dg_transport<C: FnMut() -> bool>(
     }
     // Heating and wave work can change a pressure ordering that transport alone
     // admitted. Reuse the original rule against the complete FINAL endpoint map.
-    transport.admit_endpoint_nozzle_pressures(&next_parcels, &mut *cancelled)
+    transport.admit_endpoint_driving_forces(&next_parcels, &mut *cancelled)
         .map_err(transport_error)?;
     let mut gas_storage = Sum::default();
     let mut acoustic_storage = Sum::default();
@@ -296,8 +362,6 @@ pub fn advance_finite_gas_dg_transport<C: FnMut() -> bool>(
         total_mass_residual_kg: mass.value, combined_energy_residual_j: residual,
     };
     check(cancelled)?;
-    *parcels = next_parcels;
-    *nodes = next_nodes;
-    Ok(report)
+    Ok(FiniteGasDgTransportCandidate { parcels: next_parcels, nodes: next_nodes, step: report })
 }
 

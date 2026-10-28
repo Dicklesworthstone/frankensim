@@ -1,11 +1,11 @@
-//! Both existing transport laws feed ONE inventory before the original coupled step.
+//! All declared gas transport laws feed ONE inventory before the original coupled step.
 //! No accepted gas, circuit, thermal or mechanical history changes during a trial.
 use super::*;
 use fs_material::thermochemical_gas::energy::parcel::transfer::{
-    snapshot::{MAX_SNAPSHOT_PARCELS, MAX_SNAPSHOT_TRANSFERS},
+    snapshot::MAX_SNAPSHOT_PARCELS,
     nozzle::network::snapshot::SnapshotNozzleLink,
     species::{diffusion::network::DiffusionNetworkLink,
-        network::transport::{self as shared, GasTransportError, GasTransportSolve, GasTransportStep}},
+        network::transport::{self as shared, GasTransportError, GasTransportPaths, GasTransportSolve, GasTransportStep}},
 };
 
 impl From<GasTransportError> for MaterialFlowError {
@@ -75,10 +75,9 @@ impl<'m> MaterialExchangeState<'m> {
         diffusion: &[DiffusionNetworkLink<'_>], transport_controls: GasTransportSolve,
         controls: NetworkSolve, guess_j: &[f64],
     ) -> Result<(Self, MaterialFlowAdvance<GasTransportStep>), MaterialFlowError> {
-        let stage = self.transport_stage(cx, target_s, drives, nozzles, diffusion,
-            transport_controls, controls)?;
-        self.finish_flow_candidate(prepared, cx, target_s, ports, drives, reactions,
-            gas_patches, controls, guess_j, stage)
+        self.transport_paths_step_candidate(prepared, cx, target_s, ports, drives,
+            reactions, gas_patches, GasTransportPaths { nozzles, diffusion, ..Default::default() },
+            transport_controls, controls, guess_j)
     }
 
     /// The same combined transport with a caller-selected gas heat law.
@@ -104,16 +103,68 @@ impl<'m> MaterialExchangeState<'m> {
         resolve: impl Fn(Contact, &DepositionSimulation<'m>, &MaterialExchangeSample,
             &ResolvedThermochemicalGasState) -> Result<ConductanceSample<I>, E>,
     ) -> Result<(Self, MaterialFlowAdvance<GasTransportStep, I>), MaterialGasLawFlowError<E>> {
-        let stage = self.transport_stage(cx, target_s, drives, nozzles, diffusion,
-            transport_controls, controls)?;
-        self.finish_flow_with_gas_law_candidate(prepared, cx, target_s, ports,
-            drives, reactions, surfaces, controls, guess_j, stage, resolve)
+        self.transport_paths_step_with_gas_law_candidate(prepared, cx, target_s,
+            ports, drives, reactions, surfaces,
+            GasTransportPaths { nozzles, diffusion, ..Default::default() },
+            transport_controls, controls, guess_j, resolve)
+    }
+
+    /// Preview nozzle, molecular, porous and selective membrane transport in
+    /// the original reacting, electrical, thermal and moving-chamber assembly.
+    ///
+    /// Every path samples the same initial inventory and uses one combined
+    /// species/enthalpy update. Reaction and coupled heat/work run once after
+    /// transport. Total/partial-pressure driving-force checks are reapplied to
+    /// the actual final chambers, including heating, reaction and piston work.
+    /// Failure leaves every accepted owner unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn transport_paths_step_candidate(
+        &self, prepared: &PreparedMaterialExchangeNetwork<'_, '_>, cx: &Cx<'_>, target_s: f64,
+        ports: &[f64], drives: &[ChamberDrive], reactions: &[ChamberReaction<'_>],
+        gas_patches: &[MaterialContact], paths: GasTransportPaths<'_>,
+        transport_controls: GasTransportSolve, controls: NetworkSolve, guess_j: &[f64],
+    ) -> Result<(Self, MaterialFlowAdvance<GasTransportStep>), MaterialFlowError> {
+        let stage = self.transport_stage(cx, target_s, drives, paths, transport_controls, controls)?;
+        let (next, report) = self.finish_flow_candidate(prepared, cx, target_s, ports, drives,
+            reactions, gas_patches, controls, guess_j, stage)?;
+        next.admit_transport_endpoint(&report.flow, cx)?;
+        Ok((next, report))
+    }
+
+    /// The complete transport-path set with the original caller-selected gas
+    /// heat law. Evolving mixture properties reach the same nonlinear heat/work
+    /// trials; transport and chemistry are never repeated inside those trials.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn transport_paths_step_with_gas_law_candidate<I, E>(
+        &self, prepared: &PreparedMaterialExchangeNetwork<'_, '_>, cx: &Cx<'_>, target_s: f64,
+        ports: &[f64], drives: &[ChamberDrive], reactions: &[ChamberReaction<'_>],
+        surfaces: &[GasSurface], paths: GasTransportPaths<'_>,
+        transport_controls: GasTransportSolve, controls: NetworkSolve, guess_j: &[f64],
+        resolve: impl Fn(Contact, &DepositionSimulation<'m>, &MaterialExchangeSample,
+            &ResolvedThermochemicalGasState) -> Result<ConductanceSample<I>, E>,
+    ) -> Result<(Self, MaterialFlowAdvance<GasTransportStep, I>), MaterialGasLawFlowError<E>> {
+        let stage = self.transport_stage(cx, target_s, drives, paths, transport_controls, controls)?;
+        let (next, report) = self.finish_flow_with_gas_law_candidate(prepared, cx, target_s,
+            ports, drives, reactions, surfaces, controls, guess_j, stage, resolve)?;
+        next.admit_transport_endpoint(&report.flow, cx)?;
+        Ok((next, report))
+    }
+
+    fn admit_transport_endpoint(&self, report: &GasTransportStep, cx: &Cx<'_>)
+        -> Result<(), GasTransportError>
+    {
+        let mut parcels = BTreeMap::new();
+        for (&id, chamber) in &self.chambers {
+            cx.checkpoint().map_err(|_| GasTransportError::Cancelled)?;
+            parcels.insert(id, chamber.gas().clone());
+        }
+        report.admit_endpoint_driving_forces(&parcels, || cx.checkpoint().is_err())
     }
 
     #[allow(clippy::too_many_arguments)]
     fn transport_stage(
         &self, cx: &Cx<'_>, target_s: f64, drives: &[ChamberDrive],
-        nozzles: &[SnapshotNozzleLink], diffusion: &[DiffusionNetworkLink<'_>],
+        paths: GasTransportPaths<'_>,
         transport_controls: GasTransportSolve, controls: NetworkSolve,
     ) -> Result<FlowStage<GasTransportStep>, TransportStageError> {
         let check = || cx.checkpoint().map_err(|_| GasTransportError::Cancelled);
@@ -122,8 +173,7 @@ impl<'m> MaterialExchangeState<'m> {
         if !dt.is_finite() || dt <= 0.0 || self.chambers.is_empty()
             || self.chambers.len() > controls.maximum_chambers
             || self.chambers.len() > MAX_SNAPSHOT_PARCELS
-            || drives.len() != self.chambers.len()
-            || nozzles.len().checked_add(diffusion.len()).is_none_or(|n| n > MAX_SNAPSHOT_TRANSFERS) {
+            || drives.len() != self.chambers.len() {
             return Err(TransportStageError::Invalid(
                 "one forward clock, bounded combined paths and one drive per live chamber required"));
         }
@@ -140,7 +190,7 @@ impl<'m> MaterialExchangeState<'m> {
             check()?;
             parcels.insert(id, chamber.gas().clone());
         }
-        let (parcels, flow) = shared::step_candidate(&parcels, nozzles, diffusion, dt,
+        let (parcels, flow) = shared::step_candidate_with_paths(&parcels, paths, dt,
             &endpoints, transport_controls, || cx.checkpoint().is_err())?.into_parts();
         let moved = flow.exchange.parcels.iter()
             .filter(|p| p.incoming_mass_kg > 0.0 || p.outgoing_mass_kg > 0.0)
@@ -161,11 +211,9 @@ impl<'m> MaterialExchangeState<'m> {
         diffusion: &[DiffusionNetworkLink<'_>], transport_controls: GasTransportSolve,
         controls: NetworkSolve, guess_j: &[f64],
     ) -> Result<MaterialFlowAdvance<GasTransportStep>, MaterialFlowError> {
-        let (next, report) = self.transport_step_candidate(prepared, cx, target_s, ports,
-            drives, reactions, gas_patches, nozzles, diffusion, transport_controls, controls, guess_j)?;
-        checkpoint(cx)?;
-        *self = next;
-        Ok(report)
+        self.advance_with_transport_paths(prepared, cx, target_s, ports, drives, reactions,
+            gas_patches, GasTransportPaths { nozzles, diffusion, ..Default::default() },
+            transport_controls, controls, guess_j)
     }
 
     /// Atomically publish combined species transport and the selected gas heat
@@ -180,8 +228,41 @@ impl<'m> MaterialExchangeState<'m> {
         resolve: impl Fn(Contact, &DepositionSimulation<'m>, &MaterialExchangeSample,
             &ResolvedThermochemicalGasState) -> Result<ConductanceSample<I>, E>,
     ) -> Result<MaterialFlowAdvance<GasTransportStep, I>, MaterialGasLawFlowError<E>> {
-        let (next, report) = self.transport_step_with_gas_law_candidate(prepared, cx,
-            target_s, ports, drives, reactions, surfaces, nozzles, diffusion,
+        self.advance_with_transport_paths_and_gas_law(prepared, cx, target_s, ports,
+            drives, reactions, surfaces,
+            GasTransportPaths { nozzles, diffusion, ..Default::default() },
+            transport_controls, controls, guess_j, resolve)
+    }
+
+    /// Atomically publish all transport mechanisms and the original coupled
+    /// owners after final driving forces, whole-interval balances and cancellation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_transport_paths(
+        &mut self, prepared: &PreparedMaterialExchangeNetwork<'_, '_>, cx: &Cx<'_>, target_s: f64,
+        ports: &[f64], drives: &[ChamberDrive], reactions: &[ChamberReaction<'_>],
+        gas_patches: &[MaterialContact], paths: GasTransportPaths<'_>,
+        transport_controls: GasTransportSolve, controls: NetworkSolve, guess_j: &[f64],
+    ) -> Result<MaterialFlowAdvance<GasTransportStep>, MaterialFlowError> {
+        let (next, report) = self.transport_paths_step_candidate(prepared, cx,
+            target_s, ports, drives, reactions, gas_patches, paths,
+            transport_controls, controls, guess_j)?;
+        checkpoint(cx)?;
+        *self = next;
+        Ok(report)
+    }
+
+    /// Publish the same complete gas paths with a source-selected gas heat law.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn advance_with_transport_paths_and_gas_law<I, E>(
+        &mut self, prepared: &PreparedMaterialExchangeNetwork<'_, '_>, cx: &Cx<'_>, target_s: f64,
+        ports: &[f64], drives: &[ChamberDrive], reactions: &[ChamberReaction<'_>],
+        surfaces: &[GasSurface], paths: GasTransportPaths<'_>,
+        transport_controls: GasTransportSolve, controls: NetworkSolve, guess_j: &[f64],
+        resolve: impl Fn(Contact, &DepositionSimulation<'m>, &MaterialExchangeSample,
+            &ResolvedThermochemicalGasState) -> Result<ConductanceSample<I>, E>,
+    ) -> Result<MaterialFlowAdvance<GasTransportStep, I>, MaterialGasLawFlowError<E>> {
+        let (next, report) = self.transport_paths_step_with_gas_law_candidate(prepared, cx,
+            target_s, ports, drives, reactions, surfaces, paths,
             transport_controls, controls, guess_j, resolve)?;
         cx.checkpoint().map_err(|_| MaterialGasLawFlowError::Cancelled)?;
         *self = next;

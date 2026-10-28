@@ -28,7 +28,8 @@ pub use local::finite_gas::{
 pub use local::finite_gas::transport::{
     FiniteGasDgBinding, FiniteGasDgNode, FiniteGasDgTransportInput,
     FiniteGasDgTransportSolve, FiniteGasDgTransportStep, FiniteGasDgTransportError,
-    advance_finite_gas_dg_transport,
+    advance_finite_gas_dg_transport, FiniteGasDgTransportCandidate,
+    finite_gas_dg_transport_candidate_with_paths, advance_finite_gas_dg_transport_with_paths,
 };
 
 use fs_vfit::relaxation::RelaxationImpedanceSpec;

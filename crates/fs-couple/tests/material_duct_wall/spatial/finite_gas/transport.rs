@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use fs_couple::bernoulli_aperture::wall::material::{
     FiniteGasDgBinding, FiniteGasDgNode, FiniteGasDgTransportInput,
     FiniteGasDgTransportSolve, FiniteGasDgTransportError, advance_finite_gas_dg_transport,
+    finite_gas_dg_transport_candidate_with_paths, advance_finite_gas_dg_transport_with_paths,
 };
 use fs_material::thermochemical_gas::energy::parcel::transfer::{
     nozzle::network::snapshot::{SnapshotNozzleLink, SnapshotNozzleError},
@@ -76,16 +77,19 @@ fn nozzle() -> SnapshotNozzleLink {
         nozzle_solve:energy_solve()}
 }
 fn diffusivity(value: f64) -> MaterialCard {
+    coefficient_card(BINARY_DIFFUSIVITY_PROPERTY,BINARY_DIFFUSIVITY_DIMS,value)
+}
+fn coefficient_card(property: &str, dims: Dims, value: f64) -> MaterialCard {
     let mut claims=ClaimSet::new();
     claims.insert_claim(PropertyClaim {
-        key:PropertyKey::new(BINARY_DIFFUSIVITY_PROPERTY,BINARY_DIFFUSIVITY_DIMS),
-        value:PropertyValue::Scalar {value,dims:BINARY_DIFFUSIVITY_DIMS},
+        key:PropertyKey::new(property,dims),
+        value:PropertyValue::Scalar {value,dims},
         validity:ValidityDomain::unconstrained()
             .with_quantity("temperature",QuantitySpec::semantic(SemanticType::new(
                 QuantityKind::AbsoluteTemperature,ValueForm::Static)),200.0,900.0),
         uncertainty:UncertaintyModel::Unstated,interpolation:InterpolationPolicy::ConstantWithinValidity,
         observations:vec![],provenance:Provenance {
-            source:"synthetic binary diffusion coefficient; not measured gas validation".into(),
+            source:"synthetic transport coefficient; not measured gas validation".into(),
             license:"CC0-1.0".into(),artifact:None,
         },
     }).unwrap();
@@ -246,3 +250,55 @@ fn second_duct_refusal_and_last_poll_cancellation_preserve_every_native_owner() 
     unchanged(&nodes,&old_nodes);
 }
 
+
+#[test]
+fn membrane_paths_reach_both_acoustic_owners_and_preview_is_immutable() {
+    use fs_material::thermochemical_gas::energy::parcel::transfer::species::network::transport::{
+        self as material_transport, GasTransportPaths,
+        membrane::{MembraneGeometry, MembraneNetworkLink, MembranePermeabilityMaterial,
+            MOLAR_PERMEABILITY_DIMS,MOLAR_PERMEABILITY_PROPERTY},
+    };
+    let (mut gases,mut nodes)=fixture();
+    let (old_gases,old_nodes)=(gases.clone(),nodes.clone());
+    let cards=[coefficient_card(MOLAR_PERMEABILITY_PROPERTY,MOLAR_PERMEABILITY_DIMS,1e-10),
+        coefficient_card(MOLAR_PERMEABILITY_PROPERTY,MOLAR_PERMEABILITY_DIMS,2e-10)];
+    let context=QueryPoint::new();
+    let materials=["A","B"].into_iter().zip(&cards).map(|(name,card)|MembranePermeabilityMaterial {
+        species:SpeciesId::new(name).unwrap(),material:card,context:&context,
+        selection:MaterialPropertySelection::SingleClaimOnly,
+    }).collect::<Vec<_>>();
+    let membranes=[MembraneNetworkLink {id:81,parcels:[0,1],
+        geometry:MembraneGeometry {area_m2:2e-6,thickness_m:1e-5},
+        materials:&materials,maximum_temperature_difference_k:1.0}];
+    let paths=GasTransportPaths {membranes:&membranes,..Default::default()};
+    let input=inputs();
+    let endpoints=input.iter().map(|(&id,i)|(id,i.gas)).collect();
+    let shared=material_transport::step_candidate_with_paths(
+        &gases,paths,1e-6,&endpoints,solve().transport,||false).unwrap();
+    let preview=finite_gas_dg_transport_candidate_with_paths(
+        &gases,&nodes,&input,paths,1e-6,solve(),&mut ||false).unwrap();
+    assert_eq!(preview.step().transport,*shared.step());
+    assert!(preview.step().transport.membranes[0].flux.species[0].mass_rate_left_to_right_kg_s>0.0);
+    assert!(preview.step().transport.membranes[0].flux.species[1].mass_rate_left_to_right_kg_s<0.0);
+    assert_eq!(gases,old_gases);
+    unchanged(&nodes,&old_nodes);
+    let (candidate_gases,candidate_nodes,candidate_report)=preview.into_parts();
+    let report=advance_finite_gas_dg_transport_with_paths(
+        &mut gases,&mut nodes,&input,paths,1e-6,solve(),&mut ||false).unwrap();
+    assert_eq!(gases,candidate_gases);
+    unchanged(&nodes,&candidate_nodes);
+    assert_eq!(report.transport,candidate_report.transport);
+    for name in ["A","B"] {
+        assert!((species_mass(&gases,name)-species_mass(&old_gases,name)).abs()<1e-16);
+    }
+    let gas_change:f64=gases.iter().map(|(id,g)|energy_change(&old_gases[id],g)).sum();
+    let wave_change:f64=nodes.iter().map(|(id,n)|n.state.stored_energy_j()
+        -old_nodes[id].state.stored_energy_j()).sum();
+    let heat:f64=input.values().map(|i|i.supplied_heat_j).sum();
+    assert!((gas_change+wave_change+report.acoustic_dissipation_j-heat-report.port_work_j)
+        .abs()<=solve().energy_tolerance_j);
+    for (&id,node) in &nodes {
+        assert_eq!(node.state.step_count(),9);
+        assert_eq!(node.binding.duct().gas_field().unwrap().uniform_state(),Some(gases[&id].state()));
+    }
+}

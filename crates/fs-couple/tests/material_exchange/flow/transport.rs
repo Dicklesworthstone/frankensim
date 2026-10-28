@@ -217,3 +217,59 @@ fn late_feedback_failure_and_cancellation_publish_no_partial_assembly() {
         assert_eq!(state.circuit(),preview.circuit());assert_eq!(state.thermal().cells(),preview.thermal().cells());
     }));
 }
+
+#[test]
+fn porous_paths_feed_the_same_complete_moving_assembly_once() {
+    use fs_material::porous::permeability::{
+        DarcyGasBarrier, IntrinsicPermeability, PorousGasLayer, PorousGasSupport,
+    };
+    use fs_material::thermochemical_gas::energy::parcel::transfer::species::network::transport::{
+        GasTransportPaths, porous::PorousNetworkLink,
+    };
+    fixture([0.2,0.2],150.0,|assembly,thermal,circuit|with_cx(|cx,_| {
+        let barrier=DarcyGasBarrier::try_new(
+            vec![PorousGasLayer::try_new(IntrinsicPermeability::isotropic(1e-13).unwrap(),
+                0.001,0.0,"manufactured porous assembly fixture").unwrap()],
+            [1.0,0.0,0.0],PorousGasSupport {
+                temperature_k:(200.0,1800.0),pressure_pa:(1000.0,1e7),
+                maximum_superficial_speed_m_s:100.0,
+            },
+        ).unwrap();
+        let porous=[PorousNetworkLink {id:71,parcels:[10,30],barrier:&barrier,
+            area_m2:2e-6,maximum_temperature_difference_k:1.0}];
+        let d=pair_card(2e-5);let q=QueryPoint::new();let pairs=binding(&d,&q);
+        let faces=[face(&pairs)];
+        let paths=GasTransportPaths {porous:&porous,diffusion:&faces,..Default::default()};
+        let prepared=assembly.prepare(cx,&thermal).unwrap();
+        let mut state=MaterialExchangeState::from_parts(thermal,circuit,chambers());
+        let drives=drives(state.chambers());
+        let parcels=state.chambers().iter().map(|(&id,g)|(id,g.gas().clone())).collect();
+        let endpoints=drives.iter().map(|d|(d.chamber,d.piston_solve.gas)).collect();
+        let (transferred,expected_flow)=shared::step_candidate_with_paths(
+            &parcels,paths,DT,&endpoints,admission(),||false).unwrap().into_parts();
+        let staged=MaterialExchangeState::from_parts(state.thermal().clone(),state.circuit().clone(),
+            transferred.into_iter().map(|(id,g)|(id,GasPiston::new(g,1.0,0.01,0.0).unwrap())).collect());
+        let (expected,_)=staged.step_candidate(&prepared,cx,DT,&[],&drives,&[],
+            &gas_fixture::patches(),coupled(),&[0.0;2]).unwrap();
+        let (preview,report)=state.transport_paths_step_candidate(&prepared,cx,DT,&[],&drives,&[],
+            &gas_fixture::patches(),paths,admission(),coupled(),&[0.0;2]).unwrap();
+        assert_eq!(report.flow,expected_flow);
+        assert!(report.flow.porous[0].transferred_mass_kg>0.0);
+        for (&id,gas) in preview.chambers() {
+            assert_eq!(gas.gas(),expected.chambers()[&id].gas());
+            assert_eq!(gas.position_m(),expected.chambers()[&id].position_m());
+            assert_eq!(gas.velocity_m_s(),expected.chambers()[&id].velocity_m_s());
+        }
+        assert_eq!(preview.circuit(),expected.circuit());
+        assert_eq!(preview.thermal().cells(),expected.thermal().cells());
+        assert_eq!(state.time_s(),0.0);
+        let work:f64=report.exchange.report.source.chambers.iter()
+            .map(|c|c.boundary.piston.exterior_pressure_work_j).sum();
+        assert!((storage(&preview)+work-storage(&state)).abs()<4e-6);
+        state.advance_with_transport_paths(&prepared,cx,DT,&[],&drives,&[],
+            &gas_fixture::patches(),paths,admission(),coupled(),&[0.0;2]).unwrap();
+        assert_eq!(state.chambers(),preview.chambers());
+        assert_eq!(state.circuit(),preview.circuit());
+        assert_eq!(state.thermal().cells(),preview.thermal().cells());
+    }));
+}

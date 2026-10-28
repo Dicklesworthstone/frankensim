@@ -854,3 +854,17 @@ and manufactured-network regressions cover reversal, extreme coefficients,
 series/parallel/loop balances, gas substitution, source admission, fan operating
 points and sensitivity agreement. These remain nominal model estimates, with
 source uncertainty retained rather than promoted to a numerical certificate.
+
+
+### Permeability with mixed finite-gas heat laws
+
+`finite_gas::network::exchange::transport_paths_step_candidate` and
+`advance_with_transport_paths` pass the complete material `GasTransportPaths`
+through the original `MaterialExchangeState` owner. Darcy leakage and selective
+membrane changes therefore reach conduction, forced/natural convection, reaction,
+finite storage and wall motion through the actual transported gas. Each stage
+runs once, carries partial enthalpy once, and publishes every endpoint together.
+Final transport driving-force checks enclose the thermal/mechanical solve; the
+constitutive source domains, prescribed convection geometry and first-order
+splitting limits remain explicit. Existing two-mechanism entry points delegate
+to this same owner.
