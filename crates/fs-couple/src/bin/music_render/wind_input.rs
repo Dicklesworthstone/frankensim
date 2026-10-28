@@ -768,6 +768,12 @@ pub(super) fn flue_provenance(p: &FlueFilePerformance) -> String {
         let spec = channel.spec();
         format!(",\"windway_model\":\"unsteady-no-slip-slit-v1\",\"windway_length_m\":{:e},\"windway_dynamic_viscosity_pa_s\":{:e},\"windway_transverse_cells\":{},\"jet_convection_cells\":{}",
             spec.length_m, channel.gas().dynamic_viscosity, spec.transverse_cells, flow.convection_cells())
+    } else if let Some((law, held)) = renderer.voice().developing_windway() {
+        // The held note's validity measures; the attack and release are not covered.
+        format!(",\"windway_model\":\"developing-slit-shah1978-v1\",\"windway_length_m\":{:e},\"windway_dynamic_viscosity_pa_s\":{:e},\"windway_held\":{{\"pressure_pa\":{:e},\"bulk_speed_m_s\":{:e},\"core_speed_m_s\":{:e},\"x_plus\":{:e},\"reynolds_hydraulic\":{:e},\"reynolds_length\":{:e},\"displacement_thickness_m\":{:e},\"reynolds_displacement\":{:e},\"chen_inlet_shift\":{:e},\"developed\":{},\"attack_covered\":false,\"geometry\":\"straight parallel plates; a converging windway declared as its exit gap is most likely overstated\"}}",
+            law.length_m(), law.gas().dynamic_viscosity, held.pressure_pa, held.bulk_speed_m_s,
+            held.core_speed_m_s, held.x_plus, held.reynolds_hydraulic, held.reynolds_length,
+            held.displacement_thickness_m, held.reynolds_displacement, held.chen_inlet_shift, held.developed)
     } else {
         match renderer.voice().viscous_windway() {
             Some(law) => format!(",\"windway_model\":\"quasi-steady-slit-v1\",\"windway_length_m\":{:e},\"windway_dynamic_viscosity_pa_s\":{:e}", law.length_m(), law.dynamic_viscosity_pa_s()),

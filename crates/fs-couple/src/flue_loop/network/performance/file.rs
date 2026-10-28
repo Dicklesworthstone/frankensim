@@ -184,7 +184,9 @@ impl FlueFilePerformance {
     /// `jet_card tonal-interim` explicitly selects the retained stage-I card;
     /// `jet_card json {CANONICAL_JSON}` supplies a complete one-line card.
     /// An optional `windway none` or `windway slit LENGTH_M` row after `flue`
-    /// selects the source-gas viscous windway. `windway unsteady LENGTH_M
+    /// selects the source-gas viscous windway. `windway slit-developing LENGTH_M` instead holds
+    /// the jet by Shah's laminar developing-flow law (`bernoulli_aperture::developing`), refused
+    /// unless the held note's pressure lies inside the law's validity. `windway unsteady LENGTH_M
     /// TRANSVERSE_CELLS CONVECTION_CELLS` instead resolves the evolving channel
     /// profile and jet convection, using explicit refinement counts. Its length is actual
     /// channel geometry, never an inferred lip channel for a transverse flute.
@@ -470,9 +472,10 @@ impl FlueFilePerformance {
             let choice = match row.fields.next() {
                 Some("none") => WindwayInput::None,
                 Some("slit") => WindwayInput::QuasiSteady { length_m: row.scalar()? },
+                Some("slit-developing") => WindwayInput::Developing { length_m: row.scalar()? },
                 Some("unsteady") => WindwayInput::Unsteady { length_m: row.scalar()?,
                     transverse_cells: row.number()?, convection_cells: row.number()? },
-                _ => return Err(bad(rows.line, "windway requires none, slit LENGTH, or unsteady LENGTH TRANSVERSE_CELLS CONVECTION_CELLS")),
+                _ => return Err(bad(rows.line, "windway requires none, slit LENGTH, slit-developing LENGTH, or unsteady LENGTH TRANSVERSE_CELLS CONVECTION_CELLS")),
             };
             row.end()?;
             choice
@@ -654,6 +657,8 @@ impl FlueFilePerformance {
             WindwayInput::None => voice,
             WindwayInput::QuasiSteady { length_m } =>
                 voice.with_viscous_windway(length_m).map_err(FlueInputError::Physics)?,
+            WindwayInput::Developing { length_m } => voice.with_developing_windway(length_m,
+                held_blowing_pressure(&schedule, control_source.as_ref())).map_err(FlueInputError::Physics)?,
             WindwayInput::Unsteady { length_m, transverse_cells, convection_cells } =>
                 voice.with_unsteady_windway(length_m, transverse_cells, convection_cells)
                     .map_err(FlueInputError::Physics)?,
@@ -791,6 +796,7 @@ pub(in crate::flue_loop) fn read_mouth_aperture(rows: &mut Rows<'_>)
 enum WindwayInput {
     None,
     QuasiSteady { length_m: f64 },
+    Developing { length_m: f64 },
     Unsteady { length_m: f64, transverse_cells: usize, convection_cells: usize },
 }
 

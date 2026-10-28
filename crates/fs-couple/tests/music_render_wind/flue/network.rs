@@ -167,6 +167,55 @@ fn unsteady_windway_data_reaches_regional_source_and_physical_cli_output() {
 }
 
 #[test]
+fn developing_windway_data_holds_the_regional_jet_and_reports_its_validity_measures() {
+    let text = source().replace("windway slit 0.015", "windway slit-developing 0.015");
+    let file = FlueFilePerformance::from_bytes(text.as_bytes(),37,&CancelGate::new_clock_free()).unwrap();
+    let voice = file.renderer().voice();
+    let (law, held) = voice.developing_windway().unwrap();
+    assert_eq!(law.gas(), &voice.network().unwrap().source().gases[1]);
+    assert_eq!(law.length_m(), 0.015);
+    assert_eq!(held.pressure_pa, 3e2, "validity binds the schedule's held pressure");
+    assert!(voice.viscous_windway().is_none() && voice.unsteady_windway().is_none());
+    held.validity().unwrap();
+    let expected = physical(&text).0;
+    assert_ne!(expected,physical(&source()).0,"the entrance-shear speed must reach the receiver");
+    let wav = encode_pcm16_wav(&expected,48000,1.0).unwrap().0;
+    let dir = directory();
+    let input = dir.join("developing.performance");
+    std::fs::write(&input,&text).unwrap();
+    for block in [1,137] {
+        let output = dir.join(format!("developing-{block}.wav"));
+        success(run(&input,&output,block,false));
+        assert_eq!(std::fs::read(&output).unwrap(),wav);
+        let sidecar = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
+        let measures = [format!("\"x_plus\":{:e}",held.x_plus),
+            format!("\"reynolds_hydraulic\":{:e}",held.reynolds_hydraulic),
+            format!("\"reynolds_length\":{:e}",held.reynolds_length)];
+        for token in ["\"windway_model\":\"developing-slit-shah1978-v1\"",
+            "\"windway_length_m\":1.5e-2","\"pressure_pa\":3e2",
+            "\"attack_covered\":false","\"inlet_section\":1"].map(String::from).into_iter().chain(measures) {
+            assert!(sidecar.contains(&token),"{token}: {sidecar}");
+        }
+    }
+    // A 0.5 mm slit holds x+ near 1e-4, below Shah's stated range; a 1 Pa note holds
+    // Re_Dh near 34, where Chen's inlet term moves the drop by about 5 %.
+    for (i, changed) in [
+        text.replace("slit-developing 0.015","slit-developing 0.0005"),
+        text.replace("initial\tpressure-pa\t3e2","initial\tpressure-pa\t1e0"),
+        text.replace("initial\tpressure-pa\t3e2","initial\tpressure-pa\t0e0"),
+        text.replace("slit-developing 0.015","slit-developing 0"),
+        text.replace("slit-developing 0.015","slit-developing -0.015"),
+        text.replace("slit-developing 0.015","slit-developing"),
+    ].iter().enumerate() {
+        std::fs::write(&input,changed).unwrap();
+        let output = dir.join(format!("refused-developing-{i}.wav"));
+        assert!(!run(&input,&output,37,false).status.success());
+        assert!(!output.exists());
+        assert!(!output.with_extension("provenance.json").exists());
+    }
+}
+
+#[test]
 fn current_sample_windway_feedback_retains_regional_gas_pressure_and_pcm() {
     // A manufactured short cut-up makes transit less than the mechanical
     // sample period. Its current-mouth term must use the same physical

@@ -94,6 +94,7 @@ use fs_duct::{FingeringTable, Termination};
 use fs_material::gas::GasState;
 use fs_rand::StreamKey;
 
+use crate::bernoulli_aperture::developing::{DevelopingSlit, DevelopingSlitState};
 use crate::wind_line::{WindBoundary, WindLineBank, WindLineError};
 
 /// Physical regional tube networks sharing the same jet-drive loop.
@@ -582,6 +583,8 @@ pub struct FlueVoice {
     // The series inertance is the rest of a computed window mass.
     window_mass: bool,
     viscous_windway: Option<crate::bernoulli_aperture::viscous::ViscousSlit>,
+    // Shah's developing-flow law and its state at the held note's pressure.
+    developing_windway: Option<(DevelopingSlit, DevelopingSlitState)>,
     unsteady_windway: Option<windway::UnsteadyWindway>,
     rho: f64,
     nu: f64,
@@ -723,6 +726,7 @@ impl FlueVoice {
             window_radiation: None,
             window_mass: false,
             viscous_windway: None,
+            developing_windway: None,
             unsteady_windway: None,
             rho,
             nu,
@@ -867,7 +871,7 @@ impl FlueVoice {
     /// voice, or a held pressure outside the ACTUAL finite low-Mach jet-speed domain.
     pub fn with_viscous_windway(mut self, length_m: f64) -> Result<Self, FlueError> {
         if self.poisoned || self.samples != 0 || self.viscous_windway.is_some()
-            || self.unsteady_windway.is_some() {
+            || self.developing_windway.is_some() || self.unsteady_windway.is_some() {
             return Err(FlueError::Invalid { what: "viscous windway requires one cold attachment" });
         }
         if self.forced.is_some() {
@@ -885,6 +889,48 @@ impl FlueVoice {
     #[must_use]
     pub const fn viscous_windway(&self) -> Option<&crate::bernoulli_aperture::viscous::ViscousSlit> {
         self.viscous_windway.as_ref()
+    }
+
+    /// Attach a straight slit windway held by Shah's laminar developing-flow law
+    /// ([`crate::bernoulli_aperture::developing`]) before any accepted sample, in
+    /// place of the fully developed [`FlueVoice::with_viscous_windway`]. Its exit
+    /// width/height and the inlet gas hold the bulk speed at every pressure, and that
+    /// speed enters the jet as the slit law's does. The held note's pressure must lie
+    /// inside the law's validity (x+, Chen's low-Re term, laminarity); the attack
+    /// and release pass through the same quasi-steady law and are not covered by it.
+    /// The jet transfers are refused: their exit profiles assume Poiseuille or
+    /// uniform flow, and this law's core speed (pexfp.135.5) is not yet connected.
+    ///
+    /// # Errors
+    /// Invalid geometry or gas, repeated/late attachment, another windway or a jet
+    /// transfer, a poisoned voice, or a held pressure outside the law's validity or
+    /// the admitted jet-speed domain.
+    pub fn with_developing_windway(mut self, length_m: f64, held_pressure_pa: f64)
+        -> Result<Self, FlueError>
+    {
+        if self.poisoned || self.samples != 0 || self.viscous_windway.is_some()
+            || self.developing_windway.is_some() || self.unsteady_windway.is_some() {
+            return Err(FlueError::Invalid { what: "developing windway requires one cold attachment and no other windway" });
+        }
+        if self.forced.is_some() || self.nolle.is_some() {
+            return Err(FlueError::Invalid { what: "developing windway refuses the jet transfers, whose exit profile it does not supply" });
+        }
+        if !(held_pressure_pa > 0.0 && held_pressure_pa.is_finite()) {
+            return Err(FlueError::Invalid { what: "developing windway requires a positive held blowing pressure" });
+        }
+        let law = DevelopingSlit::from_gas(&self.gas, length_m).map_err(FlueError::Physics)?;
+        let held = law.held(self.geometry.flue_width_m, self.geometry.flue_height_m, held_pressure_pa)
+            .map_err(FlueError::Physics)?;
+        held.validity().map_err(|what| FlueError::Invalid { what })?;
+        self.developing_windway = Some((law, held));
+        self.jet_speed_m_s = self.validated_jet_speed(self.blow_pa)?;
+        Ok(self)
+    }
+
+    /// The developing-flow law and its validity state at the held pressure.
+    #[must_use]
+    pub fn developing_windway(&self) -> Option<(&DevelopingSlit, &DevelopingSlitState)> {
+        self.developing_windway.as_ref().map(|(law, held)| (law, held))
     }
 
     /// Replace the legacy `0.61 a_eq` mouth inertance with a computed window
@@ -952,7 +998,7 @@ impl FlueVoice {
         convection_cells: usize) -> Result<Self, FlueError>
     {
         if self.poisoned || self.samples != 0 || self.viscous_windway.is_some()
-            || self.unsteady_windway.is_some() {
+            || self.developing_windway.is_some() || self.unsteady_windway.is_some() {
             return Err(FlueError::Invalid { what: "unsteady windway requires one cold source-channel attachment" });
         }
         if self.forced.is_some() {
@@ -978,9 +1024,9 @@ impl FlueVoice {
     /// geometry/realisation refusal.
     pub fn with_nolle_jet(mut self, spec: nolle_jet::NolleSpec) -> Result<Self, FlueError> {
         if self.poisoned || self.samples != 0 || self.nolle.is_some()
-            || self.unsteady_windway.is_some() {
+            || self.unsteady_windway.is_some() || self.developing_windway.is_some() {
             return Err(FlueError::Invalid {
-                what: "nolle jet requires one cold attachment and no unsteady windway",
+                what: "nolle jet requires one cold attachment and no unsteady or developing windway",
             });
         }
         if self.forced.is_some() {
@@ -1028,9 +1074,9 @@ impl FlueVoice {
         -> Result<Self, FlueError>
     {
         if self.poisoned || self.samples != 0 || self.nolle.is_some() || self.forced.is_some()
-            || self.unsteady_windway.is_some() {
+            || self.unsteady_windway.is_some() || self.developing_windway.is_some() {
             return Err(FlueError::Invalid {
-                what: "forced jet requires one cold attachment and no other jet transfer or unsteady windway",
+                what: "forced jet requires one cold attachment and no other jet transfer or unsteady or developing windway",
             });
         }
         if !(reference_pressure_pa > 0.0 && reference_pressure_pa.is_finite()) {
@@ -1068,6 +1114,11 @@ impl FlueVoice {
     fn speed_at_pressure(&self, pressure_pa: f64) -> Result<f64, FlueError> {
         if let Some(channel) = &self.unsteady_windway {
             return channel.steady_speed(pressure_pa);
+        }
+        if let Some((law, _)) = &self.developing_windway {
+            // Validity binds the held note at attachment; other pressures use the same law.
+            return Ok(law.held(self.geometry.flue_width_m, self.geometry.flue_height_m, pressure_pa)
+                .map_err(FlueError::Physics)?.bulk_speed_m_s);
         }
         match self.viscous_windway {
             Some(law) => {
@@ -2082,6 +2133,49 @@ mod convection_tests {
     }
 
     #[test]
+    fn g3_developing_windway_holds_shahs_speed_and_refuses_what_it_does_not_cover() {
+        use nolle_jet::{ChannelClass, NolleSpec};
+        let (air, g) = (gas(101_325.0), geometry());
+        let held = DevelopingSlit::from_gas(&air, 0.015).unwrap()
+            .held(g.flue_width_m, g.flue_height_m, 100.0).unwrap();
+        held.validity().unwrap();
+        let mut developing = voice(air, g, 0.01).with_developing_windway(0.015, 100.0).unwrap();
+        let mut fully = voice(air, g, 0.01).with_viscous_windway(0.015).unwrap();
+        for v in [&mut developing, &mut fully] { v.apply(FlueControl::SetBlowingPressure(100.0)).unwrap(); }
+        assert_eq!(developing.jet_speed_m_s(), held.bulk_speed_m_s);
+        assert_eq!(developing.developing_windway().unwrap().1, &held);
+        assert!(developing.jet_speed_m_s() < fully.jet_speed_m_s(),
+            "entrance shear must hold a slower jet than the fully developed law");
+        let mut out = [0.0; 257];
+        developing.step_block(&mut out).unwrap();
+        assert!(out.iter().all(|p| p.is_finite()));
+        assert_work(&developing);
+        assert!(developing.with_developing_windway(0.015, 100.0).is_err(), "attachment after samples");
+        // One windway, attached cold, at a held pressure inside validity.
+        assert!(voice(air, g, 0.01).with_viscous_windway(0.015).unwrap()
+            .with_developing_windway(0.015, 100.0).is_err());
+        assert!(voice(air, g, 0.01).with_developing_windway(0.015, 100.0).unwrap()
+            .with_viscous_windway(0.015).is_err());
+        assert!(voice(air, g, 0.01).with_developing_windway(0.015, 100.0).unwrap()
+            .with_unsteady_windway(0.015, 8, 8).is_err());
+        assert!(voice(air, g, 0.01).with_unsteady_windway(0.015, 8, 8).unwrap()
+            .with_developing_windway(0.015, 100.0).is_err());
+        for pressure in [0.0, -1.0, f64::NAN] {
+            assert!(voice(air, g, 0.01).with_developing_windway(0.015, pressure).is_err());
+        }
+        // A 1 mm channel at 5 kPa holds x+ below 4e-4: refused, not extrapolated.
+        assert!(matches!(voice(air, g, 0.01).with_developing_windway(0.001, 5000.0),
+            Err(FlueError::Invalid { what }) if what.contains("x+")));
+        // The Nolle/Price transfer assumes a Poiseuille or uniform exit, in either order.
+        let nolle = FlueGeometry { cut_up_m: 0.004, ..g };
+        let spec = NolleSpec::price_2015(ChannelClass::Short, 0.0007).unwrap();
+        assert!(voice(air, nolle, 1.0).with_developing_windway(0.015, 100.0).unwrap()
+            .with_nolle_jet(spec).is_err());
+        assert!(voice(air, nolle, 1.0).with_nolle_jet(spec).unwrap()
+            .with_developing_windway(0.015, 100.0).is_err());
+    }
+
+    #[test]
     fn g0_contraction_cap_rounding_cannot_refuse_an_interior_jet_root() {
         let mut geometry = geometry();
         geometry.flue_width_m = 0.001;
@@ -2188,6 +2282,12 @@ mod forced_jet_tests {
         assert!(v.with_forced_jet(PLUMBING, 100.0).is_err());
         let v = bare_voice(gas(101_325.0), geometry(CUT_UP_M), 48_000, 4096)
             .with_unsteady_windway(0.015, 8, 8).unwrap();
+        assert!(v.with_forced_jet(PLUMBING, 100.0).is_err());
+        // The developing windway supplies no exit profile to the forced jet, in either order.
+        let v = voice(gas(101_325.0), geometry(CUT_UP_M));
+        assert!(v.with_developing_windway(0.015, 100.0).is_err());
+        let v = bare_voice(gas(101_325.0), geometry(CUT_UP_M), 48_000, 4096)
+            .with_developing_windway(0.015, 100.0).unwrap();
         assert!(v.with_forced_jet(PLUMBING, 100.0).is_err());
         // A 60 um cut-up on a 1 mm flue is 0.08 b, inside the first 0.25 b grid cell.
         let v = bare_voice(gas(101_325.0), geometry(6e-5), 48_000, 4096);

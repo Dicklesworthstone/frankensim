@@ -790,6 +790,26 @@ cell counts remain in the output sidecar. Omitted/`none` retains the ideal jet.
 A finite channel is explicit physical geometry; no lip-channel length is
 invented for a transverse flute.
 
+`windway slit-developing LENGTH_M` (opt-in, pexfp.135.4) holds the jet by
+`bernoulli_aperture::developing`: a straight parallel-plate slit fed through a
+uniform inlet, `P = rho U^2/2 [1 + 4 f_app L/D_h]` with Shah's (1978) apparent
+friction factor for developing laminar flow, as stated openly by McCreery et al.
+(NURETH-15 2013, eq. 2). No constant is tuned; at large `x+` it is the
+fully developed slit law plus `0.674 rho U^2/2`. The held note's pressure (the
+gesture's highest blowing pressure) must lie inside the correlation's validity
+or the input is refused: `x+ >= 4e-4`; Chen's low-Re inlet term
+`0.64 + 38/Re` may move the held drop by at most the stated 2.4 %; an
+undeveloped exit keeps `Re_delta* <= 520` (core speed and displacement thickness;
+the Blasius layer's linear instability, Manneville 2016); and a developed exit
+keeps `Re_Dh <= 1760` (`Re_cl = 660` of the laminar centreline speed and half gap,
+above which plane Poiseuille flow sustains turbulence, Kashyap et al. 2020). The
+sidecar records `x+`, `Re_Dh`, `Re_L`, the core
+speed, displacement thickness and these measures at the held pressure. The
+attack and release pass through the same quasi-steady law and are not covered.
+The jet transfers refuse it (their exit profiles assume Poiseuille or uniform
+flow; pexfp.135.5 owns the core speed). A converging windway declared as its
+exit-height slit most likely overstates the loss.
+
 `bernoulli_aperture::slit_channel` resolves fixed, fully developed planar
 Newtonian momentum from the retained `GasState` density and viscosity. Its
 2..=4096 cell-centred finite volumes share a no-slip wall diffusion operator;

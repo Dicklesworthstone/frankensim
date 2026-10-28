@@ -18,6 +18,8 @@ pub mod dynamic;
 pub(crate) mod moving;
 /// Explicit quasisteady wall resistance and separated flow in a uniform slit.
 pub mod viscous;
+/// Quasi-steady laminar developing flow through a straight slit (Shah 1978), with validity refusals.
+pub mod developing;
 /// Refinable unsteady no-slip momentum transport across a fixed planar channel.
 pub mod slit_channel;
 /// Independently moving source blades sharing one fluid/contact interface.
