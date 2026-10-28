@@ -248,3 +248,117 @@ fn continuous_joint_query_ignores_clock_and_transients_and_preserves_all_histori
     assert_eq!(coupled.cavity().network().samples_rendered(), 8);
     assert_eq!(coupled.load().state().step_count(), 8);
 }
+
+#[test]
+fn shared_cavity_retains_a_strictly_proper_terminal_with_zero_instantaneous_feedthrough() {
+    use fs_duct::dg::{DgBoundary, DgDuct, DgMesh, MAX_DG_PROPAGATOR_DOFS};
+    use fs_duct::{Duct, Segment};
+    use fs_vfit::mimo::{
+        MimoModel,
+        load::{MimoLoadLimits, PreparedMimoLoad},
+    };
+    use fs_vfit::model::PoleTerm;
+    let cavity = cavity(48000, true, 1e6);
+    let gas = *cavity.source().gas();
+    let zc = gas.density * gas.sound_speed / cavity.source().neck_area_m2();
+    let rate = 3000.0;
+    let source = MimoModel {
+        ports: 1,
+        poles: vec![PoleTerm::Real {
+            pole: -rate,
+            residue: 0.0,
+        }],
+        residues: vec![vec![C64::from_re(zc * rate)]],
+        d: vec![0.0],
+        e: vec![0.0],
+        reciprocal: true,
+    };
+    let dt = 1.0 / 48000.0;
+    let terminal = PreparedMimoLoad::new(
+        &source,
+        dt,
+        MimoLoadLimits {
+            band_rad_s: [100.0, core::f64::consts::PI / dt],
+            sampled_passivity_points: 33,
+            max_states: 8,
+            max_memory_bytes: 1 << 20,
+        },
+    )
+    .unwrap();
+    let duct = DgDuct::new(
+        &Duct {
+            segments: vec![Segment::Cylinder {
+                radius: 0.001,
+                length: 0.05,
+            }],
+        },
+        &gas,
+        DgMesh {
+            elements: 1,
+            order: 2,
+        },
+        DgBoundary::Port(PortId(7)),
+        DgBoundary::Port(PortId(8)),
+    )
+    .unwrap()
+    .with_viscothermal(8, [50.0, 2000.0], 0.01)
+    .unwrap();
+    let load =
+        DgPortLoad::new_with_terminal(duct, dt, 1e-11, MAX_DG_PROPAGATOR_DOFS, terminal).unwrap();
+    let gate = CancelGate::new_clock_free();
+    let mut coupled = cavity.with_downstream_duct(load, &gate).unwrap();
+    let force = C64::new(0.001, -0.0003);
+    let incident = C64::new(0.02, 0.01);
+    for omega in [700.0, 1400.0, 3000.0] {
+        let actual = coupled
+            .harmonic_response(omega, &[force], incident, 100_000_000, &gate)
+            .unwrap();
+        let terminal = actual.terminal.as_ref().unwrap();
+        assert_eq!(terminal.ports, [PortId(8)]);
+        let z = terminal.outward_flow_m3_s[0] / C64::new(rate, -omega);
+        complex_close(terminal.state[0], z);
+        complex_close(terminal.pressure_pa[0], z.scale(zc * rate));
+        let original = actual
+            .duct
+            .ports
+            .iter()
+            .find(|p| p.id == PortId(8))
+            .unwrap();
+        complex_close(original.pressure_pa, terminal.pressure_pa[0]);
+        complex_close(original.inflow_m3_s, -terminal.outward_flow_m3_s[0]);
+        // Independent relaxation loss. The generic result does not invent the
+        // fixture-specific available storage .25*zc*rate*|z|^2.
+        close(
+            actual.terminal_power_w,
+            0.5 * zc * rate * rate * z.norm_sq(),
+        );
+        close(
+            actual.authored_external_power_w,
+            actual.total_dissipation_w() + actual.terminal_power_w,
+        );
+        close(
+            actual.mean_stored_energy_j,
+            actual.cavity.network.mean_stored_energy_j + actual.duct.mean_stored_energy_j,
+        );
+        assert!(
+            actual.power_residual_w.abs() < 2e-9 * actual.authored_external_power_w.abs() + 1e-25
+        );
+    }
+    let response = coupled
+        .harmonic_response(1400.0, &[force], incident, 100_000_000, &gate)
+        .unwrap();
+    coupled.step(&[0.001], 0.01, &gate).unwrap();
+    let history = coupled.load().terminal().unwrap().pole_states().to_vec();
+    assert!(history.iter().any(|z| z.abs() > 0.0));
+    let state = coupled.load().state().clone();
+    let frame = coupled.last_frame().unwrap().clone();
+    assert_eq!(
+        response,
+        coupled
+            .harmonic_response(1400.0, &[force], incident, 100_000_000, &gate)
+            .unwrap()
+    );
+    assert_eq!(coupled.load().terminal().unwrap().pole_states(), history);
+    assert_eq!(coupled.load().state(), &state);
+    assert_eq!(coupled.last_frame(), Some(&frame));
+}
