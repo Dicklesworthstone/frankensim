@@ -2369,7 +2369,13 @@ small positive coenergy survives cancellation in `B H-psi`.
 supported range; it does not introduce a separately interpolated inverse law.
 The tangent at zero uses the first segment; an interior knot uses its right
 derivative. Bregman loss visits only the original segments crossed by the two
-field magnitudes. These are floating-point model evaluations, not uncertainty
+field magnitudes. `bregman_density_3d_j_m3` extends the same original-slope
+radial/angular decomposition to spatial fields, including rotation and crossed
+saturation segments, without subtracting large stored energies. The planar
+entry point keeps its reduction order. This loss is numerical dissipation,
+never hysteretic or Joule heat. Six direct convexity tests cover both dimensions,
+independent energy identities, rotation covariance and tiny angular losses.
+These are floating-point model evaluations, not uncertainty
 propagation or enclosures. Focused material regressions compare compiled
 curves and fixed-temperature surface slices to canonical source queries, check
 inverse and Legendre derivatives, and preserve domain refusals.

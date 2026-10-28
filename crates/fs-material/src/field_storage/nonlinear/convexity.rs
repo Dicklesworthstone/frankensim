@@ -2,14 +2,14 @@
 //! The source owner supplies its original segment slopes. Every contribution
 //! is nonnegative; subtracting two large stored energies is unnecessary.
 
-pub(super) fn bregman_density(
-    before: [f64; 2],
-    after: [f64; 2],
+pub(super) fn bregman_density<const D: usize>(
+    before: [f64; D],
+    after: [f64; D],
     h_after: f64,
     segments: impl IntoIterator<Item = (f64, f64, f64)>,
 ) -> Option<f64> {
-    let a = before[0].hypot(before[1]);
-    let b = after[0].hypot(after[1]);
+    let a = before.iter().fold(0.0_f64, |m, x| m.hypot(*x));
+    let b = after.iter().fold(0.0_f64, |m, x| m.hypot(*x));
     if !a.is_finite() || !b.is_finite() || !h_after.is_finite() || h_after < 0.0 {
         return None;
     }
@@ -35,9 +35,11 @@ pub(super) fn bregman_density(
         0.0
     } else {
         // |u-v|^2/2 = 1-cos(theta), stable even for a tiny rotation.
-        let dx = before[0] / a - after[0] / b;
-        let dy = before[1] / a - after[1] / b;
-        (h_after * a) * (0.5 * dx.mul_add(dx, dy * dy))
+        let chord_squared = before.iter().zip(after).rev().fold(0.0, |sum, (x, y)| {
+            let difference = x / a - y / b;
+            difference.mul_add(difference, sum)
+        });
+        (h_after * a) * (0.5 * chord_squared)
     };
     let result = radial + angular;
     (result.is_finite() && result >= 0.0).then_some(result)
@@ -116,5 +118,63 @@ mod tests {
     fn unrepresentable_loss_is_refused() {
         assert!(bregman_density([f64::INFINITY, 0.0], [0.0, 0.0], 0.0, []).is_none());
         assert!(bregman_density([1.0, 0.0], [-1.0, 0.0], f64::MAX, [(0.0, 2.0, 1.0)]).is_none());
+    }
+
+    #[test]
+    fn spatial_piecewise_energy_identity_includes_rotation_and_saturation_crossings() {
+        let states = [
+            [0.0, 0.0, 0.0],
+            [0.3, -0.4, 0.0],
+            [0.0, 0.0, 2.0],
+            [1.0, -1.0, 1.0],
+            [-0.5, 0.5, -2.0],
+        ];
+        for before in states {
+            for after in states {
+                let a = before.iter().fold(0.0_f64, |m, x| m.hypot(*x));
+                let b = after.iter().fold(0.0_f64, |m, x| m.hypot(*x));
+                let h = if b <= 1.0 { b } else { 1.0 + 4.0 * (b - 1.0) };
+                let work = if b == 0.0 {
+                    0.0
+                } else {
+                    after
+                        .iter()
+                        .zip(before)
+                        .map(|(x, y)| h * (x / b) * (x - y))
+                        .sum()
+                };
+                let actual =
+                    bregman_density(before, after, h, [(0.0, 1.0, 1.0), (1.0, 4.0, 4.0)]).unwrap();
+                assert!(actual >= 0.0);
+                near(actual, work - energy(b) + energy(a));
+            }
+        }
+    }
+
+    #[test]
+    fn spatial_linear_limit_rotation_covariance_and_tiny_angular_loss() {
+        let before: [f64; 3] = [0.6, -0.8, 1.2];
+        let after: [f64; 3] = [-0.4, 1.1, 0.3];
+        let norm = |v: [f64; 3]| v.iter().fold(0.0_f64, |m, x| m.hypot(*x));
+        let loss = |a, b| bregman_density(a, b, 3.0 * norm(b), [(0.0, 4.0, 3.0)]).unwrap();
+        let expected = 1.5
+            * before
+                .iter()
+                .zip(after)
+                .map(|(a, b)| (b - a).powi(2))
+                .sum::<f64>();
+        near(loss(before, after), expected);
+        // A proper non-axis-aligned rotation, expressed independently of any
+        // magnetic implementation: Rodrigues rotation about (1,1,1)/sqrt(3).
+        let rotate = |v: [f64; 3]| {
+            let (s, c) = 0.731_f64.sin_cos();
+            let u = 1.0 / 3.0_f64.sqrt();
+            let projection = u * (v[0] + v[1] + v[2]);
+            let cross = [u * (v[2] - v[1]), u * (v[0] - v[2]), u * (v[1] - v[0])];
+            std::array::from_fn(|i| c * v[i] + s * cross[i] + (1.0 - c) * u * projection)
+        };
+        near(loss(rotate(before), rotate(after)), expected);
+        let tiny = loss([0.0, 1.0, 1e-8], [0.0, 1.0, -1e-8]);
+        assert!((tiny / 6e-16 - 1.0).abs() < 1e-14);
     }
 }

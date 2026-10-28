@@ -70,15 +70,15 @@ pub struct SpatialNonlinearVectorMagnetostatics {
     pub(in crate::spatial) geometry: SpatialGeometry,
     materials: Vec<SpatialNonlinearMaterial>,
     linear_permeability: Vec<Option<f64>>,
-    cells: Vec<CellVectors>,
-    curl: Csr,
-    limits: WeightedAssemblyLimits,
+    pub(super) cells: Vec<CellVectors>,
+    pub(super) curl: Csr,
+    pub(super) limits: WeightedAssemblyLimits,
 }
-struct Response {
-    h: [f64; 3],
-    energy: f64,
+pub(super) struct Response {
+    pub(super) h: [f64; 3],
+    pub(super) energy: f64,
     coenergy: f64,
-    tangent: [[f64; 3]; 3],
+    pub(super) tangent: [[f64; 3]; 3],
     recoil: Option<RecoilOperatingPoint>,
 }
 struct Evaluation {
@@ -156,7 +156,7 @@ impl SpatialNonlinearVectorMagnetostatics {
         }
         .face_edges(face)
     }
-    fn response(&self, cell: usize, b: [f64; 3]) -> Result<Response> {
+    pub(super) fn response(&self, cell: usize, b: [f64; 3]) -> Result<Response> {
         let magnitude = finite(norm(b))?;
         let (h, energy, coenergy, secant, differential, recoil) = match &self.materials[cell] {
             SpatialNonlinearMaterial::Reversible(law) => {
@@ -565,6 +565,7 @@ impl SpatialNonlinearVectorMagnetostatics {
             flux_density_t: value.b,
             field_strength_a_m: value.h,
             current_density_a_m2: current_a_m2.to_vec(),
+            prescribed_edges: sources.prescribed.iter().map(Option::is_some).collect(),
             cell_energy_j: value.cell_energy_j,
             energy_j: value.energy_j,
             coenergy_j: value.coenergy_j,
@@ -587,6 +588,7 @@ pub struct SpatialNonlinearVectorField<'m> {
     flux_density_t: Vec<[f64; 3]>,
     field_strength_a_m: Vec<[f64; 3]>,
     current_density_a_m2: Vec<[f64; 3]>,
+    prescribed_edges: Vec<bool>,
     cell_energy_j: Vec<f64>,
     energy_j: f64,
     coenergy_j: f64,
@@ -618,6 +620,10 @@ impl<'m> SpatialNonlinearVectorField<'m> {
     }
     pub fn impressed_current_density_a_m2(&self) -> &[[f64; 3]] {
         &self.current_density_a_m2
+    }
+    /// Actual tangential-A trace edges, distinct from numerical gauge choices.
+    pub fn prescribed_edges(&self) -> &[bool] {
+        &self.prescribed_edges
     }
     pub fn cell_energy_j(&self) -> &[f64] {
         &self.cell_energy_j

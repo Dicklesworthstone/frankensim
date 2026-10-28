@@ -1118,3 +1118,52 @@ mode and second-order time refinement, analytic three-dimensional motional
 feedback/Ohmic/Lorentz work, separated floating conductors, fixed-recoil energy
 and source limits, and bounded/cancelled deterministic rollback. Synthetic
 materials qualify equations and discretization, not empirical devices.
+
+## Reversible saturation in three-dimensional A–phi histories
+
+`spatial::vector_potential::induction::nonlinear::SpatialNonlinearInduction`
+continues an admitted original nonlinear vector field with coupled conductivity,
+floating charge and prescribed nodal motion. Backward Euler uses H(B_next) and
+J=sigma*(-delta_A/dt-grad(phi)+v cross B_next). The original source's consistent
+differential reluctivity enters the original FEEC tensor curl-curl operator and
+bounded Newton/FGMRES. The shared `induction::coupling` implementation owns the
+relative tree gauge, conducting components, sparse conductivity/motion blocks,
+source compatibility and exact P1 current/Ohmic/Lorentz recovery for both
+transient discretizations. No independent copy of those equations is introduced.
+
+Original linear, reversible isotropic saturation and fixed-recoil cells may
+coexist. Fixed tangential traces and actual prescribed-edge masks are retained.
+Every nonlinear trial starts from the same accepted A and source history.
+The retained full Ampere and charge equations, div-curl, source/recoil envelopes
+and total work independently gate acceptance. Iteration, assembly and Krylov
+work bounds and cancellation return no partial state.
+
+The source-exact 3D Bregman loss D=H_next.delta_B-delta_psi is computed from
+positive original segment slopes and angular convexity. Reports separately
+retain signed magnetic storage change, physical Joule heat, Lorentz work,
+impressed work and nonnegative numerical dissipation. D is never thermal heat,
+hysteresis or a fitted core-loss term. This is first-order fixed-geometry,
+fixed-temperature MQS evolution; vector hysteresis, ALE, terminals, resolved
+displacement current and mechanical state advancement remain separate work.
+
+Seven new tests check an independently charge-eliminated BE mode, analytic
+saturated decay and first-order refinement, exact multi-knot work/heat/loss,
+three-dimensional motion/charge/Lorentz feedback, rotation/gauge covariance,
+fixed-recoil energy/envelopes and transactional source/work/cancellation
+refusal. Six original linear midpoint induction regressions remain passing.
+
+## Source-pinned temperature refresh of three-dimensional induction
+
+`SpatialInduction::step_with_materials_candidate` evolves the retained linear
+A–phi history with endpoint source-backed conductivity and permeability.
+Original geometry, Whitney bases and incidence allocations are shared; only
+material-weighted operators are rebuilt. The complete original magnetic and
+electrical source selections, conductivity basis, temperature coordinate,
+fixed traces, conducting support and accepted history remain authoritative.
+Per-cell receipts separate signed permeability parameter work from native
+Ohmic heat and prescribed Lorentz work. Magnetic free-energy change plus
+Ohmic heat plus mechanical work equals impressed work plus parameter work.
+The endpoint field and source bundle are retained together; a static re-solve
+cannot discard induction memory. This lower owner does not choose temperature
+or deposit reversible heat: the finite-caloric consumer must account for
+magnetic entropy/internal energy and positive combined heat capacity.

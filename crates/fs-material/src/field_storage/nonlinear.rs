@@ -144,8 +144,32 @@ impl ReversibleMagneticMaterial {
         before_flux_density_t: [f64; 2],
         after_flux_density_t: [f64; 2],
     ) -> Result<f64, FieldStorageError> {
-        let before_magnitude = before_flux_density_t[0].hypot(before_flux_density_t[1]);
-        let after_magnitude = after_flux_density_t[0].hypot(after_flux_density_t[1]);
+        self.bregman_density(before_flux_density_t, after_flux_density_t)
+    }
+
+    /// The same source-exact backward-Euler convexity loss for a spatial field.
+    /// Includes changes of both magnitude and direction, including rotations
+    /// crossing the original saturation segments. This is numerical loss, not
+    /// hysteretic or conductor heating; it must remain a separate work account.
+    pub fn bregman_density_3d_j_m3(
+        &self,
+        before_flux_density_t: [f64; 3],
+        after_flux_density_t: [f64; 3],
+    ) -> Result<f64, FieldStorageError> {
+        self.bregman_density(before_flux_density_t, after_flux_density_t)
+    }
+
+    fn bregman_density<const D: usize>(
+        &self,
+        before_flux_density_t: [f64; D],
+        after_flux_density_t: [f64; D],
+    ) -> Result<f64, FieldStorageError> {
+        let before_magnitude = before_flux_density_t
+            .iter()
+            .fold(0.0_f64, |m, x| m.hypot(*x));
+        let after_magnitude = after_flux_density_t
+            .iter()
+            .fold(0.0_f64, |m, x| m.hypot(*x));
         self.evaluate(before_magnitude)?;
         let after = self.evaluate(after_magnitude)?;
         let first = self.segment_at_flux_density(before_magnitude.min(after_magnitude));

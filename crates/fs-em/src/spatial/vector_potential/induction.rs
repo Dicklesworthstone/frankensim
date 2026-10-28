@@ -8,18 +8,23 @@
 //! potentials and insulating natural current boundaries, including internal
 //! conductor/insulator interfaces. Tangential A traces stay fixed.
 //!
-//! Linear/recoil material, conductivity and Eulerian occupancy remain fixed.
-//! This models prescribed nonrelativistic motion preserving those coefficient
-//! fields, not moving interfaces/ALE, terminals, saturation, hysteresis or heat
-//! feedback. Joule and Lorentz transfers require their receivers' own accounts.
+//! The base step holds linear/recoil material, conductivity and Eulerian
+//! occupancy fixed. The nonlinear child supplies reversible saturation; the
+//! thermal child refreshes source-bound linear material and conductivity.
+//! Motion is prescribed and nonrelativistic. Moving interfaces/ALE, terminals
+//! and hysteresis are outside these owners. Joule and Lorentz transfers require
+//! their receivers' own accounts.
 //! Source pairing is current-controlled, with piecewise linear impressed current
 //! and held velocity. Displacement current is outside the MQS approximation.
 //! A-v formulation reference: https://getdp.info/doc/texinfo/getdp.html .
 
-use super::super::{
-    SpatialMagneticError, SpatialMagneticMaterial, cross, dot, finite, invalid, poll, sub,
-};
+mod coupling;
+pub mod nonlinear;
+pub mod thermal;
+
+use super::super::{SpatialMagneticError, SpatialMagneticMaterial, dot, finite, invalid, poll};
 use super::{SpatialVectorField, SpatialVectorMagnetostatics, apply};
+use coupling::{Coupling, Geometry, admit_step};
 use fs_material::conductor::ResolvedConductorState;
 use fs_solver::{
     FgmresState, FlexiblePreconditioner, LinearOp, ResidualClaim, SolveReport, SolverRunProgress,
@@ -27,7 +32,8 @@ use fs_solver::{
 use fs_sparse::{Csr, ops};
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
+    ops::Deref,
     sync::Arc,
 };
 
@@ -74,6 +80,10 @@ pub struct SpatialInductionStep {
     pub endpoint_flux_density_t: Vec<[f64; 3]>,
     pub stored_before_j: f64,
     pub stored_after_j: f64,
+    /// Original per-cell magnetic energies and source-parameter work.
+    pub magnetic_cells: Vec<SpatialInductionMagneticCell>,
+    /// Signed magnetic parameter work; not heat or impressed-current supply.
+    pub parameter_work_j: f64,
     pub heat_j: f64,
     pub mechanical_work_j: f64,
     pub impressed_work_j: f64,
@@ -82,6 +92,32 @@ pub struct SpatialInductionStep {
     pub maximum_charge_residual_a: f64,
     pub maximum_cell_magnetic_peclet: f64,
     pub report: Option<SolveReport>,
+}
+#[derive(Clone, Debug)]
+pub struct SpatialInductionMagneticCell {
+    pub cell: usize,
+    pub volume_m3: f64,
+    pub flux_density_t: [[f64; 3]; 2],
+    pub free_energy_j: [f64; 2],
+    pub parameter_work_j: f64,
+}
+/// Original constitutive recovery of an accepted induction cochain.
+/// Private fields prevent construction from detached arbitrary B/H samples.
+pub struct SpatialInductionField {
+    flux_density_t: Vec<[f64; 3]>,
+    field_strength_a_m: Vec<[f64; 3]>,
+    stored_energy_j: f64,
+}
+impl SpatialInductionField {
+    pub fn flux_density_t(&self) -> &[[f64; 3]] {
+        &self.flux_density_t
+    }
+    pub fn field_strength_a_m(&self) -> &[[f64; 3]] {
+        &self.field_strength_a_m
+    }
+    pub const fn stored_energy_j(&self) -> f64 {
+        self.stored_energy_j
+    }
 }
 pub struct SpatialInductionCandidate<'m> {
     state: SpatialInduction<'m>,
@@ -106,46 +142,32 @@ pub struct SpatialInduction<'m> {
     time_s: f64,
 }
 struct Prepared<'m> {
-    problem: &'m SpatialVectorMagnetostatics,
-    sources: Vec<Option<ResolvedConductorState>>,
-    cells: Vec<ConductionCell>,
-    edge_unknown: Vec<Option<usize>>,
-    fixed_edges: Vec<bool>,
-    tree_edges: Vec<usize>,
-    charge_unknown: Vec<Option<usize>>,
-    charge_vertices: Vec<(usize, usize)>,
-    mass: Csr,
+    problem: MagneticOwner<'m>,
+    coupling: Coupling,
     magnetic: Csr,
-    physical_mass_diagonal: Vec<f64>,
 }
-struct ConductionCell {
-    cell: usize,
-    component: usize,
-    sigma: f64,
-    volume: f64,
-    indices: [Option<usize>; 10],
-    charges: [usize; 4],
-    /// Whitney edges followed by nodal gradients, evaluated at original vertices.
-    basis: [[[f64; 3]; 10]; 4],
+impl Deref for Prepared<'_> {
+    type Target = Coupling;
+    fn deref(&self) -> &Self::Target {
+        &self.coupling
+    }
+}
+#[derive(Clone)]
+enum MagneticOwner<'m> {
+    Borrowed(&'m SpatialVectorMagnetostatics),
+    Owned(Arc<SpatialVectorMagnetostatics>),
+}
+impl Deref for MagneticOwner<'_> {
+    type Target = SpatialVectorMagnetostatics;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Borrowed(p) => p,
+            Self::Owned(p) => p,
+        }
+    }
 }
 fn positive(x: f64) -> bool {
     x.is_finite() && x > 0.0
-}
-fn root(parent: &mut [usize], mut x: usize) -> usize {
-    while parent[x] != x {
-        parent[x] = parent[parent[x]];
-        x = parent[x];
-    }
-    x
-}
-fn join(parent: &mut [usize], a: usize, b: usize) -> bool {
-    let (a, b) = (root(parent, a), root(parent, b));
-    if a == b {
-        false
-    } else {
-        parent[a.max(b)] = a.min(b);
-        true
-    }
 }
 /// Exact tetrahedral integral of two P1 vector fields.
 fn product(a: [[f64; 3]; 4], b: [[f64; 3]; 4], volume: f64) -> f64 {
@@ -189,12 +211,20 @@ fn diagonal(matrix: &Csr, r: usize) -> f64 {
     let (c, v) = matrix.row(r);
     c.binary_search(&r).ok().map(|i| v[i]).unwrap_or(0.0)
 }
+fn geometry(problem: &SpatialVectorMagnetostatics) -> Geometry<'_> {
+    Geometry {
+        geometry: &problem.geometry,
+        cells: &problem.cells,
+        curl: &problem.curl,
+    }
+}
 fn field(
     problem: &SpatialVectorMagnetostatics,
     a: &[f64],
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<(Vec<[f64; 3]>, f64)> {
+) -> Result<SpatialInductionField> {
     let mut b = Vec::with_capacity(problem.cells.len());
+    let mut strengths = Vec::with_capacity(problem.cells.len());
     let mut energy = 0.0;
     for (cell, vectors) in problem.cells.iter().enumerate() {
         poll(cancelled)?;
@@ -221,8 +251,13 @@ fn field(
         let volume = problem.geometry.geometry.vol_signed[cell].abs();
         energy = finite(energy + 0.5 * problem.permeability[cell] * dot(h, h) * volume)?;
         b.push(flux);
+        strengths.push(h);
     }
-    Ok((b, energy))
+    Ok(SpatialInductionField {
+        flux_density_t: b,
+        field_strength_a_m: strengths,
+        stored_energy_j: energy,
+    })
 }
 impl<'m> SpatialInduction<'m> {
     /// Continue an admitted native static field with fixed tangential A traces.
@@ -238,228 +273,35 @@ impl<'m> SpatialInduction<'m> {
     ) -> Result<Self> {
         poll(cancelled)?;
         let problem = initial.problem();
-        let mesh = problem.mesh();
-        let nc = sources.iter().filter(|s| s.is_some()).count();
-        if sources.len() != mesh.tets.len()
-            || nc == 0
-            || nc > limits.maximum_conducting_cells
-            || !positive(flux_tolerance_wb)
-            || nc
-                .checked_mul(100)
-                .and_then(|n| n.checked_add(problem.stiffness.nnz()))
-                .is_none_or(|n| n > limits.maximum_assembly_terms)
-        {
-            return Err(invalid(
-                "complete nonempty bounded conducting/insulating map required",
-            ));
-        }
-        // Relative tree gauge: contract fixed trace edges first, then select a
-        // canonical forest among the remaining edge columns. No handle is cut.
-        let fixed_edges = initial.prescribed_edges().to_vec();
-        let mut fixed_parent: Vec<_> = (0..mesh.vertex_count).collect();
-        for (e, &[a, b]) in mesh.edges.iter().enumerate() {
-            poll(cancelled)?;
-            if fixed_edges[e] {
-                join(&mut fixed_parent, a as usize, b as usize);
-            }
-        }
-        let fixed_component: Vec<_> = (0..mesh.vertex_count)
-            .map(|v| root(&mut fixed_parent, v))
-            .collect();
-        let mut forest = fixed_parent.clone();
-        let mut tree_edges = vec![];
-        let mut adjacency = vec![vec![]; mesh.vertex_count];
-        for (e, &[a, b]) in mesh.edges.iter().enumerate() {
-            poll(cancelled)?;
-            if !fixed_edges[e] && join(&mut forest, a as usize, b as usize) {
-                tree_edges.push(e);
-                let (a, b) = (fixed_component[a as usize], fixed_component[b as usize]);
-                adjacency[a].push((b, -initial.potential_wb()[e]));
-                adjacency[b].push((a, initial.potential_wb()[e]));
-            }
-        }
-        let mut shift = vec![None; mesh.vertex_count];
-        for v in 0..mesh.vertex_count {
-            if fixed_component[v] != v || shift[v].is_some() {
-                continue;
-            }
-            shift[v] = Some(0.0);
-            let mut q = VecDeque::from([v]);
-            while let Some(a) = q.pop_front() {
-                poll(cancelled)?;
-                for &(b, delta) in &adjacency[a] {
-                    if shift[b].is_none() {
-                        shift[b] = Some(finite(shift[a].unwrap() + delta)?);
-                        q.push_back(b);
-                    }
+        let (coupling, potential_wb) = Coupling::prepare(
+            geometry(problem),
+            initial.potential_wb(),
+            initial.prescribed_edges().to_vec(),
+            sources,
+            problem.stiffness.nnz(),
+            limits,
+            flux_tolerance_wb,
+            |cell, source| {
+                let magnetic = match &problem.materials[cell] {
+                    SpatialMagneticMaterial::Linear(m) => m,
+                    SpatialMagneticMaterial::Recoil(m) => m.material().material(),
+                };
+                if source.material() != magnetic {
+                    return Err(invalid(
+                        "conductivity must retain the exact original magnetic material bundle",
+                    ));
                 }
-            }
-        }
-        let mut potential_wb = initial.potential_wb().to_vec();
-        for (e, &[a, b]) in mesh.edges.iter().enumerate() {
-            potential_wb[e] = finite(
-                potential_wb[e] + shift[fixed_component[b as usize]].unwrap()
-                    - shift[fixed_component[a as usize]].unwrap(),
-            )?;
-        }
-        let mut gauged = vec![false; mesh.edges.len()];
-        for &e in &tree_edges {
-            gauged[e] = true;
-            potential_wb[e] = 0.0;
-        }
-        let old_flux = apply(&problem.curl, initial.potential_wb(), cancelled)?;
-        let new_flux = apply(&problem.curl, &potential_wb, cancelled)?;
-        if old_flux
-            .iter()
-            .zip(&new_flux)
-            .any(|(a, b)| (a - b).abs() > flux_tolerance_wb)
-        {
-            return Err(invalid(
-                "relative tree gauge changed initial magnetic face flux",
-            ));
-        }
-        let mut edge_unknown = vec![None; mesh.edges.len()];
-        let mut unknowns = 0;
-        for e in 0..mesh.edges.len() {
-            if !fixed_edges[e] && !gauged[e] {
-                edge_unknown[e] = Some(unknowns);
-                unknowns += 1;
-            }
-        }
-        let mut regions: Vec<_> = (0..mesh.tets.len()).collect();
-        for face in &problem.geometry.faces {
-            poll(cancelled)?;
-            if face.cells.len() == 2
-                && sources[face.cells[0]].is_some()
-                && sources[face.cells[1]].is_some()
-            {
-                join(&mut regions, face.cells[0], face.cells[1]);
-            }
-        }
-        let mut charge_map = BTreeMap::new();
-        let mut component = vec![usize::MAX; mesh.tets.len()];
-        for (cell, source) in sources.iter().enumerate() {
-            poll(cancelled)?;
-            let Some(source) = source else { continue };
-            let magnetic = match &problem.materials[cell] {
-                SpatialMagneticMaterial::Linear(m) => m,
-                SpatialMagneticMaterial::Recoil(m) => m.material().material(),
-            };
-            if source.material() != magnetic
-                || !source
-                    .source_property()
-                    .is_static_at_fixed_external_conditions()
-            {
-                return Err(invalid(
-                    "conductivity must retain the exact fixed original magnetic material bundle",
-                ));
-            }
-            let sigma = source.resistivity_ohm_m().recip();
-            if !positive(sigma) {
-                return Err(invalid("positive representable conductivity required"));
-            }
-            component[cell] = root(&mut regions, cell);
-            for &v in &mesh.tets[cell] {
-                charge_map.insert((component[cell], v as usize), 0);
-            }
-        }
-        let mut charge_unknown = vec![];
-        let mut charge_vertices = vec![];
-        let mut last_region = None;
-        for (&key, index) in &mut charge_map {
-            *index = charge_vertices.len();
-            charge_vertices.push(key);
-            if last_region != Some(key.0) {
-                charge_unknown.push(None);
-                last_region = Some(key.0);
-            } else {
-                charge_unknown.push(Some(unknowns));
-                unknowns += 1;
-            }
-        }
-        if unknowns > limits.maximum_unknowns {
-            return Err(invalid("coupled A-phi unknown budget exceeded"));
-        }
-        let mut cells = Vec::with_capacity(nc);
-        let mut mass = row_map(unknowns);
-        let mut physical_mass_diagonal = vec![0.0; mesh.edges.len()];
-        for (cell, source) in sources.iter().enumerate() {
-            poll(cancelled)?;
-            let Some(source) = source else { continue };
-            let tet = mesh.tets[cell];
-            let grads = &problem.geometry.geometry.grads[cell];
-            let mut basis = [[[0.0; 3]; 10]; 4];
-            let mut indices = [None; 10];
-            let mut e = 0;
-            for a in 0..4 {
-                for b in a + 1..4 {
-                    let (a, b) = if tet[a] < tet[b] { (a, b) } else { (b, a) };
-                    indices[e] = edge_unknown[problem.cells[cell].edges[e]];
-                    basis[a][e] = grads[b];
-                    basis[b][e] = grads[a].map(|v| -v);
-                    e += 1;
-                }
-            }
-            let charges = tet.map(|v| charge_map[&(component[cell], v as usize)]);
-            for a in 0..4 {
-                indices[a + 6] = charge_unknown[charges[a]];
-                for row in &mut basis {
-                    row[a + 6] = grads[a];
-                }
-            }
-            let volume = problem.geometry.geometry.vol_signed[cell].abs();
-            let sigma = source.resistivity_ohm_m().recip();
-            for a in 0..10 {
-                for b in a..10 {
-                    let value =
-                        finite(sigma * product(basis.map(|q| q[a]), basis.map(|q| q[b]), volume))?;
-                    if a == b && a < 6 {
-                        physical_mass_diagonal[problem.cells[cell].edges[a]] += value;
-                    }
-                    if let (Some(i), Some(j)) = (indices[a], indices[b]) {
-                        add(&mut mass, i, j, value)?;
-                        if i != j {
-                            add(&mut mass, j, i, value)?;
-                        }
-                    }
-                }
-            }
-            cells.push(ConductionCell {
-                cell,
-                component: component[cell],
-                sigma,
-                volume,
-                indices,
-                charges,
-                basis,
-            });
-        }
-        let mut magnetic = row_map(unknowns);
-        for (e, index) in edge_unknown.iter().enumerate() {
-            poll(cancelled)?;
-            if let Some(i) = *index {
-                let (cols, vals) = problem.stiffness.row(e);
-                for (&f, &value) in cols.iter().zip(vals) {
-                    if let Some(j) = edge_unknown[f] {
-                        add(&mut magnetic, i, j, value)?;
-                    }
-                }
-            }
-        }
+                Ok(())
+            },
+            cancelled,
+        )?;
+        let magnetic = coupling.restrict(&problem.stiffness, cancelled)?;
         field(problem, &potential_wb, cancelled)?;
         Ok(Self {
             prepared: Arc::new(Prepared {
-                problem,
-                sources,
-                cells,
-                edge_unknown,
-                fixed_edges,
-                tree_edges,
-                charge_unknown,
-                charge_vertices,
-                mass: csr(mass),
-                magnetic: csr(magnetic),
-                physical_mass_diagonal,
+                problem: MagneticOwner::Borrowed(problem),
+                coupling,
+                magnetic,
             }),
             potential_wb,
             impressed_current_a_m2: initial.impressed_current_density_a_m2().to_vec(),
@@ -475,11 +317,22 @@ impl<'m> SpatialInduction<'m> {
     pub fn conductors(&self) -> &[Option<ResolvedConductorState>] {
         &self.prepared.sources
     }
+    pub fn impressed_current_density_a_m2(&self) -> &[[f64; 3]] {
+        &self.impressed_current_a_m2
+    }
     pub fn tree_edges(&self) -> &[usize] {
         &self.prepared.tree_edges
     }
-    pub fn problem(&self) -> &'m SpatialVectorMagnetostatics {
-        self.prepared.problem
+    pub fn problem(&self) -> &SpatialVectorMagnetostatics {
+        &self.prepared.problem
+    }
+    /// Recover the accepted physical B without a static re-equilibration.
+    pub fn flux_density_t(&self, cancelled: &mut impl FnMut() -> bool) -> Result<Vec<[f64; 3]>> {
+        geometry(self.problem()).flux(&self.potential_wb, cancelled)
+    }
+    /// Recover B/H from accepted A and its original source, with no static solve.
+    pub fn field(&self, cancelled: &mut impl FnMut() -> bool) -> Result<SpatialInductionField> {
+        field(self.problem(), &self.potential_wb, cancelled)
     }
 
     /// Piecewise linear impressed-current history, held nodal velocity and exact
@@ -493,67 +346,44 @@ impl<'m> SpatialInduction<'m> {
         controls: SpatialInductionControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialInductionCandidate<'m>> {
+        self.step_prepared_candidate(
+            Arc::clone(&self.prepared),
+            endpoint_current_a_m2,
+            velocity_m_s,
+            duration_s,
+            controls,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_prepared_candidate(
+        &self,
+        prepared: Arc<Prepared<'m>>,
+        endpoint_current_a_m2: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        duration_s: f64,
+        controls: SpatialInductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialInductionCandidate<'m>> {
         poll(cancelled)?;
-        let p = &self.prepared;
-        let problem = p.problem;
+        let p = &prepared;
+        let problem = &*p.problem;
+        let original = self.problem();
         let mesh = problem.mesh();
         let n = p.mass.nrows();
-        if !positive(duration_s)
-            || !positive(controls.relative_tolerance)
-            || controls.relative_tolerance >= 1.0
-            || [
-                controls.absolute_residual_a,
-                controls.current_tolerance_a,
-                controls.flux_tolerance_wb,
-                controls.energy_tolerance_j,
-                controls.maximum_cell_magnetic_peclet,
-            ]
-            .into_iter()
-            .any(|v| !positive(v))
-            || controls.restart == 0
-            || controls.maximum_cycles == 0
-            || endpoint_current_a_m2.len() != mesh.tets.len()
-            || endpoint_current_a_m2
-                .iter()
-                .flatten()
-                .any(|v| !v.is_finite())
-            || velocity_m_s.len() != mesh.vertex_count
-            || velocity_m_s.iter().flatten().any(|v| !v.is_finite())
-        {
-            return Err(invalid(
-                "complete finite motion/current and positive bounded induction controls required",
-            ));
-        }
-        let time_s = finite(self.time_s + duration_s)?;
-        if time_s <= self.time_s {
-            return Err(invalid(
-                "induction interval disappears in the retained clock",
-            ));
-        }
-        let restart = controls.restart.min(n.max(1));
-        let memory = restart
-            .checked_mul(2)
-            .and_then(|v| v.checked_add(12))
-            .and_then(|v| v.checked_mul(n))
-            .and_then(|v| {
-                restart
-                    .checked_add(8)
-                    .and_then(|r| r.checked_mul(restart))
-                    .and_then(|r| v.checked_add(r))
-            })
-            .and_then(|v| {
-                controls
-                    .maximum_cycles
-                    .checked_mul(4)
-                    .and_then(|r| v.checked_add(r))
-            });
-        if memory.is_none_or(|v| v > controls.maximum_krylov_scalars)
-            || restart.checked_mul(controls.maximum_cycles).is_none()
-        {
-            return Err(invalid("induction Krylov work/storage budget exceeded"));
-        }
-        let endpoint_load = current_load(
-            p,
+        let g = geometry(problem);
+        let (time_s, restart) = admit_step(
+            g,
+            &p.coupling,
+            self.time_s,
+            endpoint_current_a_m2,
+            velocity_m_s,
+            duration_s,
+            controls,
+        )?;
+        let endpoint_load = p.current_load(
+            g,
             endpoint_current_a_m2,
             controls.current_tolerance_a,
             cancelled,
@@ -564,63 +394,37 @@ impl<'m> SpatialInduction<'m> {
             .zip(endpoint_current_a_m2)
             .map(|(a, b)| std::array::from_fn(|j| f64::midpoint(a[j], b[j])))
             .collect();
-        let load = current_load(
-            p,
+        let load = p.current_load(
+            g,
             &midpoint_current,
             controls.current_tolerance_a,
             cancelled,
         )?;
-        let (b0, stored_before_j) = field(problem, &self.potential_wb, cancelled)?;
-        let old_magnetic = apply(&problem.stiffness, &self.potential_wb, cancelled)?;
+        let old_field = field(original, &self.potential_wb, cancelled)?;
+        let stored_before_j = old_field.stored_energy_j;
+        let b0 = old_field.flux_density_t;
+        let old_magnetic = apply(&original.stiffness, &self.potential_wb, cancelled)?;
+        let refreshed_magnetic = apply(&problem.stiffness, &self.potential_wb, cancelled)?;
         let mut rhs = vec![0.0; n];
         for (e, index) in p.edge_unknown.iter().enumerate() {
             if let Some(i) = *index {
-                rhs[i] = finite(load[e] + problem.remanence_load[e] - old_magnetic[e])?;
+                rhs[i] = finite(
+                    load[e] + f64::midpoint(original.remanence_load[e], problem.remanence_load[e])
+                        - f64::midpoint(old_magnetic[e], refreshed_magnetic[e]),
+                )?;
             }
         }
-        let mut motion = row_map(n);
-        let mut maximum_cell_magnetic_peclet = 0.0_f64;
-        for c in &p.cells {
-            poll(cancelled)?;
-            let tet = mesh.tets[c.cell];
-            let v = tet.map(|i| velocity_m_s[i as usize]);
-            let mut diameter = 0.0_f64;
-            let mut speed = 0.0_f64;
-            for a in 0..4 {
-                speed = speed.max(super::super::norm(v[a]));
-                for b in a + 1..4 {
-                    diameter = diameter.max(super::super::norm(sub(
-                        problem.positions_m()[tet[a] as usize],
-                        problem.positions_m()[tet[b] as usize],
-                    )));
-                }
-            }
-            let peclet = finite(0.5 * problem.permeability[c.cell] * c.sigma * speed * diameter)?;
-            maximum_cell_magnetic_peclet = maximum_cell_magnetic_peclet.max(peclet);
-            if peclet > controls.maximum_cell_magnetic_peclet {
-                return Err(invalid(
-                    "moving-conductor magnetic Peclet allowance exceeded",
-                ));
-            }
-            let drive = v.map(|v| cross(v, b0[c.cell]));
-            for a in 0..10 {
-                let Some(i) = c.indices[a] else { continue };
-                rhs[i] =
-                    finite(rhs[i] + c.sigma * product(c.basis.map(|q| q[a]), drive, c.volume))?;
-                for b in 0..6 {
-                    if let Some(j) = c.indices[b] {
-                        let motional = v.map(|v| cross(v, problem.cells[c.cell].curls[b]));
-                        add(
-                            &mut motion,
-                            i,
-                            j,
-                            finite(c.sigma * product(c.basis.map(|q| q[a]), motional, c.volume))?,
-                        )?;
-                    }
-                }
-            }
+        let (motion, drive, maximum_cell_magnetic_peclet) = p.motion(
+            g,
+            velocity_m_s,
+            &b0,
+            &problem.permeability,
+            controls.maximum_cell_magnetic_peclet,
+            cancelled,
+        )?;
+        for (rhs, drive) in rhs.iter_mut().zip(drive) {
+            *rhs = finite(*rhs + drive)?;
         }
-        let motion = csr(motion);
         let transpose = ops::transpose(&motion);
         let inverse: Vec<_> = (0..n)
             .map(|i| {
@@ -658,6 +462,8 @@ impl<'m> SpatialInduction<'m> {
                 motion: &motion,
                 transpose: &transpose,
                 dt: duration_s,
+                magnetic_scale: 0.5,
+                motion_scale: 0.5,
                 check: &check,
             };
             if rhs_norm > target {
@@ -735,79 +541,30 @@ impl<'m> SpatialInduction<'m> {
             .zip(&next)
             .map(|(a, b)| f64::midpoint(*a, *b))
             .collect();
-        let (stage_flux_density_t, _) = field(problem, &mid, cancelled)?;
-        let (endpoint_flux_density_t, stored_after_j) = field(problem, &next, cancelled)?;
-        let midpoint_magnetic = apply(&problem.stiffness, &mid, cancelled)?;
+        let stage_flux_density_t = field(problem, &mid, cancelled)?.flux_density_t;
+        let endpoint_field = field(problem, &next, cancelled)?;
+        let stored_after_j = endpoint_field.stored_energy_j;
+        let endpoint_flux_density_t = endpoint_field.flux_density_t;
         let endpoint_magnetic = apply(&problem.stiffness, &next, cancelled)?;
-        let mut current_edges = vec![0.0; mesh.edges.len()];
-        let mut charge = vec![0.0; p.charge_vertices.len()];
-        let mut cells = vec![];
-        let mut heat_j = 0.0;
-        let mut mechanical_work_j = 0.0;
-        for c in &p.cells {
-            poll(cancelled)?;
-            let vectors = &problem.cells[c.cell];
-            let tet = mesh.tets[c.cell];
-            let velocity = tet.map(|v| velocity_m_s[v as usize]);
-            let potential_v = c
-                .charges
-                .map(|i| p.charge_unknown[i].map_or(0.0, |j| x[j] / duration_s));
-            let mut laboratory = [[0.0; 3]; 4];
-            for k in 0..4 {
-                for j in 0..3 {
-                    let mut electric = 0.0;
-                    for a in 0..6 {
-                        electric -= delta[vectors.edges[a]] / duration_s * c.basis[k][a][j];
-                    }
-                    for a in 0..4 {
-                        electric -= potential_v[a] * c.basis[k][a + 6][j];
-                    }
-                    laboratory[k][j] = finite(electric)?;
-                }
-            }
-            let conductor = std::array::from_fn(|k| {
-                let motional = cross(velocity[k], stage_flux_density_t[c.cell]);
-                std::array::from_fn(|j| laboratory[k][j] + motional[j])
-            });
-            let current = conductor.map(|e| e.map(|v| v * c.sigma));
-            let force = current.map(|j| cross(j, stage_flux_density_t[c.cell]));
-            let heat = finite(duration_s * c.sigma * product(conductor, conductor, c.volume))?;
-            let work = finite(duration_s * product(velocity, force, c.volume))?;
-            if heat < 0.0 {
-                return Err(invalid("negative Ohmic dissipation"));
-            }
-            heat_j = finite(heat_j + heat)?;
-            mechanical_work_j = finite(mechanical_work_j + work)?;
-            for a in 0..10 {
-                let value = finite(product(c.basis.map(|q| q[a]), current, c.volume))?;
-                if a < 6 {
-                    let e = vectors.edges[a];
-                    current_edges[e] = finite(current_edges[e] + value)?;
-                } else {
-                    let i = c.charges[a - 6];
-                    charge[i] = finite(charge[i] + value)?;
-                }
-            }
-            cells.push(SpatialInductionCell {
-                cell: c.cell,
-                component: c.component,
-                volume_m3: c.volume,
-                potential_v,
-                laboratory_electric_field_v_m: laboratory,
-                conductor_electric_field_v_m: conductor,
-                current_density_a_m2: current,
-                lorentz_force_density_n_m3: force,
-                heat_j: heat,
-                mechanical_work_j: work,
-            });
-        }
-        let maximum_charge_residual_a = charge.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        let current = p.recover(
+            g,
+            &delta,
+            &x,
+            &stage_flux_density_t,
+            velocity_m_s,
+            duration_s,
+            cancelled,
+        )?;
+        let maximum_charge_residual_a = current.maximum_charge_residual_a;
         let mut maximum_ampere_residual_a = 0.0_f64;
         for e in 0..mesh.edges.len() {
             poll(cancelled)?;
             if !p.fixed_edges[e] {
                 let residual = finite(
-                    midpoint_magnetic[e] - problem.remanence_load[e] - load[e] - current_edges[e],
+                    f64::midpoint(old_magnetic[e], endpoint_magnetic[e])
+                        - f64::midpoint(original.remanence_load[e], problem.remanence_load[e])
+                        - load[e]
+                        - current.edge_current_a[e],
                 )?;
                 maximum_ampere_residual_a = maximum_ampere_residual_a.max(residual.abs());
                 if p.physical_mass_diagonal[e] == 0.0
@@ -833,8 +590,39 @@ impl<'m> SpatialInduction<'m> {
             }
         }
         let impressed_work_j = finite(load.iter().zip(&delta).map(|(j, a)| j * a).sum())?;
+        let mut magnetic_cells = Vec::with_capacity(mesh.tets.len());
+        let mut parameter_work_j = 0.0;
+        for cell in 0..mesh.tets.len() {
+            poll(cancelled)?;
+            let volume = problem.geometry.geometry.vol_signed[cell].abs();
+            let old_mu = original.permeability[cell];
+            let new_mu = problem.permeability[cell];
+            let old_h =
+                std::array::from_fn(|j| (b0[cell][j] - original.remanence[cell][j]) / old_mu);
+            let new_h = std::array::from_fn(|j| {
+                (endpoint_flux_density_t[cell][j] - problem.remanence[cell][j]) / new_mu
+            });
+            let work = finite(
+                0.5 * volume
+                    * dot(b0[cell], endpoint_flux_density_t[cell])
+                    * ((old_mu - new_mu) / old_mu / new_mu),
+            )?;
+            parameter_work_j = finite(parameter_work_j + work)?;
+            magnetic_cells.push(SpatialInductionMagneticCell {
+                cell,
+                volume_m3: volume,
+                flux_density_t: [b0[cell], endpoint_flux_density_t[cell]],
+                free_energy_j: [
+                    finite(0.5 * volume * old_mu * dot(old_h, old_h))?,
+                    finite(0.5 * volume * new_mu * dot(new_h, new_h))?,
+                ],
+                parameter_work_j: work,
+            });
+        }
         let energy_residual_j = finite(
-            stored_after_j - stored_before_j + heat_j + mechanical_work_j - impressed_work_j,
+            stored_after_j - stored_before_j + current.heat_j + current.mechanical_work_j
+                - impressed_work_j
+                - parameter_work_j,
         )?;
         if energy_residual_j.abs() > controls.energy_tolerance_j {
             return Err(invalid(
@@ -844,19 +632,21 @@ impl<'m> SpatialInduction<'m> {
         poll(cancelled)?;
         Ok(SpatialInductionCandidate {
             state: Self {
-                prepared: Arc::clone(&self.prepared),
+                prepared,
                 potential_wb: next,
                 impressed_current_a_m2: endpoint_current_a_m2.to_vec(),
                 time_s,
             },
             step: SpatialInductionStep {
-                cells,
+                cells: current.cells,
                 stage_flux_density_t,
                 endpoint_flux_density_t,
                 stored_before_j,
                 stored_after_j,
-                heat_j,
-                mechanical_work_j,
+                magnetic_cells,
+                parameter_work_j,
+                heat_j: current.heat_j,
+                mechanical_work_j: current.mechanical_work_j,
                 impressed_work_j,
                 energy_residual_j,
                 maximum_ampere_residual_a,
@@ -867,49 +657,14 @@ impl<'m> SpatialInduction<'m> {
         })
     }
 }
-fn current_load(
-    p: &Prepared<'_>,
-    current: &[[f64; 3]],
-    tol: f64,
-    cancelled: &mut impl FnMut() -> bool,
-) -> Result<Vec<f64>> {
-    let problem = p.problem;
-    for (i, face) in problem.geometry.faces.iter().enumerate() {
-        poll(cancelled)?;
-        let jump = if face.cells.len() == 2 {
-            sub(current[face.cells[0]], current[face.cells[1]])
-        } else if problem
-            .face_edges(i)
-            .unwrap()
-            .iter()
-            .all(|&e| p.fixed_edges[e])
-        {
-            continue;
-        } else {
-            current[face.cells[0]]
-        };
-        if finite(face.area_m2 * dot(jump, face.outward_normal))?.abs() > tol {
-            return Err(invalid(
-                "impressed current violates interface or natural-boundary continuity",
-            ));
-        }
-    }
-    let mut load = vec![0.0; problem.mesh().edges.len()];
-    for (cell, vectors) in problem.cells.iter().enumerate() {
-        poll(cancelled)?;
-        for e in 0..6 {
-            let edge = vectors.edges[e];
-            load[edge] = finite(load[edge] + dot(current[cell], vectors.integrals[e]))?;
-        }
-    }
-    Ok(load)
-}
 struct Increment<'a> {
     magnetic: &'a Csr,
     mass: &'a Csr,
     motion: &'a Csr,
     transpose: &'a Csr,
     dt: f64,
+    magnetic_scale: f64,
+    motion_scale: f64,
     check: &'a dyn Fn() -> bool,
 }
 impl Increment<'_> {
@@ -923,7 +678,8 @@ impl Increment<'_> {
                 let (c, v) = a.row(i);
                 c.iter().zip(v).map(|(&j, &v)| v * x[j]).sum::<f64>()
             };
-            y[i] = 0.5 * row(self.magnetic) + row(self.mass) / self.dt - 0.5 * row(motion);
+            y[i] = self.magnetic_scale * row(self.magnetic) + row(self.mass) / self.dt
+                - self.motion_scale * row(motion);
         }
     }
 }

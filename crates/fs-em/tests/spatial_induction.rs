@@ -1,5 +1,7 @@
 //! Independent A-phi induction oracles on actual 3D Whitney fields.
 //! Synthetic materials qualify equations/discretization, not empirical devices.
+#[path = "spatial_induction/nonlinear.rs"]
+mod nonlinear;
 use fs_em::spatial::{
     SpatialMagneticError, SpatialMagneticMaterial, SpatialRecoilMaterial,
     vector_potential::{

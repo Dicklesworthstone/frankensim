@@ -15,7 +15,8 @@
 //!
 //! The baseline owner is a static, lowest-order, isotropic linear/fixed-recoil
 //! model. `nonlinear` adds reversible saturation; `induction` adds coupled
-//! linear/fixed-recoil moving-conductor evolution. These rungs do not claim a
+//! moving-conductor evolution, nonlinear saturation and sourced thermal refresh.
+//! These rungs do not claim a
 //! Coulomb saddle/HX/higher-order discretization or TEAM qualification.
 //! Weak-form reference: https://mfem.org/tesla-notes/ .
 
@@ -37,7 +38,7 @@ use fs_qty::Dims;
 use fs_rep_mesh::TetComplex;
 use fs_solver::{CheckedCgConfig, CheckedCgError, LinearOp, SolveReport, checked_cg};
 use fs_sparse::{Csr, precond::Precond};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 type Result<T> = core::result::Result<T, SpatialMagneticError>;
 
 /// Tangential A on one exterior face in sorted canonical edge order
@@ -71,12 +72,12 @@ struct CellVectors {
 
 /// Fixed geometry/material curl-curl preparation, reused across current loads.
 pub struct SpatialVectorMagnetostatics {
-    pub(super) geometry: SpatialGeometry,
+    pub(super) geometry: Arc<SpatialGeometry>,
     materials: Vec<SpatialMagneticMaterial>,
     permeability: Vec<f64>,
     remanence: Vec<[f64; 3]>,
-    cells: Vec<CellVectors>,
-    curl: Csr,
+    cells: Arc<[CellVectors]>,
+    curl: Arc<Csr>,
     stiffness: Csr,
     remanence_load: Vec<f64>,
 }
@@ -185,7 +186,47 @@ impl SpatialVectorMagnetostatics {
         if tetrahedra.len() != materials.len() {
             return Err(invalid("complete original magnetic material map required"));
         }
-        let geometry = prepare_geometry(positions_m, tetrahedra, limits, cancelled)?;
+        let geometry = Arc::new(prepare_geometry(
+            positions_m,
+            tetrahedra,
+            limits,
+            cancelled,
+        )?);
+        let cells = prepare_cells(&geometry, cancelled)?.into();
+        let curl = Arc::new(incidence_to_csr(&geometry.mesh.d1()));
+        Self::assemble_materials(geometry, cells, curl, materials, limits, cancelled)
+    }
+
+    // Field-history refreshes keep the actual geometry, incidence and Whitney
+    // basis allocations. Only material-weighted operators are reassembled.
+    pub(super) fn with_materials(
+        &self,
+        materials: Vec<SpatialMagneticMaterial>,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
+        Self::assemble_materials(
+            Arc::clone(&self.geometry),
+            Arc::clone(&self.cells),
+            Arc::clone(&self.curl),
+            materials,
+            limits,
+            cancelled,
+        )
+    }
+
+    fn assemble_materials(
+        geometry: Arc<SpatialGeometry>,
+        cells: Arc<[CellVectors]>,
+        curl: Arc<Csr>,
+        materials: Vec<SpatialMagneticMaterial>,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
+        poll(cancelled)?;
+        if materials.len() != geometry.mesh.tets.len() {
+            return Err(invalid("complete original magnetic material map required"));
+        }
         let mut permeability = Vec::with_capacity(materials.len());
         let mut remanence = Vec::with_capacity(materials.len());
         let mut weights = Vec::with_capacity(materials.len());
@@ -223,9 +264,7 @@ impl SpatialVectorMagnetostatics {
                 SpatialMagneticError::Assembly(e)
             }
         })?;
-        let curl = incidence_to_csr(&geometry.mesh.d1());
         let stiffness = stiffness(&curl, mass.matrix());
-        let cells = prepare_cells(&geometry, cancelled)?;
         let mut remanence_load = vec![0.0; geometry.mesh.edges.len()];
         for (cell, vectors) in cells.iter().enumerate() {
             poll(cancelled)?;
@@ -250,8 +289,12 @@ impl SpatialVectorMagnetostatics {
             remanence_load,
         })
     }
-    pub const fn mesh(&self) -> &TetComplex {
+    pub fn mesh(&self) -> &TetComplex {
         &self.geometry.mesh
+    }
+    /// Physical volume of an original admitted tetrahedron [m3].
+    pub fn cell_volume_m3(&self, cell: usize) -> Option<f64> {
+        self.geometry.geometry.vol_signed.get(cell).map(|v| v.abs())
     }
     pub fn positions_m(&self) -> &[[f64; 3]] {
         &self.geometry.positions_m
