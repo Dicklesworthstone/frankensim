@@ -527,3 +527,52 @@ existing nonlinear duct tests pass against the refactored kernel, and the
 mass and physical-energy residuals. These are focused production-code checks,
 not a workspace Cargo/DSR result or experimental validation. Reactive/catalytic
 surface kinetics, wall heat transfer and moving-wall work remain separate models.
+
+
+## Conservative molecular, thermal and viscous field evolution
+
+`multicomponent::dissipation::DissipationOperator<L>` binds the original gas,
+stationary constant-area mesh, boundary conditions and explicit transport law.
+`advance_for` completes an exact requested duration through bounded SSP RK2
+parabolic substeps. It publishes the complete field atomically and leaves its
+clock unchanged for the composing integrator. Nonuniform spacing is admitted
+with the actual distances and physical cell volumes; variable-area viscous
+geometry requires additional stress terms and is refused.
+
+Every shared face carries barycentric Maxwell-Stefan mass fluxes Ji, momentum
+flux `-tau`, and gauged-energy flux
+`sum_i (h_i/M_i - e_ref_i) Ji - lambda grad(T) - u*tau`.
+The longitudinal stress is `tau=(4mu/3+mu_bulk) grad(u)`; bulk viscosity is an
+explicit authored value, with zero selecting Stokes' hypothesis. The source
+enthalpy difference is evaluated as `[Delta u_i(Tmin,T)+RT]/M_i`, avoiding
+large-formation-reference subtraction. No independent viscous-heating source
+is added to total energy. Viscous loss of kinetic energy therefore appears as
+internal heating through the conservative update.
+
+Periodic faces are shared bit-for-bit. Transmissive ends use zero diffusive
+gradients. Stationary reflecting ends are impermeable and adiabatic, retain
+viscous traction, and perform exactly zero wall energy work. Frozen reservoir
+states have no species axis and are refused by the mixture boundary owner.
+Parabolic estimates are checked at both stages; positivity, source support,
+work limits and cancellation use bounded refusal/retry, with no clipping of
+conserved states. Complete species, momentum, physical-energy and boundary
+balances are returned.
+
+`TransportLaw` accepts actual face T,p and composition. `ConstantTransport`
+retains explicit coefficients and validity for authored approximations and
+analytic cases. `KineticTransport` adapts the source-bound Lennard-Jones,
+Chapman-Enskog/Wilke/Eucken model with reusable property storage. Matrix,
+face, stage and candidate buffers are prepared once. Derived fraction/gradient
+simplex identities use a checked roundoff-sized remainder on the largest
+component; no conserved species value or physical flux is projected.
+
+Seven focused native tests pass: Fourier heat-mode decay/refinement; analytic
+binary diffusion; viscous velocity decay and kinetic-to-internal conversion;
+unequal-mass partial-enthalpy transport and bit-identical evolution after a
+1e18 formation-reference shift; nonuniform geometry; wall traction with zero
+energy work; and cancellation, work limits, zero duration and reuse. Fourier
+L1 errors at 40/80 cells are 1.91446548e-5 / 4.77807730e-6. This remains an
+Estimated continuum operator: the parabolic estimate is not a spectral or
+fully discrete entropy/invariant-domain proof. Soret/Dufour effects, nonideal
+phases, Knudsen transport and variable-area viscous stresses remain separate
+closures.

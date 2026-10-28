@@ -17,6 +17,9 @@ mod evolve;
 mod flux;
 mod wall;
 
+/// Conservative molecular diffusion, heat conduction and viscous momentum transport.
+pub mod dissipation;
+
 /// Atomic finite-rate chemistry coupled to conservative species transport.
 pub mod reactive;
 
