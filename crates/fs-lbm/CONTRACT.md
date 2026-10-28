@@ -526,10 +526,11 @@ rollback. Their addition does not establish executed native validation.
   All paths reject invalid parameters or state before publication.
 - `D3Q19_MOMENT_COLLISION_SEMANTICS_VERSION` — independent version for the
   optional moment-space basis, rate grouping, `mul_add` chains, cumulant
-  projection, and deterministic back-transform. Version 2 adds the physical
-  population forcing transform; the zero-force branch retains the original
-  version-1 arithmetic and reduced-cumulant golden. The established BGK grid
-  golden is unchanged.
+  projection, and deterministic back-transform. Version 3 uses binomial
+  central-to-raw shifts and the fixed D3Q19 inverse instead of per-cell dense
+  factorization. This changes moment-collision roundoff and the unregistered
+  reduced-cumulant replay candidate, including unforced cells. The registered
+  BGK surfaces retain version 1 and their existing golden values.
 - `Face3`, `FaceBoundary3`, and `BoundarySpec3` — six-face axis-aligned
   boundary declarations: paired periodic faces, tangential moving/stationary
   halfway walls, regularized velocity faces, and isothermal pressure/density
@@ -873,7 +874,8 @@ polls cancellation at intervals of at most 256 measured links and before
 publication, and returns no loads or new fluid populations on refusal.
 `collide_cell3` returns typed errors rather than publishing non-finite or
 non-positive cell states. Both moment-space rungs additionally refuse rates
-outside `(0, 2)` or a numerically rank-deficient moment transform. Body
+outside `(0, 2)`. Their fixed lattice inverse requires no numerical pivot or
+rank-admission threshold; non-finite outputs still refuse. Body
 forcing is supported by all three collision families; the regularized open
 velocity/pressure boundary closure retains its separate force-free admission.
 
@@ -1562,8 +1564,15 @@ Their presence does not claim native execution or empirical gas validation.
 
 - Tiled D3Q19 grids default to BGK + Guo on a dense set of aligned SoA
   tiles. The selectable central-moment and `ReducedCumulant` cell operators
-  support body force but remain deterministic `O(Q^3)` correctness references
-  with no performance or high-Re stability claim. D3Q27 has the separate
+  support body force with deterministic `O(Q^2)` forward transforms and an
+  `O(Q)` algebraic inverse. They remain scalar references with no new high-Re
+  stability claim. A bounded complete-cell microbenchmark on Xeon Platinum
+  8573C, rustc 1.100-nightly (908501772), native opt-level 2, measured
+  2.50–2.93 times lower collision time than the version-2 dense solve across
+  forced/unforced central and reduced-cumulant modes (medians of three
+  30,000-call samples). These shared-host measurements cover cell collision;
+  they are not stream/collide GLUP/s, worker-scaling or cross-ISA evidence.
+  D3Q27 has the separate
   checked full collision/reference-grid surface above, pending native qualification.
   Normalized drag/lift histories and bandwidth roofline /
   fs-tilelang kernels remain staged. The sparse active-tile layer

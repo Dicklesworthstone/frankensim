@@ -54,9 +54,10 @@ pub const D3Q19_BIT_SEMANTICS_VERSION: u32 = 1;
 /// frozen BGK grids keep their established golden, while changes to the
 /// centered basis, relaxation grouping, cumulant projection, `mul_add` chains,
 /// or deterministic solve order bump this version and require their own
-/// golden evidence. Version 2 adds symmetric Guo forcing in the physical
-/// population frame; the zero-force numerical path retains version 1 bits.
-pub const D3Q19_MOMENT_COLLISION_SEMANTICS_VERSION: u32 = 2;
+/// golden evidence. Version 3 replaces the per-cell dense back-transform with
+/// an algebraic central-to-raw shift and fixed D3Q19 inverse. This changes
+/// moment-collision roundoff, including the unforced path; BGK is unchanged.
+pub const D3Q19_MOMENT_COLLISION_SEMANTICS_VERSION: u32 = 3;
 
 /// The D3Q19 population count.
 pub const Q3: usize = 19;
@@ -339,7 +340,8 @@ pub enum CollisionError3 {
         /// Rejected body-force vector.
         force: [f64; 3],
     },
-    /// The centered monomial transform could not be solved reliably.
+    /// The dense reference transform could not be solved reliably.
+    /// The version-3 algebraic inverse does not require pivoting.
     SingularCentralMomentTransform {
         /// Pivot column that lost rank.
         column: usize,
@@ -556,7 +558,7 @@ fn collide_moment_with_force3(
     collision: impl FnOnce([f64; Q3]) -> Result<[f64; Q3], CollisionError3>,
 ) -> Result<[f64; Q3], CollisionError3> {
     if force.iter().all(|&component| component == 0.0) {
-        // Preserve the existing unforced operator and its exact golden bits.
+        // Avoid source arithmetic in unforced cells.
         return collision(populations);
     }
     let half_source: [f64; Q3] = core::array::from_fn(|q| {
@@ -635,7 +637,7 @@ fn collide_central_moments3(
             moments[moment],
         );
     }
-    let post = solve_moment_system3(matrix, relaxed)?;
+    let post = populations_from_central_moments3(relaxed, velocity);
     for (direction, value) in post.into_iter().enumerate() {
         if !value.is_finite() {
             return Err(CollisionError3::NonFiniteOutput { direction, value });
@@ -704,7 +706,7 @@ fn collide_reduced_cumulants3(
         );
     }
     let relaxed_moments = reduced_moments_from_cumulants3(relaxed);
-    let post = solve_moment_system3(matrix, relaxed_moments)?;
+    let post = populations_from_central_moments3(relaxed_moments, velocity);
     for (direction, value) in post.into_iter().enumerate() {
         if !value.is_finite() {
             return Err(CollisionError3::NonFiniteOutput { direction, value });
@@ -713,6 +715,91 @@ fn collide_reduced_cumulants3(
     Ok(post)
 }
 
+// Lowering any nonzero exponent stays in the D3Q19 basis. Build these indices
+// at compile time; no moment lookup or matrix factorization occurs per cell.
+const LOWER_MOMENT3: [[usize; 3]; Q3] = {
+    let mut lower = [[0; 3]; Q3];
+    let mut moment = 0;
+    while moment < Q3 {
+        let mut axis = 0;
+        while axis < 3 {
+            let mut exponent = CENTRAL_MOMENT_EXPONENTS3[moment];
+            if exponent[axis] > 0 {
+                exponent[axis] -= 1;
+                let mut index = 0;
+                while index < moment
+                    && (CENTRAL_MOMENT_EXPONENTS3[index][0] != exponent[0]
+                        || CENTRAL_MOMENT_EXPONENTS3[index][1] != exponent[1]
+                        || CENTRAL_MOMENT_EXPONENTS3[index][2] != exponent[2])
+                {
+                    index += 1;
+                }
+                assert!(
+                    index < moment,
+                    "D3Q19 basis must contain every lower moment"
+                );
+                lower[moment][axis] = index;
+            }
+            axis += 1;
+        }
+        moment += 1;
+    }
+    lower
+};
+
+/// Invert the central-moment transform with O(Q) work and O(Q) scratch.
+/// First expand `c = (c-u) + u` by the binomial theorem, one axis at a time.
+/// Descending total degree keeps each lower moment unmodified within a shift.
+/// The raw D3Q19 inverse then follows from the three four-velocity coordinate
+/// planes, six axial velocities and rest population; its coefficients are
+/// exactly 1, 1/2 and 1/4. No velocity-dependent linear solve is needed.
+fn populations_from_central_moments3(mut raw: [f64; Q3], velocity: [f64; 3]) -> [f64; Q3] {
+    for (axis, shift) in velocity.into_iter().enumerate() {
+        let twice = 2.0 * shift;
+        let square = shift * shift;
+        for moment in (1..Q3).rev() {
+            let lower = LOWER_MOMENT3[moment][axis];
+            raw[moment] = match CENTRAL_MOMENT_EXPONENTS3[moment][axis] {
+                0 => raw[moment],
+                1 => shift.mul_add(raw[lower], raw[moment]),
+                2 => square.mul_add(
+                    raw[LOWER_MOMENT3[lower][axis]],
+                    twice.mul_add(raw[lower], raw[moment]),
+                ),
+                _ => unreachable!("D3Q19 exponents are at most two"),
+            };
+        }
+    }
+    let mut populations = [0.0; Q3];
+    populations[0] = raw[0] - raw[4] - raw[5] - raw[6] + raw[16] + raw[17] + raw[18];
+    for (positive, normal, mixed, first, odd) in [
+        (1, 4, [16, 17], 1, [12, 14]),
+        (3, 5, [16, 18], 2, [10, 15]),
+        (5, 6, [17, 18], 3, [11, 13]),
+    ] {
+        let even = raw[normal] - raw[mixed[0]] - raw[mixed[1]];
+        let odd = raw[first] - raw[odd[0]] - raw[odd[1]];
+        populations[positive] = 0.5 * (even + odd);
+        populations[positive + 1] = 0.5 * (even - odd);
+    }
+    for (first, even, odd1, odd2, cross) in
+        [(7, 16, 12, 10, 7), (11, 17, 14, 11, 8), (15, 18, 15, 13, 9)]
+    {
+        let same = raw[even] + raw[cross];
+        let opposite = raw[even] - raw[cross];
+        let sum = raw[odd1] + raw[odd2];
+        let difference = raw[odd1] - raw[odd2];
+        populations[first] = 0.25 * (same + sum);
+        populations[first + 1] = 0.25 * (same - sum);
+        populations[first + 2] = 0.25 * (opposite + difference);
+        populations[first + 3] = 0.25 * (opposite - difference);
+    }
+    populations
+}
+
+// Keep the original pivoted solve as an independent test oracle. Production
+// moment collisions use the fixed lattice inverse above.
+#[cfg(test)]
 fn solve_moment_system3(
     mut matrix: [[f64; Q3]; Q3],
     mut rhs: [f64; Q3],
@@ -762,6 +849,54 @@ fn solve_moment_system3(
 #[cfg(test)]
 mod forcing_tests {
     use super::*;
+
+    #[test]
+    fn algebraic_moment_inverse_matches_dense_reference() {
+        // G0: every population basis vector exercises the complete inverse,
+        // including moments that are absent from equilibrium/shear fixtures.
+        for velocity in [
+            [0.0; 3],
+            [0.07, -0.11, 0.05],
+            [-0.13, 0.09, -0.02],
+            [0.1, 0.08, -0.07],
+        ] {
+            let matrix = central_moment_matrix3(velocity);
+            for direction in 0..Q3 {
+                let mut population = [0.0; Q3];
+                population[direction] = 1.0;
+                let moments = apply_moment_matrix3(&matrix, population);
+                let actual = populations_from_central_moments3(moments, velocity);
+                let reference = solve_moment_system3(matrix, moments).unwrap();
+                for q in 0..Q3 {
+                    assert!(
+                        (actual[q] - population[q]).abs() < 2e-13,
+                        "u={velocity:?}, basis={direction}, q={q}"
+                    );
+                    assert!(
+                        (actual[q] - reference[q]).abs() < 2e-13,
+                        "dense inverse: u={velocity:?}, basis={direction}, q={q}"
+                    );
+                }
+            }
+            // An arbitrary moment vector also checks mixed signs and scales,
+            // independent of any equilibrium or collision relaxation law.
+            let moments = core::array::from_fn(|i| {
+                if i == 0 {
+                    1.03
+                } else {
+                    (i as f64 - 8.0) * 0.017
+                }
+            });
+            let actual = populations_from_central_moments3(moments, velocity);
+            let reference = solve_moment_system3(matrix, moments).unwrap();
+            for q in 0..Q3 {
+                assert!(
+                    (actual[q] - reference[q]).abs() < 2e-13,
+                    "arbitrary moments: u={velocity:?}, q={q}"
+                );
+            }
+        }
+    }
 
     const MODELS: [CollisionModel3; 2] = [
         CollisionModel3::CentralMoment {

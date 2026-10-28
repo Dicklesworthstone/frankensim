@@ -25,7 +25,7 @@ fn verdict(name: &str, pass: bool, details: &str) {
 #[test]
 fn lattice_invariants_hold_exactly() {
     assert_eq!(D3Q19_BIT_SEMANTICS_VERSION, 1);
-    assert_eq!(D3Q19_MOMENT_COLLISION_SEMANTICS_VERSION, 2);
+    assert_eq!(D3Q19_MOMENT_COLLISION_SEMANTICS_VERSION, 3);
     // The float weights are exactly the ×36 integers.
     for i in 0..Q3 {
         assert_eq!(W3[i].to_bits(), (W36[i] as f64 / 36.0).to_bits());
@@ -1077,7 +1077,9 @@ fn high_re_cavity_stability_falsifier_and_albensoeder_kuhlmann_coarse_band() {
     );
 }
 
-const REDUCED_CUMULANT_GOLDEN_HASH: u64 = 0x06a4_e85a_9b2d_f626;
+// Unregistered version-3 replay candidate. This is not a cross-ISA freeze;
+// promotion remains governed by docs/GOLDEN_POLICY.md.
+const REDUCED_CUMULANT_GOLDEN_HASH: u64 = 0x35d3_bdb1_f948_3a84;
 
 fn reduced_cumulant_candidate_hash() -> u64 {
     let mut acc = 0xcbf2_9ce4_8422_2325u64;
@@ -1113,8 +1115,8 @@ fn reduced_cumulant_candidate_hash() -> u64 {
 }
 
 /// lbm3-010 (G5, bead frankensim-vrif): seeded deterministic run for the
-/// ReducedCumulant D3Q19 operator: the version-1 unforced bits are retained
-/// under version 2, which adds the separate physical-frame forcing path.
+/// ReducedCumulant D3Q19 operator under version 3. The algebraic inverse changes
+/// roundoff relative to the version-2 dense solve, including the unforced path.
 #[test]
 fn d3q19_reduced_cumulant_candidate_hash_is_replay_stable() {
     let first = reduced_cumulant_candidate_hash();
