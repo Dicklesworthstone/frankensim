@@ -23,14 +23,18 @@ const MAX_TOTAL_PACK_BYTES: usize = 64 * 1024 * 1024;
 pub struct ModalValveMaterialRecord {
     blade: usize,
     section: usize,
+    region: usize,
     path: String,
     pack: Arc<NormalizedMaterialCardPack>,
 }
 impl ModalValveMaterialRecord {
     /// Original independent blade address.
     pub const fn blade(&self) -> usize { self.blade }
-    /// Original section/region address within that blade.
+    /// Original authored material section address within that blade.
     pub const fn section(&self) -> usize { self.section }
+    /// Resolved chart region address. A thickness map can subdivide an authored
+    /// section; every subdivision retains that same section, pack and state.
+    pub const fn region(&self) -> usize { self.region }
     /// Relative artifact name, interpreted only by the caller.
     pub fn path(&self) -> &str { &self.path }
     /// Original claims, material state and source provenance.
@@ -215,7 +219,7 @@ pub(super) fn read(
             material, model, thickness_constraint: PlateThicknessConstraint::FixedThickness(thickness),
             material_angle_rad: angle,
         });
-        records.push(ModalValveMaterialRecord { blade, section, path, pack });
+        records.push(ModalValveMaterialRecord { blade, section, region: section, path, pack });
     }
     let node_count = rows.count("nodes", 512)?;
     if node_count < 3 { return Err(bad(rows.line, "blade needs at least three original nodes")); }
@@ -233,15 +237,28 @@ pub(super) fn read(
     let triangle_count = rows.count("triangles", 2048)?;
     if triangle_count == 0 { return Err(bad(rows.line, "blade needs original triangles")); }
     let mut triangles = Vec::with_capacity(triangle_count);
+    let mut thicknesses = Vec::with_capacity(triangle_count);
     for element in 0..triangle_count {
         checkpoint(gate)?;
         let mut row = rows.row("triangle")?;
         triangles.push([row.parse()?, row.parse()?, row.parse()?]);
         let section: usize = row.parse()?;
+        let thickness = if let Some(selector) = row.fields.next() {
+            if selector != "thickness" {
+                return Err(bad(row.line, "triangle geometry accepts only thickness THICKNESS_M"));
+            }
+            let value = row.scalar()?;
+            if value <= 0.0 {
+                return Err(bad(row.line, "triangle thickness must be finite and positive"));
+            }
+            Some(value)
+        } else { None };
         row.finish()?;
         sections.get_mut(section).ok_or_else(|| bad(rows.line, "triangle references an absent material section"))?
             .region.triangle_indices.push(element);
+        thicknesses.push(thickness);
     }
+    let (sections, records) = thickness_regions(sections, records, &thicknesses, gate)?;
     let edge_count = rows.count("slit_edges", node_count)?;
     let mut slit_edges = Vec::with_capacity(edge_count);
     for _ in 0..edge_count {
@@ -270,4 +287,57 @@ pub(super) fn read(
         max_nodes: 512, max_triangles: 2048, max_projection_terms,
     };
     Ok((chart, options, initial, records))
+}
+
+
+/// Lower authored element geometry through the same regional material chart.
+/// There are at most as many occupied regions as original triangles; pack
+/// queries and source-byte budgets remain those of the original declarations.
+/// Equal thicknesses share a region. The original uniform layout is retained,
+/// including when a file explicitly repeats its section's thickness.
+fn thickness_regions(
+    sections: Vec<PlateRegionMaterial>,
+    records: Vec<ModalValveMaterialRecord>,
+    thicknesses: &[Option<f64>],
+    gate: &CancelGate,
+) -> Result<(Vec<PlateRegionMaterial>, Vec<ModalValveMaterialRecord>), PlateValveInputError> {
+    let mut regions = Vec::new();
+    let mut sources = Vec::new();
+    for (section, record) in sections.into_iter().zip(records) {
+        checkpoint(gate)?;
+        let PlateThicknessConstraint::FixedThickness(default) = section.thickness_constraint else {
+            return Err(bad(0, "blade thickness maps require an explicit section thickness"));
+        };
+        let mut groups = Vec::<(f64, Vec<usize>)>::new();
+        let mut indices = BTreeMap::new();
+        for &element in &section.region.triangle_indices {
+            checkpoint(gate)?;
+            let thickness = thicknesses[element].unwrap_or(default);
+            let index = *indices.entry(thickness.to_bits()).or_insert_with(|| {
+                groups.push((thickness, Vec::new()));
+                groups.len() - 1
+            });
+            groups[index].1.push(element);
+        }
+        // Keep empty declarations too: the existing chart owner must still
+        // refuse an unused physical section instead of silently dropping it.
+        if groups.is_empty() || (groups.len() == 1 && groups[0].0.to_bits() == default.to_bits()) {
+            let mut record = record;
+            record.region = regions.len();
+            regions.push(section);
+            sources.push(record);
+        } else {
+            for (index, (thickness, triangles)) in groups.into_iter().enumerate() {
+                let mut region = section.clone();
+                region.region.name = format!("{}-thickness-{index}", section.region.name);
+                region.region.triangle_indices = triangles;
+                region.thickness_constraint = PlateThicknessConstraint::FixedThickness(thickness);
+                let mut source = record.clone();
+                source.region = regions.len();
+                regions.push(region);
+                sources.push(source);
+            }
+        }
+    }
+    Ok((regions, sources))
 }

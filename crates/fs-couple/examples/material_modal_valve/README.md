@@ -558,7 +558,7 @@ section PACK isotropic|orthotropic12|orthotropic21 SOLID_T_K SOURCE_OMEGA_RAD_S 
 nodes COUNT
 node X Y SUPPORT_0_OR_1 UNIT_FORCE_WEIGHT
 triangles COUNT
-triangle A B C SECTION
+triangle A B C SECTION [thickness THICKNESS_M]
 slit_edges COUNT
 edge A B
 initial MODE_COUNT
@@ -572,6 +572,43 @@ existing regional plate adapter. Boundary edges define the physical slit width;
 both blades must have the same width. The force weights define each blade's
 existing force column; the file schedules blowing pressure, and the retained
 library performer also exposes the original held blade-force ports.
+
+
+A triangle may override only its geometric thickness, independently of the
+authored material section. For example, in the **manufactured** paired fixture:
+
+```text
+triangle 0 1 8 0 thickness 0.00015
+triangle 0 8 7 0
+```
+
+The first triangle has thickness 0.15 mm; the second retains section 0's
+declared 0.30 mm. Both use the same original material pack, state, grain axes
+and constitutive selection. This lets a measured vamp or another plate
+thickness map be refined without inventing a separate material for every
+geometric value. All thicknesses must be finite and strictly positive.
+The original 64-section material limit, 512-node/2048-triangle geometry limits,
+pack-byte limits and declared projection budgets still apply. At most one
+occupied chart region is needed per original triangle; equal thicknesses in
+one material section share a region.
+
+The adapter subdivides the original assignment through
+`PlateRegionMaterial` and `compile_plate_material_chart`. The same regional
+geometry therefore changes integrated mass, anisotropic bending stiffness,
+full tensor viscosity or Maxwell memory, signed modes, pressure traction,
+swept volume and source-mesh contact. No independent thickness correction,
+modal frequency fit or output filter is applied. Material replacements retain
+the authored thickness map. The native source records distinguish `section`
+(the original material declaration) from `region` (the resolved thickness
+subdivision), and every subdivision shares the original source artifact.
+
+Omitting triangle thickness, or explicitly repeating each section's existing
+value, retains the original region layout and arithmetic. Both the two-sided
+and DG material-modal consumers use this same reader. This is a piecewise
+constant finite-element thickness field; physical accuracy still requires
+geometry/mode/time refinement and a complete measured specimen. The shipped
+regressions use manufactured materials and geometry and do not assert a
+qualified clarinet or double-reed reconstruction.
 
 `loss elastic` explicitly selects zero material dissipation. The tensor form
 requires all six named plane-stress viscosity properties in every region,

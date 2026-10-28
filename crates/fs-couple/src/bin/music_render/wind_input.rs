@@ -462,8 +462,8 @@ pub(super) fn material_modal_dg_provenance(
         _ => unreachable!("authored material DG observes its original inlet or outlet"),
     };
     let materials = p.material_records().iter().map(|record| format!(
-        "{{\"blade\":{},\"section\":{},\"path\":{},\"pack_hash\":\"{}\"}}",
-        record.blade(), record.section(), json_string(record.path()),
+        "{{\"blade\":{},\"section\":{},\"region\":{},\"path\":{},\"pack_hash\":\"{}\"}}",
+        record.blade(), record.section(), record.region(), json_string(record.path()),
         record.pack().content_hash().to_hex(),
     )).collect::<Vec<_>>().join(",");
     let inlet = super::duct_metadata::gas_state(load.duct().inlet_gas());
@@ -489,10 +489,10 @@ pub(super) fn material_modal_provenance(
     };
     let materials = p.material_records().iter().map(|record| {
         let source = valve.material_plates()[record.blade()].source();
-        let region = &source.regions()[record.section()];
+        let region = &source.regions()[record.region()];
         let material = &region.input.material;
-        format!("{{\"blade\":{},\"section\":{},\"path\":{},\"pack_hash\":\"{}\",\"card_hash\":\"{}\",\"state_hash\":\"{}\",\"specimen_hash\":\"{}\",\"mass_kg\":{:e},\"thickness_m\":{:e},\"material_angle_rad\":{:e}}}",
-            record.blade(), record.section(), json_string(record.path()),
+        format!("{{\"blade\":{},\"section\":{},\"region\":{},\"path\":{},\"pack_hash\":\"{}\",\"card_hash\":\"{}\",\"state_hash\":\"{}\",\"specimen_hash\":\"{}\",\"mass_kg\":{:e},\"thickness_m\":{:e},\"material_angle_rad\":{:e}}}",
+            record.blade(), record.section(), record.region(), json_string(record.path()),
             record.pack().content_hash().to_hex(), material.card_identity().to_hex(),
             material.identity().to_hex(), source.specimen_identity().to_hex(),
             region.mass_kg, region.section.thickness, region.input.material_angle_rad)
