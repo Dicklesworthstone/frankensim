@@ -30,6 +30,7 @@ pub mod nsf3;
 pub mod perf;
 pub mod refine;
 pub mod rheology;
+pub mod sgs3;
 pub mod sponge;
 pub mod terrain_wind;
 pub mod thermal;

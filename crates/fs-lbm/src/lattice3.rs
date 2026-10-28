@@ -10,6 +10,7 @@ use std::sync::Mutex;
 
 /// Spatial and time-dependent force fields on the same native step owner.
 pub mod sources;
+mod sgs;
 
 /// A fixed population lattice and its caller-selected collision law.
 pub trait Lattice3<const Q: usize>: Send + Sync + 'static {

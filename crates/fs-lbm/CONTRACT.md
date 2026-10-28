@@ -990,6 +990,73 @@ high-Re stability/performance, cross-ISA identity or instrument acceptance.
 M3.2-W2a/W3a and M1.1-W8 must consume the explicit API and qualify their own
 physics. Historical D3Q19 arithmetic and semantic/golden versions are unchanged.
 
+## Exploratory three-dimensional SGS (`sgs3`, IRP M3.2-W5 partial)
+
+`sgs3::eddy_viscosity` is an allocation-free, unit-consistent Smagorinsky/WALE
+closure for a supplied full velocity gradient. Smagorinsky uses
+`nu_t = (Cs Delta)^2 sqrt(2 S:S)`. WALE uses the traceless symmetric part of
+the **matrix square** of the velocity gradient, including rotation, following
+Nicoud & Ducros (1999), DOI `10.1023/A:1009995426001`. Tensor normalization
+avoids high-power overflow/underflow; no arbitrary denominator epsilon or
+viscosity floor changes its near-wall or refinement asymptotes. Zero coefficient
+is an explicit disabled control; negative/nonfinite coefficients, nonpositive
+filter width and nonfinite gradients refuse.
+
+`Grid3::prepare_sgs`, `step_serial_with_sgs` and `step_pooled_with_sgs` are
+explicit opt-in exploration APIs. `SgsConfig` requires the model, filter width
+in lattice cells, maximum eddy/molecular viscosity ratio and intended use.
+`SgsUse::AcceptanceRender` refuses with a typed error. Exceeding the supplied
+ratio cap refuses rather than silently clipping the closure. No constructor,
+ordinary step, instrument render or acceptance path enables SGS by default.
+This does not complete the instrument program's render-admission integration
+or grant a turbulent-DNS/acceptance claim.
+
+The integration caches one macroscopic velocity/density field, using the
+grid's existing uniform force and half-force velocity shift. Interior and
+periodic derivatives are centered; stationary halfway wall derivatives use
+the quadratic through the actual zero wall value and two fluid centres.
+Solid/exterior walls use the same rule; a one-cell gap uses the symmetric
+zero derivative. Grid topology supplies these boundary semantics explicitly.
+WALE cannot be reconstructed from symmetric nonequilibrium stress alone.
+Moving/open walls and independently supplied force fields are outside this
+SGS step surface; their owners are not silently rerouted.
+
+An optional molecular collision field composes with existing per-cell material
+viscosity. The original equilibrium and independent bulk/higher rates survive:
+D3Q27 modifies only omega1; D3Q19 retains its pre-existing tied second-order
+bulk/shear rate. Each step starts from molecular viscosity, never the previous
+SGS-augmented field. Zero SGS retains the original collision bits. A reusable
+workspace removes SGS sweep allocations; preparation is an O(N) serial pass
+with cancellation every 64 cells, followed by the existing serial or pooled
+collision/streaming owner. Refusal/cancellation never publishes populations or
+increments the step counter. Per-step memory and computation scale linearly;
+no measured throughput or speedup is claimed.
+
+`SgsReport` returns fixed-order, instantaneous pre-step lattice-unit sums
+`sum(2 rho nu S_dev:S_dev)` and `sum(2 rho nu_t S_dev:S_dev)`, their ratio
+and maxima. These diagnose resolved and modeled **shear** dissipation; bulk
+dissipation is excluded (including D3Q19's tied-rate contribution). They are
+not accumulated thermal energy and do not close a total-energy or scalar-flux
+equation.
+
+`examples/turbulent_taylor_green.rs` runs the same D3Q27 cumulant step owner
+with `none`, `smagorinsky`, or `wale`. Explicit model, Reynolds-number,
+coefficient and resolution controls accompany CSV energy and instantaneous
+dissipation histories. Its `--help` gives a fixed-Re, matched-time refinement
+sequence; the example does not substitute for a developed-turbulence benchmark.
+
+`sgs3::model` unit tests check analytic simple-shear behavior, WALE's cubic
+near-wall asymptote, rotational/unit scaling and invalid-input/acceptance
+refusals. `tests/sgs3_rungs.rs` checks quadratic halfway-wall profiles,
+zero-coefficient bitwise identity, preserved independent moment rates,
+ratio-cap/acceptance/cancellation refusals and actual 1/2/4-worker identity.
+The 8/16/32-cell Taylor-Green ladder at fixed Re1600 verifies the resolved
+analytic field's SGS/molecular dissipation ratio decreases with order 2 +/-0.3
+and exercises conservative short-time SGS evolution. It does **not** qualify
+developed turbulent TGV dissipation histories, a channel DNS profile, jet
+physics or finest-rung acoustic equivalence. Those full M3.2-W5/G2 campaigns
+remain open. Neither SGS nor LVEL is a resolved-turbulence acceptance render.
+
 ## Compressible Navier-Stokes-Fourier hybrid (IRP M3.2-W3a, `nsf3`)
 
 `nsf3::NsfGrid3<L: Lattice3<27>>` advances density, momentum and total energy of an ideal gas on the D3Q27 lattice.
