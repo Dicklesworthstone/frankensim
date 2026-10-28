@@ -151,7 +151,7 @@ pub use unsteady::{
 /// Semantics version of the conjugate pipeline: covers voxel indexing, face
 /// flux layout, projection, energy discretization, solver policy, and the
 /// LBM driver's steady criterion. Bump on any change that can move results.
-pub const CHT_SEMANTICS_VERSION: u32 = 1;
+pub const CHT_SEMANTICS_VERSION: u32 = 2;
 
 /// Structured refusal from any stage of the conjugate pipeline.
 #[derive(Debug, Clone, PartialEq)]

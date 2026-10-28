@@ -2473,17 +2473,41 @@ fn exposed_plate_radiates_by_the_stefan_boltzmann_law() {
     assert!((solution.report.balance.sink_outflow_w - power).abs() < 1e-6 * power);
 }
 
+/// Independent scalar oracle: bracket the unique root of the monotone
+/// backward-Euler energy equation between the old and steady temperatures.
+fn radiating_plate_backward_euler(
+    previous: f64,
+    dt: f64,
+    capacity: f64,
+    power: f64,
+    k4: f64,
+    ambient: f64,
+) -> f64 {
+    let steady = (power / k4 + ambient.powi(4)).powf(0.25);
+    let (mut lo, mut hi) = (previous.min(steady), previous.max(steady));
+    for _ in 0..80 {
+        let t = 0.5 * (lo + hi);
+        let residual = capacity * (t - previous)
+            - dt * (power - k4 * (t.powi(4) - ambient.powi(4)));
+        if residual > 0.0 {
+            hi = t;
+        } else {
+            lo = t;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
 #[test]
-fn radiating_plate_march_follows_its_linearized_recursion() {
+fn radiating_plate_march_matches_nonlinear_backward_euler() {
     // The exposed plate of the Stefan-Boltzmann test, now with heat
     // capacity, marched from the surroundings' temperature. Uniform power,
     // uniform emission and adiabatic edges keep the plate exactly
     // isothermal, so the march is the scalar ODE
-    // C dT/dt = P - eps sigma A (T^4 - T_amb^4), and each step is backward
-    // Euler with the sink Newton-linearized about the previous step:
-    // T+ = T + dt (P - q(T)) / (C + dt q'(T)). The discrete answer matches
-    // that recursion to solver precision, converges to the ODE at first
-    // order, and settles at the closed-form steady temperature.
+    // C dT/dt = P - eps sigma A (T^4 - T_amb^4). Each backward-Euler
+    // endpoint is independently bracketed by bisection of the full T^4
+    // law. The march matches this discrete oracle, converges to the ODE
+    // at first order, and settles at the closed-form steady temperature.
     let gate = CancelGate::new();
     let (n, dx) = (6usize, 1e-2);
     let domain = VoxelDomain::from_fn(n, n, n, dx, |p| {
@@ -2552,8 +2576,7 @@ fn radiating_plate_march_follows_its_linearized_recursion() {
         let march = run(dt, steps);
         let mut recursion = 300.0f64;
         for record in &march.records {
-            recursion +=
-                dt * (power - q(recursion)) / (4.0 * k4 * recursion.powi(3)).mul_add(dt, capacity);
+            recursion = radiating_plate_backward_euler(recursion, dt, capacity, power, k4, 300.0);
             assert!(
                 record.closure_j.abs() < 1e-8 * record.source_j,
                 "closure {} J of {} J",
@@ -2587,6 +2610,202 @@ fn radiating_plate_march_follows_its_linearized_recursion() {
     );
     assert!((settled.temperature[plate] - exact).abs() < 1e-5);
     assert!((last.radiated_w - power).abs() < 1e-6 * power);
+}
+
+#[test]
+fn radiating_plate_large_steps_follow_the_physical_heating_and_cooling_law() {
+    let gate = CancelGate::new();
+    let (n, dx) = (3usize, 1e-2);
+    let domain = VoxelDomain::from_fn(n, n, n, dx, |p| {
+        if p[2] < dx { Voxel::Solid(0) } else { Voxel::Fluid }
+    }).unwrap();
+    let fluid = FluidProperties { conductivity_w_m_k: 1e-12, ..unit_fluid() };
+    let rho_c = 2.4e6;
+    let solids = [SolidMaterial::new("plate", 200.0).with_heat_capacity(rho_c)];
+    let area = (n * n) as f64 * dx * dx;
+    let capacity = rho_c * area * dx;
+    let k4 = 0.9 * STEFAN_BOLTZMANN * area;
+    let dt = 10_000.0;
+    let plate = domain.index(1, 1, 0);
+    let mut surroundings = [Some(300.0); 6];
+    surroundings[4] = None;
+    for surface_exchange in [false, true] {
+        let mut radiation = RadiationConfig::new(vec![0.9], surroundings);
+        radiation.surface_exchange = surface_exchange;
+        for (initial_k, power) in [(300.0, 5.0), (900.0, 0.0)] {
+            let mut faces = [ThermalFace::Adiabatic; 6];
+            faces[5] = ThermalFace::Temperature(300.0);
+            let mut setup = ThermalSetup::new(faces);
+            setup.add_uniform_power(&domain, power, |p| p[2] < dx);
+            let initial = vec![initial_k; domain.cell_count()];
+            let config = TransientConfig {
+                time_step_s: dt, steps: 1, energy: EnergyConfig::default(),
+            };
+            let march = march_energy(
+                &domain, &fluid, &solids, &FlowField::quiescent(&domain),
+                &setup, &initial, |_| 1.0, &config, Some(&radiation), &gate,
+            ).unwrap();
+            let expected = radiating_plate_backward_euler(initial_k, dt, capacity, power, k4, 300.0);
+            let actual = march.temperature[plate];
+            let q = k4 * (actual.powi(4) - 300f64.powi(4));
+            let record = &march.records[0];
+            assert!(
+                (actual - expected).abs() < 2e-7,
+                "exchange={surface_exchange}, initial={initial_k}: {actual} vs {expected}"
+            );
+            assert!((record.radiated_w - q).abs() < 1e-8);
+            assert!((record.boundary_outflow_j - dt * q).abs() < 1e-5);
+            assert!(record.closure_j.abs() < 1e-5, "{record:?}");
+            assert!(actual >= 300.0);
+            if power == 0.0 { assert!(actual < initial_k); }
+            if surface_exchange && power > 0.0 {
+                // A zero-velocity coupled march must use the same endpoint
+                // radiation solve as the frozen-flow entry point.
+                let coupled = march_conjugate(
+                    &domain, &fluid, &solids, &setup,
+                    &SimpleConfig::new([FvBoundary::wall(); 6]),
+                    &UnsteadyConfig::new(dt, 1), None, &initial,
+                    |_| 1.0, |_| 1.0, &EnergyConfig::default(), Some(&radiation), &gate,
+                ).unwrap();
+                assert!((coupled.temperature[plate] - expected).abs() < 2e-7);
+                assert!(coupled.energy_records[0].closure_j.abs() < 1e-5);
+                let mut insufficient = radiation.clone();
+                insufficient.max_iterations = 1;
+                let refused = march_energy(
+                    &domain, &fluid, &solids, &FlowField::quiescent(&domain),
+                    &setup, &initial, |_| 1.0, &config, Some(&insufficient), &gate,
+                );
+                assert!(matches!(refused, Err(ChtError::SolverNotConverged {
+                    system: "transient radiation", iterations: 1, ..
+                })));
+            }
+        }
+    }
+}
+
+#[test]
+fn radiating_sealed_transient_conserves_stored_heat() {
+    // Two plates exchange heat across a sealed vacuum-like gap. There is
+    // no external sink or source: all lost hot-plate energy must appear
+    // in the other cells even on a step with substantial radiative cooling.
+    let gate = CancelGate::new();
+    let (n, dx) = (4usize, 1e-2);
+    let domain = VoxelDomain::from_fn(n, n, n, dx, |p| {
+        if p[2] < dx { Voxel::Solid(0) }
+        else if p[2] > (n - 1) as f64 * dx { Voxel::Solid(1) }
+        else { Voxel::Fluid }
+    }).unwrap();
+    let fluid = FluidProperties { conductivity_w_m_k: 1e-12, ..unit_fluid() };
+    let solids = [
+        SolidMaterial::new("hot", 1e3).with_heat_capacity(1e4),
+        SolidMaterial::new("cold", 1e3).with_heat_capacity(2e4),
+    ];
+    let initial: Vec<f64> = (0..domain.cell_count())
+        .map(|cell| if domain.coords(cell)[2] == 0 { 800.0 } else { 300.0 })
+        .collect();
+    let mut radiation = RadiationConfig::new(vec![0.8, 0.6], [None; 6]);
+    radiation.rays_per_face = 128;
+    let march = march_energy(
+        &domain, &fluid, &solids, &FlowField::quiescent(&domain),
+        &ThermalSetup::new([ThermalFace::Adiabatic; 6]), &initial, |_| 1.0,
+        &TransientConfig { time_step_s: 0.2, steps: 4, energy: EnergyConfig::default() },
+        Some(&radiation), &gate,
+    ).unwrap();
+    let mut stored = 0.0;
+    for (cell, (&before, &after)) in initial.iter().zip(&march.temperature).enumerate() {
+        let rho_c = match domain.voxel_at(cell) {
+            Voxel::Fluid => fluid.volumetric_heat_capacity(),
+            Voxel::Solid(material) => solids[usize::from(material)]
+                .volumetric_heat_capacity_j_m3_k.unwrap(),
+        };
+        stored += rho_c * domain.volume(cell) * (after - before);
+        assert!((300.0 - 1e-8..=800.0 + 1e-8).contains(&after), "{cell}: {after}");
+    }
+    assert!(stored.abs() < 1e-7, "sealed enclosure changed energy by {stored} J");
+    assert!(march.temperature[domain.index(1, 1, 0)] < 790.0);
+    assert!(march.temperature[domain.index(1, 1, n - 1)] > 310.0);
+    for record in &march.records {
+        assert!(record.radiated_w.abs() < 1e-12, "{record:?}");
+        assert!(record.stored_energy_change_j.abs() < 1e-7, "{record:?}");
+        assert!(record.boundary_outflow_j.abs() < 1e-7, "{record:?}");
+        assert!(record.closure_j.abs() < 1e-7, "{record:?}");
+    }
+}
+
+#[test]
+fn radiating_fixed_temperature_reservoir_supplies_the_prescribed_storage_jump() {
+    let gate = CancelGate::new();
+    let dx = 1e-2;
+    let domain = VoxelDomain::from_fn(1, 1, 2, dx, |p| {
+        if p[2] < dx { Voxel::Solid(0) } else { Voxel::Fluid }
+    }).unwrap();
+    let fluid = FluidProperties { conductivity_w_m_k: 1e-12, ..unit_fluid() };
+    let rho_c = 2.4e6;
+    let solids = [SolidMaterial::new("held plate", 200.0).with_heat_capacity(rho_c)];
+    let mut setup = ThermalSetup::new([ThermalFace::Adiabatic; 6]);
+    let held = domain.index(0, 0, 0);
+    // The energy solver permits repeated declarations: the last wins.
+    // Their storage contribution must still be counted only once.
+    setup.fixed_temperature = vec![(held, 400.0), (held, 450.0)];
+    let mut surroundings = [Some(300.0); 6];
+    surroundings[4] = None;
+    let radiation = RadiationConfig::new(vec![0.9], surroundings);
+    for with_radiation in [false, true] {
+        for initial_k in [300.0, 700.0] {
+            let march = march_energy(
+                &domain, &fluid, &solids, &FlowField::quiescent(&domain),
+                &setup, &vec![initial_k; domain.cell_count()], |_| 1.0,
+                &TransientConfig { time_step_s: 10.0, steps: 1, energy: EnergyConfig::default() },
+                with_radiation.then_some(&radiation), &gate,
+            ).unwrap();
+            let record = &march.records[0];
+            let fixed_storage = rho_c * domain.volume(held) * (450.0 - initial_k);
+            assert_eq!(march.temperature[held], 450.0);
+            assert!((record.stored_energy_change_j - fixed_storage).abs() < 1e-6);
+            assert!((record.boundary_outflow_j + fixed_storage).abs() < 1e-6);
+            assert!(record.closure_j.abs() < 1e-7, "{record:?}");
+            if with_radiation {
+                let q = 0.9 * STEFAN_BOLTZMANN * dx * dx * (450f64.powi(4) - 300f64.powi(4));
+                assert!((record.radiated_w - q).abs() < 1e-10);
+            } else { assert_eq!(record.radiated_w, 0.0); }
+        }
+    }
+}
+
+
+#[test]
+fn transient_insulated_heating_uses_storage_as_its_temperature_anchor() {
+    let gate = CancelGate::new();
+    let domain = VoxelDomain::new(1, 1, 1, 0.01).unwrap();
+    let fluid = FluidProperties {
+        density_kg_m3: 2.0,
+        specific_heat_j_kg_k: 500.0,
+        conductivity_w_m_k: 0.1,
+        kinematic_viscosity_m2_s: 1e-5,
+    };
+    let mut setup = ThermalSetup::new([ThermalFace::Adiabatic; 6]);
+    setup.power_w = vec![0.25];
+    let dt = 0.2;
+    let steps = 4;
+    let run = march_energy(
+        &domain, &fluid, &[], &FlowField::quiescent(&domain), &setup,
+        &[300.0], |_| 1.0,
+        &TransientConfig { time_step_s: dt, steps, energy: EnergyConfig::default() },
+        None, &gate,
+    ).unwrap();
+    let capacity = fluid.volumetric_heat_capacity() * domain.volume(0);
+    let expected = 300.0 + setup.power_w[0] * dt * steps as f64 / capacity;
+    assert!((run.temperature[0] - expected).abs() < 1e-10);
+    for record in &run.records {
+        assert!((record.stored_energy_change_j - setup.power_w[0] * dt).abs() < 1e-12);
+        assert!(record.boundary_outflow_j.abs() < 1e-12);
+        assert!(record.closure_j.abs() < 1e-12);
+    }
+    assert!(matches!(
+        solve_energy(&domain, &fluid, &[], &FlowField::quiescent(&domain),
+            &setup, &EnergyConfig::default(), &gate),
+        Err(ChtError::InvalidInput { field: "thermal.faces", .. })
+    ));
 }
 
 /// A 10 mm bar of `n` conductor cells (1 mm^2 section, `rho_0` 1e-6 ohm m, k 10)

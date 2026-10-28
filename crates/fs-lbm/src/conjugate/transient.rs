@@ -18,9 +18,10 @@
 //! `dt (source - boundary outflow)` from boundary fluxes alone; their
 //! difference is the solver residual, never a modelling term.
 //!
-//! Radiation, when declared, enters each step as sinks Newton-linearized
-//! about the previous step's temperature (implicit in each face's own
-//! emission, irradiation lagged one step).
+//! Radiation, when declared, is converged at the backward-Euler endpoint:
+//! both emission and surface irradiation use the new temperature. Every
+//! nonlinear trial retains the original step's storage state. The closure
+//! uses the physical face law, and an unconverged endpoint refuses.
 //!
 //! No-claims: the flow is frozen (forced convection whose velocity does not
 //! depend on temperature; buoyant transients march through
@@ -30,7 +31,7 @@
 use fs_exec::CancelGate;
 
 use super::domain::{FluidProperties, SolidMaterial, Voxel, VoxelDomain};
-use super::energy::{EnergyConfig, PseudoStep, ThermalSetup, solve_energy_inner};
+use super::energy::{EnergyConfig, EnergySolution, PseudoStep, ThermalSetup, solve_energy_inner};
 use super::flow::FlowField;
 use super::radiation::{RadiationConfig, Radiators};
 use super::{ChtError, finite, finite_positive, poll};
@@ -66,7 +67,7 @@ pub struct TransientRecord {
     /// Net heat radiated to the surroundings at the step's end temperature,
     /// W (zero without radiation; radiation's share of the outflow).
     pub radiated_w: f64,
-    /// Krylov iterations of the step.
+    /// Total Krylov iterations over all nonlinear solves of the step.
     pub iterations: usize,
 }
 
@@ -141,14 +142,7 @@ pub fn march_energy(
                 *out = base * scale;
             }
         }
-        // Radiation: sinks Newton-linearized about the previous step.
-        if let Some(radiators) = &radiators {
-            stepped.cell_sinks.clone_from(&setup.cell_sinks);
-            stepped
-                .cell_sinks
-                .extend(radiators.sinks(domain, &temperature));
-        }
-        let (next, mut record) = energy_step(
+        let (next, record) = energy_step(
             domain,
             fluid,
             solids,
@@ -158,11 +152,9 @@ pub fn march_energy(
             (&capacity, &storage),
             &temperature,
             (time_s, config.time_step_s, solids_present),
+            radiators.as_ref().zip(radiation),
             gate,
         )?;
-        if let Some(radiators) = &radiators {
-            record.radiated_w = radiators.radiated(domain, &next);
-        }
         records.push(record);
         temperature = next;
     }
@@ -214,20 +206,11 @@ pub(crate) fn energy_step(
     (capacity, storage): (&[f64], &[f64]),
     previous: &[f64],
     (time_s, dt, solids_present): (f64, f64, bool),
+    radiation: Option<(&Radiators, &RadiationConfig)>,
     gate: &CancelGate,
 ) -> Result<(Vec<f64>, TransientRecord), ChtError> {
-    let next = solve_energy_inner(
-        domain,
-        fluid,
-        solids,
-        flow,
-        setup,
-        energy,
-        Some(&PseudoStep {
-            coefficient_w_k: storage,
-            previous,
-        }),
-        gate,
+    let (next, radiated_w, radiation_outflow_correction_w) = solve_step(
+        domain, fluid, solids, flow, setup, energy, storage, previous, radiation, gate,
     )?;
     let stored: f64 = capacity
         .iter()
@@ -236,8 +219,21 @@ pub(crate) fn energy_step(
         .sum();
     let balance = next.report.balance;
     let source_j = balance.source_w * dt;
-    let boundary_outflow_j =
-        (balance.boundary_outflow_w + balance.sink_outflow_w - balance.fixed_cell_injection_w) * dt;
+    // Prescribed cells may jump from the initial state. Their reservoir
+    // supplies that storage change as well as the steady face/sink reaction.
+    // Repeated declarations use the solver's last value and count only once.
+    let mut fixed_cells: Vec<usize> = setup.fixed_temperature.iter().map(|&(cell, _)| cell).collect();
+    fixed_cells.sort_unstable();
+    fixed_cells.dedup();
+    let fixed_storage_j: f64 = fixed_cells
+        .iter()
+        .map(|&cell| capacity[cell] * (next.temperature[cell] - previous[cell]))
+        .sum();
+    let boundary_outflow_j = (balance.boundary_outflow_w + balance.sink_outflow_w
+        - balance.fixed_cell_injection_w
+        + radiation_outflow_correction_w)
+        * dt
+        - fixed_storage_j;
     let max_temperature_k = next
         .temperature
         .iter()
@@ -257,8 +253,137 @@ pub(crate) fn energy_step(
         source_j,
         boundary_outflow_j,
         closure_j: stored - (source_j - boundary_outflow_j),
-        radiated_w: 0.0,
+        radiated_w,
         iterations: next.report.iterations,
     };
     Ok((next.temperature, record))
+}
+
+/// Solve one endpoint, returning its external radiation and the correction
+/// from tangent sinks to the physical radiation law in the net boundary
+/// balance. The non-radiating path remains one unchanged energy solve.
+#[allow(clippy::too_many_arguments)]
+fn solve_step(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    solids: &[SolidMaterial],
+    flow: &FlowField,
+    setup: &ThermalSetup,
+    energy: &EnergyConfig,
+    storage: &[f64],
+    previous: &[f64],
+    radiation: Option<(&Radiators, &RadiationConfig)>,
+    gate: &CancelGate,
+) -> Result<(EnergySolution, f64, f64), ChtError> {
+    let solve = |step: &ThermalSetup| {
+        solve_energy_inner(
+            domain,
+            fluid,
+            solids,
+            flow,
+            step,
+            energy,
+            // This is the time level, not the previous nonlinear iterate.
+            Some(&PseudoStep {
+                coefficient_w_k: storage,
+                previous,
+            }),
+            gate,
+        )
+    };
+    let Some((radiators, controls)) = radiation else {
+        return Ok((solve(setup)?, 0.0, 0.0));
+    };
+    finite_positive("radiation.tolerance", controls.tolerance)?;
+    if controls.max_iterations == 0 {
+        return Err(ChtError::InvalidInput {
+            field: "radiation.max_iterations",
+            reason: "must be at least one".into(),
+        });
+    }
+    let cells = domain.cell_count();
+    let mut fixed = vec![false; cells];
+    for &(cell, _) in &setup.fixed_temperature {
+        // The energy solver supplies the input refusal for invalid indices.
+        if let Some(value) = fixed.get_mut(cell) {
+            *value = true;
+        }
+    }
+    let mut iterate = previous.to_vec();
+    let mut endpoint = radiators.endpoint(domain, &iterate, gate)?;
+    let mut step = setup.clone();
+    let base_sinks = setup.cell_sinks.len();
+    let mut tangent_power = vec![0.0; cells];
+    let mut tangent_scale = vec![0.0; cells];
+    let mut total_iterations = 0usize;
+    let mut relative_residual = f64::INFINITY;
+    for _ in 0..controls.max_iterations {
+        poll(gate)?;
+        step.cell_sinks.truncate(base_sinks);
+        step.cell_sinks.extend_from_slice(&endpoint.sinks);
+        let mut next = solve(&step)?;
+        total_iterations = total_iterations.saturating_add(next.report.iterations);
+        let physical = radiators.endpoint(domain, &next.temperature, gate)?;
+        tangent_power.fill(0.0);
+        tangent_scale.fill(0.0);
+        for sink in &endpoint.sinks {
+            tangent_power[sink.cell] +=
+                sink.conductance_w_k * (next.temperature[sink.cell] - sink.temperature_k);
+            tangent_scale[sink.cell] += sink.conductance_w_k
+                * (next.temperature[sink.cell].abs() + sink.temperature_k.abs());
+        }
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        let mut change = 0.0f64;
+        let mut power_residual = 0.0f64;
+        let mut correction_w = 0.0;
+        for cell in 0..cells {
+            if cell % 1024 == 0 {
+                poll(gate)?;
+            }
+            let t = next.temperature[cell];
+            lo = lo.min(t);
+            hi = hi.max(t);
+            change = change.max((t - iterate[cell]).abs());
+            let defect = physical.cell_power_w[cell] - tangent_power[cell];
+            finite("radiation.power_defect_w", defect)?;
+            let scale = physical.cell_power_w[cell]
+                .abs()
+                .max(tangent_power[cell].abs())
+                .max(storage[cell] * (t - previous[cell]).abs())
+                .max(setup.power_w.get(cell).copied().unwrap_or(0.0).abs());
+            // Near radiative equilibrium, emission and absorption cancel;
+            // distinguish that roundoff from a real local power imbalance.
+            finite("radiation.tangent_scale_w", tangent_scale[cell])?;
+            finite("radiation.power_scale_w", scale)?;
+            let roundoff = 64.0 * f64::EPSILON * physical.cell_scale_w[cell]
+                + 64.0 * f64::EPSILON * tangent_scale[cell];
+            finite("radiation.power_roundoff_w", roundoff)?;
+            power_residual = power_residual.max(
+                (defect.abs() - roundoff).max(0.0) / scale.max(f64::MIN_POSITIVE),
+            );
+            if !fixed[cell] {
+                correction_w += defect;
+            }
+        }
+        finite("radiation.outflow_correction_w", correction_w)?;
+        let temperature_residual =
+            (change - 64.0 * f64::EPSILON * hi.abs()).max(0.0) / (hi - lo).max(1.0);
+        relative_residual = temperature_residual.max(power_residual);
+        if relative_residual <= controls.tolerance {
+            // A fixed cell's physical sink correction also corrects the
+            // reservoir injection by the same amount. Only free-cell
+            // corrections therefore enter the net boundary balance.
+            next.report.iterations = total_iterations;
+            return Ok((next, physical.radiated_w, correction_w));
+        }
+        iterate = next.temperature;
+        endpoint = physical;
+    }
+    Err(ChtError::SolverNotConverged {
+        system: "transient radiation",
+        iterations: controls.max_iterations,
+        relative_residual,
+        tolerance: controls.tolerance,
+    })
 }

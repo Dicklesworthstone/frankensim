@@ -18,8 +18,9 @@
 //! q = eps sigma F A (T^4 - T_amb^4)
 //! ```
 //!
-//! to the surroundings temperature (the mean over its escaping rays). The
-//! energy equation carries `q` as a cell sink Newton-linearized about the
+//! to the effective surroundings temperature `T_amb = <T_surroundings^4>^(1/4)`
+//! over its escaping rays, preserving the sum of incident radiant powers.
+//! The energy equation carries `q` as a cell sink Newton-linearized about the
 //! previous iterate (`G = 4 eps sigma F A T^3`), iterated to convergence.
 //!
 //! # Surface-to-surface exchange
@@ -69,6 +70,9 @@ use super::{ChtError, finite, poll};
 /// Stefan–Boltzmann constant, W/(m^2 K^4) (CODATA 2018, exact).
 pub const STEFAN_BOLTZMANN: f64 = 5.670_374_419e-8;
 
+const IRRADIATION_ITERATIONS: usize = 100_000;
+const IRRADIATION_TOLERANCE: f64 = 1e-13;
+
 /// Radiation controls.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RadiationConfig {
@@ -81,10 +85,12 @@ pub struct RadiationConfig {
     pub rays_per_face: usize,
     /// Seed of the counter-based ray streams.
     pub seed: u64,
-    /// Picard budget of [`solve_energy_radiating`].
+    /// Nonlinear iteration budget for steady radiation and each transient step.
     pub max_iterations: usize,
     /// Largest temperature change between Picard iterates at convergence,
-    /// relative to the temperature span.
+    /// relative to the temperature span. Transient steps also require each
+    /// cell's physical radiation power to agree with its solved tangent at
+    /// this relative tolerance (with a floating-point roundoff allowance).
     pub tolerance: f64,
     /// Exchange between the emitting surfaces (see the module docs); when
     /// false, only the escape to the surroundings is modelled.
@@ -125,7 +131,8 @@ pub struct ExposedFace {
     pub emissivity: f64,
     /// Escape factor to the surroundings.
     pub escape: f64,
-    /// Mean surroundings temperature of the escaping rays, K.
+    /// Fourth-power mean surroundings temperature of the escaping rays, K:
+    /// `<T_surroundings^4>^(1/4)`, preserving their incident radiant power.
     pub surroundings_k: f64,
 }
 
@@ -168,7 +175,7 @@ fn exit_time(domain: &VoxelDomain, axis: usize, i: i64, step: i64, origin: f64, 
 }
 
 /// March one ray from `origin` (inside fluid cell `start`) along `dir`;
-/// returns the surroundings temperature if it leaves through a
+/// returns the domain-face index if it leaves through a declared
 /// surroundings face before hitting a solid or an opaque face.
 fn march(
     domain: &VoxelDomain,
@@ -176,7 +183,7 @@ fn march(
     start: [usize; 3],
     origin: [f64; 3],
     dir: [f64; 3],
-) -> Option<f64> {
+) -> Option<usize> {
     let dims = domain.dims();
     let mut cell = start.map(|v| v as i64);
     let mut t_max = [f64::INFINITY; 3];
@@ -209,7 +216,7 @@ fn march(
         }
         if cell[axis] < 0 || cell[axis] >= dims[axis] as i64 {
             let side = 2 * axis + usize::from(step[axis] > 0);
-            return surroundings[side];
+            return surroundings[side].map(|_| side);
         }
         let index = domain.index(cell[0] as usize, cell[1] as usize, cell[2] as usize);
         if !domain.is_fluid(index) {
@@ -270,6 +277,7 @@ pub fn escape_factors(
     gate: &CancelGate,
 ) -> Result<Vec<ExposedFace>, ChtError> {
     admit_radiation(solids, config)?;
+    let surroundings = config.surroundings_k.map(|t| t.unwrap_or(0.0));
     let mut out = Vec::new();
     for c in 0..domain.cell_count() {
         if c.is_multiple_of(1024) {
@@ -300,7 +308,7 @@ pub fn escape_factors(
             };
             let nudge = 1e-9 * domain.width(axis, at[axis]);
             let start = domain.coords(n);
-            let (mut escaped, mut ambient_sum) = (0usize, 0.0f64);
+            let mut escapes_by_side = [0usize; 6];
             let stream = config
                 .seed
                 .wrapping_add((c as u64).wrapping_mul(6).wrapping_add(face as u64) << 20);
@@ -324,18 +332,34 @@ pub fn escape_factors(
                 origin[axis] = sign.mul_add(nudge, plane);
                 origin[u] = r3.mul_add(domain.width(u, at[u]), domain.face_coord(u, at[u]));
                 origin[v] = r4.mul_add(domain.width(v, at[v]), domain.face_coord(v, at[v]));
-                if let Some(t) = march(domain, &config.surroundings_k, start, origin, dir) {
-                    escaped += 1;
-                    ambient_sum += t;
+                if let Some(side) = march(domain, &config.surroundings_k, start, origin, dir) {
+                    escapes_by_side[side] += 1;
                 }
             }
+            let escaped = escapes_by_side.iter().sum::<usize>();
             if escaped > 0 {
+                // Radiant power adds in T^4, not T. Count exits first so
+                // this reduction costs at most six terms per emitting face.
+                // Scale by a reached temperature to avoid overflow in T^4
+                // and underflow caused by a hotter, unseen domain face.
+                let scale = escapes_by_side
+                    .iter()
+                    .zip(surroundings)
+                    .filter_map(|(&count, t)| (count > 0).then_some(t))
+                    .fold(0.0, f64::max);
+                let scaled_fourth_sum = escapes_by_side
+                    .iter()
+                    .zip(surroundings)
+                    .filter(|(count, _)| **count > 0)
+                    .map(|(&count, t)| count as f64 * (t / scale).powi(4))
+                    .sum::<f64>();
+                let effective_k = scale * (scaled_fourth_sum / escaped as f64).sqrt().sqrt();
                 out.push(ExposedFace {
                     cell: c,
                     face,
                     emissivity,
                     escape: escaped as f64 / config.rays_per_face as f64,
-                    surroundings_k: ambient_sum / escaped as f64,
+                    surroundings_k: effective_k,
                 });
             }
         }
@@ -356,7 +380,7 @@ pub fn radiative_sinks(
     faces
         .iter()
         .map(|f| {
-            let (t, ta) = (temperature[f.cell].max(1.0), f.surroundings_k);
+            let (t, ta) = (temperature[f.cell], f.surroundings_k);
             let area = domain.face_area(f.cell, f.face / 2);
             let scale = f.emissivity * STEFAN_BOLTZMANN * f.escape * area;
             let slope = 4.0 * scale * t * t * t;
@@ -780,10 +804,30 @@ impl SurfaceExchange {
     /// the radiosity system to 1e-13 of the largest value).
     #[must_use]
     pub fn irradiation(&self, temperature: &[f64]) -> Vec<f64> {
+        // Retain the public sampling API and its original change criterion.
+        // Physical solvers use the fallible checked path below.
+        match self.irradiation_iterations(
+            temperature,
+            || Ok::<(), std::convert::Infallible>(()),
+            |_, _| Ok(true),
+        ) {
+            Ok((irradiation, _, _)) => irradiation,
+            Err(never) => match never {},
+        }
+    }
+
+    fn irradiation_iterations<E>(
+        &self,
+        temperature: &[f64],
+        mut checkpoint: impl FnMut() -> Result<(), E>,
+        mut accept: impl FnMut(&[f64], &[f64]) -> Result<bool, E>,
+    ) -> Result<(Vec<f64>, Vec<f64>, bool), E> {
+        checkpoint()?;
         let e = self.blackbody(temperature);
         let n = self.patches();
         let mut h: Vec<f64> = (0..n).map(|i| e[i]).collect();
-        for _ in 0..100_000 {
+        for _ in 0..IRRADIATION_ITERATIONS {
+            checkpoint()?;
             let mut change = 0.0f64;
             let mut scale = 0.0f64;
             for i in 0..n {
@@ -801,11 +845,87 @@ impl SurfaceExchange {
                 scale = scale.max(next.abs());
                 h[i] = next;
             }
-            if change <= 1e-13 * scale {
-                break;
+            if change <= IRRADIATION_TOLERANCE * scale && accept(&e, &h)? {
+                return Ok((h, e, true));
             }
         }
-        h
+        Ok((h, e, false))
+    }
+
+    fn checked_irradiation(
+        &self, temperature: &[f64], gate: &CancelGate,
+    ) -> Result<Vec<f64>, ChtError> {
+        let (h, e, converged) = self.irradiation_iterations(
+            temperature,
+            || poll(gate),
+            |e, h| Ok(self.irradiation_residual(e, h)? <= IRRADIATION_TOLERANCE),
+        )?;
+        if !converged {
+            return Err(ChtError::SolverNotConverged {
+                system: "radiation irradiation",
+                iterations: IRRADIATION_ITERATIONS,
+                relative_residual: self.irradiation_residual(&e, &h)?,
+                tolerance: IRRADIATION_TOLERANCE,
+            });
+        }
+        poll(gate)?;
+        Ok(h)
+    }
+
+    // Reconstruct the ORIGINAL irradiation equations and the independent
+    // face-emission/escape energy account. A small iterate change alone can
+    // accept a badly wrong heat transfer when emissivity is close to zero.
+    fn irradiation_residual(&self, e: &[f64], h: &[f64]) -> Result<f64, ChtError> {
+        let mut radiosity = Vec::with_capacity(self.patches());
+        for (i, (&emission, &incoming)) in e.iter().zip(h).enumerate() {
+            finite("radiation.blackbody_w_m2", emission)?;
+            finite("radiation.irradiation_w_m2", incoming)?;
+            let value = (1.0 - self.emissivity[i]).mul_add(
+                incoming, self.emissivity[i] * emission,
+            );
+            finite("radiation.radiosity_w_m2", value)?;
+            if emission < 0.0 || incoming < 0.0 || value < 0.0 {
+                return Err(ChtError::InvalidInput {
+                    field: "radiation.irradiation",
+                    reason: "radiative intensities must be non-negative".into(),
+                });
+            }
+            radiosity.push(value);
+        }
+        let mut worst = 0.0_f64;
+        let (mut net, mut external, mut heat_scale, mut roundoff_scale) = (0.0, 0.0, 0.0, 0.0);
+        for i in 0..self.patches() {
+            let mut incoming = self.escape[i].1;
+            for &(j, factor) in &self.exchange[i] {
+                incoming = factor.mul_add(radiosity[j], incoming);
+            }
+            incoming = self.self_view[i].mul_add(radiosity[i], incoming);
+            finite("radiation.irradiation_equation_w_m2", incoming)?;
+            let scale = incoming.abs().max(h[i].abs()).max(f64::MIN_POSITIVE);
+            worst = worst.max(
+                ((incoming - h[i]).abs() - 64.0 * f64::EPSILON * scale).max(0.0) / scale,
+            );
+            let eps_area = self.emissivity[i] * self.patch_area[i];
+            let emitted = eps_area * (e[i] - h[i]);
+            let escaped = self.patch_area[i]
+                * self.escape[i].0.mul_add(radiosity[i], -self.escape[i].1);
+            finite("radiation.patch_emission_w", emitted)?;
+            finite("radiation.patch_escape_w", escaped)?;
+            net += emitted;
+            external += escaped;
+            heat_scale += emitted.abs() + escaped.abs();
+            roundoff_scale += eps_area * (e[i].abs() + h[i].abs())
+                + self.patch_area[i]
+                    * ((self.escape[i].0 * radiosity[i]).abs() + self.escape[i].1.abs());
+        }
+        let closure = net - external;
+        finite("radiation.enclosure_closure_w", closure)?;
+        finite("radiation.enclosure_heat_scale_w", heat_scale)?;
+        finite("radiation.enclosure_roundoff_scale_w", roundoff_scale)?;
+        Ok(worst.max(
+            (closure.abs() - 64.0 * f64::EPSILON * roundoff_scale).max(0.0)
+                / heat_scale.max(f64::MIN_POSITIVE),
+        ))
     }
 
     /// Radiative sinks at `temperature` with the patch irradiation
@@ -817,7 +937,7 @@ impl SurfaceExchange {
             .iter()
             .zip(&self.face_areas)
             .map(|(&(cell, _, patch), face_area)| {
-                let t = temperature[cell].max(1.0);
+                let t = temperature[cell];
                 let eps_a = self.emissivity[patch] * face_area;
                 let slope = 4.0 * eps_a * STEFAN_BOLTZMANN * t * t * t;
                 let q = eps_a * STEFAN_BOLTZMANN.mul_add(t.powi(4), -irradiation[patch]);
@@ -870,6 +990,16 @@ pub(crate) enum Radiators {
     Exchange(SurfaceExchange),
 }
 
+/// Radiation evaluated once at one admissible temperature field. The same
+/// irradiation supplies the next tangent, the physical cell powers, and
+/// the heat actually escaping to the surroundings.
+pub(crate) struct RadiationEndpoint {
+    pub(crate) sinks: Vec<CellSink>,
+    pub(crate) cell_power_w: Vec<f64>,
+    pub(crate) cell_scale_w: Vec<f64>,
+    pub(crate) radiated_w: f64,
+}
+
 impl Radiators {
     pub(crate) fn build(
         domain: &VoxelDomain,
@@ -884,23 +1014,76 @@ impl Radiators {
         })
     }
 
-    /// Newton-linearized sinks about `temperature`.
-    pub(crate) fn sinks(&self, domain: &VoxelDomain, temperature: &[f64]) -> Vec<CellSink> {
-        match self {
-            Self::Escape(faces) => radiative_sinks(domain, faces, temperature),
-            Self::Exchange(model) => model.sinks(temperature, &model.irradiation(temperature)),
+    /// Evaluate the nonlinear face law and its next Newton tangent together.
+    pub(crate) fn endpoint(
+        &self,
+        domain: &VoxelDomain,
+        temperature: &[f64],
+        gate: &CancelGate,
+    ) -> Result<RadiationEndpoint, ChtError> {
+        if temperature.len() != domain.cell_count() {
+            return Err(ChtError::InvalidInput {
+                field: "radiation.temperature",
+                reason: "expected one absolute temperature per cell".into(),
+            });
         }
+        for (cell, &t) in temperature.iter().enumerate() {
+            if cell % 1024 == 0 {
+                poll(gate)?;
+            }
+            super::finite_positive("radiation.temperature", t)?;
+        }
+        let mut cell_power_w = vec![0.0; domain.cell_count()];
+        let mut cell_scale_w = vec![0.0; domain.cell_count()];
+        let (sinks, radiated_w) = match self {
+            Self::Escape(faces) => {
+                for face in faces {
+                    let scale = face.emissivity
+                        * STEFAN_BOLTZMANN
+                        * face.escape
+                        * domain.face_area(face.cell, face.face / 2);
+                    let emission = scale * temperature[face.cell].powi(4);
+                    let absorption = scale * face.surroundings_k.powi(4);
+                    cell_power_w[face.cell] += emission - absorption;
+                    cell_scale_w[face.cell] += emission.abs() + absorption.abs();
+                }
+                (
+                    radiative_sinks(domain, faces, temperature),
+                    cell_power_w.iter().sum(),
+                )
+            }
+            Self::Exchange(model) => {
+                let irradiation = model.checked_irradiation(temperature, gate)?;
+                for (&(cell, _, patch), &area) in model.faces.iter().zip(&model.face_areas) {
+                    let eps_a = model.emissivity[patch] * area;
+                    let emission = STEFAN_BOLTZMANN * temperature[cell].powi(4);
+                    cell_power_w[cell] +=
+                        eps_a * STEFAN_BOLTZMANN.mul_add(temperature[cell].powi(4), -irradiation[patch]);
+                    cell_scale_w[cell] += eps_a * (emission.abs() + irradiation[patch].abs());
+                }
+                (
+                    model.sinks(temperature, &irradiation),
+                    model.radiated_to_surroundings(temperature, &irradiation),
+                )
+            }
+        };
+        for (&power, &scale) in cell_power_w.iter().zip(&cell_scale_w) {
+            finite("radiation.power_w", power)?;
+            finite("radiation.power_scale_w", scale)?;
+        }
+        finite("radiation.radiated_w", radiated_w)?;
+        for sink in &sinks {
+            finite("radiation.conductance_w_k", sink.conductance_w_k)?;
+            finite("radiation.sink_temperature_k", sink.temperature_k)?;
+        }
+        Ok(RadiationEndpoint {
+            sinks,
+            cell_power_w,
+            cell_scale_w,
+            radiated_w,
+        })
     }
 
-    /// Net heat radiated to the surroundings at `temperature`, W.
-    pub(crate) fn radiated(&self, domain: &VoxelDomain, temperature: &[f64]) -> f64 {
-        match self {
-            Self::Escape(faces) => radiated_power(domain, faces, temperature),
-            Self::Exchange(model) => {
-                model.radiated_to_surroundings(temperature, &model.irradiation(temperature))
-            }
-        }
-    }
 
     /// A reference temperature for the first linearization: the mean
     /// surroundings of escaping faces, else `fallback`.
@@ -939,25 +1122,32 @@ pub fn solve_energy_radiating(
     radiation: &RadiationConfig,
     gate: &CancelGate,
 ) -> Result<(EnergySolution, RadiationReport), ChtError> {
+    super::finite_positive("radiation.tolerance", radiation.tolerance)?;
+    if radiation.max_iterations == 0 {
+        return Err(ChtError::InvalidInput {
+            field: "radiation.max_iterations", reason: "must be at least one".into(),
+        });
+    }
     let radiators = Radiators::build(domain, solids, radiation, gate)?;
     // Start from the sinks linearized about a reference temperature (the
     // surroundings, else a declared face or fixed temperature): without
     // radiation the first iterate can lack the dominant heat path.
     let reference = radiators.reference(reference_temperature(setup, radiation));
     let mut first = setup.clone();
-    first
-        .cell_sinks
-        .extend(radiators.sinks(domain, &vec![reference; domain.cell_count()]));
+    first.cell_sinks.extend(
+        radiators.endpoint(domain, &vec![reference; domain.cell_count()], gate)?.sinks,
+    );
     let mut solution = solve_energy(domain, fluid, solids, flow, &first, energy, gate)?;
+    let mut endpoint = radiators.endpoint(domain, &solution.temperature, gate)?;
     let mut change = f64::INFINITY;
     let mut iterations = 0usize;
     while iterations < radiation.max_iterations {
         poll(gate)?;
         iterations += 1;
         let mut step = setup.clone();
-        step.cell_sinks
-            .extend(radiators.sinks(domain, &solution.temperature));
+        step.cell_sinks.extend_from_slice(&endpoint.sinks);
         let next = solve_energy(domain, fluid, solids, flow, &step, energy, gate)?;
+        let next_endpoint = radiators.endpoint(domain, &next.temperature, gate)?;
         let (lo, hi) = next
             .temperature
             .iter()
@@ -971,6 +1161,7 @@ pub fn solve_energy_radiating(
             .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
         change = largest / (hi - lo).max(f64::MIN_POSITIVE);
         solution = next;
+        endpoint = next_endpoint;
         if change <= radiation.tolerance {
             break;
         }
@@ -988,7 +1179,7 @@ pub fn solve_energy_radiating(
         exposed_faces,
         rays,
         iterations,
-        radiated_w: radiators.radiated(domain, &solution.temperature),
+        radiated_w: endpoint.radiated_w,
         temperature_change: change,
         patches,
     };
@@ -1012,4 +1203,122 @@ pub(crate) fn reference_temperature(setup: &ThermalSetup, radiation: &RadiationC
         })
         .or_else(|| setup.fixed_temperature.first().map(|&(_, t)| t))
         .unwrap_or(300.0)
+}
+
+#[cfg(test)]
+mod checked_irradiation_tests {
+    use super::*;
+
+    // Exact equal-area parallel plates isolate the thermal radiosity solve
+    // from Monte Carlo geometry error. Every emitted ray reaches its neighbor.
+    fn closed_plates(emissivity: f64) -> SurfaceExchange {
+        SurfaceExchange {
+            faces: vec![(0, 0, 0), (1, 1, 1)],
+            emissivity: vec![emissivity; 2],
+            patch_area: vec![1.0; 2],
+            exchange: vec![vec![(1, 1.0)], vec![(0, 1.0)]],
+            self_view: vec![0.0; 2],
+            escape: vec![(0.0, 0.0); 2],
+            face_areas: vec![1.0; 2],
+            rays: 0,
+        }
+    }
+
+    #[test]
+    fn checked_steady_consumers_refuse_unresolved_closed_cavity() {
+        use crate::conjugate::{
+            FvBoundary, FvBuoyancyConfig, SimpleConfig, fv_natural_convection,
+        };
+        let domain = VoxelDomain::from_fn(3, 1, 1, 1.0, |p| {
+            if p[0] > 1.0 && p[0] < 2.0 { Voxel::Fluid } else { Voxel::Solid(0) }
+        }).unwrap();
+        let fluid = FluidProperties {
+            density_kg_m3: 1.0, specific_heat_j_kg_k: 1.0,
+            conductivity_w_m_k: 1.0, kinematic_viscosity_m2_s: 1.0,
+        };
+        let solids = [SolidMaterial::new("reflective plate", 1.0)];
+        let mut setup = ThermalSetup::new([ThermalFace::Adiabatic; 6]);
+        setup.fixed_temperature = vec![(0, 400.0), (1, 350.0), (2, 300.0)];
+        let mut radiation = RadiationConfig::new(vec![1e-9], [None; 6]);
+        radiation.rays_per_face = 64;
+        radiation.patch_size = 1;
+        let gate = CancelGate::new();
+        assert!(matches!(
+            solve_energy_radiating(&domain, &fluid, &solids, &FlowField::quiescent(&domain),
+                &setup, &EnergyConfig::default(), &radiation, &gate),
+            Err(ChtError::SolverNotConverged { system: "radiation irradiation", .. })
+        ));
+        let mut natural = FvBuoyancyConfig::new([0.0; 3], 0.0, 350.0,
+            SimpleConfig::new([FvBoundary::wall(); 6]));
+        natural.max_couplings = 4;
+        natural.sweeps_per_coupling = 1;
+        natural.radiation = Some(radiation);
+        assert!(matches!(
+            fv_natural_convection(&domain, &fluid, &solids, &setup, &natural, &gate),
+            Err(ChtError::SolverNotConverged { system: "radiation irradiation", .. })
+        ));
+        natural.radiation.as_mut().unwrap().emissivity[0] = 0.8;
+        let (steady, report) = solve_energy_radiating(
+            &domain, &fluid, &solids, &FlowField::quiescent(&domain),
+            &setup, &EnergyConfig::default(), natural.radiation.as_ref().unwrap(), &gate,
+        ).unwrap();
+        assert_eq!(steady.temperature, vec![400.0, 350.0, 300.0]);
+        assert_eq!(report.radiated_w, 0.0);
+        let coupled = fv_natural_convection(
+            &domain, &fluid, &solids, &setup, &natural, &gate,
+        ).unwrap();
+        assert_eq!(coupled.energy.temperature, vec![400.0, 350.0, 300.0]);
+        assert_eq!(coupled.report.radiated_w, Some(0.0));
+        for balance in [steady.report.balance, coupled.energy.report.balance] {
+            for value in [
+                balance.source_w, balance.fixed_cell_injection_w, balance.boundary_outflow_w,
+                balance.advective_outflow_w, balance.sink_outflow_w, balance.residual_w,
+                balance.relative_residual,
+            ] {
+                assert!(value.is_finite(), "{balance:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn checked_closed_cavity_matches_gray_parallel_plate_heat() {
+        let domain = VoxelDomain::new(2, 1, 1, 1.0).unwrap();
+        let gate = CancelGate::new();
+        for emissivity in [1.0, 0.8, 0.1, 0.01] {
+            let endpoint = Radiators::Exchange(closed_plates(emissivity))
+                .endpoint(&domain, &[400.0, 300.0], &gate).unwrap();
+            let expected = STEFAN_BOLTZMANN * (400.0_f64.powi(4) - 300.0_f64.powi(4))
+                / (2.0 / emissivity - 1.0);
+            assert!((endpoint.cell_power_w[0] - expected).abs() < 1e-11 * expected);
+            assert!((endpoint.cell_power_w[1] + expected).abs() < 1e-11 * expected);
+            assert_eq!(endpoint.radiated_w, 0.0);
+            let closure = endpoint.cell_power_w.iter().sum::<f64>();
+            assert!(closure.abs() < 1e-11 * expected, "eps={emissivity}: {closure}");
+        }
+    }
+
+    #[test]
+    fn checked_closed_cavity_refuses_unresolved_reflection_and_observes_cancellation() {
+        let domain = VoxelDomain::new(2, 1, 1, 1.0).unwrap();
+        let gate = CancelGate::new();
+        // 1e-9 exhausts the sweep budget; 1e-15 tricks the legacy iterate-change
+        // threshold almost immediately. Neither may publish fictitious net heat.
+        for emissivity in [1e-9, 1e-15] {
+            let model = Radiators::Exchange(closed_plates(emissivity));
+            let equilibrium = model.endpoint(&domain, &[350.0; 2], &gate).unwrap();
+            assert!(equilibrium.cell_power_w.iter().all(|q| q.abs() < 1e-20));
+            assert!(matches!(
+                model.endpoint(&domain, &[400.0, 300.0], &gate),
+                Err(ChtError::SolverNotConverged {
+                    system: "radiation irradiation", iterations: IRRADIATION_ITERATIONS, ..
+                })
+            ));
+        }
+        let cancelled = CancelGate::new();
+        cancelled.request();
+        assert!(matches!(
+            closed_plates(0.8).checked_irradiation(&[400.0, 300.0], &cancelled),
+            Err(ChtError::Cancelled)
+        ));
+    }
 }

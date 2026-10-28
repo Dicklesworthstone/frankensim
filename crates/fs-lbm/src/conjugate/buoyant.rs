@@ -32,7 +32,7 @@ use fs_exec::CancelGate;
 use super::domain::{FluidProperties, SolidMaterial, VoxelDomain};
 use super::energy::{EnergyConfig, EnergySolution, ThermalFace, ThermalSetup, solve_energy};
 use super::flow::FlowField;
-use super::radiation::{RadiationConfig, Radiators};
+use super::radiation::{RadiationConfig, RadiationEndpoint, Radiators};
 use super::simple::{FvFlow, SimpleConfig, Solver, Turbulence, admit};
 use super::turbulence::TURBULENT_PRANDTL;
 use super::{ChtError, finite, finite_positive, poll};
@@ -182,10 +182,10 @@ pub fn fv_natural_convection(
     };
     // Each energy solve carries the current radiative sinks and, with a
     // turbulence closure, the current eddy conductivity.
-    let energy_setup = |temperature: &[f64], eddy_viscosity: &[f64]| {
+    let energy_setup = |radiation: Option<&RadiationEndpoint>, eddy_viscosity: &[f64]| {
         let mut step = setup.clone();
-        if let Some(radiators) = &exposed {
-            step.cell_sinks.extend(radiators.sinks(domain, temperature));
+        if let Some(endpoint) = radiation {
+            step.cell_sinks.extend_from_slice(&endpoint.sinks);
         }
         if config.flow.turbulence != Turbulence::Laminar {
             step.eddy_conductivity_w_m_k = eddy_viscosity
@@ -194,6 +194,9 @@ pub fn fv_natural_convection(
                 .collect();
         }
         step
+    };
+    let evaluate_radiation = |temperature: &[f64]| -> Result<Option<RadiationEndpoint>, ChtError> {
+        exposed.as_ref().map(|radiators| radiators.endpoint(domain, temperature, gate)).transpose()
     };
     let mut solver = Solver::new(domain, fluid, &config.flow);
     // Seed the coupling with conduction through still fluid, the openings
@@ -219,6 +222,7 @@ pub fn fv_natural_convection(
         gate,
     )?
     .temperature;
+    let mut radiation_endpoint = evaluate_radiation(&temperature)?;
     let mut residuals = (f64::INFINITY, f64::INFINITY);
     let mut temperature_change = f64::INFINITY;
     let (mut couplings, mut sweeps) = (0usize, 0usize);
@@ -239,10 +243,11 @@ pub fn fv_natural_convection(
             fluid,
             solids,
             &solver.field(),
-            &energy_setup(&temperature, &solver.heat_eddy_viscosity()),
+            &energy_setup(radiation_endpoint.as_ref(), &solver.heat_eddy_viscosity()),
             &config.energy,
             gate,
         )?;
+        let next_radiation = evaluate_radiation(&energy.temperature)?;
         let (lo, hi) = energy
             .temperature
             .iter()
@@ -256,6 +261,7 @@ pub fn fv_natural_convection(
             .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
         temperature_change = change / (hi - lo).max(f64::MIN_POSITIVE);
         temperature = energy.temperature;
+        radiation_endpoint = next_radiation;
         if residuals.0 <= tolerance
             && residuals.1 <= tolerance
             && temperature_change <= config.temperature_tolerance
@@ -279,13 +285,11 @@ pub fn fv_natural_convection(
         fluid,
         solids,
         &flow.field,
-        &energy_setup(&temperature, &flow.heat_eddy_viscosity_m2_s),
+        &energy_setup(radiation_endpoint.as_ref(), &flow.heat_eddy_viscosity_m2_s),
         &config.energy,
         gate,
     )?;
-    let radiated_w = exposed
-        .as_ref()
-        .map(|radiators| radiators.radiated(domain, &energy.temperature));
+    let radiated_w = evaluate_radiation(&energy.temperature)?.map(|endpoint| endpoint.radiated_w);
     Ok(FvNaturalConvection {
         flow,
         energy,

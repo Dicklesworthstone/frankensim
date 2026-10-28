@@ -413,7 +413,7 @@ fn simple_unsteady_inner(
 /// March flow and energy together from rest and `initial_temperature`;
 /// inlets follow `inlet_schedule(t)` and sources `power_schedule(t)`;
 /// buoyancy (when declared) follows the previous step's temperature, and
-/// radiation (when declared) enters as sinks linearized about it.
+/// radiation (when declared) converges emission and irradiation at the new endpoint.
 ///
 /// # Errors
 /// The refusals of [`simple_unsteady`] and [`super::march_energy`]
@@ -604,12 +604,7 @@ fn march_conjugate_inner(
                 *out = base * scale;
             }
         }
-        if let Some(radiators) = &radiators {
-            stepped.cell_sinks.clone_from(&setup.cell_sinks);
-            stepped
-                .cell_sinks
-                .extend(radiators.sinks(domain, &temperature));
-        }
+
         if wall_heat.is_none()
             && (config.turbulence != Turbulence::Laminar || marcher.solver.has_sgs())
         {
@@ -622,13 +617,13 @@ fn march_conjugate_inner(
         }
         // One projected flux image is shared with wall preparation and energy.
         // `stepped` never receives generated wall corrections: it remains the
-        // authored setup plus this step's source/radiation schedule.
+        // authored setup plus this step's source schedule.
         let field = marcher.solver.field();
         let prepared_walls = wall_heat.as_deref_mut()
             .map(|wall| wall.prepare(&marcher.solver, &field, &stepped, gate))
             .transpose()?;
         let thermal = prepared_walls.as_ref().map_or(&stepped, |walls| &walls.thermal);
-        let (next, mut record) = energy_step(
+        let (next, record) = energy_step(
             domain,
             fluid,
             solids,
@@ -638,11 +633,9 @@ fn march_conjugate_inner(
             (&capacity, &storage),
             &temperature,
             (time_s, unsteady.time_step_s, solids_present),
+            radiators.as_ref().zip(radiation),
             gate,
         )?;
-        if let Some(radiators) = &radiators {
-            record.radiated_w = radiators.radiated(domain, &next);
-        }
         if let (Some(wall), Some(prepared)) = (wall_heat.as_deref_mut(), prepared_walls) {
             wall.record(prepared, &next, time_s, unsteady.time_step_s, gate)?;
         }

@@ -929,10 +929,15 @@ fn solve_energy_field(
             continue;
         }
         let (mut diag, mut rhs) = match step {
-            Some(step) => (
-                step.coefficient_w_k[c],
-                step.coefficient_w_k[c].mul_add(step.previous[c], source(c)),
-            ),
+            Some(step) => {
+                let coefficient = step.coefficient_w_k[c];
+                finite_positive("thermal.storage.coefficient_w_k", coefficient)?;
+                finite("thermal.storage.previous_k", step.previous[c])?;
+                // Physical storage fixes the absolute temperature even when
+                // every boundary is insulated or supplies only a heat flux.
+                anchored = true;
+                (coefficient, coefficient.mul_add(step.previous[c], source(c)))
+            }
             None => (0.0, source(c)),
         };
         // Cell sinks: G (T - T_sink) leaves the cell.
