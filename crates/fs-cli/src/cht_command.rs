@@ -862,6 +862,10 @@ const FACE_KEYS: [&str; 6] = ["x-", "x+", "y-", "y+", "z-", "z+"];
 const COMPACT_MATERIAL: &str = "compact-model";
 
 impl Scene {
+    fn temperature_dependent(&self) -> bool {
+        self.fluid_source.as_ref().is_some_and(material::FluidSource::temperature_dependent)
+    }
+
     fn append_material_inputs(&self, out: &mut String) {
         let _ = write!(
             out,
@@ -1352,6 +1356,42 @@ impl Scene {
         let lengths = [0, 1, 2].map(|a| grid.length(a));
         let mut reference = optional_number(&root, "reference_temperature_k", "scene")?;
         let mut expansion = optional_number(&root, "expansion_per_k", "scene")?;
+        let evolving = fluid_source.as_ref().is_some_and(material::FluidSource::temperature_dependent)
+            || solid_sources.iter().any(material::SolidSource::temperature_dependent);
+        if evolving {
+            if !fluid_source.as_ref().is_some_and(material::FluidSource::temperature_dependent) {
+                return Err(bad("temperature-dependent CHT requires a source-backed liquid in temperature-dependent mode"));
+            }
+            if !components.is_empty() {
+                return Err(bad("temperature-dependent CHT does not support compact components"));
+            }
+            if solid_sources.len() != materials.len()
+                || solid_sources.iter().enumerate().any(|(index, source)| {
+                    source.index != index || !source.temperature_dependent()
+                })
+            {
+                return Err(bad("temperature-dependent CHT requires every solid material in temperature-dependent source mode; frozen or authored solid coefficients cannot be mixed"));
+            }
+            if root.get("transient").is_some() {
+                return Err(bad("temperature-dependent CHT is steady; transient storage needs its own enthalpy owner"));
+            }
+            if turbulence != Turbulence::Laminar {
+                return Err(bad("temperature-dependent CHT requires laminar flow"));
+            }
+            if root.get("radiation").is_some() || emissivities.iter().any(|e| *e > 0.0) {
+                return Err(bad("temperature-dependent CHT does not support radiation"));
+            }
+            if expansion.is_some() {
+                return Err(bad("temperature-dependent liquid density owns buoyancy; expansion_per_k cannot override it"));
+            }
+            let temperature = fluid_source.as_ref()
+                .and_then(material::FluidSource::evolving_reference_temperature)
+                .expect("evolving liquid was admitted");
+            if reference.is_some_and(|value| value != temperature) {
+                return Err(bad("reference_temperature_k conflicts with the original liquid source state"));
+            }
+            reference = Some(temperature);
+        }
         if let Some(t) = fluid_source
             .as_ref()
             .and_then(material::FluidSource::gas_reference_temperature)
@@ -1903,8 +1943,15 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
     }
     let started = Instant::now();
     let buoyant = scene.gravity.filter(|g| g.iter().any(|v| *v != 0.0));
+    let mut material_feedback = None;
     let (flow, energy, couplings): (FvFlow, EnergySolution, Option<usize>) =
-        if let Some(gravity) = buoyant {
+        if scene.temperature_dependent() {
+            let (flow, energy, passes, evidence) = material::solve(
+                scene, &domain, &flow_config, &setup, gate,
+            )?;
+            material_feedback = Some(evidence);
+            (flow, energy, Some(passes))
+        } else if let Some(gravity) = buoyant {
             let reference = scene
                 .reference
                 .or_else(|| {
@@ -2103,12 +2150,19 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
         Turbulence::Laminar => "laminar",
         Turbulence::Lvel => "lvel",
     };
-    let solver_name = if couplings.is_some() {
+    let solver_name = if material_feedback.is_some() {
+        "fv-simplec-material"
+    } else if couplings.is_some() {
         "fv-simplec-boussinesq"
     } else if averaged_steps.is_some() {
         "fv-simplec-unsteady-mean-flow"
     } else {
         "fv-simplec"
+    };
+    let no_claim = if material_feedback.is_some() {
+        material::EVOLVING_NO_CLAIM
+    } else {
+        NO_CLAIM
     };
     if json_mode {
         let mut out = format!(
@@ -2121,6 +2175,9 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             scene.grid.uniform.is_none()
         );
         scene.append_material_inputs(&mut out);
+        if let Some(evidence) = &material_feedback {
+            let _ = write!(out, ",\"material_feedback\":{evidence}");
+        }
         let _ = write!(
             out,
             ",\"flow\":{{\"iterations\":{},\"mass_residual\":{},\"momentum_residual\":{},\"inflow_m3_s\":{},\"outflow_m3_s\":{},\"max_divergence_m3_s\":{},\"max_speed_m_s\":{},\"max_cell_reynolds\":{}",
@@ -2298,7 +2355,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             out,
             ",\"wall_s\":{},\"evidence\":\"Estimated\",\"no_claim\":{}}}",
             num(wall_s)?,
-            quote(NO_CLAIM)
+            quote(no_claim)
         );
         Ok(out)
     } else {
@@ -2372,7 +2429,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
         }
         let _ = writeln!(
             out,
-            "wall_s={wall_s:.2}\nevidence=Estimated\nno_claim={NO_CLAIM}"
+            "wall_s={wall_s:.2}\nevidence=Estimated\nno_claim={no_claim}"
         );
         Ok(out)
     }
@@ -2421,7 +2478,7 @@ fn execute_within_budget(scene: &Scene, json_mode: bool) -> Result<String> {
 pub(super) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
         let help = format!(
-            "{HELP}\nSource-backed materials: fluid may declare {{mode: \"frozen\", gas: <shared gas record>}}\nor {{mode: \"frozen\", pack, state, viscosity: \"dynamic\"|\"kinematic\"}}.\nA solid material may declare source: {{mode: \"frozen\", pack, state}}.\nCanonical packs and typed state coordinates are shared with the material\nlibraries; source coefficients cannot be overridden. See docs/COOLING_CHT_MATERIALS.md.\n"
+            "{HELP}\nSource-backed materials: fluid may declare {{mode: \"frozen\", gas: <shared gas record>}}\nor {{mode: \"frozen\", pack, state, viscosity: \"dynamic\"|\"kinematic\"}}.\nA solid material may declare source: {{mode: \"frozen\", pack, state}}.\nUse mode \"temperature-dependent\" and an explicit temperature_axis on the\nliquid and every solid source to close steady laminar temperature feedback;\nliquid density owns buoyancy and no expansion_per_k override is allowed.\nCanonical packs and typed state coordinates are shared with the material\nlibraries; source coefficients cannot be overridden. See docs/COOLING_CHT_MATERIALS.md.\n"
         );
         return CommandOutput {
             exit_code: exit::SUCCESS,

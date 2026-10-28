@@ -1,10 +1,11 @@
-//! Cold material admission for the existing CHT solver. The canonical gas,
-//! liquid and material-state owners supply every coefficient; this module only
-//! reads files and retains the exact reference states used by the CLI.
+//! Material admission and source-preserving CHT feedback. The canonical gas,
+//! liquid and material-state owners supply every coefficient; this module
+//! retains the original cards and invokes the existing coupled solver.
 
 use std::path::Path;
 
 use fs_lbm::material::conjugate::MaterialChtFluid;
+use fs_lbm::material::conjugate::solid::SolidConductivityLaw;
 use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
 use fs_material::gas_species::input::packs::{
     MAX_RECORD_BYTES, MAX_SOURCE_BYTES, MAX_SOURCE_PACK_BYTES, SourcePackBytes, read_source_packs,
@@ -13,6 +14,7 @@ use fs_material::gas_species::input::{GasRecord, ThermochemicalPhase, read_gas_r
 use fs_material::liquid::{
     ResolvedLiquidState, resolve_liquid_state, resolve_liquid_state_from_kinematic,
 };
+use fs_material::liquid_temperature::{LiquidTemperatureLaw, LiquidViscosityBasis};
 use fs_material::state_point::{
     DENSITY_PROPERTY, MaterialPropertySelection, ResolvedMaterialStatePoint,
     SPECIFIC_HEAT_CAPACITY_DIMS, SPECIFIC_HEAT_CAPACITY_PROPERTY, ScalarAdmissibility,
@@ -31,14 +33,17 @@ pub(super) enum FluidSource {
     },
     Liquid {
         state: ResolvedLiquidState,
-        pack: String,
+        pack: NormalizedMaterialCardPack,
+        temperature_axis: Option<String>,
+        viscosity_basis: LiquidViscosityBasis,
     },
 }
 
 pub(super) struct SolidSource {
     pub index: usize,
     state: ResolvedMaterialStatePoint,
-    pack: String,
+    pack: NormalizedMaterialCardPack,
+    temperature_axis: Option<String>,
 }
 
 fn fields(value: &J, allowed: &[&str]) -> Result<()> {
@@ -61,13 +66,13 @@ fn string<'a>(value: &'a J, key: &str) -> Result<&'a str> {
         .ok_or_else(|| bad(format!("material source {key} must be a nonempty string")))
 }
 
-fn frozen(value: &J) -> Result<()> {
-    if string(value, "mode")? != "frozen" {
-        return Err(bad(
-            "cooling-cht material sources require explicit mode frozen; evolving properties need the coupled material solver",
-        ));
+fn temperature_axis(value: &J) -> Result<Option<String>> {
+    match string(value, "mode")? {
+        "frozen" if value.get("temperature_axis").is_none() => Ok(None),
+        "temperature-dependent" => Ok(Some(string(value, "temperature_axis")?.into())),
+        "frozen" => Err(bad("temperature_axis belongs to temperature-dependent material mode")),
+        _ => Err(bad("material mode must explicitly be frozen or temperature-dependent")),
     }
-    Ok(())
 }
 
 fn bytes(base: &Path, path: &str, total: &mut usize) -> Result<Vec<u8>> {
@@ -105,8 +110,11 @@ pub(super) fn fluid(
     base: &Path,
     total: &mut usize,
 ) -> Result<(FluidProperties, FluidSource)> {
-    frozen(value)?;
+    let temperature_axis = temperature_axis(value)?;
     if value.get("gas").is_some() {
+        if temperature_axis.is_some() {
+            return Err(bad("temperature-dependent cooling-cht requires a source-backed liquid; gas sources currently support frozen mode"));
+        }
         fields(value, &["mode", "gas", "sources", "phase", "water_species"])?;
         let declaration = string(value, "gas")?;
         if declaration.len() > MAX_RECORD_BYTES {
@@ -176,27 +184,32 @@ pub(super) fn fluid(
             },
         ))
     } else {
-        fields(value, &["mode", "pack", "state", "viscosity"])?;
+        fields(value, &["mode", "pack", "state", "viscosity", "temperature_axis"])?;
         let (pack, point) = load_card(value, base, total)?;
-        let state = match string(value, "viscosity")? {
-            "dynamic" => resolve_liquid_state(
+        let viscosity_basis = match string(value, "viscosity")? {
+            "dynamic" => LiquidViscosityBasis::Dynamic,
+            "kinematic" => LiquidViscosityBasis::Kinematic,
+            _ => return Err(bad("liquid source viscosity must explicitly be dynamic or kinematic")),
+        };
+        let state = match viscosity_basis {
+            LiquidViscosityBasis::Dynamic => resolve_liquid_state(
                 pack.card(),
                 &point,
                 MaterialPropertySelection::SingleClaimOnly,
             ),
-            "kinematic" => resolve_liquid_state_from_kinematic(
+            LiquidViscosityBasis::Kinematic => resolve_liquid_state_from_kinematic(
                 pack.card(),
                 &point,
                 MaterialPropertySelection::SingleClaimOnly,
             ),
-            _ => {
-                return Err(bad(
-                    "liquid source viscosity must explicitly be dynamic or kinematic",
-                ));
-            }
         }
         .map_err(|error| bad(error.to_string()))?;
         admit_static(state.material())?;
+        if let Some(axis) = &temperature_axis {
+            LiquidTemperatureLaw::try_from_material(
+                pack.card(), state.material().clone(), axis, viscosity_basis,
+            ).map_err(|error| bad(error.to_string()))?;
+        }
         let properties = MaterialChtFluid::try_new(&state)
             .map_err(|error| bad(error.to_string()))?
             .properties()
@@ -205,7 +218,9 @@ pub(super) fn fluid(
             properties,
             FluidSource::Liquid {
                 state,
-                pack: pack.content_hash().to_hex(),
+                pack,
+                temperature_axis,
+                viscosity_basis,
             },
         ))
     }
@@ -218,8 +233,8 @@ pub(super) fn solid(
     name: &str,
     index: usize,
 ) -> Result<(SolidMaterial, SolidSource)> {
-    fields(value, &["mode", "pack", "state"])?;
-    frozen(value)?;
+    fields(value, &["mode", "pack", "state", "temperature_axis"])?;
+    let temperature_axis = temperature_axis(value)?;
     let (pack, point) = load_card(value, base, total)?;
     let positive = ScalarAdmissibility::StrictlyPositive;
     let conductivity_quantity = if pack
@@ -259,6 +274,11 @@ pub(super) fn solid(
     )
     .map_err(|error| bad(error.to_string()))?;
     admit_static(&state)?;
+    if let Some(axis) = &temperature_axis {
+        SolidConductivityLaw::try_new(
+            pack.card(), state.clone(), axis, [THERMAL_CONDUCTIVITY_PROPERTY; 3],
+        ).map_err(|error| bad(error.to_string()))?;
+    }
     let coefficient = |name| {
         state
             .property(name)
@@ -276,7 +296,8 @@ pub(super) fn solid(
         SolidSource {
             index,
             state,
-            pack: pack.content_hash().to_hex(),
+            pack,
+            temperature_axis,
         },
     ))
 }
@@ -288,7 +309,7 @@ fn admit_static(state: &ResolvedMaterialStatePoint) -> Result<()> {
         .any(|property| !property.is_static_at_fixed_external_conditions())
     {
         return Err(bad(
-            "frozen CHT requires static material coefficients at fixed thermal, pressure and composition conditions; frequency, field, strain and shear-rate sources need their physical owner",
+            "CHT requires static material coefficients at fixed thermal, pressure and composition conditions; frequency, field, strain and shear-rate sources need their physical owner",
         ));
     }
     Ok(())
@@ -297,7 +318,29 @@ fn admit_static(state: &ResolvedMaterialStatePoint) -> Result<()> {
 impl FluidSource {
     /// A liquid must never inherit the legacy ideal-gas expansion coefficient.
     pub(super) fn requires_expansion(&self) -> bool {
-        matches!(self, Self::Liquid { .. })
+        matches!(self, Self::Liquid { temperature_axis: None, .. })
+    }
+
+    pub(super) fn temperature_dependent(&self) -> bool {
+        matches!(self, Self::Liquid { temperature_axis: Some(_), .. })
+    }
+
+    pub(super) fn evolving_reference_temperature(&self) -> Option<f64> {
+        match self {
+            Self::Liquid { state, temperature_axis: Some(axis), .. } => {
+                Some(state.material().query().axes()[axis])
+            }
+            _ => None,
+        }
+    }
+
+    fn law(&self) -> Result<LiquidTemperatureLaw<'_>> {
+        let Self::Liquid { state, pack, temperature_axis: Some(axis), viscosity_basis } = self else {
+            return Err(bad("temperature-dependent CHT needs an explicitly evolving liquid source"));
+        };
+        LiquidTemperatureLaw::try_from_material(
+            pack.card(), state.material().clone(), axis, *viscosity_basis,
+        ).map_err(|error| bad(error.to_string()))
     }
 
     pub(super) fn gas_reference_temperature(&self) -> Option<f64> {
@@ -331,16 +374,29 @@ impl FluidSource {
                     packs
                 )
             }
-            Self::Liquid { state, pack } => format!(
-                "{{\"kind\":\"liquid\",\"mode\":\"frozen\",\"pack_identity\":{},\"material_state\":{}}}",
-                quote(pack),
-                quote(&state.material().identity().to_hex())
+            Self::Liquid { state, pack, temperature_axis, .. } => format!(
+                "{{\"kind\":\"liquid\",{},\"pack_identity\":{},\"material_state\":{}}}",
+                mode_json(temperature_axis.as_deref()),
+                quote(&pack.content_hash().to_hex()),
+                quote(&state.material().identity().to_hex()),
             ),
         }
     }
 }
 
 impl SolidSource {
+    pub(super) fn temperature_dependent(&self) -> bool {
+        self.temperature_axis.is_some()
+    }
+
+    fn law(&self) -> Result<SolidConductivityLaw<'_>> {
+        let axis = self.temperature_axis.as_deref()
+            .ok_or_else(|| bad("temperature-dependent CHT needs every solid source in the same mode"))?;
+        SolidConductivityLaw::try_new(
+            self.pack.card(), self.state.clone(), axis, [THERMAL_CONDUCTIVITY_PROPERTY; 3],
+        ).map_err(|error| bad(error.to_string()))
+    }
+
     pub(super) fn json(&self) -> String {
         let value = |name| {
             self.state
@@ -349,13 +405,135 @@ impl SolidSource {
                 .value_si()
         };
         format!(
-            "{{\"index\":{},\"mode\":\"frozen\",\"pack_identity\":{},\"material_state\":{},\"conductivity_w_m_k\":{},\"density_kg_m3\":{},\"specific_heat_j_kg_k\":{}}}",
+            "{{\"index\":{},{},\"pack_identity\":{},\"material_state\":{},\"conductivity_w_m_k\":{},\"density_kg_m3\":{},\"specific_heat_j_kg_k\":{}}}",
             self.index,
-            quote(&self.pack),
+            mode_json(self.temperature_axis.as_deref()),
+            quote(&self.pack.content_hash().to_hex()),
             quote(&self.state.identity().to_hex()),
             value(THERMAL_CONDUCTIVITY_PROPERTY),
             value(DENSITY_PROPERTY),
             value(SPECIFIC_HEAT_CAPACITY_PROPERTY)
         )
     }
+}
+
+fn mode_json(axis: Option<&str>) -> String {
+    axis.map_or_else(|| "\"mode\":\"frozen\"".into(), |axis| {
+        format!("\"mode\":\"temperature-dependent\",\"temperature_axis\":{}", quote(axis))
+    })
+}
+
+pub(super) const EVOLVING_NO_CLAIM: &str = "steady laminar fixed-geometry Boussinesq flow and conservative conjugate heat transfer; original liquid density, viscosity and conductivity and solid conductivity reevaluated at local temperature with source claims pinned; reference liquid density and heat capacity retained in inertia, continuity and heat advection with at most 5 percent departures; isotropic source solids; no compressibility, solid storage, melting, deformation, radiation, turbulence closure or phase-stability claim; staircase geometry and one declared resolution unless grid_convergence is requested; Estimated numerical evidence, not experimental validation";
+
+/// Existing CLI geometry and boundaries, existing coupled momentum/heat owner.
+/// Every runtime query borrows the same owned cards admitted by the loader.
+pub(super) fn solve(
+    scene: &super::Scene,
+    domain: &fs_lbm::conjugate::VoxelDomain,
+    flow: &fs_lbm::conjugate::SimpleConfig,
+    thermal: &fs_lbm::conjugate::ThermalSetup,
+    gate: &fs_exec::CancelGate,
+) -> Result<(fs_lbm::conjugate::FvFlow, fs_lbm::conjugate::EnergySolution, usize, String)> {
+    use fs_lbm::material::conjugate::buoyant::{MaterialBuoyancyConfig, MaterialBuoyancyError};
+    use fs_lbm::material::transport::boussinesq::BoussinesqConfig;
+    use fs_material::MaterialError;
+
+    let liquid = scene.fluid_source.as_ref()
+        .ok_or_else(|| bad("temperature-dependent CHT requires a liquid source"))?.law()?;
+    let solids = scene.solid_sources.iter().map(SolidSource::law).collect::<Result<Vec<_>>>()?;
+    let reference_temperature = liquid.reference_point().axes()[liquid.temperature_axis()];
+    let solid_initial: Vec<_> = scene.solid_sources.iter().map(|source| {
+        let axis = source.temperature_axis.as_ref().expect("evolving scene admitted");
+        source.state.query().axes()[axis]
+    }).collect();
+    let mut initial = vec![reference_temperature; domain.cell_count()];
+    for (cell, temperature) in initial.iter_mut().enumerate() {
+        if gate.is_requested() {
+            return Err(super::solver_failure(&fs_lbm::conjugate::ChtError::Cancelled));
+        }
+        if let fs_lbm::conjugate::Voxel::Solid(index) = domain.voxel_at(cell) {
+            *temperature = solid_initial[usize::from(index)];
+        }
+    }
+    let bound = MaterialChtFluid::try_new(liquid.reference_state())
+        .map_err(|error| bad(error.to_string()))?;
+    let relative = scene.tolerance.min(1e-6);
+    let gravity = scene.gravity.unwrap_or([0.0; 3]);
+    let force_scale = scene.fluid.density_kg_m3
+        * gravity.into_iter().map(f64::abs).fold(1.0, f64::max);
+    let controls = MaterialBuoyancyConfig {
+        boussinesq: BoussinesqConfig {
+            gravity_m_s2: gravity,
+            max_relative_density_departure: 0.05,
+            max_relative_specific_heat_departure: 0.05,
+        },
+        maximum_passes: scene.max_iterations,
+        temperature_tolerance_k: relative * reference_temperature,
+        transport_relative_tolerance: relative,
+        force_tolerance_n_m3: relative * force_scale,
+        temperature_relaxation: 0.5,
+    };
+    let run = bound.solve_natural_convection_with_material_solids(
+        domain, &solids, flow, thermal, &fs_lbm::conjugate::EnergyConfig::default(),
+        &initial, controls, gate, |_, temperature, _| {
+            liquid.at_temperature(fs_qty::Temperature::new(temperature))
+                .map_err(|error| MaterialError::State { what: error.to_string() })
+        },
+    ).map_err(|error| match &error {
+        MaterialBuoyancyError::Solver(source) => super::solver_failure(source),
+        MaterialBuoyancyError::NotConverged(_) => super::Failure {
+            code: "cooling-cht-not-steady", message: error.to_string(),
+        },
+        _ => bad(error.to_string()),
+    })?;
+    let fluid = endpoint_json(run.endpoint.iter().map(|sample| (
+        sample.cell, sample.temperature_k,
+        sample.material.resolved_transport().thermal_conductivity_w_m_k(),
+        sample.material.material().material(),
+    )), gate)?;
+    let solid = endpoint_json(run.solid_endpoint.iter().map(|sample| (
+        sample.cell, sample.temperature_k, sample.conductivity_w_m_k[0], &sample.material,
+    )), gate)?;
+    let report = run.report;
+    let evidence = format!(concat!(
+        "{{\"mode\":\"temperature-dependent\",\"passes\":{},",
+        "\"temperature_defect_k\":{},\"transport_relative_defect\":{},\"force_defect_n_m3\":{},",
+        "\"temperature_tolerance_k\":{},\"transport_relative_tolerance\":{},\"force_tolerance_n_m3\":{},",
+        "\"max_relative_density_departure\":0.05,\"max_relative_specific_heat_departure\":0.05,\"solid_to_fluid_heat_w\":{},",
+        "\"fluid_endpoint\":{},\"solid_endpoint\":{}}}"),
+        report.passes, super::num(report.temperature_defect_k)?,
+        super::num(report.transport_relative_defect)?, super::num(report.force_defect_n_m3)?,
+        super::num(controls.temperature_tolerance_k)?, super::num(controls.transport_relative_tolerance)?,
+        super::num(controls.force_tolerance_n_m3)?,
+        super::num(run.energy.solid_to_fluid_heat_w(domain))?, fluid, solid);
+    Ok((run.flow, run.energy, report.passes, evidence))
+}
+
+/// Compact identities of the actual endpoint states, in original cell order.
+/// The digest includes each complete state identity (source choices and query),
+/// rather than claiming that one representative temperature describes a body.
+fn endpoint_json<'a>(
+    samples: impl Iterator<Item = (usize, f64, f64, &'a ResolvedMaterialStatePoint)>,
+    gate: &fs_exec::CancelGate,
+) -> Result<String> {
+    let mut digest = fs_blake3::DomainHasher::new("frankensim.cooling-cht.material-endpoint.v1");
+    let mut count = 0;
+    let (mut t_min, mut t_max, mut k_min, mut k_max) =
+        (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+    for (cell, temperature, conductivity, state) in samples {
+        if gate.is_requested() {
+            return Err(super::solver_failure(&fs_lbm::conjugate::ChtError::Cancelled));
+        }
+        count += 1;
+        digest.update(&(cell as u64).to_le_bytes());
+        digest.update(state.identity().as_bytes());
+        t_min = t_min.min(temperature); t_max = t_max.max(temperature);
+        k_min = k_min.min(conductivity); k_max = k_max.max(conductivity);
+    }
+    if count == 0 { return Ok("{\"cells\":0}".into()); }
+    Ok(format!(concat!(
+        "{{\"cells\":{},\"states_identity\":{},\"minimum_temperature_k\":{},\"maximum_temperature_k\":{},",
+        "\"minimum_conductivity_w_m_k\":{},\"maximum_conductivity_w_m_k\":{}}}"),
+        count, quote(&digest.finalize().to_hex()), super::num(t_min)?, super::num(t_max)?,
+        super::num(k_min)?, super::num(k_max)?))
 }

@@ -307,6 +307,162 @@ fn radiating_transient_settles_on_the_steady_radiating_solution() {
     );
 }
 
+mod evolving_materials {
+    use super::*;
+    use fs_evidence::ValidityDomain;
+    use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedMaterialCardPack,
+        NormalizedPack, PropertyClaim, PropertyKey, PropertyValue, Provenance, UncertaintyModel};
+    use fs_material::liquid::{DYNAMIC_VISCOSITY_DIMS, DYNAMIC_VISCOSITY_PROPERTY};
+    use fs_material::state_point::{DENSITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_DIMS,
+        SPECIFIC_HEAT_CAPACITY_PROPERTY, THERMAL_CONDUCTIVITY_DIMS, THERMAL_CONDUCTIVITY_PROPERTY};
+    use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+    use fs_qty::{Density, QuantitySpec, Temperature};
+
+    fn quantity(kind: QuantityKind) -> QuantitySpec {
+        QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
+    }
+
+    // Actual canonical pack bytes, decoded by the ordinary binary input path.
+    // These deliberately synthetic laws test coupling, not a measured substance.
+    fn pack(liquid: bool, slope: f64, upper: f64) -> Vec<u8> {
+        let mut properties = vec![
+            (DENSITY_PROPERTY, Density::DIMS, if liquid {
+                [1.01, 1.0, 1.0-0.001*(upper-300.0)]
+            } else { [2.0; 3] }),
+            (SPECIFIC_HEAT_CAPACITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_DIMS, [2.0; 3]),
+            (THERMAL_CONDUCTIVITY_PROPERTY, THERMAL_CONDUCTIVITY_DIMS,
+                [1.0, 1.0, 1.0+slope*(upper-300.0)]),
+        ];
+        if liquid { properties.push((DYNAMIC_VISCOSITY_PROPERTY, DYNAMIC_VISCOSITY_DIMS, [1.0; 3])); }
+        let mut claims = ClaimSet::new();
+        for (name, dims, values) in properties {
+            let response = if name == THERMAL_CONDUCTIVITY_PROPERTY {
+                quantity(QuantityKind::ThermalConductivity)
+            } else { QuantitySpec::dimensional(dims) };
+            claims.insert_claim(PropertyClaim {
+                key: PropertyKey::with_quantity(name, response),
+                value: PropertyValue::Curve { abscissa: "T".into(), abscissa_dims: Temperature::DIMS,
+                    knots: vec![(290.0, values[0]), (300.0, values[1]), (upper, values[2])], dims },
+                validity: ValidityDomain::unconstrained()
+                    .with_quantity("T", quantity(QuantityKind::AbsoluteTemperature), 290.0, upper)
+                    .with_quantity("pressure", quantity(QuantityKind::Pressure), 100000.0, 100000.0),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::LinearInside, observations: vec![],
+                provenance: Provenance { source: "synthetic coupled CHT source law, not measurements".into(),
+                    license: "CC0 synthetic data".into(), artifact: None },
+            }).unwrap();
+        }
+        let pack = NormalizedPack::new("evolving-cht-fixture", "v1",
+            fs_blake3::hash_bytes(b"synthetic coupled CHT source law"), "CC0 synthetic data",
+            claims, vec![], vec![]).unwrap();
+        NormalizedMaterialCardPack::new(MaterialStateId {
+            chemistry: "synthetic".into(), phase: if liquid { "liquid" } else { "solid" }.into(),
+            process: "test fixture".into(), revision: 0,
+        }, pack).unwrap().to_bytes()
+    }
+
+    const SCENE: &str = r#"{
+ "schema":"frankensim.cooling-cht.v1", "size_m":[1,1,0.16666666666666666], "voxel_m":0.16666666666666666,
+ "fluid":{"mode":"temperature-dependent","temperature_axis":"T","pack":"LIQUID","viscosity":"dynamic",
+   "state":[{"name":"T","value":"300 K","kind":"absolute-temperature"},
+            {"name":"pressure","value":"100 kPa","kind":"pressure"}]},
+ "materials":[{"name":"wall","source":{"mode":"temperature-dependent","temperature_axis":"T","pack":"SOLID",
+   "state":[{"name":"T","value":"300 K","kind":"absolute-temperature"},
+            {"name":"pressure","value":"100 kPa","kind":"pressure"}]}}],
+ "solids":[{"material":"wall","min_m":[0,0,0],"max_m":[0.16666666666666666,1,0.16666666666666666]}],
+ "faces":{"x-":{"type":"wall","temperature_k":310},"x+":{"type":"wall","temperature_k":300},
+          "z-":{"type":"symmetry"},"z+":{"type":"symmetry"}},
+ "gravity_m_s2":[0,-9.81,0], "solver":{"tolerance":1e-10}
+}"#;
+
+    fn prepare(name: &str, slope: f64, solid_upper: f64) -> (PathBuf, String) {
+        let liquid = format!("{name}-liquid.fsmcdpk");
+        let solid = format!("{name}-solid.fsmcdpk");
+        let scene = SCENE.replace("LIQUID", &liquid).replace("SOLID", &solid);
+        let path = scratch(&format!("{name}.json"), &scene);
+        let base = path.parent().unwrap();
+        std::fs::write(base.join(liquid), pack(true, 0.0, 350.0)).unwrap();
+        std::fs::write(base.join(solid), pack(false, slope, solid_upper)).unwrap();
+        (path, scene)
+    }
+
+    #[test]
+    fn temperature_dependent_solid_pack_changes_heat_and_actual_liquid_flow() {
+        let mut results = Vec::new();
+        for (name, slope) in [("evolving-low", 0.0), ("evolving-high", 1.0)] {
+            let (path, original) = prepare(name, slope, 350.0);
+            let (code, result, error) = run(&path);
+            assert_eq!(code, 0, "{error}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+            assert_eq!(result.str_field("solver"), Some("fv-simplec-material"));
+            let input = &result.path(&["material_inputs", "solids"]).unwrap().as_array().unwrap()[0];
+            assert_eq!(input.str_field("mode"), Some("temperature-dependent"));
+            // Identical reference conductivity: a frozen snapshot cannot pass.
+            assert_eq!(input.f64_field("conductivity_w_m_k"), Some(1.0));
+            assert!(f(&result, &["energy", "balance_relative_residual"]) < 1e-8);
+            assert!(f(&result, &["energy", "boundary_outflow_w"]).abs() < 1e-8);
+            assert!(f(&result, &["flow", "max_speed_m_s"]) > 1e-8);
+            let feedback = result.get("material_feedback").unwrap();
+            for (defect, tolerance) in [
+                ("temperature_defect_k", "temperature_tolerance_k"),
+                ("transport_relative_defect", "transport_relative_tolerance"),
+                ("force_defect_n_m3", "force_tolerance_n_m3"),
+            ] {
+                assert!(f(feedback, &[defect]) <= f(feedback, &[tolerance]));
+            }
+            assert_eq!(f(feedback, &["fluid_endpoint", "cells"]), 30.0);
+            assert_eq!(f(feedback, &["solid_endpoint", "cells"]), 6.0);
+            assert!(f(feedback, &["solid_to_fluid_heat_w"]) > 0.0);
+            let endpoint_k = f(feedback, &["solid_endpoint", "maximum_conductivity_w_m_k"]);
+            let endpoint_t = f(feedback, &["solid_endpoint", "maximum_temperature_k"]);
+            assert!((endpoint_k - (1.0+slope*(endpoint_t-300.0))).abs() < 1e-10);
+            results.push(result);
+        }
+        let heat = |r: &J| f(r, &["material_feedback", "solid_to_fluid_heat_w"]);
+        assert!(heat(&results[1]) > heat(&results[0]) * 1.01);
+        let speed = |r: &J| f(r, &["flow", "max_speed_m_s"]);
+        assert!((speed(&results[1])-speed(&results[0])).abs() > 1e-7);
+        assert_ne!(results[0].path(&["material_feedback", "solid_endpoint", "states_identity"]),
+            results[1].path(&["material_feedback", "solid_endpoint", "states_identity"]));
+        assert_eq!(results[0].path(&["material_inputs", "fluid"]),
+            results[1].path(&["material_inputs", "fluid"]));
+    }
+
+    #[test]
+    fn temperature_dependent_mode_refuses_conflicting_physics_and_unsupported_endpoints() {
+        let (_, scene) = prepare("evolving-refusals", 1.0, 350.0);
+        let insert = |field: &str| scene.replacen('{', &format!("{{{field},"), 1);
+        for (index, (input, reason)) in [
+            (insert("\"expansion_per_k\":0.001"), "density owns buoyancy"),
+            (insert("\"reference_temperature_k\":301"), "conflicts with the original liquid"),
+            (insert("\"transient\":{}"), "is steady"),
+            (insert("\"radiation\":{}"), "does not support radiation"),
+            (scene.replace("\"tolerance\":1e-10", "\"tolerance\":1e-10,\"turbulence\":\"lvel\""), "requires laminar"),
+            (scene.replacen("\"mode\":\"temperature-dependent\",\"temperature_axis\":\"T\"",
+                "\"mode\":\"frozen\"", 1), "requires a source-backed liquid"),
+            (scene.replace("\"source\":{\"mode\":\"temperature-dependent\",\"temperature_axis\":\"T\"",
+                "\"source\":{\"mode\":\"frozen\""), "every solid material"),
+            (scene.replace("\"temperature_axis\":\"T\"", "\"temperature_axis\":\"pressure\""), "absolute-temperature"),
+        ].into_iter().enumerate() {
+            let path = scratch(&format!("evolving-refusal-{index}.json"), &input);
+            let (code, result, error) = run(&path);
+            assert_ne!(code, 0, "unexpected acceptance: {input}");
+            assert!(error.contains(reason), "{error}");
+            assert!(result.get("material_feedback").is_none());
+            assert_eq!(std::fs::read_to_string(path).unwrap(), input);
+        }
+        let gas = DUCT.replacen('{', r#"{"fluid":{"mode":"temperature-dependent","temperature_axis":"T","gas":"300 100000 0"},"#, 1);
+        assert!(run(&scratch("evolving-gas-refusal.json", &gas)).2.contains("gas sources currently support frozen"));
+        // Reference T=300 K is supported, but the actual warmed wall is not.
+        let (path, original) = prepare("evolving-endpoint-refusal", 0.01, 301.0);
+        let (code, result, error) = run(&path);
+        assert_ne!(code, 0);
+        assert!(error.contains("SolidMaterial"), "{error}");
+        assert!(result.get("material_feedback").is_none());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+}
+
 const CORNER_PLATE: &str = r#"{
  "schema": "frankensim.cooling-cht.v1",
  "size_m": [0.008, 0.008, 0.004], "voxel_m": 0.002,
