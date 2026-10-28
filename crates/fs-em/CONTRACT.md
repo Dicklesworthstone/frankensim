@@ -543,13 +543,50 @@ topologies can refuse this partitioned lane. Geometry, proposed magnetic law and
 native graph coefficients stay fixed during each native trial. No hysteresis,
 moving-conductor or experimental material-qualification claim is introduced.
 
+### Oriented permanent magnets with saturating cores and induction history
+
+`IsotropicMagneticMaterial::Recoil(PlanarRecoilMaterial)` admits the same
+source-backed, specimen-oriented recoil law as the original linear owner.
+Linear regions, single-valued reversible H(B) cores and permanent magnets share
+the original nonlinear P1/FEEC solve. Magnet cells evaluate
+`H=(B-Br)/mu_recoil`, shifted storage `psi=|B-Br|^2/(2 mu_recoil)`, and
+Legendre coenergy `psi*=mu_recoil |H|^2/2+Br.H`. This coenergy can be negative.
+Remanence enters the constitutive weak residual independently of impressed
+current, including on natural boundaries; it is not a fitted current source.
+
+Each initial and trial field must satisfy the original parallel and transverse
+recoil envelope. Newton backtracking handles both nonlinear H(B) range and
+recoil-range refusals. Accepted fields expose per-cell operating points and
+remaining source margins beside their declared energy reference. These are
+numerical estimates, not certified bounds or an irreversible-demagnetization
+model. Construction checks the positive recoil tangent without requiring an
+inadmissible zero-field initial state; callers can supply a valid biased seed.
+
+The same fixed law participates in `PlanarNonlinearEddy` and
+`NonlinearWindingCircuit`. Physical storage uses the shifted energy, while
+the recoil backward-Euler Bregman loss is computed directly as
+`|B_next-B_old|^2/(2 mu_recoil)`. Constant Br cancels from this increment.
+Winding linkage retains the actual magnetic bias; its time difference supplies
+Faraday voltage. Spatial Ohmic loss remains the only magnetic material heat
+in this lane. Accepted induction fields can transfer an exterior Maxwell
+wrench while retaining enclosed magnets and saturating material.
+
+Conductivity refresh requires the original complete material source and
+unchanged recoil quantities. Magnetic-law refresh preserves the exact recoil
+law and orientation. Temperature-dependent remanence, permeability or envelope
+changes are refused; the caloric nonlinear-recoil path is also refused until
+remanence work and entropy data have an owner. Geometry and remanence remain
+fixed. No hysteresis, irreversible loss, moving-magnet induction or 3D end-field
+claim follows from this extension.
+
 ### Source-pinned magnetic temperature refresh on continuing circuits
 
 `PlanarNonlinearEddy::step_with_materials_candidate` and
 `NonlinearWindingCircuit::step_with_materials_candidate` reassemble the same
 original mesh at proposed source-pinned linear mu(T) states. Original material
 cards, complete claims, coordinate schema, fixed context and constitutive kinds
-remain pinned. Nonlinear H(B) entries must remain exactly unchanged. A refreshed
+remain pinned. Nonlinear H(B) and oriented recoil entries must remain exactly
+unchanged. A refreshed
 candidate owns its assembled problem and retains original field, circuit and
 linkage histories through clone and continuation.
 
@@ -591,7 +628,7 @@ the actual accepted B/H from their retained potential and share one source
 admission with the original geometric Maxwell-stress integral. They do not
 re-equilibrate the field. Every contour edge needs the same complete linear
 material snapshot on both sides, zero original impressed current, and no
-resolved eddy conductor. Enclosed source-defined nonlinear magnetic material,
+resolved eddy conductor. Enclosed source-defined nonlinear magnetic material, fixed recoil magnets,
 stranded current and eddy currents remain admissible. The history supplies the
 source support that a detached recovered static field intentionally lacks.
 Mesh work bounds apply before field recovery. Original edge orientation,

@@ -98,6 +98,9 @@ impl EddySection for PlanarNonlinearMagnetostatics {
             IsotropicMagneticMaterial::Reversible(law) => {
                 law.admit_fixed_material_refresh(material)?;
             }
+            IsotropicMagneticMaterial::Recoil(law) => {
+                law.material().admit_fixed_material_refresh(material)?;
+            }
         }
         Ok(())
     }
@@ -170,8 +173,10 @@ pub(crate) fn admit_material_refresh(
                 IsotropicMagneticMaterial::Reversible(a),
                 IsotropicMagneticMaterial::Reversible(b),
             ) if a == b => {}
+            (IsotropicMagneticMaterial::Recoil(a), IsotropicMagneticMaterial::Recoil(b))
+                if a == b => {}
             _ => return Err(EddyError::Invalid(
-                "temperature refresh preserves linear sources and complete fixed nonlinear laws",
+                "temperature refresh preserves linear sources and complete fixed nonlinear/recoil laws",
             )
             .into()),
         }
@@ -530,6 +535,14 @@ impl<'m> PlanarNonlinearEddy<'m> {
                 }
                 IsotropicMagneticMaterial::Reversible(law) => {
                     law.bregman_density_j_m3(b0, b1).map_err(EddyError::from)?
+                }
+                IsotropicMagneticMaterial::Recoil(law) => {
+                    // Fixed Br cancels from the convex increment. Evaluate the
+                    // positive quadratic directly, without subtracting stored
+                    // bias energies or labeling numerical loss as Joule heat.
+                    let mu = law.material().permeability_h_m();
+                    let difference = (b1[0] - b0[0]).hypot(b1[1] - b0[1]);
+                    finite((0.5 * difference) * (difference / mu))?
                 }
             };
             let numerical = finite(volume_m3 * density)?;

@@ -24,12 +24,13 @@
 //! in the low-induction regime: their induced currents do not update this field.
 //! `planar::eddy` additionally retains stationary planar induction history and
 //! spatial Ohmic heat, including floating conductor current-return constraints.
-//! The stationary induction-history owner still refuses permanent-magnet bias
-//! until its source/storage trajectory accounts for it explicitly. There is
-//! no hysteresis, irreversible demagnetization, moving
-//! conductor induction feedback or distributed magnetostriction claim.
-//! `planar::nonlinear` supplies a separate fixed-state reversible H(B) solve,
-//! with source-integrated energy and the same Hodge, gauge and transfer owners.
+//! The linear midpoint induction owner still refuses permanent-magnet bias;
+//! the nonlinear backward-Euler owner includes fixed oriented recoil sources.
+//! There is no hysteresis, irreversible demagnetization, moving-conductor
+//! induction feedback or distributed magnetostriction claim.
+//! `planar::nonlinear` combines source-bound reversible H(B), linear media and
+//! oriented recoil magnets in the same mesh, with source-integrated energy,
+//! checked operating limits and the same Hodge, gauge and transfer owners.
 //! Its nonlinear fields can drive existing imposed-field flow consumers; they
 //! do not acquire the linear winding/induction superposition assumptions.
 //! `planar::eddy::nonlinear` evolves those same H(B) fields with the original

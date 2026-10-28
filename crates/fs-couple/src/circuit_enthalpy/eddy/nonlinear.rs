@@ -138,6 +138,11 @@ impl MagneticThermalNetwork<'_> {
                             Some(law.source_path().axis.as_str()),
                         )
                     }
+                    IsotropicMagneticMaterial::Recoil(_) => {
+                        return Err(invalid(
+                            "magnetothermal recoil refresh requires remanence work and entropy data",
+                        ));
+                    }
                 };
                 let property = snapshot
                     .property(property_name)

@@ -236,6 +236,216 @@ mod nonlinear_magnetics {
     }
 }
 
+mod permanent_recoil_refresh {
+    use super::*;
+    use fs_material::{
+        conductor::{ELECTRICAL_CONDUCTIVITY_DIMS, ELECTRICAL_CONDUCTIVITY_PROPERTY},
+        field_storage::permanent::{
+            FIELD_STRENGTH_DIMS, FLUX_DENSITY_DIMS, RECOIL_MAXIMUM_PARALLEL_FIELD_PROPERTY,
+            RECOIL_MAXIMUM_TRANSVERSE_FIELD_PROPERTY, RECOIL_MINIMUM_PARALLEL_FIELD_PROPERTY,
+            RECOIL_PERMEABILITY_PROPERTY, REMANENT_FLUX_DENSITY_PROPERTY, ResolvedRecoilMaterial,
+        },
+        state_point::{
+            ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point,
+        },
+    };
+
+    const RECOIL_PROPERTIES: [(&str, Dims, f64); 5] = [
+        (
+            RECOIL_PERMEABILITY_PROPERTY,
+            MAGNETIC_PERMEABILITY_DIMS,
+            1.5e-6,
+        ),
+        (REMANENT_FLUX_DENSITY_PROPERTY, FLUX_DENSITY_DIMS, 0.8),
+        (
+            RECOIL_MINIMUM_PARALLEL_FIELD_PROPERTY,
+            FIELD_STRENGTH_DIMS,
+            -1e6,
+        ),
+        (
+            RECOIL_MAXIMUM_PARALLEL_FIELD_PROPERTY,
+            FIELD_STRENGTH_DIMS,
+            1e6,
+        ),
+        (
+            RECOIL_MAXIMUM_TRANSVERSE_FIELD_PROPERTY,
+            FIELD_STRENGTH_DIMS,
+            1e5,
+        ),
+    ];
+
+    fn point(temperature_k: f64) -> QueryPoint {
+        QueryPoint::new()
+            .with_quantity(
+                "T",
+                QuantitySpec::dimensional(Temperature::DIMS),
+                temperature_k,
+            )
+            .unwrap()
+            .with_quantity(
+                "pressure",
+                QuantitySpec::dimensional(fs_qty::Pressure::DIMS),
+                1e5,
+            )
+            .unwrap()
+    }
+
+    fn source(temperature_dependent_recoil: Option<&str>) -> MaterialCard {
+        let mut set = ClaimSet::new();
+        for (name, dims, value) in RECOIL_PROPERTIES.into_iter().chain([(
+            ELECTRICAL_CONDUCTIVITY_PROPERTY,
+            ELECTRICAL_CONDUCTIVITY_DIMS,
+            2e6,
+        )]) {
+            let is_recoil_curve = temperature_dependent_recoil == Some(name);
+            let is_curve = is_recoil_curve || name == ELECTRICAL_CONDUCTIVITY_PROPERTY;
+            let payload = if is_curve {
+                PropertyValue::Curve {
+                    abscissa: "T".into(),
+                    abscissa_dims: Temperature::DIMS,
+                    knots: if is_recoil_curve {
+                        vec![(300.0, value), (350.0, 1.1 * value), (400.0, value)]
+                    } else {
+                        vec![(300.0, value), (400.0, 0.5 * value)]
+                    },
+                    dims,
+                }
+            } else {
+                PropertyValue::Scalar { value, dims }
+            };
+            set.insert_claim(PropertyClaim {
+                key: PropertyKey::new(name, dims),
+                value: payload,
+                validity: ValidityDomain::unconstrained().with("T", 300.0, 400.0),
+                interpolation: if is_curve {
+                    InterpolationPolicy::LinearInside
+                } else {
+                    InterpolationPolicy::ConstantWithinValidity
+                },
+                uncertainty: UncertaintyModel::Unstated,
+                observations: vec![],
+                provenance: Provenance {
+                    source: "manufactured conducting recoil material".into(),
+                    license: "test-only".into(),
+                    artifact: None,
+                },
+            })
+            .unwrap();
+        }
+        MaterialCard::assemble(
+            MaterialStateId {
+                chemistry: "synthetic conducting magnet".into(),
+                phase: "solid".into(),
+                process: "fixed-recoil refresh fixture".into(),
+                revision: 0,
+            },
+            set,
+            vec![],
+        )
+        .unwrap()
+    }
+
+    fn recoil(source: &MaterialCard, include_conductor: bool) -> ResolvedRecoilMaterial {
+        let mut properties = RECOIL_PROPERTIES.to_vec();
+        if include_conductor {
+            properties.push((
+                ELECTRICAL_CONDUCTIVITY_PROPERTY,
+                ELECTRICAL_CONDUCTIVITY_DIMS,
+                2e6,
+            ));
+        }
+        let requirements: Vec<_> = properties
+            .into_iter()
+            .map(|(name, dims, _)| {
+                ScalarPropertyRequirement::try_new(name, dims, ScalarAdmissibility::Finite).unwrap()
+            })
+            .collect();
+        ResolvedRecoilMaterial::try_from_material(
+            resolve_material_state_point(
+                source,
+                &point(300.0),
+                &requirements,
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn fixed_recoil_admits_native_conductivity_temperature_refresh() {
+        let source = source(None);
+        let law = recoil(&source, true);
+        let warm = law
+            .material()
+            .at_query_point(&source, &point(400.0))
+            .unwrap();
+        assert_eq!(warm.properties().len(), 6);
+        near(
+            warm.property(ELECTRICAL_CONDUCTIVITY_PROPERTY)
+                .unwrap()
+                .value_si(),
+            1e6,
+        );
+        law.admit_fixed_material_refresh(&warm).unwrap();
+        for (name, _, _) in RECOIL_PROPERTIES {
+            assert_eq!(
+                law.material().property(name).unwrap().value_si().to_bits(),
+                warm.property(name).unwrap().value_si().to_bits()
+            );
+        }
+        assert_eq!(
+            law.material().query_point(),
+            &[("T".into(), 300.0), ("pressure".into(), 1e5)]
+        );
+    }
+
+    #[test]
+    fn every_temperature_dependent_recoil_property_refuses_even_equal_endpoints() {
+        for (name, _, _) in RECOIL_PROPERTIES {
+            let source = source(Some(name));
+            let law = recoil(&source, true);
+            law.admit_fixed_material_refresh(law.material()).unwrap();
+            let warm = law
+                .material()
+                .at_query_point(&source, &point(400.0))
+                .unwrap();
+            assert_eq!(
+                law.material().property(name).unwrap().value_si().to_bits(),
+                warm.property(name).unwrap().value_si().to_bits()
+            );
+            assert!(law.admit_fixed_material_refresh(&warm).is_err(), "{name}");
+            let midway = law
+                .material()
+                .at_query_point(&source, &point(350.0))
+                .unwrap();
+            assert!(law.admit_fixed_material_refresh(&midway).is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn recoil_refresh_preserves_complete_bundle_card_and_nonthermal_context() {
+        let original = source(None);
+        let law = recoil(&original, true);
+        let reduced = recoil(&original, false);
+        assert!(
+            law.admit_fixed_material_refresh(reduced.material())
+                .is_err()
+        );
+        let other_card = source(Some(REMANENT_FLUX_DENSITY_PROPERTY));
+        let substituted = recoil(&other_card, true);
+        assert!(
+            law.admit_fixed_material_refresh(substituted.material())
+                .is_err()
+        );
+        let changed_pressure = law
+            .material()
+            .at_query_point(&original, &point(300.0).with("pressure", 2e5).unwrap())
+            .unwrap();
+        assert!(law.admit_fixed_material_refresh(&changed_pressure).is_err());
+    }
+}
+
 #[test]
 fn geometry_and_material_set_capacitance_and_the_same_field_energy() {
     let source = constant(

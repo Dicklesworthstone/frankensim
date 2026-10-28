@@ -79,9 +79,10 @@ impl PlanarRecoilMaterial {
 /// circuit source work, irreversible heat or a force/coenergy calculation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MagneticEnergyReference {
-    /// All cells use B.H/2, with zero at B=0.
+    /// Induced cells use their source-integrated energy, with zero at B=0.
     ZeroFlux,
     /// Magnet cells use (B-Br).H/2=mu_recoil*|H|²/2, with zero at B=Br;
-    /// induced cells retain B.H/2. Br and all material conditions are held fixed.
+    /// induced cells retain their zero-flux energy. Br and material conditions
+    /// are held fixed.
     FixedRemanence,
 }

@@ -1,4 +1,4 @@
-//! Reversible isotropic material H(B) on the original planar P1/FEEC substrate.
+//! Reversible H(B) and oriented recoil magnets on the planar P1/FEEC substrate.
 //!
 //! The residual is integral H(curl A).curl(test) - J*test. Its Newton tangent
 //! has eigenvalues H/B and dH/dB, supplied by the SAME material law as energy.
@@ -7,7 +7,11 @@
 //! This is fixed-state magnetostatics: no hysteresis, heat, induction history,
 //! motion or dynamic parameter-work interpretation is attached to this solve.
 
-use super::{MagneticError, PlanarMagnetostatics, finite, gradients, poll};
+use super::{
+    MagneticError, PlanarMagnetostatics, finite, gradients,
+    permanent::{MagneticEnergyReference, PlanarRecoilMaterial},
+    poll,
+};
 use fs_feec::{
     assembly::{incidence_to_csr, stiffness},
     weighted::{WeightedAssemblyLimits, WeightedError},
@@ -17,6 +21,7 @@ use fs_material::{
     field_storage::{
         linear_magnetic_permeability,
         nonlinear::{ReversibleMagneticMaterial, ReversibleMagneticResponse},
+        permanent::RecoilOperatingPoint,
     },
     state_point::ResolvedMaterialStatePoint,
 };
@@ -33,20 +38,30 @@ pub enum IsotropicMagneticMaterial {
     Linear(ResolvedMaterialStatePoint),
     /// Monotone reversible H(|B|), with zero remanence.
     Reversible(ReversibleMagneticMaterial),
+    /// Source-backed B=mu_recoil H+Br with explicit specimen orientation and
+    /// reversible operating envelope. Remanence is fixed during a trajectory.
+    Recoil(PlanarRecoilMaterial),
 }
 impl IsotropicMagneticMaterial {
-    /// Immutable source snapshot of this physical law (H(B) is anchored at B=0).
+    /// Immutable source snapshot of this physical law.
     pub fn material(&self) -> &ResolvedMaterialStatePoint {
         match self {
             Self::Linear(material) => material,
             Self::Reversible(law) => law.material(),
+            Self::Recoil(law) => law.material().material(),
         }
     }
     fn response(&self, b: f64) -> Result<ReversibleMagneticResponse, MagneticError> {
         match self {
             Self::Reversible(law) => law.evaluate(b).map_err(MagneticError::Material),
-            Self::Linear(material) => {
-                let mu = linear_magnetic_permeability(material).map_err(MagneticError::Material)?;
+            Self::Linear(_) | Self::Recoil(_) => {
+                let mu = match self {
+                    Self::Linear(material) => {
+                        linear_magnetic_permeability(material).map_err(MagneticError::Material)?
+                    }
+                    Self::Recoil(law) => law.material().permeability_h_m(),
+                    Self::Reversible(_) => unreachable!(),
+                };
                 let h = finite(b / mu)?;
                 let energy = finite((0.5 * b) * h)?;
                 let reluctivity = finite(1.0 / mu)?;
@@ -111,6 +126,19 @@ pub enum NonlinearMagneticError {
         /// Original source range's upper endpoint [T].
         maximum_t: f64,
     },
+    /// The physical H left a source-backed reversible recoil envelope.
+    RecoilRange {
+        /// Original mesh triangle.
+        triangle: usize,
+        /// H projected onto the declared magnet direction [A/m].
+        parallel_field_a_m: f64,
+        /// Magnitude of the perpendicular component of H [A/m].
+        transverse_field_a_m: f64,
+        /// Original source interval for the parallel component [A/m].
+        parallel_range_a_m: [f64; 2],
+        /// Original source maximum transverse field [A/m].
+        maximum_transverse_field_a_m: f64,
+    },
     /// Newton or line-search work exhausted before the physical residual passed.
     Nonconvergence(NonlinearMagneticReport),
 }
@@ -140,6 +168,7 @@ struct Evaluation {
     h: Vec<[f64; 2]>,
     energies: Vec<f64>,
     coenergies: Vec<f64>,
+    recoil_operating_points: Vec<Option<RecoilOperatingPoint>>,
     tangent_weights: Vec<CellWeight2>,
     residual: Vec<f64>,
     energy: f64,
@@ -203,7 +232,7 @@ fn norm(values: impl Iterator<Item = f64>) -> f64 {
 }
 
 impl PlanarNonlinearMagnetostatics {
-    /// Bind each original triangle to its actual linear or reversible source.
+    /// Bind each original triangle to its actual induced or recoil source.
     /// Material names never select coefficients or a solver branch.
     pub fn new(
         mesh: TriComplex2,
@@ -287,6 +316,7 @@ impl PlanarNonlinearMagnetostatics {
             h: Vec::with_capacity(count),
             energies: Vec::with_capacity(count),
             coenergies: Vec::with_capacity(count),
+            recoil_operating_points: Vec::with_capacity(count),
             tangent_weights: Vec::with_capacity(count),
             residual: rhs.iter().map(|x| -x).collect(),
             energy: 0.0,
@@ -306,7 +336,12 @@ impl PlanarNonlinearMagnetostatics {
                 )
             });
             let b = [finite(gradient[1])?, finite(-gradient[0])?];
-            let magnitude = finite(b[0].hypot(b[1]))?;
+            let remanence = match material {
+                IsotropicMagneticMaterial::Recoil(law) => law.remanence_t(),
+                _ => [0.0; 2],
+            };
+            let induced_b = [finite(b[0] - remanence[0])?, finite(b[1] - remanence[1])?];
+            let magnitude = finite(induced_b[0].hypot(induced_b[1]))?;
             if let IsotropicMagneticMaterial::Reversible(law) = material
                 && magnitude > law.maximum_flux_density_t()
             {
@@ -319,13 +354,45 @@ impl PlanarNonlinearMagnetostatics {
             let response = material.response(magnitude)?;
             let nu = response.secant_reluctivity_m_h;
             let differential = response.differential_reluctivity_m_h;
-            let h = [finite(nu * b[0])?, finite(nu * b[1])?];
+            let h = [finite(nu * induced_b[0])?, finite(nu * induced_b[1])?];
+            let operating_point = if let IsotropicMagneticMaterial::Recoil(recoil) = material {
+                let direction = recoil.direction();
+                let parallel = finite(direction[0].mul_add(h[0], direction[1] * h[1]))?;
+                let transverse = finite(direction[0].mul_add(h[1], -direction[1] * h[0]))?.abs();
+                let source = recoil.material();
+                let range = source.parallel_range_a_m();
+                if parallel < range[0]
+                    || parallel > range[1]
+                    || transverse > source.maximum_transverse_a_m()
+                {
+                    return Err(NonlinearMagneticError::RecoilRange {
+                        triangle,
+                        parallel_field_a_m: parallel,
+                        transverse_field_a_m: transverse,
+                        parallel_range_a_m: range,
+                        maximum_transverse_field_a_m: source.maximum_transverse_a_m(),
+                    });
+                }
+                Some(
+                    source
+                        .admit_operating_point(parallel, transverse)
+                        .map_err(MagneticError::Material)?,
+                )
+            } else {
+                None
+            };
             let volume = self
                 .mesh
                 .face_measure(triangle)
                 .ok_or(MagneticError::Invalid("missing triangle measure"))?;
             let energy = finite(volume * response.energy_density_j_m3)?;
-            let coenergy = finite(volume * response.coenergy_density_j_m3)?;
+            // The Legendre dual of shifted recoil storage is
+            // mu*|H|^2/2 + Br.H. It can be negative; B.H/2 is NOT its energy.
+            let coenergy_density = finite(remanence[0].mul_add(
+                h[0],
+                remanence[1].mul_add(h[1], response.coenergy_density_j_m3),
+            ))?;
+            let coenergy = finite(volume * coenergy_density)?;
             result.energy = finite(result.energy + energy)?;
             result.coenergy = finite(result.coenergy + coenergy)?;
             for (local, &vertex) in face.iter().enumerate() {
@@ -350,6 +417,7 @@ impl PlanarNonlinearMagnetostatics {
             result.h.push(h);
             result.energies.push(energy);
             result.coenergies.push(coenergy);
+            result.recoil_operating_points.push(operating_point);
             result.tangent_weights.push(weight);
         }
         result.objective = result.energy;
@@ -404,6 +472,7 @@ impl PlanarNonlinearMagnetostatics {
             magnetic_field_a_m: evaluation.h,
             cell_energy_j: evaluation.energies,
             cell_coenergy_j: evaluation.coenergies,
+            recoil_operating_points: evaluation.recoil_operating_points,
             energy_j: evaluation.energy,
             coenergy_j: evaluation.coenergy,
             report,
@@ -533,6 +602,7 @@ impl PlanarNonlinearMagnetostatics {
                     magnetic_field_a_m: evaluation.h,
                     cell_energy_j: evaluation.energies,
                     cell_coenergy_j: evaluation.coenergies,
+                    recoil_operating_points: evaluation.recoil_operating_points,
                     energy_j: evaluation.energy,
                     coenergy_j: evaluation.coenergy,
                     report,
@@ -641,7 +711,10 @@ impl PlanarNonlinearMagnetostatics {
                             break;
                         }
                     }
-                    Err(NonlinearMagneticError::FieldRange { .. }) => {}
+                    Err(
+                        NonlinearMagneticError::FieldRange { .. }
+                        | NonlinearMagneticError::RecoilRange { .. },
+                    ) => {}
                     Err(error) => return Err(error),
                 }
                 alpha *= 0.5;
@@ -664,6 +737,7 @@ pub struct PlanarNonlinearField<'a> {
     magnetic_field_a_m: Vec<[f64; 2]>,
     cell_energy_j: Vec<f64>,
     cell_coenergy_j: Vec<f64>,
+    recoil_operating_points: Vec<Option<RecoilOperatingPoint>>,
     energy_j: f64,
     coenergy_j: f64,
     report: NonlinearMagneticReport,
@@ -693,13 +767,27 @@ impl<'a> PlanarNonlinearField<'a> {
     pub fn cell_coenergy_j(&self) -> &[f64] {
         &self.cell_coenergy_j
     }
-    /// Sum of original cell magnetic energies [J], relative to zero field.
+    /// Sum of source-integrated energies [J] at the declared energy reference.
     pub fn energy_j(&self) -> f64 {
         self.energy_j
     }
     /// Sum of original cell magnetic coenergies [J].
     pub fn coenergy_j(&self) -> f64 {
         self.coenergy_j
+    }
+    /// Storage reference; recoil cells have zero energy at B=Br and induced
+    /// cells retain their source-integrated zero-flux reference.
+    pub fn energy_reference(&self) -> MagneticEnergyReference {
+        if self.recoil_operating_points.iter().any(Option::is_some) {
+            MagneticEnergyReference::FixedRemanence
+        } else {
+            MagneticEnergyReference::ZeroFlux
+        }
+    }
+    /// Actual H components and remaining source-envelope margins, per triangle.
+    /// These are numerical operating estimates, not certified field bounds.
+    pub fn recoil_operating_points(&self) -> &[Option<RecoilOperatingPoint>] {
+        &self.recoil_operating_points
     }
     /// Recomputed nonlinear residual and actual solve work.
     pub fn report(&self) -> &NonlinearMagneticReport {

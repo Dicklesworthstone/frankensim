@@ -167,7 +167,9 @@ impl PlanarNonlinearEddy<'_> {
             self.impressed_current_density_a_m2(),
             |cell| match &self.problem().materials()[cell] {
                 IsotropicMagneticMaterial::Linear(source) => Some(source),
-                IsotropicMagneticMaterial::Reversible(_) => None,
+                IsotropicMagneticMaterial::Reversible(_) | IsotropicMagneticMaterial::Recoil(_) => {
+                    None
+                }
             },
             field.magnetic_flux_density_t(),
             field.magnetic_field_a_m(),

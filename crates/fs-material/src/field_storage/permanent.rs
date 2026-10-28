@@ -191,6 +191,50 @@ impl ResolvedRecoilMaterial {
         Self::try_from_material(self.material.at_query_point(card, point)?)
     }
 
+    /// Admit a continuing electrical/material state without changing the
+    /// original reversible recoil law or any of its operating limits.
+    /// The complete original bundle, source claims and coordinate meanings
+    /// remain pinned. Conductivity may change with the owned temperature, but
+    /// a temperature-dependent recoil property requires its own magnetic
+    /// parameter-work and entropy law, even if two endpoint values coincide.
+    pub fn admit_fixed_material_refresh(
+        &self,
+        refreshed: &ResolvedMaterialStatePoint,
+    ) -> Result<(), FieldStorageError> {
+        super::admit_source_temperature_refresh(&self.material, refreshed)?;
+        for name in [
+            RECOIL_PERMEABILITY_PROPERTY,
+            REMANENT_FLUX_DENSITY_PROPERTY,
+            RECOIL_MINIMUM_PARALLEL_FIELD_PROPERTY,
+            RECOIL_MAXIMUM_PARALLEL_FIELD_PROPERTY,
+            RECOIL_MAXIMUM_TRANSVERSE_FIELD_PROPERTY,
+        ] {
+            let original = self
+                .material
+                .property(name)
+                .expect("prepared recoil source");
+            let next = refreshed.property(name).ok_or(FieldStorageError::Invalid(
+                "refreshed material must retain every original recoil property",
+            ))?;
+            if original.value_si().to_bits() != next.value_si().to_bits()
+                || self
+                    .material
+                    .query_point()
+                    .iter()
+                    .zip(refreshed.query_point())
+                    .any(|((axis, before), (_, after))| {
+                        before.to_bits() != after.to_bits()
+                            && original.source_axes().iter().any(|(name, _)| name == axis)
+                    })
+            {
+                return Err(FieldStorageError::Invalid(
+                    "temperature-dependent recoil requires magnetic parameter work and entropy",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Check the computed field in specimen-aligned coordinates. A point outside
     /// any source limit refuses; no magnetization state is clamped or changed.
     pub fn admit_operating_point(

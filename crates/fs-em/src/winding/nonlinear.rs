@@ -324,6 +324,9 @@ fn bind(
                 IsotropicMagneticMaterial::Reversible(law) => {
                     law.admit_fixed_material_refresh(material)?
                 }
+                IsotropicMagneticMaterial::Recoil(law) => {
+                    law.material().admit_fixed_material_refresh(material)?
+                }
             }
             Ok(())
         },
