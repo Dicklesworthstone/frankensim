@@ -6,6 +6,9 @@
 //! iteration, second kinetics integrator or extra chemical heat source exists.
 //! Reference: https://www.cantera.org/3.2/reference/reactors/constant-pressure-reactor.html
 
+/// Same-endpoint thermal contacts with bounded total chemical work.
+pub mod thermal;
+
 use super::*;
 use boundary::{BoundaryGasReactionStep, GasReactionBoundary};
 use fs_thermal::enthalpy::advection::species::close_generated_simplex;
@@ -132,17 +135,34 @@ impl GasReaction {
         &self, gas: &ClosedGasParcel, duration_s: f64, heat_j: f64,
         controls: GasReactionSolve, mut cancelled: impl FnMut() -> bool,
     ) -> Result<IsobaricGasReactionCandidate, GasReactionError> {
-        poll(&mut cancelled)?;
+        let policy = self.isobaric_policy(duration_s, heat_j, controls, &mut cancelled)?;
+        self.isobaric_candidate_with_policy(gas, duration_s, heat_j, controls, policy, &mut cancelled)
+    }
+
+    // Shared admission and numerical owner. A thermal caller may only tighten
+    // the borrowed policy's work limit, never change the physical constraint.
+    fn isobaric_policy(
+        &self, duration_s: f64, heat_j: f64, controls: GasReactionSolve,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<&ImplicitMechanismSolve, GasReactionError> {
+        poll(cancelled)?;
         controls.validate(duration_s)?;
-        let constraint = Constraint::Pressure { heat_j };
-        constraint.validate()?;
+        Constraint::Pressure { heat_j }.validate()?;
         if self.subcycling.is_some() || self.implicit.is_some() {
             return Err(invalid("constant-pressure chemistry requires one coupled implicit interval"));
         }
-        let policy = self.implicit_mechanism.as_ref()
-            .ok_or_else(|| invalid("constant-pressure chemistry requires the original implicit mechanism"))?;
+        self.implicit_mechanism.as_ref()
+            .ok_or_else(|| invalid("constant-pressure chemistry requires the original implicit mechanism"))
+    }
+
+    fn isobaric_candidate_with_policy(
+        &self, gas: &ClosedGasParcel, duration_s: f64, heat_j: f64,
+        controls: GasReactionSolve, policy: &ImplicitMechanismSolve,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<IsobaricGasReactionCandidate, GasReactionError> {
+        let constraint = Constraint::Pressure { heat_j };
         let candidate = candidate_with_constraint(self, gas, duration_s, constraint, true,
-            controls, policy, &mut cancelled)?;
+            controls, policy, cancelled)?;
         let (next, reaction) = candidate.into_parts();
         let boundary = constraint.boundary(gas, &next)?;
         let enthalpy = gas.mass_kg() * (next.state().specific_enthalpy_j_kg()
@@ -156,7 +176,7 @@ impl GasReaction {
         let heat_entropy = heat_j / next.state().state().temperature;
         let energy_residual = (reaction.stored_energy_change_j + boundary.work_by_gas_j) - heat_j;
         let entropy_residual = reaction.entropy_change_j_k - heat_entropy;
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         Ok(IsobaricGasReactionCandidate {
             gas: next,
             step: IsobaricGasReactionStep {
@@ -171,4 +191,3 @@ impl GasReaction {
         })
     }
 }
-
