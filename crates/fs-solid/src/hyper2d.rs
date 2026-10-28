@@ -158,6 +158,41 @@ impl HyperProblem<'_> {
         self.assemble(u, load, &BTreeMap::new())
     }
 
+    /// Unconstrained force residual, without material tangents or sparse assembly.
+    ///
+    /// Contact line searches and refreshed friction lags need only forces.
+    /// This uses the same Piola stresses, quadrature order, and dead tractions
+    /// as [`Self::residual_and_tangent`], avoiding nine nested-dual sweeps per
+    /// quadrature point when no Newton matrix will be consumed.
+    ///
+    /// # Errors
+    /// [`SolidError::MaterialRefused`] when the material rejects `u`, or
+    /// [`SolidError::UnknownPatch`] for an unknown traction patch.
+    pub fn unconstrained_residual(&self, u: &[f64], load: f64) -> Result<Vec<f64>, SolidError> {
+        let mut resid = vec![0.0; u.len()];
+        for conn in &self.mesh.elems {
+            for &(xi, eta, w) in &quad_points(conn.len()) {
+                let (_, grads, det) = shapes_at(&self.mesh.nodes, conn, xi, eta);
+                let wq = w * det;
+                let f = Self::def_grad(&grads, conn, u);
+                let p = self
+                    .material
+                    .piola(&f)
+                    .map_err(|e| SolidError::MaterialRefused {
+                        what: format!("{e:?}"),
+                    })?;
+                for (a, &na) in conn.iter().enumerate() {
+                    for i in 0..2 {
+                        resid[2 * na + i] +=
+                            wq * (p[3 * i] * grads[a][0] + p[3 * i + 1] * grads[a][1]);
+                    }
+                }
+            }
+        }
+        self.for_traction(load, |dof, v| resid[dof] -= v)?;
+        Ok(resid)
+    }
+
     /// Public probe: the total potential energy at a state (`None`
     /// when the material refuses it).
     #[must_use]
@@ -363,4 +398,93 @@ impl crate::continuation::PathResidual for HyperProblem<'_> {
 
 fn norm(v: &[f64]) -> f64 {
     v.iter().map(|x| x * x).sum::<f64>().sqrt()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fs_material::hyper::{FibreInvariants, HyperelasticModel, OgdenTerm, Volumetric};
+
+    /// The cheaper force probe must preserve the fully assembled residual bits.
+    #[test]
+    fn residual_only_matches_all_materials_on_triangles_and_quads() {
+        let models = [
+            HyperelasticModel::NeoHookean {
+                mu: 2.0,
+                lambda: 5.0,
+            },
+            HyperelasticModel::MooneyRivlin {
+                c10: 0.7,
+                c01: 0.3,
+                kappa: 8.0,
+            },
+            HyperelasticModel::Ogden {
+                terms: vec![OgdenTerm {
+                    mu_pa: 2.0,
+                    alpha: 2.0,
+                }],
+                volumetric: Volumetric::LogSquared { kappa: 8.0 },
+            },
+            HyperelasticModel::HolzapfelGasserOgden {
+                c10: 0.7,
+                k1: 1.2,
+                k2: 2.0,
+                dispersion: 0.1,
+                fibres: vec![[1.0, 0.0, 0.0]],
+                invariants: FibreInvariants::Full,
+                volumetric: Volumetric::Quadratic { kappa: 8.0 },
+            },
+        ];
+        let traction = |x: f64, y: f64| [0.2 + 0.1 * y, -0.15 * x];
+        let prescribed = |_: f64, _: f64| [0.03, -0.01];
+        for mesh in [
+            Mesh2::quads(1.0, 0.7, 2, 2),
+            Mesh2::triangles(1.0, 0.7, 2, 2),
+        ] {
+            for model in &models {
+                let material = Hyperelastic::new(model.clone(), 3.0).unwrap();
+                let problem = HyperProblem {
+                    mesh: &mesh,
+                    material: &material,
+                    // Both public probes intentionally leave Dirichlet DOFs free.
+                    dirichlet: vec![(Patch::Left, &prescribed)],
+                    traction: vec![(Patch::Top, &traction), (Patch::Right, &traction)],
+                    settings: NewtonSettings::default(),
+                };
+                for scale in [0.0, 0.1, -0.15] {
+                    let u: Vec<f64> = mesh
+                        .nodes
+                        .iter()
+                        .flat_map(|&[x, y]| {
+                            [
+                                scale * (0.2 * x + 0.1 * y + 0.15 * x * y),
+                                scale * (-0.1 * x + 0.3 * y - 0.1 * x * y),
+                            ]
+                        })
+                        .collect();
+                    for load in [0.0, 0.6] {
+                        let actual = problem.unconstrained_residual(&u, load).unwrap();
+                        let expected = problem.residual_and_tangent(&u, load).unwrap().0;
+                        assert_eq!(
+                            actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+                        );
+                    }
+                }
+                let inverted: Vec<f64> = mesh
+                    .nodes
+                    .iter()
+                    .flat_map(|&[x, _]| [-2.0 * x, 0.0])
+                    .collect();
+                assert!(matches!(
+                    problem.unconstrained_residual(&inverted, 0.6),
+                    Err(SolidError::MaterialRefused { .. })
+                ));
+                assert!(matches!(
+                    problem.residual_and_tangent(&inverted, 0.6),
+                    Err(SolidError::MaterialRefused { .. })
+                ));
+            }
+        }
+    }
 }

@@ -341,7 +341,7 @@ impl ContactProblem<'_> {
         self.validate_state_len(u)?;
         let n = self.node_count();
         let ndof = self.ndof();
-        let (mut r, _) = self.hyper.residual_and_tangent(u, load)?;
+        let mut r = self.hyper.unconstrained_residual(u, load)?;
         for i in 0..n {
             let x = self.deformed(u, i);
             let d = self.sdf_value(u, i)?;
