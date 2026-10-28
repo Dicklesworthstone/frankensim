@@ -1,7 +1,7 @@
 //! Source-bound dry-interface applicability on the actual reciprocal motion.
 //!
 //! fs-tribo owns the law, ordered surface/history identity and its state domain.
-//! This binding adds a fixed contact temperature and explicit nominal area.
+//! This binding adds a contact temperature and explicit nominal area.
 //! It does not turn bulk elasticity into friction, infer a contact patch, or
 //! upgrade caller-declared/synthetic data into measured material evidence.
 
@@ -10,8 +10,10 @@ use fs_tribo::{DryFrictionState, DryInterfaceSystemCard};
 
 /// Immutable interface data and the geometry/state needed to query its domain.
 /// The nominal area is NOT a Hertz patch and does not determine normal load.
-/// Temperature and area are frozen during a realization; no heat/wear model is
-/// implied. The producer remains responsible for mapping the ordered surfaces
+/// Ordinary stepping holds temperature and area. The shared finite-cell heat
+/// transaction may re-admit the original card at its solved interface temperature;
+/// this never invents temperature dependence in the card's constant traction law.
+/// The producer remains responsible for mapping the ordered surfaces
 /// to the actual participants of the mechanical port.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DryFrictionBinding {
@@ -43,6 +45,12 @@ impl DryFrictionBinding {
     #[must_use] pub const fn temperature_kelvin(&self) -> f64 { self.temperature_kelvin }
     /// Original nominal contact area used to map prescribed load to pressure.
     #[must_use] pub const fn nominal_area_m2(&self) -> f64 { self.nominal_area_m2 }
+
+    /// Re-admit exactly the same interface, area and law at a physical thermal
+    /// endpoint. A domain failure leaves the accepted source unchanged.
+    pub(crate) fn at_temperature(&self, temperature_kelvin: f64) -> Result<Self, ModalFrictionError> {
+        Self::new(self.card.clone(), temperature_kelvin, self.nominal_area_m2)
+    }
 
     fn check_speed(&self, normal: f64, relative_speed: f64) -> Result<(), ModalFrictionError> {
         // No interface traction exists while released. A card may legitimately

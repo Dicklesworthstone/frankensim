@@ -186,3 +186,6 @@ pub mod surfaces;
 
 /// Source-bound isothermal material shear in the original pressure renderer.
 mod shear_layer;
+
+/// Explicit finite thermal strips following the source string/fiber contact.
+pub use shear_layer::dry::{BowDryContactHeat, DryReceiverHeatPosition};

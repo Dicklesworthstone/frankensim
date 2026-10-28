@@ -41,6 +41,19 @@ impl BowStationMotionLimits {
     }
 }
 
+/// One source-projected candidate shared by mechanical and finite-heat steps.
+/// Material positions are the SAME midpoint locations used by these maps.
+pub(super) struct BowGeometryStep<'a> {
+    pub external: &'a [f64],
+    pub drives: &'a [FrictionDrive],
+    pub geometry: &'a [FrictionGeometry],
+    pub endpoints: Option<&'a [FrictionEndpointGeometry]>,
+    pub normal_geometry: Option<&'a [ObstacleGeometry]>,
+    pub config: FrictionGeometryConfig,
+    pub string_centres_m: &'a [f64],
+    pub fiber_centre_m: Option<f64>,
+}
+
 pub(super) struct BowStationState {
     pub(super) accepted: Vec<f64>,
     pub(super) limits: BowStationMotionLimits,
@@ -223,14 +236,30 @@ impl MultiBowStringBank {
     }
 
     pub(super) fn step_with_bow_geometry(
-        &mut self,
-        external: &[f64],
-        drives: &[FrictionDrive],
-        stations: Option<&[f64]>,
-        normal_geometry: Option<&[ObstacleGeometry]>,
-        stop_offsets_m: Option<&[f64]>,
+        &mut self, external: &[f64], drives: &[FrictionDrive], stations: Option<&[f64]>,
+        normal_geometry: Option<&[ObstacleGeometry]>, stop_offsets_m: Option<&[f64]>,
         gate: &CancelGate,
     ) -> Result<&MultiFrictionFrame, ModalFrictionError> {
+        self.with_bow_geometry(external, drives, stations, normal_geometry, gate, |system, step| {
+            if let Some(endpoints) = step.endpoints {
+                system.step_with_friction_geometry_and_endpoints(step.external, step.drives,
+                    step.geometry, endpoints, step.normal_geometry, stop_offsets_m, step.config, gate)?;
+            } else {
+                system.step_with_friction_geometry(step.external, step.drives, step.geometry,
+                    step.normal_geometry, stop_offsets_m, step.config, gate)?;
+            }
+            Ok::<(), ModalFrictionError>(())
+        })?;
+        Ok(self.system.last_frame().expect("accepted bow geometry"))
+    }
+
+    pub(super) fn with_bow_geometry<R, E: From<ModalFrictionError>>(
+        &mut self, external: &[f64], drives: &[FrictionDrive], stations: Option<&[f64]>,
+        normal_geometry: Option<&[ObstacleGeometry]>, gate: &CancelGate,
+        run: impl FnOnce(&mut MultiFrictionModalSystem, BowGeometryStep<'_>) -> Result<R, E>,
+    ) -> Result<R, E> {
+        let (support, normal_stations, normal_geometry, geometry, endpoints, config, string_centres_m) =
+            (|| -> Result<_, ModalFrictionError> {
         if gate.is_requested() {
             return Err(ModalCouplingError::Cancelled.into());
         }
@@ -295,6 +324,7 @@ impl MultiBowStringBank {
         // binding. After a move it also replaces the previous midpoint map by
         // the accepted endpoint, without altering vibration or material memory.
         let mut geometry = Vec::with_capacity(end.len());
+        let mut string_centres_m = Vec::with_capacity(end.len());
         let mut endpoints = (0..end.len()).any(|port| self.system.interface(port).is_some())
             .then(|| Vec::with_capacity(end.len()));
         for (i, ((&end, &start), bow)) in end
@@ -312,6 +342,7 @@ impl MultiBowStringBank {
                 start + 0.5 * (end - start)
             };
             let string = bow.location.string;
+            string_centres_m.push(station * self.cards[string].length_m);
             let shapes = self.source.bank.strings[string]
                 .source
                 .surface_shape(&self.cards[string], station)
@@ -348,34 +379,35 @@ impl MultiBowStringBank {
                 },
             });
         }
+        let normal_geometry = normal_geometry.map(<[ObstacleGeometry]>::to_vec);
+        let config = FrictionGeometryConfig { max_update_terms: limits.max_update_terms };
+        Ok((support, normal_stations, normal_geometry, geometry, endpoints, config, string_centres_m))
+        })()?;
         let (external, drives) = support.as_ref()
             .map_or((external, drives), |s| (s.forces.as_slice(), s.drives.as_slice()));
-        let config = FrictionGeometryConfig { max_update_terms: limits.max_update_terms };
-        if let Some(endpoints) = &endpoints {
-            self.system.step_with_friction_geometry_and_endpoints(external, drives, &geometry,
-                endpoints, normal_geometry, stop_offsets_m, config, gate)?;
-        } else {
-            self.system.step_with_friction_geometry(external, drives, &geometry,
-                normal_geometry, stop_offsets_m, config, gate)?;
-        }
+        let fiber_centre_m = support.as_ref().map(|s| s.material_midpoint_m).or_else(||
+            self.source.fiber_ribbon().map(|fiber|
+                fiber.station_fraction() * fiber.model().geometry().length_m));
+        let result = run(&mut self.system, BowGeometryStep {
+            external, drives, geometry: &geometry, endpoints: endpoints.as_deref(),
+            normal_geometry: normal_geometry.as_deref(), config,
+            string_centres_m: &string_centres_m,
+            fiber_centre_m,
+        })?;
         let frame = self.system.last_frame().expect("accepted friction geometry step");
         if let Some(support) = support {
             self.bow_stations.as_mut().expect("admitted bow motion")
                 .fiber_support.as_mut().expect("admitted fiber support").accept(support, &self.system, frame);
         }
         if let Some(end) = stations {
-            self.bow_stations
-                .as_mut()
-                .expect("admitted bow motion")
-                .accepted
-                .copy_from_slice(end);
+            self.bow_stations.as_mut().expect("admitted bow motion").accepted.copy_from_slice(end);
         }
         if let Some(end) = normal_stations {
-            self.stop_stations.as_mut().expect("admitted normal patch motion")
-                .accepted.copy_from_slice(&end);
+            self.stop_stations.as_mut().expect("admitted normal patch motion").accepted.copy_from_slice(&end);
         }
-        Ok(frame)
+        Ok(result)
     }
+
 }
 
 // A ribbon is one finite geometric interval, not independently steered point

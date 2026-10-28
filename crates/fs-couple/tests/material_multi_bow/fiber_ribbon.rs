@@ -264,7 +264,7 @@ fn fiber_material(rho: f64, young: f64, eta: f64) -> ResolvedMaterialStatePoint 
     .unwrap()
 }
 
-fn fibers(
+pub(super) fn fibers(
     cells: usize,
     modes: usize,
     rho: f64,
@@ -927,7 +927,7 @@ fn axial_support_inertia_is_the_original_fiber_mass_projection() {
     assert!(previous_error < 0.026);
 }
 
-fn support_limits() -> fs_couple::bowed_string::runtime::reciprocal::bank::multiple::ribbon::motion::FiberSupportMotionLimits {
+pub(super) fn support_limits() -> fs_couple::bowed_string::runtime::reciprocal::bank::multiple::ribbon::motion::FiberSupportMotionLimits {
     fs_couple::bowed_string::runtime::reciprocal::bank::multiple::ribbon::motion::FiberSupportMotionLimits {
         maximum_speed_m_s:1.0,maximum_acceleration_m_s2:2000.0,
         maximum_step_m:0.001,max_update_terms:1_048_576,

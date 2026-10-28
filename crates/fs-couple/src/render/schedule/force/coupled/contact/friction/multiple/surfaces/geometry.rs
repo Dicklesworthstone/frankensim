@@ -83,6 +83,25 @@ impl MultiFrictionModalSystem {
         endpoints: &[FrictionEndpointGeometry], normal_geometry: Option<&[ObstacleGeometry]>,
         normal_offsets_m: Option<&[f64]>, config: FrictionGeometryConfig, gate: &CancelGate,
     ) -> Result<&MultiFrictionFrame, ModalFrictionError> {
+        self.with_friction_geometry_and_endpoints(geometry, Some(endpoints), normal_geometry,
+            config, gate, |system| system.step_with_patch_geometry_inner(external, drives,
+                normal_offsets_m, normal_geometry, normal_geometry.is_some(), Some(gate)).map(|_| ()))?;
+        Ok(&self.frame)
+    }
+
+    // The mechanical and thermal entry points share this SAME temporary map
+    // transaction. The caller publishes its complete coupled state or refuses;
+    // endpoint controls and geometry roll back without resetting physical history.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn with_friction_geometry_and_endpoints<R, E: From<ModalFrictionError>>(
+        &mut self, geometry: &[FrictionGeometry], endpoints: Option<&[FrictionEndpointGeometry]>,
+        normal_geometry: Option<&[ObstacleGeometry]>, config: FrictionGeometryConfig,
+        gate: &CancelGate, run: impl FnOnce(&mut Self) -> Result<R, E>,
+    ) -> Result<R, E> {
+        let Some(endpoints) = endpoints else {
+            return self.with_friction_geometry(geometry, normal_geometry, config, gate, run);
+        };
+        let (controls, config) = (|| -> Result<_, ModalFrictionError> {
         poll(Some(gate))?;
         if endpoints.len() != self.points.len() || self.endpoint_controls.is_some() {
             return Err(invalid("endpoint applicability needs one complete pair per original port").into());
@@ -114,14 +133,12 @@ impl MultiFrictionModalSystem {
                 start_speed_m_s: endpoint.start_speed_m_s, end_speed_m_s: endpoint.end_speed_m_s,
             });
         }
+        Ok((controls, config))
+        })()?;
         self.endpoint_controls = Some(controls);
-        let result = self.step_with_friction_geometry(external, drives, geometry,
-            normal_geometry, normal_offsets_m, config, gate).map(|_| ());
-        // Clear per-call data after success OR failure. The original geometry
-        // transaction has already restored held maps on any refused trial.
+        let result = self.with_friction_geometry(geometry, normal_geometry, config, gate, run);
         self.endpoint_controls = None;
-        result?;
-        Ok(&self.frame)
+        result
     }
 
     pub(crate) fn check_interface_endpoint(&self, port: usize,
@@ -161,6 +178,18 @@ impl MultiFrictionModalSystem {
         normal_geometry: Option<&[ObstacleGeometry]>, normal_offsets_m: Option<&[f64]>,
         config: FrictionGeometryConfig, gate: &CancelGate,
     ) -> Result<&MultiFrictionFrame, ModalFrictionError> {
+        self.with_friction_geometry(geometry, normal_geometry, config, gate, |system|
+            system.step_with_patch_geometry_inner(external, drives, normal_offsets_m,
+                normal_geometry, normal_geometry.is_some(), Some(gate)).map(|_| ()))?;
+        Ok(&self.frame)
+    }
+
+    pub(crate) fn with_friction_geometry<R, E: From<ModalFrictionError>>(
+        &mut self, geometry: &[FrictionGeometry], normal_geometry: Option<&[ObstacleGeometry]>,
+        config: FrictionGeometryConfig, gate: &CancelGate,
+        run: impl FnOnce(&mut Self) -> Result<R, E>,
+    ) -> Result<R, E> {
+        let prepared = (|| -> Result<_, ModalFrictionError> {
         poll(Some(gate))?;
         self.validate_friction_geometry_config(config)?;
         if geometry.len() != self.points.len() {
@@ -195,8 +224,7 @@ impl MultiFrictionModalSystem {
             changed |= moving;
         }
         if !changed {
-            return self.step_with_patch_geometry_inner(external, drives, normal_offsets_m,
-                normal_geometry, normal_geometry.is_some(), Some(gate));
+            return Ok(None);
         }
         let mut ports = Vec::with_capacity(self.points.len());
         for (next, old) in geometry.iter().zip(&self.points) {
@@ -212,25 +240,25 @@ impl MultiFrictionModalSystem {
             Some(set) => set.stage_friction_geometry(&self.core.network, &points, gate)?,
             None => None,
         };
+        Ok(Some((points, compliance, normal_snapshot)))
+        })()?;
+        let Some((points, compliance, normal_snapshot)) = prepared else { return run(self); };
         // All fallible geometry preparation precedes these swaps. The existing
-        // mechanical owner is atomic on failure; restore its port caches too.
+        // coupled owner is atomic on failure; restore its port caches too.
         let core_port = std::mem::replace(&mut self.core.port, points[0].port.clone());
         let core_column = std::mem::replace(&mut self.core.column, points[0].column.clone());
         let core_compliance = std::mem::replace(&mut self.core.compliance, compliance[0]);
         let points = std::mem::replace(&mut self.points, points);
         let compliance = std::mem::replace(&mut self.compliance, compliance);
-        let result = self.step_with_patch_geometry_inner(external, drives, normal_offsets_m,
-            normal_geometry, normal_geometry.is_some(), Some(gate))
-            .map(|_| ());
-        if let Err(error) = result {
+        let result = run(self);
+        if result.is_err() {
             self.core.port = core_port;
             self.core.column = core_column;
             self.core.compliance = core_compliance;
             self.points = points;
             self.compliance = compliance;
             if let Some(set) = &mut self.obstacles { set.restore_friction_geometry(normal_snapshot); }
-            return Err(error);
         }
-        Ok(&self.frame)
+        result
     }
 }

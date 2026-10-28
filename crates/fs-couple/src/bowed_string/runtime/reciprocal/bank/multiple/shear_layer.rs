@@ -1,6 +1,9 @@
 //! Explicit material interfacial shear in the retained instrument bank.
 //! No new excitation, body, observer, material defaults or rendering loop.
 
+/// Moving dry-contact finite-cell heat on the original bow geometry.
+pub mod dry;
+
 use super::{MultiBowStringBank, ReciprocalStringError};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::render::RenderError;

@@ -102,6 +102,8 @@ struct FiberNormalStep {
 }
 pub(crate) struct FiberSupportStep {
     accepted: FiberSupportKinematics,
+    /// Same material location used by the held mechanical map at t=dt/2.
+    pub(crate) material_midpoint_m: f64,
     component_start: usize,
     shape: Vec<f64>,
     start_shape: Vec<f64>,
@@ -549,6 +551,7 @@ impl FiberSupportState {
         let previous_kinetic_correction_j =
             previous * momentum + 0.5 * self.mass_kg * previous * previous;
         Ok(FiberSupportStep {
+            material_midpoint_m: midpoint_station * length,
             accepted: FiberSupportKinematics {
                 velocity_m_s: velocity,
                 displacement_m: displacement,

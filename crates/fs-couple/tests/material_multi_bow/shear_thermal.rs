@@ -959,3 +959,6 @@ fn drive_heat_route_and_late_source_refusals_preserve_stretch_heat_and_pressure_
 
 #[path = "shear_thermal/performance.rs"]
 mod performance;
+
+#[path = "shear_thermal/dry.rs"]
+mod dry;
