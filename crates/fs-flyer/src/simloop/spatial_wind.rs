@@ -200,8 +200,13 @@ impl SimLoop {
     /// and rotor torque. Pitch-rate motion enters each sample exactly once.
     /// This remains quasi-steady strip aerodynamics with a shared straight
     /// wake, axial disk-center BEMT, and reduced longitudinal flight motion.
-    /// It does not add gust memory, disk harmonics, or lateral gust dynamics.
-    /// V4 checkpoints preserve this explicit mode; V3 retains CG sampling.
+    /// Accepted distributed force moments also drive the existing reduced
+    /// roll/yaw response once airborne. Control and damping remain in the
+    /// reduced lateral model; no banked translation, sideslip, rotor reaction
+    /// torque, chordwise gust memory or disk harmonics are introduced.
+    /// V4 checkpoints retain their layout; the v2 distributed model identity
+    /// rejects older distributed trajectories that omitted roll/yaw forcing.
+    /// V3 retains its original CG-only sampling and lateral behavior.
     ///
     /// # Errors
     /// As [`Self::init_with_spatial_wind`]. Local-flow/ground-plane refusals
@@ -216,7 +221,7 @@ impl SimLoop {
             .expect("initialized spatial field")
             .distributed = true;
         sim.run_intent_id = hash_domain(
-            "org.frankensim.wf.distributed-wind-intent.v1",
+            "org.frankensim.wf.distributed-wind-intent.v2",
             sim.run_intent_id.as_bytes(),
         )
         .to_hex();
@@ -373,6 +378,35 @@ impl SimLoop {
         }
     }
 
+    /// Use the already accepted force solve, not a second wind sample after
+    /// longitudinal integration. This callback is reached only on an airborne
+    /// step; the rail still carries the lateral reaction. The distributed
+    /// aerodynamic path has no warp or p/r damping, so adding its resolved
+    /// torque to the existing reduced owners does not duplicate either law.
+    pub(super) fn step_lateral_current_wind(
+        &mut self,
+        loaded_twist_rad: f64,
+        v_air: f64,
+        dc_eff: f64,
+        loads: &crate::aircraft::ForceBuildup,
+        dt: f64,
+    ) -> Result<crate::lateral::LateralTick, Refusal> {
+        if self.spatial_wind.as_ref().is_some_and(|wind| wind.distributed) {
+            let incident = self.design.distributed_lateral_loads(
+                loads, dc_eff.clamp(-0.55, 0.55), self.spec.rho_kg_m3,
+            )?.net();
+            self.lateral_model.step_with_moments(
+                &mut self.lateral_state, loaded_twist_rad, v_air,
+                self.spec.rho_kg_m3, dt, incident,
+            ).map(|step| step.reduced)
+        } else {
+            self.lateral_model.step(
+                &mut self.lateral_state, loaded_twist_rad, v_air,
+                self.spec.rho_kg_m3, dt,
+            )
+        }
+    }
+
     pub(super) fn finish_spatial_tick(&mut self) -> Result<Option<f64>, Refusal> {
         if let Some(wind) = &mut self.spatial_wind {
             // A lateral envelope exit can coincide with crossing the ground.
@@ -447,3 +481,6 @@ fn invalid(message: &str) -> Refusal {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod lateral_tests;

@@ -25,7 +25,9 @@
 //! gust loads and crosswind/sideslip dynamics remain outside that mode.
 //! `init_with_distributed_spatial_wind` adds local wing/canard strip and
 //! separate disk-center inflow to the actual force and rotor solves, with V4
-//! checkpoints. Crosswind/sideslip dynamics remain outside the reduced tier.
+//! checkpoints. Resolved panel/profile/thrust moments drive the existing
+//! reduced roll/yaw response; crosswind/sideslip and banked translational
+//! dynamics remain outside that tier.
 
 use crate::Refusal;
 use crate::aerowarp::ReducedAeroelasticWarp;
@@ -963,11 +965,11 @@ impl SimLoop {
                             .fold((0.0, 0.0), |(projection, norm), (strip, basis)| {
                                 (projection + strip.loaded_rad * basis, norm + basis * basis)
                             });
-                        self.lateral_model.step(
-                            &mut self.lateral_state,
+                        self.step_lateral_current_wind(
                             projection / norm,
                             v_air,
-                            self.spec.rho_kg_m3,
+                            dc_eff,
+                            &b,
                             dt,
                         )
                     });
