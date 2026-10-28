@@ -65,10 +65,10 @@ pub use material::{NsfGasMedium, ThermochemicalNsfGas};
 mod open;
 pub use open::NsfOpenState;
 mod open_boundary;
+use open_boundary::{BoundaryFlux, IncomingPopulations, OpenFaces};
 pub use open_boundary::{
     NsfBoundaryExchange, NsfBoundaryTrace, NsfCharacteristicAxis, NsfCharacteristicBoundary,
 };
-use open_boundary::{BoundaryFlux, IncomingPopulations, OpenFaces};
 mod characteristic_trial;
 /// Unpublished original NSF interval for reciprocal characteristic coupling.
 pub use characteristic_trial::NsfCharacteristicTrial;
@@ -90,9 +90,9 @@ pub const MAX_VERIFIED_LATTICE_VISCOSITY: f64 = 0.03;
 /// of a decay rate below 5e-3 of the quiescent rate up to this value, and nothing was measured above it. A larger declared
 /// `maximum_mach` is refused ([`NsfError::MachBound`]), not extrapolated.
 pub const MAX_QUALIFIED_MACH: f64 = 0.2;
-/// Version of the arithmetic order, coefficients and coupling (bump on any change that moves bits). 3: the stress of the
-/// energy flux carries the Guo half-force shift.
-pub const NSF3_BIT_SEMANTICS_VERSION: u32 = 3;
+/// Version of the arithmetic order, coefficients and coupling (bump on any change that moves bits). 4: the trace of the
+/// Guo source uses the bulk relaxation rate, consistently with the half-force stress in the energy flux.
+pub const NSF3_BIT_SEMANTICS_VERSION: u32 = 4;
 
 /// Refusals of the NSF grid. A failed step leaves the published state unchanged.
 #[derive(Clone, Debug, PartialEq)]
@@ -392,6 +392,8 @@ fn half_force_velocity(rho: f64, mom: [f64; 3], force: [f64; 3]) -> [f64; 3] {
 /// Isothermal regularised collision with Guo forcing: shear relaxation `ws`, trace relaxation `wb`. The first-moment
 /// non-equilibrium `-F/2` of Guo's scheme, relaxed at `ws`, is added back because the regularised projection drops it
 /// (without it only `(3 - ws) / 2` of the force would reach the momentum).
+/// Each second-moment source mode carries its OWN `(1 - rate/2)` factor:
+/// Premnath, Pattison and Banerjee (2009), Eq. (1), https://arxiv.org/abs/0901.2786.
 fn collide<L: Lattice3<27>>(f: &[f64; Q], force: [f64; 3], ws: f64, wb: f64) -> [f64; Q] {
     let (rho, mom) = raw_moments::<L>(f);
     let u = half_force_velocity(rho, mom, force);
@@ -412,6 +414,11 @@ fn collide<L: Lattice3<27>>(f: &[f64; Q], force: [f64; 3], ws: f64, wb: f64) -> 
         d[4] * u[0] + d[5] * u[1] + d[2] * u[2],
     ];
     let uf = u[0] * force[0] + u[1] * force[1] + u[2] * force[2];
+    // The raw Guo source has second moment uF + Fu and trace 2 u.F.
+    // Its isotropic Hermite projection has zero mass/first moment and
+    // second moment (2 u.F / 3) I. Replace only its shear-rate prefactor
+    // by the bulk-rate prefactor; the deviatoric source stays unchanged.
+    let trace_force = 0.5 * (ws - wb) * uf / (3.0 * THETA0 * THETA0);
     let mut out = [0.0; Q];
     for q in 0..Q {
         let c = L::E[q];
@@ -433,6 +440,7 @@ fn collide<L: Lattice3<27>>(f: &[f64; Q], force: [f64; 3], ws: f64, wb: f64) -> 
                 * (h2 / (2.0 * THETA0 * THETA0)
                     + h3 / (6.0 * THETA0 * THETA0 * THETA0)
                     + (1.0 - 0.5 * ws) * source
+                    + trace_force * (c2 - 3.0 * THETA0)
                     + first);
     }
     out
@@ -811,7 +819,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         high: bool,
         velocity: [f64; 3],
     ) -> Result<(), NsfError> {
-        if axis >= 3 || self.spec.periodic[axis]
+        if axis >= 3
+            || self.spec.periodic[axis]
             || self.open.as_ref().is_some_and(|open| open.axis == axis)
             || self.reservoir_faces[axis][usize::from(high)].is_some()
         {
@@ -842,7 +851,12 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let u = self.velocity_field(&rho, &mom, &self.force);
         let sig = self.stress_field(&self.f, &self.force, &rho, &self.theta, &self.material);
         let (div, wall, open) = match self.flux_divergence(
-            &self.e, &rho, &u, &self.theta, &sig, self.open_faces.as_ref(),
+            &self.e,
+            &rho,
+            &u,
+            &self.theta,
+            &sig,
+            self.open_faces.as_ref(),
         ) {
             Ok(history) => history,
             Err(error) => {
@@ -1068,7 +1082,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         // edge wall (zero normal velocity, so no convective part; solid cells and still walls do no work).
         let wall_flux = |i: usize, a: usize, s: i64| -> Result<f64, NsfError> {
             if let Some(face) = self.characteristic_face(faces, i, a, s) {
-                return self.open_energy_flux(face, i, a, s, rho, theta, sig).map(|f| f.0);
+                return self
+                    .open_energy_flux(face, i, a, s, rho, theta, sig)
+                    .map(|f| f.0);
             }
             if let Some(b) = self.open_at(i, a, s) {
                 let sg = sig[i];
@@ -1146,7 +1162,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             for a in 0..3 {
                 if self.fluid_at(x, a, 1).is_none() {
                     if let Some(face) = self.characteristic_face(faces, i, a, 1) {
-                        let (total, internal) = self.open_energy_flux(face, i, a, 1, rho, theta, sig)?;
+                        let (total, internal) =
+                            self.open_energy_flux(face, i, a, 1, rho, theta, sig)?;
                         open.total_out[1] += total;
                         open.internal_out[1] += internal;
                     } else if self.open_at(i, a, 1).is_some() {
@@ -1157,7 +1174,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 }
                 if self.fluid_at(x, a, -1).is_none() {
                     if let Some(face) = self.characteristic_face(faces, i, a, -1) {
-                        let (total, internal) = self.open_energy_flux(face, i, a, -1, rho, theta, sig)?;
+                        let (total, internal) =
+                            self.open_energy_flux(face, i, a, -1, rho, theta, sig)?;
                         open.total_out[0] -= total;
                         open.internal_out[0] -= internal;
                     } else if self.open_at(i, a, -1).is_some() {
@@ -1195,7 +1213,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 }
                 out[q] = match edge {
                     Some((a, side)) if self.open.as_ref().is_some_and(|open| open.axis == a) => {
-                        incoming.expect("open stream has prepared incoming populations")
+                        incoming
+                            .expect("open stream has prepared incoming populations")
                             .at(x, self.spec.dims, side)[q]
                     }
                     None if !self.solid[self.index(y)] => post[self.index(y)][q],
@@ -1205,9 +1224,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                         let local_u = mom.map(|m| m / rho);
                         // Post-collision populations carry rho*u + F/2. Extrapolate
                         // that half-force shift as well as the non-equilibrium part.
-                        let ghost_u = core::array::from_fn(|k| b.u[k] + 0.5 * self.force[i][k] / b.rho);
-                        equilibrium::<L>(b.rho, ghost_u, THETA0)[q]
-                            + post[i][q] - equilibrium::<L>(rho, local_u, THETA0)[q]
+                        let ghost_u =
+                            core::array::from_fn(|k| b.u[k] + 0.5 * self.force[i][k] / b.rho);
+                        equilibrium::<L>(b.rho, ghost_u, THETA0)[q] + post[i][q]
+                            - equilibrium::<L>(rho, local_u, THETA0)[q]
                     }
                     _ => {
                         let mut v = post[i][L::OPP[q]];
@@ -1324,9 +1344,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 })
                 .collect();
             let sig = self.stress_field(&next, &f1, &rho1, &th1, &trial_material);
-            let (div1, wall1, open1) = self.flux_divergence(
-                &et_trial, &rho1, &u1, &th1, &sig, faces1.as_ref(),
-            )?;
+            let (div1, wall1, open1) =
+                self.flux_divergence(&et_trial, &rho1, &u1, &th1, &sig, faces1.as_ref())?;
             let mut material_new = trial_material;
             let mut e1 = self.e.clone();
             let mut th_new = th1.clone();
@@ -1414,10 +1433,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             }
         }
         let wall_in = -0.5 * (wall1 + self.wall_out);
-        let open_in = -0.5 * (open1.total_out.iter().sum::<f64>()
-            + self.open_out.total_out.iter().sum::<f64>());
-        let open_internal_in = -0.5 * (open1.internal_out.iter().sum::<f64>()
-            + self.open_out.internal_out.iter().sum::<f64>());
+        let open_in = -0.5
+            * (open1.total_out.iter().sum::<f64>() + self.open_out.total_out.iter().sum::<f64>());
+        let open_internal_in = -0.5
+            * (open1.internal_out.iter().sum::<f64>()
+                + self.open_out.internal_out.iter().sum::<f64>());
         let prescribed_in = -0.5 * (open1.prescribed_out + self.open_out.prescribed_out);
         // Use the exact source quadrature from the native energy update and
         // the already-sampled fields; never query a callback again for the audit.
@@ -1441,9 +1461,17 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             d_int - wall_in - open_internal_in - pressure_work
         } else {
             let remainder = d_int - wall_in - pressure_work;
-            if prescribed_in == 0.0 { remainder } else { remainder - prescribed_in }
+            if prescribed_in == 0.0 {
+                remainder
+            } else {
+                remainder - prescribed_in
+            }
         };
-        let remainder = if source_in == 0.0 { viscous } else { viscous - source_in };
+        let remainder = if source_in == 0.0 {
+            viscous
+        } else {
+            viscous - source_in
+        };
         let (viscous, unresolved) = if source_carries_mechanics {
             (0.0, remainder)
         } else {
@@ -1455,8 +1483,16 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             d_total - wall_in
         };
         // Retain closed/characteristic arithmetic, including signed zero.
-        let balance = if prescribed_in == 0.0 { balance } else { balance - prescribed_in };
-        let balance = if source_in == 0.0 { balance } else { balance - source_in };
+        let balance = if prescribed_in == 0.0 {
+            balance
+        } else {
+            balance - prescribed_in
+        };
+        let balance = if source_in == 0.0 {
+            balance
+        } else {
+            balance - source_in
+        };
         let ledger = EnergyLedger {
             internal_j: unit * (e_new - ke1),
             kinetic_j: unit * ke1,
@@ -1470,7 +1506,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             residual_rel: balance.abs() / e_new.abs().max(f64::MIN_POSITIVE),
         };
         let boundary_exchange = self.finish_boundary_exchange(
-            boundary_links, self.open_faces.as_ref(), faces1.as_ref(), open1,
+            boundary_links,
+            self.open_faces.as_ref(),
+            faces1.as_ref(),
+            open1,
         );
         self.f = next;
         self.e = e1;
@@ -1500,7 +1539,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
 
     /// `p div u` per fluid cell with the fourth-order central divergence (second order beside walls).
     fn pressure_work_density(
-        &self, rho: &[f64], u: &[[f64; 3]], theta: &[f64], faces: Option<&OpenFaces>,
+        &self,
+        rho: &[f64],
+        u: &[[f64; 3]],
+        theta: &[f64],
+        faces: Option<&OpenFaces>,
     ) -> Vec<f64> {
         let mut out = vec![0.0; self.n];
         let solid = &self.solid;
@@ -1524,17 +1567,15 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     },
                     (None, Some(p)) => match self.characteristic_face(faces, i, a, -1) {
                         Some(f) => 0.5 * (u[p][a] + u[i][a]) - f.u[a],
-                        None => self.open_at(i, a, -1).map_or(
-                            0.5 * (u[p][a] + u[i][a]),
-                            |b| 0.5 * (u[p][a] - b.u[a]),
-                        ),
+                        None => self
+                            .open_at(i, a, -1)
+                            .map_or(0.5 * (u[p][a] + u[i][a]), |b| 0.5 * (u[p][a] - b.u[a])),
                     },
                     (Some(m), None) => match self.characteristic_face(faces, i, a, 1) {
                         Some(f) => f.u[a] - 0.5 * (u[m][a] + u[i][a]),
-                        None => self.open_at(i, a, 1).map_or(
-                            -0.5 * (u[m][a] + u[i][a]),
-                            |b| 0.5 * (b.u[a] - u[m][a]),
-                        ),
+                        None => self
+                            .open_at(i, a, 1)
+                            .map_or(-0.5 * (u[m][a] + u[i][a]), |b| 0.5 * (b.u[a] - u[m][a])),
                     },
                     (None, None) => 0.0,
                 };
@@ -1673,3 +1714,102 @@ fn check_state(
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::d3q27::D3q27;
+
+    fn raw_source(u: [f64; 3], force: [f64; 3]) -> [f64; Q] {
+        let uf: f64 = u.iter().zip(force).map(|(u, force)| u * force).sum();
+        std::array::from_fn(|q| {
+            let c = D3q27::E[q].map(f64::from);
+            let cu: f64 = c.iter().zip(u).map(|(c, u)| c * u).sum();
+            let cf: f64 = c.iter().zip(force).map(|(c, force)| c * force).sum();
+            D3q27::W[q] * (cf / THETA0 + (cu * cf - THETA0 * uf) / THETA0.powi(2))
+        })
+    }
+
+    fn half_source_second(u: [f64; 3], force: [f64; 3]) -> [f64; 6] {
+        [
+            u[0] * force[0],
+            u[1] * force[1],
+            u[2] * force[2],
+            0.5 * (u[0] * force[1] + u[1] * force[0]),
+            0.5 * (u[0] * force[2] + u[2] * force[0]),
+            0.5 * (u[1] * force[2] + u[2] * force[1]),
+        ]
+    }
+
+    #[test]
+    fn guo_source_respects_bulk_relaxation_for_uniform_acceleration() {
+        // G0: the transformed populations of a locally unstrained flow are
+        // feq - S/2. Collision must produce second moment Pi_eq + (uF+Fu)/2
+        // independently of both viscosities, while supplying exactly F to
+        // momentum. A single source prefactor leaves a spurious isotropic
+        // stress of (wb-ws) (u.F)/3 when the two rates differ.
+        let rho = 1.3;
+        let u = [0.07, -0.03, 0.02];
+        let force = [0.001, -0.0017, 0.0004];
+        let eq = equilibrium::<D3q27>(rho, u, THETA0);
+        let source = raw_source(u, force);
+        let initial = std::array::from_fn(|q| eq[q] - 0.5 * source[q]);
+        let wanted_second = half_source_second(u, force);
+        for (ws, wb) in [(1.82, 1.15), (0.75, 1.95), (1.2, 1.2)] {
+            let initial_stress = stress::<D3q27>(&initial, force, ws, wb);
+            assert!(initial_stress.iter().all(|v| v.abs() < 2e-14));
+            let next = collide::<D3q27>(&initial, force, ws, wb);
+            let (density, momentum) = raw_moments::<D3q27>(&next);
+            assert!((density - rho).abs() < 2e-14);
+            for axis in 0..3 {
+                assert!((momentum[axis] - rho * u[axis] - 0.5 * force[axis]).abs() < 2e-14);
+            }
+            let second = neq_second::<D3q27>(&next, &eq);
+            for component in 0..6 {
+                assert!(
+                    (second[component] - wanted_second[component]).abs() < 2e-14,
+                    "mode {component}, ws={ws}, wb={wb}: {} vs {}",
+                    second[component],
+                    wanted_second[component]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bulk_and_shear_stress_relax_independently_in_forced_flow() {
+        // G0: a supplied physical second moment must relax in its own trace
+        // and deviatoric eigenspaces. Nonparallel u and F exercise all source
+        // components; an isotropic-only patch must not change the shear modes.
+        let rho = 0.9;
+        let u = [-0.04, 0.03, 0.05];
+        let force = [0.0006, -0.0002, 0.0007];
+        let physical = [2e-4, -1e-4, 3e-4, 1.5e-4, -2.5e-4, 5e-5];
+        let trace = physical[0] + physical[1] + physical[2];
+        let eq = equilibrium::<D3q27>(rho, u, THETA0);
+        let source = raw_source(u, force);
+        let initial = std::array::from_fn(|q| {
+            let [x, y, z] = D3q27::E[q].map(f64::from);
+            let cpc = x * x * physical[0]
+                + y * y * physical[1]
+                + z * z * physical[2]
+                + 2.0 * (x * y * physical[3] + x * z * physical[4] + y * z * physical[5]);
+            eq[q] + D3q27::W[q] * (cpc - THETA0 * trace) / (2.0 * THETA0.powi(2)) - 0.5 * source[q]
+        });
+        let half_source = half_source_second(u, force);
+        for (ws, wb) in [(1.87, 0.64), (0.72, 1.91), (1.3, 1.3)] {
+            let next = collide::<D3q27>(&initial, force, ws, wb);
+            let second = neq_second::<D3q27>(&next, &eq);
+            for component in 0..6 {
+                let isotropic = if component < 3 { trace / 3.0 } else { 0.0 };
+                let expected = (1.0 - ws) * (physical[component] - isotropic)
+                    + (1.0 - wb) * isotropic
+                    + half_source[component];
+                assert!(
+                    (second[component] - expected).abs() < 2e-14,
+                    "mode {component}, ws={ws}, wb={wb}: {} vs {expected}",
+                    second[component]
+                );
+            }
+        }
+    }
+}

@@ -1014,6 +1014,17 @@ truncation error); with the shift the defect is +2.3e-3 on 32 points and +8.8e-4
 Taylor-Green numbers of the battery did not move (kinetic-energy decay rate over `4 nu k^2` 0.99945 on 16 and 0.99964 on 32
 points; accumulated heating +1.388e-2 and +1.138e-2).
 
+**Force projection by viscous mode (`NSF3_BIT_SEMANTICS_VERSION` 4).** The Guo
+source's isotropic second moment now uses `1 - w_b/2`; its deviatoric second
+moment retains `1 - w_s/2`. Previously both used the shear prefactor, creating
+an artificial isotropic stress during acceleration whenever the bulk and shear
+rates differed. The correction has zero mass and momentum moments and adds no
+allocation. The local collision regressions `guo_source_respects_bulk_relaxation_for_uniform_acceleration`
+and `bulk_and_shear_stress_relax_independently_in_forced_flow` verify independent
+trace/deviatoric relaxation against prescribed physical moments, including
+unequal rates, nonparallel velocity/forcing, and the equal-rate limit. These
+local identities do not extend the existing Mach or transport envelopes.
+
 **Why not a temperature-corrected equilibrium (measured).** The first formulation put `theta - theta0` into the equilibrium
 (Hermite through third order). Its Bloch-linearised one-step matrix (28 x 28: 27 populations and the energy) about a
 quiescent uniform state has a REAL eigenvalue of 1.4 to 2.0 at oblique wavevectors near the Nyquist limit at air
