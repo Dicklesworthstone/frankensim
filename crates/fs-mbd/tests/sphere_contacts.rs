@@ -8,6 +8,9 @@ use fs_mbd::{
     Wrench,
 };
 
+#[path = "sphere_contacts/gravity.rs"]
+mod gravity;
+
 fn close(a: f64, b: f64) {
     assert!(
         (a - b).abs() < 3e-8 * a.abs().max(b.abs()).max(1.0),
@@ -102,6 +105,7 @@ fn g1_hidden_crossing_unequal_mass_collision_has_analytic_time_and_endpoint() {
         &properties,
         &spheres,
         &laws(&spheres, 0.0, 0.5),
+        Gravity::ZERO,
         2.0,
         controls(),
         &CancelGate::new(),
@@ -168,6 +172,7 @@ fn g1_spin_driven_stick_and_slide_use_actual_sphere_inertia() {
             &properties,
             &spheres,
             &laws(&spheres, mu, 1.0),
+            Gravity::ZERO,
             0.5,
             controls(),
             &CancelGate::new(),
@@ -229,6 +234,7 @@ fn g1_simultaneous_symmetric_chain_is_not_sequential_pair_resolution() {
         &properties,
         &spheres,
         &laws(&spheres, 0.0, 1.0),
+        Gravity::ZERO,
         1.0,
         controls(),
         &CancelGate::new(),
@@ -251,6 +257,7 @@ fn g1_simultaneous_symmetric_chain_is_not_sequential_pair_resolution() {
         &properties,
         &spheres_reordered,
         &laws_reordered,
+        Gravity::ZERO,
         1.0,
         controls(),
         &CancelGate::new(),
@@ -291,6 +298,7 @@ fn g1_sequential_collisions_and_split_continuation_recover_newton_cradle() {
         &properties,
         &spheres,
         &law,
+        Gravity::ZERO,
         3.0,
         controls(),
         &CancelGate::new(),
@@ -311,6 +319,7 @@ fn g1_sequential_collisions_and_split_continuation_recover_newton_cradle() {
         &properties,
         &spheres,
         &law,
+        Gravity::ZERO,
         1.5,
         controls(),
         &CancelGate::new(),
@@ -321,6 +330,7 @@ fn g1_sequential_collisions_and_split_continuation_recover_newton_cradle() {
         &properties,
         &spheres,
         &law,
+        Gravity::ZERO,
         1.5,
         controls(),
         &CancelGate::new(),
@@ -356,6 +366,7 @@ fn g1_tangent_touch_needs_no_impulse_and_free_asymmetric_drift_is_original() {
         &properties,
         &spheres,
         &laws(&spheres, 0.8, 0.0),
+        Gravity::ZERO,
         1.0,
         controls(),
         &CancelGate::new(),
@@ -386,6 +397,7 @@ fn g1_tangent_touch_needs_no_impulse_and_free_asymmetric_drift_is_original() {
         &props,
         &sphere,
         &[],
+        Gravity::ZERO,
         0.2,
         controls(),
         &CancelGate::new(),
@@ -427,6 +439,7 @@ fn g4_initial_geometry_late_event_budget_and_cancellation_refuse_atomically() {
             &properties,
             &spheres,
             &law,
+            Gravity::ZERO,
             3.0,
             cap,
             &CancelGate::new()
@@ -442,6 +455,7 @@ fn g4_initial_geometry_late_event_budget_and_cancellation_refuse_atomically() {
             &properties,
             &spheres,
             &law,
+            Gravity::ZERO,
             3.0,
             controls(),
             &gate
@@ -455,6 +469,7 @@ fn g4_initial_geometry_late_event_budget_and_cancellation_refuse_atomically() {
             &properties,
             &spheres,
             &law[..2],
+            Gravity::ZERO,
             3.0,
             controls(),
             &CancelGate::new()
@@ -479,6 +494,7 @@ fn g4_initial_geometry_late_event_budget_and_cancellation_refuse_atomically() {
             &properties,
             &spheres,
             &law,
+            Gravity::ZERO,
             3.0,
             controls(),
             &CancelGate::new()
@@ -492,6 +508,7 @@ fn g4_initial_geometry_late_event_budget_and_cancellation_refuse_atomically() {
         &properties,
         &spheres,
         &law,
+        Gravity::ZERO,
         3.0,
         controls(),
         &CancelGate::new(),
