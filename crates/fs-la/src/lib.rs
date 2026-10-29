@@ -17,6 +17,8 @@ pub mod factor;
 pub mod gemm;
 pub mod mixed;
 pub mod nonlinear_eig;
+/// Prepared force residues and analytic parameter tangents of resolved poles.
+pub mod pole_response;
 pub mod rand_nla;
 /// Reusable dense solves for repeated small nonlinear systems.
 pub mod prepared_lu;
