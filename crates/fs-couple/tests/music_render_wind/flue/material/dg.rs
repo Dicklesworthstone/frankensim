@@ -6,14 +6,27 @@ use fs_couple::pcm_wav::{
     encode_pcm16_wav,
     observation::{DecimatedRenderer, PressureRenderer},
 };
+use fs_material::gas_species::input::{ThermochemicalPhase, ThermochemicalSources};
+
+// The existing synthetic NASA-9/transport pack fixture, not a new gas law.
+#[path = "../../../../src/render/schedule/reed/field_input/tests/support.rs"]
+mod gas_support;
 
 const WALL: &str = "dg_wall isotropic wall.fsmcdpk 293.15 1000 0.00002 stress-free 50 2000 ";
 const TUBE: &str = "dg_tube 0.05 0.001 open 1 2 8 50 2000 0.01 1e-11 256";
 
+// The example's gesture releases at 10 ms; the controls refuse an event after the
+// observed window, so the shortened window must still hold it (1024 samples at 96 kHz).
 fn input(loss: &str) -> String {
     include_str!("../../../../examples/flue-dg.performance")
-        .replace("output 2048", "output 256")
+        .replace("output 2048", "output 1024")
         .replace("\nflue ", &format!("\n{WALL}{loss}\nflue "))
+}
+
+/// Synthetic species A and B for an authored `gas_field ... mole 2 A B`: they
+/// exercise the registry wiring, not measured gas data.
+fn gas_packs() -> [gas_support::Packs; 2] {
+    [gas_support::packs("A", 0.028, 3.5, 200.0), gas_support::packs("B", 0.044, 4.5, 200.0)]
 }
 
 fn loaded(
@@ -21,11 +34,20 @@ fn loaded(
     material: &NormalizedMaterialCardPack,
     block: usize,
 ) -> FlueDgFilePerformance {
+    loaded_in(text, material, block, None)
+}
+
+fn loaded_in(
+    text: &str,
+    material: &NormalizedMaterialCardPack,
+    block: usize,
+    gas: Option<&ThermochemicalSources<'_>>,
+) -> FlueDgFilePerformance {
     FlueDgFilePerformance::from_bytes_with_sources(
         text.as_bytes(),
         block,
         &CancelGate::new_clock_free(),
-        None,
+        gas,
         |path| {
             assert_eq!(path, "wall.fsmcdpk");
             Ok(material.clone())
@@ -105,13 +127,18 @@ fn source_density_stiffness_and_loss_drive_the_actual_dg_wall_and_jet_pressure()
 fn nonuniform_composition_and_the_solid_source_share_one_original_operator() {
     let material = pack(1000.0, 1e6, None, 100_000.0);
     let text = input("maxwell 1 1 0.5 boundary_modulus boundary_time").replace(TUBE,
-        "dg_bore 1 open 2 1 8 50 2000 0.01 1e-11 256 2 gas_field 2 mole 2 N2 CO2\ndg_segment cylinder 0.001 0.05\ngas_station 0 293.15 1 0\ngas_station 0.05 293.15 1 0");
+        "dg_bore 1 open 2 1 8 50 2000 0.01 1e-11 256 2 gas_field 2 mole 2 A B\ndg_segment cylinder 0.001 0.05\ngas_station 0 293.15 1 0\ngas_station 0.05 293.15 1 0");
     let changed = text.replace(
         "gas_station 0.05 293.15 1 0",
         "gas_station 0.05 293.15 0.7 0.3",
     );
-    let a = loaded(&text, &material, 37);
-    let b = loaded(&changed, &material, 37);
+    let packs = gas_packs();
+    let bindings = packs.each_ref().map(gas_support::Packs::binding);
+    let gas = ThermochemicalSources {
+        species: &bindings, water_species: None, phase: ThermochemicalPhase::FrozenGas,
+    };
+    let a = loaded_in(&text, &material, 37, Some(&gas));
+    let b = loaded_in(&changed, &material, 37, Some(&gas));
     let a_duct = a.renderer().voice().dg().unwrap().load().duct();
     let b_duct = b.renderer().voice().dg().unwrap().load().duct();
     assert_eq!(a_duct.inlet_gas(), b_duct.inlet_gas());

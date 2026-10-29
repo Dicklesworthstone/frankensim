@@ -1,7 +1,7 @@
 //! Physical material partitions survive mesh changes and reach native pressure.
 use super::{CancelGate, FlueDgFilePerformance, NormalizedMaterialCardPack,
-    PressureRenderer, DecimatedRenderer, TUBE, WALL, directory, encode_pcm16_wav,
-    input, loaded, pack, run, success, trace};
+    PressureRenderer, DecimatedRenderer, TUBE, WALL, ThermochemicalPhase, ThermochemicalSources,
+    directory, encode_pcm16_wav, gas_packs, gas_support, input, loaded, pack, run, success, trace};
 
 fn declaration(first: &str, first_loss: &str, second: &str, second_loss: &str) -> String {
     format!("dg_wall regions 2\n\
@@ -20,8 +20,15 @@ fn build(
     text: &str, first: &NormalizedMaterialCardPack,
     second: &NormalizedMaterialCardPack, block: usize,
 ) -> FlueDgFilePerformance {
+    build_in(text, first, second, block, None)
+}
+
+fn build_in(
+    text: &str, first: &NormalizedMaterialCardPack,
+    second: &NormalizedMaterialCardPack, block: usize, gas: Option<&ThermochemicalSources<'_>>,
+) -> FlueDgFilePerformance {
     FlueDgFilePerformance::from_bytes_with_sources(
-        text.as_bytes(), block, &CancelGate::new_clock_free(), None,
+        text.as_bytes(), block, &CancelGate::new_clock_free(), gas,
         |path| match path {
             "wall.fsmcdpk" => Ok(first.clone()),
             "second.fsmcdpk" => Ok(second.clone()),
@@ -91,17 +98,22 @@ fn distinct_regional_histories_and_a_gas_field_reach_the_same_renderer() {
     let second = pack(2000.0, 4e6, None, 100_000.0);
     let text = regional("maxwell 1 1 0.5 boundary_modulus boundary_time", "kelvin-voigt")
         .replace("dg_tube 0.05 0.001 open 2 2 8 50 2000 0.01 1e-11 256", concat!(
-            "dg_bore 1 open 2 2 8 50 2000 0.01 1e-11 256 3 gas_field 2 mole 2 N2 CO2\n",
+            "dg_bore 1 open 2 2 8 50 2000 0.01 1e-11 256 3 gas_field 2 mole 2 A B\n",
             "dg_segment cylinder 0.001 0.05\n",
             "gas_station 0 293.15 1 0\n",
             "gas_station 0.05 293.15 0.7 0.3",
         ));
-    let source = build(&text, &first, &second, 37);
+    let packs = gas_packs();
+    let bindings = packs.each_ref().map(gas_support::Packs::binding);
+    let gas = ThermochemicalSources {
+        species: &bindings, water_species: None, phase: ThermochemicalPhase::FrozenGas,
+    };
+    let source = build_in(&text, &first, &second, 37, Some(&gas));
     let duct = source.renderer().voice().dg().unwrap().load().duct();
     assert!(duct.gas_field().is_some());
     assert!(duct.spatial_viscothermal_admission().is_some());
     let reference = trace(source);
-    assert_eq!(reference, trace(build(&text, &first, &second, 1)));
+    assert_eq!(reference, trace(build_in(&text, &first, &second, 1, Some(&gas))));
     assert_eq!(reference.1.relaxation_pressure_pa.len(), 1);
     let pressure = &reference.1.relaxation_pressure_pa[0];
     assert!(pressure[..3].iter().any(|p| *p != 0.0));
