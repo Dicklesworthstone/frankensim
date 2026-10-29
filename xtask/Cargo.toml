@@ -33,6 +33,7 @@ fs-math = { path = "../crates/fs-math" }
 fs-phs = { path = "../crates/fs-phs" }
 fs-scenario = { path = "../crates/fs-scenario" }
 fs-solid = { path = "../crates/fs-solid" }
+fs-thermal = { path = "../crates/fs-thermal" }
 fs-thermochem = { path = "../crates/fs-thermochem" }
 
 [lints]
