@@ -5,7 +5,7 @@
 //! is exactly the wall heat used below. The same owner serves planar and
 //! axisymmetric passages, including pressure reversal and retained inertia.
 
-use super::{AcousticRealizeError, SlitChannelLoad, SlitChannelStep, SlitExit, invalid};
+use super::{AcousticRealizeError, ChannelGasUpdate, SlitChannelLoad, SlitChannelStep, SlitExit, invalid};
 use fs_math::det;
 
 #[derive(Debug, Clone)]
@@ -25,6 +25,7 @@ pub(super) struct MomentumProfile {
     steady_mean_response: f64,
     velocity: Vec<f64>,
     trial: Vec<f64>,
+    energy_j: f64,
     last: SlitChannelStep,
 }
 
@@ -89,11 +90,58 @@ impl MomentumProfile {
         Ok(Self { density, dt, exit, area, total_area, mass, conductance,
             inverse_diagonal, lower_ratio, upper_ratio, pressure_response,
             mean_pressure_response, steady_mean_response,
-            velocity: vec![0.0; n], trial: vec![0.0; n], last: SlitChannelStep::default() })
+            velocity: vec![0.0; n], trial: vec![0.0; n], energy_j: 0.0,
+            last: SlitChannelStep::default() })
     }
 
     pub(super) fn velocities(&self) -> &[f64] { &self.velocity }
     pub(super) const fn last_step(&self) -> SlitChannelStep { self.last }
+    pub(super) const fn stored_energy_j(&self) -> f64 { self.energy_j }
+
+    // This profile has already been assembled with the new complete gas at
+    // identical physical geometry. Preserve each cell's axial momentum rather
+    // than its speed: M_new v_new = M_old v_old. The original common density
+    // ratio avoids introducing cell-dependent rounding into a uniform change.
+    pub(super) fn transfer_material_history(
+        &mut self, previous: &Self, maximum_absolute_parameter_work_j: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ChannelGasUpdate, AcousticRealizeError> {
+        super::gas::poll(cancelled)?;
+        if self.area != previous.area || self.dt.to_bits() != previous.dt.to_bits()
+            || self.exit != previous.exit || self.mass.len() != previous.mass.len()
+        {
+            return Err(invalid("channel gas transfer requires the same geometry, cells, clock and exit"));
+        }
+        let ratio = previous.density / self.density;
+        if !ratio.is_finite() || ratio <= 0.0 {
+            return Err(invalid("channel gas transfer has unrepresentable density ratio"));
+        }
+        let mut twice_energy = 0.0;
+        for i in 0..self.velocity.len() {
+            if i % 64 == 0 { super::gas::poll(cancelled)?; }
+            let old = previous.velocity[i];
+            let velocity = old * ratio;
+            if !velocity.is_finite() || (old != 0.0 && velocity == 0.0) {
+                return Err(invalid("channel gas transfer lost finite cell momentum"));
+            }
+            self.velocity[i] = velocity;
+            twice_energy += self.mass[i] * velocity * velocity;
+        }
+        let after = 0.5 * twice_energy;
+        let work = after - previous.energy_j;
+        if !after.is_finite() || !work.is_finite()
+            || work.abs() > maximum_absolute_parameter_work_j
+        {
+            return Err(invalid("channel gas transfer exceeds finite kinetic parameter-work allowance"));
+        }
+        self.energy_j = after;
+        self.last = previous.last;
+        Ok(ChannelGasUpdate {
+            kinetic_energy_before_j: previous.energy_j,
+            kinetic_energy_after_j: after,
+            parameter_work_j: work,
+        })
+    }
 
     fn free_profile(&self) -> Vec<f64> {
         let mut free: Vec<_> = self.mass.iter().zip(&self.velocity).map(|(m, v)| m * v).collect();
@@ -190,6 +238,7 @@ impl MomentumProfile {
             return Err(invalid("channel step does not close finite dissipation and kinetic storage"));
         }
         core::mem::swap(&mut self.velocity, &mut self.trial);
+        self.energy_j = step.kinetic_energy_j;
         self.last = step;
         Ok(step)
     }

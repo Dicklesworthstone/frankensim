@@ -15,7 +15,7 @@
 //! Steady reference: C. E. Brennen, *An Internet Book on Fluid Dynamics*,
 //! <https://brennen.caltech.edu/fluidbook/basicfluiddynamics/Navierstokesexactsolutions/poiseuilleflow.pdf>.
 
-use super::{AcousticRealizeError, GasState, MomentumProfile, SlitChannelLoad,
+use super::{AcousticRealizeError, ChannelGasUpdate, GasState, MomentumProfile, SlitChannelLoad,
     SlitChannelStep, SlitExit, MAX_TRANSVERSE_CELLS, invalid};
 
 /// Fixed cylindrical geometry and radial/time discretization in SI units.
@@ -72,6 +72,34 @@ impl CircularChannel {
     #[must_use] pub fn velocities_m_s(&self) -> &[f64] { self.profile.velocities() }
     /// Last accepted storage, work and separately measured losses.
     #[must_use] pub const fn last_step(&self) -> SlitChannelStep { self.profile.last_step() }
+    /// Current kinetic storage, including an accepted zero-duration gas update.
+    #[must_use] pub const fn stored_energy_j(&self) -> f64 { self.profile.stored_energy_j() }
+    /// Replace the complete source gas at fixed geometry while retaining every
+    /// annulus's axial momentum. New viscosity drives the original no-slip
+    /// operator. The signed kinetic storage change is parameter work, never
+    /// pressure work, heat or numerical dissipation. No physical sample runs;
+    /// `last_step()` remains the original historical exchange.
+    ///
+    /// The finite nonnegative allowance bounds absolute parameter work. All
+    /// gas, coefficient, transfer and cancellation checks precede publication.
+    /// This prescribed intervention does not solve mass, heat or species flow.
+    pub fn rebind_gas_controlled(
+        &mut self, gas: &GasState, maximum_absolute_parameter_work_j: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ChannelGasUpdate, AcousticRealizeError> {
+        super::gas::admit(gas, maximum_absolute_parameter_work_j, cancelled)?;
+        if gas == &self.gas {
+            super::gas::poll(cancelled)?;
+            return Ok(ChannelGasUpdate::unchanged(self.stored_energy_j()));
+        }
+        let mut candidate = Self::from_gas(gas, self.spec)?;
+        let update = candidate.profile.transfer_material_history(
+            &self.profile, maximum_absolute_parameter_work_j, cancelled,
+        )?;
+        super::gas::poll(cancelled)?;
+        *self = candidate;
+        Ok(update)
+    }
     /// Exact affine boundary of the next implicit field step, retaining inertia.
     pub fn pressure_load(&self) -> Result<SlitChannelLoad, AcousticRealizeError> {
         self.profile.pressure_load()

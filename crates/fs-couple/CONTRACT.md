@@ -7133,6 +7133,31 @@ late refusal and exact retry. Rust syntax parsing passed; native compilation,
 numerical test execution and acoustic qualification remain pending.
 
 
+## Continuing finite-channel momentum through source gas changes
+
+`SlitChannel`, `CircularChannel` and their shared `FixedChannel` owner accept
+`rebind_gas_controlled` at fixed geometry and sample period. The original
+finite-volume momentum owner reassembles density-dependent cell masses and
+source-viscosity face conductances, preserving each cell's axial momentum.
+Consequently a uniform density change scales velocity by `rho_old/rho_new`
+and kinetic storage by the same ratio. A viscosity-only change alters the
+subsequent diffusion while preserving the instantaneous field and storage.
+
+`ChannelGasUpdate` reports original and updated kinetic energy and their
+signed difference as parameter work. Work limits, representability and
+cancellation are checked before publishing the gas or any physical history.
+This zero-duration intervention consumes no flow sample and creates no
+pressure work, wall heat or numerical dissipation. `last_step()` remains the
+historical accepted exchange; `stored_energy_j()` reads the actual current
+kinetic storage, including an accepted gas intervention.
+
+Planar and annular cells use the same transfer and accounting implementation.
+The operation does not model background mass/heat transport, moving walls,
+compressible channel storage or turbulence. The external gas owner remains
+responsible for its background balance and the reported kinetic work.
+Focused native regressions use independent cell momentum and kinetic-energy
+calculations, changed-viscosity continuation and transactional refusal.
+
 ## Original cavity gas diffusion in the reciprocal string bank
 
 `with_material_shell_cavity_thermal` projects scalar heat diffusion on the same

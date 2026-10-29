@@ -20,6 +20,8 @@
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_material::gas::GasState;
 mod profile;
+mod gas;
+pub use gas::ChannelGasUpdate;
 /// Axisymmetric passages using the same no-slip momentum and work owner.
 pub mod circular;
 use profile::MomentumProfile;
@@ -159,6 +161,10 @@ impl FixedChannel {
     pub const fn last_step(&self) -> SlitChannelStep {
         match self { Self::Slit(v) => v.last_step(), Self::Circular(v) => v.last_step() }
     }
+    /// Current kinetic storage, including any zero-duration material transfer.
+    pub const fn stored_energy_j(&self) -> f64 {
+        match self { Self::Slit(v) => v.stored_energy_j(), Self::Circular(v) => v.stored_energy_j() }
+    }
     /// Exact next-step affine pressure boundary of the actual geometry.
     pub fn pressure_load(&self) -> Result<SlitChannelLoad, AcousticRealizeError> {
         match self { Self::Slit(v) => v.pressure_load(), Self::Circular(v) => v.pressure_load() }
@@ -226,6 +232,11 @@ impl SlitChannel {
     /// Last accepted exchange, all zero before the first step.
     #[must_use]
     pub const fn last_step(&self) -> SlitChannelStep { self.profile.last_step() }
+
+    /// Current kinetic storage. `last_step()` remains the historical exchange
+    /// when a zero-duration gas intervention changes the accepted endpoint.
+    #[must_use]
+    pub const fn stored_energy_j(&self) -> f64 { self.profile.stored_energy_j() }
 
     /// Exact next-step affine load of this fixed, no-slip channel.
     ///
