@@ -106,9 +106,11 @@ pub struct RigidRollingControls {
 }
 
 /// Physical impulse/work observables of the accepted supported rolling phase.
+/// Kinetic totals and momentum changes cover only the contacted pair; its
+/// changes are also the whole-system changes because other bodies are untouched.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RigidRollingReport {
-    /// The only heat-generating body for this bulk viscoelastic model.
+    /// The only heat-generating body's original input-slice index.
     pub deforming_body: usize,
     /// Original `[shear_x, shear_y, roll_x, roll_y]` response, in mixed SI units.
     pub mobility: [[f64; 4]; 4],
@@ -124,7 +126,9 @@ pub struct RigidRollingReport {
     pub maximum_static_force_n: f64,
     pub substeps: usize,
     pub dissipated_heat_j: f64,
+    /// Contacted-pair kinetic energy before the phase [J].
     pub kinetic_before_j: f64,
+    /// Contacted-pair kinetic energy after the phase [J].
     pub kinetic_after_j: f64,
     pub midpoint_impulse_work_j: f64,
     /// Work of the no-slip reactions; independently required to vanish.
@@ -197,6 +201,8 @@ impl std::error::Error for RigidRollingError {}
 /// midpoint decay factor: automatic substeps enforce `c lambda_max h <= 1`.
 /// Viscous arrest is asymptotic; zero speed stays zero without a cutoff or snap.
 /// Accuracy at frozen geometry is second order under timestep refinement.
+/// Only the bound pair is staged and audited, so unrelated kinetic energy
+/// cannot hide its energy change. Every other original body stays untouched.
 ///
 /// A surrounding trajectory owner must advance the poses and normal contact.
 /// This pure-rolling phase cannot be superposed with a second shear reaction
@@ -240,7 +246,20 @@ pub fn apply_rigid_rolling(
         vector(contact.frame.lateral()),
     ];
     let normal = vector(contact.frame.normal());
-    let before = points(bodies, properties, contact.binding)?;
+    let mut next = [
+        bodies[contact.binding.body_a],
+        bodies[contact.binding.body_b],
+    ];
+    let pair_properties = [
+        properties[contact.binding.body_a],
+        properties[contact.binding.body_b],
+    ];
+    let pair_binding = RigidContactBinding {
+        body_a: 0,
+        body_b: 1,
+        ..contact.binding
+    };
+    let before = points(&next, &pair_properties, pair_binding)?;
     let sphere = card.parameters().sphere_surface;
     let (sphere_slot, sphere_sign, deforming_body) = match sphere {
         DeformingSphereSurface::SurfaceA => (0, -1.0, contact.binding.body_a),
@@ -290,7 +309,7 @@ pub fn apply_rigid_rolling(
     let capacity =
         finite(contact.static_friction.static_coefficient()? * contact.patch.normal_load_n())?;
     let (mobility, reaction, rolling_mobility) =
-        response(bodies, properties, contact.binding, axes)?;
+        response(&next, &pair_properties, pair_binding, axes)?;
     let c = finite((card.rolling_time_s() * radius) * contact.patch.normal_load_n())?;
     if c < 0.0 || (c == 0.0 && card.rolling_time_s() > 0.0 && loaded) {
         return Err(invalid("unrepresentable material rolling damping"));
@@ -335,8 +354,7 @@ pub fn apply_rigid_rolling(
             1.0 + half_damping * rolling_mobility[1][1],
         ],
     ];
-    let (energy_before, linear_before, angular_before) = totals(bodies, properties, gate)?;
-    let mut next = bodies.to_vec();
+    let (energy_before, linear_before, angular_before) = totals(&next, &pair_properties, gate)?;
     let mut next_history = history.clone();
     let mut final_step = None;
     let mut heat = 0.0;
@@ -353,7 +371,7 @@ pub fn apply_rigid_rolling(
     let mut rolling_impulse = Vec3::ZERO;
     for _ in 0..substeps {
         poll(gate)?;
-        let old_points = points(&next, properties, contact.binding)?;
+        let old_points = points(&next, &pair_properties, pair_binding)?;
         let q = tangent(relative_spin(old_points), axes);
         let q_mid = solve_spd(midpoint_matrix, q)?;
         let rate = norm(q_mid);
@@ -377,11 +395,11 @@ pub fn apply_rigid_rolling(
         let impulse = world(force, axes).scale(h);
         let couple = world(moment, axes).scale(h);
         for (body, arm, sign) in [
-            (contact.binding.body_a, contact.binding.arm_a_body, 1.0),
-            (contact.binding.body_b, contact.binding.arm_b_body, -1.0),
+            (pair_binding.body_a, pair_binding.arm_a_body, 1.0),
+            (pair_binding.body_b, pair_binding.arm_b_body, -1.0),
         ] {
             let after_force = next[body]
-                .apply_impulse_at_body_point(properties[body], arm, impulse.scale(sign))?
+                .apply_impulse_at_body_point(pair_properties[body], arm, impulse.scale(sign))?
                 .state_after;
             let angular = after_force
                 .pose()
@@ -393,7 +411,7 @@ pub fn apply_rigid_rolling(
                 after_force.angular_momentum_body().add(angular),
             )?;
         }
-        let new_points = points(&next, properties, contact.binding)?;
+        let new_points = points(&next, &pair_properties, pair_binding)?;
         let q_after = tangent(relative_spin(new_points), axes);
         let predicted = mul(rolling_mobility, moment);
         for axis in 0..2 {
@@ -453,7 +471,7 @@ pub fn apply_rigid_rolling(
         next_history.state = step.next_state.clone();
         final_step = Some(step);
     }
-    let (energy_after, linear_after, angular_after) = totals(&next, properties, gate)?;
+    let (energy_after, linear_after, angular_after) = totals(&next, &pair_properties, gate)?;
     let final_step = final_step.ok_or_else(|| invalid("missing native rolling substep"))?;
     next_history.checkpoint = Some(final_step.checkpoint.clone());
     let report = RigidRollingReport {
@@ -462,7 +480,7 @@ pub fn apply_rigid_rolling(
         rolling_mobility,
         rolling_rate_before_rad_s: q_before,
         rolling_rate_after_rad_s: tangent(
-            relative_spin(points(&next, properties, contact.binding)?),
+            relative_spin(points(&next, &pair_properties, pair_binding)?),
             axes,
         ),
         traction_impulse_world_ns: traction_impulse,
@@ -514,7 +532,8 @@ pub fn apply_rigid_rolling(
         return Err(RigidRollingError::Audit(Box::new(report)));
     }
     poll(gate)?;
-    bodies.copy_from_slice(&next);
+    bodies[contact.binding.body_a] = next[0];
+    bodies[contact.binding.body_b] = next[1];
     *history = next_history;
     Ok(report)
 }

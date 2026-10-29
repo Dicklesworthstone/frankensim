@@ -335,6 +335,76 @@ fn both_axes_slow_the_sphere_and_recoil_the_finite_support_with_original_heat() 
 }
 
 #[test]
+fn unrelated_large_energy_cannot_hide_pair_work_or_change_original_body_indices() {
+    let f = fixture(TAU, INITIAL_RATE, 0.001);
+    let mut isolated = f.bodies;
+    let mut isolated_history = RigidRollingHistory::new();
+    let mut expected = advance(&f, &mut isolated, &mut isolated_history, 0.2, controls(0.2));
+    let spectator = RigidBodyState::new(
+        Pose::new(Vec3::new(11.0, -7.0, 5.0), UnitQuaternion::IDENTITY).unwrap(),
+        Vec3::new(1e18, -2e18, 3e18),
+        Vec3::new(-3e17, 2e17, 1e17),
+    )
+    .unwrap();
+    let spectator_properties =
+        MassProperties::new(2.0, Vec3::ZERO, Vec3::new(3.0, 4.0, 5.0)).unwrap();
+    let spectator_energy = spectator.kinetic_energy(spectator_properties).unwrap();
+    assert!(spectator_energy.is_finite());
+    assert!(expected.dissipated_heat_j > controls(0.2).energy_tolerance_j);
+    // A whole-scene subtraction loses this real, independently verified heat.
+    assert_eq!(
+        spectator_energy + expected.kinetic_before_j,
+        spectator_energy + expected.kinetic_after_j,
+    );
+    let mut scene = [spectator, f.bodies[1], f.bodies[0]];
+    let accepted = scene;
+    let properties = [spectator_properties, f.properties[1], f.properties[0]];
+    let contact = RigidRollingContact {
+        binding: RigidContactBinding {
+            body_a: 2,
+            body_b: 1,
+            ..f.binding
+        },
+        ..f.contact()
+    };
+    let mut history = RigidRollingHistory::new();
+    // The existing scene-size admission still applies before pair staging.
+    assert!(
+        apply_rigid_rolling(
+            &mut scene,
+            &properties,
+            &mut history,
+            contact,
+            0.2,
+            controls(0.2),
+            &CancelGate::new(),
+        )
+        .is_err()
+    );
+    assert_eq!(scene, accepted);
+    assert_eq!(history, RigidRollingHistory::new());
+    let report = apply_rigid_rolling(
+        &mut scene,
+        &properties,
+        &mut history,
+        contact,
+        0.2,
+        RigidRollingControls {
+            maximum_bodies: 3,
+            ..controls(0.2)
+        },
+        &CancelGate::new(),
+    )
+    .unwrap();
+    expected.deforming_body = 2;
+    assert_eq!(report, expected);
+    assert_eq!(history, isolated_history);
+    assert_eq!(scene[2], isolated[0]);
+    assert_eq!(scene[1], isolated[1]);
+    assert_eq!(scene[0], spectator);
+}
+
+#[test]
 fn anisotropic_two_axis_decay_converges_to_independent_matrix_exponential() {
     let f = fixture(TAU, INITIAL_RATE, 0.001);
     let (exact, exact_heat, _) = reference(&f, 2.0, None, INITIAL_RATE);

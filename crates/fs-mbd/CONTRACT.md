@@ -1349,6 +1349,11 @@ kinetic change, midpoint work, physical heat, zero static-reaction work, and
 total linear/orbital-plus-spin angular momentum. Candidate bodies and native
 history publish together after the final cancellation poll. Late balance,
 source, mode, traction and budget refusal leaves both unchanged.
+Only the two contacted native bodies are staged and audited in fixed-size
+storage. Unrelated scene bodies are neither scanned nor copied, and their large
+kinetic energies cannot erase the pair's physical loss in an energy subtraction.
+Report kinetic and momentum totals belong to that pair; their changes equal
+the whole-system changes. Original body indices and source roles are preserved.
 
 This is one held-geometry, held-normal-load pure-rolling phase. The surrounding
 owner still advances poses and normal contact. It does not solve contact
@@ -1361,6 +1366,49 @@ principal-direction mechanics for both-body recoil, a three-rung exponential
 motion/heat refinement ladder, nonreversing decay, exact zero limits, world and
 surface-order covariance, source/traction/mode refusal, and loaded checkpoint,
 late audit, cancellation and exact retry.
-All six groups pass in the focused native original-source build. The independent
+A seventh group requires exact isolated-pair recoil, heat and history despite
+an energetic untouched body and nondefault contact indices.
+All seven groups pass in the focused native original-source build. The independent
 8/16/32-step ladders require error-reduction factors in `[3.95, 4.05]` for both
 motion and heat. This is separate from a full Cargo/DSR workspace gate.
+
+## Joint Hertz sliding and spin on two finite bodies
+
+`tangential_friction::hertz::apply_rigid_hertz` consumes the original
+`HertzWrenchContact`, `RigidContactBinding`, tangent frame, native body momenta,
+mass properties and contact arms. It derives all nine entries of the
+radius-scaled response `W = J M^-1 J^T`, including translation/spin cross terms;
+no effective mass, inertia, prescribed support or supplied slip replaces either
+finite body. The original shared Hertz owner receives released displacement
+`dt * relative_rate` and held-effort midpoint compliance `dt² W / 2`.
+
+Equal/opposite native point impulses and normal-axis free couples are staged
+on only the two bound bodies in fixed-size storage. Actual endpoint point and
+angular velocities determine midpoint shear/spin work independently. A fresh
+evaluation of the original integrated Hertz law at those actual midpoint rates
+checks each force and moment residual and the unpartitioned local heat. Pair
+kinetic change, actual work, constitutive work/heat, and total linear plus
+orbital/spin angular momentum must close before one atomic publication. The
+pair's changes equal whole-system changes; unaffected bodies are not copied or
+included in energy subtraction. Cancellation and late geometry/momentum/work
+refusal leave the complete original body slice unchanged.
+
+The original law gives feasible global static reactions priority. Zero midpoint
+slip does not imply endpoint arrest: a held shear force or spin couple that
+would assist either actual endpoint rate refuses as an unresolved slip event.
+The trajectory owner must refine that interval; this consumer does not override
+static selection, snap endpoint velocity, manufacture an inelastic event, or
+turn a residual into heat. Exact kinetic stopping is retained when resolved by
+the admitted phase. Normal load/radius, geometry and pose stay held and caller
+owned; before/after normal relative speeds remain visible. There is no normal
+impulse, external drive, elastic-history replacement, rolling loss, heat store,
+contact discovery, time-event search or complete pose integrator in this rung.
+
+Six native G1/G3 groups in `tests/hertz_friction.rs` pass: independent finite-body
+translation and spin arrest with support recoil; a manufactured joint Hertz
+wrench with full rotated anisotropic cross response and independent native
+endpoint work; global rigid covariance, common boost and body-index permutation;
+coarse reversal refusal, late angular-momentum failure, cancellation and exact
+retry; and static/frictionless limits. The three original rigid tangential and
+seven two-axis rolling groups also pass against the same original-source build.
+This focused result is separate from a full Cargo/DSR workspace gate.

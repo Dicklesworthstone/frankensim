@@ -8,6 +8,9 @@
 /// Material-derived rolling loss with finite-body recoil and feasible no slip.
 pub mod rolling;
 
+/// Joint Hertz sliding/spin friction with full two-body recoil.
+pub mod hertz;
+
 use crate::{DynamicsError, MassProperties, RigidBodyState, Vec3};
 use fs_contact::tangential::nonsmooth::{
     NonsmoothAudit, NonsmoothContact, NonsmoothContactResult, NonsmoothControls,
