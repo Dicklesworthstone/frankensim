@@ -10,6 +10,9 @@ use crate::dynamics::wall::shared::{CaloricLaw, WallError as Error};
 use crate::dynamics::{Primitive, positive};
 use fs_math::det;
 
+/// Shared converging-nozzle closure for finite compact-volume valves.
+pub(crate) mod nozzle;
+
 #[derive(Clone, Copy)]
 pub(crate) struct PortState {
     /// Velocity is oriented outward from the duct, independent of its axis.

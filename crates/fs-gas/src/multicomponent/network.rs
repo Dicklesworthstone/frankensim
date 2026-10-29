@@ -25,6 +25,9 @@ use fs_qty::Time;
 mod coupled;
 mod step;
 
+/// Controllable, conservative valve links between finite rigid plenums.
+pub mod valve;
+
 /// Conservative molecular species, heat and viscous transport through finite ports.
 pub mod dissipation;
 
