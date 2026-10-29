@@ -1,0 +1,67 @@
+frankensim-kettle-v1
+# Tp-S1 timpani (pexfp.376): Fleischer's Kolberg Pauke Nr. 2 with kettle B, a 0.2 mm PET head and
+# Rhaouti, Chaigne and Joly's measured timpani mallet, tuned to the principal of VCSL Timpani 2B.
+# Sources are rows of data/instruments/sources/ledger.tsv (fleischer-2008-kolberg-kettle-b,
+# rhaouti-chaigne-joly-1999-timpani-mallet, timpani-tps1-recipe); every gap is a row of unknowns.tsv.
+#
+# Kettle B inner (air) surface, z up from the kettle bottom and r from the axis [m]: Fleischer,
+# Beitraege zur Vibro- und Psychoakustik Heft 1/08, Abb. 23; bearing edge r = 357 mm at z = 530 mm.
+# The 26 mm vent is sealed: the axis point replaces the vent's edge at r = 13 mm (u-vent).
+station,0,0
+station,0.015,0.096
+station,0.049,0.171
+station,0.093,0.224
+station,0.142,0.264
+station,0.190,0.283
+station,0.238,0.300
+station,0.286,0.311
+station,0.333,0.319
+station,0.381,0.329
+station,0.429,0.338
+station,0.477,0.346
+station,0.523,0.356
+station,0.530,0.357
+# thickness_m, E_Pa, nu, density_kg_m3, installed_tension_N_m, viscous_ratio
+# 0.2 mm: Remo Weather King film. E, nu, density: DuPont typical Mylar (u-film-constants).
+# Tension is computed, not measured: it puts the coupled (1,1) at 112.1 Hz, the 2B principal, for
+# exactly this card (u-tension); Fleischer's FEM tension for A2 on this drum is 2668 N/m.
+# No film or bearing-edge loss is known for this head, so it is zero (u-head-loss).
+head,0.0002,4903325000,0.38,1390,2582.2,0
+# 6 radial x 48 azimuthal intervals: the in-vacuo (2,1)..(5,1) ratios lie 0.26, 0.61, 1.10 and
+# 1.63 % below the exact membrane's (u-head-mesh).
+head_mesh,6,48
+# 17 head modes, up to the (5,1) pair; (1,3), (3,2), (6,1), (0,4) and above are absent (u-band).
+head_band_hz,0,380
+maximum_slope,0.1
+# Dry air at 20 C and 101.325 kPa (u-air-state); no momentum drag.
+air,1.204,343.2,0
+air_mesh,16,8
+# A numerical choice, not physics: the interior air's near-field mass on a head mode comes from
+# cavity modes far above it. At 1500 Hz (68 modes) the coupled (2,1), (3,1), (4,1) and (5,1)
+# ratios lie 0.5, 0.5, 1.1 and 0.7 % above a 2500 Hz (219-mode) basis (pexfp.376 bead comment,
+# convergence table; u-cavity-truncation; pexfp.376.1 is the residual-mass fix). The 288 kHz
+# clock is the slowest 48 kHz multiple that resolves this basis.
+air_maximum_hz,1500
+rate_hz,288000
+# effective_mass_kg, face_radius_m, thickness_m, gap_m, speed_m_s, x_m, y_m
+# Rhaouti, Chaigne and Joly 1999, Sec. IV.A: effective mass 0.028 kg (impedance head), 1.4 m/s
+# (integrated acceleration); face radius gives the area of their ink-spot contact window; struck
+# 10 cm in from the rim, as their x0 = 0.21 m on a 0.31 m drum (u-strike, u-contact-area).
+mallet,0.028,0.018188,0.01,0.00001,1.4,0.257,0
+# stress_Pa, reference_strain, load_power, unload_power, crush, densification, history
+# Their F = K x^p, K = 1.6e8 N/m^2.54, p = 2.54, as f_ref = K (h eps_ref)^p / A = 3693.2 Pa with
+# h = 10 mm, eps_ref = 0.1 and A = 1.039e-3 m^2. Unload power = load power and crush 0 are their
+# hysteresis-free law (u-felt-hysteresis); thickness and densification are validity bounds, not
+# data (u-felt-thickness-densification); a fresh felt (u-felt-history).
+felt,3693.2,0.1,2.54,2.54,0,0.95,0
+# Exterior surface: 2 mm outside the inner wall (0.6 to 3 mm clear of it); the copper's rim,
+# feet and struts are absent (u-outer-surface).
+outer_station,-0.002,0
+outer_station,0.015,0.098
+outer_station,0.049,0.173
+outer_station,0.093,0.226
+outer_station,0.142,0.266
+outer_station,0.238,0.302
+outer_station,0.333,0.321
+outer_station,0.429,0.340
+outer_station,0.530,0.359
