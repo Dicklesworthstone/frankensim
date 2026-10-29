@@ -1,0 +1,25 @@
+frankensim-material-strings-v3
+audio 48000 120000 1.0 512
+state 293.15 1000
+gas mixture 293.15 101325 mole 2 N2 0.7905 O2 0.2095
+body guitar-spruce-sitka-fpl-gtr282-shell.fsmatpk 0.47 0.37 0.0025 128 1.0
+strings 1
+string nylon-b3.fsmatpk 0.463823 0.00040894 tension 58.446 24 0 0.93532 100000 0
+section homogeneous
+polarizations two 0.7071067811865476 0.7071067811865476 1 0
+translational-bridges 1
+translational-bridge 0 0.93532 0 1 12 89 0 -1 0 100000 0 0
+prepared-linear 256 4294967296 1000000000000000
+residual-flexibility exact-static-green
+cavity physical-neck 0.013035685 0.043509214 0.002467782 flanged flanged 1.0
+friction stribeck 0.8 0.4 0.1 0
+forces preload 1 1
+port 0 0.676601 along 0.7071067811865476 0.7071067811865476 1.3465
+force 0 0 0
+schedule
+frankensim-gesture-schedule-v1
+control_rate_hz	750
+tracks	1
+track	bow	bow	0
+initial	bow	0e0	0e0	2e-1
+events	0

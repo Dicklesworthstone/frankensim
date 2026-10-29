@@ -1,43 +1,43 @@
 #!/usr/bin/env bash
-# Gt-S1 classical-guitar open-string renders (trj). Plain nylon trebles only; the wound basses are
-# blocked on UNKNOWN core/winding geometry (see sources.tsv).
-#   render.sh BIN_SHA12 [DATA_SHA12 [OUT_DIR]]
-# BIN_SHA12 names a wa.sh build that produced both `xtask` and the `material_strings` example
-# (data is read from the snapshot DATA_SHA12, default BIN_SHA12; pass a later snapshot when the data landed after the build):
-#   ssh trj /data/tmp/wa-inst/wa.sh build <sha> --release -p fs-couple -p xtask --example material_strings --bin xtask
-# Reference notes in the Iowa library (48 kHz mono, mf):
-#   gt-s1-solo-g3 -> Guitar.mf.sulG.G3B3 @ G3   gt-s1-solo-b3 -> Guitar.mf.sulB.B3 @ B3   gt-s1-solo-e4 -> Guitar.mf.sul_E.E4B4 @ E4
-# The solo files (one plucked string, 12 modes per plane) fit the ordinary 42-mode connected exact block. The three-string
-# gt-s1-{g3,b3,e4}.material-strings files (84 string modes) need the prepared propagator at bank construction, which the
-# generic bank does not yet offer: the bank is built with the ordinary owner before prepared-linear is applied.
+# Gt-S1's plain nylon treble strings, one at a time, on the assembled body of the 1964 Esteso guitar, using the existing
+# material_strings engine (pexfp.377). G3, B3 and E4 are open; F#4 (Gb4) and F5 are the B string stopped at frets 7
+# and 18. The launcher assembles each string's body profile from the bridged h12 shell table and that string's assembly
+# options (esteso-h12-{g,b,e}.assembly), then renders the card. F5's card runs at 96 kHz. The wound basses are blocked on
+# UNKNOWN core/winding geometry (see sources.tsv).
+# The flat cedar-plate cards (gt-s1-*) stay in this directory; their recipe is this file's history.
+# usage: render.sh MATERIAL_STRINGS_BIN XTASK_BIN NEW_OUT_DIR [launcher options]
+# Reference notes in the Iowa library (48 kHz mono, mf): G3 Guitar.mf.sulG.G3B3, B3 Guitar.mf.sulB.B3,
+# E4 Guitar.mf.sul_E.E4B4, F#4 Guitar.mf.sulB.C4B4, F5 Guitar.mf.sulB.C5Gb5 (sources.tsv).
 set -euo pipefail
-SHA12="${1:?usage: render.sh BIN_SHA12 [DATA_SHA12 [OUT_DIR]]}"
-DATA_SHA12="${2:-${SHA12}}"
-BIN="/data/tmp/wa-inst/bin/${SHA12}"
-XTASK="${XTASK:-${BIN}/xtask}"   # packs only need any xtask that predates a pack-format change
-SNAP="/data/tmp/wa-inst/snap/${DATA_SHA12}/frankensim"
-OUT="${3:-/data/tmp/wa-inst/renders/guitar/${DATA_SHA12}-${SHA12}}"
-D="${SNAP}/data/instruments/descriptions/guitar"
-mkdir -p "${OUT}"
-cd "${OUT}"
-for pack in nylon-g3 nylon-b3 nylon-e4 cedar-top; do
-  cp "${D}/${pack}.tsv" "${D}/${pack}-manifest.tsv" .
-  (cd "${SNAP}" && "${XTASK}" matdb-pack --manifest "${OUT}/${pack}-manifest.tsv" --out "${OUT}/${pack}.fsmatpk")
+bin="${1:?usage: render.sh MATERIAL_STRINGS_BIN XTASK_BIN NEW_OUT_DIR [launcher options]}"
+xtask="${2:?usage: render.sh MATERIAL_STRINGS_BIN XTASK_BIN NEW_OUT_DIR [launcher options]}"
+out="${3:?usage: render.sh MATERIAL_STRINGS_BIN XTASK_BIN NEW_OUT_DIR [launcher options]}"
+shift 3
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+repo="$(cd "$here/../../../.." && pwd -P)"
+materials="$repo/crates/fs-couple/examples/material_strings"
+geometry="$repo/data/instruments/geometry/guitar-esteso-1964-zimmer2024"
+mkdir "$out" "$out/packs"
+for pack in nylon-g3 nylon-b3 nylon-e4; do
+    cp "$here/$pack.tsv" "$here/$pack-manifest.tsv" "$out/packs/"
+    (cd "$repo" && "$xtask" matdb-pack --manifest "$out/packs/$pack-manifest.tsv" --out "$out/packs/$pack.fsmatpk")
 done
-cp "${D}"/gt-s1-solo-*.material-strings "${D}"/gt-s1-solo-*.body "${D}"/gt-s1-fret-*.material-strings "${D}"/gt-s1-m24-*.material-strings .
-# Independent single-core renders (about 5 min each). Open strings: g3 b3 e4. Stopped notes on the B string
-# (gb4 = fret 7, f5 = fret 18) reuse the B-string pack, tension and body profile unchanged.
-# NOTES="gb4 f5" renders only some of them.
-# m24-<note> is the same note with 24 bending modes per polarization (convergence rung; 65 coordinates).
-for note in ${NOTES:-g3 b3 e4 gb4 f5}; do
-  case "${note}" in
-    gb4|f5) stem="gt-s1-fret-${note}"; body="gt-s1-solo-b3.body" ;;
-    m24-gb4|m24-f5) stem="gt-s1-${note}"; body="gt-s1-solo-b3.body" ;;
-    m24-*) stem="gt-s1-${note}"; body="gt-s1-solo-${note#m24-}.body" ;;
-    *) stem="gt-s1-solo-${note}"; body="gt-s1-solo-${note}.body" ;;
-  esac
-  nice -n 10 "${BIN}/material_strings" "${stem}.material-strings" "${OUT}/${stem}.wav" \
-    --body-profile "${body}" > "${stem}.log" 2>&1 &
+for note in ${NOTES:-G3 B3 E4 Gb4 F5}; do
+    case "$note" in
+        G3) card=esteso-g3; string=g; pack=nylon-g3 ;;
+        B3) card=esteso-b3; string=b; pack=nylon-b3 ;;
+        E4) card=esteso-e4; string=e; pack=nylon-e4 ;;
+        Gb4) card=esteso-gb4; string=b; pack=nylon-b3 ;;
+        F5) card=esteso-f5; string=b; pack=nylon-b3 ;;
+        *) echo "unsupported note: $note" >&2; exit 2 ;;
+    esac
+    python3 "$repo/apps/instrument-lab/tools/render_material_strings.py" \
+        --renderer "$bin" --out "$out/$note" \
+        --performance "$here/$card.material-strings" \
+        --pack-root "$materials/packs" --pack "$pack.fsmatpk=$out/packs/$pack.fsmatpk" \
+        --shell-table "$geometry/shell-assembly-h12-bridge.tsv" \
+        --assembly-options "$here/esteso-h12-$string.assembly" \
+        --family guitar --note "$note" \
+        --observer "material shell-volume and cavity pressure at 1 m; compact receiver approximation" \
+        --recipe data/instruments/descriptions/guitar/render.sh "$@"
 done
-wait
-tail -n 2 gt-s1-*.log
