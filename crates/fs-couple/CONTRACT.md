@@ -11070,3 +11070,27 @@ quasistatic, fixed-topology applicability and does not manufacture liquid
 inertia, rupture or heat. The six focused original-source native tests cover
 both models, moving bodies, spring/damper connections, prescribed/external
 work, atomic refusals and retry; they are not full workspace validation.
+
+## Native DMT adhesion with two-dimensional junction sliding
+
+`render::schedule::force::coupled::contact::adhesive_dmt::AdhesiveDmtModalSystem`
+projects all three original reciprocal contact columns through the actual
+mechanical network and couples them to the original sourced DMT and junction
+shear laws. Normal and both tangent components share the full compliance;
+normal motion changes the actual area that carries static/kinetic shear.
+
+The native owner audits the original constitutive law on actual staged motion
+and separately accounts for normal storage, friction loss, external work,
+prescribed work and network dissipation. Initial and staged endpoint velocities,
+including prescribed support motion, determine occupied kinetic state. Zero
+net slip cannot silently restore static strength while the endpoint is moving.
+Only after force, work, energy, material and cancellation gates pass do body,
+contact, clock and frame advance together. Source mismatch or refused trials
+leave accepted history unchanged.
+
+Seven focused original-source native tests cover coupled body motion, momentum,
+complete work, off-diagonal compliance, prescribed motion, gap-only attraction,
+occupied kinetic continuation, a zero-net-slip reversal, timestep refinement
+and atomic retry. This adapter retains the straight-path constitutive model;
+it does not resolve intrastep stick/slip events, evolving contact frames,
+partial-slip elasticity, JKR peeling, heat destination or bond healing.

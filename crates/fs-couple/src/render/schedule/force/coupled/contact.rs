@@ -450,3 +450,6 @@ pub mod cohesive;
 
 /// Source-bound liquid-bridge work on the original native mechanical network.
 pub mod capillary;
+
+/// Joint sourced normal adhesion and real-junction shear on native modal bodies.
+pub mod adhesive_dmt;
