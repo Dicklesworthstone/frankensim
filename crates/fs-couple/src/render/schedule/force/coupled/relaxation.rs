@@ -12,8 +12,6 @@ use fs_phs::RelaxationBranch;
 pub struct ModalPlaneStressPoint {
     pub modes: core::ops::Range<usize>,
     pub memories: core::ops::Range<usize>,
-    /// Exact original-history reconstruction for shared equal-time coordinates.
-    pub memory_map: Option<fs_material::visco_tensor::coordinates::RelaxationMemoryMap>,
     pub strain_scale: f64,
     pub image: crate::tensor_material::PlaneStressRelaxation,
 }
@@ -24,12 +22,8 @@ impl ModalPlaneStressPoint {
             .ok_or_else(||invalid("complete tensor material displacement layout changed"))?;
         let z=memory.get(self.memories.clone())
             .ok_or_else(||invalid("complete tensor material history layout changed"))?;
-        let mut z=match &self.memory_map {
-            Some(map)=>map.reconstruct(z).map_err(|_|invalid("complete tensor material history cannot be reconstructed"))?,
-            None=>z.to_vec(),
-        };
         let q:Vec<_>=q.iter().map(|q|self.strain_scale*q).collect();
-        for value in &mut z { *value*=self.strain_scale; }
+        let z:Vec<_>=z.iter().map(|z|self.strain_scale*z).collect();
         self.image.strain(&q,&z).map_err(|_|invalid("complete tensor material surface strain exceeds its original source domain"))?;
         // Recompute through the ORIGINAL complete law, including normal history;
         // never substitute zero by definition or admit nonfinite normal traction.
@@ -57,11 +51,7 @@ impl CoupledModalSystem {
             if point.modes.start>point.modes.end || point.modes.end>self.mode_count()
                 || point.modes.len()!=point.image.point().coordinates()
                 || point.memories.start>point.memories.end || point.memories.end>self.material_memory.len()
-                || match &point.memory_map {
-                    Some(map)=>map.coordinates()!=point.memories.len()
-                        || map.original_coordinates()!=point.image.point().memory_coordinates(),
-                    None=>point.memories.len()!=point.image.point().memory_coordinates(),
-                }
+                || point.memories.len()!=point.image.point().memory_coordinates()
                 || !point.strain_scale.is_finite() || point.strain_scale<=0.0 {
                 return Err(invalid("tensor material point requires complete fixed original coordinate ranges"));
             }
@@ -96,9 +86,9 @@ impl CoupledModalSystem {
     /// Source validity, geometry and modal projection belong to the producer.
     ///
     /// The conservative instantaneous-stiffness Nyquist bound, original total
-    /// energy/setup limits and exact augmented-state capacity all remain binding.
-    /// The larger prepared mechanical-only backend is explicitly unsupported;
-    /// neither attachment order may silently lose constitutive state.
+    /// energy/setup limits and augmented-state capacity all remain binding.
+    /// The prepared backend uses its existing budgeted exponential and separate
+    /// material-loss Gramian; neither attachment order discards history.
     pub fn with_material_relaxation(
         self,
         branches: Vec<RelaxationBranch>,
@@ -137,9 +127,6 @@ impl CoupledModalSystem {
                 return Err(invalid("material memory must match every relaxation branch"));
             }
             return Ok(self);
-        }
-        if self.prepared_budget.is_some() {
-            return Err(invalid("prepared mechanical propagation cannot retain material memory"));
         }
         let base = self.mode_count().checked_mul(2)
             .ok_or_else(|| invalid("material base-state extent overflow"))?;
@@ -197,10 +184,17 @@ impl CoupledModalSystem {
         all_branches.extend(branches);
         let mut all_memory = self.material_memory.clone();
         all_memory.extend(memory);
-        let exact = exact::ExactNetwork::new_with_extensions(
-            &self.models, &self.columns, &self.connections, self.mode_count(), &all_branches,
-            self.radiation.as_ref(), gate,
-        )?;
+        let exact = if let Some(budget) = self.prepared_budget {
+            exact::ExactNetwork::new_prepared_with_relaxation(
+                &self.models, &self.columns, &self.connections, self.mode_count(), self.dt,
+                budget, &all_branches, self.radiation.as_ref(), gate,
+            )?
+        } else {
+            exact::ExactNetwork::new_with_extensions(
+                &self.models, &self.columns, &self.connections, self.mode_count(), &all_branches,
+                self.radiation.as_ref(), gate,
+            )?
+        };
         poll(Some(gate))?;
         self.exact = Some(exact);
         self.relaxation_branches = all_branches;

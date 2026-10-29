@@ -251,7 +251,8 @@ fn one_stage_costs_one_loss_sweep_and_the_shared_values_equal_a_direct_evaluatio
         let z = prepared.state_input(&x, &u, prepared.dt).unwrap();
         let direct_component = quadratic(prepared.component_loss.as_ref().unwrap(), &z).unwrap();
         let direct_connection = quadratic(prepared.connection_total.as_ref().unwrap(), &z).unwrap();
-        let (component, connection) = prepared.loss_sums(&z).unwrap();
+        let (component, connection, material) = prepared.loss_sums(&z).unwrap();
+        assert_eq!(material, 0.0);
         assert_eq!(component.to_bits(), direct_component.to_bits());
         assert_eq!(connection.to_bits(), direct_connection.to_bits());
         assert!(component > 0.0 && connection > 0.0);
@@ -264,7 +265,7 @@ fn one_stage_costs_one_loss_sweep_and_the_shared_values_equal_a_direct_evaluatio
         assert!((connection - by_links).abs() <= 1e-12 * connection.max(by_links), "{connection:e} vs {by_links:e}");
         // A second request for the same vector is served from the sweep, bit for bit.
         let count = prepared.sweeps();
-        let (again_component, again_connection) = prepared.loss_sums(&z).unwrap();
+        let (again_component, again_connection, _) = prepared.loss_sums(&z).unwrap();
         assert_eq!(prepared.sweeps(), count);
         assert_eq!((again_component.to_bits(), again_connection.to_bits()), (component.to_bits(), connection.to_bits()));
     }

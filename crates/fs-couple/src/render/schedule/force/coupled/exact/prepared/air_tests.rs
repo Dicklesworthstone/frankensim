@@ -178,6 +178,40 @@ fn zero_air_changes_nothing_and_both_attachment_orders_step_identically() {
     }
 }
 
+#[test]
+fn prepared_air_material_and_anchored_joint_preserve_history_in_every_cold_order() {
+    let gate = CancelGate::new_clock_free();
+    let branch = fs_phs::RelaxationBranch { projection: vec![1.0, 0.0, -0.6, 0.0],
+        stiffness: 8e5, relaxation_time_s: 0.001 };
+    let anchors = [ConstantLossConnection { connection: 0, reference_omega_rad_s: TAU * 200.0 }];
+    let attach = |system: CoupledModalSystem| system.with_material_relaxation(
+        vec![branch.clone()], Some(vec![0.012]), &gate).unwrap();
+    let mut first = attach(loaded(48_000, true, true))
+        .with_constant_loss_connections(&anchors, &gate).unwrap();
+    let f = fixture(true);
+    let mut last = attach(mechanics(48_000, true, false))
+        .with_prepared_linear_propagation(budget(2), &gate).unwrap()
+        .with_constant_loss_connections(&anchors, &gate).unwrap()
+        .with_radiation_load(&f.air, &[0, 1], 3, &gate).unwrap();
+    assert_eq!(first.material_memory(), [0.012]);
+    assert_eq!(first.material_memory(), last.material_memory());
+    let mut energy = first.total_energy_j().unwrap();
+    for tick in 0..32 {
+        let force = [0.001 * tick as f64, -0.002];
+        let a = first.step(&force).unwrap().clone();
+        let b = last.step(&force).unwrap().clone();
+        assert_eq!(a, b);
+        assert_eq!(first.material_memory(), last.material_memory());
+        assert_eq!(first.radiation_state(), last.radiation_state());
+        assert!(a.material_dissipation_j > 0.0 && a.radiation_dissipation_j > 0.0);
+        assert!(a.component_dissipation_j > 0.0 && a.connection_dissipation_j > 0.0);
+        close(a.total_energy_j() + a.total_dissipation_j() - a.external_work_j, energy);
+        assert_eq!(first.last_window_transfers().unwrap(), last.last_window_transfers().unwrap());
+        assert!(first.last_window_transfer_error().is_none());
+        energy = a.total_energy_j();
+    }
+}
+
 // The contacts' affine model: the fast free prediction is the full advance's end state bit for bit, and a step under an
 // extra force f along a column ends at that prediction plus f times the air-loaded response, which differs from the
 // response of the same mechanics without air.
