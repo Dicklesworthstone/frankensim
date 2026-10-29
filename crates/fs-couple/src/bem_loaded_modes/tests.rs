@@ -1,6 +1,6 @@
 use super::*;
 
-fn oscillator(cross_damping: f64) -> BemLoadedModes {
+pub(super) fn oscillator(cross_damping: f64) -> BemLoadedModes {
     // Unit-mass radial breathing plus an internal zero-opening coordinate.
     let vertices = [
         [1., 0., 0.],
@@ -55,7 +55,7 @@ fn oscillator(cross_damping: f64) -> BemLoadedModes {
     )
     .unwrap()
 }
-fn options() -> PoleOptions {
+pub(super) fn options() -> PoleOptions {
     PoleOptions {
         spectral_scale: 400.,
         step_tolerance: 1e-12,

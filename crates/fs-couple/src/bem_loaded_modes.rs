@@ -16,6 +16,13 @@
 //! Zheng et al. (2015), doi:10.1016/j.enganabound.2015.04.014. Panel, source-mode
 //! and formulation convergence remain physical validation axes. No fitted
 //! radiation resistance, imposed modal Q, or second eigensolver is introduced.
+//!
+//! Optional Maxwell internal strains follow the existing fs-phs storage law:
+//! H_j = (c_j.x-z_j)^2/2, tau_j dz_j/dt = c_j.x-z_j. The complete
+//! state order is [displacement, boundary pressure, elastic memory e=c.x-z].
+//! Keeping e rather than dividing by 1-i*omega*tau retains material relaxation
+//! poles, avoids cancellation of a large instantaneous stiffness against z,
+//! and keeps the pencil analytic at each uncoupled material relaxation rate.
 
 use fs_bem::helmholtz::laplace::complex::{ComplexError, ComplexOptions, assemble_with_cancel};
 use fs_bem::helmholtz::{Formulation, Medium};
@@ -29,6 +36,7 @@ use fs_la::nonlinear_eig::{
 use fs_math::{c64::C64, det};
 
 mod shell;
+mod memory;
 
 /// Explicit physical accuracy, discretization and callback resources.
 #[derive(Debug, Clone, Copy)]
@@ -42,7 +50,7 @@ pub struct BemModesOptions {
     pub reference_angular_frequency_rad_s: f64,
     /// Maximum componentwise backward error in EACH original physical row.
     pub physical_residual_tolerance: f64,
-    /// Includes every structural coordinate and boundary-pressure unknown.
+    /// Includes every structural coordinate, boundary pressure and material memory.
     pub max_dimension: usize,
     /// Conservative callback/model payload, excluding separately budgeted fs-la
     /// iteration, source geometry, allocator overhead and process RSS.
@@ -67,12 +75,15 @@ pub enum BemModesError {
     Pole(NonlinearEigError),
     Contour(BeynError),
     SeedSolve(LuComplexError),
+    /// Only the local initializer eliminates memory. Contour discovery does not.
+    SeedMemorySingular { branch: usize },
     EvaluationBudget {
         maximum: usize,
     },
     PhysicalResidual {
         mechanical: f64,
         boundary: f64,
+        memory: f64,
     },
     /// A passive structural source does not justify publishing a growing mode.
     GrowingMode {
@@ -88,15 +99,18 @@ impl core::fmt::Display for BemModesError {
 impl std::error::Error for BemModesError {}
 
 /// Original-coordinate eigenstate; arbitrary amplitude is chosen so maximum
-/// displacement magnitude is one, or maximum pressure is one for a zero-motion
-/// boundary mode. The pressure units refer to this same displacement amplitude.
+/// displacement magnitude is one, or the maximum remaining coordinate is one
+/// for a zero-motion mode. All fields refer to this SAME arbitrary amplitude.
 #[derive(Debug, Clone)]
 pub struct BemModePole {
     pub angular_frequency_rad_s: C64,
     pub modal_displacement: Vec<C64>,
     pub surface_pressure_pa: Vec<C64>,
+    /// e_j=c_j.x-z_j in H_j=|e_j|^2/2 [sqrt(J)], in original branch order.
+    pub elastic_memory_sqrt_j: Vec<C64>,
     pub mechanical_residual: f64,
     pub boundary_residual: f64,
+    pub memory_residual: f64,
     pub relative_step: f64,
     pub iterations: usize,
 }
@@ -132,6 +146,7 @@ pub struct BemLoadedModes {
     weights: Vec<Vec<f64>>,
     stiffness: Vec<f64>,
     viscosity: Vec<f64>,
+    memory: memory::RetainedMemory,
     medium: Medium,
     settings: BemModesOptions,
     row_scales: Vec<f64>,
@@ -174,9 +189,6 @@ impl BemLoadedModes {
         poll(cancelled)?;
         let m = weights.len();
         let p = surface.centroids().len();
-        let n = m
-            .checked_add(p)
-            .ok_or_else(|| bad("coupled dimension overflow"))?;
         Self::admit_size(m, p, &settings)?;
         if stiffness.len() != m * m
             || viscosity.len() != m * m
@@ -196,15 +208,26 @@ impl BemLoadedModes {
             weights,
             stiffness,
             viscosity,
+            memory: memory::RetainedMemory::default(),
             medium,
             settings,
-            row_scales: vec![1.0; n],
-            column_scales: vec![1.0; n],
+            row_scales: Vec::new(),
+            column_scales: Vec::new(),
         };
+        model.rebalance(cancelled)?;
+        Ok(model)
+    }
+
+    // Both the original model and a cold material attachment use one fixed
+    // normalization. Source coordinates are unchanged by this solver scaling.
+    fn rebalance(&mut self, cancelled: &mut dyn FnMut() -> bool) -> Result<(), BemModesError> {
+        let n = self.dimension();
+        self.row_scales = vec![1.0; n];
+        self.column_scales = vec![1.0; n];
         // Fixed scaling preserves the analytic matrix function. Absolute-value
         // scaling recomputed at each contour node would violate that premise.
-        let raw = model.assemble(
-            C64::from_re(settings.reference_angular_frequency_rad_s),
+        let raw = self.assemble(
+            C64::from_re(self.settings.reference_angular_frequency_rad_s),
             &mut 0,
             cancelled,
         )?;
@@ -213,34 +236,39 @@ impl BemLoadedModes {
             if !row.is_finite() || row <= 0.0 {
                 return Err(bad("zero or unrepresentable reference row"));
             }
-            model.row_scales[i] = row;
+            self.row_scales[i] = row;
         }
         for j in 0..n {
             let col = (0..n)
-                .map(|i| raw.envelope[i * n + j] / model.row_scales[i])
+                .map(|i| raw.envelope[i * n + j] / self.row_scales[i])
                 .fold(0.0, f64::max);
             let scale = 1.0 / col;
             if !scale.is_finite() || scale <= 0.0 {
                 return Err(bad("zero or unrepresentable reference coordinate"));
             }
-            model.column_scales[j] = scale;
+            self.column_scales[j] = scale;
         }
         for i in 0..n {
             let row: f64 = (0..n)
-                .map(|j| raw.envelope[i * n + j] * model.column_scales[j])
+                .map(|j| raw.envelope[i * n + j] * self.column_scales[j])
                 .sum();
             if !row.is_finite() || row <= 0.0 {
                 return Err(bad("unrepresentable balanced reference row"));
             }
-            model.row_scales[i] = row;
+            self.row_scales[i] = row;
         }
         poll(cancelled)?;
-        Ok(model)
+        Ok(())
     }
 
     fn admit_size(m: usize, p: usize, settings: &BemModesOptions) -> Result<(), BemModesError> {
+        Self::admit_dimensions(m, p, 0, settings)
+    }
+
+    fn admit_dimensions(m: usize, p: usize, memories: usize, settings: &BemModesOptions) -> Result<(), BemModesError> {
         let n = m
             .checked_add(p)
+            .and_then(|d| d.checked_add(memories))
             .ok_or_else(|| bad("coupled dimension overflow"))?;
         let bytes = n
             .checked_mul(n)
@@ -285,7 +313,10 @@ impl BemLoadedModes {
         self.surface.centroids().len()
     }
     pub fn dimension(&self) -> usize {
-        self.mode_count() + self.panel_count()
+        self.mode_count() + self.panel_count() + self.memory_count()
+    }
+    pub fn memory_count(&self) -> usize {
+        self.memory.times.len()
     }
     pub fn surface(&self) -> &SpherePanels {
         &self.surface
@@ -385,6 +416,7 @@ impl BemLoadedModes {
                 envelope[(m + i) * n + m + j] = op.a[i * p + j].abs();
             }
         }
+        self.memory.add_to_pencil(omega, m, p, &mut matrix, &mut derivative, &mut envelope, cancelled)?;
         if matrix.iter().chain(&derivative).any(|&z| !finite(z))
             || envelope.iter().any(|x| !x.is_finite())
         {
@@ -479,7 +511,7 @@ impl BemLoadedModes {
             return Err(bad("original eigenstate overflow"));
         }
         let raw = self.assemble(pole.value, evaluations, cancelled)?;
-        let mut residuals = [0.0_f64; 2];
+        let mut residuals = [0.0_f64; 3];
         for i in 0..n {
             let mut sum = C64::ZERO;
             let mut correction = C64::ZERO;
@@ -502,7 +534,7 @@ impl BemLoadedModes {
             if !relative.is_finite() {
                 return Err(bad("physical residual is not representable"));
             }
-            let block = usize::from(i >= m);
+            let block = if i < m { 0 } else if i < m + self.panel_count() { 1 } else { 2 };
             residuals[block] = residuals[block].max(relative);
         }
         if residuals
@@ -512,6 +544,7 @@ impl BemLoadedModes {
             return Err(BemModesError::PhysicalResidual {
                 mechanical: residuals[0],
                 boundary: residuals[1],
+                memory: residuals[2],
             });
         }
         if pole.value.im > 0.0 {
@@ -520,13 +553,16 @@ impl BemLoadedModes {
             });
         }
         poll(cancelled)?;
+        let memories = vector.split_off(m + self.panel_count());
         let pressure = vector.split_off(m);
         Ok(BemModePole {
             angular_frequency_rad_s: pole.value,
             modal_displacement: vector,
             surface_pressure_pa: pressure,
+            elastic_memory_sqrt_j: memories,
             mechanical_residual: residuals[0],
             boundary_residual: residuals[1],
+            memory_residual: residuals[2],
             relative_step: pole.relative_step,
             iterations: pole.iterations,
         })
@@ -568,6 +604,7 @@ impl BemLoadedModes {
             .map_err(BemModesError::SeedSolve)?;
         let mut seed = modal_seed.to_vec();
         seed.extend(rhs);
+        seed.extend(self.memory.seed(omega0, modal_seed, &mut cancelled)?);
         drop(raw);
         drop(lu);
         drop(a);
