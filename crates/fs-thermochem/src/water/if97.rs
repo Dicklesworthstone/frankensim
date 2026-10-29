@@ -734,11 +734,8 @@ pub(super) const R2_RESIDUAL: [GibbsTerm; 43] = [
     g(24, 58, -0.94369707241210e-6),
 ];
 // Table 1, equation (5), shared with original-source interval admission.
-pub(super) const B23_COEFFICIENTS: [f64; 3] = [
-    348.05185628969,
-    1.1671859879975,
-    0.0010192970039326,
-];
+pub(super) const B23_COEFFICIENTS: [f64; 3] =
+    [348.05185628969, 1.1671859879975, 0.0010192970039326];
 
 // Table 34, equations (29)--(31).
 const R4: [f64; 10] = [

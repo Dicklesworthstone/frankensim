@@ -4480,3 +4480,46 @@ with maximum complete-history energy discrepancy 5.27e-8 J and zero wall work.
 These are numerical balance checks, not source-fit uncertainty estimates.
 This advances the bounded phase-transition consumer in
 `frankensim-7sga6.2.7`.
+
+## Dense-water rigid-vessel calorimetry
+
+`phase::water::dense::DenseIsochore` connects the original IF97 Region 3 source
+to fixed-mass, fixed-volume heat evolution. The constructor retains one
+`DenseIsochoricInterval`: original regional admission, stable derivatives and
+positive Cv are established over the entire requested temperature path, with
+explicit work limits and cancellation. Its enclosure and dT/du bound are reused
+across state queries and heat steps; no proof is repeated inside the caloric
+inverse.
+
+A safeguarded Newton/bisection inverse uses original u(rho,T) and Cv to resolve
+a heat-driven endpoint. Pressure follows the same Helmholtz equation. Original
+stable increments separately provide delta_u, delta_h, delta_p and delta_s.
+Accepted heat must satisfy both Q=delta_U and Q=delta_H-V*delta_p using those
+increments and independently using the actual rounded source endpoints.
+V*delta_p is the pressure contribution to enthalpy, while rigid-wall work is
+exactly zero. No heat, entropy, caloric reference or nonzero increment is silently
+clipped or reconciled. Unrepresentable heat, failed energy admission, unsupported
+source states, work exhaustion and cancellation return no partial state.
+
+This is a single-phase Region 3 equilibrium owner. It does not automatically
+stitch across the Region 1/2/3 boundaries, provide high-temperature saturated
+pairs, resolve a moving interface, or model vessel compliance and strength.
+The separate `isochoric` owner retains the lower-temperature liquid/vapor
+coexistence model. Neither substitutes its internal-energy coordinate for the
+existing enthalpy timeline's declared caloric convention.
+
+Four focused native tests pass: source u/T round trips and retained Cv bounds;
+high-pressure heating/cooling with separate pressure enthalpy and zero wall
+work; independent Cv/Cv-over-T integration plus subdivision and small heat;
+and domain, work, energy, chart-identity and late-cancellation refusals.
+The complete original water module compiles with both new volume owners, and
+both vessel examples plus the existing Rankine example execute successfully.
+
+`cargo run -p fs-material --example water_dense_vessel` heats 0.5 kg in 1 L
+from 650 to approximately 750 K and cools it back. Pressure rises from about
+25.584 to 78.310 MPa. Heating supplies 144.903 kJ to internal energy; enthalpy
+increases by 197.629 kJ, including 52.726 kJ of V*delta_p and zero wall work.
+The whole-path preparation uses 113 interval evaluations for its 649–751 K
+source window, reused over 40 heat steps. Maximum complete-history numerical
+energy discrepancy is 1.47e-6 J. Source uncertainty, reservoir entropy and a
+container-strength prediction are outside that numerical balance claim.

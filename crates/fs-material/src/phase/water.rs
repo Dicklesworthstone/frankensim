@@ -1,6 +1,7 @@
 //! Original IF97 liquid heating, boiling and superheated steam on one isobar.
 //!
-//! Regions 1, 2 and 4 share their released h/u/s reference. Saturation is limited
+//! This module's IsobaricWater uses Regions 1, 2 and 4 on their released h/u/s
+//! reference. Its saturation interval is limited
 //! to 623.15 K: Region 3, ice, metastability and transport kinetics are absent.
 //! Raw source properties are never shifted. Because the regional Gibbs fits
 //! have a finite saturation matching defect, the fixed-pressure thermal entropy
@@ -12,12 +13,16 @@
 //! The existing thermal timeline supplies heat transfer. Its geometry remains
 //! reference heat-exchange geometry; constant-pressure expansion is reported
 //! separately and must not be interpreted as a rigid sealed vessel.
+//! Separate fixed-volume owners are provided by `isochoric` and `dense` below.
 
 /// Adiabatic throttles and shaft devices using original entropy across pressures.
 pub mod flow;
 
 /// Sealed rigid-vessel heating with internal-energy storage and evolving pressure.
 pub mod isochoric;
+
+/// Dense Region 3 rigid-vessel calorimetry with reusable whole-path Cv bounds.
+pub mod dense;
 
 use fs_qty::{Pressure, Temperature};
 use fs_thermochem::water::if97::bounds::{
