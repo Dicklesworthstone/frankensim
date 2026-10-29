@@ -948,9 +948,10 @@ compressible choking and experimental validation require separate owners.
 
 The optional `compartment-fire` feature composes the existing source-owned
 `fs-gas::multicomponent::compartment` rooms, stratified wall-opening owner,
-`fs-la::prepared_lu`, `fs-thermal::enthalpy` and `fs-convection::fire`.
-The bounded network admits up to 32 source-matched rooms and 512 wall or
-mechanical connections. Each directional vent slab carries its actual donor's
+`fs-la::prepared_lu`, `fs-thermal::enthalpy`, `fs-convection::fire`, and the
+original `fs-conduction` surface-emissivity/view-factor owners.
+The bounded network admits up to 32 source-matched rooms and 512 wall, ceiling,
+or mechanical connections. Each directional vent slab carries its actual donor's
 species and original partial enthalpies, with identical opposite room entries.
 Ambient exchange and explicitly supplied fan work enter the external account.
 Openings may be changed or closed exactly between accepted steps.
@@ -980,14 +981,25 @@ absorption, thermal properties and inverse calorics are never inferred.
 Numerical vectors/LU are reused; original thermal trial maps still allocate
 within explicit cell, Newton and backtracking budgets.
 
+`Wall1d::candidate_with_exchange` accepts a separate signed internal radiant
+power at the inner face. Negative power represents a radiating wall losing
+energy. This power enters the original half-cell surface balance and thermal
+storage residual, and is reported as `coupled_radiant_energy`; it never becomes
+`external_radiant_energy`. The caller applies the matching enclosure gas and
+other-wall powers exactly once. The old `candidate` entry point delegates with
+zero coupled radiation. Holding radiation fixed over the interval does not
+establish unconditional stability or a fully implicit radiation/temperature
+solve; coupled iteration or timestep refinement remains required.
+
 The prescribed-fire helper computes lower-layer density and mass-specific Cp
 from the original current species/caloric inventory, then reuses Heskestad
 entrainment. One identical donor vector moves from lower to upper; convective
 heat enters the upper layer and radiant power is returned separately. An absent
 upper layer can be created by real entrainment. No fuel/products/soot are
 invented, and this prescribed-HRR owner does not consume oxygen. Existing
-upper-layer weak-plume penetration, participating-gas radiation, ceiling vents,
-pyrolysis, and field-resolved flame behavior remain outside this implementation.
+upper-layer weak-plume penetration, pyrolysis, and field-resolved flame behavior
+remain outside this implementation. The separate inventory-limited burning
+adapter consumes actual reactants and accounts for original formation energy.
 
 Focused native verification passes 30 original-source airflow tests: ten
 stratified vents, seven network/source-composition cases, nine thermal-wall
@@ -995,6 +1007,61 @@ cases and four plume cases. These include simultaneous counterflow, independent
 species/enthalpy balance, pressure equilibration, forced complete-step retries,
 matched gas/wall clocks, joint gas-wall energy, latent heat storage, surface
 resistance, implicit conduction beyond the explicit limit, and cancellation.
+
+### Horizontal ceiling/floor openings
+
+`compartment::ceiling` implements the Cooper/CFAST shallow horizontal-opening
+correlation from NIST TN 1889v1 section 4.2. It retains both nonnegative
+directional flows. Denser gas above lighter gas produces exchange at zero
+pressure difference; imposed pressure progressively suppresses that exchange
+through the published flooding threshold. Each mass flow uses its actual donor
+density. The original discharge/loss owner retains the published coefficient
+0.68 and the caller's explicitly declared engineering resistance allowance.
+Round and square apertures use the separate characteristic lengths in the
+pinned CFAST implementation; other shapes are not guessed.
+
+`ZoneNetwork::new_with_ceiling_vents` places these flows inside the same implicit
+pressure solve as wall openings and uses the same species/partial-enthalpy
+transport account. A room below the aperture connects at its ceiling; a room
+above connects at its floor. Ambient may occupy either endpoint. Admission
+allows only coordinate roundoff at the shared boundary, and refuses datums
+that cannot resolve room height. The network chooses the source-owned adjacent
+present layer so an exactly absent layer is not selected through rounding.
+Closure and geometry updates are atomic. This remains an estimated shallow,
+low-Mach aperture law: thick shafts, choking, plug-holing and vent-induced
+plume entrainment are not represented. Focused law and multi-room tests cover
+counterflow, pressure suppression, original-source conservation and cancellation.
+
+### Participating gas-layer radiation
+
+`compartment::radiation::ParticipatingEnclosure` combines original admitted
+view factors and card-backed surface emissivities with explicitly supplied
+reciprocal optical paths through the two gas layers. The path weights must
+close the original area-weighted view factors; they are never renormalized to
+hide missing power. Ordered isothermal segments use the nonscattering gray
+Beer--Lambert formal transfer solution. Expanding that solution gives symmetric
+pair-exchange coefficients; the original prepared LU solves all diffuse wall
+reflections. Pair powers enter their two thermal owners with opposite signs.
+
+`evaluate_room` uses actual layer temperatures and refuses nonzero optical path
+length through an absent layer. `RadiationReport::add_gas_heat` adds only the
+gas powers to original `LayerRates`; corresponding signed surface powers enter
+`Wall1d::candidate_with_exchange`. A `step_with_sources` provider can construct
+the radiation and wall candidates for each attempted duration, add gas
+radiation and convective contact once, and return the wall candidates only
+when the network step is accepted. External fire radiation remains separately
+booked. Reused dense/chord buffers bound the solve; source-bearing result
+objects allocate in proportion to the number of boundary patches.
+
+The caller supplies absorption coefficients, their source/domain assessment,
+and optical geometry, and must regenerate paths when the interface moves.
+This is an estimated gray optical quadrature, not a gas spectroscopy database,
+RADCAL, soot-yield model, scattering solver or geometry generator. Numerical
+closure and algebraic residuals do not certify optical quadrature or physical
+accuracy. Tests include transparent diffuse plates, black gray-medium slabs,
+hemispherical angular refinement against the independent exponential-integral
+solution, ordered two-layer transfer, opaque shielding, exact equilibrium,
+self-view geometry and actual gas-plus-wall storage conservation.
 
 
 ### Runnable two-zone public-case comparison and pressure linearization

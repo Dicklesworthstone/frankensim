@@ -4,6 +4,8 @@
 //! half-cell resistance is retained when balancing area-weighted gas contacts,
 //! an outer reservoir, and explicitly supplied incident radiant power. The
 //! latter is EXTERNAL wall input: it is never silently debited from gas energy.
+//! Signed internal radiation from a coupled enclosure has a separate input and
+//! report account; the caller applies the opposite gas/surface exchanges once.
 //! No gas emissivity, soot absorption, material heat capacity, or radiation
 //! temperature is inferred. A single profile averages the declared face area;
 //! lateral variations require separate wall patches owned by the caller.
@@ -109,6 +111,9 @@ pub struct WallReport {
     pub ambient_heat_energy: Energy,
     /// Prescribed external radiant energy entering the wall, without a gas debit.
     pub external_radiant_energy: Energy,
+    /// Signed coupled radiant energy entering the inner face. This is an
+    /// internal exchange with the explicitly coupled enclosure, not fire input.
+    pub coupled_radiant_energy: Energy,
     /// Inner and outer FACE temperatures, including half-cell resistance.
     pub surface_temperatures: [Temperature; 2],
     /// Original storage/external-heat audit, not a newly reconstructed account.
@@ -339,10 +344,44 @@ impl<'a> Wall1d<'a> {
         boundary: WallBoundary,
         controls: WallSolve,
         work: &mut WallWorkspace,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<WallCandidate<'a>, WallError> {
+        self.candidate_with_exchange(
+            duration,
+            boundary,
+            Power::new(0.0),
+            controls,
+            work,
+            cancelled,
+        )
+    }
+
+    /// Solve with signed inner-face radiation supplied by a coupled enclosure.
+    /// Positive power enters this wall; negative power leaves it. The same
+    /// power must be paired with the enclosure's other surface/gas exchanges.
+    /// It is held over this candidate interval and recorded separately from
+    /// prescribed external fire radiation. Conduction and convective contact
+    /// use the actual backward-Euler wall endpoint and half-cell resistance.
+    ///
+    /// This is a frozen-flux coupling seam, not an unconditionally stable
+    /// implicit radiation integrator. An outer coupled iteration or timestep
+    /// refinement must control temperature-dependent radiation error.
+    pub fn candidate_with_exchange(
+        &self,
+        duration: Time,
+        boundary: WallBoundary,
+        coupled_radiant_power: Power,
+        controls: WallSolve,
+        work: &mut WallWorkspace,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<WallCandidate<'a>, WallError> {
         checkpoint(&mut cancelled)?;
         self.validate_boundary(boundary)?;
+        if !coupled_radiant_power.value().is_finite() {
+            return Err(WallError::Invalid(
+                "finite signed coupled radiation required",
+            ));
+        }
         let n = self.geometry.cells;
         if !positive(duration.value())
             || work.energy.len() != n
@@ -363,7 +402,13 @@ impl<'a> Wall1d<'a> {
         work.energy.fill(0.0);
         for iteration in 0..controls.maximum_iterations {
             checkpoint(&mut cancelled)?;
-            let trial = self.evaluate(&step, &work.energy, boundary, &mut cancelled)?;
+            let trial = self.evaluate(
+                &step,
+                &work.energy,
+                boundary,
+                coupled_radiant_power,
+                &mut cancelled,
+            )?;
             let norm = trial.maximum_cell_residual_j();
             if norm <= controls.cell_energy_tolerance_j
                 && trial.audit().residual_j.abs() <= controls.total_energy_tolerance_j
@@ -384,6 +429,7 @@ impl<'a> Wall1d<'a> {
                     external_radiant_energy: Energy::new(
                         boundary.external_radiant_power.value() * dt,
                     ),
+                    coupled_radiant_energy: Energy::new(coupled_radiant_power.value() * dt),
                     surface_temperatures: exchange.surfaces.map(Temperature::new),
                     audit,
                 };
@@ -394,6 +440,7 @@ impl<'a> Wall1d<'a> {
                     .chain([
                         report.ambient_heat_energy.value(),
                         report.external_radiant_energy.value(),
+                        report.coupled_radiant_energy.value(),
                     ])
                     .all(f64::is_finite)
                 {
@@ -426,7 +473,13 @@ impl<'a> Wall1d<'a> {
                     if actual_delta == 0.0 {
                         return Err(DepositionError::Arithmetic.into());
                     }
-                    match self.evaluate(&step, &work.probe, boundary, &mut cancelled) {
+                    match self.evaluate(
+                        &step,
+                        &work.probe,
+                        boundary,
+                        coupled_radiant_power,
+                        &mut cancelled,
+                    ) {
                         Ok(probe) => {
                             derivative = Some((probe, actual_delta));
                             break;
@@ -457,7 +510,13 @@ impl<'a> Wall1d<'a> {
                 for i in 0..n {
                     work.probe[i] = finite(work.energy[i] + scale * work.delta[i])?;
                 }
-                match self.evaluate(&step, &work.probe, boundary, &mut cancelled) {
+                match self.evaluate(
+                    &step,
+                    &work.probe,
+                    boundary,
+                    coupled_radiant_power,
+                    &mut cancelled,
+                ) {
                     Ok(probe) if probe.maximum_cell_residual_j() < norm => {
                         accepted = true;
                         break;
@@ -499,11 +558,12 @@ impl<'a> Wall1d<'a> {
         step: &BackwardEulerStep<'_, 'a>,
         energy: &[f64],
         boundary: WallBoundary,
+        coupled_radiant_power: Power,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<BackwardEulerTrial<'a, Exchange>, WallError> {
         step.evaluate(
             energy,
-            |state| self.coefficients(state, boundary),
+            |state| self.coefficients(state, boundary, coupled_radiant_power),
             || checkpoint(cancelled),
         )
     }
@@ -511,6 +571,7 @@ impl<'a> Wall1d<'a> {
         &self,
         state: &DepositionSimulation<'a>,
         boundary: WallBoundary,
+        coupled_radiant_power: Power,
     ) -> Result<StepCoefficients<Exchange>, WallError> {
         let first = CellId(1);
         let last = CellId(self.geometry.cells as u64);
@@ -533,21 +594,16 @@ impl<'a> Wall1d<'a> {
             conductance_w_k: finite(self.geometry.area.value() * boundary.ambient_htc.value())?,
             temperature_k: boundary.ambient_temperature.value(),
         }];
-        let (inner_surface, gas_into_wall) = surface(
-            inner,
-            self.half_cell_conductance,
-            gas,
-            boundary.external_radiant_power.value(),
-        )?;
+        let inner_radiant_power =
+            finite(boundary.external_radiant_power.value() + coupled_radiant_power.value())?;
+        let (inner_surface, gas_into_wall) =
+            surface(inner, self.half_cell_conductance, gas, inner_radiant_power)?;
         let (outer_surface, ambient_into_wall) =
             surface(outer, self.half_cell_conductance, ambient, 0.0)?;
         let mut sources_w = BTreeMap::new();
         sources_w.insert(
             first,
-            finite(
-                finite(gas_into_wall[0] + gas_into_wall[1])?
-                    + boundary.external_radiant_power.value(),
-            )?,
+            finite(finite(gas_into_wall[0] + gas_into_wall[1])? + inner_radiant_power)?,
         );
         let source = sources_w.entry(last).or_insert(0.0);
         *source = finite(*source + ambient_into_wall[0])?;

@@ -691,3 +691,313 @@ fn wall_candidates_follow_retried_duration_and_close_joint_gas_wall_energy() {
         "joint energy residual: {combined_residual:e}"
     );
 }
+
+fn ceiling_opening(height: f64, area: f64) -> ceiling::CeilingOpening {
+    ceiling::CeilingOpening::cooper(
+        Length::new(height),
+        Area::new(area),
+        ceiling::CeilingShape::Square,
+        0.0,
+    )
+    .unwrap()
+}
+
+fn stacked_ceiling_network() -> ZoneNetwork {
+    let source = gas(false);
+    let below = room(
+        source.clone(),
+        100_000.0,
+        [300.0, 600.0],
+        [[0.8, 0.2], [1.0, 0.0]],
+    );
+    let g = 9.81;
+    let pressure_above = below.gas.pressure().value()
+        - g * (below.gas.layer(Layer::Lower).density_kg_m3().unwrap() * 1.2
+            + below.gas.layer(Layer::Upper).density_kg_m3().unwrap() * 1.8);
+    let mut above = room(
+        source,
+        pressure_above,
+        [300.0, 350.0],
+        [[0.0, 1.0], [0.4, 0.6]],
+    );
+    above.floor_elevation = Length::new(3.0);
+    ZoneNetwork::new_with_ceiling_vents(
+        vec![below, above],
+        ambient(),
+        vec![],
+        vec![CeilingVent {
+            below: Endpoint::Room(0),
+            above: Endpoint::Room(1),
+            opening: ceiling_opening(3.0, 0.2),
+        }],
+        vec![],
+        Acceleration::new(g),
+        || false,
+    )
+    .unwrap()
+}
+
+#[test]
+fn ceiling_counterflow_transports_both_donor_species_and_conserves_closed_network() {
+    let mut network = stacked_ceiling_network();
+    let before = network.rooms().to_vec();
+    let (species, energy) = inventories(&before);
+    let report = network
+        .step(
+            Time::new(0.001),
+            &[[LayerRates::default(); 2]; 2],
+            controls(),
+            || false,
+        )
+        .unwrap();
+    assert_balance(&report);
+    assert_admissible(network.rooms());
+    let (after_species, after_energy) = inventories(network.rooms());
+    for i in 0..2 {
+        assert!((after_species[i] - species[i]).abs() < 2e-11);
+        assert_eq!(report.external_species_change_kg[i], 0.0);
+    }
+    assert!((after_energy - energy).abs() < 1e-4);
+    assert_eq!(report.external_physical_energy_j, 0.0);
+    // Pure A was below the aperture, pure B above it. A net-flow-only transfer
+    // would miss one of these simultaneous incoming species.
+    assert!(network.rooms()[0].gas.layer(Layer::Upper).species_masses()[1] > 0.0);
+    assert!(network.rooms()[1].gas.layer(Layer::Lower).species_masses()[0] > 0.0);
+    assert_eq!(
+        network.rooms()[0].gas.layer(Layer::Lower).species_masses(),
+        before[0].gas.layer(Layer::Lower).species_masses()
+    );
+    assert_eq!(
+        network.rooms()[1].gas.layer(Layer::Upper).species_masses(),
+        before[1].gas.layer(Layer::Upper).species_masses()
+    );
+    for room in network.rooms() {
+        assert_eq!(room.gas.time(), report.elapsed);
+    }
+}
+
+#[test]
+fn ceiling_and_floor_ambient_connections_use_original_external_species_and_energy_audit() {
+    for ambient_above in [true, false] {
+        let initial = room(
+            gas(false),
+            100_020.0,
+            [300.0, 600.0],
+            [[0.9, 0.1], [0.2, 0.8]],
+        );
+        let before = inventories(std::slice::from_ref(&initial));
+        let vent = if ambient_above {
+            CeilingVent {
+                below: Endpoint::Room(0),
+                above: Endpoint::Ambient,
+                opening: ceiling_opening(3.0, 0.1),
+            }
+        } else {
+            CeilingVent {
+                below: Endpoint::Ambient,
+                above: Endpoint::Room(0),
+                opening: ceiling_opening(0.0, 0.1),
+            }
+        };
+        let mut network = ZoneNetwork::new_with_ceiling_vents(
+            vec![initial],
+            ambient(),
+            vec![],
+            vec![vent],
+            vec![],
+            Acceleration::new(9.81),
+            || false,
+        )
+        .unwrap();
+        let report = network
+            .step(
+                Time::new(0.001),
+                &[[LayerRates::default(); 2]],
+                controls(),
+                || false,
+            )
+            .unwrap();
+        assert_balance(&report);
+        assert_admissible(network.rooms());
+        let after = inventories(network.rooms());
+        for i in 0..2 {
+            assert!(
+                (after.0[i] - before.0[i] - report.external_species_change_kg[i]).abs() < 2e-11
+            );
+        }
+        assert!((after.1 - before.1 - report.external_physical_energy_j).abs() < 1e-4);
+        assert!(report.external_species_change_kg[..2].iter().sum::<f64>() < 0.0);
+        assert_ne!(report.external_physical_energy_j, 0.0);
+    }
+}
+
+#[test]
+fn ceiling_opening_closes_exactly_and_rejected_changes_or_cancellation_are_atomic() {
+    let mut network = stacked_ceiling_network();
+    let original = network.ceiling_vents()[0].clone();
+    assert!(
+        network
+            .set_ceiling_opening(0, ceiling_opening(2.5, 0.2))
+            .is_err()
+    );
+    assert_eq!(network.ceiling_vents()[0], original);
+    assert!(
+        network
+            .set_ceiling_opening(1, ceiling_opening(3.0, 0.2))
+            .is_err()
+    );
+    let before_cancel = network.rooms().to_vec();
+    let mut polls = 0;
+    let refused = network.step(
+        Time::new(0.01),
+        &[[LayerRates::default(); 2]; 2],
+        controls(),
+        || {
+            polls += 1;
+            polls == 6
+        },
+    );
+    assert_eq!(refused, Err(NetworkError::Cancelled));
+    assert_eq!(network.rooms(), before_cancel);
+    network
+        .set_ceiling_opening(0, ceiling_opening(3.0, 0.0))
+        .unwrap();
+    let report = network
+        .step(
+            Time::new(0.01),
+            &[[LayerRates::default(); 2]; 2],
+            controls(),
+            || false,
+        )
+        .unwrap();
+    assert_balance(&report);
+    for (before, after) in before_cancel.iter().zip(network.rooms()) {
+        for layer in [Layer::Lower, Layer::Upper] {
+            assert_eq!(
+                before.gas.layer(layer).species_masses(),
+                after.gas.layer(layer).species_masses()
+            );
+        }
+    }
+    assert_eq!(report.external_species_change_kg, [0.0; MAX_SPECIES]);
+    assert_eq!(report.external_physical_energy_j, 0.0);
+}
+
+#[test]
+fn ceiling_topology_refuses_overlapping_reversed_disconnected_or_unresolvable_rooms() {
+    let baseline = stacked_ceiling_network();
+    for upper_floor in [2.9, 3.1, -3.0] {
+        let mut rooms = baseline.rooms().to_vec();
+        rooms[1].floor_elevation = Length::new(upper_floor);
+        assert!(
+            ZoneNetwork::new_with_ceiling_vents(
+                rooms,
+                ambient(),
+                vec![],
+                baseline.ceiling_vents().to_vec(),
+                vec![],
+                Acceleration::new(9.81),
+                || false,
+            )
+            .is_err()
+        );
+    }
+    for (below, above) in [
+        (Endpoint::Room(1), Endpoint::Room(0)),
+        (Endpoint::Room(0), Endpoint::Room(0)),
+        (Endpoint::Ambient, Endpoint::Ambient),
+        (Endpoint::Room(0), Endpoint::Room(2)),
+    ] {
+        assert!(
+            ZoneNetwork::new_with_ceiling_vents(
+                baseline.rooms().to_vec(),
+                ambient(),
+                vec![],
+                vec![CeilingVent {
+                    below,
+                    above,
+                    opening: ceiling_opening(3.0, 0.2)
+                }],
+                vec![],
+                Acceleration::new(9.81),
+                || false,
+            )
+            .is_err()
+        );
+    }
+    let mut far = baseline.rooms()[0].clone();
+    far.floor_elevation = Length::new(1e16);
+    assert!(
+        ZoneNetwork::new_with_ceiling_vents(
+            vec![far],
+            ambient(),
+            vec![],
+            vec![CeilingVent {
+                below: Endpoint::Room(0),
+                above: Endpoint::Ambient,
+                opening: ceiling_opening(1e16 + 4.0, 0.2)
+            }],
+            vec![],
+            Acceleration::new(9.81),
+            || false,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn ceiling_roundoff_equivalent_boundaries_do_not_draw_from_absent_layers() {
+    let source = gas(true);
+    let make =
+        |pressure, interface, temperatures: [f64; 2], fractions: [[f64; 2]; 2], floor| Room {
+            gas: TwoZone::new(
+                source.clone(),
+                Area::new(10.0),
+                Length::new(0.2),
+                Length::new(interface),
+                Pressure::new(pressure),
+                temperatures.map(Temperature::new),
+                fractions.map(Vec::from),
+                || false,
+            )
+            .unwrap(),
+            floor_elevation: Length::new(floor),
+        };
+    let below = make(100_000.0, 0.2, [500.0; 2], [[1.0, 0.0]; 2], 0.1);
+    let pressure_above =
+        100_000.0 - 9.81 * 0.2 * below.gas.layer(Layer::Lower).density_kg_m3().unwrap();
+    let above = make(pressure_above, 0.0, [300.0; 2], [[0.0, 1.0]; 2], 0.1 + 0.2);
+    let before = inventories(&[below.clone(), above.clone()]);
+    let mut network = ZoneNetwork::new_with_ceiling_vents(
+        vec![below, above],
+        ambient(),
+        vec![],
+        vec![CeilingVent {
+            below: Endpoint::Room(0),
+            above: Endpoint::Room(1),
+            opening: ceiling_opening(0.3, 0.01),
+        }],
+        vec![],
+        Acceleration::new(9.81),
+        || false,
+    )
+    .unwrap();
+    let report = network
+        .step(
+            Time::new(0.0001),
+            &[[LayerRates::default(); 2]; 2],
+            controls(),
+            || false,
+        )
+        .unwrap();
+    assert_balance(&report);
+    assert_eq!(network.rooms()[0].gas.layer(Layer::Upper).mass_kg(), 0.0);
+    assert_eq!(network.rooms()[1].gas.layer(Layer::Lower).mass_kg(), 0.0);
+    assert!(network.rooms()[0].gas.layer(Layer::Lower).species_masses()[1] > 0.0);
+    assert!(network.rooms()[1].gas.layer(Layer::Upper).species_masses()[0] > 0.0);
+    let after = inventories(network.rooms());
+    for i in 0..2 {
+        assert!((after.0[i] - before.0[i]).abs() < 2e-11);
+    }
+    assert!((after.1 - before.1).abs() < 1e-4);
+}

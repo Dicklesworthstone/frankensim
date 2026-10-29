@@ -20,12 +20,18 @@ pub mod wall;
 /// Original-source plume entrainment and explicitly prescribed heat release.
 pub mod fire;
 
+/// Reciprocal gray gas-layer radiation with original surface material sources.
+pub mod radiation;
+
+/// Cooper shallow ceiling/floor openings with pressure and buoyant counterflow.
+pub mod ceiling;
+
 #[cfg(test)]
 mod tests;
 
 /// Maximum number of coupled rooms in the bounded dense pressure solve.
 pub const MAX_ROOMS: usize = 32;
-/// Maximum number of authored wall and mechanical connections in total.
+/// Maximum number of authored wall, ceiling and mechanical connections in total.
 pub const MAX_CONNECTIONS: usize = 512;
 
 /// One room and its floor elevation in the shared vertical coordinate system.
@@ -69,6 +75,20 @@ pub struct WallVent {
     pub right: Endpoint,
     /// World-coordinate rectangular opening and source-bearing discharge law.
     pub opening: WallOpening,
+}
+
+/// Horizontal aperture joining the ceiling of the physically lower room to
+/// the floor of the physically upper room. Ambient may occupy either side.
+/// Transfers use the immediately adjacent layers; plug-holing and vent-plume
+/// redistribution are not introduced by this topology adapter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CeilingVent {
+    /// Space physically below the opening.
+    pub below: Endpoint,
+    /// Space physically above the opening.
+    pub above: Endpoint,
+    /// Actual aperture area, shape and world elevation.
+    pub opening: ceiling::CeilingOpening,
 }
 
 /// Prescribed mechanical ventilation. The caller explicitly supplies any fan
@@ -163,6 +183,8 @@ pub enum NetworkError {
     Wall(wall::WallError),
     /// The original prescribed-fire/plume source refused its regime.
     Fire(fire::PrescribedFireError),
+    /// Participating gas/surface radiation refused its geometry or solve.
+    Radiation(radiation::RadiationError),
     /// The original inventory-limited reaction adapter refused a split source.
     Burning(fs_gas::multicomponent::compartment::burning::BurningError),
     /// Pressure closure exhausted its bounded nonlinear budget.
@@ -218,6 +240,14 @@ impl From<fire::PrescribedFireError> for NetworkError {
         }
     }
 }
+impl From<radiation::RadiationError> for NetworkError {
+    fn from(e: radiation::RadiationError) -> Self {
+        match e {
+            radiation::RadiationError::Cancelled => Self::Cancelled,
+            other => Self::Radiation(other),
+        }
+    }
+}
 impl From<fs_gas::multicomponent::compartment::burning::BurningError> for NetworkError {
     fn from(e: fs_gas::multicomponent::compartment::burning::BurningError) -> Self {
         use fs_gas::multicomponent::compartment::burning::BurningError;
@@ -250,6 +280,7 @@ pub struct ZoneNetwork {
     ambient: Ambient,
     ambient_density: f64,
     walls: Vec<WallVent>,
+    ceilings: Vec<CeilingVent>,
     mechanical: Vec<MechanicalVent>,
     gravity: Acceleration,
     rates: Vec<[LayerRates; 2]>,
@@ -271,12 +302,40 @@ impl ZoneNetwork {
         walls: Vec<WallVent>,
         mechanical: Vec<MechanicalVent>,
         gravity: Acceleration,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, NetworkError> {
+        Self::new_with_ceiling_vents(
+            rooms,
+            ambient,
+            walls,
+            Vec::new(),
+            mechanical,
+            gravity,
+            cancelled,
+        )
+    }
+
+    /// Admit wall, horizontal ceiling/floor, and mechanical connections over
+    /// one common original gas bank. Ceiling geometry must coincide with each
+    /// finite room boundary within floating-point coordinate roundoff.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_ceiling_vents(
+        rooms: Vec<Room>,
+        ambient: Ambient,
+        walls: Vec<WallVent>,
+        ceilings: Vec<CeilingVent>,
+        mechanical: Vec<MechanicalVent>,
+        gravity: Acceleration,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, NetworkError> {
         poll(&mut cancelled)?;
         let n = rooms.len();
         if !(1..=MAX_ROOMS).contains(&n)
-            || walls.len() + mechanical.len() > MAX_CONNECTIONS
+            || walls
+                .len()
+                .saturating_add(ceilings.len())
+                .saturating_add(mechanical.len())
+                > MAX_CONNECTIONS
             || !gravity.value().is_finite()
             || gravity.value() < 0.0
             || !positive(ambient.pressure.value())
@@ -287,7 +346,10 @@ impl ZoneNetwork {
             ));
         }
         for room in &rooms {
+            let ceiling = room.floor_elevation.value() + room.gas.height().value();
             if !room.floor_elevation.value().is_finite()
+                || !ceiling.is_finite()
+                || ceiling <= room.floor_elevation.value()
                 || room.gas.gas() != rooms[0].gas.gas()
                 || room.gas.time() != rooms[0].gas.time()
             {
@@ -317,6 +379,9 @@ impl ZoneNetwork {
         for vent in &walls {
             admit_wall(&rooms, vent)?;
         }
+        for vent in &ceilings {
+            admit_ceiling(&rooms, vent)?;
+        }
         for vent in &mechanical {
             admit_endpoints(n, vent.from, vent.to)?;
             if !vent.mass_rate.value().is_finite()
@@ -336,6 +401,7 @@ impl ZoneNetwork {
             ambient,
             ambient_density,
             walls,
+            ceilings,
             mechanical,
             gravity,
             rates: vec![[LayerRates::default(); 2]; n],
@@ -358,6 +424,10 @@ impl ZoneNetwork {
     pub const fn ambient(&self) -> &Ambient {
         &self.ambient
     }
+    /// Authored horizontal apertures in their original connection order.
+    pub fn ceiling_vents(&self) -> &[CeilingVent] {
+        &self.ceilings
+    }
     /// Change one authored opening between steps, including exact zero-area
     /// closure. Existing state, other connections and original loss laws persist.
     pub fn set_wall_opening(
@@ -376,6 +446,27 @@ impl ZoneNetwork {
         };
         admit_wall(&self.rooms, &next)?;
         self.walls[index] = next;
+        Ok(())
+    }
+
+    /// Change one horizontal aperture between accepted steps, including exact
+    /// zero-area closure. A refused geometry leaves the original vent intact.
+    pub fn set_ceiling_opening(
+        &mut self,
+        index: usize,
+        opening: ceiling::CeilingOpening,
+    ) -> Result<(), NetworkError> {
+        let old = self
+            .ceilings
+            .get(index)
+            .ok_or(NetworkError::Invalid("ceiling index"))?;
+        let next = CeilingVent {
+            below: old.below,
+            above: old.above,
+            opening,
+        };
+        admit_ceiling(&self.rooms, &next)?;
+        self.ceilings[index] = next;
         Ok(())
     }
 
@@ -736,6 +827,63 @@ impl ZoneNetwork {
                 )?;
             }
         }
+        for vent in &self.ceilings {
+            poll(cancelled)?;
+            let below = column(
+                &self.rooms,
+                &self.ambient,
+                self.ambient_density,
+                &self.perturbation,
+                vent.below,
+            )?;
+            let above = column(
+                &self.rooms,
+                &self.ambient,
+                self.ambient_density,
+                &self.perturbation,
+                vent.above,
+            )?;
+            let below_layer = ceiling_layer(&self.rooms, vent.below, true);
+            let above_layer = ceiling_layer(&self.rooms, vent.above, false);
+            let flow = ceiling::flow_from_layers(
+                &vent.opening,
+                below,
+                above,
+                vent_layer(below_layer),
+                vent_layer(above_layer),
+                self.gravity,
+                &mut *cancelled,
+            )?;
+            for (from, from_layer, to, to_layer, rate) in [
+                (
+                    vent.below,
+                    below_layer,
+                    vent.above,
+                    above_layer,
+                    flow.upward_mass_rate,
+                ),
+                (
+                    vent.above,
+                    above_layer,
+                    vent.below,
+                    below_layer,
+                    flow.downward_mass_rate,
+                ),
+            ] {
+                if rate.value() > 0.0 {
+                    let carried = carried(&self.rooms, &self.ambient, from, from_layer, rate)?;
+                    transfer(
+                        &mut self.rates,
+                        &mut self.external,
+                        from,
+                        from_layer,
+                        to,
+                        to_layer,
+                        carried,
+                    )?;
+                }
+            }
+        }
         for vent in &self.mechanical {
             poll(cancelled)?;
             if vent.mass_rate.value() > 0.0 {
@@ -779,6 +927,25 @@ fn gas_layer(layer: stratified::Layer) -> Layer {
         stratified::Layer::Upper => Layer::Upper,
     }
 }
+fn vent_layer(layer: Layer) -> stratified::Layer {
+    match layer {
+        Layer::Lower => stratified::Layer::Lower,
+        Layer::Upper => stratified::Layer::Upper,
+    }
+}
+fn ceiling_layer(rooms: &[Room], endpoint: Endpoint, below: bool) -> Layer {
+    let adjacent = if below { Layer::Upper } else { Layer::Lower };
+    match endpoint {
+        Endpoint::Room(i) if rooms[i].gas.layer(adjacent).mass_kg() == 0.0 => {
+            if below {
+                Layer::Lower
+            } else {
+                Layer::Upper
+            }
+        }
+        _ => adjacent,
+    }
+}
 fn admit_endpoints(n: usize, left: Endpoint, right: Endpoint) -> Result<(), NetworkError> {
     if left == right {
         return Err(NetworkError::Invalid(
@@ -802,6 +969,43 @@ fn admit_wall(rooms: &[Room], vent: &WallVent) -> Result<(), NetworkError> {
             let ceiling = floor + rooms[i].gas.height().value();
             if vent.opening.bottom().value() < floor || vent.opening.top().value() > ceiling {
                 return Err(NetworkError::Invalid("opening outside room height"));
+            }
+        }
+    }
+    Ok(())
+}
+fn admit_ceiling(rooms: &[Room], vent: &CeilingVent) -> Result<(), NetworkError> {
+    admit_endpoints(rooms.len(), vent.below, vent.above)?;
+    let opening = vent.opening.height().value();
+    for (endpoint, below) in [(vent.below, true), (vent.above, false)] {
+        if let Endpoint::Room(i) = endpoint {
+            let room = &rooms[i];
+            let floor = room.floor_elevation.value();
+            let height = room.gas.height().value();
+            let ceiling = floor + height;
+            if !ceiling.is_finite() || ceiling <= floor {
+                return Err(NetworkError::Invalid("unrepresentable ceiling elevation"));
+            }
+            let boundary = if below { ceiling } else { floor };
+            // Independently authored sums (e.g. 0.1 + 0.2 versus 0.3) may differ
+            // by roundoff. Eight epsilons cover the boundary additions and
+            // comparison, not a physical gap/overlap allowance. Reject a datum
+            // so large that this band could conceal a substantial room height.
+            let scale = floor
+                .abs()
+                .max(ceiling.abs())
+                .max(opening.abs())
+                .max(height);
+            let tolerance = 8.0 * f64::EPSILON * scale;
+            if tolerance >= 0.25 * height {
+                return Err(NetworkError::Invalid(
+                    "ceiling coordinate precision requires rebasing",
+                ));
+            }
+            if (opening - boundary).abs() > tolerance {
+                return Err(NetworkError::Invalid(
+                    "horizontal opening must join a ceiling to a floor",
+                ));
             }
         }
     }

@@ -129,6 +129,30 @@ impl TwoLayerColumn {
         Ok(Pressure::new(pressure))
     }
 
+    /// Self-minus-other pressure at one common world elevation. Both absolute
+    /// pressures must remain positive. Subtracting reference pressures before
+    /// hydrostatic heads preserves small buoyant drives that would be lost by
+    /// first forming and subtracting two large absolute pressures.
+    pub fn pressure_difference_at(
+        self,
+        other: Self,
+        height: Length,
+        gravity: Acceleration,
+    ) -> Result<Pressure, VentError> {
+        self.pressure_at(height, gravity)?;
+        other.pressure_at(height, gravity)?;
+        let mut difference = self.reference_pressure.value() - other.reference_pressure.value();
+        if gravity.value() != 0.0 {
+            difference = finite(
+                difference
+                    - gravity.value()
+                        * (self.density_height(height)? - other.density_height(height)?),
+                "hydrostatic pressure difference",
+            )?;
+        }
+        Ok(Pressure::new(difference))
+    }
+
     fn density_height(self, height: Length) -> Result<f64, VentError> {
         let z = height.value();
         if !z.is_finite() {

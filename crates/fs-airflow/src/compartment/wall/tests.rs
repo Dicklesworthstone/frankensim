@@ -84,7 +84,8 @@ fn account(report: &WallReport) {
             .map(|e| e.value())
             .sum::<f64>()
         - report.ambient_heat_energy.value()
-        - report.external_radiant_energy.value();
+        - report.external_radiant_energy.value()
+        - report.coupled_radiant_energy.value();
     near(combined, report.audit.residual_j, 2e-8);
     assert!(report.audit.residual_j.abs() <= WallSolve::default().total_energy_tolerance_j);
     assert!(report.maximum_cell_residual_j <= WallSolve::default().cell_energy_tolerance_j);
@@ -127,6 +128,78 @@ fn original_cells_material_binding_and_conductances_define_the_real_wall() {
     assert_eq!(unchanged.report.audit.stored_energy_change_j, 0.0);
     assert_eq!(unchanged.report.gas_heat_power, [Power::new(0.0); 2]);
     assert_eq!(unchanged.wall.time(), Time::new(1e4));
+    assert_eq!(wall.time(), Time::new(0.0));
+}
+
+#[test]
+fn signed_enclosure_radiation_heats_and_cools_without_becoming_external_fire_input() {
+    let wall = wall(1);
+    for power in [-80.0, 80.0] {
+        let next = wall
+            .candidate_with_exchange(
+                Time::new(10.0),
+                insulated(),
+                Power::new(power),
+                WallSolve::default(),
+                &mut wall.workspace().unwrap(),
+                || false,
+            )
+            .unwrap();
+        near(next.report.audit.stored_energy_change_j, 10.0 * power, 1e-6);
+        near(
+            next.wall.cell_temperature(0).unwrap().value(),
+            300.0 + power / 4000.0,
+            1e-10,
+        );
+        near(
+            next.report.surface_temperatures[0].value(),
+            300.0 + power / 4000.0 + power / 20.0,
+            1e-10,
+        );
+        assert_eq!(
+            next.report.coupled_radiant_energy,
+            Energy::new(10.0 * power)
+        );
+        assert_eq!(next.report.external_radiant_energy, Energy::new(0.0));
+        assert_eq!(next.report.gas_heat_power, [Power::new(0.0); 2]);
+        account(&next.report);
+    }
+    assert_eq!(wall.time(), Time::new(0.0));
+    assert_eq!(wall.cell_temperature(0).unwrap(), Temperature::new(300.0));
+}
+
+#[test]
+fn external_fire_and_internal_exchange_retain_separate_signed_accounts() {
+    let wall = wall(1);
+    let mut boundary = insulated();
+    boundary.external_radiant_power = Power::new(50.0);
+    let next = wall
+        .candidate_with_exchange(
+            Time::new(10.0),
+            boundary,
+            Power::new(-30.0),
+            WallSolve::default(),
+            &mut wall.workspace().unwrap(),
+            || false,
+        )
+        .unwrap();
+    assert_eq!(next.report.external_radiant_energy, Energy::new(500.0));
+    assert_eq!(next.report.coupled_radiant_energy, Energy::new(-300.0));
+    near(next.report.audit.stored_energy_change_j, 200.0, 1e-6);
+    account(&next.report);
+    for power in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(matches!(
+            wall.candidate_with_exchange(
+                Time::new(10.0),
+                boundary,
+                Power::new(power),
+                WallSolve::default(),
+                &mut wall.workspace().unwrap(),
+                || false,
+            ),
+            Err(WallError::Invalid(_))
+        ));
+    }
     assert_eq!(wall.time(), Time::new(0.0));
 }
 
