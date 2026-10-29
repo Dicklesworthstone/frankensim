@@ -148,12 +148,15 @@ selected bending law still use their installed T60 decay points.
 
 `KitMaterials::with_film_loss_curve(temperature_axis, frequency_axis, T)` reads each
 head card's `loss_tangent_tensile` (`materials::FILM_LOSS_TANGENT`), a curve over a
-typed cyclic-frequency axis, through the canonical resolver. Each retained `m >= 1`
-head mode takes the tan delta at its own loaded frequency times its bending share,
+typed cyclic-frequency axis, through the canonical resolver. Each retained head
+mode takes the tan delta at its own loaded frequency times its bending share,
 the part of its stiffness energy in the body's bending operator rather than the
 tension (`Body::attach_head_radiation_with_film`), through the head radiation's
-modal damping. A mode outside the card's band takes none, and its receipt says so;
-the volume shapes and the dropped shapes take none either. The drum's notes carry
+modal damping. With the head's own loss modelled, the load retains every shape
+the grid resolves (see the head radiation section), so the volume shapes
+`(0,n)`, `n >= 2`, and the shapes beyond the table's set carry it too. A mode
+outside the card's band takes none, and its receipt says so; the `(0,1)` volume
+shape and the shapes the grid cannot resolve take none either. The drum's notes carry
 the film receipt and `materials::EDGE_LOSS_STATED_UNKNOWN_RECEIPT`, since no edge,
 hoop, shell or mount loss law exists, and `info_json` has `filmLossCurve`. Only
 the native card route uses it; live and browser drums keep the stated unknown.
@@ -331,9 +334,24 @@ bakes it on the power-consistent Rayleigh route
   clamped or extrapolated. The shape gets no exterior load, and the receipt
   names it as an upper bound. The summary gives the lowest in-vacuo frequency
   among refused shapes. A refused or unresolved (1,1) shape refuses the drum.
-- Only the `m >= 1` families load a head. Volume motion keeps the compact
-  monopole, the piston air mass and the cavity. The baked `m = 0` family only
-  prints `R_compact / R_baffled` per volume shape in the receipt.
+- Without a modelled head loss, only the `m >= 1` families load a head. Volume
+  motion keeps the compact monopole, the piston air mass and the cavity. The
+  baked `m = 0` family only prints `R_compact / R_baffled` per volume shape in
+  the receipt.
+- A head whose own loss is modelled (the film loss curve, the viscous face
+  layer) retains every shape its grid resolves, so that loss reaches every
+  resolved mode (`ModalAirLoad::new_with_losses`, `extend`):
+  - A volume shape `(0,n)`, `n >= 2`, takes the table's baffled load less what
+    the compact net-volume model already gives it (`R_c V^2` and the piston air
+    mass times `V^2 / A^2`), so nothing is counted twice. `(0,1)` stays on the
+    compact model alone.
+  - A shape beyond the table's `j_mn <= 20` set takes the air mass of its
+    untruncated evanescent field, `rho (integral of phi^2 dA) / sqrt(k_s^2 - k^2)`,
+    and no radiation resistance, so its radiation T60 is an upper bound. The
+    receipt compares that air mass with the table's own for `j_mn >= 15`.
+  - It costs more. On the offline 3.5 mm snare a head carries 623 columns
+    instead of 86, and the wires-on render takes about 8x longer. Live grids
+    add only a few volume shapes, about +6.5 % per sample on the card routes.
 - Each grid-resolved shape, in both parities, gets a narrowband load at its own
   loaded frequency. That frequency is a fixed point of
   `omega^2 (M + Ma(omega)) = K` with the head's Rayleigh-quotient `K` and `M`.

@@ -1099,8 +1099,13 @@ impl Body {
         };
         let film = tan_delta.map(|t| (t, &bending as &dyn Fn(&[f64]) -> Vec<f64>));
         let viscous = coincidence_hz.map(|fc| (self.mass.iter().sum::<f64>() / self.area, fc));
+        // A head whose own losses are modelled (film, viscous layer) carries
+        // them on every shape the grid resolves, not only the table's: the
+        // load then also needs the piston's share of each volume shape.
+        let extend = (film.is_some() || viscous.is_some())
+            .then(|| if self.air_mass > 0.0 { self.air_mass / (self.area * self.area) } else { 0.0 });
         let load = radiation::ModalAirLoad::new_with_losses(
-            table, radius, self.h, &self.xy, &self.mass, &stiffness, gas, compact_volume_resistance, film, viscous)?;
+            table, radius, self.h, &self.xy, &self.mass, &stiffness, gas, compact_volume_resistance, film, viscous, extend)?;
         let receipt = load.receipt.clone();
         self.head_radiation = Some(Box::new(load));
         self.kc = 0.0; // the implicit air mass is prepared with the update coefficients

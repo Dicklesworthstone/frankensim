@@ -8,7 +8,10 @@
 //! so density and sound speed always come from the instrument's gas. Only
 //! `m >= 1` families load the head: the volume (`m = 0`) motion keeps the
 //! kit builder's compact monopole, piston air mass and cavity, and its baked
-//! family only states that compact model's error in the receipt.
+//! family only states that compact model's error in the receipt. A head whose
+//! own losses are modelled (film, viscous layer) extends the load to every
+//! shape its grid resolves (`ModalAirLoad::new_with_losses`), so that no
+//! resolved mode is left without loss.
 //!
 //! The time-domain load is narrowband. Each retained mode gets the diagonal
 //! resistance `Re Z_rr` and air mass `-Im Z_rr / omega` at its own loaded
@@ -603,6 +606,14 @@ struct Retained {
     film_resistance: f64,
     /// Stokes face-layer resistance at the loaded frequency.
     viscous_resistance: f64,
+    /// `shape` indexes the table's modes; false: a shape beyond the table's
+    /// set (evanescent air mass, no radiation resistance).
+    in_table: bool,
+    /// A volume shape's share already on the compact net-volume model,
+    /// `(R_c V^2, piston air mass V^2 / A^2)`, not in `resistance`/`air_mass`.
+    compact: Option<(f64, f64)>,
+    /// A table shape's evanescent air mass over its table air mass, minus 1.
+    evanescent_check: Option<f64>,
 }
 
 fn cholesky(a: &mut [f64], n: usize) -> Result<(), String> {
@@ -848,12 +859,24 @@ impl ModalAirLoad {
     ) -> Result<ModalAirLoad, String> {
         let held = |_: f64| Ok(film.map(|(tan_delta, _)| tan_delta));
         let film = film.map(|(_, bending)| (&held as FilmTanDelta, bending));
-        Self::new_with_losses(table, radius, h, xy, mass, stiffness, gas, compact_volume_resistance, film, None)
+        Self::new_with_losses(table, radius, h, xy, mass, stiffness, gas, compact_volume_resistance, film, None, None)
     }
 
     /// The general constructor: an optional film loss whose loss tangent is
     /// read at each retained mode's own loaded frequency, and an optional
     /// Stokes face layer `(areal density, coincidence frequency)`.
+    ///
+    /// `extend` (the piston air mass over the head's area squared [kg/m^4],
+    /// 0 without one) retains every shape the grid resolves, not only the
+    /// table's `m >= 1` set, so that the film and viscous losses reach every
+    /// resolved mode. A volume shape `(0,n)`, `n >= 2`, takes the table's
+    /// baffled load less what the compact net-volume model already gives it
+    /// (`compact_volume_resistance` and the piston, times its volume
+    /// squared); `(0,1)` stays on the compact model alone. A shape beyond the
+    /// table's set takes the air mass of its untruncated evanescent field,
+    /// `rho A / sqrt(k_s^2 - k^2)` (A its area integral of phi^2, k_s its
+    /// Bessel zero over the radius), and no radiation resistance: its decay
+    /// is an upper bound.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_losses(
         table: &RadiationTable,
@@ -866,6 +889,7 @@ impl ModalAirLoad {
         compact_volume_resistance: Option<f64>,
         film: Option<(FilmTanDelta, &dyn Fn(&[f64]) -> Vec<f64>)>,
         viscous: Option<(f64, f64)>,
+        extend: Option<f64>,
     ) -> Result<ModalAirLoad, String> {
         if let Some((areal_density, coincidence_hz)) = viscous
             && !(areal_density.is_finite() && areal_density > 0.0 && coincidence_hz.is_finite() && coincidence_hz > 0.0)
@@ -898,7 +922,27 @@ impl ModalAirLoad {
         // In-vacuo frequency [Hz] and label of every shape the table refused.
         let mut refused_shapes: Vec<(f64, String)> = Vec::new();
         let mut volume_lines = Vec::new();
-        for (index, shape) in table.modes().iter().enumerate() {
+        // The table's shapes, then (extended) every shape the grid resolves
+        // that the table's set lacks.
+        let tabulated = table.modes().len();
+        let mut shapes: Vec<ModeShape> = table.modes().to_vec();
+        if extend.is_some() {
+            for m in 0..=(limit as usize) {
+                for n in 1.. {
+                    if table.modes().iter().any(|s| s.m == m && s.n == n) {
+                        continue;
+                    }
+                    let shape = ModeShape::new(m, n);
+                    if shape.zero > limit {
+                        break;
+                    }
+                    shapes.push(shape);
+                }
+            }
+        }
+        let (compact_r, piston) = (compact_volume_resistance.unwrap_or(0.0), extend.unwrap_or(0.0));
+        for (index, shape) in shapes.iter().enumerate() {
+            let in_table = index < tabulated;
             let label = format!("({},{})", shape.m, shape.n);
             let unresolved = shape.zero > limit || shape.m as f64 > limit;
             if unresolved && shape.m == 0 {
@@ -922,8 +966,10 @@ impl ModalAirLoad {
                 ));
                 continue;
             }
-            if shape.m == 0 {
-                // Diagnostic only: the compact route's error at this ka.
+            if shape.m == 0 && in_table {
+                // The compact route's error at this ka: a diagnostic, and
+                // (extended) the share subtracted from the shape's own load.
+                let applied = extend.is_some() && shape.n >= 2;
                 let phi = sample(shape, false);
                 let (stiff, modal_mass) = quotient(&phi, &stiffness(&phi));
                 let omega = (stiff / modal_mass).sqrt();
@@ -946,10 +992,28 @@ impl ModalAirLoad {
                         "{label}: ka {ka:.4} in vacuo; this head has no compact volume resistance to compare"
                     ),
                 };
+                let line = if applied {
+                    line.replace("diagnostic, not applied", "applied: the shape takes the baffled load less this compact share")
+                } else {
+                    line
+                };
                 volume_lines.push(format!("volume shape {line}"));
-                continue;
+                if !applied {
+                    continue;
+                }
             }
-            for sine in [false, true] {
+            // The area integral of phi^2 and wavenumber of a shape beyond the
+            // table: its untruncated field decays as exp(-sqrt(k_s^2 - k^2) z).
+            let k_shape = shape.zero / radius;
+            let evanescent = |phi: &[f64], omega: f64| -> Result<f64, String> {
+                let kz2 = k_shape * k_shape - (omega / c) * (omega / c);
+                if !(kz2 > 0.0) {
+                    return Err(format!("the shape is supersonic at {omega:.1} rad/s, no evanescent air mass"));
+                }
+                Ok(rho * phi.iter().map(|v| v * v).sum::<f64>() * h2 / kz2.sqrt())
+            };
+            let parities: &[bool] = if shape.m == 0 { &[false] } else { &[false, true] };
+            for &sine in parities {
                 let phi = sample(shape, sine);
                 let k_phi = stiffness(&phi);
                 let (stiff, modal_mass) = quotient(&phi, &k_phi);
@@ -958,6 +1022,16 @@ impl ModalAirLoad {
                         "head radiation: mode {label} has no positive stiffness and mass on this grid"
                     ));
                 }
+                // The shape's exterior load at omega: its total air mass and,
+                // in the table, the table's entry.
+                let air_at = |omega: f64| -> Result<(f64, Option<Zhat>), String> {
+                    if in_table {
+                        let z = table.zhat(index, index, omega * radius / c)?;
+                        Ok((-scale * z.reactance / omega, Some(z)))
+                    } else {
+                        Ok((evanescent(&phi, omega)?, None))
+                    }
+                };
                 // Loaded frequency: omega^2 (M + Ma(omega)) = K, by fixed point.
                 // A table refusal along the way (outside its ka range, or a
                 // supersonic non-mass-like span) refuses THIS shape: it gets
@@ -967,12 +1041,10 @@ impl ModalAirLoad {
                 let mut iterations = 0;
                 let refused = loop {
                     iterations += 1;
-                    let ka = omega * radius / c;
-                    let z = match table.zhat(index, index, ka) {
-                        Ok(z) => z,
+                    let air_mass = match air_at(omega) {
+                        Ok((air_mass, _)) => air_mass,
                         Err(e) => break Some(e),
                     };
-                    let air_mass = -scale * z.reactance / omega;
                     let next = (stiff / (modal_mass + air_mass)).sqrt();
                     let done = (next - omega).abs() <= 1e-13 * omega;
                     omega = next;
@@ -986,8 +1058,8 @@ impl ModalAirLoad {
                     }
                 };
                 let ka = omega * radius / c;
-                let z = match refused.map_or_else(|| table.zhat(index, index, ka), Err) {
-                    Ok(z) => z,
+                let (air_total, z) = match refused.map_or_else(|| air_at(omega), Err) {
+                    Ok(load) => load,
                     Err(e) => {
                         let parity = if sine { "sin" } else { "cos" };
                         if shape.m == 1 && shape.n == 1 {
@@ -1003,15 +1075,41 @@ impl ModalAirLoad {
                         continue;
                     }
                 };
-                let air_mass = -scale * z.reactance / omega;
-                let (resistance, below_resolution) = match z.resistance {
-                    Some(r) if r >= 0.0 => (scale * r, None),
-                    Some(_) => {
+                let mut air_mass = air_total;
+                let (mut resistance, below_resolution) = match z.as_ref().map(|z| z.resistance) {
+                    Some(Some(r)) if r >= 0.0 => (scale * r, None),
+                    Some(Some(_)) => {
                         return Err(format!(
                             "head radiation: mode {label} has an active load at ka {ka}"
                         ));
                     }
-                    None => (0.0, Some(scale * z.resistance_bound)),
+                    Some(None) => (0.0, z.as_ref().map(|z| scale * z.resistance_bound)),
+                    None => (0.0, None),
+                };
+                // A table shape's own air mass against its untruncated
+                // evanescent field (the law applied beyond the table).
+                let evanescent_check = (extend.is_some() && in_table)
+                    .then(|| evanescent(&phi, omega).ok().map(|e| e / air_total - 1.0))
+                    .flatten();
+                // A volume shape's net volume already carries the compact
+                // monopole's resistance and the piston's air mass: apply the
+                // rest, so that its own load is the baffled table's (beyond
+                // the table, the evanescent air mass; the monopole stays).
+                let compact = if shape.m == 0 {
+                    let volume: f64 = phi.iter().sum::<f64>() * h2;
+                    let (r_c, m_c) = (compact_r * volume * volume, piston * volume * volume);
+                    let r_off = if z.is_some() && below_resolution.is_none() { r_c } else { 0.0 };
+                    if !(resistance >= r_off && air_mass > m_c) {
+                        dropped.push(format!(
+                            "{label} kept on the compact model alone: its compact share (R {r_c:.3e} kg/s, air mass {m_c:.3e} kg) exceeds its own load (R {resistance:.3e} kg/s, air mass {air_mass:.3e} kg)"
+                        ));
+                        continue;
+                    }
+                    resistance -= r_off;
+                    air_mass -= m_c;
+                    Some((r_c, m_c))
+                } else {
+                    None
                 };
                 let (bending_share, film_tan_delta, film_resistance) = match film {
                     Some((tan_delta, bending)) => {
@@ -1063,6 +1161,9 @@ impl ModalAirLoad {
                     film_tan_delta,
                     film_resistance,
                     viscous_resistance,
+                    in_table,
+                    compact,
+                    evanescent_check,
                 });
                 phis.push(phi);
                 kphis.push(k_phi);
@@ -1077,13 +1178,13 @@ impl ModalAirLoad {
         // MAC per (family, parity) against Rayleigh-Ritz FD modes.
         let mut groups: Vec<(usize, bool)> = retained
             .iter()
-            .map(|r| (table.modes[r.shape].m, r.sine))
+            .map(|r| (shapes[r.shape].m, r.sine))
             .collect();
         groups.sort_unstable();
         groups.dedup();
         for (m, sine) in groups {
             let members: Vec<usize> = (0..n)
-                .filter(|&i| table.modes[retained[i].shape].m == m && retained[i].sine == sine)
+                .filter(|&i| shapes[retained[i].shape].m == m && retained[i].sine == sine)
                 .collect();
             let macs = ritz_macs(
                 &members.iter().map(|&i| &phis[i]).collect::<Vec<_>>(),
@@ -1155,11 +1256,17 @@ impl ModalAirLoad {
         let (mut loss_share, mut mass_share) = (0.0_f64, 0.0_f64);
         let mut shares = Vec::with_capacity(n);
         for a in &retained {
+            // Beyond the table there is no coupling entry to bound.
+            if !a.in_table {
+                shares.push((f64::NAN, f64::NAN));
+                continue;
+            }
             let (mut d_re, mut d_im) = (0.0, 0.0);
             for b in &retained {
                 if std::ptr::eq(a, b)
+                    || !b.in_table
                     || b.sine != a.sine
-                    || table.modes[b.shape].m != table.modes[a.shape].m
+                    || shapes[b.shape].m != shapes[a.shape].m
                 {
                     continue;
                 }
@@ -1200,14 +1307,49 @@ impl ModalAirLoad {
         let mut receipt = Vec::new();
         let mut low_mac = 0;
         for (r, share) in retained.iter().zip(&shares) {
-            let shape = &table.modes[r.shape];
-            let t60 = |resistance: f64| 6.907755 * 2.0 * (r.mass + r.air_mass) / resistance;
-            let loss = match r.below_resolution {
-                None => format!("radiation T60 {:.3} s", t60(r.resistance)),
-                Some(bound) => format!(
+            let shape = &shapes[r.shape];
+            // A volume shape's compact share is part of its exterior load.
+            let (r_c, m_c) = r.compact.unwrap_or((0.0, 0.0));
+            let t60 = |resistance: f64| 6.907755 * 2.0 * (r.mass + r.air_mass + m_c) / resistance;
+            let loss = match (r.in_table, r.below_resolution) {
+                (true, None) => format!("radiation T60 {:.3} s", t60(r.resistance + r_c)),
+                (true, Some(bound)) => format!(
                     "radiation below the table's resolution, none applied: its T60 is an upper bound (true radiation T60 > {:.3e} s)",
                     t60(bound)
                 ),
+                (false, _) => format!(
+                    "radiation NOT TABULATED (j_mn {:.3} lies beyond the table's set): no radiation resistance{}, so its T60 is an upper bound; air mass of the untruncated shape's evanescent field",
+                    shape.zero,
+                    if r_c > 0.0 { format!(" but the compact monopole's (T60 {:.3e} s)", t60(r_c)) } else { String::new() }
+                ),
+            };
+            let tag = match (shape.m == 0, r.in_table) {
+                (false, true) => "",
+                (true, true) => " [volume]",
+                (false, false) => " [untabulated]",
+                (true, false) => " [volume untabulated]",
+            };
+            let interpolation = if r.in_table {
+                format!("ka interpolation <= {:.1e}; dropped in-family coupling <= {:.1e} of its resistance, {:.1e} of its air mass",
+                    table.interpolation_error(r.shape, r.ka), share.0, share.1)
+            } else {
+                "ka interpolation n/a; dropped in-family coupling not tabulated".to_string()
+            };
+            let extended_note = if extend.is_some() {
+                let mut note = String::new();
+                if r.compact.is_some() {
+                    let _ = write!(note, "; compact net-volume share: R_c V^2 {r_c:.3e} kg/s, piston air mass {m_c:.3e} kg (exterior air mass in all {:.3e} kg)", r.air_mass + m_c);
+                }
+                if let Some(check) = r.evanescent_check {
+                    let _ = write!(note, "; evanescent air mass {:+.1} % against the table's", 100.0 * check);
+                }
+                if viscous.is_some() {
+                    let _ = write!(note, "; viscous T60 {:.3} s", t60(r.viscous_resistance));
+                }
+                let _ = write!(note, "; total T60 {:.3} s", t60(r.resistance + r_c + r.film_resistance + r.viscous_resistance));
+                note
+            } else {
+                String::new()
             };
             let caveat = if r.mac < LOW_MAC {
                 low_mac += 1;
@@ -1229,11 +1371,10 @@ impl ModalAirLoad {
                 (None, _) => String::new(),
             };
             receipt.push(format!(
-                "({},{}) {}: in vacuo {:.1} Hz, loaded {:.1} Hz (ka {:.4}, {} iterations), air mass {:.3e} kg on {:.3e} kg, {loss}; MAC {:.4}{caveat}; ka interpolation <= {:.1e}; dropped in-family coupling <= {:.1e} of its resistance, {:.1e} of its air mass{film_note}",
+                "({},{}) {}{tag}: in vacuo {:.1} Hz, loaded {:.1} Hz (ka {:.4}, {} iterations), air mass {:.3e} kg on {:.3e} kg, {loss}; MAC {:.4}{caveat}; {interpolation}{film_note}{extended_note}",
                 shape.m, shape.n, if r.sine { "sin" } else { "cos" },
                 (r.stiffness / r.mass).sqrt() / (2.0 * std::f64::consts::PI),
                 r.omega / (2.0 * std::f64::consts::PI), r.ka, r.iterations, r.air_mass, r.mass, r.mac,
-                table.interpolation_error(r.shape, r.ka), share.0, share.1
             ));
         }
         // At a glance: does a refusal reach into the band that dominates the decay?
@@ -1260,6 +1401,21 @@ impl ModalAirLoad {
             table.discretization_bound,
             dropped.len()
         );
+        if extend.is_some() {
+            let volume = retained.iter().filter(|r| r.compact.is_some()).count();
+            let beyond = retained.iter().filter(|r| !r.in_table).count();
+            let checks = retained.iter().filter_map(|r| r.evanescent_check.filter(|_| shapes[r.shape].zero >= 15.0));
+            let (lo, hi) = checks.fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| (lo.min(v), hi.max(v)));
+            let check = if lo <= hi {
+                format!("{:+.1} % to {:+.1} %", 100.0 * lo, 100.0 * hi)
+            } else {
+                "no such shape retained on this grid".to_string()
+            };
+            let _ = write!(
+                summary,
+                "; extended to every shape the grid resolves (the head's own losses are modelled): {volume} volume shapes (m = 0, n >= 2) take the table's baffled load (or beyond it the evanescent air mass) less the compact net-volume model's own share, (0,1) staying on the compact model alone; {beyond} shapes beyond the table's set take the air mass of their untruncated evanescent field, rho A / sqrt(k_s^2 - k^2), and no radiation resistance, so their radiation is an upper bound; that air mass against the table's own shapes with j_mn >= 15: {check}"
+            );
+        }
         receipt.push(summary);
         if film.is_some() {
             let hz = |r: &Retained| r.omega / (2.0 * std::f64::consts::PI);
@@ -1278,7 +1434,7 @@ impl ModalAirLoad {
                 .iter()
                 .filter(|r| r.film_tan_delta.is_none())
                 .map(|r| {
-                    let shape = &table.modes[r.shape];
+                    let shape = &shapes[r.shape];
                     format!("({},{}) {} at {:.1} Hz", shape.m, shape.n, if r.sine { "sin" } else { "cos" }, hz(r))
                 })
                 .collect();
@@ -1289,6 +1445,11 @@ impl ModalAirLoad {
             };
             receipt.push(if covered.is_empty() {
                 format!("head film loss: NONE applied, no retained shape lies inside the film source's band{outside}")
+            } else if extend.is_some() {
+                format!(
+                    "head film loss: {tangent} at each mode's own loaded frequency on {} of the {n} retained shapes (every shape the grid resolves but (0,1)), loaded {low:.1} to {high:.1} Hz (eta = tan delta x bending share){outside}; the (0,1) volume shape and every shape the grid cannot resolve carry NO film loss, so their decays stay upper bounds",
+                    covered.len()
+                )
             } else {
                 format!(
                     "head film loss: {tangent} at each mode's own loaded frequency on {} of the {n} retained m >= 1 shapes, loaded {low:.1} to {high:.1} Hz (eta = tan delta x bending share){outside}; the volume (m = 0) shapes and every dropped or refused shape carry NO film loss, so their decays stay upper bounds",
@@ -1299,8 +1460,13 @@ impl ModalAirLoad {
         if viscous.is_some() {
             let (low, high) = retained.iter().map(|r| r.viscous_resistance / (r.mass * r.omega))
                 .fold((f64::INFINITY, 0.0_f64), |(lo, hi), eta| (lo.min(eta), hi.max(eta)));
+            let uncovered = if extend.is_some() {
+                "(0,1) and the shapes the grid cannot resolve carry none"
+            } else {
+                "m = 0 and dropped shapes carry none"
+            };
             receipt.push(format!(
-                "head viscous layer: exact linear Stokes face loss on both faces, eta {low:.3e} to {high:.3e} at each retained mode's loaded frequency; m = 0 and dropped shapes carry none, so their decays stay upper bounds; every retained mode is below coincidence"
+                "head viscous layer: exact linear Stokes face loss on both faces, eta {low:.3e} to {high:.3e} at each retained mode's loaded frequency; {uncovered}, so their decays stay upper bounds; every retained mode is below coincidence"
             ));
         }
         receipt.push(format!(
@@ -1308,7 +1474,11 @@ impl ModalAirLoad {
         ));
         receipt.extend(dropped.iter().map(|line| format!("head radiation {line}")));
         receipt.extend(volume_lines);
-        receipt.push("head radiation scope: each head in its own infinite rigid baffle; no shell diffraction; no exterior coupling between the batter and resonant heads' m >= 1 motion; no cavity loading of m >= 1 modes; shapes outside the table's set carry no exterior load".into());
+        receipt.push(if extend.is_some() {
+            "head radiation scope: each head in its own infinite rigid baffle; no shell diffraction; no exterior coupling between the batter and resonant heads' m >= 1 motion; no cavity loading of m >= 1 modes; shapes beyond the table's set carry their evanescent air mass and no radiation resistance; shapes the grid cannot resolve carry no exterior load".into()
+        } else {
+            "head radiation scope: each head in its own infinite rigid baffle; no shell diffraction; no exterior coupling between the batter and resonant heads' m >= 1 motion; no cavity loading of m >= 1 modes; shapes outside the table's set carry no exterior load".into()
+        });
         let nodes = xy.len();
         Ok(ModalAirLoad {
             cols,
