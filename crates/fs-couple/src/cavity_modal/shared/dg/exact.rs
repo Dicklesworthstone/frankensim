@@ -8,8 +8,14 @@ impl SharedCavity {
     /// viscothermal wall states on every retained duct.
     /// Every original coordinate and mutual terminal entry is retained. Ordinary
     /// closed/open/matched distal boundaries remain supported. Rational terminals
-    /// require nonsingular, well-conditioned instantaneous D; a singular D needs
-    /// a descriptor treatment and is refused. Gaps, driven mouths,
+    /// admit well-conditioned invertible instantaneous D or exactly zero D.
+    /// Zero-D terminals (including pressure release and strictly proper dynamic
+    /// loads) retain every source state and original pressure constraint; one
+    /// differentiated constraint eliminates only the zero-storage flow. Initial
+    /// and endpoint pressures and hidden derivative identities must agree.
+    /// Mixed-rank singular D, singular/ill-conditioned differentiated constraints
+    /// and inconsistent initial states refuse; no epsilon resistance or state
+    /// projection is inserted. Gaps, driven mouths,
     /// direct neck radiation and constant-loss connections remain unsupported.
     ///
     /// Original neck geometry and inlet gas/area/clock admissions remain binding.

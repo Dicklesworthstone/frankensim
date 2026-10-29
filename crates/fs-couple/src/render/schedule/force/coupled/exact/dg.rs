@@ -21,9 +21,75 @@ pub(crate) struct PreparedJointDg {
     link_integrals: Vec<Option<usize>>,
 }
 struct TerminalCache {
+    /// Complete modal/DG/rational rows: constrained terminal flow can depend
+    /// directly on the original inlet volume flow and hence modal velocity.
     flow_columns: Vec<Vec<f64>>,
+    constraints: Vec<Vec<f64>>,
+    constraint_norms: Vec<f64>,
+    constraint_pressure_norms: Vec<f64>,
+    extra_scales: Vec<f64>,
     work_start: usize,
     linear_start: usize,
+}
+impl TerminalCache {
+    fn check_constraints(
+        &self,
+        state: &[f64],
+        duct_dimension: usize,
+    ) -> Result<(), ModalCouplingError> {
+        if self.constraints.is_empty() {
+            return Ok(());
+        }
+        if state.len() != duct_dimension + self.extra_scales.len() {
+            return Err(invalid(
+                "zero-direct terminal lost original constrained coordinates",
+            ));
+        }
+        let mut square = 0.0;
+        for (i, &value) in state.iter().enumerate() {
+            let scaled = finite(
+                value
+                    * if i < duct_dimension {
+                        1.0
+                    } else {
+                        self.extra_scales[i - duct_dimension]
+                    },
+            )?;
+            square = finite(square + scaled * scaled)?;
+        }
+        let norm = det::sqrt(square);
+        for (row, &dual_norm) in self.constraints.iter().zip(&self.constraint_norms) {
+            let residual = dot(row, state)?;
+            let scale = finite(dual_norm * norm)?;
+            if residual.abs() > 1e-10 * scale.max(f64::MIN_POSITIVE) {
+                return Err(invalid(
+                    "zero-direct terminal state violates original pressure continuity; inconsistent states are never projected",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+/// Pull a physical pressure row back through the existing exact solver's
+/// numerical state scaling. This is an error scale, not terminal storage.
+fn terminal_dual_norm(
+    row: &[f64],
+    duct_dimension: usize,
+    extra_scales: &[f64],
+) -> Result<f64, ModalCouplingError> {
+    let mut square = 0.0;
+    for (i, &value) in row.iter().enumerate() {
+        let scaled = finite(
+            value
+                / if i < duct_dimension {
+                    1.0
+                } else {
+                    extra_scales[i - duct_dimension]
+                },
+        )?;
+        square = finite(square + scaled * scaled)?;
+    }
+    finite(det::sqrt(square))
 }
 struct JunctionCache {
     work_start: usize,
@@ -242,37 +308,61 @@ impl PreparedJointDg {
         let mut terminal = if let Some(attachment) = &attachment {
             let work_start = forms.len();
             let linear_start = linear_forms.len();
-            let width = nd + nt;
+            let mut flow_columns = Vec::with_capacity(attachment.ports.len());
+            let mut constraint_pressure_norms = Vec::with_capacity(attachment.ports.len());
             for i in 0..attachment.ports.len() {
-                let flow = &attachment.flow_columns[i];
-                for pressure in [
-                    &attachment.pressure_columns[i],
-                    &attachment.load_pressure_columns[i],
-                ] {
-                    let mut form = vec![0.0; n * n];
-                    for a in 0..width {
-                        for b in 0..width {
-                            form[(nm + a) * n + nm + b] =
-                                0.5 * (pressure[a] * flow[b] + flow[a] * pressure[b]);
-                        }
-                    }
-                    forms.push(form);
+                let mut flow = vec![0.0; n];
+                flow[nm..].copy_from_slice(&attachment.flow_columns[i]);
+                for (k, &b) in column.iter().enumerate() {
+                    flow[2 * k + 1] = attachment.inlet_flow_factors[i] * b;
                 }
                 for source in [
                     &attachment.pressure_columns[i],
                     &attachment.load_pressure_columns[i],
-                    &attachment.flow_columns[i],
                 ] {
-                    let mut observation = vec![0.0; n];
-                    observation[nm..].copy_from_slice(source);
-                    linear_forms.push(observation);
+                    let mut pressure = vec![0.0; n];
+                    pressure[nm..].copy_from_slice(source);
+                    let mut form = vec![0.0; n * n];
+                    for a in 0..n {
+                        for b in 0..n {
+                            form[a * n + b] = 0.5 * (pressure[a] * flow[b] + flow[a] * pressure[b]);
+                        }
+                    }
+                    forms.push(form);
+                    linear_forms.push(pressure);
                 }
+                linear_forms.push(flow.clone());
+                flow_columns.push(flow);
+                constraint_pressure_norms.push(if attachment.constraints.is_empty() {
+                    0.0
+                } else {
+                    let difference: Vec<_> = attachment.pressure_columns[i]
+                        .iter()
+                        .zip(&attachment.load_pressure_columns[i])
+                        .map(|(a, b)| a - b)
+                        .collect();
+                    terminal_dual_norm(&difference, nd, &attachment.extra_scales)?
+                });
             }
-            Some(TerminalCache {
-                flow_columns: attachment.flow_columns.clone(),
+            let cache = TerminalCache {
+                flow_columns,
+                constraints: attachment.constraints.clone(),
+                constraint_norms: attachment
+                    .constraints
+                    .iter()
+                    .map(|row| terminal_dual_norm(row, nd, &attachment.extra_scales))
+                    .collect::<Result<_, _>>()?,
+                constraint_pressure_norms,
+                extra_scales: attachment.extra_scales.clone(),
                 work_start,
                 linear_start,
-            })
+            };
+            let mut original_state = load.continuous_energy_coordinates()?;
+            if let Some(original) = load.terminal() {
+                original_state.extend(original.continuous_operator().real_coordinates());
+            }
+            cache.check_constraints(&original_state, nd)?;
+            Some(cache)
         } else {
             None
         };
@@ -284,13 +374,13 @@ impl PreparedJointDg {
             for (i, &b) in column.iter().enumerate() {
                 flow[2 * i + 1] = junction.inlet_flow_factor * b;
             }
-            if let Some(attachment) = &attachment {
+            if let Some(terminal) = &terminal {
                 for (factor, terminal_flow) in junction
                     .terminal_flow_factors
                     .iter()
-                    .zip(&attachment.flow_columns)
+                    .zip(&terminal.flow_columns)
                 {
-                    for (value, &coefficient) in flow[nm..].iter_mut().zip(terminal_flow) {
+                    for (value, &coefficient) in flow.iter_mut().zip(terminal_flow) {
                         *value += factor * coefficient;
                     }
                 }
@@ -332,6 +422,14 @@ impl PreparedJointDg {
             for i in 0..width {
                 generator[(nm + i) * n + nm..(nm + i) * n + n]
                     .copy_from_slice(&attachment.generator[i * width..(i + 1) * width]);
+                if !attachment.constraints.is_empty() {
+                    // Differentiated pressure closure changes the inlet vector
+                    // as well as A. Retain the original mechanical reaction
+                    // pressure; only the acoustic/rational receiving rows change.
+                    for (k, &b) in column.iter().enumerate() {
+                        generator[(nm + i) * n + 2 * k + 1] = attachment.inlet_column[i] * b;
+                    }
+                }
             }
             PreparedQuadraticFlow::new_extended_controlled(
                 &system,
@@ -408,6 +506,9 @@ impl PreparedJointDg {
         if let Some(terminal) = load.terminal() {
             x.extend(terminal.continuous_operator().real_coordinates());
         }
+        if let Some(terminal) = &self.terminal {
+            terminal.check_constraints(&x[self.modal_dimension..], self.duct_dimension)?;
+        }
         let input: Vec<_> = external
             .iter()
             .zip(&self.rest_force)
@@ -420,6 +521,10 @@ impl PreparedJointDg {
             .evaluate(&x, &input)
             .map_err(ModalCouplingError::Propagation)?;
         poll(Some(gate))?;
+        if let Some(terminal) = &self.terminal {
+            terminal
+                .check_constraints(&result.state[self.modal_dimension..], self.duct_dimension)?;
+        }
         let values = &result.integrals;
         let nm = self.modal_dimension;
         let inlet_work_j = values[3];
@@ -461,12 +566,15 @@ impl PreparedJointDg {
             let endpoint_input: Vec<_> = terminal
                 .flow_columns
                 .iter()
-                .map(|column| dot(column, &result.state[nm..]))
+                .map(|column| dot(column, &result.state))
                 .collect::<Result<_, _>>()?;
             let observations: Vec<_> = (0..terminal.flow_columns.len())
                 .map(|i| DgTerminalTrajectory {
                     pressure_impulse_pa_s: values[terminal.linear_start + 3 * i],
                     load_pressure_impulse_pa_s: values[terminal.linear_start + 3 * i + 1],
+                    constraint_pressure_scale_pa_s: network.dt
+                        * terminal.constraint_pressure_norms[i]
+                        * root_bound,
                     outward_volume_m3: values[terminal.linear_start + 3 * i + 2],
                     port_work_j: values[terminal.work_start + 2 * i],
                     load_work_j: values[terminal.work_start + 2 * i + 1],

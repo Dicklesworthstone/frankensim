@@ -183,7 +183,13 @@ preserve the original pressure constraints from the admitted cold state. This
 eliminates only zero-storage junction flows; it does not reduce the acoustic or
 wall-state basis. The same cached exponential and quadratic-integral owner
 evolves the coupled modal, cavity, duct and original rational terminal states.
-Instantaneous terminal D must remain nonsingular and conditioned as before.
+Terminals admit conditioned invertible D or exactly zero D. For zero D,
+original states obey `x'=A x+F U+b u` and `H x=0`; the conditioned solve
+`(-H F) U=H A x+H b u` removes only zero-storage flow multipliers. Full
+projected inlet coupling, original pressure/work observations and all DG/rational
+coordinates are retained. Initial and endpoint constraints and their
+differentiated identities must pass; no artificial resistance or state reset
+is applied.
 
 Each original duct's unprojected loss form is integrated separately. Junction
 flow includes its acoustic-state, modal-velocity and complete terminal-feedback
@@ -196,8 +202,9 @@ rational realization supplies no physical storage certificate. Tests compare
 24/48/96 kHz constant-drive trajectories, reversed branch ownership, original
 wall memory, an independent physical mutual-terminal heat ladder, and late
 refusal/cancellation with identical retry. Preparation retains the existing
-256-dimensional complete-state allowance; finite gaps, driven mouths and
-singular-D time-domain constraints remain outside this backend.
+256-dimensional complete-state allowance; finite gaps, driven mouths,
+mixed-rank singular D and unresolved higher-index pressure constraints remain
+outside this backend.
 
 ### Shared cavity exterior loading
 

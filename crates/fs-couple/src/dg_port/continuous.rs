@@ -3,12 +3,18 @@ use super::*;
 use fs_duct::dg::continuous::{DgContinuous, state::DgTrajectoryPort};
 
 mod network;
+mod zero_direct;
 pub(crate) use network::DgContinuousNetwork;
 
-/// Original DG/rational ODE after eliminating an invertible instantaneous D.
-/// Terminal coordinates carry no declared storage; port work stays external.
+/// Original DG/rational ODE after eliminating terminal flow multipliers.
+/// Invertible D uses direct pressure closure; exactly zero D retains pressure
+/// constraints and differentiates them once. Terminal coordinates carry no
+/// declared storage; signed port work stays with the original external owner.
 pub(crate) struct DgContinuousTerminal {
     pub generator: Vec<f64>,
+    pub inlet_column: Vec<f64>,
+    pub inlet_flow_factors: Vec<f64>,
+    pub constraints: Vec<Vec<f64>>,
     pub extra_scales: Vec<f64>,
     pub ports: Vec<PortId>,
     pub flow_columns: Vec<Vec<f64>>,
@@ -51,36 +57,22 @@ impl DgPortLoad {
                     invalid(error.0)
                 }
             })?;
-        let solve = super::terminal::TerminalSolve::new(&model.d, p).map_err(|_| {
-            invalid(
-                "continuous rational terminal needs nonsingular well-conditioned instantaneous D",
-            )
-        })?;
+        let zero_direct = model.d.iter().all(|d| *d == 0.0);
+        let solve = if zero_direct {
+            None
+        } else {
+            Some(super::terminal::TerminalSolve::new(&model.d, p).map_err(|_| {
+                invalid(
+                    "continuous rational terminal needs invertible D or exactly zero D; mixed-rank direct constraints are unsupported",
+                )
+            })?)
+        };
         let ports = self.terminal_ports().to_vec();
         let mut pressure_columns = Vec::with_capacity(p);
         for column in &original.terminal_pressure_columns {
             let mut pressure = vec![0.0; n];
             pressure[..nd].copy_from_slice(column);
             pressure_columns.push(pressure);
-        }
-        // Outward U = D^-1 (B_terminal^T x_DG - C z), in original order.
-        let mut flow_columns = vec![vec![0.0; n]; p];
-        for col in 0..n {
-            if gate.is_requested() {
-                return Err(AcousticRealizeError::Cancelled);
-            }
-            let rhs: Vec<_> = (0..p)
-                .map(|row| {
-                    if col < nd {
-                        pressure_columns[row][col]
-                    } else {
-                        -model.c[row * nt + col - nd]
-                    }
-                })
-                .collect();
-            for (row, value) in solve.apply(&rhs)?.into_iter().enumerate() {
-                flow_columns[row][col] = value;
-            }
         }
         let mut generator = vec![0.0; n * n];
         for i in 0..nd {
@@ -90,21 +82,67 @@ impl DgPortLoad {
             generator[(nd + i) * n + nd..(nd + i) * n + n]
                 .copy_from_slice(&model.a[i * nt..(i + 1) * nt]);
         }
-        for i in 0..n {
-            if gate.is_requested() {
-                return Err(AcousticRealizeError::Cancelled);
-            }
-            for j in 0..n {
-                for k in 0..p {
-                    let input = if i < nd {
-                        -original.terminal_input_columns[k][i]
-                    } else {
-                        model.b[(i - nd) * p + k]
-                    };
-                    generator[i * n + j] += input * flow_columns[k][j];
+        let mut inlet_column = vec![0.0; n];
+        inlet_column[..nd].copy_from_slice(&original.inlet_column);
+        let (flow_columns, inlet_flow_factors, constraints) = if let Some(solve) = solve {
+            // Preserve direct closure and its original summation order:
+            // outward U = D^-1 (B_terminal^T x_DG - C z).
+            let mut flow_columns = vec![vec![0.0; n]; p];
+            for col in 0..n {
+                if gate.is_requested() {
+                    return Err(AcousticRealizeError::Cancelled);
+                }
+                let rhs: Vec<_> = (0..p)
+                    .map(|row| {
+                        if col < nd {
+                            pressure_columns[row][col]
+                        } else {
+                            -model.c[row * nt + col - nd]
+                        }
+                    })
+                    .collect();
+                for (row, value) in solve.apply(&rhs)?.into_iter().enumerate() {
+                    flow_columns[row][col] = value;
                 }
             }
-        }
+            for i in 0..n {
+                if gate.is_requested() {
+                    return Err(AcousticRealizeError::Cancelled);
+                }
+                for j in 0..n {
+                    for k in 0..p {
+                        let input = if i < nd {
+                            -original.terminal_input_columns[k][i]
+                        } else {
+                            model.b[(i - nd) * p + k]
+                        };
+                        generator[i * n + j] += input * flow_columns[k][j];
+                    }
+                }
+            }
+            (flow_columns, vec![0.0; p], Vec::new())
+        } else {
+            let mut inputs = vec![vec![0.0; n]; p];
+            let mut constraints = pressure_columns.clone();
+            for k in 0..p {
+                for i in 0..nd {
+                    inputs[k][i] = -original.terminal_input_columns[k][i];
+                }
+                for i in 0..nt {
+                    inputs[k][nd + i] = model.b[i * p + k];
+                    constraints[k][nd + i] = -model.c[k * nt + i];
+                }
+            }
+            let retained =
+                zero_direct::eliminate(&generator, &inputs, &constraints, &inlet_column, gate)?;
+            generator = retained.generator;
+            inlet_column = retained.inlet_column;
+            (
+                retained.flow_columns,
+                retained.inlet_flow_factors,
+                retained.constraints,
+            )
+        };
         let mut load_pressure_columns = vec![vec![0.0; n]; p];
         for i in 0..p {
             for j in 0..n {
@@ -141,6 +179,8 @@ impl DgPortLoad {
         }
         if generator
             .iter()
+            .chain(&inlet_column)
+            .chain(&inlet_flow_factors)
             .chain(flow_columns.iter().flatten())
             .chain(load_pressure_columns.iter().flatten())
             .any(|v| !v.is_finite())
@@ -151,6 +191,9 @@ impl DgPortLoad {
         }
         Ok(Some(DgContinuousTerminal {
             generator,
+            inlet_column,
+            inlet_flow_factors,
+            constraints,
             extra_scales,
             ports,
             flow_columns,
@@ -164,6 +207,10 @@ impl DgPortLoad {
 pub(crate) struct DgTerminalTrajectory {
     pub pressure_impulse_pa_s: f64,
     pub load_pressure_impulse_pa_s: f64,
+    /// Original pressure-row norm times the exact interval coordinate bound;
+    /// zero for direct closure. Keeps a zero-pressure constraint check scaled
+    /// by physical operators when both measured impulses vanish.
+    pub constraint_pressure_scale_pa_s: f64,
     pub outward_volume_m3: f64,
     pub port_work_j: f64,
     pub load_work_j: f64,
@@ -233,13 +280,15 @@ impl DgPortLoad {
         for (&id, data) in self.terminal_ports().iter().zip(terminals) {
             let residual = data.port_work_j - data.load_work_j;
             let work_scale = data.port_work_j.abs() + data.load_work_j.abs();
-            let pressure_scale =
-                data.pressure_impulse_pa_s.abs() + data.load_pressure_impulse_pa_s.abs();
+            let pressure_scale = data.pressure_impulse_pa_s.abs()
+                + data.load_pressure_impulse_pa_s.abs()
+                + data.constraint_pressure_scale_pa_s;
             let flow = data.outward_volume_m3 / dt;
             let pressure = data.pressure_impulse_pa_s / dt;
-            if ![residual, work_scale, pressure_scale, flow, pressure]
-                .iter()
-                .all(|v| v.is_finite())
+            if data.constraint_pressure_scale_pa_s < 0.0
+                || ![residual, work_scale, pressure_scale, flow, pressure]
+                    .iter()
+                    .all(|v| v.is_finite())
                 || residual.abs() > absolute_tolerance_j + relative_tolerance * work_scale
                 || (data.pressure_impulse_pa_s - data.load_pressure_impulse_pa_s).abs()
                     > 1e-10 * pressure_scale.max(1e-300)

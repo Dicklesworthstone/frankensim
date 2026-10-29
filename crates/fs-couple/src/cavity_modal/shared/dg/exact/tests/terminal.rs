@@ -270,24 +270,27 @@ fn original_rlc_storage_and_heat_independently_close_work_with_real_wall_memory(
     assert_eq!(coarse.cavity().network().material_memory(), memory);
 }
 
-#[test]
-fn strictly_proper_terminal_refuses_instantaneous_elimination_without_invented_storage() {
-    let gate = CancelGate::new_clock_free();
-    // Original held-flow mean coupling has a valid nonzero dynamic impedance,
-    // but its zero instantaneous D requires a descriptor-system treatment.
-    let rate = 48000;
+fn strictly_proper_load(rate: u32, pressure_release: bool) -> DgPortLoad {
     let dt = 1.0 / f64::from(rate);
     let (gas, _) = source();
     let zc = gas.density * gas.sound_speed / (core::f64::consts::PI * 0.001_f64.powi(2));
-    // Same admitted strictly proper primitive as the harmonic owner test:
-    // Z(s)=Zc*3000/(s+3000), with a genuinely zero instantaneous D.
+    // A parallel acoustic compliance/resistance: Z(s)=k/(s+a), D=0.
+    // Its original rational coordinate obeys z'=-a*z+U, p=k*z.
     let source = MimoModel {
         ports: 1,
-        poles: vec![PoleTerm::Real {
-            pole: -3000.0,
-            residue: 0.0,
-        }],
-        residues: vec![vec![C64::from_re(zc * 3000.0)]],
+        poles: if pressure_release {
+            vec![]
+        } else {
+            vec![PoleTerm::Real {
+                pole: -3000.0,
+                residue: 0.0,
+            }]
+        },
+        residues: if pressure_release {
+            vec![]
+        } else {
+            vec![vec![C64::from_re(zc * 3000.0)]]
+        },
         d: vec![0.0],
         e: vec![0.0],
         reciprocal: true,
@@ -304,10 +307,145 @@ fn strictly_proper_terminal_refuses_instantaneous_elimination_without_invented_s
     )
     .unwrap();
     let original = terminated_load(rate, false, 0.02 * zc);
-    let load =
-        DgPortLoad::new_with_terminal(original.duct().clone(), dt, 1e-10, 256, terminal).unwrap();
-    let mean = cavity(rate, false, 1e6)
-        .with_downstream_duct(load, &gate)
-        .unwrap();
-    assert!(mean.with_exact_evolution(budget(), &gate).is_err());
+    DgPortLoad::new_with_terminal(original.duct().clone(), dt, 1e-10, 256, terminal).unwrap()
+}
+fn strictly_proper(rate: u32, pressure_release: bool) -> SharedCavityDg {
+    let gate = CancelGate::new_clock_free();
+    cavity(rate, false, 1e6)
+        .with_exact_downstream_duct(
+            strictly_proper_load(rate, pressure_release),
+            budget(),
+            &gate,
+        )
+        .unwrap()
+}
+fn rc_energy_heat(system: &SharedCavityDg) -> (f64, f64) {
+    let terminal = system.load().terminal().unwrap();
+    let k = terminal.source_model().residues[0][0].re;
+    let z = terminal.pole_states()[0].re;
+    (0.5 * k * z * z, 3000.0 * k * z * z)
+}
+
+#[test]
+fn strictly_proper_terminal_keeps_original_states_work_and_clock_partitions() {
+    let gate = CancelGate::new_clock_free();
+    let rate = 24000;
+    let mut whole = strictly_proper(rate, false);
+    let mut halves = strictly_proper(2 * rate, false);
+    let mut quarters = strictly_proper(4 * rate, false);
+    let mut fine = strictly_proper(64 * rate, false);
+    let initial = whole.stored_energy_j().unwrap();
+    let (mut work, mut heat, mut authored, mut ordinary_loss) = (0.0, 0.0, 0.0, 0.0);
+    for _ in 0..24 {
+        let frame = whole.step(&[0.001], 0.1, &gate).unwrap().clone();
+        for (system, count) in [(&mut halves, 2), (&mut quarters, 4)] {
+            let mut partitioned_work = 0.0;
+            for _ in 0..count {
+                partitioned_work += system.step(&[0.001], 0.1, &gate).unwrap().terminal_work_j;
+            }
+            same_terminal(&whole, system);
+            close(frame.terminal_work_j, partitioned_work, 2e-15);
+        }
+        // Independent physical storage and Simpson heat use the authored RC
+        // law, not the terminal's generic signed-work bookkeeping.
+        let mut quadrature = rc_energy_heat(&fine).1;
+        for step in 1..=64 {
+            fine.step(&[0.001], 0.1, &gate).unwrap();
+            let weight = if step == 64 {
+                1.0
+            } else if step % 2 == 0 {
+                2.0
+            } else {
+                4.0
+            };
+            quadrature += weight * rc_energy_heat(&fine).1;
+        }
+        heat += quadrature / (3.0 * f64::from(64 * rate));
+        same_terminal(&whole, &fine);
+        let original = whole.load().last_terminal_frame().unwrap();
+        close(original.port_work_j, original.load_work_j, 1e-20);
+        assert!(frame.balance_residual_j.abs() <= frame.balance_tolerance_j);
+        work += frame.terminal_work_j;
+        authored += frame.authored_external_work_j;
+        ordinary_loss += frame.inferred_total_dissipation_j;
+    }
+    let terminal_energy = rc_energy_heat(&whole).0;
+    close(work, terminal_energy + heat, 2e-16);
+    close(
+        whole.stored_energy_j().unwrap() + terminal_energy + ordinary_loss + heat,
+        initial + authored,
+        2e-14,
+    );
+    assert!(terminal_energy > 0.0 && heat > 0.0);
+    assert_eq!(
+        whole
+            .load()
+            .terminal()
+            .unwrap()
+            .continuous_operator()
+            .dimension(),
+        1
+    );
+    // Failed/cancelled candidates retain every accepted modal, DG and rational
+    // coordinate and every original clock/ledger.
+    let accepted = whole.last_frame().unwrap().clone();
+    let duct = whole.load().state().clone();
+    let poles = whole.load().terminal().unwrap().pole_states().to_vec();
+    let mechanical = endpoint(&whole);
+    assert!(whole.step(&[1e20], 0.0, &gate).is_err());
+    let cancel = CancelGate::new_clock_free();
+    cancel.request();
+    assert!(whole.step(&[0.0], 0.0, &cancel).is_err());
+    assert_eq!(whole.last_frame().unwrap(), &accepted);
+    assert_eq!(whole.load().state(), &duct);
+    assert_eq!(whole.load().terminal().unwrap().pole_states(), poles);
+    assert_eq!(endpoint(&whole), mechanical);
+}
+
+#[test]
+fn pressure_release_terminal_has_zero_pressure_work_and_nonzero_flow() {
+    let gate = CancelGate::new_clock_free();
+    let mut whole = strictly_proper(24000, true);
+    let mut quarters = strictly_proper(96000, true);
+    let mut maximum_flow = 0.0_f64;
+    for _ in 0..24 {
+        let frame = whole.step(&[0.001], 0.1, &gate).unwrap().clone();
+        for _ in 0..4 {
+            quarters.step(&[0.001], 0.1, &gate).unwrap();
+        }
+        same_terminal(&whole, &quarters);
+        let terminal = whole.load().last_terminal_frame().unwrap();
+        maximum_flow = maximum_flow.max(terminal.outward_flow_m3_s.abs());
+        close(terminal.mean_pressure_pa, 0.0, 1e-8);
+        close(terminal.load_work_j, 0.0, 1e-20);
+        close(terminal.port_work_j, 0.0, 1e-20);
+        assert!(frame.balance_residual_j.abs() <= frame.balance_tolerance_j);
+        assert!(whole.load().terminal().unwrap().pole_states().is_empty());
+    }
+    assert!(maximum_flow > 1e-14);
+}
+
+#[test]
+fn zero_direct_rlc_terminal_retains_both_original_resonant_coordinates() {
+    let gate = CancelGate::new_clock_free();
+    let make = |rate| {
+        cavity(rate, false, 1e6)
+            .with_exact_downstream_duct(terminated_load(rate, false, 0.0), budget(), &gate)
+            .unwrap()
+    };
+    let mut whole = make(24000);
+    let mut halves = make(48000);
+    for _ in 0..32 {
+        let original = whole.step(&[0.001], 0.1, &gate).unwrap().clone();
+        let a = halves.step(&[0.001], 0.1, &gate).unwrap().terminal_work_j;
+        let b = halves.step(&[0.001], 0.1, &gate).unwrap().terminal_work_j;
+        same_terminal(&whole, &halves);
+        close(original.terminal_work_j, a + b, 2e-15);
+        assert!(original.balance_residual_j.abs() <= original.balance_tolerance_j);
+    }
+    let original = whole.load().terminal().unwrap();
+    assert_eq!(original.continuous_operator().dimension(), 2);
+    assert_eq!(original.source_model().d, [0.0]);
+    assert!(original.pole_states()[0].re.abs() > 0.0);
+    assert!(original.pole_states()[0].im.abs() > 0.0);
 }
