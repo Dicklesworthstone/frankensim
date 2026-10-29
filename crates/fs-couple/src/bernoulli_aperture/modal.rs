@@ -112,6 +112,7 @@ pub struct ModalAperture {
     samples: u64,
     material_plates: Vec<material::MaterialModalPlate>,
     material_solid: Option<solid::MaterialModalSolid>,
+    hereditary_solid: Option<solid::HereditaryModalSolid>,
     pressure_ports: [Option<pressure::MaterialPressurePort>; 2],
     material_gas: Option<fs_material::gas::GasState>,
     viscous_slit: Option<super::viscous::ViscousSlit>,
@@ -250,6 +251,7 @@ impl ModalAperture {
             samples: 0,
             material_plates: Vec::new(),
             material_solid: None,
+            hereditary_solid: None,
             pressure_ports: [None, None],
             material_gas: None,
             viscous_slit: None,
@@ -388,6 +390,9 @@ impl ModalAperture {
         }
         for plate in &self.material_plates {
             plate.validate_state(state, self.closure.is_none())?;
+        }
+        if let Some(solid) = &self.hereditary_solid {
+            solid.validate_state(state)?;
         }
         if let Some(closure) = &self.closure {
             closure.validate_state(state)?;

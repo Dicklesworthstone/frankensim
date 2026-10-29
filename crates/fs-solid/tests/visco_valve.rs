@@ -403,3 +403,6 @@ fn complete_material_image_keeps_source_admission_and_legacy_identity() {
             reduce_modal_pressure_loaded_valve(&req, &changed, &controls(), cx).unwrap().identity());
     });
 }
+
+#[path = "visco_valve/hereditary.rs"]
+mod hereditary;

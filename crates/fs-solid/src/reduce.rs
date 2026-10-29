@@ -536,6 +536,8 @@ struct PreparedValve<'a> {
     /// Equilibrium K for static compliance when the modal pencil is frozen K'(omega).
     static_stiffness: Option<&'a fs_sparse::Csr>,
     material_loss: Option<&'a visco::Projection<'a>>,
+    /// Preserve every selected shape before compatibility-card opening filtering.
+    complete_basis: bool,
 }
 
 struct ReducedValve {
@@ -593,7 +595,8 @@ fn reduce_valve_impl<M>(
     }
 
     validate_element_topology(request)?;
-    let thermal_tangent = prepared.as_ref().is_some_and(|p| p.material_loss.is_none());
+    let thermal_tangent = prepared.as_ref().is_some_and(|p| p.material_loss.is_none() && !p.complete_basis);
+    let retain_complete_material_basis = prepared.as_ref().is_some_and(|p| p.complete_basis);
     let prepared_pencil = prepared.is_some();
     let assembled;
     let (assembly, observation_nodes_m, static_stiffness, material_loss) = if let Some(prepared) = prepared {
@@ -648,7 +651,6 @@ fn reduce_valve_impl<M>(
         });
     }
 
-    let retain_complete_material_basis = material_loss.is_some_and(|p| p.complete_basis);
     let material_loss = material_loss
         .map(|projection| projection.project(&report.modes, cx))
         .transpose()?;

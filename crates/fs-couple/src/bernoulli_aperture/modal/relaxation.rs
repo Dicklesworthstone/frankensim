@@ -40,6 +40,8 @@ pub struct ModalRelaxation {
 }
 impl ModalRelaxation {
     /// Original reference Young moduli and branches, in plate/region order.
+    /// Empty for a tensor-solid image: its original tensor laws remain on
+    /// ModalAperture::hereditary_solid(), without a fabricated scalar spectrum.
     /// Orthotropic branches scale the whole original tensor proportionally.
     pub fn material_spectra(&self) -> &[Vec<GeneralizedMaxwell>] {
         &self.spectra
@@ -54,7 +56,7 @@ impl ModalRelaxation {
     pub fn memory_sqrt_j(&self) -> &[Vec<f64>] {
         &self.states
     }
-    /// Whether separate original regions retain full cross-mode memory.
+    /// Whether original regions or tensor-solid factors retain full cross-mode memory.
     pub fn is_regional(&self) -> bool { self.coupled_arms.is_some() }
     /// Full 3D material points, present only for exact tensor selection.
     /// Their source laws, normal constraints and histories remain observable.
@@ -67,15 +69,32 @@ impl ModalRelaxation {
         for point in &self.tensor_points { point.surface_strain(modes,memory)?; }
         Ok(())
     }
-    /// A regional channel's original physical-coordinate row c, in sqrt(N/m).
+    /// A coupled material channel's physical-coordinate row c, in sqrt(N/m).
     /// Its positive energy is `(c^T q - z)^2/2`; exact-zero rows are absent.
     pub fn regional_coupling_row(&self, channel: usize) -> Option<&[f64]> {
         self.coupled_arms.as_ref()?.get(channel).map(|arm| arm.coupling.as_slice())
     }
-    /// Relaxation time [s] of that original regional material channel.
+    /// Original source relaxation time [s] of that coupled material channel.
     pub fn regional_relaxation_time_s(&self, channel: usize) -> Option<f64> {
         self.coupled_arms.as_ref()?.get(channel).map(|arm| arm.relaxation_time_s)
     }
+    pub(super) fn from_coupled_tensor(
+        coupled_arms: Vec<super::exact::CoupledArm>,
+        modes: &[BladeState],
+        initial: InitialModalMemory,
+    ) -> Result<Self, AcousticRealizeError> {
+        let states = vec![coupled_arms.iter().map(|arm| match initial {
+            InitialModalMemory::Relaxed => arm.coupling.iter().zip(modes)
+                .map(|(c, mode)| c * mode.displacement_m).sum(),
+            InitialModalMemory::Unrelaxed => 0.0,
+        }).collect::<Vec<f64>>()];
+        if states[0].iter().any(|z| !z.is_finite()) {
+            return Err(invalid("initial tensor material memory is unrepresentable"));
+        }
+        Ok(Self { spectra: Vec::new(), initial, arms: Vec::new(), states,
+            coupled_arms: Some(coupled_arms), tensor_points: Vec::new() })
+    }
+
     pub(super) fn energy(&self, modes: &[BladeState], states: &[Vec<f64>]) -> f64 {
         if let Some(arms) = &self.coupled_arms {
             let memory = states.first().map_or(&[][..], Vec::as_slice);

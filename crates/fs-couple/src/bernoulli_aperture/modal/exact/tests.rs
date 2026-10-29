@@ -81,6 +81,20 @@ fn trajectory(
     time: f64,
 ) -> Vec<f64> {
     let n = old.len();
+    let mut c = vec![0.0; n*n];
+    for i in 0..n { c[i*n+i] = spec.modes[i].damping_n_s_m; }
+    trajectory_with_c(spec, &c, arms, old, memory, held, time)
+}
+fn trajectory_with_c(
+    spec: &ModalApertureSpec,
+    c: &[f64],
+    arms: &[CoupledArm],
+    old: &[BladeState],
+    memory: &[f64],
+    held: &[f64],
+    time: f64,
+) -> Vec<f64> {
+    let n = old.len();
     let size = 3 * n + arms.len();
     let mut a = vec![0.0; size * size];
     let mut x = vec![0.0; size];
@@ -91,7 +105,9 @@ fn trajectory(
         x[2 * n + i] = held[i];
         a[i * size + n + i] = 1.0 / mode.mass_kg;
         a[(n + i) * size + i] = -mode.stiffness_n_m;
-        a[(n + i) * size + n + i] = -mode.damping_n_s_m / mode.mass_kg;
+        for j in 0..n {
+            a[(n + i) * size + n + j] = -c[i*n+j] / spec.modes[j].mass_kg;
+        }
         a[(n + i) * size + 2 * n + i] = 1.0;
     }
     for (j, arm) in arms.iter().enumerate() {
@@ -398,4 +414,54 @@ fn g0_complete_memory_capacity_shape_and_empty_history_are_explicit() {
         near(a.mean_displacement[i], b.mean_displacement[i], 2e-10);
     }
     near(a.viscous_loss_j, b.viscous_loss_j, 2e-10);
+}
+
+#[test]
+fn g1_full_kelvin_and_tensor_memory_share_momentum_and_actual_heat() {
+    let mut spec = spec();
+    for mode in &mut spec.modes { mode.damping_n_s_m = 0.0; }
+    let c = [0.02, -0.008, -0.008, 0.013];
+    let arms = arms();
+    let old = initial();
+    let memory = vec![vec![3e-5, -1e-5]];
+    let held = [0.0015, -0.0008];
+    let dt = spec.time_step_s;
+    let exact = ExactModes::with_coupled_memory(&spec, &c, arms.clone()).unwrap();
+    let mut mean_velocity = vec![0.0; 2];
+    exact.free_velocity(&old, &held, dt, Some(&memory), &mut mean_velocity).unwrap();
+    let end = exact.endpoint(&old, &held, &mean_velocity, dt, Some(&memory));
+    let physical = trajectory_with_c(&spec, &c, &arms, &old, &memory[0], &held, dt);
+    for i in 0..2 {
+        near(end.state[i].displacement_m, physical[i], 2e-10);
+        near(end.state[i].velocity_m_s, physical[2+i]/spec.modes[i].mass_kg, 2e-10);
+        near(end.memory[0][i], physical[6+i], 2e-10);
+        let reaction = (0..2).map(|j| c[i*2+j]*mean_velocity[j]).sum::<f64>();
+        near(spec.modes[i].mass_kg*(end.state[i].velocity_m_s-old[i].velocity_m_s)/dt,
+            held[i]-spec.modes[i].stiffness_n_m*end.mean_displacement[i]
+                -reaction-end.relaxation_force_n[i], 2e-10);
+    }
+    // Independent physical trajectory quadrature; neither loss is a residual.
+    let panels = 128;
+    let mut viscous = 0.0;
+    let mut relaxation = 0.0;
+    for k in 0..=panels {
+        let x = trajectory_with_c(&spec, &c, &arms, &old, &memory[0], &held,
+            dt*k as f64/panels as f64);
+        let weight = if k == 0 || k == panels { 1.0 } else if k%2 == 0 { 2.0 } else { 4.0 };
+        let v = [x[2]/spec.modes[0].mass_kg, x[3]/spec.modes[1].mass_kg];
+        viscous += weight*(v[0]*(c[0]*v[0]+c[1]*v[1])+v[1]*(c[2]*v[0]+c[3]*v[1]));
+        for (j, arm) in arms.iter().enumerate() {
+            let elastic = arm.coupling.iter().zip(&x).map(|(a,q)| a*q).sum::<f64>()-x[6+j];
+            relaxation += weight*elastic*elastic/arm.relaxation_time_s;
+        }
+    }
+    let scale = dt/(3*panels) as f64;
+    near(end.viscous_loss_j, viscous*scale, 2e-8);
+    near(end.relaxation_loss_j, relaxation*scale, 2e-8);
+    assert!(end.viscous_loss_j > 0.0 && end.relaxation_loss_j > 0.0);
+    let work = held.iter().zip(&end.state).zip(&old)
+        .map(|((f,new),old)| f*(new.displacement_m-old.displacement_m)).sum::<f64>();
+    near(energy(&spec,&arms,&old,&memory[0])+work,
+        energy(&spec,&arms,&end.state,&end.memory[0])+end.viscous_loss_j+end.relaxation_loss_j,
+        2e-10);
 }

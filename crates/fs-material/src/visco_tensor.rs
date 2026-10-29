@@ -205,6 +205,10 @@ impl TensorProny {
     pub fn equilibrium_mandel(&self) -> &Tangent6 {
         &self.c_eq
     }
+    /// Original Frobenius-norm ceiling on the small-strain tensor.
+    /// Infinite when the frequency-domain constructor supplied no strain cap.
+    pub const fn maximum_strain_norm(&self) -> f64 { self.strain_limit }
+
     /// Virgin zero-strain, relaxed history. No state can be rebound to another law.
     pub fn history(&self) -> TensorPronyHistory {
         TensorPronyHistory {

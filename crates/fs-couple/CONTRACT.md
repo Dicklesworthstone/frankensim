@@ -4280,6 +4280,39 @@ cancellation refusal. The reduction remains a frozen material image with one
 effective mean slit; this does not add spatial solid contact, evolving material
 memory or broadband accuracy beyond its original admission.
 
+### Hereditary tetrahedral material aperture resonance
+
+`ModalAperture::from_hereditary_material_solid` consumes the complete
+equilibrium-mode `HereditaryModalValve` in the same existing aperture,
+pressure/contact transaction and exact structural propagator. Original
+tensor-Prony times and coupled factor rows become actual `ModalRelaxation`
+states; the complete Kelvin matrix is present in that SAME exact block.
+No source mode is divided by mean opening, and no frequency-frozen C or
+independent damping ratio replaces hereditary loss. Pressure, optional nodal
+forces, swept volume and `solid_nodal_motion` use the source's one
+q=sqrt(total_mass)*x coordinate map.
+
+Explicit relaxed/unrelaxed initialization selects the original Maxwell
+viscous deformation, including its initial recoverable energy. The existing
+exact owner independently integrates Kelvin and Maxwell heat along the
+actual trajectory and returns their restoring reactions to the same momentum
+and work equations. Failed trials publish neither motion nor memory.
+The source remains available through `hereditary_solid()`; scalar plate
+spectra are empty because the original tensor laws remain on that source.
+
+All channels must fit the existing exact-state capacity. Every active source
+time requires dt/tau<=2, and the complete instantaneous frequency must satisfy
+the caller's angular-step ceiling in (0,pi). Original material strain limits
+are checked at initial and candidate endpoints. These checks do not establish
+within-sample strain bounds, arbitrary forcing-band validity, nonlinear
+contact accuracy, modal/spatial convergence or thermally evolving material.
+Heat reports total constitutive dissipation, without invented per-element deposition.
+
+Regressions cover relaxed/unrelaxed storage, full-C plus tensor-memory
+momentum and independent power integrals, original material stress/history,
+dark-mode excitation, free decay, held-force sample subdivision, work-conjugate
+nodal observation and transactional clock/strain/cancellation refusals.
+
 ### Semidefinite modal reed viscosity
 
 `ModalAperture::with_viscosity` admits passive relative-motion losses with a

@@ -100,7 +100,17 @@ impl ExactModes {
         for (i, mode) in spec.modes.iter().enumerate() {
             c[i * n + i] = mode.damping_n_s_m;
         }
-        let block = CoupledModes::with_memory(spec, &c, Some(arms))?;
+        Self::with_coupled_memory(spec, &c, arms)
+    }
+
+    /// Full Kelvin matrix and full Maxwell memory share one physical block.
+    /// C is the complete viscosity, including any admitted diagonal entries.
+    pub(super) fn with_coupled_memory(
+        spec: &ModalApertureSpec,
+        c: &[f64],
+        arms: Vec<CoupledArm>,
+    ) -> Result<Self, AcousticRealizeError> {
+        let block = CoupledModes::with_memory(spec, c, Some(arms))?;
         Self::from_maps(spec, ModeMaps::Coupled(block), Vec::new())
     }
 

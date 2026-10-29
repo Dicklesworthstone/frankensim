@@ -1918,6 +1918,42 @@ pressure-carrying mode in an anisotropic two-coordinate tetrahedron, full-C
 work against the original element assembly, virtual-work reciprocity, legacy
 refusal, source-dispersion admission and cancellation.
 
+### Hereditary complete material valve modes
+
+`reduce::visco::reduce_hereditary_pressure_loaded_valve` exports a separate
+`HereditaryModalValve` from the original equilibrium pencil. It retains all
+selected mass-normalized modes, including zero-opening modes, their signed
+pressure/force observations, original tetrahedral laws and complete Kelvin C.
+The same `ViscoElements::project_basis` supplies every quadrature strain map,
+physical volume and tensor-Prony factor. This path does not freeze storage or
+loss at a reference frequency, use modal loss ratios, or loosen the legacy
+frozen/independent-mode admission.
+
+Physical coordinates satisfy q=sqrt(total_mass)*x. Explicit projection and
+factor-work caps apply before workspaces are allocated. The projected mass
+and equilibrium stiffness must match the original modal pencil within the
+caller-declared basis error. DC and the conservative complete instantaneous
+frequency bound must lie in the original material bands.
+
+Bit-identical relaxation times share one existing Householder-QR row reduction.
+Column equilibration and original Gram reconstruction preserve all coupled and
+weak physical directions without a relative rank cutoff. At most n channels
+remain per distinct source time, independent of the number of mesh points.
+This is energy/work/heat equivalent for wholly relaxed or unrelaxed initial
+histories driven by the same retained coordinates; arbitrary independently
+authored quadrature memories and per-element heat reconstruction are not
+provided. Original material strain limits and maps remain attached and bound
+into image identity. A conservative Mandel-norm bound admits ordinary runtime endpoints in O(n);
+near a limit the original quadrature maps decide. Endpoint strain admission
+is not an interval enclosure.
+Source/modal/spatial convergence and sampled coupling accuracy remain separate.
+
+Regressions compare full frequency-dependent matrices with the original
+sparse material assembly, and compact-channel stress, energy, work and heat
+with the original tensor history under signed shear ramps and holds. They
+also cover strong dispersion refused by a frozen fit, dark modes, very weak
+loss directions, source bands and explicit capacity refusals.
+
 ## Source tetrahedra projected into full-memory structural dynamics
 
 `linear3::visco::ViscoElements::project_basis` projects an explicit displacement

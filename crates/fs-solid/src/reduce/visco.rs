@@ -35,6 +35,9 @@ use fs_sparse::Csr;
 
 /// Complete source-bound modal images, retaining nonproportional loss.
 pub mod modal;
+/// Equilibrium-mode images with the original tensor-Prony internal histories.
+pub mod hereditary;
+pub use hereditary::{HereditaryModalValve, HereditaryValveControls, reduce_hereditary_pressure_loaded_valve};
 pub use modal::{MaterialModalValve, ModalStaticCompliance, reduce_modal_pressure_loaded_valve};
 
 /// Explicit finite-dimensional accuracy and allocation policies. No default
@@ -226,6 +229,7 @@ fn reduce_material(
             observation_nodes_m: request.nodes_m,
             static_stiffness: Some(&equilibrium.real),
             material_loss: Some(&projection),
+            complete_basis,
         }),
     )?;
     Ok((system, reduced))

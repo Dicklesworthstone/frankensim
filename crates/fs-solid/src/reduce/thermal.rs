@@ -264,6 +264,7 @@ pub fn reduce_pressure_loaded_valve(
             observation_nodes_m: &observation_nodes_m,
             static_stiffness: None,
             material_loss: None,
+            complete_basis: false,
         }),
     )?;
     let mut identity =

@@ -5,6 +5,10 @@
 //! force and displacement map receives the same sqrt(M_total) factor.
 //! No mode is normalized by its mean opening and no cross-mode loss is dropped.
 
+/// Original hereditary tensor-solid images through the same aperture owner.
+pub mod hereditary;
+pub use hereditary::{HereditaryModalSolid, HereditarySolidOptions};
+
 use super::{ApertureMode, ModalAperture, ModalApertureSpec, invalid, nonlinear};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::paired::{BladePropagator, BladeState, PairedApertureLimits};
@@ -199,12 +203,16 @@ impl ModalAperture {
         &self,
         gate: &CancelGate,
     ) -> Result<(Vec<[f64; 3]>, Vec<[f64; 3]>), AcousticRealizeError> {
-        let solid = self
-            .material_solid
-            .as_ref()
-            .ok_or_else(|| invalid("modal aperture has no original solid image"))?;
         let displacement: Vec<_> = self.state.iter().map(|s| s.displacement_m).collect();
         let velocity: Vec<_> = self.state.iter().map(|s| s.velocity_m_s).collect();
+        if let Some(solid) = &self.hereditary_solid {
+            return Ok((
+                solid.expand_nodal(&displacement, gate)?,
+                solid.expand_nodal(&velocity, gate)?,
+            ));
+        }
+        let solid = self.material_solid.as_ref()
+            .ok_or_else(|| invalid("modal aperture has no original solid image"))?;
         Ok((
             solid.expand_nodal(&displacement, gate)?,
             solid.expand_nodal(&velocity, gate)?,

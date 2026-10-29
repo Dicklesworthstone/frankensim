@@ -319,3 +319,6 @@ fn material_adapter_requires_all_states_and_preserves_cancellation() {
         Err(fs_couple::acoustic_realize::AcousticRealizeError::Cancelled)
     ));
 }
+
+#[path = "material_modal_valve/hereditary.rs"]
+mod hereditary;
