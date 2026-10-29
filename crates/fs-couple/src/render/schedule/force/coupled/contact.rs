@@ -453,3 +453,6 @@ pub mod capillary;
 
 /// Joint sourced normal adhesion and real-junction shear on native modal bodies.
 pub mod adhesive_dmt;
+
+/// Event-resolved sourced junction friction on the original free modal bodies.
+pub mod adhesive_events;

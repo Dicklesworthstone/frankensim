@@ -11462,3 +11462,32 @@ source-strain checks, full viscosity and hereditary material states; failed
 contact, source-domain or cancellation checks publish no state. This is
 small-displacement surface contact, not resolved moving-channel gas flow.
 Native `solid_closure spatial` data and the Lab starter select this exact owner.
+
+## Native event-resolved adhesive stopping and restart
+
+`contact::adhesive_events::AdhesiveEventModalSystem` applies the original
+sourced DMT junction events to actual mass-normalized free body coordinates.
+A complete fixed tangent column supplies the reciprocal force and exact
+effective mass. Both friction impulse and its first time moment propagate
+original positions and velocities, preserving common and uncontacted motion.
+The original event owner selects actual stops, static support, area-dependent
+breakaway and reversals; a native velocity tolerance never selects sticking.
+
+An independent impulse integral supplies friction's actual work on the native
+bodies and is checked against the original nonnegative junction loss. The
+body subsystem records this signed boundary work. Prescribed normal work is
+retained separately in the combined signed surface-energy account. Zero net
+slip cannot erase positive friction loss or its effect on body position.
+
+Preallocated candidates use the original modal state budgets and joint
+publication methods. Body states, contact history, sample clock, native work
+account and observation publish together only after source, compatibility,
+work, energy and cancellation checks. Refused trials preserve accepted state
+for deterministic retry. Runtime body propagation is linear in the retained
+mode count and allocates no new state buffers.
+
+This path admits sample-zero networks of unconnected free coordinates with
+zero acoustic transfers and no material memory or radiation. Normal approach
+is prescribed linearly within a sample. Elastic networks, normal inertia,
+arbitrary vector slip, changing frames and thermal deposition require their
+own trajectory/transfer owners and are not inferred by this adapter.
