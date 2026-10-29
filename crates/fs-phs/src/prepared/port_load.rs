@@ -1,7 +1,53 @@
 //! Parallel impedance loading through the existing lossless port interconnection.
 use crate::{PhsError, PortHamiltonian, Storage, interconnect};
 
+// Constitutive callbacks are immutable. All evolving memory stays in x.
+struct SharedStorage(std::rc::Rc<dyn Storage>);
+impl Storage for SharedStorage {
+    fn shared_clone(&self) -> Option<Box<dyn Storage>> {
+        Some(Box::new(Self(self.0.clone())))
+    }
+    fn hamiltonian(&self, x: &[f64]) -> f64 { self.0.hamiltonian(x) }
+    fn gradient(&self, x: &[f64], out: &mut [f64]) { self.0.gradient(x, out); }
+    fn quadratic_part(&self) -> Option<crate::linear_exact::QuadraticPart> {
+        self.0.quadratic_part()
+    }
+    fn exact_quadratic_matrix(&self) -> Option<&[f64]> { self.0.exact_quadratic_matrix() }
+    fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
+        self.0.midpoint_energy_remainder(a, b, mid)
+    }
+}
+
 impl PortHamiltonian {
+    /// Read-only constitutive law. Physical histories belong to the explicit x.
+    #[must_use]
+    pub fn storage(&self) -> &dyn Storage { self.storage.as_ref() }
+
+    /// Cold-copy J/R/G while sharing the original immutable storage callbacks.
+    ///
+    /// This permits transactional preparation of a joint owner without moving
+    /// or resetting its source's accepted state. Every callback, including the
+    /// stable nonlinear energy remainder, is delegated unchanged. There is no
+    /// approximation or inferred quadratic law. Allocations occur here only;
+    /// shared callbacks retain the original owner's allocation behavior.
+    ///
+    /// Storage must obey its existing read-only trial contract. The caller owns
+    /// state synchronization and a single accepted clock; this shares no x.
+    #[must_use]
+    pub fn share_storage(&mut self) -> Self {
+        let j = self.j.clone();
+        let r = self.r.clone();
+        let g = self.g.clone();
+        if let Some(storage)=self.storage.shared_clone() {
+            return Self { n:self.n, m:self.m, j, r, g, storage };
+        }
+        let original = core::mem::replace(&mut self.storage,
+            Box::new(crate::QuadraticStorage { n: 0, q: Vec::new() }));
+        let shared: std::rc::Rc<dyn Storage> = std::rc::Rc::from(original);
+        self.storage = Box::new(SharedStorage(shared.clone()));
+        Self { n:self.n, m:self.m, j, r, g, storage:Box::new(SharedStorage(shared)) }
+    }
+
     /// Cold-append storage coordinates without moving any original state or
     /// external port. Their structure rows begin at zero; a caller-supplied
     /// dissipative port may evolve them inside the SAME discrete-gradient step.
@@ -114,6 +160,32 @@ impl PortHamiltonian {
 mod tests {
     use super::*;
     use crate::{QuadraticStorage, modal_bank_ports, step};
+    #[test]
+    fn repeated_cold_sharing_preserves_the_complete_storage_without_wrapper_growth() {
+        let mut source=crate::mass_spring_damper(2.0,7.0,0.3).unwrap()
+            .with_relaxation_branches(vec![crate::RelaxationBranch {
+                projection:vec![1.0,0.0],stiffness:3.0,relaxation_time_s:0.2,
+            }]).unwrap();
+        let x=[0.25,-0.1,0.03];let next=[0.24,-0.09,0.031];
+        let mid:Vec<_>=x.iter().zip(next).map(|(a,b)|f64::midpoint(*a,b)).collect();
+        let energy=source.hamiltonian(&x);let effort=source.effort(&x);
+        let remainder=source.storage().midpoint_energy_remainder(&x,&next,&mid);
+        let quadratic=source.storage().quadratic_part().unwrap();
+        let first=source.share_storage();
+        let identity=core::ptr::from_ref(source.storage()).cast::<()>().addr();
+        for _ in 0..1024 {
+            let copy=source.share_storage();
+            assert_eq!(core::ptr::from_ref(source.storage()).cast::<()>().addr(),identity);
+            assert_eq!(copy.structure(),source.structure());
+            assert_eq!(copy.hamiltonian(&x),energy);assert_eq!(copy.effort(&x),effort);
+            assert_eq!(copy.storage().midpoint_energy_remainder(&x,&next,&mid),remainder);
+            let q=copy.storage().quadratic_part().unwrap();
+            assert_eq!(q.exact,quadratic.exact);assert_eq!(q.matrix,quadratic.matrix);
+        }
+        let a=step(&source,&x,&[0.1],0.001).unwrap();
+        let b=step(&first,&x,&[0.1],0.001).unwrap();
+        assert_eq!(a.x,b.x);assert_eq!(a.dissipated,b.dissipated);assert_eq!(a.supplied,b.supplied);
+    }
     fn host() -> PortHamiltonian {
         // Two free unit inertias, with arbitrary positions and velocities.
         PortHamiltonian::new(4,2,

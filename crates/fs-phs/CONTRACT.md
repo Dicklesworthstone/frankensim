@@ -839,3 +839,23 @@ The authored exact-flow regression checks exponential decay of a nonzero
 uncoupled history, unchanged mechanical coordinates, independently integrated
 heat and the original energy balance. Native execution remains unverified for
 this increment.
+
+## Immutable constitutive sharing for transactional preparation
+
+`PortHamiltonian::share_storage` copies the original J/R/G matrices during cold
+preparation and shares its immutable constitutive callbacks. Evolving physical
+history remains in the caller's explicit state vector. Hamiltonian, gradient,
+declared quadratic data and stable nonlinear energy remainder are delegated
+unchanged; this neither approximates the law nor infers a quadratic model.
+`storage` exposes the original read-only law. The optional `Storage::shared_clone`
+hook lets the internal sharing wrapper duplicate its handle without nesting
+another callback wrapper on every cache preparation. Other storage owners keep
+the default and require no implementation change. Read-only trial semantics and
+accepted-state synchronization remain the caller's responsibility.
+
+The focused `prepared::port_load` regression makes 1,024 cold copies of an
+original oscillator with Maxwell memory and checks stable wrapper identity,
+complete J/R/G, energy, effort, quadratic data, nonlinear-remainder delegation
+and actual step/heat/work equivalence. Existing physical load-port regressions
+remain unchanged. This is a composition and numerical-cache reuse seam, not a
+new state integrator, threading guarantee or measured performance certificate.

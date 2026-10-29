@@ -535,7 +535,8 @@ band refuses with a typed `TimeResolution` error; nothing is retuned.
 | --- | --- | --- |
 | KC string (`realize_coupled_kc`) and nonlinear plate (`thin_plate::VkBody`) through fs-phs `step_render` | Exact ZOH when the storage is exactly quadratic, otherwise Gonzalez midpoint | Midpoint admits only the one-cent band on the split's pole-rate bound and refuses with `TimeResolution` |
 | Dirac joins (`realize_dirac_join` / `step_descriptor`) | Gonzalez midpoint | One-cent band on the descriptor pole-rate bound; typed `TimeResolution` refusal |
-| Glottis fold island, PlateBank cavity held-flow island, coupled ODE chains, blown and reed ODEs, brass lip held-force island, plate-cavity transformer | Exact ZOH (fs-phs `linear_exact`) | No warping; nonlinear forces are held over the step |
+| Glottis fold island, coupled ODE chains, blown and reed ODEs, brass lip held-force island, plate-cavity transformer | Exact ZOH (fs-phs `linear_exact`) | No warping; nonlinear forces are held over the step |
+| PlateBank complete body/material/cavity/exterior state | Prepared full exact ZOH for quadratic storage, otherwise Gonzalez midpoint | Reciprocal loads share one accepted solve; the original nonlinear pole-rate band and complete-state capacity apply |
 | TsDriver speaker coil/cone/panel | Full coupled exact ZOH | Held voltage, independently integrated current/work/loss; dense reference step, not an allocation-free callback |
 | ImpactSystem | Gonzalez midpoint | One-cent band on the complete retained block (modal stiffness, volume-spring dyads and resistance), typed `ImpactError::TimeResolution`; the per-mode 0.9*pi guard remains a separate validity check |
 | ModalAperture, uniform condensation, and Dynamic/PairedAperture with `BladePropagator::Midpoint` | Midpoint response | One-cent band (pole-rate bound times dt <= 0.04, DEF-04) refuses at construction and at every step; the material-modal adapter additionally caps its caller's bound at 1 |
@@ -11365,3 +11366,56 @@ work, numerical energy uncertainty, and atomic refusal/retry. The six existing
 planar/axisymmetric native tests also pass. The new path retains the original
 symmetric two-dimensional, connected, contact-line-dominated liquid regime;
 it does not resolve bulk liquid motion, pinch-off or thermal deposition.
+
+### Reciprocal PlateBank evolution with complete material and acoustic history
+
+`thin_plate::PlateBank::advance_controlled` composes the original compact-body
+mass, signed force and volume projections, optional full nonlinear `VkBody`,
+uniform-pressure Helmholtz cavity and declared exterior loads into the existing
+`PreparedVkBody` owner. It retains every material and acoustic coordinate, full
+modal damping and nonlinear potential. The original exact quadratic or Gonzalez
+equation owns the single accepted step; this adapter introduces no integrator.
+`PlateBankStep` reports interval-mean compact pressure, endpoint volume flow,
+complete storage change, physical input work and total physical dissipation.
+The total includes acoustic loss and must not be deposited again as solid heat.
+
+Positive surface area denotes outward motion. Cavity input is `-sum(A_i v_i)`;
+its pressure reaction is `+A_i p`. Exterior input is `+sum(A_i v_i)` with the
+opposite mechanical pressure reaction. Each exchange uses the same signed map
+in both directions, independently of the external point-force projection.
+Modes harvested from one plate carry producer-owned face identity and share
+ONE uniform-piston history, preserving cross-mode loading. Equal face areas
+alone do not identify a shared face; separate faces remain independent loads.
+The complete original Vk material/load history is retained without reattaching
+or duplicating its existing loads. Automatic exterior attachment applies to the
+bank's compact faces; Vk exterior loading remains explicit in its original API.
+
+Continuous piston attachment starts from explicitly quiescent acoustic history
+and refuses migration from sampled digital filters. The original fit window
+is retained, each active structural frequency must be in that source band, and
+the source's pointwise/global sampled fit limits apply unchanged. Gas and face
+definitions stay pinned. A finer numerical clock reuses the same continuous
+source and complete accepted history; a coarser-than-declared clock refuses.
+Repeated same-source attachment cannot reset history. Independent changes to
+public body coefficients, topology or accepted mirrors refuse after preparation.
+Solver, invalid observation and late cancellation publish no physical state.
+
+Preparation and changed clocks allocate the existing numerical caches; fixed
+clocks reuse them. Immutable constitutive sharing preserves stable nonlinear
+energy callbacks and does not add wrapper depth on repeated preparation. The
+existing dense exponential capacity bounds the COMPLETE joint state (126
+coordinates for this single-force adapter); no history or mode is truncated to
+fit. A bare bank of independent compact oscillators retains its O(mode-count)
+scalar exact path without that dense capacity. Assembly dispatch declares bank
+radiation lazily, so paths selecting another physical owner do not prepare an
+unused bank model. This does not migrate those other renderers' own loading.
+
+Focused G0/G1/G3/G4 native regressions compare joint motion, Maxwell history,
+cavity exchange, external work and heat with independent physical equations;
+exercise nonlinear time refinement, signed projections, shared-face loading,
+clock subdivision and atomic refusal; and retain the large bare-bank path.
+The sharing seam also preserves complete storage and step results across 1,024
+cold copies. Full workspace Cargo/DSR qualification remains blocked by the
+unavailable constellation siblings. No measured real-time performance, spatial
+cavity standing waves, mutual radiation between separate faces, or continuum
+frequency-error certificate is claimed by this adapter.

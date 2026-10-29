@@ -220,23 +220,35 @@ fn retained_reaction_must_match_the_observer_gas_and_clock() {
 fn retained_piston_load_keeps_its_gas_clock_and_memory() {
     let gas = air();
     let other = GasState::try_new_moist_air(293.15, 202_650.0, 0.0).unwrap();
-    let mut bank = fs_couple::thin_plate::PlateBank::default();
-    bank.linear.push(CompactBody::from_radiator(RadiatingPlate {
-        area_m2: 0.01, mass_kg: 0.1, frequency_hz: 220.0, damping_ratio: 0.001,
-    }).unwrap());
-    bank.attach_radiation_loads(&gas, 48_000).unwrap();
+    let make = || {
+        let mut bank = fs_couple::thin_plate::PlateBank::default();
+        bank.linear.push(CompactBody::from_radiator(RadiatingPlate {
+            area_m2: 0.01, mass_kg: 0.1, frequency_hz: 220.0, damping_ratio: 0.001,
+        }).unwrap());
+        bank.attach_radiation_loads(&gas, 48_000).unwrap();
+        bank
+    };
+    let mut bank = make();
+    let mut reference = make();
     let dt = 48_000.0_f64.recip();
-    for _ in 0..19 { bank.linear[0].drive(1.0, dt).unwrap(); }
-    let mut original = bank.linear[0].clone();
+    for _ in 0..19 {
+        bank.advance_controlled(1.0, dt, gas.density, 1.0, || false).unwrap();
+        reference.advance_controlled(1.0, dt, gas.density, 1.0, || false).unwrap();
+    }
     assert!(bank.attach_radiation_loads(&other, 48_000).is_err());
     assert!(bank.attach_radiation_loads(&gas, 96_000).is_err());
-    assert!(bank.linear[0].drive(0.0, dt*0.5).is_err());
     bank.attach_radiation_loads(&gas, 48_000).unwrap();
-    for _ in 0..200 {
-        assert_eq!(bank.linear[0].drive(0.0, dt).unwrap().to_bits(),
-            original.drive(0.0, dt).unwrap().to_bits());
+    for _ in 0..20 {
+        let full = bank.advance_controlled(0.0, dt, gas.density, 1.0, || false).unwrap();
+        let first = reference.advance_controlled(0.0, dt*0.5, gas.density, 1.0, || false).unwrap();
+        let second = reference.advance_controlled(0.0, dt*0.5, gas.density, 1.0, || false).unwrap();
+        let scale = full.volume_velocity_m3_s.abs().max(1e-12);
+        assert!((full.volume_velocity_m3_s-second.volume_velocity_m3_s).abs() < 1e-10*scale);
+        let heat = first.work.dissipated+second.work.dissipated;
+        assert!((full.work.dissipated-heat).abs() < 1e-10*heat.max(1e-18));
     }
-    assert_eq!(bank.linear[0].volume_velocity(), original.volume_velocity());
+    assert!((bank.stored_energy_j()-reference.stored_energy_j()).abs()
+        < 1e-10*bank.stored_energy_j());
 }
 
 #[test]

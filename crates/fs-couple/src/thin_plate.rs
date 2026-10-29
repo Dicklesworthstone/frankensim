@@ -70,6 +70,9 @@ pub struct CompactBody {
     v: f64,
     // Physical face area, independent of modal normalization and cancellation.
     piston_area_m2: f64,
+    // Producer-owned identity: modes harvested from one physical face share
+    // one uniform-piston volume-flow load. Equal areas never imply identity.
+    piston_face: Option<std::sync::Arc<()>>,
     rad: Option<PistonLoad>,
 }
 
@@ -111,7 +114,7 @@ impl CompactBody {
             });
         }
         Ok(Self { area_m2:area, mass_kg:1.0, drive_participation:drive,
-            omega, zeta:0.0, y:0.0, v:0.0, piston_area_m2:face_area, rad:None })
+            omega, zeta:0.0, y:0.0, v:0.0, piston_area_m2:face_area, piston_face:None, rad:None })
     }
     /// From a caller-supplied compact monopole.
     ///
@@ -136,6 +139,7 @@ impl CompactBody {
             y: 0.0,
             v: 0.0,
             piston_area_m2: spec.area_m2,
+            piston_face: None,
             rad: None,
         })
     }
@@ -322,9 +326,11 @@ impl CompactBody {
 }
 
 mod cavity;
+mod bank;
 mod piston;
 mod prepared;
 mod radiation;
+pub use bank::{PlateBank, PlateBankStep};
 pub use piston::{BaffledPistonRadiation, PistonRadiationFit};
 pub use cavity::{VkCavityInitial, VkCavityLoad, VkCavityObservation};
 pub use prepared::{PreparedVkBody, PreparedVkStep};
@@ -789,127 +795,6 @@ fn odd_odd_modes(n: usize) -> Vec<fs_nlmodal::SineMode> {
     out
 }
 
-/// Optional flow-driven Helmholtz volume facing the plate monopoles.
-struct PlateCavity {
-    sys: fs_phs::PortHamiltonian,
-    linear: fs_phs::linear_exact::LinearSplit,
-    x: Vec<f64>,
-}
-
-/// Linear compact radiators plus an optional von Karman pHS.
-#[derive(Default)]
-pub struct PlateBank {
-    /// Linear modal monopoles.
-    pub linear: Vec<CompactBody>,
-    /// Von Karman plate, if requested.
-    pub vk: Option<VkBody>,
-    /// Lumped Helmholtz volume, if the assembly declared one.
-    cavity: Option<PlateCavity>,
-}
-
-impl PlateBank {
-    /// True when nothing will radiate or load the waveguide.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.linear.is_empty() && self.vk.is_none()
-    }
-
-    /// Volume velocity of every radiator.
-    #[must_use]
-    pub fn volume_velocity(&self) -> f64 {
-        let linear: f64 = self.linear.iter().map(CompactBody::volume_velocity).sum();
-        linear + self.vk.as_ref().map_or(0.0, VkBody::volume_velocity)
-    }
-
-    /// Drive every radiator and sum compact-monopole pressures.
-    pub fn drive_and_radiate(
-        &mut self,
-        force_n: f64,
-        dt: f64,
-        rho: f64,
-        listener_m: f64,
-    ) -> Result<f64, AcousticRealizeError> {
-        let u_vol = self.volume_velocity();
-        let p_cav = if let Some(cav) = self.cavity.as_mut() {
-            let rec = fs_phs::linear_exact::step_render(&cav.sys, &cav.linear, &cav.x, &[u_vol], dt)
-                .map_err(render_step_error)?;
-            cav.x = rec.x;
-            cav.sys.output(&cav.x)[0]
-        } else {
-            0.0
-        };
-        let mut p = 0.0;
-        for body in &mut self.linear {
-            let f_cav = p_cav * body.area_m2;
-            p += body.drive_and_radiate(
-                force_n * body.drive_participation + f_cav,
-                dt,
-                rho,
-                listener_m,
-            )?;
-        }
-        if let Some(vk) = &mut self.vk {
-            let a_vk: f64 = vk.areas.iter().sum();
-            p += vk
-                .drive_and_radiate(force_n + p_cav * a_vk, dt, rho, listener_m)?
-                .0;
-        }
-        Ok(p)
-    }
-
-    /// Face the bank with a flow-driven Helmholtz volume whose damper is the
-    /// declared outer end's compact radiation resistance plus the Bessel
-    /// neck loss, both at `ω₀` (DEF-09).
-    ///
-    /// # Errors
-    /// Non-physical cavity, a mouth beyond the compact fit, or pHS admission.
-    pub fn attach_cavity(
-        &mut self,
-        cavity: fs_scenario::HelmholtzCavity,
-        gas: &GasState,
-    ) -> Result<(), AcousticRealizeError> {
-        if !(cavity.volume_m3 > 0.0 && cavity.neck_radius_m > 0.0 && cavity.neck_length_m >= 0.0) {
-            return Err(AcousticRealizeError::InvalidDescription {
-                what: "Helmholtz cavity geometry must be physical",
-            });
-        }
-        let resistance = crate::cavity_modal::resonance_neck_resistance(&cavity, gas)?;
-        let sys = fs_phs::helmholtz_resonator_flow(
-            cavity.volume_m3,
-            cavity.neck_radius_m,
-            cavity.neck_length_m,
-            gas.density,
-            gas.sound_speed,
-            resistance,
-            crate::cavity_modal::neck_ends(&cavity),
-        )
-        .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-        self.cavity = Some(PlateCavity {
-            x: vec![0.0; sys.state_dim()],
-            linear: prepare_render_linear(&sys)?,
-            sys,
-        });
-        Ok(())
-    }
-
-    /// Fit a baffled-piston radiation impedance onto every linear
-    /// compact radiator. Refuses if impedance evaluation or identification fails.
-    ///
-    /// # Errors
-    /// Invalid piston parameters or a failed passive realization. Callers must
-    /// discard an assembly whose construction refuses.
-    pub fn attach_radiation_loads(
-        &mut self,
-        gas: &GasState,
-        sample_rate_hz: u32,
-    ) -> Result<(), AcousticRealizeError> {
-        for body in &mut self.linear {
-            body.attach_piston_load(gas, sample_rate_hz)?;
-        }
-        Ok(())
-    }
-}
-
 /// Certified compact radiators of a thin plate.
 ///
 /// # Errors
@@ -1060,8 +945,10 @@ fn harvest_radiators(
             what: "no usable plate radiators after harvesting",
         });
     }
+    let face = std::sync::Arc::new(());
     for (body, bending_zeta) in out.iter_mut().zip(bending_zetas) {
         body.zeta += bending_zeta;
+        body.piston_face = Some(face.clone());
     }
     Ok(out)
 }
@@ -1307,6 +1194,7 @@ impl PlateProjection {
             y: 0.0,
             v: 0.0,
             piston_area_m2: self.area,
+            piston_face: None,
             rad: None,
         })
     }

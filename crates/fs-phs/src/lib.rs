@@ -78,6 +78,12 @@ pub use zk::{
 /// Implementations supply ANALYTIC gradients; the discrete-gradient
 /// integrator turns them into exact discrete energy accounting.
 pub trait Storage {
+    /// Optional cold duplicate of an immutable shared law. This does not copy
+    /// an evolving state. The default asks the composition owner to establish
+    /// sharing once; wrappers return another handle to avoid nested callbacks
+    /// when numerical caches are prepared repeatedly.
+    fn shared_clone(&self) -> Option<Box<dyn Storage>> { None }
+
     /// `H(x)` — total stored energy, joules.
     fn hamiltonian(&self, x: &[f64]) -> f64;
     /// `grad H(x)` into `out` (efforts).

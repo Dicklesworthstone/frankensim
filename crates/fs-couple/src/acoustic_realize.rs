@@ -584,7 +584,7 @@ fn realize_assembly_inner(
             }
         });
     }
-    bodies.attach_radiation_loads(&gas, assembly.sample_rate_hz)?;
+    bodies.declare_radiation_loads(&gas, assembly.sample_rate_hz)?;
     let dirac_base = assembly.string.as_ref().is_some_and(|s| s.moving_end);
     let dirac_string_only = dirac_base && assembly.duct.is_none();
     let dirac_string_duct = dirac_base

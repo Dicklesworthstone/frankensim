@@ -14,7 +14,7 @@ use fs_couple::bowed_string::{
     Termination, cents_deviation, classify, gate_metrics, run_bowed, run_log_hash,
 };
 use fs_couple::stribeck_friction::StribeckFriction;
-use fs_couple::thin_plate::{CompactBody, PlateBank};
+use fs_couple::thin_plate::CompactBody;
 use fs_material::gas::{GasSpec, GasState};
 use fs_scenario::RadiatingPlate;
 
@@ -796,7 +796,7 @@ fn plate_one_port_refuses_invalid_listener_distance() {
 /// The declared gas loads the bridge body and sets its time of flight (.362;
 /// it used to scale only the listener conversion, with gas-invariant motion).
 /// - The run's body motion is the public gas-loaded body
-///   (`PlateBank::attach_radiation_loads`) driven by the run's own bridge
+///   (`CompactBody::attach_piston_load`) driven by the run's own bridge
 ///   force, bit for bit, in each gas. The string is unchanged: the bridge is
 ///   one-way.
 /// - The listener hears silence until the time of flight: the first sound
@@ -844,12 +844,9 @@ fn plate_one_port_body_carries_its_gas_load_and_time_of_flight() {
     let dt = 1.0 / f64::from(card().sample_rate_hz);
     for (gas, run) in gases.iter().zip(&runs) {
         assert_eq!(bits(&run.bridge_force_n), bits(&runs[0].bridge_force_n));
-        let mut bank = PlateBank::default();
-        bank.linear
-            .push(CompactBody::from_radiator(body_spec).expect("body spec admits"));
-        bank.attach_radiation_loads(gas, card().sample_rate_hz)
+        let mut body = CompactBody::from_radiator(body_spec).expect("body spec admits");
+        body.attach_piston_load(gas, card().sample_rate_hz)
             .expect("gas load admits");
-        let mut body = bank.linear.pop().unwrap();
         let volume: Vec<f64> = run
             .bridge_force_n
             .iter()
