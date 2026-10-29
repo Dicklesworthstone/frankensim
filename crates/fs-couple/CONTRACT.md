@@ -11442,3 +11442,23 @@ cold copies. Full workspace Cargo/DSR qualification remains blocked by the
 unavailable constellation siblings. No measured real-time performance, spatial
 cavity standing waves, mutual radiation between separate faces, or continuum
 frequency-error certificate is claimed by this adapter.
+
+### Material-solid surface contact in the shared aperture solve
+
+`ModalAperture::with_solid_surface_closure` maps each retained original solid
+mode onto declared exterior Tet4 faces using their signed outward normal.
+Original node clearances, area weights and physical boundary-edge lengths
+enter the same `ModalPlateClosure`, contact potential, dissipative contact and
+positive P1 slit-flow integral as plate valves. Zero-mean modes remain local
+gap coordinates. Reported opening and opening velocity use that same spatial
+trace. Pressure traction and swept-volume projections remain the original
+solid integrals; contact selection does not silently redefine pressure work.
+
+Geometry is prepared once on a cold source and admits parallel fixed-reference
+face normals only. Unsupported Tet10 traces, missing or repeated exterior
+faces, non-boundary slit edges, incomplete clearances, exhausted projection
+budgets and inadmissible penetration refuse. Every trial retains the original
+source-strain checks, full viscosity and hereditary material states; failed
+contact, source-domain or cancellation checks publish no state. This is
+small-displacement surface contact, not resolved moving-channel gas flow.
+Native `solid_closure spatial` data and the Lab starter select this exact owner.

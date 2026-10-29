@@ -385,6 +385,18 @@ the original constitutive memory. Point, projection, source-strain, temporal and
 exact-state limits remain active; refinement that exceeds them is refused.
 This tiny manufactured Tet4 specimen does not establish measured reed accuracy.
 
+The **Material reed — original solid surface contact** starter opens
+`solid-surface-dg.performance` with the same `solid-valve.matpack`.
+`solid_closure spatial` selects original exterior faces, physical boundary
+edges and independently declared nodal clearances. Every retained solid mode
+changes the local signed gap, even when its average opening is zero. The same
+native contact potential and positive P1 slit integral determine partial
+closure, reaction and flow; the original pressure-work map and hereditary
+material histories stay coupled to the bore and microphone. Change those
+source data to compare local contact without changing renderer code. The
+current geometry is fixed-reference Tet4 with parallel face normals; it does
+not resolve moving-channel gas flow or establish measured reed accuracy.
+
 The **Material reed — three-dimensional solid** starter opens
 `solid-dg.performance`. Build `solid-valve.matpack` from `solid-valve.tsv`
 and its manifest in the same material-modal example directory, then attach it.

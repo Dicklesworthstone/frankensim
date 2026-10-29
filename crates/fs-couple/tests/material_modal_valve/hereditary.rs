@@ -184,8 +184,8 @@ fn actual_hereditary_ringdown_activates_dark_mode_and_accounts_for_material_heat
     let mut dark_motion = 0.0_f64;
     for _ in 0..500 {
         let frame = model.step(zero_drive(), [0.; 2]).unwrap();
-        assert!(frame.dissipated_energy_j >= 0.);
-        heat += frame.dissipated_energy_j;
+        assert!(frame.aperture.dissipated_energy_j >= 0.);
+        heat += frame.aperture.dissipated_energy_j;
         dark_motion = dark_motion.max(model.modal_states()[dark].displacement_m.abs());
     }
     assert!(dark_motion > 1e-7);
@@ -227,11 +227,13 @@ fn held_force_response_and_both_loss_channels_are_sample_refinement_invariant() 
         loss[0] += coarse
             .step(zero_drive(), [0.0004, 0.])
             .unwrap()
+            .aperture
             .dissipated_energy_j;
         for _ in 0..2 {
             loss[1] += fine
                 .step(zero_drive(), [0.0004, 0.])
                 .unwrap()
+                .aperture
                 .dissipated_energy_j;
         }
     }

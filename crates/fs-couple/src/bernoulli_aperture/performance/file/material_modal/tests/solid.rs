@@ -1,5 +1,6 @@
 //! G1/G3: original tetrahedral material data drives the ordinary DG microphone.
 //! Manufactured geometry/laws do not establish measured instrument realism.
+mod surface;
 use super::*;
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::dg::loaded::performance::LoadedDgPerformance;

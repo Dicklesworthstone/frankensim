@@ -109,6 +109,7 @@ pub struct ModalAperture {
     obstacle: Obstacle,
     contact_storage: ContactStorage,
     closure: Option<closure::ModalPlateClosure>,
+    solid_closure: Option<solid::SolidSurfaceClosureSpec>,
     samples: u64,
     material_plates: Vec<material::MaterialModalPlate>,
     material_solid: Option<solid::MaterialModalSolid>,
@@ -248,6 +249,7 @@ impl ModalAperture {
             obstacle,
             contact_storage,
             closure: None,
+            solid_closure: None,
             samples: 0,
             material_plates: Vec::new(),
             material_solid: None,
@@ -774,11 +776,11 @@ impl ModalAperture {
             time_s: (self.samples + 1) as f64 * dt,
             state: ApertureState {
                 opening_m: next_gap,
-                opening_velocity_m_s: shape[..n]
-                    .iter()
-                    .zip(&next)
-                    .map(|(g, s)| g * s.velocity_m_s)
-                    .sum(),
+                opening_velocity_m_s: match &self.closure {
+                    Some(closure) => closure.state_gap_velocity(&next)?,
+                    None => shape[..n].iter().zip(&next)
+                        .map(|(g, s)| g * s.velocity_m_s).sum(),
+                },
             },
             midpoint_opening_m: opening,
             outgoing_pressure_pa: outgoing,

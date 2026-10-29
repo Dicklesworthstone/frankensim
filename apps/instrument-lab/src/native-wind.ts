@@ -15,6 +15,7 @@ import materialReedDgSource from "../../../crates/fs-couple/examples/material_mo
 import tensorReedDgSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-tensor-dg.performance?raw";
 import solidReedDgSource from "../../../crates/fs-couple/examples/material_modal_valve/solid-dg.performance?raw";
 import hereditarySolidReedSource from "../../../crates/fs-couple/examples/material_modal_valve/solid-hereditary-dg.performance?raw";
+import surfaceSolidReedSource from "../../../crates/fs-couple/examples/material_modal_valve/solid-surface-dg.performance?raw";
 import stringExampleSource from "../../../crates/fs-couple/examples/material_strings/pluck-and-bow.material-strings?raw";
 import nonlinearPreloadStringSource from "../../../crates/fs-couple/examples/material_strings/nonlinear-preload.material-strings?raw";
 import stoppedNonlinearStringSource from "../../../crates/fs-couple/examples/material_strings/nonlinear-stopped-preload.material-strings?raw";
@@ -157,6 +158,15 @@ const EXAMPLES = [
     decimate: true,
     intro: "Starter: the original tetrahedral solid retains its source-derived relaxation history while driving the same spatial bore and exterior microphone. Build and attach solid-valve.matpack using the material-modal source recipe, then edit its material properties, geometry, supports or loaded faces.",
     help: "solid_memory selects relaxed or unrelaxed initial material history and explicit projection budgets. Original tensor branches, source relaxation times, signed pressure work and every selected mode enter the existing exact structural solver. Source strain, clock and capacity limits remain active. This small manufactured soft solid does not establish measured cane or instrument accuracy.",
+  },
+  {
+    name: "material_modal_valve/solid-surface-dg.performance",
+    label: "Material reed — original solid surface contact",
+    renderer: "wind",
+    source: surfaceSolidReedSource,
+    decimate: true,
+    intro: "Starter: a three-dimensional material reed touches its lay along selected original solid faces. Build and attach solid-valve.matpack using the canonical source recipe, then change the material, local clearances or physical slit edges to hear their effect through the same bore and exterior microphone.",
+    help: "solid_closure spatial retains each original nodal normal displacement, including modes whose average opening is zero. Partial slit closure, contact forces and material memory enter the shared native solve. This path uses fixed reference Tet4 faces with parallel normals; it does not resolve a moving fluid channel or establish measured reed accuracy. Native decimation preserves the 96 kHz mechanics.",
   },
   {
     name: "material_modal_valve/solid-dg.performance",

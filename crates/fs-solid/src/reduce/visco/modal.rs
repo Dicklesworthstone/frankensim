@@ -35,6 +35,7 @@ pub struct ModalStaticCompliance {
 /// is provided. The legacy MaterialValve keeps its coupled-block refusal.
 pub struct MaterialModalValve {
     source: ViscoElements,
+    surface: Option<super::MaterialValveSurface>,
     modes: Vec<ModePair>,
     approximation: Approximation,
     pressure_projection: Vec<f64>,
@@ -51,6 +52,10 @@ pub struct MaterialModalValve {
 impl MaterialModalValve {
     pub fn source(&self) -> &ViscoElements {
         &self.source
+    }
+    /// Original exterior geometry; absent for unsupported higher-order traces.
+    pub fn surface_geometry(&self) -> Option<&super::MaterialValveSurface> {
+        self.surface.as_ref()
     }
     /// Original shapes in canonical free-DOF order; phi^T M phi = I.
     pub fn modes(&self) -> &[ModePair] {
@@ -206,6 +211,7 @@ pub fn reduce_modal_pressure_loaded_valve(
     cx: &Cx<'_>,
 ) -> Result<MaterialModalValve, ReduceError> {
     let (source, mut reduced) = reduce_material(request, nodal_load_per_pa_m2, controls, true, cx)?;
+    let surface = super::MaterialValveSurface::from_request(request, controls.assembly, cx)?;
     let modes = reduced
         .complete_material_modes
         .take()
@@ -292,6 +298,7 @@ pub fn reduce_modal_pressure_loaded_valve(
     poll(cx)?;
     Ok(MaterialModalValve {
         source,
+        surface,
         modes,
         approximation,
         pressure_projection,

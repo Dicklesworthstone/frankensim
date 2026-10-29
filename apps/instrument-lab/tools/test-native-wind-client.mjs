@@ -169,7 +169,7 @@ test("higher mechanical clocks request the original native decimator without mod
 test("canonical DG flute and reed atmosphere records reach the native packet unchanged", async () => {
   const connected = {...status, maximumAttachments:32, maximumAttachmentFileBytes:8388608,
     maximumAttachmentBytes:33554432, maximumRequestBytes:48000000};
-  for (const path of ["flue-dg-baffled.performance", "flue-dg-molecular.performance", "flue-dg-nolle-molecular.performance", "flue-dg-conical-molecular.performance", "material_modal_valve/paired-dg-chimney.performance", "material_modal_valve/paired-tensor-dg.performance", "material_modal_valve/solid-dg.performance", "material_modal_valve/solid-hereditary-dg.performance"]) {
+  for (const path of ["flue-dg-baffled.performance", "flue-dg-molecular.performance", "flue-dg-nolle-molecular.performance", "flue-dg-conical-molecular.performance", "material_modal_valve/paired-dg-chimney.performance", "material_modal_valve/paired-tensor-dg.performance", "material_modal_valve/solid-dg.performance", "material_modal_valve/solid-hereditary-dg.performance", "material_modal_valve/solid-surface-dg.performance"]) {
     const bytes = await readFile(new URL(`../../../crates/fs-couple/examples/${path}`, import.meta.url));
     const source = bytes.toString("utf8");
     if (path.endsWith("-molecular.performance")) {

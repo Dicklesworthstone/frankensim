@@ -2251,3 +2251,16 @@ advance no material history and construct no alternate elastic operator. They
 poll cancellation at source points and retain all accepted state on refusal.
 TET10 observes its admitted quadrature; unsampled spatial extrema and maxima
 between time samples remain separate accuracy obligations.
+
+## Original exterior geometry on material valve images
+
+Frozen and hereditary `MaterialModalValve` images retain one immutable
+`MaterialValveSurface` prepared from the original Tet4 nodes and exterior
+`TetLoadGeometry3` faces. Canonical node triples, physical face areas and
+outward normals use the original solid owner, including reversed tetrahedron
+winding. Preparation respects its existing cancellation and load budgets.
+No geometry is rebuilt during stepping and no material response is fitted.
+Tet10 images deliberately carry no P1 exterior surface: a consumer requiring
+that trace must refuse rather than invent midside geometry or interpolate an
+unqualified contact surface. Mechanical pressure and swept-volume maps retain
+their original ownership independently of a consumer's contact-face selection.

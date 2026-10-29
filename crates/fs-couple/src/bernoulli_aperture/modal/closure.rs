@@ -1,4 +1,4 @@
-//! Physical nodal lay/blade contact and slit flow on the retained DKT basis.
+//! Physical nodal surface contact and slit flow on original material modes.
 //!
 //! Every original displacement column participates in local gap and contact
 //! work, including modes with zero mean slit motion. The same interface owns
@@ -23,10 +23,10 @@ pub(crate) struct ClosureResponse {
     pub dissipated_power_w: f64,
 }
 
-/// One common planar interface attached to the original material modes.
+/// One fixed reference interface attached to the original material modes.
 /// Contact uses triangle area quadrature; flow integrates the positive P1 gap
 /// along each slit edge. Pressure faces and swept-volume projections remain
-/// those of the source plates. Independently meshed blades use the first blade's
+/// those of the source. Independently meshed blades use the first blade's
 /// interface quadrature and work-conjugate P1 traces in the same physical frame.
 /// This is a fixed small-slope basis, not changing pressure footprints or
 /// resolved moving-wall flow; source and interface refinement remain distinct.
@@ -125,10 +125,39 @@ impl ModalPlateClosure {
         shapes: Vec<Vec<f64>>,
         spec: PlateClosureSpec,
     ) -> Result<Self, AcousticRealizeError> {
+        let (weights, nodes) = contact_quadrature(mesh, &spec)?;
+        let edges = slit.iter().map(|&edge| {
+            let [a, b] = edge.map(|node| mesh.nodes[node]);
+            (edge, (a.0 - b.0).hypot(a.1 - b.1))
+        }).collect();
+        Self::from_traces(shapes, spec, weights, nodes, edges)
+    }
+
+    // Plate and volume-surface adapters provide their original physical area
+    // weights, complete signed nodal columns and actual slit edge lengths.
+    // The contact law, potential, secants and flow integration remain one owner.
+    pub(super) fn from_traces(
+        shapes: Vec<Vec<f64>>,
+        spec: PlateClosureSpec,
+        weights: Vec<f64>,
+        nodes: Vec<usize>,
+        edges: Vec<([usize; 2], f64)>,
+    ) -> Result<Self, AcousticRealizeError> {
         let modes = shapes.first().map_or(0, Vec::len);
         if modes == 0
             || modes > MAX_MODES
-            || shapes.len() != mesh.node_count()
+            || shapes.len() != spec.nodal_rest_gap_m.len()
+            || weights.len() != shapes.len()
+            || nodes.is_empty()
+            || nodes.len() > crate::unilateral_contact::distributed::MAX_APERTURE_CONTACT_POINTS
+            || nodes.iter().any(|&i| i >= shapes.len() || weights[i] <= 0.0)
+            || weights.iter().any(|v| !v.is_finite() || *v < 0.0)
+            || spec.nodal_rest_gap_m.iter().any(|v| !v.is_finite())
+            || !spec.max_penetration_m.is_finite() || spec.max_penetration_m <= 0.0
+            || spec.provenance.trim().is_empty()
+            || edges.is_empty() || edges.iter().any(|(edge, length)|
+                edge[0] >= shapes.len() || edge[1] >= shapes.len()
+                || edge[0] == edge[1] || !length.is_finite() || *length <= 0.0)
             || shapes
                 .iter()
                 .any(|s| s.len() != modes || s.iter().any(|x| !x.is_finite()))
@@ -137,7 +166,6 @@ impl ModalPlateClosure {
                 "modal contact requires complete finite original displacement columns",
             ));
         }
-        let (weights, nodes) = contact_quadrature(mesh, &spec)?;
         let mut rows = Vec::with_capacity(nodes.len() * modes);
         let mut gaps = Vec::with_capacity(nodes.len());
         let mut areas = Vec::with_capacity(nodes.len());
@@ -175,13 +203,6 @@ impl ModalPlateClosure {
         .map_err(nonlinear)?;
         let storage =
             ContactStorage::new(Box::new(ZeroStorage), modes, vec![law]).map_err(nonlinear)?;
-        let edges: Vec<_> = slit
-            .iter()
-            .map(|&edge| {
-                let [a, b] = edge.map(|node| mesh.nodes[node]);
-                (edge, (a.0 - b.0).hypot(a.1 - b.1))
-            })
-            .collect();
         let width_m: f64 = edges.iter().map(|(_, length)| length).sum();
         if !width_m.is_finite() || width_m <= 0.0 {
             return Err(invalid(
@@ -213,6 +234,8 @@ impl ModalPlateClosure {
     pub fn displacement_shapes(&self) -> &[Vec<f64>] {
         &self.shapes
     }
+    /// Sum of the original source slit-edge lengths [m].
+    pub const fn width_m(&self) -> f64 { self.width_m }
     fn validate_coordinates(&self, q: &[f64]) -> Result<(), AcousticRealizeError> {
         if q.len() != self.modes || q.iter().any(|x| !x.is_finite()) {
             return Err(invalid(
@@ -272,6 +295,21 @@ impl ModalPlateClosure {
             return Err(invalid("modal mean clearance overflowed"));
         }
         Ok(gap)
+    }
+    /// Time derivative of the same signed width-mean clearance. Rest gaps do
+    /// not participate; every local motion column does, even when absent from
+    /// the source's older scalar opening observation.
+    pub fn mean_gap_velocity_m_s(&self, velocity: &[f64]) -> Result<f64, AcousticRealizeError> {
+        self.validate_coordinates(velocity)?;
+        let local = |node: usize| self.shapes[node].iter().zip(velocity)
+            .map(|(shape, v)| shape*v).sum::<f64>();
+        let value = self.edges.iter().map(|&(edge, length)|
+            length*f64::midpoint(local(edge[0]), local(edge[1])))
+            .sum::<f64>() / self.width_m;
+        if !value.is_finite() {
+            return Err(invalid("modal mean clearance velocity overflowed"));
+        }
+        Ok(value)
     }
     /// Same analytic laminar/Bernoulli channel integral as the scalar and paired
     /// plate owners, evaluated on the actual P1 gap. Material gas supplies mu/rho.
@@ -350,6 +388,13 @@ impl ModalPlateClosure {
     pub(super) fn state_gap(&self, states: &[BladeState]) -> f64 {
         let q = displacements(states);
         self.mean_gap_m(&q[..self.modes]).unwrap_or(f64::NAN)
+    }
+    pub(super) fn state_gap_velocity(&self, states: &[BladeState])
+        -> Result<f64, AcousticRealizeError>
+    {
+        let mut velocity = [0.0; MAX_MODES];
+        for (out, state) in velocity.iter_mut().zip(states) { *out = state.velocity_m_s; }
+        self.mean_gap_velocity_m_s(&velocity[..self.modes])
     }
     pub(super) fn contact_step(
         &self,

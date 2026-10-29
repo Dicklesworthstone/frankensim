@@ -37,6 +37,9 @@ use fs_sparse::Csr;
 pub mod modal;
 /// Equilibrium-mode images with the original tensor-Prony internal histories.
 pub mod hereditary;
+/// Original exterior geometry for complete source-owned surface interactions.
+pub mod surface;
+pub use surface::MaterialValveSurface;
 pub use hereditary::{HereditaryModalValve, HereditaryValveControls, reduce_hereditary_pressure_loaded_valve};
 pub use modal::{MaterialModalValve, ModalStaticCompliance, reduce_modal_pressure_loaded_valve};
 

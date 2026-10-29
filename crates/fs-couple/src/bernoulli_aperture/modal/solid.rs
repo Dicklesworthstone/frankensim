@@ -8,6 +8,9 @@
 /// Original hereditary tensor-solid images through the same aperture owner.
 pub mod hereditary;
 pub use hereditary::{HereditaryModalSolid, HereditarySolidOptions};
+/// Original exterior-face contact and slit geometry on the same solid modes.
+pub mod surface;
+pub use surface::SolidSurfaceClosureSpec;
 
 use super::{ApertureMode, ModalAperture, ModalApertureSpec, invalid, nonlinear};
 use crate::acoustic_realize::AcousticRealizeError;

@@ -158,6 +158,66 @@ fn zero_drive() -> ApertureDrive {
 }
 
 #[test]
+fn g1_solid_surface_dark_motion_reaches_contact_and_refusal_preserves_the_original_state() {
+    use fs_couple::bernoulli_aperture::modal::solid::SolidSurfaceClosureSpec;
+    use fs_couple::bernoulli_aperture::plate::closure::PlateClosureSpec;
+    let build = |gate: &CancelGate| {
+        let source=image(false,true);
+        let face=source.surface_geometry().unwrap().faces().iter()
+            .position(|f|f.nodes==FACE).unwrap();
+        // The original consistent-mass basis need not contain an individually
+        // dark eigenvector. Construct the physical null-opening motion in its
+        // complete two-mode span without changing either original mode.
+        let opening=source.opening_projection_per_sqrt_kg();
+        assert_eq!(opening.len(),2);
+        let mut displacement=[-opening[1],opening[0]];
+        let row=source.source().equilibrium().free_dofs.iter().position(|d|*d==7).unwrap();
+        let normal_motion=source.modes().iter().zip(displacement)
+            .map(|(mode,q)|mode.phi[row]*q).sum::<f64>()
+            *source.total_mass_kg().sqrt()/3.0_f64.sqrt();
+        assert!(normal_motion.is_finite() && normal_motion!=0.0);
+        for q in &mut displacement { *q *= -0.0003/normal_motion; }
+        let mean=opening.iter().zip(displacement).map(|(g,q)|g*q).sum::<f64>();
+        let scale=opening.iter().zip(displacement).map(|(g,q)|(g*q).abs()).sum::<f64>();
+        assert!(mean.abs()<=64.0*f64::EPSILON*scale.max(1e-30));
+        let state=displacement.into_iter().map(|displacement_m|BladeState {
+            displacement_m,velocity_m_s:0.0,
+        }).collect();
+        let aperture=ModalAperture::from_material_solid(source,[Some(&FORCE),None],
+            gas(),options(1e-4),state,contact(),&CancelGate::new_clock_free()).unwrap();
+        aperture.with_solid_surface_closure(SolidSurfaceClosureSpec {
+            contact:PlateClosureSpec {nodal_rest_gap_m:vec![0.0001;4],lay_triangles:vec![face],
+                stiffness_pa_per_m_alpha:1e5,alpha:2.0,internal_loss_s_per_m:0.5,
+                provenance:"manufactured original solid surface contact".into(),max_penetration_m:0.001},
+            slit_edges:vec![[2,3]],opening_sign:1.0,max_projection_terms:10000,
+        },gate)
+    };
+    let gate=CancelGate::new_clock_free();
+    let mut actual=build(&gate).unwrap();
+    let mut expected=build(&gate).unwrap();
+    let coordinates:Vec<_>=actual.modal_states().iter().map(|s|s.displacement_m).collect();
+    let closure=actual.plate_closure().unwrap();
+    assert_eq!(closure.probe(&coordinates).unwrap().active_lay_points,1);
+    assert!(closure.open_area_m2(&coordinates).unwrap()>0.0,
+        "the positive part of a partly closed edge must remain open");
+    let old=actual.modal_states().to_vec();
+    let energy=actual.stored_energy_j();
+    assert!(actual.step(zero_drive(),[1e20,0.0]).is_err());
+    assert_eq!(actual.modal_states(),old);
+    assert_eq!(actual.stored_energy_j(),energy);
+    assert_eq!(actual.accepted_steps(),0);
+    let frame=actual.step(zero_drive(),[0.0;2]).unwrap();
+    assert!(frame.contact_force_n>0.0);
+    let (_,nodal_velocity)=actual.solid_nodal_motion(&gate).unwrap();
+    let actual_normal_velocity=(nodal_velocity[2].iter().sum::<f64>()
+        +nodal_velocity[3].iter().sum::<f64>())/(2.0*3.0_f64.sqrt());
+    close(frame.aperture.state.opening_velocity_m_s,actual_normal_velocity,1e-13);
+    assert_eq!(frame,expected.step(zero_drive(),[0.0;2]).unwrap());
+    gate.request();
+    assert!(matches!(build(&gate),Err(fs_couple::acoustic_realize::AcousticRealizeError::Cancelled)));
+}
+
+#[test]
 fn material_adapter_keeps_dark_ports_complete_c_and_source_virtual_work() {
     let source = image(true, true);
     let source_identity = source.identity();

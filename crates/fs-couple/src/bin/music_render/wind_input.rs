@@ -582,7 +582,24 @@ pub(super) fn material_modal_dg_provenance(
     } else {
         (String::new(), "original regional material plates, signed modal pressure/force projections and retained material memory coupled to the shared exact DG bore; flat DKT and finite-mode interface; nonlinear time and DG spatial convergence require separate refinement; no measured-instrument qualification")
     };
-    let source_json = format!("\"material_modal_dg_valve_input\":{{\"schema\":\"frankensim-material-modal-dg-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"mechanics_rate_hz\":{},\"pressure_point\":\"{pressure_point}\",\"material_sources\":[{materials}],\"structural_propagator\":\"exact-zoh\",\"dg_operator_identity\":\"{}\",\"length_m\":{:e},\"inlet_gas\":{inlet},\"outlet_gas\":{outlet},\"model_scope\":\"{model_scope}\"{structure}{observation}{radiation}{gas_sources}{solid_wall}{upstream}{relaxation_json}}}",
+    let surface_closure = match source.system().aperture() {
+        fs_couple::bernoulli_aperture::two_sided::LoadedAperture::Modal(valve) =>
+            valve.solid_surface_closure().map_or_else(String::new, |spec| {
+                let contact = &spec.contact;
+                let faces = contact.lay_triangles.iter().map(usize::to_string)
+                    .collect::<Vec<_>>().join(",");
+                let edges = spec.slit_edges.iter().map(|edge| format!("[{},{}]", edge[0], edge[1]))
+                    .collect::<Vec<_>>().join(",");
+                let gaps = contact.nodal_rest_gap_m.iter().map(|gap| format!("{gap:e}"))
+                    .collect::<Vec<_>>().join(",");
+                format!(",\"solid_surface_closure\":{{\"original_exterior_face_indices\":[{faces}],\"slit_edge_original_nodes\":[{edges}],\"opening_sign\":{:e},\"normal_convention\":\"gap = nodal_rest_gap + opening_sign * original_outward_normal dot original_nodal_displacement\",\"nodal_rest_gap_m\":[{gaps}],\"contact_law\":{{\"stiffness_pa_per_m_alpha\":{:e},\"alpha\":{:e},\"internal_loss_s_per_m\":{:e},\"max_penetration_m\":{:e},\"provenance\":{}}},\"scope\":\"fixed-reference Tet4 parallel-normal patches; original area-lumped contact and positive P1 slit integral on all retained modes; original pressure and swept-volume projections remain the shared conjugate work port; no resolved moving-channel flow\"}}",
+                    spec.opening_sign, contact.stiffness_pa_per_m_alpha, contact.alpha,
+                    contact.internal_loss_s_per_m, contact.max_penetration_m,
+                    json_string(&contact.provenance))
+            }),
+        _ => String::new(),
+    };
+    let source_json = format!("\"material_modal_dg_valve_input\":{{\"schema\":\"frankensim-material-modal-dg-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"mechanics_rate_hz\":{},\"pressure_point\":\"{pressure_point}\",\"material_sources\":[{materials}],\"structural_propagator\":\"exact-zoh\",\"dg_operator_identity\":\"{}\",\"length_m\":{:e},\"inlet_gas\":{inlet},\"outlet_gas\":{outlet},\"model_scope\":\"{model_scope}\"{structure}{surface_closure}{observation}{radiation}{gas_sources}{solid_wall}{upstream}{relaxation_json}}}",
         i.input_hash.to_hex(), i.blades, i.modes, i.nodes, i.triangles,
         i.mechanics_rate_hz, load.duct().operator_identity().to_hex(),
         load.duct().total_length());

@@ -43,6 +43,8 @@ use fs_solid::reduce::{
 };
 use std::sync::Arc;
 
+mod closure;
+
 /// One complete source selection at its original external material state.
 pub struct SolidValveMaterialRecord {
     section: usize,
@@ -92,6 +94,7 @@ pub(super) struct PreparedSolid {
     initial: Vec<BladeState>,
     force_per_n: Vec<[f64; 3]>,
     record: SolidValveRecord,
+    closure: Option<crate::bernoulli_aperture::modal::solid::SolidSurfaceClosureSpec>,
 }
 pub(super) enum SolidImage {
     Frozen(MaterialModalValve),
@@ -130,7 +133,7 @@ impl PreparedSolid {
         gate: &CancelGate,
     ) -> Result<(ModalAperture, SolidValveRecord), PlateValveInputError> {
         let force = [Some(self.force_per_n.as_slice()), None];
-        let valve = match self.image {
+        let mut valve = match self.image {
             SolidImage::Frozen(source) => ModalAperture::from_material_solid(
                 source,
                 force,
@@ -159,6 +162,10 @@ impl PreparedSolid {
             ),
         }
         .map_err(PlateValveInputError::Physics)?;
+        if let Some(closure) = self.closure {
+            valve = valve.with_solid_surface_closure(closure, gate)
+                .map_err(PlateValveInputError::Physics)?;
+        }
         Ok((valve, self.record))
     }
 }
@@ -642,6 +649,7 @@ pub(super) fn read(
             "valve rest gap must agree with the original three-dimensional opening geometry",
         ));
     }
+    let closure = closure::read(rows, &image, gate)?;
     checkpoint(gate)?;
     Ok(PreparedSolid {
         image,
@@ -651,5 +659,6 @@ pub(super) fn read(
             tetrahedra: tetrahedra.len(),
             materials: records,
         },
+        closure,
     })
 }

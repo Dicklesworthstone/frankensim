@@ -39,6 +39,7 @@ pub struct HereditaryValveControls {
 /// histories; arbitrary independently authored quadrature memories are absent.
 pub struct HereditaryModalValve {
     source: ViscoElements,
+    surface: Option<super::MaterialValveSurface>,
     modes: Vec<ModePair>,
     points: Vec<ProjectedTensorProny>,
     point_elements: Vec<usize>,
@@ -63,6 +64,10 @@ pub struct HereditaryModalValve {
 impl HereditaryModalValve {
     pub fn source(&self) -> &ViscoElements {
         &self.source
+    }
+    /// Original exterior geometry; absent for unsupported higher-order traces.
+    pub fn surface_geometry(&self) -> Option<&super::MaterialValveSurface> {
+        self.surface.as_ref()
     }
     /// Original shapes in canonical free-DOF order; phi^T M phi = I.
     pub fn modes(&self) -> &[ModePair] {
@@ -531,8 +536,10 @@ pub fn reduce_hereditary_pressure_loaded_valve(
         }
     }
     poll(cx)?;
+    let surface = super::MaterialValveSurface::from_request(request, controls.assembly, cx)?;
     Ok(HereditaryModalValve {
         source,
+        surface,
         modes,
         points,
         point_elements,

@@ -1038,8 +1038,58 @@ projected hereditary source, while modal/spatial refinement, sampled nonlinear
 coupling and within-sample strain extrema still require separate resolution.
 It does not reconstruct per-element heat deposition. Native volume geometry currently uses Tet4/P1
 surface pressure with mesh refinement; Tet10 input refuses instead of
-replacing its curved faces with linear loads. The gap contact is the existing
-effective mean-slit law; plate spatial closure, plate pressure traces,
-follower pressure and large-strain mechanics are not implied. Material
+replacing its curved faces with linear loads. Without an explicit solid surface
+closure, gap contact uses the existing effective mean-slit law. Plate spatial
+closure, plate pressure traces, follower pressure and large-strain mechanics
+are not implied. Material
 strain-domain checks operate on the original solid strain matrices.
+
+### Original solid surface contact and partial slit closure
+
+`solid-surface-dg.performance` retains the same source-derived hereditary solid,
+but its contact and flow gap use the original exterior triangle and both local
+nodal motions. Build the same `solid-valve.matpack` described above, then render
+this file through `music_render wind`. The fixture is a manufactured small
+soft-solid interface, not acquired cane or a qualified instrument specimen.
+
+An optional block follows the solid's `initial` states and precedes
+`source_forces`:
+
+```text
+solid_closure spatial OPENING_SIGN PRESSURE_STIFFNESS ALPHA LOSS MAX_PENETRATION MAX_PROJECTION_TERMS SOURCE
+solid_clearances ORIGINAL_VOLUME_NODE_COUNT
+solid_gap SIGNED_CLEARANCE_M
+solid_lay_faces COUNT
+solid_lay_face ORIGINAL_NODE_0 ORIGINAL_NODE_1 ORIGINAL_NODE_2
+solid_slit_edges COUNT
+solid_slit_edge ORIGINAL_NODE_0 ORIGINAL_NODE_1
+```
+
+Repeat gap, face and edge rows for their declared counts. `solid_closure none`
+explicitly keeps the original effective slit. Signed clearances describe the
+stationary opposing lay at every original volume node; only nodes on selected
+exterior faces carry contact. Negative clearance is declared interference,
+with its actual initial contact storage, not a hidden settling step.
+`OPENING_SIGN` is exactly +1 or -1 relative to the original outward normals.
+Selected faces must have parallel outward normals, and each slit edge must be
+a unique boundary edge of their original patch. Interior/invented faces,
+curved-normal patches, repeated edges, incomplete clearances, excessive local
+penetration and exhausted projection capacity refuse.
+
+The actual source face area divided among its three nodes supplies contact
+quadrature. Full nodal mode columns project displacement along the signed
+normal; their transpose returns every local reaction to the same modes.
+The existing shared contact potential, dissipation and nonlinear solver are
+reused. The slit integral includes the positive part of a partially closed
+P1 edge, and its total width comes from original three-dimensional edge
+lengths. A zero-mean mode can therefore close one location and open another.
+Original pressure/swept-volume projections, full viscosity and causal material
+histories stay attached and are counted once. Geometry is retained/prepared
+once, with no per-sample surface construction.
+
+This attachment works with both `solid_memory` and `solid_approximation`.
+It remains fixed-reference, small-displacement, area-lumped surface contact;
+curved contact normals, evolving/follower geometry, resolved moving-channel
+flow and source thermal evolution require their own physical extensions.
+Modal, surface quadrature, time and nonlinear refinement are still required.
 
