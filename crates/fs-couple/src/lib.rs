@@ -36,6 +36,8 @@ pub mod air_path;
 pub mod bakeoff;
 /// Source-owned shell resonances retaining the original complex BEM pressure equations.
 pub mod bem_loaded_modes;
+/// Prepared force participation and analytic gas/material pole derivatives.
+pub mod bem_pole_response;
 pub mod bernoulli_aperture;
 pub mod bowed_string;
 pub mod brass_loop;
