@@ -9,6 +9,9 @@
 //! No pressure work, phase change, moisture exchange or moving volume is added.
 
 use super::{PreparedVolumetricThermalTransport, ThermalTransportError};
+use crate::thermal::conduction::{
+    ConductivityCurve, LayerConductionConfig, LayerConductionResponse, TwoLayerConduction,
+};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_thermal::enthalpy::{
     CellId, DepositedCell, DepositionError, DepositionSimulation, ThermalLaw, ThermalLink,
@@ -297,6 +300,40 @@ impl<'l, 'p> FixedVolumeConductionLink<'l, 'p> {
         })
     }
 
+    /// Select quasi-steady, one-dimensional layers with temperature-dependent k.
+    ///
+    /// Each leg is homogeneous and internally source-free, with the selected
+    /// scalar conductivity aligned to heat flow. This declaration does not infer
+    /// isotropy, phase stability or spatial resolution from the source data.
+    /// Positive area is required. The original conductivity knots are copied once
+    /// into the shared layer kernel; no union-grid resampling changes their law.
+    /// Both prepared lines must cover the full endpoint temperature interval at
+    /// evaluation. Storage remains on the original fixed-volume caloric laws.
+    pub fn into_integrated_layers(
+        self,
+    ) -> Result<FixedVolumeLayerConduction<'l, 'p>, DepositionError> {
+        let [a, b] = self.laws.map(|law| {
+            ConductivityCurve::new(
+                law.path.source_lines()[1]
+                    .knots
+                    .iter()
+                    .map(|(temperature, answer)| [*temperature, answer.evidence.value.value])
+                    .collect(),
+            )
+        });
+        let conductivity = [a?, b?];
+        TwoLayerConduction::new(
+            [&conductivity[0], &conductivity[1]],
+            self.distances_m,
+            self.area_m2,
+            self.contact_resistance_m2_k_w,
+        )?;
+        Ok(FixedVolumeLayerConduction {
+            binding: self,
+            conductivity,
+        })
+    }
+
     #[must_use]
     pub const fn id(&self) -> u64 {
         self.id
@@ -310,6 +347,27 @@ impl<'l, 'p> FixedVolumeConductionLink<'l, 'p> {
         &self,
         state: &DepositionSimulation<'_>,
     ) -> Result<f64, DepositionError> {
+        let temperatures = self.temperatures_k(state)?;
+        let mut conductivity = [0.0; 2];
+        for (i, value) in conductivity.iter_mut().enumerate() {
+            *value = self.laws[i]
+                .path
+                .at_temperature(temperatures[i])
+                .map_err(|_| DepositionError::MaterialDomain)?
+                .conductivity_w_m_k();
+        }
+        series_contact_conductance_w_k(
+            self.area_m2,
+            self.distances_m,
+            conductivity,
+            self.contact_resistance_m2_k_w,
+        )
+    }
+
+    fn temperatures_k(
+        &self,
+        state: &DepositionSimulation<'_>,
+    ) -> Result<[f64; 2], DepositionError> {
         let link = state
             .links()
             .get(&self.id)
@@ -321,8 +379,8 @@ impl<'l, 'p> FixedVolumeConductionLink<'l, 'p> {
                 "sourced conduction interface geometry changed",
             ));
         }
-        let mut conductivity = [0.0; 2];
-        for (i, value) in conductivity.iter_mut().enumerate() {
+        let mut temperatures = [0.0; 2];
+        for (i, value) in temperatures.iter_mut().enumerate() {
             let cell = state
                 .cells()
                 .get(&self.cells[i])
@@ -335,19 +393,56 @@ impl<'l, 'p> FixedVolumeConductionLink<'l, 'p> {
                 ));
             }
             self.laws[i].admit_cell(cell)?;
-            let temperature = state.temperature_k(cell.id)?;
-            *value = self.laws[i]
-                .path
-                .at_temperature(temperature)
-                .map_err(|_| DepositionError::MaterialDomain)?
-                .conductivity_w_m_k();
+            *value = state.temperature_k(cell.id)?;
         }
-        series_contact_conductance_w_k(
-            self.area_m2,
-            self.distances_m,
-            conductivity,
-            self.contact_resistance_m2_k_w,
-        )
+        Ok(temperatures)
+    }
+}
+
+/// Integrated layer flux on the original fixed-volume timeline and source paths.
+///
+/// Preparation allocates only the two bounded conductivity charts. Successful
+/// evaluation allocates nothing, queries no material card and hashes no state.
+/// The shared layer solver owns its iteration bound, cancellation, interface
+/// temperatures, contact jump and endpoint derivatives. The existing timeline
+/// continues to own stored energy, time stepping and optional sensible entropy.
+#[derive(Clone, Debug)]
+pub struct FixedVolumeLayerConduction<'l, 'p> {
+    binding: FixedVolumeConductionLink<'l, 'p>,
+    conductivity: [ConductivityCurve; 2],
+}
+
+impl<'l, 'p> FixedVolumeLayerConduction<'l, 'p> {
+    #[must_use]
+    pub const fn id(&self) -> u64 {
+        self.binding.id
+    }
+
+    /// Original borrowed paths retain both caloric and conductivity receipts.
+    #[must_use]
+    pub fn source_paths(&self) -> [&'p PreparedVolumetricThermalTransport; 2] {
+        self.binding.laws.map(|law| law.path)
+    }
+
+    /// Evaluate the actual matching cells without publishing a timeline change.
+    /// Feed the returned secant conductance to the existing `StepCoefficients`
+    /// callback on each trial state; it is not the endpoint Newton derivative.
+    /// The separate derivatives and interface diagnostics remain in the result.
+    pub fn evaluate(
+        &self,
+        state: &DepositionSimulation<'_>,
+        config: LayerConductionConfig,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<LayerConductionResponse, DepositionError> {
+        checkpoint()?;
+        let temperatures = self.binding.temperatures_k(state)?;
+        TwoLayerConduction::new(
+            [&self.conductivity[0], &self.conductivity[1]],
+            self.binding.distances_m,
+            self.binding.area_m2,
+            self.binding.contact_resistance_m2_k_w,
+        )?
+        .evaluate(temperatures, config, checkpoint)
     }
 }
 
