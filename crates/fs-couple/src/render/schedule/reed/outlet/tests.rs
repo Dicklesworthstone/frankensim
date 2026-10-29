@@ -215,12 +215,14 @@ fn gas_changes_reach_physical_pressure_and_invalid_observation_retains_its_error
 
 #[test]
 fn open_tone_hole_radiates_to_listener_before_bell_without_changing_in_loop_state() {
+    // The hole goes between the fixture's two cylinders; the last keeps its regional gas suffix.
     let with_hole = SOURCE
         .replace(
-            "segments 2\ncylinder 0.0015 0.2\ngas mixture 293.15 100000 mole 3 N2 0.4 O2 0.2 CO2 0.4\ncylinder 0.0015 0.3",
+            "segments 2\ncylinder 0.0015 0.2\ncylinder 0.0015 0.3",
             "segments 3\ncylinder 0.0015 0.2\nhole 0.0010 0.004 0.0015 1\ncylinder 0.0015 0.3",
         )
         .replace(RECEIVER, &format!("{RECEIVER}\nobserver_law none"));
+    assert!(with_hole.contains("\nhole 0.0010 0.004 0.0015 1\n"), "the fixture's bore changed");
     let mut baffled = ReedPerformance::from_bytes(with_hole.as_bytes(), 1).unwrap();
     let mut legacy = ReedPerformance::from_bytes(
         with_hole.replace(RECEIVER, "listener_m 0.5").as_bytes(),

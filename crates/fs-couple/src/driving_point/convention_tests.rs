@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use fs_duct::{Duct, HoleState, LossModel, Segment, Termination, input_impedance_wall};
 use fs_fft::{C64 as FftC64, Fft};
-use fs_material::gas::{GasSpec, GasState};
+use fs_material::gas::{ConductivityModel, GasSpec, GasState};
 use fs_math::c64::C64;
 use fs_vfit::discretize::{DelayedFilter, reflectance};
 
@@ -413,9 +413,19 @@ fn impedance_line_closed_volume_compliance_low_band() {
     let t0 = Instant::now();
     // Adiabatic high-shear regime (gamma -> 1, r_v >= 1215) with radius = 0.05 m, f_s = 16 Hz,
     // n_fft = 256: on bins 1..=8 (0.0625..0.50 Hz) both (kL)^2 / 3 and 1 / r_v^2 are < 7e-7.
-    let mut gas = air20();
-    gas.gamma = 1.0 + 1.0e-9;
-    gas.dynamic_viscosity = 8.0e-10;
+    // One coherent state (the duct admits no hand-edited GasState): air's spec with gamma
+    // 1 + 1e-9 and its Sutherland viscosity scaled to 8e-10 Pa s at 293.15 K. Coherence
+    // makes cp = gamma R / (gamma - 1) ~ 2.9e11 J/(kg K); with air's conductivity fit,
+    // r_t = r_v sqrt(Pr) would reach 1.3e6 at 8 Hz, outside the certified Zwikker-Kosten
+    // domain. Eucken conductivity keeps Pr ~ 1, and (gamma - 1) F_t stays below 1e-11.
+    let air = GasSpec::dry_air_ussa1976();
+    let spec = GasSpec {
+        gamma: 1.0 + 1.0e-9,
+        sutherland_beta: air.sutherland_beta * 8.0e-10 / air20().dynamic_viscosity,
+        conductivity: ConductivityModel::Eucken,
+        ..air
+    };
+    let gas = GasState::try_new(&spec, 293.15, 101_325.0).expect("adiabatic high-shear air");
     let length_m = 0.02f64;
     let radius_m = 0.05f64;
     let sample_rate_hz = 16u32;
