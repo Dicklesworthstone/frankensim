@@ -444,7 +444,7 @@ fn fit_common_responses(
 ///
 /// # Errors
 /// [`VfError`] on empty, nonfinite or mis-shaped data, a zero order, too
-/// few samples, sigma collapse or an eigensolve failure.
+/// few samples, a non-finite fixed-sigma re-solve or an eigensolve failure.
 pub fn mimo_vector_fit(
     omega: &[f64],
     data: &[Vec<C64>],
@@ -645,10 +645,19 @@ fn relocate_shared(
         a[last * ncols + ncols - 1] += mean_wt;
     }
     rhs[nrows - 1] = mean_wt * omega.len() as f64;
-    let x = solve_ls_equilibrated(&mut a, nrows, ncols, &rhs);
-    let d_tilde = x[ncols - 1];
-    if d_tilde.abs() < 1.0e-12 {
-        return Err(VfError::SigmaCollapse);
+    let sample_rows = a[..(nrows - 1) * ncols].to_vec();
+    let mut x = solve_ls_equilibrated(&mut a, nrows, ncols, &rhs);
+    let mut d_tilde = x[ncols - 1];
+    let floor = 1.0e-12_f64;
+    if d_tilde.abs() < floor {
+        // Relaxed VF (Gustavsen 2006, as in vectfit3) does not use a vanishing
+        // sigma direct term: it solves the sample rows again without the
+        // relaxation row, with d_tilde fixed at the floor and its own sign.
+        d_tilde = floor.copysign(d_tilde);
+        x = fixed_sigma_direct(&sample_rows, nrows - 1, ncols, d_tilde);
+        if x.iter().any(|v| !v.is_finite()) {
+            return Err(VfError::SigmaCollapse);
+        }
     }
     let sigma = crate::model::RationalModel {
         terms: terms_with_residues(terms, &x[sigma0..sigma0 + order]),
@@ -675,6 +684,21 @@ fn relocate_shared(
     let next = conjugate_close(&zeros);
     let movement = pole_movement(terms, &next);
     Ok((next, movement))
+}
+
+/// The relaxed sample rows (`rows x ncols`, `d_tilde`'s column last) solved
+/// with `d_tilde` fixed: the other unknowns, then `d_tilde` itself.
+fn fixed_sigma_direct(sample_rows: &[f64], rows: usize, ncols: usize, d_tilde: f64) -> Vec<f64> {
+    let free = ncols - 1;
+    let mut a = vec![0.0f64; rows * free];
+    let mut rhs = vec![0.0f64; rows];
+    for r in 0..rows {
+        a[r * free..(r + 1) * free].copy_from_slice(&sample_rows[r * ncols..r * ncols + free]);
+        rhs[r] = -d_tilde * sample_rows[r * ncols + free];
+    }
+    let mut x = solve_ls_equilibrated(&mut a, rows, free, &rhs);
+    x.push(d_tilde);
+    x
 }
 
 /// Unconstrained residue pass for one response at fixed poles.
