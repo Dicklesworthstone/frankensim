@@ -15,6 +15,9 @@
 //! of the published coefficients, without a separate numerical datum shift.
 
 use crate::{MassSpecificEnergyQuantityV1, MassSpecificThermalQuantityV1};
+
+/// Independent original IF97 liquid/steam Gibbs and saturation formulations.
+pub mod if97;
 use core::fmt;
 use fs_math::det;
 use fs_qty::{Density, Pressure, Qty, Temperature};

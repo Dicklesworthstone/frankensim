@@ -1057,3 +1057,46 @@ References: Neufeld, Janzen and Aziz, J. Chem. Phys.57,1100-1102(1972),
 <https://doi.org/10.1063/1.1678363>;
 <https://cantera.org/3.2/cxx/d5/de4/GasTransport_8cpp_source.html>;
 <https://cantera.org/3.2/cxx/dd/d16/MixTransport_8cpp_source.html>.
+
+## Original IF97 compressed-liquid and steam source
+
+`water::if97` implements the original IAPWS industrial formulation in native
+Rust: Region 1 liquid, Region 2 vapor, Region 4 saturation and the B23 boundary.
+The source is the [IAPWS R7-97(2012) revised release](https://iapws.org/technical-guidance/release/IF97-Rev.download).
+The released coefficients and equations are attributed to IAPWS; this is a
+separate source from the existing SR1-86(1992) saturation formulation. They are
+never silently combined into one caloric chart.
+
+States retain typed pressure, temperature, density, specific volume, enthalpy,
+internal energy, entropy and Gibbs energy, together with Cp, Cv, sound speed and
+analytic thermodynamic derivatives. Admission follows the original regional
+bounds through 100 MPa and 1073.15 K. Region 3, Region 5 and the separate
+metastable-vapor formulation are absent. The source's 273.15–273.16 K extension
+includes the metastability explicitly described in the release; it does not
+establish stable liquid water against ice. Saturation pressure and temperature
+extend to the critical point, while paired Region 1/2 saturated calorics stop
+at 623.15 K. Original regional Gibbs mismatch is exposed, not repaired by
+shifting source caloric values. Canonical closed saturation and B23 endpoints
+are admitted without widening a regional domain by a tolerance band.
+
+`bounds::isobaric_heat_capacity_bound` proves a positive Cp enclosure over a
+caller-selected regional temperature interval using outward-rounded arithmetic
+and bounded adaptive subdivision. The result bounds the retained binary64
+coefficient model, not experimental uncertainty or source-fit error. It exposes
+the inverse-temperature slope bound and work count; unsupported paths, exhausted
+budgets and cancellation refuse explicitly.
+
+`increments::isobaric_difference` evaluates changes of h, s, v and u on one
+original-source isobar. Cached integer-power difference recurrences preserve the
+input temperature increment before subtracting reduced temperatures or large
+absolute caloric values. The first-law relation is delta_u=delta_h-p*delta_v.
+Both endpoints and the complete regional path are admitted; cancellation is
+polled and no foreign numerical runtime is used.
+
+The 17 focused tests cover published verification tables, independent
+thermodynamic derivative identities, density anomaly and Cv behavior, raw
+saturation Gibbs mismatch, closed source boundaries, whole-interval Cp bounds,
+adjacent-representable-temperature increments, independent Cp/Cp-over-T
+integrals, reversal, work refusal and cancellation. The merged native
+thermochem source suite passes all 156 tests. This does not claim validation of
+unsupported regions or a full-workspace Cargo/DSR build.
