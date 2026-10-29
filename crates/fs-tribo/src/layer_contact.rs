@@ -7,9 +7,10 @@
 //! return has a closed form; no velocity regularization or fitted spectrum is
 //! introduced. Work splits into delta(k |e|^2/2) + Y |dp| + c |dp|^2/dt.
 //!
-//! The contact must remain compressive. Opening, changes of tangent frame,
-//! geometry, wear and layer advection need
-//! their own state transfer; none may silently erase this stored shear energy.
+//! The contact must remain compressive. Opening, geometry, wear and layer
+//! advection need their own state transfer; none may silently erase this stored
+//! shear energy. Frame-only changes use `tangential::transport`, retaining both
+//! elastic and plastic vectors and the original constitutive owner.
 //! Thermal owners may use `continue_state` with an unchanged elastic potential,
 //! or `continue_state_with_work` when they account explicitly for coefficient
 //! work and the mechanical entropy. Neither operation resets accepted strain.
@@ -30,7 +31,7 @@ pub struct ThirdBodyLayerContact {
     maximum_elastic_slip_m: f64,
 }
 
-/// Accepted elastic and plastic slip in the original, unchanged tangent frame.
+/// Accepted elastic and plastic slip in the checkpoint's current tangent frame.
 /// The private owner binding prevents reusing stored strain with another law.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThirdBodyLayerState {
@@ -170,6 +171,21 @@ impl ThirdBodyLayerContact {
                 value: magnitude, minimum: 0.0, maximum: self.maximum_elastic_slip_m });
         }
         Ok(())
+    }
+}
+
+impl crate::tangential::transport::ObjectiveTangentialLaw for ThirdBodyLayerContact {
+    fn transport_state(&self, state: &Self::State,
+        rotation: crate::tangential::transport::TangentialHistoryRotation)
+        -> Result<Self::State, TriboError> {
+        if state.owner != *self {
+            return Err(TriboError::InvalidInput { field: "layer_checkpoint_owner" });
+        }
+        self.admit_elastic_slip(state.elastic_slip_m)?;
+        let elastic_slip_m = rotation.apply(state.elastic_slip_m)?;
+        let plastic_slip_m = rotation.apply(state.plastic_slip_m)?;
+        self.admit_elastic_slip(elastic_slip_m)?;
+        Ok(ThirdBodyLayerState { elastic_slip_m, plastic_slip_m, owner: state.owner.clone() })
     }
 }
 

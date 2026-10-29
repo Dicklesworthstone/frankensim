@@ -20,6 +20,9 @@ pub mod matrix;
 /// Simultaneous retained tangential contacts sharing one full body response.
 pub mod multiple;
 
+/// Objective transport of supported two-axis retained histories.
+pub mod transport;
+
 fn finite(value: f64, field: &'static str) -> Result<f64, TriboError> {
     crate::finite(value, field)?;
     Ok(value)
@@ -114,7 +117,7 @@ pub struct DryTangentialState {
 }
 
 impl DryTangentialState {
-    /// Accumulated solved slip in the caller's unchanged tangent frame [m].
+    /// Accumulated solved slip in the checkpoint's current tangent frame [m].
     #[must_use]
     pub const fn slip_m(&self) -> [f64; 2] {
         self.slip_m

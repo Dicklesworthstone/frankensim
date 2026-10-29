@@ -170,6 +170,35 @@ cross-contact recoil, globally feasible static reactions with kinetic rivals,
 mixed branches, separate tangent rotations/contact permutations, minimum-norm
 redundant rows, incompatible drives, full PSD refusal and atomic bounded retry.
 
+### Objective retained tangential history
+
+`tangential::transport::FramedTangentialState` ties the original constitutive
+checkpoint to its accepted `partial_slip::TangentFrame`. The optional
+`ObjectiveTangentialLaw` capability reuses that frame's existing minimum-normal
+rotation followed by caller-supplied common material spin. A tangent-gauge
+change only re-expresses coordinates. The common spin angle is distinct from
+relative torsional slip; neither a time interval nor a constitutive relaxation
+is inferred. Finite rotations follow the supplied normal path, including its
+geometric holonomy, so intermediate geometry and spin refinement belong to the
+mechanical owner. Antipodal normal changes require resolved intermediate frames.
+
+The native dry ladder and source card rotate accumulated slip and retain the
+optional thermal boundary. `ThirdBodyLayerContact` rotates both elastic and
+plastic vectors and keeps the original private law binding. No history reset,
+parameter continuation, source replacement, new work or heat occurs. Candidates
+must preserve finite nonnegative storage under explicit absolute and relative
+roundoff tolerances. Their signed storage residual remains visible for the
+coupled energy gate; it is never relabeled as heat. Refusal and bounded
+cancellation leave the accepted state and frame unchanged. Scalar Mindlin and
+other unsupported histories do not implement this capability.
+
+`tests/tangential_transport.rs` covers loaded gauge rebases, minimum-normal
+tilts, physical common spin, global rigid covariance, inverse and path
+composition, elastic/plastic norm and storage invariance, the original dry-card
+domain, post-transport nonlinear full-matrix continuation, and atomic refusal,
+cancellation and retry. This orientation transfer supplies no contact geometry,
+patch migration, wear, material advection or general three-dimensional plasticity.
+
 ### Exact Hertz sliding and spin wrench
 
 `sliding_patch::HertzSlidingPatch` evaluates the actual surface integral of

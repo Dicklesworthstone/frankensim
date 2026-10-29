@@ -280,7 +280,7 @@ impl TangentFrame {
     // followed by the caller's physical common spin about the current normal.
     // Gauge rotation is not material rotation. Construct one isometry for both
     // regions; projecting each shear separately would shorten stored springs.
-    fn history_rotation_from(
+    pub(crate) fn history_rotation_from(
         self,
         previous: Self,
         common_spin_angle_rad: f64,
