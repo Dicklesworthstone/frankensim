@@ -48,6 +48,38 @@ once per solve and reuse iteration scratch, retaining the original product/sum
 order. `nonlinear_battery` adds uniform exact-equivalence, mirrored nonuniform
 loading/local lift, and wash-vector/refusal tests. Existing goldens are unchanged.
 
+### Noncontracting alternating strip modes
+
+The nonlinear owner also detects two successive residual-vector reversals
+(angle greater than 120 degrees) without contraction in the Euclidean norm of
+the unrelaxed circulation mismatch. Shared scaling makes this comparison finite;
+an allowance of 64 machine epsilons recognizes a roundoff-level plateau. This
+allowance is exclusively a safeguard diagnostic and never changes the acceptance
+tolerance. The scalar relative residual alone cannot identify this defect: a
+two-cycle may alternate between large and small denominators, while a gradually
+growing negative mode may stay below the existing 25% scalar-growth threshold.
+
+On detection, the solver halves its current relaxation and reevaluates the same
+state. It uses the existing `OMEGA_MIN=0.02`, `MAX_ITERATIONS=600` (including
+repeated evaluations), `GAMMA_TOL=1e-10`, section closure and starting state.
+There is no Newton/global branch search, extrapolation, cold restart or linear
+fallback. The additional scratch is one residual vector; reductions are fixed
+order. Ordinary successful updates retain their prior arithmetic and the
+original nonlinear golden remains unchanged. Nonfinite circulation mismatch
+and an exhausted relaxation floor return `nonlinear-did-not-converge`.
+
+`tests/nonlinear_oscillation.rs` freezes two actual low-speed Huffman launch
+wing evaluations exposed by the corrected actuator-disk wash. The unchanged
+owner exhausted 600 evaluations at residuals 3.220064062700418 and
+6.113375193275809. The safeguard resolves the same attached solutions in 422
+and 28 evaluations. Independent reconstruction from the returned circulation,
+the complete public horseshoe field and a separate finite-bound-segment
+subtraction measures final relative mismatches `8.095e-13` and `4.729e-11`,
+respectively, both below the unchanged tolerance. Replay and warm continuation
+retain that branch. These are discrete nonlinear-solver checks, not evidence of
+global uniqueness, aerodynamic validity outside the section model, or full
+flight calibration.
+
 ## Invariants
 
 - No scalar biplane factor anywhere: interference EMERGES from the

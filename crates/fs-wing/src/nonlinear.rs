@@ -6,7 +6,8 @@
 //!
 //!   per strip s:  α_eff = α_geo − w_ind/V,  Γ_target = ½·V·c·cl(α_eff),
 //!   Γ ← Γ + ω·(Γ_target − Γ), with ω halved (down to ω_min) whenever the
-//!   residual grows and restored on progress — never a silent jump.
+//!   residual repeatedly grows or an opposing residual mode stops contracting.
+//!   Halving stays on the current continuation path — never a silent jump.
 //!
 //! Chordwise rows keep the LINEAR solve's row-split ratios (the hinge
 //! pressure arm survives the strip-level closure). Every solve reports
@@ -364,9 +365,17 @@ fn solve_nonlinear_impl(
     let mut regimes = vec![StripRegime::Attached; strips.len()];
     let mut iterations = 0u32;
     let mut next = vec![0.0; strips.len()];
+    let mut previous_mismatch = vec![0.0f64; strips.len()];
+    let mut oscillation_streak = 0u32;
     while iterations < MAX_ITERATIONS {
         iterations += 1;
         let mut worst = 0.0f64;
+        // Common scaling keeps the residual angle/norm comparison finite
+        // without changing the convergence metric or the circulation update.
+        let mut comparison_scale = 0.0f64;
+        let mut previous_norm_sq = 0.0f64;
+        let mut current_norm_sq = 0.0f64;
+        let mut direction_dot = 0.0f64;
         for (s, spec) in strips.iter().enumerate() {
             let mut w = 0.0;
             for (j, coefficient) in downwash[s].iter().enumerate() {
@@ -399,6 +408,32 @@ fn solve_nonlinear_impl(
             // converged to −5420 N because the closure assumed the
             // opposite sign. Match the solver, not the textbook.
             let target = -0.5 * v_local * spec.chord_m * cl;
+            let mismatch = target - strip_gamma[s];
+            if !mismatch.is_finite() {
+                return Err(refuse(
+                    "nonlinear-did-not-converge",
+                    format!("non-finite circulation mismatch at strip {s}"),
+                    "the closure and circulation must remain finite; NEVER fall back silently to the linear answer",
+                ));
+            }
+            let prior = previous_mismatch[s];
+            let component_scale = prior.abs().max(mismatch.abs());
+            if component_scale > comparison_scale {
+                let ratio = comparison_scale / component_scale;
+                let squared = ratio * ratio;
+                previous_norm_sq *= squared;
+                current_norm_sq *= squared;
+                direction_dot *= squared;
+                comparison_scale = component_scale;
+            }
+            if comparison_scale > 0.0 {
+                let old_scaled = prior / comparison_scale;
+                let new_scaled = mismatch / comparison_scale;
+                previous_norm_sq += old_scaled * old_scaled;
+                current_norm_sq += new_scaled * new_scaled;
+                direction_dot += old_scaled * new_scaled;
+            }
+            previous_mismatch[s] = mismatch;
             // Residual = the OMEGA-INDEPENDENT fixed-point mismatch (the
             // step-size metric shrank with every safeguard halving and
             // faked progress — a measured lesson).
@@ -407,6 +442,39 @@ fn solve_nonlinear_impl(
             // fusable mul-add; bind the update first.
             let upd = omega * (target - strip_gamma[s]);
             next[s] = strip_gamma[s] + upd;
+        }
+        // The scalar relative residual can alternate as a strip passes near
+        // zero, and an unstable mode may grow less than 25% each time. Both
+        // evade the legacy two-growth guard indefinitely. Two successive
+        // residual reversals (angle >120 degrees) with no norm contraction
+        // identify that oscillatory mode independently of the denominator.
+        // The epsilon allowance recognizes a roundoff-level two-cycle; it
+        // does not relax GAMMA_TOL or accept any circulation as converged.
+        let opposing = direction_dot < 0.0
+            && 4.0 * direction_dot * direction_dot > previous_norm_sq * current_norm_sq;
+        let noncontracting = previous_norm_sq > 0.0
+            && current_norm_sq >= previous_norm_sq * (1.0 - 64.0 * f64::EPSILON);
+        if worst >= GAMMA_TOL && opposing && noncontracting {
+            oscillation_streak += 1;
+        } else {
+            oscillation_streak = 0;
+        }
+        if oscillation_streak >= 2 {
+            omega *= 0.5;
+            oscillation_streak = 0;
+            growth_streak = 0;
+            if omega < OMEGA_MIN {
+                return Err(refuse(
+                    "nonlinear-did-not-converge",
+                    format!(
+                        "oscillation relaxation floor: residual {worst:e} at iteration {iterations}"
+                    ),
+                    "the current branch did not contract within the admitted relaxation range; NEVER fall back silently to the linear answer",
+                ));
+            }
+            // Reevaluate the same current state with the smaller relaxation;
+            // no extrapolation, cold restart, or search for another branch.
+            continue;
         }
         if worst > residual * 1.25 {
             growth_streak += 1;
