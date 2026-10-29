@@ -4,6 +4,16 @@ This directory retains the human-reviewable source inputs compiled by
 `xtask matdb-pack`. Generated binary packs are deliberately not committed:
 the compiler must reproduce them from the pinned manifest and source record.
 
+## Violin varnish and historical finish layers
+
+The [violin-varnish source guide](VIOLIN_VARNISHES.md) documents seven packs:
+six independently fitted modern oil, shellac and mineral-ground specimens,
+plus measured coating/penetration ranges from five Stradivari instruments.
+Their 52 claims preserve conditioning, density scatter, frequency conventions
+and the distinction between historical identification and modern mechanical
+surrogates. Missing historical elastic, thermal and optical properties remain
+absent. The ordinary compiler and catalog consume all seven profiles.
+
 ## Continuous-range discovery and material follow-through: October 2026
 
 This follow-through adds **15 source-specific profiles with 119 claims**, in

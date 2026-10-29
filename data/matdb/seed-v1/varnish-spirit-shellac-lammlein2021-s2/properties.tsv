@@ -1,0 +1,48 @@
+frankensim.matdb-source.v1
+observation	dma-a2	1704-type spirit varnish: orange shellac, gum elemi and spike-lavender oil in ethanol; DMA sample A2	Published five-parameter fractional fit of tensile DMA/TTS, Table 2; coefficients are model parameters, not direct moduli at every frequency	See ../VIOLIN_VARNISHES.md for equation, conditioning and evidence boundaries. E_inf is a scale parameter, not a finite high-frequency limit. The admitted 20-20000 Hz band is an explicit conservative subset of the source fit. Component ratios, Poisson ratio and historical-Stradivari identity are absent.
+observation	density-a	Spirit-varnish film group, seven samples	Table 1 weighing and measured film dimensions after conditioning at 20 C and 35 percent RH	Mean and sample standard deviation are separate facts. The publication does not pair the density measurements with DMA sample A2; source_density_sample_matched=0 is mandatory. Reported scatter is not a confidence interval or parameter covariance.
+scalar	density	density-a	density	984	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293.15	293.15	K
+validity	density	conditioning_relative_humidity	0.35	0.35	1
+validity	density	source_density_sample_matched	0	0	1
+scalar	density-standard-deviation	density-a	density_standard_deviation	30	kg/m3	constant
+uncertainty	density-standard-deviation	unstated	-	-	-	-
+validity	density-standard-deviation	temperature	293.15	293.15	K
+validity	density-standard-deviation	conditioning_relative_humidity	0.35	0.35	1
+validity	density-standard-deviation	source_density_sample_matched	0	0	1
+scalar	density-sample-count	density-a	density_sample_count	7	1	constant
+uncertainty	density-sample-count	unstated	-	-	-	-
+validity	density-sample-count	temperature	293.15	293.15	K
+validity	density-sample-count	conditioning_relative_humidity	0.35	0.35	1
+validity	density-sample-count	source_density_sample_matched	0	0	1
+scalar	e0	dma-a2	varnish_e0	70e6	Pa	constant
+uncertainty	e0	unstated	-	-	-	-
+validity	e0	temperature	293.15	293.15	K
+validity	e0	conditioning_relative_humidity	0.35	0.35	1
+validity	e0	frequency	20	20000	Hz
+validity	e0	source_fitted_response	1	1	1
+scalar	einf	dma-a2	varnish_einf	1.83e9	Pa	constant
+uncertainty	einf	unstated	-	-	-	-
+validity	einf	temperature	293.15	293.15	K
+validity	einf	conditioning_relative_humidity	0.35	0.35	1
+validity	einf	frequency	20	20000	Hz
+validity	einf	source_fitted_response	1	1	1
+scalar	alpha	dma-a2	varnish_alpha	0.335	1	constant
+uncertainty	alpha	unstated	-	-	-	-
+validity	alpha	temperature	293.15	293.15	K
+validity	alpha	conditioning_relative_humidity	0.35	0.35	1
+validity	alpha	frequency	20	20000	Hz
+validity	alpha	source_fitted_response	1	1	1
+scalar	beta	dma-a2	varnish_beta	0.313	1	constant
+uncertainty	beta	unstated	-	-	-	-
+validity	beta	temperature	293.15	293.15	K
+validity	beta	conditioning_relative_humidity	0.35	0.35	1
+validity	beta	frequency	20	20000	Hz
+validity	beta	source_fitted_response	1	1	1
+scalar	tau	dma-a2	varnish_tau	0.179	s	constant
+uncertainty	tau	unstated	-	-	-	-
+validity	tau	temperature	293.15	293.15	K
+validity	tau	conditioning_relative_humidity	0.35	0.35	1
+validity	tau	frequency	20	20000	Hz
+validity	tau	source_fitted_response	1	1	1

@@ -1,0 +1,19 @@
+frankensim.matdb-source.v1
+observation	external-film	Musée de la musique historical Stradivari samples; specimen_code 1=Long Pattern circa1692, 2=Davidoff1708, 3=Provigny1716, 4=viola-d'amore head circa1720, 5=Sarasate1724	Optical cross sections combined with SR-FTIR, Raman, SEM-EDX and pyrolysis-GC/MS; external oil/Pinaceae-resin coating	Observed approximate range endpoints are separate properties, not nominal thickness, confidence bounds or whole-instrument thickness maps. Specimen codes are categorical: no interpolation. These samples do not establish a universal recipe, historical density, elastic modulus or damping.
+observation	penetrating-oil	Spruce soundboards Davidoff and Provigny; maple Long Pattern and viola-d'amore head	Lower drying-oil material penetrates wood cells; depth depends on wood and medullary-ray orientation	This depth lies within the wood, not another external solid layer. No Sarasate penetration-depth value is supplied. No absorbed volume fraction, density increment, penetration profile or modified-wood tensor is inferred.
+curve	external-lower	external-film	external_coating_thickness_observed_lower	specimen_code	1	m	1:0.000010,2:0.000010,3:0.000010,4:0.000010,5:0.000010	tabulated
+uncertainty	external-lower	unstated	-	-	-	-
+validity	external-lower	specimen_code	1	5	1
+validity	external-lower	source_stratigraphy_only	1	1	1
+curve	external-upper	external-film	external_coating_thickness_observed_upper	specimen_code	1	m	1:0.000030,2:0.000030,3:0.000030,4:0.000030,5:0.000030	tabulated
+uncertainty	external-upper	unstated	-	-	-	-
+validity	external-upper	specimen_code	1	5	1
+validity	external-upper	source_stratigraphy_only	1	1	1
+curve	penetration-lower	penetrating-oil	penetrating_oil_depth_observed_lower	specimen_code	1	m	1:0.000030,2:0.000010,3:0.000010,4:0.000030	tabulated
+uncertainty	penetration-lower	unstated	-	-	-	-
+validity	penetration-lower	specimen_code	1	4	1
+validity	penetration-lower	source_stratigraphy_only	1	1	1
+curve	penetration-upper	penetrating-oil	penetrating_oil_depth_observed_upper	specimen_code	1	m	1:0.000100,2:0.000030,3:0.000030,4:0.000100	tabulated
+uncertainty	penetration-upper	unstated	-	-	-	-
+validity	penetration-upper	specimen_code	1	4	1
+validity	penetration-upper	source_stratigraphy_only	1	1	1

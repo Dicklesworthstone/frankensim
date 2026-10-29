@@ -1,0 +1,19 @@
+frankensim.matdb-manifest.v3
+pack_id	varnish-oil-copal-lammlein2021-s1
+redistribution	permitted	Attributed numerical scientific facts and original scope notes only; the CC BY-NC-ND 4.0 article, figures and table layout are not redistributed
+citation	Laemmlein S. et al., Frequency dependent mechanical properties of violin varnishes and their impact on vibro-mechanical tonewood properties, Results in Materials 9 (2021) 100137, Sections 2.1-2.3, Eqs. 1-3, Tables 1-2; https://doi.org/10.1016/j.rinma.2020.100137 ; accessed 2026-10-29
+license	Attributed-Numerical-Facts-Only-No-Article-Redistribution
+source	oil-copal-sample1	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	density_standard_deviation	density_standard_deviation	dimensional
+property	density_sample_count	density_sample_count	dimensional
+property	varnish_e0	varnish_e0	dimensional
+property	varnish_einf	varnish_einf	dimensional
+property	varnish_alpha	varnish_alpha	dimensional
+property	varnish_beta	varnish_beta	dimensional
+property	varnish_tau	varnish_tau	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	conditioning_relative_humidity	conditioning_relative_humidity	dimensional
+axis	frequency	frequency	cyclic-frequency
+axis	source_fitted_response	source_fitted_response	dimensional
+axis	source_density_sample_matched	source_density_sample_matched	dimensional

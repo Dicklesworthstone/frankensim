@@ -1,0 +1,12 @@
+frankensim.matdb-manifest.v3
+pack_id	varnish-stradivari-echard2010-stratigraphy
+redistribution	permitted	Selected attributed numerical scientific facts and original specimen mapping only; no article, figures or table layout redistributed
+citation	Echard J.-P. et al., The Nature of the Extraordinary Finish of Stradivari's Instruments, Angewandte Chemie International Edition 49 (2010), 197-201, cross-section observations and Figure 1; https://doi.org/10.1002/anie.200905131 ; accessible author proof https://www.forumklassika.ru/attachment.php?attachmentid=56317 pp. 1-3; accessed 2026-10-29
+license	Attributed-Numerical-Facts-Only-No-Article-Redistribution
+source	historical-cross-sections	properties.tsv	material-tsv-v1
+property	external_coating_thickness_observed_lower	external_coating_thickness_observed_lower	dimensional
+property	external_coating_thickness_observed_upper	external_coating_thickness_observed_upper	dimensional
+property	penetrating_oil_depth_observed_lower	penetrating_oil_depth_observed_lower	dimensional
+property	penetrating_oil_depth_observed_upper	penetrating_oil_depth_observed_upper	dimensional
+axis	specimen_code	specimen_code	dimensional
+axis	source_stratigraphy_only	source_stratigraphy_only	dimensional
