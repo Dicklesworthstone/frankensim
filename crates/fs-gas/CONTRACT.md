@@ -779,3 +779,33 @@ This is an Estimated well-mixed low-Mach compartment owner, not a flame,
 ceiling-jet, acoustic, soot-radiation or experimental-validation claim. Prescribed
 source rates are frozen over a step; the midpoint work alone does not make the
 complete source/network integration second order.
+
+
+## Inventory-limited compartment burning
+
+`multicomponent::compartment::burning` binds an original admitted ideal-gas
+kinetics mechanism and one conserved global reaction to the exact room species,
+NASA calorics, and per-species energy references. The requested nonnegative
+forward extent is capped by every net reactant inventory, including oxygen,
+with optional nonnegative incoming species rates over the explicit interval.
+Incoming rates are availability only: the caller must add their physical mass
+and enthalpy exactly once. A driver with simultaneous reactant outflow must
+reserve that withdrawal first or transport before burning; timestep halving
+alone cannot make an additional withdrawal compatible with complete depletion.
+
+The adapter returns chemistry-only species rates and the energy-reference
+correction `-sum(dm_s/dt * e_ref_s)`. Original formation energies therefore
+produce sensible heating while preserving physical internal energy. Reported
+reaction enthalpy and power are diagnostics, never a second heat source.
+Power-to-extent conversion uses the original reaction enthalpy at an explicit
+reference temperature. One common extent may be rounded down by a bounded
+number of adjacent floating-point values to admit actual update arithmetic;
+individual species are never clipped, seeded, or independently repaired.
+
+This is an estimated global, inventory-limited burning closure, not an
+Arrhenius ignition/extinction model, equilibrium solver, soot model, or proof of
+second-order temporal accuracy. Reactions with species on both sides are
+explicitly refused by this single-pass adapter. Six focused tests cover oxygen
+exhaustion, atom/mass conservation, analytic variable-Cv formation-energy
+heating, inflow counted exactly once, a one-ULP depletion case, temperature-
+dependent reaction enthalpy, cancellation, and source identity/refusals.

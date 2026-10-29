@@ -14,6 +14,9 @@
 use super::{Error as GasError, MAX_COMPONENTS, MAX_SPECIES, MixtureGas, sum};
 use fs_qty::{Area, Energy, Length, MassFlowRate, Power, Pressure, Temperature, Time, Volume};
 
+/// Original-source, reactant-inventory-limited global burning increments.
+pub mod burning;
+
 #[cfg(test)]
 mod tests;
 
