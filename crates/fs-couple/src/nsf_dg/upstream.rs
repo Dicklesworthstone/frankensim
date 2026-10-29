@@ -310,6 +310,8 @@ fn solve_scalar<T>(
 ) -> Result<(f64, T), NsfDgError> {
     let mut bracket = limits.incoming_bracket_m_s;
     let mut residuals = [0.0; 2];
+    let mut weights = [0.0; 2];
+    let mut previous_replaced_side = None;
     let mut incoming = bracket[0];
     for evaluation in 1..=limits.maximum_evaluations {
         let (residual, scale, value) = evaluate(incoming)?;
@@ -320,11 +322,13 @@ fn solve_scalar<T>(
         }
         if evaluation == 1 {
             residuals[0] = residual;
+            weights[0] = residual;
             incoming = bracket[1];
             continue;
         }
         if evaluation == 2 {
             residuals[1] = residual;
+            weights[1] = residual;
             if residuals[0].is_sign_positive() == residuals[1].is_sign_positive() {
                 return Err(NsfDgError::NoBracket {
                     residual_pa: residuals,
@@ -334,13 +338,21 @@ fn solve_scalar<T>(
             let side = usize::from(residual.is_sign_positive() != residuals[0].is_sign_positive());
             bracket[side] = incoming;
             residuals[side] = residual;
+            weights[side] = residual;
+            // Illinois false position retains the physical signed bracket.
+            // Repeatedly replacing one endpoint halves the OTHER interpolation
+            // weight so an asymptotic endpoint cannot stall the scalar solve.
+            // The actual residuals still determine convergence and admission.
+            weights[1 - side] = if previous_replaced_side == Some(side) {
+                0.5 * weights[1 - side]
+            } else {
+                residuals[1 - side]
+            };
+            previous_replaced_side = Some(side);
         }
         let proposed =
-            bracket[0] - residuals[0] * ((bracket[1] - bracket[0]) / (residuals[1] - residuals[0]));
-        incoming = if proposed.is_finite()
-            && proposed > bracket[0] + 0.1 * (bracket[1] - bracket[0])
-            && proposed < bracket[1] - 0.1 * (bracket[1] - bracket[0])
-        {
+            bracket[0] - weights[0] * ((bracket[1] - bracket[0]) / (weights[1] - weights[0]));
+        incoming = if proposed.is_finite() && proposed > bracket[0] && proposed < bracket[1] {
             proposed
         } else {
             f64::midpoint(bracket[0], bracket[1])
