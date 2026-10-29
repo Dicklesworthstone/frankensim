@@ -144,8 +144,8 @@ impl SharedCavity {
             .fold(C64::ZERO, |sum, (&c, &v)| sum + v.scale(c * area));
         let neck_velocity = network.velocity_m_sqrt_kg_per_s[self.surface_modes];
         let neck_flow = neck_velocity.scale(projection);
-        let (compression_force, compression_energy) = match &self.thermal_compression {
-            Some(law) => {
+        let (compression_force, compression_energy) = match (&self.thermal_compression, &self.molecular_compression) {
+            (Some(law), _) => {
                 // Reuse the original constitutive law; conjugation converts its
                 // documented +i omega convention to this solve's -i omega.
                 let compression_force = law.stiffness_at(omega_rad_s)?.conj() * extension;
@@ -159,7 +159,8 @@ impl SharedCavity {
                 }
                 (compression_force, energy)
             }
-            None => {
+            (_, Some(law)) => law.harmonic_observation(omega_rad_s, extension)?,
+            (None, None) => {
                 let stiffness = self.source.compression_stiffness_n_m();
                 (
                     extension.scale(stiffness),

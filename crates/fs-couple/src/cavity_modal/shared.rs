@@ -16,6 +16,7 @@ pub mod exterior;
 pub mod dg;
 pub mod harmonic;
 pub mod thermal;
+pub mod molecular;
 pub use dg::{SharedCavityDg, SharedCavityDgError, SharedCavityDgFrame};
 pub use thermal::{CylindricalCavityThermalOptions, CylindricalThermalCompression, ThermalCompressionArm};
 
@@ -73,6 +74,7 @@ pub struct SharedCavity {
     neck_component: usize,
     viscous_neck: Option<fs_phs::ZkDiffusive>,
     thermal_compression: Option<CylindricalThermalCompression>,
+    molecular_compression: Option<molecular::MolecularCavityCompression>,
     external: Vec<f64>,
     ports: crate::port_adoption::ModulePorts,
     old_q: Vec<f64>,
@@ -93,7 +95,7 @@ impl SharedCavity {
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
         Self::new_inner(source, surfaces, sample_rate_hz, neck_initial, neck_budget,
-            config, None, None, gate)
+            config, None, None, None, gate)
     }
 
     /// Replace the resonance-frozen neck resistance with physical viscous memory.
@@ -125,7 +127,7 @@ impl SharedCavity {
     ) -> Result<Self, ModalCouplingError> {
         let memory=Self::prepare_viscous_neck(&source,sample_rate_hz,config,options,gate)?;
         Self::new_inner(source, surfaces, sample_rate_hz, neck_initial, neck_budget,
-            config, Some(memory), None, gate)
+            config, Some(memory), None, None, gate)
     }
 
     fn prepare_viscous_neck(
@@ -156,9 +158,13 @@ impl SharedCavity {
         config: ModalCouplingConfig,
         viscous_neck: Option<fs_phs::ZkDiffusive>,
         thermal_compression: Option<(CylindricalThermalCompression,Option<Vec<f64>>)>,
+        molecular_compression: Option<(molecular::MolecularCavityCompression,Option<Vec<f64>>)>,
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
         if gate.is_requested() { return Err(ModalCouplingError::Cancelled); }
+        if thermal_compression.is_some() && molecular_compression.is_some() {
+            return Err(network_invalid("wall heat diffusion and molecular relaxation require a joint caloric law, not independent compression shunts"));
+        }
         if surfaces.is_empty() || surfaces.len()>64 {
             return Err(network_invalid("shared cavity requires 1..=64 moving surfaces"));
         }
@@ -217,8 +223,10 @@ impl SharedCavity {
         let mut neck=source.neck_component(sample_rate_hz,neck_budget)?;
         neck.restore_states(&[neck_initial]).map_err(|source|ModalCouplingError::Component {component:neck_index,source})?;
         models.push(neck);
-        let compression_stiffness=thermal_compression.as_ref().map_or(
-            source.compression_stiffness_n_m(),|(law,_)|law.equilibrium_stiffness_n_m());
+        let compression_stiffness=molecular_compression.as_ref().map_or_else(
+            || thermal_compression.as_ref().map_or(source.compression_stiffness_n_m(),
+                |(law,_)|law.equilibrium_stiffness_n_m()),
+            |(law,_)|law.equilibrium_stiffness_n_m());
         let mut links=vec![ModalColumnConnection {column:column.clone(),
             stiffness_n_m:compression_stiffness,damping_n_s_m:0.0,rest_extension_m:0.0}];
         if let Some(loss)=loss {links.push(loss);}
@@ -260,6 +268,20 @@ impl SharedCavity {
             }
             None=>None,
         };
+        let molecular_compression=match molecular_compression {
+            Some((law,initial_memory))=>{
+                let branches=law.branches(&column)?;
+                if branches.is_empty() {
+                    if initial_memory.as_ref().is_some_and(|history|!history.is_empty()) {
+                        return Err(network_invalid("nonrelaxing molecular gas has no compression history"));
+                    }
+                } else {
+                    system=system.with_material_relaxation(branches,initial_memory,gate)?;
+                }
+                Some(law)
+            }
+            None=>None,
+        };
         let names: Vec<_> = (0..surface_modes)
             .map(|i| format!("surface/generalized/{i}"))
             .collect();
@@ -288,6 +310,7 @@ impl SharedCavity {
             neck_component: neck_index,
             viscous_neck,
             thermal_compression,
+            molecular_compression,
             external: vec![0.0; count],
             ports,
             old_q: vec![0.0; count],
@@ -307,6 +330,10 @@ impl SharedCavity {
     /// Actual cylindrical thermal geometry, positive compression arms and sampled band.
     pub fn cavity_thermal_compression(&self)->Option<&CylindricalThermalCompression> {
         self.thermal_compression.as_ref()
+    }
+    /// Original gas reservoirs lowered into the same cavity compression solve.
+    pub fn cavity_molecular_compression(&self)->Option<&molecular::MolecularCavityCompression> {
+        self.molecular_compression.as_ref()
     }
     /// Original accepted bank; no mutable access that could bypass coupling.
     pub fn network(&self)->&CoupledModalSystem {&self.system}
@@ -477,9 +504,10 @@ impl SharedCavity {
         }}
         let neck=self.system.components()[self.neck_component].states()[0];
         let volume=extension*self.source.neck_area_m2();
-        let (compression_force,compression_energy)=match &self.thermal_compression {
-            Some(law)=>law.observation(extension,self.system.material_memory())?,
-            None=>(self.source.compression_stiffness_n_m()*extension,
+        let (compression_force,compression_energy)=match (&self.thermal_compression,&self.molecular_compression) {
+            (Some(law),_)=>law.observation(extension,self.system.material_memory())?,
+            (_,Some(law))=>law.observation(extension,self.system.material_memory())?,
+            (None,None)=>(self.source.compression_stiffness_n_m()*extension,
                 0.5*self.source.compression_stiffness_n_m()*extension*extension),
         };
         let pressure=-compression_force/self.source.neck_area_m2();

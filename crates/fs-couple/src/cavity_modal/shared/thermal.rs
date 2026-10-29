@@ -271,7 +271,7 @@ impl SharedCavity {
         let viscous=neck_options.map(|options|Self::prepare_viscous_neck(&source,
             sample_rate_hz,config,options,gate)).transpose()?;
         Self::new_inner(source,surfaces,sample_rate_hz,neck_initial,neck_budget,
-            config,viscous,Some((thermal,initial_thermal_memory)),gate)
+            config,viscous,Some((thermal,initial_thermal_memory)),None,gate)
     }
 
     /// Retain radial thermal wall diffusion in an explicitly cylindrical cavity.
@@ -305,7 +305,7 @@ impl SharedCavity {
         let viscous=neck_options.map(|options|Self::prepare_viscous_neck(&source,
             sample_rate_hz,config,options,gate)).transpose()?;
         Self::new_inner(source,surfaces,sample_rate_hz,neck_initial,neck_budget,
-            config,viscous,Some((thermal,initial_thermal_memory)),gate)
+            config,viscous,Some((thermal,initial_thermal_memory)),None,gate)
     }
 }
 
