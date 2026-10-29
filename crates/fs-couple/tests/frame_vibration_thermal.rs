@@ -2,6 +2,8 @@
 //! References use physical consistent inertia, section integrals, continuous
 //! damped motion and independently solved finite-cell heat equations.
 
+#[path = "frame_vibration_thermal/assembly.rs"]
+mod assembly;
 #[path = "frame_vibration_thermal/thermoelastic.rs"]
 mod thermoelastic;
 

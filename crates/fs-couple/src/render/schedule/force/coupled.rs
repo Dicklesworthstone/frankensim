@@ -549,6 +549,12 @@ impl CoupledModalSystem {
     /// Accepted components in original order; callers cannot mutate their basis.
     #[must_use]
     pub fn components(&self) -> &[ModalAcousticTimeModel] { &self.models }
+    /// Original signed work-conjugate displacement/force column, in component
+    /// then mode order. Coefficient updates preserve this physical definition.
+    #[must_use]
+    pub fn connection_column(&self, connection: usize) -> Option<&[f64]> {
+        self.columns.get(connection).map(Vec::as_slice)
+    }
     /// Read-only endpoint for the native stage/admit/publish composition boundary.
     pub(crate) fn staged_components(&self) -> &[ModalAcousticTimeModel] { &self.candidates }
     /// Flattened force layout: component order, then each component's mode order.

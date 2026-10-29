@@ -11123,3 +11123,8 @@ entry/exit, tangent rotation, source/history checks, actual rupture-to-reclosure
 handoff, velocity occupancy and atomic retry. Partial-damage friction, rebonding,
 evolving sources, evolving frames, heat recipients and exact stopping events
 remain outside this owner; a full Cargo/workspace check is separate.
+
+
+## Live thermoelastic frames in complete native assemblies
+
+`into_thermoelastic_parts` supplies the original free-coordinate frame, material connections and a source/caloric binding for an explicit component and contiguous connection range. The existing standalone constructor delegates to this path. Binding admits a cold, unchanged source frame within the original fully configured `CoupledModalSystem`; signed columns, coefficients, initial state, thermal clock and source temperatures must agree. Native companions, reciprocal acoustic loads, initialized Maxwell memory, propagation and budgets remain in that same owner. Source K/rest/C updates use their original global addresses. Only frame material dashpot loss heats its finite cells; foreign connector loss is recovered from its native work and spring-storage change and checked against the complete loss account. Focused physical-coordinate ODE, acoustic refinement, finite-heat, memory and rollback regressions cover this coupling. This slice supports one live thermoelastic frame, fixed mass/geometry and its complete basis; warm rebinding and changing phase remain unsupported. Prepared acoustic propagation retains its existing second-order averaged interconnection.

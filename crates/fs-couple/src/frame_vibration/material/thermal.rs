@@ -565,7 +565,8 @@ impl FrameThermalSystem<'_, '_> {
                             sections.push((region.element, section));
                         }
                         Ok(DrivenCoefficients {
-                            circuit: MechanicalCandidate { frame: frame.clone(), stored_before_j: before, outside_loss_j: outside },
+                            circuit: MechanicalCandidate { frame: frame.clone(), stored_before_j: before,
+                                material_heat_j: frame.connection_dissipation_j, outside_loss_j: outside },
                             sources_w: source.sources_w, conductances_w_k: source.conductances_w_k,
                             source: (source.source, sections), circuit_trials: 1,
                         })
@@ -633,6 +634,7 @@ impl FrameThermalSystem<'_, '_> {
 struct MechanicalCandidate {
     frame: CoupledModalFrame,
     stored_before_j: f64,
+    material_heat_j: f64,
     outside_loss_j: f64,
 }
 impl ThermalDriver for MechanicalCandidate {
@@ -642,7 +644,7 @@ impl ThermalDriver for MechanicalCandidate {
         DriverAccount {
             resistors: &[],
             contacts: &[],
-            heat_j: self.frame.connection_dissipation_j,
+            heat_j: self.material_heat_j,
             numerical_dissipation_j: 0.0,
             stored_change_j: self.frame.total_energy_j() - self.stored_before_j,
             supplied_j: self.frame.external_work_j - self.outside_loss_j,

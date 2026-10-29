@@ -21,6 +21,15 @@
 //! explicit small-strain envelope. Radial constraint, buckling/geometric
 //! stiffness, changing mass, topology and phase transitions require other
 //! owners. No residual-energy correction or second time integrator is used.
+//!
+//! [`FrameVibrationComponent::into_thermoelastic_parts`] retains this physical
+//! source when the frame joins other native mechanical components, reciprocal
+//! acoustic loads and constitutive memories. Only this frame's original
+//! dashpots heat its caloric cells; every other storage and loss stays in the
+//! same complete mechanical account.
+
+mod assembly;
+pub use assembly::FrameThermoelasticBinding;
 
 use super::*;
 use crate::modal_acoustic_time::{ModalAcousticMode, ModalAcousticState, ModalAcousticTimeModel};
@@ -126,6 +135,8 @@ pub struct FrameThermoelasticSystem<'n, 'a> {
     states: Vec<FrameThermoelasticMemberState>,
     origin_s: f64,
     linear_strain_limit: f64,
+    component: usize,
+    connection_start: usize,
 }
 
 fn modal(error: crate::modal_acoustic_time::ModalAcousticTimeError) -> FrameThermalError {
@@ -331,6 +342,50 @@ impl FrameVibrationComponent {
         prepared: Option<PreparedModalBudget>,
         gate: &CancelGate,
     ) -> Result<FrameThermoelasticSystem<'n, 'a>> {
+        let (binding, model, connections) = self.into_thermoelastic_parts(
+            thermal,
+            source,
+            destinations,
+            linear_strain_limit,
+            0,
+            0,
+            config,
+            gate,
+        )?;
+        let mechanical = match prepared {
+            Some(budget) => {
+                CoupledModalSystem::new_prepared(vec![model], connections, config, budget, gate)?
+            }
+            None => CoupledModalSystem::new(vec![model], connections, config, gate)?,
+        };
+        binding.into_system(mechanical, thermal, gate)
+    }
+
+    /// Prepare the SAME source-bound frame for a larger original coupled owner.
+    /// Append its returned model at `component` and EVERY returned connection
+    /// contiguously at `connection_start`, in unchanged order. Other components
+    /// and reciprocal connectors may precede or follow those addresses.
+    /// Configure native radiation, material memories and propagation normally,
+    /// then call [`FrameThermoelasticBinding::into_system`]. No extra integrator
+    /// or acoustic pressure transfer is supplied by these mechanical parts.
+    /// The explicit config bounds this source projection; the final native
+    /// constructor independently admits the complete assembly and its budgets.
+    #[allow(clippy::too_many_arguments)]
+    pub fn into_thermoelastic_parts<'n, 'a>(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        source: &'n MaterialNetwork<'a>,
+        destinations: &[FrameLayerCell],
+        linear_strain_limit: f64,
+        component: usize,
+        connection_start: usize,
+        config: ModalCouplingConfig,
+        gate: &CancelGate,
+    ) -> Result<(
+        FrameThermoelasticBinding<'n, 'a>,
+        ModalAcousticTimeModel,
+        Vec<ModalConnection>,
+    )> {
         check(gate)?;
         if !linear_strain_limit.is_finite()
             || linear_strain_limit <= 0.0
@@ -365,7 +420,10 @@ impl FrameVibrationComponent {
             .and_then(|n| n.checked_add(connections.len()))
             .ok_or_else(|| invalid("thermoelastic layer port count overflow"))?;
         if count > config.max_modes
-            || total_ports > config.max_connections
+            || component >= config.max_modes
+            || connection_start
+                .checked_add(total_ports)
+                .is_none_or(|n| n > config.max_connections)
             || total_ports
                 .checked_mul(count)
                 .and_then(|n| n.checked_mul(count))
@@ -469,22 +527,27 @@ impl FrameVibrationComponent {
                 }
             }
         }
-        let mechanical = match prepared {
-            Some(budget) => {
-                CoupledModalSystem::new_prepared(vec![free], connections, config, budget, gate)?
-            }
-            None => CoupledModalSystem::new(vec![free], connections, config, gate)?,
-        };
+        for link in &mut connections {
+            link.left.component = component;
+            link.right.component = component;
+        }
+        for member in &mut members {
+            member.spring_start += connection_start;
+        }
         check(gate)?;
-        Ok(FrameThermoelasticSystem {
+        let binding = FrameThermoelasticBinding {
             basis,
-            mechanical,
             prepared: binding,
             members,
             states,
             origin_s: thermal.time_s(),
             linear_strain_limit,
-        })
+            component,
+            connection_start,
+            initial_model: free.clone(),
+            definitions: connections.clone(),
+        };
+        Ok((binding, free, connections))
     }
 }
 
@@ -496,6 +559,14 @@ impl FrameThermoelasticSystem<'_, '_> {
     }
     pub const fn mechanical(&self) -> &CoupledModalSystem {
         &self.mechanical
+    }
+    /// Original component containing this frame's fixed mass coordinates.
+    pub const fn component_index(&self) -> usize {
+        self.component
+    }
+    /// First protected material dashpot; all layer springs follow the dashpots.
+    pub const fn connection_start(&self) -> usize {
+        self.connection_start
     }
     pub fn members(&self) -> &[FrameThermoelasticMemberState] {
         &self.states
@@ -544,6 +615,8 @@ impl FrameThermoelasticSystem<'_, '_> {
         let states = &self.states;
         let prepared = &self.prepared;
         let strain_limit = self.linear_strain_limit;
+        let component = self.component;
+        let connection_start = self.connection_start;
         for (member, state) in members.iter().zip(states) {
             for (temperature, old) in temperatures(&member.region, thermal)?
                 .iter()
@@ -558,22 +631,24 @@ impl FrameThermoelasticSystem<'_, '_> {
         }
         let (next_thermal, report, update, next_states) = self.mechanical.step_with_admission(
             external_modal_forces, gate, |mechanical, frame, transfers| {
-                let endpoint = mechanical.staged_components()[0].states();
+                let endpoint = mechanical.staged_components()[component].states();
                 let mut frozen = Vec::with_capacity(members.len());
                 let mut works = Vec::new();
                 let mut losses = Vec::new();
                 let mut powers = BTreeMap::new();
+                let mut material_heat_j = 0.0;
                 for (index, (member, old)) in members.iter().zip(states).enumerate() {
                     check(gate)?;
                     frozen.push(resolve_member(member, &old.layers.iter().map(|l| l.temperature_k).collect::<Vec<_>>(),
                         endpoint, strain_limit, dt)?);
                     let port_loss = |k: usize| -> Result<f64> {
-                        let loss = finite(-transfers[3*index+k].energy_into().value())?;
+                        let loss = finite(-transfers[connection_start+3*index+k].energy_into().value())?;
                         if loss < 0.0 { return Err(invalid("frame dashpot supplied negative material heat")); }
                         Ok(loss)
                     };
                     let axial_loss = port_loss(0)?;
                     let bending_loss = finite(port_loss(1)?+port_loss(2)?)?;
+                    material_heat_j = finite(material_heat_j+axial_loss+bending_loss)?;
                     for (layer, receiver) in member.region.receivers.iter().enumerate() {
                         let eta = &old.viscosity;
                         let partition = |fraction: f64, loss: f64| -> Result<f64> {
@@ -599,7 +674,8 @@ impl FrameThermoelasticSystem<'_, '_> {
                         works.push(work); losses.push(loss);
                     }
                 }
-                let outside = finite(frame.component_dissipation_j+frame.material_dissipation_j+frame.radiation_dissipation_j)?;
+                let outside = assembly::outside_loss(mechanical, frame, transfers,
+                    connection_start, members, material_heat_j, controls.total_energy_tolerance_j, gate)?;
                 let (candidate, (), audit, entropy) = cell_driver_candidate_entropy_option(
                     thermal, target, controls.driver(), energy_guess_j,
                     |trial, _remaining| {
@@ -643,7 +719,8 @@ impl FrameThermoelasticSystem<'_, '_> {
                             next_states.push(state);
                         }
                         Ok(DrivenCoefficients {
-                            circuit: MechanicalCandidate { frame: frame.clone(), stored_before_j: before, outside_loss_j: outside },
+                            circuit: MechanicalCandidate { frame: frame.clone(), stored_before_j: before,
+                                material_heat_j, outside_loss_j: outside },
                             sources_w: network_source.sources_w, conductances_w_k: network_source.conductances_w_k,
                             source: (network_source.source, next_states, exchanges, independent_entropy, has_independent),
                             circuit_trials: 1,
@@ -663,7 +740,7 @@ impl FrameThermoelasticSystem<'_, '_> {
                         return Err(invalid("refreshed frame viscosity underflows its original geometry"));
                     }
                     for (k, damping_n_s_m) in [a, finite(3.0*b)?, b].into_iter().enumerate() {
-                        updates.push(ConnectionCoefficients { connection: 3*index+k,
+                        updates.push(ConnectionCoefficients { connection: connection_start+3*index+k,
                             stiffness_n_m: 0.0, damping_n_s_m, rest_extension_m: 0.0 });
                     }
                 }
