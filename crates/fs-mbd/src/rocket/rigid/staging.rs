@@ -9,7 +9,11 @@
 //! contact/reimpact, fracture or plume interaction.
 
 use super::{RigidRocketError, RigidRocketInertia, RigidRocketState, poll};
-use crate::{MassProperties, Vec3, rocket::RocketState};
+use crate::assembly::{
+    AssemblyError, AssemblyPart, ImpulseTotals, SeparationImpulse, release_accounting,
+    release_components_into,
+};
+use crate::{MassProperties, Pose, UnitQuaternion, Vec3, rocket::RocketState};
 
 /// One piece, with axes aligned to the parent body and its own COM origin.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -58,13 +62,6 @@ impl RocketStage {
         }
         self.inertia.mass_properties(translation)
     }
-}
-fn multiply_diagonal(inertia: Vec3, vector: Vec3) -> Vec3 {
-    Vec3::new(
-        inertia.x * vector.x,
-        inertia.y * vector.y,
-        inertia.z * vector.z,
-    )
 }
 fn magnitude(vector: Vec3) -> f64 {
     vector.x.abs().max(vector.y.abs()).max(vector.z.abs())
@@ -164,86 +161,87 @@ impl RigidRocketState {
             }
         }
         poll(&mut cancelled)?;
-        let omega_body =
-            properties.angular_velocity_body_checked(self.angular_momentum_body_kg_m2_s)?;
+        let components = [
+            AssemblyPart {
+                properties: parts[0],
+                pose_in_reference: Pose::new(
+                    retained.center_of_mass_body_m,
+                    UnitQuaternion::IDENTITY,
+                )?,
+            },
+            AssemblyPart {
+                properties: parts[1],
+                pose_in_reference: Pose::new(
+                    released.center_of_mass_body_m,
+                    UnitQuaternion::IDENTITY,
+                )?,
+            },
+        ];
+        let rigid = self.rigid_body()?;
+        let mut bodies = [rigid; 2];
+        let mut deltas = [ImpulseTotals::default(); 2];
+        let release = release_components_into(
+            &components,
+            properties,
+            rigid,
+            &[SeparationImpulse {
+                part_a: 0,
+                part_b: 1,
+                point_assembly_m: application_point_body_m,
+                impulse_on_a_assembly_ns: impulse_on_retained_body_n_s,
+                couple_on_a_assembly_nms: Vec3::ZERO,
+            }],
+            &mut deltas,
+            &mut bodies,
+            &mut cancelled,
+        )
+        .map_err(separation_error)?;
         let mut states = [*self; 2];
-        let mut relative_velocities = [Vec3::ZERO; 2];
-        let mut separation_work = 0.0;
-        for i in 0..2 {
-            let sign = if i == 0 { 1.0 } else { -1.0 };
-            let impulse = impulse_on_retained_body_n_s.scale(sign);
-            let piece = pieces[i];
-            let part = parts[i];
-            let arm = application_point_body_m.sub(piece.center_of_mass_body_m);
-            let torque_impulse = arm.cross(impulse);
-            let spin =
-                multiply_diagonal(part.principal_inertia_body(), omega_body).add(torque_impulse);
-            let velocity_body = omega_body
-                .cross(piece.center_of_mass_body_m)
-                .add(impulse.scale(part.mass().recip()));
-            relative_velocities[i] = self.orientation.rotate_body_to_world(velocity_body);
-            let translation = RocketState {
-                position_m: self.translation.position_m.add(
-                    self.orientation
-                        .rotate_body_to_world(piece.center_of_mass_body_m),
-                ),
-                velocity_m_s: self.translation.velocity_m_s.add(relative_velocities[i]),
-                dry_mass_kg: piece.dry_mass_kg,
-                propellant_mass_kg: piece.propellant_mass_kg,
-            };
-            states[i] = Self::new(translation, self.orientation, spin, piece.inertia)?;
-            separation_work += 0.5 * impulse.dot(impulse.scale(part.mass().recip()))
-                + 0.5 * torque_impulse.dot(part.angular_velocity_body_checked(torque_impulse)?);
+        for (i, body) in bodies.iter().enumerate() {
+            states[i] = Self::new(
+                RocketState {
+                    position_m: body.pose().position_world(),
+                    velocity_m_s: body.center_of_mass_velocity_world(parts[i])?,
+                    dry_mass_kg: pieces[i].dry_mass_kg,
+                    propellant_mass_kg: pieces[i].propellant_mass_kg,
+                },
+                body.pose().orientation(),
+                body.angular_momentum_body(),
+                pieces[i].inertia,
+            )?;
         }
-        let mut linear = Vec3::ZERO;
-        let mut angular = Vec3::ZERO;
-        let mut kinetic = 0.0;
-        for i in 0..2 {
-            let state = states[i];
-            let part = parts[i];
-            let relative_momentum = relative_velocities[i].scale(part.mass());
-            linear = linear.add(state.translation.velocity_m_s.scale(part.mass()));
-            angular = angular
-                .add(
-                    self.orientation
-                        .rotate_body_to_world(state.angular_momentum_body_kg_m2_s),
-                )
-                .add(
-                    self.orientation
-                        .rotate_body_to_world(pieces[i].center_of_mass_body_m)
-                        .cross(relative_momentum),
-                );
-            kinetic += 0.5 * relative_momentum.dot(relative_velocities[i])
-                + 0.5
-                    * state.angular_momentum_body_kg_m2_s.dot(
-                        part.angular_velocity_body_checked(state.angular_momentum_body_kg_m2_s)?,
-                    );
-        }
-        let linear_residual = linear.sub(self.translation.velocity_m_s.scale(properties.mass()));
-        let angular_residual = angular.sub(
-            self.orientation
-                .rotate_body_to_world(self.angular_momentum_body_kg_m2_s),
-        );
-        let energy_residual =
-            kinetic - 0.5 * self.angular_momentum_body_kg_m2_s.dot(omega_body) - separation_work;
-        if !linear_residual.is_finite()
-            || !angular_residual.is_finite()
-            || !separation_work.is_finite()
-            || !energy_residual.is_finite()
-        {
-            return Err(RigidRocketError::Invalid(
-                "stage momenta or energy are not representable",
-            ));
-        }
+        let actual = [states[0].rigid_body()?, states[1].rigid_body()?];
+        let release = release_accounting(
+            &components,
+            properties,
+            rigid,
+            &actual,
+            release.supplied_work_j,
+            &mut cancelled,
+        )
+        .map_err(separation_error)?;
         poll(&mut cancelled)?;
         Ok(StageSeparation {
             retained: states[0],
             released: states[1],
             mass_residual_kg: total_mass - properties.mass(),
-            linear_momentum_residual_world_kg_m_s: linear_residual,
-            angular_momentum_residual_world_kg_m2_s: angular_residual,
-            separation_work_j: separation_work,
-            energy_balance_residual_j: energy_residual,
+            linear_momentum_residual_world_kg_m_s: release
+                .balance
+                .linear_momentum_residual_world_ns,
+            angular_momentum_residual_world_kg_m2_s: release
+                .balance
+                .angular_momentum_residual_world_nms,
+            separation_work_j: release.supplied_work_j,
+            energy_balance_residual_j: release.balance.energy_residual_j,
         })
+    }
+}
+
+fn separation_error(error: AssemblyError) -> RigidRocketError {
+    match error {
+        AssemblyError::Dynamics(error) => RigidRocketError::Dynamics(error),
+        AssemblyError::Cancelled => RigidRocketError::Cancelled,
+        AssemblyError::Invalid(reason) => RigidRocketError::Invalid(reason),
+        _ => RigidRocketError::Invalid("native rigid separation refused"),
     }
 }

@@ -1475,3 +1475,48 @@ coarse reversal refusal, late angular-momentum failure, cancellation and exact
 retry; and static/frictionless limits. The three original rigid tangential and
 seven two-axis rolling groups also pass against the same original-source build.
 This focused result is separate from a full Cargo/DSR workspace gate.
+
+
+## Rigid assembly, release and inelastic latching
+
+`assembly::RigidAssembly` combines arbitrary oriented native full COM inertias
+and component poses using the parallel-axis law. It computes the composite COM
+relative to the supplied reference and caches one admitted full tensor.
+Construction and connectivity events are linear in the component and impulse
+counts; no dense 6N matrix is assembled. All returned components retain their
+original body coordinates and native `RigidBodyState` owners.
+
+Release inherits the parent's rigid velocity field `v_com + omega cross r`
+and each component's correct spin before applying prescribed internal impulses
+at common physical points. Equal/opposite free couples are separate from point
+force moments. Net impulses are accumulated per component before evaluating
+work, so multiple impulses sharing a body retain their quadratic cross terms.
+Every component survives in the result; spin and orbital momentum are both
+included about the same event COM.
+
+Latching is the instantaneous perfectly inelastic rigid-connection law at
+unchanged component poses. Total linear and angular momentum determine the
+locked velocity. The removed relative kinetic energy is evaluated as a
+nonnegative mass-metric squared velocity residual. Accounting uses a common
+translating frame, so small locking losses are not hidden by a large common
+translational kinetic energy. This loss has no automatic thermal destination.
+The caller owns connection geometry, admissibility and the physical latching
+decision; no contact discovery, restitution, finite attachment forces,
+deformation, fracture, or stored elastic energy model is implied.
+
+Actual returned states supply momentum and energy/work residuals. Declared
+part/impulse caps and absolute physical gates apply before publication, and
+bounded cancellation leaves borrowed inputs unchanged. Fixed input order is
+deterministic; reordered floating sums have only roundoff-level equivalence.
+The rocket staging adapter keeps its dry/propellant partition and inertia
+assembly admission and uses this same release kernel with stack workspaces.
+It reconstructs receipts after conversion to its stored velocities; the
+two-piece rocket path remains allocation-free.
+
+Seven native assembly cases check an independent full parallel-axis assembly,
+zero-impulse rigid motion inheritance, shared-body impulse work against native
+sequential impulses, closed-form orbital-to-spin latching, frame covariance,
+small loss under large translation, and atomic limits/cancellation/retry.
+The existing nine rocket attitude/staging cases remain applicable. These are
+floating numerical balances, not exact arithmetic or a complete hybrid-event,
+material-calibration, interval-enclosure, or whole-workspace qualification.
