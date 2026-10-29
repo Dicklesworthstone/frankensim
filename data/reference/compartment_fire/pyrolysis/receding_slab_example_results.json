@@ -1,0 +1,293 @@
+{
+  "scope": "Retained NIST/MaCFP noncharring scalar inputs, authored heating and constant-density shrinking assumptions; not experimental validation",
+  "runs": [
+    {
+      "cells": 24,
+      "end_s": 120,
+      "maximum_dt_s": 0.02,
+      "incident_w_m2": 50000,
+      "mode": "receding",
+      "final": {
+        "time_s": 120,
+        "front_face_k": 688.246669018,
+        "front_cell_k": 671.655478266,
+        "back_cell_k": 419.152825,
+        "solid_mass_kg": 0.05824070194245,
+        "char_mass_kg": 0,
+        "emitted_mass_kg": 0.007759298057549,
+        "volatile_rate_kg_s": 0.0001379947534355,
+        "net_front_power_w": 300.826581163,
+        "solid_energy_j": 26458.31478624,
+        "emitted_enthalpy_j": 12851.33469964,
+        "external_heat_j": 39309.64948703,
+        "thickness_m": 0.005294609267496,
+        "recession_m": 0.0007053907325044,
+        "absolute_remap_mass_residual_kg": 0,
+        "absolute_remap_energy_residual_j": 1.134412741521e-8,
+        "remap_enthalpy_redistribution_j": 6450.690547698
+      },
+      "summary": {
+        "thermal_substeps": 6000,
+        "final_solid_kg": 0.05824070194245,
+        "emitted_volatile_kg": 0.007759298057549,
+        "mass_residual_kg": 4.440892098501e-16,
+        "energy_residual_j": -0.000001155232894234,
+        "maximum_cell_energy_residual_j": 2.496804873964e-9,
+        "geometry_steps": 6000,
+        "geometry_retries": 0,
+        "remaps": 5933,
+        "final_thickness_m": 0.005294609267496,
+        "recession_m": 0.0007053907325044,
+        "absolute_remap_mass_residual_kg": 0,
+        "absolute_remap_energy_residual_j": 1.134412741521e-8,
+        "remap_enthalpy_redistribution_j": 6450.690547698,
+        "maximum_geometry_mass_residual_kg": 1.561251128379e-17,
+        "steps": 6000
+      },
+      "checkpoints": [
+        {
+          "time_s": 30,
+          "front_face_k": 628.300192198,
+          "front_cell_k": 606.941226113,
+          "back_cell_k": 302.284551341,
+          "solid_mass_kg": 0.06598938766684,
+          "char_mass_kg": 0,
+          "emitted_mass_kg": 0.00001061233316301,
+          "volatile_rate_kg_s": 0.000003080832797252,
+          "net_front_power_w": 341.843696938,
+          "solid_energy_j": 11524.70091981,
+          "emitted_enthalpy_j": 16.03333398729,
+          "external_heat_j": 11540.7342539,
+          "thickness_m": 0.00599903524244,
+          "recession_m": 9.647575602741e-7,
+          "absolute_remap_mass_residual_kg": 0,
+          "absolute_remap_energy_residual_j": 2.496562956367e-9,
+          "remap_enthalpy_redistribution_j": 10.22739639657
+        },
+        {
+          "time_s": 60,
+          "front_face_k": 679.311579183,
+          "front_cell_k": 660.401965484,
+          "back_cell_k": 327.181389082,
+          "solid_mass_kg": 0.06492768573452,
+          "char_mass_kg": 0,
+          "emitted_mass_kg": 0.001072314265481,
+          "volatile_rate_kg_s": 0.00007360745996574,
+          "net_front_power_w": 307.557227345,
+          "solid_energy_j": 19376.64576144,
+          "emitted_enthalpy_j": 1747.355088922,
+          "external_heat_j": 21124.00085069,
+          "thickness_m": 0.005902516884956,
+          "recession_m": 0.00009748311504371,
+          "absolute_remap_mass_residual_kg": 0,
+          "absolute_remap_energy_residual_j": 6.149093678687e-9,
+          "remap_enthalpy_redistribution_j": 1064.380738718
+        },
+        {
+          "time_s": 90,
+          "front_face_k": 685.86097322,
+          "front_cell_k": 668.082516046,
+          "back_cell_k": 371.236860117,
+          "solid_mass_kg": 0.06203351629351,
+          "char_mass_kg": 0,
+          "emitted_mass_kg": 0.003966483706486,
+          "volatile_rate_kg_s": 0.0001139213990493,
+          "net_front_power_w": 302.645341483,
+          "solid_energy_j": 23718.98324096,
+          "emitted_enthalpy_j": 6541.306392003,
+          "external_heat_j": 30260.28963362,
+          "thickness_m": 0.005639410572138,
+          "recession_m": 0.0003605894278623,
+          "absolute_remap_mass_residual_kg": 0,
+          "absolute_remap_energy_residual_j": 9.554241842125e-9,
+          "remap_enthalpy_redistribution_j": 3618.604987366
+        },
+        {
+          "time_s": 120,
+          "front_face_k": 688.246669018,
+          "front_cell_k": 671.655478266,
+          "back_cell_k": 419.152825,
+          "solid_mass_kg": 0.05824070194245,
+          "char_mass_kg": 0,
+          "emitted_mass_kg": 0.007759298057549,
+          "volatile_rate_kg_s": 0.0001379947534355,
+          "net_front_power_w": 300.826581163,
+          "solid_energy_j": 26458.31478624,
+          "emitted_enthalpy_j": 12851.33469964,
+          "external_heat_j": 39309.64948703,
+          "thickness_m": 0.005294609267496,
+          "recession_m": 0.0007053907325044,
+          "absolute_remap_mass_residual_kg": 0,
+          "absolute_remap_energy_residual_j": 1.134412741521e-8,
+          "remap_enthalpy_redistribution_j": 6450.690547698
+        }
+      ]
+    },
+    {
+      "cells": 48,
+      "end_s": 120,
+      "maximum_dt_s": 0.02,
+      "incident_w_m2": 50000,
+      "mode": "receding",
+      "final": {
+        "time_s": 120,
+        "front_face_k": 686.013948955,
+        "front_cell_k": 677.69226179,
+        "back_cell_k": 418.892591208,
+        "solid_mass_kg": 0.05809520913307,
+        "char_mass_kg": 0,
+        "emitted_mass_kg": 0.007904790866927,
+        "volatile_rate_kg_s": 0.0001389241247976,
+        "net_front_power_w": 302.528598361,
+        "solid_energy_j": 26326.35845316,
+        "emitted_enthalpy_j": 13123.81871723,
+        "external_heat_j": 39450.17717261,
+        "thickness_m": 0.005281382648461,
+        "recession_m": 0.0007186173515389,
+        "absolute_remap_mass_residual_kg": 0,
+        "absolute_remap_energy_residual_j": 1.13368514576e-8,
+        "remap_enthalpy_redistribution_j": 6663.98297346
+      },
+      "summary": {
+        "thermal_substeps": 6000,
+        "final_solid_kg": 0.05809520913307,
+        "emitted_volatile_kg": 0.007904790866927,
+        "mass_residual_kg": -2.775557561563e-16,
+        "energy_residual_j": -0.000002228429366369,
+        "maximum_cell_energy_residual_j": 2.499557671953e-9,
+        "geometry_steps": 6000,
+        "geometry_retries": 0,
+        "remaps": 5951,
+        "final_thickness_m": 0.005281382648461,
+        "recession_m": 0.0007186173515389,
+        "absolute_remap_mass_residual_kg": 0,
+        "absolute_remap_energy_residual_j": 1.13368514576e-8,
+        "remap_enthalpy_redistribution_j": 6663.98297346,
+        "maximum_geometry_mass_residual_kg": 1.778091562876e-17,
+        "steps": 6000
+      },
+      "checkpoints": [
+        {
+          "time_s": 30,
+          "front_face_k": 627.976859263,
+          "front_cell_k": 617.291674258,
+          "back_cell_k": 302.208195542,
+          "solid_mass_kg": 0.06598679797185,
+          "char_mass_kg": 0,
+          "emitted_mass_kg": 0.00001320202815005,
+          "volatile_rate_kg_s": 0.000003720699871649,
+          "net_front_power_w": 342.039147967,
+          "solid_energy_j": 11526.97107318,
+          "emitted_enthalpy_j": 20.11826193123,
+          "external_heat_j": 11547.08933532,
+          "thickness_m": 0.005998799815623,
+          "recession_m": 0.000001200184377256,
+          "absolute_remap_mass_residual_kg": 0,
+          "absolute_remap_energy_residual_j": 2.387423592154e-9,
+          "remap_enthalpy_redistribution_j": 13.07731701741
+        },
+        {
+          "time_s": 60,
+          "front_face_k": 677.11440127,
+          "front_cell_k": 667.61934986,
+          "back_cell_k": 327.003211917,
+          "solid_mass_kg": 0.06486262147666,
+          "char_mass_kg": 0,
+          "emitted_mass_kg": 0.001137378523339,
+          "volatile_rate_kg_s": 0.00007567502899196,
+          "net_front_power_w": 309.175760162,
+          "solid_energy_j": 19299.26231321,
+          "emitted_enthalpy_j": 1860.120824557,
+          "external_heat_j": 21159.38313837,
+          "thickness_m": 0.005896601952424,
+          "recession_m": 0.0001033980475763,
+          "absolute_remap_mass_residual_kg": 0,
+          "absolute_remap_energy_residual_j": 6.301888788585e-9,
+          "remap_enthalpy_redistribution_j": 1145.795815837
+        },
+        {
+          "time_s": 90,
+          "front_face_k": 683.490039337,
+          "front_cell_k": 674.56450086,
+          "back_cell_k": 371.011086946,
+          "solid_mass_kg": 0.06192056755488,
+          "char_mass_kg": 0,
+          "emitted_mass_kg": 0.004079432445118,
+          "volatile_rate_kg_s": 0.0001151933679104,
+          "net_front_power_w": 304.435872134,
+          "solid_energy_j": 23602.05939838,
+          "emitted_enthalpy_j": 6746.10096049,
+          "external_heat_j": 30348.16036008,
+          "thickness_m": 0.005629142504989,
+          "recession_m": 0.0003708574950107,
+          "absolute_remap_mass_residual_kg": 0,
+          "absolute_remap_energy_residual_j": 9.634277375881e-9,
+          "remap_enthalpy_redistribution_j": 3773.35009602
+        },
+        {
+          "time_s": 120,
+          "front_face_k": 686.013948955,
+          "front_cell_k": 677.69226179,
+          "back_cell_k": 418.892591208,
+          "solid_mass_kg": 0.05809520913307,
+          "char_mass_kg": 0,
+          "emitted_mass_kg": 0.007904790866927,
+          "volatile_rate_kg_s": 0.0001389241247976,
+          "net_front_power_w": 302.528598361,
+          "solid_energy_j": 26326.35845316,
+          "emitted_enthalpy_j": 13123.81871723,
+          "external_heat_j": 39450.17717261,
+          "thickness_m": 0.005281382648461,
+          "recession_m": 0.0007186173515389,
+          "absolute_remap_mass_residual_kg": 0,
+          "absolute_remap_energy_residual_j": 1.13368514576e-8,
+          "remap_enthalpy_redistribution_j": 6663.98297346
+        }
+      ]
+    }
+  ],
+  "spatial_comparison": {
+    "scope": "24 vs48 cells at the same timestep and inputs; no spatial-convergence-order or mesh-independence claim",
+    "differences": {
+      "emitted_mass_kg": {
+        "fine_minus_coarse": 0.00014549280937800092,
+        "percent_of_coarse": 1.8750769502461806
+      },
+      "recession_m": {
+        "fine_minus_coarse": 0.000013226619034500064,
+        "percent_of_coarse": 1.8750769502656544
+      },
+      "front_face_k": {
+        "fine_minus_coarse": -2.232720062999988,
+        "percent_of_coarse": -0.3244069551670572
+      },
+      "back_cell_k": {
+        "fine_minus_coarse": -0.2602337920000082,
+        "percent_of_coarse": -0.062085658613897726
+      },
+      "volatile_rate_kg_s": {
+        "fine_minus_coarse": 9.293713620999974e-7,
+        "percent_of_coarse": 0.6734831136419936
+      }
+    }
+  },
+  "commands": [
+    "cargo run --release -p fs-thermal --example heated_pyrolysis_slab -- noncharring 120 0.02 24 50000 receding",
+    "cargo run --release -p fs-thermal --example heated_pyrolysis_slab -- noncharring 120 0.02 48 50000 receding"
+  ],
+  "source": {
+    "repository": "MaCFP/matl-db",
+    "commit": "9ae21bebd5dbc7478b8637fbc4df1c81291ec6ea",
+    "material_path": "PMMA/Material_Properties/2021/MaCFP_PMMA_NIST.json",
+    "material_blob": "36bc54ad1a7e98bf67dc5c542562094efebb3d53",
+    "model_source": "https://github.com/firemodels/fds/blob/a26081f3b24915552fab7ebf078185af817d9043/Manuals/FDS_Technical_Reference_Guide/Solid_Chapter.tex"
+  },
+  "verification": "Actual release native runs on original thermal owners; 178 thermal tests passed, one existing performance test ignored. DSR unavailable; not a full-workspace/DSR pass.",
+  "limits": [
+    "Same retained material scalars and authored heating as fixed example; no experimental validation or fitted case-specific changes.",
+    "First-order implicit heat/reaction plus frozen-geometry intervals; limited conservative remap can smooth the profile.",
+    "Homogeneous noncharring constant-density slab, fixed back; no pores, char, mechanical work, gas-volume displacement or full burnout.",
+    "Effective volatile enthalpy is not an MMA gas caloric model and must not be coupled to an incompatible gas reference.",
+    "Enthalpy redistribution is not lost heat or a certified PDE error bound."
+  ]
+}

@@ -47,7 +47,8 @@ cargo run -p fs-thermal --example heated_pyrolysis_slab -- \
 ```
 
 Arguments are material scenario, end time [s], maximum boundary-update interval
-[s], through-thickness cells, and incident irradiance [W/m²]. Defaults match the
+[s], through-thickness cells, incident irradiance [W/m²], and an optional sixth
+geometry selector (`fixed` or `receding`). Defaults retain `fixed` and match the
 first command. CSV goes to stdout; configuration and conservation checks go to
 stderr. The example partitions the end time directly, avoiding a spurious tiny
 final interval from repeated clock addition.
@@ -105,6 +106,56 @@ Across the ten retained slab runs, the largest absolute mass imbalance is
 1.39e-17 kg and the largest energy imbalance is 1.81e-5 J. Numerical balance
 does not remove the fixed-geometry, constitutive or resolution approximations.
 
+## Receding noncharring slab
+
+The optional geometry mode uses the same retained NIST/MaCFP scalar inputs and
+effective outgoing enthalpy, with explicit constant-density shrinkage:
+
+```bash
+cargo run --release -p fs-thermal --example heated_pyrolysis_slab -- \
+  noncharring 120 0.02 24 50000 receding
+cargo run --release -p fs-thermal --example heated_pyrolysis_slab -- \
+  noncharring 120 0.02 48 50000 receding
+```
+
+The original implicit heat/reaction operator advances each interval. Retained
+mass determines the slab length at the supplied density; the back face stays
+fixed. A monotone limited reconstruction conservatively remaps specific
+enthalpy in retained-mass coordinate, then the original calorics recover
+temperatures and original series links use the new lengths. The front surface
+balance uses its actual current half-cell resistance. No small residual cell
+mass is retained to keep the solver running.
+
+Both runs completed 6,000 intervals with zero geometry retries:
+
+| Quantity at 120 s | 24 cells | 48 cells |
+|---|---:|---:|
+| Emitted volatile mass (g) | 7.759298058 | 7.904790867 |
+| Remaining thickness (mm) | 5.294609267 | 5.281382648 |
+| Surface recession (mm) | 0.705390733 | 0.718617352 |
+| Front face temperature (K) | 688.246669 | 686.013949 |
+| Back cell temperature (K) | 419.152825 | 418.892591 |
+| Final volatile rate (g/s) | 0.137994753 | 0.138924125 |
+| Whole mass residual (kg) | +4.44e-16 | −2.78e-16 |
+| Whole energy residual (J) | −1.16e-6 | −2.23e-6 |
+
+Doubling the cells changes released mass and recession by **1.875% of the
+coarse result** and front face temperature by **−2.233 K**. Front-cell centers
+sample different physical locations across meshes, so the common face is the
+appropriate boundary-temperature comparison. This is a two-mesh sensitivity
+check, not a convergence-order or mesh-independence claim. The accumulated
+absolute remap energy discrepancy is about 1.14e-8 J in each run; the separate
+enthalpy-redistribution diagnostic measures profile redistribution, not lost
+heat or a certified error bound.
+
+The [retained receding results](receding_slab_example_results.json) contain
+commands, source identity, actual endpoint accounts and 30-second checkpoints.
+The original five-argument fixed invocation remains operational.
+`authored-char` with `receding` refuses: this homogeneous shrinking owner does
+not infer char density, pores, swelling or residue mechanics. Both the boundary
+composition and geometry update remain first order; no experimental validation
+is established by these numerical checks.
+
 ## Published FDS kinetic comparison
 
 ```bash
@@ -142,16 +193,18 @@ verification**, not experimental validation or an independent property fit.
 
 The owner currently supports an endothermic, first-order single reaction with
 distinct sensible virgin/char calorics. Gas leaves at its local production
-temperature; its time-integrated enthalpy is retained. Fixed geometry means
-shrinking/receding surfaces, changing pore structure, char oxidation and
-multicomponent wood mechanisms need further owners and data. A cell approaching
-depletion can exhaust the explicit conduction work budget; the solver refuses
-instead of inventing a residual mass or a moving boundary.
+temperature; its time-integrated enthalpy is retained. The base fixed-geometry
+explicit path can still exhaust its conduction budget near depletion. The new
+implicit and homogeneous receding owners address that numerical/geometric
+limit without introducing residual mass. Changing pore structure, char
+oxidation, multicomponent wood mechanisms, mechanical work and gas-volume
+displacement remain separate capabilities requiring appropriate data.
 
 The [machine-readable results](pyrolysis_example_results.json) retain the
 actual configurations, ten-second trajectory checkpoints, conservation outputs and
 kinetic comparisons. Verification used native Cargo on the original thermal
 source and focused supporting crates because DSR/RCH were unavailable. The
-thermal library passed 164 tests with one existing performance test ignored;
-this is not a full workspace/DSR pass. Calibration data are not relabeled as
+original fixed-geometry increment passed 164 thermal tests; with implicit and
+receding extensions the native suite passes 178, with one existing performance
+test ignored. This is not a full workspace/DSR pass. Calibration data are not relabeled as
 validation; Dalmarnock data are not used.

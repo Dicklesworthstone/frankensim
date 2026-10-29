@@ -364,3 +364,47 @@ its four-substep budget. This remains first-order backward Euler with caller
 time-resolution controls; removing the conduction CFL is not an unconditional
 nonlinear-convergence, temporal-accuracy or entropy theorem. Geometry and
 authored coefficients stay fixed within each original advance.
+
+### Conservative noncharring slab recession
+
+`pyrolysis::slab::RecedingSlab` adopts the original homogeneous x-aligned cell
+chain with caller-sourced constant density, conductivity and cross-section.
+Actual retained mass sets thickness through `L = m / (rho A)` with a fixed
+back face. This is the single-material density/length relation in the pinned
+FDS Solid Chapter's shrinking/swelling section; fixed-back anchoring and
+conservative rezoning are explicit choices of this implementation.
+
+Each bounded interval uses the original implicit conduction/reaction owner.
+Excessive actual per-cell mass loss retries the complete unpublished interval,
+without accumulating rejected volatile releases. Accepted specific enthalpy is
+reconstructed with limited linear slopes in retained-mass coordinate and
+integrated over overlaps onto equal-mass cells. The original caloric inverse
+recovers temperature; original cell geometry and series conductances are rebuilt.
+Mass and extensive enthalpy are transferred, not averaged temperatures. Cell IDs
+are spatial slots after rezoning rather than tracked material particles.
+
+Original volatile mass/enthalpy integrals are unchanged and retain their
+production slots and homogeneous source binding. The original aggregate audit
+includes actual remap storage/discrepancy once; separate mass/energy residuals,
+rounded-geometry mass equivalent and enthalpy redistribution are returned.
+The redistribution diagnostic is not lost heat or a PDE error bound. No seed
+mass, heat-capacity floor or release clipping extends the physical domain.
+Geometry and coefficient evolution remain first-order split from each implicit
+interval. Char, pores, mechanical work, thermal expansion, gas-domain volume
+displacement and complete burnout require separate models.
+
+Seven native groups verify independent isothermal inventory/recession,
+nonlinear-caloric overlap conservation, monotone reconstruction/refinement,
+formation-datum shifts, reaction-disabled identity, complete retries and
+cancellation/replay/source/work refusals. The combined native thermal suite
+passes 178 tests with one existing performance test ignored; DSR is unavailable
+in this execution environment, so this is not a repository-level gate result.
+
+`heated_pyrolysis_slab` retains its original five arguments and fixed default;
+an optional sixth `receding` argument enables the new noncharring path with the
+actual front half-cell resistance. Original NIST/MaCFP scalar inputs and the
+effective volatile enthalpy remain unchanged. The 120-second 24/48-cell runs
+complete, with emitted-mass spatial sensitivity of about 1.88%; their actual
+accounts are retained in
+`data/reference/compartment_fire/pyrolysis/receding_slab_example_results.json`.
+These authored heating cases do not establish experimental PMMA validation.
