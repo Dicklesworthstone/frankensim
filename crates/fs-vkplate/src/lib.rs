@@ -382,15 +382,97 @@ impl Band {
     #[inline]
     fn backward(&self, x: &mut [f64]) {
         let (n, b, w) = (self.n, self.b, self.b + 1);
-        // L' x = y by columns of L' (rows of L): each solved x[i] is pushed into the rows above,
-        // so both sweeps stream the same contiguous factor once
-        for i in (0..n).rev() {
+        // Eliminate two adjacent columns together. Each destination still sees
+        // exactly the descending-row subtraction order; only its load/store is
+        // shared. Solve the second pivot after the first column updates it.
+        let mut end = n;
+        while end >= 2 && b > 0 {
+            let i = end - 1;
+            let j = i - 1;
+            let lo = i.saturating_sub(b);
+            let lower = j.saturating_sub(b);
+            let row = &self.l[i * w + (lo + b - i)..i * w + b + 1];
+            let previous = &self.l[j * w + (lower + b - j)..j * w + b + 1];
+            let xi = x[i] / row[i - lo];
+            x[i] = xi;
+            x[j] -= row[j - lo] * xi;
+            let xj = x[j] / previous[j - lower];
+            x[j] = xj;
+            for ((value, li), lj) in x[lo..j].iter_mut()
+                .zip(&row[..j - lo])
+                .zip(&previous[lo - lower..j - lower]) {
+                *value -= li * xi;
+                *value -= lj * xj;
+            }
+            // The earlier column may reach one extra node at the lower edge.
+            for (value, lij) in x[lower..lo].iter_mut().zip(&previous[..lo - lower]) {
+                *value -= lij * xj;
+            }
+            end -= 2;
+        }
+        for i in (0..end).rev() {
             let lo = i.saturating_sub(b);
             let row = &self.l[i * w + (lo + b - i)..i * w + b + 1];
             let xi = x[i] / row[i - lo];
             x[i] = xi;
             for (xj, lij) in x[lo..i].iter_mut().zip(&row[..i - lo]) {
                 *xj -= lij * xi;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod band_pair_tests {
+    use super::*;
+
+    #[test]
+    fn adjacent_columns_preserve_order_and_linear_residual() {
+        for n in [0_usize, 1, 2, 3, 5, 8, 17, 32] {
+            for width in [0_usize, 1, 2, 4, 9, 31] {
+                let width = width.min(n.saturating_sub(1));
+                let mut a = vec![BTreeMap::new(); n];
+                for i in 0..n {
+                    for j in i.saturating_sub(width)..i {
+                        let value = ((i * 17 + j * 13) % 11) as f64 / 32.0 - 0.125;
+                        a[i].insert(j, value);
+                        a[j].insert(i, value);
+                    }
+                }
+                for (i, row) in a.iter_mut().enumerate() {
+                    row.insert(i, 1.0 + row.values().map(|x| x.abs()).sum::<f64>());
+                }
+                let factor = Band::factor(&a).unwrap();
+                for scale in [1e-9, 1.0, 1e9] {
+                    let rhs: Vec<_> = (0..n).map(|i| scale * ((i * 19 % 23) as f64 - 11.0)).collect();
+                    let mut expected = rhs.clone();
+                    // Retained incumbent order, including both triangular
+                    // sweeps, independently checks every output bit.
+                    let (b, stride) = (factor.b, factor.b + 1);
+                    for i in 0..n {
+                        let lo = i.saturating_sub(b);
+                        let row = &factor.l[i * stride + (lo + b - i)..i * stride + b + 1];
+                        expected[i] = (expected[i] - dot(&row[..i - lo], &expected[lo..i])) / row[i - lo];
+                    }
+                    for i in (0..n).rev() {
+                        let lo = i.saturating_sub(b);
+                        let row = &factor.l[i * stride + (lo + b - i)..i * stride + b + 1];
+                        let xi = expected[i] / row[i - lo];
+                        expected[i] = xi;
+                        for (value, lij) in expected[lo..i].iter_mut().zip(&row[..i - lo]) {
+                            *value -= lij * xi;
+                        }
+                    }
+                    let mut actual = rhs.clone();
+                    factor.solve(&mut actual);
+                    assert_eq!(actual.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                               expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>());
+                    for (i, row) in a.iter().enumerate() {
+                        let product: f64 = row.iter().map(|(&j, &v)| v * actual[j]).sum();
+                        assert!((product - rhs[i]).abs() <= scale * 1e-12,
+                                "n={n} width={width} row={i}: residual {}", product - rhs[i]);
+                    }
+                }
             }
         }
     }
