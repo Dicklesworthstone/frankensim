@@ -1,6 +1,6 @@
 //! Complete held-input dynamics cached through the existing quadratic owner.
 use super::{DenseExponentialBudget, LinearSplitBudget, MAX_LINEAR_EXPONENTIAL_BLOCK_DIM,
-    finite, prepared::PreparedQuadraticFlow, product, refuse, split_quadratic};
+    finite, positive_heat::PositiveHeat, prepared::PreparedQuadraticFlow, refuse, split_quadratic};
 use crate::{PhsError, PortHamiltonian, PreparedStepRecord, StepRecord, storage_energy_change};
 
 /// Conservative numerical energy scale, invariant under adding a constant to H.
@@ -29,12 +29,13 @@ impl System<'_> {
 struct Scratch {
     augmented: Vec<f64>, balanced: Vec<f64>, endpoint: Vec<f64>, integrals: Vec<f64>,
     midpoint: Vec<f64>, effort: Vec<f64>, output: Vec<f64>,
+    heat_state: Vec<f64>,
 }
 impl Scratch {
     fn new(n: usize, m: usize) -> Self {
         Self { augmented: vec![0.0; n+m+1], balanced: vec![0.0; n], endpoint: vec![0.0; n],
-            integrals: vec![0.0; m+1], midpoint: vec![0.0; n], effort: vec![0.0; n],
-            output: vec![0.0; m] }
+            integrals: vec![0.0; m], midpoint: vec![0.0; n], effort: vec![0.0; n],
+            output: vec![0.0; m], heat_state: vec![0.0; 2*n] }
     }
 }
 
@@ -46,6 +47,7 @@ pub struct PreparedExactZoh<'a> {
     system: System<'a>,
     duration: f64,
     flow: Option<PreparedQuadraticFlow>,
+    heat: Option<PositiveHeat>,
     scratch: Scratch,
 }
 
@@ -76,15 +78,15 @@ impl<'a> PreparedExactZoh<'a> {
         }
         let (n, m) = (system.n, system.m);
         let scratch = Scratch::new(n, m);
-        if duration == 0.0 { return Ok(Self { system: owner, duration, flow: None, scratch }); }
+        if duration == 0.0 { return Ok(Self { system: owner, duration, flow: None, heat: None, scratch }); }
         let q = split.quadratic_matrix();
-        let loss = product(q, &product(&system.r, q, n), n);
         let outputs: Vec<Vec<f64>> = (0..m).map(|p| (0..n).map(|j|
             (0..n).map(|k| system.g[k*m+p]*q[k*n+j]).sum()).collect()).collect();
-        let flow = PreparedQuadraticFlow::new(system, &split, duration, &[loss], &outputs,
+        let flow = PreparedQuadraticFlow::new(system, &split, duration, &[], &outputs,
             DenseExponentialBudget { max_dimension: MAX_LINEAR_EXPONENTIAL_BLOCK_DIM,
                 max_dense_bytes: usize::MAX, max_multiply_terms: u64::MAX })?;
-        Ok(Self { system: owner, duration, flow: Some(flow), scratch })
+        let heat = PositiveHeat::new(system, &split, duration, &system.r)?;
+        Ok(Self { system: owner, duration, flow: Some(flow), heat: Some(heat), scratch })
     }
 
     /// Original immutable physical owner, including complete material storage.
@@ -97,7 +99,7 @@ impl<'a> PreparedExactZoh<'a> {
     pub fn step(&self, initial: &[f64], input: &[f64]) -> Result<StepRecord, PhsError> {
         let sys = self.system();
         let mut scratch = Scratch::new(sys.n, sys.m);
-        let record = evaluate_step(sys, self.duration, self.flow.as_ref(), initial, input, &mut scratch)?;
+        let record = evaluate_step(sys, self.duration, self.flow.as_ref(), self.heat.as_ref(), initial, input, &mut scratch)?;
         Ok(StepRecord { x: scratch.endpoint, y: scratch.output, delta_h: record.delta_h,
             dissipated: record.dissipated, supplied: record.supplied,
             newton_iters: record.newton_iters, solver_residual: record.solver_residual,
@@ -114,7 +116,7 @@ impl<'a> PreparedExactZoh<'a> {
         if next.len() != sys.n || average_output.len() != sys.m {
             return Err(refuse("prepared ZOH output buffers must match the complete state and ports"));
         }
-        let record = evaluate_step(sys, self.duration, self.flow.as_ref(), initial, input, &mut self.scratch)?;
+        let record = evaluate_step(sys, self.duration, self.flow.as_ref(), self.heat.as_ref(), initial, input, &mut self.scratch)?;
         next.copy_from_slice(&self.scratch.endpoint);
         average_output.copy_from_slice(&self.scratch.output);
         Ok(record)
@@ -122,7 +124,7 @@ impl<'a> PreparedExactZoh<'a> {
 }
 
 fn evaluate_step(sys: &PortHamiltonian, duration: f64, flow: Option<&PreparedQuadraticFlow>,
-    initial: &[f64], input: &[f64], scratch: &mut Scratch) -> Result<PreparedStepRecord, PhsError> {
+    heat: Option<&PositiveHeat>, initial: &[f64], input: &[f64], scratch: &mut Scratch) -> Result<PreparedStepRecord, PhsError> {
     if initial.len() != sys.n || input.len() != sys.m || !finite(initial) || !finite(input) {
         return Err(refuse("prepared ZOH requires complete finite state and input"));
     }
@@ -141,9 +143,11 @@ fn evaluate_step(sys: &PortHamiltonian, duration: f64, flow: Option<&PreparedQua
     };
     flow.evaluate_into(initial, input, &mut scratch.augmented, &mut scratch.balanced,
         &mut scratch.endpoint, &mut scratch.integrals)?;
-    for (out, value) in scratch.output.iter_mut().zip(&scratch.integrals[1..]) { *out = value/duration; }
-    let supplied: f64 = input.iter().zip(&scratch.integrals[1..]).map(|(u, integral)| u*integral).sum();
-    let dissipated = scratch.integrals[0];
+    for (out, value) in scratch.output.iter_mut().zip(&scratch.integrals) { *out = value/duration; }
+    let supplied: f64 = input.iter().zip(&scratch.integrals).map(|(u, integral)| u*integral).sum();
+    let dissipated = heat.ok_or_else(||refuse("prepared positive heat is missing"))?
+        .evaluate_into(sys,initial,input,&mut scratch.effort,&mut scratch.balanced,
+            &mut scratch.heat_state)?;
     let delta_h = storage_energy_change(sys.storage.as_ref(), initial, &scratch.endpoint,
         &mut scratch.midpoint, &mut scratch.effort);
     let scale = energetic_scale_into(sys, initial, &mut scratch.effort)

@@ -26,6 +26,7 @@ use gramian::{accumulate, identity, product};
 /// Cold caching of the same complete quadratic trajectory and its integrals.
 pub mod prepared;
 mod prepared_zoh;
+mod positive_heat;
 pub use prepared_zoh::PreparedExactZoh;
 pub(crate) use prepared_zoh::energetic_scale;
 
@@ -848,31 +849,23 @@ fn exact_zoh_loss(
             }
         }
     }
-    let mut loss = vec![0.0; d * d];
-    let r_effort = product(loss_resistance, &effort_map, n);
-    for i in 0..n {
-        for j in 0..n {
-            loss[i * d + j] = (0..n)
-                .map(|a| effort_map[a * n + i] * r_effort[a * n + j])
-                .sum();
-        }
-    }
-    // Preserve the original dense capacity gate. Joint Taylor/Lyapunov
-    // propagation works on d x d matrices and doubles W as W + E^T W E.
-    // No exp(-B^T dt) is formed: stiff physical decay retains finite heat.
+    // Preserve the original dense capacity gate and held-input transition.
+    // Physical heat has its own positive factor below, so a tiny vibration
+    // about static force balance never subtracts expanded Gramian entries.
     admit_exponential(2 * d, DenseExponentialBudget {
         max_dimension: MAX_LINEAR_EXPONENTIAL_BLOCK_DIM,
         max_dense_bytes: usize::MAX,
         max_multiply_terms: u64::MAX,
     })?;
-    let flow = gramian::flow_integral(&b, &loss, d, dt).map_err(refuse)?;
+    let flow = gramian::flow_integral(&b, &vec![0.0; d * d], d, dt).map_err(refuse)?;
     let mut end = vec![0.0; d];
     for i in 0..d {
         for j in 0..d {
             end[i] += flow.transition[i * d + j] * initial[j];
         }
     }
-    let dissipated = quadratic(&flow.loss_integral, &initial);
+    let dissipated = positive_heat::PositiveHeat::new(sys, split, dt, loss_resistance)?
+        .evaluate(sys, x0, u)?;
     let x: Vec<_> = (0..n)
         .map(|i| (0..n).map(|j| inverse[i * n + j] * end[j]).sum())
         .collect();

@@ -157,21 +157,39 @@ source checks larger explicit admission, unchanged default refusal and exact
 byte/work boundaries. Native execution is pending.
 
 `ExactZoh` advances the full coupled `(J-R)Q` operator with held input. Port
-outputs are step averages; dissipation is the independently evaluated integral
-of `grad H^T R grad H`, obtained by a joint propagator/finite-horizon Gramian
-calculation. It is NOT
-`dt*dg^T R dg` for the endpoint Gonzalez gradient. The independent energy
-balance must close to 1e-12 relative or the step refuses. A converged scaled
-Taylor/Lyapunov series computes the short-interval transition `E` and loss
-integral `W`; doubling uses `W <- W + E^T W E` and `E <- E E`. This avoids
-forming an exponentially growing inverse propagator for stiff passive decay,
-while retaining held sources, every port output, zero-energy coordinates and
-separate resistance channels. The calculation uses state-sized dense matrices
-and retains the original capacity, 32-term and 48-doubling bounds. It neither
-clips loss nor infers heat from the storage difference. This is floating
-point evidence, not an interval certificate, allocation-free kernel or
-cooperative cancellation guarantee. Callers poll at their existing block
-boundary. Purely quadratic storage is mandatory; nonlinear ZOH is refused.
+outputs are step averages. Physical heat independently integrates
+`grad H^T R grad H` along that same complete trajectory. It retains a positive
+square-root factor instead of expanding a Gramian whose terms can cancel near
+a force-supported equilibrium. Initial loss effort and the original force
+imbalance supply numerically stable coordinates; no equilibrium solve, state
+reduction or change of physical generator occurs.
+
+Positive eight-point Gauss quadrature on a norm-bounded short interval and QR
+semigroup doubling preserve the heat factor. The existing fs-la Householder QR
+owns factorization, and the existing bounded exponential owns every transition.
+Absolute resistance scaling retains even very small physical damping; a negative
+computed resistance eigenvalue refuses instead of being clipped. Exactly zero
+resistance gives exactly zero heat. No inverse-growing passive propagator is
+formed. Separate resistance channels still observe the same full original
+trajectory. The original state/port admission and 48-doubling limit remain.
+
+Source work and constitutive storage change are computed independently, and
+the original 1e-12 relative energy-balance gate remains. Heat is neither an
+endpoint discrete-gradient approximation nor an inferred energy remainder.
+Generic signed quadratic observations retain their existing Gramian integration.
+This is floating-point evidence, not an interval certificate or cooperative
+cancellation guarantee; callers poll at their existing block boundary. Purely
+quadratic storage is mandatory. `PreparedExactZoh` caches the same heat factor,
+and its successful `step_into` reuses all numerical buffers.
+
+Four physical regressions in `tests/exact_heat.rs` compare heat with independent
+physical-equation RK4 and analytic limits: exact static silence and 1e-10 motion
+with resistance down to 1e-200; high-Q and million-per-second relaxation;
+relative-velocity damping nullspaces; and complete off-diagonal damping plus
+Maxwell memory, clock subdivision and atomic refusal. Existing prepared-runtime
+allocation, exact-flow, stiff-energy and multirate regressions pass in native
+numerical testing. This does not claim measured wall-time acceleration or full
+workspace qualification.
 
 `FrequencyMatched` replaces Q by a per-mode matched quadratic energy while
 retaining every term of the original nonlinear Hamiltonian. For lossless
