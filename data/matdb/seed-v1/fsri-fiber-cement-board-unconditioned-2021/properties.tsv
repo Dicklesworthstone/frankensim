@@ -1,0 +1,117 @@
+frankensim.matdb-source.v1
+observation	identity	fsri-fiber-cement-board-unconditioned-2021	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Fiber_Cement_Board/material.json	Wood pulp and Portland cement board, cut from nominal 8.5 mm stock. Exact cement formulation, fiber fraction, manufacturer, cure age and porosity are unspecified. The source metadata headline density is 1290 kg/m3; the reported Wet HFM density inputs instead average 1332.6666666666667 kg/m3. They are not silently reconciled. Stock thickness identifies the source product population, not an intrinsic property or the test thickness. Capacity and conductivity use distinct experiments in the same source population; exact same-coupon correspondence is not established. No structural, acoustic, fire, dehydration, melting or service-temperature qualification follows.
+observation	method	fsri-fiber-cement-board-unconditioned-2021	https://materials.fsri.org/experimentalmethodology	Wet in the filenames means unconditioned indoor storage at 22 +/- 3 degC and relative humidity 40 +/- 20 percent, not water saturation or oven drying. Actual moisture content and applied contact pressure are unspecified. HFM samples are planar. Conductivity generally follows ASTM C518 through thickness with upward heat flow. Capacity generally follows ASTM C1784-20 equal-plate temperature steps. Finite differences and test direction remain part of the source conditions. Calibration uncertainty and cross-property covariance are unknown.
+observation	capacity-r1	fsri-fiber-cement-board-unconditioned-2021	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Fiber_Cement_Board/HFM/Fiber_Cement_Board_HFM_Wet_heatcapacity_210614_R1.tst	Recorded thickness 8.59 mm; instrument measured. Mean temperatures 10,20.010000000000002,30.010000000000002,40.009999999999998 degC and native capacity readings 1171294,1204310,1239544,1269595 J/(m3 K). The instrument label Specific Heat has volumetric units; it is not J/(kg K). Equal-plate steps are 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC. These readings average finite 10 K steps, not infinitesimal calorimetry.
+observation	capacity-r2	fsri-fiber-cement-board-unconditioned-2021	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Fiber_Cement_Board/HFM/Fiber_Cement_Board_HFM_Wet_heatcapacity_210615_R2.tst	Recorded thickness 8.24 mm; instrument measured. Mean temperatures 10,20.010000000000002,30.010000000000002,40.009999999999998 degC and native capacity readings 1216015,1268076,1304073,1345828 J/(m3 K). The instrument label Specific Heat has volumetric units; it is not J/(kg K). Equal-plate steps are 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC. These readings average finite 10 K steps, not infinitesimal calorimetry.
+observation	capacity-r3	fsri-fiber-cement-board-unconditioned-2021	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Fiber_Cement_Board/HFM/Fiber_Cement_Board_HFM_Wet_heatcapacity_210615_R3.tst	Recorded thickness 8.48 mm; instrument measured. Mean temperatures 10,20.010000000000002,30.010000000000002,40.009999999999998 degC and native capacity readings 1237398,1271615,1312065,1340740 J/(m3 K). The instrument label Specific Heat has volumetric units; it is not J/(kg K). Equal-plate steps are 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC. These readings average finite 10 K steps, not infinitesimal calorimetry.
+observation	capacity-reduction	fsri-fiber-cement-board-unconditioned-2021	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/02_Scripts/plot_HFM_data_html.py	Round mean temperatures to 0.1 degC, grouping at 10,20,30,40 degC. Arithmetic means of the three retained C_vol readings are 1208235.6666666667,1248000.3333333333,1285227.3333333333,1318721 J/(m3 K). Sample SD is sqrt(sum((C_i-mean)^2)/(3-1)), retained as a separate TabulatedOnly statistic. Extra arithmetic digits do not increase source precision. Linear interpolation is an authored approximation with no measured interpolation-error bound; no extrapolation is supplied.
+observation	conductivity	fsri-fiber-cement-board-unconditioned-2021	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Fiber_Cement_Board/HFM/	Fiber_Cement_Board_HFM_Wet_conductivity_210611_R1.tst at 9.04 mm (instrument measured): temperatures 15.01,45.009999999999998,15.01,45.009999999999998,15.01,45.009999999999998 degC, Average Cond 0.1138,0.12909999999999999,0.1148,0.12939999999999999,0.11509999999999999,0.1295 W/(m K); Fiber_Cement_Board_HFM_Wet_conductivity_210611_R2.tst at 8.25 mm (instrument measured): temperatures 15.01,45.009999999999998,15.01,45.009999999999998,15.01,45.009999999999998 degC, Average Cond 0.14530000000000001,0.16259999999999999,0.1467,0.16270000000000001,0.1469,0.16220000000000001 W/(m K); Fiber_Cement_Board_HFM_Wet_conductivity_210614_R3.tst at 8.52 mm (instrument measured): temperatures 15.01,45.009999999999998,15.01,45.009999999999998,15.01,45.009999999999998 degC, Average Cond 0.1484,0.16619999999999999,0.15040000000000001,0.16739999999999999,0.15060000000000001,0.16750000000000001 W/(m K). Upper/lower plate setpoints are 5/25 degC and 35/55 degC, nominal 20 K difference. Three cycles per specimen provide nine pooled readings per temperature, not nine independent specimens. The source script rounds mean temperature to integer degC, computes pooled arithmetic mean and sample SD, then rounds to 0.001 W/(m K). Published means 0.13700000000000001,0.153 and SD 0.017000000000000001,0.017999999999999999 at 15,45 degC are retained. Zero rounded SD does not establish zero scatter or uncertainty. Apparent through-thickness values do not imply in-plane equality or isotropy.
+observation	local-model	fsri-fiber-cement-board-unconditioned-2021	Explicit approximation required by mean-test-temperature-as-local-model=1	The thermal-conductivity key opts into interpreting the finite-plate-difference apparent conductivity at its mean temperature as a local scalar thermal model. This is not a new point measurement or deconvolution. The apparent-thermal-conductivity key separately retains the original test-mean-temperature axis. Linear interpolation is authored without a measured error bound.
+observation	density-normalization	fsri-fiber-cement-board-unconditioned-2021	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Fiber_Cement_Board/HFM/	The reported density inputs in Fiber_Cement_Board_Density_Wet_R1.csv, Fiber_Cement_Board_Density_Wet_R2.csv, Fiber_Cement_Board_Density_Wet_R3.csv are 1359,1338,1301 kg/m3. The primary script uses their mean 1332.6666666666667 kg/m3, without substituting the metadata density headline or recomputing density from mass/volume. Measurement temperature is unspecified; this is a normalization input, not a density(T) law.
+observation	specific-heat-reduction	fsri-fiber-cement-board-unconditioned-2021	https://materials.fsri.org/materialdetail/fiber-cement-board	Published Cp means 907,936,964,990 and SD 25,28,30,32 J/(kg K) at 10,20,30,40 degC equal mean C_vol and its sample SD divided by the common reported normalization density, rounded to whole units. No density scatter or calibration uncertainty is propagated. These quantities are algebraically related, not independent measurements.
+curve	mean-volume-capacity	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction	volumetric_capacity	temperature	K	J/m3/K	283.14999999999998:1208235.6666666667,293.14999999999998:1248000.3333333333,303.14999999999998:1285227.3333333333,313.14999999999998:1318721	linear
+uncertainty	mean-volume-capacity	unstated	-	-	-	-
+validity	mean-volume-capacity	family	1	1	1
+validity	mean-volume-capacity	unconditioned	1	1	1
+validity	mean-volume-capacity	grade_known	0	0	1
+validity	mean-volume-capacity	formulation_known	0	0	1
+validity	mean-volume-capacity	moisture_known	0	0	1
+validity	mean-volume-capacity	pressure_known	0	0	1
+validity	mean-volume-capacity	statistic	1	1	1
+validity	mean-volume-capacity	specimens	3	3	1
+validity	mean-volume-capacity	stock_thickness	0.0085000000000000006	0.0085000000000000006	m
+validity	mean-volume-capacity	temperature	283.14999999999998	313.14999999999998	K
+curve	apparent-conductivity	identity,method,conductivity	apparent_conductivity	test_mean_temperature	K	W/m/K	288.14999999999998:0.13700000000000001,318.14999999999998:0.153	linear
+uncertainty	apparent-conductivity	unstated	-	-	-	-
+validity	apparent-conductivity	family	1	1	1
+validity	apparent-conductivity	unconditioned	1	1	1
+validity	apparent-conductivity	grade_known	0	0	1
+validity	apparent-conductivity	formulation_known	0	0	1
+validity	apparent-conductivity	moisture_known	0	0	1
+validity	apparent-conductivity	pressure_known	0	0	1
+validity	apparent-conductivity	statistic	1	1	1
+validity	apparent-conductivity	specimens	3	3	1
+validity	apparent-conductivity	stock_thickness	0.0085000000000000006	0.0085000000000000006	m
+validity	apparent-conductivity	through_thickness	1	1	1
+validity	apparent-conductivity	upward	1	1	1
+validity	apparent-conductivity	plate_delta	20	20	K
+validity	apparent-conductivity	test_mean_temperature	288.14999999999998	318.14999999999998	K
+curve	local-conductivity	identity,method,conductivity,local-model	local_conductivity	temperature	K	W/m/K	288.14999999999998:0.13700000000000001,318.14999999999998:0.153	linear
+uncertainty	local-conductivity	unstated	-	-	-	-
+validity	local-conductivity	family	1	1	1
+validity	local-conductivity	unconditioned	1	1	1
+validity	local-conductivity	grade_known	0	0	1
+validity	local-conductivity	formulation_known	0	0	1
+validity	local-conductivity	moisture_known	0	0	1
+validity	local-conductivity	pressure_known	0	0	1
+validity	local-conductivity	statistic	1	1	1
+validity	local-conductivity	specimens	3	3	1
+validity	local-conductivity	stock_thickness	0.0085000000000000006	0.0085000000000000006	m
+validity	local-conductivity	through_thickness	1	1	1
+validity	local-conductivity	upward	1	1	1
+validity	local-conductivity	plate_delta	20	20	K
+validity	local-conductivity	local_model	1	1	1
+validity	local-conductivity	temperature	288.14999999999998	318.14999999999998	K
+curve	computed-volume-capacity-sd	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction	capacity_sd	temperature	K	J/m3/K	283.14999999999998:33731.635364051552,293.14999999999998:37878.292600555971,303.14999999999998:39764.220403942702,313.14999999999998:42620.357143036708	tabulated
+uncertainty	computed-volume-capacity-sd	unstated	-	-	-	-
+validity	computed-volume-capacity-sd	family	1	1	1
+validity	computed-volume-capacity-sd	unconditioned	1	1	1
+validity	computed-volume-capacity-sd	grade_known	0	0	1
+validity	computed-volume-capacity-sd	formulation_known	0	0	1
+validity	computed-volume-capacity-sd	moisture_known	0	0	1
+validity	computed-volume-capacity-sd	pressure_known	0	0	1
+validity	computed-volume-capacity-sd	statistic	0	0	1
+validity	computed-volume-capacity-sd	specimens	3	3	1
+validity	computed-volume-capacity-sd	stock_thickness	0.0085000000000000006	0.0085000000000000006	m
+validity	computed-volume-capacity-sd	temperature	283.14999999999998	313.14999999999998	K
+curve	published-conductivity-sd	identity,method,conductivity	conductivity_sd	test_mean_temperature	K	W/m/K	288.14999999999998:0.017000000000000001,318.14999999999998:0.017999999999999999	tabulated
+uncertainty	published-conductivity-sd	unstated	-	-	-	-
+validity	published-conductivity-sd	family	1	1	1
+validity	published-conductivity-sd	unconditioned	1	1	1
+validity	published-conductivity-sd	grade_known	0	0	1
+validity	published-conductivity-sd	formulation_known	0	0	1
+validity	published-conductivity-sd	moisture_known	0	0	1
+validity	published-conductivity-sd	pressure_known	0	0	1
+validity	published-conductivity-sd	statistic	0	0	1
+validity	published-conductivity-sd	specimens	3	3	1
+validity	published-conductivity-sd	stock_thickness	0.0085000000000000006	0.0085000000000000006	m
+validity	published-conductivity-sd	through_thickness	1	1	1
+validity	published-conductivity-sd	upward	1	1	1
+validity	published-conductivity-sd	plate_delta	20	20	K
+validity	published-conductivity-sd	test_mean_temperature	288.14999999999998	318.14999999999998	K
+curve	published-specific-heat	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction,density-normalization,specific-heat-reduction	specific_heat	temperature	K	J/kg/K	283.14999999999998:907,293.14999999999998:936,303.14999999999998:964,313.14999999999998:990	linear
+uncertainty	published-specific-heat	unstated	-	-	-	-
+validity	published-specific-heat	family	1	1	1
+validity	published-specific-heat	unconditioned	1	1	1
+validity	published-specific-heat	grade_known	0	0	1
+validity	published-specific-heat	formulation_known	0	0	1
+validity	published-specific-heat	moisture_known	0	0	1
+validity	published-specific-heat	pressure_known	0	0	1
+validity	published-specific-heat	statistic	1	1	1
+validity	published-specific-heat	specimens	3	3	1
+validity	published-specific-heat	stock_thickness	0.0085000000000000006	0.0085000000000000006	m
+validity	published-specific-heat	temperature	283.14999999999998	313.14999999999998	K
+curve	published-specific-heat-sd	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction,density-normalization,specific-heat-reduction	specific_heat_sd	temperature	K	J/kg/K	283.14999999999998:25,293.14999999999998:28,303.14999999999998:30,313.14999999999998:32	tabulated
+uncertainty	published-specific-heat-sd	unstated	-	-	-	-
+validity	published-specific-heat-sd	family	1	1	1
+validity	published-specific-heat-sd	unconditioned	1	1	1
+validity	published-specific-heat-sd	grade_known	0	0	1
+validity	published-specific-heat-sd	formulation_known	0	0	1
+validity	published-specific-heat-sd	moisture_known	0	0	1
+validity	published-specific-heat-sd	pressure_known	0	0	1
+validity	published-specific-heat-sd	statistic	0	0	1
+validity	published-specific-heat-sd	specimens	3	3	1
+validity	published-specific-heat-sd	stock_thickness	0.0085000000000000006	0.0085000000000000006	m
+validity	published-specific-heat-sd	temperature	283.14999999999998	313.14999999999998	K
+scalar	normalization-density	identity,method,density-normalization	normalization_density	1332.6666666666667	kg/m3	constant
+uncertainty	normalization-density	unstated	-	-	-	-
+validity	normalization-density	family	1	1	1
+validity	normalization-density	unconditioned	1	1	1
+validity	normalization-density	grade_known	0	0	1
+validity	normalization-density	formulation_known	0	0	1
+validity	normalization-density	moisture_known	0	0	1
+validity	normalization-density	pressure_known	0	0	1
+validity	normalization-density	statistic	1	1	1
+validity	normalization-density	specimens	3	3	1
+validity	normalization-density	stock_thickness	0.0085000000000000006	0.0085000000000000006	m
+validity	normalization-density	density_temperature_known	0	0	1

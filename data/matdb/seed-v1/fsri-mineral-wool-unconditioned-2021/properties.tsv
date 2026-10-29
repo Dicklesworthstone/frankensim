@@ -1,0 +1,117 @@
+frankensim.matdb-source.v1
+observation	identity	fsri-mineral-wool-unconditioned-2021	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Mineral_Wool_Insulation/material.json	Resin-bound natural-stone-fiber insulation from nominal 89 mm R-15 commercial batts. The material family can include basalt or diabase; exact mineral blend, binder fraction, manufacturer, porosity and applied compression are unspecified. R-15 is a source product description, not a newly inferred resistance claim. HFM specimens are approximately 39-41 mm thick, not 89 mm; no compression law or equivalence of these thicknesses is inferred. Stock thickness identifies the source product population, not an intrinsic property or the test thickness. Capacity and conductivity use distinct experiments in the same source population; exact same-coupon correspondence is not established. No structural, acoustic, fire, dehydration, melting or service-temperature qualification follows.
+observation	method	fsri-mineral-wool-unconditioned-2021	https://materials.fsri.org/experimentalmethodology	Wet in the filenames means unconditioned indoor storage at 22 +/- 3 degC and relative humidity 40 +/- 20 percent, not water saturation or oven drying. Actual moisture content and applied contact pressure are unspecified. HFM samples are planar. Conductivity generally follows ASTM C518 through thickness with upward heat flow. Capacity generally follows ASTM C1784-20 equal-plate temperature steps. Finite differences and test direction remain part of the source conditions. Calibration uncertainty and cross-property covariance are unknown.
+observation	capacity-r1	fsri-mineral-wool-unconditioned-2021	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Mineral_Wool_Insulation/HFM/Mineral_Wool_Insulation_HFM_Wet_heatcapacity_211216_R1.tst	Recorded thickness 38.99 mm; user entered. Mean temperatures 10,20.010000000000002,30.010000000000002,40.009999999999998 degC and native capacity readings 38899,41780,42989,43334 J/(m3 K). The instrument label Specific Heat has volumetric units; it is not J/(kg K). Equal-plate steps are 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC. These readings average finite 10 K steps, not infinitesimal calorimetry.
+observation	capacity-r2	fsri-mineral-wool-unconditioned-2021	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Mineral_Wool_Insulation/HFM/Mineral_Wool_Insulation_HFM_Wet_heatcapacity_211216_R2.tst	Recorded thickness 38.96 mm; user entered. Mean temperatures 10,20.010000000000002,30.010000000000002,40.009999999999998 degC and native capacity readings 40529,43315,44883,45161 J/(m3 K). The instrument label Specific Heat has volumetric units; it is not J/(kg K). Equal-plate steps are 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC. These readings average finite 10 K steps, not infinitesimal calorimetry.
+observation	capacity-r3	fsri-mineral-wool-unconditioned-2021	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Mineral_Wool_Insulation/HFM/Mineral_Wool_Insulation_HFM_Wet_heatcapacity_211213_R3.tst	Recorded thickness 40.98 mm; user entered. Mean temperatures 10,20.010000000000002,30.010000000000002,40.009999999999998 degC and native capacity readings 42288,43594,44713,45601 J/(m3 K). The instrument label Specific Heat has volumetric units; it is not J/(kg K). Equal-plate steps are 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC. These readings average finite 10 K steps, not infinitesimal calorimetry.
+observation	capacity-reduction	fsri-mineral-wool-unconditioned-2021	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/02_Scripts/plot_HFM_data_html.py	Round mean temperatures to 0.1 degC, grouping at 10,20,30,40 degC. Arithmetic means of the three retained C_vol readings are 40572,42896.333333333336,44195,44698.666666666664 J/(m3 K). Sample SD is sqrt(sum((C_i-mean)^2)/(3-1)), retained as a separate TabulatedOnly statistic. Extra arithmetic digits do not increase source precision. Linear interpolation is an authored approximation with no measured interpolation-error bound; no extrapolation is supplied. The source script sorts filenames and overwrites the Wet_R1 and Wet_R2 columns with the later December 16 runs, while retaining December 13 R3. This exact published reduction is retained: the two earlier R1/R2 runs are not five independent specimens and are not pooled. Their earlier C_vol readings are R1 40637,39684,43915,43416 and R2 40496,43115,41888,45105 J/(m3 K).
+observation	conductivity	fsri-mineral-wool-unconditioned-2021	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Mineral_Wool_Insulation/HFM/	Mineral_Wool_Insulation_HFM_Wet_conductivity_211210_R1.tst at 38.96 mm (user entered): temperatures 15.01,45.009999999999998,15.01,45.009999999999998,15.01,45.009999999999998 degC, Average Cond 0.033709999999999997,0.038620000000000002,0.033619999999999997,0.038640000000000001,0.033640000000000003,0.038609999999999998 W/(m K); Mineral_Wool_Insulation_HFM_Wet_conductivity_211210_R2.tst at 38.99 mm (user entered): temperatures 15.01,45.009999999999998,15.01,45.009999999999998,15.01,45.009999999999998 degC, Average Cond 0.033300000000000003,0.038269999999999998,0.033309999999999999,0.038240000000000003,0.033300000000000003,0.038199999999999998 W/(m K); Mineral_Wool_Insulation_HFM_Wet_conductivity_211210_R3.tst at 40.98 mm (user entered): temperatures 15.01,45.009999999999998,15.01,45.009999999999998,15.01,45.009999999999998 degC, Average Cond 0.032960000000000003,0.037780000000000001,0.032910000000000002,0.037749999999999999,0.032919999999999998,0.037749999999999999 W/(m K). Upper/lower plate setpoints are 5/25 degC and 35/55 degC, nominal 20 K difference. Three cycles per specimen provide nine pooled readings per temperature, not nine independent specimens. The source script rounds mean temperature to integer degC, computes pooled arithmetic mean and sample SD, then rounds to 0.001 W/(m K). Published means 0.033000000000000002,0.037999999999999999 and SD 0,0 at 15,45 degC are retained. Zero rounded SD does not establish zero scatter or uncertainty. Apparent through-thickness values do not imply in-plane equality or isotropy.
+observation	local-model	fsri-mineral-wool-unconditioned-2021	Explicit approximation required by mean-test-temperature-as-local-model=1	The thermal-conductivity key opts into interpreting the finite-plate-difference apparent conductivity at its mean temperature as a local scalar thermal model. This is not a new point measurement or deconvolution. The apparent-thermal-conductivity key separately retains the original test-mean-temperature axis. Linear interpolation is authored without a measured error bound.
+observation	density-normalization	fsri-mineral-wool-unconditioned-2021	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Mineral_Wool_Insulation/HFM/	The reported density inputs in Mineral_Wool_Insulation_Density_Wet_R1.csv, Mineral_Wool_Insulation_Density_Wet_R2.csv, Mineral_Wool_Insulation_Density_Wet_R3.csv are 50,54,60 kg/m3. The primary script uses their mean 54.666666666666664 kg/m3, without substituting the metadata density headline or recomputing density from mass/volume. Measurement temperature is unspecified; this is a normalization input, not a density(T) law.
+observation	specific-heat-reduction	fsri-mineral-wool-unconditioned-2021	https://materials.fsri.org/materialdetail/mineral-wool-insulation	Published Cp means 742,785,808,818 and SD 31,18,19,22 J/(kg K) at 10,20,30,40 degC equal mean C_vol and its sample SD divided by the common reported normalization density, rounded to whole units. No density scatter or calibration uncertainty is propagated. These quantities are algebraically related, not independent measurements.
+curve	mean-volume-capacity	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction	volumetric_capacity	temperature	K	J/m3/K	283.14999999999998:40572,293.14999999999998:42896.333333333336,303.14999999999998:44195,313.14999999999998:44698.666666666664	linear
+uncertainty	mean-volume-capacity	unstated	-	-	-	-
+validity	mean-volume-capacity	family	1	1	1
+validity	mean-volume-capacity	unconditioned	1	1	1
+validity	mean-volume-capacity	grade_known	0	0	1
+validity	mean-volume-capacity	formulation_known	0	0	1
+validity	mean-volume-capacity	moisture_known	0	0	1
+validity	mean-volume-capacity	pressure_known	0	0	1
+validity	mean-volume-capacity	statistic	1	1	1
+validity	mean-volume-capacity	specimens	3	3	1
+validity	mean-volume-capacity	stock_thickness	0.088999999999999996	0.088999999999999996	m
+validity	mean-volume-capacity	temperature	283.14999999999998	313.14999999999998	K
+curve	apparent-conductivity	identity,method,conductivity	apparent_conductivity	test_mean_temperature	K	W/m/K	288.14999999999998:0.033000000000000002,318.14999999999998:0.037999999999999999	linear
+uncertainty	apparent-conductivity	unstated	-	-	-	-
+validity	apparent-conductivity	family	1	1	1
+validity	apparent-conductivity	unconditioned	1	1	1
+validity	apparent-conductivity	grade_known	0	0	1
+validity	apparent-conductivity	formulation_known	0	0	1
+validity	apparent-conductivity	moisture_known	0	0	1
+validity	apparent-conductivity	pressure_known	0	0	1
+validity	apparent-conductivity	statistic	1	1	1
+validity	apparent-conductivity	specimens	3	3	1
+validity	apparent-conductivity	stock_thickness	0.088999999999999996	0.088999999999999996	m
+validity	apparent-conductivity	through_thickness	1	1	1
+validity	apparent-conductivity	upward	1	1	1
+validity	apparent-conductivity	plate_delta	20	20	K
+validity	apparent-conductivity	test_mean_temperature	288.14999999999998	318.14999999999998	K
+curve	local-conductivity	identity,method,conductivity,local-model	local_conductivity	temperature	K	W/m/K	288.14999999999998:0.033000000000000002,318.14999999999998:0.037999999999999999	linear
+uncertainty	local-conductivity	unstated	-	-	-	-
+validity	local-conductivity	family	1	1	1
+validity	local-conductivity	unconditioned	1	1	1
+validity	local-conductivity	grade_known	0	0	1
+validity	local-conductivity	formulation_known	0	0	1
+validity	local-conductivity	moisture_known	0	0	1
+validity	local-conductivity	pressure_known	0	0	1
+validity	local-conductivity	statistic	1	1	1
+validity	local-conductivity	specimens	3	3	1
+validity	local-conductivity	stock_thickness	0.088999999999999996	0.088999999999999996	m
+validity	local-conductivity	through_thickness	1	1	1
+validity	local-conductivity	upward	1	1	1
+validity	local-conductivity	plate_delta	20	20	K
+validity	local-conductivity	local_model	1	1	1
+validity	local-conductivity	temperature	288.14999999999998	318.14999999999998	K
+curve	computed-volume-capacity-sd	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction	capacity_sd	temperature	K	J/m3/K	283.14999999999998:1694.9091421076234,293.14999999999998:976.78571515626356,303.14999999999998:1047.8797640950988,313.14999999999998:1202.13823387052	tabulated
+uncertainty	computed-volume-capacity-sd	unstated	-	-	-	-
+validity	computed-volume-capacity-sd	family	1	1	1
+validity	computed-volume-capacity-sd	unconditioned	1	1	1
+validity	computed-volume-capacity-sd	grade_known	0	0	1
+validity	computed-volume-capacity-sd	formulation_known	0	0	1
+validity	computed-volume-capacity-sd	moisture_known	0	0	1
+validity	computed-volume-capacity-sd	pressure_known	0	0	1
+validity	computed-volume-capacity-sd	statistic	0	0	1
+validity	computed-volume-capacity-sd	specimens	3	3	1
+validity	computed-volume-capacity-sd	stock_thickness	0.088999999999999996	0.088999999999999996	m
+validity	computed-volume-capacity-sd	temperature	283.14999999999998	313.14999999999998	K
+curve	published-conductivity-sd	identity,method,conductivity	conductivity_sd	test_mean_temperature	K	W/m/K	288.14999999999998:0,318.14999999999998:0	tabulated
+uncertainty	published-conductivity-sd	unstated	-	-	-	-
+validity	published-conductivity-sd	family	1	1	1
+validity	published-conductivity-sd	unconditioned	1	1	1
+validity	published-conductivity-sd	grade_known	0	0	1
+validity	published-conductivity-sd	formulation_known	0	0	1
+validity	published-conductivity-sd	moisture_known	0	0	1
+validity	published-conductivity-sd	pressure_known	0	0	1
+validity	published-conductivity-sd	statistic	0	0	1
+validity	published-conductivity-sd	specimens	3	3	1
+validity	published-conductivity-sd	stock_thickness	0.088999999999999996	0.088999999999999996	m
+validity	published-conductivity-sd	through_thickness	1	1	1
+validity	published-conductivity-sd	upward	1	1	1
+validity	published-conductivity-sd	plate_delta	20	20	K
+validity	published-conductivity-sd	test_mean_temperature	288.14999999999998	318.14999999999998	K
+curve	published-specific-heat	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction,density-normalization,specific-heat-reduction	specific_heat	temperature	K	J/kg/K	283.14999999999998:742,293.14999999999998:785,303.14999999999998:808,313.14999999999998:818	linear
+uncertainty	published-specific-heat	unstated	-	-	-	-
+validity	published-specific-heat	family	1	1	1
+validity	published-specific-heat	unconditioned	1	1	1
+validity	published-specific-heat	grade_known	0	0	1
+validity	published-specific-heat	formulation_known	0	0	1
+validity	published-specific-heat	moisture_known	0	0	1
+validity	published-specific-heat	pressure_known	0	0	1
+validity	published-specific-heat	statistic	1	1	1
+validity	published-specific-heat	specimens	3	3	1
+validity	published-specific-heat	stock_thickness	0.088999999999999996	0.088999999999999996	m
+validity	published-specific-heat	temperature	283.14999999999998	313.14999999999998	K
+curve	published-specific-heat-sd	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction,density-normalization,specific-heat-reduction	specific_heat_sd	temperature	K	J/kg/K	283.14999999999998:31,293.14999999999998:18,303.14999999999998:19,313.14999999999998:22	tabulated
+uncertainty	published-specific-heat-sd	unstated	-	-	-	-
+validity	published-specific-heat-sd	family	1	1	1
+validity	published-specific-heat-sd	unconditioned	1	1	1
+validity	published-specific-heat-sd	grade_known	0	0	1
+validity	published-specific-heat-sd	formulation_known	0	0	1
+validity	published-specific-heat-sd	moisture_known	0	0	1
+validity	published-specific-heat-sd	pressure_known	0	0	1
+validity	published-specific-heat-sd	statistic	0	0	1
+validity	published-specific-heat-sd	specimens	3	3	1
+validity	published-specific-heat-sd	stock_thickness	0.088999999999999996	0.088999999999999996	m
+validity	published-specific-heat-sd	temperature	283.14999999999998	313.14999999999998	K
+scalar	normalization-density	identity,method,density-normalization	normalization_density	54.666666666666664	kg/m3	constant
+uncertainty	normalization-density	unstated	-	-	-	-
+validity	normalization-density	family	1	1	1
+validity	normalization-density	unconditioned	1	1	1
+validity	normalization-density	grade_known	0	0	1
+validity	normalization-density	formulation_known	0	0	1
+validity	normalization-density	moisture_known	0	0	1
+validity	normalization-density	pressure_known	0	0	1
+validity	normalization-density	statistic	1	1	1
+validity	normalization-density	specimens	3	3	1
+validity	normalization-density	stock_thickness	0.088999999999999996	0.088999999999999996	m
+validity	normalization-density	density_temperature_known	0	0	1

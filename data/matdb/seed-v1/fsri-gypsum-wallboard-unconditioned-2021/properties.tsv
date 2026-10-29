@@ -1,0 +1,117 @@
+frankensim.matdb-source.v1
+observation	identity	fsri-gypsum-wallboard-unconditioned-2021	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Gypsum_Wallboard/material.json	Commercial gypsum panel with paper facings, nominally 12.8 mm thick. This is the whole faced panel, not isolated gypsum core or paper. Type-X rating, additives and exact manufacturer are unspecified. The metadata length field says 1.2 m by 2.4 cm; no correction or full sheet geometry is inferred. The metadata density headline is 635 kg/m3, distinct from the HFM normalization inputs. Stock thickness identifies the source product population, not an intrinsic property or the test thickness. Capacity and conductivity use distinct experiments in the same source population; exact same-coupon correspondence is not established. No structural, acoustic, fire, dehydration, melting or service-temperature qualification follows.
+observation	method	fsri-gypsum-wallboard-unconditioned-2021	https://materials.fsri.org/experimentalmethodology	Wet in the filenames means unconditioned indoor storage at 22 +/- 3 degC and relative humidity 40 +/- 20 percent, not water saturation or oven drying. Actual moisture content and applied contact pressure are unspecified. HFM samples are planar. Conductivity generally follows ASTM C518 through thickness with upward heat flow. Capacity generally follows ASTM C1784-20 equal-plate temperature steps. Finite differences and test direction remain part of the source conditions. Calibration uncertainty and cross-property covariance are unknown.
+observation	capacity-r1	fsri-gypsum-wallboard-unconditioned-2021	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Gypsum_Wallboard/HFM/Gypsum_Wallboard_HFM_Wet_heatcapacity_210804_R1.tst	Recorded thickness 12.83 mm; instrument measured. Mean temperatures 10,20.010000000000002,30.010000000000002,40.009999999999998 degC and native capacity readings 616163,633908,651825,656377 J/(m3 K). The instrument label Specific Heat has volumetric units; it is not J/(kg K). Equal-plate steps are 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC. These readings average finite 10 K steps, not infinitesimal calorimetry.
+observation	capacity-r2	fsri-gypsum-wallboard-unconditioned-2021	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Gypsum_Wallboard/HFM/Gypsum_Wallboard_HFM_Wet_heatcapacity_210804_R2.tst	Recorded thickness 12.78 mm; instrument measured. Mean temperatures 10,20.010000000000002,30.010000000000002,40.009999999999998 degC and native capacity readings 623206,638616,655301,662155 J/(m3 K). The instrument label Specific Heat has volumetric units; it is not J/(kg K). Equal-plate steps are 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC. These readings average finite 10 K steps, not infinitesimal calorimetry.
+observation	capacity-r3	fsri-gypsum-wallboard-unconditioned-2021	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Gypsum_Wallboard/HFM/Gypsum_Wallboard_HFM_Wet_heatcapacity_210805_R3.tst	Recorded thickness 12.87 mm; instrument measured. Mean temperatures 10,20.010000000000002,30.010000000000002,40.009999999999998 degC and native capacity readings 592216,611031,624168,631953 J/(m3 K). The instrument label Specific Heat has volumetric units; it is not J/(kg K). Equal-plate steps are 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC. These readings average finite 10 K steps, not infinitesimal calorimetry.
+observation	capacity-reduction	fsri-gypsum-wallboard-unconditioned-2021	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/02_Scripts/plot_HFM_data_html.py	Round mean temperatures to 0.1 degC, grouping at 10,20,30,40 degC. Arithmetic means of the three retained C_vol readings are 610528.33333333337,627851.66666666663,643764.66666666663,650161.66666666663 J/(m3 K). Sample SD is sqrt(sum((C_i-mean)^2)/(3-1)), retained as a separate TabulatedOnly statistic. Extra arithmetic digits do not increase source precision. Linear interpolation is an authored approximation with no measured interpolation-error bound; no extrapolation is supplied.
+observation	conductivity	fsri-gypsum-wallboard-unconditioned-2021	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Gypsum_Wallboard/HFM/	Gypsum_Wallboard_HFM_Wet_conductivity_210803_R1.tst at 12.92 mm (instrument measured): temperatures 15.01,45.009999999999998,15.01,45.009999999999998,15.01,45.009999999999998 degC, Average Cond 0.1454,0.14849999999999999,0.1469,0.1484,0.14699999999999999,0.1484 W/(m K); Gypsum_Wallboard_HFM_Wet_conductivity_210803_R2.tst at 12.79 mm (instrument measured): temperatures 15.01,45.009999999999998,15.01,45.009999999999998,15.01,45.009999999999998 degC, Average Cond 0.15840000000000001,0.1595,0.15939999999999999,0.15920000000000001,0.15890000000000001,0.1588 W/(m K); Gypsum_Wallboard_HFM_Wet_conductivity_210804_R3.tst at 12.81 mm (instrument measured): temperatures 15.01,45.009999999999998,15.01,45.009999999999998,15.01,45.009999999999998 degC, Average Cond 0.1497,0.15190000000000001,0.15129999999999999,0.1517,0.151,0.15140000000000001 W/(m K). Upper/lower plate setpoints are 5/25 degC and 35/55 degC, nominal 20 K difference. Three cycles per specimen provide nine pooled readings per temperature, not nine independent specimens. The source script rounds mean temperature to integer degC, computes pooled arithmetic mean and sample SD, then rounds to 0.001 W/(m K). Published means 0.152,0.153 and SD 0.0060000000000000001,0.0050000000000000001 at 15,45 degC are retained. Zero rounded SD does not establish zero scatter or uncertainty. Apparent through-thickness values do not imply in-plane equality or isotropy.
+observation	local-model	fsri-gypsum-wallboard-unconditioned-2021	Explicit approximation required by mean-test-temperature-as-local-model=1	The thermal-conductivity key opts into interpreting the finite-plate-difference apparent conductivity at its mean temperature as a local scalar thermal model. This is not a new point measurement or deconvolution. The apparent-thermal-conductivity key separately retains the original test-mean-temperature axis. Linear interpolation is authored without a measured error bound.
+observation	density-normalization	fsri-gypsum-wallboard-unconditioned-2021	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Gypsum_Wallboard/HFM/	The reported density inputs in Gypsum_Wallboard_Density_Wet_R1.csv, Gypsum_Wallboard_Density_Wet_R2.csv, Gypsum_Wallboard_Density_Wet_R3.csv are 595,591,588 kg/m3. The primary script uses their mean 591.33333333333337 kg/m3, without substituting the metadata density headline or recomputing density from mass/volume. Measurement temperature is unspecified; this is a normalization input, not a density(T) law. Source-record inconsistency is unresolved: all three CSV column headers say Lightweight_Gypsum_Wallboard although located under Gypsum_Wallboard; R1 reports mass 3.705 g, volume 516.6 cm3 and density 595 kg/m3, which do not close arithmetically. R2/R3 report masses 307.4/305.2 g and volumes 519.8/519.4 cm3. No correction, cross-product substitution or source-consistency assertion is made. Published Cp uses the reported density column despite these discrepancies. Native volumetric capacity is independent of this normalization.
+observation	specific-heat-reduction	fsri-gypsum-wallboard-unconditioned-2021	https://materials.fsri.org/materialdetail/gypsum-wallboard	Published Cp means 1032,1062,1089,1099 and SD 27,25,29,27 J/(kg K) at 10,20,30,40 degC equal mean C_vol and its sample SD divided by the common reported normalization density, rounded to whole units. No density scatter or calibration uncertainty is propagated. These quantities are algebraically related, not independent measurements.
+curve	mean-volume-capacity	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction	volumetric_capacity	temperature	K	J/m3/K	283.14999999999998:610528.33333333337,293.14999999999998:627851.66666666663,303.14999999999998:643764.66666666663,313.14999999999998:650161.66666666663	linear
+uncertainty	mean-volume-capacity	unstated	-	-	-	-
+validity	mean-volume-capacity	family	1	1	1
+validity	mean-volume-capacity	unconditioned	1	1	1
+validity	mean-volume-capacity	grade_known	0	0	1
+validity	mean-volume-capacity	formulation_known	0	0	1
+validity	mean-volume-capacity	moisture_known	0	0	1
+validity	mean-volume-capacity	pressure_known	0	0	1
+validity	mean-volume-capacity	statistic	1	1	1
+validity	mean-volume-capacity	specimens	3	3	1
+validity	mean-volume-capacity	stock_thickness	0.012800000000000001	0.012800000000000001	m
+validity	mean-volume-capacity	temperature	283.14999999999998	313.14999999999998	K
+curve	apparent-conductivity	identity,method,conductivity	apparent_conductivity	test_mean_temperature	K	W/m/K	288.14999999999998:0.152,318.14999999999998:0.153	linear
+uncertainty	apparent-conductivity	unstated	-	-	-	-
+validity	apparent-conductivity	family	1	1	1
+validity	apparent-conductivity	unconditioned	1	1	1
+validity	apparent-conductivity	grade_known	0	0	1
+validity	apparent-conductivity	formulation_known	0	0	1
+validity	apparent-conductivity	moisture_known	0	0	1
+validity	apparent-conductivity	pressure_known	0	0	1
+validity	apparent-conductivity	statistic	1	1	1
+validity	apparent-conductivity	specimens	3	3	1
+validity	apparent-conductivity	stock_thickness	0.012800000000000001	0.012800000000000001	m
+validity	apparent-conductivity	through_thickness	1	1	1
+validity	apparent-conductivity	upward	1	1	1
+validity	apparent-conductivity	plate_delta	20	20	K
+validity	apparent-conductivity	test_mean_temperature	288.14999999999998	318.14999999999998	K
+curve	local-conductivity	identity,method,conductivity,local-model	local_conductivity	temperature	K	W/m/K	288.14999999999998:0.152,318.14999999999998:0.153	linear
+uncertainty	local-conductivity	unstated	-	-	-	-
+validity	local-conductivity	family	1	1	1
+validity	local-conductivity	unconditioned	1	1	1
+validity	local-conductivity	grade_known	0	0	1
+validity	local-conductivity	formulation_known	0	0	1
+validity	local-conductivity	moisture_known	0	0	1
+validity	local-conductivity	pressure_known	0	0	1
+validity	local-conductivity	statistic	1	1	1
+validity	local-conductivity	specimens	3	3	1
+validity	local-conductivity	stock_thickness	0.012800000000000001	0.012800000000000001	m
+validity	local-conductivity	through_thickness	1	1	1
+validity	local-conductivity	upward	1	1	1
+validity	local-conductivity	plate_delta	20	20	K
+validity	local-conductivity	local_model	1	1	1
+validity	local-conductivity	temperature	288.14999999999998	318.14999999999998	K
+curve	computed-volume-capacity-sd	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction	capacity_sd	temperature	K	J/m3/K	283.14999999999998:16245.21856834599,293.14999999999998:14756.098276080074,303.14999999999998:17059.972225456095,313.14999999999998:16031.624288678091	tabulated
+uncertainty	computed-volume-capacity-sd	unstated	-	-	-	-
+validity	computed-volume-capacity-sd	family	1	1	1
+validity	computed-volume-capacity-sd	unconditioned	1	1	1
+validity	computed-volume-capacity-sd	grade_known	0	0	1
+validity	computed-volume-capacity-sd	formulation_known	0	0	1
+validity	computed-volume-capacity-sd	moisture_known	0	0	1
+validity	computed-volume-capacity-sd	pressure_known	0	0	1
+validity	computed-volume-capacity-sd	statistic	0	0	1
+validity	computed-volume-capacity-sd	specimens	3	3	1
+validity	computed-volume-capacity-sd	stock_thickness	0.012800000000000001	0.012800000000000001	m
+validity	computed-volume-capacity-sd	temperature	283.14999999999998	313.14999999999998	K
+curve	published-conductivity-sd	identity,method,conductivity	conductivity_sd	test_mean_temperature	K	W/m/K	288.14999999999998:0.0060000000000000001,318.14999999999998:0.0050000000000000001	tabulated
+uncertainty	published-conductivity-sd	unstated	-	-	-	-
+validity	published-conductivity-sd	family	1	1	1
+validity	published-conductivity-sd	unconditioned	1	1	1
+validity	published-conductivity-sd	grade_known	0	0	1
+validity	published-conductivity-sd	formulation_known	0	0	1
+validity	published-conductivity-sd	moisture_known	0	0	1
+validity	published-conductivity-sd	pressure_known	0	0	1
+validity	published-conductivity-sd	statistic	0	0	1
+validity	published-conductivity-sd	specimens	3	3	1
+validity	published-conductivity-sd	stock_thickness	0.012800000000000001	0.012800000000000001	m
+validity	published-conductivity-sd	through_thickness	1	1	1
+validity	published-conductivity-sd	upward	1	1	1
+validity	published-conductivity-sd	plate_delta	20	20	K
+validity	published-conductivity-sd	test_mean_temperature	288.14999999999998	318.14999999999998	K
+curve	published-specific-heat	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction,density-normalization,specific-heat-reduction	specific_heat	temperature	K	J/kg/K	283.14999999999998:1032,293.14999999999998:1062,303.14999999999998:1089,313.14999999999998:1099	linear
+uncertainty	published-specific-heat	unstated	-	-	-	-
+validity	published-specific-heat	family	1	1	1
+validity	published-specific-heat	unconditioned	1	1	1
+validity	published-specific-heat	grade_known	0	0	1
+validity	published-specific-heat	formulation_known	0	0	1
+validity	published-specific-heat	moisture_known	0	0	1
+validity	published-specific-heat	pressure_known	0	0	1
+validity	published-specific-heat	statistic	1	1	1
+validity	published-specific-heat	specimens	3	3	1
+validity	published-specific-heat	stock_thickness	0.012800000000000001	0.012800000000000001	m
+validity	published-specific-heat	temperature	283.14999999999998	313.14999999999998	K
+curve	published-specific-heat-sd	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction,density-normalization,specific-heat-reduction	specific_heat_sd	temperature	K	J/kg/K	283.14999999999998:27,293.14999999999998:25,303.14999999999998:29,313.14999999999998:27	tabulated
+uncertainty	published-specific-heat-sd	unstated	-	-	-	-
+validity	published-specific-heat-sd	family	1	1	1
+validity	published-specific-heat-sd	unconditioned	1	1	1
+validity	published-specific-heat-sd	grade_known	0	0	1
+validity	published-specific-heat-sd	formulation_known	0	0	1
+validity	published-specific-heat-sd	moisture_known	0	0	1
+validity	published-specific-heat-sd	pressure_known	0	0	1
+validity	published-specific-heat-sd	statistic	0	0	1
+validity	published-specific-heat-sd	specimens	3	3	1
+validity	published-specific-heat-sd	stock_thickness	0.012800000000000001	0.012800000000000001	m
+validity	published-specific-heat-sd	temperature	283.14999999999998	313.14999999999998	K
+scalar	normalization-density	identity,method,density-normalization	normalization_density	591.33333333333337	kg/m3	constant
+uncertainty	normalization-density	unstated	-	-	-	-
+validity	normalization-density	family	1	1	1
+validity	normalization-density	unconditioned	1	1	1
+validity	normalization-density	grade_known	0	0	1
+validity	normalization-density	formulation_known	0	0	1
+validity	normalization-density	moisture_known	0	0	1
+validity	normalization-density	pressure_known	0	0	1
+validity	normalization-density	statistic	1	1	1
+validity	normalization-density	specimens	3	3	1
+validity	normalization-density	stock_thickness	0.012800000000000001	0.012800000000000001	m
+validity	normalization-density	density_temperature_known	0	0	1

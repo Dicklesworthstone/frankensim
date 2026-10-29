@@ -1,0 +1,79 @@
+frankensim.matdb-source.v1
+observation	identity	fsri-frp-panel-unconditioned-2022	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/FRP_Panel/material.json	Commercial nominal 2.3 mm fiberglass-strand reinforced polyester panel. Exact fiber volume fraction, layup, cure, void fraction, polyester formulation and manufacturer are unspecified. The raw directory contains three native volumetric heat-capacity runs but no density CSV and the public material page publishes no mass-specific heat table. No Cp or normalization density is manufactured from the metadata headline density 1614 kg/m3. Stock thickness identifies the source product population, not an intrinsic property or the test thickness. Capacity and conductivity use distinct experiments in the same source population; exact same-coupon correspondence is not established. No structural, acoustic, fire, dehydration, melting or service-temperature qualification follows.
+observation	method	fsri-frp-panel-unconditioned-2022	https://materials.fsri.org/experimentalmethodology	Wet in the filenames means unconditioned indoor storage at 22 +/- 3 degC and relative humidity 40 +/- 20 percent, not water saturation or oven drying. Actual moisture content and applied contact pressure are unspecified. HFM samples are planar. Conductivity generally follows ASTM C518 through thickness with upward heat flow. Capacity generally follows ASTM C1784-20 equal-plate temperature steps. Finite differences and test direction remain part of the source conditions. Calibration uncertainty and cross-property covariance are unknown.
+observation	capacity-r1	fsri-frp-panel-unconditioned-2022	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/FRP_Panel/HFM/FRP_Panel_HFM_Wet_HeatCapacity_220610_R1.tst	Recorded thickness 2.30 mm; instrument measured. Mean temperatures 10,20.010000000000002,30.010000000000002,40.009999999999998 degC and native capacity readings 1472292,1546098,1653830,1745092 J/(m3 K). The instrument label Specific Heat has volumetric units; it is not J/(kg K). Equal-plate steps are 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC. These readings average finite 10 K steps, not infinitesimal calorimetry.
+observation	capacity-r2	fsri-frp-panel-unconditioned-2022	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/FRP_Panel/HFM/FRP_Panel_HFM_Wet_HeatCapacity_220613_R2.tst	Recorded thickness 2.26 mm; instrument measured. Mean temperatures 10,20.010000000000002,30.010000000000002,40.009999999999998 degC and native capacity readings 1450575,1537905,1628139,1741910 J/(m3 K). The instrument label Specific Heat has volumetric units; it is not J/(kg K). Equal-plate steps are 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC. These readings average finite 10 K steps, not infinitesimal calorimetry.
+observation	capacity-r3	fsri-frp-panel-unconditioned-2022	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/FRP_Panel/HFM/FRP_Panel_HFM_Wet_HeatCapacity_220613_R3.tst	Recorded thickness 2.40 mm; instrument measured. Mean temperatures 10,20.010000000000002,30.010000000000002,40.009999999999998 degC and native capacity readings 1482404,1552146,1666615,1766131 J/(m3 K). The instrument label Specific Heat has volumetric units; it is not J/(kg K). Equal-plate steps are 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC. These readings average finite 10 K steps, not infinitesimal calorimetry.
+observation	capacity-reduction	fsri-frp-panel-unconditioned-2022	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/02_Scripts/plot_HFM_data_html.py	Round mean temperatures to 0.1 degC, grouping at 10,20,30,40 degC. Arithmetic means of the three retained C_vol readings are 1468423.6666666667,1545383,1649528,1751044.3333333333 J/(m3 K). Sample SD is sqrt(sum((C_i-mean)^2)/(3-1)), retained as a separate TabulatedOnly statistic. Extra arithmetic digits do not increase source precision. Linear interpolation is an authored approximation with no measured interpolation-error bound; no extrapolation is supplied. This volumetric reduction is authored here from the three primary raw runs, not a published mass-specific heat table. The primary script skips Cp production when density CSV inputs are absent. Native C_vol needs no density substitution.
+observation	conductivity	fsri-frp-panel-unconditioned-2022	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/FRP_Panel/HFM/	FRP_Panel_HFM_Wet_Conductivity_220608_R1.tst at 2.25 mm (instrument measured): temperatures 15.01,65.010000000000005,15.01,65.010000000000005,15.01,65.010000000000005 degC, Average Cond 0.092679999999999998,0.1149,0.094170000000000004,0.1148,0.093640000000000001,0.1145 W/(m K); FRP_Panel_HFM_Wet_Conductivity_220608_R2.tst at 2.23 mm (instrument measured): temperatures 15.01,65.010000000000005,15.01,65.010000000000005,15.01,65.010000000000005 degC, Average Cond 0.08412,0.10589999999999999,0.088190000000000004,0.10580000000000001,0.088660000000000003,0.10580000000000001 W/(m K); FRP_Panel_HFM_Wet_Conductivity_220609_R3.tst at 2.35 mm (instrument measured): temperatures 15.01,65.010000000000005,15.01,65.010000000000005,15.01,65.010000000000005 degC, Average Cond 0.093009999999999995,0.11550000000000001,0.09597,0.11550000000000001,0.095920000000000005,0.1154 W/(m K). Upper/lower plate setpoints are 5/25 degC and 55/75 degC, nominal 20 K difference. Three cycles per specimen provide nine pooled readings per temperature, not nine independent specimens. The source script rounds mean temperature to integer degC, computes pooled arithmetic mean and sample SD, then rounds to 0.001 W/(m K). Published means 0.091999999999999998,0.112 and SD 0.0040000000000000001,0.0050000000000000001 at 15,65 degC are retained. Zero rounded SD does not establish zero scatter or uncertainty. Apparent through-thickness values do not imply in-plane equality or isotropy.
+observation	local-model	fsri-frp-panel-unconditioned-2022	Explicit approximation required by mean-test-temperature-as-local-model=1	The thermal-conductivity key opts into interpreting the finite-plate-difference apparent conductivity at its mean temperature as a local scalar thermal model. This is not a new point measurement or deconvolution. The apparent-thermal-conductivity key separately retains the original test-mean-temperature axis. Linear interpolation is authored without a measured error bound.
+curve	mean-volume-capacity	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction	volumetric_capacity	temperature	K	J/m3/K	283.14999999999998:1468423.6666666667,293.14999999999998:1545383,303.14999999999998:1649528,313.14999999999998:1751044.3333333333	linear
+uncertainty	mean-volume-capacity	unstated	-	-	-	-
+validity	mean-volume-capacity	family	1	1	1
+validity	mean-volume-capacity	unconditioned	1	1	1
+validity	mean-volume-capacity	grade_known	0	0	1
+validity	mean-volume-capacity	formulation_known	0	0	1
+validity	mean-volume-capacity	moisture_known	0	0	1
+validity	mean-volume-capacity	pressure_known	0	0	1
+validity	mean-volume-capacity	statistic	1	1	1
+validity	mean-volume-capacity	specimens	3	3	1
+validity	mean-volume-capacity	stock_thickness	0.0023	0.0023	m
+validity	mean-volume-capacity	temperature	283.14999999999998	313.14999999999998	K
+curve	apparent-conductivity	identity,method,conductivity	apparent_conductivity	test_mean_temperature	K	W/m/K	288.14999999999998:0.091999999999999998,338.14999999999998:0.112	linear
+uncertainty	apparent-conductivity	unstated	-	-	-	-
+validity	apparent-conductivity	family	1	1	1
+validity	apparent-conductivity	unconditioned	1	1	1
+validity	apparent-conductivity	grade_known	0	0	1
+validity	apparent-conductivity	formulation_known	0	0	1
+validity	apparent-conductivity	moisture_known	0	0	1
+validity	apparent-conductivity	pressure_known	0	0	1
+validity	apparent-conductivity	statistic	1	1	1
+validity	apparent-conductivity	specimens	3	3	1
+validity	apparent-conductivity	stock_thickness	0.0023	0.0023	m
+validity	apparent-conductivity	through_thickness	1	1	1
+validity	apparent-conductivity	upward	1	1	1
+validity	apparent-conductivity	plate_delta	20	20	K
+validity	apparent-conductivity	test_mean_temperature	288.14999999999998	338.14999999999998	K
+curve	local-conductivity	identity,method,conductivity,local-model	local_conductivity	temperature	K	W/m/K	288.14999999999998:0.091999999999999998,338.14999999999998:0.112	linear
+uncertainty	local-conductivity	unstated	-	-	-	-
+validity	local-conductivity	family	1	1	1
+validity	local-conductivity	unconditioned	1	1	1
+validity	local-conductivity	grade_known	0	0	1
+validity	local-conductivity	formulation_known	0	0	1
+validity	local-conductivity	moisture_known	0	0	1
+validity	local-conductivity	pressure_known	0	0	1
+validity	local-conductivity	statistic	1	1	1
+validity	local-conductivity	specimens	3	3	1
+validity	local-conductivity	stock_thickness	0.0023	0.0023	m
+validity	local-conductivity	through_thickness	1	1	1
+validity	local-conductivity	upward	1	1	1
+validity	local-conductivity	plate_delta	20	20	K
+validity	local-conductivity	local_model	1	1	1
+validity	local-conductivity	temperature	288.14999999999998	338.14999999999998	K
+curve	computed-volume-capacity-sd	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction	capacity_sd	temperature	K	J/m3/K	283.14999999999998:16263.281106017117,293.14999999999998:7147.3728740006281,303.14999999999998:19595.434340682525,313.14999999999998:13161.949488329354	tabulated
+uncertainty	computed-volume-capacity-sd	unstated	-	-	-	-
+validity	computed-volume-capacity-sd	family	1	1	1
+validity	computed-volume-capacity-sd	unconditioned	1	1	1
+validity	computed-volume-capacity-sd	grade_known	0	0	1
+validity	computed-volume-capacity-sd	formulation_known	0	0	1
+validity	computed-volume-capacity-sd	moisture_known	0	0	1
+validity	computed-volume-capacity-sd	pressure_known	0	0	1
+validity	computed-volume-capacity-sd	statistic	0	0	1
+validity	computed-volume-capacity-sd	specimens	3	3	1
+validity	computed-volume-capacity-sd	stock_thickness	0.0023	0.0023	m
+validity	computed-volume-capacity-sd	temperature	283.14999999999998	313.14999999999998	K
+curve	published-conductivity-sd	identity,method,conductivity	conductivity_sd	test_mean_temperature	K	W/m/K	288.14999999999998:0.0040000000000000001,338.14999999999998:0.0050000000000000001	tabulated
+uncertainty	published-conductivity-sd	unstated	-	-	-	-
+validity	published-conductivity-sd	family	1	1	1
+validity	published-conductivity-sd	unconditioned	1	1	1
+validity	published-conductivity-sd	grade_known	0	0	1
+validity	published-conductivity-sd	formulation_known	0	0	1
+validity	published-conductivity-sd	moisture_known	0	0	1
+validity	published-conductivity-sd	pressure_known	0	0	1
+validity	published-conductivity-sd	statistic	0	0	1
+validity	published-conductivity-sd	specimens	3	3	1
+validity	published-conductivity-sd	stock_thickness	0.0023	0.0023	m
+validity	published-conductivity-sd	through_thickness	1	1	1
+validity	published-conductivity-sd	upward	1	1	1
+validity	published-conductivity-sd	plate_delta	20	20	K
+validity	published-conductivity-sd	test_mean_temperature	288.14999999999998	338.14999999999998	K
