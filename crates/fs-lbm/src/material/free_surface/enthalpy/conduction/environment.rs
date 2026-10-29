@@ -49,6 +49,8 @@ pub struct FreeSurfaceGasSample {
     pub bath_temperature_k: f64,
     pub liquid_temperature_k: f64,
     pub liquid: ResolvedLiquidState,
+    /// Original liquid source plus its declared phase correction.
+    pub liquid_conductivity: FreeSurfaceConductivity,
     /// Full species, EOS and transport snapshot at the declared film temperature.
     pub gas: ResolvedThermochemicalGasState,
     pub conductance_w_k: f64,
@@ -240,11 +242,12 @@ impl Conduction<'_, '_> {
                     "environmental film left its original transport source claims",
                 ));
             }
+            let liquid_conductivity = phase_conduction::resolve(&liquid, self.phase_conduction)?;
             let conductance = series_conductance_w_k(
                 contact.face.area_m2,
                 contact.face.distances_m,
                 [
-                    liquid.thermal_conductivity_w_m_k(),
+                    liquid_conductivity.effective_w_m_k,
                     gas.state().thermal_conductivity,
                 ],
             )?;
@@ -253,6 +256,7 @@ impl Conduction<'_, '_> {
                 bath_temperature_k: bath,
                 liquid_temperature_k: temperature,
                 liquid,
+                liquid_conductivity,
                 gas,
                 conductance_w_k: conductance,
                 heat_into_liquid_w: finite(conductance * (bath - temperature))?,

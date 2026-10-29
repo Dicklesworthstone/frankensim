@@ -205,6 +205,7 @@ fn close(a: f64, b: f64, tolerance: f64) {
 
 #[test]
 fn actual_latent_heating_releases_into_native_gravity_flow_and_preserves_the_clock() {
+    use fs_material::phase::conductivity::LiquidMassFractionConductivity;
     let card = source(1.0);
     let curve = chart(&card);
     let mushy = MushyPhaseLaw::try_new_with_immobile_solid(&curve, 1.0, 1.0, 1.0).unwrap();
@@ -213,7 +214,9 @@ fn actual_latent_heating_releases_into_native_gravity_flow_and_preserves_the_clo
     let config = config();
     let gate = CancelGate::new_clock_free();
     let original = initial(&domain, &curve, -100.0, 2000.0, 0.11);
-    let history = bound(&original, &domain, &ids, &config, &gate, &card, &mushy);
+    let phase_conduction = LiquidMassFractionConductivity::declared(4.0, 3.0).unwrap();
+    let history = bound(&original, &domain, &ids, &config, &gate, &card, &mushy)
+        .with_phase_conductivity(&curve, phase_conduction).unwrap();
     let (plateau, history, _) = original
         .advance_observed(&history, 0.075, step(), || Ok(()))
         .unwrap();
@@ -277,6 +280,10 @@ fn actual_latent_heating_releases_into_native_gravity_flow_and_preserves_the_clo
             )
             .unwrap();
         close(released.physical_time_s(), 0.11, 0.0);
+        assert_eq!(released.phase_conductivity_law(), Some(phase_conduction));
+        let coefficient = released.conductivity_at([1, 1, 0]).unwrap().unwrap();
+        assert_eq!(coefficient.phase_multiplier, 3.0);
+        close(coefficient.effective_w_m_k, 3.0 * coefficient.source_w_m_k, 0.0);
         close(report.source.mass_kg, 8.0, 0.0);
         close(report.target_enthalpy_j, molten.energy_j(), 1e-9);
         close(report.kinetic_projection_deficit_j, 0.0, 1e-20);

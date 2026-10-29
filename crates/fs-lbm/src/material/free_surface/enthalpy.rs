@@ -32,6 +32,7 @@ use fs_material::liquid::surface::{
 };
 use fs_material::liquid_temperature::LiquidTemperatureLaw;
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, PhaseStateError, SolidLiquidPhase};
+use fs_material::phase::conductivity::LiquidMassFractionConductivity;
 use fs_material::state_point::MaterialStatePointError;
 use fs_qty::Temperature;
 
@@ -42,6 +43,9 @@ use crate::d3q19::freesurface3::{FreeSurface3, FreeSurfaceError3};
 use crate::material::plan_momentum_scaling;
 
 mod transport;
+
+mod phase_conduction;
+pub use phase_conduction::FreeSurfaceConductivity;
 
 /// Source-density buoyancy with explicitly bounded reference-mass storage.
 pub mod buoyancy;
@@ -281,6 +285,7 @@ pub struct MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     accepted_steps: u64,
     h: BTreeMap<MassLocation3, f64>,
     states: BTreeMap<MassLocation3, ResolvedLiquidState>,
+    phase_conduction: Option<LiquidMassFractionConductivity>,
     buoyancy: Option<BoussinesqLiquid>,
     rheology: Option<rheology::RheologyBinding>,
     rheology_samples: BTreeMap<MassLocation3, rheology::FreeSurfaceRheologySample>,
@@ -430,6 +435,7 @@ impl<'s> MaterialFreeSurface3<'s> {
             accepted_steps: 0,
             h,
             states: BTreeMap::new(),
+            phase_conduction: None,
             buoyancy,
             rheology,
             rheology_samples: BTreeMap::new(),
@@ -823,6 +829,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 )?;
                 (state, plan.tau)
             };
+            phase_conduction::resolve(&state, self.phase_conduction)?;
             if let MassLocation3::Cell(key, lane) = location {
                 tau.insert((key, lane), local_tau);
                 if let (Some(binding), Some(forces)) = (self.buoyancy, &mut forces) {

@@ -82,6 +82,8 @@ pub struct FreeSurfaceConductionControls {
 pub struct FreeSurfaceConductionSample {
     pub face: FreeSurfaceConductionFace,
     pub materials: [ResolvedLiquidState; 2],
+    /// Raw source, declared phase multiplier and actual half-cell coefficients.
+    pub conductivities: [FreeSurfaceConductivity; 2],
     pub conductance_w_k: f64,
 }
 
@@ -128,6 +130,7 @@ struct Conduction<'a, 'm> {
     caloric: &'a EquilibriumEnthalpyPhaseCurve,
     density: f64,
     buoyancy: Option<BoussinesqLiquid>,
+    phase_conduction: Option<LiquidMassFractionConductivity>,
     rheology: Option<rheology::RheologyModel<'m>>,
     rheology_stress: BTreeMap<CellId, rheology::RheologyStress>,
     faces: &'a [FreeSurfaceConductionFace],
@@ -215,6 +218,7 @@ impl Conduction<'_, '_> {
             check()?;
             let cell = &thermal.cells()[&id];
             let state = self.sample_liquid(id, cell.specific_h_j_kg, check)?;
+            phase_conduction::resolve(&state, self.phase_conduction)?;
             if let Some(wetting) = &self.wetting {
                 wetting.admit_temperature(
                     self.liquid_coordinates[&id], self.law.temperature_axis(),
@@ -228,14 +232,19 @@ impl Conduction<'_, '_> {
         for (&face, &[a, b]) in self.faces.iter().zip(&self.endpoints) {
             check()?;
             let materials = [states[&a].clone(), states[&b].clone()];
+            let conductivities = [
+                phase_conduction::resolve(&materials[0], self.phase_conduction)?,
+                phase_conduction::resolve(&materials[1], self.phase_conduction)?,
+            ];
             let conductance_w_k = series_conductance_w_k(
                 face.area_m2,
                 face.distances_m,
-                materials.each_ref().map(|s| s.thermal_conductivity_w_m_k()),
+                conductivities.map(|s| s.effective_w_m_k),
             )?;
             samples.push(FreeSurfaceConductionSample {
                 face,
                 materials,
+                conductivities,
                 conductance_w_k,
             });
         }
@@ -253,6 +262,7 @@ impl Conduction<'_, '_> {
         {
             check()?;
             let liquid = states[&liquid_id].clone();
+            let liquid_conductivity = phase_conduction::resolve(&liquid, self.phase_conduction)?;
             let body = bodies[body_index].clone();
             let interface = self
                 .interfaces
@@ -280,7 +290,7 @@ impl Conduction<'_, '_> {
                 contact.area_m2,
                 contact.distances_m,
                 [
-                    liquid.thermal_conductivity_w_m_k(),
+                    liquid_conductivity.effective_w_m_k,
                     self.bodies[body_index].conductivity(&body),
                 ],
                 resistance,
@@ -288,6 +298,7 @@ impl Conduction<'_, '_> {
             contacts.push(FreeSurfaceBodyContactSample {
                 contact,
                 liquid,
+                liquid_conductivity,
                 body,
                 interface,
                 conductance_w_k,
@@ -991,6 +1002,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             caloric: self.caloric,
             density: rho,
             buoyancy: self.buoyancy,
+            phase_conduction: self.phase_conduction,
             rheology,
             rheology_stress,
             faces,

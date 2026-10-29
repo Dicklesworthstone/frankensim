@@ -86,6 +86,8 @@ pub struct FreeSurfaceBodyContactSample {
     pub contact: FreeSurfaceBodyContact,
     /// Original liquid density/viscosity/conductivity tuple at its current h.
     pub liquid: ResolvedLiquidState,
+    /// Source and effective liquid conductivity; the solid keeps its own law.
+    pub liquid_conductivity: FreeSurfaceConductivity,
     /// Original pinned solid conductivity source at its current h.
     pub body: ResolvedMaterialStatePoint,
     /// Original ordered interface at the SAME two caloric states. None is the

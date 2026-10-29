@@ -209,6 +209,44 @@ fn g3_gas_material_data_changes_actual_liquid_viscosity_and_native_populations()
 }
 
 #[test]
+fn g1_phase_conductivity_reaches_gas_film_and_counts_supply_once() {
+    use fs_material::phase::conductivity::LiquidMassFractionConductivity;
+    let liquid = conducting_card(1.0);
+    let gas = gas_source::model(0.0, 250000.0, 100.0);
+    let context = gas_source::point(450.0, 100000.0);
+    with_exposed_liquid(&liquid, false, |thermal, gate| {
+        *thermal = thermal.clone().with_phase_conductivity(
+            LiquidMassFractionConductivity::declared(4.0, 0.25).unwrap(), gate,
+        ).unwrap();
+        let before = thermal.total_enthalpy_j().unwrap();
+        let report = thermal.step_with_gas_environment(
+            &[], &[], controls(), &mut [], &[], &[gas_contact(&gas, &context)], false, gate,
+        ).unwrap().conduction;
+        let kg = 0.026 * 100.0 * (0.5 + 99000.0 / 249000.0);
+        let (mut t, mut heat, mut last_g) = (400.0, 0.0, 0.0);
+        for _ in 0..4 {
+            last_g = 1e-6 / (0.0005 / (0.25 * (t - 200.0)) + 0.0005 / kg);
+            let q = 0.00025 * last_g * (450.0 - t);
+            t += q / 0.002;
+            heat += q;
+        }
+        assert_eq!(report.thermal.substeps, 4);
+        let exchange = report.environment.unwrap();
+        near(exchange.last_applied[0].conductance_w_k, last_g, 2e-13);
+        let endpoint = &exchange.thermal_endpoint[0];
+        near(endpoint.liquid_temperature_k, t, 2e-13);
+        near(endpoint.liquid_conductivity.source_w_m_k, t - 200.0, 2e-13);
+        assert_eq!(endpoint.liquid_conductivity.phase_multiplier, 0.25);
+        near(endpoint.liquid_conductivity.effective_w_m_k, 0.25 * (t - 200.0), 2e-13);
+        near(endpoint.gas.state().thermal_conductivity, kg, 2e-13);
+        near(exchange.heat_to_liquid_j, heat, 2e-12);
+        near(report.flow.external_heat_j, heat, 2e-12);
+        near(thermal.total_enthalpy_j().unwrap(), before + heat, 2e-12);
+        assert!(report.flow.balance_defect_j.abs() < 1e-9);
+    });
+}
+
+#[test]
 fn g1_environment_wall_molecular_and_authored_heat_share_one_account() {
     let liquid = conducting_card(1.0);
     let gas = gas_source::model(0.0, 250000.0, 100.0);

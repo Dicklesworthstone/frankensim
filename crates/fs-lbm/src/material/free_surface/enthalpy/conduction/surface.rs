@@ -119,6 +119,8 @@ pub struct FreeSurfaceInterfaceSample {
     pub surface: FreeSurfaceInterfaceFace,
     /// Original liquid source at the cell temperature, used for its half-cell k.
     pub liquid: ResolvedLiquidState,
+    /// Original bulk source plus its declared phase correction.
+    pub liquid_conductivity: FreeSurfaceConductivity,
     /// Original gas sources at (surface_temperature_k + gas_temperature_k)/2.
     pub gas: ResolvedThermochemicalGasState,
     pub liquid_temperature_k: f64,
@@ -657,8 +659,9 @@ impl Conduction<'_, '_> {
                 "surface and film temperature domains do not intersect",
             ));
         }
+        let liquid_conductivity = phase_conduction::resolve(&liquid, self.phase_conduction)?;
         let gl = environment::finite(
-            liquid.thermal_conductivity_w_m_k() * surface.face.area_m2
+            liquid_conductivity.effective_w_m_k * surface.face.area_m2
                 / surface.face.distances_m[0],
         )?;
         let radiation = surface.emissivity * STEFAN_BOLTZMANN * surface.face.area_m2;
@@ -736,6 +739,7 @@ impl Conduction<'_, '_> {
                 accepted = Some(FreeSurfaceInterfaceSample {
                     surface,
                     liquid,
+                    liquid_conductivity,
                     gas,
                     liquid_temperature_k: tl,
                     surface_temperature_k: ts,

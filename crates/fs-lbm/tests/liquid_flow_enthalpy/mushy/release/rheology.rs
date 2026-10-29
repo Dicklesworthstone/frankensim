@@ -76,9 +76,10 @@ fn molten_native_shear_response_survives_release_and_drives_vof_heat_and_motion(
         let source = |_: usize, cell: &DepositedCell, _: f64, rate: f64| {
             resolve_at(&card, &mushy, cell.specific_h_j_kg, rate)
         };
+        let phase_conduction = LiquidMassFractionConductivity::declared(4.0, 2.0).unwrap();
         let bound = history(
             &original, &domain, &ids, &config, &gate, &card, &mushy, &source,
-        );
+        ).with_phase_conductivity(&curve, phase_conduction).unwrap();
         let (molten, bound, _) = original
             .advance_observed(&bound, 0.1, step(), || Ok(()))
             .unwrap();
@@ -170,20 +171,6 @@ fn molten_native_shear_response_survives_release_and_drives_vof_heat_and_motion(
                     )
                     .is_err()
             );
-            // An extra phase multiplier cannot silently vanish at release.
-            let enhanced = bound
-                .clone()
-                .with_phase_conductivity(
-                    &curve,
-                    LiquidMassFractionConductivity::declared(4.0, 2.0).unwrap(),
-                )
-                .unwrap();
-            assert!(
-                matches!(enhanced.release_fully_liquid_with_rheology(&thermal, scaling,
-                receiving([0.0; 3]), &liquid_law, &curve, StationaryConstraintRelease::Withdraw,
-                allowance, FreeSurfaceEnthalpyControls::default(), solve(), cx),
-                Err(LiquidReleaseError::Invalid(message)) if message.contains("phase-conductivity"))
-            );
             let (mut released, report) = bound
                 .release_fully_liquid_with_rheology(
                     &thermal,
@@ -206,6 +193,7 @@ fn molten_native_shear_response_survives_release_and_drives_vof_heat_and_motion(
             near(report.source.angular_momentum_kg_m2_s[2], 4.0 * speed);
             assert_eq!(released.physical_time_s(), thermal.time_s());
             assert_eq!(released.accepted_steps(), 0);
+            assert_eq!(released.phase_conductivity_law(), Some(phase_conduction));
             let first = released
                 .step_with_heat(
                     &[FreeSurfaceCellHeat {
@@ -256,7 +244,13 @@ fn molten_native_shear_response_survives_release_and_drives_vof_heat_and_motion(
                     let q = material.material().query();
                     0.2 + 0.001 * (q.axes()["T"] - 500.0) + 0.05 * q.axes()["rate"]
                 });
-                near(applied.conductance_w_k, 1.0 / (0.5 / k[0] + 0.5 / k[1]));
+                for i in 0..2 {
+                    near(applied.materials[i].thermal_conductivity_w_m_k(), k[i]);
+                    near(applied.conductivities[i].source_w_m_k, k[i]);
+                    assert_eq!(applied.conductivities[i].phase_multiplier, 2.0);
+                    near(applied.conductivities[i].effective_w_m_k, 2.0 * k[i]);
+                }
+                near(applied.conductance_w_k, 1.0 / (0.5 / (2.0 * k[0]) + 0.5 / (2.0 * k[1])));
                 near(step.conduction.flow.external_heat_j, 0.0);
                 total_heat += independently_summed_heat;
             }

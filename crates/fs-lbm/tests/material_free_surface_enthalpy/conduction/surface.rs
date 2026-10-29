@@ -150,6 +150,50 @@ fn reference_surface(
 }
 
 #[test]
+fn g1_phase_conductivity_reaches_solved_surface_and_signed_energy_balance() {
+    use fs_material::phase::conductivity::LiquidMassFractionConductivity;
+    let liquid = conducting_card(0.0005);
+    let gas = temperature_dependent_gas();
+    let context = gas_source::point(350.0, 100000.0);
+    with_exposed_liquid(&liquid, false, |thermal, gate| {
+        *thermal = thermal.clone().with_phase_conductivity(
+            LiquidMassFractionConductivity::declared(4.0, 3.0).unwrap(), gate,
+        ).unwrap();
+        let before = thermal.total_enthalpy_j().unwrap();
+        let report = thermal.step_with_surface_exchange(
+            &[], &[], controls(), &mut [], &[], &[],
+            &[FreeSurfaceInterfaceContact { surface: face(800.0), model: &gas, context: &context }],
+            FreeSurfaceInterfaceSolve::default(), false, gate,
+        ).unwrap().conduction;
+        let (mut t, mut gas_j, mut radiant_j) = (400.0, 0.0, 0.0);
+        for _ in 0..4 {
+            let (_, qg, qr) = reference_surface(t, 350.0, 800.0, 0.8,
+                3.0 * 0.0005 * (t - 200.0), |film| 0.001 * film);
+            t += 0.00025 * (qg + qr) / 0.002;
+            gas_j += 0.00025 * qg;
+            radiant_j += 0.00025 * qr;
+        }
+        let (ts, qg, qr) = reference_surface(t, 350.0, 800.0, 0.8,
+            3.0 * 0.0005 * (t - 200.0), |film| 0.001 * film);
+        let exchange = report.surface.as_ref().unwrap();
+        let endpoint = &exchange.thermal_endpoint[0];
+        assert_eq!(report.thermal.substeps, 4);
+        near(endpoint.liquid_temperature_k, t, 2e-12);
+        near(endpoint.surface_temperature_k, ts, 2e-11);
+        near(endpoint.liquid_conductivity.source_w_m_k, 0.0005 * (t - 200.0), 2e-12);
+        assert_eq!(endpoint.liquid_conductivity.phase_multiplier, 3.0);
+        near(endpoint.liquid_conductance_w_k, 3.0 * 0.0005 * (t - 200.0) * 1e-6 / 0.0005, 2e-12);
+        near(endpoint.heat_from_gas_w, qg, 2e-8);
+        near(endpoint.heat_from_radiation_w, qr, 2e-8);
+        near(exchange.heat_from_gas_j, gas_j, 2e-8);
+        near(exchange.heat_from_radiation_j, radiant_j, 2e-8);
+        near(report.flow.external_heat_j, gas_j + radiant_j, 2e-8);
+        near(thermal.total_enthalpy_j().unwrap(), before + gas_j + radiant_j, 2e-12);
+        assert!(endpoint.balance_residual_w.abs() < 1e-10);
+    });
+}
+
+#[test]
 fn g1_shared_surface_matches_independent_nonlinear_balance_and_film_source() {
     let liquid = conducting_card(0.0005);
     let gas = temperature_dependent_gas();

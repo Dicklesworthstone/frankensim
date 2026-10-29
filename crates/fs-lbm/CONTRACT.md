@@ -4615,3 +4615,8 @@ focused pressure-boundary tests exercise all three axes, returning-wave and
 material impedance dependence, original integrated work/mass/energy accounts,
 typed characteristic identity and atomic refusals. They do not establish a
 reflection bound or measured-instrument accuracy.
+
+
+## Original phase conductivity through moving-liquid release
+
+The original `MaterialFreeSurfaceEnthalpy3` can retain `LiquidMassFractionConductivity`. Both ordinary and rheological complete-melt release transfer that exact law before publishing the receiving liquid and its clock. One shared helper keeps the pinned raw source, declared phase multiplier and effective conductivity separate. Liquid/liquid, finite-solid contact, gas-film and solved gas/radiation-interface half-cell resistances all consume that same effective coefficient, including thermal CFL admission. Source overflow and cancellation refuse before native publication. Focused regressions independently close each heat balance, preserve identity-law behavior and source claims, and carry the law through real melt/release and viscosity-dependent motion. This owner still admits only pure liquid at fixed caloric density; moving mushy phase, solidification, shrinkage and surface-creation energy remain outside this feature.

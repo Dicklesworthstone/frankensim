@@ -101,7 +101,8 @@ where
     /// constraints are not a moving-solid calculation. Old thermal contacts end
     /// here: use the receiver's original conduction API on current wet faces.
     /// Source rheology uses `release_fully_liquid_with_rheology`; the separate
-    /// phase-conductivity multiplier and buoyancy still refuse. Surface tension must be explicitly neglected:
+    /// phase-conductivity law is retained by the original liquid owner. Buoyancy
+    /// still requires a separate receiving force owner. Surface tension must be explicitly neglected:
     /// no surface-creation energy, residual elastic stress or latent heat is invented.
     ///
     /// MAC-to-cell averaging preserves P and angular P on this shared grid.
@@ -224,9 +225,9 @@ where
                 "release needs one complete cubic liquid, stationary walls, original law and explicitly neglected capillarity",
             ));
         }
-        if self.buoyancy.is_some() || self.phase_conduction.is_some() {
+        if self.buoyancy.is_some() {
             return Err(refused(
-                "release must retain phase-conductivity and buoyancy through explicit receiving owners",
+                "release must retain buoyancy through an explicit receiving force owner",
             ));
         }
         let rate_axis = match (
@@ -358,6 +359,10 @@ where
                 .free_surface3_from_cells(domain, &initial, cx)
                 .map_err(FreeSurfaceEnthalpyError::from)?
                 .with_enthalpy(law, caloric, transport, initial_h, self.gate)?
+        };
+        let liquid = match self.phase_conductivity_law() {
+            Some(law) => liquid.with_phase_conductivity(law, self.gate)?,
+            None => liquid,
         }
         .with_time_origin(thermal.time_s())?;
         let mut target = LiquidTransferMoments::default();

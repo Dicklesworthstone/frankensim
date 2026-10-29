@@ -542,6 +542,46 @@ fn g3_body_material_swap_changes_native_flow_without_replacing_any_solver() {
 }
 
 #[test]
+fn g1_phase_conductivity_reaches_finite_wall_contact_without_scaling_the_wall() {
+    use fs_material::phase::conductivity::LiquidMassFractionConductivity;
+    let liquid = conducting_card(1.0);
+    let solid = wall_card(0.5, 500.0);
+    let chart = wall_chart(&solid);
+    let context = point(450.0);
+    with_liquid(&liquid, false, |thermal, gate| {
+        *thermal = thermal.clone().with_phase_conductivity(
+            LiquidMassFractionConductivity::declared(4.0, 2.0).unwrap(), gate,
+        ).unwrap();
+        let mut bodies = [wall(&solid, &chart, &context, 450.0)];
+        let before = thermal.total_enthalpy_j().unwrap() + bodies[0].enthalpy_j();
+        let report = thermal.step_with_body_conduction(
+            &[], &[], controls(), &mut bodies, &[contact()], gate,
+        ).unwrap();
+        let (mut tl, mut ts) = (400.0, 450.0);
+        let mut last_g = 0.0;
+        for _ in 0..4 {
+            last_g = 1e-6 / (0.0005 / (2.0 * (tl - 200.0)) + 0.0005 / (0.5 * (ts - 200.0)));
+            let q = 0.00025 * last_g * (ts - tl);
+            tl += q / 0.002;
+            ts -= q / 0.001;
+        }
+        assert_eq!(report.thermal.substeps, 4);
+        let exchange = report.bodies.unwrap();
+        near(exchange.last_applied[0].conductance_w_k, last_g, 2e-13);
+        let endpoint = &exchange.thermal_endpoint[0];
+        near(endpoint.liquid_conductivity.source_w_m_k, tl - 200.0, 2e-13);
+        assert_eq!(endpoint.liquid_conductivity.phase_multiplier, 2.0);
+        near(endpoint.liquid_conductivity.effective_w_m_k, 2.0 * (tl - 200.0), 2e-13);
+        near(temperature(thermal.material_at(WALL_LIQUID).unwrap()), tl, 2e-13);
+        near(bodies[0].specific_enthalpy_j_kg(), (ts - 300.0) * 500.0, 2e-13);
+        near(report.flow.body_heat_j, 0.001 * (450.0 - ts), 2e-12);
+        assert_eq!(report.flow.external_heat_j, 0.0);
+        near(thermal.total_enthalpy_j().unwrap() + bodies[0].enthalpy_j(), before, 2e-12);
+        assert!(exchange.combined_balance_defect_j.abs() < 1e-9);
+    });
+}
+
+#[test]
 fn g3_insulating_body_reduces_exactly_to_original_liquid_conduction() {
     let liquid = conducting_card(1.0);
     let reference = with_liquid(&liquid, true, |thermal, gate| {
