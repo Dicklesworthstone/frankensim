@@ -8,8 +8,9 @@
 //!
 //! This is a separate source from the parent module's SR1-86 saturation model.
 //! No coefficients, caloric datums or endpoints are mixed between the releases.
-//! Regions 3 and 5, ice and the separate metastable-vapor equation are not
-//! implemented. Region requests never extrapolate into those domains. IF97's
+//! The separate `region3` module supplies the original dense-water Helmholtz
+//! source. Region 5, ice and the separate metastable-vapor equation are not
+//! implemented. Gibbs-region requests never extrapolate into those domains. IF97's
 //! stated 273.15--273.16 K extension includes states metastable relative to ice.
 //! Source uncertainties remain those in release section 12, not floating-point
 //! error bars. The raw Gibbs energies of the two saturation branches have the
@@ -24,6 +25,7 @@ use fs_qty::{Density, Pressure, Qty, Temperature, Velocity};
 
 pub mod bounds;
 pub mod increments;
+pub mod region3;
 
 /// Authoritative coefficient release and temperature scale.
 pub const SOURCE_RELEASE: &str = "IAPWS R7-97(2012), IF97, ITS-90";
@@ -39,7 +41,7 @@ pub const MINIMUM_TEMPERATURE_K: f64 = 273.15;
 pub const REGION1_MAXIMUM_TEMPERATURE_K: f64 = 623.15;
 /// Region 2 upper temperature [K]; hotter Region 5 is not implemented.
 pub const REGION2_MAXIMUM_TEMPERATURE_K: f64 = 1073.15;
-/// Source critical temperature [K]. The critical state is in unimplemented Region 3.
+/// Source critical temperature [K]. The exact critical state has singular response.
 pub const CRITICAL_TEMPERATURE_K: f64 = 647.096;
 /// Source critical pressure [Pa], equation (3).
 pub const CRITICAL_PRESSURE_PA: f64 = 22.064e6;
@@ -372,7 +374,7 @@ pub fn boundary23_pressure(temperature: Temperature) -> Result<Pressure, If97Err
     Ok(Pressure::new(boundary23_pressure_raw(t)))
 }
 pub(super) fn boundary23_pressure_raw(t: f64) -> f64 {
-    1e6 * (348.05185628969 - 1.1671859879975 * t + 0.0010192970039326 * t * t)
+    1e6 * (B23_COEFFICIENTS[0] - B23_COEFFICIENTS[1] * t + B23_COEFFICIENTS[2] * t * t)
 }
 
 fn on_saturation(p: f64, t: f64) -> bool {
@@ -731,6 +733,13 @@ pub(super) const R2_RESIDUAL: [GibbsTerm; 43] = [
     g(24, 40, 0.55414715350778e-16),
     g(24, 58, -0.94369707241210e-6),
 ];
+// Table 1, equation (5), shared with original-source interval admission.
+pub(super) const B23_COEFFICIENTS: [f64; 3] = [
+    348.05185628969,
+    1.1671859879975,
+    0.0010192970039326,
+];
+
 // Table 34, equations (29)--(31).
 const R4: [f64; 10] = [
     0.11670521452767e4,

@@ -1070,8 +1070,8 @@ never silently combined into one caloric chart.
 States retain typed pressure, temperature, density, specific volume, enthalpy,
 internal energy, entropy and Gibbs energy, together with Cp, Cv, sound speed and
 analytic thermodynamic derivatives. Admission follows the original regional
-bounds through 100 MPa and 1073.15 K. Region 3, Region 5 and the separate
-metastable-vapor formulation are absent. The source's 273.15–273.16 K extension
+bounds through 100 MPa and 1073.15 K. Region 5 and the separate metastable-vapor formulation are absent. Region 3
+is supplied by the distinct density/temperature source documented below. The source's 273.15–273.16 K extension
 includes the metastability explicitly described in the release; it does not
 establish stable liquid water against ice. Saturation pressure and temperature
 extend to the critical point, while paired Region 1/2 saturated calorics stop
@@ -1123,3 +1123,50 @@ and an inactive `D12=1e-300` pair whose common normalization underflows while
 the actual `1e-30` mass flux remains representable. The correction addresses
 the concrete refined N2/O2 molecular-manifold refusal, not a model calibration
 or new entropy/stability certificate.
+
+## Original IF97 Region 3 dense water
+
+`water::if97::region3` extends the original IF97 source with the Region 3
+density/temperature Helmholtz equation, using equation 28 and Tables 30–33 of
+the attributed [IAPWS R7-97(2012) release](https://iapws.org/technical-guidance/release/IF97-Rev.download).
+`If97DenseState` returns typed p, rho, T, v, h, u, s, Helmholtz/Gibbs energies,
+Cp, Cv, sound speed and analytic pressure/caloric/volume derivatives. Cached
+integer powers and one compensated coefficient pass evaluate the source without
+allocation or a nonlinear density solve. Existing Region 1/2 APIs retain their
+original operation order and references.
+
+Admission uses 623.15–863.15 K, the original B23/100 MPa pressure limits,
+positive Cv and isothermal stiffness, and the stable Region 4 side below Tc.
+A conservative 805 kg/m3 density envelope excludes remote extrapolated
+polynomial roots; independent outward interval arithmetic verifies that its
+upper boundary lies beyond 100 MPa over the complete source temperature
+interval. The exact critical state refuses its singular response functions.
+No critical neighborhood is smoothed, and no pressure, entropy or energy is
+shifted to join independently fitted regions. This API does not provide a p,T
+density inverse, a Region 3 saturation pair, a mixture lever rule, ice or Region 5.
+
+`region3::increments::DenseIsochoricInterval` prepares an immutable fixed-density
+temperature path. Bounded outward interval subdivision establishes its complete
+source-domain membership, stable derivatives and positive Cv enclosure, including
+B23, pressure and subcritical saturation-side constraints. Coefficients are
+collected once at the fixed density and evaluated with interval Horner arithmetic.
+Explicit work exhaustion, unresolved boundary inclusion and cancellation refuse;
+the proof does not widen physical bounds by a tolerance band. Enclosures concern
+the retained binary64 coefficient model, not source-fit or experimental uncertainty.
+
+Repeated `difference` queries reuse this proof and factor the original
+integer-power changes before subtracting large absolute properties. Original
+temperature differences survive adjacent-representable endpoints; delta_h equals
+delta_u+delta_p/rho. Changes of entropy, pressure and both caloric potentials
+remain on the original datum, with exact reversal and zero-change behavior.
+The convenience free function has a documented 4095-interval setup ceiling;
+repeated consumers should retain the prepared interval.
+
+All 169 tests pass in the current native thermochemistry source suite. The ten
+new tests include all published Table 33 states at their printed precision;
+independent thermodynamic derivatives, isobaric Cp and isentropic acoustic paths;
+stable/metastable/critical/domain refusals; the density-envelope proof; whole-path
+Cv bounds; adjacent-temperature increments; independent Cv and Cv/T integrals;
+additivity, reversal, bounded work and cancellation. The existing 37 unchanged
+source files match the inspected main-tree blobs. Full workspace DSR remains
+unavailable in this environment.
