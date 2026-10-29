@@ -14,6 +14,9 @@
 use super::{IsobaricWater, WaterEntropySolve, WaterError, WaterState};
 use core::fmt;
 
+/// Pressure devices joining the Gibbs and dense-water Helmholtz charts.
+pub mod across;
+
 /// Absolute numerical first/second-law allowances, not source uncertainty.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WaterFlowSolve {

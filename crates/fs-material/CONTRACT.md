@@ -4647,3 +4647,48 @@ small/zero heat; coarse pressure closure rejected by the physical joule budget;
 and domain, ambiguity, work, seam, chart, representability and cancellation
 refusals. No transport coefficient, spatial boiling, moving interface, vessel
 mechanics or reservoir entropy model is supplied by this equilibrium owner.
+
+## Pressure equipment across original water source regions
+
+`phase::water::flow::across` connects existing Region 1/2/4 Gibbs charts and the
+new Region 3 Helmholtz pressure chart. Typed state/chart enums retain the exact
+source owner and reuse the existing pressure-device controls and balance
+report. Steady adiabatic throttles preserve original h; compressors and expanders
+resolve original s at the outlet pressure, then apply the caller's explicit
+isentropic efficiency. No pressure-local entropy correction is used across
+pressures, and no caloric datum is shifted to manufacture regional agreement.
+
+Every accepted device independently closes Delta h+W and
+Delta u+Delta(p*v)+W, with outward shaft work positive and flow work included
+once. Original h-u-p_requested*v defects at the inlet, outlet and isentropic
+reference are individually limited by the energy budget so pressure errors
+cannot cancel invisibly. Reports retain source entropy production, numerical
+entropy residual, source-junction defects, density-source evaluation counts and
+caloric iterations. Reversible devices reuse the isentropic endpoint. Numerical,
+chart-domain, direction, efficiency, work and cancellation refusals return no
+partial device state. The production dispatch and solves allocate nothing.
+
+Four focused tests pass: a dense-liquid throttle reaching wet low-pressure
+steam; supercritical expansion with raw entropy and declared efficiency;
+hot-liquid compression across the Gibbs/dense interface with reversible return;
+and invalid direction/efficiency, pressure closure, unsupported outlet, work and
+cancellation refusals. The combined production water library also passes the six
+new dense-calorimetry tests and all five existing pressure-device/Rankine tests:
+15 integrated native tests in total.
+
+`cargo run -p fs-material --example water_high_pressure_steam` runs a partial
+steady steam train: 20 MPa water heats from 630 to 645 K through its
+638.895911546 K saturation plateau, expands through an explicitly illustrative
+85% efficient turbine to 10 kPa, and condenses to saturated liquid. Boiler heat
+is 851.285931773 kJ/kg, including 584.286587172 kJ/kg of latent enthalpy.
+Shaft output is 788.761576280 kJ/kg; the wet turbine outlet has vapor quality
+0.659460798. Maximum independent stage energy residual is 1.08e-8 J/kg and
+the complete open-train residual is 2.10e-9 J/kg on the native validation run.
+These are numerical balances, not source or equipment measurement accuracy.
+
+The inlet already contains substantial thermal energy. Feed-pump/preheater
+return and reservoir temperatures are not modeled, so this example supplies
+neither a closed-cycle efficiency nor a reservoir-entropy claim. Equipment
+endpoint connections do not imply automatic temperature-path stitching of
+Region 1/2/3, transient machine dynamics, pressure-drop/flow-rate laws, phase
+kinetics, or resolved two-phase flow.
