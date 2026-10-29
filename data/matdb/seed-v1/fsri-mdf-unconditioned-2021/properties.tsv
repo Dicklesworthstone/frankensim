@@ -1,0 +1,103 @@
+frankensim.matdb-source.v1
+observation	identity	fsri-mdf-unconditioned-2021	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/MDF/material.json	Medium-density fiberboard from the FSRI MDF collection. Exact producer, density profile, wood species and binder formulation are unreported. Metadata nominal thickness is 15.9 mm, while HFM conductivity specimens are 19.09,19.21,19.25 mm and the capacity specimen is 18.77 mm. Metadata headline density 583 kg/m3 differs from the density CSV inputs retained below. These discrepancies are preserved, not reconciled by guessing a grade or coupon geometry. The source-metadata-stock-thickness coordinate identifies only the metadata label; it is not the actual HFM thickness, a thickness-scaling law or a geometry prescription. Conductivity and capacity are separate experiments, without proof of identical coupons. No in-plane equivalence, stiffness, swelling, phase-change, fire-performance or structural qualification is supplied.
+observation	method	fsri-mdf-unconditioned-2021	FSRI HFM experimental methodology; https://materials.fsri.org/experimentalmethodology	Wet filenames mean unconditioned indoor storage at 22 +/- 3 degC and 40 +/- 20 percent relative humidity, not saturation. Moisture content is unreported and is not inferred from storage humidity. Planar HFM specimens may be machined under the general preparation method. Conductivity generally follows ASTM C518 through thickness with upward heat flow. Capacity uses the general ASTM C1784-20 equal-plate temperature-step method. Contact pressure, calibration uncertainty and cross-property covariance are unknown. Dried material is a separate source condition and cannot be selected here.
+observation	capacity-r2	fsri-mdf-unconditioned-2021	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/MDF/HFM/MDF_HFM_Wet_HeatCapacity_210402_R2.tst	Instrument thickness 18.77mm. Mean temperatures 10.0,20.01,30.01,40.01 degC have native volume-capacity values 842070,886846,948692,945432 J/(m3 K). The instrument label Specific Heat has explicitly volumetric units, not J/(kg K). Equal-temperature plate steps are 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC; these finite-step means are not infinitesimal calorimetry. Individual-run uncertainty is not reported.
+observation	capacity-reduction	fsri-mdf-unconditioned-2021	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/02_Scripts/plot_HFM_data_html.py	Round recorded capacity mean temperatures to 0.1 degC, grouping at 10,20,30,40 degC, and add 273.15 for kelvin. Only the R2 capacity experiment exists in the pinned source. Its one reading per group is retained without fabricated replicates. The published Cp SD is NaN; no volume-capacity or Cp SD claim is created. Missing scatter is not zero scatter. Linear C_vol(T) and published Cp(T) interpolation is an authored approximation between groups with no interpolation-error guarantee or extrapolation. Extra arithmetic digits add no source measurement precision.
+observation	density-normalization	fsri-mdf-unconditioned-2021	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/MDF/HFM/	MDF_Density_Wet_R1.csv=740.3654617 kg/m3; MDF_Density_Wet_R2.csv=734.5767314 kg/m3; MDF_Density_Wet_R3.csv=735.3357691 kg/m3. The source reduction uses the mean reported density column 736.7593207333333 kg/m3, not a value reconstructed from mass/volume or the metadata headline. Test temperature and exact pairing to thermal specimens are unknown. This is a reference normalization input with no temperature validity; it is not measured density(T).
+observation	specific-heat-reduction	fsri-mdf-unconditioned-2021	https://materials.fsri.org/materialdetail/medium-density-fiberboard	Mean native C_vol divided by the mean CSV density, then rounded to whole J/(kg K), gives 1143,1204,1288,1283 at 10,20,30,40 degC. Published SD is undefined for the one capacity specimen and is omitted. Cp, C_vol and normalization density are algebraically related, not independent observations. Density scatter and covariance are not propagated.
+observation	conductivity	fsri-mdf-unconditioned-2021	https://materials.fsri.org/materialdetail/medium-density-fiberboard; https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/MDF/HFM/	MDF_HFM_Wet_Conductivity_210226_R1.tst (thickness 19.09mm): 30.01degC=0.1197,35.01degC=0.1216,40.01degC=0.1233,45.01degC=0.1247; MDF_HFM_Wet_Conductivity_210301_R2.tst (thickness 19.21mm): 30.01degC=0.1171,35.01degC=0.1193,40.01degC=0.1208,45.01degC=0.1219; MDF_HFM_Wet_Conductivity_210303_R3.tst (thickness 19.25mm): 30.01degC=0.1178,35.01degC=0.1196,40.01degC=0.1211,45.01degC=0.1225. Values are native Average Cond results in W/(m K). Round mean temperatures to integer degC, pool readings at each group, and round mean/sample SD to 0.001 W/(m K), following the primary script. At 30,35,40,45 degC, published means are 0.118,0.12,0.122,0.123 and SD 0.001,0.001,0.001,0.001. One reading from each of three specimens contributes at each temperature. All plate pairs have a nominal 20 K difference. These are apparent through-thickness conductivities, not an isotropic constitutive tensor. Linear interpolation is an authored approximation with no error bound.
+observation	local-model	fsri-mdf-unconditioned-2021	Explicit local interpretation of finite-gradient HFM data	The thermal-conductivity key requires mean-test-temperature-as-local-model=1. This opts into using finite-20-K-gradient apparent conductivity as a local through-thickness scalar at the same numerical temperature. It is not deconvolution, a new point measurement or an in-plane/isotropic assumption. The apparent-thermal-conductivity key retains the native test-mean-temperature coordinate.
+curve	native-volume-capacity	identity,method,capacity-r2,capacity-reduction	volumetric_capacity	temperature	K	J/m3/K	283.15:842070.0,293.15:886846.0,303.15:948692.0,313.15:945432.0	linear
+uncertainty	native-volume-capacity	unstated	-	-	-	-
+validity	native-volume-capacity	family	1	1	1
+validity	native-volume-capacity	unconditioned	1	1	1
+validity	native-volume-capacity	grade_known	0	0	1
+validity	native-volume-capacity	formulation_known	0	0	1
+validity	native-volume-capacity	moisture_known	0	0	1
+validity	native-volume-capacity	pressure_known	0	0	1
+validity	native-volume-capacity	capacity_specimens	1	1	1
+validity	native-volume-capacity	conductivity_specimens	3	3	1
+validity	native-volume-capacity	density_specimens	3	3	1
+validity	native-volume-capacity	metadata_thickness	0.0159	0.0159	m
+validity	native-volume-capacity	statistic	1	1	1
+validity	native-volume-capacity	temperature	283.15	313.15	K
+curve	published-specific-heat	identity,method,capacity-r2,capacity-reduction,density-normalization,specific-heat-reduction	specific_heat	temperature	K	J/kg/K	283.15:1143,293.15:1204,303.15:1288,313.15:1283	linear
+uncertainty	published-specific-heat	unstated	-	-	-	-
+validity	published-specific-heat	family	1	1	1
+validity	published-specific-heat	unconditioned	1	1	1
+validity	published-specific-heat	grade_known	0	0	1
+validity	published-specific-heat	formulation_known	0	0	1
+validity	published-specific-heat	moisture_known	0	0	1
+validity	published-specific-heat	pressure_known	0	0	1
+validity	published-specific-heat	capacity_specimens	1	1	1
+validity	published-specific-heat	conductivity_specimens	3	3	1
+validity	published-specific-heat	density_specimens	3	3	1
+validity	published-specific-heat	metadata_thickness	0.0159	0.0159	m
+validity	published-specific-heat	statistic	1	1	1
+validity	published-specific-heat	temperature	283.15	313.15	K
+curve	apparent-conductivity	identity,method,conductivity	apparent_conductivity	test_mean_temperature	K	W/m/K	303.15:0.118,308.15:0.12,313.15:0.122,318.15:0.123	linear
+uncertainty	apparent-conductivity	unstated	-	-	-	-
+validity	apparent-conductivity	family	1	1	1
+validity	apparent-conductivity	unconditioned	1	1	1
+validity	apparent-conductivity	grade_known	0	0	1
+validity	apparent-conductivity	formulation_known	0	0	1
+validity	apparent-conductivity	moisture_known	0	0	1
+validity	apparent-conductivity	pressure_known	0	0	1
+validity	apparent-conductivity	capacity_specimens	1	1	1
+validity	apparent-conductivity	conductivity_specimens	3	3	1
+validity	apparent-conductivity	density_specimens	3	3	1
+validity	apparent-conductivity	metadata_thickness	0.0159	0.0159	m
+validity	apparent-conductivity	statistic	1	1	1
+validity	apparent-conductivity	through_thickness	1	1	1
+validity	apparent-conductivity	upward	1	1	1
+validity	apparent-conductivity	plate_delta	20	20	K
+validity	apparent-conductivity	test_mean_temperature	303.15	318.15	K
+curve	local-conductivity	identity,method,conductivity,local-model	local_conductivity	temperature	K	W/m/K	303.15:0.118,308.15:0.12,313.15:0.122,318.15:0.123	linear
+uncertainty	local-conductivity	unstated	-	-	-	-
+validity	local-conductivity	family	1	1	1
+validity	local-conductivity	unconditioned	1	1	1
+validity	local-conductivity	grade_known	0	0	1
+validity	local-conductivity	formulation_known	0	0	1
+validity	local-conductivity	moisture_known	0	0	1
+validity	local-conductivity	pressure_known	0	0	1
+validity	local-conductivity	capacity_specimens	1	1	1
+validity	local-conductivity	conductivity_specimens	3	3	1
+validity	local-conductivity	density_specimens	3	3	1
+validity	local-conductivity	metadata_thickness	0.0159	0.0159	m
+validity	local-conductivity	statistic	1	1	1
+validity	local-conductivity	through_thickness	1	1	1
+validity	local-conductivity	upward	1	1	1
+validity	local-conductivity	plate_delta	20	20	K
+validity	local-conductivity	local_model	1	1	1
+validity	local-conductivity	temperature	303.15	318.15	K
+curve	published-conductivity-sd	identity,method,conductivity	conductivity_sd	test_mean_temperature	K	W/m/K	303.15:0.001,308.15:0.001,313.15:0.001,318.15:0.001	tabulated
+uncertainty	published-conductivity-sd	unstated	-	-	-	-
+validity	published-conductivity-sd	family	1	1	1
+validity	published-conductivity-sd	unconditioned	1	1	1
+validity	published-conductivity-sd	grade_known	0	0	1
+validity	published-conductivity-sd	formulation_known	0	0	1
+validity	published-conductivity-sd	moisture_known	0	0	1
+validity	published-conductivity-sd	pressure_known	0	0	1
+validity	published-conductivity-sd	capacity_specimens	1	1	1
+validity	published-conductivity-sd	conductivity_specimens	3	3	1
+validity	published-conductivity-sd	density_specimens	3	3	1
+validity	published-conductivity-sd	metadata_thickness	0.0159	0.0159	m
+validity	published-conductivity-sd	statistic	0	0	1
+validity	published-conductivity-sd	through_thickness	1	1	1
+validity	published-conductivity-sd	upward	1	1	1
+validity	published-conductivity-sd	plate_delta	20	20	K
+validity	published-conductivity-sd	test_mean_temperature	303.15	318.15	K
+scalar	normalization-density	identity,method,density-normalization	normalization_density	736.7593207333333	kg/m3	constant
+uncertainty	normalization-density	unstated	-	-	-	-
+validity	normalization-density	family	1	1	1
+validity	normalization-density	unconditioned	1	1	1
+validity	normalization-density	grade_known	0	0	1
+validity	normalization-density	formulation_known	0	0	1
+validity	normalization-density	moisture_known	0	0	1
+validity	normalization-density	pressure_known	0	0	1
+validity	normalization-density	capacity_specimens	1	1	1
+validity	normalization-density	conductivity_specimens	3	3	1
+validity	normalization-density	density_specimens	3	3	1
+validity	normalization-density	metadata_thickness	0.0159	0.0159	m
+validity	normalization-density	statistic	1	1	1
+validity	normalization-density	density_temperature_known	0	0	1
