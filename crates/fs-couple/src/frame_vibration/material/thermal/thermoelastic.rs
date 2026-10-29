@@ -24,12 +24,14 @@
 //!
 //! [`FrameVibrationComponent::into_thermoelastic_parts`] retains this physical
 //! source when the frame joins other native mechanical components, reciprocal
-//! acoustic loads and constitutive memories. Only this frame's original
-//! dashpots heat its caloric cells; every other storage and loss stays in the
-//! same complete mechanical account.
+//! acoustic loads and constitutive memories. Multiple bindings join through
+//! [`FrameThermoelasticBinding::into_shared_system`]: ONE native mechanical step,
+//! ONE complete thermal residual and ONE endpoint coefficient replacement.
+//! Each frame's original dashpots heat only its own cells. Cross-frame thermal
+//! links use the same source network; unbound losses remain separate sinks.
 
 mod assembly;
-pub use assembly::FrameThermoelasticBinding;
+pub use assembly::{FrameThermoelasticBinding, FrameThermoelasticFrame};
 
 use super::*;
 use crate::modal_acoustic_time::{ModalAcousticMode, ModalAcousticState, ModalAcousticTimeModel};
@@ -46,6 +48,9 @@ struct Member<'a> {
     law: ConcentricThermoelasticLaw<'a>,
     columns: [Vec<f64>; 3],
     spring_start: usize,
+    component: usize,
+    damping_start: usize,
+    linear_strain_limit: f64,
     axial_property: String,
     bending_property: String,
 }
@@ -64,6 +69,8 @@ pub struct FrameThermoelasticLayerState {
 /// Complete pinned source evaluation at the actual accepted layer temperatures.
 #[derive(Clone, Debug)]
 pub struct FrameThermoelasticMemberState {
+    /// Original native component; element numbers are local to this frame.
+    pub component: usize,
     pub element: usize,
     pub source: ConcentricThermoelasticState,
     pub viscosity: FrameViscousSection,
@@ -128,15 +135,14 @@ pub struct FrameThermoelasticReport {
 
 /// Original mechanical history, fixed physical chart and finite-cell sources.
 pub struct FrameThermoelasticSystem<'n, 'a> {
-    basis: FrameVibrationBasis,
+    frames: Vec<FrameThermoelasticFrame>,
+    /// Sorted disjoint source-owned connection ranges, prepared once.
+    owned_connections: Vec<core::ops::Range<usize>>,
     mechanical: CoupledModalSystem,
     prepared: PreparedMaterialNetwork<'n, 'a>,
     members: Vec<Member<'a>>,
     states: Vec<FrameThermoelasticMemberState>,
     origin_s: f64,
-    linear_strain_limit: f64,
-    component: usize,
-    connection_start: usize,
 }
 
 fn modal(error: crate::modal_acoustic_time::ModalAcousticTimeError) -> FrameThermalError {
@@ -186,9 +192,9 @@ fn resolve_member(
     member: &Member<'_>,
     temperatures: &[f64],
     q: &[ModalAcousticState],
-    strain_limit: f64,
     dt: f64,
 ) -> Result<FrameThermoelasticMemberState> {
+    let strain_limit = member.linear_strain_limit;
     let mut x = [0.0; 3];
     for (value, column) in x.iter_mut().zip(&member.columns) {
         *value = sum(column
@@ -248,6 +254,7 @@ fn resolve_member(
         ));
     }
     Ok(FrameThermoelasticMemberState {
+        component: member.component,
         element: member.region.element,
         source,
         viscosity,
@@ -366,7 +373,8 @@ impl FrameVibrationComponent {
     /// contiguously at `connection_start`, in unchanged order. Other components
     /// and reciprocal connectors may precede or follow those addresses.
     /// Configure native radiation, material memories and propagation normally,
-    /// then call [`FrameThermoelasticBinding::into_system`]. No extra integrator
+    /// then call [`FrameThermoelasticBinding::into_system`] or collect bindings
+    /// in [`FrameThermoelasticBinding::into_shared_system`]. No extra integrator
     /// or acoustic pressure transfer is supplied by these mechanical parts.
     /// The explicit config bounds this source projection; the final native
     /// constructor independently admits the complete assembly and its budgets.
@@ -463,6 +471,9 @@ impl FrameVibrationComponent {
                 law: ConcentricThermoelasticLaw::try_new(region.law.clone()).map_err(material)?,
                 columns: core::array::from_fn(|k| connections[3 * index + k].left.shapes.clone()),
                 spring_start: connections.len(),
+                component,
+                damping_start: connection_start + 3 * index,
+                linear_strain_limit,
                 axial_property: eta.axial().viscosity_property().into(),
                 bending_property: eta.bending().viscosity_property().into(),
                 region,
@@ -471,7 +482,6 @@ impl FrameVibrationComponent {
                 &member,
                 &temperatures(&member.region, thermal)?,
                 model.states(),
-                linear_strain_limit,
                 dt,
             )?;
             admit_capacity(&member, &state, source, linear_strain_limit)?;
@@ -538,10 +548,10 @@ impl FrameVibrationComponent {
         let binding = FrameThermoelasticBinding {
             basis,
             prepared: binding,
+            source,
             members,
             states,
             origin_s: thermal.time_s(),
-            linear_strain_limit,
             component,
             connection_start,
             initial_model: free.clone(),
@@ -552,21 +562,27 @@ impl FrameVibrationComponent {
 }
 
 impl FrameThermoelasticSystem<'_, '_> {
-    /// Immutable original mass chart; its reference eigenfrequencies are not
-    /// the evolving elastic operator. Motion always uses the native springs.
+    /// All source frames in canonical native-component order. Each range indexes
+    /// the same flattened member states returned by `members()` and step reports.
+    pub fn frames(&self) -> &[FrameThermoelasticFrame] {
+        &self.frames
+    }
+    /// Immutable mass chart of the lowest-index bound frame. Existing single-
+    /// frame calls retain their meaning; use `frames()` for a shared assembly.
+    /// Reference eigenfrequencies are not the evolving elastic operator.
     pub const fn basis(&self) -> &FrameVibrationBasis {
-        &self.basis
+        &self.frames.as_slice()[0].basis
     }
     pub const fn mechanical(&self) -> &CoupledModalSystem {
         &self.mechanical
     }
-    /// Original component containing this frame's fixed mass coordinates.
+    /// Lowest-index bound component; see `frames()` for the complete assembly.
     pub const fn component_index(&self) -> usize {
-        self.component
+        self.frames.as_slice()[0].component
     }
-    /// First protected material dashpot; all layer springs follow the dashpots.
+    /// First material connection of the lowest-index bound component.
     pub const fn connection_start(&self) -> usize {
-        self.connection_start
+        self.frames.as_slice()[0].connections.start
     }
     pub fn members(&self) -> &[FrameThermoelasticMemberState] {
         &self.states
@@ -614,9 +630,7 @@ impl FrameThermoelasticSystem<'_, '_> {
         let members = &self.members;
         let states = &self.states;
         let prepared = &self.prepared;
-        let strain_limit = self.linear_strain_limit;
-        let component = self.component;
-        let connection_start = self.connection_start;
+        let owned_connections = &self.owned_connections;
         for (member, state) in members.iter().zip(states) {
             for (temperature, old) in temperatures(&member.region, thermal)?
                 .iter()
@@ -631,7 +645,6 @@ impl FrameThermoelasticSystem<'_, '_> {
         }
         let (next_thermal, report, update, next_states) = self.mechanical.step_with_admission(
             external_modal_forces, gate, |mechanical, frame, transfers| {
-                let endpoint = mechanical.staged_components()[component].states();
                 let mut frozen = Vec::with_capacity(members.len());
                 let mut works = Vec::new();
                 let mut losses = Vec::new();
@@ -639,10 +652,11 @@ impl FrameThermoelasticSystem<'_, '_> {
                 let mut material_heat_j = 0.0;
                 for (index, (member, old)) in members.iter().zip(states).enumerate() {
                     check(gate)?;
+                    let endpoint = mechanical.staged_components()[member.component].states();
                     frozen.push(resolve_member(member, &old.layers.iter().map(|l| l.temperature_k).collect::<Vec<_>>(),
-                        endpoint, strain_limit, dt)?);
+                        endpoint, dt)?);
                     let port_loss = |k: usize| -> Result<f64> {
-                        let loss = finite(-transfers[connection_start+3*index+k].energy_into().value())?;
+                        let loss = finite(-transfers[member.damping_start+k].energy_into().value())?;
                         if loss < 0.0 { return Err(invalid("frame dashpot supplied negative material heat")); }
                         Ok(loss)
                     };
@@ -675,7 +689,7 @@ impl FrameThermoelasticSystem<'_, '_> {
                     }
                 }
                 let outside = assembly::outside_loss(mechanical, frame, transfers,
-                    connection_start, members, material_heat_j, controls.total_energy_tolerance_j, gate)?;
+                    owned_connections, material_heat_j, controls.total_energy_tolerance_j, gate)?;
                 let (candidate, (), audit, entropy) = cell_driver_candidate_entropy_option(
                     thermal, target, controls.driver(), energy_guess_j,
                     |trial, _remaining| {
@@ -695,7 +709,8 @@ impl FrameThermoelasticSystem<'_, '_> {
                         let mut flat = 0;
                         for (index, (member, old)) in members.iter().zip(states).enumerate() {
                             check(gate)?;
-                            let state = resolve_member(member, &temperatures(&member.region, trial)?, endpoint, strain_limit, dt)?;
+                            let endpoint = mechanical.staged_components()[member.component].states();
+                            let state = resolve_member(member, &temperatures(&member.region, trial)?, endpoint, dt)?;
                             for (layer, (a, b)) in old.layers.iter().zip(&state.layers).enumerate() {
                                 let parameter = finite(b.free_energy_j-frozen[index].layers[layer].free_energy_j)?;
                                 let entropy_energy = finite(b.temperature_k*b.entropy_j_k-a.temperature_k*a.entropy_j_k)?;
@@ -731,7 +746,7 @@ impl FrameThermoelasticSystem<'_, '_> {
                 )?;
                 let (source, next_states, layers, independent_entropy, has_independent) = audit.source;
                 let mut updates = Vec::with_capacity(transfers.len());
-                for (index, (member, state)) in members.iter().zip(&next_states).enumerate() {
+                for (member, state) in members.iter().zip(&next_states) {
                     let l = member.region.length_m;
                     let a = finite(state.viscosity.axial().viscous_rigidity_n_s()/l)?;
                     let b = finite(state.viscosity.bending().viscous_stiffness_n_m2_s()/l/l/l)?;
@@ -740,7 +755,7 @@ impl FrameThermoelasticSystem<'_, '_> {
                         return Err(invalid("refreshed frame viscosity underflows its original geometry"));
                     }
                     for (k, damping_n_s_m) in [a, finite(3.0*b)?, b].into_iter().enumerate() {
-                        updates.push(ConnectionCoefficients { connection: connection_start+3*index+k,
+                        updates.push(ConnectionCoefficients { connection: member.damping_start+k,
                             stiffness_n_m: 0.0, damping_n_s_m, rest_extension_m: 0.0 });
                     }
                 }

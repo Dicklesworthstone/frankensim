@@ -1,17 +1,34 @@
 //! Source ownership through the original complete mechanical assembly.
 use super::*;
+use core::ops::Range;
+
+/// Immutable placement of one source frame in the complete coupled assembly.
+/// Member ranges index the accepted system states and its step reports.
+pub struct FrameThermoelasticFrame {
+    pub(super) basis: FrameVibrationBasis,
+    pub(super) component: usize,
+    pub(super) connections: Range<usize>,
+    members: Range<usize>,
+}
+impl FrameThermoelasticFrame {
+    pub const fn basis(&self) -> &FrameVibrationBasis { &self.basis }
+    pub const fn component_index(&self) -> usize { self.component }
+    pub fn connection_range(&self) -> Range<usize> { self.connections.clone() }
+    pub fn member_range(&self) -> Range<usize> { self.members.clone() }
+}
 
 /// Source/caloric ownership for the returned free-coordinate frame and ports.
 /// Keep every definition unchanged when assembling the original native owner.
-/// This binds ONE live thermoelastic frame; companions retain their own laws
-/// and their losses are not silently deposited into this frame's finite cells.
+/// Single and multiple frame bindings use the same admission and step owner.
+/// A shared assembly requires one original MaterialNetwork and disjoint
+/// component, material-port and whole-layer caloric inventories.
 pub struct FrameThermoelasticBinding<'n, 'a> {
     pub(super) basis: FrameVibrationBasis,
     pub(super) prepared: PreparedMaterialNetwork<'n, 'a>,
+    pub(super) source: &'n MaterialNetwork<'a>,
     pub(super) members: Vec<Member<'a>>,
     pub(super) states: Vec<FrameThermoelasticMemberState>,
     pub(super) origin_s: f64,
-    pub(super) linear_strain_limit: f64,
     pub(super) component: usize,
     pub(super) connection_start: usize,
     pub(super) initial_model: ModalAcousticTimeModel,
@@ -44,6 +61,103 @@ impl<'n, 'a> FrameThermoelasticBinding<'n, 'a> {
         thermal: &DepositionSimulation<'_>,
         gate: &CancelGate,
     ) -> Result<FrameThermoelasticSystem<'n, 'a>> {
+        Self::into_shared_system(vec![self], mechanical, thermal, gate)
+    }
+
+    /// Bind several independently heated source frames to one original native
+    /// assembly and one finite thermal timeline. Mechanical components and
+    /// protected port blocks may appear in any order, with ordinary connectors
+    /// between them. All bindings must borrow the SAME complete MaterialNetwork.
+    /// Cross-frame conduction is then resolved once, at the same thermal endpoint.
+    ///
+    /// Every original frame state, material port, source, whole-cell inventory
+    /// and clock is admitted before ownership is consumed. Duplicate components,
+    /// overlapping port ranges and reused caloric cells refuse. No coefficients
+    /// or coordinates are changed here. Binding order cannot change reductions:
+    /// accepted frames and member reports use native component order.
+    ///
+    /// Evolution retains one native step/admit/publish boundary. No frame can
+    /// advance ahead of another, and one failed source or heat solve rolls back
+    /// the complete assembly. Fixed mass/geometry and first-order splitting
+    /// limits are the same as for a single frame.
+    pub fn into_shared_system(
+        mut bindings: Vec<Self>,
+        mechanical: CoupledModalSystem,
+        thermal: &DepositionSimulation<'_>,
+        gate: &CancelGate,
+    ) -> Result<FrameThermoelasticSystem<'n, 'a>> {
+        check(gate)?;
+        if bindings.is_empty() || bindings.len() > mechanical.components().len() {
+            return Err(invalid("nonempty bounded thermoelastic frame bindings required"));
+        }
+        bindings.sort_unstable_by_key(|binding| binding.component);
+        let source = bindings[0].source;
+        let origin_s = bindings[0].origin_s;
+        let mut used_cells = BTreeSet::new();
+        let mut owned_connections = Vec::with_capacity(bindings.len());
+        let mut previous_component = None;
+        for binding in &bindings {
+            check(gate)?;
+            if previous_component == Some(binding.component)
+                || !core::ptr::eq(source, binding.source)
+                || binding.origin_s.to_bits() != origin_s.to_bits()
+            {
+                return Err(invalid(
+                    "shared thermoelastic frames need distinct components, one original material network and one clock",
+                ));
+            }
+            binding.admit(&mechanical, thermal, gate)?;
+            previous_component = Some(binding.component);
+            let end = binding.connection_start.checked_add(binding.definitions.len())
+                .ok_or_else(|| invalid("thermoelastic connection range overflows"))?;
+            owned_connections.push(binding.connection_start..end);
+            for receiver in binding.members.iter().flat_map(|member| &member.region.receivers) {
+                check(gate)?;
+                if !used_cells.insert(receiver.binding.cell) {
+                    return Err(invalid("a whole caloric cell cannot belong to multiple frame layers"));
+                }
+            }
+        }
+        owned_connections.sort_unstable_by_key(|range| range.start);
+        if owned_connections.windows(2).any(|pair| pair[0].end > pair[1].start) {
+            return Err(invalid("thermoelastic material connection ranges overlap"));
+        }
+        let mut frames = Vec::with_capacity(bindings.len());
+        let mut members = Vec::new();
+        let mut states = Vec::new();
+        let mut prepared = None;
+        for mut binding in bindings {
+            check(gate)?;
+            let first = members.len();
+            members.append(&mut binding.members);
+            states.append(&mut binding.states);
+            frames.push(FrameThermoelasticFrame {
+                basis: binding.basis,
+                component: binding.component,
+                connections: binding.connection_start..binding.connection_start + binding.definitions.len(),
+                members: first..members.len(),
+            });
+            // All preparations select from the same immutable source network
+            // at the same admitted initial state. Retain one transport owner,
+            // not one repeated full-network resolution per frame per trial.
+            if prepared.is_none() {
+                prepared = Some(binding.prepared);
+            }
+        }
+        check(gate)?;
+        Ok(FrameThermoelasticSystem {
+            frames, owned_connections, mechanical,
+            prepared: prepared.ok_or_else(|| invalid("missing shared material preparation"))?,
+            members, states, origin_s,
+        })
+    }
+
+    fn admit(
+        &self,
+        mechanical: &CoupledModalSystem,
+        thermal: &DepositionSimulation<'_>,
+        gate: &CancelGate,
+    ) -> Result<()> {
         check(gate)?;
         let model = mechanical
             .components()
@@ -114,17 +228,7 @@ impl<'n, 'a> FrameThermoelasticBinding<'n, 'a> {
             }
         }
         check(gate)?;
-        Ok(FrameThermoelasticSystem {
-            basis: self.basis,
-            mechanical,
-            prepared: self.prepared,
-            members: self.members,
-            states: self.states,
-            origin_s: self.origin_s,
-            linear_strain_limit: self.linear_strain_limit,
-            component: self.component,
-            connection_start: self.connection_start,
-        })
+        Ok(())
     }
 }
 
@@ -136,19 +240,21 @@ pub(super) fn outside_loss(
     mechanical: &CoupledModalSystem,
     frame: &CoupledModalFrame,
     transfers: &[fs_ports::IntegratedWindowTransfer],
-    connection_start: usize,
-    members: &[Member<'_>],
+    owned_connections: &[Range<usize>],
     material_heat_j: f64,
     tolerance: f64,
     gate: &CancelGate,
 ) -> Result<f64> {
-    let end = members.last().map_or(connection_start, |m| {
-        m.spring_start + 3 * m.region.receivers.len()
-    });
+    let mut owned = 0;
     let mut foreign = 0.0;
     for (i, transfer) in transfers.iter().enumerate() {
         check(gate)?;
-        if (connection_start..end).contains(&i) {
+        // Both lists are canonical; this is linear in connections + frames,
+        // including unbound connectors between noncontiguous source blocks.
+        while owned < owned_connections.len() && owned_connections[owned].end <= i {
+            owned += 1;
+        }
+        if owned < owned_connections.len() && owned_connections[owned].contains(&i) {
             continue;
         }
         let law = mechanical
