@@ -332,3 +332,35 @@ NIST/MaCFP scalar PMMA inputs in an authored heating scenario; its optional
 the same kinetic update against the retained MaCFP FDS material-temperature
 history. Source data, units, calibration/verification distinctions and commands
 are in `data/reference/compartment_fire/pyrolysis/README.md`.
+
+### Implicit conduction and finite-rate decomposition
+
+`pyrolysis::implicit` removes the explicit conduction stability limit while
+retaining the original physical model. Its nonlinear unknown is absorbed cell
+energy. Every trial calls the existing `solve_cell` for temperature, virgin/char
+inventory and escaping volatile enthalpy, then the original
+`heat_rates_with_calorics` evaluates endpoint conductive/Robin/source powers.
+The actual residual is absorbed energy minus duration times endpoint power.
+No alternate heat graph, heat capacity, kinetic law or heat-of-reaction source
+is introduced.
+
+`implicit_workspace` prepares original dense LU and numerical buffers for at
+most 128 cells. The Jacobian combines the original link/boundary conductances
+with local caloric-response probes, avoiding a complete graph reevaluation for
+every column. Original bounded heat-rate maps and candidate/result objects
+still allocate; this is not an allocation-free whole-advance claim.
+`advance_implicit_to` returns the unchanged original release/audit format plus
+actual nonlinear, local-solve, linear-solve and backtracking work counts. Local
+and whole-advance conservation gates include original kinetic roundoff and the
+separately reported graph heat-transfer summation discrepancy. Cancellation or
+nonlinear/domain refusal publishes no candidate.
+
+Seven focused native tests cover an independent stiff two-capacity endpoint,
+simultaneous heating/conduction/reaction, char and caloric-datum invariance,
+actual Robin coverage, temporal refinement, activated Arrhenius comparison
+with the original fine explicit method, and refusal/cancellation/reuse. The
+stiff case completes in one implicit interval while the explicit owner exhausts
+its four-substep budget. This remains first-order backward Euler with caller
+time-resolution controls; removing the conduction CFL is not an unconditional
+nonlinear-convergence, temporal-accuracy or entropy theorem. Geometry and
+authored coefficients stay fixed within each original advance.

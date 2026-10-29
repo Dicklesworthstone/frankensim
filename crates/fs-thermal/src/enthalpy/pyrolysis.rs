@@ -5,8 +5,10 @@
 //! `virgin -> y_char char + (1-y_char) volatile` by mass. Its finite-rate
 //! backward-Euler extent and temperature close one local energy equation;
 //! product formation enthalpy is carried once, never added as another heater.
-//! This reduced first-order lane has fixed geometry and instantaneous removal
-//! of volatiles at their local production temperature. It does not model pore
+//! The base owner has fixed geometry and instantaneous removal of volatiles at
+//! their local production temperature. The `implicit` extension couples endpoint
+//! conduction and reaction without the explicit conduction timestep limit.
+//! This reduced first-order model does not model pore
 //! gas transport, oxidation, shrinkage, cracking, flame chemistry or a validated
 //! PMMA/wood parameter set. Full cell exhaustion and exhausted work budgets
 //! refuse instead of retaining an artificial seed mass.
@@ -23,6 +25,10 @@ use super::{
     MaterialId, ThermalLaw, finite, nonnegative, positive,
 };
 use std::collections::BTreeMap;
+
+/// Coupled backward-Euler heat transport and finite-rate decomposition.
+#[path = "pyrolysis/implicit.rs"]
+pub mod implicit;
 
 /// SI universal molar gas constant, J/(mol K).
 const GAS_CONSTANT: f64 = 8.314_462_618_153_24;
@@ -214,6 +220,8 @@ pub struct PyrolysisAudit {
     /// Largest actual local stored-plus-emitted-minus-input energy defect, J.
     pub maximum_cell_energy_residual_j: f64,
     /// Sum of absolute local defects over all cells and accepted substeps, J.
+    /// Implicit/remapping extensions also include their separately reported
+    /// heat-transfer summation and remap discrepancies in this budget.
     pub absolute_energy_residual_j: f64,
     /// Sum of absolute consumed-mass roundoff against the stably computed BE
     /// extent. It is numerical discrepancy, not an extra physical mass stream.
