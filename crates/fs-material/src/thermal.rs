@@ -18,7 +18,28 @@ pub mod conduction;
 
 use crate::phase::EquilibriumEnthalpyPhaseCurve;
 use crate::phase::vaporization::IsobaricWaterVaporization;
+use crate::phase::water::IsobaricWater;
 use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
+
+impl ThermalLaw for IsobaricWater {
+    fn temperature_k(&self, specific_h_j_kg: f64) -> Result<f64, DepositionError> {
+        self.state_at_specific_enthalpy(specific_h_j_kg, || false)
+            .map(|answer| answer.state().temperature_k())
+            .map_err(|_| DepositionError::MaterialDomain)
+    }
+    fn maximum_temperature_slope(&self) -> f64 {
+        IsobaricWater::maximum_temperature_slope(self)
+    }
+    fn specific_entropy_change_j_kg_k(
+        &self,
+        initial_h: f64,
+        final_h: f64,
+    ) -> Result<Option<f64>, DepositionError> {
+        IsobaricWater::specific_entropy_change_j_kg_k(self, initial_h, final_h, || false)
+            .map(Some)
+            .map_err(|_| DepositionError::MaterialDomain)
+    }
+}
 
 // The external constant-pressure load permits expansion/contraction. The
 // thermal kernel's fixed geometry is reference heat-exchange geometry, not a

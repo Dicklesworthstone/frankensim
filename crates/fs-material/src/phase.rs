@@ -20,6 +20,8 @@ pub mod transport;
 pub mod melting;
 /// Source-backed liquid/vapor coexistence and isobaric heat with expansion work.
 pub mod vaporization;
+/// IF97 liquid heating, boiling and superheated steam with explicit source seams.
+pub mod water;
 /// Fixed-mass calorimetry with explicit constant-pressure boundary work.
 pub mod isobaric {
     //! Fixed-mass calorimetry at a caller-declared constant absolute pressure.

@@ -4169,3 +4169,53 @@ independent of the evolving coordinate. Explicitly authored h(T,phase) charts
 carry no resolved-source receipts and retain their declared law; an empty
 receipt list is not empirical material validation. Tests retain Cp/density and
 melting receipts through the original curve and its clone.
+
+## IF97 water heating, boiling and superheat
+
+`phase::water::IsobaricWater` gives one original-source, constant-pressure
+enthalpy chart spanning compressed liquid, liquid/vapor coexistence and
+superheated steam. It consumes only `fs-thermochem::water::if97`; original h, u,
+s and v share that source's reference and are never mixed with SR1-86.
+Temperature bounds must bracket saturation, remain within 273.16–1073.15 K and
+admit the Region 1/2 coexistence join only through 623.15 K. This is not an ice,
+Region 3, supercritical, metastable, kinetic phase-change or rigid-vessel model.
+
+Original-source p,h and p,s inversions use safeguarded Newton/bisection, caller
+residual and iteration limits, and cancellation. Coexistence resolves quality
+analytically at the fixed saturation temperature. Actual source endpoints and
+residuals are returned without shifting h or s. Single-phase states report no
+vapor quality; mass fractions, density and specific volume remain available in
+every phase. Temperature alone at saturation refuses as ambiguous.
+
+Construction proves positive Cp over both complete sensible branches using the
+source's bounded interval arithmetic. The retained global inverse slope admits
+stable use of the existing `fs-thermal` timeline across latent plateaus; it is
+not a sampled or locally guessed heat-capacity bound. Chart construction is
+separate from repeated state queries.
+
+The original IF97 regional fits have a finite saturation matching error:
+delta_s=(h_v-h_l)/Ts-(s_v-s_l). Admission requires an explicit bound on its
+magnitude. Raw source entropy and this defect remain visible. The thermal law
+uses the continuous pressure-specific primitive S*=s+chi*delta_s, where chi is
+zero in liquid, vapor quality in coexistence and one in vapor. It integrates
+dh/T on this isobar, and must never be substituted for absolute source entropy
+in a pressure-changing device. The correction is not physical entropy
+generation or an added heat source.
+
+`advance_heat` retains fixed mass and reports both phase inventories, physical
+volume change, delta_h, delta_u and outward p*delta_v work. Original-source
+stable increments and actual rounded endpoint differences independently satisfy
+the caller's unchanged absolute joule budget. Nonzero heat or phase inventory
+lost to representability refuses. The shared thermal geometry remains reference
+heat-exchange geometry, while physical expansion is explicitly reported.
+
+Six native material tests exercise p,h/p,s source round trips; complete
+heating/condensation and phase depletion; explicit entropy-seam accounting;
+domain/work/cancellation refusals; the real shared thermal history through all
+three regimes; and finite steam/liquid thermal contact with conserved total
+enthalpy and positive modeled entropy production. The runnable
+`cargo run -p fs-material --example water_heating` heats and cools 50 g from
+300 K through boiling to 700 K and back, independently reconciling every
+accepted thermal interval with material calorimetry. This establishes a bounded
+liquid/vapor consumer for bead `frankensim-7sga6.2.7`, not its complete ice and
+all-regime scope.
