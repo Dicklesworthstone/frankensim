@@ -45,6 +45,7 @@ pub(crate) struct Spec {
     bridges: Vec<AssemblyBridge>,
     window: (f64, f64),
     projection_work: usize,
+    coating_memory: Option<coating::MemoryInput>,
 }
 
 impl Spec {
@@ -55,6 +56,7 @@ impl Spec {
         };
         r.row("frankensim-string-body-v4", 0)?;
         let (window, projection_work) = read_window(&mut r)?;
+        let coating_memory = coating::MemoryInput::read(&mut r)?;
         let n = count(r.row("components", 1)?[0], 1, MAX_COMPONENTS)?;
         let mut components = Vec::<Component>::with_capacity(n);
         let (mut nodes, mut triangles) = (0, 0);
@@ -66,7 +68,8 @@ impl Spec {
             {
                 return Err("assembly component names must be unique bounded tokens".into());
             }
-            let shell = super::Spec::read(&mut r, Some((window, projection_work)))?;
+            let mut shell = super::Spec::read(&mut r, Some((window, projection_work)))?;
+            shell.coating_memory = coating_memory.clone();
             nodes += shell.nodes.len();
             triangles += shell.triangles.len();
             if nodes > MAX_TOTAL_NODES || triangles > MAX_TOTAL_TRIANGLES {
@@ -86,6 +89,9 @@ impl Spec {
             .any(|c| c.shell.regions.iter().any(|r| r.pack == "@body"))
         {
             return Err("assembled body must retain the performance body material pack".into());
+        }
+        if coating_memory.is_some() && components.iter().all(|c| c.shell.coatings.is_empty()) {
+            return Err("coating-memory requires at least one physical film in the assembly".into());
         }
         let v = r.row("tie-budget", 4)?;
         let ties = TieBudget {
@@ -199,6 +205,7 @@ impl Spec {
             bridges,
             window,
             projection_work,
+            coating_memory,
         })
     }
 
@@ -210,6 +217,7 @@ impl Spec {
             return Err(format!("assembled body admits 1..={MAX_MODES} retained global body modes").into());
         }
         spec.network_dimensions_with_body_connections(true, self.additional_body_connections())?;
+        if let Some(memory) = &self.coating_memory { memory.preflight(spec)?; }
         for component in &self.components {
             component.shell.geometry(spec)?;
             component
@@ -225,6 +233,18 @@ impl Spec {
             .iter()
             .map(|c| c.shell.additional_body_connections())
             .sum()
+    }
+
+    pub(crate) fn material_memory_states(&self) -> usize {
+        self.coating_memory.as_ref().map_or(0, |memory| memory.options.max_memory_coordinates)
+    }
+
+    pub(crate) fn bind_material_memory(&self, bank: ReciprocalStringBank, gate: &CancelGate)
+        -> Result<ReciprocalStringBank>
+    {
+        Ok(if self.coating_memory.is_some() {
+            bank.with_material_shell_coating_relaxation(None, gate)?
+        } else { bank })
     }
 
     pub(crate) fn load_interfaces(

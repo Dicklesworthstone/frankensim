@@ -67,6 +67,7 @@ pub(super) struct Spec {
     triangles: Vec<[usize; 3]>,
     regions: Vec<RegionInput>,
     coatings: coating::Inputs,
+    coating_memory: Option<coating::MemoryInput>,
     supports: Vec<ShellConstraint>,
     interfaces: interfaces::Inputs,
     pressure_surfaces: Option<fs_couple::shear_shell::pressure::ShellPressureSurfaces>,
@@ -111,6 +112,7 @@ impl Spec {
         } else {
             read_window(r)?
         };
+        let coating_memory = if assembly_window.is_none() { coating::MemoryInput::read(r)? } else { None };
         let n = count(r.row("regions", 1)?[0], 1, 16)?;
         let mut regions = Vec::<RegionInput>::with_capacity(n);
         for _ in 0..n {
@@ -140,6 +142,9 @@ impl Spec {
             return Err("shell regions must retain the performance body material pack".into());
         }
         let coatings = coating::Inputs::parse(r, &regions)?;
+        if coating_memory.is_some() && coatings.is_empty() {
+            return Err("coating-memory requires at least one declared physical film".into());
+        }
         let n = count(r.row("nodes", 1)?[0], 3, MAX_NODES)?;
         let mut nodes = Vec::with_capacity(n);
         for _ in 0..n {
@@ -198,7 +203,7 @@ impl Spec {
             }
             bridges.push(Bridge { node, direction });
         }
-        Ok(Self { nodes, triangles, regions, coatings, supports, interfaces, pressure_surfaces, bridges, minimum_facet_dot,
+        Ok(Self { nodes, triangles, regions, coatings, coating_memory, supports, interfaces, pressure_surfaces, bridges, minimum_facet_dot,
             mass, drilling_alpha, window, projection_work })
     }
 
@@ -210,12 +215,25 @@ impl Spec {
             return Err(format!("shell body profile admits 1..={MAX_MODES} retained body modes").into());
         }
         self.geometry(spec)?;
+        if let Some(memory) = &self.coating_memory { memory.preflight(spec)?; }
         self.interfaces.preflight(self, spec)?;
         Ok(())
     }
 
     pub(super) fn additional_body_connections(&self) -> usize {
         self.interfaces.connection_count()
+    }
+
+    pub(super) fn material_memory_states(&self) -> usize {
+        self.coating_memory.as_ref().map_or(0, |memory| memory.options.max_memory_coordinates)
+    }
+
+    pub(super) fn bind_material_memory(&self, bank: ReciprocalStringBank, gate: &CancelGate)
+        -> Result<ReciprocalStringBank>
+    {
+        Ok(if self.coating_memory.is_some() {
+            bank.with_material_shell_coating_relaxation(None, gate)?
+        } else { bank })
     }
 
     pub(super) fn load_interfaces(&mut self, gate: &CancelGate,
@@ -329,6 +347,9 @@ impl Spec {
         }
         let specimen = compile_material_shear_shell(mesh, regions, assembly_budget, gate)?;
         let specimen = self.coatings.bind(specimen, spec, catalog, loader, gate)?;
+        let specimen = if let Some(memory) = &self.coating_memory {
+            specimen.with_coating_relaxation(memory.options, gate)?
+        } else { specimen };
         let specimen = self.interfaces.bind(specimen, gate)?;
         let specimen = if let Some(surfaces) = &self.pressure_surfaces {
             specimen.with_pressure_surfaces(surfaces.clone(), gate)?

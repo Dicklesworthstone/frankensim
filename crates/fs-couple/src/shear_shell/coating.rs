@@ -24,6 +24,8 @@ use fs_qty::Pressure;
 
 /// Equilibrium sections and source-fitted passive Maxwell memory.
 pub mod relaxation;
+/// In-band source-law structural response and uncoated body comparison.
+pub mod harmonic;
 
 /// Cold-work ceiling for the complete coating stack across one shell.
 pub const MAX_SHELL_COATINGS: usize = 64;

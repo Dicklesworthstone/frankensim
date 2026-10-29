@@ -609,6 +609,50 @@ fn shell_coatings_require_explicit_regions_sources_and_physical_assumptions() {
     assert!(Profile::parse(shell_text().replace("nodes 25\n", "coatings 0\nnodes 25\n").as_bytes()).is_ok());
 }
 
+#[test]
+fn shell_coating_memory_requires_the_explicit_continuation_and_complete_budget() {
+    let row = "coatings 1\ncoating body varnish.fsmatpk positive 0.00002 1000 0.3 0.001 0.35 0.25\n";
+    let film = shell_text().replace("nodes 25\n", &format!("{row}nodes 25\n"));
+    let text = film.replace("regions 1\n",
+        "coating-memory prony-continuation 16 0.001 0.001 64\nregions 1\n");
+    let profile = Profile::parse(text.as_bytes()).unwrap();
+    assert_eq!(profile.material_memory_states(), 64);
+    for (old, new) in [
+        ("prony-continuation", "measured-broadband"),
+        ("16 0.001", "0 0.001"),
+        ("16 0.001", "33 0.001"),
+        ("0.001 0.001 64", "0 0.001 64"),
+        ("0.001 0.001 64", "0.001 1 64"),
+        ("0.001 0.001 64", "0.001 NaN 64"),
+        ("0.001 0.001 64", "0.001 0.001 0"),
+        ("0.001 0.001 64", "0.001 0.001 3073"),
+    ] {
+        assert!(Profile::parse(text.replace(old, new).as_bytes()).is_err(), "accepted {new}");
+    }
+    assert!(Profile::parse(text.replace(row, "").as_bytes()).is_err());
+    assert!(Profile::parse(text.replace("regions 1\n",
+        "coating-memory prony-continuation 16 0.001 0.001 64\nregions 1\n").as_bytes()).is_err());
+}
+
+#[test]
+fn cannone_memory_selection_keeps_the_same_film_and_reserves_one_assembly_budget() {
+    use super::super::shell::assembly::table::OptionsFile;
+    let memory = OptionsFile::parse(include_str!("../../cannone-h8-varnish-memory.assembly"))
+        .unwrap().convert(CANNONE_H8).unwrap();
+    let frozen = OptionsFile::parse(include_str!("../../cannone-h8-varnished.assembly"))
+        .unwrap().convert(CANNONE_H8).unwrap();
+    let profile = Profile::parse(memory.profile.as_bytes()).unwrap();
+    assert_eq!(profile.material_memory_states(), 512);
+    let stripped: String = memory.profile.lines().filter(|line| !line.starts_with("coating-memory "))
+        .map(|line| format!("{line}\n")).collect();
+    assert_eq!(stripped, frozen.profile);
+    let text = include_str!("../../cannone-dominant-g3.material-strings");
+    profile.preflight(&input::Spec::parse(text.as_bytes()).unwrap()).unwrap();
+    let unprepared: String = text.lines().filter(|line| !line.starts_with("prepared-linear "))
+        .map(|line| format!("{line}\n")).collect();
+    assert!(profile.preflight(&input::Spec::parse(unprepared.as_bytes()).unwrap()).is_err());
+}
+
 /// The actual violin table carries 45 exterior components and 60 material
 /// regions. An exterior selection covers them, without coating internal parts.
 #[test]

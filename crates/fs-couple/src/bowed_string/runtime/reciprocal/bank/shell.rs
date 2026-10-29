@@ -16,6 +16,7 @@ use crate::shear_shell::assembly::{MaterialShellAssembly, ShellAssemblyForcePort
 use fs_plate::shell::mitc::{MitcBudget, NodalDirectors, ShellConstraint, ShellMass};
 
 mod point;
+mod relaxation;
 pub use point::{MaterialShellPoint, ShellPointGeometry};
 
 /// Complete source-bound curved body and physical connection geometry.
@@ -74,6 +75,11 @@ impl ReciprocalStringBank {
     /// Component stiffness/mass are assembled before any modal truncation, and
     /// all bulk/interface loss, pressure and force maps use that common basis.
     /// One cavity compression law sees the sum of its authored wall-volume rows.
+    /// When the specimen selects coating relaxation, its returned image uses
+    /// equilibrium film storage. Complete the cold bank with
+    /// [`Self::with_material_shell_coating_relaxation`] before playback, so the
+    /// film's projected histories join that same mechanical owner. The material
+    /// strings frontend performs this binding after its gas-inertia selection.
     ///
     /// This retains the original reciprocal bow, sympathetic strings, torsion,
     /// gas loading and scheduled performance. It is an unloaded linear assembly
@@ -109,7 +115,8 @@ impl ReciprocalStringBank {
             return Err(invalid("material shell assembly needs one original force footprint per string"));
         }
         let has_loss = body.specimen.has_viscous_glue() || body.specimen.components.iter().any(|part|
-            part.specimen.regions().iter().any(|r| !r.viscosity().is_zero()));
+            !part.specimen.coatings().is_empty()
+                || part.specimen.regions().iter().any(|r| !r.viscosity().is_zero()));
         let interfaces = body.specimen.components.iter().map(|part|
             part.specimen.interfaces().iter().filter(|i| i.law().damping_n_s_m != 0.0).count())
             .try_fold(0usize, usize::checked_add)
@@ -158,9 +165,13 @@ impl ReciprocalStringBank {
     /// Material/geometry sources survive optional torsion/fluid/prepared, stops
     /// and multi-bow scheduling through the original bank's immutable source.
     ///
-    /// Starts a cold unloaded realization. Finite strain, prestress, laminate
-    /// B coupling, continuum ties between parts and shell radiation loading
-    /// require their own physical owners; they are not inferred by this adapter.
+    /// Starts a cold unloaded realization, including explicitly selected
+    /// laminate B/I1 coupling. Finite strain, prestress and exterior radiation
+    /// loading require their own physical owners. A specimen that selects
+    /// coating relaxation uses equilibrium film storage: call
+    /// [`Self::with_material_shell_coating_relaxation`] on the returned cold
+    /// bank before playback to attach the complete projected film histories.
+    /// The material strings frontend performs this binding automatically.
     /// # Errors
     /// Incomplete/detached ports, material/geometry/cavity mismatch, bandwidth,
     /// budget, spectral/section refusal or cancellation.
@@ -193,7 +204,8 @@ impl ReciprocalStringBank {
         if body.force_ports.len()!=sources.len() {
             return Err(invalid("material shell requires one original physical bridge footprint per string"));
         }
-        let has_loss=body.specimen.regions().iter().any(|r|!r.viscosity().is_zero());
+        let has_loss=!body.specimen.coatings().is_empty()
+            || body.specimen.regions().iter().any(|r|!r.viscosity().is_zero());
         let links=sources.len().checked_add(if has_loss {body.n_modes} else {0})
             .and_then(|n|n.checked_add(body.specimen.interfaces().iter()
                 .filter(|i|i.law().damping_n_s_m!=0.0).count()))

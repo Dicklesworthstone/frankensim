@@ -207,7 +207,8 @@ impl Profile {
     pub fn material_memory_states(&self) -> usize {
         let solid = match &self.model {
             BodyModel::Plate(plate) => plate.loss.max_memory_states(),
-            _ => 0,
+            BodyModel::Shell(shell) => shell.material_memory_states(),
+            BodyModel::Assembly(assembly) => assembly.material_memory_states(),
         };
         solid + self.interior.as_ref().map_or(0, cavity::Spec::thermal_memory_states)
     }
@@ -218,7 +219,8 @@ impl Profile {
     {
         match &self.model {
             BodyModel::Plate(plate) => plate.loss.bind(bank, gate),
-            _ => Ok(bank),
+            BodyModel::Shell(shell) => shell.bind_material_memory(bank, gate),
+            BodyModel::Assembly(assembly) => assembly.bind_material_memory(bank, gate),
         }
     }
 }

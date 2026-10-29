@@ -8,6 +8,8 @@ mod construction;
 mod material_inputs;
 #[path = "material_strings/body.rs"]
 mod body;
+#[path = "material_strings/body_response.rs"]
+mod body_response;
 #[path = "material_strings/stops.rs"]
 mod stops;
 #[path = "material_strings/bow_interfaces.rs"]
@@ -284,7 +286,7 @@ impl input::Spec {
                 .and_then(|d| core.checked_mul(internal_states).and_then(|m| d.checked_add(m)))
                 .and_then(|d| settings.network.max_setup_terms.checked_add(d))
                 .ok_or("complete material setup work overflow")?;
-            if memory > 256 || terms > input::MAX_WORK as usize {
+            if (memory > 256 && self.prepared_linear.is_none()) || terms > input::MAX_WORK as usize {
                 return Err("complete string/body memory exceeds the original state or setup-work ceiling".into());
             }
             settings.network.max_setup_terms = terms;
@@ -637,8 +639,9 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     if raw.get(1).is_some_and(|a| a=="assemble-shell") { return assemble_shell(&raw[2..]); }
     let (args, gas_options)=thermochemical::Options::extract_os(raw)?;
     let (args, source_options)=native_input::SourceOptions::extract(&args)?;
+    let (args, response_options)=body_response::Options::extract(&args)?;
     if args.len()<3 {
-        return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav [--body-profile PROFILE] [--stop-profile PROFILE] [--observer-store DIR] [--bow-trace NEW_FILE] [--contact-thermal PROFILE] [--decimate] [--workers N] [--self-contained --attached-source RELATIVE_PATH ...] [--gas-component SPECIES NASA9 TRANSPORT --gas-water none|ID --gas-phase frozen|liquid-water]".into());
+        return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav [--body-profile PROFILE] [--body-response NEW.tsv MIN_HZ MAX_HZ POINTS BRIDGE_INDEX] [--stop-profile PROFILE] [--observer-store DIR] [--bow-trace NEW_FILE] [--contact-thermal PROFILE] [--decimate] [--workers N] [--self-contained --attached-source RELATIVE_PATH ...] [--gas-component SPECIES NASA9 TRANSPORT --gas-water none|ID --gas-phase frozen|liquid-water]".into());
     }
     if gas_options.record.is_some() {
         return Err("material-string gas records belong in the performance file".into());
@@ -655,6 +658,9 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
         &sources.read_option(p,contact_thermal::MAX_BYTES)?)).transpose()?;
     let (body_path,stop_path)=stops::profile_paths(&options)?;
     let mut profile=body_path.map(|p|body::Profile::parse(&sources.read_option(p,body::MAX_SHELL_BYTES)?)).transpose()?;
+    if response_options.is_some() && !profile.as_ref().is_some_and(body::Profile::has_shell_material_basis) {
+        return Err("--body-response requires --body-profile with curved or assembled shell mechanics".into());
+    }
     if let Some(dir)=store_dir {
         profile.as_mut().ok_or("--observer-store requires --body-profile")?.keep_observer_setups(dir)?;
     }
@@ -753,6 +759,16 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
         eprintln!("bow_fiber_support_motion={motion:?}; material-derived frame inertia and laboratory kinetic correction");
     }
     if let Some(profile)=&ready.body_profile { eprintln!("body_profile={profile:?}"); }
+    if let Some(memory)=ready.performance.bank().source().bank().material_shell_coating_relaxation() {
+        let band=memory.source_band_rad_s();
+        eprintln!("coating_memory=prony-continuation; body_modes={}; histories={}; source_fit_band_Hz=[{},{}]; continuation=passive_model_outside_measured_band; initial_history=relaxed; full_modal_cross_terms=true",
+            memory.mode_count(),memory.coupling_rows_per_s().len(),
+            band.0/core::f64::consts::TAU,band.1/core::f64::consts::TAU);
+        for (fit,certificate) in memory.fit_certificates().iter().enumerate() {
+            eprintln!("coating_fit={fit}; sampled_storage_relative_error={}; sampled_loss_relative_error={}; verification_points={}; errors=numerical_fit_not_measurement_uncertainty",
+                certificate.sup_rel_storage_err,certificate.sup_rel_loss_err,certificate.verification_points);
+        }
+    }
     if let Some(report)=&ready.body_radiation { eprintln!("computed_body_radiation={report}"); }
     // A skin load's first-order receipt at each loaded coordinate's own frequency,
     // in the one-way receipt's terms: zeta = Re Z/(2 w), shift = Im Z/(2 w).
@@ -855,6 +871,10 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
         let info=renderer.info();
         renderer.output_samples_for(ready.spec.samples)?;
         eprintln!("pressure_observation={info:?}; mechanical state and gesture clock unchanged");
+    }
+    if let Some(response)=response_options {
+        let source=ready.performance.bank().source().bank();
+        response.write(source.material_shell_image(),source.material_shell_assembly_image(),&gate)?;
     }
     let output=OpenOptions::new().write(true).create_new(true).open(&args[2])?;
     let mut trace=trace_path.map(|path|OpenOptions::new().write(true).create_new(true).open(path)

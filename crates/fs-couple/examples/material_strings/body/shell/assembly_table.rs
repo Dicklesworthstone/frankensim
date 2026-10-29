@@ -10,7 +10,7 @@
 //! fractions of the performance body's length and width (the table's own bounding box); z stays in metres. Directors and
 //! region axes are normalized to unit length (the table prints them rounded). Nothing else is changed or fitted.
 use super::*;
-use super::super::coating::{FilmInput, MAX_COATINGS};
+use super::super::coating::{FilmInput, MemoryInput, MAX_COATINGS};
 
 /// The choices a shell-assembly table leaves to its user.
 pub(crate) struct TableOptions<'a> {
@@ -47,6 +47,7 @@ pub(crate) struct OptionsFile {
     bridges: Vec<(f64, f64)>,
     bridge_direction: [f64; 3],
     coatings: Vec<TableCoating>,
+    coating_memory: Option<MemoryInput>,
 }
 
 struct TableCoating {
@@ -64,6 +65,7 @@ impl OptionsFile {
         let (mut bridge_component, mut bridge_direction) = (None, None);
         let (mut packs, mut bridges) = (Vec::new(), Vec::new());
         let mut coatings = Vec::new();
+        let mut coating_memory = None;
         for line in lines.filter(|l| !l.starts_with('#')) {
             let f: Vec<&str> = line.split_ascii_whitespace().collect();
             match f.as_slice() {
@@ -82,6 +84,9 @@ impl OptionsFile {
                     }
                     coatings.push(TableCoating { component: component.to_string(), film: FilmInput::parse(rest)? });
                 }
+                ["coating-memory", rest @ ..] if coating_memory.is_none() => {
+                    coating_memory = Some(MemoryInput::parse(rest)?);
+                }
                 _ => return Err(format!("unknown, repeated or malformed shell-assembly option: {line}").into()),
             }
         }
@@ -93,6 +98,9 @@ impl OptionsFile {
         if bridges.is_empty() {
             return Err(missing("at least one bridge").into());
         }
+        if coating_memory.is_some() && coatings.is_empty() {
+            return Err("coating-memory requires at least one physical coating selection".into());
+        }
         Ok(Self {
             window_hz: (lo, hi),
             projection_work: projection_work.ok_or_else(|| missing("projection-work"))?,
@@ -102,6 +110,7 @@ impl OptionsFile {
             bridges,
             bridge_direction: bridge_direction.ok_or_else(|| missing("bridge-direction"))?,
             coatings,
+            coating_memory,
         })
     }
 
@@ -122,7 +131,7 @@ impl OptionsFile {
             bridge_component: &self.bridge_component,
             bridges: &self.bridges,
             bridge_direction: self.bridge_direction,
-        }, &self.coatings)
+        }, &self.coatings, self.coating_memory.as_ref())
     }
 }
 
@@ -177,10 +186,11 @@ fn floats<const N: usize>(fields: &[&str]) -> Result<[f64; N]> {
 
 /// Read the table and write it as a v4 assembled body profile (see the module documentation).
 pub(crate) fn convert(table: &str, options: &TableOptions<'_>) -> Result<ConvertedTable> {
-    convert_with_coatings(table, options, &[])
+    convert_with_coatings(table, options, &[], None)
 }
 
-fn convert_with_coatings(table: &str, options: &TableOptions<'_>, coatings: &[TableCoating]) -> Result<ConvertedTable> {
+fn convert_with_coatings(table: &str, options: &TableOptions<'_>, coatings: &[TableCoating],
+    coating_memory: Option<&MemoryInput>) -> Result<ConvertedTable> {
     let mut lines = table.lines();
     if lines.next() != Some("frankensim.shell-assembly.v1") {
         return Err("not a frankensim.shell-assembly.v1 table".into());
@@ -259,8 +269,10 @@ fn convert_with_coatings(table: &str, options: &TableOptions<'_>, coatings: &[Ta
 
     use std::fmt::Write as _;
     let mut out = String::new();
-    writeln!(out, "frankensim-string-body-v4\nwindow {} {}\nprojection-work {}\ncomponents {}",
-        options.window.0, options.window.1, options.projection_work, parts.len())?;
+    writeln!(out, "frankensim-string-body-v4\nwindow {} {}\nprojection-work {}",
+        options.window.0, options.window.1, options.projection_work)?;
+    if let Some(memory) = coating_memory { memory.write_row(&mut out)?; }
+    writeln!(out, "components {}", parts.len())?;
     for part in &parts {
         writeln!(out, "component {}\ndirector-min-dot 0.9\nmass consistent\ndrilling 0.001\nregions {}",
             part.name, part.axes.len())?;

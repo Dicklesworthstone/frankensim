@@ -577,7 +577,7 @@ a fixed-mass substrate allowance. Perfect bonding is assumed. Penetrating oil,
 curing stress, moisture transport, damage and a displaced exterior acoustic
 boundary are not modeled by an added surface layer.
 
-Storage is frozen at `REFERENCE_HZ`. Every retained body mode must satisfy
+By default, storage is frozen at `REFERENCE_HZ`. Every retained body mode must satisfy
 `abs(Eprime(reference)-Eprime(mode))/Eprime(mode) <= MAX_STORAGE_RELATIVE_DRIFT`,
 with an authored tolerance in `[0,1)`, and all original material frequency
 bands. The reference itself must be in both film and wood source bands. Each
@@ -608,6 +608,82 @@ bass bar, soundpost and bridge. It does not establish the original Guarneri
 finish or transfer Stradivari observations to that instrument. Compile the
 varnish pack and use the violin recipe's `ASSEMBLY_OPTIONS` selection described
 in [`violin/README.md`](../../../../data/instruments/descriptions/violin/README.md).
+
+### Hereditary varnish and a structural frequency response
+
+An explicit record **after `projection-work`**, before `regions` in V3 or
+`components` in V4, selects the original passive material-memory owner:
+
+```text
+coating-memory prony-continuation 16 0.001 0.001 512
+```
+
+The fields are `prony-continuation TERMS STORAGE_RELATIVE_TOLERANCE
+LOSS_RELATIVE_TOLERANCE MAX_MEMORY_COORDINATES`. Assembly options files accept
+the same record. It applies to all declared films, with one complete assembly
+history cap. The shell basis uses equilibrium film stiffness; projected
+positive Maxwell branches supply frequency-dependent storage and loss through
+the existing coupled renderer. Wood and interface losses keep their own
+operators. Equal relaxation times are combined across regions before factoring
+their complete modal matrices, preserving the cross terms without duplicating
+one history bank for every small component. Body histories survive cold gas
+and connection rebuilds and remain in the shared pressure/work/heat state.
+
+`prony-continuation` explicitly accepts the passive fitted model outside the
+measured fit band during a transient. The original source band is retained;
+it is not expanded into a claim of measured DC or high-frequency behavior.
+The two fit tolerances bound sampled numerical approximation errors separately,
+not measurement uncertainty. Every retained body mode still needs source
+support. A declaration above 256 histories requires `prepared-linear`, whose
+actual combined mechanical/history dimension, memory and work limits remain
+binding. The ordinary source-string and plate memory guards are unchanged.
+New histories start relaxed at the current body displacement.
+
+`cannone-h8-varnish-memory.assembly` selects this path for the same 20 µm O1
+film and geometry as `cannone-h8-varnished.assembly`. Use it through the
+existing `ASSEMBLY_OPTIONS` selector. Its 512-history declaration is an
+independent cap, not a promise that every case at that cap fits the prepared
+resources. The current O1 fit retains 13 positive scalar times and therefore
+at most 390 histories for the complete 30-body-mode violin. With its 445
+mechanical coordinates and at most 36 connection channels, the original
+prepared-owner bound is 3,954,407,664 bytes and 145,345,993,394,700 multiply-add
+terms, inside the existing 4 GiB / 1e15-work declaration. A full 512-history
+case would exceed that byte budget and refuse. These are analytical resource
+bounds for the declared model, not evidence of a completed whole-violin render.
+
+The native renderer also accepts a read-only response export:
+
+```text
+--body-response NEW.tsv MIN_HZ MAX_HZ POINTS BRIDGE_INDEX
+```
+
+After staging a run with the launcher’s `--prepare-only`, for example:
+
+```bash
+target/release/material_strings \
+  /path/to/new-memory-run/G3/performance.material-strings \
+  /path/to/new-memory-run/G3/render.wav \
+  --body-profile /path/to/new-memory-run/G3/body.profile \
+  --body-response /path/to/new-memory-run/G3/body-response.tsv 100 2000 128 0
+```
+
+This writes logarithmically spaced complex bridge mobilities, signed exterior
+and cavity volume velocities, wood/glue, interface and per-film dissipation,
+supplied power, and power/solve residuals. Source identities travel in the TSV.
+The transfer is normalized to a 1 N peak bridge force; this normalization does
+not certify the source’s finite-amplitude strain envelope. The response uses
+the exact source film law at each common drive frequency and refuses outside
+the original wood/film/interface bands. It supports bare and hereditary shell
+images; frozen-film images explicitly refuse this exact-source analysis.
+
+The TSV describes the unloaded retained structural body and fixed reduced
+wood/glue viscosity. The ordinary WAV calculation separately retains the
+coupled strings, bow, cavity and chosen acoustic observation. For a controlled
+comparison, stage bare and hereditary runs with equal mesh, mode count,
+strings, loads, atmosphere and PCM scale. The response adds no sound-pressure
+gain, amplitude normalization of the WAV or new time stepper. Reports admit
+2–1024 frequencies within the complete work allowance and an 8 MiB output
+limit; all frequency solves pass before a new report file is created.
 
 ## Separate exterior and cavity pressure surfaces
 

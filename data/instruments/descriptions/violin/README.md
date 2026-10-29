@@ -66,11 +66,13 @@ retuned** after substitution, and the sound is not peak-normalized.
 
 ## Apply a measured varnish to the existing violin
 
-`cannone-h8-varnished.assembly` adds an explicitly authored 20 µm film to the
-positive, outward faces of all exterior top, back and rib regions. It uses the
-measured modern oil/copal specimen `varnish-oil-copal-lammlein2021-s1`.
-This is a mechanical surrogate on the il Cannone model, not a recovered
-Guarneri or Stradivari recipe. The uncoated assembly remains the comparison.
+`cannone-h8-varnish-memory.assembly` adds an explicitly authored 20 µm film
+to the positive, outward faces of all exterior top, back and rib regions.
+It uses the measured modern oil/copal specimen
+`varnish-oil-copal-lammlein2021-s1` and advances its passive relaxation
+histories through the existing coupled renderer. This is a mechanical
+surrogate on the il Cannone model, not a recovered Guarneri or Stradivari
+recipe. The uncoated assembly remains the comparison.
 
 Compile the ordinary source pack, then select the coated assembly:
 
@@ -81,7 +83,7 @@ cargo run -p xtask -- matdb-pack \
   --manifest "data/matdb/seed-v1/$varnish/manifest.tsv" \
   --out "$varnish_dir/$varnish.fsmatpk"
 NOTES=G3 \
-ASSEMBLY_OPTIONS="$PWD/crates/fs-couple/examples/material_strings/cannone-h8-varnished.assembly" \
+ASSEMBLY_OPTIONS="$PWD/crates/fs-couple/examples/material_strings/cannone-h8-varnish-memory.assembly" \
 data/instruments/descriptions/violin/render.sh \
   target/release/material_strings /path/to/new-varnished-violin-run \
   --pack "$varnish.fsmatpk=$varnish_dir/$varnish.fsmatpk"
@@ -102,14 +104,56 @@ is not a scalar stiffness multiplier or audio equalizer. The source conditioning
 is 293.15 K and RH 0.35. The declared Poisson ratio 0.30 and small-strain
 envelope 0.001 are modeling assumptions, not source measurements.
 
-The current shell route freezes storage modulus at 1 kHz and refuses a
-retained body mode whose film storage differs by more than the explicitly
-selected 25% relative allowance. This is a limit on the film modulus
-approximation, not a 25% bound on frequency, sound or total prediction error.
-Loss reads the actual source spectrum at each retained mode and preserves
-passive cross-mode damping by geometric-mean congruence. A full hereditary
-shell solve, evolving coating strain checks, moisture/cure/aging effects and
-frequency-dependent Poisson ratio remain outside this option.
+The hereditary recipe uses equilibrium film stiffness and adds the complete
+projected positive Maxwell branches, including cross-mode terms. Film mass is
+included once; wood/glue, interface and film losses retain separate owners.
+Its explicit `prony-continuation` policy accepts the fitted passive model
+outside the finite measured band during a transient, while retaining the
+original source band and separate sampled storage/loss error certificates.
+It does not claim measured behavior outside that band.
+
+The current 16-candidate O1 fit has 13 positive relaxation times. Combining
+equal times across regions before factorization requires at most 390
+histories for the 30-mode body. The existing 4 GiB prepared resource
+declaration admits that model analytically; the independent 512-history cap
+does not guarantee that every larger selection fits the byte budget.
+
+For the previous frozen-reference approximation, select
+`cannone-h8-varnished.assembly` instead. That option freezes storage at 1 kHz
+and checks each retained mode against the authored 25% film-storage drift
+allowance. The allowance is not a bound on frequency, sound or total
+prediction error. Its source-dependent modal loss is passive but does not
+advance hereditary film states.
+
+### Inspect the varnish's structural response
+
+Add `--prepare-only` to the launcher command above to stage a new run, then
+invoke the native renderer with the same staged files and a response export:
+
+```bash
+target/release/material_strings \
+  /path/to/new-varnished-violin-run/G3/performance.material-strings \
+  /path/to/new-varnished-violin-run/G3/render.wav \
+  --body-profile /path/to/new-varnished-violin-run/G3/body.profile \
+  --body-response /path/to/new-varnished-violin-run/G3/body-response.tsv 100 2000 128 0
+```
+
+The logarithmic TSV evaluates each film's original law at the common drive
+frequency. It reports complex bridge mobilities, signed exterior/cavity
+volume velocities, supplied power, separate wood/glue, interface and film
+dissipation, and power/solve residuals. Bare and hereditary images are
+supported; frozen-film images refuse this exact-source analysis. All samples
+must pass source support and solve checks before a new file is created.
+
+This is the unloaded retained body's response, normalized to a 1 N peak
+bridge force. It has no string or air-pressure feedback and no per-element
+finite-amplitude strain certificate. The ordinary WAV calculation separately
+includes the coupled strings, bow and cavity. Compare bare and coated runs
+with the same inputs and PCM scale. No independent audio normalization or
+sound-pressure gain is introduced.
+
+Evolving coating strain checks, moisture/cure/aging effects, penetration and
+frequency-dependent Poisson ratio remain outside these coating options.
 
 The [source-data guide](../../../matdb/seed-v1/VIOLIN_VARNISHES.md) distinguishes
 historical observations from modern DMA fits. The executable

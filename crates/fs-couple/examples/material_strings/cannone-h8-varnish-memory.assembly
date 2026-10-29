@@ -1,0 +1,29 @@
+frankensim-shell-assembly-options-v1
+# The same il Cannone h8 geometry and modern O1 exterior film as
+# cannone-h8-varnished.assembly, with complete passive material histories.
+# This is a modern measured oil/copal surrogate, not a historical recipe.
+window-hz 15 2000
+projection-work 549755813888
+reference-thickness-m 0.003
+pack spruce @body
+pack maple violin-maple-sycamore-sonderegger2013-shell.fsmatpk
+# Explicit modeling choice: fit sixteen candidate positive Prony arms, require
+# sampled storage and loss errors below 0.1%, and reserve at most 512 histories
+# after equal-time aggregation over the whole assembled body. This is a cap,
+# not a promise that all 512 fit the separate prepared resources. O1 retains 13
+# positive times: at 30 body modes there are at most 390 histories, which fit
+# the original 4 GiB / 1e15-work declaration; the full 512 case would refuse.
+# The source fit
+# remains finite-band; causal continuation outside it is an authored model.
+# Use the existing cannone-dominant-g3.material-strings prepared resources.
+coating-memory prony-continuation 16 0.001 0.001 512
+# Identical thickness, source, side, reference and tensor assumptions to the
+# frozen-film recipe. The final storage-drift field belongs to frozen mode;
+# hereditary mode uses the separately declared fit tolerances above.
+coating @exterior varnish-oil-copal-lammlein2021-s1.fsmatpk positive 0.000020 1000 0.30 0.001 0.35 0.25
+bridge-component bridge
+bridge-direction 1 0 0
+bridge -0.01734 -0.05164
+bridge -0.00557 -0.05421
+bridge 0.00629 -0.05329
+bridge 0.01728 -0.04887

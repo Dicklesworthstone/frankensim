@@ -178,3 +178,6 @@ mod bem;
 
 #[path = "shell/cavity.rs"]
 mod cavity;
+
+#[path = "shell/coating.rs"]
+mod coating;

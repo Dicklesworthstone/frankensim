@@ -2,6 +2,7 @@
 //! Thickness, tensor-lift assumptions and spectral approximation limits are
 //! authored inputs; the published source supplies the density and spectrum.
 use super::*;
+use fs_couple::shear_shell::coating::relaxation::CoatingRelaxationOptions;
 use fs_couple::shear_shell::{CoatingSide, ResolvedShearShell, ShellCoating};
 use fs_material::coating::ResolvedCoating;
 use fs_qty::{
@@ -10,6 +11,72 @@ use fs_qty::{
 };
 
 pub(super) const MAX_COATINGS: usize = 64;
+
+/// An explicit causal continuation of a finite-band measured-film fit.
+/// The declaration is separate from each physical film, so an assembly shares
+/// one complete history allowance after equal relaxation times are combined.
+#[derive(Clone, Debug)]
+pub(super) struct MemoryInput {
+    pub(super) options: CoatingRelaxationOptions,
+}
+
+impl MemoryInput {
+    /// PRONY_CONTINUATION TERMS STORAGE_REL_TOL LOSS_REL_TOL MAX_MEMORY.
+    pub(super) fn parse(values: &[&str]) -> Result<Self> {
+        if values.len() != 5 || values[0] != "prony-continuation" {
+            return Err("coating-memory requires prony-continuation, term count, storage/loss fit tolerances and a complete history allowance".into());
+        }
+        let options = CoatingRelaxationOptions {
+            terms: count(values[1], 1, 32)?,
+            storage_relative_tolerance: scalar(values[2])?,
+            loss_relative_tolerance: scalar(values[3])?,
+            max_memory_coordinates: count(values[4], 1, 3072)?,
+        };
+        if !(0.0..1.0).contains(&options.storage_relative_tolerance)
+            || options.storage_relative_tolerance == 0.0
+            || !(0.0..1.0).contains(&options.loss_relative_tolerance)
+            || options.loss_relative_tolerance == 0.0
+        {
+            return Err(
+                "coating-memory fit tolerances must lie strictly between zero and one".into(),
+            );
+        }
+        Ok(Self { options })
+    }
+
+    pub(super) fn read(rows: &mut Records<'_>) -> Result<Option<Self>> {
+        if rows
+            .lines
+            .clone()
+            .next()
+            .and_then(|line| line.split_ascii_whitespace().next())
+            != Some("coating-memory")
+        {
+            return Ok(None);
+        }
+        Ok(Some(Self::parse(&rows.row("coating-memory", 5)?)?))
+    }
+
+    pub(super) fn write_row(&self, out: &mut String) -> Result<()> {
+        use std::fmt::Write as _;
+        writeln!(
+            out,
+            "coating-memory prony-continuation {} {} {} {}",
+            self.options.terms,
+            self.options.storage_relative_tolerance,
+            self.options.loss_relative_tolerance,
+            self.options.max_memory_coordinates
+        )?;
+        Ok(())
+    }
+
+    pub(super) fn preflight(&self, spec: &input::Spec) -> Result<()> {
+        if spec.prepared_linear.is_none() && self.options.max_memory_coordinates > 256 {
+            return Err("coating-memory above 256 declared histories requires explicit prepared-linear resources".into());
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(super) struct FilmInput {
@@ -156,6 +223,10 @@ impl FilmInput {
 pub(super) struct Inputs(Vec<(String, FilmInput)>);
 
 impl Inputs {
+    pub(super) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     pub(super) fn parse(rows: &mut Records<'_>, regions: &[RegionInput]) -> Result<Self> {
         if rows
             .lines

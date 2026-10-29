@@ -1,0 +1,227 @@
+//! Read-only structural response of the same source-bound shell image.
+//! This linear transfer is normalized to a unit peak bridge force; WAV rendering
+//! continues through the complete string/body/cavity/bow owner.
+use super::{Result, input, poll};
+use fs_couple::shear_shell::coating::harmonic::{
+    ShellCoatingHarmonicOptions, ShellCoatingHarmonicResponse,
+};
+use fs_couple::shear_shell::{MaterialShellImage, assembly::MaterialShellAssemblyImage};
+use fs_math::c64::C64;
+use std::{ffi::OsString, fmt::Write as _, fs::OpenOptions, io::Write as _, path::PathBuf};
+
+pub(super) struct Options {
+    output: PathBuf,
+    minimum_hz: f64,
+    maximum_hz: f64,
+    points: usize,
+    bridge: usize,
+}
+
+impl Options {
+    pub(super) fn extract(args: &[OsString]) -> Result<(Vec<OsString>, Option<Self>)> {
+        let mut retained = args.iter().take(3).cloned().collect::<Vec<_>>();
+        let mut selected = None;
+        let mut index = 3;
+        while index < args.len() {
+            if args[index] != "--body-response" {
+                retained.push(args[index].clone());
+                index += 1;
+                continue;
+            }
+            if selected.is_some() {
+                return Err("--body-response cannot be repeated".into());
+            }
+            let values = args
+                .get(index + 1..index + 6)
+                .ok_or("--body-response needs NEW.tsv MIN_HZ MAX_HZ POINTS BRIDGE_INDEX")?;
+            let number = |value: &OsString| -> Result<f64> {
+                Ok(value
+                    .to_str()
+                    .ok_or("body-response numbers must be UTF-8")?
+                    .parse()?)
+            };
+            let minimum_hz = number(&values[1])?;
+            let maximum_hz = number(&values[2])?;
+            let points: usize = values[3]
+                .to_str()
+                .ok_or("invalid body-response point count")?
+                .parse()?;
+            let bridge: usize = values[4]
+                .to_str()
+                .ok_or("invalid body-response bridge index")?
+                .parse()?;
+            if !minimum_hz.is_finite()
+                || !maximum_hz.is_finite()
+                || minimum_hz <= 0.0
+                || maximum_hz <= minimum_hz
+                || !(2..=1024).contains(&points)
+                || bridge >= 8
+            {
+                return Err("body-response requires finite 0 < MIN_HZ < MAX_HZ, 2..=1024 points and a bridge index in 0..8".into());
+            }
+            selected = Some(Self {
+                output: PathBuf::from(&values[0]),
+                minimum_hz,
+                maximum_hz,
+                points,
+                bridge,
+            });
+            index += 6;
+        }
+        Ok((retained, selected))
+    }
+
+    /// Finish every source-band and solve check before creating a new report.
+    pub(super) fn write(
+        &self,
+        shell: Option<&MaterialShellImage>,
+        assembly: Option<&MaterialShellAssemblyImage>,
+        gate: &fs_exec::CancelGate,
+    ) -> Result<()> {
+        let (ports, memory) = if let Some(image) = shell {
+            (image.force_ports(), image.coating_relaxation())
+        } else if let Some(image) = assembly {
+            (image.force_ports(), image.coating_relaxation())
+        } else {
+            return Err("body-response requires a curved shell or assembled shell body".into());
+        };
+        let force: Vec<_> = ports
+            .get(self.bridge)
+            .ok_or("body-response bridge index is absent from this body")?
+            .iter()
+            .map(|&value| C64::from_re(value))
+            .collect();
+        let films = memory.map_or(0, |image| image.films().len());
+        let columns = 2 * ports.len() + films + 12;
+        let bytes = self
+            .points
+            .checked_mul(columns)
+            .and_then(|n| n.checked_mul(32))
+            .and_then(|n| n.checked_add(films.checked_mul(256)?));
+        if bytes.is_none_or(|bytes| bytes > 8 * 1_048_576) {
+            return Err("body-response exceeds 8 MiB; reduce its point count".into());
+        }
+        let budget = ShellCoatingHarmonicOptions {
+            maximum_work: input::MAX_WORK as usize / self.points,
+            solve_relative_tolerance: 1e-10,
+        };
+        let response = |omega| -> Result<ShellCoatingHarmonicResponse> {
+            Ok(if let Some(image) = shell {
+                image.coating_harmonic_response(omega, &force, budget, gate)?
+            } else {
+                assembly
+                    .expect("checked shell image")
+                    .coating_harmonic_response(omega, &force, budget, gate)?
+            })
+        };
+        let mut text = String::new();
+        writeln!(
+            text,
+            "# frankensim-body-response-v1\n# scope: unloaded structural body; the coupled WAV is rendered separately"
+        )?;
+        writeln!(
+            text,
+            "# peak phasors: exp(-i omega t); linear transfer normalized to a 1 N peak force at bridge {}\n# amplitude range: no per-element strain certificate\n# film law: exact source response at each admitted frequency; wood/glue: fixed reduced viscosity",
+            self.bridge
+        )?;
+        writeln!(
+            text,
+            "# modes: {}; total work allowance: {}; source support checked at every frequency",
+            force.len(),
+            input::MAX_WORK
+        )?;
+        if let Some(memory) = memory {
+            let band = memory.source_band_rad_s();
+            writeln!(
+                text,
+                "# source-fit band Hz: {} {}",
+                band.0 / core::f64::consts::TAU,
+                band.1 / core::f64::consts::TAU
+            )?;
+            for (index, film) in memory.films().iter().enumerate() {
+                let input = film.source().input();
+                writeln!(
+                    text,
+                    "# film {index}: region={} source={} thickness_m={}",
+                    input.region,
+                    input.material.source().identity(),
+                    input.thickness_m
+                )?;
+            }
+        }
+        if text.len() > 8 * 1_048_576 {
+            return Err("body-response source metadata exceeds 8 MiB".into());
+        }
+        write!(text, "frequency_hz")?;
+        for port in 0..ports.len() {
+            write!(
+                text,
+                "\tbridge{port}_mobility_re_m_s_per_N\tbridge{port}_mobility_im_m_s_per_N"
+            )?;
+        }
+        write!(
+            text,
+            "\texterior_volume_re_m3_s_per_N\texterior_volume_im_m3_s_per_N\tcavity_volume_re_m3_s_per_N\tcavity_volume_im_m3_s_per_N\texternal_power_W_per_N2\twood_glue_loss_W_per_N2\tinterface_loss_W_per_N2"
+        )?;
+        for film in 0..films {
+            write!(text, "\tfilm{film}_loss_W_per_N2")?;
+        }
+        writeln!(
+            text,
+            "\ttotal_loss_W_per_N2\tpower_residual_W_per_N2\tsolve_relative_residual"
+        )?;
+        let lo = fs_math::det::ln(self.minimum_hz);
+        let span = fs_math::det::ln(self.maximum_hz) - lo;
+        for point in 0..self.points {
+            poll(gate)?;
+            let frequency = if point == 0 {
+                self.minimum_hz
+            } else if point + 1 == self.points {
+                self.maximum_hz
+            } else {
+                fs_math::det::exp(lo + span * point as f64 / (self.points - 1) as f64)
+            };
+            let value = response(core::f64::consts::TAU * frequency)?;
+            write!(text, "{frequency:.17e}")?;
+            for port in &value.force_port_velocity_m_s {
+                write!(text, "\t{:.17e}\t{:.17e}", port.re, port.im)?;
+            }
+            for volume in [
+                value.exterior_volume_velocity_m3_s,
+                value.cavity_volume_velocity_m3_s,
+            ] {
+                write!(text, "\t{:.17e}\t{:.17e}", volume.re, volume.im)?;
+            }
+            write!(
+                text,
+                "\t{:.17e}\t{:.17e}\t{:.17e}",
+                value.external_power_w,
+                value.background_dissipation_w,
+                value.interface_dissipation_w
+            )?;
+            for loss in &value.film_dissipation_w {
+                write!(text, "\t{loss:.17e}")?;
+            }
+            writeln!(
+                text,
+                "\t{:.17e}\t{:.17e}\t{:.17e}",
+                value.total_dissipation_w(),
+                value.power_residual_w,
+                value.solve_relative_residual
+            )?;
+            if text.len() > 8 * 1_048_576 {
+                return Err("body-response exceeds 8 MiB; reduce its point count".into());
+            }
+        }
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&self.output)?
+            .write_all(text.as_bytes())?;
+        eprintln!(
+            "body_response={:?}; frequencies={}; drive_bridge={}; normalization_peak_force_N=1; scope=linear_unloaded_structural_response",
+            self.output, self.points, self.bridge
+        );
+        Ok(())
+    }
+}

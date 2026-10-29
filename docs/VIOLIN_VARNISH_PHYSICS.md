@@ -161,17 +161,61 @@ Measured varnished-wood studies also report direction-dependent changes, includi
 
 ## Frequency slices, material memory, and the violin solver
 
-`ResolvedCoating::at_frequency(h, omega)` returns a layer with source storage stiffness and viscosity `E''/omega`. At that frequency its complex response is the fitted law. The example regenerates the slice at **each** frequency. Reusing one slice across a broad spectrum would keep storage constant and make loss proportional to frequency; that additional approximation must stay visible.
+`ResolvedCoating::at_frequency(h, omega)` returns a layer with source storage stiffness and viscosity `E''/omega`. At that frequency its complex response is the fitted law. The section example regenerates the slice at **each** frequency. Reusing one slice across a broad spectrum would keep storage constant and make loss proportional to frequency; that additional approximation must stay visible.
 
-`ResolvedCoating::lower_to_tensor_prony` instead produces passive material memory using the existing tensor-Prony owner. The example also performs this lowering for each source and prints its certificate. Sixteen candidate relaxation times yield thirteen positive scalar arms for these fits. Over the 512-point verification grid, worst relative storage error is about `8.314e-5` and worst relative loss error about `4.533e-4`, below independently authored `0.001` gates. These measure approximation to the fitted equation, not experimental uncertainty; a grid is not a continuous analytic bound. The section table uses exact frequency slices, not the Prony approximation.
+`ResolvedCoating::lower_to_tensor_prony` instead produces passive material memory using the existing tensor-Prony owner. The section example also performs this lowering for each source and prints its certificate. Sixteen candidate relaxation times yield thirteen positive scalar arms for these fits. Over the 512-point verification grid, worst relative storage error is about `8.314e-5` and worst relative loss error about `4.533e-4`, below independently authored `0.001` gates. These measure approximation to the fitted equation, not experimental uncertainty; a grid is not a continuous analytic bound. The section table uses exact frequency slices, not the Prony approximation.
 
-`LaminateSection` owns the geometry, A/B/D and inertia integrals. The MITC layered-shell path consumes the coupled section and layer viscosity. A frequency-domain Prony section can also supply `complex_abd(omega)`. A material Prony object alone does not establish that a particular shell time stepper advances every film's hereditary state. Consumers must distinguish a frozen-frequency approximation from actual material memory.
+### Two explicit coating choices
 
-The shared `ResolvedShearShell::with_coatings` path now carries this layered section into the original body eigensolve, bridge/string/contact coupling and pressure projections. The renderer freezes storage at an authored reference and checks each retained mode against an explicit relative storage-drift limit. Each film's loss reads `E''(omega)/omega` at that mode's frequency; positive diagonal congruence preserves the full passive modal damping matrix, with geometric-mean cross terms. Wood retains its own source loss law. This is a modal approximation, not hereditary film memory or a self-consistent dispersive eigenproblem.
+The default `ResolvedShearShell::with_coatings` route freezes storage at an authored reference and checks each retained mode against an explicit relative storage-drift limit. Each film's loss reads `E''(omega)/omega` at that mode's frequency; positive diagonal congruence preserves a passive modal damping matrix with geometric-mean cross terms. Wood retains its own source loss law. This is a modal approximation, not hereditary film memory or a self-consistent dispersive eigenproblem.
 
-The [body profile grammar](../crates/fs-couple/examples/material_strings/BODY_PROFILES.md#source-bound-varnish-and-other-measured-films) exposes region, side, thickness, source, tensor assumptions and storage tolerance. The [varnished il Cannone configuration](../crates/fs-couple/examples/material_strings/cannone-h8-varnished.assembly) coats the exterior top, back and ribs; the [violin recipe](../data/instruments/descriptions/violin/README.md#apply-a-measured-varnish-to-the-existing-violin) supplies build and render commands. Its 25% allowance concerns film storage approximation only, not sound-prediction accuracy. Both bare and coated curved sections use the same physical director-motion inertia, so the vanishing-film limit does not switch the substrate's mass interpolation.
+The additional `with_coating_relaxation` selection uses the source's **equilibrium modulus E0** in the original laminate/MITC eigensolve. Film mass, centroid and rotary inertia remain in I0/I1/I2; signed face offsets and membrane–bending coupling remain in A/B/D. The same equilibrium modal/bubble transformation maps every film's complete unit-modulus stiffness form H, including off-diagonal terms. Each positive Prony increment supplies a restoring branch proportional to H. Wood/glue damping and assembly-interface losses retain their own operators; the frozen film damping is not added a second time.
 
-For sound, the changed section affects the body's response to bridge forces and its surface velocity. The existing reciprocal solver carries these changes into string reactions, cavity coupling and pressure under the same excitation. The section study supplies quantitative mechanism checks. A completed coated full-violin render and mesh/mode/time convergence are still needed before attributing a particular audible difference to varnish.
+Equal relaxation times are combined across the entire body before the existing positive factorization. For the current O1 fit, 13 positive scalar times and 30 body modes require at most 390 histories, even though the varnish covers 60 regions in 45 components. A separate history bank per face would make the same physical transfer needlessly large. The aggregation preserves relaxed or uniformly unrelaxed initialization; it does not recover arbitrary independent initial histories of individual films.
+
+The existing coupled dynamics owner advances these internal strains together with strings, body modes, cavity, bow/contact and external loads. For one factored branch, with r = cᵀq − z,
+
+```text
+v' = -K0 q - C v - Σ c r + applied_force
+z' = r / tau
+H  = (vᵀv + qᵀK0q + Σ r²) / 2
+H' = applied_forceᵀv - vᵀCv - Σ r²/tau
+```
+
+Thus the same material branch changes the body restoring force and deposits nonnegative heat. The prepared backend now includes those histories in its existing exponential and work/heat integrals, with no new time stepper. Its original mode, byte, multiply-work and augmented-dimension limits remain binding.
+
+The [body profile grammar](../crates/fs-couple/examples/material_strings/BODY_PROFILES.md#hereditary-varnish-and-a-structural-frequency-response) exposes the explicit policy:
+
+```text
+coating-memory prony-continuation 16 0.001 0.001 512
+```
+
+`prony-continuation` means that transient calculation accepts the globally passive fit outside its finite measured frequency band. The original source band and separate sampled storage/loss certificates remain visible; this is not a claim of measured DC or high-frequency behavior. Every retained body mode must still have source support. The fixed Galerkin/bubble basis also remains an approximation: it is not frequency-dependent local condensation.
+
+The [hereditary il Cannone configuration](../crates/fs-couple/examples/material_strings/cannone-h8-varnish-memory.assembly) applies the same 20 µm modern O1 film to the exterior top, back and ribs as the [frozen-reference configuration](../crates/fs-couple/examples/material_strings/cannone-h8-varnished.assembly). The [violin recipe](../data/instruments/descriptions/violin/README.md#apply-a-measured-varnish-to-the-existing-violin) supplies build and render commands. The current recipe's conservative prepared-memory admission is 3,954,407,664 bytes, within its existing 4 GiB declaration. Its independent 512-history cap is not a promise that every case at that cap fits the byte budget. This resource calculation does not establish that a full violin render has completed.
+
+Library users explicitly call `ReciprocalStringBank::with_material_shell_coating_relaxation` before playback; the frontend performs that binding when the policy record is present. Shell constructors alone return the equilibrium image and retained projection, without silently selecting a transient continuation.
+
+### Trace bridge force to structural motion and loss
+
+Both single-shell and assembled-shell images now expose `coating_harmonic_response`. It evaluates each film's **original fitted law at the common drive frequency**, rather than at separate natural frequencies. With the exp(-iωt) phasor convention and mass-normalized coordinates, the dynamic matrix is
+
+```text
+Z(omega) = K0 - omega² I - i omega (Cwood/glue + Cinterface)
+           + Σfilm [(E'(omega) - E0) - i E''(omega)] Hfilm.
+```
+
+The existing complex LU solves Zq = F and checks the residual against the original equations. Returned complex bridge mobilities and signed exterior/cavity volume velocities show how changed stiffness and damping affect mechanical motion. Separate wood/glue, interface and per-film dissipation, supplied power and power residual make the loss accounting inspectable. Source bands are enforced at every frequency. Bare images are supported; frozen-film images refuse this exact-source calculation.
+
+The renderer's `--body-response NEW.tsv MIN_HZ MAX_HZ POINTS BRIDGE_INDEX` exports these quantities on a logarithmic grid. It validates all samples before creating a new report, refuses overwrite, and limits total solve work and output size. The transfer is normalized to a 1 N peak bridge force; that linear normalization does not certify the material's finite-amplitude strain envelope. The [body-profile guide](../crates/fs-couple/examples/material_strings/BODY_PROFILES.md#hereditary-varnish-and-a-structural-frequency-response) shows a staged-run command.
+
+This response is the **unloaded retained structural body**, including its fixed reduced wood/glue viscosity. It does not include string impedance, cavity pressure feedback or a full exterior wave solution. The ordinary WAV path separately couples the modified body to the strings, bow and cavity, then uses the existing acoustic observer. A changed bridge response is a mechanism for changed sound, not a perceptual quality score.
+
+### Verification and remaining qualification
+
+Seven focused native shell checks cover the physical section and projection path, equilibrium stiffness counted once, unchanged coating mass, full off-diagonal reconstruction, unique-time aggregation, and transactional refusals. Four original prepared-owner tests cover state, work and heat against an independent full fs-phs realization, step subdivision, histories beyond the previous small-state ceiling, and stiff relaxation. Four harmonic checks cover force/velocity and power identities, source support and bare/assembly response. Five frontend checks use the actual source pack, parsers and report writer, including finite TSV data, overwrite refusal and out-of-band refusal before file creation.
+
+These checks exercise the original numerical owners through focused native builds. The complete Cargo workspace and full violin WAV were not executed in that environment because required sibling constellation repositories were absent. No mesh/mode/time convergence, evolving coating-strain certificate, listening comparison or recording-level validation is claimed. Those are still required before attributing a particular audible difference to varnish.
 
 ## Remaining physical limits
 

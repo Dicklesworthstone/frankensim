@@ -214,6 +214,7 @@ impl MaterialStringBankSource {
         poll(gate)?;
         if self.material_chart_relaxation.is_none() && self.string_bending_relaxation.is_none()
             && self.material_chart_tensor_relaxation.is_none()
+            && self.material_shell_coating_relaxation.is_none()
             && self.spatial_cavity.as_ref().and_then(|cavity|cavity.thermal_loss()).is_none()
             && self.strings.iter().all(|m| m.source.bending_relaxation().is_none()
                 && m.source.torsional_relaxation().is_none()) {

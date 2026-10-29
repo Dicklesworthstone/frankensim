@@ -4576,12 +4576,23 @@ memory; static equilibrium publishes the corresponding relaxed memory.
 
 The original dense augmented exponential ceiling, instantaneous stiffness
 Nyquist bound, total energy and explicit setup-work budget remain binding.
-The larger mechanical-only prepared backend refuses memory in either binding
-order. Empty memory retains the original arithmetic. Focused G0/G3 regression
-sources exercise analytic free-mass relaxation, independent work/loss channels,
-initial history, force response, friction, component extension and rollback.
-Rust parse checks and an independent analytic/matrix-exponential oracle passed;
-native Rust execution and general continuum/modal accuracy remain unqualified.
+The existing prepared backend also advances material histories, in either
+binding order. Its input-augmented dimension is `d = 3*N + M` for N mechanical
+coordinates and M histories; the original Van Loan ceiling `2*d <= 6144`
+and the explicit mode, byte and multiply-work limits remain binding. The same
+scaled exponential and integral Gramians retain separate mechanical loss,
+connection loss, material heat and external work. Instantaneous stiffness
+balances the calculation while the mechanical baseline remains equilibrium
+stiffness. Coefficient, constant-loss connection and radiation rebuilds retain
+the histories. Empty memory retains the original dimensions and arithmetic.
+
+Four focused native tests of this original prepared owner check complete
+state/work/heat against an independent full fs-phs realization, whole-step
+versus two-half-step agreement, 125 histories beyond the small backend ceiling,
+and release of a stiff isolated history without invented mechanical work.
+Additional contact/air rollback regression sources are present; those wider
+integration tests were not executed in that focused native check. These tests
+do not establish general continuum/modal or whole-instrument accuracy.
 
 ### Regional body-material memory through the original string performer
 
@@ -5154,8 +5165,9 @@ applied.
 side of each substrate region without moving its midsurface or attachment
 skins. The original laminate/MITC owners retain full A/B/D, I0/I1/I2 and each
 film's offset viscous coupling; the regional shear correction remains explicit.
-Storage is frozen at an authored reference, with every retained mode checked
-against both source support and an authored relative storage-drift bound.
+By default, storage is frozen at an authored reference, with every retained
+mode checked against both source support and an authored relative
+storage-drift bound.
 Each film is projected separately and reads its own E''(omega)/omega; positive
 diagonal congruence gives exact modal-diagonal loss for that basis and a passive
 geometric-mean cross-mode approximation. Wood's anchored law never rescales
@@ -5163,9 +5175,66 @@ film loss. Complete projection budgets count every material-law group.
 Replacing or removing the stack and rebinding wood preserve the original
 substrate mass/thickness policy, interfaces and pressure ownership. Films add
 mass. Source, geometry, budget and cancellation refusals are transactional.
-Perfect bonding and linear small strains are assumptions; this route supplies
-no penetration, cure stress, slip, hereditary shell memory, evolving local
-strain-amplitude gate or displaced acoustic boundary.
+Perfect bonding and linear small strains are assumptions; this frozen option
+supplies no hereditary memory. Neither coating option supplies penetration,
+cure stress, slip, an evolving local strain-amplitude gate or a displaced
+acoustic boundary.
+
+An explicit `ResolvedShearShell::with_coating_relaxation` instead rebuilds each
+film at its source equilibrium coefficient E0, retaining the same signed
+offsets, A/B/D, I0/I1/I2, bridge maps and pressure geometry. The original MITC
+viscosity projection yields each film's complete unit-modulus PSD form H in
+the retained equilibrium basis, including membrane, bending, shear and their
+cross terms. Positive scalar Prony arms multiply H; equal relaxation times
+are summed across all regions/components before the shared PSD factorization.
+This preserves the transfer while bounding history count by retained rank
+per unique time, rather than by number of coated faces. This aggregation
+covers relaxed or uniformly unrelaxed initialization; it does not identify
+independently authored histories for every source film.
+
+`ShellCoatingRelaxation` retains projected films, original source identities,
+the intersected support band, separate sampled storage/loss fit certificates,
+and complete coupling rows/time constants. Wood/glue and interface viscosity
+remain in their original owners; no frozen film damping is also added.
+Projection work, sampled approximation tolerances, history count and
+cancellation are explicit transactional gates. Coated parts in an assembly
+must select one consistent memory policy. The finite-band
+`prony-continuation` selection explicitly accepts the globally passive fitted
+continuation for a transient; it does not widen the source's measured domain.
+The fixed modal/bubble transformation is a Galerkin approximation, not
+frequency-dependent local condensation or a convergence certificate.
+
+`ReciprocalStringBank::with_material_shell_coating_relaxation` explicitly
+binds this retained image to the original coupled memory owner. Library callers
+must bind before playback; shell constructors alone return the equilibrium
+image. The material_strings frontend performs this binding automatically when
+`coating-memory prony-continuation TERMS STORAGE_TOL LOSS_TOL MAX_HISTORY`
+is selected in a V3/V4 body profile or assembly options. The same body rows
+enter the shared string/body/cavity state and survive source rebuilds and
+additional string-memory selection. Prepared rendering uses the existing
+resource declaration. The Cannone O1 recipe's 16 candidates retain 13 positive
+times; 30 body modes need at most 390 histories. Its conservative admission
+bound is 3,954,407,664 bytes, within the existing 4 GiB declaration. The
+independent 512-history cap does not guarantee that a 512-history case fits
+that byte limit.
+
+Both shell image types expose `coating_harmonic_response`. For bare images
+or equilibrium/hereditary coating images it solves the unloaded structural
+response with the original complex LU. With exp(-i*omega*t), the dynamic
+matrix is K0 - omega^2*I - i*omega*C_background plus the sum of
+[(E'(omega)-E0)-i*E''(omega)]*H; interface viscosity is added independently.
+Source support is checked at the common drive frequency. Frozen-film images
+refuse this exact-source analysis. Returned bridge and signed exterior/cavity
+volume velocities, supplied power, separate wood/glue, interface and per-film
+heat, and original-equation solve/power residuals permit physical comparison
+without adding a sound-pressure gain. The frontend
+`--body-response NEW.tsv MIN_HZ MAX_HZ POINTS BRIDGE_INDEX` exports 2..1024
+log-spaced frequencies within a complete work limit and 8 MiB report limit,
+validating all samples before a create-new write. Unit-force normalization
+does not certify finite-amplitude strain. The structural FRF has no string
+or air-pressure feedback; the ordinary coupled WAV route supplies those
+separate dynamics. Focused shell, harmonic and frontend native checks do not
+constitute a completed coated-violin render or mesh/mode/time convergence.
 
 `SharedMaterialShellBody` and
 `ReciprocalStringBank::from_material_shear_shell` connect that image to every
