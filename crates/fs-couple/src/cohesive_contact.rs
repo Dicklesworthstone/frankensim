@@ -381,3 +381,6 @@ mod tests;
 
 /// Finite bonded patches with complete cross-site mechanical compliance.
 pub mod patch;
+
+/// Objective cohesive transport and exact finite-rotation work ports.
+pub mod objective;

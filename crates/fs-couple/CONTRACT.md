@@ -10683,3 +10683,30 @@ states and observations. The fixed-direction bridge remains the declared
 planar quasistatic model with its own rate/geometry screens; native body
 inertia does not add resolved liquid inertia, 3-D end curvature or pinch-off.
 No topology release is automatically deposited as heat.
+
+## Objective cohesive transport and finite-rotation work
+
+`cohesive_contact::objective::ObjectiveCohesivePoint` retains the original
+cohesive point, bonded area, stress-free material offset and explicit material
+frame. Common rigid transport preserves the complete material history. A
+physical trial uses the original timed analytic local-path mean traction;
+an explicit local-jump route represents zero local deformation under rotation
+without clamping a computed strain or altering the constitutive law.
+
+The spatial discrete force pair and balancing frame couple obey the finite
+work identity using the arithmetic average of endpoint rotation matrices,
+the spatial Cayley increment and midpoint separation. Vector kinematic and
+scalar work checks independently refuse an inconsistent proposal. Endpoint
+wrenches remain distinct from these discrete work efforts. The mechanics
+owner must apply the additional couple to the frame-carrying side and use
+compatible rotation increments and moment arms, or audit its actual work;
+this adapter does not certify an arbitrary rigid-body integrator. Physical
+half-turn/chart-limit steps require subdivision. Pure common-frame transport
+does not advance material damage or viscosity.
+
+`objective::source::SourceBoundObjectiveCohesivePoint` retains the original
+resolved interface by reference, checks ordered receiving materials and exact
+constitutive-law pointer identity, and retains that binding in successors.
+Fixed source conditions and caller-supplied attachment/frame geometry remain
+explicit. Numerical and source refusals leave accepted history unchanged;
+fracture work and viscous loss keep their original separate accounts.
