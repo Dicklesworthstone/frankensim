@@ -64,7 +64,7 @@ impl TensorModalMaterialPoint {
                     .collect::<Vec<_>>(),
                 &z.iter().map(|z| surface * z).collect::<Vec<_>>(),
             )
-            .map_err(super::super::super::nonlinear)
+            .map_err(super::super::nonlinear)
     }
 }
 
@@ -79,7 +79,7 @@ fn poll(gate: &CancelGate) -> Result<(), AcousticRealizeError> {
 fn material_error(error: TensorMaterialError) -> AcousticRealizeError {
     match error {
         TensorMaterialError::Cancelled => AcousticRealizeError::Cancelled,
-        error => super::super::super::nonlinear(error),
+        error => super::super::nonlinear(error),
     }
 }
 
@@ -172,7 +172,7 @@ impl ModalAperture {
                 poll(gate)?;
                 let law = if region.input.model == PlateMaterialModel::Orthotropic21 {
                     law.rotated([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]])
-                        .map_err(super::super::super::nonlinear)?
+                        .map_err(super::super::nonlinear)?
                 } else {
                     law
                 };
@@ -183,16 +183,16 @@ impl ModalAperture {
                         [0.0, 0.0, 1.0],
                         region.input.material_angle_rad,
                     ))
-                    .map_err(super::super::super::nonlinear)?
+                    .map_err(super::super::nonlinear)?
                 };
                 // Compare at equilibrium, even if the source's operating band
                 // begins above zero; this is constitutive admission, not a
                 // claim to operate out of band. The source law is left intact.
                 let section = law
                     .plane_stress(0.0)
-                    .map_err(super::super::super::nonlinear)?
+                    .map_err(super::super::nonlinear)?
                     .section(region.section.thickness)
-                    .map_err(super::super::super::nonlinear)?;
+                    .map_err(super::super::nonlinear)?;
                 for i in 0..3 {
                     for j in 0..3 {
                         let scale = det::sqrt(region.section.d[3 * i + i])

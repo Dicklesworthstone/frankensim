@@ -7,9 +7,12 @@ use super::*;
 use std::fmt::Write as _;
 use fs_project::uncertainty::{DesignControl, DesignPolicy, UniformParameter};
 
+#[path = "design/cases.rs"]
 mod cases;
+#[path = "design/coordinate.rs"]
 mod coordinate;
 #[cfg(test)]
+#[path = "design/schedule_tests.rs"]
 mod schedule_tests;
 
 pub(super) const DRIVER: &str = "native-cooling-power-design-v1";

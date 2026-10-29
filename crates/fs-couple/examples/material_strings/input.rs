@@ -630,7 +630,7 @@ impl Spec {
             let maximum_replay_terms = row.count(fs_vfit::observation::MAX_OBSERVATION_ENTRIES)?;
             row.end()?;
             let mut row = r.row("observer_gas")?;
-            let propagation = fs_couple::baffled_pressure::gas::GasPropagation::read_record_for_gas(
+            let propagation = fs_couple::pcm_wav::baffled::gas::GasPropagation::read_record_for_gas(
                 &mut row.words, &gas_record)?;
             let options = PlateObserverOptions { position_m, maximum_frequency_hz,
                 maximum_surface_cells, maximum_replay_terms, propagation };

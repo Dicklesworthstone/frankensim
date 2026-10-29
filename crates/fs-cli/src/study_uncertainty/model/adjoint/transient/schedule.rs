@@ -72,7 +72,7 @@ fn contract(
     let mut schedule_index = 0;
     let mut row_index = 0;
     let mut coarse_start = 0.0;
-    let mut start = 0.0;
+    let mut start: f64 = 0.0;
     let mut sum = 0.0;
     let mut correction = 0.0;
     for &coarse_end in coarse {
@@ -127,4 +127,5 @@ fn contract(
 }
 
 #[cfg(test)]
+#[path = "schedule/tests.rs"]
 mod tests;

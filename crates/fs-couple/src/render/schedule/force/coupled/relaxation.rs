@@ -63,7 +63,7 @@ impl CoupledModalSystem {
         Ok(self)
     }
 
-    fn validate_staged_material_points(&self,gate:Option<&CancelGate>) -> Result<(),ModalCouplingError> {
+    pub(super) fn validate_staged_material_points(&self,gate:Option<&CancelGate>) -> Result<(),ModalCouplingError> {
         if self.plane_stress_material_points.is_empty() {return Ok(());}
         let q:Vec<_>=self.candidates.iter().flat_map(|m|m.states())
             .map(|s|s.displacement_m_sqrt_kg).collect();

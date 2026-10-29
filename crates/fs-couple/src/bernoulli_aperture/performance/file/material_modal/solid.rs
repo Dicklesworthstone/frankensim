@@ -486,7 +486,7 @@ pub(super) fn read(
     let mut pressure_faces = Vec::with_capacity(pressure_count);
     for _ in 0..pressure_count {
         let mut row = rows.row("solid_pressure_face")?;
-        let mut nodes = [row.parse()?, row.parse()?, row.parse()?];
+        let mut nodes: [usize; 3] = [row.parse()?, row.parse()?, row.parse()?];
         nodes.sort_unstable();
         let sign = row.scalar()?;
         if sign != 1.0 && sign != -1.0 {

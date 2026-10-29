@@ -9,6 +9,7 @@ use super::{J, NominalCalibration, Result, Target, UniformParameter, array, inva
 
 #[path = "transient/peak.rs"]
 mod peak;
+#[path = "transient/schedule.rs"]
 mod schedule;
 
 const FINAL: &str = "temperature-final-adjoint";

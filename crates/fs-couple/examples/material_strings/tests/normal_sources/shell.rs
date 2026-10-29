@@ -135,7 +135,7 @@ fn material_receiver_uses_original_shell_point_and_reacts_in_the_same_step() {
         let mut samples = vec![0.0; instrument.spec.samples as usize];
         instrument.performance.block(&mut samples[..1]).unwrap();
         let system = instrument.performance.bank().system();
-        assert!(system.last_obstacle_frames()[0].normal_force_n > 0.0);
+        assert!(system.last_obstacle_frames().unwrap()[0].normal_force_n > 0.0);
         let body_velocity = row
             .iter()
             .zip(system.components()[1].states())
