@@ -34,6 +34,8 @@
 pub mod acoustic_realize;
 pub mod air_path;
 pub mod bakeoff;
+/// Source-owned shell resonances retaining the original complex BEM pressure equations.
+pub mod bem_loaded_modes;
 pub mod bernoulli_aperture;
 pub mod bowed_string;
 pub mod brass_loop;
