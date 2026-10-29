@@ -5900,6 +5900,28 @@ example regressions check finite-energy temperature, fixed reference mass,
 data-only heat-capacity changes reaching actual microphone pressure,
 deterministic replay and refusal without a sound comparison.
 
+### Native radiative heat on the same compatible solid state
+
+`solid_enthalpy::spatial::SpatialSolidEnthalpy::advance_with_radiation` takes
+the native borrowed `EnthalpyRadiation` selection. Ambient reservoirs and
+closed reflected exchange, using either mean patches or pointwise P1 emission,
+therefore change the original nodal enthalpy, pinned material response,
+integrated thermal strain and compatible native stress/deformation together.
+The result retains `EnthalpyHeatStep`, including complete physical heat audits
+and separate convection/radiation accounts. The original `advance` result and
+its arithmetic remain unchanged; the candidate's defaulted thermal-result type
+also carries the complete radiative variant without discarding its evidence.
+
+All corners must remain fully solid and within source support before centroid
+mechanical quadrature. A failed thermal, source, strain or mechanical admission
+returns no candidate and leaves old enthalpy untouched. Fixed reference mass,
+geometry and one-way thermal loading remain the model; this adds no reciprocal
+elastic heat or acoustic radiation reaction. Focused G1/G3 tests compare both
+ambient discretizations to a scalar Stefan-Boltzmann backward-Euler balance,
+both closed-enclosure discretizations to two finite-body exchange equations,
+then verify integrated expansion and clamped stress from those same states.
+They also check default equivalence and late geometric/source refusal.
+
 ### Native nodal heat on the same continuing modal trajectory
 
 `solid_enthalpy::spatial::motion::SpatialHeatedValveMotion` joins the native
@@ -5919,11 +5941,22 @@ reduction, observation, transfer or budget refusal retains the accepted heat
 field, vibration and sample clock. No independent conductivity, thermal store,
 modal integrator or mode-number state matching is introduced.
 
+`step_with_radiation` admits the same explicit native ambient/enclosure and
+mean/pointwise heat owners as the quasistatic spatial path. It shares the
+original continuing-motion transaction and returns the complete selected heat
+report. Radiative heating refreshes source stiffness, integrated strain,
+equilibrium and tangent modes before shape-based state transfer and the new
+pressure observation. Both accepted heat and the modal sample clock remain
+unchanged after a late observation or transfer-budget refusal. The focused
+motion radiation regression independently integrates P1 fourth-power emission,
+checks native mass/storage, follows the analytic changing-stiffness oscillator
+and velocity-derived pressure, varies only emissivity, and checks exact retry.
+
 This is a first-order one-way thermal composition on fixed reference geometry,
 supports and pressure footprint. Signed parameter work and discarded modal
 state are reported separately; neither becomes heat. Spatial/time/modal
 convergence, reciprocal thermoelastic heat, moving geometry, melting and
-radiation back-reaction remain separate obligations. Focused manufactured
+acoustic radiation back-reaction remain separate obligations. Focused manufactured
 tests in `spatial_solid_enthalpy::motion` compare an independent affine-tet
 oscillator, unchanged-temperature continuation, heat-capacity sensitivity,
 and late refusal with exact retry. These are implementation checks, not

@@ -11,6 +11,8 @@ use fs_solid::reduce::OrificeSpec;
 use fs_solid::reduce::thermal::ThermalPressureLoadedValve;
 use std::convert::Infallible;
 
+mod radiation;
+
 const RATE: u32 = 100;
 const DT: f64 = 1.0 / RATE as f64;
 const DEAD_FORCE: f64 = -0.1;

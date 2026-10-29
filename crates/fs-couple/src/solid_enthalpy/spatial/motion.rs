@@ -17,8 +17,9 @@ use fs_solid::reduce::thermal::motion::{
 };
 
 use super::{
-    EnthalpyStepConfig, EnthalpyStepSolution, ScalarField, SpatialSolidEnthalpy,
-    SpatialSolidEnthalpyError, SpatialSolidState, ThermalBoundary, ThermalInterfaces,
+    EnthalpyHeatStep, EnthalpyRadiation, EnthalpyStepConfig, EnthalpyStepSolution, ScalarField,
+    SpatialSolidEnthalpy, SpatialSolidEnthalpyError, SpatialSolidState, ThermalBoundary,
+    ThermalInterfaces,
 };
 use crate::solid_enthalpy::valve::{HeatedValveError, HeatedValveReduction};
 
@@ -111,13 +112,13 @@ pub struct SpatialHeatedValveMotion<'s, 'a, 'm, 'c, 'r> {
 
 /// Original thermal and mechanical accounts for one jointly accepted interval.
 #[derive(Clone, Debug)]
-pub struct SpatialValveMotionStep {
+pub struct SpatialValveMotionStep<Thermal = EnthalpyStepSolution> {
     /// Elapsed time from the supplied initial heat/motion state [s].
     pub time_s: f64,
     /// Held-pressure motion using the accepted start-of-step coefficients.
     pub pressure_step: ThermalValveMotionFrame,
     /// Complete native nodal heat result, including its original energy audit.
-    pub thermal: EnthalpyStepSolution,
+    pub thermal: Thermal,
     /// Existing physical shape-transfer work and discarded-state accounting.
     pub transfer: ModalTransfer,
     /// Diagnostic pressure on the NEW source basis and transferred state [Pa].
@@ -188,19 +189,81 @@ impl<'s, 'a, 'm: 'a, 'c: 'a, 'r> SpatialHeatedValveMotion<'s, 'a, 'm, 'c, 'r> {
         observe: impl FnOnce(&ThermalPressureLoadedValve) -> Result<Vec<C64>, E>,
         cx: &Cx<'_>,
     ) -> Result<SpatialValveMotionStep, SpatialValveMotionError<E>> {
+        let owner = self.source;
+        self.step_with_heat(
+            pressure_pa,
+            |old, dt| {
+                owner.advance_thermal(old, dt, boundary, interfaces, source, thermal_config, cx)
+            },
+            |step| step,
+            controls,
+            observe,
+            cx,
+        )
+    }
+
+    /// Advance radiative heat, source-dependent mechanics and the pressure
+    /// observer through the same transaction as [`Self::step`].
+    ///
+    /// Ambient/enclosure and mean/pointwise laws are explicit existing native
+    /// heat owners. Their complete original reports are retained; thermal
+    /// radiation is neither an additional convection heat port nor an acoustic
+    /// radiation-reaction model. Any late refusal leaves both histories intact.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_radiation<E>(
+        &mut self,
+        pressure_pa: f64,
+        boundary: &ThermalBoundary,
+        interfaces: Option<&ThermalInterfaces>,
+        source: &ScalarField,
+        thermal_config: EnthalpyStepConfig,
+        radiation: EnthalpyRadiation<'_>,
+        controls: ModalTransferControls,
+        observe: impl FnOnce(&ThermalPressureLoadedValve) -> Result<Vec<C64>, E>,
+        cx: &Cx<'_>,
+    ) -> Result<SpatialValveMotionStep<EnthalpyHeatStep>, SpatialValveMotionError<E>> {
+        let owner = self.source;
+        self.step_with_heat(
+            pressure_pa,
+            |old, dt| {
+                owner.advance_thermal_with_radiation(
+                    old,
+                    dt,
+                    boundary,
+                    interfaces,
+                    source,
+                    thermal_config,
+                    radiation,
+                    cx,
+                )
+            },
+            EnthalpyHeatStep::conduction,
+            controls,
+            observe,
+            cx,
+        )
+    }
+
+    /// One publication block for every native thermal boundary approximation.
+    fn step_with_heat<E, Thermal>(
+        &mut self,
+        pressure_pa: f64,
+        advance: impl FnOnce(&[f64], f64) -> Result<Thermal, SpatialSolidEnthalpyError>,
+        conduction: fn(&Thermal) -> &EnthalpyStepSolution,
+        controls: ModalTransferControls,
+        observe: impl FnOnce(&ThermalPressureLoadedValve) -> Result<Vec<C64>, E>,
+        cx: &Cx<'_>,
+    ) -> Result<SpatialValveMotionStep<Thermal>, SpatialValveMotionError<E>> {
         poll(cx)?;
         let mut motion = self.motion.clone();
         let pressure_step = motion.step_pressure(pressure_pa, cx)?;
-        let thermal = self.source.advance_thermal(
+        let thermal = advance(
             &self.specific_enthalpy_j_kg,
             motion.model().sample_period_s(),
-            boundary,
-            interfaces,
-            source,
-            thermal_config,
-            cx,
         )?;
-        let state = self.source.resolve(&thermal.specific_enthalpy_j_kg, cx)?;
+        let state = self
+            .source
+            .resolve(&conduction(&thermal).specific_enthalpy_j_kg, cx)?;
         let valve = state.reduce_pressure_valve(&self.reduction, cx)?;
         let transfers = observe(&valve).map_err(SpatialValveMotionError::Observation)?;
         let (motion, transfer) = motion.rebind_candidate(valve, &transfers, controls, cx)?;
@@ -210,7 +273,7 @@ impl<'s, 'a, 'm: 'a, 'c: 'a, 'r> SpatialHeatedValveMotion<'s, 'a, 'm, 'c, 'r> {
             .map_err(ThermalValveMotionError::from)?;
         // Allocate the retained snapshot before the final poll. No fallible
         // operation separates publication of the two accepted physical owners.
-        let enthalpy = thermal.specific_enthalpy_j_kg.clone();
+        let enthalpy = conduction(&thermal).specific_enthalpy_j_kg.clone();
         poll(cx)?;
         self.specific_enthalpy_j_kg = enthalpy;
         self.motion = motion;
