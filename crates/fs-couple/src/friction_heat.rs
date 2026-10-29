@@ -44,6 +44,9 @@ pub mod rigid;
 /// Simultaneous friction sources on one original thermal network.
 pub mod network;
 
+/// Prepared native articulated contacts and original finite-cell heat together.
+pub mod articulated;
+
 fn invalid(message: &'static str) -> DepositionError {
     DepositionError::InvalidInput(message)
 }

@@ -214,6 +214,74 @@ fn temperature_weakening_causes_native_static_breakaway_and_correct_actual_work(
     close(broken.compatibility_residual_m[0], 0.0);
 }
 
+#[test]
+fn objective_transport_preserves_original_source_and_refreshes_only_on_physical_advance() {
+    use fs_tribo::partial_slip::TangentFrame;
+    use fs_tribo::tangential::transport::{ObjectiveTangentialLaw, TangentialHistoryRotation};
+
+    let law = resolve_at(&source_card(), query(300.0)).unwrap();
+    let loaded = law
+        .advance(&law.initial_state(), &input(320.0, [0.003, 0.004]))
+        .unwrap();
+    let saved = loaded.state.clone();
+    let old_frame = TangentFrame::new([0.0, 0.0, 1.0], [1.0, 0.0, 0.0]).unwrap();
+    let new_frame = TangentFrame::new([0.0, 0.0, 1.0], [0.0, 1.0, 0.0]).unwrap();
+    let identity = TangentialHistoryRotation::between(old_frame, old_frame, 0.0).unwrap();
+    assert_eq!(law.transport_state(&loaded.state, identity).unwrap(), saved);
+    let rotation = TangentialHistoryRotation::between(old_frame, new_frame, 0.0).unwrap();
+    let rotated = law.transport_state(&loaded.state, rotation).unwrap();
+    close(rotated.constitutive_state().slip_m()[0], 0.004);
+    close(rotated.constitutive_state().slip_m()[1], -0.003);
+    assert_eq!(rotated.friction_source(), saved.friction_source());
+    assert_eq!(
+        rotated.constitutive_state().contact_temperature_k(),
+        Some(320.0)
+    );
+    assert_eq!(law.stored_energy_j(&rotated), 0.0);
+
+    // The next physical step, not orientation transport, queries the cold source.
+    let continued = law
+        .advance(&rotated, &input(280.0, [0.004, -0.003]))
+        .unwrap();
+    close(continued.traction_n[0], 4.8);
+    close(continued.traction_n[1], -3.6);
+    close(continued.dissipated_j, 0.03);
+    close(continued.state.constitutive_state().slip_m()[0], 0.008);
+    close(continued.state.constitutive_state().slip_m()[1], -0.006);
+    assert_eq!(
+        continued.state.friction_source().state_coordinate("T"),
+        Some(280.0)
+    );
+    for property in continued.state.friction_source().properties() {
+        assert_eq!(
+            property.answer().receipt.selected,
+            saved
+                .friction_source()
+                .property(property.requirement().name())
+                .unwrap()
+                .answer()
+                .receipt
+                .selected
+        );
+        law.interface()
+            .card()
+            .claims()
+            .verify_receipt(&property.answer().receipt)
+            .unwrap();
+    }
+    let foreign = resolve_at(
+        &card(vec![curve(STATIC, [0.9, 0.5]), curve(KINETIC, [0.6, 0.2])]),
+        query(300.0),
+    )
+    .unwrap();
+    assert!(foreign.transport_state(&loaded.state, rotation).is_err());
+    assert_eq!(loaded.state, saved);
+    assert_eq!(
+        law.transport_state(&loaded.state, rotation).unwrap(),
+        rotated
+    );
+}
+
 fn pressure_surface(name: &str, offset: f64) -> PropertyClaim {
     let mut property = curve(name, [0.8, 0.4]);
     property.value = PropertyValue::Surface2D {

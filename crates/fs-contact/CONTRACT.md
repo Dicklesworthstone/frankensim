@@ -147,6 +147,16 @@ load/pressure generation, temperature evolution and heat partition.
 `tests/source_thermal_friction.rs` checks the actual temperature/pressure force
 and heat response, static breakaway, pinned source support and atomic retry.
 
+The same source owner implements `ObjectiveTangentialLaw`: changing the contact
+frame rotates only the native accumulated slip. Original ownership, selected
+coefficient receipts and last physical temperature/pressure remain unchanged;
+only a subsequent constitutive advance refreshes them. Identity transport is
+exact and foreign-source checkpoints refuse. The retained-source regression
+checks a loaded quarter-turn, unchanged receipts, physical continuation at a
+different temperature, foreign-source refusal and exact retry. This lets framed
+articulated heat trials reuse their accepted histories without aging or
+re-querying them during orientation transport.
+
 ### Source-backed Hertz--Mindlin normal loading and recontact
 
 `interface_binding::mindlin::loading::SourceHertzMindlinContact` reuses an

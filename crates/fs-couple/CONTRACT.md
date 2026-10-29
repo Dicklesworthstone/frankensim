@@ -9717,6 +9717,49 @@ The scope remains frozen poses, supplied positive normal patches, matching finit
 Four G0/G1/G5 tests in `rigid_friction_heat_network.rs` cover an independently eliminated three-body/two-interface reference with shared middle-body mobility and shared finite heat capacity, retained second-step input permutation, source/budget/cancellation/competing-owner rollback and exact retry, and zero-friction hot-to-cold conduction. The reference interface temperatures are 304.69405993744004 K and 303.18187043010846 K; physical heats are 0.17343547971344292 J and 0.088803662273099 J. Tests admit 2e-7 K and 1e-9 J respectively. Four existing single-interface regressions also pass in the bounded native source-selected lane; this is not full workspace/DSR verification.
 
 
+### Prepared articulated contacts and same-step finite-cell thermal feedback
+
+`friction_heat::articulated::propose_articulated_friction_heat` borrows the
+accepted native articulated systems, original framed constitutive checkpoints
+and original enthalpy simulation. It returns one complete candidate containing
+every body response, every new framed history and the thermal endpoint; the
+surrounding integrator publishes these together. No accepted body or thermal
+owner is mutated during preparation, root iterations or final admission.
+
+The original `PreparedArticulatedFramedTangentialContacts` transports histories
+once and retains the full native ABA contact response and constitutive factor.
+Thermal trials reuse those bodies, histories and immutable laws while solving
+each distinct contact temperature. Dense contact matrices stay borrowed until
+the final report. Each native irreversible heat enters its explicit original
+route in one `FrictionHeatNetworkStep`; shared cells retain one capacity, signed
+ordinary conduction remains active, and replaced direct links are suppressed
+once. Accepted-state shear energy, native recoil and prescribed-support work
+remain in the combined balance. Optional final-root entropy uses the original
+caloric integrals without another physical solve.
+
+Each mechanical site must have one distinct heat route. Callback/report order
+is canonical ascending original link ID, with an explicit map back to original
+mechanical order. Route A belongs to the point, B to its dynamic counterpart or
+prescribed support; the caller owns material/body identity. The prepared common
+world point must meet the actual shared face centre and the tangent normal must
+be parallel to both cell centrelines. Contact temperatures are solved, so
+prepopulated drive temperatures refuse. Original source laws own temperature,
+pressure and history applicability; source callbacks cannot replace laws.
+Frozen elastic laws retain their refusal of unsupported temperature changes;
+this adapter supplies no variable-potential thermoelastic heat/entropy port.
+
+Cell/contact/unknown counts, trials and nonlinear iterations are bounded.
+Source identity, original per-contact work, native momentum/energy, cell,
+interface, thermal, combined-energy and cancellation gates precede return.
+`tests/articulated_friction_heat.rs` covers an independently eliminated joint
+thermal-softening/rigid-recoil reference on two contacts sharing a body and a
+cell, original pinned coefficient receipts, world/frame covariance, zero-slip
+conduction/entropy, reversible storage release and frozen-temperature refusal,
+and whole-candidate late source/cancellation/budget retry. Its curves are
+synthetic fixtures, not measured-material validation. Geometry, normal loading
+and material spin remain caller-owned frozen-interval inputs; spatial/time
+refinement and source applicability remain necessary.
+
 ## Finite-gas rocket propulsion and translation
 
 `rocket_blowdown::GasRocketState` binds an immutable source-bearing finite

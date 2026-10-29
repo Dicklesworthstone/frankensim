@@ -17,6 +17,7 @@ use fs_material::state_point::{
 };
 use fs_qty::semantic::{QuantityKind, ValueForm};
 use fs_qty::{Dims, QuantitySpec, Temperature};
+use fs_tribo::tangential::transport::{ObjectiveTangentialLaw, TangentialHistoryRotation};
 use fs_tribo::{
     DryTangentialState, FrictionLaw, InputAuthority, TangentialLaw, TangentialStep,
     TangentialStepInput, TriboError,
@@ -306,6 +307,31 @@ impl TangentialLaw for SourceThermalCoulomb {
                     field: "original thermal Coulomb coefficient source",
                 },
             })
+    }
+}
+
+impl ObjectiveTangentialLaw for SourceThermalCoulomb {
+    fn transport_state(
+        &self,
+        state: &SourceThermalCoulombState,
+        rotation: TangentialHistoryRotation,
+    ) -> Result<SourceThermalCoulombState, TriboError> {
+        if state.owner != self.identity {
+            return Err(TriboError::InvalidInput {
+                field: "thermal Coulomb checkpoint belongs to another original source",
+            });
+        }
+        // Orientation changes only the native slip vector. The original owner,
+        // last temperature/pressure and selected coefficient receipts survive;
+        // the following physical step performs any actual thermal refresh.
+        let constitutive = self
+            .initial_law
+            .transport_state(&state.constitutive, rotation)?;
+        Ok(SourceThermalCoulombState {
+            owner: state.owner,
+            constitutive,
+            source: state.source.clone(),
+        })
     }
 }
 
