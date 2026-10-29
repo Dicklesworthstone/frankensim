@@ -287,11 +287,11 @@ fn trim_golden_digest() {
     // Golden bump 2026-08-21 (bead guzez.7.2.1): fs-airscrew Prandtl
     // acos + fs-flyer contact tanh routed through det::, unifying the
     // native and wasm lanes; the trim point moved by ulps.
-    // Golden bump 2026-10-28: stable propeller station momentum arithmetic
-    // and residual-certified local finishing move the accepted trim by
-    // roundoff without changing its physical bands or aircraft parameters.
+    // Golden bump 2026-10-28: ordinary prop wash now applies disk induction
+    // once, matching its momentum root. Aircraft parameters and all physical
+    // trim bands remain unchanged.
     assert_eq!(
-        digest, "e7c9acf1896b3479a8053fca74ef351c991fe0e55effc02fda274e5e5ee221e9",
+        digest, "7633d43057a81be27b75cbcbbc6d4f4640f8a613a557c1be838b958fec7838a7",
         "trim golden moved — determinism regression or an intentional \
          model change requiring the golden-bump protocol"
     );

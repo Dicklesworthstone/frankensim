@@ -103,6 +103,87 @@ fn camber_closure(_s: usize, alpha: f64) -> (f64, fs_wing::nonlinear::StripRegim
 }
 
 #[test]
+fn ordinary_wash_reconstructs_disk_induction_without_a_second_half_factor() {
+    let (panels, strips) = wing_setup();
+    let velocity = freestream();
+    let op = InfluenceOperator::build(&panels, velocity, RHO).unwrap();
+    let rotor = rotor_1903();
+    let disks = disks();
+    let spec = PropCouplingSolverSpec {
+        tol: 1.0e-11,
+        ..CANDIDATE_B
+    };
+    let coupled = coupled_prop_airframe_step(
+        &op,
+        &panels,
+        &strips,
+        &camber_closure,
+        &rotor,
+        &disks,
+        velocity,
+        RHO,
+        &spec,
+        None,
+    )
+    .unwrap();
+    let area = core::f64::consts::PI * rotor.radius_m * rotor.radius_m;
+    for k in 0..2 {
+        let induced =
+            fs_wing::induced_velocity_free(disks[k].center_m, &panels, &coupled.gamma, velocity);
+        let disk_inflow = (velocity[0] + induced[0]).max(0.1);
+        let vi = coupled.w_slip[k];
+        // Independent mass-flux × far-wake velocity increment. The returned
+        // momentum root is already vi, which is half the far-wake increment.
+        let mass_flow = RHO * area * (disk_inflow + vi);
+        let thrust = mass_flow * (2.0 * vi);
+        assert!((thrust - coupled.thrust_n[k]).abs() < 1.0e-9);
+    }
+    let wash: Vec<f64> = strips
+        .iter()
+        .map(|strip| {
+            let p = panels[strip.panel_indices[0]];
+            let x = 0.5 * (p.a[0] + p.b[0]);
+            let y = 0.5 * (p.a[1] + p.b[1]);
+            let left = wash_factor(
+                x - disks[0].center_m[0],
+                (y - disks[0].center_m[1]).abs(),
+                rotor.radius_m,
+            ) * coupled.w_slip[0];
+            let right = wash_factor(
+                x - disks[1].center_m[0],
+                (y - disks[1].center_m[1]).abs(),
+                rotor.radius_m,
+            ) * coupled.w_slip[1];
+            left + right
+        })
+        .collect();
+    let solve = |du: &[f64]| {
+        fs_wing::nonlinear::solve_nonlinear(
+            &op,
+            &panels,
+            &strips,
+            velocity,
+            RHO,
+            &camber_closure,
+            Some(du),
+            None,
+        )
+        .unwrap()
+    };
+    let physical = solve(&wash);
+    assert!((physical.total_lift_n - coupled.wing_lift_n).abs() < 1.0e-7);
+    for (expected, actual) in physical.gamma.iter().zip(&coupled.gamma) {
+        assert!((expected - actual).abs() < 1.0e-8);
+    }
+    let half_wash: Vec<_> = wash.iter().map(|du| 0.5 * du).collect();
+    let double_halved = solve(&half_wash);
+    assert!(
+        (double_halved.total_lift_n - coupled.wing_lift_n).abs() > 0.2,
+        "the native fixture must detect an extra factor 1/2 in momentum transfer"
+    );
+}
+
+#[test]
 fn distributed_incident_field_drives_separate_rotors_and_consistent_wash() {
     let (panels, strips) = wing_setup();
     let velocity = freestream();
@@ -434,25 +515,24 @@ fn nonconvergence_is_typed_and_spec_identity_is_sensitive() {
 
 #[test]
 fn grown_native_correction_rolls_back_and_keeps_the_existing_budget() {
-    // Actual member-3 midpoint at tick 1443, captured with the unchanged
-    // registered plant, signed annular momentum solve and candidate B.
-    // Its separated-strip map chatters between branches; a corrected retry
-    // must not relabel that unresolved physical solve as a converged one.
+    // Full-strength disk wash at an admitted off-trim native state. Its
+    // separated-strip map still chatters between branches; a correct retry
+    // must not relabel that unresolved physical solve as converged.
     let mut design = fs_flyer::aircraft::wright_openloop_v1();
     for (cap, expected_residual) in [
-        (6, 0.025_711_390_521_519_95),
-        (12, 0.025_495_204_911_592_344),
+        (5, 0.086_412_799_529_274_37),
+        (12, 0.086_011_921_941_914_73),
     ] {
         design.coupling = PropCouplingSolverSpec { cap, ..CANDIDATE_B };
         let error = design
             .force_buildup_warm(
-                12.109_920_004_298_539,
-                -0.527_706_488_358_26,
+                10.0,
+                -0.54,
                 0.116_761_945_162_323_48,
                 49.437_682_658_920_99,
-                -2.9,
+                -2.5,
                 RHO,
-                Some([1.660_416_864_469_997_5, 1.660_416_865_101_871_6]),
+                Some([2.0, 2.0]),
             )
             .unwrap_err();
         assert_eq!(error.code, "PropAirframeCouplingDidNotConverge");
@@ -463,10 +543,10 @@ fn grown_native_correction_rolls_back_and_keeps_the_existing_budget() {
             .expect("a recovering correction must not consume a false growth strike")
             .parse()
             .unwrap();
-        // Correction 5 grows from x=[2.170050503482444, 2.166792091293377].
-        // The retry belongs to that predecessor, giving
-        // x_retry=[2.1646859895132637, 2.1721562824711147]. Advancing from
-        // the rejected point instead leaves residual 0.0387415 at cap 6.
+        // Correction 4 grows to residual 0.20955. Retrying from its
+        // predecessor gives 0.08641 at cap 5; the old algorithm instead
+        // advanced from the rejected point, leaving 0.18505 and then
+        // reporting a false second growth before the cap was exhausted.
         assert!((residual - expected_residual).abs() < 1.0e-8);
         assert!(residual > CANDIDATE_B.tol, "unresolved loads stay refused");
         assert!(error.ranked_repairs[0].contains("never switch"));
@@ -478,6 +558,36 @@ fn grown_native_correction_rolls_back_and_keeps_the_existing_budget() {
             ),
         );
     }
+}
+
+#[test]
+fn correct_disk_wash_resolves_the_previous_member3_stopping_state() {
+    // Exact former member-3 midpoint at tick 1443. Keep the native plant,
+    // rotor, controls, warm state, candidate B and its tolerance unchanged.
+    let mut design = fs_flyer::aircraft::wright_openloop_v1();
+    design.coupling = CANDIDATE_B;
+    let result = design
+        .force_buildup_warm(
+            12.109_920_004_298_539,
+            -0.527_706_488_358_26,
+            0.116_761_945_162_323_48,
+            49.437_682_658_920_99,
+            -2.9,
+            RHO,
+            Some([1.660_416_864_469_997_5, 1.660_416_865_101_871_6]),
+        )
+        .unwrap();
+    assert!(result.coupled.residual < CANDIDATE_B.tol);
+    assert_eq!(result.coupled.corrections, 0);
+    assert!((result.thrust_n[0] - result.thrust_n[1]).abs() < 1.0e-8);
+    assert!(result.force_n.iter().all(|f| f.is_finite()));
+    jlog(
+        "previous-stopping-state",
+        &format!(
+            "\"residual\":{},\"thrust_left\":{},\"thrust_right\":{}",
+            result.coupled.residual, result.thrust_n[0], result.thrust_n[1]
+        ),
+    );
 }
 
 #[test]
@@ -513,12 +623,12 @@ fn coupling_golden_digest() {
         "golden",
         &format!("\"digest\":\"{digest}\",\"thrust\":{}", r.thrust_n[0]),
     );
-    // Golden bump 2026-10-28: the native station solve now admits signed
-    // normal-throughflow induction in the braking inner annuli, with a
-    // certified momentum residual. The original 350 RPM geometry and all
-    // reciprocal-coupling, warm-start, and liveness gates are unchanged.
+    // Golden bump 2026-10-28: both loading paths now apply the disk-induced
+    // velocity once, using the same rationalized momentum root. The original
+    // 350 RPM geometry, signed annular solve and all reciprocal-coupling,
+    // warm-start and liveness gates are unchanged.
     assert_eq!(
-        digest, "8130f7a1b19d877bb8638465d21d172ee19daaaf1b400a752e4280abc009ce31",
+        digest, "281389a06cab98db04c3f27a581a1b41ff10f2581dcebc9fc81d66a629c60210",
         "coupling golden moved — determinism regression or an intentional \
          scheme change requiring the golden-bump protocol"
     );

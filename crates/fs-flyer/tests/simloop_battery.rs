@@ -81,15 +81,16 @@ fn run_assisted_lifecycle(mode: PilotMode) -> (SimLoop, u64, Phase, f64, f64) {
 fn fixed_control_assisted_lifecycle_preserves_its_numerical_refusal() {
     let (sim, tick, phase, x_end, max_forward_m) = run_assisted_lifecycle(PilotMode::FixedControls);
     // Same-tick release retains its free vertical/pitch impulse. The aircraft
-    // climbs and turns back before the native station solver reaches
-    // its evaluation budget. This is a numerical refusal, not proof of a physical
+    // climbs and turns back before the native outer coupling reaches
+    // its correction budget. This is a numerical refusal, not proof of a physical
     // flight-envelope boundary. Keep its exact code/tick and real travel gate.
     assert_eq!(phase, Phase::Ended(TerminalEvent::EnvelopeExceeded));
-    assert_eq!(tick, 676);
+    assert_eq!(tick, 655);
     let r = sim
         .envelope_refusal()
         .expect("numerical terminal keeps its receipt");
-    assert_eq!(r.code, "station-did-not-converge");
+    assert_eq!(r.code, "PropAirframeCouplingDidNotConverge");
+    assert!(r.message.starts_with("cap 12 exhausted:"));
     jlog("envelope-receipt", &format!("\"code\":\"{}\"", r.code));
     assert!(
         max_forward_m > 5.0,
@@ -377,9 +378,9 @@ fn member3_assisted_fixture_has_bounded_undulating_flight() {
         TerminalEvent::EnvelopeExceeded,
         "the explicit assisted fixture has a measured numerical solver refusal"
     );
-    assert_eq!(refusal, Some("PropAirframeCouplingDidNotConverge"));
+    assert_eq!(refusal, Some("nonlinear-did-not-converge"));
     assert_eq!(
-        end_tick, 1_443,
+        end_tick, 1_444,
         "registered controls and the corrected plant must reproduce the terminal tick"
     );
     let airborne_s = (end_tick - liftoff) as f64 / 120.0;
@@ -433,11 +434,11 @@ fn original_dec17_reference_reports_the_corrected_rail_shortfall() {
         assert!((spec.rail_length_m..spec.rail_length_m + 0.04).contains(&end.x_m));
         assert!(sim.envelope_refusal().is_none());
         if mode == PilotMode::FixedControls {
-            // Stable station arithmetic changes settled-trim roundoff and the
+            // The corrected actuator-disk wash changes the settled trim and
             // digest while preserving this same tick-975 rail shortfall.
             assert_eq!(
                 sim.digest_hex(),
-                "923a28531de664fd615ea13cd22961f185da87150584608be68d9a4f12af0f76"
+                "949fca76eb2879406d5616bec83955a83b7cf0e63f485595125095d55d56d36d"
             );
         }
         jlog(
@@ -453,7 +454,7 @@ fn original_dec17_reference_reports_the_corrected_rail_shortfall() {
 #[test]
 fn catapult_mechanics_and_the_huffman_low_speed_block() {
     // E5.4 (bead guzez.6.7). Part 1 — catapult mechanics INSIDE the
-    // certified envelope: explicit 60 m test rails with the same KDH wind
+    // admitted numerical domain: explicit 60 m test rails with the same KDH wind
     // let both runs lift; the registered 1904 catapult launches earlier
     // (executed comparative discriminator), the tow binds into
     // RunIntentId but never the tick-0 digest, and both catapult axes
@@ -527,26 +528,17 @@ fn catapult_mechanics_and_the_huffman_low_speed_block() {
     assert_eq!(CATAPULT_1904_V1.pull_force_n, 2073.0);
     assert_eq!(CATAPULT_1904_V1.pull_length_m, 14.6);
 
-    // Part 2 — the LIVING MARKER (honest, executed). 5.7.1's
-    // upstream-wash decay LANDED 2026-08-21 and moved the floor: the
-    // flat wash map used to hand the wing the disk-plane slipstream,
-    // which (a) fabricated calm-takeoff lift the historical record
-    // contradicts and (b) blew up the coupled solve at 4-8 m/s
-    // (probe 2026-08-20: 2-8 all EnvelopeExceeded). With the decay,
-    // the probe 2026-08-21 reads: 2-3 m/s REFUSE (the near-calm run
-    // stays outside the admitted envelope — the honest outcome; the
-    // near-static solve schedule remains future work), 4-8 m/s LIFT
-    // with the scenario's catapult. The floor bracket is
-    // asserted below; THIS near-calm assertion flips to a liftoff
-    // claim only if a near-static solve tier ever lands AND the
-    // historical catapult requirement is re-argued.
+    // Part 2 — an executed low-speed numerical limitation (bead guzez.5.7.1).
+    // The registered near-calm scenario still refuses with the unchanged
+    // catapult and solver budgets. This receipt is not evidence of a physical
+    // launch boundary. A future solver improvement may admit this same case;
+    // it must retain the physical inputs and independently demonstrate liftoff.
     let mut sim = SimLoop::init(huffman_scenario(1904, PilotMode::FixedControls)).unwrap();
     let end = loop {
         let out = sim.step(None).unwrap();
         assert!(
             !matches!(out.phase, Phase::Airborne),
-            "low-speed tier landed? move this test to a liftoff claim \
-             and close guzez.5.7.1's DONE-WHEN"
+            "low-speed solve improved: preserve the inputs and register the liftoff receipt"
         );
         if let Phase::Ended(e) = out.phase {
             break e;
@@ -559,28 +551,40 @@ fn catapult_mechanics_and_the_huffman_low_speed_block() {
         &format!("\"code\":\"{}\",\"tracked\":\"guzez.5.7.1\"", receipt.code),
     );
 
-    // Part 3 — the 5.7.1 FLOOR BRACKET (executed both sides): at
-    // 3 m/s the coupled core still refuses (calm-class Huffman needs
-    // the catapult, matching the record); at 4 m/s the same scenario
-    // lifts with the declared catapult within the 30 m rail. Both outcomes are receipts,
-    // not assumptions.
-    let outcome_at = |headwind: f64| -> (bool, bool) {
+    // Part 3 — unchanged low-speed inputs on both sides of the current
+    // numerical limit. Correct disk wash and the native strip-cycle safeguard
+    // retain the 4 m/s liftoff gate. At 3 m/s the wing now solves, but the
+    // propeller station budget is exhausted later; keep that actual receipt.
+    let outcome_at = |headwind: f64| -> (bool, u64, Option<String>) {
         let mut spec = huffman_scenario(1904, PilotMode::FixedControls);
         spec.headwind_mps = headwind;
-        let mut sim = SimLoop::init(spec).unwrap();
+        let mut sim = SimLoop::init(spec.clone()).unwrap();
         loop {
             let out = sim.step(None).unwrap();
             if matches!(out.phase, Phase::Airborne) {
-                return (true, false);
+                assert!(out.x_m < spec.rail_length_m, "must lift within the rail");
+                return (true, out.tick, None);
             }
             if let Phase::Ended(e) = out.phase {
-                return (false, e == TerminalEvent::EnvelopeExceeded);
+                assert_eq!(e, TerminalEvent::EnvelopeExceeded);
+                return (
+                    false,
+                    out.tick,
+                    Some(
+                        sim.envelope_refusal()
+                            .expect("numerical receipt")
+                            .code
+                            .to_owned(),
+                    ),
+                );
             }
         }
     };
-    let (lift3, refused3) = outcome_at(3.0);
-    assert!(!lift3 && refused3, "3 m/s must refuse (calm class)");
-    let (lift4, _) = outcome_at(4.0);
+    let (lift3, tick3, refusal3) = outcome_at(3.0);
+    assert!(!lift3, "the unresolved 3 m/s solve must keep its refusal");
+    assert_eq!(tick3, 8);
+    assert_eq!(refusal3.as_deref(), Some("station-did-not-converge"));
+    let (lift4, _, _) = outcome_at(4.0);
     assert!(lift4, "4 m/s must lift with the declared catapult");
     jlog(
         "huffman-floor-bracket",
@@ -618,8 +622,12 @@ fn golden_digest() {
     // and residual-certified local finishing solve the former tick-673 case.
     // The same evaluation budget still refuses an unresolved station at 676;
     // the equation, controls and substantive flight gates are unchanged.
+    // Golden bump 2026-10-29: actuator-disk vi is no longer halved again
+    // before entering the spatial wash law. The unchanged assisted fixture
+    // now reaches the outer correction cap at tick 655; no physical gate,
+    // pilot gain, tolerance or iteration cap was relaxed for this digest.
     assert_eq!(
-        digest, "e018b27796ee9cb18318baf9fd4668fb69d3cb9b082fc47ea45db878efe64988",
+        digest, "73d1fbb87f3df4b830cf92fafc1f4603d6839742dac485d4b7166a43e43ac5f7",
         "lifecycle golden moved — determinism regression or an \
          intentional physics change requiring the golden-bump protocol"
     );

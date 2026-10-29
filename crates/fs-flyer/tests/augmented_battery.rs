@@ -281,13 +281,14 @@ fn determinism_and_golden() {
     // Golden bump 2026-10-28: the residual-certified native station solve
     // moves trim roundoff and its augmented spectrum. Only x86_64 was
     // remeasured here; the aarch64 pin retains its previous measurement
-    // and requires a native aarch64 remeasurement for this station change.
+    // and requires a native aarch64 remeasurement for the station and
+    // disk-induced-wash corrections. No aarch64 result is inferred from x86.
     #[cfg(target_arch = "aarch64")]
     const EXPECTED_DIGEST: &str =
         "389e2a7c4f5a97e8c8507e011979571d10cb87d50c3f57d0b06cd38955d29321";
     #[cfg(not(target_arch = "aarch64"))]
     const EXPECTED_DIGEST: &str =
-        "db4ba3a9640bf6b97c5f86fb482955b1919d6a6576dd72e47fe40236c9a9be91";
+        "48828f654100a2407311265ac37a06525e09ed8543aaca5737ddf86ed1756dcc";
     assert_eq!(
         digest, EXPECTED_DIGEST,
         "augmented-spectrum golden moved — determinism regression or an \

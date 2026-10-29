@@ -81,7 +81,9 @@ impl PropCouplingSolverSpec {
         ] {
             p.extend_from_slice(&v.to_bits().to_le_bytes());
         }
-        hash_domain("org.frankensim.fs-flyer.prop-coupling-spec.v1", &p).to_hex()
+        // v2 binds one disk-induced velocity convention in both loading
+        // modes; v1 legacy wash applied an additional, erroneous factor 1/2.
+        hash_domain("org.frankensim.fs-flyer.prop-coupling-spec.v2", &p).to_hex()
     }
 }
 
@@ -136,23 +138,22 @@ pub struct CoupledStep {
 /// window is |x_strip − x_disk| < 2R (a surface many radii away in
 /// x, like the canard ~3.6R ahead of the 1903 pusher disks, stays
 /// UNWASHED — the doctrine the old boolean map declared). Inside the
-/// window the factor follows actuator-disk momentum theory instead
-/// of a flat hit:
+/// window the factor multiplies the DISK-INDUCED velocity `vi`:
 ///
 ///   upstream  (dx ≥ 0, ahead of the pusher disk):
 ///       f = 1 − dx/√(dx² + R²)      → 1 at the disk, →0 far ahead
 ///   downstream (dx < 0):
-///       f = 1 + |dx|/√(dx² + R²)    → 2·(w_s/2) = full w_s far aft
+///       f = 1 + |dx|/√(dx² + R²)
 ///
-/// applied against the HALF-slipstream state variable, so the disk
-/// plane carries w_s/2 and only genuinely-downstream surfaces feel
-/// the full slipstream. The old map handed the wing (1.9R AHEAD of
-/// the disks) the disk-plane value, which at near-static Huffman
-/// speeds fabricated an unaided calm takeoff the historical record
-/// contradicts.
+/// At the disk the increment is `vi`; the untruncated axial law tends to
+/// `2 vi` far downstream. That factor of two is already in this spatial
+/// law: multiplying `vi` by another 1/2 would halve the induction again.
+/// The retained finite 2R window is a model truncation, not a far-wake
+/// calculation. This spanwise-overlap model also omits wake contraction,
+/// swirl, radial loading and vertical disk overlap.
 
 /// The actuator-disk axial wash factor for one strip×disk pair
-/// (bead wf-root-guzez.5.7.1; multiplies the HALF-slipstream state):
+/// (bead wf-root-guzez.5.7.1; multiplies the DISK-INDUCED velocity `vi`):
 /// 0 outside the radial gate (dy ≥ R) or the axial window
 /// (|dx| ≥ 2R); inside, 1 − dx/√(dx²+R²) upstream (dx ≥ 0, ahead of
 /// the pusher disk) and 1 + |dx|/√(dx²+R²) downstream. Exposed so
@@ -194,6 +195,19 @@ fn wash_map(
         .collect()
 }
 
+/// `T = rho A (V + vi) (2 vi)`: the disk increment is `vi`, while the
+/// ideal far-wake increment is `2 vi`. `wash_factor` owns the spatial
+/// factor, so both loading modes use this same sum without another 1/2.
+/// See NASA Glenn, "Propeller Thrust", and Deters/Ananda/Selig (2015),
+/// AIAA 2015-2265, equations (3)--(7).
+#[inline]
+fn strip_wash(factors: [f64; 2], induction: [f64; 2]) -> f64 {
+    // Statement-split to preserve the deterministic no-FMA convention.
+    let left = factors[0] * induction[0];
+    let right = factors[1] * induction[1];
+    left + right
+}
+
 /// One coupled prop–airframe step (see module docs).
 ///
 /// # Errors
@@ -222,7 +236,8 @@ pub fn coupled_prop_airframe_step(
 /// converged momentum state is disk-induced velocity `vi`, satisfying
 /// `T = 2 rho A vi (V_disk + vi)`; strip wash is `wash_factor * vi`.
 /// Local section incidence, circulation, and returned force velocities all
-/// receive this same wash. Existing legacy wash scaling remains unchanged.
+/// receive this same wash. Both loading modes use the disk-induced velocity
+/// convention; the ordinary path retains its freestream-force approximation.
 /// Each disk must meet its own relative convergence tolerance, so a strongly
 /// loaded disk cannot hide an unconverged weak disk. The momentum root uses
 /// its rationalized form to retain small nonzero induction at weak loading.
@@ -326,16 +341,7 @@ fn coupled_step_impl(
     let evaluate = |x: &[f64; 2]| -> Result<EvalOut, Refusal> {
         let du: Vec<f64> = wash
             .iter()
-            .map(|w| {
-                // Statement-split (guzez.7.2.1): no fused mul-add.
-                let a = w[0] * x[0];
-                let b = w[1] * x[1];
-                if incident.is_some() {
-                    a + b
-                } else {
-                    0.5 * (a + b)
-                }
-            })
+            .map(|&factors| strip_wash(factors, *x))
             .collect();
         let wing = match incident {
             Some(flow) => solve_nonlinear_with_incident(
@@ -386,12 +392,7 @@ fn coupled_step_impl(
             thrust[k] = sol.thrust_n;
             torque[k] = sol.torque_nm;
             let t_term = sol.thrust_n / (2.0 * rho * disk_area);
-            g[k] = if incident.is_some() {
-                momentum_disk_root(v_disk, t_term)?
-            } else {
-                let disc = v_disk * v_disk + 4.0 * t_term;
-                0.5 * (-v_disk + disc.sqrt())
-            };
+            g[k] = momentum_disk_root(v_disk, t_term)?;
         }
         Ok((g, thrust, torque, wing.total_lift_n, wing.gamma))
     };
@@ -424,9 +425,7 @@ fn coupled_step_impl(
                             let mut velocity = *velocity;
                             // `gamma` belongs to the evaluated x, not the next
                             // predictor g returned as the warm-start state.
-                            let left = factors[0] * x[0];
-                            let right = factors[1] * x[1];
-                            velocity[0] += left + right;
+                            velocity[0] += strip_wash(*factors, x);
                             velocity
                         })
                         .collect()

@@ -164,23 +164,24 @@ Pilot member 3 retains its registered gains. Its earlier crash-class calibration
 predates these momentum/gravity corrections and is no longer a validation claim
 for the current plant. With consistent stationary/rail velocity, the unchanged
 seed-1903 Dec-17 reference reaches RailEndWithoutLift at tick 975, approximately
-18.316 m: the 18.3 m rail is too short for this currently calibrated plant.
+18.314 m: the 18.3 m rail is too short for this currently calibrated plant.
 The battery pins that outcome rather than fabricating lift or retuning gains.
 Airborne lifecycle tests explicitly add the existing registered catapult as a
-test fixture, distinct from historical Dec-17. With same-tick support release,
-member 3 flies 11.41 s with five undulations and 44.90 m of travel before the
-native outer coupling solver exhausts its midpoint correction budget at tick 1443.
-Fixed controls fly 5.02 s, reach 11.60 m forward and turn back to 4.09 m before
-the propeller station solver exhausts its 120-evaluation budget at tick 676.
-Stable station momentum arithmetic and local residual-certified finishing solve
-the earlier tick-673 slow-convergence failure; the later operating point remains
-unresolved within that bounded local solve. It is not a station wake-domain
-refusal, and no broader station-robustness claim is made. These are
-numerical nonconvergence receipts carried by EnvelopeExceeded, not established
-physical envelope boundaries. The substantive flight duration/undulation and
-travel gates remain, along with exact terminal code/tick and replay evidence.
-Neither assisted fixture nor original rail shortfall establishes a revised
-historical launch or pilot calibration.
+test fixture, distinct from historical Dec-17. With consistent disk-induced
+wash and same-tick support release, member 3 flies 11.42 s with five undulations
+and 44.90 m of travel before the native wing solver exhausts its 600-evaluation
+budget at tick 1444 (residual 5.92825e-10). Fixed controls fly 4.84 s, reach
+11.61 m forward and turn back to 5.41 m before the outer coupling exhausts its
+12-correction budget at tick 655 (residual 0.00584813, tolerance 0.005).
+The native strip-cycle safeguard preserves the unchanged Huffman 4 m/s catapult
+liftoff gate: lift occurs at tick 197 and 10.229 m, followed by 4.66 s airborne
+before an outer-coupling second-growth refusal at tick 756. The unchanged
+3 m/s case passes its initial wing solve but reaches the 120-evaluation
+propeller station cap at tick 8. These are numerical nonconvergence receipts
+carried by EnvelopeExceeded, not established physical envelope boundaries.
+The substantive flight duration/undulation and travel gates remain, along with
+exact terminal code/tick and replay evidence. Neither assisted fixture nor
+original rail shortfall establishes a revised historical launch or pilot calibration.
 
 `SimLoop::init_with_spatial_wind(scenario, SpatialWindSpec)` opts into the
 wall-compatible evolving `fs-atmo` field. The specification declares the mean
@@ -224,6 +225,26 @@ profile drag and section pitching moments. Converged propeller wash is included
 in both circulation and force velocity. The separate disk-center axial inflows
 drive the two BEMT thrust/torque solves and the existing engine dynamics.
 
+Both native propeller/airframe paths carry the same disk-induced axial velocity
+`vi`. Ideal actuator-disk momentum gives mass flux `rho A (V + vi)`, far-wake
+increment `2 vi`, and thrust `2 rho A vi (V + vi)`. The rationalized disk root
+therefore returns `vi`, not `2 vi`. Each strip receives `wash_factor * vi` once;
+the factor already supplies the disk-plane value 1 and the upstream/downstream
+spatial variation. The former additional factor 1/2 in ordinary loading was
+inconsistent with its own momentum root. Both loading modes now use the same
+wash sum and root. The coupling spec digest uses v2 to distinguish the corrected
+physical convention; candidate tuples, acceptance tolerances and budgets are
+unchanged. The independent native regression reconstructs mass-flux thrust and
+the washed wing circulation, and rejects a second halving of the wash.
+
+This corrects the induction amplitude within the existing model: the ordinary
+path retains freestream Kutta–Joukowsky force evaluation, while the distributed
+path evaluates forces with local strip velocities. The finite 2R influence
+window, spanwise overlap approximation and omission of wake contraction, swirl
+and vertical disk overlap remain explicit model limitations. References: NASA
+Glenn, [Propeller Thrust](https://www1.grc.nasa.gov/beginners-guide-to-aeronautics/propeller-thrust/),
+and Deters, Ananda and Selig, AIAA 2015-2265, equations (3)–(7).
+
 Both native propeller/airframe paths judge residual growth against the evaluated
 predecessor of the current correction. A first growth above 25% rejects the
 entire trial and retries `x_previous + omega_min * residual_previous`; the
@@ -231,11 +252,12 @@ rejected state never becomes the retry's origin or Aitken history. Subsequent
 corrections retain the relaxation floor, and a second genuine growth refuses.
 Both the rejected trial and retry count against the unchanged candidate cap;
 there are at most `cap + 2` native map evaluations including initialization.
-The same acceptance tolerance and spec digest remain in force. The actual
-member-3 stopping state still has an unresolved separated-strip branch cycle:
-correct rollback lowers its residual, but does not manufacture a converged load
-or a longer flight. The native regression checks the rollback residual at cap 6
-and exhaustion at the registered cap 12. No one-way fallback is introduced.
+The same acceptance tolerance remains in force. An admitted off-trim native
+fixture checks rollback at cap 5 and exhaustion at the registered cap 12; the
+old retry falsely classified its recovery as a second growth. Correct disk
+wash also resolves the former member-3 tick-1443 force input within the unchanged
+candidate-B tolerance; that local recovery does not establish a complete
+flight envelope. No one-way fallback is introduced.
 
 `coupled_prop_airframe_step_with_incident` carries disk-induced velocity `vi`,
 with `T = 2 rho A vi (V_disk + vi)`, and applies `wash_factor * vi` at each
