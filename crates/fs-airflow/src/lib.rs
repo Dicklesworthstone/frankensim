@@ -8,6 +8,9 @@
 //! The `graph` module adds arbitrary passive topologies as residual-bearing
 //! nominal estimates, without interval root certificates.
 
+/// Hydrostatic two-layer wall openings with simultaneous directional exchange.
+pub mod stratified;
+
 pub mod composite;
 pub mod conjugate;
 pub mod graph;

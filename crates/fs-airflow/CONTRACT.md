@@ -907,3 +907,38 @@ Final transport driving-force checks enclose the thermal/mechanical solve; the
 constitutive source domains, prescribed convection geometry and first-order
 splitting limits remain explicit. Existing two-mechanism entry points delegate
 to this same owner.
+
+
+## Stratified wall-opening exchange for compartment networks
+
+`stratified::wall_vent_flow` integrates the original quadratic orifice law
+between two hydrostatic, two-layer columns. It partitions each rectangular
+opening at both layer interfaces and every neutral-pressure plane, producing
+up to six directional slabs. Each slab retains its donor and receiver layer,
+uses the actual donor density, and analytically integrates the square root of
+the linear pressure difference. Small counterflow intervals are evaluated in
+local coordinates rather than snapped away when world coordinates round alike.
+
+The caller supplies a sourced discharge coefficient and the original resistance
+uncertainty semantics. Explicit Cd lowers once to `LossElement`; the convenience
+sharp-edged path calls the existing Cd=0.61 owner unchanged. CFAST's Cd=0.7 is
+not silently substituted. Source identities and validity declarations persist;
+this leaf does not propagate uncertainty or certify an empirical regime.
+
+Returned slabs preserve simultaneous counterflow even if the net mass rate is
+zero. Layer mass rates are equal and opposite across the opening; optional
+enthalpy advection uses each slab's donor enthalpy and the same mass transfer.
+The primitive does not mutate species or thermal inventories. Zero area seals
+exactly, zero gravity is supported, and malformed/unrepresentable columns or
+cancellation refuse without a partial result. Successful evaluation allocates
+no vectors or per-slab state.
+
+Ten focused native tests pass: sealed/equal columns; original orifice equivalence;
+donor-density reversal; analytic neutral planes; all six slabs; opening
+refinement; zero-net-mass heat exchange; reference-height invariance; tiny
+counterflow; and invalid data/cancellation. Tests compile the actual new source
+and exact original loss/Cd/error owners with the original pure dependencies in
+an isolated leaf build, not the entire airflow/conduction/runtime graph.
+Reference: [NIST TN1889v1, section4.1, equations4.1–4.4](https://doi.org/10.6028/NIST.TN.1889v1).
+This remains a low-Mach wall-opening closure; ceiling exchange, jet entrainment,
+compressible choking and experimental validation require separate owners.
