@@ -878,7 +878,17 @@ pub fn check_mimo_passivity(
         return Err(PassivityError::NegativeAsymptote);
     }
     let lambda_min = |w: f64| hermitian_part(&model.eval_iw(w), n).0[0];
-    let (worst, mut violation_freqs) = grid_scan(&build_grid(model, band), lambda_min);
+    let (mut worst, mut violation_freqs) = grid_scan(&build_grid(model, band), lambda_min);
+    // The grid starts a decade below the band, and a Hamiltonian crossing that
+    // close to DC can fail the imaginary-axis test, so DC itself is probed. As
+    // for the asymptote, a DC eigenvalue within the 1e-12 floor is rounding.
+    let dc = lambda_min(0.0);
+    if !(dc >= -tol) {
+        violation_freqs.push(0.0);
+        if !(dc >= worst.0) {
+            worst = (dc, 0.0);
+        }
+    }
     let mut crossings = Vec::new();
     let class = if r_values[0] > 1.0e-9 * r_values[n - 1].abs().max(f64::MIN_POSITIVE) {
         crossings =

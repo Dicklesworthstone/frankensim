@@ -321,3 +321,33 @@ fn sampled_grid_reads_a_zero_dc_resistance_against_the_direct_term_floor() {
         }
     }
 }
+
+#[test]
+fn passivity_certificate_sees_a_negative_dc_resistance_below_its_grid() {
+    // Re Z(i w) = r / (w^2 + 1) + 5000 / (w^2 + 1e4): for r = -1 it is -0.5 at
+    // DC and crosses zero near 1 rad/s, a decade below the grid's 10 rad/s
+    // start. D = 0, so no Hamiltonian test runs: only the DC probe sees it.
+    let model = |r: f64| MimoModel {
+        ports: 1,
+        poles: vec![
+            PoleTerm::Real { pole: -1.0, residue: 0.0 },
+            PoleTerm::Real { pole: -100.0, residue: 0.0 },
+        ],
+        residues: vec![vec![C64::from_re(r)], vec![C64::from_re(50.0)]],
+        d: vec![0.0],
+        e: vec![0.0],
+        reciprocal: true,
+    };
+    let band = (100.0, 10_000.0);
+    let fine = check_mimo_passivity(&model(-0.4), band).unwrap();
+    assert!(fine.passive && fine.violation_freqs.is_empty(), "{fine:?}");
+    let report = check_mimo_passivity(&model(-1.0), band).unwrap();
+    assert_eq!(report.class, CertificateClass::GridOnly);
+    assert!(!report.passive, "{report:?}");
+    assert_eq!(report.violation_freqs, [0.0]);
+    assert!((report.worst.0 + 1.0).abs() < 1e-12 && report.worst.1 == 0.0, "{report:?}");
+    // The residue repair can act on that DC violation.
+    let (repaired, repair) = repair_mimo_passivity(&model(-1.0), band).unwrap();
+    assert!(repair.certificate.passive, "{repair:?}");
+    assert!(hermitian_part(&repaired.eval_iw(0.0), 1).0[0] >= 0.0);
+}
