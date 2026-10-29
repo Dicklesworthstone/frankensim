@@ -10710,3 +10710,33 @@ constitutive-law pointer identity, and retains that binding in successors.
 Fixed source conditions and caller-supplied attachment/frame geometry remain
 explicit. Numerical and source refusals leave accepted history unchanged;
 fracture work and viscous loss keep their original separate accounts.
+
+## Reciprocal cavity loading of complete nonlinear plates
+
+`VkBody::with_cavity_load` connects the original `HelmholtzModalCavity`
+pressure/flow owner to the complete nonlinear plate, full damping and material
+history. The supplied signed cavity-side shapes are independent of both point
+drive and exterior observation: outward surface motion gives U_in = -A.v,
+while cavity pressure applies +A.p. The shared explicit-column interconnection
+therefore closes internal work in the same exact/Gonzalez step.
+
+Every accepted host coordinate remains unchanged. Two appended coordinates retain
+gas compression volume and inward acoustic momentum, initialized from explicit
+pressure and outward neck flow. Compliance, neck inertia, end corrections and
+selected resistance come from the existing source owner once. The returned
+`VkCavityLoad` observes accepted ordinary or prepared-body state without
+advancing it or applying a second reaction. Gas/neck storage is already part
+of the body's total energy; neck loss is already part of total dissipation.
+
+Three focused G1/G3 regressions compare complete linear/nonlinear,
+full-damping/Maxwell/cavity trajectories with independent pressure/flow RK4
+equations and a three-clock nonlinear convergence ladder; check independent
+work/heat, signed surface cancellation and pressure acting on an undriven mode;
+and check exact linear subdivision, state preservation, capacity and rollback.
+
+The original uniform small-signal cavity, fixed geometry/gas and selected neck
+loss approximation remain explicit. This adds neither cavity standing waves
+nor broadband neck/exterior radiation. Native checks use the actual gas and
+Helmholtz coefficient owners for authored-resistance fixtures; unused Bessel
+loss branches refuse in the narrow native adapter. They do not establish full
+workspace, source-material or measured-instrument qualification.

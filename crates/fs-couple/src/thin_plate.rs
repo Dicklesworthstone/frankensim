@@ -321,8 +321,10 @@ impl CompactBody {
     }
 }
 
+mod cavity;
 mod prepared;
 mod radiation;
+pub use cavity::{VkCavityInitial, VkCavityLoad, VkCavityObservation};
 pub use prepared::{PreparedVkBody, PreparedVkStep};
 
 /// A von Karman plate as one pHS.
