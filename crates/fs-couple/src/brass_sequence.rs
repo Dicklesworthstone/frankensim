@@ -14,6 +14,9 @@ use crate::render::RenderError;
 use fs_duct::Duct;
 use fs_material::gas::GasState;
 
+/// Every original mouth mode observed from the same loaded bore and valve history.
+pub mod mouth;
+
 /// Maximum number of authored control assignments in a sequence.
 pub const MAX_BRASS_EVENTS: usize = 16_384;
 /// Maximum number of independently realized valve paths.
