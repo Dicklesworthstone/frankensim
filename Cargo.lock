@@ -5150,6 +5150,7 @@ dependencies = [
  "fs-qty",
  "fs-scenario",
  "fs-solid",
+ "fs-thermal",
  "fs-thermochem",
  "fs-tropical",
  "fs-vvreg",

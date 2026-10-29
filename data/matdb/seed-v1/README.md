@@ -3940,7 +3940,7 @@ general coupled thermodynamic closure remain outside these bounded additions.
 
 ## Engineering alloys, acrylic, solid wood and dried panels (2026-10-29)
 
-This increment adds **12 profiles, 72 property claims and 1,575 numerical
+This increment adds **13 profiles, 80 property claims and 1,598 numerical
 ordinates/scalars**. Counts include separate published statistics and explicit
 apparent/local conductivity interpretations.
 
@@ -3958,6 +3958,7 @@ apparent/local conductivity interpretations.
 | [Dried OSB](fsri-osb-dried-2022/manifest.tsv) | 8 | Condition-specific capacity and conductivity |
 | [Dried plywood](fsri-plywood-dried-2021/manifest.tsv) | 8 | Condition-specific capacity and conductivity |
 | [Dried particleboard](fsri-particleboard-dried-2021/manifest.tsv) | 8 | Condition-specific capacity and conductivity |
+| [Cellulose insulation](fsri-cellulose-insulation-unconditioned-2022/manifest.tsv) | 8 | Native capacity and conductivity for the reported unconditioned insulation population |
 
 The NIST profiles retain 1,404 sampled curve knots and three plateau scalars.
 Finite expansion is `(L(T)-L293)/L293`; fitted residuals and strict branch
@@ -3983,11 +3984,20 @@ header discrepancy. Rounded zero sample scatter remains separate from
 measurement uncertainty. Local use of mean-temperature conductivity still
 requires `mean-test-temperature-as-local-model=1`.
 
+Cellulose retains the source population's substantial specimen scatter and
+different capacity/conductivity test thicknesses. Its three density-normalization
+values are 80, 71 and 53 kg/m3, with a source population mean of 68 kg/m3.
+Published Cp uses that population mean; native C_vol remains independent.
+Packing, applied pressure and coupon continuity are not established, and these
+temperature curves do not define an installation-density response. The existing
+constant CFAST cellulose reference remains a separate source profile.
+
 The consumer follow-through is `FixedVolumeLayerConduction`: original native
 capacity paths now use the existing temperature-integrated two-layer flux
 solver, with contact resistance, interface temperatures and endpoint derivatives
-on the original thermal timeline. The three data suites
-`nist_engineering_alloy_thermal_profiles`, `fsri_acrylic_lumber_thermal_profiles`
-and `fsri_dried_panel_thermal_profiles` contain nine focused tests. The existing
-`material_volumetric_timeline` suite now has ten tests, including three new
-layer/timeline checks. Together they pass 19 tests in the focused native build.
+on the original thermal timeline. The four data suites
+`nist_engineering_alloy_thermal_profiles`, `fsri_acrylic_lumber_thermal_profiles`,
+`fsri_dried_panel_thermal_profiles` and `fsri_cellulose_thermal_profiles` contain
+twelve focused tests. The existing `material_volumetric_timeline` suite now has
+ten tests, including three new
+layer/timeline checks. Together they pass 22 tests in the focused native build.

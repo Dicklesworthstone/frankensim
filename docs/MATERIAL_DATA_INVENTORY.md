@@ -781,10 +781,11 @@ qualification, nonlinear foam mechanics or complete orthotropic closure.
 
 ## 2026-10-29 engineering alloys, lumber, acrylic and dried-panel increment
 
-Added **12 source profiles / 72 property claims / 1,575 numerical values**:
+Added **13 source profiles / 80 property claims / 1,598 numerical values**:
 6063-T5 aluminum, Ti-6Al-4V, Inconel 718 and Fe-9Ni steel (12 claims);
 black PMMA, wood stud, pallet wood and basswood panel (32); and separately
-conditioned MDF, OSB, plywood and particleboard (28). Exact source manifests,
+conditioned MDF, OSB, plywood and particleboard (28), plus unconditioned
+cellulose insulation (8). Exact source manifests,
 ranges and distinctions are in the
 [seed catalog](../data/matdb/seed-v1/README.md#engineering-alloys-acrylic-solid-wood-and-dried-panels-2026-10-29).
 Counts include statistics and explicit model interpretations, rather than
@@ -798,6 +799,12 @@ moisture, grain axes, specimen correspondence and density-header conflicts stay
 explicit. Dried MDF lacks a dried capacity experiment and supports conduction
 without claiming transient caloric completeness.
 
+Cellulose insulation adds a native temperature path with the source population's
+substantial specimen variability retained as descriptive scatter. Capacity and
+conductivity test thicknesses differ, and coupon continuity, packing and applied
+pressure remain unknown. Published specific heat uses population-mean density;
+the profile does not infer an installation-density or compression response.
+
 `FixedVolumeLayerConduction` connects these prepared volumetric laws to the
 existing temperature-integrated two-layer conduction solver. It retains the
 original source paths and actual thermal-cell binding, resolves contact
@@ -807,8 +814,8 @@ successful evaluation performs no allocation, database query or content hash.
 This is the declared quasi-steady one-dimensional layer closure, with the
 original fixed-volume storage model and explicit source-domain restrictions.
 
-Focused native verification passes **19 tests: 12 new and 7 regressions**.
-The three data suites each pass three tests, and all ten volumetric-timeline
+Focused native verification passes **22 tests: 15 new and 7 regressions**.
+The four data suites each pass three tests, and all ten volumetric-timeline
 tests pass. They exercise the real pack compiler and production modules,
 independent source reductions and equations, original-context refusals,
 different materials across a contact, analytic flux/derivative oracles and

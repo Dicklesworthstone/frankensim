@@ -1,0 +1,143 @@
+frankensim.matdb-source.v1
+observation	identity	fsri-cellulose-insulation-unconditioned-2022	Cellulose insulation metadata; https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Cellulose_Insulation/material.json	Commercial blow-in insulation made from recycled paper with fire-retardant and mold-inhibiting treatments. Exact paper mix, treatment chemistry/loading, grade, moisture, installed packing state and compaction response are unreported. This profile represents the measured source population, not arbitrary installed density. The metadata nominal density is 68 kg/m3; the reduction below independently uses the three reported density columns. Cone-test tray/no-compression preparation is not transferred to the HFM specimens. Cross-property physical coupon continuity and covariance are unknown.
+observation	method	fsri-cellulose-insulation-unconditioned-2022	FSRI HFM methodology; https://materials.fsri.org/experimentalmethodology	Wet filenames denote unconditioned indoor storage at 22 +/- 3 degC and 40 +/- 20 percent relative humidity, not saturation. HFM capacity uses equal-plate temperature steps generally following ASTM C1784-20; conductivity generally follows ASTM C518. Exact moisture, contact pressure, packing history and principal-axis mapping are unreported. Three repeated conductivity cycles per specimen do not provide nine independent specimens. Native volume capacity remains tied to the experiment's reference-volume convention.
+observation	capacity-r1	fsri-cellulose-insulation-unconditioned-2022	Native volume-capacity result; https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Cellulose_Insulation/HFM/Cellulose_Insulation_HFM_Wet_heatcapacity_220107_R1.tst	Instrument thickness 19.82 mm; recorded mean temperatures 10.00,20.01,30.01,40.01 degC; native capacity 124118,129140,135311,140681 J/(m3 K). The instrument labels these Specific Heat but supplies volumetric units. Finite-step averages across equal-plate changes 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC are not an infinitesimal or fixed-volume thermodynamic Cv measurement.
+observation	capacity-r2	fsri-cellulose-insulation-unconditioned-2022	Native volume-capacity result; https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Cellulose_Insulation/HFM/Cellulose_Insulation_HFM_Wet_heatcapacity_220110_R2.tst	Instrument thickness 19.62 mm; recorded mean temperatures 10.00,20.01,30.01,40.01 degC; native capacity 112244,117979,123255,128034 J/(m3 K). Same finite-step interpretation as R1; specimen-scale packing and calibration uncertainty are not quantified.
+observation	capacity-r3	fsri-cellulose-insulation-unconditioned-2022	Native volume-capacity result; https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Cellulose_Insulation/HFM/Cellulose_Insulation_HFM_Wet_heatcapacity_220111_R3.tst	Instrument thickness 19.58 mm; recorded mean temperatures 10.00,20.01,30.01,40.01 degC; native capacity 76292,78908,82994,86489 J/(m3 K). Lower native capacity is retained rather than replaced by another specimen. Same finite-step interpretation as R1.
+observation	capacity-reduction	fsri-cellulose-insulation-unconditioned-2022	Explicit arithmetic following FSRI temperature grouping; https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/02_Scripts/plot_HFM_data_html.py	Round recorded mean temperature to 0.1 degC, group at 10,20,30,40 degC and add 273.15 for kelvin. Native C_vol is the arithmetic mean across three specimens. Separate sample SD uses n-1=2 and is discrete descriptive scatter, not a confidence or calibration uncertainty bound. Additional computed digits carry arithmetic only. Linear interpolation of the mean is an authored approximation with no interpolation-error bound or extrapolation. No density enters native C_vol.
+observation	density-normalization	fsri-cellulose-insulation-unconditioned-2022	Original density CSV columns; https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Cellulose_Insulation/HFM	Cellulose_Insulation_Density_Wet_R1.csv,R2.csv,R3.csv report densities 80,71,53 kg/m3, masses 38.5,33.6,25.0 g and volumes 479.9,472.2,474.8 cm3 respectively; each filename uses the full Cellulose_Insulation_Density_Wet_ prefix. The source script averages the rounded density columns to 68 kg/m3 rather than recomputing ratios. Measurement temperature and relation to installed packing are unknown. This is a normalization input, not a density-vs-temperature or density-vs-compression law.
+observation	specific-heat-reduction	fsri-cellulose-insulation-unconditioned-2022	Published specific heat; https://materials.fsri.org/materialdetail/cellulose-insulation	Divide population-mean native capacity and its sample SD by the condition-mean density 68 kg/m3, then round to whole J/(kg K): means 1533,1598,1674,1741 and SD 366,388,403,417 at 10,20,30,40 degC. Individual native capacities are not divided by individual specimen densities. Density scatter, cross-property covariance and calibration uncertainty are not propagated. Native C_vol, rounded Cp and normalization density are algebraically related; Cp interpolation is an authored approximation.
+observation	conductivity	fsri-cellulose-insulation-unconditioned-2022	Final Average Cond rows and published reduction; https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Cellulose_Insulation/HFM; https://materials.fsri.org/materialdetail/cellulose-insulation	Cellulose_Insulation_HFM_Wet_conductivity_220107_R1.tst: thickness 20.07 mm, k=0.04651,0.04546,0.04543 at 15 degC and 0.05052,0.05005,0.04991 at 45 degC. The 220110_R2 file: 19.48 mm, k=0.04576,0.04513,0.04513 and 0.05006,0.04985,0.04980. The 220111_R3 file: 19.69 mm, k=0.04352,0.04305,0.04300 and 0.04883,0.04866,0.04861. Units W/(m K). Source means 15.00/15.01 and 45.01 degC are grouped by integer temperature. Plate setpoints are 5/25 and 35/55 degC, with 20 K difference and upward through-thickness heat flow. Pooled nine-reading means rounded to 0.001 are 0.045,0.050; sample SD rounded to 0.001 is 0.001,0.001. The three specimen identities and their capacity-test thickness differences remain explicit. The population reduction does not establish a compaction law, isotropy or matched coupons.
+observation	local-model	fsri-cellulose-insulation-unconditioned-2022	Explicit local conductivity interpretation	Thermal-conductivity requires mean-test-temperature-as-local-model=1. It interprets a finite-gradient apparent through-thickness coefficient as a local scalar at the numerical mean temperature, with linear interpolation between source groups. Apparent-thermal-conductivity retains test-mean-temperature. Neither interpretation deconvolves the finite plate gradient, fills missing material axes, supplies a density response or establishes service-temperature qualification.
+curve	mean-volume-capacity	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction	volumetric_capacity	temperature	K	J/m3/K	283.15:104218,293.15:108675.66666666667,303.15:113853.33333333333,313.15:118401.33333333333	linear
+uncertainty	mean-volume-capacity	unstated	-	-	-	-
+validity	mean-volume-capacity	family	1	1	1
+validity	mean-volume-capacity	unconditioned	1	1	1
+validity	mean-volume-capacity	grade_known	0	0	1
+validity	mean-volume-capacity	formulation_known	0	0	1
+validity	mean-volume-capacity	moisture_known	0	0	1
+validity	mean-volume-capacity	pressure_known	0	0	1
+validity	mean-volume-capacity	axis_known	0	0	1
+validity	mean-volume-capacity	packing_known	0	0	1
+validity	mean-volume-capacity	treatment_known	0	0	1
+validity	mean-volume-capacity	matched	0	0	1
+validity	mean-volume-capacity	specimens	3	3	1
+validity	mean-volume-capacity	statistic	1	1	1
+validity	mean-volume-capacity	temperature	283.15	313.15	K
+curve	published-specific-heat	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction,density-normalization,specific-heat-reduction	specific_heat	temperature	K	J/kg/K	283.15:1533,293.15:1598,303.15:1674,313.15:1741	linear
+uncertainty	published-specific-heat	unstated	-	-	-	-
+validity	published-specific-heat	family	1	1	1
+validity	published-specific-heat	unconditioned	1	1	1
+validity	published-specific-heat	grade_known	0	0	1
+validity	published-specific-heat	formulation_known	0	0	1
+validity	published-specific-heat	moisture_known	0	0	1
+validity	published-specific-heat	pressure_known	0	0	1
+validity	published-specific-heat	axis_known	0	0	1
+validity	published-specific-heat	packing_known	0	0	1
+validity	published-specific-heat	treatment_known	0	0	1
+validity	published-specific-heat	matched	0	0	1
+validity	published-specific-heat	specimens	3	3	1
+validity	published-specific-heat	statistic	1	1	1
+validity	published-specific-heat	density_temperature_known	0	0	1
+validity	published-specific-heat	temperature	283.15	313.15	K
+curve	volume-capacity-scatter	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction	capacity_sd	temperature	K	J/m3/K	283.15:24902.69214362174,293.15:26376.64619191252,303.15:27396.361516327917,313.15:28351.091977793963	tabulated
+uncertainty	volume-capacity-scatter	unstated	-	-	-	-
+validity	volume-capacity-scatter	family	1	1	1
+validity	volume-capacity-scatter	unconditioned	1	1	1
+validity	volume-capacity-scatter	grade_known	0	0	1
+validity	volume-capacity-scatter	formulation_known	0	0	1
+validity	volume-capacity-scatter	moisture_known	0	0	1
+validity	volume-capacity-scatter	pressure_known	0	0	1
+validity	volume-capacity-scatter	axis_known	0	0	1
+validity	volume-capacity-scatter	packing_known	0	0	1
+validity	volume-capacity-scatter	treatment_known	0	0	1
+validity	volume-capacity-scatter	matched	0	0	1
+validity	volume-capacity-scatter	specimens	3	3	1
+validity	volume-capacity-scatter	statistic	0	0	1
+validity	volume-capacity-scatter	temperature	283.15	313.15	K
+curve	specific-heat-scatter	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction,density-normalization,specific-heat-reduction	specific_heat_sd	temperature	K	J/kg/K	283.15:366,293.15:388,303.15:403,313.15:417	tabulated
+uncertainty	specific-heat-scatter	unstated	-	-	-	-
+validity	specific-heat-scatter	family	1	1	1
+validity	specific-heat-scatter	unconditioned	1	1	1
+validity	specific-heat-scatter	grade_known	0	0	1
+validity	specific-heat-scatter	formulation_known	0	0	1
+validity	specific-heat-scatter	moisture_known	0	0	1
+validity	specific-heat-scatter	pressure_known	0	0	1
+validity	specific-heat-scatter	axis_known	0	0	1
+validity	specific-heat-scatter	packing_known	0	0	1
+validity	specific-heat-scatter	treatment_known	0	0	1
+validity	specific-heat-scatter	matched	0	0	1
+validity	specific-heat-scatter	specimens	3	3	1
+validity	specific-heat-scatter	statistic	0	0	1
+validity	specific-heat-scatter	density_temperature_known	0	0	1
+validity	specific-heat-scatter	temperature	283.15	313.15	K
+curve	apparent-k	identity,method,conductivity	apparent_conductivity	test_mean_temperature	K	W/m/K	288.15:0.045,318.15:0.050	linear
+uncertainty	apparent-k	unstated	-	-	-	-
+validity	apparent-k	family	1	1	1
+validity	apparent-k	unconditioned	1	1	1
+validity	apparent-k	grade_known	0	0	1
+validity	apparent-k	formulation_known	0	0	1
+validity	apparent-k	moisture_known	0	0	1
+validity	apparent-k	pressure_known	0	0	1
+validity	apparent-k	axis_known	0	0	1
+validity	apparent-k	packing_known	0	0	1
+validity	apparent-k	treatment_known	0	0	1
+validity	apparent-k	matched	0	0	1
+validity	apparent-k	specimens	3	3	1
+validity	apparent-k	statistic	1	1	1
+validity	apparent-k	through_thickness	1	1	1
+validity	apparent-k	upward	1	1	1
+validity	apparent-k	plate_delta	20	20	K
+validity	apparent-k	test_mean_temperature	288.15	318.15	K
+curve	local-k	identity,method,conductivity,local-model	local_conductivity	temperature	K	W/m/K	288.15:0.045,318.15:0.050	linear
+uncertainty	local-k	unstated	-	-	-	-
+validity	local-k	family	1	1	1
+validity	local-k	unconditioned	1	1	1
+validity	local-k	grade_known	0	0	1
+validity	local-k	formulation_known	0	0	1
+validity	local-k	moisture_known	0	0	1
+validity	local-k	pressure_known	0	0	1
+validity	local-k	axis_known	0	0	1
+validity	local-k	packing_known	0	0	1
+validity	local-k	treatment_known	0	0	1
+validity	local-k	matched	0	0	1
+validity	local-k	specimens	3	3	1
+validity	local-k	statistic	1	1	1
+validity	local-k	through_thickness	1	1	1
+validity	local-k	upward	1	1	1
+validity	local-k	local_model	1	1	1
+validity	local-k	plate_delta	20	20	K
+validity	local-k	temperature	288.15	318.15	K
+curve	conductivity-scatter	identity,method,conductivity	conductivity_sd	test_mean_temperature	K	W/m/K	288.15:0.001,318.15:0.001	tabulated
+uncertainty	conductivity-scatter	unstated	-	-	-	-
+validity	conductivity-scatter	family	1	1	1
+validity	conductivity-scatter	unconditioned	1	1	1
+validity	conductivity-scatter	grade_known	0	0	1
+validity	conductivity-scatter	formulation_known	0	0	1
+validity	conductivity-scatter	moisture_known	0	0	1
+validity	conductivity-scatter	pressure_known	0	0	1
+validity	conductivity-scatter	axis_known	0	0	1
+validity	conductivity-scatter	packing_known	0	0	1
+validity	conductivity-scatter	treatment_known	0	0	1
+validity	conductivity-scatter	matched	0	0	1
+validity	conductivity-scatter	specimens	3	3	1
+validity	conductivity-scatter	statistic	0	0	1
+validity	conductivity-scatter	through_thickness	1	1	1
+validity	conductivity-scatter	upward	1	1	1
+validity	conductivity-scatter	plate_delta	20	20	K
+validity	conductivity-scatter	test_mean_temperature	288.15	318.15	K
+scalar	density-normalization-input	identity,method,density-normalization	normalization_density	68	kg/m3	constant
+uncertainty	density-normalization-input	unstated	-	-	-	-
+validity	density-normalization-input	family	1	1	1
+validity	density-normalization-input	unconditioned	1	1	1
+validity	density-normalization-input	grade_known	0	0	1
+validity	density-normalization-input	formulation_known	0	0	1
+validity	density-normalization-input	moisture_known	0	0	1
+validity	density-normalization-input	pressure_known	0	0	1
+validity	density-normalization-input	axis_known	0	0	1
+validity	density-normalization-input	packing_known	0	0	1
+validity	density-normalization-input	treatment_known	0	0	1
+validity	density-normalization-input	matched	0	0	1
+validity	density-normalization-input	specimens	3	3	1
+validity	density-normalization-input	statistic	1	1	1
+validity	density-normalization-input	density_temperature_known	0	0	1
