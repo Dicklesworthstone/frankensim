@@ -11722,3 +11722,21 @@ work accuracy and atomic
 retry; all six prior free-body event tests also pass. Arbitrary connection
 networks, elastic component modes, moving anchors in this native adapter,
 normal inertia and vector-slip events remain outside this reduction.
+
+## Native liquid adhesion between unlike wetting surfaces
+
+`capillary::AsymmetricContactLineCapillaryModalSystem::new_asymmetric_contact_line`
+uses the same original native mechanical transaction as the symmetric and
+axisymmetric bridge adapters. Actual moving bodies and prescribed/external
+loads exchange work with both original footprint histories. Ordered source
+identities, each surface's viscous/pinning losses and the source's numerical
+force/work uncertainty remain in the accepted frame.
+
+Final constitutive replay uses actual mechanical gap and the original accepted
+two-footprint state. Body state, both footprints, physical gap, clock and frame
+publish jointly after all existing source, force, compatibility, energy and
+cancellation gates. Six new native tests cover asymmetric response, independent
+pinning, actual source exchange, reciprocal work/momentum and late accuracy
+rollback. The five symmetric-wetting and six existing planar/axisymmetric
+native tests also pass. The liquid owner remains a connected planar bridge;
+topology release and a thermal recipient are not inferred.

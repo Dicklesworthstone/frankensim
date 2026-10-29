@@ -18,6 +18,10 @@ use super::{
     CoupledModalSystem, ModalCouplingError, dot, finite, invalid, limit, network_response, poll,
 };
 use crate::modal_acoustic_time::ModalAcousticTimeModel;
+use fs_contact::capillary_bridge::asymmetric_contact_line::{
+    AsymmetricContactLineLoadLine, AsymmetricContactLineState, AsymmetricContactLineStep,
+    SourceAsymmetricContactLineBridge,
+};
 use fs_contact::capillary_bridge::axisymmetric::load_line::{
     AxisymmetricBridgeLoadLine, AxisymmetricLoadLineConfig, AxisymmetricLoadLineError,
 };
@@ -212,6 +216,14 @@ pub type ContactLineCapillaryModalSystem<'a> =
 pub type ContactLineCapillaryModalConfig = CapillaryModalConfig<ContactLineLoadLineConfig>;
 pub type ContactLineCapillaryModalFrame = CapillaryModalFrame<ContactLineStep>;
 
+/// Native finite-rate wetting between two independently sourced substrates.
+/// Each original footprint, pinning regime and loss remains in the frame.
+pub type AsymmetricContactLineCapillaryModalSystem<'a> =
+    CapillaryModalSystem<'a, AsymmetricContactLineLoadLine<'a>>;
+pub type AsymmetricContactLineCapillaryModalConfig =
+    CapillaryModalConfig<ContactLineLoadLineConfig>;
+pub type AsymmetricContactLineCapillaryModalFrame = CapillaryModalFrame<AsymmetricContactLineStep>;
+
 /// One fixed-direction liquid bridge and the complete unchanged native network.
 pub struct CapillaryModalSystem<'a, L: NativeCapillaryModel<'a> = PlanarBridgeLoadLine<'a>> {
     network: CoupledModalSystem,
@@ -288,6 +300,31 @@ impl<'a> CapillaryModalSystem<'a, ContactLineBridgeLoadLine<'a>> {
         state: ContactLineState,
         column: Vec<f64>,
         config: ContactLineCapillaryModalConfig,
+        gate: &CancelGate,
+    ) -> Result<Self, CapillaryModalError> {
+        Self::from_source(
+            network,
+            source,
+            substrate_materials,
+            state,
+            column,
+            config,
+            gate,
+        )
+    }
+}
+
+impl<'a> CapillaryModalSystem<'a, AsymmetricContactLineLoadLine<'a>> {
+    /// Bind both original wetting histories to the actual native gap motion.
+    /// The original connected planar geometry, independent line resistances
+    /// and source bounds remain active under the shared mechanical transaction.
+    pub fn new_asymmetric_contact_line(
+        network: CoupledModalSystem,
+        source: &'a SourceAsymmetricContactLineBridge,
+        substrate_materials: [&MaterialStateId; 2],
+        state: AsymmetricContactLineState,
+        column: Vec<f64>,
+        config: AsymmetricContactLineCapillaryModalConfig,
         gate: &CancelGate,
     ) -> Result<Self, CapillaryModalError> {
         Self::from_source(

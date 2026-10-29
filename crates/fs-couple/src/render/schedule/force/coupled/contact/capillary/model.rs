@@ -14,6 +14,7 @@ use fs_contact::capillary_bridge::{BridgeState, BridgeStep, SourcePlanarCapillar
 use fs_exec::CancelGate;
 use fs_matdb::MaterialStateId;
 
+mod asymmetric_contact_line;
 mod contact_line;
 
 mod sealed {
