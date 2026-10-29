@@ -12,6 +12,9 @@ mod curved;
 #[path = "sphere_plane/support_friction.rs"]
 mod support_friction;
 
+#[path = "sphere_plane/rolling.rs"]
+mod rolling;
+
 const MASS: f64 = 2.0;
 const RADIUS: f64 = 0.5;
 const INERTIA: f64 = 0.2;

@@ -13,6 +13,10 @@
 //! flight and sliding from rest. Otherwise bounded second-order Lie midpoint
 //! steps resolve the changing spin axis. There is no penetration projection.
 
+/// Material-derived deformation resistance during feasible supported rolling.
+#[path = "sphere_plane/rolling.rs"]
+pub mod rolling;
+
 use crate::{DynamicsError, MassProperties, Pose, RigidBodyState, Vec3};
 use core::fmt;
 use fs_contact::ballistic::{

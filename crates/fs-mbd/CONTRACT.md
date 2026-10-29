@@ -1414,6 +1414,27 @@ All seven groups pass in the focused native original-source build. The independe
 8/16/32-step ladders require error-reduction factors in `[3.95, 4.05]` for both
 motion and heat. This is separate from a full Cargo/DSR workspace gate.
 
+## Material-derived supported sphere rolling
+
+`sphere_plane::rolling` advances the original supported sphere pose and momenta
+under the existing material-derived Kelvin–Voigt rolling moment. The original
+Hertz patch, source density/radius, held temperature and frequency, and
+quasistatic validity remain binding. The constant-load vector equation
+`(m + I/R²) du/dt = F_t - (A N/R) u` is integrated analytically, including
+driven turning and reversal. Both endpoint static-traction norms bound the
+entire exponential path; infeasible rolling refuses rather than projecting
+away slip. Native linear and world-origin angular impulses, actual force work,
+moving-plane work and continuous bulk torque work are audited. The nonnegative
+heat integral uses exponential moments, not an energy defect. Normal spin is
+preserved. Changing-axis attitude alone uses bounded Lie midpoint steps;
+commuting attitude is exact. This is a homogeneous-sphere, held-load no-slip
+phase with asymptotic coast-down, not sliding, impact, finite-time viscous
+arrest, torsional loss or thermal transport. Generated heat belongs to the
+card's deforming sphere and is already included in the native advance loss.
+Focused physical groups cover exact coast-down, driven work, world/boost
+covariance, continuation, elastic limits, source/traction refusal, late
+cancellation and attitude refinement.
+
 ## Joint Hertz sliding and spin on two finite bodies
 
 `tangential_friction::hertz::apply_rigid_hertz` consumes the original
