@@ -14,12 +14,12 @@ use fs_thermochem::transport::maxwell_stefan::{
 };
 
 #[derive(Clone, Copy)]
-struct Stage {
-    left: [f64; MAX_COMPONENTS],
-    right: [f64; MAX_COMPONENTS],
-    rate: f64,
-    gradient_residual: f64,
-    mass_frame_residual: f64,
+pub(in crate::multicomponent) struct Stage {
+    pub(in crate::multicomponent) left: [f64; MAX_COMPONENTS],
+    pub(in crate::multicomponent) right: [f64; MAX_COMPONENTS],
+    pub(in crate::multicomponent) rate: f64,
+    pub(in crate::multicomponent) gradient_residual: f64,
+    pub(in crate::multicomponent) mass_frame_residual: f64,
 }
 
 pub(super) fn advance<L: TransportLaw>(
@@ -249,7 +249,7 @@ pub(super) fn advance<L: TransportLaw>(
     })
 }
 
-fn forward(
+pub(in crate::multicomponent) fn forward(
     gas: &MixtureGas,
     mesh: &Mesh1d,
     states: &[f64],
@@ -278,7 +278,7 @@ fn forward(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn spatial<L: TransportLaw>(
+pub(in crate::multicomponent) fn spatial<L: TransportLaw>(
     gas: &MixtureGas,
     mesh: &Mesh1d,
     boundaries: Boundaries,
@@ -303,24 +303,7 @@ fn spatial<L: TransportLaw>(
         poll(cancelled)?;
         let p = gas.decode(q, Some(primitive[i].temperature), cancelled)?;
         primitive[i] = p;
-        let mut capacity = [0.0; MAX_SPECIES];
-        for k in 0..n {
-            if q[k] == 0.0 {
-                continue;
-            }
-            let model = &gas.source().models()[k];
-            capacity[k] = (q[k] / model.molar_mass().value())
-                * (model
-                    .evaluate_properties(Temperature::new(p.temperature))
-                    .map_err(super::FlowError::from)?
-                    .cp()
-                    .value()
-                    - R);
-        }
-        cv[i] = sum(capacity[..n].iter().copied());
-        if !positive(cv[i]) {
-            return Err(DissipationError::Invalid("unrepresentable cell Cv density"));
-        }
+        cv[i] = heat_capacity_density(gas, q, p)?;
     }
     faces.fill(0.0);
     face_rates.fill(0.0);
@@ -431,7 +414,7 @@ fn spatial<L: TransportLaw>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn interior_face<L: TransportLaw>(
+pub(in crate::multicomponent) fn interior_face<L: TransportLaw>(
     gas: &MixtureGas,
     law: &mut L,
     diffusion: &MaxwellStefanV1,
@@ -546,6 +529,34 @@ fn interior_face<L: TransportLaw>(
         return Err(DissipationError::Invalid("molecular face scale overflow"));
     }
     Ok(rate)
+}
+
+/// Original-source volumetric heat capacity shared by branches and compact gas.
+pub(in crate::multicomponent) fn heat_capacity_density(
+    gas: &MixtureGas,
+    state: &[f64],
+    primitive: Primitive,
+) -> Result<f64, DissipationError> {
+    let n = gas.species_count();
+    let mut capacity = [0.0; MAX_SPECIES];
+    for k in 0..n {
+        if state[k] == 0.0 {
+            continue;
+        }
+        let model = &gas.source().models()[k];
+        capacity[k] = (state[k] / model.molar_mass().value())
+            * (model
+                .evaluate_properties(Temperature::new(primitive.temperature))
+                .map_err(super::FlowError::from)?
+                .cp()
+                .value()
+                - R);
+    }
+    let cv = sum(capacity[..n].iter().copied());
+    if !positive(cv) {
+        return Err(DissipationError::Invalid("unrepresentable cell Cv density"));
+    }
+    Ok(cv)
 }
 
 #[allow(clippy::too_many_arguments)]

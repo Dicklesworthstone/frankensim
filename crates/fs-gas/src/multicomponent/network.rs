@@ -22,7 +22,14 @@ pub use crate::dynamics::network::{
 use crate::dynamics::{Boundaries, MAX_EULER_CELLS};
 use fs_qty::Time;
 
+mod coupled;
 mod step;
+
+/// Conservative molecular species, heat and viscous transport through finite ports.
+pub mod dissipation;
+
+/// Atomic molecular/advection/molecular composition of a complete network.
+pub mod dissipating;
 
 /// Atomic finite-rate chemistry in every branch cell and compact gas volume.
 pub mod reactive;

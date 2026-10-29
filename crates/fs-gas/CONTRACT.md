@@ -824,3 +824,52 @@ reported reaction heat is still never an extra energy source. All eight
 original burning tests pass, including two added regressions for post-outflow
 oxygen depletion, fixed clock, paired interface work, physical-energy balance,
 late cancellation, reuse, and caloric-domain refusal of excessive source heating.
+
+## Molecular transport through finite-plenum networks
+
+`multicomponent::network::dissipation::NetworkDissipationOperator` extends the
+existing original-source Maxwell--Stefan, Fourier and longitudinal-viscous
+operator across branch/plenum connections. Every branch retains the existing
+stationary constant-area restriction. A caller supplies one strictly positive
+plenum-side `Length` per connection. Together with the branch half-cell width
+it defines the constitutive gradient and interpolated face state; no mixing
+length is inferred from plenum volume.
+
+Each connected face uses the same molecular kernel as an interior branch face.
+Species diffusion is mass-averaged, carries each original partial enthalpy,
+and shares total-energy flux with conduction and viscous work. The branch and
+plenum receive equal-and-opposite species and energy exchange. A stationary
+plenum retains zero bulk momentum; its fixed support receives the signed local
+axial impulse. No scalar momentum is summed over differently oriented branches,
+and no separate viscous-heating source duplicates conservative energy.
+
+One global explicit SSPRK2 subcycle advances all participating physical
+volumes. Its estimated parabolic bound includes both branch cells and the sum
+of all port rates divided by each plenum volume. Every requested molecular
+interval completes its exact duration before fields publish; the flow clock
+is unchanged. Law, constitutive solver, stages and diagnostic arrays are prepared
+once and reused. Candidate port/branch reports remain separate from accepted
+reports, allowing a composing owner to reject an entire split step atomically.
+
+`multicomponent::network::dissipating::DissipatingNetwork1d` owns a complete
+`D(dt/2), A(dt), D(dt/2)` step. If advection shortens the duration, both molecular
+halves restart from the original accepted state. Its report closes species and
+physical energy against the combined external boundary transfers, and its
+accepted molecular-port slice is the sum of both D halves. The A-only exchange
+and branch reports explicitly describe the intermediate advection stage.
+Releasing the raw network clears its stale intermediate whole-step report.
+
+Five molecular regressions check two-volume binary/Fourier exponential
+relaxation and timestep refinement, source-consistent partial-enthalpy transfer,
+viscous support impulses, formation-gauge/orientation invariance, compact-volume
+subcycling and atomic cancellation/reuse. Three composing-owner regressions
+check zero-law identity, independent A+D port/storage budgets, late cancellation
+and exhausted molecular work without partial publication. All eight new checks
+passed in the integrated production-source native build.
+
+The compact gradient-length closure is an Estimated continuum model. It does
+not resolve multidimensional mixing, radial wall layers, variable-area viscous
+stresses or rarefied gas. Soret/Dufour effects and a fully discrete entropy or
+invariant-domain theorem remain outside this operator. Native source-linked
+checks are supplementary: `dsr quality --tool frankensim` is unavailable here
+(`dsr: command not found`), so no workspace DSR verdict is claimed.

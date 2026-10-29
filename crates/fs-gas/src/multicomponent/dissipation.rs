@@ -7,7 +7,7 @@
 //! Soret/Dufour cross effects and viscous stresses in variable-area geometry
 //! require additional closures and are not represented by this operator.
 
-mod evolve;
+pub(super) mod evolve;
 mod law;
 
 pub use law::{
@@ -53,7 +53,7 @@ impl Default for DissipationControl {
     }
 }
 impl DissipationControl {
-    fn validate(self) -> Result<(), DissipationError> {
+    pub(super) fn validate(self) -> Result<(), DissipationError> {
         if !positive(self.parabolic_cfl)
             || self.parabolic_cfl > 0.45
             || !positive(self.maximum_step_s)
