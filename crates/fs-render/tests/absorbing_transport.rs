@@ -194,15 +194,23 @@ fn g1_absorption_is_applied_to_direct_light_shadow_segments() {
         let (scene, reflectance, (emission, scale)) = lit_receiver();
         let mut settings = settings(DirectStrategy::NeeOnly);
         settings.max_depth = 1;
-        let film = render_absorbing(&scene, &medium, cx, &settings).unwrap();
+        let direct_reference = render_absorbing(&scene, &medium, cx, &settings).unwrap();
         let unattenuated = render(&scene, cx, &settings).unwrap();
         let integral = shadow_square_integral(1.4);
         let expected = xyz_of_spectrum(|lambda| {
             reflectance.eval(lambda) * emission.eval(lambda) * scale * integral
                 / core::f64::consts::PI
         });
-        assert_mean(&film, expected, 0.006);
-        assert!(film.xyz[0][1] < 0.55 * unattenuated.xyz[0][1]);
+        assert_mean(&direct_reference, expected, 0.006);
+        assert!(direct_reference.xyz[0][1] < 0.55 * unattenuated.xyz[0][1]);
+        // Every strategy has the same complete NEE estimator at the final
+        // admitted vertex. There is no BSDF continuation with which to share
+        // its weight, even for a single rectangle's legacy surface scene.
+        for strategy in [DirectStrategy::Mis, DirectStrategy::PowerMis] {
+            settings.strategy = strategy;
+            let film = render_absorbing(&scene, &medium, cx, &settings).unwrap();
+            assert_eq!(film, direct_reference);
+        }
     });
 }
 

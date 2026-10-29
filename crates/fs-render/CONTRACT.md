@@ -494,7 +494,9 @@ differentiable lift). Pure Rust throughout.
   consume the same medium. This is a static-camera, absorption/emission,
   refractive-index-one model. Nonzero media with dielectric geometry refuse
   until their curved connection segments are integrated; vacuum grids preserve
-  the ordinary tracer's exact results. `AbsorbingFilm` binds the medium snapshot
+  the ordinary tracer's exact results. With nonzero media, final-vertex NEE keeps
+  its complete weight because no competing BSDF continuation is evaluated,
+  including a single rectangular light. `AbsorbingFilm` binds the medium snapshot
   and all sample settings, caps progressive samples and commits whole ranges
   transactionally. Callers retain the same scene between appends. This surface
   adds no scattering, volume-light NEE, dynamic-field exposure interpolation,

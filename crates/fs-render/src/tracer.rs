@@ -12626,6 +12626,12 @@ fn trace_path_with_medium(
     resume: Option<SpectralPathState>,
     #[cfg(feature = "volumes")] medium: Option<&crate::volumes::transport::AbsorbingGrid<'_>>,
 ) -> Result<PathTraceSample, TracerError> {
+    let legacy_light_weights = lighting.is_legacy_compatibility_path();
+    // The frozen surface-only estimator predates terminal-vertex NEE weights.
+    // Physical media are a new estimator and must not inherit its missing
+    // energy when the final vertex has no evaluated BSDF continuation.
+    #[cfg(feature = "volumes")]
+    let legacy_light_weights = legacy_light_weights && medium.is_none();
     let key = [(s.seed & 0xffff_ffff) as u32, (s.seed >> 32) as u32];
     let rng = PathRng {
         pixel,
@@ -13113,7 +13119,7 @@ fn trace_path_with_medium(
                                         let weight = match s.strategy {
                                             DirectStrategy::Mis | DirectStrategy::PowerMis
                                                 if depth + 1 == s.max_depth
-                                                    && !lighting.is_legacy_compatibility_path() =>
+                                                    && !legacy_light_weights =>
                                             {
                                                 1.0
                                             }
@@ -13345,8 +13351,7 @@ fn trace_path_with_medium(
                                     bsdf_pdf(&prim.material, n, wo, wi, brushed_frame.as_ref());
                                 let weight = match s.strategy {
                                     DirectStrategy::Mis | DirectStrategy::PowerMis
-                                        if depth + 1 == s.max_depth
-                                            && !lighting.is_legacy_compatibility_path() =>
+                                        if depth + 1 == s.max_depth && !legacy_light_weights =>
                                     {
                                         1.0
                                     }
