@@ -146,7 +146,7 @@ impl<'n, 'a> FrameThermoelasticBinding<'n, 'a> {
         }
         check(gate)?;
         Ok(FrameThermoelasticSystem {
-            frames, owned_connections, mechanical,
+            frames, owned_connections, connection_heat_destinations: Vec::new(), mechanical,
             prepared: prepared.ok_or_else(|| invalid("missing shared material preparation"))?,
             members, states, origin_s,
         })
@@ -232,21 +232,33 @@ impl<'n, 'a> FrameThermoelasticBinding<'n, 'a> {
     }
 }
 
+pub(super) struct ConnectionLossAccount {
+    pub(super) outside_j: f64,
+    pub(super) routed_j: f64,
+    pub(super) receivers: Vec<FrameConnectionHeat>,
+}
+
 // A foreign spring/dashpot's integrated work is -delta(Psi)-D. Recover its
 // OWN loss from that original ledger and original endpoint coordinates. Never
-// call conservative support work heat, and never route a foreign damper into
-// this frame's caloric inventory. The native independent total must agree.
+// call conservative support work heat. Only an explicitly admitted map routes
+// connector loss into finite cells; the remaining loss stays external. The
+// native independent total must agree with BOTH categories and frame heat.
 pub(super) fn outside_loss(
     mechanical: &CoupledModalSystem,
     frame: &CoupledModalFrame,
     transfers: &[fs_ports::IntegratedWindowTransfer],
     owned_connections: &[Range<usize>],
+    destinations: &[FrameConnectionHeatDestination],
     material_heat_j: f64,
     tolerance: f64,
     gate: &CancelGate,
-) -> Result<f64> {
+) -> Result<ConnectionLossAccount> {
     let mut owned = 0;
     let mut foreign = 0.0;
+    let mut unrouted = 0.0;
+    let mut routed = 0.0;
+    let mut route = 0;
+    let mut receivers = Vec::with_capacity(destinations.len());
     for (i, transfer) in transfers.iter().enumerate() {
         check(gate)?;
         // Both lists are canonical; this is linear in connections + frames,
@@ -284,17 +296,42 @@ pub(super) fn outside_loss(
                 "foreign connection work implies negative dissipation",
             ));
         }
-        foreign = finite(foreign + loss.max(0.0))?;
+        let loss = loss.max(0.0);
+        foreign = finite(foreign + loss)?;
+        if destinations.get(route).is_some_and(|r| r.connection == i) {
+            routed = finite(routed + loss)?;
+            while let Some(destination) = destinations.get(route).filter(|r| r.connection == i) {
+                check(gate)?;
+                let heat_j = finite(destination.fraction * loss)?;
+                if loss > 0.0 && heat_j == 0.0 {
+                    return Err(invalid("physical connection heat partition underflow"));
+                }
+                receivers.push(FrameConnectionHeat { connection: i, cell: destination.cell, heat_j });
+                route += 1;
+            }
+        } else {
+            unrouted = finite(unrouted + loss)?;
+        }
+    }
+    if route != destinations.len() {
+        return Err(invalid("routed connection no longer has its original dissipative port"));
+    }
+    if finite(sum(receivers.iter().map(|r| r.heat_j))? - routed)?.abs() > tolerance {
+        return Err(invalid("connection heat fractions do not reproduce original physical loss"));
     }
     if finite(foreign + material_heat_j - frame.connection_dissipation_j)?.abs() > tolerance {
         return Err(invalid(
             "frame and foreign connector losses disagree with the complete native account",
         ));
     }
-    sum([
-        foreign,
-        frame.component_dissipation_j,
-        frame.material_dissipation_j,
-        frame.radiation_dissipation_j,
-    ])
+    Ok(ConnectionLossAccount {
+        outside_j: sum([
+            unrouted,
+            frame.component_dissipation_j,
+            frame.material_dissipation_j,
+            frame.radiation_dissipation_j,
+        ])?,
+        routed_j: routed,
+        receivers,
+    })
 }

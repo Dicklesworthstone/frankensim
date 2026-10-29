@@ -45,6 +45,26 @@ impl AbsorbingFilm {
     pub fn into_film(self) -> Film {
         self.film
     }
+
+    pub(super) fn checked_append(
+        &mut self,
+        medium: &AbsorbingGrid<'_>,
+        settings: &Settings,
+        from: u32,
+        to: u32,
+    ) -> Result<&mut Film, TracerError> {
+        if to < from {
+            return Err(TracerError::InvalidRange { from, to });
+        }
+        if *settings != self.settings
+            || medium.content_identity() != self.medium_identity
+            || self.film.spp_done != from
+            || to > settings.spp
+        {
+            return Err(TracerError::InvalidInput);
+        }
+        Ok(&mut self.film)
+    }
 }
 
 /// Render a static scene through a physical, non-scattering index-one medium.
@@ -84,21 +104,12 @@ pub fn render_absorbing_range(
     to: u32,
 ) -> Result<(), TracerError> {
     cx.checkpoint()?;
-    if to < from {
-        return Err(TracerError::InvalidRange { from, to });
-    }
-    if *settings != film.settings
-        || medium.content_identity() != film.medium_identity
-        || film.film.spp_done != from
-        || to > settings.spp
-    {
-        return Err(TracerError::InvalidInput);
-    }
+    let film = film.checked_append(medium, settings, from, to)?;
     scattering::render_medium_range(
         scene,
         cx,
         settings,
-        &mut film.film,
+        film,
         (!medium.is_vacuum()).then_some(PathMedium::Absorbing(medium)),
         medium.has_thermal_emission(),
         from,

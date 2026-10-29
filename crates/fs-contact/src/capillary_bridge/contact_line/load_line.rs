@@ -1,4 +1,4 @@
-//! Finite mechanical compliance coupled to the original dynamic wetting law.
+//! Finite mechanical compliance coupled to original dynamic wetting laws.
 //!
 //! The scalar mechanical equation is h=h_free+S*F_mean. Every force probe
 //! advances the SAME immutable contact-line state over the SAME physical dt;
@@ -17,6 +17,65 @@ use super::{ContactLineError, ContactLineState, ContactLineStep, SourceContactLi
 use crate::capillary_bridge::BridgeError;
 use crate::capillary_bridge::load_line::BridgeLoadLineConfig;
 use fs_exec::CancelGate;
+
+pub(crate) mod sealed {
+    pub trait Sealed {}
+    impl Sealed for super::SourceContactLineBridge {}
+}
+
+/// Original constitutive quantities needed by the scalar mechanical equation.
+/// This view retains the complete model-specific successor in the outer step.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DynamicContactLineStepView {
+    pub gap_m: f64,
+    pub mean_normal_force_n: f64,
+    pub mean_force_gap_derivative_n_per_m: f64,
+    pub estimated_force_error_n: f64,
+}
+
+/// Sealed, statically dispatched wetting owners sharing one mechanical solve.
+/// Each owner retains its own physical footprints, sources and geometry.
+pub trait DynamicContactLineModel: sealed::Sealed {
+    type State: Copy;
+    type Step: Copy;
+
+    fn state_gap(state: Self::State) -> f64;
+    fn advance(
+        &self,
+        previous: Self::State,
+        gap_m: f64,
+        dt_s: f64,
+        gate: &CancelGate,
+    ) -> Result<Self::Step, ContactLineError>;
+    fn step_view(step: &Self::Step) -> DynamicContactLineStepView;
+}
+
+impl DynamicContactLineModel for SourceContactLineBridge {
+    type State = ContactLineState;
+    type Step = ContactLineStep;
+
+    fn state_gap(state: Self::State) -> f64 {
+        state.gap_m()
+    }
+    fn advance(
+        &self,
+        previous: Self::State,
+        gap_m: f64,
+        dt_s: f64,
+        gate: &CancelGate,
+    ) -> Result<Self::Step, ContactLineError> {
+        SourceContactLineBridge::advance(self, previous, gap_m, dt_s, gate)
+    }
+    fn step_view(step: &Self::Step) -> DynamicContactLineStepView {
+        DynamicContactLineStepView {
+            gap_m: step.state().gap_m(),
+            mean_normal_force_n: step.mean_normal_force_n,
+            mean_force_gap_derivative_n_per_m: step.mean_force_gap_derivative_n_per_m,
+            estimated_force_error_n: step.estimated_force_error_n,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ContactLineLoadLineConfig {
@@ -73,8 +132,8 @@ impl From<ContactLineError> for ContactLineLoadLineError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ContactLineLoadLineStep {
-    pub bridge: ContactLineStep,
+pub struct DynamicContactLineLoadLineStep<S> {
+    pub bridge: S,
     pub compatibility_residual_m: f64,
     pub compatibility_tolerance_m: f64,
     pub estimated_compatibility_error_m: f64,
@@ -84,16 +143,22 @@ pub struct ContactLineLoadLineStep {
     pub evaluations: usize,
 }
 
+/// Existing symmetric bridge result, retaining its original public shape.
+pub type ContactLineLoadLineStep = DynamicContactLineLoadLineStep<ContactLineStep>;
+
+/// Existing symmetric bridge constructor and accessors remain available.
+pub type ContactLineBridgeLoadLine<'a> = DynamicContactLineLoadLine<'a, SourceContactLineBridge>;
+
 /// Allocation-free continuation borrowing the original source and all history.
 #[derive(Debug)]
-pub struct ContactLineBridgeLoadLine<'a> {
-    source: &'a SourceContactLineBridge,
+pub struct DynamicContactLineLoadLine<'a, M: DynamicContactLineModel> {
+    source: &'a M,
     compliance_m_per_n: f64,
     config: ContactLineLoadLineConfig,
 }
-impl<'a> ContactLineBridgeLoadLine<'a> {
+impl<'a, M: DynamicContactLineModel> DynamicContactLineLoadLine<'a, M> {
     pub fn new(
-        source: &'a SourceContactLineBridge,
+        source: &'a M,
         compliance_m_per_n: f64,
         config: ContactLineLoadLineConfig,
     ) -> Result<Self, ContactLineLoadLineError> {
@@ -123,7 +188,7 @@ impl<'a> ContactLineBridgeLoadLine<'a> {
             config,
         })
     }
-    pub const fn source(&self) -> &'a SourceContactLineBridge {
+    pub const fn source(&self) -> &'a M {
         self.source
     }
     pub const fn compliance_m_per_n(&self) -> f64 {
@@ -136,11 +201,11 @@ impl<'a> ContactLineBridgeLoadLine<'a> {
     /// An independent original constitutive proposal on final physical motion.
     pub fn advance_actual(
         &self,
-        previous: ContactLineState,
+        previous: M::State,
         gap_m: f64,
         dt_s: f64,
         gate: &CancelGate,
-    ) -> Result<ContactLineStep, ContactLineLoadLineError> {
+    ) -> Result<M::Step, ContactLineLoadLineError> {
         poll(gate)?;
         self.check_increment(previous, gap_m)?;
         let step = self.source.advance(previous, gap_m, dt_s, gate)?;
@@ -151,11 +216,11 @@ impl<'a> ContactLineBridgeLoadLine<'a> {
 
     pub fn trial(
         &self,
-        previous: ContactLineState,
+        previous: M::State,
         free_gap_m: f64,
         dt_s: f64,
         gate: &CancelGate,
-    ) -> Result<ContactLineLoadLineStep, ContactLineLoadLineError> {
+    ) -> Result<DynamicContactLineLoadLineStep<M::Step>, ContactLineLoadLineError> {
         poll(gate)?;
         if !free_gap_m.is_finite() {
             return Err(ContactLineLoadLineError::Invalid(
@@ -165,7 +230,7 @@ impl<'a> ContactLineBridgeLoadLine<'a> {
         let initial = if self.compliance_m_per_n == 0.0 {
             free_gap_m
         } else {
-            previous.gap_m()
+            M::state_gap(previous)
         };
         let mut evaluations = 0;
         let mut current =
@@ -193,7 +258,7 @@ impl<'a> ContactLineBridgeLoadLine<'a> {
             let mut accepted = None;
             for _ in 0..self.config.mechanical.max_backtracks {
                 poll(gate)?;
-                let candidate = current.bridge.state().gap_m() + fraction * correction;
+                let candidate = M::step_view(&current.bridge).gap_m + fraction * correction;
                 match self.evaluate(
                     previous,
                     candidate,
@@ -228,10 +293,10 @@ impl<'a> ContactLineBridgeLoadLine<'a> {
 
     fn check_increment(
         &self,
-        previous: ContactLineState,
+        previous: M::State,
         gap_m: f64,
     ) -> Result<(), ContactLineLoadLineError> {
-        let dh = gap_m - previous.gap_m();
+        let dh = gap_m - M::state_gap(previous);
         if !gap_m.is_finite()
             || !dh.is_finite()
             || dh.abs() > self.config.mechanical.maximum_gap_increment_m
@@ -240,8 +305,9 @@ impl<'a> ContactLineBridgeLoadLine<'a> {
         }
         Ok(())
     }
-    fn admit_force_error(&self, step: &ContactLineStep) -> Result<f64, ContactLineLoadLineError> {
-        let error = checked(step.estimated_force_error_n)?;
+    fn admit_force_error(&self, step: &M::Step) -> Result<f64, ContactLineLoadLineError> {
+        let view = M::step_view(step);
+        let error = checked(view.estimated_force_error_n)?;
         if error < 0.0 {
             return Err(ContactLineLoadLineError::Invalid(
                 "negative force error estimate",
@@ -249,7 +315,7 @@ impl<'a> ContactLineBridgeLoadLine<'a> {
         }
         let tolerance = checked(
             self.config.force_absolute_tolerance_n
-                + self.config.force_relative_tolerance * step.mean_normal_force_n.abs(),
+                + self.config.force_relative_tolerance * view.mean_normal_force_n.abs(),
         )?;
         if error > tolerance {
             return Err(ContactLineLoadLineError::ForceAccuracy {
@@ -261,32 +327,33 @@ impl<'a> ContactLineBridgeLoadLine<'a> {
     }
     fn evaluate(
         &self,
-        previous: ContactLineState,
+        previous: M::State,
         gap_m: f64,
         free_gap_m: f64,
         dt_s: f64,
         evaluations: &mut usize,
         gate: &CancelGate,
-    ) -> Result<ContactLineLoadLineStep, ContactLineLoadLineError> {
+    ) -> Result<DynamicContactLineLoadLineStep<M::Step>, ContactLineLoadLineError> {
         poll(gate)?;
         if *evaluations >= self.config.mechanical.max_evaluations {
             return Err(ContactLineLoadLineError::Budget);
         }
         *evaluations += 1;
         let bridge = self.advance_actual(previous, gap_m, dt_s, gate)?;
-        let response = checked(self.compliance_m_per_n * bridge.mean_normal_force_n)?;
+        let view = M::step_view(&bridge);
+        let response = checked(self.compliance_m_per_n * view.mean_normal_force_n)?;
         let slope =
-            checked(1.0 - self.compliance_m_per_n * bridge.mean_force_gap_derivative_n_per_m)?;
+            checked(1.0 - self.compliance_m_per_n * view.mean_force_gap_derivative_n_per_m)?;
         if slope < self.config.mechanical.minimum_compatibility_slope {
             return Err(ContactLineLoadLineError::CompatibilitySlope {
                 slope,
                 minimum: self.config.mechanical.minimum_compatibility_slope,
             });
         }
-        let residual = checked((bridge.state().gap_m() - free_gap_m) - response)?;
-        let scale = (gap_m - previous.gap_m())
+        let residual = checked((view.gap_m - free_gap_m) - response)?;
+        let scale = (gap_m - M::state_gap(previous))
             .abs()
-            .max((free_gap_m - previous.gap_m()).abs())
+            .max((free_gap_m - M::state_gap(previous)).abs())
             .max(response.abs());
         let tolerance = checked(
             self.config.mechanical.gap_absolute_tolerance_m
@@ -299,7 +366,7 @@ impl<'a> ContactLineBridgeLoadLine<'a> {
                 tolerance_m: tolerance,
             });
         }
-        Ok(ContactLineLoadLineStep {
+        Ok(DynamicContactLineLoadLineStep {
             bridge,
             compatibility_residual_m: residual,
             compatibility_tolerance_m: tolerance,

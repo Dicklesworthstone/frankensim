@@ -1226,3 +1226,27 @@ dashpot references, threshold release, reversal loss, multi-period partition
 consistency and atomic refusal/retry. Arbitrary elastic networks, evolving
 normal area, two-dimensional slip and thermal deposition remain outside this
 scalar event owner.
+
+## Independently sourced wetting on unlike surfaces
+
+`capillary_bridge::asymmetric_contact_line::SourceAsymmetricContactLineBridge`
+evolves two independent physical footprints over the original fixed liquid
+volume. Each ordered substrate retains its own equilibrium wetting source,
+line friction and advancing/receding thresholds. Circular segment geometry
+supplies both plate resultants, surface energy, gradients and full geometric
+Hessian without manufacturing a symmetric material bundle.
+
+A symmetric gap/footprint-block discrete gradient and a vector-field integral
+retain reciprocal plate exchange and reduce to the original symmetric law.
+The two-variable active-set solve permits one plate to remain pinned while the
+other moves. Each plate's viscous and pinning losses stay separate. Root,
+quadrature and surface-energy arithmetic uncertainty enter force/work gates;
+numerical probes never advance history more than once.
+
+The original symmetric and asymmetric sources share one sealed, statically
+dispatched `DynamicContactLineLoadLine`. Existing symmetric constructors and
+result types remain available through aliases. Seven original-source tests
+cover independent volume/force/energy references, source asymmetry, every
+active set, plate exchange, symmetric reduction, ODE refinement and atomic
+refusals. Both models retain connected two-dimensional, acute-angle, frozen
+source applicability; they do not resolve bulk liquid flow or pinch-off.

@@ -456,3 +456,6 @@ pub mod adhesive_dmt;
 
 /// Event-resolved sourced junction friction on the original free modal bodies.
 pub mod adhesive_events;
+
+/// Resolved junction events through an original native elastic connection.
+pub mod adhesive_elastic_events;

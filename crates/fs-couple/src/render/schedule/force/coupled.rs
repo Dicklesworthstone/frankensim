@@ -478,7 +478,8 @@ impl CoupledModalSystem {
     /// Existing initial conditions, port ledgers and all source coordinates stay
     /// owned by this system. Use before adding components that need the larger
     /// explicit capacity; this method cannot rescue a constructor already refused.
-    /// A bound radiation load moves with it, as the prepared owner's air bank.
+    /// Bound material histories move into the same prepared exponential. A bound
+    /// radiation load moves with it, as the prepared owner's air bank.
     pub fn with_prepared_linear_propagation(
         mut self, budget: PreparedModalBudget, gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
@@ -486,12 +487,9 @@ impl CoupledModalSystem {
         if self.samples_rendered() != 0 || self.prepared_budget.is_some() {
             return Err(invalid("prepared exact propagation requires one cold budget binding"));
         }
-        if !self.relaxation_branches.is_empty() {
-            return Err(invalid("prepared mechanical propagation cannot discard material memory"));
-        }
-        self.exact = Some(exact::ExactNetwork::new_prepared(
+        self.exact = Some(exact::ExactNetwork::new_prepared_with_relaxation(
             &self.models, &self.columns, &self.connections, self.mode_count(),
-            self.dt, budget, self.radiation.as_ref(), gate,
+            self.dt, budget, &self.relaxation_branches, self.radiation.as_ref(), gate,
         )?);
         self.prepared_budget = Some(budget);
         poll(Some(gate))?;
@@ -502,7 +500,7 @@ impl CoupledModalSystem {
     /// prepare it again. Nothing else changes: the same connections, springs, initial states and port ledgers.
     ///
     /// # Errors
-    /// A started, unprepared or memory-carrying owner, an already bound anchor, an invalid list, or the preparation's
+    /// A started or unprepared owner, an already bound anchor, an invalid list, or the preparation's
     /// own refusals.
     pub fn with_constant_loss_connections(
         mut self, constant_loss: &[ConstantLossConnection], gate: &CancelGate,
@@ -515,13 +513,10 @@ impl CoupledModalSystem {
             || self.connections.iter().any(|link| link.constant_loss_reference_omega_rad_s.is_some()) {
             return Err(invalid("constant-loss connections require one nonempty cold binding"));
         }
-        if !self.relaxation_branches.is_empty() {
-            return Err(invalid("prepared mechanical propagation cannot discard material memory"));
-        }
         anchor_constant_loss(&mut self.connections, constant_loss)?;
-        self.exact = Some(exact::ExactNetwork::new_prepared(
+        self.exact = Some(exact::ExactNetwork::new_prepared_with_relaxation(
             &self.models, &self.columns, &self.connections, self.mode_count(), self.dt, budget,
-            self.radiation.as_ref(), gate,
+            &self.relaxation_branches, self.radiation.as_ref(), gate,
         )?);
         poll(Some(gate))?;
         Ok(self)

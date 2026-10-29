@@ -31,7 +31,9 @@
 //! links use the same source network; unbound losses remain separate sinks.
 
 mod assembly;
+mod connection_heat;
 pub use assembly::{FrameThermoelasticBinding, FrameThermoelasticFrame};
+pub use connection_heat::{FrameConnectionHeat, FrameConnectionHeatDestination};
 
 use super::*;
 use crate::modal_acoustic_time::{ModalAcousticMode, ModalAcousticState, ModalAcousticTimeModel};
@@ -118,9 +120,12 @@ pub struct FrameThermoelasticReport {
     pub source: MaterialNetworkSample,
     pub members: Vec<FrameThermoelasticMemberState>,
     pub layers: Vec<FrameThermoelasticLayerExchange>,
+    /// Original non-frame connection losses routed into explicit caloric cells.
+    pub connection_heat: Vec<FrameConnectionHeat>,
     pub entropy: FrameThermoelasticEntropy,
     pub parameter_work_j: f64,
     pub reversible_heat_j: f64,
+    /// Source-frame damping plus explicitly routed connector losses, counted once.
     pub deposited_material_heat_j: f64,
     pub external_thermal_heat_j: f64,
     pub external_mechanical_loss_j: f64,
@@ -138,6 +143,7 @@ pub struct FrameThermoelasticSystem<'n, 'a> {
     frames: Vec<FrameThermoelasticFrame>,
     /// Sorted disjoint source-owned connection ranges, prepared once.
     owned_connections: Vec<core::ops::Range<usize>>,
+    connection_heat_destinations: Vec<FrameConnectionHeatDestination>,
     mechanical: CoupledModalSystem,
     prepared: PreparedMaterialNetwork<'n, 'a>,
     members: Vec<Member<'a>>,
@@ -631,6 +637,7 @@ impl FrameThermoelasticSystem<'_, '_> {
         let states = &self.states;
         let prepared = &self.prepared;
         let owned_connections = &self.owned_connections;
+        let connection_heat_destinations = &self.connection_heat_destinations;
         for (member, state) in members.iter().zip(states) {
             for (temperature, old) in temperatures(&member.region, thermal)?
                 .iter()
@@ -688,8 +695,22 @@ impl FrameThermoelasticSystem<'_, '_> {
                         works.push(work); losses.push(loss);
                     }
                 }
-                let outside = assembly::outside_loss(mechanical, frame, transfers,
-                    owned_connections, material_heat_j, controls.total_energy_tolerance_j, gate)?;
+                let loss_account = assembly::outside_loss(mechanical, frame, transfers,
+                    owned_connections, connection_heat_destinations, material_heat_j,
+                    controls.total_energy_tolerance_j, gate)?;
+                // These are actual connection losses, not spring work, an
+                // energy residual, or a second copy of source-frame damping.
+                for receipt in &loss_account.receivers {
+                    check(gate)?;
+                    let power = finite(receipt.heat_j / dt_heat)?;
+                    if receipt.heat_j > 0.0 && power == 0.0 {
+                        return Err(invalid("routed connection heat power underflow"));
+                    }
+                    let source = powers.entry(receipt.cell).or_insert(0.0);
+                    *source = finite(*source + power)?;
+                }
+                let material_heat_j = finite(material_heat_j + loss_account.routed_j)?;
+                let outside = loss_account.outside_j;
                 let (candidate, (), audit, entropy) = cell_driver_candidate_entropy_option(
                     thermal, target, controls.driver(), energy_guess_j,
                     |trial, _remaining| {
@@ -767,25 +788,36 @@ impl FrameThermoelasticSystem<'_, '_> {
                         }
                     }
                 }
+                // Frame/member order is physical reporting order, not native
+                // connection order. The original coefficient owner requires a
+                // strictly increasing batch, including noncontiguous frames.
+                check(gate)?;
+                updates.sort_unstable_by_key(|update| update.connection);
                 let update = mechanical.prepare_staged_connection_coefficients(&updates, gate)?;
                 let mut flat = 0;
                 for (index, member) in members.iter().enumerate() {
                     for layer in 0..member.region.receivers.len() {
                         let first = member.spring_start+3*layer;
-                        let native = sum(update.parameter_changes().iter()
-                            .filter(|p| p.connection >= first && p.connection < first+3)
-                            .map(|p| p.parameter_work_j))?;
+                        // Ordered native receipts locate one layer in O(log P)
+                        // rather than repeatedly scanning every assembly port.
+                        let all = update.parameter_changes();
+                        let entries = if all.is_empty() { all } else {
+                            let start = all.partition_point(|p| p.connection < first);
+                            let entries = all.get(start..start+3)
+                                .ok_or_else(|| invalid("native layer coefficient receipts are incomplete"))?;
+                            if entries.iter().enumerate().any(|(k, p)| p.connection != first+k) {
+                                return Err(invalid("native layer coefficient receipt addresses changed"));
+                            }
+                            entries
+                        };
+                        let native = sum(entries.iter().map(|p| p.parameter_work_j))?;
                         if finite(native-layers[flat].coefficient_free_energy_change_j)?.abs()
                             > controls.total_energy_tolerance_j {
                             return Err(invalid("native spring parameter work reached the wrong material layer"));
                         }
                         if !update.parameter_changes().is_empty() {
-                            let before = sum(update.parameter_changes().iter()
-                                .filter(|p| p.connection >= first && p.connection < first+3)
-                                .map(|p| p.free_energy_before_j))?;
-                            let after = sum(update.parameter_changes().iter()
-                                .filter(|p| p.connection >= first && p.connection < first+3)
-                                .map(|p| p.free_energy_after_j))?;
+                            let before = sum(entries.iter().map(|p| p.free_energy_before_j))?;
+                            let after = sum(entries.iter().map(|p| p.free_energy_after_j))?;
                             if finite(before-frozen[index].layers[layer].free_energy_j)?.abs()
                                 > controls.total_energy_tolerance_j
                                 || finite(after-next_states[index].layers[layer].free_energy_j)?.abs()
@@ -832,7 +864,7 @@ impl FrameThermoelasticSystem<'_, '_> {
                 };
                 let report = FrameThermoelasticReport {
                     mechanical: audit.electrical, thermal: audit.thermal, source, members: next_states.clone(),
-                    layers, entropy, parameter_work_j, reversible_heat_j,
+                    layers, connection_heat: loss_account.receivers, entropy, parameter_work_j, reversible_heat_j,
                     deposited_material_heat_j: audit.deposited_joule_j,
                     external_thermal_heat_j: external_heat, external_mechanical_loss_j: outside,
                     mechanical_internal_energy_before_j: internal_before,

@@ -6,6 +6,9 @@ use fs_render::volumes::transport::scattering::{
     MassScatteringSpectrum, PhaseFunction, ScatteringGrid,
 };
 
+#[path = "scattering/execution.rs"]
+mod execution;
+
 fn physical_grid<'a>(
     cx: &Cx<'_>,
     density: &'a [f64],

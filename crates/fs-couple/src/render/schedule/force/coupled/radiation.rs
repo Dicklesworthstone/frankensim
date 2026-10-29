@@ -84,8 +84,8 @@ impl CoupledModalSystem {
             return Err(invalid("complete acoustic/mechanical frequency bound exceeds Nyquist admission"));
         }
         let exact = if let Some(budget) = self.prepared_budget {
-            exact::ExactNetwork::new_prepared(&self.models, &self.columns, &self.connections,
-                self.mode_count(), self.dt, budget, Some(&binding), gate)?
+            exact::ExactNetwork::new_prepared_with_relaxation(&self.models, &self.columns, &self.connections,
+                self.mode_count(), self.dt, budget, &self.relaxation_branches, Some(&binding), gate)?
         } else {
             self.admit_augmented_setup(self.relaxation_branches.len(), 2*model.poles.len())?;
             exact::ExactNetwork::new_with_extensions(&self.models, &self.columns,

@@ -9,6 +9,12 @@ use super::*;
 use crate::volumes::transport::scattering::{FreeFlightSample, PhaseFunction, ScatteringGrid};
 use crate::volumes::transport::{AbsorbingGrid, VolumeTransportError};
 
+mod execution;
+pub use execution::{
+    render_absorbing_range_with_execution, render_absorbing_with_execution,
+    render_scattering_range_with_execution, render_scattering_with_execution,
+};
+
 /// Bit-affecting physical free-flight, phase and survival-aware MIS semantics.
 pub const SCATTERING_TRACER_SEMANTICS_VERSION: u32 = 1;
 
@@ -49,6 +55,26 @@ impl ScatteringFilm {
     pub fn into_film(self) -> Film {
         self.film
     }
+
+    fn checked_append(
+        &mut self,
+        medium: &ScatteringGrid<'_>,
+        settings: &Settings,
+        from: u32,
+        to: u32,
+    ) -> Result<&mut Film, TracerError> {
+        if to < from {
+            return Err(TracerError::InvalidRange { from, to });
+        }
+        if *settings != self.settings
+            || medium.content_identity() != self.medium_identity
+            || self.film.spp_done != from
+            || to > settings.spp
+        {
+            return Err(TracerError::InvalidInput);
+        }
+        Ok(&mut self.film)
+    }
 }
 
 /// Render coupled surface and multiple-scattering transport through a physical grid.
@@ -86,29 +112,13 @@ pub fn render_scattering_range(
     to: u32,
 ) -> Result<(), TracerError> {
     cx.checkpoint()?;
-    if to < from {
-        return Err(TracerError::InvalidRange { from, to });
-    }
-    if *settings != film.settings
-        || medium.content_identity() != film.medium_identity
-        || film.film.spp_done != from
-        || to > settings.spp
-    {
-        return Err(TracerError::InvalidInput);
-    }
-    let path_medium = if medium.is_vacuum() {
-        None
-    } else if medium.has_scattering() {
-        Some(PathMedium::Scattering(medium))
-    } else {
-        Some(PathMedium::Absorbing(medium.absorption_grid()))
-    };
+    let film = film.checked_append(medium, settings, from, to)?;
     render_medium_range(
         scene,
         cx,
         settings,
-        &mut film.film,
-        path_medium,
+        film,
+        scattering_medium(medium),
         medium.has_thermal_emission(),
         from,
         to,
@@ -119,6 +129,18 @@ pub fn render_scattering_range(
 pub(super) enum PathMedium<'view, 'field> {
     Absorbing(&'view AbsorbingGrid<'field>),
     Scattering(&'view ScatteringGrid<'field>),
+}
+
+fn scattering_medium<'view, 'field>(
+    medium: &'view ScatteringGrid<'field>,
+) -> Option<PathMedium<'view, 'field>> {
+    if medium.is_vacuum() {
+        None
+    } else if medium.has_scattering() {
+        Some(PathMedium::Scattering(medium))
+    } else {
+        Some(PathMedium::Absorbing(medium.absorption_grid()))
+    }
 }
 
 impl PathMedium<'_, '_> {
@@ -209,14 +231,7 @@ pub(super) fn render_medium_range(
     from: u32,
     to: u32,
 ) -> Result<(), TracerError> {
-    if medium.is_some() {
-        for primitive in &scene.primitives {
-            cx.checkpoint()?;
-            if matches!(primitive.material, Material::Dielectric { .. }) {
-                return Err(TracerError::VolumeDielectricUnsupported);
-            }
-        }
-    }
+    validate_medium_scene(scene, cx, medium)?;
     let lighting = validate_scene_with_medium_emission(scene, cx, None, has_emission)?;
     if from == to {
         return Ok(());
@@ -273,6 +288,22 @@ pub(super) fn render_medium_range(
     film.xyz = staged;
     film.spp_done = to;
     film.time_mode = FilmTimeMode::Static;
+    Ok(())
+}
+
+fn validate_medium_scene(
+    scene: &Scene,
+    cx: &Cx<'_>,
+    medium: Option<PathMedium<'_, '_>>,
+) -> Result<(), TracerError> {
+    if medium.is_some() {
+        for primitive in &scene.primitives {
+            cx.checkpoint()?;
+            if matches!(primitive.material, Material::Dielectric { .. }) {
+                return Err(TracerError::VolumeDielectricUnsupported);
+            }
+        }
+    }
     Ok(())
 }
 

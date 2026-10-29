@@ -11695,3 +11695,75 @@ ordinary body-profile path, including in the Lab. This makes finer source
 meshes admissible without raising the exact structural owner capacity or
 discarding material history. Manufactured cantilever data, fixed thermal state,
 flat-plate geometry and finite modes remain explicit qualification limits.
+
+## Native elastic connections with resolved adhesive stick/slip
+
+`contact::adhesive_elastic_events::AdhesiveElasticEventModalSystem` binds the
+original elastic event law to one actual native spring/damper connection and
+its complete signed column. Original free body modes, rest extension, stiffness
+and Kelvin-Voigt resistance are retained. This exact scalar reduction preserves
+common motion while actual spring loading changes the adhesive stopping and
+restart history. Normal indentation and the original anchor remain fixed;
+external modal forces may change each sample.
+
+The original free and connected event adapters share preallocated native
+impulse/time-moment propagation and native account staging. Actual represented
+body travel, spring extension and endpoint velocity are checked against the
+original event path. Independent integrated total-reaction work closes spring
+storage, physical damper loss and junction loss. Original connection ports
+retain their actual spring/damper work; friction crosses the body-network
+boundary once. Numerical propagation uncertainty must fit inside the combined
+energy budget. Full-sample passive force bounds preserve original connection
+limits, and rejected steps publish neither body nor contact history.
+
+Six focused native tests check independent connected-oscillator and dashpot
+solutions, original ports, stop/hold/restart, center-of-mass motion, numerical
+work accuracy and atomic
+retry; all six prior free-body event tests also pass. Arbitrary connection
+networks, elastic component modes, moving anchors in this native adapter,
+normal inertia and vector-slip events remain outside this reduction.
+
+## Native liquid adhesion between unlike wetting surfaces
+
+`capillary::AsymmetricContactLineCapillaryModalSystem::new_asymmetric_contact_line`
+uses the same original native mechanical transaction as the symmetric and
+axisymmetric bridge adapters. Actual moving bodies and prescribed/external
+loads exchange work with both original footprint histories. Ordered source
+identities, each surface's viscous/pinning losses and the source's numerical
+force/work uncertainty remain in the accepted frame.
+
+Final constitutive replay uses actual mechanical gap and the original accepted
+two-footprint state. Body state, both footprints, physical gap, clock and frame
+publish jointly after all existing source, force, compatibility, energy and
+cancellation gates. Six new native tests cover asymmetric response, independent
+pinning, actual source exchange, reciprocal work/momentum and late accuracy
+rollback. The five symmetric-wetting and six existing planar/axisymmetric
+native tests also pass. The liquid owner remains a connected planar bridge;
+topology release and a thermal recipient are not inferred.
+
+## Friction while adhesive cohesion is only partially damaged
+
+`cohesive_contact::frictional_damage::DamageFrictionLoadLine` adds an explicit
+damaged-area rigid-Coulomb specialization: surviving bonds retain the original
+cohesive/viscous traction, while damaged area carries independently sourced
+compression-only friction. The original material path analytically integrates
+damage times compression pressure through initiation, reversals and failure.
+It is queried through `trial_over_time_with_damage_weighted_compression`; damage
+is not frozen at an endpoint or advanced a second time.
+
+This declared mixture adds no elastic friction storage. Original compression,
+bond energy, fracture dissipation and physical viscosity keep their existing
+ownership; friction adds a separate nonnegative loss. The full reciprocal
+normal/two-tangent compliance and original cohesive Newton solve remain active
+under one aggregate material-evaluation budget. This is a rigid-friction member
+of a damage/friction model family, not the full elastic-slip Alfano-Sacco law.
+
+`CohesiveModalSystem::enable_frictional_damage` retains original bodies, sources,
+clock and canonical damage history. The final audit uses actual body motion
+and endpoint velocity before joint publication. Partial-damage friction and
+the older full-failure reclosure mode are mutually exclusive. Three material
+and eight core/native tests cover independent quadrature/work, evolving damage,
+intact/open/failed limits, source effects, 5/10/20/40-kHz refinement, kinetic
+occupancy and atomic retry. Nine original reclosure tests also pass. Sources
+and frames remain fixed; global softening uniqueness and intrastep event
+resolution are not asserted by this held-force path.

@@ -255,13 +255,14 @@ impl CoupledModalSystem {
         }
         let radiation = refreshed_radiation.as_ref().or(self.radiation.as_ref());
         let exact = if let Some(budget) = self.prepared_budget {
-            Some(exact::ExactNetwork::new_prepared(
+            Some(exact::ExactNetwork::new_prepared_with_relaxation(
                 &self.models,
                 &self.columns,
                 &connections,
                 self.mode_count(),
                 self.dt,
                 budget,
+                &self.relaxation_branches,
                 radiation,
                 gate,
             )?)

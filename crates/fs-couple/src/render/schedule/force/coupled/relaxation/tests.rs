@@ -166,52 +166,63 @@ fn friction(network: CoupledModalSystem) -> FrictionModalSystem {
 #[test]
 fn friction_and_acceleration_pressure_see_the_same_material_reaction() {
     let gate = CancelGate::new_clock_free();
-    let mut owner = friction(mechanical(48_000, 100.0, 1e-4))
-        .with_acceleration_pressure(vec![2.0]).unwrap()
-        .with_material_relaxation(vec![arm(vec![1.0, 0.0], 4e6, 0.001)],
-            Some(vec![0.0]), &gate).unwrap();
-    for _ in 0..8 {
-        let frame = *owner.step(&[0.03], FrictionDrive { speed_m_s: 0.04, normal_force_n: 0.2 }).unwrap();
-        let state = owner.components()[0].states()[0];
-        let material_force = -2000.0*(2000.0*state.displacement_m_sqrt_kg-owner.material_memory()[0]);
-        let acceleration = 0.03 + frame.traction_n + material_force - 1e4*state.displacement_m_sqrt_kg;
-        close(frame.observer_pressure_pa, 2.0*acceleration);
-        close(frame.network_energy_j, owner.total_energy_j().unwrap());
-        assert!(owner.coupled_frame().unwrap().material_dissipation_j > 0.0);
-        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+    for prepared in [false, true] {
+        let network = mechanical(48_000, 100.0, 1e-4);
+        let network = if prepared { network.with_prepared_linear_propagation(PreparedModalBudget {
+            max_modes: 1, max_dense_bytes: 8 * 1024 * 1024, max_multiply_terms: 1_000_000_000,
+        }, &gate).unwrap() } else { network };
+        let mut owner = friction(network)
+            .with_acceleration_pressure(vec![2.0]).unwrap()
+            .with_material_relaxation(vec![arm(vec![1.0, 0.0], 4e6, 0.001)],
+                Some(vec![0.0]), &gate).unwrap();
+        for _ in 0..8 {
+            let frame = *owner.step(&[0.03], FrictionDrive { speed_m_s: 0.04, normal_force_n: 0.2 }).unwrap();
+            let state = owner.components()[0].states()[0];
+            let material_force = -2000.0*(2000.0*state.displacement_m_sqrt_kg-owner.material_memory()[0]);
+            let acceleration = 0.03 + frame.traction_n + material_force - 1e4*state.displacement_m_sqrt_kg;
+            close(frame.observer_pressure_pa, 2.0*acceleration);
+            close(frame.network_energy_j, owner.total_energy_j().unwrap());
+            assert!(owner.coupled_frame().unwrap().material_dissipation_j > 0.0);
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        }
     }
 }
 
 #[test]
 fn refused_pressure_and_cancelled_trials_retain_memory_and_retry_identically() {
-    let make = || {
-        let mut network = mechanical(48_000, 100.0, 0.0);
-        network.config.maximum_abs_pressure_pa = 0.001;
-        friction(network).with_material_relaxation(vec![arm(vec![1.0, 0.0], 4e4, 0.002)],
-            None, &CancelGate::new_clock_free()).unwrap()
-            .with_acceleration_pressure(vec![2.0]).unwrap()
-    };
-    let (mut owner, mut clean) = (make(), make());
-    let released = FrictionDrive { speed_m_s: 0.0, normal_force_n: 0.0 };
-    owner.step(&[0.0], released).unwrap();
-    clean.step(&[0.0], released).unwrap();
-    let before = owner.components()[0].states().to_vec();
-    let memory = owner.material_memory().to_vec();
-    let frame = *owner.last_frame().unwrap();
-    assert!(owner.step(&[10.0], released).is_err()); // fails after the z candidate exists
-    assert_eq!(owner.components()[0].states(), before);
-    assert_eq!(owner.material_memory(), memory);
-    assert_eq!(owner.last_frame(), Some(&frame));
-    assert_eq!(owner.samples_rendered(), 1);
-    let gate = CancelGate::new_clock_free();
-    gate.request();
-    assert!(owner.step_under_gate(&[1e-6], released, &gate).is_err());
-    assert_eq!(owner.material_memory(), memory);
-    let retry = *owner.step(&[1e-6], released).unwrap();
-    let expected = *clean.step(&[1e-6], released).unwrap();
-    assert_eq!(retry, expected);
-    assert_eq!(owner.material_memory(), clean.material_memory());
-    assert_eq!(owner.components()[0].states(), clean.components()[0].states());
+    for prepared in [false, true] {
+        let make = || {
+            let mut network = mechanical(48_000, 100.0, 0.0);
+            network.config.maximum_abs_pressure_pa = 0.001;
+            let network = if prepared { network.with_prepared_linear_propagation(PreparedModalBudget {
+                max_modes: 1, max_dense_bytes: 8 * 1024 * 1024, max_multiply_terms: 1_000_000_000,
+            }, &CancelGate::new_clock_free()).unwrap() } else { network };
+            friction(network).with_material_relaxation(vec![arm(vec![1.0, 0.0], 4e4, 0.002)],
+                None, &CancelGate::new_clock_free()).unwrap()
+                .with_acceleration_pressure(vec![2.0]).unwrap()
+        };
+        let (mut owner, mut clean) = (make(), make());
+        let released = FrictionDrive { speed_m_s: 0.0, normal_force_n: 0.0 };
+        owner.step(&[0.0], released).unwrap();
+        clean.step(&[0.0], released).unwrap();
+        let before = owner.components()[0].states().to_vec();
+        let memory = owner.material_memory().to_vec();
+        let frame = *owner.last_frame().unwrap();
+        assert!(owner.step(&[10.0], released).is_err()); // fails after the z candidate exists
+        assert_eq!(owner.components()[0].states(), before);
+        assert_eq!(owner.material_memory(), memory);
+        assert_eq!(owner.last_frame(), Some(&frame));
+        assert_eq!(owner.samples_rendered(), 1);
+        let gate = CancelGate::new_clock_free();
+        gate.request();
+        assert!(owner.step_under_gate(&[1e-6], released, &gate).is_err());
+        assert_eq!(owner.material_memory(), memory);
+        let retry = *owner.step(&[1e-6], released).unwrap();
+        let expected = *clean.step(&[1e-6], released).unwrap();
+        assert_eq!(retry, expected);
+        assert_eq!(owner.material_memory(), clean.material_memory());
+        assert_eq!(owner.components()[0].states(), clean.components()[0].states());
+    }
 }
 
 #[test]
@@ -264,7 +275,7 @@ fn component_extension_and_nonlinear_reactions_keep_original_material_history() 
 }
 
 #[test]
-fn no_memory_is_unchanged_and_augmented_capacity_setup_and_prepared_refusals_are_explicit() {
+fn no_memory_is_unchanged_and_augmented_capacity_setup_limits_remain_explicit() {
     let gate = CancelGate::new_clock_free();
     let branch = || arm(vec![1.0, 0.0], 100.0, 0.002);
     let mut plain = mechanical(48_000, 100.0, 1e-4);
@@ -287,10 +298,12 @@ fn no_memory_is_unchanged_and_augmented_capacity_setup_and_prepared_refusals_are
         max_multiply_terms: 1_000_000_000 };
     let material = mechanical(48_000, 100.0, 0.0)
         .with_material_relaxation(vec![branch()], None, &gate).unwrap();
-    assert!(material.with_prepared_linear_propagation(budget, &gate).is_err());
+    let material = material.with_prepared_linear_propagation(budget, &gate).unwrap();
+    assert_eq!(material.material_memory().len(), 1);
     let prepared = mechanical(48_000, 100.0, 0.0)
         .with_prepared_linear_propagation(budget, &gate).unwrap();
-    assert!(prepared.with_material_relaxation(vec![branch()], None, &gate).is_err());
+    let prepared = prepared.with_material_relaxation(vec![branch()], None, &gate).unwrap();
+    assert_eq!(prepared.material_memory(), material.material_memory());
     for bad in [arm(vec![1.0, 1.0], 1.0, 0.001),
         arm(vec![1.0, 0.0], 1.0, 0.0), arm(vec![1.0, 0.0], 1e12, 0.001)] {
         assert!(mechanical(48_000, 100.0, 0.0).with_material_relaxation(vec![bad], None, &gate).is_err());

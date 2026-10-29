@@ -131,7 +131,9 @@ mod thermal_lighting;
 pub use absorbing::{AbsorbingFilm, render_absorbing, render_absorbing_range};
 #[cfg(feature = "volumes")]
 pub use scattering::{
-    SCATTERING_TRACER_SEMANTICS_VERSION, ScatteringFilm, render_scattering, render_scattering_range,
+    SCATTERING_TRACER_SEMANTICS_VERSION, ScatteringFilm, render_absorbing_range_with_execution,
+    render_absorbing_with_execution, render_scattering, render_scattering_range,
+    render_scattering_range_with_execution, render_scattering_with_execution,
 };
 mod transport;
 
@@ -3863,6 +3865,8 @@ struct ParallelRenderKernel<'run, 'assets> {
     sample_counts: Option<&'run [u32]>,
     shutter: Option<ShutterInterval>,
     camera_path: CameraPath<'assets>,
+    #[cfg(feature = "volumes")]
+    medium: Option<PathMedium<'run, 'assets>>,
     sobol: Option<&'run Sobol>,
     path_sobol: Option<&'run Sobol>,
     compute_ns: &'run AtomicU64,
@@ -3945,7 +3949,7 @@ impl ParallelRenderKernel<'_, '_> {
                         atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
                         return ControlFlow::Break(Cancelled);
                     }
-                    let sample_xyz = match trace_pixel_sample(
+                    let sample_xyz = match trace_pixel_sample_with_primary_and_medium(
                         self.scene,
                         self.lighting,
                         cx,
@@ -3958,8 +3962,11 @@ impl ParallelRenderKernel<'_, '_> {
                         sample,
                         self.shutter,
                         self.camera_path,
+                        false,
+                        #[cfg(feature = "volumes")]
+                        self.medium,
                     ) {
-                        Ok(sample_xyz) => sample_xyz,
+                        Ok(sample) => sample.xyz,
                         Err(TracerError::Cancelled) => {
                             atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
                             return ControlFlow::Break(Cancelled);
@@ -3972,6 +3979,11 @@ impl ParallelRenderKernel<'_, '_> {
                     xyz[0] += sample_xyz[0];
                     xyz[1] += sample_xyz[1];
                     xyz[2] += sample_xyz[2];
+                    if xyz.iter().any(|channel| !channel.is_finite()) {
+                        atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
+                        return self
+                            .fail(tile, RenderTileFailure::Tracer(TracerError::InvalidInput));
+                    }
                 }
                 pixels.push(xyz);
             }
@@ -5548,13 +5560,47 @@ fn render_range_parallel_impl<R: RenderPoolRunner>(
     execution: &RenderExecutionConfig,
     runner: &R,
 ) -> Result<ParallelRenderResult, RenderExecutionError> {
+    render_range_parallel_with_medium_impl(
+        scene,
+        cx,
+        settings,
+        base_film,
+        sample_plan,
+        from,
+        to,
+        shutter,
+        camera_path,
+        execution,
+        runner,
+        #[cfg(feature = "volumes")]
+        None,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn render_range_parallel_with_medium_impl<R: RenderPoolRunner>(
+    scene: &Scene,
+    cx: &Cx<'_>,
+    settings: &Settings,
+    base_film: Option<&Film>,
+    sample_plan: Option<&IndependentPilotSamplePlan>,
+    from: u32,
+    to: u32,
+    shutter: Option<ShutterInterval>,
+    camera_path: CameraPath<'_>,
+    execution: &RenderExecutionConfig,
+    runner: &R,
+    #[cfg(feature = "volumes")] medium: Option<PathMedium<'_, '_>>,
+    has_medium_emission: bool,
+) -> Result<ParallelRenderResult, RenderExecutionError> {
     let setup_started = Instant::now();
     if sample_plan.is_some() && (base_film.is_some() || from != 0 || to != settings.spp) {
         return Err(RenderExecutionError::Internal(
             "fixed sample plan is valid only for a fresh complete production render",
         ));
     }
-    let (lighting, requested_mode) = preflight_render(
+    let (lighting, requested_mode) = preflight_render_with_medium_emission(
         scene,
         cx,
         settings,
@@ -5563,6 +5609,7 @@ fn render_range_parallel_impl<R: RenderPoolRunner>(
         to,
         shutter,
         camera_path,
+        has_medium_emission,
     )?;
     let layout = RenderTileLayout::try_new(
         settings.width,
@@ -5692,6 +5739,8 @@ fn render_range_parallel_impl<R: RenderPoolRunner>(
         sample_counts: sample_plan.map(IndependentPilotSamplePlan::sample_counts),
         shutter,
         camera_path,
+        #[cfg(feature = "volumes")]
+        medium,
         sobol: sobol.as_ref(),
         path_sobol: path_sobol.as_ref(),
         compute_ns: &compute_ns,
@@ -9412,6 +9461,42 @@ fn trace_pixel_sample_with_primary(
     camera_path: CameraPath<'_>,
     capture_primary: bool,
 ) -> Result<PathTraceSample, TracerError> {
+    trace_pixel_sample_with_primary_and_medium(
+        scene,
+        lighting,
+        cx,
+        settings,
+        kn,
+        sobol,
+        path_sobol,
+        key,
+        pixel,
+        sample,
+        shutter,
+        camera_path,
+        capture_primary,
+        #[cfg(feature = "volumes")]
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn trace_pixel_sample_with_primary_and_medium(
+    scene: &Scene,
+    lighting: &AdmittedLighting<'_>,
+    cx: &Cx<'_>,
+    settings: &Settings,
+    kn: f64,
+    sobol: Option<&Sobol>,
+    path_sobol: Option<&Sobol>,
+    key: [u32; 2],
+    pixel: u32,
+    sample: u32,
+    shutter: Option<ShutterInterval>,
+    camera_path: CameraPath<'_>,
+    capture_primary: bool,
+    #[cfg(feature = "volumes")] medium: Option<PathMedium<'_, '_>>,
+) -> Result<PathTraceSample, TracerError> {
     // Pool seeds control scheduling/placement only. Bind downstream chart,
     // camera, and intersection work to the public render seed while retaining
     // the executor's logical tile/iteration and refusal routing.
@@ -9444,7 +9529,7 @@ fn trace_pixel_sample_with_primary(
         }
         None => None,
     };
-    trace_path(
+    trace_path_with_medium(
         scene,
         lighting,
         &render_cx,
@@ -9460,6 +9545,8 @@ fn trace_pixel_sample_with_primary(
         capture_primary,
         path_sobol,
         None,
+        #[cfg(feature = "volumes")]
+        medium,
     )
 }
 
@@ -14816,6 +14903,31 @@ fn preflight_render<'a>(
     shutter: Option<ShutterInterval>,
     camera_path: CameraPath<'_>,
 ) -> Result<(AdmittedLighting<'a>, FilmTimeMode), TracerError> {
+    preflight_render_with_medium_emission(
+        scene,
+        cx,
+        settings,
+        film,
+        from,
+        to,
+        shutter,
+        camera_path,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn preflight_render_with_medium_emission<'a>(
+    scene: &'a Scene,
+    cx: &Cx<'_>,
+    settings: &Settings,
+    film: Option<&Film>,
+    from: u32,
+    to: u32,
+    shutter: Option<ShutterInterval>,
+    camera_path: CameraPath<'_>,
+    has_medium_emission: bool,
+) -> Result<(AdmittedLighting<'a>, FilmTimeMode), TracerError> {
     cx.checkpoint()?;
     let expected_len = checked_pixel_len(settings.width, settings.height)?;
     if to < from {
@@ -14833,7 +14945,7 @@ fn preflight_render<'a>(
     } else if from != 0 {
         return Err(TracerError::InvalidInput);
     }
-    let lighting = validate_scene(scene, cx, shutter)?;
+    let lighting = validate_scene_with_medium_emission(scene, cx, shutter, has_medium_emission)?;
     cx.checkpoint()?;
     Ok((lighting, requested_mode))
 }

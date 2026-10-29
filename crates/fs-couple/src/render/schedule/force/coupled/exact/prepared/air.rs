@@ -68,8 +68,8 @@ pub(super) struct AirStep {
 impl PreparedAir {
     /// The bytes this bank keeps beside the network: port rows and responses, the exchange and its factor, the coupling
     /// and every pole's step.
-    pub(super) fn dense_entries(count: usize, ports: usize, poles: usize) -> Option<usize> {
-        let rows = ports.checked_mul(count.checked_mul(3)?)?;
+    pub(super) fn dense_entries(count: usize, memory: usize, ports: usize, poles: usize) -> Option<usize> {
+        let rows = ports.checked_mul(count.checked_mul(3)?.checked_add(memory)?)?;
         let response = count.checked_mul(ports)?;
         let square = ports.checked_mul(ports)?.checked_mul(4)?;
         let coupling = poles.checked_mul(ports)?;
@@ -86,11 +86,11 @@ impl PreparedAir {
     }
 
     pub(super) fn new(
-        binding: &radiation::Binding, count: usize, dt: f64, weights: &[f64], transition: &[f64], gate: &CancelGate,
+        binding: &radiation::Binding, count: usize, memory: usize, dt: f64, weights: &[f64], transition: &[f64], gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
         poll(Some(gate))?;
         let model = &binding.model;
-        let (ports, d) = (model.ports, 3 * count);
+        let (ports, d) = (model.ports, 3 * count + memory);
         if model.poles.is_empty() || model.poles.len() > MAX_PREPARED_AIR_POLES || binding.source_modes.len() != ports
             || binding.source_modes.iter().any(|&mode| mode >= count) || weights.len() != count
             || transition.len() != d * d {
@@ -124,7 +124,7 @@ impl PreparedAir {
         let mut port_response = vec![0.0; count * ports];
         for i in 0..count {
             for (k, &mode) in sources.iter().enumerate() {
-                port_response[i * ports + k] = finite(transition[2 * i * d + 2 * count + mode] / weights[i])?;
+                port_response[i * ports + k] = finite(transition[2 * i * d + 2 * count + memory + mode] / weights[i])?;
             }
         }
         // D: each pole's displacement per unit held drive over the step.

@@ -19,6 +19,9 @@ use fs_contact::normal_patch::dmt::{DmtError, SourceDmtSphereContact};
 use fs_exec::CancelGate;
 use fs_matdb::MaterialStateId;
 
+pub(super) mod native;
+use native::{EventNativeAccount, projected_velocity, stage_account, stage_motion};
+
 #[derive(Debug)]
 pub enum AdhesiveEventModalError {
     Network(ModalCouplingError),
@@ -289,54 +292,26 @@ impl<'a> AdhesiveEventModalSystem<'a> {
         )?;
         let impulse = path.friction_impulse_n_s;
         let moment = path.friction_time_moment_n_s2;
-        let position_impulse = finite(dt * impulse - moment)?;
-        let mut after = 0.0;
-        for (k, old) in self
-            .network
-            .models
-            .iter()
-            .flat_map(|m| m.states())
-            .enumerate()
-        {
-            let increment = finite(
-                dt * old.velocity_m_sqrt_kg_per_s + 0.5 * dt * dt * external[k]
-                    - self.column[k] * position_impulse,
-            )?;
-            let next = ModalAcousticState {
-                displacement_m_sqrt_kg: finite(old.displacement_m_sqrt_kg + increment)?,
-                velocity_m_sqrt_kg_per_s: finite(
-                    old.velocity_m_sqrt_kg_per_s + dt * external[k] - self.column[k] * impulse,
-                )?,
-            };
-            // Recompute actual represented displacement, rather than trusting
-            // an increment that may be lost when added to a large coordinate.
-            self.network.old_q[k] = old.displacement_m_sqrt_kg;
-            self.network.free_delta[k] =
-                finite(next.displacement_m_sqrt_kg - old.displacement_m_sqrt_kg)?;
-            after = finite(after + 0.5 * next.velocity_m_sqrt_kg_per_s.powi(2))?;
-            self.candidate_states[k] = next;
-        }
-        for i in 0..self.network.models.len() {
-            poll(Some(gate))?;
-            self.network.candidates[i]
-                .restore_states(
-                    &self.candidate_states[self.network.offsets[i]..self.network.offsets[i + 1]],
-                )
-                .map_err(|source| ModalCouplingError::Component {
-                    component: i,
-                    source,
-                })?;
-        }
+        let motion = stage_motion(
+            &mut self.network,
+            &mut self.candidate_states,
+            &self.column,
+            external,
+            impulse,
+            moment,
+            gate,
+        )?;
+        let after = motion.modal_energy_j;
         let coordinate_residual = compatible(
             "actual tangent increment",
-            dot(&self.column, &self.network.free_delta)?,
+            motion.tangent_increment_m,
             path.tangent_increment_m,
             self.config.coordinate_absolute_tolerance_m,
             self.config.coordinate_relative_tolerance,
         )?;
         let velocity_residual = compatible(
             "actual endpoint relative velocity",
-            projected_velocity(&self.network.candidates, &self.column)?,
+            motion.tangent_velocity_m_s,
             path.state().tangent_velocity_m_s(),
             self.config.velocity_absolute_tolerance_m_s,
             self.config.velocity_relative_tolerance,
@@ -352,15 +327,8 @@ impl<'a> AdhesiveEventModalSystem<'a> {
             finite(after + surface_after)?.abs(),
             self.network.config.maximum_total_energy_j,
         )?;
-        let external_work = dot(external, &self.network.free_delta)?;
-        // Independent exact work on the actual native trajectory:
-        // v_rel(t)=v0+a*t-(B·B)*I(t), ∫F I dt=J²/2.
-        // This retains common motion in the body energy and never infers work
-        // from a zero net slip or manufactures a residual-energy correction.
-        let friction_work = finite(
-            -v0 * impulse - acceleration * moment
-                + 0.5 * dot(&self.column, &self.column)? * impulse * impulse,
-        )?;
+        let external_work = motion.external_work_j;
+        let friction_work = motion.reaction_work_j;
         let mechanical_work = finite(external_work + friction_work)?;
         let native_residual = finite(after - before - mechanical_work)?;
         let friction_residual = finite(friction_work + path.friction_dissipation_j)?;
@@ -391,31 +359,17 @@ impl<'a> AdhesiveEventModalSystem<'a> {
                 .into());
             }
         }
-        let frame = &mut self.network.staged_frame;
-        frame.sample = sample;
-        frame.observer_pressure_pa = 0.0;
-        frame.modal_energy_j = after;
-        frame.connection_energy_j = 0.0;
-        frame.material_energy_j = 0.0;
-        frame.radiation_energy_j = 0.0;
-        frame.external_work_j = mechanical_work;
-        frame.component_dissipation_j = 0.0;
-        frame.connection_dissipation_j = 0.0;
-        frame.material_dissipation_j = 0.0;
-        frame.radiation_dissipation_j = 0.0;
-        frame.energy_residual_j = native_residual;
-        frame.energy_tolerance_j = tolerance;
-        frame.solve_relative_residual = 0.0;
-        self.network.staged_ports.accept(
-            crate::port_adoption::StepAccount {
-                tick: sample,
-                duration_s: dt,
-                storage_change_j: Some(after - before),
-                loss_j: Some(0.0),
-                included_work_j: mechanical_work,
-                entropy_change_j_k: 0.0,
-                tolerance_j: Some(tolerance),
-                unavailable: None,
+        stage_account(
+            &mut self.network,
+            EventNativeAccount {
+                sample,
+                energy_before_j: before,
+                modal_energy_j: after,
+                connection_energy_j: 0.0,
+                connection_dissipation_j: 0.0,
+                work_j: mechanical_work,
+                residual_j: native_residual,
+                tolerance_j: tolerance,
             },
             [],
         );
@@ -443,20 +397,7 @@ impl<'a> AdhesiveEventModalSystem<'a> {
     }
 }
 
-fn projected_velocity(
-    models: &[ModalAcousticTimeModel],
-    column: &[f64],
-) -> Result<f64, ModalCouplingError> {
-    models
-        .iter()
-        .flat_map(|m| m.states())
-        .zip(column)
-        .try_fold(0.0, |v, (state, b)| {
-            finite(v + b * state.velocity_m_sqrt_kg_per_s)
-        })
-}
-
-fn compatible(
+pub(super) fn compatible(
     what: &'static str,
     actual: f64,
     expected: f64,
