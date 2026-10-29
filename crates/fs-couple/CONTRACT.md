@@ -10612,3 +10612,41 @@ continued accepted state. Regressions include nested work limits, late
 cancellation, source-domain exits, mixed old/new endpoint refusal, conductivity
 applicability, and Cp/rho/latent-heat response/applicability guards with a valid
 ordinary melting-chart control.
+
+## Complete Kelvin-Maxwell plane-stress dynamics
+
+`PlaneStressPoint` admits the original Kelvin tensor when its normal block is
+positive definite, retaining three massless normal-strain coordinates after all
+six coordinates of each Maxwell branch. The normal traction constraint is
+(D_{nn}\dot e_n=-H_{e_n}-D_{nu}\dot u). Its exact elimination contributes a
+skew momentum/normal-strain coupling, normal resistance (D_{nn}^{-1}), and
+in-plane resistance (D_{uu}-D_{un}D_{nn}^{-1}D_{nu}). The latter is assembled
+as a congruence through the existing material factor projection, never by
+subtracting large loss matrices or fitting modal damping. The existing complete
+port-Hamiltonian exact-ZOH owner integrates mechanics, internal history, source
+work and heat with either diagonal or consistent physical inertia.
+
+Purely in-plane Kelvin viscosity keeps the existing algebraic normal-strain
+condensation and history layout. Zero Kelvin viscosity is unchanged. A nonzero
+singular normal-viscosity block explicitly refuses; no normal inertia, penalty,
+pseudoinverse, eigenvalue clipping, branch deletion or substituted material law
+is introduced. Membrane capacity includes every retained normal strain before
+point preparation. A nonzero instantaneous displacement jump with normal
+Kelvin viscosity has no finite-work prehistory and refuses; relaxed
+initialization and a zero-displacement virgin history are admitted.
+
+Accepted-history traction uses actual velocity and includes the original elastic,
+Maxwell and Kelvin stress. The velocity-free point traction API refuses when
+normal Kelvin viscosity is active. Strain-domain, cancellation and accepted-state
+publication remain owned by the existing material history.
+The pure-Maxwell `PlaneStressRelaxation` image explicitly refuses nonzero Kelvin
+viscosity; complete Kelvin evolution remains available through the original body.
+
+Three new regressions cover full-mass dynamics against independently integrated
+physical traction-rate equations, force work and Kelvin/Maxwell heat; the
+analytic purely in-plane damped oscillator; and quadrature subdivision,
+initialization/capacity refusals and cancellation. Together with the existing
+plane-stress, exact relaxation-image and membrane checks, the focused native
+target passes 20 tests.
+This establishes these bounded linear-kinematic material equations, not a
+general singular DAE, finite-strain shell or full-workspace qualification.

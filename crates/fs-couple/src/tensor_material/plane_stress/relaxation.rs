@@ -23,12 +23,17 @@ impl PlaneStressPoint {
     /// truncated. The complete energy reconstruction must pass at 1e-9 relative
     /// diagonal scale. Cancellation is polled before/after the bounded dense
     /// eigensolve; interruption within that low-level call is not promised.
+    /// Kelvin viscosity remains in the complete body evolution; this pure
+    /// Maxwell image cannot silently discard its normal-rate or dashpot terms.
     pub fn relaxation_image(
         self,
         max_scalar_terms: usize,
         gate: &CancelGate,
     ) -> Result<PlaneStressRelaxation> {
         poll(gate)?;
+        if self.source.viscosity_matrix().iter().any(|v| *v != 0.0) {
+            return Err(bad("Kelvin plane-stress viscosity is not a pure Maxwell relaxation image"));
+        }
         let n = self.coordinates;
         let r = self.memory_coordinates();
         let m = n + r;
@@ -47,7 +52,7 @@ impl PlaneStressPoint {
         for i in 0..n {
             poll(gate)?;
             t[i][i] = 1.0;
-            let rhs =
+            let rhs: [f64; 3] =
                 core::array::from_fn(|k| -self.source.equilibrium_stiffness()[(n + k) * d + i]);
             let normal = normal_solve(self.source.equilibrium_stiffness(), d, n, &rhs)?;
             t[i][n..].copy_from_slice(&normal);

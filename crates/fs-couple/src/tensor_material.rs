@@ -83,6 +83,8 @@ pub enum InitialMemory {
     Relaxed,
     /// Instantaneous jump from a zero-strain relaxed material. Full-3D points
     /// initialize spring z_j=A_j*u; plane-stress points initialize viscous a_j=0.
+    /// With normal Kelvin viscosity, a nonzero displacement jump has no finite
+    /// work and refuses; relaxed displacement or a virgin zero state is admitted.
     Instantaneous,
 }
 
@@ -221,6 +223,7 @@ impl TensorMaterialBody {
         }
         for (point,&offset) in self.plane_points.iter().zip(&self.plane_offsets) {
             poll(gate)?;
+            point.admit_initial_memory(displacement_m,memory)?;
             // Plane-stress memory stores viscous coordinates a, not spring z.
             // Instantaneous deformation has a=0; relaxed deformation has a=B e.
             if memory==InitialMemory::Relaxed {
@@ -269,7 +272,8 @@ pub struct TensorMaterialHistory<'a> {
 }
 impl TensorMaterialHistory<'_> {
     /// Read-only [displacement, momentum, material coordinates]. Full-3D
-    /// points use spring z; plane-stress points use viscous a coordinates.
+    /// points use spring z; plane-stress points use viscous a coordinates, then
+    /// three normal tensor strains per point when normal Kelvin viscosity acts.
     pub fn state(&self)->&[f64] {&self.state}
     /// Accepted physical displacements [m].
     pub fn displacement_m(&self)->&[f64] {&self.state[..self.body.coordinates()]}

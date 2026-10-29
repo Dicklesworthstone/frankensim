@@ -1,9 +1,11 @@
-//! Exact algebraic plane-stress elimination of the COMPLETE Maxwell energy.
+//! Exact plane-stress evolution of the COMPLETE Kelvin-Maxwell material.
 //!
 //! Let e=(e_parallel,e_normal) and a_j be the viscous Gram coordinates.
 //! H=V e^T C_eq e/2 + sum |sqrt(V) B_j e-a_j|^2/2.
-//! Zero normal traction minimizes this energy over the three normal strains.
-//! It is one coupled Schur complement, NOT one condensation per Prony branch.
+//! Without normal viscosity, zero normal traction minimizes this energy over
+//! the three normal strains in one coupled Schur complement. With positive
+//! definite normal Kelvin viscosity, those strains remain massless dynamic
+//! coordinates and satisfy the complete traction-rate constraint instead.
 //! The retained a_j obey a_j' = -(1/tau_j) dH/da_j. Coupling this energy to
 //! physical inertia therefore uses the original fs-phs J/R/Q/G integrator.
 //! All six coordinates per branch survive, including zero/dependent rows.
@@ -18,9 +20,9 @@ pub use relaxation::PlaneStressRelaxation;
 /// One homogeneous material quadrature contribution under local z-plane stress.
 /// In-plane columns are [epsilon_xx,epsilon_yy,gamma_xy] per displacement [1/m].
 /// Normal epsilon_zz,epsilon_yz,epsilon_zx are reconstructed at EVERY state.
-/// A fixed material orientation must be applied before construction. Nonzero
-/// Kelvin viscosity refuses: its normal strain-rate constraint is a different
-/// differential-algebraic problem, not an algebraic Maxwell condensation.
+/// A fixed material orientation must be applied before construction. Kelvin
+/// viscosity may be purely in-plane or have a positive-definite normal block.
+/// A nonzero singular normal block requires a mixed DAE and explicitly refuses.
 #[derive(Clone, Debug)]
 pub struct PlaneStressPoint {
     source: ProjectedTensorProny,
@@ -29,6 +31,25 @@ pub struct PlaneStressPoint {
     normal_map: Vec<Vec<f64>>,
     pub(super) relaxed_memory: Vec<Vec<f64>>,
     rates: Vec<f64>,
+    viscosity: Vec<f64>,
+    normal_viscosity: Option<NormalViscosity>,
+}
+
+#[derive(Clone, Debug)]
+struct NormalViscosity {
+    /// D_nn^-1 in normal tensor-strain coordinates.
+    mobility: [f64;9],
+    /// D_nn^-1 D_nu, row-major (3 x displacement coordinates).
+    coupling: Vec<f64>,
+}
+
+// All three normal strains survive whenever the normal rate block is nonzero.
+// The material owner has already admitted the complete Kelvin tensor as PSD.
+pub(super) fn internal_coordinate_count(material:&TensorProny)->Result<usize> {
+    let normal=material.kv_pa_s().is_some_and(|d|
+        [2,4,5].iter().any(|&i|[2,4,5].iter().any(|&j|d[i][j]!=0.0)));
+    material.branches().len().checked_mul(6).and_then(|n|n.checked_add(if normal {3} else {0}))
+        .ok_or_else(||bad("plane-stress internal-coordinate extent"))
 }
 
 // Scaled Cholesky solve of the existing material's 3x3 normal block. No inverse,
@@ -55,9 +76,9 @@ fn normal_solve(matrix:&[f64],d:usize,n:usize,rhs:&[f64])->Result<[f64;3]> {
 }
 
 impl PlaneStressPoint {
-    /// Prepare a work-conjugate plane-stress energy and strain reconstruction.
+    /// Prepare work-conjugate plane-stress energy, rates and reconstruction.
     /// Positive volume includes the quadrature weight. The projection budget's
-    /// coordinate ceiling includes the THREE eliminated normal strain columns;
+    /// coordinate ceiling includes the THREE local normal strain columns;
     /// its work ceiling covers both projection and full energy condensation.
     /// Nothing changes the material's original source, band, branches or domain.
     pub fn new(material:&TensorProny,columns:&[[f64;3]],volume_m3:f64,
@@ -66,25 +87,60 @@ impl PlaneStressPoint {
         poll(gate)?;
         let n=columns.len();let d=n.checked_add(3).ok_or_else(||bad("plane-stress coordinate extent"))?;
         let memory=material.branches().len().checked_mul(6).ok_or_else(||bad("plane-stress memory extent"))?;
-        let m=n.checked_add(memory).ok_or_else(||bad("plane-stress energy extent"))?;
+        let internal=internal_coordinate_count(material)?;
+        let retained_normal=internal>memory;
+        let m=n.checked_add(internal).ok_or_else(||bad("plane-stress energy extent"))?;
         if n==0 || d>budget.max_coordinates || m>MAX_LINEAR_EXPONENTIAL_BLOCK_DIM
             || columns.iter().flatten().any(|v|!v.is_finite()) {
             return Err(bad("plane stress requires bounded finite in-plane strain columns and full memory"));
-        }
-        if material.kv_pa_s().is_some_and(|c|c.iter().flatten().any(|v|*v!=0.0)) {
-            return Err(bad("plane-stress Maxwell elimination does not omit Kelvin normal-rate terms"));
         }
         // Include the original strain projection, total K, normal solves, full
         // equilibrium congruence and every retained branch residual Gram product.
         let work=(material.branches().len() as u128+2)*36*d as u128
             +12*(d as u128).pow(2)+memory as u128*(d as u128).pow(2)
             +128*m as u128+(m as u128).pow(2)*((d as u128).pow(2)+memory as u128)
-            +memory as u128*m as u128*d as u128;
+            +memory as u128*m as u128*d as u128
+            +(material.branches().len() as u128+2)*36*n as u128+24*(d as u128).pow(2);
         if work>budget.max_scalar_terms as u128 {return Err(bad("plane-stress condensation exceeds scalar-work budget"));}
         let mut full:Vec<Voigt>=columns.iter().map(|s|[s[0],s[1],0.0,0.5*s[2],0.0,0.0]).collect();
         full.extend([[0.0,0.0,1.0,0.0,0.0,0.0],[0.0,0.0,0.0,0.0,1.0,0.0],[0.0,0.0,0.0,0.0,0.0,1.0]]);
         let source=material.project_strain(&full,volume_m3,budget,||gate.is_requested())
             .map_err(TensorMaterialError::Material)?;
+        let damping=source.viscosity_matrix();
+        let mut viscosity=vec![0.0;n*n];
+        let normal_viscosity=if retained_normal {
+            let mut mobility=[0.0;9];let mut coupling=vec![0.0;3*n];
+            for col in 0..3 {
+                poll(gate)?;
+                let mut rhs=[0.0;3];rhs[col]=1.0;
+                let x=normal_solve(damping,d,n,&rhs)
+                    .map_err(|_|bad("nonzero normal Kelvin viscosity must be positive definite and resolved"))?;
+                for i in 0..=col {mobility[i*3+col]=x[i];mobility[col*3+i]=x[i];}
+            }
+            for i in 0..3 {for k in 0..3 {
+                let value=(0..3).fold(0.0,|s,j|s+damping[(n+i)*d+n+j]*mobility[j*3+k]);
+                if !value.is_finite() || (value-if i==k {1.0} else {0.0}).abs()>192.0*f64::EPSILON {
+                    return Err(bad("normal Kelvin inverse does not resolve the original viscosity"));
+                }
+            }}
+            for col in 0..n {
+                poll(gate)?;
+                let rhs:[f64;3]=core::array::from_fn(|i|damping[(n+i)*d+col]);
+                let x=normal_solve(damping,d,n,&rhs)?;
+                for i in 0..3 {coupling[i*n+col]=x[i];}
+            }
+            // D_uu-D_un D_nn^-1 D_nu is evaluated as an original-factor
+            // congruence by the material owner, avoiding subtraction of losses.
+            let rate_columns:Vec<Voigt>=(0..n).map(|col|core::array::from_fn(|i|
+                full[col][i]-(0..3).fold(0.0,|s,k|s+full[n+k][i]*coupling[k*n+col]))).collect();
+            let reduced=material.project_strain(&rate_columns,volume_m3,budget,||gate.is_requested())
+                .map_err(TensorMaterialError::Material)?;
+            viscosity.copy_from_slice(reduced.viscosity_matrix());
+            Some(NormalViscosity {mobility,coupling})
+        } else {
+            for i in 0..n {for j in 0..n {viscosity[i*n+j]=damping[i*d+j];}}
+            None
+        };
         let rows:Vec<_>=source.branches().iter().flat_map(|b|b.rows()).collect();
         let rates:Vec<_>=source.branches().iter().flat_map(|b|[b.relaxation_time_s().recip();6]).collect();
         if rates.iter().any(|v|!v.is_finite() || *v<=0.0) {return Err(bad("plane-stress relaxation rate is unrepresentable"));}
@@ -97,11 +153,15 @@ impl PlaneStressPoint {
         }
         if !finite(&instantaneous) {return Err(bad("plane-stress instantaneous stiffness overflow"));}
         let mut normal_map=vec![vec![0.0;m];3];
-        for col in 0..m {
-            poll(gate)?;
-            let rhs:[f64;3]=core::array::from_fn(|i|if col<n {-instantaneous[(n+i)*d+col]} else {rows[col-n][n+i]});
-            let x=normal_solve(&instantaneous,d,n,&rhs)?;
-            for i in 0..3 {normal_map[i][col]=x[i];}
+        if retained_normal {
+            for i in 0..3 {normal_map[i][n+memory+i]=1.0;}
+        } else {
+            for col in 0..m {
+                poll(gate)?;
+                let rhs:[f64;3]=core::array::from_fn(|i|if col<n {-instantaneous[(n+i)*d+col]} else {rows[col-n][n+i]});
+                let x=normal_solve(&instantaneous,d,n,&rhs)?;
+                for i in 0..3 {normal_map[i][col]=x[i];}
+            }
         }
         // e_full = T [u,a]. Compute the equilibrium congruence followed by
         // residual-factor Grams, rather than subtracting two large energies.
@@ -126,7 +186,7 @@ impl PlaneStressPoint {
                 energy[i*m+j]=value;energy[j*m+i]=value;
             }
         }
-        let mut relaxed_memory=vec![vec![0.0;n];memory];
+        let mut relaxed_memory=vec![vec![0.0;n];internal];
         for col in 0..n {
             poll(gate)?;
             let rhs:[f64;3]=core::array::from_fn(|i|-source.equilibrium_stiffness()[(n+i)*d+col]);
@@ -134,21 +194,33 @@ impl PlaneStressPoint {
             for (r,row) in rows.iter().enumerate() {
                 relaxed_memory[r][col]=row[col]+(0..3).fold(0.0,|s,k|s+row[n+k]*normal[k]);
             }
+            if retained_normal {for i in 0..3 {relaxed_memory[memory+i][col]=normal[i];}}
         }
         if !finite(&energy) || relaxed_memory.iter().flatten().any(|v|!v.is_finite()) {
             return Err(bad("plane-stress energy or initialization overflow"));
         }
         poll(gate)?;
-        Ok(Self {source,coordinates:n,energy,normal_map,relaxed_memory,rates})
+        Ok(Self {source,coordinates:n,energy,normal_map,relaxed_memory,rates,viscosity,normal_viscosity})
     }
     /// Original in-plane displacement coordinates.
     pub fn coordinates(&self)->usize {self.coordinates}
-    /// All original six-per-branch viscous factor coordinates a_j [sqrt(J)].
-    pub fn memory_coordinates(&self)->usize {self.rates.len()}
-    /// Complete local energy Q for [displacement, viscous factor coordinates].
+    /// All original six-per-branch viscous coordinates a_j [sqrt(J)], followed
+    /// by three retained normal tensor strains when normal Kelvin viscosity acts.
+    pub fn memory_coordinates(&self)->usize {self.rates.len()+self.normal_strain_coordinates()}
+    /// Number of massless normal-strain history coordinates: either zero or three.
+    pub fn normal_strain_coordinates(&self)->usize {if self.normal_viscosity.is_some() {3} else {0}}
+    /// Complete local energy Q for [displacement, material/history coordinates].
     pub fn energy_matrix(&self)->&[f64] {&self.energy}
     /// Original immutable constitutive law; no fitted reduced law is substituted.
     pub fn material(&self)->&TensorProny {self.source.material()}
+
+    pub(super) fn admit_initial_memory(&self,u:&[f64],memory:InitialMemory)->Result<()> {
+        if memory==InitialMemory::Instantaneous && self.normal_viscosity.is_some()
+            && u.iter().any(|v|*v!=0.0) {
+            return Err(bad("normal Kelvin viscosity requires relaxed initial displacement; an instantaneous jump has no finite-work prehistory"));
+        }
+        Ok(())
+    }
 
     fn full_strain_coordinates(&self,u:&[f64],a:&[f64])->Result<Vec<f64>> {
         if u.len()!=self.coordinates || a.len()!=self.memory_coordinates() || !finite(u) || !finite(a) {
@@ -168,7 +240,21 @@ impl PlaneStressPoint {
     }
     /// Original 3D normal tractions [sigma_zz,sigma_yz,sigma_zx] [Pa].
     /// Recomputed from full material factors, not set to zero by definition.
+    /// Normal Kelvin viscosity requires the velocity-aware variant.
     pub fn normal_stress_pa(&self,u:&[f64],a:&[f64])->Result<[f64;3]> {
+        if self.normal_viscosity.is_some() {
+            return Err(bad("normal Kelvin traction requires the actual in-plane velocity"));
+        }
+        self.normal_stress_pa_with_velocity(u,&vec![0.0;self.coordinates],a)
+    }
+
+    /// Recompute total elastic, Maxwell and Kelvin normal traction [Pa].
+    /// The massless normal rate solves D_nn e_n'=-dH/de_n-D_nu u'.
+    /// This exposes the original constitutive traction, not a literal zero.
+    pub fn normal_stress_pa_with_velocity(&self,u:&[f64],velocity:&[f64],a:&[f64])->Result<[f64;3]> {
+        if velocity.len()!=self.coordinates || !finite(velocity) {
+            return Err(bad("plane-stress traction requires matching finite velocity"));
+        }
         let full=self.full_strain_coordinates(u,a)?;
         self.source.strain(&full).map_err(TensorMaterialError::Material)?;
         let n=self.coordinates;let d=n+3;
@@ -176,6 +262,16 @@ impl PlaneStressPoint {
         for (row,&memory) in self.source.branches().iter().flat_map(|b|b.rows()).zip(a) {
             let z=row.iter().zip(&full).fold(0.0,|s,(b,x)|s+b*x)-memory;
             for i in 0..3 {force[i]+=row[n+i]*z;}
+        }
+        if self.normal_viscosity.is_some() {
+            let damping=self.source.viscosity_matrix();
+            let rhs:[f64;3]=core::array::from_fn(|i|-force[i]
+                -(0..n).fold(0.0,|s,j|s+damping[(n+i)*d+j]*velocity[j]));
+            let normal_rate=normal_solve(damping,d,n,&rhs)?;
+            for i in 0..3 {
+                force[i]+=(0..n).fold(0.0,|s,j|s+damping[(n+i)*d+j]*velocity[j]);
+                force[i]+=(0..3).fold(0.0,|s,j|s+damping[(n+i)*d+n+j]*normal_rate[j]);
+            }
         }
         let volume=self.source.volume_m3();
         let stress=[force[0]/volume,0.5*force[1]/volume,0.5*force[2]/volume];
@@ -228,9 +324,24 @@ impl TensorMaterialBody {
             let address=|i|if i<n {i} else {offset+i-n};
             for i in 0..m {for k in 0..m {q[address(i)*states+address(k)]+=point.energy[i*m+k];}}
             for (i,rate) in point.rates.iter().enumerate() {r[(offset+i)*states+offset+i]=*rate;}
+            for i in 0..n {for k in 0..n {r[(n+i)*states+n+k]+=point.viscosity[i*n+k];}}
+            if let Some(normal)=&point.normal_viscosity {
+                let z=offset+point.rates.len();
+                // p'=-H_u-S*v+D_un*D_nn^-1*H_n;
+                // e_n'=-D_nn^-1*D_nu*v-D_nn^-1*H_n.
+                // The cross coupling is skew, so only the two original
+                // Kelvin loss terms and Maxwell dashpots dissipate energy.
+                for i in 0..3 {
+                    for k in 0..3 {r[(z+i)*states+z+k]=normal.mobility[3*i+k];}
+                    for k in 0..n {
+                        j[(n+k)*states+z+i]=normal.coupling[i*n+k];
+                        j[(z+i)*states+n+k]=-normal.coupling[i*n+k];
+                    }
+                }
+            }
             offset+=point.memory_coordinates();
         }
-        if !finite(&q) {return Err(bad("assembled plane-stress energy overflow"));}
+        if !finite(&q) || !finite(&j) || !finite(&r) {return Err(bad("assembled plane-stress operator overflow"));}
         let storage=QuadraticStorage::new(q,states).map_err(TensorMaterialError::Propagation)?;
         let system=PortHamiltonian::new(states,n,j,r,g,Box::new(storage)).map_err(TensorMaterialError::Propagation)?;
         poll(gate)?;
@@ -273,7 +384,8 @@ impl TensorMaterialHistory<'_> {
     pub fn plane_stress_normal_stress_pa(&self,point:usize)->Result<[f64;3]> {
         let p=self.body.plane_points.get(point).ok_or_else(||bad("unknown plane-stress point"))?;
         let offset=self.body.plane_offsets[point];
-        p.normal_stress_pa(self.displacement_m(),&self.state[offset..offset+p.memory_coordinates()])
+        p.normal_stress_pa_with_velocity(self.displacement_m(),&self.velocity_m_s(),
+            &self.state[offset..offset+p.memory_coordinates()])
     }
 }
 

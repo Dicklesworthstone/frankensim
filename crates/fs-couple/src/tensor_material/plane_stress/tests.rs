@@ -153,7 +153,7 @@ fn plane_stress_refuses_unsupported_rate_constraints_and_keeps_failed_history() 
     assert!(PlaneStressPoint::new(&law,&columns,0.0,budget(),&gate).is_err());
     assert!(PlaneStressPoint::new(&law,&columns,1.0,TensorProjectionBudget{max_scalar_terms:1,..budget()},&gate).is_err());
     let kv=TensorProny::new(*law.c_eq(),Some(core::array::from_fn(|i|core::array::from_fn(|j|
-        if i==j {1.0} else {0.0}))),vec![],(0.0,f64::MAX)).unwrap();
+        if i==j && i==2 {1.0} else {0.0}))),vec![],(0.0,f64::MAX)).unwrap();
     assert!(PlaneStressPoint::new(&kv,&columns,1.0,budget(),&gate).is_err());
     let cancelled=CancelGate::new_clock_free();cancelled.request();
     assert!(PlaneStressPoint::new(&law,&columns,1.0,budget(),&cancelled).is_err());
@@ -257,4 +257,125 @@ fn full_plane_stress_inertia_preserves_diagonal_motion_and_refuses_invalid_mass(
     let mut y=b.history(&[0.001,-0.002],&[0.002,0.003],InitialMemory::Relaxed,&gate).unwrap();
     x.advance(&[0.01,0.02],0.03,&gate).unwrap();y.advance(&[0.01,0.02],0.03,&gate).unwrap();
     for (x,y) in x.state().iter().zip(y.state()) {close(*x,*y,2e-13);}
+}
+
+fn kelvin_law()->TensorProny {
+    let material=law();
+    let mut factor:Tangent6=core::array::from_fn(|i|core::array::from_fn(|j|if i==j {1.0+0.2*i as f64} else {0.0}));
+    factor[0][2]=0.6;factor[1][4]=-0.4;factor[3][5]=0.5;factor[2][4]=0.3;
+    let viscosity=core::array::from_fn(|i|core::array::from_fn(|j|
+        (0..6).fold(0.0,|s,k|s+factor[k][i]*factor[k][j])));
+    TensorProny::new(*material.c_eq(),Some(viscosity),material.branches().to_vec(),(0.0,f64::MAX)).unwrap()
+}
+
+#[test]
+fn kelvin_plane_stress_matches_independent_traction_rate_dynamics_and_heat() {
+    let gate=CancelGate::new_clock_free();let material=kelvin_law();
+    let point=PlaneStressPoint::new(&material,&[[1.0,0.0,0.2],[0.0,1.0,-0.3]],0.2,budget(),&gate).unwrap();
+    assert_eq!(point.memory_coordinates(),15);
+    assert_eq!(point.normal_strain_coordinates(),3);
+    assert!(point.clone().relaxation_image(2_000_000,&gate).is_err());
+    let mass=[1.4,0.45,0.45,0.9];let determinant=mass[0]*mass[3]-mass[1]*mass[2];
+    let inverse=[mass[3]/determinant,-mass[1]/determinant,-mass[2]/determinant,mass[0]/determinant];
+    let body=TensorMaterialBody::from_plane_stress_mass_matrix(2,mass.to_vec(),vec![point],body_budget(),&gate).unwrap();
+    let point=&body.plane_stress_points()[0];let source=&point.source;
+    let d=5;let branches=12;let states=19;
+    let normal:Vec<_>=(0..9).map(|i|source.viscosity_matrix()[(2+i/3)*d+2+i%3]).collect();
+    let normal_lu=fs_la::factor::lu(&normal,3).unwrap();
+    let mut history=body.history(&[0.001,-0.002],&[0.003,-0.002],InitialMemory::Relaxed,&gate).unwrap();
+    let mut reference=history.state().to_vec();reference[2..4].copy_from_slice(&history.velocity_m_s());
+    reference.extend([0.0,0.0]);
+    assert!(point.normal_stress_pa(history.displacement_m(),&history.state()[4..]).is_err());
+    // Independent equations in physical (u,v,a,e_normal), using the original
+    // full material factors and a LU traction-rate solve, not assembled J/R/Q.
+    for tick in 0..16 {
+        let force=if tick<5 {[0.03,-0.02]} else if tick<10 {[-0.01,0.02]} else {[0.0;2]};
+        let rhs=|x:&[f64]| {
+            let full=[x[0],x[1],x[4+branches],x[5+branches],x[6+branches]];
+            let mut internal:Vec<_>=(0..d).map(|i|(0..d).map(|j|source.equilibrium_stiffness()[i*d+j]*full[j]).sum::<f64>()).collect();
+            let mut derivative=vec![0.0;x.len()];derivative[..2].copy_from_slice(&x[2..4]);
+            for (k,row) in source.branches().iter().flat_map(|b|b.rows()).enumerate() {
+                let spring=row.iter().zip(full).map(|(a,e)|a*e).sum::<f64>()-x[4+k];
+                for i in 0..d {internal[i]+=row[i]*spring;}
+                let rate=source.branches()[k/6].relaxation_time_s().recip();
+                derivative[4+k]=rate*spring;derivative[states+1]+=rate*spring*spring;
+            }
+            let mut normal_rate:[f64;3]=core::array::from_fn(|i|-internal[2+i]
+                -source.viscosity_matrix()[(2+i)*d]*x[2]-source.viscosity_matrix()[(2+i)*d+1]*x[3]);
+            normal_lu.solve(&mut normal_rate);
+            derivative[4+branches..states].copy_from_slice(&normal_rate);
+            let rate=[x[2],x[3],normal_rate[0],normal_rate[1],normal_rate[2]];
+            for i in 0..d {
+                let viscous=(0..d).map(|j|source.viscosity_matrix()[i*d+j]*rate[j]).sum::<f64>();
+                derivative[states+1]+=rate[i]*viscous;internal[i]+=viscous;
+            }
+            for i in 0..2 {derivative[2+i]=inverse[2*i]*(force[0]-internal[0])+inverse[2*i+1]*(force[1]-internal[1]);}
+            derivative[states]=force[0]*x[2]+force[1]*x[3];
+            for traction in &internal[2..] {close(*traction,0.0,1e-12);}
+            derivative
+        };
+        let dt=0.004;let h=dt/200.0;
+        for _ in 0..200 {
+            let k1=rhs(&reference);
+            let stage=|k:&[f64],scale:f64|reference.iter().zip(k).map(|(x,k)|x+scale*k).collect::<Vec<_>>();
+            let k2=rhs(&stage(&k1,0.5*h));let k3=rhs(&stage(&k2,0.5*h));let k4=rhs(&stage(&k3,h));
+            for i in 0..reference.len() {reference[i]+=h*(k1[i]+2.0*k2[i]+2.0*k3[i]+k4[i])/6.0;}
+        }
+        history.advance(&force,dt,&gate).unwrap();
+        for (got,want) in history.displacement_m().iter().chain(&history.velocity_m_s())
+            .chain(&history.state()[4..]).zip(&reference[..states]) {close(*got,*want,3e-11);}
+        for traction in history.plane_stress_normal_stress_pa(0).unwrap() {close(traction,0.0,2e-11);}
+        close(history.supplied_work_j(),reference[states],3e-11);
+        close(history.dissipated_heat_j(),reference[states+1],3e-11);
+        close(history.balance_residual_j(),0.0,3e-11);
+    }
+    assert!(history.dissipated_heat_j()>0.0);
+}
+
+#[test]
+fn purely_in_plane_kelvin_viscosity_has_the_analytic_damped_plane_stress_motion() {
+    let gate=CancelGate::new_clock_free();let mut viscosity=[[0.0;6];6];viscosity[0][0]=5.0;
+    let elastic=TensorProny::from_tensor_shear(IsotropicElastic::new(120.0,0.25,0.1).unwrap().stiffness(),vec![],0.1).unwrap();
+    let material=TensorProny::new(*elastic.c_eq(),Some(viscosity),vec![],(0.0,f64::MAX)).unwrap();
+    let point=PlaneStressPoint::new(&material,&[[1.0,0.0,0.0]],0.3,budget(),&gate).unwrap();
+    assert_eq!(point.memory_coordinates(),0);assert_eq!(point.normal_strain_coordinates(),0);
+    assert!(point.clone().relaxation_image(2_000_000,&gate).is_err());
+    let body=TensorMaterialBody::from_plane_stress(vec![2.0],vec![point],body_budget(),&gate).unwrap();
+    let mut history=body.history(&[0.002],&[0.0],InitialMemory::Instantaneous,&gate).unwrap();
+    let omega2=0.3*120.0/(1.0-0.25*0.25)/2.0;
+    let decay=0.3*5.0/4.0;let damped=det::sqrt(omega2-decay*decay);
+    for tick in 1..=24 {
+        history.advance(&[0.0],0.01,&gate).unwrap();let time=tick as f64*0.01;
+        let envelope=0.002*det::exp(-decay*time);
+        close(history.displacement_m()[0],envelope*(det::cos(damped*time)+decay/damped*det::sin(damped*time)),1e-12);
+        close(history.velocity_m_s()[0],-envelope*omega2/damped*det::sin(damped*time),1e-12);
+        for traction in history.plane_stress_normal_stress_pa(0).unwrap() {close(traction,0.0,1e-12);}
+        close(history.balance_residual_j(),0.0,1e-12);
+    }
+    assert!(history.dissipated_heat_j()>0.0);
+}
+
+#[test]
+fn kelvin_normal_histories_preserve_quadrature_scaling_and_refused_initialization() {
+    let gate=CancelGate::new_clock_free();let material=kelvin_law();let columns=[[1.0,0.0,0.2]];
+    let full=PlaneStressPoint::new(&material,&columns,0.2,budget(),&gate).unwrap();
+    let half=PlaneStressPoint::new(&material,&columns,0.1,budget(),&gate).unwrap();
+    assert!(TensorMaterialBody::from_plane_stress(vec![2.0],vec![full.clone()],
+        TensorMaterialBudget{max_state_coordinates:14,..body_budget()},&gate).is_err());
+    let one=TensorMaterialBody::from_plane_stress(vec![2.0],vec![full],body_budget(),&gate).unwrap();
+    let two=TensorMaterialBody::from_plane_stress(vec![2.0],vec![half.clone(),half],body_budget(),&gate).unwrap();
+    assert!(one.history(&[0.001],&[0.0],InitialMemory::Instantaneous,&gate).is_err());
+    assert!(one.history(&[0.0],&[0.0],InitialMemory::Instantaneous,&gate).is_ok());
+    let mut a=one.history(&[0.001],&[0.002],InitialMemory::Relaxed,&gate).unwrap();
+    let mut b=two.history(&[0.001],&[0.002],InitialMemory::Relaxed,&gate).unwrap();
+    for _ in 0..10 {
+        a.advance(&[0.01],0.004,&gate).unwrap();b.advance(&[0.01],0.004,&gate).unwrap();
+        close(a.displacement_m()[0],b.displacement_m()[0],2e-12);
+        close(a.velocity_m_s()[0],b.velocity_m_s()[0],2e-12);
+        close(a.dissipated_heat_j(),b.dissipated_heat_j(),2e-12);
+        for i in 0..6 {close(a.plane_stress_strain(0).unwrap()[i],b.plane_stress_strain(1).unwrap()[i],2e-12);}
+    }
+    let before=a.state().to_vec();let cancelled=CancelGate::new_clock_free();cancelled.request();
+    assert!(a.advance(&[0.01],0.004,&cancelled).is_err());assert_eq!(a.state(),before);
+    assert!(a.advance(&[f64::NAN],0.004,&gate).is_err());assert_eq!(a.state(),before);
 }

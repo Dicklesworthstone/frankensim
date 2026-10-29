@@ -59,7 +59,8 @@ fn poll(gate: &CancelGate) -> Result<()> { super::poll(gate).map_err(MembraneErr
 
 /// Immutable geometry/material assembly and the original force-driven body.
 /// Every free Cartesian displacement and six coordinates of EACH material
-/// branch at EACH triangle survive. No mode selection or diagonal loss fit.
+/// branch at EACH triangle survive, with three additional massless normal
+/// strains wherever normal Kelvin viscosity acts. No mode selection or loss fit.
 pub struct TensorMembrane {
     mesh: ShellMesh,
     materials: Vec<MembraneFacetMaterial>,
@@ -124,9 +125,11 @@ impl TensorMembrane {
         let dof_map: Vec<_> = fixed.iter().map(|&fixed| if fixed { None } else {
             let i = free; free += 1; Some(i)
         }).collect();
-        let memory = materials.iter().try_fold(0_usize, |n, m|
-            m.law.branches().len().checked_mul(6).and_then(|b| n.checked_add(b)))
-            .ok_or_else(|| bad("membrane memory extent overflow"))?;
+        let memory = materials.iter().try_fold(0_usize, |n, m| {
+            let count=super::plane_stress::internal_coordinate_count(&m.law)
+                .map_err(MembraneError::Dynamics)?;
+            n.checked_add(count).ok_or_else(||bad("membrane memory extent overflow"))
+        })?;
         let states = memory.checked_add(2*free).ok_or_else(|| bad("membrane state extent overflow"))?;
         let block = states.checked_add(free+1).and_then(|n| n.checked_mul(2))
             .ok_or_else(|| bad("membrane exponential extent overflow"))?;
