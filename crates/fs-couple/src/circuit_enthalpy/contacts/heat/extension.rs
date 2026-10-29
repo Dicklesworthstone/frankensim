@@ -31,6 +31,9 @@ impl PreparedHeatNetwork<'_, '_> {
     ) -> Result<PreparedHeatNetwork<'n, 'a>, HeatNetworkError> {
         check(cx)?;
         let invalid = HeatNetworkError::Invalid;
+        if self.integrated_conduction.is_some() {
+            return Err(invalid("integrated conduction geometry must be explicitly rebound after topology changes"));
+        }
         let old_count = self.network.radiation.map_or(0, |r| r.enclosure.surfaces().len());
         let new_count = network.radiation.map_or(0, |r| r.enclosure.surfaces().len());
         if surface_successors.len() != old_count

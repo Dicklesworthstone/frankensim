@@ -47,6 +47,13 @@ pub struct LayerLinkSample {
 }
 
 impl<'a, 'm> PreparedLayerConduction<'a, 'm> {
+    /// Original link, source layers and geometric distances. Coupled consumers
+    /// use these immutable bindings to admit the same physical cells and source
+    /// choices before replacing an existing bulk-conduction approximation.
+    pub fn bindings(&self) -> impl ExactSizeIterator<Item = &LayerLinkBinding<'a, 'm>> {
+        self.links.iter().map(|link| &link.binding)
+    }
+
     /// Bind bounded unique links to their actual caloric objects and coverage.
     pub fn new(thermal: &DepositionSimulation<'_>, mut bindings: Vec<LayerLinkBinding<'a, 'm>>,
         max_links: usize, mut checkpoint: impl FnMut() -> Result<(), DepositionError>)

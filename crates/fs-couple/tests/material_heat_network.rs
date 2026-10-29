@@ -1,4 +1,6 @@
 //! Same material assembly through real electrical, contact and radiation owners.
+#[path = "material_heat_network/layers.rs"]
+mod layers;
 #[path = "../../fs-conduction/tests/radiation_material/common.rs"]
 mod common;
 use common::*;

@@ -19,6 +19,7 @@ use fs_material::state_point::MaterialPropertySelection;
 
 mod extension;
 mod observer;
+mod layers;
 pub use observer::MaterialHeatObserver;
 pub mod solid;
 
@@ -46,6 +47,8 @@ pub enum HeatNetworkError {
     Contact(ConductionError),
     /// Existing radiation/material/geometry refusal.
     Radiation(RadiationCellError),
+    /// Original source-integrated layer conduction refusal.
+    Layer(fs_material::thermal::conduction::source::LayerSourceError),
     /// Original shared-timeline checkpoint or thermal-state failure.
     Thermal(DepositionError),
     /// Cancellation before returning a source or any physical endpoint.
@@ -75,6 +78,16 @@ impl From<RadiationCellError> for HeatNetworkError {
         match e { RadiationCellError::Cancelled => Self::Cancelled, other => Self::Radiation(other) }
     }
 }
+impl From<fs_material::thermal::conduction::source::LayerSourceError> for HeatNetworkError {
+    fn from(e: fs_material::thermal::conduction::source::LayerSourceError) -> Self {
+        match e {
+            fs_material::thermal::conduction::source::LayerSourceError::Thermal(
+                DepositionError::Cancelled,
+            ) => Self::Cancelled,
+            other => Self::Layer(other),
+        }
+    }
+}
 impl core::fmt::Display for HeatNetworkError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "material heat network: {self:?}")
@@ -92,6 +105,9 @@ pub struct HeatNetworkSample {
     pub material: MaterialNetworkSample,
     /// Original bulk-plus-contact resistance and both endpoint phase states.
     pub thermal_contacts: Vec<ContactLinkSample>,
+    /// Source-integrated nonlinear layer fluxes replacing named bulk links.
+    /// These transfers already enter the native conductance map, not sources.
+    pub integrated_conduction: Vec<fs_material::thermal::conduction::network::LayerLinkSample>,
     /// Original radiosity, source receipts and per-cell signed radiation powers.
     pub radiation: Option<RadiationCellSources>,
 }
@@ -111,6 +127,7 @@ pub struct PreparedHeatNetwork<'n, 'a> {
     electrical: PreparedElectricalContactNetwork<'n, 'a>,
     thermal_contacts: Vec<MaterialContactLink<'a>>,
     radiating_cells: Vec<RadiatingCell<'a>>,
+    integrated_conduction: Option<layers::IntegratedConduction<'n, 'a>>,
 }
 
 impl<'a> MaterialHeatNetwork<'a> {
@@ -178,7 +195,8 @@ impl<'a> MaterialHeatNetwork<'a> {
             }
         }
         check(cx)?;
-        Ok(PreparedHeatNetwork { network: self, electrical, thermal_contacts, radiating_cells })
+        Ok(PreparedHeatNetwork { network: self, electrical, thermal_contacts, radiating_cells,
+            integrated_conduction: None })
     }
 }
 
@@ -229,6 +247,8 @@ impl PreparedHeatNetwork<'_, '_> {
     {
         check(cx)?;
         let mut coefficients = self.electrical.resolve(thermal, || cx.checkpoint().is_err())?;
+        let integrated_conduction = self.resolve_integrated_conduction(cx, thermal,
+            &mut coefficients.bulk.conductances_w_k, &mut coefficients.bulk.source)?;
         let thermal_contacts = apply_material_contacts(thermal, &self.thermal_contacts,
             &mut coefficients.bulk.conductances_w_k, || cx.checkpoint().is_err())?;
         let radiation = if let Some(original) = self.network.radiation {
@@ -243,7 +263,8 @@ impl PreparedHeatNetwork<'_, '_> {
         Ok(ContactThermalCoefficients { contacts: coefficients.contacts,
             bulk: CircuitThermalCoefficients { resistors: bulk.resistors, sources_w: bulk.sources_w,
                 conductances_w_k: bulk.conductances_w_k,
-                source: HeatNetworkSample { material: bulk.source, thermal_contacts, radiation } } })
+                source: HeatNetworkSample { material: bulk.source, thermal_contacts,
+                    integrated_conduction, radiation } } })
     }
 
     /// Advance the original coupled circuit/enthalpy solve with all authored
