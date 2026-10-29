@@ -528,6 +528,16 @@ differentiable lift). Pure Rust throughout.
   Focused regressions cover independent single-scatter source integrals,
   thermal spectra, surface shadow extinction, spectral furnace conservation,
   phase normalization/moments, exact progressive replay and bounded refusals.
+  Both physical-media renderers also expose fresh and progressive
+  `*_with_execution` entries. They share the original tile pool, render-seeded
+  pixel streams, per-pixel accumulation order, operation memory leases and
+  execution reports. Workers borrow the same accepted fields. A fresh render
+  allocates one film payload plus bounded tile scratch; appends stage privately
+  and retain the original field/settings binding. Serial, tile-layout,
+  worker-count and split-range comparisons assert exact binary64 pixels.
+  Memory, traversal, cancellation and nonfinite-radiance refusals publish no
+  partial film. This adds parallel static-field rendering, not adaptive media,
+  dynamic-field shutter interpolation or a separate executor.
 
 ## Invariants
 
