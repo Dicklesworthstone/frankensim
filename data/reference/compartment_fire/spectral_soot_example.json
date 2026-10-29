@@ -1,0 +1,143 @@
+{
+  "scope": "Authored, estimated nonscattering two-layer normal-chord optical comparison; not fire validation or a molecular spectroscopy database",
+  "verification": "Actual native run on original focused source owners; 22 radiation tests and combined 98-test airflow library suite passed; no full-workspace/DSR claim",
+  "command": "cargo run -p fs-airflow --features compartment-fire --example soot_layer_radiation -- 1.75 1.03 1800 0.001 200 2500 0.00018 0.0018 600 1000 600 1000 1 0.25 0.75 300 400 0.8 0.6 authored-demo spectral 1e-7 1e-3 1e-5 1e-5 8192 1e-4",
+  "inputs": {
+    "source": "authored-demo; not a validated universal soot property set",
+    "refractive_index": [
+      1.75,
+      1.03
+    ],
+    "index_convention": "m = n - i k",
+    "particle_density_kg_m3": 1800,
+    "maximum_volume_fraction": 0.001,
+    "source_temperature_range_k": [
+      200,
+      2500
+    ],
+    "soot_concentration_kg_m3": [
+      0.00018,
+      0.0018
+    ],
+    "gas_temperature_k": [
+      600,
+      1000
+    ],
+    "gray_weighting_temperature_k": [
+      600,
+      1000
+    ],
+    "area_m2": 1,
+    "path_lengths_m": [
+      0.25,
+      0.75
+    ],
+    "wall_temperature_k": [
+      300,
+      400
+    ],
+    "gray_surface_emissivity": [
+      0.8,
+      0.6
+    ],
+    "molecular_absorption_m_inv": [
+      0,
+      0
+    ]
+  },
+  "controls": {
+    "wavelength_window_m": [
+      1e-7,
+      0.001
+    ],
+    "heat_tolerance_w": 0.00001,
+    "radiosity_tolerance_w_m2": 0.00001,
+    "maximum_evaluations": 8192,
+    "maximum_omitted_blackbody_fraction": 0.0001
+  },
+  "positive_heat_convention": "Into the named thermal owner",
+  "layers": [
+    {
+      "owner": "lower",
+      "spectral_heat_w": 2191.714109488,
+      "gray_heat_w": 1172.641529627,
+      "quadrature_error_estimate_w": 4.127301818671e-8
+    },
+    {
+      "owner": "upper",
+      "spectral_heat_w": -59957.24708007,
+      "gray_heat_w": -64059.11712089,
+      "quadrature_error_estimate_w": 9.444570423864e-7
+    }
+  ],
+  "walls": [
+    {
+      "owner": "wall0",
+      "spectral_heat_w": 33499.6112351,
+      "gray_heat_w": 36682.77795559,
+      "quadrature_error_estimate_w": 4.669095784495e-7,
+      "spectral_radiosity_w_m2": 8834.200582525,
+      "radiosity_error_estimate_w_m2": 1.407556399246e-7
+    },
+    {
+      "owner": "wall1",
+      "spectral_heat_w": 24265.92173548,
+      "gray_heat_w": 26203.69763567,
+      "quadrature_error_estimate_w": 4.38882603111e-7,
+      "spectral_radiosity_w_m2": 17628.89358725,
+      "radiosity_error_estimate_w_m2": 2.304034566957e-7
+    }
+  ],
+  "coverage": [
+    {
+      "owner": "wall0",
+      "temperature_k": 300,
+      "participating": true,
+      "omitted_shortwave_fraction": 8.88263107792e-202,
+      "omitted_longwave_fraction": 0.000005561042369118,
+      "omitted_blackbody_emission_w_m2": 0.002554188583819
+    },
+    {
+      "owner": "wall1",
+      "temperature_k": 400,
+      "participating": true,
+      "omitted_shortwave_fraction": 4.422875354476e-150,
+      "omitted_longwave_fraction": 0.000002356684815241,
+      "omitted_blackbody_emission_w_m2": 0.003421001034237
+    },
+    {
+      "owner": "lower",
+      "temperature_k": 600,
+      "participating": true,
+      "omitted_shortwave_fraction": 1.549957529066e-98,
+      "omitted_longwave_fraction": 7.014338421876e-7,
+      "omitted_blackbody_emission_w_m2": 0.005154700699908
+    },
+    {
+      "owner": "upper",
+      "temperature_k": 1000,
+      "participating": true,
+      "omitted_shortwave_fraction": 1.532049443676e-57,
+      "omitted_longwave_fraction": 1.520567975996e-7,
+      "omitted_blackbody_emission_w_m2": 0.008622189753438
+    }
+  ],
+  "work": {
+    "wavelength_evaluations": 288,
+    "factorizations": 288,
+    "accepted_panels": 11
+  },
+  "residuals": {
+    "spectral_energy_w": -7.275957614183e-12,
+    "spectral_surface_equation_integral_w_m2": 1.591908402602e-12,
+    "gray_energy_w": 0,
+    "gray_surface_equation_w_m2": 9.094947017729e-13
+  },
+  "limits": [
+    "Constant-index Rayleigh soot; source assumptions must support the finite wavelength window and small-particle, dilute, nonscattering regime.",
+    "Original total surface emissivities are explicitly treated as gray.",
+    "One reciprocal normal chord is a conservative angular approximation, not an exact hemispherical slab.",
+    "Particles and gas share a temperature; no soot moles, pressure, yield, transport or deposition are inferred.",
+    "Quadrature differences are estimates, not certified bounds. Omitted blackbody emission is not a bound on omitted net heat."
+  ]
+}

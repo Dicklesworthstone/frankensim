@@ -29,6 +29,9 @@ use fs_qty::{Area, Length, Power, Qty, Temperature};
 /// Source-explicit Rayleigh soot absorption and its Planck-weighted gray mean.
 pub mod soot;
 
+/// Wavelength-resolved band/soot transfer through these same reciprocal paths.
+pub mod spectral;
+
 /// Maximum surface axis for the bounded dense reflection solve.
 pub const MAX_RADIATION_SURFACES: usize = 64;
 /// Maximum authored reciprocal chords per enclosure.
@@ -181,6 +184,20 @@ pub enum RadiationError {
         surface_w_m2: f64,
         /// Net enclosure energy defect [W].
         energy_w: f64,
+    },
+    /// The declared spectral work budget cannot resolve the requested outputs.
+    SpectralBudget {
+        /// Actual wavelength evaluations already performed.
+        evaluations: usize,
+        /// Caller-declared maximum number of wavelength evaluations.
+        maximum_evaluations: usize,
+    },
+    /// The selected wavelength window omits too much blackbody emission.
+    SpectralTruncation {
+        /// Largest omitted fraction among the actual surface/layer spectra.
+        maximum_fraction: f64,
+        /// Caller-declared maximum omitted blackbody fraction.
+        allowed_fraction: f64,
     },
     /// No physical state or report was published.
     Cancelled,
@@ -386,9 +403,78 @@ impl ParticipatingEnclosure {
         work: &mut RadiationWorkspace,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<RadiationReport, RadiationError> {
-        checkpoint(&mut cancelled)?;
+        self.admit_state(
+            surface_temperatures,
+            emissivities,
+            gas_temperatures,
+            controls,
+            work,
+            &mut cancelled,
+        )?;
         let n = self.geometry.len();
         let m = n + 2;
+        self.prepare_optics(
+            emissivities,
+            absorption.each_ref().map(|a| a.coefficient.value()),
+            work,
+            &mut cancelled,
+        )?;
+        // Subtract one common blackbody background before solving. A transparent,
+        // disconnected gas layer must not obscure adjacent surface temperatures.
+        let mut reference = surface_temperatures
+            .iter()
+            .map(|t| t.value())
+            .fold(f64::INFINITY, f64::min);
+        for (layer, t) in gas_temperatures.iter().enumerate() {
+            if work.exchange[(n + layer) * m..(n + layer + 1) * m]
+                .iter()
+                .any(|&g| g > 0.0)
+            {
+                reference = reference.min(t.value());
+            }
+        }
+        let reference_emission = finite(STEFAN_BOLTZMANN_W_M2_K4 * reference.powi(4))?;
+        for (i, t) in surface_temperatures
+            .iter()
+            .chain(gas_temperatures.iter())
+            .enumerate()
+        {
+            work.emission[i] = emission_difference(t.value(), reference)?;
+        }
+        let (maximum, balance) =
+            self.solve_emission(emissivities, controls, work, &mut cancelled)?;
+        let mut radiosity = Vec::with_capacity(n);
+        for &delta in &work.radiosity {
+            let value = finite(reference_emission + delta)?;
+            if value < 0.0 {
+                return Err(RadiationError::Invalid("negative surface radiosity"));
+            }
+            radiosity.push(value);
+        }
+        checkpoint(&mut cancelled)?;
+        Ok(RadiationReport {
+            surface_heat_power: work.powers[..n].iter().map(|&q| Power::new(q)).collect(),
+            gas_heat_power: [Power::new(work.powers[n]), Power::new(work.powers[n + 1])],
+            surface_radiosity_w_m2: radiosity,
+            surface_emissivities: emissivities.to_vec(),
+            absorption: (*absorption).clone(),
+            maximum_surface_residual_w_m2: maximum,
+            energy_residual_w: balance,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn admit_state(
+        &self,
+        surface_temperatures: &[Temperature],
+        emissivities: &[SurfaceEmissivity],
+        gas_temperatures: [Temperature; 2],
+        controls: RadiationSolve,
+        work: &RadiationWorkspace,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), RadiationError> {
+        checkpoint(cancelled)?;
+        let n = self.geometry.len();
         if work.n != n
             || surface_temperatures.len() != n
             || emissivities.len() != n
@@ -412,9 +498,26 @@ impl ParticipatingEnclosure {
                 ));
             }
         }
+        Ok(())
+    }
+
+    // Both gray and spectral radiation use this exact optical operator. The
+    // retained factor can serve many emission spectra when band optics are fixed.
+    fn prepare_optics(
+        &self,
+        emissivities: &[SurfaceEmissivity],
+        absorption: [f64; 2],
+        work: &mut RadiationWorkspace,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), RadiationError> {
+        let n = self.geometry.len();
+        let m = n + 2;
+        if absorption.iter().any(|&k| !nonnegative(k)) {
+            return Err(RadiationError::Invalid("invalid spectral absorption"));
+        }
         work.exchange.fill(0.0);
         for path in &self.paths {
-            checkpoint(&mut cancelled)?;
+            checkpoint(cancelled)?;
             let count = path.segments.len();
             let mut nodes = [0_usize; 4];
             let mut absorptance = [1.0; 4];
@@ -423,8 +526,7 @@ impl ParticipatingEnclosure {
             nodes[count + 1] = path.surfaces[1];
             for (k, segment) in path.segments.iter().enumerate() {
                 let layer = segment.layer.index();
-                let optical_depth =
-                    finite(absorption[layer].coefficient.value() * segment.length.value())?;
+                let optical_depth = finite(absorption[layer] * segment.length.value())?;
                 nodes[k + 1] = n + layer;
                 transmission[k + 1] = (-optical_depth).exp();
                 absorptance[k + 1] = -(-optical_depth).exp_m1();
@@ -449,53 +551,53 @@ impl ParticipatingEnclosure {
                 }
             }
         }
-        // Subtract one common blackbody background before solving. A transparent,
-        // disconnected gas layer must not obscure adjacent surface temperatures.
-        let mut reference = surface_temperatures
-            .iter()
-            .map(|t| t.value())
-            .fold(f64::INFINITY, f64::min);
-        for (layer, t) in gas_temperatures.iter().enumerate() {
-            if work.exchange[(n + layer) * m..(n + layer + 1) * m]
-                .iter()
-                .any(|&g| g > 0.0)
-            {
-                reference = reference.min(t.value());
-            }
-        }
-        let reference_emission = finite(STEFAN_BOLTZMANN_W_M2_K4 * reference.powi(4))?;
-        for (i, t) in surface_temperatures
-            .iter()
-            .chain(gas_temperatures.iter())
-            .enumerate()
-        {
-            work.emission[i] = emission_difference(t.value(), reference)?;
-        }
         work.matrix.fill(0.0);
         for i in 0..n {
-            checkpoint(&mut cancelled)?;
+            checkpoint(cancelled)?;
             let e = emissivities[i].value();
             let reflected_per_area = (1.0 - e) / self.geometry.areas_m2()[i];
             let mut diagonal = e;
-            let mut rhs = e * work.emission[i];
             for j in 0..m {
                 let coefficient = finite(reflected_per_area * work.exchange[i * m + j])?;
                 diagonal = finite(diagonal + coefficient)?;
                 if j < n {
                     work.matrix[i * n + j] = -coefficient;
-                } else {
-                    rhs = finite(coefficient.mul_add(work.emission[j], rhs))?;
                 }
             }
             work.matrix[i * n + i] = diagonal;
+        }
+        work.lu.factor(&work.matrix)?;
+        checkpoint(cancelled)
+    }
+
+    // `emission` contains the blackbody input minus one common background.
+    // Pair powers are independent of that background at every wavelength.
+    fn solve_emission(
+        &self,
+        emissivities: &[SurfaceEmissivity],
+        controls: RadiationSolve,
+        work: &mut RadiationWorkspace,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(f64, f64), RadiationError> {
+        let n = self.geometry.len();
+        let m = n + 2;
+        for i in 0..n {
+            checkpoint(cancelled)?;
+            let e = emissivities[i].value();
+            let reflected_per_area = (1.0 - e) / self.geometry.areas_m2()[i];
+            let mut rhs = e * work.emission[i];
+            for j in n..m {
+                let coefficient = finite(reflected_per_area * work.exchange[i * m + j])?;
+                rhs = finite(coefficient.mul_add(work.emission[j], rhs))?;
+            }
             work.rhs[i] = finite(rhs)?;
         }
         work.lu
-            .solve_into(&work.matrix, &work.rhs, &mut work.radiosity)?;
-        checkpoint(&mut cancelled)?;
+            .solve_factored_into(&work.rhs, &mut work.radiosity)?;
+        checkpoint(cancelled)?;
         work.powers.fill(0.0);
         for i in 0..m {
-            checkpoint(&mut cancelled)?;
+            checkpoint(cancelled)?;
             let a = if i < n {
                 work.radiosity[i]
             } else {
@@ -528,24 +630,8 @@ impl ParticipatingEnclosure {
                 energy_w: balance,
             });
         }
-        let mut radiosity = Vec::with_capacity(n);
-        for &delta in &work.radiosity {
-            let value = finite(reference_emission + delta)?;
-            if value < 0.0 {
-                return Err(RadiationError::Invalid("negative surface radiosity"));
-            }
-            radiosity.push(value);
-        }
-        checkpoint(&mut cancelled)?;
-        Ok(RadiationReport {
-            surface_heat_power: work.powers[..n].iter().map(|&q| Power::new(q)).collect(),
-            gas_heat_power: [Power::new(work.powers[n]), Power::new(work.powers[n + 1])],
-            surface_radiosity_w_m2: radiosity,
-            surface_emissivities: emissivities.to_vec(),
-            absorption: (*absorption).clone(),
-            maximum_surface_residual_w_m2: maximum,
-            energy_residual_w: balance,
-        })
+        checkpoint(cancelled)?;
+        Ok((maximum, balance))
     }
 }
 

@@ -1131,6 +1131,44 @@ molecular gas spectroscopy or universal optical constants are inferred. Tests
 exercise the original enclosure's signed surface/gas exchange at four soot
 loadings as well as the independent spectral integral.
 
+### Wavelength-dependent participating radiation
+
+`radiation::spectral` extends the same enclosure with sourced, contiguous
+`SpectralBand` absorption and optional original `RayleighSoot` populations.
+Every surface and gas layer emits at its own actual temperature. Soot absorption
+is evaluated at each wavelength, retaining spectral filtering instead of
+substituting a single Planck mean. Original reciprocal chords, gray surface
+emissivity cards, diffuse reflection equations and prepared LU still own the
+transfer. The caller explicitly names the assumption extending those total
+emissivities over wavelength; no molecular coefficients are inferred.
+
+Positive 8/16-point Gauss--Legendre integration in log wavelength splits at
+every supplied band boundary, with initial panel widths at most one logarithmic
+unit. Controls bound absolute heat/radiosity error estimates, evaluation count,
+and omitted blackbody fraction. Constant band optics reuse one factorization
+per band. Reused buffers avoid allocation per wavelength or subdivision.
+Reports retain individual output estimates, source identities, wavelength
+coverage, omitted blackbody emission, algebraic and energy residuals, and
+actual work counts. `evaluate_room_spectral` enforces original layer presence;
+`SpectralRadiationReport::add_gas_heat` adds the integrated gas powers once,
+while matching surface powers remain available to the original wall owners.
+
+The quadrature differences are estimates, not certified bounds. Omitted
+blackbody emission is not a bound on omitted net heat. The source must justify
+constant coefficients within each band, optical geometry, negligible scattering
+and particle/gas thermal equilibrium. This is not a molecular spectroscopy
+database, soot-yield model or RADCAL replacement. Planck normalization retains
+the original conduction owner's Stefan--Boltzmann convention.
+
+Six new test groups check independent Planck/tail quadrature, finite-window
+gray recovery and factorization reuse, selective absorption bands, independent
+spectral Beer--Lambert traversal, equilibrium/adjacent-temperature exchange,
+and bounded-work/cancellation/reuse behavior. The existing
+`soot_layer_radiation` example accepts an optional spectral suffix while
+preserving its original invocation. Its authored comparison and actual native
+results are in `data/reference/compartment_fire/spectral_soot_example.json`;
+both models conserve energy but predict different layer/wall heat distributions.
+
 
 ### Conservative solid-to-gas volatile transfer
 

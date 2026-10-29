@@ -25,10 +25,21 @@
 //! Particles and gas share each layer's actual temperature. Reported layer heat
 //! belongs to that thermally equilibrated mixture; no soot moles or pressure,
 //! combustion heat, kinetics, deposition, or molecular opacity are inferred.
+//!
+//! An optional suffix enables a wavelength-resolved comparison on the same
+//! geometry and actual temperatures:
+//! `spectral lambda_min_m lambda_max_m heat_tol_W radiosity_tol_W_m2 max_evaluations max_omitted_fraction`.
+//! The supplied Planck weighting temperatures then affect only the retained
+//! gray comparison. Molecular absorption is explicitly zero. Gray boundary
+//! emissivities and the normal-chord angular approximation still apply.
 
 use fs_airflow::compartment::radiation::soot::{RayleighSoot, SootOpticalDomain};
+use fs_airflow::compartment::radiation::spectral::{
+    SootPopulation, SpectralBand, SpectralOptics, SpectralSolve,
+};
 use fs_airflow::compartment::radiation::{
-    OpticalPath, OpticalSegment, ParticipatingEnclosure, RadiationSolve,
+    AbsorptionCoefficient, LayerAbsorption, OpticalPath, OpticalSegment, ParticipatingEnclosure,
+    RadiationSolve,
 };
 use fs_conduction::radiation::{
     EMISSIVITY_DIMS, SURFACE_EMISSIVITY_PROPERTY, SurfaceEmissivity, ViewFactorMatrix,
@@ -50,7 +61,15 @@ const USAGE: &str = "required arguments:\n\
 All optical inputs are source declarations; this is an estimated gray normal-chord slab.\n\
 Illustrative smoke case (authored values, not a validated soot-property source):\n\
   1.75 1.03 1800 0.001 200 2500 0.00018 0.0018 600 1000 600 1000 1 0.25 0.75 300 400 0.8 0.6 authored-demo\n\
-Set both soot concentrations to zero for the transparent comparison.";
+Set both soot concentrations to zero for the transparent comparison.\n\
+Optional wavelength-resolved comparison suffix (all seven values together):\n\
+  spectral lambda_min_m lambda_max_m heat_tol_W radiosity_tol_W_m2 max_evaluations max_omitted_fraction\n\
+Example suffix: spectral 1e-7 1e-3 1e-5 1e-5 8192 1e-4\n\
+This keeps the gray result for comparison, then resolves Rayleigh soot at each wavelength.\n\
+Each wall/layer emits at its own actual temperature; the two T_spectral inputs only weight the gray comparison.\n\
+Molecular absorption is declared transparent. Emissivities remain explicitly gray.\n\
+The finite wavelength interval is a caller-declared optical-source assumption.\n\
+Reported omitted blackbody emission is separate from quadrature error and is not a bound on omitted net heat.";
 
 fn surface(
     value: f64,
@@ -103,9 +122,29 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("{USAGE}");
         return Ok(());
     }
-    if arguments.len() != 20 {
+    if arguments.len() != 20 && arguments.len() != 27 {
         return Err(USAGE.into());
     }
+    let spectral = if arguments.len() == 27 {
+        if arguments[20] != "spectral" {
+            return Err(USAGE.into());
+        }
+        Some((
+            [
+                Length::new(arguments[21].parse::<f64>()?),
+                Length::new(arguments[22].parse::<f64>()?),
+            ],
+            SpectralSolve {
+                heat_tolerance_w: arguments[23].parse()?,
+                radiosity_tolerance_w_m2: arguments[24].parse()?,
+                maximum_evaluations: arguments[25].parse()?,
+                maximum_omitted_blackbody_fraction: arguments[26].parse()?,
+                ..SpectralSolve::default()
+            },
+        ))
+    } else {
+        None
+    };
     let numeric = arguments[..19]
         .iter()
         .map(|s| s.parse::<f64>())
@@ -231,5 +270,105 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!(
         "model_scope=estimated absorption; no soot yield, molecular absorption, scattering, or gas pressure contribution"
     );
+    if let Some((wavelengths, controls)) = spectral {
+        let molecular = [
+            LayerAbsorption::new(
+                AbsorptionCoefficient::new(0.0),
+                "authored transparent lower-layer molecular background; soot-only comparison",
+            )?,
+            LayerAbsorption::new(
+                AbsorptionCoefficient::new(0.0),
+                "authored transparent upper-layer molecular background; soot-only comparison",
+            )?,
+        ];
+        let optics = SpectralOptics::new(
+            vec![SpectralBand {
+                wavelengths,
+                absorption: molecular,
+            }],
+            soot.map(|s| {
+                Some(SootPopulation {
+                    model: &optical,
+                    volume_fraction: s.volume_fraction,
+                })
+            }),
+            format!(
+                "caller-supplied diffuse gray engineering wall inputs, held constant over the declared wavelength window; {source}"
+            ),
+        )?;
+        let resolved = enclosure.evaluate_spectral(
+            &walls,
+            &emissivities,
+            gas,
+            &optics,
+            controls,
+            &mut enclosure.spectral_workspace()?,
+            || false,
+        )?;
+        println!(
+            "spectral_model=constant-index Rayleigh soot with individual Planck spectra; same normal-chord geometry and gray boundaries"
+        );
+        println!(
+            "spectral_window_m=[{:.12e},{:.12e}]",
+            wavelengths[0].value(),
+            wavelengths[1].value()
+        );
+        println!(
+            "spectral_heat_tolerance_W={:.12e}; radiosity_tolerance_W_m2={:.12e}; maximum_evaluations={}; maximum_omitted_blackbody_fraction={:.12e}",
+            controls.heat_tolerance_w,
+            controls.radiosity_tolerance_w_m2,
+            controls.maximum_evaluations,
+            controls.maximum_omitted_blackbody_fraction
+        );
+        println!(
+            "spectral_wavelength_evaluations={}; factorizations={}; accepted_panels={}",
+            resolved.wavelength_evaluations, resolved.factorizations, resolved.accepted_panels
+        );
+        println!("layer,spectral_heat_W,gray_comparison_heat_W,quadrature_error_estimate_W");
+        for (i, name) in ["lower", "upper"].iter().enumerate() {
+            println!(
+                "{name},{:.12e},{:.12e},{:.12e}",
+                resolved.gas_heat_power[i].value(),
+                report.gas_heat_power[i].value(),
+                resolved.gas_heat_error_estimate_w[i]
+            );
+        }
+        println!(
+            "surface,spectral_heat_W,gray_comparison_heat_W,quadrature_error_estimate_W,spectral_radiosity_W_m2,radiosity_error_estimate_W_m2"
+        );
+        for i in 0..2 {
+            println!(
+                "wall{i},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e}",
+                resolved.surface_heat_power[i].value(),
+                report.surface_heat_power[i].value(),
+                resolved.surface_heat_error_estimate_w[i],
+                resolved.surface_radiosity_w_m2[i],
+                resolved.radiosity_error_estimate_w_m2[i]
+            );
+        }
+        println!(
+            "node,temperature_K,participating,omitted_shortwave_fraction,omitted_longwave_fraction,omitted_blackbody_emission_W_m2"
+        );
+        for (name, coverage) in ["wall0", "wall1", "lower", "upper"]
+            .iter()
+            .zip(&resolved.coverage)
+        {
+            println!(
+                "{name},{:.12e},{},{:.12e},{:.12e},{:.12e}",
+                coverage.temperature.value(),
+                coverage.participating,
+                coverage.shortwave_fraction,
+                coverage.longwave_fraction,
+                coverage.omitted_blackbody_w_m2
+            );
+        }
+        println!(
+            "spectral_surface_residual_integral_W_m2={:.12e}; enclosure_energy_residual_W={:.12e}",
+            resolved.surface_residual_integral_w_m2, resolved.energy_residual_w
+        );
+        println!(
+            "spectral_scope=estimated finite-window quadrature; supplied optical constants; no molecular spectroscopy, soot-yield prediction or scattering; omitted blackbody emission is not omitted net heat"
+        );
+    }
     Ok(())
 }
