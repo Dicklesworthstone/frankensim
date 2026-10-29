@@ -100,6 +100,15 @@ impl ViscousSlit {
     #[must_use]
     pub const fn gas(&self) -> Option<&GasState> { self.gas.as_ref() }
 
+    // A sourced channel follows the same new complete gas as its acoustic
+    // owner. An explicitly supplied viscosity remains an explicit override.
+    // The quasisteady law carries no fluid momentum or independent storage.
+    pub(super) fn rebind_source_gas(self, gas: &GasState)
+        -> Result<Self, AcousticRealizeError>
+    {
+        if self.gas.is_some() { Self::from_gas(gas, self.length_m) } else { Ok(self) }
+    }
+
     fn admit_density(self, density: f64) -> Result<(), AcousticRealizeError> {
         if self.gas.is_some_and(|gas| (gas.density - density).abs()
             > 64.0 * f64::EPSILON * gas.density.abs().max(density.abs())) {

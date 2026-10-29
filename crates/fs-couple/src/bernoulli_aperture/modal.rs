@@ -338,6 +338,35 @@ impl ModalAperture {
     pub const fn viscous_slit(&self) -> Option<super::viscous::ViscousSlit> {
         self.viscous_slit
     }
+
+    pub(super) fn rebind_exact_gas_load(
+        &mut self, gas: &fs_material::gas::GasState, impedance_pa_s_m3: f64,
+    ) -> Result<(), AcousticRealizeError> {
+        gas.validate_coherence().map_err(|_| invalid("live modal aperture requires one coherent source gas"))?;
+        if self.exact.is_none() || !impedance_pa_s_m3.is_finite() || impedance_pa_s_m3 <= 0.0 {
+            return Err(invalid("live modal gas refresh requires ExactZoh mechanics and positive finite impedance"));
+        }
+        let law = self.viscous_slit.map(|law| law.rebind_source_gas(gas)).transpose()?;
+        if let Some(law) = law {
+            match &self.closure {
+                Some(closure) => {
+                    let mut coordinates = [0.0; MAX_MODES];
+                    for (q, state) in coordinates.iter_mut().zip(&self.state) {
+                        *q = state.displacement_m;
+                    }
+                    closure.viscous_flow(law, &coordinates[..self.state.len()], gas.density, 0.0)?;
+                }
+                None => { law.evaluate(self.spec.width_m, self.gap(&self.state).max(0.0), gas.density, 0.0)?; }
+            }
+        }
+        // A gas intervention changes no structural mode, material relaxation,
+        // contact coordinate or observation port and advances no sample clock.
+        self.spec.density_kg_m3 = gas.density;
+        self.spec.impedance_pa_s_m3 = impedance_pa_s_m3;
+        self.viscous_slit = law;
+        self.material_gas = Some(*gas);
+        Ok(())
+    }
     fn gap(&self, state: &[BladeState]) -> f64 {
         if let Some(closure) = &self.closure {
             return closure.state_gap(state);

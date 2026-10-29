@@ -8110,6 +8110,24 @@ static pressure traction or an exterior gas change. Independent-source
 branch/terminal histories and late refusal are covered by authored focused
 regressions; native execution remains a separate verification gate.
 
+`ApertureDg::rebind_gas_field_controlled` publishes that continuing load with
+the original scalar, independent-pair or material-modal source. The source's
+density and exact mean impedance follow the same inlet gas; source-bound slit
+viscosity follows its complete gas state. Explicit numerical viscosity remains
+explicit. Structural propagators, positions, velocities, signed pressure
+projections, contact and solid relaxation histories are retained. The
+quasisteady aperture carries no gas inertia to reset or charge as storage.
+
+For a valve between two continuing ducts,
+`rebind_series_gas_fields_controlled` takes explicit upstream/downstream fields
+on their own geometries and prepares both before publishing either. The
+complete inlet gas must agree, and the valve receives the sum of the new exact
+mean impedances. The work allowance bounds the sum of absolute interventions;
+opposite signed transfers cannot hide an exceeded budget. Independent pressure,
+viscous/Bernoulli flow, continuum storage, two-blade oscillator and exact-retry
+regressions cover source changes after nonzero mechanical/acoustic histories.
+This does not add a density-changing mass-flow junction or a new gas-energy law.
+
 ## Continuing spatial dielectric charge through thermal phase change
 
 `ConductionThermalNetwork::step_dielectric_candidate` connects the native

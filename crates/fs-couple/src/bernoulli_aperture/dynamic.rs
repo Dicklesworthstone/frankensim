@@ -312,6 +312,29 @@ impl DynamicAperture {
     #[must_use]
     pub const fn viscous_slit(&self) -> Option<ViscousSlit> { self.viscous_slit }
 
+    // The DG transaction prepares all acoustic participants first. This final
+    // source update changes only the algebraic gas/load law: structural mass,
+    // position, velocity, contact and relaxation storage retain their owners.
+    pub(super) fn rebind_exact_gas_load(
+        &mut self, gas: &fs_material::gas::GasState, impedance_pa_s_m3: f64,
+    ) -> Result<(), AcousticRealizeError> {
+        gas.validate_coherence().map_err(|_| invalid("live aperture requires one coherent source gas"))?;
+        if self.exact.is_none() || !impedance_pa_s_m3.is_finite() || impedance_pa_s_m3 <= 0.0 {
+            return Err(invalid("live aperture gas refresh requires ExactZoh mechanics and positive finite impedance"));
+        }
+        let law = self.viscous_slit.map(|law| law.rebind_source_gas(gas)).transpose()?;
+        if let Some(law) = law {
+            match &self.closure {
+                Some(closure) => { closure.viscous_flow(law, self.state.opening_m, gas.density, 0.0)?; }
+                None => { law.evaluate(self.spec.aperture.width_m, self.state.opening_m.max(0.0), gas.density, 0.0)?; }
+            }
+        }
+        self.spec.density_kg_m3 = gas.density;
+        self.spec.impedance_pa_s_m3 = impedance_pa_s_m3;
+        self.viscous_slit = law;
+        Ok(())
+    }
+
     /// Bind the actual plate specimen to the existing nonlinear slit junction.
     /// Geometry-derived mass, stiffness, width and pressure area cannot be
     /// independently overridden. Fluid/load, clock, initial state and lay law

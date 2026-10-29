@@ -477,6 +477,29 @@ impl PairedAperture {
         self.set_viscous_slit(super::viscous::ViscousSlit::from_gas(gas, length_m)?)
     }
 
+    pub(super) fn rebind_exact_gas_load(&mut self, gas: &GasState, impedance_pa_s_m3: f64)
+        -> Result<(), AcousticRealizeError>
+    {
+        gas.validate_coherence().map_err(|_| invalid("live paired aperture requires one coherent source gas"))?;
+        if self.exact.is_none() || !impedance_pa_s_m3.is_finite() || impedance_pa_s_m3 <= 0.0 {
+            return Err(invalid("live paired gas refresh requires ExactZoh mechanics and positive finite impedance"));
+        }
+        let law = self.viscous_slit.map(|law| law.rebind_source_gas(gas)).transpose()?;
+        if let Some(law) = law {
+            match &self.closure {
+                Some(closure) => { closure.viscous_flow(law, self.blades.map(|s| s.displacement_m), gas.density, 0.0)?; }
+                None => { law.evaluate(self.spec.width_m, self.gap(self.blades).max(0.0), gas.density, 0.0)?; }
+            }
+        }
+        // Both blades and all solid/contact memories keep their original
+        // coordinates; the quasisteady gas law has no stored energy to remap.
+        self.spec.density_kg_m3 = gas.density;
+        self.spec.impedance_pa_s_m3 = impedance_pa_s_m3;
+        self.viscous_slit = law;
+        self.gas = Some(*gas);
+        Ok(())
+    }
+
     /// Original explicit or material-bound channel law, shared by both blades.
     #[must_use]
     pub const fn viscous_slit(&self) -> Option<super::viscous::ViscousSlit> { self.viscous_slit }

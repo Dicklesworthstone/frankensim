@@ -25,6 +25,7 @@ use crate::dg_port::{DgTerminalFrame, sum_terminal_work};
 /// Original single, paired and material-modal sources on the shared DG load.
 pub mod loaded;
 mod tract;
+mod gas;
 /// Actual upstream tract exchange and cold preparation of the series load.
 pub use tract::{DgTractFrame, series_inlet_state};
 /// Independent blades or material modes on the same DG pressure/work coupling.
@@ -102,7 +103,7 @@ impl<A> ApertureDg<A> {
     #[must_use]
     pub const fn aperture(&self) -> &A { &self.aperture }
 
-    /// Immutable cold source and original exponential metadata.
+    /// Current accepted material source and original exponential metadata.
     #[must_use]
     pub const fn load(&self) -> &ApertureDgLoad { &self.load }
 

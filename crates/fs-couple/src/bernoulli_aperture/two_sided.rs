@@ -129,6 +129,15 @@ impl LoadedAperture {
             Self::Modal(a) => (a.spec().density_kg_m3, a.spec().impedance_pa_s_m3),
         }
     }
+    pub(super) fn rebind_exact_gas_load(&mut self, gas: &GasState, impedance_pa_s_m3: f64)
+        -> Result<(), AcousticRealizeError>
+    {
+        match self {
+            Self::Single(a) => a.rebind_exact_gas_load(gas, impedance_pa_s_m3),
+            Self::Paired(a) => a.rebind_exact_gas_load(gas, impedance_pa_s_m3),
+            Self::Modal(a) => a.rebind_exact_gas_load(gas, impedance_pa_s_m3),
+        }
+    }
     pub(super) fn energy(&self) -> f64 {
         match self { Self::Single(a) => a.stored_energy_j(), Self::Paired(a) => a.stored_energy_j(),
             Self::Modal(a) => a.stored_energy_j() }
