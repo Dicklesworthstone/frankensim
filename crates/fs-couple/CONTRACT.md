@@ -10347,8 +10347,9 @@ not a hard real-time timing certificate.
 `drive_and_radiate[_controlled]` returns a `PreparedVkStep` containing the
 original mechanical/material work record, endpoint volume velocity, and compact
 baffled-monopole pressure from interval-mean acceleration. Density and listener
-distance remain observation parameters; the prepared API adds no radiation
-backreaction or finite-wavelength approximation. Invalid inputs, solver or
+distance remain observation parameters. Preparation retains explicitly attached
+acoustic loading without adding another radiation reaction or a finite-wavelength
+receiver approximation. Invalid inputs, solver or
 observation refusal, and cancellation publish no physical-state or
 constitutive-history change.
 
@@ -10650,3 +10651,11 @@ plane-stress, exact relaxation-image and membrane checks, the focused native
 target passes 20 tests.
 This establishes these bounded linear-kinematic material equations, not a
 general singular DAE, finite-strain shell or full-workspace qualification.
+
+## Complete radiation reaction on nonlinear plate bodies
+
+`thin_plate::VkBody::with_radiation_load` binds the existing shared passive acoustic `Model` to every original mass-normalized modal velocity. Every mode has a model column, including zeros; all signed mutual terms survive. The original point-force and area projections remain independent. The existing acoustic modal bank and explicit physical-port interconnection append the complete acoustic storage and its reciprocal force to the same exact/Gonzalez equation. The existing prepared-body API applies unchanged.
+
+Accepted mechanical, material and other appended host histories stay an identical prefix; only the new acoustic coordinates begin at rest. A moving attachment explicitly starts a new quiescent exterior at that instant, rather than inferring past acoustic memory. Total loss includes acoustic damping once and must not be credited again as material heat. Every physical exterior needs a single ownership declaration. The original complete dense-render cap and caller pole allowance refuse oversized requests without discarding modes or histories. Cancellation is checked around the bounded original setup owners.
+
+The producer remains responsible for geometry, gas, basis and fitted-band validity. A passive authored pole model is not acoustic-fidelity evidence. Existing compact pressure observations remain distinct from a finite-wavelength receiver transfer. Three focused native G1/G3 tests compare complete linear/nonlinear, full-damping, Maxwell-memory and two-pole mutual-radiation trajectories with an independently assembled velocity-space RK4 system, independently check stored energy and force work/heat, measure second-order time convergence over three clocks, and cover moving-history preservation, zero loading, capacities, invalid physics and cancellation. Native tests use original numerical owners and a narrow source-extracted plate/model/cancellation seam; they do not establish full workspace or instrument qualification.

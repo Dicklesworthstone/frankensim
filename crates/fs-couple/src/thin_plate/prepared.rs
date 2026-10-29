@@ -10,7 +10,8 @@ pub struct PreparedVkStep {
     pub pressure_pa: f64,
     /// Accepted endpoint volume velocity [m^3/s].
     pub volume_velocity_m3_s: f64,
-    /// Complete nonlinear storage, Maxwell/Kelvin heat and physical input work [J].
+    /// Complete storage, material/acoustic losses and physical input work [J].
+    /// Acoustic loss must not also be routed as solid material heat.
     pub work: PreparedStepRecord,
 }
 
@@ -116,13 +117,14 @@ impl PreparedVkBody {
         self.dt_s
     }
 
-    /// Complete original `[q0,p0,q1,p1,...,material histories...]` state.
+    /// Original `[q0,p0,q1,p1,...]` followed by constitutive and acoustic/cavity
+    /// histories in their attachment order, retaining each load's coordinates.
     #[must_use]
     pub fn state(&self) -> &[f64] {
         &self.x
     }
 
-    /// Complete mechanical and material-memory storage [J].
+    /// Complete mechanical, constitutive and attached acoustic storage [J].
     #[must_use]
     pub fn stored_energy_j(&self) -> f64 {
         self.evolution.system().hamiltonian(&self.x)

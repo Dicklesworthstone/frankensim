@@ -799,3 +799,9 @@ the complete production fs-phs source. These finite-region results provide
 numerical convergence and original-equation evidence; they do not certify an
 entire spectrum, nonlinear sounding threshold, observable transfer pole, or
 resolution of repeated/defective modes.
+
+## Explicit physical load ports beside independent drive ports
+
+`PortHamiltonian::with_parallel_load_columns` accepts the complete finite host-state-by-load-port matrix B. The load receives B^T grad(H_host), and the host receives the reciprocal reaction -B y_load through the existing `interconnect` owner. Every original state, constitutive law and external drive port remains in order. This permits a surface-volume-flow or distributed-velocity port to differ from a point-force drive without changing internal work. Signed, repeated and nonorthogonal columns are retained. The existing indexed `with_parallel_load` delegates to the same owner.
+
+Callers supply physical units and explicit work/state capacities; this is no new integrator, reduction or impedance fit. Three focused native G0/G1 tests check signed reciprocal work, independent force work and total storage/loss, undriven-coordinate reaction, malformed projections, and exact structure equivalence of the indexed API. Full-workspace qualification is not asserted.

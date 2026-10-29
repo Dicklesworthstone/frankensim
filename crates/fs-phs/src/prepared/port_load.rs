@@ -52,7 +52,44 @@ impl PortHamiltonian {
         if load.m == 0 || load_port_to_drive.len() != load.m
             || load_port_to_drive.iter().any(|&p| p >= self.m)
         { return Err(PhsError::BadPortPairing); }
+        let extent = self.n.checked_mul(load.m).ok_or(PhsError::Dimension {
+            what: "parallel load column dimensions",
+        })?;
+        let mut columns = vec![0.0; extent];
+        for row in 0..self.n {
+            for (column, &drive) in load_port_to_drive.iter().enumerate() {
+                columns[row*load.m+column] = self.g[row*self.m+drive];
+            }
+        }
+        self.with_parallel_load_columns(load, &columns)
+    }
+
+    /// Attach a load at physical flow ports distinct from the external drives.
+    ///
+    /// `load_columns` is the finite row-major host-state-by-load-port matrix B.
+    /// The load receives `u_load = B^T grad H_host`; its reaction on the host is
+    /// `-B y_load`. Both maps use the SAME columns, so the internal power is
+    /// exactly zero even for signed, nonorthogonal or repeated projections.
+    /// For canonical mechanics, entries on momentum rows select velocities;
+    /// physical area weights select a cavity's volume flow. They need not be
+    /// proportional to an external point-force projection.
+    ///
+    /// Every original external drive, state and constitutive law stays in its
+    /// original order. All load states follow, and no load port remains external.
+    /// The existing interconnect owner assembles and admits the full skew
+    /// coupling. This supplies no time integrator, reduction or impedance fit.
+    /// Callers own state/work capacities and the physical units of each column.
+    ///
+    /// # Errors
+    /// An incomplete/nonfinite column matrix, zero load ports, unrepresentable
+    /// dimensions, or the existing composite skew/PSD admission refusal.
+    pub fn with_parallel_load_columns(self, load: Self, load_columns: &[f64])
+        -> Result<Self, PhsError>
+    {
         let error = || PhsError::Dimension { what: "parallel load dimensions" };
+        if load.m == 0 || self.n.checked_mul(load.m) != Some(load_columns.len())
+            || load_columns.iter().any(|x| !x.is_finite())
+        { return Err(PhsError::BadPortPairing); }
         let dim = self.n.checked_add(load.n).ok_or_else(error)?;
         dim.checked_mul(dim).ok_or_else(error)?;
         let external = self.m;
@@ -62,12 +99,11 @@ impl PortHamiltonian {
         for row in 0..self.n {
             g[row*expanded..row*expanded+external]
                 .copy_from_slice(&self.g[row*external..(row+1)*external]);
-            for (j,&p) in load_port_to_drive.iter().enumerate() {
-                g[row*expanded+external+j] = self.g[row*external+p];
-            }
+            g[row*expanded+external..(row+1)*expanded]
+                .copy_from_slice(&load_columns[row*load.m..(row+1)*load.m]);
         }
-        // Duplicate only PORT columns, never storage or state. Consuming the
-        // duplicate ports with interconnect leaves all original drives external.
+        // Extra columns expose physical ports, not new states or storage.
+        // Consuming them leaves every original external drive untouched.
         let host = Self::new(self.n, expanded, self.j, self.r, g, self.storage)?;
         let pairs: Vec<_> = (0..load.m).map(|j| (external+j,j)).collect();
         interconnect(host, load, &pairs)

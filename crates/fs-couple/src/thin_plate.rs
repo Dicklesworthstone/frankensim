@@ -322,6 +322,7 @@ impl CompactBody {
 }
 
 mod prepared;
+mod radiation;
 pub use prepared::{PreparedVkBody, PreparedVkStep};
 
 /// A von Karman plate as one pHS.
@@ -424,13 +425,14 @@ impl VkBody {
     }
 
     /// Accepted state: mass-normalized `[q0, p0, q1, p1, ...]`, followed by
-    /// energy-normalized material histories in the original branch order.
+    /// constitutive and acoustic/cavity histories in their attachment order.
+    /// Each load retains its declared coordinates; original modal pairs stay first.
     #[must_use]
     pub fn state(&self) -> &[f64] {
         &self.x
     }
 
-    /// Complete mechanical AND material-memory storage [J].
+    /// Complete mechanical, constitutive and attached acoustic storage [J].
     #[must_use]
     pub fn stored_energy_j(&self) -> f64 {
         self.sys.hamiltonian(&self.x)
