@@ -17,6 +17,9 @@ use fs_tribo::tangential::matrix::MatrixTangentialConfig;
 use fs_tribo::tangential::multiple::MultipleTangentialConfig;
 use fs_tribo::{FrictionLaw, FrictionRegime, TangentialLaw};
 
+#[path = "modal_multi_tangential/heat.rs"]
+mod heat;
+
 const OMEGAS: [[f64; 2]; 3] = [[800.0, 1100.0], [1700.0, 2200.0], [1300.0, 1900.0]];
 const LEFT: [[[f64; 2]; 2]; 2] = [[[8.0, 2.0], [3.0, 6.0]], [[-3.0, 7.0], [4.0, 1.0]]];
 const RIGHT: [[[f64; 2]; 2]; 2] = [[[4.0, -1.0], [2.0, 5.0]], [[5.0, 3.0], [-2.0, 6.0]]];

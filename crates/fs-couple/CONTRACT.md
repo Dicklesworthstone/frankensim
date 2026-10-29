@@ -10820,3 +10820,57 @@ feedback, direct original-owner replay, typed/legacy characteristic identity,
 callback partition, source molecular memory and transactional refusal. This is
 an exploratory fixed-composition, local-linear boundary capability; it does
 not qualify a measured flute, a finite player airway or nonlinear transparency.
+
+## Simultaneous retained modal contacts and shared finite-cell thermal feedback
+
+`friction::tangential::multiple::heat` connects the original
+`MultiTangentialModalSystem<L>` to one `FrictionHeatNetworkStep`. Every physical
+interface has its own massless common temperature; all original finite cells
+share one enthalpy residual. Each thermal trial solves all retained contacts
+against their complete original `2N`-coordinate modal response, then stages one
+sum of body efforts. Contact-to-contact compliance, both tangent directions,
+original network losses and original constitutive histories remain active.
+
+`ModalTangentialHeatRoute` explicitly binds a mechanical construction index to
+an original thermal link and its numerical temperature guess. Bindings can be
+enumerated in any order. Duplicate, missing or out-of-range contact indices and
+duplicate link ownership refuse before solving. The thermal owner and source
+callback use ascending original link IDs; source conductivities must carry
+those same identities. Mechanical frames retain construction order, and the
+returned index map relates each thermal report to its original contact.
+The caller retains authority for the physical modal-body/cell correspondence.
+
+Only native irreversible contact work heats the interface nodes. Geometry and
+actual endpoint conductivities determine signed body heat. A shared cell keeps
+one original capacity and receives each adjacent interface contribution once;
+ordinary interbody conduction continues at zero friction. Reversible shear
+storage and original network damping retain their mechanical accounts. The
+combined balance cancels friction transfer internally. An optional final-root
+audit reuses original exact caloric entropy and reports each interface's
+physical friction and conduction generation without adding another solve.
+
+Cell count, interface count, joint unknown count, nonlinear iterations and
+total source/mechanical trials have explicit bounds. Finite-difference probes
+start from the same accepted bodies and contact histories. After convergence,
+all contacts and their summed body force are restaged at the final temperature
+vector. Source admission, original mechanical/thermal balances and cancellation
+checks precede joint publication. Frozen-temperature laws retain their refusal;
+changing elastic free energy requires an explicit reversible heat/entropy port
+and cannot be admitted by replacing a law or resetting its retained history.
+
+Five focused groups in `tests/modal_multi_tangential/heat.rs` and seven existing
+multi-contact mechanical groups pass through the original native source and
+dependency implementations. An independent two-equation thermal-softening
+reference eliminates three finite cells and retains shared body compliance;
+it verifies distinct interface temperatures, both force axes, all three body
+recoils, shared-cell heat once and exact caloric entropy. Further groups verify
+mechanical/contact-route permutation, zero-slip tridiagonal conduction,
+duplicate/missing/source-identity refusal and loaded vector-history late
+refusal/cancellation with exact retry.
+
+Scope: a retained contact set, fixed tangent frames and prescribed normal loads
+per sample. Original held-effort mechanics and backward-Euler conduction require
+time refinement. Root convergence establishes neither uniqueness nor continuous
+event accuracy. Moving footprints, evolving normal geometry, variable-elastic
+entropy coupling, measured calibration and full workspace validation are outside
+this composition.

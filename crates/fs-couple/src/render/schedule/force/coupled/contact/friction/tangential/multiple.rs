@@ -25,6 +25,10 @@ use fs_tribo::tangential::multiple::{
 };
 use fs_tribo::{FrictionRegime, TangentialLaw, TangentialSolveConfig, TangentialStepInput};
 
+/// All retained contacts and their original finite thermal network accept together.
+#[path = "multiple/heat.rs"]
+pub mod heat;
+
 /// One two-axis material contact and its unchanged physical body projections.
 pub struct ModalTangentialContact<L> {
     /// Both axes name the same positive-side component and modal basis.
@@ -130,6 +134,11 @@ pub struct MultiTangentialModalSystem<L: TangentialLaw> {
     response: PreparedTangentialContacts,
     forces: Vec<f64>,
     last: Option<MultiTangentialModalFrame>,
+}
+
+struct MultiTangentialModalCandidate<S> {
+    frame: MultiTangentialModalFrame,
+    states: Vec<S>,
 }
 
 impl<L: TangentialLaw> MultiTangentialModalSystem<L> {
@@ -287,6 +296,16 @@ impl<L: TangentialLaw> MultiTangentialModalSystem<L> {
         drives: &[PlanarTangentialModalDrive],
         gate: Option<&CancelGate>,
     ) -> Result<&MultiTangentialModalFrame, MultiTangentialModalError> {
+        let candidate = self.stage_candidate(external, drives, gate)?;
+        Ok(self.publish_candidate(candidate))
+    }
+
+    fn stage_candidate(
+        &mut self,
+        external: &[f64],
+        drives: &[PlanarTangentialModalDrive],
+        gate: Option<&CancelGate>,
+    ) -> Result<MultiTangentialModalCandidate<L::State>, MultiTangentialModalError> {
         poll(gate)?;
         if drives.len() != self.laws.len()
             || drives.iter().any(|drive| {
@@ -484,10 +503,18 @@ impl<L: TangentialLaw> MultiTangentialModalSystem<L> {
             law_evaluations: result.law_evaluations,
         };
         poll(gate)?;
+        Ok(MultiTangentialModalCandidate {
+            frame: accepted,
+            states: result.contacts.into_iter().map(|step| step.state).collect(),
+        })
+    }
+
+    fn publish_candidate(
+        &mut self,
+        candidate: MultiTangentialModalCandidate<L::State>,
+    ) -> &MultiTangentialModalFrame {
         self.network.publish_staged();
-        for (state, candidate) in self.states.iter_mut().zip(result.contacts) {
-            *state = candidate.state;
-        }
-        Ok(self.last.insert(accepted))
+        self.states = candidate.states;
+        self.last.insert(candidate.frame)
     }
 }
