@@ -1,6 +1,8 @@
 //! Force-driven material contact, using the same source and finite heat fixtures.
 #[path = "dynamics/collinear.rs"]
 mod collinear;
+#[path = "dynamics/planar.rs"]
+mod planar;
 
 use super::*;
 use fs_ga::Vec3;

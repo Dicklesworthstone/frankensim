@@ -26,6 +26,8 @@
 
 /// Work-conjugate collinear motion with physical stopping and reversal events.
 pub mod collinear;
+/// Work-conjugate planar motion with resolved turning, arrest and restart.
+pub mod planar;
 
 use super::*;
 use fs_thermal::enthalpy::DepositedCell;

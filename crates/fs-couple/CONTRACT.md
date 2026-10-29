@@ -382,6 +382,29 @@ sources. A density change at fixed geometry therefore changes both inertial
 response and the matching finite heat inventory through data resolution.
 Mismatched identities, masses or geometry refuse before motion advances.
 
+`SlidingPair::step_planar_candidate` advances turning and stopping motion in
+that same fixed tangent frame through the original material/contact/enthalpy
+candidates. Each segment uses midpoint displacement, with a scalar radial
+speed solve for the current isotropic friction law. Physical traction work
+heats the original finite bodies; no backward-Euler kinetic defect is booked
+as heat. Static reaction is considered only at an accepted zero relative
+velocity. A stopping-time root must also satisfy the full vector impulse
+gate; unresolved turning is subdivided instead of accepting a mirror-velocity
+midpoint root. Both bodies' accumulated impulse defects and the whole-call
+energy account must pass before any segment is published.
+
+Constant collinear Coulomb motion is exact at arbitrary tangent orientation,
+including arrest and restart. General curved paths require refinement of the
+declared maximum segment duration, independently of root accuracy. An oblique
+limiting stop is approximate within its vector impulse/time budgets. G1/G3
+tests compare curved-stop integrals and a separate continuous RK4 turning
+reference on three time rungs, and exercise rotated frames, distinct static
+and kinetic capacity, source temperature feedback, and transactional refusal.
+Temperature-dependent coefficients still use endpoint thermal states and
+segment mean speed; thermal transport remains first order. No normal motion,
+anisotropic material law, within-stick thermal event localization, or real
+material calibration is inferred.
+
 ### Material contact loads on a field actuator
 
 `tribothermal::field_motion` closes the existing dry-contact active-set/enthalpy
