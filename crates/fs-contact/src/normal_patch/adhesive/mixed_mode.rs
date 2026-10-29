@@ -21,6 +21,9 @@
 /// Finite tangential apparatus stiffness and competing sourced slip/peel limits.
 pub mod loading;
 
+/// Mixed-mode withdrawal through finite normal and tangential apparatus springs.
+pub mod pull_off;
+
 use super::{JkrError, SourceJkrSphereContact};
 use core::f64::consts::PI;
 use fs_blake3::{ContentHash, DomainHasher};

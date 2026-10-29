@@ -1095,3 +1095,28 @@ shear elasticity, evolving sources or a heat destination. Floating-point event
 gates do not provide interval certificates for nearly multiple roots. Nine
 focused original-source tests cover actual stopping, reversal, breakaway,
 entry/exit, partition invariance, two-body reconstruction and atomic refusals.
+
+## Mixed-mode pull-off through finite loading apparatus
+
+`normal_patch::adhesive::mixed_mode::pull_off::JkrPullOffFixture` binds the
+original conservative full-stick JKR and sourced junction-shear owners to
+finite normal and tangential apparatus springs. A normal stage withdraws under
+a fixed two-component shear stage. Actual tip motion, shrinking contact area,
+both spring energies and the full symmetric stage stiffness follow the same
+original potential. A strictly monotone scalar fold ratio and the independently
+sourced gross-slip threshold select the first admitted boundary.
+
+Separation publishes an irreversible detached successor only when its relaxed
+geometry is noninterpenetrating and the released energy is nonnegative. The
+successor retains cumulative released-energy transfer, emitted once for a
+separate fast-transient owner. Gross slip and unsupported folds retain the
+actual boundary storage and untraversed stage motion. Detached states do not
+spontaneously rebond. Explicit source/range/work budgets and cancellation keep
+trials atomic and runtime continuation allocation-free.
+
+This is a quasistatic failure handoff under constant mode-independent adhesion
+energy. It does not resolve inertial snap trajectories, post-slip JKR behavior,
+partial slip, changing shear-stage motion or empirical mixed-mode toughness.
+Six focused original-source tests recover the pure-normal finite-spring limit,
+check complete energy gradients/stiffness and independent normal-work
+quadrature, retain release across subdivision, and cover source/refusal/retry.
