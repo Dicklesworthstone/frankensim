@@ -515,121 +515,145 @@ fn react_cells(
     report: &mut ChemistryReport,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), ReactiveError> {
-    let n = flow.gas.species_count();
-    let width = n + 2;
-    let controls = reactor.controls();
-    let domain = flow.gas.domain();
-    let mut next = [0.0; MAX_COMPONENTS];
+    let width = flow.gas.species_count() + 2;
     for i in 0..flow.cell_count() {
-        poll(cancelled)?;
-        let q = &flow.states[i * width..(i + 1) * width];
-        let primitive = flow.gas.decode(q, None, cancelled)?;
-        let volume = flow.mesh.volumes()[i];
-        let thermal = q[n + 1] - 0.5 * q[n] * primitive.velocity;
-        let reference = sum(q[..n]
-            .iter()
-            .zip(flow.gas.energy_references())
-            .map(|(rho, e)| rho * e));
-        let internal = (thermal + reference) * volume;
-        let tolerance = controls.energy_tolerance_j
-            + volume
-                * (primitive.density * domain.absolute_energy_tolerance
-                    + domain.relative_energy_tolerance * thermal.abs());
-        let initial_roundtrip = (internal / volume - reference - thermal) * volume;
-        if !internal.is_finite() || !tolerance.is_finite() || initial_roundtrip.abs() > tolerance {
-            return Err(ReactiveError::EnergyConsistency {
-                cell: i,
-                residual_j: initial_roundtrip,
-                tolerance_j: tolerance,
-            });
-        }
-        for k in 0..n {
-            amounts[k] =
-                Amount::new((q[k] * volume) / flow.gas.source().models()[k].molar_mass().value());
-        }
-        let endpoint = reactor
-            .advance_adiabatic_energy(
-                amounts,
-                Energy::new(internal),
-                Volume::new(volume),
-                Temperature::new(primitive.temperature),
-                Time::new(duration),
-                &mut *cancelled,
-            )
-            .map_err(|source| chemistry_error(i, source))?;
-        for k in 0..n {
-            next[k] = (endpoint.amounts()[k].value()
-                * flow.gas.source().models()[k].molar_mass().value())
-                / volume;
-        }
-        next[n] = q[n];
-        // A linear conserved-variable gauge: never add a separate heat-release
-        // source to the original chemical total energy.
-        let reference_change =
-            sum((0..n).map(|k| (next[k] - q[k]) * flow.gas.energy_references()[k]));
-        next[n + 1] = q[n + 1] - reference_change;
-        let resolved = flow.gas.decode(
-            &next[..width],
-            Some(endpoint.temperature().value()),
+        react_cell(
+            &flow.gas,
+            &mut flow.states[i * width..(i + 1) * width],
+            flow.mesh.volumes()[i],
+            i,
+            reactor,
+            amounts,
+            duration,
+            report,
             cancelled,
         )?;
-        let next_thermal = next[n + 1] - 0.5 * next[n] * resolved.velocity;
-        let balance = endpoint.balance();
-        let mut source_thermal = [0.0; MAX_SPECIES];
-        for k in 0..n {
-            source_thermal[k] = (next[k] / flow.gas.source().models()[k].molar_mass().value())
-                * flow.gas.source().models()[k]
-                    .molar_internal_energy_change(
-                        Temperature::new(domain.minimum_temperature),
-                        endpoint.temperature(),
-                    )
-                    .map_err(FlowError::from)?
-                    .value();
-        }
-        // Independently reconstruct sensible energy at the reactor's endpoint
-        // temperature. Checking only the gauge update would be an algebraic
-        // identity and could hide a thermodynamically inconsistent endpoint.
-        let reconstruction_residual =
-            (next_thermal - sum(source_thermal[..n].iter().copied())) * volume;
-        let physical_residual = ((next_thermal - thermal) + reference_change) * volume;
-        let reconstruction_tolerance = tolerance + balance.energy_residual_j.abs();
-        if !reconstruction_residual.is_finite()
-            || reconstruction_residual.abs() > reconstruction_tolerance
-        {
-            return Err(ReactiveError::EnergyConsistency {
-                cell: i,
-                residual_j: reconstruction_residual,
-                tolerance_j: reconstruction_tolerance,
-            });
-        }
-        // A molecular-mass mismatch may also change kinetic energy at fixed
-        // momentum. It must fit the same actual energy budget, not be hidden.
-        if !physical_residual.is_finite() || physical_residual.abs() > tolerance {
-            return Err(ReactiveError::EnergyConsistency {
-                cell: i,
-                residual_j: physical_residual,
-                tolerance_j: tolerance,
-            });
-        }
-        report.cell_solves += 1;
-        report.accepted_steps += balance.accepted_steps;
-        report.rejected_steps += balance.rejected_steps;
-        report.nonlinear_iterations += balance.nonlinear_iterations;
-        report.maximum_energy_residual_j = report
-            .maximum_energy_residual_j
-            .max(balance.energy_residual_j.abs());
-        report.maximum_reconstruction_residual_j = report
-            .maximum_reconstruction_residual_j
-            .max(reconstruction_residual.abs());
-        report.entropy_change_j_k += balance.entropy_change_j_k;
-        for k in 0..n {
-            report.species_change_kg[k] += (next[k] - q[k]) * volume;
-        }
-        report.referenced_energy_change_j += (next[n + 1] - q[n + 1]) * volume;
-        flow.states[i * width..(i + 1) * width].copy_from_slice(&next[..width]);
     }
     flow.validate_states(cancelled)?;
     poll(cancelled)
+}
+
+/// One physical control volume at fixed momentum and chemical total energy.
+/// Branch and compact-volume owners reuse the identical original-source update.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn react_cell(
+    gas: &super::MixtureGas,
+    q: &mut [f64],
+    volume: f64,
+    i: usize,
+    reactor: &mut IsochoricReactor,
+    amounts: &mut [Amount],
+    duration: f64,
+    report: &mut ChemistryReport,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), ReactiveError> {
+    let n = gas.species_count();
+    let width = n + 2;
+    let controls = reactor.controls();
+    let domain = gas.domain();
+    let mut next = [0.0; MAX_COMPONENTS];
+    poll(cancelled)?;
+    let primitive = gas.decode(q, None, cancelled)?;
+    let thermal = q[n + 1] - 0.5 * q[n] * primitive.velocity;
+    let reference = sum(q[..n]
+        .iter()
+        .zip(gas.energy_references())
+        .map(|(rho, e)| rho * e));
+    let internal = (thermal + reference) * volume;
+    let tolerance = controls.energy_tolerance_j
+        + volume
+            * (primitive.density * domain.absolute_energy_tolerance
+                + domain.relative_energy_tolerance * thermal.abs());
+    let initial_roundtrip = (internal / volume - reference - thermal) * volume;
+    if !internal.is_finite() || !tolerance.is_finite() || initial_roundtrip.abs() > tolerance {
+        return Err(ReactiveError::EnergyConsistency {
+            cell: i,
+            residual_j: initial_roundtrip,
+            tolerance_j: tolerance,
+        });
+    }
+    for k in 0..n {
+        amounts[k] = Amount::new((q[k] * volume) / gas.source().models()[k].molar_mass().value());
+    }
+    let endpoint = reactor
+        .advance_adiabatic_energy(
+            amounts,
+            Energy::new(internal),
+            Volume::new(volume),
+            Temperature::new(primitive.temperature),
+            Time::new(duration),
+            &mut *cancelled,
+        )
+        .map_err(|source| chemistry_error(i, source))?;
+    for k in 0..n {
+        next[k] = (endpoint.amounts()[k].value() * gas.source().models()[k].molar_mass().value())
+            / volume;
+    }
+    next[n] = q[n];
+    // A linear conserved-variable gauge: never add a separate heat-release
+    // source to the original chemical total energy.
+    let reference_change = sum((0..n).map(|k| (next[k] - q[k]) * gas.energy_references()[k]));
+    next[n + 1] = q[n + 1] - reference_change;
+    let resolved = gas.decode(
+        &next[..width],
+        Some(endpoint.temperature().value()),
+        cancelled,
+    )?;
+    let next_thermal = next[n + 1] - 0.5 * next[n] * resolved.velocity;
+    let balance = endpoint.balance();
+    let mut source_thermal = [0.0; MAX_SPECIES];
+    for k in 0..n {
+        source_thermal[k] = (next[k] / gas.source().models()[k].molar_mass().value())
+            * gas.source().models()[k]
+                .molar_internal_energy_change(
+                    Temperature::new(domain.minimum_temperature),
+                    endpoint.temperature(),
+                )
+                .map_err(FlowError::from)?
+                .value();
+    }
+    // Independently reconstruct sensible energy at the reactor's endpoint
+    // temperature. Checking only the gauge update would be an algebraic
+    // identity and could hide a thermodynamically inconsistent endpoint.
+    let reconstruction_residual =
+        (next_thermal - sum(source_thermal[..n].iter().copied())) * volume;
+    let physical_residual = ((next_thermal - thermal) + reference_change) * volume;
+    let reconstruction_tolerance = tolerance + balance.energy_residual_j.abs();
+    if !reconstruction_residual.is_finite()
+        || reconstruction_residual.abs() > reconstruction_tolerance
+    {
+        return Err(ReactiveError::EnergyConsistency {
+            cell: i,
+            residual_j: reconstruction_residual,
+            tolerance_j: reconstruction_tolerance,
+        });
+    }
+    // A molecular-mass mismatch may also change kinetic energy at fixed
+    // momentum. It must fit the same actual energy budget, not be hidden.
+    if !physical_residual.is_finite() || physical_residual.abs() > tolerance {
+        return Err(ReactiveError::EnergyConsistency {
+            cell: i,
+            residual_j: physical_residual,
+            tolerance_j: tolerance,
+        });
+    }
+    report.cell_solves += 1;
+    report.accepted_steps += balance.accepted_steps;
+    report.rejected_steps += balance.rejected_steps;
+    report.nonlinear_iterations += balance.nonlinear_iterations;
+    report.maximum_energy_residual_j = report
+        .maximum_energy_residual_j
+        .max(balance.energy_residual_j.abs());
+    report.maximum_reconstruction_residual_j = report
+        .maximum_reconstruction_residual_j
+        .max(reconstruction_residual.abs());
+    report.entropy_change_j_k += balance.entropy_change_j_k;
+    for k in 0..n {
+        report.species_change_kg[k] += (next[k] - q[k]) * volume;
+    }
+    report.referenced_energy_change_j += (next[n + 1] - q[n + 1]) * volume;
+    q.copy_from_slice(&next[..width]);
+    Ok(())
 }
 
 #[cfg(test)]

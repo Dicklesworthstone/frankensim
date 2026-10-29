@@ -24,6 +24,9 @@ use fs_qty::Time;
 
 mod step;
 
+/// Atomic finite-rate chemistry in every branch cell and compact gas volume.
+pub mod reactive;
+
 /// Finite, stationary, perfectly mixed gas volume with evolving species.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plenum {

@@ -695,3 +695,47 @@ is claimed. This network transport owner has no chemical source, resolved
 junction mixing, molecular port diffusion, wall loss or entropy certificate.
 The required `dsr quality --tool frankensim` could not run because DSR is
 unavailable; focused native checks are not the workspace gate.
+
+## Finite-rate reacting shockwave networks
+
+`multicomponent::network::reactive::ReactingNetwork1d` owns a complete mixture
+network and one prepared original-source isochoric reactor. Every branch cell
+and finite rigid plenum participates in `C(dt/2), A(dt), C(dt/2)`, using its
+actual volume. The existing reacting single-branch owner and this network
+share the same per-cell chemistry update. Momentum and physical chemical total
+energy are fixed during C; the stored referenced-energy change is exactly the
+negative change in species reference energy, without a second heat-release
+source. Endpoint sensible energy is independently reconstructed from the
+original species models.
+
+The initial duration respects branch and compact-volume acoustic scales. If
+the first chemical half raises wave speeds and transport accepts less time,
+the whole composition restarts from accepted branch and plenum states at the
+actual duration. Exhausted retries, source refusal and cancellation cannot
+publish a partly reacted network. Fields, clocks, combined reports and port
+exchanges publish together after final admission. Trial fields, amount storage,
+reactor and numerical workspaces are reused; reset work polls in bounded tiles.
+
+Combined reports distinguish chemical species/reference-energy changes from
+external transport and reconstruct physical total-energy balance. Accepted
+port exchanges remain opposite to the branch transport reports. Those reports
+explicitly describe the intermediate transport stage; releasing the raw network
+clears its stale transport-only whole-step report. Compact plenums retain the
+same perfectly mixed, zero-bulk-momentum, fixed-support interpretation.
+
+Four new regressions compare homogeneous reversible isomerization with analytic
+decay, and strong exothermic steps with independent constant-volume reactors at
+the accepted duration after a heat-driven restart. They separately reconstruct
+branch/plenum chemistry and actual port-energy budgets, reject mismatched
+original sources and plenum temperatures outside the chemistry interval, and
+verify late cancellation plus workspace reuse. The complete integrated native
+gas suite passes 92 tests, including existing reacting molecular-transport
+checks. Eight existing nonlinear duct tests pass against the shared port and
+mixture-network kernel. These are production-source native checks, not a full
+workspace Cargo/DSR result; DSR is unavailable in this environment.
+
+This owner composes inviscid network transport with finite-rate chemistry.
+Molecular junction diffusion, wall heat/loss, valves and resolved mixing remain
+separate closures. The chemistry entropy diagnostic is not a network entropy
+certificate, and symmetric splitting does not prove second-order convergence
+for the adaptive first-order chemistry base.
