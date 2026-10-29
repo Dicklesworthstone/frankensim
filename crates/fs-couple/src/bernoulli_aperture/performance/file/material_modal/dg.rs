@@ -22,6 +22,12 @@
 //! actual computed DG terminal and its independently declared exterior gas.
 //! Its optional gas law acts on every original terminal-to-receiver surface
 //! path; omission keeps the original lossless receiver.
+//!
+//! Alternatively, `solid tet4 SOURCE_TOKEN` replaces `loss`/`blades` and
+//! selects an original source-bound volume mesh. Complete source histories or
+//! an explicitly admitted frozen K/full C enter the same pressure/contact/DG clock. Source
+//! geometry supplies opening and wetted-face pressure; no DKT chart is invented.
+//! Original solid material records and approximation bounds remain inspectable.
 
 use super::{
     BladePropagator, BladeState, LossSelection, MaterialCache,
@@ -29,7 +35,7 @@ use super::{
     NormalizedMaterialCardPack, Obstacle, PairedApertureLimits,
     PlateValveInputError, Reader, MAX_CONTROLS, MAX_PLATE_VALVE_PERFORMANCE_BYTES,
     bad, checkpoint, closure, forces, gas, optional_positive, plate, pressure,
-    read_propagator, read_receiver, wetted,
+    read_propagator, read_receiver, solid, wetted,
 };
 use crate::bernoulli_aperture::dg::LoadedApertureDg;
 use crate::bernoulli_aperture::dg::loaded::performance::LoadedDgPerformance;
@@ -56,6 +62,7 @@ pub struct MaterialModalDgValvePerformance {
     ambient: GasState,
     wall: DgMaterialWallLayout,
     upstream_wall: Option<DgMaterialWallLayout>,
+    solid: Option<solid::SolidValveRecord>,
 }
 
 impl MaterialModalDgValvePerformance {
@@ -237,8 +244,14 @@ impl MaterialModalDgValvePerformance {
             .map_err(|error| PlateValveInputError::Physics(
                 crate::acoustic_realize::AcousticRealizeError::Nonlinear(error.to_string()),
             ))?;
-        let loss = LossSelection::read(&mut rows)?;
-        let blades = rows.count("blades", 2)?;
+        let solid = if rows.lines.clone().next().and_then(|line|
+            line.split_ascii_whitespace().next()) == Some("solid")
+        {
+            Some(solid::read(&mut rows, rest_opening, &mut cache, &mut load_material, gate)?)
+        } else { None };
+        let loss = if solid.is_some() { LossSelection::Elastic }
+            else { LossSelection::read(&mut rows)? };
+        let blades = if solid.is_some() { 1 } else { rows.count("blades", 2)? };
         if blades == 0 {
             return Err(bad(rows.line, "one or two independently supplied material blades are required"));
         }
@@ -246,7 +259,7 @@ impl MaterialModalDgValvePerformance {
         let mut states = Vec::<BladeState>::new();
         let mut materials = Vec::new();
         let (mut nodes, mut triangles) = (0, 0);
-        for blade in 0..blades {
+        for blade in 0..if solid.is_some() { 0 } else { blades } {
             let (source, options, initial, records) = plate::read(
                 &mut rows, blade, states.len(), &loss, &mut cache, &mut load_material, gate,
             )?;
@@ -256,12 +269,26 @@ impl MaterialModalDgValvePerformance {
             materials.extend(records);
             plates.push((source, options));
         }
-        let modes = states.len();
+        let modes = if let Some(source) = &solid {
+            nodes = source.image.node_count();
+            source.image.mode_count()
+        } else { states.len() };
+        if solid.is_some() && matches!(rows.lines.clone().next().and_then(|line|
+            line.split_ascii_whitespace().next()), Some("wetted_surfaces" | "pressure_shapes" | "closure"))
+        {
+            return Err(bad(rows.line + 1,
+                "solid pressure surfaces belong to the original volume mesh; plate-only traces or closure are unsupported"));
+        }
         let wetted_surfaces = wetted::read(&mut rows, blades, gate)?;
         let pressure_shapes = pressure::shapes(&mut rows, blades, gate)?;
         let closure = closure::read(&mut rows, gate)?;
         let forces = forces::read(&mut rows, blades, samples, gate)?;
         let pressure_events = pressure::events(&mut rows, blades, samples, gate)?;
+        if solid.is_some() && (!wetted_surfaces.is_empty() || !pressure_shapes.is_empty()
+            || closure.is_some() || pressure_events.iter().any(|events| !events.is_empty()))
+        {
+            return Err(bad(rows.line, "solid source does not own plate spatial pressure or closure records"));
+        }
         let mut row = rows.row("compile_limits")?;
         let max_compile_work: u64 = row.parse()?;
         let max_controls = row.count(MAX_CONTROLS)?;
@@ -295,11 +322,21 @@ impl MaterialModalDgValvePerformance {
             } else { None };
             prepared_plates.push((source, options, tensor));
         }
-        let mut valve = ModalAperture::from_material_images_with_wetted(
-            prepared_plates, wetted_surfaces, rest_opening, inlet, impedance, dt,
-            samples, limits, states, contact, propagator, gate,
-        ).map_err(PlateValveInputError::Physics)?;
-        valve = loss.attach(valve, gate)?;
+        let (mut valve, solid) = if let Some(source) = solid {
+            let (valve, record) = source.into_aperture(inlet,
+                crate::bernoulli_aperture::modal::solid::MaterialSolidOptions {
+                    impedance_pa_s_m3: impedance, time_step_s: dt, max_steps: samples, limits,
+                },
+                contact, gate,
+            )?;
+            (valve, Some(record))
+        } else {
+            let valve = ModalAperture::from_material_images_with_wetted(
+                prepared_plates, wetted_surfaces, rest_opening, inlet, impedance, dt,
+                samples, limits, states, contact, propagator, gate,
+            ).map_err(PlateValveInputError::Physics)?;
+            (loss.attach(valve, gate)?, None)
+        };
         for pressure in pressure_shapes {
             valve = pressure.bind(valve, gate)?;
         }
@@ -329,8 +366,11 @@ impl MaterialModalDgValvePerformance {
         }
         for (blade, events) in forces.into_iter().enumerate() {
             if !events.is_empty() {
-                renderer = renderer.with_material_plate_force_controls(blade, events)
-                    .map_err(PlateValveInputError::Gesture)?;
+                renderer = if solid.is_some() {
+                    renderer.with_material_solid_force_controls(events)
+                } else {
+                    renderer.with_material_plate_force_controls(blade, events)
+                }.map_err(PlateValveInputError::Gesture)?;
             }
         }
         for (blade, events) in pressure_events.into_iter().enumerate() {
@@ -346,7 +386,7 @@ impl MaterialModalDgValvePerformance {
                 mechanics_rate_hz: mechanics, propagator, output_rate_hz: output,
                 samples, full_scale_pa, blades, modes, nodes, triangles,
             },
-            renderer, materials, gases, ambient, wall, upstream_wall,
+            renderer, materials, gases, ambient, wall, upstream_wall, solid,
         })
     }
 
@@ -356,6 +396,9 @@ impl MaterialModalDgValvePerformance {
     pub const fn renderer(&self) -> &LoadedDgPerformance { &self.renderer }
     /// Every original normalized material artifact and regional address.
     pub fn material_records(&self) -> &[ModalValveMaterialRecord] { &self.materials }
+    /// Original volume mesh/material records, when this source selects a solid.
+    /// Plate material records are empty for this distinct structural family.
+    pub const fn solid_record(&self) -> Option<&solid::SolidValveRecord> { self.solid.as_ref() }
     /// Ambient, prescribed local and computed exterior material receipts.
     pub fn gas_records(&self) -> &[GasRecord] { &self.gases }
     /// Original material wall source, shared with any plate using the same pack.

@@ -10874,3 +10874,40 @@ time refinement. Root convergence establishes neither uniqueness nor continuous
 event accuracy. Moving footprints, evolving normal geometry, variable-elastic
 entropy coupling, measured calibration and full workspace validation are outside
 this composition.
+
+## Native three-dimensional material valves on the shared DG renderer
+
+The material-modal DG grammar accepts `solid tet4 SOURCE_TOKEN` in place of
+plate loss/blade records. Original material cards provide equilibrium elasticity,
+density, complete symmetric Mandel branch coefficients, relaxation times and
+strain limits at declared external states. Explicit material axes, regional
+element assignments, supports and original exterior pressure faces reach the
+existing solid owners; no effective modulus, loss ratio or pressure area is
+invented by this reader. The signed reference pressure map is work-conjugate to
+swept volume; positive closing pressure acts against it. Nodal force histories
+use the same source-port scheduler and original shape projection.
+
+`solid_memory` selects the existing complete hereditary reduction and aperture,
+including actual Maxwell history and relaxed/unrelaxed initialization.
+`solid_approximation` explicitly selects the existing frozen-frequency K/full-C
+image and its retained-frequency dispersion gates. Every selected mode, including
+zero-opening modes, survives either route. Both use the same pressure/contact,
+DG gas, radiation, exterior observer and source clocks. Metadata distinguishes
+the two physical approximations and retains original source pack identities.
+
+The frozen solid aperture now validates original volume strain at cold and
+actual candidate endpoints through the source element maps; modal displacement
+or mean opening alone cannot admit an invalid material strain. Failure precedes
+accepted motion/clock publication. The hereditary owner retains its existing
+source-domain check. These are endpoint checks, not temporal strain enclosures.
+
+The native surface-load owner is P1, so Tet10 input refuses rather than silently
+using linear pressure faces. Contact remains the existing effective mean slit;
+plate spatial traces, follower pressure, arbitrary authored material memory,
+large strain and thermal material evolution are not implied. The supplied
+`solid-dg.performance` and `solid-hereditary-dg.performance` are manufactured
+small-solid integration fixtures, not measured clarinet/oboe specimens.
+Focused regressions exercise an independent tetrahedral compliance/work identity,
+material-only changes reaching actual DG/microphone state, complete viscosity
+and causal memory, partition identity, source/clock/capacity refusals and atomic
+strain rejection. Native execution remains a separate verification requirement.

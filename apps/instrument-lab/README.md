@@ -139,6 +139,18 @@ inlet diagnostic pressure or the native baffled receiver, and `observer_gas`
 retains the declared propagation model. Keep the receiver and pressure scale
 fixed when comparing two material or atmosphere experiments.
 
+The **Resolved flow — physical blowing pressure** starter opens
+`resolved-dg-pressure.performance`. Its `boundary pressure` records hold a
+pressure offset in pascals relative to the original source-face gas. The
+original characteristic reconstruction uses the returning wave to determine
+normal velocity; changing gas composition, calorics or static pressure therefore
+changes actual source flow at the same prescribed blowing pressure. The same
+resolved field, DG feedback and exterior pressure observer remain active.
+This is an ideal pressure boundary within the existing local-linear domain,
+not finite airway storage or a measured flute. Explicit `boundary characteristic`
+and legacy `boundary COUNT` remain incoming-wave controls in m/s. Optional
+`dg_molecular` uses the same source-bound DG loss reader as the wind performers.
+
 The canonical `resolved-dg.performance` starter is a small exploratory physical
 field fixture. It does not describe a complete flute or reed instrument.
 Native admission retains the stated grid spacing, substeps and physical clock;
@@ -349,6 +361,31 @@ material history, reed motion, returning bore pressure and microphone. The
 example retains 12 area points and 72 history coordinates; refinement must
 respect the exact owner's explicit capacity. Native decimation retains 96 kHz
 mechanics. These manufactured source coefficients are not wet-cane measurements.
+
+The **Material reed — three-dimensional material memory** starter opens
+`solid-hereditary-dg.performance`. Build and attach `solid-valve.matpack` using
+the material-modal instructions. `solid_memory` retains the original tensor
+branches and relaxation times in the existing exact aperture solver, alongside
+the complete selected equilibrium modes, pressure work, contact and bore state.
+Relaxed and unrelaxed initial history are explicit data. Material and source-time
+changes therefore alter the physical trajectory and microphone output through
+the original constitutive memory. Point, projection, source-strain, temporal and
+exact-state limits remain active; refinement that exceeds them is refused.
+This tiny manufactured Tet4 specimen does not establish measured reed accuracy.
+
+The **Material reed — three-dimensional solid** starter opens
+`solid-dg.performance`. Build `solid-valve.matpack` from `solid-valve.tsv`
+and its manifest in the same material-modal example directory, then attach it.
+The source declares the tetrahedral mesh, constrained degrees of freedom,
+pressure-loaded exterior faces, material regions and tensor property names.
+The existing solid owner derives all selected modes and the full coupled
+viscosity; zero-opening modes remain in that same aperture/duct solve.
+Material, geometry and support changes therefore reach the native microphone.
+This Tet4 example is a small manufactured soft-solid specimen. Its material
+response is frozen at the declared reference frequency, with explicit storage
+and loss dispersion checks at retained modal frequencies. It does not evolve
+hereditary solid histories or qualify measured cane, clarinet or oboe accuracy.
+Native decimation retains the original 96 kHz mechanics.
 
 ### Material-string performances
 

@@ -146,3 +146,25 @@ fn material_admission_and_extreme_relaxation_scales_fail_closed() {
     close(report.dissipated,report.stored_energy,2e-14);
     assert_eq!(report.work,0.0);close(report.balance_residual,0.0,2e-14);
 }
+
+#[test]
+fn original_mandel_and_tensor_shear_histories_share_source_strain_admission() {
+    let law = model();
+    let strain = [0.0, 0.0, 0.0, 0.07, 0.0, 0.0];
+    let mandel = [0.0, 0.0, 0.0, 0.07 * core::f64::consts::SQRT_2, 0.0, 0.0];
+    let mut original = law.state();
+    let mut factored = law.history();
+    let stress = law.step(&mut original, mandel, 0.01).unwrap();
+    let other = factored.advance(strain, 0.01, || false).unwrap();
+    close(stress[3], other.stress[3] * core::f64::consts::SQRT_2, 2e-12);
+    let original_before = original.clone();
+    let factored_before = factored.clone();
+    for value in [0.071, f64::NAN, f64::INFINITY] {
+        let tensor = [0.0, 0.0, 0.0, value, 0.0, 0.0];
+        let mandel = [0.0, 0.0, 0.0, value * core::f64::consts::SQRT_2, 0.0, 0.0];
+        assert!(law.step(&mut original, mandel, 0.01).is_err());
+        assert!(factored.advance(tensor, 0.01, || false).is_err());
+        assert_eq!(original, original_before);
+        assert_eq!(factored, factored_before);
+    }
+}

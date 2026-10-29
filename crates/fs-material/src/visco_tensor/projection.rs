@@ -138,10 +138,8 @@ impl ProjectedTensorProny {
         for (column, &value) in self.columns.iter().zip(displacement) {
             for i in 0..6 { out[i] += column[i]*value; }
         }
-        let m = mandel(&out); let norm2 = dot(&m, &m);
-        if !finite(&out) || !norm2.is_finite() || det::sqrt(norm2) > self.model.strain_limit {
-            return Err(invalid("projected strain exceeds original small-strain domain"));
-        }
+        self.model.validate_mandel_strain(&mandel(&out))
+            .map_err(|_| invalid("projected strain exceeds original small-strain domain"))?;
         Ok(out)
     }
 

@@ -18,6 +18,7 @@ mod pressure;
 mod wetted;
 mod relaxation;
 mod thickness;
+mod solid;
 
 fn pack(rho: f64, missing: bool) -> NormalizedMaterialCardPack {
     pack_with_relaxation(rho, missing, 1e8, 0.001)

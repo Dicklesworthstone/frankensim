@@ -132,7 +132,33 @@ impl MaterialModalValve {
         coordinates: &[f64],
         gate: &CancelGate,
     ) -> Result<Vec<[f64; 3]>, ReduceError> {
-        poll_gate(gate)?;
+        self.expand_nodal_cancellable(coordinates, || gate.is_requested())
+    }
+
+    /// Admit actual modal displacement at every original material quadrature
+    /// point. Uses the same source shapes and B matrices as volume mechanics;
+    /// no bound is inferred from modal amplitude or mean opening alone.
+    pub fn validate_modal_displacement(
+        &self,
+        coordinates: &[f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), ReduceError> {
+        let nodal = self.expand_nodal_cancellable(coordinates, &mut cancelled)?;
+        let displacement: Vec<_> = nodal.into_iter().flatten().collect();
+        self.source.validate_displacement(&displacement, cancelled)?;
+        Ok(())
+    }
+
+    fn expand_nodal_cancellable(
+        &self,
+        coordinates: &[f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<[f64; 3]>, ReduceError> {
+        let mut poll = || -> Result<(), ReduceError> {
+            if cancelled() { Err(crate::linear3::TetElasticError::Cancelled.into()) }
+            else { Ok(()) }
+        };
+        poll()?;
         if coordinates.len() != self.modes.len() || coordinates.iter().any(|v| !v.is_finite()) {
             return Err(invalid(
                 "complete modal observation needs all finite original coordinates",
@@ -140,7 +166,7 @@ impl MaterialModalValve {
         }
         let mut result = vec![[0.0; 3]; self.nodes];
         for (row, &dof) in self.source.equilibrium().free_dofs.iter().enumerate() {
-            poll_gate(gate)?;
+            poll()?;
             let value = self
                 .modes
                 .iter()
@@ -152,7 +178,7 @@ impl MaterialModalValve {
             }
             result[dof / 3][dof % 3] = value;
         }
-        poll_gate(gate)?;
+        poll()?;
         Ok(result)
     }
 }

@@ -169,7 +169,7 @@ test("higher mechanical clocks request the original native decimator without mod
 test("canonical DG flute and reed atmosphere records reach the native packet unchanged", async () => {
   const connected = {...status, maximumAttachments:32, maximumAttachmentFileBytes:8388608,
     maximumAttachmentBytes:33554432, maximumRequestBytes:48000000};
-  for (const path of ["flue-dg-baffled.performance", "flue-dg-molecular.performance", "flue-dg-nolle-molecular.performance", "flue-dg-conical-molecular.performance", "material_modal_valve/paired-dg-chimney.performance", "material_modal_valve/paired-tensor-dg.performance"]) {
+  for (const path of ["flue-dg-baffled.performance", "flue-dg-molecular.performance", "flue-dg-nolle-molecular.performance", "flue-dg-conical-molecular.performance", "material_modal_valve/paired-dg-chimney.performance", "material_modal_valve/paired-tensor-dg.performance", "material_modal_valve/solid-dg.performance", "material_modal_valve/solid-hereditary-dg.performance"]) {
     const bytes = await readFile(new URL(`../../../crates/fs-couple/examples/${path}`, import.meta.url));
     const source = bytes.toString("utf8");
     if (path.endsWith("-molecular.performance")) {
@@ -291,15 +291,17 @@ test("resolved sources always select their command, including experiments withou
     maximumAttachments:32, maximumAttachmentFileBytes:8388608,
     maximumAttachmentBytes:33554432, maximumRequestBytes:48000000};
   const source = (await readFile(new URL("../../../crates/fs-couple/examples/resolved-dg.performance", import.meta.url))).toString("utf8");
-  for (const decimate of [false, true]) {
-    await renderNativeWindBundle(source, [], connected, {renderer:"resolved", decimate}, undefined,
+  const pressureSource = (await readFile(new URL("../../../crates/fs-couple/examples/resolved-dg-pressure.performance", import.meta.url))).toString("utf8");
+  assert.match(pressureSource, /^boundary pressure 3$/m);
+  for (const selected of [source, pressureSource]) for (const decimate of [false, true]) {
+    await renderNativeWindBundle(selected, [], connected, {renderer:"resolved", decimate}, undefined,
       async (_url, options) => {
         assert.equal(options.headers["Content-Type"], "application/json;charset=utf-8");
         const packet = validateInput(new TextEncoder().encode(options.body), true);
         assert.equal(packet.renderer, "resolved");
         assert.equal(packet.decimate, decimate);
         assert.deepEqual(packet.attachments, []);
-        assert.deepEqual(packet.source, new TextEncoder().encode(source));
+        assert.deepEqual(packet.source, new TextEncoder().encode(selected));
         return audio();
       });
   }

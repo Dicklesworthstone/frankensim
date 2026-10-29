@@ -49,6 +49,8 @@
 //! development and compressibility require other physical models.
 /// Material modal mechanics bound to the shared exact DG bore and source clock.
 pub mod dg;
+/// Original three-dimensional source geometry and complete material selections.
+pub mod solid;
 
 mod plate;
 mod boundaries;

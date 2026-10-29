@@ -559,6 +559,23 @@ impl TensorProny {
         self.band_rad_s
     }
 
+    /// Admit one physical small-strain tensor in Mandel coordinates.
+    /// Its Euclidean norm is the Frobenius norm of the symmetric tensor;
+    /// tensor shear therefore enters as sqrt(2) times the off-diagonal entry.
+    /// This observes a supplied state, not extrema between time or space points.
+    pub fn validate_mandel_strain(&self, strain: &[f64; 6]) -> Result<(), ViscoError> {
+        let norm2 = strain.iter().fold(0.0, |sum, value| sum + value * value);
+        if strain.iter().any(|value| !value.is_finite())
+            || !norm2.is_finite()
+            || det::sqrt(norm2) > self.strain_limit
+        {
+            return Err(ViscoError::Parameters {
+                what: "strain exceeds the original tensor material small-strain domain",
+            });
+        }
+        Ok(())
+    }
+
     /// Evaluate the step-strain relaxation tensor `G(t) = C_eq + Σ_j C_j exp(-t / τ_j)`
     /// at time `t >= 0` [s] in Mandel coordinates.
     ///
@@ -805,6 +822,7 @@ impl TensorProny {
     ///
     /// # Errors
     /// Returns [`ViscoError::Parameters`] if `dt < 0`, `dt` or `strain_new` is non-finite,
+    /// the original material small-strain bound is exceeded,
     /// or `s.q.len() != self.branches.len()`.
     pub fn step(
         &self,
@@ -822,6 +840,7 @@ impl TensorProny {
                 what: "TensorPronyState branch count does not match TensorProny law",
             });
         }
+        self.validate_mandel_strain(&strain_new)?;
         let d_eps: [f64; 6] = core::array::from_fn(|i| strain_new[i] - s.strain[i]);
         let mid_eps: [f64; 6] = core::array::from_fn(|i| s.strain[i] + 0.5 * d_eps[i]);
 

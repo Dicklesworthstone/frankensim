@@ -423,11 +423,17 @@ fn resolved_provenance(
     let solid_wall = dg_wall_provenance(p.wall_layout());
     let radiation = super::duct_metadata::dg_radiation_provenance(load);
     let propagation = super::duct_metadata::observer_gas_provenance(renderer.observer_gas());
+    let boundary = match renderer.boundary_history().first().expect("finite native boundary history") {
+        fs_lbm::nsf3::NsfBoundaryDrive::PressureOffset(_) =>
+            ",\"external_boundary\":{\"kind\":\"prescribed-pressure-offset\",\"units\":\"Pa\",\"reference\":\"original source-face material pressure\",\"flow\":\"determined by the live outgoing characteristic at every original face reconstruction\"}",
+        fs_lbm::nsf3::NsfBoundaryDrive::IncomingCharacteristic(_) =>
+            ",\"external_boundary\":{\"kind\":\"incoming-characteristic\",\"units\":\"m/s\",\"definition\":\"delta outward normal velocity minus delta pressure over reference material impedance\"}",
+    };
     let timing = format!(",\"time_projection\":{{\"physical_interval_s\":{:e},\"declared_physical_intervals\":{},\"declared_physical_duration_s\":{:e},\"observation_rate_hz\":{},\"declared_observation_samples\":{},\"declared_observation_duration_s\":{:e},\"method\":\"conservative overlap of original interval means; direct same-clock path\",\"boundary_control\":\"held value at each physical interval start; event error at most one physical interval\",\"bandlimited_antialias_filter\":false,\"scope\":\"box-average temporal projection requires clock refinement; physical prefix may lead observation by less than one physical interval; shared PCM decimation may truncate an incomplete output interval\"}}",
         load.propagator().dt(), info.physical_intervals,
         load.propagator().dt() * info.physical_intervals as f64,
         info.sample_rate_hz, info.samples, info.samples as f64 / f64::from(info.sample_rate_hz));
-    format!("\"resolved_input\":{{\"schema\":\"frankensim-resolved-dg-performance-v1\",\"blake3\":\"{}\",\"source_owner\":\"original-NsfGrid3-D3Q27\",\"dimensions\":[{},{},{}],\"solid_cells\":{},\"initial_state_cells\":{},\"boundary_segments\":{},\"dx_m\":{:e},\"nsf_dt_s\":{:e},\"substeps\":{},\"source_gas\":{gas},\"bulk_to_shear_ratio\":{:e},\"bulk_ratio_source\":{},\"coupled_area_m2\":{:e},\"maximum_root_evaluations\":{},\"maximum_cell_steps\":{},\"pressure_absolute_tolerance_pa\":{:e},\"pressure_relative_tolerance\":{:e},\"projection_absolute_tolerance_j\":{:e},\"projection_relative_tolerance\":{:e},\"duct_operator_identity\":\"{}\",\"duct_total_dofs\":{},\"pressure_point\":\"{point}\",\"observer_gas\":{propagation},\"model_scope\":\"original resolved fixed-composition fluid and live material DG bore; uniform acoustic interface projection with separate mass/energy flux; stationary voxel walls and two-cell fluid collars; source, geometry, boundary and coupling convergence remain required; no measured flute/reed qualification\"{timing}{observer}{radiation}{solid_wall}{gas_sources}}}",
+    format!("\"resolved_input\":{{\"schema\":\"frankensim-resolved-dg-performance-v1\",\"blake3\":\"{}\",\"source_owner\":\"original-NsfGrid3-D3Q27\",\"dimensions\":[{},{},{}],\"solid_cells\":{},\"initial_state_cells\":{},\"boundary_segments\":{},\"dx_m\":{:e},\"nsf_dt_s\":{:e},\"substeps\":{},\"source_gas\":{gas},\"bulk_to_shear_ratio\":{:e},\"bulk_ratio_source\":{},\"coupled_area_m2\":{:e},\"maximum_root_evaluations\":{},\"maximum_cell_steps\":{},\"pressure_absolute_tolerance_pa\":{:e},\"pressure_relative_tolerance\":{:e},\"projection_absolute_tolerance_j\":{:e},\"projection_relative_tolerance\":{:e},\"duct_operator_identity\":\"{}\",\"duct_total_dofs\":{},\"pressure_point\":\"{point}\",\"observer_gas\":{propagation},\"model_scope\":\"original resolved fixed-composition fluid and live material DG bore; uniform acoustic interface projection with separate mass/energy flux; stationary voxel walls and two-cell fluid collars; source, geometry, boundary and coupling convergence remain required; no measured flute/reed qualification\"{boundary}{timing}{observer}{radiation}{solid_wall}{gas_sources}}}",
         info.input_hash.to_hex(), info.dimensions[0], info.dimensions[1], info.dimensions[2],
         info.solid_cells, info.initial_state_cells, info.boundary_segments, law.dx_m, law.dt_s,
         limits.substeps, law.bulk_to_shear_ratio, json_string(system.zone().bulk_ratio_source()),
@@ -505,11 +511,18 @@ pub(super) fn material_modal_dg_provenance(
         ),
         _ => unreachable!("authored material DG observes its original inlet or outlet"),
     };
-    let materials = p.material_records().iter().map(|record| format!(
-        "{{\"blade\":{},\"section\":{},\"region\":{},\"path\":{},\"pack_hash\":\"{}\"}}",
-        record.blade(), record.section(), record.region(), json_string(record.path()),
-        record.pack().content_hash().to_hex(),
-    )).collect::<Vec<_>>().join(",");
+    let materials = if let Some(solid) = p.solid_record() {
+        solid.materials().iter().map(|record| format!(
+            "{{\"section\":{},\"path\":{},\"pack_hash\":\"{}\"}}",
+            record.section(), json_string(record.path()), record.pack().content_hash().to_hex(),
+        )).collect::<Vec<_>>().join(",")
+    } else {
+        p.material_records().iter().map(|record| format!(
+            "{{\"blade\":{},\"section\":{},\"region\":{},\"path\":{},\"pack_hash\":\"{}\"}}",
+            record.blade(), record.section(), record.region(), json_string(record.path()),
+            record.pack().content_hash().to_hex(),
+        )).collect::<Vec<_>>().join(",")
+    };
     let inlet = super::duct_metadata::gas_state(load.duct().inlet_gas());
     let outlet = super::duct_metadata::gas_state(load.duct().outlet_gas());
     let gas_sources = super::thermochemical::provenance(p.gas_records());
@@ -535,7 +548,31 @@ pub(super) fn material_modal_dg_provenance(
             modal_relaxation_provenance(valve),
         _ => String::new(),
     };
-    let source_json = format!("\"material_modal_dg_valve_input\":{{\"schema\":\"frankensim-material-modal-dg-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"mechanics_rate_hz\":{},\"pressure_point\":\"{pressure_point}\",\"material_sources\":[{materials}],\"structural_propagator\":\"exact-zoh\",\"dg_operator_identity\":\"{}\",\"length_m\":{:e},\"inlet_gas\":{inlet},\"outlet_gas\":{outlet},\"model_scope\":\"original regional material plates, signed modal pressure/force projections and retained material memory coupled to the shared exact DG bore; flat DKT and finite-mode interface; nonlinear time and DG spatial convergence require separate refinement; no measured-instrument qualification\"{observation}{radiation}{gas_sources}{solid_wall}{upstream}{relaxation_json}}}",
+    let (structure, model_scope) = if let Some(record) = p.solid_record() {
+        let fs_couple::bernoulli_aperture::two_sided::LoadedAperture::Modal(valve) =
+            source.system().aperture() else { unreachable!("solid source owns a modal aperture") };
+        if let Some(solid) = valve.hereditary_solid() {
+            let image = solid.source();
+            let band = image.frequency_band_rad_s();
+            (format!(",\"solid\":{{\"element_order\":{},\"tetrahedra\":{},\"source_identity\":\"{}\",\"coordinate_mass_kg\":{:e},\"material_response\":\"hereditary\",\"material_quadrature_points\":{},\"memory_channels\":{},\"basis_error\":{:e},\"frequency_band_rad_s\":[{:e},{:e}],\"instantaneous_frequency_bound_rad_s\":{:e},\"selected_zero_opening_modes_retained\":true}}",
+                json_string(record.element_order()), record.tetrahedra(), image.identity().to_hex(),
+                solid.coordinate_mass_kg(), image.material_points().len(), image.memory_channel_count(),
+                image.basis_error(), band.0, band.1, image.instantaneous_frequency_bound_rad_s()),
+                "original three-dimensional regional tensor material, complete selected equilibrium basis and causal Maxwell history in the shared exact pressure/contact/DG owner; explicit source clock, strain, basis and capacity gates; mesh, mode, time and DG refinement remain separate; no measured-instrument qualification")
+        } else {
+        let solid = valve.material_solid().expect("native solid retains its original material image");
+        let image = solid.source();
+        let approximation = image.approximation();
+        (format!(",\"solid\":{{\"element_order\":{},\"tetrahedra\":{},\"source_identity\":\"{}\",\"coordinate_mass_kg\":{:e},\"reference_omega_rad_s\":{:e},\"maximum_storage_sample_error\":{:e},\"maximum_loss_sample_error\":{:e},\"full_modal_viscosity\":true,\"selected_zero_opening_modes_retained\":true}}",
+            json_string(record.element_order()), record.tetrahedra(), image.identity().to_hex(),
+            solid.coordinate_mass_kg(), approximation.reference_omega_rad_s,
+            approximation.maximum_storage_sample_error, approximation.maximum_loss_sample_error),
+            "original three-dimensional regional material solid with all selected modes, signed pressure/force maps and full coupled viscosity in the shared DG aperture solve; frozen-frequency material image with sampled dispersion checks, not hereditary solid dynamics; mesh, mode, time and DG refinement remain separate; no measured-instrument qualification")
+        }
+    } else {
+        (String::new(), "original regional material plates, signed modal pressure/force projections and retained material memory coupled to the shared exact DG bore; flat DKT and finite-mode interface; nonlinear time and DG spatial convergence require separate refinement; no measured-instrument qualification")
+    };
+    let source_json = format!("\"material_modal_dg_valve_input\":{{\"schema\":\"frankensim-material-modal-dg-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"mechanics_rate_hz\":{},\"pressure_point\":\"{pressure_point}\",\"material_sources\":[{materials}],\"structural_propagator\":\"exact-zoh\",\"dg_operator_identity\":\"{}\",\"length_m\":{:e},\"inlet_gas\":{inlet},\"outlet_gas\":{outlet},\"model_scope\":\"{model_scope}\"{structure}{observation}{radiation}{gas_sources}{solid_wall}{upstream}{relaxation_json}}}",
         i.input_hash.to_hex(), i.blades, i.modes, i.nodes, i.triangles,
         i.mechanics_rate_hz, load.duct().operator_identity().to_hex(),
         load.duct().total_length());
@@ -551,6 +588,13 @@ fn modal_relaxation_provenance(
             fs_couple::bernoulli_aperture::modal::relaxation::InitialModalMemory::Unrelaxed => "unrelaxed",
         };
         let arms: usize = memory.memory_sqrt_j().iter().map(Vec::len).sum();
+        if let Some(solid) = valve.hereditary_solid() {
+            let branches = solid.source().branches().iter().map(|branch| format!(
+                "{{\"relaxation_time_s\":{:e},\"channels\":{}}}",
+                branch.relaxation_time_s(), branch.rows().len(),
+            )).collect::<Vec<_>>().join(",");
+            return format!(",\"solid_material_relaxation\":{{\"initial_memory\":\"{initial}\",\"live_arms\":{arms},\"branches\":[{branches}],\"scope\":\"original volume material laws and strain maps; equal-time factors retain every loss direction; Kelvin and Maxwell losses share the original exact structural owner\"}}");
+        }
         let points = memory.tensor_material_points();
         if !points.is_empty() {
             let mut regions = std::collections::BTreeSet::new();

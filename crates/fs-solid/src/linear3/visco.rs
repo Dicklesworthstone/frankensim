@@ -609,6 +609,43 @@ impl ViscoElements {
         })
     }
 
+    /// Check the complete displacement against every original material point.
+    /// This reuses the element's exact Mandel strain map and source domain;
+    /// it evolves no history and introduces no alternate stiffness or stress.
+    /// TET10 checks its declared quadrature points, not unsampled extrema.
+    pub fn validate_displacement(
+        &self,
+        displacement_m: &[f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), ViscoElementError> {
+        if cancelled() {
+            return Err(TetElasticError::Cancelled.into());
+        }
+        if displacement_m.len() != self.full_dofs
+            || displacement_m.iter().any(|value| !value.is_finite())
+        {
+            return Err(ViscoElementError::InvalidHistory {
+                what: "complete finite node-major displacement required",
+            });
+        }
+        for element in &self.elements {
+            for point in &element.points {
+                if cancelled() {
+                    return Err(TetElasticError::Cancelled.into());
+                }
+                let strain = core::array::from_fn(|i| {
+                    point.b.iter().zip(&element.dofs)
+                        .map(|(b, &dof)| b[i] * displacement_m[dof]).sum()
+                });
+                element.law.validate_mandel_strain(&strain)?;
+            }
+        }
+        if cancelled() {
+            return Err(TetElasticError::Cancelled.into());
+        }
+        Ok(())
+    }
+
     /// Start a relaxed zero-displacement history, bound to this exact system.
     pub fn state(&self, cx: &Cx<'_>) -> Result<ViscoElementState<'_>, ViscoElementError> {
         let mut histories = Vec::with_capacity(self.elements.len());

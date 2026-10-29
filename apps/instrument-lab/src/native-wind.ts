@@ -4,6 +4,7 @@ import reedExampleSource from "../../../crates/fs-couple/examples/reed-two-mediu
 import flueExampleSource from "../../../crates/fs-couple/examples/flue-nolle.performance?raw";
 import flueDgSource from "../../../crates/fs-couple/examples/flue-dg-baffled.performance?raw";
 import resolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg.performance?raw";
+import pressureResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-pressure.performance?raw";
 import molecularFlueSource from "../../../crates/fs-couple/examples/flue-dg-molecular.performance?raw";
 import nolleMolecularFlueSource from "../../../crates/fs-couple/examples/flue-dg-nolle-molecular.performance?raw";
 import conicalMolecularFlueSource from "../../../crates/fs-couple/examples/flue-dg-conical-molecular.performance?raw";
@@ -11,6 +12,8 @@ import fieldMolecularFlueSource from "../../../crates/fs-couple/examples/flue-dg
 import materialReedSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-walls.performance?raw";
 import materialReedDgSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-dg-chimney.performance?raw";
 import tensorReedDgSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-tensor-dg.performance?raw";
+import solidReedDgSource from "../../../crates/fs-couple/examples/material_modal_valve/solid-dg.performance?raw";
+import hereditarySolidReedSource from "../../../crates/fs-couple/examples/material_modal_valve/solid-hereditary-dg.performance?raw";
 import stringExampleSource from "../../../crates/fs-couple/examples/material_strings/pluck-and-bow.material-strings?raw";
 import nonlinearPreloadStringSource from "../../../crates/fs-couple/examples/material_strings/nonlinear-preload.material-strings?raw";
 import stoppedNonlinearStringSource from "../../../crates/fs-couple/examples/material_strings/nonlinear-stopped-preload.material-strings?raw";
@@ -62,6 +65,15 @@ const EXAMPLES = [
     decimate: true,
     intro: "Starter: a small resolved gas field coupled to a spatial duct. Edit the original grid, stationary solids, physical initial states and incoming characteristic history, then render through the native flow solver.",
     help: "This canonical source observes pressure at 96 kHz, with native decimation selected for 48 kHz playback. Changing the gas retains grid geometry and may change the physical flow/duct timestep; the observation clock stays fixed. Attached thermochemical sources and duct-wall materials use the same controls as other performers. This exploratory field fixture is not a complete flute or reed instrument.",
+  },
+  {
+    name: "resolved-dg-pressure.performance",
+    label: "Resolved flow — physical blowing pressure",
+    renderer: "resolved",
+    source: pressureResolvedDgSource,
+    decimate: true,
+    intro: "Starter: a declared pressure history drives the original resolved gas field and spatial bore. The returning wave and actual gas properties determine inlet flow; the native exterior microphone observes the resulting pressure.",
+    help: "boundary pressure gives pascals relative to the original source-face pressure. Change the gas, stationary geometry or pressure history in the source, keeping the declared numerical limits. This is an ideal pressure boundary in the existing local-linear characteristic domain, not finite airway storage or a measured flute. Native decimation preserves the physical solver clock.",
   },
   {
     name: "flue-dg-molecular.performance",
@@ -125,6 +137,24 @@ const EXAMPLES = [
     decimate: true,
     intro: "Starter: two material reeds carry a complete three-dimensional relaxation tensor through the original plate motion, spatial bore and exterior microphone. Build and attach tensor-blade.matpack using the canonical material-modal source recipe, then change its directional stiffness or relaxation-time data.",
     help: "loss tensor-maxwell names the source strain limit and complete Mandel branch coefficients, including explicit zeros. The native solver retains coupled normal-strain histories and every declared material point. Equilibrium elasticity stays owned by the same card; material, state-count and clock limits may refuse an unsupported change. This coarse manufactured specimen does not establish measured cane or clarinet/oboe accuracy.",
+  },
+  {
+    name: "material_modal_valve/solid-hereditary-dg.performance",
+    label: "Material reed — three-dimensional material memory",
+    renderer: "wind",
+    source: hereditarySolidReedSource,
+    decimate: true,
+    intro: "Starter: the original tetrahedral solid retains its source-derived relaxation history while driving the same spatial bore and exterior microphone. Build and attach solid-valve.matpack using the material-modal source recipe, then edit its material properties, geometry, supports or loaded faces.",
+    help: "solid_memory selects relaxed or unrelaxed initial material history and explicit projection budgets. Original tensor branches, source relaxation times, signed pressure work and every selected mode enter the existing exact structural solver. Source strain, clock and capacity limits remain active. This small manufactured soft solid does not establish measured cane or instrument accuracy.",
+  },
+  {
+    name: "material_modal_valve/solid-dg.performance",
+    label: "Material reed — three-dimensional solid",
+    renderer: "wind",
+    source: solidReedDgSource,
+    decimate: true,
+    intro: "Starter: an original tetrahedral solid drives the same spatial bore and exterior microphone as the material-plate reeds. Build and attach solid-valve.matpack using the material-modal source recipe, then edit the solid geometry, supports, loaded faces or source properties.",
+    help: "The native solid owner derives mass, stiffness, signed pressure work and the complete coupled viscosity from the declared material tensor. Every selected mode remains, including modes with zero mean opening. This path uses a frozen-frequency material image with explicit dispersion checks; it does not evolve full solid relaxation histories or establish measured reed accuracy. Native decimation preserves the mechanical clock.",
   },
   {
     name: "material_strings/pluck-and-bow.material-strings",

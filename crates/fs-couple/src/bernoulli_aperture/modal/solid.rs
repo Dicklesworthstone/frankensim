@@ -36,6 +36,15 @@ pub struct MaterialModalSolid {
     root_mass: f64,
 }
 impl MaterialModalSolid {
+    /// Same mass conversion and original nodal strain map as the solid owner.
+    /// The aperture checks one bounded physical endpoint before publication;
+    /// this does not certify strain extrema between samples.
+    pub(super) fn validate_state(&self, state: &[BladeState]) -> Result<(), AcousticRealizeError> {
+        let coordinates = state.iter().map(|value|
+            scaled(value.displacement_m, self.root_mass)).collect::<Result<Vec<_>, _>>()?;
+        self.source.validate_modal_displacement(&coordinates, || false).map_err(nonlinear)
+    }
+
     pub fn source(&self) -> &MaterialModalValve {
         &self.source
     }
@@ -188,6 +197,7 @@ impl ModalAperture {
             .with_viscosity(viscosity, gate)?;
         valve.material_solid = Some(MaterialModalSolid { source, root_mass });
         valve.material_gas = Some(gas);
+        valve.validate_state(&valve.state)?;
         poll(gate)?;
         Ok(valve)
     }

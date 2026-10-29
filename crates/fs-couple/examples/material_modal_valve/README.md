@@ -933,3 +933,113 @@ metadata; combining it with other traces does not make it an exterior
 microphone. The ensemble superposes independent physical pressure sources and
 does not introduce mechanical coupling between instruments.
 
+# Three-dimensional solid material source
+
+`solid-hereditary-dg.performance` exposes the existing complete 3D
+material-valve owner with its actual tensor relaxation histories through the
+same native DG source and Lab runner. `solid-dg.performance` selects the
+explicit frozen-frequency image of the same source as a comparator.
+These are manufactured 1 cm
+tetrahedron with two free displacement coordinates, positive equilibrium
+elasticity and a nonproportional tensor-Maxwell branch. It is an integration
+fixture, **not measured cane, tissue or a qualified instrument specimen**.
+The remaining structural family is chosen by data: replace the volume mesh,
+supports, material assignments, axes, source claims and frequency window.
+
+Normalize its source data using the same material normalizer as the plate
+examples, selecting `solid-valve-manifest.tsv` and writing
+`solid-valve.matpack` alongside the performance. The source clock is 96 kHz;
+use the ordinary native mechanical render and explicit decimation for playback.
+The computed baffled terminal and exterior gas observation retain their
+existing physical owners. A density, elastic modulus or tensor-branch change
+rebuilds the actual 3D mass/stiffness/full viscosity and changes the coupled
+aperture, bore and exterior pressure.
+
+The `solid` block replaces `loss` and `blades`, immediately after `contact`:
+
+```text
+solid tet4 SOURCE_TOKEN
+solid_window LOW_HZ HIGH_HZ MAX_SELECTED_MODES MIN_RETAINED_COMPLIANCE
+solid_approximation REFERENCE_OMEGA MAX_STORAGE_ERROR MAX_LOSS_ERROR MAX_MODAL_LOSS MAX_DECAY_ERROR MAX_FREQ_CENTS MAX_CLUSTER
+solid_limits MAX_NODES MAX_TETS MAX_FREE_DOFS MIN_SCALED_JACOBIAN MAX_INTERNAL_STRAINS
+solid_materials COUNT
+solid_material PACK isotropic|orthotropic T_K QUERY_OMEGA STRAIN_LIMIT_PROPERTY
+solid_axes R11 R12 R13 R21 R22 R23 R31 R32 R33
+solid_branches COUNT
+tensor_branch TIME_PROPERTY C11 C12 C13 C14 C15 C16 C22 C23 C24 C25 C26 C33 C34 C35 C36 C44 C45 C46 C55 C56 C66
+solid_nodes COUNT
+solid_node X_M Y_M Z_M FIX_X FIX_Y FIX_Z FORCE_X FORCE_Y FORCE_Z
+solid_elements COUNT
+solid_tet N0 N1 N2 N3 MATERIAL_SECTION
+solid_orifice OPEN_X OPEN_Y OPEN_Z WIDTH_X WIDTH_Y WIDTH_Z OPPOSING_PLANE_M
+solid_face_nodes COUNT
+solid_face_node NODE
+solid_pressure_faces COUNT
+solid_pressure_face N0 N1 N2 SIGN
+initial COUNT
+state DISPLACEMENT_M VELOCITY_M_S
+```
+
+For complete material memory, replace the `solid_approximation` row with:
+
+```text
+solid_memory relaxed|unrelaxed MAX_ANGULAR_STEP MAX_BASIS_SCALARS MAX_POINTS MAX_PROJECTION_TERMS MAX_FACTOR_TERMS MAX_BASIS_ERROR
+```
+
+This selects the original equilibrium modes and every source tensor branch.
+The shared solid projection uses its original strain matrices, integration
+volumes and consistent mass. Source terms with exactly equal relaxation time
+share the existing orthogonal energy-preserving channel compression; no
+material rate is fitted or averaged. The same exact aperture owner evolves
+the resulting histories with pressure, swept volume, contact and physical
+force. Maxwell energy and heat appear in its existing material ledger, and no
+frequency-frozen viscosity is added for those same branches.
+
+`solid_window MAX_SELECTED_MODES` also caps the hereditary projection
+coordinates. The additional limits bound actual free-DOF basis entries,
+material quadrature points, projection work and equal-time factor work.
+`MAX_BASIS_ERROR` checks mass/equilibrium-stiffness projection identities,
+not omitted-mode accuracy. The source clock must resolve both the declared
+instantaneous angular-frequency ceiling and `dt/tau <= 2`. Relaxed and
+unrelaxed initial memories are distinct physical initial conditions; they
+never reset when the output callback size changes. The source frequency band
+and complete three-dimensional strain domain remain in force.
+
+Repeat material/axes/branch records per section, and the node, element, face and
+state rows according to their counts. Tensor entries and times are **property
+names in the pack**, not coefficients authored in the performance. Full
+orthotropic equilibrium requires all three Young moduli, Poisson ratios and
+shear moduli; no missing out-of-plane data are inferred. All tensors use the
+original Mandel convention and the explicit material-to-mesh rotation. Each
+declared material section must own at least one original tetrahedron. The same
+query resolves density, equilibrium elasticity, strain limit, branch entries
+and times; their original validity domains remain in force.
+
+The existing `fs-solid::loads3` owner integrates each selected exterior
+triangle. `SIGN=+1` is unit inward pressure; `SIGN=-1` is unit outward
+pressure relative to the actual solid. Connectivity winding cannot change
+this convention. This is the conjugate reference load: the aperture applies
+its **negative** for positive upstream-minus-bore pressure, so an opening-positive
+reference map gives a closing blowing-pressure force. The resulting signed nodal pressure map drives **both**
+structural traction and swept volume. An interior, duplicate or absent
+triangle refuses. Opening-axis/width geometry supplies the mean slit and its
+rest gap; `valve REST_GAP` must agree with that geometry. The three force
+columns per node are an explicit dimensionless nodal pattern per applied
+newton; optional `source_forces` rows address source zero and drive the same
+complete mode basis without dividing by mean opening.
+
+Both choices retain every selected mode, including zero-opening modes, and the
+entire applicable coupled viscosity matrix. The `solid_approximation` choice admits a **frozen-frequency** K/C image
+using the original storage/loss error samples, equilibrium compliance check,
+modal bandwidth and exact propagation limits. It does not evolve the complete
+hereditary volume history, establish an error bound between frequency samples,
+or certify omitted modes. The `solid_memory` choice instead evolves the full
+projected hereditary source, while modal/spatial refinement, sampled nonlinear
+coupling and within-sample strain extrema still require separate resolution.
+It does not reconstruct per-element heat deposition. Native volume geometry currently uses Tet4/P1
+surface pressure with mesh refinement; Tet10 input refuses instead of
+replacing its curved faces with linear loads. The gap contact is the existing
+effective mean-slit law; plate spatial closure, plate pressure traces,
+follower pressure and large-strain mechanics are not implied. Material
+strain-domain checks operate on the original solid strain matrices.
+

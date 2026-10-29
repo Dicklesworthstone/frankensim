@@ -4256,3 +4256,14 @@ condenser, a 4 MPa boiler at 773.15 K, pump efficiency 0.80 and turbine efficien
 internal-energy/flow-work cycle check. Its approximately 31.22% efficiency is
 the result for those illustrative inputs, not a calibrated plant prediction.
 Heat-exchanger reservoir entropy and pressure losses are not supplied.
+
+## Shared tensor strain admission in all material-history interfaces
+
+`TensorProny::validate_mandel_strain` checks the original finite small-strain
+bound in the Frobenius norm, with Mandel shear normalization. The original
+Mandel `step`, tensor-shear `history().advance` and projected strain observer
+use this one admission rule before constitutive history can change. Source
+limits therefore survive a change of consumer or coordinate representation.
+The focused regression checks shear-stress parity and identical refusal without
+mutation in both time-domain interfaces. This admits supplied endpoints only;
+it does not enclose strain extrema between time samples or quadrature points.

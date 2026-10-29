@@ -391,6 +391,9 @@ impl ModalAperture {
         for plate in &self.material_plates {
             plate.validate_state(state, self.closure.is_none())?;
         }
+        if let Some(solid) = &self.material_solid {
+            solid.validate_state(state)?;
+        }
         if let Some(solid) = &self.hereditary_solid {
             solid.validate_state(state)?;
         }

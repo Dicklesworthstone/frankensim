@@ -2240,3 +2240,14 @@ members' stored energy and physical layer inventories even when they do not
 appear in a free modal coordinate. This flag adds no mass, stiffness or damping
 law. The original operator still rejects massless free-coordinate condensation
 and retains its complete reference geometry, source sections and native ports.
+
+## Original material strain domains on frozen modal solid trajectories
+
+`ViscoElements::validate_displacement` evaluates the existing element Mandel
+strain maps at every original material quadrature point and invokes the source
+law's strain admission. `MaterialModalValve::validate_modal_displacement` uses
+the existing modal-to-node expansion before that same check. These observations
+advance no material history and construct no alternate elastic operator. They
+poll cancellation at source points and retain all accepted state on refusal.
+TET10 observes its admitted quadrature; unsampled spatial extrema and maxima
+between time samples remain separate accuracy obligations.

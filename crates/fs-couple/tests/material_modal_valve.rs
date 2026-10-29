@@ -45,6 +45,10 @@ fn diagonal(values: [f64; 6]) -> Mandel6 {
     core::array::from_fn(|i| core::array::from_fn(|j| if i == j { values[i] } else { 0.0 }))
 }
 fn image(pressure: bool, coupled: bool) -> MaterialModalValve {
+    image_with_strain_limit(pressure, coupled, None)
+}
+
+fn image_with_strain_limit(pressure: bool, coupled: bool, strain_limit: Option<f64>) -> MaterialModalValve {
     with_cx(|cx| {
         let stiffness = diagonal([80.0, 100.1, 100.0, 40.0, 45.0, 50.0]);
         let mut viscosity = diagonal([0.08, 0.1, 0.1, 0.04, 0.045, 0.05]);
@@ -52,8 +56,16 @@ fn image(pressure: bool, coupled: bool) -> MaterialModalValve {
             viscosity[1][2] = 0.09;
             viscosity[2][1] = 0.09;
         }
+        let law = if let Some(limit) = strain_limit {
+            // An elastic bounded law isolates source-domain admission from
+            // the separate full-viscosity assertions in the existing fixture.
+            TensorProny::new_mandel(stiffness, vec![], limit).unwrap()
+                .with_band((0.0, 10_000.0)).unwrap()
+        } else {
+            TensorProny::new(stiffness, Some(viscosity), vec![], (0.0, 10_000.0)).unwrap()
+        };
         let material = TetViscoMaterial {
-            law: TensorProny::new(stiffness, Some(viscosity), vec![], (0.0, 10_000.0)).unwrap(),
+            law,
             density_kg_m3: 1.0,
             material_state_identity: [83; 32],
         };
@@ -322,3 +334,36 @@ fn material_adapter_requires_all_states_and_preserves_cancellation() {
 
 #[path = "material_modal_valve/hereditary.rs"]
 mod hereditary;
+
+#[test]
+fn original_solid_strain_limits_gate_cold_and_actual_forced_states_atomically() {
+    let gate = CancelGate::new_clock_free();
+    let build = |state| ModalAperture::from_material_solid(
+        image_with_strain_limit(false, false, Some(1e-10)),
+        [Some(&FORCE), None], gas(), options(0.001), state, contact(), &gate,
+    );
+    // These modal amplitudes are inside the independent 1 cm displacement
+    // allowance, but violate the actual element source's much smaller strain.
+    assert!(build(vec![BladeState { displacement_m: 1e-6, velocity_m_s: 0.0 }; 2]).is_err());
+    let mut actual = build(vec![BladeState::default(); 2]).unwrap();
+    let mut control = build(vec![BladeState::default(); 2]).unwrap();
+    let state = actual.modal_states().to_vec();
+    let energy = actual.stored_energy_j();
+    let error = actual.step(zero_drive(), [0.01, 0.0]).unwrap_err();
+    assert!(error.to_string().contains("small-strain"), "{error}");
+    assert_eq!(actual.modal_states(), state.as_slice());
+    assert_eq!(actual.stored_energy_j().to_bits(), energy.to_bits());
+    actual.step(zero_drive(), [0.0; 2]).unwrap();
+    control.step(zero_drive(), [0.0; 2]).unwrap();
+    assert_eq!(actual.modal_states(), control.modal_states());
+    assert_eq!(actual.stored_energy_j().to_bits(), control.stored_energy_j().to_bits());
+
+    let image = image_with_strain_limit(false, false, Some(1e-10));
+    let mut displacement = vec![0.0; 12];
+    displacement[7] = 1e-6; // yy strain equals this value in the unit tetrahedron.
+    assert!(image.source().validate_displacement(&displacement, || false).is_err());
+    displacement[7] = 5e-11;
+    image.source().validate_displacement(&displacement, || false).unwrap();
+    assert!(image.validate_modal_displacement(&[0.0; 2], || true).is_err());
+    image.validate_modal_displacement(&[0.0; 2], || false).unwrap();
+}

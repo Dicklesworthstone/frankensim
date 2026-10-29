@@ -41,6 +41,29 @@ impl LoadedDgPerformance {
         Ok(self)
     }
 
+    /// Force in newtons on the original complete solid nodal footprint. Every
+    /// selected mode, including a zero-opening mode, uses the same source basis
+    /// as pressure and swept volume. The existing source-port scheduler owns
+    /// equal-time assignments, release and transactional accepted-sample state.
+    pub fn with_material_solid_force_controls(
+        mut self, events: Vec<ApertureForceEvent>,
+    ) -> Result<Self, GestureCompileError> {
+        self.admit_force_attachment(0)?;
+        let LoadedAperture::Modal(source) = self.system.aperture() else {
+            return Err(invalid("solid force controls require an original material solid"));
+        };
+        if source.material_solid().is_none() && source.hereditary_solid().is_none() {
+            return Err(invalid("solid force controls require an original material solid"));
+        }
+        source.validate_forces([1.0, 0.0])
+            .map_err(|error| GestureCompileError::Render(RenderError::Voice(error)))?;
+        let (assignments, work) = self.remaining_control_budgets()?;
+        self.plate_forces[0] = Some(ForceSchedule::source_port(
+            events, self.config.samples, assignments, work,
+        )?);
+        Ok(self)
+    }
+
     /// Project explicit physical node/patch loads from a retained scalar or paired
     /// source plate. Material-modal sources instead use their complete force port
     /// through with_material_plate_force_controls; no modal column is discarded.

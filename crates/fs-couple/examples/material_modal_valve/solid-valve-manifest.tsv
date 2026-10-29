@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	synthetic-solid-material-modal-valve
+redistribution	permitted	Manufactured three-dimensional valve integration fixture; not measured cane or tissue
+citation	Synthetic tetrahedral material valve fixture
+license	CC0-1.0
+source	fixture	solid-valve.tsv	material-tsv-v1

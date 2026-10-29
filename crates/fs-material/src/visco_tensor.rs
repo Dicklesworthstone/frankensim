@@ -335,11 +335,11 @@ impl TensorPronyHistory {
         mut cancelled: impl FnMut() -> bool) -> Result<TensorPronyStep> {
         poll(&mut cancelled)?;
         let next_strain = mandel(&strain);
-        let norm2 = dot(&next_strain,&next_strain);
-        if !dt_s.is_finite() || dt_s < 0.0 || !finite(&next_strain) || !norm2.is_finite()
-            || det::sqrt(norm2) > self.model.strain_limit {
+        if !dt_s.is_finite() || dt_s < 0.0 {
             return Err(invalid("invalid time step or strain outside declared small-strain domain"));
         }
+        self.model.validate_mandel_strain(&next_strain)
+            .map_err(|_| invalid("invalid time step or strain outside declared small-strain domain"))?;
         let delta = core::array::from_fn(|i| next_strain[i]-self.strain[i]);
         let eq = &self.model.equilibrium_gram;
         let old_eq = apply(eq,&self.strain); let delta_eq = apply(eq,&delta);
