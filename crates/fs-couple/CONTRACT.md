@@ -10773,3 +10773,29 @@ nor broadband neck/exterior radiation. Native checks use the actual gas and
 Helmholtz coefficient owners for authored-resistance fixtures; unused Bessel
 loss branches refuse in the narrow native adapter. They do not establish full
 workspace, source-material or measured-instrument qualification.
+
+## Resolved fluid pressure controls through the original NSF/DG path
+
+`NsfDg::step_with_boundary` and the typed `NsfDgPerformance` constructors
+accept an original NSF incoming characteristic or prescribed pressure offset.
+The noncoupled face holds that physical control while the existing scalar
+interface solve matches the other face to the live DG pressure/flow response.
+No additional flow law, jet source, force integrator or material snapshot is
+introduced. The same trial owns fluid populations, boundary work and acoustic
+state; failed steps publish neither subsystem nor new boundary controls.
+
+Native `boundary pressure COUNT` records hold Pa relative to the original face
+reference pressure. `boundary characteristic COUNT` and legacy `boundary COUNT`
+hold m/s. Source-clock events and conservative observation-clock projection
+retain the existing timing semantics. `dg_molecular` now reaches the resolved
+reader through the shared source parser and material DG owner; it adds no
+molecular internal-energy model to the NSF volume. Species/source-band refusals
+remain original material refusals.
+
+`resolved-dg-pressure.performance` composes the prescribed pressure, stationary
+resolved constriction, DG bore, computed radiation and exterior gas observer.
+Focused tests cover physical flow sensitivity at fixed pressure, returning-bore
+feedback, direct original-owner replay, typed/legacy characteristic identity,
+callback partition, source molecular memory and transactional refusal. This is
+an exploratory fixed-composition, local-linear boundary capability; it does
+not qualify a measured flute, a finite player airway or nonlinear transparency.

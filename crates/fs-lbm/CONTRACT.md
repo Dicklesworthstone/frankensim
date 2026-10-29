@@ -4526,3 +4526,24 @@ axis rotation and origin covariance; reproduces ordinary BGK bits at zero
 fractions; and checks invalid-model/input/cancellation refusal and bit-identical
 retry. These are discrete balance/conformance checks, not a continuum error or
 performance certification, and do not close the full moving-boundary bead.
+
+## Prescribed pressure on original NSF characteristic faces
+
+`NsfBoundaryDrive` distinguishes an incoming acoustic characteristic [m/s]
+from a pressure offset [Pa] relative to the original face reference gas.
+The pressure variant sets the incoming characteristic from the live outgoing
+wave at each original face reconstruction: `J- = J+ - 2 dp/(rho_ref c_ref)`.
+Normal velocity, inflow entropy, tangential velocity, thermochemical state,
+population reconstruction and conservative mass/energy flux retain their
+existing owners. It is an ideal prescribed pressure within the existing local
+linear characteristic domain, not a finite reservoir or stagnation pressure.
+
+`set_boundary_drives` and `preview_boundary_interval` retain both controls and
+all accepted fields on refusal or cancellation. The existing characteristic
+methods delegate to the typed path without changing their reconstruction
+arithmetic. Source pressure, temperature, Mach and relative-perturbation limits
+still apply; prescribed pressure does not bypass material admission. The
+focused pressure-boundary tests exercise all three axes, returning-wave and
+material impedance dependence, original integrated work/mass/energy accounts,
+typed characteristic identity and atomic refusals. They do not establish a
+reflection bound or measured-instrument accuracy.

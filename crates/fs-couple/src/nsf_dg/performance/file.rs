@@ -3,7 +3,7 @@
 //! Geometry is an explicit Cartesian grid and stationary solid-cell mask. Gas
 //! evolution retains either the original dry-air law or complete thermochemical
 //! source models; a mixture snapshot is never converted into an invented law.
-//! Initial physical states and finite incoming characteristics are data. No jet
+//! Initial physical states and finite pressure/characteristic controls are data. No jet
 //! card, noise generator, desired pitch or instrument name enters this path.
 //! See `docs/RESOLVED_NSF_DG_COUPLING.md` for the grammar and physical limits.
 
@@ -19,7 +19,7 @@ use fs_blake3::{ContentHash, hash_domain};
 use fs_exec::CancelGate;
 use fs_lbm::d3q27::D3q27;
 use fs_lbm::nsf3::{
-    NsfCharacteristicAxis, NsfCharacteristicBoundary, NsfError, NsfGasMedium,
+    NsfBoundaryDrive, NsfCharacteristicAxis, NsfCharacteristicBoundary, NsfError, NsfGasMedium,
     NsfGrid3, NsfSpec, ThermochemicalNsfGas, WallThermal,
 };
 use fs_matdb::NormalizedMaterialCardPack;
@@ -308,6 +308,13 @@ impl ResolvedDgFilePerformance {
         let source = DgSourceInput::read(kind, row.line, &mut row.fields,
             &mut || rows.next(), &gas, sources, &mut gas_records, &gate)?;
         row.end()?;
+        let source = if rows.next_is("dg_molecular") {
+            let mut row = rows.row("dg_molecular")?;
+            let law = fs_material::relaxation::input::read_relaxation(&mut row.fields)
+                .map_err(|error| ResolvedDgInputError::Gas(GasInputError::Material(error)))?;
+            row.end()?;
+            source.with_molecular_relaxation(law, &gas_records[0])?
+        } else { source };
         let wall = if rows.next_is("dg_wall") {
             let mut row = rows.row("dg_wall")?;
             let declaration = DgMaterialWallLayoutInput::read(row.line, &mut row.fields,
@@ -337,6 +344,13 @@ impl ResolvedDgFilePerformance {
             Some(value)
         } else { None };
         let mut row = rows.row("boundary")?;
+        // The legacy bare count denotes m/s, exactly as before. Explicit
+        // pressure data is in Pa relative to the source face's gas reference.
+        let pressure_boundary = match row.fields.clone().next() {
+            Some("pressure") => { row.word()?; true }
+            Some("characteristic") => { row.word()?; false }
+            _ => false,
+        };
         let boundary_segments: usize = row.number()?;
         row.end()?;
         if boundary_segments == 0 || boundary_segments > 16_384 || boundary_segments > samples {
@@ -353,7 +367,9 @@ impl ResolvedDgFilePerformance {
             if end <= previous_end || end > samples {
                 return Err(bad(rows.line, "boundary endpoints must increase inside the declared sample window"));
             }
-            boundaries.push((end, value));
+            boundaries.push((end, if pressure_boundary {
+                NsfBoundaryDrive::PressureOffset(value)
+            } else { NsfBoundaryDrive::IncomingCharacteristic(value) }));
             previous_end = end;
         }
         if previous_end != samples { return Err(bad(rows.line, "boundary history must cover the complete declared window")); }
@@ -366,7 +382,7 @@ impl ResolvedDgFilePerformance {
         // interval holds the value at its start. Event timing error is bounded
         // by that interval and refines with the same physical discretization.
         let matching_clock = same_clock(physical_dt, 1.0 / f64::from(sample_rate_hz));
-        let mut incoming = Vec::with_capacity(physical_intervals);
+        let mut boundary = Vec::with_capacity(physical_intervals);
         let mut segment = 0;
         for index in 0..physical_intervals {
             if index % 256 == 0 { poll(&gate)?; }
@@ -377,7 +393,7 @@ impl ResolvedDgFilePerformance {
             }
             let value = boundaries.get(segment).ok_or_else(|| bad(0,
                 "physical source interval starts beyond the declared boundary window"))?.1;
-            incoming.push(value);
+            boundary.push(value);
         }
         let coordinate = |x: [usize; 3]| (x[2] * dims[1] + x[1]) * dims[0] + x[0];
         let zone = NsfGrid3::<D3q27>::new(NsfSpec {
@@ -404,8 +420,8 @@ impl ResolvedDgFilePerformance {
         poll(&gate)?;
         let load = source.prepare_with_material_wall_layout(&gas, dt, &gate, &wall)?;
         let system = NsfDg::new(zone, load, high, limits, &gate).map_err(ResolvedDgInputError::Coupling)?;
-        let mut renderer = NsfDgPerformance::new_resampled(system, observation, sample_rate_hz,
-            incoming, samples as u64, maximum_block, Arc::clone(&gate)).map_err(ResolvedDgInputError::Render)?;
+        let mut renderer = NsfDgPerformance::new_resampled_with_boundary(system, observation, sample_rate_hz,
+            boundary, samples as u64, maximum_block, Arc::clone(&gate)).map_err(ResolvedDgInputError::Render)?;
         if let Some(propagation) = observer_gas {
             renderer = renderer.with_observer_gas(&propagation).map_err(ResolvedDgInputError::Render)?;
         }

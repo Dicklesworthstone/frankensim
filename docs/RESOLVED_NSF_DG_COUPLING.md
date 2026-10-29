@@ -14,7 +14,8 @@ instrument-specific solver.
 
 The fluid zone must already have its original characteristic axis. Select either
 complete face; its outward normal flow is positive into the DG inlet. The other
-face retains a caller-supplied incoming characteristic in metres per second.
+face receives either a caller-supplied incoming characteristic in metres per
+second or a physical pressure relative to its original reference in pascals.
 For a zero-velocity reference, the original boundary uses
 
 `J− = u_normal − (p − p_reference)/(rho_reference c_reference)`.
@@ -24,6 +25,44 @@ the original NSF owner advances from the same accepted state while the original
 DG owner supplies its current step-mean law `p_DG = H + Z Q`. The scalar solve
 matches the mean reference-relative NSF face pressure to that law, using the
 face's actual integrated continuum volume flow.
+
+### Physical pressure control
+
+`NsfBoundaryDrive::PressureOffset(delta_p)` fixes the other face's pressure
+at `p_reference + delta_p`. The original reconstruction uses its live outgoing
+characteristic `J+` and the original material impedance `Z = rho_reference
+c_reference`:
+
+    J− = J+ − 2 delta_p / Z
+    u_normal = u_reference_normal + J+ − delta_p / Z
+
+This is evaluated at every original face quadrature point and every original
+predictor/corrector stage. Returning acoustic waves therefore change source
+flow while prescribed pressure stays fixed. Changing the gas's density,
+calorics or temperature changes the physical response through the same material
+owner. There is no fixed pressure-to-velocity conversion, second flow solve or
+additional sound source.
+
+`NsfGrid3::set_boundary_drives` and `preview_boundary_interval` retain the
+original face temperature/entropy donor, tangential velocity, material queries,
+population reconstruction, pressure force and conservative energy flux. Control
+changes rebase the original force chart without changing physical density,
+velocity or total energy. Rejected states and dropped/cancelled trials publish
+neither a new control nor a partial field.
+
+`NsfDg::step_with_boundary` selects this source condition while the existing
+scalar interface solve still controls only the opposite DG face. `NsfDgFrame`
+retains the typed external control alongside the actual source-face flow and
+integrated work. A uniform held pressure has source acoustic work
+`delta_p * Q_out * interval`; the original quadrature computes that work.
+The existing `step(incoming_m_s)` remains the incoming-characteristic route.
+
+This source is an **ideal prescribed-pressure boundary in the admitted local
+linear characteristic domain**. It is neither stagnation pressure nor a finite
+airway/reservoir's compliance, thermal capacity or mass inventory. It reflects
+returning acoustic disturbances according to a fixed-pressure condition; it is
+not a nonreflecting boundary. All original source, pressure-perturbation,
+temperature and Mach restrictions still apply.
 
 The complete reference gas state, including transport properties, must equal the
 DG inlet gas. The actual complete face area must match inlet area. The DG interval
@@ -87,6 +126,13 @@ characteristics on the other face, a maximum callback length and an
 The microphone consumes the actual accepted terminal flows and retains its
 physical/numerical delay.
 
+`new_with_boundary` instead takes a `Vec<NsfBoundaryDrive>` so every control
+value carries its physical kind and units. `new_resampled_with_boundary` uses
+the same typed controls with the independent observation clock below.
+`boundary_history()` exposes those exact original controls; pressure samples are
+never returned as characteristic velocities. The original scalar constructors
+select the characteristic variant and retain their existing physical arithmetic.
+
 Call `with_observer_gas(&propagation)` before playback to use the same physical
 atmosphere law as native flute and reed observation. `GasPropagation` selects
 the shared law and finite path/filter budgets; the actual DG radiation source
@@ -145,6 +191,16 @@ owners from UTF-8 data. The native entry point is:
 music_render resolved crates/fs-couple/examples/resolved-dg.performance output.wav --decimate --self-contained
 ```
 
+For physical pressure control of the same resolved constriction, bore and
+exterior microphone:
+
+    music_render resolved crates/fs-couple/examples/resolved-dg-pressure.performance output.wav --decimate --self-contained
+
+This second source declares a `+20 Pa`, then `−20 Pa`, then zero pressure history
+relative to the authored 100 kPa source reference. The flow is solved. Changing
+the source gas or pressure history is a data edit; it does not require changing
+the solver or calculating a replacement characteristic velocity.
+
 The canonical example observes at 96 kHz; `--decimate` uses the shared pressure
 decimator for 48 kHz PCM. Pressure remains in pascals and the authored full-scale
 value controls PCM conversion; there is no peak normalization. The existing
@@ -177,6 +233,7 @@ state X Y Z DENSITY_KG_M3 VX_M_S VY_M_S VZ_M_S TEMPERATURE_K
 [repeat exactly COUNT state records]
 coupling MAX_ROOT_EVALUATIONS MAX_CELL_STEPS JMIN_M_S JMAX_M_S PRESSURE_ABS_PA PRESSURE_REL WORK_ABS_J WORK_REL
 dg_tube [existing shared DgSourceInput fields and subsidiary records]
+[optional dg_molecular declaration from the shared molecular-law reader]
 [optional existing dg_wall material-layout records]
 observation inlet-pressure
 [optional existing observer_gas record, only with a baffled observer]
@@ -203,6 +260,14 @@ Alternatives use the same original parsers and owners:
   chimney records. `dg_wall` retains material-card identities and selected
   constitutive sources for the bore/chimney wall layout. The original load
   checks inlet area, complete inlet gas, material bands and work admission.
+- `dg_molecular` selects the existing causal molecular-relaxation law for the
+  original DG gas region, using exactly the same grammar as native reed/flue
+  sources. Its species composition comes from the original thermochemical
+  source record or axial field. A dry-air scalar snapshot has no species
+  association and refuses this law; missing species, unsupported temperatures
+  and insufficient memory allowances also refuse. This changes the DG gas
+  region's memory; it does not add molecular internal-energy dynamics to the
+  NSF volume or replace that volume's declared bulk-viscosity law.
 - `observation baffled X_M Y_M Z_M RADIAL_RINGS ANGULAR_POINTS FMAX_HZ` binds the
   existing computed-radiation source and all its actual terminal openings. An
   optional `observer_gas` record selects the same atmospheric propagation law
@@ -210,6 +275,10 @@ Alternatives use the same original parsers and owners:
   have explicitly different temperatures/compositions at their admitted common
   equilibrium pressure; changing the whole atmosphere requires changing each
   explicitly authored region/exterior declaration.
+- `boundary pressure COUNT` selects pressure offsets in Pa for each `hold`
+  value. `boundary characteristic COUNT` explicitly names the original m/s
+  condition. The existing bare `boundary COUNT` has the same characteristic
+  meaning and arithmetic. Unknown kinds and trailing fields refuse.
 
 Cell indices are zero-based. Axes are `0`, `1`, `2`; periodic flags are `0` or
 `1`, and the characteristic axis must be nonperiodic. The `low|high` field
@@ -248,6 +317,12 @@ Focused tests are in `fs-lbm/tests/nsf3_characteristic_trial.rs` and
 candidate cancellation, reference-relative work, both face signs, real downstream
 feedback, gas-pressure substitution, thermochemical support, projection refusal,
 cold area/clock/work admission, and physical-pressure/PCM partition identity.
+Pressure-control cases additionally check local characteristic algebra on all
+axes, fixed-pressure integrated work, original fluid/DG replay, returned-wave
+and material-dependent flow, typed-history callback identity and transactional
+domain/cancellation refusal. Native cases exercise source-only composition,
+calorics and DG molecular-memory changes through the same pressure-controlled
+path.
 
 Additional regressions live in `fs-lbm/tests/nsf3_open_boundaries.rs`,
 `fs-couple/src/nsf_dg/performance/clock.rs`,

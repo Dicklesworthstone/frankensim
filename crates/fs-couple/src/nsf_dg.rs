@@ -21,7 +21,7 @@ use fs_duct::dg::{DgPortResponse, DgStepOutput};
 use fs_exec::CancelGate;
 use fs_lbm::lattice3::Lattice3;
 use fs_lbm::nsf3::{
-    EnergyLedger, NsfBoundaryExchange, NsfCharacteristicTrial, NsfError, NsfGrid3,
+    EnergyLedger, NsfBoundaryDrive, NsfBoundaryExchange, NsfCharacteristicTrial, NsfError, NsfGrid3,
 };
 use fs_material::gas::GasState;
 
@@ -132,6 +132,9 @@ pub struct NsfDgFrame {
     pub evaluations: usize,
     /// Accepted incoming characteristic on the coupled face [m/s].
     pub incoming_characteristic_m_s: f64,
+    /// Actual prescribed control on the other original face, including units.
+    /// Pressure is relative to that face's retained reference, never a velocity.
+    pub external_boundary: NsfBoundaryDrive,
     /// Original NSF face accounts: low, high. Flux/work are summed over all
     /// substeps; pressure and continuum flow are their interval means.
     pub faces: [NsfBoundaryExchange; 2],
@@ -238,8 +241,21 @@ impl<L: Lattice3<27>> NsfDg<L> {
     pub fn step(&mut self, external_incoming_m_s: f64, gate: &CancelGate)
         -> Result<NsfDgFrame, NsfDgError>
     {
+        self.step_with_boundary(NsfBoundaryDrive::IncomingCharacteristic(external_incoming_m_s), gate)
+    }
+
+    /// Advance against a physical incoming-wave or prescribed-pressure source.
+    ///
+    /// Pressure is imposed at every original NSF boundary reconstruction. The
+    /// returning wave determines source-face flow, while the same scalar solve
+    /// matches the opposite face to the live DG bore. No independent density,
+    /// sound speed, source flow law or pressure-to-wave calibration is added.
+    /// The source is an ideal pressure boundary, not finite airway storage.
+    pub fn step_with_boundary(&mut self, external_boundary: NsfBoundaryDrive, gate: &CancelGate)
+        -> Result<NsfDgFrame, NsfDgError>
+    {
         poll(gate)?;
-        if !external_incoming_m_s.is_finite() || self.steps >= self.limits.maximum_steps {
+        if !external_boundary.is_finite() || self.steps >= self.limits.maximum_steps {
             return Err(NsfDgError::Input("resolved interface input is nonfinite or its horizon is exhausted"));
         }
         let relation = self.load.port_response().map_err(NsfDgError::Acoustic)?;
@@ -253,9 +269,9 @@ impl<L: Lattice3<27>> NsfDg<L> {
         for evaluation in 1..=limits.maximum_evaluations {
             poll(gate)?;
             evaluations = evaluation;
-            let mut drive = [external_incoming_m_s; 2];
-            drive[side] = incoming;
-            let candidate = self.zone.preview_characteristic_interval(
+            let mut drive = [external_boundary; 2];
+            drive[side] = NsfBoundaryDrive::IncomingCharacteristic(incoming);
+            let candidate = self.zone.preview_boundary_interval(
                 drive, limits.substeps, limits.maximum_cell_steps, || gate.is_requested(),
             ).map_err(|e| if gate.is_requested() { NsfDgError::Cancelled } else { NsfDgError::Flow(e) })?;
             let face = candidate.boundary_exchange()[side];
@@ -271,7 +287,8 @@ impl<L: Lattice3<27>> NsfDg<L> {
                 + limits.pressure_relative_tolerance * scale;
             if residual.abs() <= allowance {
                 let frame = accept_candidate(candidate, &mut self.load, side, relation,
-                    self.reference, limits, incoming, evaluation, self.steps + 1, gate)?;
+                    self.reference, limits, incoming, external_boundary,
+                    evaluation, self.steps + 1, gate)?;
                 self.steps += 1;
                 return Ok(frame);
             }
@@ -312,7 +329,8 @@ impl<L: Lattice3<27>> NsfDg<L> {
 fn accept_candidate<L: Lattice3<27>>(
     fluid: NsfCharacteristicTrial<'_, L>, load: &mut DgPortLoad, side: usize,
     relation: DgPortResponse, reference: GasState, limits: NsfDgLimits,
-    incoming: f64, evaluations: usize, step: u64, gate: &CancelGate,
+    incoming: f64, external_boundary: NsfBoundaryDrive,
+    evaluations: usize, step: u64, gate: &CancelGate,
 ) -> Result<NsfDgFrame, NsfDgError> {
     let face = fluid.boundary_exchange()[side];
     let q = face.normal_volume_flow_m3_s;
@@ -358,7 +376,7 @@ fn accept_candidate<L: Lattice3<27>>(
     fluid.accept();
     let duct = acoustic.accept();
     Ok(NsfDgFrame {
-        step, evaluations, incoming_characteristic_m_s: incoming, faces, flow,
+        step, evaluations, incoming_characteristic_m_s: incoming, external_boundary, faces, flow,
         flow_mass_change_kg: mass_change, flow_energy_change_j: energy_change, duct, terminals,
         inlet_flow_m3_s: q, inlet_pressure_pa: p, pressure_residual_pa: pressure_residual,
         projection_covariance_j: covariance, acoustic_work_residual_j: work_residual,

@@ -11,6 +11,10 @@
 //! populations, thermal-pressure force and total-energy flux. The incoming
 //! populations extrapolate the adjacent post-collision non-equilibrium part;
 //! no cell is overwritten with a reservoir and no sponge absorbs its energy.
+//! A pressure-driven face instead prescribes dp and evaluates
+//! J- = J+ - 2 dp/(rho_ref c_ref) at each original quadrature point and predictor.
+//! The outgoing wave then determines normal velocity; the same reconstructed
+//! face still owns populations, material response and conservative fluxes.
 //! The normal boundary stencil is first order. Oblique transparency, a
 //! <-40 dB reflection bound and resolved instrument accuracy are unqualified.
 
@@ -27,7 +31,32 @@ pub struct NsfCharacteristicBoundary {
     pub reference_velocity_m_s: [f64; 3],
     /// `delta u_n - delta p / (rho_ref*c_ref)` [m/s]. Zero is the
     /// unperturbed incoming acoustic characteristic, not zero throughflow.
+    /// This value is used by the incoming-characteristic drive. A prescribed
+    /// pressure drive computes its local incoming value from the outgoing wave.
     pub incoming_characteristic_m_s: f64,
+}
+
+/// Physical control at one original characteristic face.
+///
+/// Pressure is relative to that face's retained material/reference pressure.
+/// It is a uniform prescribed pressure, not a finite reservoir's dynamics,
+/// stagnation pressure, imposed velocity or an independent thermodynamic state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NsfBoundaryDrive {
+    /// Hold J- = delta u_n - delta p/(rho_ref*c_ref) [m/s].
+    IncomingCharacteristic(f64),
+    /// Hold the reconstructed face pressure minus its reference pressure [Pa].
+    /// Each local outgoing characteristic determines the resulting flow.
+    PressureOffset(f64),
+}
+
+impl NsfBoundaryDrive {
+    /// Scalar finiteness only; original face/material admission still applies.
+    pub const fn is_finite(self) -> bool {
+        match self {
+            Self::IncomingCharacteristic(value) | Self::PressureOffset(value) => value.is_finite(),
+        }
+    }
 }
 
 /// Two open faces on one axis of the original NSF grid.
@@ -180,7 +209,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 ));
             }
         }
-        self.rebind_characteristics(open)?;
+        self.rebind_characteristics(open, [None; 2])?;
         Ok(self)
     }
 
@@ -190,13 +219,53 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// together, so the next trapezoid uses the new data on both time levels.
     /// Failure publishes neither data nor partial boundary state.
     pub fn set_incoming_characteristics(&mut self, incoming_m_s: [f64; 2]) -> Result<(), NsfError> {
+        self.set_boundary_drives(incoming_m_s.map(NsfBoundaryDrive::IncomingCharacteristic))
+    }
+
+    /// Change the physical drive at both original characteristic faces.
+    ///
+    /// A pressure drive fixes each reconstructed quadrature pressure throughout
+    /// the original predictor/corrector. It does not freeze the incoming wave:
+    /// the live outgoing wave determines its value and the normal flow. Inflow
+    /// entropy/tangential data retain the original material reference; outflow
+    /// retains the adjacent cell. Pressure, temperature, Mach and source-domain
+    /// refusals apply before any physical state or control is published.
+    pub fn set_boundary_drives(&mut self, drives: [NsfBoundaryDrive; 2]) -> Result<(), NsfError> {
         let mut open = self
             .open
             .ok_or(NsfError::Input("no characteristic axis is attached"))?;
-        for (face, value) in open.faces.iter_mut().zip(incoming_m_s) {
-            face.incoming_characteristic_m_s = value;
+        let mut pressure = [None; 2];
+        for (side, drive) in drives.into_iter().enumerate() {
+            if !drive.is_finite() {
+                return Err(NsfError::Input("characteristic boundary drive must be finite"));
+            }
+            match drive {
+                NsfBoundaryDrive::IncomingCharacteristic(value) => {
+                    open.faces[side].incoming_characteristic_m_s = value;
+                }
+                NsfBoundaryDrive::PressureOffset(value) => {
+                    // No single incoming characteristic represents a
+                    // pressure-controlled face with a nonuniform outgoing wave.
+                    open.faces[side].incoming_characteristic_m_s = 0.0;
+                    pressure[side] = Some(value);
+                }
+            }
         }
-        self.rebind_characteristics(open)
+        self.rebind_characteristics(open, pressure)
+    }
+
+    /// Actual accepted controls, low then high, with their physical units.
+    #[must_use]
+    pub fn boundary_drives(&self) -> Option<[NsfBoundaryDrive; 2]> {
+        let open = self.open.as_ref()?;
+        Some(std::array::from_fn(|side| {
+            self.characteristic_pressure_offset_pa[side].map_or(
+                NsfBoundaryDrive::IncomingCharacteristic(
+                    open.faces[side].incoming_characteristic_m_s,
+                ),
+                NsfBoundaryDrive::PressureOffset,
+            )
+        }))
     }
 
     #[must_use]
@@ -290,7 +359,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         total.map(|p| p * unit)
     }
 
-    fn rebind_characteristics(&mut self, open: NsfCharacteristicAxis) -> Result<(), NsfError> {
+    fn rebind_characteristics(
+        &mut self, open: NsfCharacteristicAxis, pressure_offset_pa: [Option<f64>; 2],
+    ) -> Result<(), NsfError> {
         let bound = open.maximum_relative_perturbation;
         if !bound.is_finite() || bound <= 0.0 || bound > 0.1 {
             return Err(NsfError::Input(
@@ -299,7 +370,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         }
         let (rho, mom) = self.macro_fields(&self.f);
         let u = self.velocity_field(&rho, &mom, &self.force);
-        let faces = self.resolve_open_faces(Some(&open), &rho, &u, &self.theta)?;
+        let faces = self.resolve_open_faces(Some(&open), pressure_offset_pa, &rho, &u, &self.theta)?;
         let force = self.force_field(&rho, &self.theta, faces.as_ref());
         let mut f = self.f.clone();
         for i in 0..self.n {
@@ -315,6 +386,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let (div, wall, flux) =
             self.flux_divergence(&self.e, &rho, &u, &self.theta, &sig, &[], faces.as_ref())?;
         self.open = Some(open);
+        self.characteristic_pressure_offset_pa = pressure_offset_pa;
         self.open_faces = faces;
         self.f = f;
         self.force = force;
@@ -328,6 +400,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     pub(super) fn resolve_open_faces(
         &self,
         open: Option<&NsfCharacteristicAxis>,
+        pressure_offset_pa: [Option<f64>; 2],
         rho: &[f64],
         u: &[[f64; 3]],
         theta: &[f64],
@@ -378,10 +451,21 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 let ui = u[i].map(|v| v * velocity_unit);
                 let outgoing =
                     sign * ui[open.axis] - normal_reference + (pi - reference.pressure) / impedance;
-                let normal =
-                    normal_reference + 0.5 * (outgoing + boundary.incoming_characteristic_m_s);
-                let pressure = reference.pressure
-                    + 0.5 * impedance * (outgoing - boundary.incoming_characteristic_m_s);
+                let (normal, pressure) = match pressure_offset_pa[side] {
+                    Some(offset) => {
+                        // J- = J+ - 2 dp/Z. Evaluate the equivalent normal
+                        // velocity directly, avoiding cancellation between
+                        // two similar characteristic values. The pressure is
+                        // exact to addition roundoff at every original face.
+                        (normal_reference + outgoing - offset / impedance,
+                            reference.pressure + offset)
+                    }
+                    None => (
+                        normal_reference + 0.5 * (outgoing + boundary.incoming_characteristic_m_s),
+                        reference.pressure
+                            + 0.5 * impedance * (outgoing - boundary.incoming_characteristic_m_s),
+                    ),
+                };
                 let entropy_temperature = if normal >= 0.0 {
                     ti - reference.temperature - alpha * (pi - reference.pressure)
                 } else {

@@ -3,7 +3,7 @@
 //! topology already excludes manufactured volume sources. Every physical state,
 //! boundary force chart, source material and cumulative ledger remains retained.
 
-use super::{EnergyLedger, NsfBoundaryExchange, NsfError, NsfGrid3};
+use super::{EnergyLedger, NsfBoundaryDrive, NsfBoundaryExchange, NsfError, NsfGrid3};
 use crate::lattice3::Lattice3;
 
 /// A complete unpublished interval. Dropping it changes no accepted field,
@@ -46,6 +46,24 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         maximum_cell_steps: usize,
         cancelled: impl Fn() -> bool,
     ) -> Result<NsfCharacteristicTrial<'_, L>, NsfError> {
+        self.preview_boundary_interval(
+            incoming_m_s.map(NsfBoundaryDrive::IncomingCharacteristic),
+            steps, maximum_cell_steps, cancelled,
+        )
+    }
+
+    /// Preview original steps under typed incoming-wave or pressure controls.
+    /// A pressure control is imposed by the original local reconstruction at
+    /// every predictor, not by another flow solve or a rebaked source waveform.
+    /// Dropping or refusing the trial preserves both accepted controls and all
+    /// original populations, force/energy history and material state.
+    pub fn preview_boundary_interval(
+        &mut self,
+        drives: [NsfBoundaryDrive; 2],
+        steps: usize,
+        maximum_cell_steps: usize,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<NsfCharacteristicTrial<'_, L>, NsfError> {
         if cancelled() {
             return Err(NsfError::Input("characteristic interval cancelled"));
         }
@@ -58,7 +76,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let mass_before_kg = self.total_mass_kg();
         let energy_before_j = self.total_energy_j();
         let mut candidate = self.characteristic_copy();
-        candidate.set_incoming_characteristics(incoming_m_s)?;
+        candidate.set_boundary_drives(drives)?;
         let mut exchange = [NsfBoundaryExchange::default(); 2];
         let mut ledger = EnergyLedger::default();
         for _ in 0..steps {
@@ -127,7 +145,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             sgs: self.sgs, sgs_transport: self.sgs_transport.clone(),
             n: self.n, solid: self.solid.clone(), f: self.f.clone(), e: self.e.clone(),
             theta: self.theta.clone(), force: self.force.clone(), div: self.div.clone(),
-            wall_out: self.wall_out, open: self.open, open_faces: self.open_faces.clone(),
+            wall_out: self.wall_out, open: self.open,
+            characteristic_pressure_offset_pa: self.characteristic_pressure_offset_pa,
+            open_faces: self.open_faces.clone(),
             reservoir_faces: self.reservoir_faces, open_out: self.open_out,
             last_boundary_exchange: self.last_boundary_exchange, steps: self.steps,
             cumulative: self.cumulative, edge_velocity: self.edge_velocity,

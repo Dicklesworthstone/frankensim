@@ -71,7 +71,8 @@ pub use open::NsfOpenState;
 mod open_boundary;
 use open_boundary::{BoundaryFlux, IncomingPopulations, OpenFaces};
 pub use open_boundary::{
-    NsfBoundaryExchange, NsfBoundaryTrace, NsfCharacteristicAxis, NsfCharacteristicBoundary,
+    NsfBoundaryDrive, NsfBoundaryExchange, NsfBoundaryTrace, NsfCharacteristicAxis,
+    NsfCharacteristicBoundary,
 };
 mod characteristic_trial;
 /// Unpublished original NSF interval for reciprocal characteristic coupling.
@@ -555,6 +556,7 @@ pub struct NsfGrid3<L: Lattice3<27>> {
     div: Vec<f64>,
     wall_out: f64,
     open: Option<NsfCharacteristicAxis>,
+    characteristic_pressure_offset_pa: [Option<f64>; 2],
     open_faces: Option<OpenFaces>,
     reservoir_faces: [[Option<open::OpenGhost>; 2]; 3],
     open_out: BoundaryFlux,
@@ -749,6 +751,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             div: vec![0.0; n],
             wall_out: 0.0,
             open: None,
+            characteristic_pressure_offset_pa: [None; 2],
             open_faces: None,
             reservoir_faces: [[None; 2]; 3],
             open_out: BoundaryFlux::default(),
@@ -1398,7 +1401,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         };
         let mut result = None;
         for _ in 0..COUPLING_PASSES {
-            let faces1 = self.resolve_open_faces(self.open.as_ref(), &rho1, &u_guess, &th1)?;
+            let faces1 = self.resolve_open_faces(
+                self.open.as_ref(), self.characteristic_pressure_offset_pa, &rho1, &u_guess, &th1,
+            )?;
             let mut f1 = self.force_field(&rho1, &th1, faces1.as_ref());
             if have_sources {
                 for i in 0..n {
@@ -1505,7 +1510,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         // The last corrector changes temperature after faces1 was evaluated.
         // Admit the actual endpoint too, without replacing the common
         // predictor faces that supplied its force and conservative FV flux.
-        let _ = self.resolve_open_faces(self.open.as_ref(), &rho1, &u1, &th1)?;
+        let _ = self.resolve_open_faces(
+            self.open.as_ref(), self.characteristic_pressure_offset_pa, &rho1, &u1, &th1,
+        )?;
         // The next collision must use the actual accepted force-corrected
         // velocity and source state, after the final temperature corrector.
         let transport_new = self.sgs_field(&rho1, &u1, &th1, &material_new)?;

@@ -1,6 +1,7 @@
 //! Physical-owner composition checks, not a resolved-instrument qualification.
 use super::performance::NsfDgPerformance;
 use super::*;
+mod pressure;
 use crate::bernoulli_aperture::performance::ApertureObservation;
 use crate::pcm_wav::observation::PressureRenderer;
 use fs_duct::dg::PortId;
