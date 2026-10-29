@@ -1,4 +1,7 @@
 //! Native capillary body coupling using the original manufactured liquid/wetting fixture.
+#[path = "capillary_modal/axisymmetric.rs"]
+mod axisymmetric;
+
 use core::f64::consts::PI;
 use fs_contact::capillary_bridge::*;
 use fs_evidence::ValidityDomain;

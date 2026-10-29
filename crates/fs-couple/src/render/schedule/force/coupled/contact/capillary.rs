@@ -7,14 +7,22 @@
 //! connections and original energy/force limits. Only an accepted joint
 //! mechanics/surface account publishes the bridge and body successors.
 //!
-//! The bridge remains the planar quasistatic liquid model, with its own
-//! capillary/Weber/geometry screens. This integrates body inertia; it does not
-//! add resolved liquid inertia, three-dimensional ends or physical pinch-off.
+//! The planar and axisymmetric models share this SAME mechanical transaction.
+//! Each original liquid owner retains its geometric and numerical scope.
+//! Body inertia does not add liquid inertia or dynamic contact-line physics;
+//! the axisymmetric branch requires caller-established quasistatic applicability
+//! and does not manufacture rupture at a branch refusal.
 
 use super::{
     CoupledModalSystem, ModalCouplingError, dot, finite, invalid, limit, network_response, poll,
 };
 use crate::modal_acoustic_time::ModalAcousticTimeModel;
+use fs_contact::capillary_bridge::axisymmetric::load_line::{
+    AxisymmetricBridgeLoadLine, AxisymmetricLoadLineConfig, AxisymmetricLoadLineError,
+};
+use fs_contact::capillary_bridge::axisymmetric::{
+    AxisymmetricError, AxisymmetricState, AxisymmetricStep, SourceAxisymmetricCapillaryBridge,
+};
 use fs_contact::capillary_bridge::load_line::{
     BridgeLoadLineConfig, BridgeLoadLineError, PlanarBridgeLoadLine,
 };
@@ -24,10 +32,13 @@ use fs_contact::capillary_bridge::{
 use fs_exec::CancelGate;
 use fs_matdb::MaterialStateId;
 
+mod model;
+pub use model::NativeCapillaryModel;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct CapillaryModalConfig {
+pub struct CapillaryModalConfig<C = BridgeLoadLineConfig> {
     /// Ceiling includes one final bridge proposal on actual staged motion.
-    pub contact: BridgeLoadLineConfig,
+    pub contact: C,
     pub force_absolute_tolerance_n: f64,
     pub force_relative_tolerance: f64,
 }
@@ -37,8 +48,26 @@ pub enum CapillaryModalError {
     Network(ModalCouplingError),
     Contact(BridgeLoadLineError),
     Bridge(BridgeError),
-    GapMismatch { residual_m: f64, tolerance_m: f64 },
-    ForceMismatch { residual_n: f64, tolerance_n: f64 },
+    Axisymmetric(AxisymmetricError),
+    AxisymmetricContact(AxisymmetricLoadLineError),
+    GapMismatch {
+        residual_m: f64,
+        tolerance_m: f64,
+    },
+    ForceMismatch {
+        residual_n: f64,
+        tolerance_n: f64,
+    },
+    GapAccuracy {
+        residual_m: f64,
+        estimated_error_m: f64,
+        tolerance_m: f64,
+    },
+    ForceAccuracy {
+        residual_n: f64,
+        estimated_error_n: f64,
+        tolerance_n: f64,
+    },
 }
 impl core::fmt::Display for CapillaryModalError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -51,6 +80,8 @@ impl std::error::Error for CapillaryModalError {
             Self::Network(e) => Some(e),
             Self::Contact(e) => Some(e),
             Self::Bridge(e) => Some(e),
+            Self::Axisymmetric(e) => Some(e),
+            Self::AxisymmetricContact(e) => Some(e),
             _ => None,
         }
     }
@@ -70,10 +101,20 @@ impl From<BridgeError> for CapillaryModalError {
         Self::Bridge(value)
     }
 }
+impl From<AxisymmetricError> for CapillaryModalError {
+    fn from(value: AxisymmetricError) -> Self {
+        Self::Axisymmetric(value)
+    }
+}
+impl From<AxisymmetricLoadLineError> for CapillaryModalError {
+    fn from(value: AxisymmetricLoadLineError) -> Self {
+        Self::AxisymmetricContact(value)
+    }
+}
 
 /// Complete accepted sample. Topology release has no automatic heat recipient.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct CapillaryModalFrame {
+pub struct CapillaryModalFrame<S = BridgeStep> {
     pub sample: u64,
     pub observer_pressure_pa: f64,
     pub network_energy_j: f64,
@@ -88,24 +129,62 @@ pub struct CapillaryModalFrame {
     pub energy_tolerance_j: f64,
     pub applied_mean_force_n: f64,
     /// Independent original constitutive proposal on actual staged body motion.
-    pub bridge: BridgeStep,
+    pub bridge: S,
     pub compatibility_residual_m: f64,
     pub compatibility_tolerance_m: f64,
+    /// Estimated quadrature/force contribution to gap error; not an interval bound.
+    pub estimated_compatibility_error_m: f64,
+    /// Actual mechanical gap minus the final constitutive equilibrium gap.
+    pub constitutive_gap_residual_m: f64,
     pub constitutive_residual_n: f64,
     pub force_tolerance_n: f64,
+    /// Sum of both original constitutive force-error estimates, admitted within
+    /// the force budget. Zero for the closed-form planar path.
+    pub estimated_constitutive_force_error_n: f64,
     pub iterations: usize,
     pub evaluations: usize,
 }
 
+/// Common proposal metadata retaining the complete original bridge step.
+#[doc(hidden)]
+pub struct CapillaryProposal<S> {
+    bridge: S,
+    compatibility_tolerance_m: f64,
+    estimated_compatibility_error_m: f64,
+    iterations: usize,
+    evaluations: usize,
+}
+
+/// Work ports read directly from the original constitutive step.
+#[doc(hidden)]
+pub struct CapillaryStepView<S> {
+    state: S,
+    gap_m: f64,
+    surface_energy_j: f64,
+    mean_force_n: f64,
+    topology_release_j: f64,
+}
+
+/// Native 3-D capillary mechanics with the same network and work audit as the
+/// planar owner. Construct using `new_axisymmetric`.
+pub type AxisymmetricCapillaryModalSystem<'a> =
+    CapillaryModalSystem<'a, AxisymmetricBridgeLoadLine<'a>>;
+pub type AxisymmetricCapillaryModalConfig = CapillaryModalConfig<AxisymmetricLoadLineConfig>;
+pub type AxisymmetricCapillaryModalFrame = CapillaryModalFrame<AxisymmetricStep>;
+
 /// One fixed-direction liquid bridge and the complete unchanged native network.
-pub struct CapillaryModalSystem<'a> {
+pub struct CapillaryModalSystem<'a, L: NativeCapillaryModel<'a> = PlanarBridgeLoadLine<'a>> {
     network: CoupledModalSystem,
-    load_line: PlanarBridgeLoadLine<'a>,
-    state: BridgeState,
+    source: &'a L::Source,
+    load_line: L,
+    state: L::State,
+    // Preserve the mechanical coordinate independently of numerical profile
+    // root residuals, so those residuals cannot accumulate as geometric drift.
+    gap_m: f64,
     column: Vec<f64>,
     forces: Vec<f64>,
-    config: CapillaryModalConfig,
-    last: Option<CapillaryModalFrame>,
+    config: CapillaryModalConfig<L::Config>,
+    last: Option<CapillaryModalFrame<L::Step>>,
 }
 impl<'a> CapillaryModalSystem<'a> {
     /// Attach an explicit bridge state to the current sample-zero configuration.
@@ -122,11 +201,58 @@ impl<'a> CapillaryModalSystem<'a> {
         config: CapillaryModalConfig,
         gate: &CancelGate,
     ) -> Result<Self, CapillaryModalError> {
+        Self::from_source(
+            network,
+            source,
+            substrate_materials,
+            state,
+            column,
+            config,
+            gate,
+        )
+    }
+}
+
+impl<'a> CapillaryModalSystem<'a, AxisymmetricBridgeLoadLine<'a>> {
+    /// Couple the original fixed-volume 3-D bridge to actual native body motion.
+    /// Its admitted branch, source accuracy and substrate identities remain in
+    /// force. The caller must establish quasistatic liquid applicability.
+    pub fn new_axisymmetric(
+        network: CoupledModalSystem,
+        source: &'a SourceAxisymmetricCapillaryBridge,
+        substrate_materials: [&MaterialStateId; 2],
+        state: AxisymmetricState,
+        column: Vec<f64>,
+        config: AxisymmetricCapillaryModalConfig,
+        gate: &CancelGate,
+    ) -> Result<Self, CapillaryModalError> {
+        Self::from_source(
+            network,
+            source,
+            substrate_materials,
+            state,
+            column,
+            config,
+            gate,
+        )
+    }
+}
+
+impl<'a, L: NativeCapillaryModel<'a>> CapillaryModalSystem<'a, L> {
+    fn from_source(
+        network: CoupledModalSystem,
+        source: &'a L::Source,
+        substrate_materials: [&MaterialStateId; 2],
+        state: L::State,
+        column: Vec<f64>,
+        config: CapillaryModalConfig<L::Config>,
+        gate: &CancelGate,
+    ) -> Result<Self, CapillaryModalError> {
         poll(Some(gate))?;
         if network.samples_rendered() != 0
             || column.len() != network.mode_count()
             || column.iter().any(|v| !v.is_finite())
-            || config.contact.max_evaluations < 2
+            || L::maximum_evaluations(config.contact) < 2
             || !config.force_absolute_tolerance_n.is_finite()
             || config.force_absolute_tolerance_n <= 0.0
             || !config.force_relative_tolerance.is_finite()
@@ -134,22 +260,23 @@ impl<'a> CapillaryModalSystem<'a> {
         {
             return Err(invalid("capillary binding needs a sample-zero network, complete finite column and positive solve/force budgets").into());
         }
+        let original_materials = L::substrate_materials(source);
         for i in 0..2 {
-            if &source.wetting()[i].surfaces()[0].material != substrate_materials[i] {
+            if original_materials[i] != substrate_materials[i] {
                 return Err(invalid("capillary substrate assignment differs from the original ordered wetting sources").into());
             }
         }
-        source.evaluate(state)?;
         let response = network_response(&network, &column, gate)?;
         let compliance = dot(&column, &response)?;
-        let mut solve = config.contact;
-        solve.max_evaluations -= 1;
-        let load_line = PlanarBridgeLoadLine::new(source, compliance, solve)?;
+        let load_line = L::create(source, compliance, config.contact)?;
+        let (gap_m, _) = load_line.gap_energy(state)?;
         let owner = Self {
             forces: vec![0.0; network.mode_count()],
             network,
+            source,
             load_line,
             state,
+            gap_m,
             column,
             config,
             last: None,
@@ -163,12 +290,18 @@ impl<'a> CapillaryModalSystem<'a> {
         Ok(owner)
     }
     #[must_use]
-    pub fn source(&self) -> &'a SourcePlanarCapillaryBridge {
-        self.load_line.source()
+    pub fn source(&self) -> &'a L::Source {
+        self.source
     }
     #[must_use]
-    pub const fn state(&self) -> BridgeState {
+    pub const fn state(&self) -> L::State {
         self.state
+    }
+    /// Actual accepted mechanical separation, distinct from the source's
+    /// numerically converged profile gap and its reported root residual.
+    #[must_use]
+    pub const fn gap_m(&self) -> f64 {
+        self.gap_m
     }
     #[must_use]
     pub fn components(&self) -> &[ModalAcousticTimeModel] {
@@ -188,25 +321,24 @@ impl<'a> CapillaryModalSystem<'a> {
     }
     #[must_use]
     pub fn compliance_m_per_n(&self) -> f64 {
-        self.load_line.compliance_m_per_n()
+        self.load_line.compliance()
     }
     #[must_use]
     pub fn work_column(&self) -> &[f64] {
         &self.column
     }
     #[must_use]
-    pub const fn config(&self) -> CapillaryModalConfig {
+    pub const fn config(&self) -> CapillaryModalConfig<L::Config> {
         self.config
     }
     #[must_use]
-    pub const fn last_frame(&self) -> Option<&CapillaryModalFrame> {
+    pub const fn last_frame(&self) -> Option<&CapillaryModalFrame<L::Step>> {
         self.last.as_ref()
     }
     /// Signed combined storage. Surface energy retains the original dry reference.
     pub fn total_energy_j(&self) -> Result<f64, CapillaryModalError> {
         Ok(finite(
-            self.network.total_energy_j()?
-                + self.source().evaluate(self.state)?.surface_free_energy_j,
+            self.network.total_energy_j()? + self.load_line.gap_energy(self.state)?.1,
         )?)
     }
 
@@ -216,7 +348,7 @@ impl<'a> CapillaryModalSystem<'a> {
         &mut self,
         external: &[f64],
         prescribed_gap_rate_m_s: f64,
-    ) -> Result<&CapillaryModalFrame, CapillaryModalError> {
+    ) -> Result<&CapillaryModalFrame<L::Step>, CapillaryModalError> {
         let gate = CancelGate::new_clock_free();
         self.step_under_gate(external, prescribed_gap_rate_m_s, &gate)
     }
@@ -225,27 +357,26 @@ impl<'a> CapillaryModalSystem<'a> {
         external: &[f64],
         prescribed_gap_rate_m_s: f64,
         gate: &CancelGate,
-    ) -> Result<&CapillaryModalFrame, CapillaryModalError> {
+    ) -> Result<&CapillaryModalFrame<L::Step>, CapillaryModalError> {
         poll(Some(gate))?;
-        let source = self.load_line.source();
         let before = self.total_energy_j()?;
+        let old_gap = self.gap_m;
         let dt = self.network.dt;
         let prescribed_delta = finite(prescribed_gap_rate_m_s * dt)?;
         self.network.prepare_prediction(external, Some(gate))?;
-        let free_gap = finite(
-            self.state.gap_m() + prescribed_delta + dot(&self.column, &self.network.free_delta)?,
-        )?;
-        let solved = self.load_line.trial(self.state, free_gap, dt, gate)?;
-        let force = solved.bridge.mean_normal_force_n;
+        let free_gap =
+            finite(old_gap + prescribed_delta + dot(&self.column, &self.network.free_delta)?)?;
+        let solved = self.load_line.propose(self.state, free_gap, dt, gate)?;
+        let solved_view = L::view(&solved.bridge);
+        let force = solved_view.mean_force_n;
         self.forces.copy_from_slice(external);
         for (f, &b) in self.forces.iter_mut().zip(&self.column) {
             *f = finite(*f + b * force)?;
         }
         self.network.stage_inner(&self.forces, Some(gate))?;
-        let actual_gap = finite(
-            self.state.gap_m() + prescribed_delta + dot(&self.column, &self.network.free_delta)?,
-        )?;
-        let gap_residual = finite(actual_gap - solved.bridge.state().gap_m())?;
+        let actual_gap =
+            finite(old_gap + prescribed_delta + dot(&self.column, &self.network.free_delta)?)?;
+        let gap_residual = finite(actual_gap - solved_view.gap_m)?;
         if gap_residual.abs() > solved.compatibility_tolerance_m {
             return Err(CapillaryModalError::GapMismatch {
                 residual_m: gap_residual,
@@ -254,15 +385,34 @@ impl<'a> CapillaryModalSystem<'a> {
         }
         limit(
             "actual capillary gap increment",
-            (actual_gap - self.state.gap_m()).abs(),
-            self.config.contact.maximum_gap_increment_m,
+            (actual_gap - old_gap).abs(),
+            self.load_line.maximum_gap_increment(),
         )?;
-        let actual = source.advance(self.state, actual_gap, dt, gate)?;
-        let force_residual = finite(force - actual.mean_normal_force_n)?;
+        if finite(gap_residual.abs() + solved.estimated_compatibility_error_m)?
+            > solved.compatibility_tolerance_m
+        {
+            return Err(CapillaryModalError::GapAccuracy {
+                residual_m: gap_residual,
+                estimated_error_m: solved.estimated_compatibility_error_m,
+                tolerance_m: solved.compatibility_tolerance_m,
+            });
+        }
+        let actual = self
+            .load_line
+            .advance_actual(self.state, actual_gap, dt, gate)?;
+        let actual_view = L::view(&actual);
+        let constitutive_gap_residual = finite(actual_gap - actual_view.gap_m)?;
+        if constitutive_gap_residual.abs() > solved.compatibility_tolerance_m {
+            return Err(CapillaryModalError::GapMismatch {
+                residual_m: constitutive_gap_residual,
+                tolerance_m: solved.compatibility_tolerance_m,
+            });
+        }
+        let force_residual = finite(force - actual_view.mean_force_n)?;
         let force_tolerance = finite(
             self.config.force_absolute_tolerance_n
                 + self.config.force_relative_tolerance
-                    * force.abs().max(actual.mean_normal_force_n.abs()),
+                    * force.abs().max(actual_view.mean_force_n.abs()),
         )?;
         if force_residual.abs() > force_tolerance {
             return Err(CapillaryModalError::ForceMismatch {
@@ -270,9 +420,20 @@ impl<'a> CapillaryModalSystem<'a> {
                 tolerance_n: force_tolerance,
             });
         }
+        let force_error = finite(
+            self.load_line.force_error(self.state, &solved.bridge)?
+                + self.load_line.force_error(self.state, &actual)?,
+        )?;
+        if finite(force_residual.abs() + force_error)? > force_tolerance {
+            return Err(CapillaryModalError::ForceAccuracy {
+                residual_n: force_residual,
+                estimated_error_n: force_error,
+                tolerance_n: force_tolerance,
+            });
+        }
         let frame = &self.network.staged_frame;
         let network_energy = finite(frame.total_energy_j())?;
-        let surface_energy = actual.profile.surface_free_energy_j;
+        let surface_energy = actual_view.surface_energy_j;
         let after = finite(network_energy + surface_energy)?;
         limit(
             "native/capillary energy magnitude",
@@ -282,7 +443,7 @@ impl<'a> CapillaryModalSystem<'a> {
         let external_work = dot(external, &self.network.free_delta)?;
         let prescribed_work = finite(-force * prescribed_delta)?;
         let network_loss = finite(frame.total_dissipation_j())?;
-        let total_loss = finite(network_loss + actual.irreversible_release_j)?;
+        let total_loss = finite(network_loss + actual_view.topology_release_j)?;
         let residual = finite((after - before) + total_loss - external_work - prescribed_work)?;
         let scale = before
             .abs()
@@ -309,22 +470,26 @@ impl<'a> CapillaryModalSystem<'a> {
             external_work_j: external_work,
             prescribed_work_j: prescribed_work,
             network_dissipation_j: network_loss,
-            topology_release_j: actual.irreversible_release_j,
+            topology_release_j: actual_view.topology_release_j,
             energy_residual_j: residual,
             energy_tolerance_j: tolerance,
             applied_mean_force_n: force,
             bridge: actual,
             compatibility_residual_m: gap_residual,
             compatibility_tolerance_m: solved.compatibility_tolerance_m,
+            estimated_compatibility_error_m: solved.estimated_compatibility_error_m,
+            constitutive_gap_residual_m: constitutive_gap_residual,
             constitutive_residual_n: force_residual,
             force_tolerance_n: force_tolerance,
+            estimated_constitutive_force_error_n: force_error,
             iterations: solved.iterations,
             evaluations: solved.evaluations + 1,
         };
         self.network.validate_staged_material_points(Some(gate))?;
         poll(Some(gate))?;
         self.network.publish_staged();
-        self.state = actual.state();
+        self.state = actual_view.state;
+        self.gap_m = actual_gap;
         Ok(self.last.insert(accepted))
     }
 }

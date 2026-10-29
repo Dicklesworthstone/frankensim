@@ -11047,3 +11047,26 @@ and PCM, complete normal-history reconstruction, block partition identity,
 source/clock/capacity refusal, zero-coupling decay and unique island ownership,
 and atomic strain admission after contact, preload and restart. Native Cargo
 execution remains a separate verification requirement.
+
+## Native three-dimensional capillary adhesion
+
+`render::schedule::force::coupled::contact::capillary` admits the original
+planar and axisymmetric bridge models through one sealed, statically dispatched
+native mechanical transaction. Existing planar construction remains available;
+`AxisymmetricCapillaryModalSystem::new_axisymmetric` binds the original 3-D
+bridge source and its work/accuracy budgets to actual modal bodies.
+
+The owner stores the actual mechanical gap separately from the numerical
+equilibrium profile gap. Root residuals therefore do not accumulate as physical
+geometric drift. After the original network is staged, the original bridge is
+reevaluated at actual displacement. Compatibility, estimated gap/force error,
+actual constitutive force, total energy and cancellation must all pass before
+body state, bridge state, physical gap and observation publish together.
+One constitutive evaluation is reserved for this final actual-motion audit.
+
+Signed surface energy, external and prescribed work, network loss and planar
+topology release remain distinct. The axisymmetric model retains its original
+quasistatic, fixed-topology applicability and does not manufacture liquid
+inertia, rupture or heat. The six focused original-source native tests cover
+both models, moving bodies, spring/damper connections, prescribed/external
+work, atomic refusals and retry; they are not full workspace validation.
