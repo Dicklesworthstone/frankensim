@@ -18,6 +18,9 @@ use std::collections::BTreeMap;
 
 mod sensitivity;
 
+/// Source-bearing compartment-fire correlations and public-data comparisons.
+pub mod fire;
+
 use fs_evidence::{
     Ambition, Evidence, ModelCard, ModelEvidence, NumericalCertificate, ProvenanceHash,
     SensitivitySummary, StatisticalCertificate, ValidityDomain,

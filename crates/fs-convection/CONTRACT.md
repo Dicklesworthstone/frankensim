@@ -223,3 +223,44 @@ None.
   the correlation prediction beyond its model evidence. A downstream
   `ThermalBc` row cloned through the public accessor is detachable raw
   coherent-SI data and does not independently carry that evidence.
+
+
+## Compartment-fire correlation rung and public comparison data
+
+`fire` reuses the existing typed quantities, source provenance, and validity
+owner for Heskestad flame height, virtual origin, plume entrainment and
+centerline estimates; MQH hot-layer temperature; Thomas/Babrauskas flashover
+heat release; and Kawagoe ventilation capacity. Heskestad buoyancy uses actual
+supplied ambient density, heat capacity, temperature and gravity. The flaming
+entrainment branch is explicit and joins the above-flame relation. Exactly
+zero fire power is dormant; invalid empirical regimes are refused. Total and
+convective heat release are distinct. MQH implements its published kW-based
+coefficient with explicit SI conversions and enclosing area excluding openings.
+Kawagoe requires explicit heat release per mass of air and efficiency and does
+not replace a species/oxygen balance or a pressure-resolved vent calculation.
+
+Every empirical result retains its source card, qualitative applicability,
+and unquantified model discrepancy. No universal finite validity box,
+zero uncertainty, calibration claim, or fire-safety certificate is invented.
+Six focused tests cover hand-calculated plume/density behavior, branch joining,
+dormant/refusal cases, flashover/ventilation units, metadata, and all eight
+published NIST SP 1169 Table 2.1 MQH examples (0.006 K tolerance).
+
+`fire::validation` computes allocation-free log-ratio sample statistics over
+positive model/observation pairs. Unknown experimental standard uncertainty
+leaves separated model scatter and adjusted FDS bias absent. With explicitly
+supported experimental relative sigma it applies the pinned FDS guide's
+small-uncertainty approximation and refuses separation when its scatter
+constraint fails. Three tests independently check these formulas/refusals.
+Temperature comparisons use positive rises over a stated ambient baseline.
+
+`data/reference/compartment_fire` preserves six Steckler 1982 cases with
+pinned upstream commits and per-file Git blob hashes, original profile and
+reduced-layer data, original CFAST input decks, and their intact NIST notice.
+Authored CFAST wall properties are distinguished from the experimental
+assembly; reduced-layer measurement standard uncertainty remains unknown.
+Dalmarnock is excluded. The runnable `compartment_fire_correlations` example
+requires both the retained cases CSV and an explicit effective wall coefficient.
+Its h=10 W/(m² K) illustration produces geometric upper-layer-rise ratio
+1.314403236 and combined log scatter 0.086888962; this is an uncalibrated
+comparison, not a validation pass. No parameter is fitted to the observations.

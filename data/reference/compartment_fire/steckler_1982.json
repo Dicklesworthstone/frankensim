@@ -1,0 +1,356 @@
+{
+  "dataset": "Steckler, Quintiere and Rinkinen (1982), six centered-methane-burner compartment experiments",
+  "citation": "Flow Induced by Fire in a Compartment, NBSIR 82-2520, https://doi.org/10.6028/NBS.IR.82-2520",
+  "reference_kind": "Open experimental profile data and later layer reductions, paired with authored CFAST inputs. No calibration or blind-prediction claim.",
+  "extraction_date": "2026-10-29",
+  "common_input": {
+    "room": {
+      "width_m": 2.8,
+      "depth_m": 2.8,
+      "height_m": 2.13
+    },
+    "door": {
+      "height_m": 1.83,
+      "bottom_m": 0,
+      "face": "FRONT",
+      "horizontal_offset_m": 1.28
+    },
+    "ambient": {
+      "pressure_pa": 101325,
+      "relative_humidity_percent": 50
+    },
+    "prescribed_fire": {
+      "fuel": "CH4",
+      "location_xy_m": [
+        1.4,
+        1.4
+      ],
+      "base_height_m": 0.02,
+      "area_m2": 0.09,
+      "heat_release_rate_w": 62900,
+      "start_s": 0,
+      "end_s": 1800,
+      "heat_of_combustion_j_kg": 50000000,
+      "radiative_fraction": 0.2,
+      "co_yield_kg_kg": 0,
+      "soot_yield_kg_kg": 0,
+      "hcn_yield_kg_kg": 0,
+      "hcl_yield_kg_kg": 0,
+      "trace_yield_kg_kg": 0
+    },
+    "cfast_wall_approximation": {
+      "material_id": "Fiberboard",
+      "surfaces": [
+        "ceiling",
+        "walls",
+        "floor"
+      ],
+      "thermal_conductivity_w_m_k": 1,
+      "density_kg_m3": 200,
+      "specific_heat_j_kg_k": 1000,
+      "thickness_m": 0.013,
+      "emissivity": 0.9,
+      "authority": "Authored CFAST validation-model approximation; not measured material properties of the experiment."
+    },
+    "cfast_input_version": 7600,
+    "comparison": {
+      "experiment": "steady state, not a measured transient",
+      "cfast_layer_height_comparison_window_s": [
+        1500,
+        1800
+      ],
+      "simulation_end_s": 1800,
+      "temperature_reduction": "Upper/lower temperature entries retained verbatim from firemodels/exp layer CSV; not recomputed or fitted.",
+      "temperature_metric_warning": "These reduced layer means differ from the maximum raw T_in profile used for the CFAST guide's temperature scatterplot."
+    }
+  },
+  "measurement_limits": {
+    "source": "NBSIR 82-2520 Appendix B, printed p.27 (PDF page39)",
+    "aspirated_room_thermocouple_reported_error_k": {
+      "negative": -3,
+      "positive": 1
+    },
+    "wire_and_recording_system_error_k": 1,
+    "reduced_qoi_uncertainty": "Unstated. The instrument error limits are not a standard deviation, do not quantify reduction/interface uncertainty, and are not used as a solver acceptance band.",
+    "calibration": "No parameter fitting or calibration performed.",
+    "blind_exclusion": "Dalmarnock Test One is not included."
+  },
+  "cases": [
+    {
+      "id": "steckler-1982-10",
+      "test_number": 10,
+      "input": {
+        "ambient_temperature_k": 299.15,
+        "ambient_temperature_c": 26,
+        "door_width_m": 0.24
+      },
+      "experimental_reduction": {
+        "upper_temperature_k": 453.25,
+        "lower_temperature_k": 338.65,
+        "upper_temperature_c": 180.1,
+        "lower_temperature_c": 65.5,
+        "interface_height_above_floor_m": 0.48,
+        "hot_layer_depth_m": 1.65,
+        "upper_temperature_rise_from_cfast_ambient_k": 154.1,
+        "raw_room_profile_maximum_temperature_c": 193.14,
+        "quantitative_uncertainty": null
+      },
+      "sources": {
+        "profile": {
+          "repository": "firemodels/exp",
+          "commit": "704e0d91f15088ae41c6a30a662a7524bf5ff4e8",
+          "path": "Steckler_Compartment/Steckler_Test_10.csv",
+          "git_blob_sha": "9c27ce3f872ad0adf6da888a813e45e974848456",
+          "url": "https://github.com/firemodels/exp/blob/704e0d91f15088ae41c6a30a662a7524bf5ff4e8/Steckler_Compartment/Steckler_Test_10.csv",
+          "local_path": "steckler_1982_raw/steckler_010_profile.csv"
+        },
+        "layer_reduction": {
+          "repository": "firemodels/exp",
+          "commit": "704e0d91f15088ae41c6a30a662a7524bf5ff4e8",
+          "path": "Steckler_Compartment/Steckler_Test_10_layer.csv",
+          "git_blob_sha": "11987d9a114f9183e57ead025153c0b16211fa5f",
+          "url": "https://github.com/firemodels/exp/blob/704e0d91f15088ae41c6a30a662a7524bf5ff4e8/Steckler_Compartment/Steckler_Test_10_layer.csv",
+          "local_path": "steckler_1982_raw/steckler_010_layer.csv"
+        },
+        "cfast_input": {
+          "repository": "firemodels/cfast",
+          "commit": "1b5ad2cb3cd9db885382d262a27324a4495c96b2",
+          "path": "Validation/Steckler_Compartment/Steckler_010.in",
+          "git_blob_sha": "f57155659926d015a0087782e954451f15aa9fc5",
+          "url": "https://github.com/firemodels/cfast/blob/1b5ad2cb3cd9db885382d262a27324a4495c96b2/Validation/Steckler_Compartment/Steckler_010.in",
+          "local_path": "steckler_1982_raw/steckler_010_cfast.in"
+        }
+      }
+    },
+    {
+      "id": "steckler-1982-11",
+      "test_number": 11,
+      "input": {
+        "ambient_temperature_k": 301.15,
+        "ambient_temperature_c": 28,
+        "door_width_m": 0.36
+      },
+      "experimental_reduction": {
+        "upper_temperature_k": 426.85,
+        "lower_temperature_k": 329.55,
+        "upper_temperature_c": 153.7,
+        "lower_temperature_c": 56.4,
+        "interface_height_above_floor_m": 0.58,
+        "hot_layer_depth_m": 1.55,
+        "upper_temperature_rise_from_cfast_ambient_k": 125.7,
+        "raw_room_profile_maximum_temperature_c": 166.19,
+        "quantitative_uncertainty": null
+      },
+      "sources": {
+        "profile": {
+          "repository": "firemodels/exp",
+          "commit": "704e0d91f15088ae41c6a30a662a7524bf5ff4e8",
+          "path": "Steckler_Compartment/Steckler_Test_11.csv",
+          "git_blob_sha": "ca1bbbef49329bde8d604bf2adefa4ca84dd284f",
+          "url": "https://github.com/firemodels/exp/blob/704e0d91f15088ae41c6a30a662a7524bf5ff4e8/Steckler_Compartment/Steckler_Test_11.csv",
+          "local_path": "steckler_1982_raw/steckler_011_profile.csv"
+        },
+        "layer_reduction": {
+          "repository": "firemodels/exp",
+          "commit": "704e0d91f15088ae41c6a30a662a7524bf5ff4e8",
+          "path": "Steckler_Compartment/Steckler_Test_11_layer.csv",
+          "git_blob_sha": "47cb2ca0749b7e3cb5621d46dd0c769ae5670092",
+          "url": "https://github.com/firemodels/exp/blob/704e0d91f15088ae41c6a30a662a7524bf5ff4e8/Steckler_Compartment/Steckler_Test_11_layer.csv",
+          "local_path": "steckler_1982_raw/steckler_011_layer.csv"
+        },
+        "cfast_input": {
+          "repository": "firemodels/cfast",
+          "commit": "1b5ad2cb3cd9db885382d262a27324a4495c96b2",
+          "path": "Validation/Steckler_Compartment/Steckler_011.in",
+          "git_blob_sha": "5f56a8af8f4b1120e6a7f6a0c8d78a4f83cfc77e",
+          "url": "https://github.com/firemodels/cfast/blob/1b5ad2cb3cd9db885382d262a27324a4495c96b2/Validation/Steckler_Compartment/Steckler_011.in",
+          "local_path": "steckler_1982_raw/steckler_011_cfast.in"
+        }
+      }
+    },
+    {
+      "id": "steckler-1982-12",
+      "test_number": 12,
+      "input": {
+        "ambient_temperature_k": 295.15,
+        "ambient_temperature_c": 22,
+        "door_width_m": 0.49
+      },
+      "experimental_reduction": {
+        "upper_temperature_k": 399.05,
+        "lower_temperature_k": 316.95,
+        "upper_temperature_c": 125.9,
+        "lower_temperature_c": 43.8,
+        "interface_height_above_floor_m": 0.67,
+        "hot_layer_depth_m": 1.46,
+        "upper_temperature_rise_from_cfast_ambient_k": 103.9,
+        "raw_room_profile_maximum_temperature_c": 141.97,
+        "quantitative_uncertainty": null
+      },
+      "sources": {
+        "profile": {
+          "repository": "firemodels/exp",
+          "commit": "704e0d91f15088ae41c6a30a662a7524bf5ff4e8",
+          "path": "Steckler_Compartment/Steckler_Test_12.csv",
+          "git_blob_sha": "d4829d26c29144f4d3d7be760e2cc4cee89bb645",
+          "url": "https://github.com/firemodels/exp/blob/704e0d91f15088ae41c6a30a662a7524bf5ff4e8/Steckler_Compartment/Steckler_Test_12.csv",
+          "local_path": "steckler_1982_raw/steckler_012_profile.csv"
+        },
+        "layer_reduction": {
+          "repository": "firemodels/exp",
+          "commit": "704e0d91f15088ae41c6a30a662a7524bf5ff4e8",
+          "path": "Steckler_Compartment/Steckler_Test_12_layer.csv",
+          "git_blob_sha": "c643075faa75acf07c81d82249c59b5ba861514a",
+          "url": "https://github.com/firemodels/exp/blob/704e0d91f15088ae41c6a30a662a7524bf5ff4e8/Steckler_Compartment/Steckler_Test_12_layer.csv",
+          "local_path": "steckler_1982_raw/steckler_012_layer.csv"
+        },
+        "cfast_input": {
+          "repository": "firemodels/cfast",
+          "commit": "1b5ad2cb3cd9db885382d262a27324a4495c96b2",
+          "path": "Validation/Steckler_Compartment/Steckler_012.in",
+          "git_blob_sha": "54e21e5ef6960c6050754dbc07ced185061dc206",
+          "url": "https://github.com/firemodels/cfast/blob/1b5ad2cb3cd9db885382d262a27324a4495c96b2/Validation/Steckler_Compartment/Steckler_012.in",
+          "local_path": "steckler_1982_raw/steckler_012_cfast.in"
+        }
+      }
+    },
+    {
+      "id": "steckler-1982-13",
+      "test_number": 13,
+      "input": {
+        "ambient_temperature_k": 296.15,
+        "ambient_temperature_c": 23,
+        "door_width_m": 0.62
+      },
+      "experimental_reduction": {
+        "upper_temperature_k": 391.55,
+        "lower_temperature_k": 313.45,
+        "upper_temperature_c": 118.4,
+        "lower_temperature_c": 40.3,
+        "interface_height_above_floor_m": 0.71,
+        "hot_layer_depth_m": 1.42,
+        "upper_temperature_rise_from_cfast_ambient_k": 95.4,
+        "raw_room_profile_maximum_temperature_c": 130.41,
+        "quantitative_uncertainty": null
+      },
+      "sources": {
+        "profile": {
+          "repository": "firemodels/exp",
+          "commit": "704e0d91f15088ae41c6a30a662a7524bf5ff4e8",
+          "path": "Steckler_Compartment/Steckler_Test_13.csv",
+          "git_blob_sha": "157b98c2e7e516ad69653427c690aac36fe45a14",
+          "url": "https://github.com/firemodels/exp/blob/704e0d91f15088ae41c6a30a662a7524bf5ff4e8/Steckler_Compartment/Steckler_Test_13.csv",
+          "local_path": "steckler_1982_raw/steckler_013_profile.csv"
+        },
+        "layer_reduction": {
+          "repository": "firemodels/exp",
+          "commit": "704e0d91f15088ae41c6a30a662a7524bf5ff4e8",
+          "path": "Steckler_Compartment/Steckler_Test_13_layer.csv",
+          "git_blob_sha": "d49b8189e5f485e4044ef2243860bed736e495b4",
+          "url": "https://github.com/firemodels/exp/blob/704e0d91f15088ae41c6a30a662a7524bf5ff4e8/Steckler_Compartment/Steckler_Test_13_layer.csv",
+          "local_path": "steckler_1982_raw/steckler_013_layer.csv"
+        },
+        "cfast_input": {
+          "repository": "firemodels/cfast",
+          "commit": "1b5ad2cb3cd9db885382d262a27324a4495c96b2",
+          "path": "Validation/Steckler_Compartment/Steckler_013.in",
+          "git_blob_sha": "5d5c750df12cfd98686da9f785b6d6facf679f69",
+          "url": "https://github.com/firemodels/cfast/blob/1b5ad2cb3cd9db885382d262a27324a4495c96b2/Validation/Steckler_Compartment/Steckler_013.in",
+          "local_path": "steckler_1982_raw/steckler_013_cfast.in"
+        }
+      }
+    },
+    {
+      "id": "steckler-1982-14",
+      "test_number": 14,
+      "input": {
+        "ambient_temperature_k": 302.15,
+        "ambient_temperature_c": 29,
+        "door_width_m": 0.74
+      },
+      "experimental_reduction": {
+        "upper_temperature_k": 388.45,
+        "lower_temperature_k": 317.35,
+        "upper_temperature_c": 115.3,
+        "lower_temperature_c": 44.2,
+        "interface_height_above_floor_m": 0.78,
+        "hot_layer_depth_m": 1.35,
+        "upper_temperature_rise_from_cfast_ambient_k": 86.3,
+        "raw_room_profile_maximum_temperature_c": 129.63,
+        "quantitative_uncertainty": null
+      },
+      "sources": {
+        "profile": {
+          "repository": "firemodels/exp",
+          "commit": "704e0d91f15088ae41c6a30a662a7524bf5ff4e8",
+          "path": "Steckler_Compartment/Steckler_Test_14.csv",
+          "git_blob_sha": "f5881d22e43cc5c032e477719fee39b2f7501aea",
+          "url": "https://github.com/firemodels/exp/blob/704e0d91f15088ae41c6a30a662a7524bf5ff4e8/Steckler_Compartment/Steckler_Test_14.csv",
+          "local_path": "steckler_1982_raw/steckler_014_profile.csv"
+        },
+        "layer_reduction": {
+          "repository": "firemodels/exp",
+          "commit": "704e0d91f15088ae41c6a30a662a7524bf5ff4e8",
+          "path": "Steckler_Compartment/Steckler_Test_14_layer.csv",
+          "git_blob_sha": "c2ae125ac4ef4dba8c51c3655700693ecc8b4ed2",
+          "url": "https://github.com/firemodels/exp/blob/704e0d91f15088ae41c6a30a662a7524bf5ff4e8/Steckler_Compartment/Steckler_Test_14_layer.csv",
+          "local_path": "steckler_1982_raw/steckler_014_layer.csv"
+        },
+        "cfast_input": {
+          "repository": "firemodels/cfast",
+          "commit": "1b5ad2cb3cd9db885382d262a27324a4495c96b2",
+          "path": "Validation/Steckler_Compartment/Steckler_014.in",
+          "git_blob_sha": "d9a53ce4d32c08fca8bcf6660a24be7b6e30eef6",
+          "url": "https://github.com/firemodels/cfast/blob/1b5ad2cb3cd9db885382d262a27324a4495c96b2/Validation/Steckler_Compartment/Steckler_014.in",
+          "local_path": "steckler_1982_raw/steckler_014_cfast.in"
+        }
+      }
+    },
+    {
+      "id": "steckler-1982-16",
+      "test_number": 16,
+      "input": {
+        "ambient_temperature_k": 299.15,
+        "ambient_temperature_c": 26,
+        "door_width_m": 0.86
+      },
+      "experimental_reduction": {
+        "upper_temperature_k": 380.55,
+        "lower_temperature_k": 310.95,
+        "upper_temperature_c": 107.4,
+        "lower_temperature_c": 37.8,
+        "interface_height_above_floor_m": 0.82,
+        "hot_layer_depth_m": 1.31,
+        "upper_temperature_rise_from_cfast_ambient_k": 81.4,
+        "raw_room_profile_maximum_temperature_c": 120.26,
+        "quantitative_uncertainty": null
+      },
+      "sources": {
+        "profile": {
+          "repository": "firemodels/exp",
+          "commit": "704e0d91f15088ae41c6a30a662a7524bf5ff4e8",
+          "path": "Steckler_Compartment/Steckler_Test_16.csv",
+          "git_blob_sha": "033a709db44f909c00ee02afac6b3c25c80a4655",
+          "url": "https://github.com/firemodels/exp/blob/704e0d91f15088ae41c6a30a662a7524bf5ff4e8/Steckler_Compartment/Steckler_Test_16.csv",
+          "local_path": "steckler_1982_raw/steckler_016_profile.csv"
+        },
+        "layer_reduction": {
+          "repository": "firemodels/exp",
+          "commit": "704e0d91f15088ae41c6a30a662a7524bf5ff4e8",
+          "path": "Steckler_Compartment/Steckler_Test_16_layer.csv",
+          "git_blob_sha": "0cd7e30379a0576d561f3a59da128955537e3276",
+          "url": "https://github.com/firemodels/exp/blob/704e0d91f15088ae41c6a30a662a7524bf5ff4e8/Steckler_Compartment/Steckler_Test_16_layer.csv",
+          "local_path": "steckler_1982_raw/steckler_016_layer.csv"
+        },
+        "cfast_input": {
+          "repository": "firemodels/cfast",
+          "commit": "1b5ad2cb3cd9db885382d262a27324a4495c96b2",
+          "path": "Validation/Steckler_Compartment/Steckler_016.in",
+          "git_blob_sha": "dffd57d0ee66c569b8294b39b3ec983cca57bbd8",
+          "url": "https://github.com/firemodels/cfast/blob/1b5ad2cb3cd9db885382d262a27324a4495c96b2/Validation/Steckler_Compartment/Steckler_016.in",
+          "local_path": "steckler_1982_raw/steckler_016_cfast.in"
+        }
+      }
+    }
+  ]
+}
