@@ -1183,3 +1183,28 @@ near-equilibrium contact-line law. Bulk-flow dissipation, liquid inertia,
 asymmetric wetting, evaporation and resolved pinch-off remain outside it.
 Numerical uncertainty estimates are not interval certificates, and loss of
 admitted geometry does not manufacture rupture or a heat destination.
+
+## Elastic loading, resolved junction events and actual dashpot loss
+
+`normal_patch::dmt::elastic_events::DmtElasticSlipEvents` binds the original
+DMT area and sourced static/kinetic junction strengths to finite relative mass,
+an actual tangential loading spring and a fixed-reference dashpot. Normal
+indentation is held; the spring stage may move linearly during each call.
+Actual spring load selects static support and release. The loading apparatus
+does not substitute for an unmeasured adhesive shear spring.
+
+Phase-limited analytic oscillator cells and monotone velocity brackets resolve
+stops and restarts in all damping regimes. Interior force/velocity extrema,
+source identity, physical ranges, event/root/phase budgets and cancellation
+remain active. Runtime stepping allocates nothing. Junction and total reaction
+impulses and their first time moments permit actual receiving-body propagation.
+
+Spring storage, positive direct integration of dashpot loss, junction loss,
+applied-load work and moving-stage work remain distinct. Numerical work
+uncertainty includes conservative propagation and static segments and must fit
+inside energy admission; it is neither physical dissipation nor an interval
+certificate. Seven original-source tests cover independent oscillator and
+dashpot references, threshold release, reversal loss, multi-period partition
+consistency and atomic refusal/retry. Arbitrary elastic networks, evolving
+normal area, two-dimensional slip and thermal deposition remain outside this
+scalar event owner.

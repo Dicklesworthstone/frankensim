@@ -21,6 +21,9 @@ pub mod coupled;
 /// Finite-mass normal motion with original contact work and explicit damping.
 #[path = "dmt/dynamics.rs"]
 pub mod dynamics;
+/// Finite loading-spring and dashpot motion with sourced junction events.
+#[path = "dmt/elastic_events.rs"]
+pub mod elastic_events;
 #[path = "dmt/energy.rs"]
 mod energy;
 /// Exact collinear stick/slip events for prescribed linear normal motion.
