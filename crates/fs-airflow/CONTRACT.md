@@ -1208,6 +1208,27 @@ with source-inclusive pressure. This supplies conservative transfer, not a
 volatile-composition predictor, soot model, combustion closure or calibrated
 material dataset; those models remain separately owned.
 
+The `pyrolyzing_compartment_fire` example now runs the complete path from an
+externally heated spatial solid, through original NASA volatile enthalpy, into
+oxygen-limited reacting ventilation. Solid conduction/decomposition determines
+the released fuel; no fuel-feed or heat-release history is prescribed. Actual
+gas-to-face convection is an internal equal/opposite exchange, and the external
+heater/300 K radiative environment has a separate energy account. Every pressure
+trial applies original inventory-limited burning after transport. Accepted
+solid/gas candidates advance together; whole-step retries rebuild release at
+their actual duration. Combined mass, canonical species, C/H/N/O elements,
+physical energy, pressure and clocks are checked during execution.
+
+Its four authored small-box cases are closed, restricted/open doorway, and
+restricted doorway with pressure-dependent exhaust fan. Exhaust shaft heat
+enters downstream ambient and is not counted again inside the room. The solid
+is explicitly manufactured to release methane with compatible formation
+energy; it is not a PMMA or wood dataset. The case uses one active gas layer,
+instantaneous complete oxidation and a simple external optical boundary, not
+an ignition, finite-rate flame or smoke-feedback closure. Geometry stays fixed;
+the example refuses below an explicit retained-cell-mass threshold instead of
+adding seed mass or clipping release. Numerical coupling remains first order.
+
 ### Finite-rate chemistry inside the opening-pressure equation
 
 `fs-gas::multicomponent::compartment::kinetics::ZoneKinetics` can now run in

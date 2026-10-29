@@ -69,3 +69,8 @@ required-features = ["compartment-fire"]
 name = "soot_layer_radiation"
 path = "examples/soot_layer_radiation.rs"
 required-features = ["compartment-fire"]
+
+[[example]]
+name = "pyrolyzing_compartment_fire"
+path = "examples/pyrolyzing_compartment_fire.rs"
+required-features = ["compartment-fire"]

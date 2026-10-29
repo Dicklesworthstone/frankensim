@@ -1,0 +1,341 @@
+{
+  "scope": "Authored methane-releasing solid coupled to existing ideal-gas calorics, instantaneous complete oxidation and pressure-driven ventilation; numerical integration example, not PMMA/wood or experimental fire validation",
+  "verification": "Actual release-mode native runs on original fs-airflow/fs-gas/fs-thermal/fs-thermochem owners in focused supporting workspace; default four cases and one timestep refinement complete; no full-workspace/DSR claim",
+  "commands": [
+    "cargo run --release -p fs-airflow --features compartment-fire --example pyrolyzing_compartment_fire -- all 30 0.02 24 50000",
+    "cargo run --release -p fs-airflow --features compartment-fire --example pyrolyzing_compartment_fire -- fan-exhaust 30 0.01 24 50000"
+  ],
+  "gas_source": {
+    "species": [
+      "CH4",
+      "CO2",
+      "H2O",
+      "N2",
+      "O2"
+    ],
+    "repository": "nasa/cea",
+    "commit": "2f79a647e85737742fb08a127da00d1ea1d069da",
+    "source_file": "data/thermo.inp",
+    "existing_owner": "crates/fs-airflow/examples/ventilated_compartment_fire/nasa9.rs",
+    "admitted_caloric_temperature_k": [
+      200,
+      3500
+    ],
+    "chemistry": "CH4 + 2 O2 -> CO2 + 2 H2O; instantaneous, inventory-limited, not a kinetic rate law"
+  },
+  "parameters": {
+    "ambient_temperature_k": 300,
+    "initial_pressure_pa": 101325,
+    "room_floor_area_m2": 0.1,
+    "room_height_m": 0.2,
+    "solid_area_m2": 0.01,
+    "solid_thickness_m": 0.006,
+    "solid_initial_mass_kg": 0.051,
+    "solid_density_kg_m3": 850,
+    "solid_cp_j_kg_k": 1500,
+    "solid_conductivity_w_m_k": 0.2,
+    "solid_temperature_range_k": [
+      250,
+      1000
+    ],
+    "solid_arrhenius_prefactor_s_inv": 100000000,
+    "solid_arrhenius_activation_j_mol": 100000,
+    "solid_char_mass_yield": 0,
+    "solid_reference": "h_s(300K) = original NASA methane h(300K) - 1000000 J/kg",
+    "face_emissivity": 0.9,
+    "face_htc_w_m2_k": 10,
+    "external_irradiance_w_m2": 50000,
+    "external_radiative_temperature_k": 300,
+    "door_height_m": 0.2,
+    "door_discharge_coefficient": 0.7,
+    "case_door_width_m": {
+      "closed": 0,
+      "restricted": 0.001,
+      "open": 0.02,
+      "fan-exhaust": 0.001
+    }
+  },
+  "fan_fixture": {
+    "source": "Authored demonstration, not a measured product rating",
+    "reference_density": "Initial room mixture density",
+    "static_curve_q_m3_s_pressure_pa": [
+      [
+        0,
+        100
+      ],
+      [
+        0.01,
+        0
+      ]
+    ],
+    "bank": {
+      "count": 1,
+      "arrangement": "series",
+      "speed_ratio": 1
+    },
+    "outlet_area_per_fan_m2": 0.002,
+    "complete_loss_resistance_pa_s2_m6": 100000000,
+    "total_efficiency": 0.5,
+    "rejected_loss_fraction": 0,
+    "density_ratio_domain": [
+      0.05,
+      2
+    ],
+    "maximum_pressure_fraction": 0.02,
+    "power_account": "Fan shaft work enters downstream ambient, not the finite solid/room system"
+  },
+  "minimum_retained_cell_fraction": 0.0001,
+  "minimum_network_step_s": 0.00001,
+  "runs": [
+    {
+      "case": "closed",
+      "maximum_dt_s": 0.02,
+      "cells": 24,
+      "end_s": 30,
+      "final": {
+        "time_s": 30,
+        "gas_temperature_k": 2093.93906004,
+        "pressure_pa": 945352.438472743,
+        "lagged_front_face_k": 685.823430152,
+        "front_cell_k": 655.728548352,
+        "solid_mass_kg": 0.04661159342806,
+        "emitted_fuel_kg": 0.004388406571938,
+        "burned_fuel_kg": 0.001368520894141,
+        "gas_fuel_kg": 0.003019885677797,
+        "gas_oxygen_kg": 0,
+        "reference300K_hrr_w": 0,
+        "combined_mass_residual_kg": -1.387948187371e-17,
+        "combined_energy_residual_j": -0.000002893342752941,
+        "minimum_retained_cell_fraction": 0.001460614818937,
+        "fan_volume_rate_m3_s": 0,
+        "fan_mass_rate_kg_s": 0,
+        "fan_shaft_power_w": 0,
+        "fan_downstream_gas_power_w": 0
+      },
+      "summary": {
+        "case": "closed",
+        "width_m": 0,
+        "steps": 1501,
+        "halvings": 0,
+        "emitted_kg": 0.004388406571938,
+        "burned_kg": 0.001368520894141,
+        "first_oxygen_limited_s": 17.73999999999971,
+        "minimum_retained_cell_fraction": 0.001460614818937,
+        "fan_exhaust_mass_kg": 0,
+        "fan_shaft_energy_to_ambient_j": 0,
+        "max_combined_mass_residual_kg": 6.938893903907e-17,
+        "max_combined_energy_residual_j": 0.000002893342752941,
+        "max_element_residual_mol": 1.600372234433e-14,
+        "max_pressure_residual_pa": 0
+      }
+    },
+    {
+      "case": "restricted",
+      "maximum_dt_s": 0.02,
+      "cells": 24,
+      "end_s": 30,
+      "final": {
+        "time_s": 30,
+        "gas_temperature_k": 938.698549618,
+        "pressure_pa": 101325.556533695,
+        "lagged_front_face_k": 639.217803449,
+        "front_cell_k": 614.319021847,
+        "solid_mass_kg": 0.0473613848555,
+        "emitted_fuel_kg": 0.003638615144498,
+        "burned_fuel_kg": 0.0003778526687091,
+        "gas_fuel_kg": 0.0027404250806,
+        "gas_oxygen_kg": 0,
+        "reference300K_hrr_w": 0,
+        "combined_mass_residual_kg": -7.632783294298e-17,
+        "combined_energy_residual_j": -7.565795385744e-7,
+        "minimum_retained_cell_fraction": 0.05501490793852,
+        "fan_volume_rate_m3_s": 0,
+        "fan_mass_rate_kg_s": 0,
+        "fan_shaft_power_w": 0,
+        "fan_downstream_gas_power_w": 0
+      },
+      "summary": {
+        "case": "restricted",
+        "width_m": 0.001,
+        "steps": 1501,
+        "halvings": 0,
+        "emitted_kg": 0.003638615144498,
+        "burned_kg": 0.0003778526687091,
+        "first_oxygen_limited_s": 12.239999999999828,
+        "minimum_retained_cell_fraction": 0.05501490793852,
+        "fan_exhaust_mass_kg": 0,
+        "fan_shaft_energy_to_ambient_j": 0,
+        "max_combined_mass_residual_kg": 8.673617379884e-17,
+        "max_combined_energy_residual_j": 7.565795385744e-7,
+        "max_element_residual_mol": 1.643625527192e-14,
+        "max_pressure_residual_pa": 0.00000998740142677
+      }
+    },
+    {
+      "case": "open",
+      "maximum_dt_s": 0.02,
+      "cells": 24,
+      "end_s": 30,
+      "final": {
+        "time_s": 30,
+        "gas_temperature_k": 1574.367135198,
+        "pressure_pa": 101324.393355217,
+        "lagged_front_face_k": 662.522583913,
+        "front_cell_k": 634.658801743,
+        "solid_mass_kg": 0.04702763726372,
+        "emitted_fuel_kg": 0.003972362736277,
+        "burned_fuel_kg": 0.001104747503477,
+        "gas_fuel_kg": 0.0006813799595602,
+        "gas_oxygen_kg": 0,
+        "reference300K_hrr_w": 2045.666083562,
+        "combined_mass_residual_kg": -7.979727989493e-17,
+        "combined_energy_residual_j": -0.000001096992491512,
+        "minimum_retained_cell_fraction": 0.01776203461307,
+        "fan_volume_rate_m3_s": 0,
+        "fan_mass_rate_kg_s": 0,
+        "fan_shaft_power_w": 0,
+        "fan_downstream_gas_power_w": 0
+      },
+      "summary": {
+        "case": "open",
+        "width_m": 0.02,
+        "steps": 1505,
+        "halvings": 11,
+        "emitted_kg": 0.003972362736277,
+        "burned_kg": 0.001104747503477,
+        "first_oxygen_limited_s": 12.224999999999827,
+        "minimum_retained_cell_fraction": 0.01776203461307,
+        "fan_exhaust_mass_kg": 0,
+        "fan_shaft_energy_to_ambient_j": 0,
+        "max_combined_mass_residual_kg": 9.367506770275e-17,
+        "max_combined_energy_residual_j": 0.000001096992491512,
+        "max_element_residual_mol": 1.492239119002e-14,
+        "max_pressure_residual_pa": 0.000009850977221504
+      }
+    },
+    {
+      "case": "fan-exhaust",
+      "maximum_dt_s": 0.02,
+      "cells": 24,
+      "end_s": 30,
+      "final": {
+        "time_s": 30,
+        "gas_temperature_k": 1063.739348711,
+        "pressure_pa": 101323.802850756,
+        "lagged_front_face_k": 643.571498322,
+        "front_cell_k": 618.069691173,
+        "solid_mass_kg": 0.04729723023078,
+        "emitted_fuel_kg": 0.003702769769225,
+        "burned_fuel_kg": 0.0004923335852898,
+        "gas_fuel_kg": 0.002104441880009,
+        "gas_oxygen_kg": 0,
+        "reference300K_hrr_w": 299.1489317962,
+        "combined_mass_residual_kg": -4.163336342344e-17,
+        "combined_energy_residual_j": -8.714450814296e-7,
+        "minimum_retained_cell_fraction": 0.04616445004257,
+        "fan_volume_rate_m3_s": 0.0009671436491772,
+        "fan_mass_rate_kg_s": 0.0002326287433253,
+        "fan_shaft_power_w": 0.03591408212381,
+        "fan_downstream_gas_power_w": 0.03591408212381
+      },
+      "summary": {
+        "case": "fan-exhaust",
+        "width_m": 0.001,
+        "steps": 1501,
+        "halvings": 0,
+        "emitted_kg": 0.003702769769225,
+        "burned_kg": 0.0004923335852898,
+        "first_oxygen_limited_s": 12.219999999999828,
+        "minimum_retained_cell_fraction": 0.04616445004257,
+        "fan_exhaust_mass_kg": 0.01738958060409,
+        "fan_shaft_energy_to_ambient_j": 2.51170274692,
+        "max_combined_mass_residual_kg": 8.673617379884e-17,
+        "max_combined_energy_residual_j": 8.714450814296e-7,
+        "max_element_residual_mol": 1.611185553352e-14,
+        "max_pressure_residual_pa": 0.000009943658369593
+      }
+    },
+    {
+      "case": "fan-exhaust",
+      "maximum_dt_s": 0.01,
+      "cells": 24,
+      "end_s": 30,
+      "final": {
+        "time_s": 30,
+        "gas_temperature_k": 1063.933547532,
+        "pressure_pa": 101323.80280183,
+        "lagged_front_face_k": 643.570932044,
+        "front_cell_k": 618.068694981,
+        "solid_mass_kg": 0.04729786890101,
+        "emitted_fuel_kg": 0.003702131098988,
+        "burned_fuel_kg": 0.0004931795105742,
+        "gas_fuel_kg": 0.002103591111279,
+        "gas_oxygen_kg": 0,
+        "reference300K_hrr_w": 299.1585707595,
+        "combined_mass_residual_kg": -3.469446951954e-17,
+        "combined_energy_residual_j": -0.00001491692455602,
+        "minimum_retained_cell_fraction": 0.0461601594503,
+        "fan_volume_rate_m3_s": 0.0009671454518684,
+        "fan_mass_rate_kg_s": 0.0002326029940696,
+        "fan_shaft_power_w": 0.03591009990591,
+        "fan_downstream_gas_power_w": 0.03591009990591
+      },
+      "summary": {
+        "case": "fan-exhaust",
+        "width_m": 0.001,
+        "steps": 3000,
+        "halvings": 0,
+        "emitted_kg": 0.003702131098988,
+        "burned_kg": 0.0004931795105742,
+        "first_oxygen_limited_s": 12.229999999999784,
+        "minimum_retained_cell_fraction": 0.0461601594503,
+        "fan_exhaust_mass_kg": 0.0173942413327,
+        "fan_shaft_energy_to_ambient_j": 2.512050592506,
+        "max_combined_mass_residual_kg": 6.591949208712e-17,
+        "max_combined_energy_residual_j": 0.00001491692455602,
+        "max_element_residual_mol": 1.654438856999e-14,
+        "max_pressure_residual_pa": 0.00000999124313239
+      }
+    }
+  ],
+  "time_refinement": {
+    "scope": "One timestep halving, same 24-cell grid and authored physical inputs; not a convergence-order or mesh-independence claim",
+    "changes": {
+      "emitted_fuel_kg": {
+        "coarse_minus_fine": 6.386702369998686e-7,
+        "coarse_minus_fine_percent_of_fine": 0.01725142140899475
+      },
+      "burned_fuel_kg": {
+        "coarse_minus_fine": -8.459252843999584e-7,
+        "coarse_minus_fine_percent_of_fine": -0.17152482336808011
+      },
+      "gas_fuel_kg": {
+        "coarse_minus_fine": 8.507687299999511e-7,
+        "coarse_minus_fine_percent_of_fine": 0.040443635906156544
+      },
+      "gas_temperature_k": {
+        "coarse_minus_fine": -0.19419882099987262,
+        "coarse_minus_fine_percent_of_fine": -0.01825290888235966
+      },
+      "fan_volume_rate_m3_s": {
+        "coarse_minus_fine": -1.8026911999821996e-9,
+        "coarse_minus_fine_percent_of_fine": -0.0001863929770335613
+      }
+    }
+  },
+  "scope_refusal": {
+    "command": "cargo run --release -p fs-airflow --features compartment-fire --example pyrolyzing_compartment_fire -- closed 33 0.02 24 50000",
+    "exit_code": 1,
+    "completed": false,
+    "last_printed_time_s": 32.02,
+    "result": "RetryLimit { attempts: 11, last: Invalid(\"fixed-geometry example scope: retained cell mass below 1e-4 of initial; surface recession/remeshing required\") }"
+  },
+  "limits": [
+    "One active gas layer; instantaneous perfect mixing and complete oxidation, no ignition, extinction, dissociation, CO/soot or flame structure.",
+    "Fixed solid geometry and conduction links; no char, pores, solid oxidation or recession. Per-cell retained-mass scope refusal is explicit.",
+    "First-order lagged boundary/source composition. One timestep halving is not a convergence-order or mesh-independence proof.",
+    "External irradiation and radiation to300K are a declared simple boundary, not smoke or flame radiative feedback.",
+    "Closed room is an authored rigid control volume; its high pressure is not a building-fire or structural-containment prediction.",
+    "Small conservation residuals are numerical checks, not physical validation."
+  ]
+}
