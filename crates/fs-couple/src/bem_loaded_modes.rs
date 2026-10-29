@@ -37,6 +37,8 @@ use fs_math::{c64::C64, det};
 
 mod shell;
 mod memory;
+mod harmonic;
+pub use harmonic::{BemHarmonicOptions, BemHarmonicPower, BemHarmonicResponse};
 
 /// Explicit physical accuracy, discretization and callback resources.
 #[derive(Debug, Clone, Copy)]
@@ -75,6 +77,9 @@ pub enum BemModesError {
     Pole(NonlinearEigError),
     Contour(BeynError),
     SeedSolve(LuComplexError),
+    /// The driven full-state solve failed; no artificial pole damping is added.
+    ResponseSolve(LuComplexError),
+    PowerBalance { relative: f64, tolerance: f64 },
     /// Only the local initializer eliminates memory. Contour discovery does not.
     SeedMemorySingular { branch: usize },
     EvaluationBudget {
@@ -490,7 +495,7 @@ impl BemLoadedModes {
         evaluations: &mut usize,
         cancelled: &mut dyn FnMut() -> bool,
     ) -> Result<BemModePole, BemModesError> {
-        let (m, n) = (self.mode_count(), self.dimension());
+        let m = self.mode_count();
         let mut vector: Vec<_> = pole
             .vector
             .iter()
@@ -511,11 +516,46 @@ impl BemLoadedModes {
             return Err(bad("original eigenstate overflow"));
         }
         let raw = self.assemble(pole.value, evaluations, cancelled)?;
+        let residuals = self.check_physical_rows(&raw, &vector, None, cancelled)?;
+        if pole.value.im > 0.0 {
+            return Err(BemModesError::GrowingMode {
+                angular_frequency_rad_s: pole.value,
+            });
+        }
+        poll(cancelled)?;
+        let memories = vector.split_off(m + self.panel_count());
+        let pressure = vector.split_off(m);
+        Ok(BemModePole {
+            angular_frequency_rad_s: pole.value,
+            modal_displacement: vector,
+            surface_pressure_pa: pressure,
+            elastic_memory_sqrt_j: memories,
+            mechanical_residual: residuals[0],
+            boundary_residual: residuals[1],
+            memory_residual: residuals[2],
+            relative_step: pole.relative_step,
+            iterations: pole.iterations,
+        })
+    }
+
+    // One original-equation gate for free modes and driven physical responses.
+    // RHS acts only on structural displacement equations. Material/boundary
+    // rows and coefficient envelopes retain their exact original semantics.
+    fn check_physical_rows(
+        &self, raw: &PhysicalPencil, vector: &[C64], force: Option<&[C64]>,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<[f64; 3], BemModesError> {
+        let (m, n) = (self.mode_count(), self.dimension());
+        if vector.len() != n || force.is_some_and(|f| f.len() != m) {
+            return Err(bad("physical residual needs complete state and force coordinates"));
+        }
         let mut residuals = [0.0_f64; 3];
         for i in 0..n {
-            let mut sum = C64::ZERO;
+            poll(cancelled)?;
+            let rhs = force.and_then(|f| f.get(i)).copied().unwrap_or(C64::ZERO);
+            let mut sum = -rhs;
             let mut correction = C64::ZERO;
-            let mut denominator = 0.0;
+            let mut denominator = rhs.abs();
             for j in 0..n {
                 let term = raw.value.matrix[i * n + j] * vector[j] - correction;
                 let next = sum + term;
@@ -547,25 +587,8 @@ impl BemLoadedModes {
                 memory: residuals[2],
             });
         }
-        if pole.value.im > 0.0 {
-            return Err(BemModesError::GrowingMode {
-                angular_frequency_rad_s: pole.value,
-            });
-        }
         poll(cancelled)?;
-        let memories = vector.split_off(m + self.panel_count());
-        let pressure = vector.split_off(m);
-        Ok(BemModePole {
-            angular_frequency_rad_s: pole.value,
-            modal_displacement: vector,
-            surface_pressure_pa: pressure,
-            elastic_memory_sqrt_j: memories,
-            mechanical_residual: residuals[0],
-            boundary_residual: residuals[1],
-            memory_residual: residuals[2],
-            relative_step: pole.relative_step,
-            iterations: pole.iterations,
-        })
+        Ok(residuals)
     }
 
     /// Local simple-pole refinement. Only the initializer solves pressure from
