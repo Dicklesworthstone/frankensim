@@ -17,6 +17,9 @@
 use crate::eigen_complex::{LuComplexError, lu_complex_with_cancel};
 use fs_math::{c64::C64, det};
 
+/// Contour discovery reuses this module's original-equation pole refinement.
+pub mod beyn;
+
 /// Hard ceiling for this dense local method, before the normalization row.
 pub const MAX_NONLINEAR_POLE_DIMENSION: usize = 1024;
 

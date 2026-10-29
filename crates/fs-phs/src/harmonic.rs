@@ -16,6 +16,7 @@ use fs_la::eigen_complex::{LuComplex, LuComplexError, lu_complex_with_cancel};
 use fs_math::c64::C64;
 
 mod poles;
+pub use poles::{BeynOptions, HarmonicSpectrum, HarmonicSpectrumError, ResonanceRegion};
 pub use poles::{HarmonicPole, HarmonicPoleError, PoleOptions};
 
 /// Hard ceiling of this explicitly dense frequency-domain path.

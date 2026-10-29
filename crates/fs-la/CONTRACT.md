@@ -780,3 +780,45 @@ The original `eig` delegates with its existing 120-sweep cap. No second QR
 algorithm or eigenvector approximation is introduced. This supplies a bounded
 small general-spectrum solve for contour methods; it does not add balancing,
 large-scale sparse eigensolving or a forward eigenvalue-error certificate.
+
+### Contour discovery of finite nonlinear poles
+
+`nonlinear_eig::beyn::beyn_with_cancel` discovers isolated simple finite poles
+inside an explicitly declared counterclockwise ellipse without individual
+mode seeds. The operator and analytic derivative use the existing
+`PoleEvaluation` contract. T must be holomorphic on and throughout that
+region; meromorphic operator poles or branch cuts invalidate its count.
+
+The two Beyn moments use original coordinates and one fixed operator scale.
+Each node factors once with the existing cancellable LU. Full inverse columns
+supply both probe moments and an independent argument-principle trace. Their
+rowwise backward residual is
+`|A_i*x-b_i|/(|b_i|+||A_i||_1*||x||_inf)`; up to three corrective solves reuse
+the LU. This scale remains meaningful at structural zero inverse entries.
+No entry is clipped. The contour margin also includes the declared coefficient
+envelope, so scalar near-poles are not hidden by a condition number of one.
+
+Even nodes reuse the same evaluations for a nested half-resolution quadrature.
+Both argument integrals must agree with the same integer and the numerical
+moment rank; moment differences must meet the declared indicator tolerance.
+The direct complex SVD, existing general QR and shared original-equation
+bordered Newton owner produce and refine the modes. Full n probes use the
+identity; narrower probes use a deterministic integer generator and refuse
+saturation. All accepted poles stay inside the region and unresolved duplicate
+roots refuse. No original physical state is truncated by this seed extraction.
+
+Dimension, fine nodes (8..4096, even), probes, SVD/QR sweeps, refinement,
+simultaneous payload and dense work have explicit admission before assembly.
+Cancellation reaches the callback and numerical owners. Callback caches,
+assembly work, source storage and process overhead are outside the numerical
+payload/work bounds. Refusal publishes no partial spectrum.
+
+The seven native regressions in `nonlinear_eig/beyn_tests.rs` cover nonnormal
+complex modes, quadratic companion truth, a Lambert-W spectrum and live
+16/32/64 quadrature ladder, a singular descriptor, extreme uniform coefficient
+scales, contour/probe/empty-region refusal, cancellation and exact replay.
+The same source passes all thirteen isolated-pole regressions and eight SVD
+regressions. Nested quadrature and residuals are numerical evidence, not
+interval enclosures or a rigorous completeness certificate. Two moments cannot
+resolve more modes than the available probe rank, dependent eigendirections,
+or unresolved repeated/defective poles; such cases refuse.

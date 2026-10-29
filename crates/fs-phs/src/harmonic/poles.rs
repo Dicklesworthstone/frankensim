@@ -3,10 +3,15 @@
 //! observability claim is inferred from a single mode.
 
 use super::{C64, HarmonicModel, finite};
-use fs_la::nonlinear_eig::{NonlinearEigError, PoleEvaluation, newton_pole_with_cancel};
+use fs_la::nonlinear_eig::{
+    NonlinearEigError, NonlinearPole, PoleEvaluation, newton_pole_with_cancel,
+};
 use fs_math::det;
 
 pub use fs_la::nonlinear_eig::PoleOptions;
+
+mod spectrum;
+pub use spectrum::{BeynOptions, HarmonicSpectrum, HarmonicSpectrumError, ResonanceRegion};
 
 /// A local mode of exp(s t), including every original constraint and memory state.
 #[derive(Debug, Clone, PartialEq)]
@@ -67,6 +72,85 @@ fn divide(z: C64, scale: f64) -> C64 {
     C64::new(z.re / scale, z.im / scale)
 }
 
+// Local and contour solves share precisely this original descriptor pencil.
+// Preparation stays lazy so each numerical owner admits its resources first.
+struct PolePencil<'a> {
+    model: &'a HarmonicModel,
+    spectral_scale: f64,
+    conditioning: Option<(Vec<f64>, f64, f64)>,
+}
+
+impl<'a> PolePencil<'a> {
+    fn new(model: &'a HarmonicModel, spectral_scale: f64) -> Self {
+        Self {
+            model,
+            spectral_scale,
+            conditioning: None,
+        }
+    }
+
+    fn evaluate(
+        &mut self,
+        s: C64,
+        cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<PoleEvaluation, NonlinearEigError> {
+        let model = self.model;
+        let n = model.n;
+        if self.conditioning.is_none() {
+            let mut rows = Vec::with_capacity(n);
+            let mut generator_sq = 0.0;
+            let mut descriptor_norm = 0.0;
+            for i in 0..n {
+                poll(cancel)?;
+                let floor = if i < model.n_diff {
+                    self.spectral_scale
+                } else {
+                    0.0
+                };
+                let scale = model.generator[i * n..(i + 1) * n]
+                    .iter()
+                    .map(|v| v.abs())
+                    .fold(floor, f64::max);
+                if !scale.is_finite() || scale <= 0.0 {
+                    return Err(NonlinearEigError::BadInput {
+                        what: "a zero descriptor row cannot define an isolated pole",
+                    });
+                }
+                for &a in &model.generator[i * n..(i + 1) * n] {
+                    generator_sq += (a / scale) * (a / scale);
+                }
+                if i < model.n_diff {
+                    descriptor_norm = det::hypot(descriptor_norm, 1.0 / scale);
+                }
+                rows.push(scale);
+            }
+            self.conditioning = Some((rows, det::sqrt(generator_sq), descriptor_norm));
+        }
+        let (rows, a_norm, e_norm) = self.conditioning.as_ref().expect("prepared above");
+        let residual_scale = *a_norm + s.abs().max(self.spectral_scale) * *e_norm;
+        if !residual_scale.is_finite() || residual_scale <= 0.0 {
+            return Err(NonlinearEigError::FunctionRefused { at: s });
+        }
+        let mut matrix = vec![C64::ZERO; n * n];
+        let mut derivative = vec![C64::ZERO; n * n];
+        for i in 0..n {
+            poll(cancel)?;
+            for j in 0..n {
+                matrix[i * n + j] = C64::from_re(-model.generator[i * n + j] / rows[i]);
+            }
+            if i < model.n_diff {
+                matrix[i * n + i] = matrix[i * n + i] + divide(s, rows[i]);
+                derivative[i * n + i] = C64::from_re(1.0 / rows[i]);
+            }
+        }
+        Ok(PoleEvaluation {
+            matrix,
+            derivative,
+            residual_scale,
+        })
+    }
+}
+
 impl HarmonicModel {
     /// Refine one isolated finite free mode of the ORIGINAL continuous model.
     ///
@@ -94,69 +178,25 @@ impl HarmonicModel {
     ) -> Result<HarmonicPole, HarmonicPoleError> {
         // The numerical owner admits sizes/resources BEFORE this lazy callback
         // allocates or assembles any additional matrices.
-        let mut conditioning: Option<(Vec<f64>, f64, f64)> = None;
+        let mut pencil = PolePencil::new(self, options.spectral_scale);
         let n = self.n;
         let pole = newton_pole_with_cancel(
             n,
             laplace_seed_per_s,
             state_seed,
             options,
-            |s, cancel| {
-                if conditioning.is_none() {
-                    let mut rows = Vec::with_capacity(n);
-                    let mut generator_sq = 0.0;
-                    let mut descriptor_norm = 0.0;
-                    for i in 0..n {
-                        poll(cancel)?;
-                        let floor = if i < self.n_diff {
-                            options.spectral_scale
-                        } else {
-                            0.0
-                        };
-                        let scale = self.generator[i * n..(i + 1) * n]
-                            .iter()
-                            .map(|v| v.abs())
-                            .fold(floor, f64::max);
-                        if !scale.is_finite() || scale <= 0.0 {
-                            return Err(NonlinearEigError::BadInput {
-                                what: "a zero descriptor row cannot define an isolated pole",
-                            });
-                        }
-                        for &a in &self.generator[i * n..(i + 1) * n] {
-                            generator_sq += (a / scale) * (a / scale);
-                        }
-                        if i < self.n_diff {
-                            descriptor_norm = det::hypot(descriptor_norm, 1.0 / scale);
-                        }
-                        rows.push(scale);
-                    }
-                    conditioning = Some((rows, det::sqrt(generator_sq), descriptor_norm));
-                }
-                let (rows, a_norm, e_norm) = conditioning.as_ref().expect("prepared above");
-                let residual_scale = *a_norm + s.abs().max(options.spectral_scale) * *e_norm;
-                if !residual_scale.is_finite() || residual_scale <= 0.0 {
-                    return Err(NonlinearEigError::FunctionRefused { at: s });
-                }
-                let mut matrix = vec![C64::ZERO; n * n];
-                let mut derivative = vec![C64::ZERO; n * n];
-                for i in 0..n {
-                    poll(cancel)?;
-                    for j in 0..n {
-                        matrix[i * n + j] = C64::from_re(-self.generator[i * n + j] / rows[i]);
-                    }
-                    if i < self.n_diff {
-                        matrix[i * n + i] = matrix[i * n + i] + divide(s, rows[i]);
-                        derivative[i * n + i] = C64::from_re(1.0 / rows[i]);
-                    }
-                }
-                Ok(PoleEvaluation {
-                    matrix,
-                    derivative,
-                    residual_scale,
-                })
-            },
+            |s, cancel| pencil.evaluate(s, cancel),
             &mut cancelled,
         )?;
+        self.observe_pole(pole, &mut cancelled)
+    }
+
+    fn observe_pole(
+        &self,
+        pole: NonlinearPole,
+        mut cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<HarmonicPole, HarmonicPoleError> {
+        let n = self.n;
         let s = pole.value;
         let state = pole.vector;
         let mut relative = 0.0_f64;

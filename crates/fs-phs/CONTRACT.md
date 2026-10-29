@@ -771,3 +771,31 @@ direct exact propagation, energy-datum invariance, capacity and atomic refusal.
 All nine existing multirate tests pass against the changed owner. These are
 native numerical and allocation checks, not measured wall-time acceleration or
 full workspace qualification.
+
+### Resonance spectrum of the original descriptor model
+
+`HarmonicModel::resonance_spectrum` discovers finite free modes inside an
+explicit `ResonanceRegion` ellipse in the Laplace s-plane [1/s], using
+`BeynOptions`. It shares the exact same lazy `sE-(J-R)W` pencil, fixed row
+conditioning, bordered-Newton refinement and physical observation owner as
+`resonance_pole`. This complete linear pencil is entire even when E is
+singular. All algebraic constraints, mutual storage and material memory remain;
+finite modes with zero port output are retained. E is never inverted.
+
+Every returned `HarmonicPole` passes the unchanged original split-pencil
+componentwise residual gate and reports original coordinates/efforts/ports,
+physical energy and dissipation, and independent decay-power balance. The
+spectrum reports numerical argument count, resolved rank, unrefined values,
+nested-quadrature indicators and contour margin. Physical result storage and
+observation work are reserved in addition to the shared numerical budget.
+Cancellation or refusal leaves the source model and reusable AC factors intact.
+
+Four native integrations in `tests/harmonic_spectrum.rs` recover an unobservable
+mechanical resonance, all three poles of a Maxwell hereditary oscillator,
+only the finite poles of an RLC descriptor with original Kirchhoff constraints,
+and exact replay after cancellation with unchanged reusable AC output. The
+four isolated-pole and eight harmonic-response integrations also pass against
+the complete production fs-phs source. These finite-region results provide
+numerical convergence and original-equation evidence; they do not certify an
+entire spectrum, nonlinear sounding threshold, observable transfer pole, or
+resolution of repeated/defective modes.
