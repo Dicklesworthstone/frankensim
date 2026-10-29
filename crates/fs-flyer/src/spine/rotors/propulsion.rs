@@ -19,7 +19,11 @@ use crate::propcoupling::{
 };
 use fs_ga::Vec3;
 use fs_math::det;
-use fs_wing::nonlinear::{InfluenceOperator, StripRegime};
+use fs_wing::Panel;
+use fs_wing::nonlinear::{InfluenceOperator, SectionClosure, StripRegime, StripSpec};
+
+#[path = "propulsion/dynamic.rs"]
+pub mod dynamic;
 
 /// Blade handedness relative to a mounted rotor's declared positive spin axis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,6 +100,49 @@ pub struct GearedPropulsion<'a, const N: usize> {
     assembly: &'a GearedAssembly<N>,
     mounts: [PropellerMount; 2],
     spatial_axes: Option<DiskAxes>,
+}
+
+// Both wake models use exactly the same material-air sampling and body/shaft
+// wrench assembly. Their distinct public results keep equilibrium residuals
+// separate from physical wake acceleration.
+struct AerodynamicStage<'a> {
+    op: &'a InfluenceOperator,
+    panels: &'a [Panel],
+    strips: &'a [StripSpec],
+    closure: SectionClosure<'a>,
+    disks: &'a [PropDisk; 2],
+    freestream: [f64; 3],
+    rho: f64,
+    incident: IncidentInflow<'a>,
+}
+
+struct AerodynamicFields<'a> {
+    gamma: &'a [f64],
+    strip_velocity_mps: Option<&'a [[f64; 3]]>,
+    thrust_n: [f64; 2],
+    torque_nm: [f64; 2],
+}
+
+trait AerodynamicSolution {
+    fn load_fields(&self) -> AerodynamicFields<'_>;
+}
+
+impl AerodynamicSolution for CoupledStep {
+    fn load_fields(&self) -> AerodynamicFields<'_> {
+        AerodynamicFields {
+            gamma: &self.gamma,
+            strip_velocity_mps: self.strip_velocity_mps.as_deref(),
+            thrust_n: self.thrust_n,
+            torque_nm: self.torque_nm,
+        }
+    }
+}
+
+struct StageEvaluation<const N: usize, S> {
+    loads: GearedLoads<N>,
+    aerodynamic_force_body_n: [f64; 3],
+    propeller_absolute_speed_rad_s: [f64; 2],
+    aerodynamics: S,
 }
 
 fn reject(code: &'static str, message: &str) -> Refusal {
@@ -246,6 +293,57 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
         wind_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
         warm: Option<[f64; 2]>,
     ) -> Result<PropulsionEvaluation<N>, Refusal> {
+        if warm.is_some_and(|w| !w.iter().all(|x| x.is_finite())) {
+            return Err(reject(
+                "propulsion-state-invalid",
+                "nonfinite warm induction",
+            ));
+        }
+        let result =
+            self.evaluate_with(state, inputs, wind_world, |stage| match self.spatial_axes {
+                Some(axes) => spatial::coupled_step(
+                    &axes,
+                    stage.op,
+                    stage.panels,
+                    stage.strips,
+                    stage.closure,
+                    &self.design.rotor,
+                    stage.disks,
+                    stage.freestream,
+                    stage.rho,
+                    &self.design.coupling,
+                    warm,
+                    stage.incident,
+                ),
+                None => coupled_prop_airframe_step_with_incident(
+                    stage.op,
+                    stage.panels,
+                    stage.strips,
+                    stage.closure,
+                    &self.design.rotor,
+                    stage.disks,
+                    stage.freestream,
+                    stage.rho,
+                    &self.design.coupling,
+                    warm,
+                    stage.incident,
+                ),
+            })?;
+        Ok(PropulsionEvaluation {
+            loads: result.loads,
+            aerodynamic_force_body_n: result.aerodynamic_force_body_n,
+            propeller_absolute_speed_rad_s: result.propeller_absolute_speed_rad_s,
+            coupled: result.aerodynamics,
+        })
+    }
+
+    fn evaluate_with<S: AerodynamicSolution>(
+        &self,
+        state: &GearedState,
+        inputs: PropulsionInputs,
+        wind_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+        solve: impl FnOnce(AerodynamicStage<'_>) -> Result<S, Refusal>,
+    ) -> Result<StageEvaluation<N, S>, Refusal> {
         let rotation = self.assembly.admit_state(state, 1.0 / TICK_HZ)?;
         if !inputs.density_kg_m3.is_finite()
             || inputs.density_kg_m3 <= 0.0
@@ -253,7 +351,6 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
             || inputs.canard_rad.abs() >= 0.6
             || !inputs.motor_nm.is_finite()
             || !finite(vec(inputs.gravity_world_mps2))
-            || warm.is_some_and(|w| !w.iter().all(|x| x.is_finite()))
         {
             return Err(reject(
                 "propulsion-state-invalid",
@@ -352,36 +449,18 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
             strip_velocity_mps: &strip_velocity,
             disk_velocity_mps: [sample(disks[0].center_m)?, sample(disks[1].center_m)?],
         };
-        let coupled = match self.spatial_axes {
-            Some(axes) => spatial::coupled_step(
-                &axes,
-                &op,
-                &panels,
-                &strips,
-                &closure,
-                &design.rotor,
-                &disks,
-                freestream,
-                rho,
-                &design.coupling,
-                warm,
-                incident,
-            ),
-            None => coupled_prop_airframe_step_with_incident(
-                &op,
-                &panels,
-                &strips,
-                &closure,
-                &design.rotor,
-                &disks,
-                freestream,
-                rho,
-                &design.coupling,
-                warm,
-                incident,
-            ),
-        }?;
-        let local = coupled.strip_velocity_mps.as_ref().ok_or_else(|| {
+        let aerodynamics = solve(AerodynamicStage {
+            op: &op,
+            panels: &panels,
+            strips: &strips,
+            closure: &closure,
+            disks: &disks,
+            freestream,
+            rho,
+            incident,
+        })?;
+        let fields = aerodynamics.load_fields();
+        let local = fields.strip_velocity_mps.ok_or_else(|| {
             reject(
                 "propulsion-state-invalid",
                 "distributed coupled solve omitted its accepted local velocities",
@@ -394,7 +473,7 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
             for &j in &strip.panel_indices {
                 let panel = &panels[j];
                 let segment = vec(panel.b) - vec(panel.a);
-                let panel_force = velocity.cross(segment).scale(rho * coupled.gamma[j]);
+                let panel_force = velocity.cross(segment).scale(rho * fields.gamma[j]);
                 let arm = (vec(panel.a) + vec(panel.b)).scale(0.5) - vec(design.cg_m);
                 force = force + panel_force;
                 moment = moment + arm.cross(panel_force);
@@ -436,12 +515,12 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
         let mut aerodynamic_nm = [0.0; N];
         for k in 0..2 {
             let mount = self.mounts[k];
-            let thrust = vec(mount.thrust_direction_body).scale(coupled.thrust_n[k]);
+            let thrust = vec(mount.thrust_direction_body).scale(fields.thrust_n[k]);
             force = force + thrust;
             moment = moment + (vec(disks[k].center_m) - vec(design.cg_m)).cross(thrust);
             // BEMT reports required drive torque in its positive-speed branch.
             // Physical aerodynamic torque on the rotor has the opposite sign.
-            aerodynamic_nm[mount.rotor_index] = -mount.handedness.sign() * coupled.torque_nm[k];
+            aerodynamic_nm[mount.rotor_index] = -mount.handedness.sign() * fields.torque_nm[k];
         }
         let world_force = rotation.rotate(force).map_err(|_| {
             reject(
@@ -459,7 +538,7 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
                 "aerodynamic wrench overflow",
             ));
         }
-        Ok(PropulsionEvaluation {
+        Ok(StageEvaluation {
             loads: GearedLoads {
                 carrier: Loads {
                     force_n: array(world_force),
@@ -470,7 +549,7 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
             },
             aerodynamic_force_body_n: array(force),
             propeller_absolute_speed_rad_s,
-            coupled,
+            aerodynamics,
         })
     }
 

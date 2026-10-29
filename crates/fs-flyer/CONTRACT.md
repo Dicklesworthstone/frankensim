@@ -151,7 +151,7 @@ inertia and independent physical momentum reconstruction, admitted-count and
 state boundaries, current symmetric aerodynamic parity, real asymmetric
 six-DOF motion, absolute-speed/handedness refusal, and second-order refinement
 of both an analytic motor/drag law and real coupled aerodynamic dynamics.
-The aerodynamic tier remains quasi-steady, with existing 2-D section closures,
+The `GearedPropulsion` aerodynamic tier remains quasi-steady, with existing 2-D section closures,
 axial disk inflow, straight wakes, spanwise wash overlap and Estimated drag.
 It does not add rudder dynamics, propeller crossflow/harmonics, apparent mass,
 shaft compliance/failure, gimbals, contact, checkpoint serialization, or
@@ -495,3 +495,41 @@ sensitivity + pinned golden. JSONL receipts per case.
   claim.
 - No aerodynamic force model lives here; sections are fs-airfoil, planform
   effects are fs-wing.
+
+
+## Transient wake, shaft and aircraft propulsion
+
+`spine::rotors::propulsion::dynamic::DynamicPropulsion` couples two original
+uniform axial inflow states to the existing physical geared rotor/aircraft
+assembly. `DynamicState` retains both disk-induced velocities alongside native
+six-DOF motion and canonical shaft momentum. The apparent-air-mass model is
+owned by `fs-airscrew::dynamic_inflow`; its density remains fixed throughout
+a trajectory and its air mass is excluded from aircraft inertia.
+
+Each actual aerodynamic evaluation solves the original wing under the
+current vector wash, projects incident plus wing-induced velocities onto
+the declared disk axes, and evaluates original blade forces at the stored
+induction. The shared carrier-wrench owner applies thrust arms, counterrotating
+shaft loads, internal motor torque, and fixed/canted geometry exactly once.
+The quasi-steady and dynamic models reuse the same section forces and
+body/shaft wrench assembly while retaining distinct public result types.
+
+The initial real loads predict aircraft, shaft and both wake states to
+half time. A second real evaluation supplies the accepted native gear map
+and the two implicit-midpoint wake-flux steps. The complete result is published
+only after every motion and wake stage succeeds; borrowed input state is
+unchanged on late refusal. Callback side effects remain caller-owned.
+World aircraft/rotor impulse balances and axial reduced-wake impulse/work
+balances remain separately inspectable, with no resolved-wake world balance
+or whole-fluid/body energy theorem inferred from them.
+
+Four new native coupled cases establish canted startup momentum accounting,
+state-dependent motor/gust/body/shaft/wake refinement, exact shaft-sign
+convention invariance, and late density refusal. Together with six dynamic
+inflow and 37 original BEMT/station/geared/spatial/coupling cases, 47 focused
+native cases pass and legacy goldens remain unchanged. Smooth admitted
+coupled refinement is second order. The tier retains normal axial,
+constant-density, disk-average flow, quasi-steady blade/wing sections and
+the existing wash window; it supplies no skew/crossflow loading, swirl,
+harmonics, transported wake geometry, blade memory, gimbal motion, historical
+calibration, browser wiring or cross-platform qualification.

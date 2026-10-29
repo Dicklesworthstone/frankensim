@@ -115,7 +115,41 @@ or a universal branch selector.
 - The 1903 radial table is an ESTIMATED reconstruction (prop-geometry-v1
   1903-absence rule); quantitative CT/CQ validation awaits real tables.
 - Swirl enters via the section angle only (small-swirl DISCLOSED);
-  dynamic inflow, blade unsteadiness, and inflow harmonics are E4.5-ii+.
+  nonuniform/skew dynamic inflow, blade unsteadiness, and inflow harmonics remain E4.5-ii+.
 - The engine curve is a declared flat-torque approximation; the real
   torque-vs-rpm curve is load-bearing and remains an E1 follow-on.
 - No airframe coupling here (fs-flyer owns CoupledPropAirframeStep).
+
+
+## Uniform axial dynamic inflow
+
+`dynamic_inflow::UniformAxialInflow` adds physical axial induction memory
+using the Carpenter--Fridovich apparent-air-mass model:
+`m_a dv_i/dt = T_blade - 2 rho A v_i (V_axial + v_i)`, with the ideal
+normal-disk apparent mass `m_a = (8/3) rho R^3`. The model follows the
+normal-flow approximation described in Chen and Hindson, NASA TM-88327,
+equation (1), https://ntrs.nasa.gov/citations/19870015049. It is an approximate
+uniform-disk closure, not a resolved wake or a fitted arbitrary time constant.
+
+Blade thrust and torque are evaluated at the stored induced velocity using
+the same native section force law and radial widths as steady BEMT. No steady
+annular momentum solve is substituted for this evaluation. Uniform momentum
+transport replaces the steady annular Prandtl closure, so identical steady
+radial distributions between the two models are not claimed. Existing BEMT
+and station goldens remain unchanged.
+
+A held-input implicit-midpoint step solves the scalar wake quadratic through
+its rationalized normal root. It reports induced-coordinate thrust impulse,
+transported momentum, apparent-fluid kinetic storage, induced work, transport
+work, and numerical residuals. Signed loads and moderate braking remain
+explicit; leaving normal throughflow refuses rather than clipping. The model
+requires constant positive density and matching rotor radius. Apparent wake
+mass is never added to rigid aircraft mass or inertia.
+
+Six native cases establish analytic hover thrust-step and unpowered-decay
+refinement, equilibrium/weak-load behavior, signed normal-branch admission,
+physical blade-force dependence on stored induction, and impulse/storage/work
+balances. The method is second order for held smooth admitted inputs. These
+axial reduced-state balances do not establish whole-fluid/body passivity,
+skew/crossflow forces, azimuthal harmonics, swirl, wake geometry transport,
+blade unsteadiness, or historical calibration.

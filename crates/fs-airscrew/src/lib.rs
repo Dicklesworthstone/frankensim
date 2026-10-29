@@ -21,6 +21,8 @@
 use fs_airfoil::flat_plate_separated;
 use fs_math::det;
 
+pub mod dynamic_inflow;
+
 /// Station-count cap (refusals at cap AND cap+1).
 pub const MAX_STATIONS: usize = 64;
 /// Per-station force-evaluation cap, including any local bracket finish.
@@ -79,6 +81,21 @@ pub struct Rotor {
 }
 
 impl Rotor {
+    fn station_width_m(&self, index: usize) -> f64 {
+        let station = &self.stations[index];
+        let low = if index == 0 {
+            self.stations[0].r_over_r * 0.8
+        } else {
+            (self.stations[index - 1].r_over_r + station.r_over_r) / 2.0
+        };
+        let high = if index + 1 == self.stations.len() {
+            1.0
+        } else {
+            (station.r_over_r + self.stations[index + 1].r_over_r) / 2.0
+        };
+        (high - low) * self.radius_m
+    }
+
     /// Validate the rotor.
     ///
     /// # Errors
@@ -237,18 +254,7 @@ pub fn bemt_solve(
             root_radius: r_root * r_tip,
         };
         let (accepted, iters) = problem.solve(w_warm)?;
-        // Annulus width from station midpoints.
-        let r_lo = if si == 0 {
-            rotor.stations[0].r_over_r * 0.8
-        } else {
-            (rotor.stations[si - 1].r_over_r + st.r_over_r) / 2.0
-        };
-        let r_hi = if si + 1 == rotor.stations.len() {
-            1.0
-        } else {
-            (st.r_over_r + rotor.stations[si + 1].r_over_r) / 2.0
-        };
-        let dr = (r_hi - r_lo) * r_tip;
+        let dr = rotor.station_width_m(si);
         let dthrust = accepted.thrust * dr;
         thrust += dthrust;
         let dtorque = accepted.torque * dr;
@@ -318,6 +324,15 @@ struct StationSample {
     normal_target: bool,
 }
 
+/// Section forces before imposing a steady annular momentum equation.
+/// The transient inflow owner uses this identical force law at its stored flow.
+struct BladeLoads {
+    alpha: f64,
+    sin_phi: f64,
+    thrust: f64,
+    torque: f64,
+}
+
 impl StationSample {
     fn tolerance(self) -> f64 {
         W_TOL * (self.w.abs() + 1e-9)
@@ -344,7 +359,7 @@ impl StationProblem<'_> {
         )
     }
 
-    fn evaluate(&self, w: f64) -> Result<StationSample, Refusal> {
+    fn blade_loads(&self, w: f64) -> Result<BladeLoads, Refusal> {
         let u_ax = self.axial + w;
         if !w.is_finite() || !u_ax.is_finite() || !self.tangential.is_finite() {
             return Err(self.refusal(
@@ -372,6 +387,32 @@ impl StationProblem<'_> {
         let lift_tan = cl * sin_phi;
         let drag_tan = cd * cos_phi;
         let torque = q * self.station.chord_m * (lift_tan + drag_tan) * b * self.radius;
+        if ![alpha, sin_phi, thrust, torque]
+            .into_iter()
+            .all(f64::is_finite)
+        {
+            return Err(self.refusal(
+                "station-numerical-invalid",
+                "nonfinite blade-element arithmetic",
+                "supply a representable finite rotor operating point",
+            ));
+        }
+        Ok(BladeLoads {
+            alpha,
+            sin_phi,
+            thrust,
+            torque,
+        })
+    }
+
+    fn evaluate(&self, w: f64) -> Result<StationSample, Refusal> {
+        let BladeLoads {
+            alpha,
+            sin_phi,
+            thrust,
+            torque,
+        } = self.blade_loads(w)?;
+        let b = f64::from(self.rotor.n_blades);
         let f_tip = if sin_phi.abs() > 1e-9 {
             let ft = b / 2.0 * (self.rotor.radius_m - self.radius) / (self.radius * sin_phi.abs());
             2.0 / core::f64::consts::PI * det::acos(det::exp(-ft))

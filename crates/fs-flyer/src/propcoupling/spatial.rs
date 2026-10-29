@@ -87,7 +87,7 @@ impl DiskAxes {
         Ok(factors)
     }
 
-    pub(super) fn wash_map(
+    pub(crate) fn wash_map(
         &self,
         strips: &[StripSpec],
         panels: &[Panel],
@@ -105,7 +105,7 @@ impl DiskAxes {
             .collect()
     }
 
-    pub(super) fn velocity(
+    pub(crate) fn velocity(
         &self,
         incident: [f64; 3],
         factors: [f64; 2],
@@ -119,7 +119,7 @@ impl DiskAxes {
         })
     }
 
-    pub(super) fn axial(&self, disk: usize, incident: [f64; 3], induced: [f64; 3]) -> f64 {
+    pub(crate) fn axial(&self, disk: usize, incident: [f64; 3], induced: [f64; 3]) -> f64 {
         dot(
             core::array::from_fn(|j| incident[j] + induced[j]),
             self.directions[disk],
