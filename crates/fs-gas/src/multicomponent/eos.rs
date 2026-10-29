@@ -180,7 +180,7 @@ impl MixtureGas {
     }
     // Returns sensible internal-energy density and Cv density. Formation
     // constants cancel within each original species owner before rounding.
-    fn caloric(&self, densities: &[f64], t: f64) -> Result<(f64, f64), Error> {
+    pub(super) fn caloric(&self, densities: &[f64], t: f64) -> Result<(f64, f64), Error> {
         if !(self.domain.minimum_temperature..=self.domain.maximum_temperature).contains(&t) {
             return Err(Error::EnergyDomain);
         }

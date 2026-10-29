@@ -3878,3 +3878,62 @@ and existing implicit residual. The source/consumer tests are
 `nist_metal_thermal_completion` and `material_volumetric_timeline`.
 These bounded additions do not close the full B04/B06/B09/B10/A05/M06/MR11
 qualification tasks.
+
+## More plastics, flexible foams and composite expansion (2026-10-28)
+
+This increment adds **12 profiles** and expands existing G-10 CR with
+**68 new claims** and **1,586 scalar or curve-knot values**:
+
+| Source profiles | New claims | Scope |
+| --- | ---: | --- |
+| `fsri-{pp,ldpe,pet,nylon}-unconditioned-2021` | 32 | Native C_vol(T), published Cp(T), through-thickness apparent/local k(T), descriptive scatter and reference normalization density |
+| `fsri-rebond-foam-pad-{unconditioned,dried}-2022` | 16 | Separate conditioning histories, native capacity, published specific heat, conductivity and normalization inputs |
+| `fsri-puf-mattress-pad-unconditioned-2022` | 5 | Native volumetric capacity and conductivity without density or Cp |
+| `fsri-chair-pu-foam-r1-unconditioned-2021` | 3 | Selected R1 capacity and conductivity; no invented sample scatter or density |
+| Existing `g10cr-nist-cryogenic` | 2 | Separate normal and warp finite thermal expansion; original three claims retained |
+| `glass-fabric-polyester-nist-thermal-reference` | 5 | Three directional/medium-specific conductivity curves and normal/warp expansion |
+| `glass-mat-epoxy-{chopped,continuous}-nist-expansion-reference` | 2 | Separate chopped-strand and continuous-strand finite expansion |
+| `beechwood-phenolic-crosslaminate-nist-thermal-reference` | 3 | Grain/flatwise conductivity and grain expansion of the source [0/90] cross-laminate |
+
+FSRI numerical inputs remain pinned to
+`a432697e4b7d40f642b5cc8f384506439ebb32df`.
+Native capacities span 10-40 degC; the common transport interval is limited
+by each conductivity experiment. Local conductivity still requires
+`mean-test-temperature-as-local-model=1`. Rounded Cp and normalization
+density are not independent of their native capacity reduction, and an
+unknown density measurement temperature does not authorize rho(T).
+Material metadata inconsistencies and stock-versus-instrument thicknesses
+remain in the observations. PP's conflicting short-description field and
+nylon's PA66/caprolactum metadata conflict are not silently resolved.
+
+Foam populations stay separate. Dried rebond has three capacity specimens
+but two conductivity specimens. Mattress capacity uses the complete later
+R1 run instead of its aborted predecessor; its nonmonotonic capacity and
+scatter are preserved. Chair R1 capacity was measured at 50.96 mm, versus
+33.11 mm for the unused R2 capacity run; combining them would risk mixing
+compression states. The selected chair R1 conductivity thickness was
+50.78 mm. Exact coupon continuity and unreported conditions remain unknown.
+
+NIST coefficients, original data/equation intersections, fitted residuals,
+fit-error descriptions and measurement directions survive all 1,420 new
+sampled knots. Expansion remains `(L(T)-L293)/L293`, not CTE.
+The polyester normal/warp fits end at 285/280 K even though their denominator
+refers to 293 K. No missing G-10 fill axis, helium-normal polyester curve,
+matched density, full orthotropic tensor or heat capacity is invented.
+Chopped mat, continuous mat and cross-laminated phenolic wood are distinct
+source constructions. Numerical interpolation checks are not certified
+continuous error or statistical uncertainty bounds.
+
+Prepared volumetric paths now also provide an explicit sensible entropy
+integral. `FixedVolumeThermalLaw::with_sensible_entropy` connects that
+interpretation to the existing thermal entropy owner, with unchanged
+energy evolution and separate conductive generation, unclassified source
+contributions and temporal defect. This requires the caller's compatible
+caloric/work assumptions; it is not an entropy measurement inferred from
+HFM data.
+
+Focused tests are `fsri_polyolefin_polyamide_profiles`,
+`fsri_flexible_foam_thermal_profiles`, `nist_composite_thermal_expansion`
+and `material_volumetric_timeline`, plus the existing G-10 regression.
+Full nonlinear foam mechanics, complete composite qualification and
+general coupled thermodynamic closure remain outside these bounded additions.

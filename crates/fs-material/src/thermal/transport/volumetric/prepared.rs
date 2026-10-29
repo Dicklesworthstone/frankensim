@@ -218,6 +218,61 @@ impl PreparedVolumetricThermalTransport {
         Ok(sign * sum)
     }
 
+    /// Relative sensible thermal entropy `integral C_vol(T)/T dT` [J/(m3 K)].
+    ///
+    /// Calling this method selects a reversible sensible-caloric interpretation
+    /// at the source's fixed work/composition coordinates and reference volume.
+    /// It does not turn a measured apparent capacity into thermodynamic Cv or
+    /// infer absolute entropy, pressure work, phase changes, chemical mixing,
+    /// moisture exchange or hysteresis. Source uncertainty remains unchanged.
+    ///
+    /// Each positive affine-capacity segment has an analytic logarithmic integral.
+    /// Positive endpoint weights avoid cancellation for decreasing capacity;
+    /// a short bounded series retains small temperature differences. Traversal
+    /// is bounded by the original knots, uses compensated sums and allocates
+    /// nothing. Roundoff remains; no cross-ISA transcendental guarantee is made.
+    pub fn sensible_entropy_change_j_m3_k(
+        &self,
+        initial_k: f64,
+        final_k: f64,
+    ) -> Result<f64, ThermalTransportError> {
+        self.check_temperature(initial_k)?;
+        self.check_temperature(final_k)?;
+        if initial_k == final_k {
+            return Ok(0.0);
+        }
+        let (low, high, sign) = if initial_k < final_k {
+            (initial_k, final_k, 1.0)
+        } else {
+            (final_k, initial_k, -1.0)
+        };
+        let mut index = self.segment(low);
+        let mut current = low;
+        let mut sum = 0.0;
+        let mut correction = 0.0;
+        while current < high {
+            let end = high.min(self.knots[index + 1].temperature);
+            let [cold_weight, hot_weight] = entropy_weights(current, end);
+            let amount = self.on_segment(index, current)[0] * cold_weight
+                + self.on_segment(index, end)[0] * hot_weight;
+            if !positive(cold_weight) || !positive(hot_weight) || !positive(amount) {
+                return Err(invalid(
+                    "sensible entropy increment is not positive and representable",
+                ));
+            }
+            let corrected = amount - correction;
+            let next = sum + corrected;
+            if !positive(next) {
+                return Err(invalid("sensible entropy is not finite and representable"));
+            }
+            correction = (next - sum) - corrected;
+            sum = next;
+            current = end;
+            index += 1;
+        }
+        Ok(sign * sum)
+    }
+
     /// Invert the same fixed-volume storage change for heating or cooling.
     /// Positive capacity makes the supported inverse unique. Traversal is bounded
     /// by the retained knots; the final affine-capacity segment uses a scaled
@@ -407,6 +462,33 @@ impl PreparedVolumetricThermalTransport {
         }
         Ok(amount)
     }
+}
+
+// C(T) is the convex interpolation of its two endpoint capacities. Integrating
+// its two basis functions divided by T gives positive weights whose sum is
+// ln(high/low). With r=(high-low)/low, w_hot=1-ln(1+r)/r. The short-interval
+// series avoids subtracting nearly equal values in that expression.
+fn entropy_weights(low: f64, high: f64) -> [f64; 2] {
+    let width = high - low;
+    let ratio = width / low;
+    let logarithm = if ratio.is_finite() {
+        ratio.ln_1p()
+    } else {
+        // The temperature ratio may overflow while its logarithm stays finite.
+        high.ln() - low.ln()
+    };
+    let hot = if ratio < 0.125 {
+        let mut sum = 0.0;
+        let mut power = ratio;
+        for n in 1..=18 {
+            sum += power / f64::from(n + 1);
+            power *= -ratio;
+        }
+        sum
+    } else {
+        1.0 - (low / width) * logarithm
+    };
+    [logarithm - hot, hot]
 }
 
 fn invalid(reason: &'static str) -> ThermalTransportError {

@@ -28,6 +28,7 @@ pub struct FixedVolumeThermalLaw<'p> {
     datum_temperature: f64,
     specific_storage_span: [f64; 2],
     maximum_slope: f64,
+    sensible_entropy: bool,
     identity: ContentHash,
 }
 
@@ -83,8 +84,34 @@ impl<'p> FixedVolumeThermalLaw<'p> {
             datum_temperature: datum_temperature_k,
             specific_storage_span,
             maximum_slope,
+            sensible_entropy: false,
             identity: hash.finalize(),
         })
+    }
+
+    /// Explicitly select reversible sensible thermal entropy on this same curve.
+    ///
+    /// The caller declares the capacity appropriate to the fixed caloric/work
+    /// constraint, composition and reference volume. This enables the existing
+    /// timeline's relative entropy account; it does not infer an absolute entropy
+    /// datum, source entropy, missing work coordinates or an experimental entropy
+    /// measurement. Default laws continue to report entropy as unavailable.
+    /// The selected interpretation changes the binding identity exactly once.
+    #[must_use]
+    pub fn with_sensible_entropy(mut self) -> Self {
+        if !self.sensible_entropy {
+            let mut hash =
+                DomainHasher::new("org.frankensim.fs-material.fixed-volume-sensible-entropy.v1");
+            hash.update(self.identity.as_bytes());
+            self.identity = hash.finalize();
+            self.sensible_entropy = true;
+        }
+        self
+    }
+
+    #[must_use]
+    pub const fn sensible_entropy_enabled(&self) -> bool {
+        self.sensible_entropy
     }
 
     /// The unchanged source path, including both original lines and receipts.
@@ -93,7 +120,7 @@ impl<'p> FixedVolumeThermalLaw<'p> {
         self.path
     }
 
-    /// Identity includes the source path, authored mass basis and storage datum.
+    /// Identity includes the source path, mass basis, datum and entropy opt-in.
     #[must_use]
     pub const fn identity(&self) -> ContentHash {
         self.identity
@@ -181,6 +208,47 @@ impl ThermalLaw for FixedVolumeThermalLaw<'_> {
 
     fn maximum_temperature_slope(&self) -> f64 {
         self.maximum_slope
+    }
+
+    fn specific_entropy_change_j_kg_k(
+        &self,
+        initial_h_j_kg: f64,
+        final_h_j_kg: f64,
+    ) -> Result<Option<f64>, DepositionError> {
+        if !self.sensible_entropy {
+            return Ok(None);
+        }
+        let initial_k = self.temperature_k(initial_h_j_kg)?;
+        let final_k = self.temperature_k(final_h_j_kg)?;
+        if initial_h_j_kg == final_h_j_kg {
+            return Ok(Some(0.0));
+        }
+        let change_h = final_h_j_kg - initial_h_j_kg;
+        let entropy = if initial_k == final_k {
+            // Distinct stored h coordinates can round to the same T. Retain the
+            // actual small dh using the isothermal limit instead of erasing it.
+            change_h / initial_k
+        } else {
+            let entropy_v = self
+                .path
+                .sensible_entropy_change_j_m3_k(initial_k, final_k)
+                .map_err(|_| DepositionError::MaterialDomain)?;
+            let storage_v = self
+                .path
+                .storage_change_j_m3(initial_k, final_k)
+                .map_err(|_| DepositionError::MaterialDomain)?;
+            // ds/dh is the capacity-weighted mean of 1/T. Use the actual
+            // stored dh so inversion roundoff cannot erase a small heat input.
+            // In exact arithmetic this is entropy_v/reference_density.
+            change_h * (entropy_v / storage_v)
+        };
+        if !entropy.is_finite()
+            || entropy == 0.0
+            || entropy.is_sign_positive() != (final_h_j_kg > initial_h_j_kg)
+        {
+            return Err(DepositionError::MaterialDomain);
+        }
+        Ok(Some(entropy))
     }
 }
 
