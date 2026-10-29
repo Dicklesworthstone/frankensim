@@ -7,9 +7,17 @@
 //! With u_j=sqrt(g_j), inversion uses diag(p)+u*u^T. Its positive spectral
 //! measure gives K(s)=K_eq + sum k_j*s/(s+lambda_j). Thus genuine first-order
 //! thermal memory joins the existing Maxwell/exact owner without fake masses.
+//!
+//! The molecular constructor couples the same diffusion coordinates to the
+//! original material heat reservoirs BEFORE forming compression arms. It retains
+//! the isothermal static limit and the frozen molecular instantaneous limit in
+//! one positive storage/heat account, used by both time and harmonic response.
 
 use super::*;
 use fs_la::eigen::jacobi_eigh;
+use fs_material::relaxation::RelaxationState;
+
+mod molecular;
 
 /// Geometry and diffusion accuracy for an isothermal cylindrical sidewall.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -42,15 +50,57 @@ pub struct CylindricalThermalCompression {
     diffusion: fs_phs::ZkDiffusive,
     equilibrium_stiffness_n_m: f64,
     adiabatic_stiffness_n_m: f64,
+    instantaneous_stiffness_n_m: f64,
     arms: Vec<ThermalCompressionArm>,
+    molecular_relaxation: Option<RelaxationState>,
 }
 
 impl CylindricalThermalCompression {
     fn new(source: &HelmholtzModalCavity, options: CylindricalCavityThermalOptions,
         gate: &CancelGate) -> Result<Self, ModalCouplingError>
     {
+        Self::new_inner(source, options, None, gate)
+    }
+
+    /// Couple the original molecular reservoirs to radial wall heat diffusion.
+    ///
+    /// Both mechanisms act on the same gas temperatures. Independent molecular
+    /// and thermal springs would double-count storage and miss their coupled
+    /// transition. The source gas must match the complete relaxation snapshot.
+    /// The isothermal limit remains p A_neck^2/V; the instantaneous limit uses
+    /// the molecularly frozen heat capacity.
+    ///
+    /// Preparation uses one joint symmetric eigensolve, bounded by
+    /// maximum_coordinates (at most 128). Its dimension is the thermal pole
+    /// count times one plus the number of nonzero molecular reservoirs.
+    /// Every resulting arm joins the original exact mechanical propagator.
+    /// Algebraic accuracy of complex stiffness AND its loss is checked at
+    /// 33 frequencies to 1e-8 relative error inside the supplied band.
+    /// The separate equilibrium Bessel admission is not a bound on the spatial
+    /// error of the joint molecular model; thermal pole refinement remains
+    /// necessary. Local Debye reservoirs and constant Fourier conductivity are
+    /// retained, without separate diffusion of molecular internal energy.
+    pub fn new_with_molecular_relaxation(
+        source: &HelmholtzModalCavity,
+        options: CylindricalCavityThermalOptions,
+        relaxation: RelaxationState,
+        maximum_coordinates: usize,
+        gate: &CancelGate,
+    ) -> Result<Self, ModalCouplingError> {
+        Self::new_inner(source, options, Some((relaxation, maximum_coordinates)), gate)
+    }
+
+    fn new_inner(source: &HelmholtzModalCavity, options: CylindricalCavityThermalOptions,
+        molecular: Option<(RelaxationState, usize)>,
+        gate: &CancelGate) -> Result<Self, ModalCouplingError>
+    {
         if gate.is_requested() { return Err(ModalCouplingError::Cancelled); }
         let gas=source.gas();
+        if let Some((law, _)) = &molecular {
+            if law.gas() != gas {
+                return Err(network_invalid("cavity thermal and molecular owners need the same gas snapshot"));
+            }
+        }
         let diffusion=fs_phs::ZkDiffusive::new(options.radius_m,gas.density,
             gas.dynamic_viscosity,gas.gamma,gas.prandtl,options.poles,
             options.band_rad_s,options.maximum_relative_error)
@@ -59,6 +109,40 @@ impl CylindricalThermalCompression {
             /(core::f64::consts::PI*options.radius_m*options.radius_m);
         if !length_m.is_finite() || length_m<=0.0 {
             return Err(network_invalid("cylindrical cavity thermal geometry is not representable"));
+        }
+        if let Some((law, maximum_coordinates)) = molecular {
+            let modes: Vec<_> = diffusion.shunt_terms().iter().map(|term|
+                molecular::ThermalMode {
+                    weight: term.gain_per_s / (term.rate_per_s * (gas.gamma - 1.0)),
+                    rate_per_s: term.rate_per_s,
+                }).collect();
+            let spectrum = molecular::realize(&law, &modes, options.band_rad_s,
+                maximum_coordinates, &mut || gate.is_requested()).map_err(|reason| {
+                    if gate.is_requested() { ModalCouplingError::Cancelled }
+                    else { network_invalid(reason) }
+                })?;
+            let area = source.neck_area_m2();
+            let scale = area * area / source.geometry().volume_m3;
+            let equilibrium = gas.pressure * scale;
+            let instantaneous = spectrum.frozen_bulk_modulus_pa * scale;
+            if ![scale,equilibrium,instantaneous].iter().all(|v|v.is_finite() && *v>0.0) {
+                return Err(network_invalid("molecular cavity compression geometry is unrepresentable"));
+            }
+            let mut arms = Vec::with_capacity(spectrum.arms.len());
+            for arm in spectrum.arms {
+                let stiffness = arm.increment_pa * scale;
+                if !stiffness.is_finite() || stiffness<=0.0 {
+                    return Err(network_invalid("molecular cavity compression arm is unrepresentable"));
+                }
+                arms.push(ThermalCompressionArm {stiffness_n_m:stiffness,
+                    relaxation_time_s:arm.relaxation_time_s,
+                    root_stiffness:det::sqrt(stiffness)});
+            }
+            return Ok(Self {options,length_m,diffusion,
+                equilibrium_stiffness_n_m:equilibrium,
+                adiabatic_stiffness_n_m:source.compression_stiffness_n_m(),
+                instantaneous_stiffness_n_m:instantaneous,
+                arms,molecular_relaxation:Some(law)});
         }
         let terms=diffusion.shunt_terms();
         let excess: f64=terms.iter().map(|t|t.gain_per_s/t.rate_per_s).sum();
@@ -112,7 +196,8 @@ impl CylindricalThermalCompression {
             }
         }
         Ok(Self {options,length_m,diffusion,equilibrium_stiffness_n_m:equilibrium,
-            adiabatic_stiffness_n_m:adiabatic,arms})
+            adiabatic_stiffness_n_m:adiabatic,instantaneous_stiffness_n_m:adiabatic,
+            arms,molecular_relaxation:None})
     }
 
     /// Original physical radius and sampled approximation controls.
@@ -123,8 +208,13 @@ impl CylindricalThermalCompression {
     pub fn diffusion(&self)->&fs_phs::ZkDiffusive {&self.diffusion}
     /// Fully relaxed isothermal compression stiffness [N/m].
     pub const fn equilibrium_stiffness_n_m(&self)->f64 {self.equilibrium_stiffness_n_m}
-    /// Original adiabatic compression stiffness [N/m].
+    /// Original equilibrium-gas adiabatic stiffness [N/m], with molecular
+    /// reservoirs equilibrated. Use instantaneous_stiffness_n_m for the frozen limit.
     pub const fn adiabatic_stiffness_n_m(&self)->f64 {self.adiabatic_stiffness_n_m}
+    /// Instantaneous compression stiffness [N/m], including frozen reservoirs.
+    pub const fn instantaneous_stiffness_n_m(&self)->f64 {self.instantaneous_stiffness_n_m}
+    /// Original material law, when molecular relaxation is attached.
+    pub fn molecular_relaxation(&self)->Option<&RelaxationState> {self.molecular_relaxation.as_ref()}
     /// The admitted positive thermal arms, in accepted-memory order.
     pub fn arms(&self)->&[ThermalCompressionArm] {&self.arms}
 
@@ -154,6 +244,36 @@ impl CylindricalThermalCompression {
 }
 
 impl SharedCavity {
+    /// Couple molecular relaxation and a cylindrical thermal sidewall to the
+    /// SAME moving surfaces, neck, exterior loading and accepted time history.
+    ///
+    /// The original molecular source and wall diffusion form joint positive
+    /// compression arms. None initializes them fully relaxed; supplied history
+    /// must contain every admitted joint arm in the returned spectrum's order.
+    /// Neck viscous memory is an independent option. Constant conductivity,
+    /// isothermal sidewall, insulated endcaps and uniform acoustic pressure are
+    /// the same physical restrictions as the thermal constructor below.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_cylindrical_molecular_wall(
+        source:HelmholtzModalCavity,surfaces:Vec<CavitySurface>,sample_rate_hz:u32,
+        neck_initial:ModalAcousticState,neck_budget:ModalAcousticTimeBudget,
+        config:ModalCouplingConfig,neck_options:Option<ViscousNeckOptions>,
+        options:CylindricalCavityThermalOptions,relaxation:RelaxationState,
+        maximum_coordinates:usize,initial_thermal_memory:Option<Vec<f64>>,
+        gate:&CancelGate,
+    )->Result<Self,ModalCouplingError> {
+        if gate.is_requested() { return Err(ModalCouplingError::Cancelled); }
+        if options.band_rad_s[1]>core::f64::consts::PI*sample_rate_hz as f64*config.nyquist_guard_fraction {
+            return Err(network_invalid("cavity thermal band exceeds the original Nyquist guard"));
+        }
+        let thermal=CylindricalThermalCompression::new_with_molecular_relaxation(
+            &source,options,relaxation,maximum_coordinates,gate)?;
+        let viscous=neck_options.map(|options|Self::prepare_viscous_neck(&source,
+            sample_rate_hz,config,options,gate)).transpose()?;
+        Self::new_inner(source,surfaces,sample_rate_hz,neck_initial,neck_budget,
+            config,viscous,Some((thermal,initial_thermal_memory)),gate)
+    }
+
     /// Retain radial thermal wall diffusion in an explicitly cylindrical cavity.
     ///
     /// `radius_m` is the actual cavity radius; original volume fixes its length.
@@ -191,3 +311,6 @@ impl SharedCavity {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod molecular_tests;

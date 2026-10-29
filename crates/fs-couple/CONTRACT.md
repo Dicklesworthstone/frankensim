@@ -271,6 +271,27 @@ time-domain tests cover this compact reference. No arbitrary-cavity geometry,
 finite wall conductivity, distributed acoustics or full wall-temperature
 evolution is inferred.
 
+`SharedCavity::new_with_cylindrical_molecular_wall` and
+`CylindricalThermalCompression::new_with_molecular_relaxation` bind the
+original gas reservoirs to those same radial heat coordinates before lowering
+compression. The complete material gas snapshot must match the cavity source.
+A positive capacity/conductance pencil yields positive Maxwell arms in one
+joint symmetric eigensolve; the existing coupled propagator, harmonic solve,
+pressure observation and material-memory work account consume them unchanged.
+There is no second heat deposit. Setup explicitly admits the joint coordinate
+count (thermal poles times one plus nonzero molecular reservoirs; ceiling 128).
+The frozen molecular instantaneous stiffness and equilibrium-gas adiabatic
+reference have distinct accessors; the fully relaxed limit stays isothermal.
+A 33-frequency check bounds sampled complex and dissipative realization error
+to 1e-8 within the original wall band, separately from equilibrium Bessel
+admission. Joint spatial error remains a thermal-pole refinement question.
+Independent tests cover a quadratic constitutive oracle, three-rung complex
+Bessel convergence, reservoir splitting, physical temperature ODE storage/heat,
+the original loaded two-coordinate solve, and accepted-time work closure.
+This preserves local Debye reservoirs and the original constant Fourier
+conductivity; separate molecular-energy diffusion, finite wall conductivity,
+nonuniform pressure, flow and changing background state are outside this lane.
+
 ### Accelerating material-fiber supports
 
 `MultiBowPerformance::with_fiber_support_program` supplies declared continuous
