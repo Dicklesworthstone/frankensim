@@ -19,7 +19,7 @@ use fs_qty::{MolarMass, Pressure, Temperature};
 /// Hard species/work bound for the dense constitutive solve.
 pub const MAX_MAXWELL_STEFAN_SPECIES_V1: usize = 128;
 /// Fixed operation-tree version of the barycentric friction solve.
-pub const MAXWELL_STEFAN_EVALUATOR_VERSION_V1: u32 = 1;
+pub const MAXWELL_STEFAN_EVALUATOR_VERSION_V1: u32 = 2;
 
 /// Explicit checks on original constitutive equations and the mass frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -46,7 +46,7 @@ impl Default for MaxwellStefanSolveV1 {
 pub enum MaxwellStefanErrorV1 {
     /// Invalid species, dimensions, fractions, coefficients or controls.
     Invalid(&'static str),
-    /// Nonzero physical intermediate cannot be represented by binary64.
+    /// A required algebraic intermediate is non-finite or unrepresentable.
     Arithmetic(&'static str),
     /// Scaled elimination found a zero or non-finite pivot.
     SingularSystem,
@@ -140,6 +140,8 @@ impl MaxwellStefanV1 {
     /// Fractions may contain exact zeros; neither fractions nor fluxes are
     /// clipped or projected. Every original friction row, including the one
     /// replaced by the barycentric constraint, is checked before return.
+    /// Naturally rounded subnormal or zero fluxes must pass those same checks;
+    /// a small driving force alone is never grounds to suppress a response.
     #[allow(clippy::too_many_arguments)]
     pub fn evaluate<'a>(
         &self,
@@ -281,20 +283,37 @@ impl MaxwellStefanV1 {
             n,
             &mut cancelled,
         )?;
-        let flux_scale = product3(concentration, minimum_diffusion, drive_scale)?;
         for i in 0..n {
-            let molar = workspace.right[i] * flux_scale;
-            let mass = molar * self.molar_masses[i].value();
-            if !molar.is_finite()
-                || !mass.is_finite()
-                || (workspace.right[i] != 0.0 && (molar == 0.0 || mass == 0.0))
-            {
+            // The common c*D_min*drive scale can underflow even when the
+            // solved amplitude makes the actual species flux representable.
+            // Include every factor before rounding into the binary64 range.
+            let mass = scaled_product_ratio(
+                &[
+                    concentration,
+                    minimum_diffusion,
+                    drive_scale,
+                    workspace.right[i],
+                    self.molar_masses[i].value(),
+                ],
+                &[],
+            )?;
+            let molar = mass / self.molar_masses[i].value();
+            if !molar.is_finite() {
                 return Err(MaxwellStefanErrorV1::Arithmetic("species diffusion flux"));
             }
             workspace.mass_flux[i] = mass;
             // All residuals concern the actually published mass flux, including
             // the final molar/mass conversion's rounding.
-            workspace.molar_flux[i] = mass / self.molar_masses[i].value();
+            workspace.molar_flux[i] = molar;
+            workspace.right[i] = scaled_product_ratio(
+                &[mass],
+                &[
+                    self.molar_masses[i].value(),
+                    concentration,
+                    minimum_diffusion,
+                    drive_scale,
+                ],
+            )?;
         }
         let mass_residual = sum(workspace.mass_flux.iter().copied());
         let mass_scale = sum(workspace.mass_flux.iter().map(|j| j.abs()));
@@ -303,10 +322,10 @@ impl MaxwellStefanV1 {
         for i in 0..n {
             poll(&mut cancelled)?;
             let mut terms = [0.0; MAX_MAXWELL_STEFAN_SPECIES_V1];
-            let wi = workspace.molar_flux[i] / flux_scale;
+            let wi = workspace.right[i];
             for j in 0..n {
                 if i != j {
-                    let wj = workspace.molar_flux[j] / flux_scale;
+                    let wj = workspace.right[j];
                     terms[j] = (mole_fractions[j] * wi - mole_fractions[i] * wj)
                         * workspace.ratios[i * n + j]
                         * drive_scale;
@@ -480,17 +499,96 @@ fn drag_entropy(x: &[f64], z: &[f64], diffusion: &[f64], concentration: f64) -> 
     }
     total.is_finite().then_some(total)
 }
-fn product3(a: f64, b: f64, c: f64) -> Result<f64, MaxwellStefanErrorV1> {
-    for value in [(a * b) * c, (a * c) * b, (b * c) * a] {
-        if positive(value) {
-            return Ok(value);
+/// Balance binary exponents before final rounding, without forming a potentially
+/// unrepresentable common scale. A rounded zero is only a candidate: the caller
+/// still checks the original constitutive equations with its unchanged budgets.
+fn scaled_product_ratio(
+    numerator: &[f64],
+    denominator: &[f64],
+) -> Result<f64, MaxwellStefanErrorV1> {
+    let mut direct = 1.0;
+    let mut ordinary = true;
+    let mut negative = false;
+    let mut zero = false;
+    for &factor in numerator {
+        if !factor.is_finite() {
+            return Err(MaxwellStefanErrorV1::Arithmetic("scaled diffusion product"));
+        }
+        negative ^= factor.is_sign_negative();
+        zero |= factor == 0.0;
+        direct *= factor;
+        ordinary &= direct.is_normal();
+    }
+    for &factor in denominator {
+        if !positive(factor) {
+            return Err(MaxwellStefanErrorV1::Arithmetic(
+                "scaled diffusion quotient",
+            ));
+        }
+        direct /= factor;
+        ordinary &= direct.is_normal();
+    }
+    if zero {
+        return Ok(if negative { -0.0 } else { 0.0 });
+    }
+    if ordinary {
+        return Ok(direct);
+    }
+    let mut mantissa = 1.0;
+    let mut exponent = 0_i32;
+    for &factor in numerator {
+        let (part, power) = binary_parts(factor.abs());
+        mantissa *= part;
+        exponent += power;
+        if mantissa >= 2.0 {
+            mantissa *= 0.5;
+            exponent += 1;
         }
     }
-    let value = fs_math::det::exp(fs_math::det::ln(a) + fs_math::det::ln(b) + fs_math::det::ln(c));
-    if positive(value) {
-        Ok(value)
+    for &factor in denominator {
+        let (part, power) = binary_parts(factor);
+        mantissa /= part;
+        exponent -= power;
+        if mantissa < 1.0 {
+            mantissa *= 2.0;
+            exponent -= 1;
+        }
+    }
+    let magnitude = if exponent > 1023 {
+        return Err(MaxwellStefanErrorV1::Arithmetic(
+            "scaled diffusion result overflow",
+        ));
+    } else if exponent >= -1022 {
+        mantissa * f64::from_bits(((exponent + 1023) as u64) << 52)
+    } else if exponent >= -1075 {
+        // Both factors are normal until the last multiplication, so gradual
+        // underflow is rounded once (including the half-minimum ties-to-even).
+        (mantissa * f64::from_bits(((exponent + 2045) as u64) << 52)) * f64::MIN_POSITIVE
     } else {
-        Err(MaxwellStefanErrorV1::Arithmetic("diffusive flux scale"))
+        0.0
+    };
+    if !magnitude.is_finite() {
+        return Err(MaxwellStefanErrorV1::Arithmetic(
+            "scaled diffusion result overflow",
+        ));
+    }
+    Ok(if negative { -magnitude } else { magnitude })
+}
+
+/// Exact decomposition of positive normal or subnormal binary64 into m*2^e,
+/// with 1 <= m < 2. No logarithm or reciprocal of a tiny input is needed.
+fn binary_parts(value: f64) -> (f64, i32) {
+    let bits = value.to_bits();
+    let power = ((bits >> 52) & 0x7ff) as i32;
+    let fraction = bits & 0x000f_ffff_ffff_ffff;
+    if power != 0 {
+        (f64::from_bits((1023_u64 << 52) | fraction), power - 1023)
+    } else {
+        let highest = 63 - fraction.leading_zeros();
+        (
+            fraction as f64 / (1_u64 << highest) as f64,
+            highest as i32 - 1074,
+        )
     }
 }
 fn positive(value: f64) -> bool {

@@ -282,3 +282,98 @@ fn g0_bounds_original_equation_refusals_and_reuse_after_cancellation() {
     near(result.mass_fluxes()[n - 1], 0.05, 1e-12);
     assert!(result.mass_frame_residual_kg_m2_s().abs() < 1e-15);
 }
+
+#[test]
+fn g1_small_driving_forces_retain_normal_and_subnormal_binary_fick_flux() {
+    let owner = model(&[1.0, 1.0]);
+    for (gradient, diffusivity) in [(1e-20, 1e5), (f64::from_bits(32), 1.0)] {
+        let (mass, _, residual, _) = run(
+            &owner,
+            &[0.5, 0.5],
+            &[gradient, -gradient],
+            0.0,
+            &matrix(2, diffusivity),
+        );
+        // Equal molecular masses and concentration 1 mol/m³ give j=-D grad x.
+        // Both driving forces are far below the absolute residual tolerance;
+        // that tolerance must not become a cutoff for representable transport.
+        let expected = diffusivity * gradient;
+        assert!(mass[0] < 0.0 && mass[1] > 0.0);
+        if expected.is_subnormal() {
+            assert!(mass[0].abs().to_bits().abs_diff(expected.to_bits()) <= 1);
+            assert!(mass[1].to_bits().abs_diff(expected.to_bits()) <= 1);
+        } else {
+            assert!((mass[0] / -expected - 1.0).abs() < 2e-14);
+            assert!((mass[1] / expected - 1.0).abs() < 2e-14);
+        }
+        assert!(residual <= gradient * 1e-13 + f64::from_bits(1));
+    }
+}
+
+#[test]
+fn g0_rounded_zero_flux_is_admitted_only_by_original_equation_budgets() {
+    let owner = model(&[0.028, 0.028]);
+    let mut work = owner.workspace().unwrap();
+    let gradient = f64::from_bits(4);
+    let pair = matrix(2, 1e-5);
+    let controls = MaxwellStefanSolveV1::default();
+    let result = owner
+        .evaluate(
+            &[0.5, 0.5],
+            &[gradient, -gradient],
+            Temperature::new(500.0),
+            Pressure::new(R * 500.0),
+            0.0,
+            &pair,
+            controls,
+            &mut work,
+            || false,
+        )
+        .unwrap();
+    // The exact nonzero mass flux lies below half the smallest binary64 value.
+    // Its rounded zero leaves the actual original-row residual equal to grad x.
+    assert!(result.mass_fluxes().iter().all(|&j| j == 0.0));
+    assert_eq!(result.maximum_gradient_residual_per_m(), gradient);
+    let strict = MaxwellStefanSolveV1 {
+        absolute_gradient_tolerance_per_m: f64::from_bits(1),
+        ..controls
+    };
+    let error = owner
+        .evaluate(
+            &[0.5, 0.5],
+            &[gradient, -gradient],
+            Temperature::new(500.0),
+            Pressure::new(R * 500.0),
+            0.0,
+            &pair,
+            strict,
+            &mut work,
+            || false,
+        )
+        .unwrap_err();
+    assert!(matches!(error, MaxwellStefanErrorV1::Residual {
+        maximum_gradient_residual_per_m, mass_frame_residual_kg_m2_s: 0.0,
+    } if maximum_gradient_residual_per_m == gradient));
+}
+
+#[test]
+fn g1_inactive_tiny_diffusivity_does_not_erase_a_representable_response() {
+    let owner = model(&[1.0, 1.0, 1.0]);
+    let gradient = 1e-30;
+    let pair = [0.0, 1.0, 1.0, 1.0, 0.0, 1e-300, 1.0, 1e-300, 0.0];
+    let (mass, _, residual, _) = run(
+        &owner,
+        &[1.0, 0.0, 0.0],
+        &[gradient, -gradient, 0.0],
+        0.0,
+        &pair,
+    );
+    // Species 2 has no driving force and remains absent. D12 therefore cannot
+    // change the independent binary result j0=-D01*grad x0, j1=-j0. Yet it sets
+    // the matrix normalization: c*D_min*drive=1e-330 rounds to zero while the
+    // dimensionless solved amplitudes are +/-1e300. Their final flux is normal.
+    assert!((mass[0] / -gradient - 1.0).abs() < 3e-14);
+    assert!((mass[1] / gradient - 1.0).abs() < 3e-14);
+    assert_eq!(mass[2], 0.0);
+    assert!(residual < 1e-43);
+}

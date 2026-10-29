@@ -1100,3 +1100,26 @@ adjacent-representable-temperature increments, independent Cp/Cp-over-T
 integrals, reversal, work refusal and cancellation. The merged native
 thermochem source suite passes all 156 tests. This does not claim validation of
 unsupported regions or a full-workspace Cargo/DSR build.
+
+## Maxwell--Stefan scaling across trace gradients
+
+Fixed operation-tree evaluator version 2 forms each mass flux with its solved
+amplitude before rounding a scale. Normal intermediates retain an ordinary
+arithmetic path; otherwise finite products and quotients balance exact binary
+exponents and round only the final normal/subnormal magnitude. This avoids
+rejecting a representable species flux because the common
+`concentration * minimum_diffusivity * driving_scale` underflowed first.
+
+Published mass flux reconstructs the normalized coefficients for the original
+friction-row and mass-frame checks. A naturally zero-rounded flux is admitted
+only if those unchanged budgets pass. There is no gradient cutoff, species
+clipping or tolerance increase, and true overflow still refuses. The fixed
+operation-tree version changes because operation ordering can change rounding.
+
+All ten exact-production-module tests pass. Three new independent cases cover
+normal/subnormal Fick flux below the absolute residual tolerance, genuinely
+unrepresentable flux with both admitted and stricter-refused residual budgets,
+and an inactive `D12=1e-300` pair whose common normalization underflows while
+the actual `1e-30` mass flux remains representable. The correction addresses
+the concrete refined N2/O2 molecular-manifold refusal, not a model calibration
+or new entropy/stability certificate.
