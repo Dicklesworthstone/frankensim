@@ -500,6 +500,112 @@ fn array(v: Vec3) -> [f64; 3] {
 }
 
 #[test]
+fn full_tensor_body_coordinates_preserve_rolling_recoil_mobility_and_heat() {
+    let f = fixture(TAU, INITIAL_RATE, 0.001);
+    let mut principal_bodies = f.bodies;
+    let mut principal_history = RigidRollingHistory::new();
+    let expected = advance(
+        &f,
+        &mut principal_bodies,
+        &mut principal_history,
+        0.3,
+        controls(0.1),
+    );
+    // Rotate each BODY coordinate system, retaining the same world geometry,
+    // material, velocity, inertia tensor and physical initial momentum.
+    // The support now has products of inertia in its geometry frame.
+    let labels = [
+        UnitQuaternion::from_axis_angle(Vec3::new(1.0, 2.0, -0.7), 0.81).unwrap(),
+        UnitQuaternion::from_axis_angle(Vec3::new(-0.4, 0.7, 1.3), -0.63).unwrap(),
+    ];
+    let mut dense = fixture(TAU, INITIAL_RATE, 0.001);
+    for k in 0..2 {
+        let [w, x, y, z] = labels[k].components();
+        let inverse = UnitQuaternion::new(w, -x, -y, -z).unwrap();
+        dense.properties[k] = MassProperties::from_principal_frame(
+            f.properties[k].mass(),
+            Vec3::ZERO,
+            f.properties[k].principal_inertia_body(),
+            labels[k],
+        )
+        .unwrap();
+        dense.bodies[k] = RigidBodyState::new(
+            Pose::new(
+                f.bodies[k].pose().position_world(),
+                compose(f.bodies[k].pose().orientation(), inverse),
+            )
+            .unwrap(),
+            f.bodies[k].linear_momentum_world(),
+            labels[k].rotate_body_to_world(f.bodies[k].angular_momentum_body()),
+        )
+        .unwrap();
+    }
+    assert!(dense.properties[1].inertia_tensor_body().m[1].abs() > 0.01);
+    dense.binding.arm_a_body = labels[0].rotate_body_to_world(f.binding.arm_a_body);
+    dense.binding.arm_b_body = labels[1].rotate_body_to_world(f.binding.arm_b_body);
+    let mut bodies = dense.bodies;
+    let mut history = RigidRollingHistory::new();
+    let actual = advance(&dense, &mut bodies, &mut history, 0.3, controls(0.1));
+    for k in 0..2 {
+        close_vec(
+            bodies[k].linear_momentum_world(),
+            principal_bodies[k].linear_momentum_world(),
+            3e-16,
+        );
+        close_vec(
+            bodies[k]
+                .pose()
+                .orientation()
+                .rotate_body_to_world(bodies[k].angular_momentum_body()),
+            principal_bodies[k]
+                .pose()
+                .orientation()
+                .rotate_body_to_world(principal_bodies[k].angular_momentum_body()),
+            3e-17,
+        );
+        close(
+            actual.rolling_rate_after_rad_s[k],
+            expected.rolling_rate_after_rad_s[k],
+            3e-16,
+        );
+        for j in 0..2 {
+            close(
+                actual.rolling_mobility[k][j],
+                expected.rolling_mobility[k][j],
+                5e-12,
+            );
+        }
+    }
+    for i in 0..4 {
+        for j in 0..4 {
+            close(actual.mobility[i][j], expected.mobility[i][j], 5e-12);
+        }
+    }
+    close_vec(
+        actual.traction_impulse_world_ns,
+        expected.traction_impulse_world_ns,
+        3e-16,
+    );
+    close_vec(
+        actual.rolling_angular_impulse_world_nms,
+        expected.rolling_angular_impulse_world_nms,
+        3e-17,
+    );
+    close(actual.dissipated_heat_j, expected.dissipated_heat_j, 3e-18);
+    close(
+        history.state().cumulative_heat_j(),
+        principal_history.state().cumulative_heat_j(),
+        3e-18,
+    );
+    close(actual.kinetic_after_j, expected.kinetic_after_j, 3e-18);
+    close(actual.static_reaction_work_j, 0.0, 1e-19);
+    close(actual.work_energy_residual_j, 0.0, 3e-18);
+    close(actual.total_energy_residual_j, 0.0, 3e-18);
+    close_vec(actual.linear_momentum_change_ns, Vec3::ZERO, 1e-16);
+    close_vec(actual.angular_momentum_change_nms, Vec3::ZERO, 1e-17);
+}
+
+#[test]
 fn world_rotation_surface_order_and_rate_reversal_preserve_physical_work() {
     let f = fixture(TAU, INITIAL_RATE, 0.001);
     let mut original = f.bodies;

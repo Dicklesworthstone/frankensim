@@ -672,19 +672,20 @@ fn response(
         (0, binding.body_a, binding.arm_a_body, 1.0),
         (1, binding.body_b, binding.arm_b_body, -1.0),
     ] {
-        let inertia = components(properties[body].principal_inertia_body());
-        let inverse_roots = inertia.map(|v| v.sqrt().recip());
         let inverse_mass_root = properties[body].mass().sqrt().recip();
         let orientation = bodies[body].pose().orientation();
         for axis in 0..2 {
             let direction = orientation.rotate_world_to_body(axes[axis]);
             let translation = components(axes[axis].scale(sign * inverse_mass_root));
-            let force_rotation = components(arm.cross(direction).scale(sign));
-            let moment_rotation = components(direction.scale(sign));
+            let force_rotation = components(
+                properties[body].angular_mobility_factor(arm.cross(direction).scale(sign)),
+            );
+            let moment_rotation =
+                components(properties[body].angular_mobility_factor(direction.scale(sign)));
             for j in 0..3 {
                 factor[axis][6 * slot + j] = translation[j];
-                factor[axis][6 * slot + 3 + j] = force_rotation[j] * inverse_roots[j];
-                factor[axis + 2][6 * slot + 3 + j] = moment_rotation[j] * inverse_roots[j];
+                factor[axis][6 * slot + 3 + j] = force_rotation[j];
+                factor[axis + 2][6 * slot + 3 + j] = moment_rotation[j];
             }
         }
     }

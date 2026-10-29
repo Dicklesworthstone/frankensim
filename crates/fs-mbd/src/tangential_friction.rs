@@ -1,6 +1,6 @@
 //! Finite-patch tangential impulses on the original rigid-body state.
 //!
-//! Masses, principal inertias, poses and actual contact arms produce the full
+//! Masses, full body inertias, poses and actual contact arms produce the full
 //! shared-body mobility. No surrogate effective mass is accepted. This is a
 //! frozen-geometry impulse phase: poses stay fixed, and the surrounding motion
 //! integrator owns configuration advance and normal contact/impact admission.
@@ -23,7 +23,7 @@ use fs_exec::CancelGate;
 pub struct RigidContactBinding {
     pub body_a: usize,
     pub body_b: usize,
-    /// Both arms are relative to their body's COM in its principal frame.
+    /// Both arms are relative to their body's COM in its declared body frame.
     pub arm_a_body: Vec3,
     pub arm_b_body: Vec3,
 }
@@ -197,12 +197,6 @@ pub fn apply_rigid_friction(
             (binding.body_a, binding.arm_a_body, 1.0),
             (binding.body_b, binding.arm_b_body, -1.0),
         ] {
-            let inertia = properties[body].principal_inertia_body();
-            let inverse_roots = [
-                inertia.x.sqrt().recip(),
-                inertia.y.sqrt().recip(),
-                inertia.z.sqrt().recip(),
-            ];
             let inverse_mass_root = properties[body].mass().sqrt().recip();
             let orientation = bodies[body].pose().orientation();
             for axis in 0..3 {
@@ -217,11 +211,11 @@ pub fn apply_rigid_friction(
                 } else {
                     direction.scale(sign * contact.torsional_length_m)
                 };
-                let rotation = components(rotation);
+                let rotation = components(properties[body].angular_mobility_factor(rotation));
                 let offset = (3 * slot + axis) * dofs + 6 * body;
                 for j in 0..3 {
                     factor[offset + j] = translation[j];
-                    factor[offset + 3 + j] = rotation[j] * inverse_roots[j];
+                    factor[offset + 3 + j] = rotation[j];
                 }
             }
         }

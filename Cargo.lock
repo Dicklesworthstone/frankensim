@@ -2059,6 +2059,7 @@ dependencies = [
  "fs-exec",
  "fs-ga",
  "fs-math",
+ "fs-time",
  "fs-tribo",
 ]
 

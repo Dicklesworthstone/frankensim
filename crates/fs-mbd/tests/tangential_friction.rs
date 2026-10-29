@@ -181,6 +181,111 @@ fn rotated_anisotropic_bodies_use_point_arms_and_torsional_inertia() {
 }
 
 #[test]
+fn full_tensor_patch_mobility_is_invariant_to_body_coordinate_relabeling() {
+    let l = law();
+    let p = patch("tensor-patch", 10000.0);
+    let i = interface();
+    let rotations = [
+        UnitQuaternion::from_axis_angle(Vec3::new(1.0, 2.0, -0.7), 0.81).unwrap(),
+        UnitQuaternion::from_axis_angle(Vec3::new(-0.4, 0.7, 1.3), -0.63).unwrap(),
+    ];
+    let moments = [Vec3::new(1.0, 1.5, 2.0), Vec3::new(0.7, 1.1, 1.4)];
+    let dense = core::array::from_fn::<_, 2, _>(|k| {
+        MassProperties::from_principal_frame([2.0, 3.0][k], Vec3::ZERO, moments[k], rotations[k])
+            .unwrap()
+    });
+    assert!(dense[0].inertia_tensor_body().m[1].abs() > 0.01);
+    let principal = [properties(2.0, moments[0]), properties(3.0, moments[1])];
+    let centers = [Vec3::new(-0.4, 0.2, 0.7), Vec3::new(0.8, -0.1, -0.3)];
+    let point = Vec3::new(0.2, 0.3, 0.1);
+    let arms = centers.map(|center| point.sub(center));
+    let momentum = [Vec3::new(2.5, -0.6, 0.2), Vec3::new(-1.2, 0.8, -0.3)];
+    let angular = [Vec3::new(0.4, 0.7, -0.3), Vec3::new(-0.2, 0.1, 0.5)];
+    // First describe both physical bodies in the world-aligned geometry
+    // frames; then describe exactly the same bodies in their principal axes.
+    // Contact points and angular momenta change coordinates, not physics.
+    let mut a = core::array::from_fn::<_, 2, _>(|k| {
+        state(
+            Pose::new(centers[k], UnitQuaternion::IDENTITY).unwrap(),
+            momentum[k],
+            angular[k],
+        )
+    });
+    let mut b = core::array::from_fn::<_, 2, _>(|k| {
+        state(
+            Pose::new(centers[k], rotations[k]).unwrap(),
+            momentum[k],
+            rotations[k].rotate_world_to_body(angular[k]),
+        )
+    });
+    let binding_a = RigidContactBinding {
+        body_a: 0,
+        body_b: 1,
+        arm_a_body: arms[0],
+        arm_b_body: arms[1],
+    };
+    let binding_b = RigidContactBinding {
+        arm_a_body: rotations[0].rotate_world_to_body(arms[0]),
+        arm_b_body: rotations[1].rotate_world_to_body(arms[1]),
+        ..binding_a
+    };
+    let mut history_a = NonsmoothTangentialState::new(1, 8).unwrap();
+    let mut history_b = history_a.clone();
+    let ra = apply_rigid_friction(
+        &mut a,
+        &dense,
+        &mut history_a,
+        &[contact(&l, &p, &i)],
+        &[binding_a],
+        0.005,
+        controls(),
+        &CancelGate::new(),
+    )
+    .unwrap();
+    let rb = apply_rigid_friction(
+        &mut b,
+        &principal,
+        &mut history_b,
+        &[contact(&l, &p, &i)],
+        &[binding_b],
+        0.005,
+        controls(),
+        &CancelGate::new(),
+    )
+    .unwrap();
+    for k in 0..2 {
+        close_vector(a[k].linear_momentum_world(), b[k].linear_momentum_world());
+        close_vector(
+            a[k].angular_momentum_body(),
+            rotations[k].rotate_body_to_world(b[k].angular_momentum_body()),
+        );
+        let ka = a[k].point_kinematics(dense[k], arms[k]).unwrap();
+        let kb = b[k]
+            .point_kinematics(principal[k], rotations[k].rotate_world_to_body(arms[k]))
+            .unwrap();
+        close_vector(ka.point_velocity_world, kb.point_velocity_world);
+        close_vector(ka.angular_velocity_world, kb.angular_velocity_world);
+    }
+    for j in 0..3 {
+        close(
+            ra.contacts[0].endpoint_velocity_mps[j],
+            rb.contacts[0].endpoint_velocity_mps[j],
+        );
+        close(ra.contacts[0].impulse_ns[j], rb.contacts[0].impulse_ns[j]);
+        assert!(ra.contacts[0].impulse_ns[j].abs() > 1e-5);
+    }
+    close(ra.kinetic_before_j, rb.kinetic_before_j);
+    close(ra.kinetic_after_j, rb.kinetic_after_j);
+    close(ra.midpoint_impulse_work_j, rb.midpoint_impulse_work_j);
+    close(ra.friction.physical_heat_j, rb.friction.physical_heat_j);
+    close(ra.total_energy_residual_j, 0.0);
+    close(rb.total_energy_residual_j, 0.0);
+    close_vector(ra.linear_momentum_change_ns, Vec3::ZERO);
+    close_vector(ra.angular_momentum_change_nms, Vec3::ZERO);
+    close(history_a.time_s(), history_b.time_s());
+}
+
+#[test]
 fn shared_body_contacts_publish_physical_recoil_independently_of_input_order() {
     let l = law();
     let pa = patch("a", 100.0);

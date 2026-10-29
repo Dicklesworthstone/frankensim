@@ -825,6 +825,48 @@ fn z_axis_rigid_world_transforms_preserve_intrinsic_qois() {
 }
 
 #[test]
+fn metadata_refuses_inertia_axes_that_the_codec_cannot_retain() {
+    let mut input = sample(0.01, RenderSampleDisposition::HorizonCensored);
+    RenderTrajectory::try_new(metadata(), vec![input.clone()])
+        .expect("existing principal-frame metadata stays admitted");
+    let principal = mass();
+    let axes = UnitQuaternion::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), 0.4).unwrap();
+    let full = MassProperties::from_principal_frame(
+        principal.mass(),
+        Vec3::ZERO,
+        principal.principal_inertia_body(),
+        axes,
+    )
+    .unwrap();
+    assert!(full.inertia_tensor_body().m[2].abs() > 1.0e-4);
+    // Both frames have exactly the same values serialized by the schema, but
+    // those values do not encode the different body-coordinate inertia.
+    assert_eq!(full.mass(), principal.mass());
+    assert_eq!(full.center_of_mass_body(), principal.center_of_mass_body());
+    assert_eq!(
+        full.principal_inertia_body(),
+        principal.principal_inertia_body()
+    );
+    let spin = Vec3::new(0.001, 0.0, 0.002);
+    assert!(
+        full.angular_velocity_body_checked(spin)
+            .unwrap()
+            .sub(principal.angular_velocity_body_checked(spin).unwrap())
+            .norm_squared()
+            > 0.01
+    );
+    input.qois = DerivedEulerQois::from_state(state_from(&input), full, 0.0).unwrap();
+    let mut unsupported = metadata();
+    unsupported.mass_properties.properties = full;
+    assert_eq!(
+        RenderTrajectory::try_new(unsupported, vec![input]).unwrap_err(),
+        RenderTrajectoryError::DerivedState(
+            "render trajectory schema requires principal-frame mass properties".to_owned()
+        )
+    );
+}
+
+#[test]
 fn unknown_schema_and_zero_component_identity_refuse() {
     let mut wrong_version = metadata();
     wrong_version.schema_version += 1;

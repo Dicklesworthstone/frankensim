@@ -1,6 +1,6 @@
 //! Simultaneous normal and Coulomb impulses on native rigid-body momenta.
 //!
-//! Contact-space inertia comes from the original masses, principal inertias,
+//! Contact-space inertia comes from the original masses, full body inertias,
 //! poses and point arms. Normal/tangent cross terms are retained. Geometry is
 //! supplied by the collision owner; this frozen-configuration event does not
 //! advance poses, find collisions or replace a contact time integrator.
@@ -401,16 +401,16 @@ fn influence(
 ) -> Influence {
     let body = bodies[point.body];
     let property = properties[point.body];
-    let inertia = components(property.principal_inertia_body());
     let inverse_mass_root = property.mass().sqrt().recip();
     let mut factor = [[0.0; 6]; 3];
     for row in 0..3 {
         let translation = components(axes[row].scale(inverse_mass_root));
         let direction = body.pose().orientation().rotate_world_to_body(axes[row]);
-        let rotation = components(point.arm_body.cross(direction));
+        let rotation =
+            components(property.angular_mobility_factor(point.arm_body.cross(direction)));
         for axis in 0..3 {
             factor[row][axis] = translation[axis];
-            factor[row][axis + 3] = rotation[axis] / inertia[axis].sqrt();
+            factor[row][axis + 3] = rotation[axis];
         }
     }
     Influence {

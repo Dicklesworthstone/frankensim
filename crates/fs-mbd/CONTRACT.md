@@ -101,6 +101,12 @@ a dynamic, contact, grasp-stability, or force-closure result.
   accepts finite positive mass and principal moments satisfying the rigid-body
   triangle inequalities. The centre of mass must be exactly zero in the
   principal frame; offset-reference spatial inertia is refused.
+- `MassProperties::from_principal_frame` admits known principal moments and
+  their fixed orientation in the actual body coordinates.
+  `from_inertia_tensor` uses the shared `fs_time::lie::gyrostat::InertiaTensor3` admission
+  once. Both retain the same rigid-body triangle and COM-reference rules.
+  `principal_inertia_body()` returns eigenvalues; `principal_axes_to_body()`
+  supplies their axes and `inertia_tensor_body()` supplies the full tensor.
 - `RigidBodyState` stores world-frame linear momentum and body-frame angular
   momentum. Its fields are private and exposed through frame-named getters; it
   has no independent velocity or angular-velocity state.
@@ -127,7 +133,7 @@ a dynamic, contact, grasp-stability, or force-closure result.
   receipts plus algebraic impulse balance, floating-point linear-momentum
   change, and paired kinetic/work accounting. It does not infer that the two
   declared points coincide or constitute a physical contact.
-- `Wrench` carries a constant world-frame force and principal-body-frame torque
+- `Wrench` carries a constant world-frame force and declared-body-frame torque
   for one step. `Gravity` is a validated uniform world-frame acceleration with
   a private field and `acceleration_world()` getter.
 - `RigidBodyIntegrator::step` returns a `StepReceipt` with the before/after
@@ -281,6 +287,40 @@ a dynamic, contact, grasp-stability, or force-closure result.
   curriculum code selects owner coordinates from this layout rather than
   reproducing a second robot-policy representation.
 
+## Rigid dynamics in arbitrary body coordinates
+
+The native `MassProperties` and `RigidBodyState` owners now accept fixed full
+COM inertia tensors while keeping geometry, contact arms, body torques and
+angular momentum in the caller's declared body coordinates. Known principal
+frames require no eigensolve; a full matrix is decomposed once by the existing
+bounded shared owner, with its numerical reconstruction gate. Positive kinetic
+definiteness alone is insufficient here: the physical principal-moment triangle
+inequalities also apply. The cached representation adds no per-step allocation,
+factorization, or eigensolve. The old diagonal constructor and its integration
+paths retain their original numerical results.
+
+Both implicit midpoint/Cayley and symplectic free-rotation maps reuse their
+original principal-frame numerical owners through a fixed change of basis.
+Their attitude increments, momentum and torque use the same transformation.
+Spherical/axisymmetric shortcuts therefore refer to actual principal directions,
+not arbitrary geometry axes. Point kinematics, kinetic energy, directional
+effective mass and impulse work all use the same full inverse tensor.
+Normal/Coulomb, finite-patch shear/torsion, Hertz sliding/spin and constrained
+rolling mobility
+assemble rotational Gram factors `diag(1/sqrt(I_principal)) Q^T`; products of
+inertia cannot disappear merely because a geometry frame was relabelled.
+
+`angular_momentum_body_checked` supplies the matching velocity-to-momentum
+conversion for callers; componentwise multiplication by the returned principal
+eigenvalues is valid only in the associated principal frame. Focused native
+tests compare the same physical trajectories and contacts under different body
+coordinate choices, independently reconstruct off-centre impulse response,
+check the nonprincipal symmetric-top closed form, preserve diagonal results
+bit for bit, and reject invalid/nonphysical tensors. Existing energy,
+friction and rolling regressions remain applicable. This is fixed-inertia
+rigid motion, not a changing-mass, moving-COM, deforming-body, interval-inertia,
+material-calibration or arbitrary offset-reference spatial-inertia model.
+
 ## Invariants
 
 - Public construction rejects non-finite mass-property, state, gravity, wrench,
@@ -290,7 +330,7 @@ a dynamic, contact, grasp-stability, or force-closure result.
 - The public orientation remains normalized and uses a canonical quaternion
   sign after every successful attitude update.
 - The declared force and gravity are world-frame quantities; the declared
-  torque and angular momentum are principal-body-frame quantities. Diagnostics
+  torque and angular momentum are declared-body-frame quantities. Diagnostics
   rotate the latter to world space before adding orbital angular momentum.
 - Each successful `step` constructs and returns a complete new state. In
   `advance`, only complete preceding steps are committed when cancellation is
@@ -462,8 +502,9 @@ fault injection, or G5 cross-ISA evidence.
   and scalar revolute/prismatic/helical joints.
 - The articulated lane provides a full 6x6 spatial inertia and an articulated
   tree, but no geometry-derived inertia assembly, flexible body, closed-loop
-  graph, or Euler-disc-specific rule. The separate point/impulse API remains
-  parameterized by the legacy centre-of-mass diagonal principal inertia.
+  graph, or Euler-disc-specific rule. The separate point/impulse API admits
+  fixed full rotational inertia about its centre of mass, without an arbitrary
+  offset-reference spatial-inertia state.
 - Catalog entries are transcriptions and explicit reductions, not complete or
   manufacturer-validated digital twins. The G1 entry omits all arm DoFs and
   links, fixed body/sensor attachments, contact geometry, and their mass rather
@@ -495,8 +536,9 @@ fault injection, or G5 cross-ISA evidence.
   pendulum without explicit external/contact forces from another owner.
 - The midpoint update is not claimed symplectic, variational, adaptive,
   adjoint-capable, or physically validated. Its torque-free energy and spatial
-  momentum invariants hold to solve tolerance and roundoff for diagonal
-  principal inertia; prescribed torque obeys the stated midpoint work balance.
+  momentum invariants hold to solve tolerance and roundoff for admitted fixed
+  full inertia through its principal-frame map; prescribed torque obeys the
+  stated midpoint work balance.
   Energy conservation alone does not bound phase/orientation error: timestep
   refinement remains necessary. The separate kick-drift lane retains its own
   first-order rotational approximation and does not inherit these invariants.
@@ -891,7 +933,7 @@ native original-source target; this is not a full Cargo/DSR workspace gate.
 ## Native rigid-body finite-patch tangential impulses
 
 `tangential_friction::apply_rigid_friction` binds supplied positive normal
-patches to original COM/principal-frame `RigidBodyState` and `MassProperties`
+patches to original COM/body-frame `RigidBodyState` and `MassProperties`
 values. It derives `B = J M^(-1/2)`, including translational mass,
 orientation-dependent rotational inertia, shear lever arms, torsional couples,
 and all shared-body coupling. No authored effective mass substitutes for body
@@ -940,7 +982,7 @@ Fifteen focused native integration groups pass: the eleven original ballistic, s
 ## Native rigid-body simultaneous frictional impacts
 
 `frictional_impact::apply_rigid_frictional_impacts` binds the simultaneous
-normal/Coulomb owner to original rigid-body states. Actual masses, principal
+normal/Coulomb owner to original rigid-body states. Actual masses, full body
 inertias, orientations and COM-relative contact arms determine the full
 normal/tangent Delassus matrix. Assembly contracts only shared-body influence
 blocks, avoiding products over unrelated body coordinates. Stable contact IDs

@@ -395,6 +395,98 @@ fn compose(q: UnitQuaternion, r: UnitQuaternion) -> UnitQuaternion {
 }
 
 #[test]
+fn nonprincipal_body_coordinates_preserve_hertz_force_spin_recoil_and_heat() {
+    let dt = 0.005;
+    let (f, force, moment) = coupled(dt);
+    let expected = independent_endpoint(&f, force, moment, dt);
+    let expected_mobility = mobility(&f);
+    let labels = [
+        UnitQuaternion::from_axis_angle(Vec3::new(1.0, 2.0, -0.7), 0.81).unwrap(),
+        UnitQuaternion::from_axis_angle(Vec3::new(-0.4, 0.7, 1.3), -0.63).unwrap(),
+    ];
+    let (mut dense, _, _) = coupled(dt);
+    // Preserve the independently manufactured physical state while changing
+    // each body's geometry frame. The original diagonal oracle remains
+    // independent of the new full-tensor mobility implementation.
+    for k in 0..2 {
+        let [w, x, y, z] = labels[k].components();
+        let inverse = UnitQuaternion::new(w, -x, -y, -z).unwrap();
+        dense.properties[k] = MassProperties::from_principal_frame(
+            f.properties[k].mass(),
+            Vec3::ZERO,
+            f.properties[k].principal_inertia_body(),
+            labels[k],
+        )
+        .unwrap();
+        dense.bodies[k] = RigidBodyState::new(
+            Pose::new(
+                f.bodies[k].pose().position_world(),
+                compose(f.bodies[k].pose().orientation(), inverse),
+            )
+            .unwrap(),
+            f.bodies[k].linear_momentum_world(),
+            labels[k].rotate_body_to_world(f.bodies[k].angular_momentum_body()),
+        )
+        .unwrap();
+        let m = dense.properties[k].inertia_tensor_body().m;
+        assert!(m[1].abs() + m[2].abs() + m[5].abs() > 0.01);
+    }
+    dense.binding.arm_a_body = labels[0].rotate_body_to_world(f.binding.arm_a_body);
+    dense.binding.arm_b_body = labels[1].rotate_body_to_world(f.binding.arm_b_body);
+    let mut bodies = dense.bodies;
+    let report = dense.advance(&mut bodies, dt, controls()).unwrap();
+    close(report.contact.force_n[0], force.x, 3e-9);
+    close(report.contact.force_n[1], force.y, 3e-9);
+    close(report.contact.spin_moment_nm, moment, 2e-10);
+    for i in 0..3 {
+        for j in 0..3 {
+            close(
+                report.scaled_mobility_per_kg[i][j],
+                expected_mobility[i][j],
+                4e-15,
+            );
+        }
+    }
+    for k in 0..2 {
+        close_vec(
+            bodies[k].linear_momentum_world(),
+            expected[k].linear_momentum_world(),
+            2e-11,
+        );
+        close_vec(
+            bodies[k]
+                .pose()
+                .orientation()
+                .rotate_body_to_world(bodies[k].angular_momentum_body()),
+            expected[k]
+                .pose()
+                .orientation()
+                .rotate_body_to_world(expected[k].angular_momentum_body()),
+            5e-12,
+        );
+        assert_eq!(bodies[k].pose(), dense.bodies[k].pose());
+    }
+    let work = dt * (force.dot(Vec3::new(0.3, -0.4, 0.0)) + moment * 0.5 / RADIUS);
+    close(report.midpoint_impulse_work_j, work, 2e-11);
+    close(report.dissipated_energy_j, -work, 2e-11);
+    close(
+        report.kinetic_after_j,
+        kinetic(&expected, &f.properties),
+        2e-11,
+    );
+    close(report.actual_midpoint_displacement_m[0], 0.3 * dt, 2e-13);
+    close(report.actual_midpoint_displacement_m[1], -0.4 * dt, 2e-13);
+    close(
+        report.actual_midpoint_spin_angle_rad,
+        (0.5 / RADIUS) * dt,
+        2e-12,
+    );
+    assert!(norm(report.linear_momentum_change_ns) < 1e-14);
+    assert!(norm(report.angular_momentum_change_nms) < 1e-14);
+    assert!(report.total_energy_residual_j.abs() < 2e-11);
+}
+
+#[test]
 fn world_covariance_common_boost_and_body_index_permutation_preserve_the_physical_solve() {
     let dt = 0.005;
     let (f, _, _) = coupled(dt);

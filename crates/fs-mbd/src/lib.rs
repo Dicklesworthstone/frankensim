@@ -23,12 +23,10 @@
 pub mod articulated;
 pub mod articulated_contacts;
 pub mod articulated_impact;
-/// Coupled finite-patch friction on native rigid-body momenta.
-pub mod tangential_friction;
-/// Coupled normal/Coulomb events on native rigid-body momenta.
-pub mod frictional_impact;
 pub mod daimler;
 pub mod davinci;
+/// Coupled normal/Coulomb events on native rigid-body momenta.
+pub mod frictional_impact;
 pub mod goddard;
 pub mod howe;
 pub mod otis;
@@ -38,10 +36,12 @@ pub mod robot_models;
 pub mod rocket;
 pub mod roomba;
 pub mod salisbury;
-/// Ballistic sphere/plane impacts, sustained support, sliding, and rolling.
-pub mod sphere_plane;
 /// Complete finite-mass sphere-pair flight, frictional impact, and recoil.
 pub mod sphere_pair;
+/// Ballistic sphere/plane impacts, sustained support, sliding, and rolling.
+pub mod sphere_plane;
+/// Coupled finite-patch friction on native rigid-body momenta.
+pub mod tangential_friction;
 pub mod tri_wheel_cluster;
 pub mod versatran;
 
@@ -154,6 +154,8 @@ pub enum DynamicsError {
     InvalidMass,
     /// A principal moment must be finite and strictly positive.
     InvalidPrincipalInertia,
+    /// The full body inertia is not a finite symmetric positive-definite form.
+    InvalidInertiaTensor,
     /// Principal moments fail a rigid-body triangle inequality.
     InconsistentPrincipalInertia,
     /// A quaternion with zero or non-finite norm cannot define an orientation.
@@ -179,6 +181,9 @@ impl fmt::Display for DynamicsError {
             Self::InvalidMass => formatter.write_str("mass must be finite and positive"),
             Self::InvalidPrincipalInertia => {
                 formatter.write_str("each principal moment must be finite and positive")
+            }
+            Self::InvalidInertiaTensor => {
+                formatter.write_str("body inertia must be finite, symmetric and positive definite")
             }
             Self::InconsistentPrincipalInertia => formatter
                 .write_str("principal moments must satisfy rigid-body triangle inequalities"),
@@ -511,12 +516,17 @@ impl Pose {
     }
 }
 
-/// Validated mass and diagonal inertia tensor in its principal body frame.
+/// Validated mass and rotational inertia about the body-frame centre of mass.
+///
+/// Principal moments and their fixed body-frame orientation are prepared once.
+/// Point mechanics, contact mobility and both rotation integrators retain the
+/// full tensor without eigensolves or allocations in their stepping loops.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MassProperties {
     mass: f64,
     center_of_mass_body: Vec3,
     principal_inertia_body: Vec3,
+    principal_to_body: UnitQuaternion,
 }
 
 impl MassProperties {
@@ -557,7 +567,49 @@ impl MassProperties {
             mass,
             center_of_mass_body,
             principal_inertia_body,
+            principal_to_body: UnitQuaternion::IDENTITY,
         })
+    }
+
+    /// Admit known principal moments in an arbitrary fixed body frame.
+    ///
+    /// `principal_to_body` maps principal components into the coordinates used
+    /// by poses, contact arms, angular momenta and applied torques. It is fixed
+    /// for the life of these properties; changing mass distributions need an
+    /// explicit momentum-transfer model. No diagonalization is performed.
+    pub fn from_principal_frame(
+        mass: f64,
+        center_of_mass_body: Vec3,
+        principal_moments: Vec3,
+        principal_to_body: UnitQuaternion,
+    ) -> Result<Self, DynamicsError> {
+        let mut properties = Self::new(mass, center_of_mass_body, principal_moments)?;
+        properties.principal_to_body = principal_to_body;
+        Ok(properties)
+    }
+
+    /// Admit a full centre-of-mass inertia tensor in the supplied body frame.
+    ///
+    /// The shared `fs-time` tensor owner performs one bounded principal-frame
+    /// decomposition and checks its reconstruction. Rigid-body triangle
+    /// inequalities are additionally required here. This is floating-point
+    /// admission, not an interval certificate or a material-density inference.
+    pub fn from_inertia_tensor(
+        mass: f64,
+        center_of_mass_body: Vec3,
+        inertia_body: fs_ga::Mat3,
+    ) -> Result<Self, DynamicsError> {
+        let tensor = fs_time::lie::gyrostat::InertiaTensor3::new(inertia_body)
+            .map_err(|_| DynamicsError::InvalidInertiaTensor)?;
+        let moments = tensor.principal_moments();
+        let principal_to_body = tensor.principal_to_body();
+        let q = principal_to_body.as_quat();
+        Self::from_principal_frame(
+            mass,
+            center_of_mass_body,
+            Vec3::new(moments.x, moments.y, moments.z),
+            UnitQuaternion::from_canonical_components([q.w, q.x, q.y, q.z])?,
+        )
     }
 
     /// Returns mass in kilograms.
@@ -566,26 +618,120 @@ impl MassProperties {
         self.mass
     }
 
-    /// Returns the declared center of mass in the principal body frame.
+    /// Returns the declared center of mass in the body frame.
     #[must_use]
     pub const fn center_of_mass_body(self) -> Vec3 {
         self.center_of_mass_body
     }
 
-    /// Returns principal moments `(Ixx, Iyy, Izz)` in kg m².
+    /// Returns principal moments in kg m². For a nonprincipal body frame these
+    /// are eigenvalues, not the diagonal entries of its body-frame tensor;
+    /// [`Self::principal_axes_to_body`] supplies the associated axes.
     #[must_use]
     pub const fn principal_inertia_body(self) -> Vec3 {
         self.principal_inertia_body
     }
 
+    /// Fixed principal-to-body orientation; identity for [`Self::new`].
+    #[must_use]
+    pub const fn principal_axes_to_body(self) -> UnitQuaternion {
+        self.principal_to_body
+    }
+
+    /// Full symmetric inertia reconstructed in the actual body coordinates.
+    #[must_use]
+    pub fn inertia_tensor_body(self) -> fs_ga::Mat3 {
+        let columns = [
+            self.principal_to_body
+                .rotate_body_to_world(Vec3::new(1.0, 0.0, 0.0)),
+            self.principal_to_body
+                .rotate_body_to_world(Vec3::new(0.0, 1.0, 0.0)),
+            self.principal_to_body
+                .rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0)),
+        ]
+        .map(|v| [v.x, v.y, v.z]);
+        let d = self.principal_inertia_body;
+        let diagonal = [d.x, d.y, d.z];
+        let mut matrix = [0.0; 9];
+        for row in 0..3 {
+            for column in row..3 {
+                let value = (0..3)
+                    .map(|k| diagonal[k] * columns[k][row] * columns[k][column])
+                    .sum();
+                matrix[3 * row + column] = value;
+                matrix[3 * column + row] = value;
+            }
+        }
+        fs_ga::Mat3 { m: matrix }
+    }
+
     /// Converts body angular momentum into body angular velocity.
     #[must_use]
     pub fn angular_velocity_body(self, angular_momentum_body: Vec3) -> Vec3 {
+        let principal = self.to_principal(angular_momentum_body);
+        self.from_principal(Vec3::new(
+            principal.x / self.principal_inertia_body.x,
+            principal.y / self.principal_inertia_body.y,
+            principal.z / self.principal_inertia_body.z,
+        ))
+    }
+
+    /// Convert body angular velocity to body angular momentum with the same
+    /// admitted full tensor used by dynamics and contact response.
+    pub fn angular_momentum_body_checked(self, omega_body: Vec3) -> Result<Vec3, DynamicsError> {
+        if !omega_body.is_finite() {
+            return Err(DynamicsError::NonFinite("angular_velocity_body"));
+        }
+        let principal = self.to_principal(omega_body);
+        let momentum = self.from_principal(Vec3::new(
+            self.principal_inertia_body.x * principal.x,
+            self.principal_inertia_body.y * principal.y,
+            self.principal_inertia_body.z * principal.z,
+        ));
+        if !momentum.is_finite() {
+            return Err(DynamicsError::NonFinite("angular_momentum_body"));
+        }
+        Ok(momentum)
+    }
+
+    fn to_principal(self, body: Vec3) -> Vec3 {
+        if self.principal_to_body == UnitQuaternion::IDENTITY {
+            body
+        } else {
+            self.principal_to_body.rotate_world_to_body(body)
+        }
+    }
+
+    fn from_principal(self, principal: Vec3) -> Vec3 {
+        if self.principal_to_body == UnitQuaternion::IDENTITY {
+            principal
+        } else {
+            self.principal_to_body.rotate_body_to_world(principal)
+        }
+    }
+
+    // Contact rows require a factor F with F^T F = I_body^-1. The rows of
+    // diag(1/sqrt(I_principal)) Q^T retain all products of inertia and keep
+    // the existing Gram-matrix mobility assembly symmetric by construction.
+    fn angular_mobility_factor(self, body: Vec3) -> Vec3 {
+        let p = self.to_principal(body);
         Vec3::new(
-            angular_momentum_body.x / self.principal_inertia_body.x,
-            angular_momentum_body.y / self.principal_inertia_body.y,
-            angular_momentum_body.z / self.principal_inertia_body.z,
+            p.x / self.principal_inertia_body.x.sqrt(),
+            p.y / self.principal_inertia_body.y.sqrt(),
+            p.z / self.principal_inertia_body.z.sqrt(),
         )
+    }
+
+    fn principal_properties(self) -> Self {
+        Self {
+            principal_to_body: UnitQuaternion::IDENTITY,
+            ..self
+        }
+    }
+
+    fn increment_in_body(self, principal: UnitQuaternion) -> Result<UnitQuaternion, DynamicsError> {
+        let vector = self.from_principal(Vec3::new(principal.x, principal.y, principal.z));
+        UnitQuaternion::new(principal.w, vector.x, vector.y, vector.z)
     }
 
     /// Converts finite body angular momentum into finite body angular velocity.
@@ -624,7 +770,7 @@ pub struct RigidBodyState {
     pose: Pose,
     /// Linear momentum in kg m/s, expressed in the world frame.
     linear_momentum_world: Vec3,
-    /// Angular momentum in kg m²/s, expressed in the principal body frame.
+    /// Angular momentum in kg m²/s, expressed in the actual body frame.
     angular_momentum_body: Vec3,
 }
 
@@ -661,7 +807,7 @@ impl RigidBodyState {
         self.linear_momentum_world
     }
 
-    /// Returns principal-body-frame angular momentum.
+    /// Returns body-frame angular momentum.
     #[must_use]
     pub const fn angular_momentum_body(self) -> Vec3 {
         self.angular_momentum_body
@@ -918,7 +1064,7 @@ pub struct PointKinematics {
     pub point_world: Vec3,
     /// Centre-of-mass velocity in the world frame.
     pub center_of_mass_velocity_world: Vec3,
-    /// Angular velocity in the principal body frame.
+    /// Angular velocity in the declared body frame.
     pub angular_velocity_body: Vec3,
     /// Angular velocity in the world frame.
     pub angular_velocity_world: Vec3,
@@ -1081,7 +1227,7 @@ pub fn apply_equal_and_opposite_impulse_at_body_points(
 pub struct Wrench {
     /// Applied force in newtons, expressed in the world frame.
     pub force_world: Vec3,
-    /// Applied torque in newton metres, expressed in the principal body frame.
+    /// Applied torque in newton metres, expressed in the declared body frame.
     pub torque_body: Vec3,
 }
 
@@ -1539,6 +1685,21 @@ fn implicit_rotation_step(
     torque: Vec3,
     h: f64,
 ) -> Result<(Vec3, UnitQuaternion), DynamicsError> {
+    if properties.principal_to_body != UnitQuaternion::IDENTITY {
+        let (principal_after, principal_increment) = implicit_rotation_step(
+            properties.to_principal(before),
+            UnitQuaternion::IDENTITY,
+            properties.principal_properties(),
+            properties.to_principal(torque),
+            h,
+        )?;
+        let increment = properties.increment_in_body(principal_increment)?;
+        let q = orientation.multiply(increment);
+        return Ok((
+            properties.from_principal(principal_after),
+            UnitQuaternion::new(q.w, q.x, q.y, q.z)?,
+        ));
+    }
     let impulse = torque.scale(h);
     if !impulse.is_finite() {
         return Err(DynamicsError::NonFinite("rotational.torque_impulse"));
@@ -1686,6 +1847,20 @@ fn free_rotation_step(
     properties: MassProperties,
     duration_seconds: f64,
 ) -> Result<(UnitQuaternion, Vec3), DynamicsError> {
+    if properties.principal_to_body != UnitQuaternion::IDENTITY {
+        let (principal_increment, _) = free_rotation_step(
+            UnitQuaternion::IDENTITY,
+            properties.to_principal(momentum),
+            properties.principal_properties(),
+            duration_seconds,
+        )?;
+        let increment = properties.increment_in_body(principal_increment)?;
+        let q = orientation.multiply(increment);
+        return Ok((
+            UnitQuaternion::new(q.w, q.x, q.y, q.z)?,
+            increment.rotate_world_to_body(momentum),
+        ));
+    }
     properties.angular_velocity_body_checked(momentum)?;
     let inertia = [
         properties.principal_inertia_body.x,

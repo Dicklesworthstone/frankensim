@@ -1,7 +1,7 @@
 //! Joint Hertz sliding/spin friction on two original finite rigid bodies.
 //!
 //! This is a held-geometry, held-effort midpoint impulse phase. Actual masses,
-//! principal inertias, orientations and COM-relative arms determine the full
+//! full inertia tensors, orientations and COM-relative arms determine the full
 //! three-coordinate recoil. Normal load, patch radius, contact discovery and
 //! pose advance remain with their original owners. Static midpoint selection
 //! is not endpoint arrest: a coarse phase that would assist slip or spin at an
@@ -21,7 +21,7 @@ use fs_tribo::sliding_patch::{HertzSlidingPatch, HertzSlidingPatchParameters};
 /// One caller-owned closed normal patch between two finite dynamic bodies.
 #[derive(Clone, Copy, Debug)]
 pub struct RigidHertzContact<'a> {
-    /// Original body indices and principal-frame COM-relative contact arms.
+    /// Original body indices and declared-body-frame COM-relative contact arms.
     pub binding: RigidContactBinding,
     /// Original normal and tangent gauge, held over the impulse phase.
     pub frame: TangentFrame,
@@ -414,8 +414,6 @@ fn response(
 ) -> Result<[[f64; 3]; 3], RigidHertzError> {
     let mut factor = [[0.0; 12]; 3];
     for (body, sign) in [(0, 1.0), (1, -1.0)] {
-        let inverse_roots =
-            components(properties[body].principal_inertia_body()).map(|v| v.sqrt().recip());
         let inverse_mass_root = properties[body].mass().sqrt().recip();
         let orientation = bodies[body].pose().orientation();
         for axis in 0..3 {
@@ -425,14 +423,15 @@ fn response(
             } else {
                 [0.0; 3]
             };
-            let rotation = components(if axis < 2 {
+            let rotation = if axis < 2 {
                 arms[body].cross(direction).scale(sign)
             } else {
                 direction.scale(sign * radius)
-            });
+            };
+            let rotation = components(properties[body].angular_mobility_factor(rotation));
             for j in 0..3 {
                 factor[axis][6 * body + j] = translation[j];
-                factor[axis][6 * body + 3 + j] = rotation[j] * inverse_roots[j];
+                factor[axis][6 * body + 3 + j] = rotation[j];
             }
         }
     }

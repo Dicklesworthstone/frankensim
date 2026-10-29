@@ -104,6 +104,8 @@ pub struct RenderMassProperties {
     /// Content identity of the resolved mass-property artifact.
     pub identity: ContentHash,
     /// Exact properties used to interpret body-frame angular momentum.
+    /// The schema stores principal moments in the declared body frame, without
+    /// a separate principal-axis rotation; admission refuses other frames.
     pub properties: MassProperties,
 }
 
@@ -3117,6 +3119,13 @@ fn validate_metadata(metadata: &RenderTrajectoryMetadata) -> Result<(), RenderTr
     }
     if metadata.units != RenderUnitSystem::SiRadians {
         return Err(RenderTrajectoryError::UnsupportedUnits(metadata.units));
+    }
+    // The codec retains mass, COM and principal moments only. Admitting a
+    // separate inertia frame would silently change angular velocity on decode.
+    if metadata.mass_properties.properties.principal_axes_to_body() != UnitQuaternion::IDENTITY {
+        return Err(RenderTrajectoryError::DerivedState(
+            "render trajectory schema requires principal-frame mass properties".to_owned(),
+        ));
     }
     if metadata.channel_availability.contact
         && metadata.channel_availability.normal_force_sampling
