@@ -1,0 +1,151 @@
+frankensim.matdb-source.v1
+observation	identity	fsri-acrylic-countertop-dried-2021	Source material metadata; https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Corian_Countertop/material.json	Acrylic/alumina-trihydrate solid surface from the source Corian_Countertop directory. The source gives Corian as an alternate name but identifies no specific manufacturer, grade, resin chemistry, filler fraction or cure. Metadata density 1670 kg/m3 is a separate nominal label; the actual reduction uses the condition-mean CSV density 1677 kg/m3. No neat-acrylic, pure-alumina or general branded-product qualification is inferred. Cross-property coupon continuity, covariance and material-axis mapping are unreported. Data describe the source specimen population.
+observation	method	fsri-acrylic-countertop-dried-2021	FSRI HFM methodology; https://materials.fsri.org/experimentalmethodology	Dry samples were oven conditioned at 105 degC for at least 48 hours with mass monitoring, then stored over desiccant. The drying temperature is not a service-temperature limit and exact residual moisture is unknown. Capacity uses equal-plate temperature steps generally following ASTM C1784-20; conductivity generally follows ASTM C518. Contact pressure and principal-axis mapping are unreported. Capacity and conductivity thicknesses differ; neither isotropy nor identical physical coupons is inferred.
+observation	capacity-r1	fsri-acrylic-countertop-dried-2021	Native volume-capacity result; https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Corian_Countertop/HFM/Corian_Countertop_HFM_Dry_heatcapacity_210507_R1.tst	Instrument label Corian_1_Heat_Capacity; thickness 12.40mm. Recorded mean temperatures 10.00,20.01,30.01,40.01 degC and native capacity 2051024,2102883,2162612,2257228 J/(m3 K). The instrument labels this Specific Heat but reports volumetric units. These are finite-step averages across equal-plate changes 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC; no thermodynamic Cv or zero-gradient differential measurement is inferred.
+observation	capacity-r2	fsri-acrylic-countertop-dried-2021	Native volume-capacity result; https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Corian_Countertop/HFM/Corian_Countertop_HFM_Dry_heatcapacity_210506_R2.tst	Instrument label Corian_2_Heat_Capacity; thickness 12.41mm. Recorded mean temperatures 10.00,20.01,30.01,40.01 degC and native capacity 2049294,2123869,2200405,2261385 J/(m3 K). The instrument labels this Specific Heat but reports volumetric units. These are finite-step averages across equal-plate changes 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC; no thermodynamic Cv or zero-gradient differential measurement is inferred.
+observation	capacity-r3	fsri-acrylic-countertop-dried-2021	Native volume-capacity result; https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Corian_Countertop/HFM/Corian_Countertop_HFM_Dry_heatcapacity_210506_R3.tst	Instrument label Corian_3_Heat_Capacity; thickness 12.38mm. Recorded mean temperatures 10.00,20.01,30.01,40.01 degC and native capacity 2053829,2128380,2195664,2252849 J/(m3 K). The instrument labels this Specific Heat but reports volumetric units. These are finite-step averages across equal-plate changes 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC; no thermodynamic Cv or zero-gradient differential measurement is inferred.
+observation	capacity-reduction	fsri-acrylic-countertop-dried-2021	Explicit arithmetic following the pinned FSRI script; https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/02_Scripts/plot_HFM_data_html.py	Group recorded mean temperature to 0.1 degC, then convert group temperature to kelvin by adding 273.15. Native C_vol is the arithmetic mean of three specimens. Its separate sample SD uses n-1=2 and is descriptive, not a confidence/calibration uncertainty bound. Extra digits represent arithmetic only. Linear interpolation of means is an authored approximation with no certified interpolation error or extrapolation; scatter remains discrete. No density enters native capacity.
+observation	density-normalization	fsri-acrylic-countertop-dried-2021	Original density CSV inputs; https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Corian_Countertop/HFM	Corian_Countertop_Density_Dry_R1.csv: header Corian_Countertop_DRY_1, mass 850.2 g, volume 508.7 cm3, density 1671 kg/m3; Corian_Countertop_Density_Dry_R2.csv: header Corian_Countertop_DRY_2, mass 848.5 g, volume 502.6 cm3, density 1688 kg/m3; Corian_Countertop_Density_Dry_R3.csv: header Corian_Countertop_DRY_3, mass 849.5 g, volume 508 cm3, density 1672 kg/m3. The source reduction averages the reported rounded density columns to 1677 kg/m3, rather than recomputing mass/volume ratios. Measurement temperature is unreported. This is a source normalization input, not rho(T), current installed density or an expansion law.
+observation	specific-heat-reduction	fsri-acrylic-countertop-dried-2021	FSRI specific-heat reduction; https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/02_Scripts/plot_HFM_data_html.py; material page https://materials.fsri.org/materialdetail/acrylic-countertop	Divide population-mean native capacity and its sample SD by the condition-mean density 1677 kg/m3, then round to whole J/(kg K). Means at 10,20,30,40 degC are 1223,1263,1304,1346; reported-reduction SD are 1,8,12,3. No per-specimen density normalization, density-scatter propagation or measured covariance is supplied. Cp, native C_vol and normalization density are algebraically related. Cp interpolation is an authored approximation.
+observation	conductivity	fsri-acrylic-countertop-dried-2021	Final Average Cond rows; https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Corian_Countertop/HFM; reduction https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/02_Scripts/plot_HFM_data_html.py	Corian_Countertop_HFM_Dry_conductivity_210504_R1.tst: instrument label Corian_1, thickness 12.40mm, Average Cond at 15 degC 0.3421,0.3492,0.3505 and at 45 degC 0.3717,0.3722,0.3709; Corian_Countertop_HFM_Dry_conductivity_210505_R2.tst: instrument label Corian_2, thickness 12.28mm, Average Cond at 15 degC 0.3755,0.3809,0.3798 and at 45 degC 0.4047,0.4048,0.4047; Corian_Countertop_HFM_Dry_conductivity_210505_R3.tst: instrument label Corian_3, thickness 12.40mm, Average Cond at 15 degC 0.3487,0.3588,0.3577 and at 45 degC 0.3823,0.3814,0.3798. Units W/(m K). The source pools three cycles from each of three specimens by integer mean temperature, then rounds mean and sample SD (n-1=8) to 0.001. Means are 0.36,0.386; SD 0.015,0.015. Nine readings are not nine independent specimens. Plate setpoints 5/25 and 35/55 degC give 20 K upward through-thickness gradients. Source temperature groups are mean test temperatures. Conditioning-specific source populations remain separate, even when rounded k happens to agree.
+observation	local-model	fsri-acrylic-countertop-dried-2021	Explicit local conductivity interpretation	Thermal-conductivity requires mean-test-temperature-as-local-model=1. It interprets the finite-gradient apparent coefficient as a local through-thickness scalar at numerical mean temperature, with linear interpolation between the two source groups. Apparent-thermal-conductivity retains test-mean-temperature. Neither interpretation resolves unknown filler/layer structure, deconvolves the finite plate gradient or qualifies other material axes or service conditions.
+curve	mean-volume-capacity	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction	volumetric_capacity	temperature	K	J/m3/K	283.15:2051382.3333333333,293.15:2118377.3333333335,303.15:2186227,313.15:2257154	linear
+uncertainty	mean-volume-capacity	unstated	-	-	-	-
+validity	mean-volume-capacity	family	1	1	1
+validity	mean-volume-capacity	unconditioned	0	0	1
+validity	mean-volume-capacity	dried	1	1	1
+validity	mean-volume-capacity	grade_known	0	0	1
+validity	mean-volume-capacity	formulation_known	0	0	1
+validity	mean-volume-capacity	moisture_known	0	0	1
+validity	mean-volume-capacity	pressure_known	0	0	1
+validity	mean-volume-capacity	axis_known	0	0	1
+validity	mean-volume-capacity	fraction_known	0	0	1
+validity	mean-volume-capacity	layers_known	0	0	1
+validity	mean-volume-capacity	matched	0	0	1
+validity	mean-volume-capacity	specimens	3	3	1
+validity	mean-volume-capacity	statistic	1	1	1
+validity	mean-volume-capacity	temperature	283.15	313.15	K
+curve	published-specific-heat	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction,density-normalization,specific-heat-reduction	specific_heat	temperature	K	J/kg/K	283.15:1223,293.15:1263,303.15:1304,313.15:1346	linear
+uncertainty	published-specific-heat	unstated	-	-	-	-
+validity	published-specific-heat	family	1	1	1
+validity	published-specific-heat	unconditioned	0	0	1
+validity	published-specific-heat	dried	1	1	1
+validity	published-specific-heat	grade_known	0	0	1
+validity	published-specific-heat	formulation_known	0	0	1
+validity	published-specific-heat	moisture_known	0	0	1
+validity	published-specific-heat	pressure_known	0	0	1
+validity	published-specific-heat	axis_known	0	0	1
+validity	published-specific-heat	fraction_known	0	0	1
+validity	published-specific-heat	layers_known	0	0	1
+validity	published-specific-heat	matched	0	0	1
+validity	published-specific-heat	specimens	3	3	1
+validity	published-specific-heat	statistic	1	1	1
+validity	published-specific-heat	density_temperature_known	0	0	1
+validity	published-specific-heat	temperature	283.15	313.15	K
+curve	volume-capacity-scatter	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction	capacity_sd	temperature	K	J/m3/K	283.15:2288.6367849296953,293.15:13606.728274399153,303.15:20588.114022415943,313.15:4268.4811115899292	tabulated
+uncertainty	volume-capacity-scatter	unstated	-	-	-	-
+validity	volume-capacity-scatter	family	1	1	1
+validity	volume-capacity-scatter	unconditioned	0	0	1
+validity	volume-capacity-scatter	dried	1	1	1
+validity	volume-capacity-scatter	grade_known	0	0	1
+validity	volume-capacity-scatter	formulation_known	0	0	1
+validity	volume-capacity-scatter	moisture_known	0	0	1
+validity	volume-capacity-scatter	pressure_known	0	0	1
+validity	volume-capacity-scatter	axis_known	0	0	1
+validity	volume-capacity-scatter	fraction_known	0	0	1
+validity	volume-capacity-scatter	layers_known	0	0	1
+validity	volume-capacity-scatter	matched	0	0	1
+validity	volume-capacity-scatter	specimens	3	3	1
+validity	volume-capacity-scatter	statistic	0	0	1
+validity	volume-capacity-scatter	temperature	283.15	313.15	K
+curve	specific-heat-scatter	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction,density-normalization,specific-heat-reduction	specific_heat_sd	temperature	K	J/kg/K	283.15:1,293.15:8,303.15:12,313.15:3	tabulated
+uncertainty	specific-heat-scatter	unstated	-	-	-	-
+validity	specific-heat-scatter	family	1	1	1
+validity	specific-heat-scatter	unconditioned	0	0	1
+validity	specific-heat-scatter	dried	1	1	1
+validity	specific-heat-scatter	grade_known	0	0	1
+validity	specific-heat-scatter	formulation_known	0	0	1
+validity	specific-heat-scatter	moisture_known	0	0	1
+validity	specific-heat-scatter	pressure_known	0	0	1
+validity	specific-heat-scatter	axis_known	0	0	1
+validity	specific-heat-scatter	fraction_known	0	0	1
+validity	specific-heat-scatter	layers_known	0	0	1
+validity	specific-heat-scatter	matched	0	0	1
+validity	specific-heat-scatter	specimens	3	3	1
+validity	specific-heat-scatter	statistic	0	0	1
+validity	specific-heat-scatter	density_temperature_known	0	0	1
+validity	specific-heat-scatter	temperature	283.15	313.15	K
+curve	apparent-k	identity,method,conductivity	apparent_conductivity	test_mean_temperature	K	W/m/K	288.15:0.35999999999999999,318.15:0.38600000000000001	linear
+uncertainty	apparent-k	unstated	-	-	-	-
+validity	apparent-k	family	1	1	1
+validity	apparent-k	unconditioned	0	0	1
+validity	apparent-k	dried	1	1	1
+validity	apparent-k	grade_known	0	0	1
+validity	apparent-k	formulation_known	0	0	1
+validity	apparent-k	moisture_known	0	0	1
+validity	apparent-k	pressure_known	0	0	1
+validity	apparent-k	axis_known	0	0	1
+validity	apparent-k	fraction_known	0	0	1
+validity	apparent-k	layers_known	0	0	1
+validity	apparent-k	matched	0	0	1
+validity	apparent-k	specimens	3	3	1
+validity	apparent-k	statistic	1	1	1
+validity	apparent-k	through_thickness	1	1	1
+validity	apparent-k	upward	1	1	1
+validity	apparent-k	plate_delta	20	20	K
+validity	apparent-k	test_mean_temperature	288.15	318.15	K
+curve	local-k	identity,method,conductivity,local-model	local_conductivity	temperature	K	W/m/K	288.15:0.35999999999999999,318.15:0.38600000000000001	linear
+uncertainty	local-k	unstated	-	-	-	-
+validity	local-k	family	1	1	1
+validity	local-k	unconditioned	0	0	1
+validity	local-k	dried	1	1	1
+validity	local-k	grade_known	0	0	1
+validity	local-k	formulation_known	0	0	1
+validity	local-k	moisture_known	0	0	1
+validity	local-k	pressure_known	0	0	1
+validity	local-k	axis_known	0	0	1
+validity	local-k	fraction_known	0	0	1
+validity	local-k	layers_known	0	0	1
+validity	local-k	matched	0	0	1
+validity	local-k	specimens	3	3	1
+validity	local-k	statistic	1	1	1
+validity	local-k	through_thickness	1	1	1
+validity	local-k	upward	1	1	1
+validity	local-k	plate_delta	20	20	K
+validity	local-k	local_model	1	1	1
+validity	local-k	temperature	288.15	318.15	K
+curve	conductivity-scatter	identity,method,conductivity	conductivity_sd	test_mean_temperature	K	W/m/K	288.15:0.014999999999999999,318.15:0.014999999999999999	tabulated
+uncertainty	conductivity-scatter	unstated	-	-	-	-
+validity	conductivity-scatter	family	1	1	1
+validity	conductivity-scatter	unconditioned	0	0	1
+validity	conductivity-scatter	dried	1	1	1
+validity	conductivity-scatter	grade_known	0	0	1
+validity	conductivity-scatter	formulation_known	0	0	1
+validity	conductivity-scatter	moisture_known	0	0	1
+validity	conductivity-scatter	pressure_known	0	0	1
+validity	conductivity-scatter	axis_known	0	0	1
+validity	conductivity-scatter	fraction_known	0	0	1
+validity	conductivity-scatter	layers_known	0	0	1
+validity	conductivity-scatter	matched	0	0	1
+validity	conductivity-scatter	specimens	3	3	1
+validity	conductivity-scatter	statistic	0	0	1
+validity	conductivity-scatter	through_thickness	1	1	1
+validity	conductivity-scatter	upward	1	1	1
+validity	conductivity-scatter	plate_delta	20	20	K
+validity	conductivity-scatter	test_mean_temperature	288.15	318.15	K
+scalar	density-normalization	identity,method,density-normalization	normalization_density	1677	kg/m3	constant
+uncertainty	density-normalization	unstated	-	-	-	-
+validity	density-normalization	family	1	1	1
+validity	density-normalization	unconditioned	0	0	1
+validity	density-normalization	dried	1	1	1
+validity	density-normalization	grade_known	0	0	1
+validity	density-normalization	formulation_known	0	0	1
+validity	density-normalization	moisture_known	0	0	1
+validity	density-normalization	pressure_known	0	0	1
+validity	density-normalization	axis_known	0	0	1
+validity	density-normalization	fraction_known	0	0	1
+validity	density-normalization	layers_known	0	0	1
+validity	density-normalization	matched	0	0	1
+validity	density-normalization	specimens	3	3	1
+validity	density-normalization	statistic	1	1	1
+validity	density-normalization	density_temperature_known	0	0	1

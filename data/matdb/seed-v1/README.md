@@ -4011,3 +4011,54 @@ on the original thermal timeline. The four data suites
 twelve focused tests. The existing `material_volumetric_timeline` suite now has
 ten tests, including three new
 layer/timeline checks. Together they pass 22 tests in the focused native build.
+
+## Elemental expansion and manufactured-product thermal response (2026-10-29)
+
+This increment adds **8 profiles, 41 property claims and 2,920 numerical
+ordinates/scalars**, with 53 source observations. The four NIST profiles retain
+2,828 curve knots; the four FSRI populations retain 92 numerical values.
+
+| Profile | Claims | Supported response |
+| --- | ---: | --- |
+| [Molybdenum](molybdenum-nist-thermal-reference/manifest.tsv) | 2 | Conductivity 4–300 K and finite expansion 20–350 K |
+| [Beryllium](beryllium-nist-thermal-reference/manifest.tsv) | 4 | Specific heat 14–284 K; separate a-axis, c-axis and polycrystalline expansion 75–500 K |
+| [Sapphire](sapphire-nist-thermal-expansion-reference/manifest.tsv) | 2 | Expansion coefficient 5–80 K and independently fitted finite expansion 20–293 K |
+| [Silicon](silicon-nist-thermal-expansion-reference/manifest.tsv) | 1 | High-purity expansion coefficient 13–600 K, including its negative region and sign changes |
+| [Dried acrylic/mineral countertop](fsri-acrylic-countertop-dried-2021/manifest.tsv) | 8 | Native volumetric capacity, published Cp, conductivity, separate scatter and normalization density |
+| [Composite deck board](fsri-composite-deck-board-unconditioned-2021/manifest.tsv) | 8 | Unconditioned extruded wood/polymer population's thermal response |
+| [Unconditioned vinyl plank](fsri-vinyl-plank-unconditioned-2022/manifest.tsv) | 8 | Original unconditioned flooring population's thermal response |
+| [Dried vinyl plank](fsri-vinyl-plank-dried-2022/manifest.tsv) | 8 | Separately conditioned flooring population's thermal response |
+
+NIST source data/equation intersections bound all four profiles. Finite expansion
+retains `(L(T)-L293)/L293` and fitted residuals. Sapphire and silicon coefficient
+sources leave the length-denominator convention unstated; queries retain
+`source-coefficient-length-convention-known=0`. These coefficients are not
+automatically integrated into a finite length law. Missing density, caloric
+properties, directions and matched-coupon qualification stay explicit. Sampled
+interpolation comparisons do not establish continuous certified error bounds.
+
+The FSRI inputs remain pinned to
+`a432697e4b7d40f642b5cc8f384506439ebb32df`. Capacity/Cp spans 10–40 C and
+conductivity spans 15–45 C, giving a joint prepared path of 15–40 C. Native
+capacity remains independent of density normalization. Actual normalization
+densities for countertop/decking are 1677/1103 kg/m3, distinct from the nominal
+metadata values. Vinyl conditioning populations have identical rounded
+conductivity curves but different measured heat storage and heating response.
+Original thicknesses, unknown formulations/layer structures, specimen counts,
+contact pressure and coupon correspondence remain in the source context.
+Local conductivity requires the existing mean-temperature interpretation opt-in.
+
+`PreparedFreeExpansion` now consumes finite length-change data independently of
+density, returning principal stretches and relative volume under the declared
+isotropic or fixed-principal basis. The optional `PreparedFreeExpansionDensity`
+composition adds a compatible reference density and reuses that original
+geometry for constant-mass density and expanding thermal transport.
+
+The new `nist_element_mineral_thermal_profiles` and
+`fsri_composite_product_thermal_profiles` suites each pass three tests. All eight
+`material_expansion_density` tests and three existing
+`material_expanding_transport` tests pass, for **17 focused native tests: 10 new
+and 7 regressions**. They exercise the real compiler, original data reductions,
+source/context refusals, finite geometry without inserted density, conditioned
+heat storage and the shared conduction solver. Full coupled mechanical, phase,
+drying and experimental qualification remain outside these bounded additions.

@@ -823,3 +823,33 @@ actual sourced implicit conservation and sensible entropy. Full workspace
 Cargo validation is unavailable in this authoring environment: the required
 seven sibling checkouts fail the repository's constellation preflight. No
 full-workspace or experimental qualification is claimed.
+
+## 2026-10-29 elemental geometry and manufactured-product increment
+
+Added **8 profiles / 41 property claims / 2,920 numerical values / 53 source
+observations**: molybdenum, beryllium, sapphire and silicon (9 claims), plus
+dried acrylic/mineral countertop, composite decking, and separate unconditioned
+and dried vinyl-plank populations (32). Exact sources and ranges are linked in
+the [seed catalog](../data/matdb/seed-v1/README.md#elemental-expansion-and-manufactured-product-thermal-response-2026-10-29).
+
+The NIST profiles preserve finite-expansion reference lengths, directional
+beryllium curves, signed silicon coefficients, original validity intervals and
+unknown coefficient conventions. The FSRI profiles retain population reductions,
+conditioning, descriptive scatter, actual normalization densities and unknown
+construction/packing/coupon details. Equal rounded vinyl conductivities do not
+erase the measured difference in heat storage.
+
+The functional addition is `PreparedFreeExpansion`: supported length and volume
+change no longer requires a density source. It uses original finite strain lines
+and an explicit reference and geometric basis. Optional density composition
+reuses that geometry and its source evidence; the existing density constructor,
+identity and expanding thermal consumer remain compatible. Evaluation performs
+one binary search with no allocation, database query or hashing.
+
+Focused native verification passes **17 tests: 10 new and 7 regressions**,
+covering both new data batches, independent anisotropic geometry, source/domain
+refusals, real NIST geometry without authored density, optional density
+composition, thermal storage and shared layer conduction. Full workspace Cargo
+validation remains unavailable because the required sibling checkouts are
+missing; this is bounded compiler/model verification, not experimental
+qualification or completion of the broad material-reality program.
