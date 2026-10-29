@@ -151,6 +151,18 @@ not finite airway storage or a measured flute. Explicit `boundary characteristic
 and legacy `boundary COUNT` remain incoming-wave controls in m/s. Optional
 `dg_molecular` uses the same source-bound DG loss reader as the wind performers.
 
+The **Resolved flow — upstream acoustic feedback** starter opens
+`resolved-dg-upstream.performance`. `upstream_dg` attaches a second original
+finite material duct to the source zone. Its pressure and flow are solved with
+the downstream bore on the same physical interval, retaining both ducts' wave,
+wall and terminal histories. `boundary upstream-pressure` declares the ideal
+series pressure rise between the upstream duct and the resolved zone; it does
+not prescribe the resulting face pressure. Changing upstream geometry or its
+material response therefore changes the actual source feedback. The source work
+has a separate signed account. The observer remains on the downstream duct.
+This is acoustic coupling without mean mass/enthalpy advection into either duct;
+the short closed-tube fixture does not qualify an anatomical airway or flute.
+
 The canonical `resolved-dg.performance` starter is a small exploratory physical
 field fixture. It does not describe a complete flute or reed instrument.
 Native admission retains the stated grid spacing, substeps and physical clock;

@@ -11,7 +11,7 @@ use super::{NsfDgPerformance, source_intervals_for};
 use crate::bernoulli_aperture::performance::ApertureObservation;
 use crate::dg_port::input::{DgSourceError, DgSourceInput};
 use crate::dg_port::input::wall::regions::{DgMaterialWallLayout, DgMaterialWallLayoutInput};
-use crate::nsf_dg::{NsfDg, NsfDgError, NsfDgLimits, same_clock};
+use crate::nsf_dg::{NsfDg, NsfDgDrive, NsfDgError, NsfDgLimits, same_clock};
 use crate::pcm_wav::baffled::CircularOutletReceiver;
 use crate::pcm_wav::baffled::gas::GasPropagation;
 use crate::render::RenderError;
@@ -136,6 +136,7 @@ pub struct ResolvedDgFilePerformance {
     renderer: NsfDgPerformance<D3q27>,
     gas_records: Vec<GasRecord>,
     wall: DgMaterialWallLayout,
+    upstream_wall: Option<DgMaterialWallLayout>,
 }
 impl ResolvedDgFilePerformance {
     pub fn from_bytes(bytes: &[u8], maximum_block: usize, gate: Arc<CancelGate>)
@@ -303,29 +304,12 @@ impl ResolvedDgFilePerformance {
         };
         row.end()?;
         limits.validate_for_cells(cells).map_err(ResolvedDgInputError::Coupling)?;
-        let kind = if rows.next_is("dg_tube") { "dg_tube" } else { "dg_bore" };
-        let mut row = rows.row(kind)?;
-        let source = DgSourceInput::read(kind, row.line, &mut row.fields,
-            &mut || rows.next(), &gas, sources, &mut gas_records, &gate)?;
-        row.end()?;
-        let source = if rows.next_is("dg_molecular") {
-            let mut row = rows.row("dg_molecular")?;
-            let law = fs_material::relaxation::input::read_relaxation(&mut row.fields)
-                .map_err(|error| ResolvedDgInputError::Gas(GasInputError::Material(error)))?;
-            row.end()?;
-            source.with_molecular_relaxation(law, &gas_records[0])?
-        } else { source };
-        let wall = if rows.next_is("dg_wall") {
-            let mut row = rows.row("dg_wall")?;
-            let declaration = DgMaterialWallLayoutInput::read(row.line, &mut row.fields,
-                &mut || rows.next())?;
-            row.end()?;
-            declaration.resolve(&gate, &mut |path, line| {
-                let pack = load_material(path).map_err(|source|
-                    ResolvedDgInputError::Material { line, source })?;
-                Ok::<_, ResolvedDgInputError>(Arc::new(pack))
-            })?
-        } else { DgMaterialWallLayout::default() };
+        let (source, wall) = read_load(&mut rows, false, &gas, sources,
+            &mut gas_records, &gate, &mut load_material)?;
+        let upstream = if rows.next_is("upstream_dg") {
+            Some(read_load(&mut rows, true, &gas, sources,
+                &mut gas_records, &gate, &mut load_material)?)
+        } else { None };
         let mut row = rows.row("observation")?;
         let observation = match row.word()? {
             "inlet-pressure" => ApertureObservation::Inlet,
@@ -346,11 +330,15 @@ impl ResolvedDgFilePerformance {
         let mut row = rows.row("boundary")?;
         // The legacy bare count denotes m/s, exactly as before. Explicit
         // pressure data is in Pa relative to the source face's gas reference.
-        let pressure_boundary = match row.fields.clone().next() {
-            Some("pressure") => { row.word()?; true }
-            Some("characteristic") => { row.word()?; false }
-            _ => false,
+        let boundary_kind = match row.fields.clone().next() {
+            Some("pressure") => { row.word()?; 1 }
+            Some("upstream-pressure") => { row.word()?; 2 }
+            Some("characteristic") => { row.word()?; 0 }
+            _ => 0,
         };
+        if upstream.is_some() != (boundary_kind == 2) {
+            return Err(bad(row.line, "upstream-pressure requires its declared upstream DG load; face controls require an unloaded source face"));
+        }
         let boundary_segments: usize = row.number()?;
         row.end()?;
         if boundary_segments == 0 || boundary_segments > 16_384 || boundary_segments > samples {
@@ -367,9 +355,11 @@ impl ResolvedDgFilePerformance {
             if end <= previous_end || end > samples {
                 return Err(bad(rows.line, "boundary endpoints must increase inside the declared sample window"));
             }
-            boundaries.push((end, if pressure_boundary {
-                NsfBoundaryDrive::PressureOffset(value)
-            } else { NsfBoundaryDrive::IncomingCharacteristic(value) }));
+            boundaries.push((end, match boundary_kind {
+                2 => NsfDgDrive::UpstreamPressureRise(value),
+                1 => NsfDgDrive::Boundary(NsfBoundaryDrive::PressureOffset(value)),
+                _ => NsfDgDrive::Boundary(NsfBoundaryDrive::IncomingCharacteristic(value)),
+            }));
             previous_end = end;
         }
         if previous_end != samples { return Err(bad(rows.line, "boundary history must cover the complete declared window")); }
@@ -419,8 +409,13 @@ impl ResolvedDgFilePerformance {
         }).map_err(ResolvedDgInputError::Flow)?;
         poll(&gate)?;
         let load = source.prepare_with_material_wall_layout(&gas, dt, &gate, &wall)?;
-        let system = NsfDg::new(zone, load, high, limits, &gate).map_err(ResolvedDgInputError::Coupling)?;
-        let mut renderer = NsfDgPerformance::new_resampled_with_boundary(system, observation, sample_rate_hz,
+        let mut system = NsfDg::new(zone, load, high, limits, &gate).map_err(ResolvedDgInputError::Coupling)?;
+        let upstream_wall = if let Some((source, wall)) = upstream {
+            let load = source.prepare_with_material_wall_layout(&gas, dt, &gate, &wall)?;
+            system = system.with_upstream_load(load, &gate).map_err(ResolvedDgInputError::Coupling)?;
+            Some(wall)
+        } else { None };
+        let mut renderer = NsfDgPerformance::new_resampled_with_drives(system, observation, sample_rate_hz,
             boundary, samples as u64, maximum_block, Arc::clone(&gate)).map_err(ResolvedDgInputError::Render)?;
         if let Some(propagation) = observer_gas {
             renderer = renderer.with_observer_gas(&propagation).map_err(ResolvedDgInputError::Render)?;
@@ -432,14 +427,60 @@ impl ResolvedDgFilePerformance {
                 sample_rate_hz, samples: samples as u64, full_scale_pa, dimensions: dims,
                 solid_cells, initial_state_cells, boundary_segments,
                 physical_intervals: physical_intervals as u64,
-            }, renderer, gas_records, wall,
+            }, renderer, gas_records, wall, upstream_wall,
         })
     }
     pub const fn info(&self) -> ResolvedDgPerformanceInfo { self.info }
     pub const fn renderer(&self) -> &NsfDgPerformance<D3q27> { &self.renderer }
     pub fn gas_records(&self) -> &[GasRecord] { &self.gas_records }
     pub const fn wall_layout(&self) -> &DgMaterialWallLayout { &self.wall }
+    pub fn upstream_wall_layout(&self) -> Option<&DgMaterialWallLayout> { self.upstream_wall.as_ref() }
     pub fn into_renderer(self) -> NsfDgPerformance<D3q27> { self.renderer }
+}
+
+// Both sides consume exactly the same geometry, gas, wall and molecular source
+// readers. Prefixes only identify the physical participant; they add no law.
+#[allow(clippy::too_many_arguments)]
+fn read_load(
+    rows: &mut Rows<'_>, upstream: bool, gas: &GasState,
+    sources: Option<&ThermochemicalSources<'_>>, records: &mut Vec<GasRecord>, gate: &CancelGate,
+    load_material: &mut impl FnMut(&str)->Result<NormalizedMaterialCardPack, String>,
+) -> Result<(DgSourceInput, DgMaterialWallLayout), ResolvedDgInputError> {
+    let (kind, mut row) = if upstream {
+        let mut row = rows.row("upstream_dg")?;
+        let kind = match row.word()? {
+            "dg_tube" => "dg_tube", "dg_bore" => "dg_bore",
+            _ => return Err(bad(row.line, "upstream_dg requires the original dg_tube or dg_bore grammar")),
+        };
+        (kind, row)
+    } else {
+        let kind = if rows.next_is("dg_tube") { "dg_tube" } else { "dg_bore" };
+        (kind, rows.row(kind)?)
+    };
+    let source = DgSourceInput::read(kind, row.line, &mut row.fields,
+        &mut || rows.next(), gas, sources, records, gate)?;
+    row.end()?;
+    let molecular_key = if upstream { "upstream_molecular" } else { "dg_molecular" };
+    let source = if rows.next_is(molecular_key) {
+        let mut row = rows.row(molecular_key)?;
+        let law = fs_material::relaxation::input::read_relaxation(&mut row.fields)
+            .map_err(|error| ResolvedDgInputError::Gas(GasInputError::Material(error)))?;
+        row.end()?;
+        source.with_molecular_relaxation(law, &records[0])?
+    } else { source };
+    let wall_key = if upstream { "upstream_wall" } else { "dg_wall" };
+    let wall = if rows.next_is(wall_key) {
+        let mut row = rows.row(wall_key)?;
+        let declaration = DgMaterialWallLayoutInput::read(row.line, &mut row.fields,
+            &mut || rows.next())?;
+        row.end()?;
+        declaration.resolve(gate, &mut |path, line| {
+            let pack = load_material(path).map_err(|source|
+                ResolvedDgInputError::Material { line, source })?;
+            Ok::<_, ResolvedDgInputError>(Arc::new(pack))
+        })?
+    } else { DgMaterialWallLayout::default() };
+    Ok((source, wall))
 }
 
 #[cfg(test)]

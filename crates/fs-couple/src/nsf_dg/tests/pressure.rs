@@ -12,7 +12,7 @@ fn pressure_source_advances_the_original_zone_and_live_bore_on_both_orientations
             for pressure in [2.0, 2.0, -1.0, 0.0] {
                 let drive = NsfBoundaryDrive::PressureOffset(pressure);
                 let frame = coupled.step_with_boundary(drive, &gate).unwrap();
-                assert_eq!(frame.external_boundary, drive);
+                assert_eq!(frame.drive, NsfDgDrive::Boundary(drive));
                 let mut controls = [drive; 2];
                 controls[side] =
                     NsfBoundaryDrive::IncomingCharacteristic(frame.incoming_characteristic_m_s);
@@ -124,7 +124,7 @@ fn typed_playback_preserves_old_wave_bits_and_pressure_callback_identity() {
         parts.block(chunk).unwrap();
     }
     assert_eq!(a, b);
-    assert_eq!(whole.boundary_history(), parts.boundary_history());
+    assert_eq!(whole.drive_history(), parts.drive_history());
     assert_eq!(
         whole.system().zone().state_hash(),
         parts.system().zone().state_hash()

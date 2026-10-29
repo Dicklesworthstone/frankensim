@@ -423,17 +423,27 @@ fn resolved_provenance(
     let solid_wall = dg_wall_provenance(p.wall_layout());
     let radiation = super::duct_metadata::dg_radiation_provenance(load);
     let propagation = super::duct_metadata::observer_gas_provenance(renderer.observer_gas());
-    let boundary = match renderer.boundary_history().first().expect("finite native boundary history") {
-        fs_lbm::nsf3::NsfBoundaryDrive::PressureOffset(_) =>
+    let boundary = match renderer.drive_history().first().expect("finite native drive history") {
+        fs_couple::nsf_dg::NsfDgDrive::Boundary(fs_lbm::nsf3::NsfBoundaryDrive::PressureOffset(_)) =>
             ",\"external_boundary\":{\"kind\":\"prescribed-pressure-offset\",\"units\":\"Pa\",\"reference\":\"original source-face material pressure\",\"flow\":\"determined by the live outgoing characteristic at every original face reconstruction\"}",
-        fs_lbm::nsf3::NsfBoundaryDrive::IncomingCharacteristic(_) =>
+        fs_couple::nsf_dg::NsfDgDrive::Boundary(fs_lbm::nsf3::NsfBoundaryDrive::IncomingCharacteristic(_)) =>
             ",\"external_boundary\":{\"kind\":\"incoming-characteristic\",\"units\":\"m/s\",\"definition\":\"delta outward normal velocity minus delta pressure over reference material impedance\"}",
+        fs_couple::nsf_dg::NsfDgDrive::UpstreamPressureRise(_) =>
+            ",\"external_boundary\":{\"kind\":\"upstream-series-pressure-rise\",\"units\":\"Pa\",\"definition\":\"resolved face pressure minus finite upstream duct pressure\",\"flow\":\"both original acoustic loads and resolved faces solved on the same physical interval\",\"source_work\":\"minus pressure rise times outward upstream volume flow times physical interval\"}",
     };
+    let upstream = system.upstream_load().map_or_else(String::new, |upstream| {
+        let duct = upstream.duct();
+        let gas = super::duct_metadata::gas_state(duct.inlet_gas());
+        let wall = dg_wall_provenance(p.upstream_wall_layout().expect("native upstream source retains its wall layout"));
+        let radiation = super::duct_metadata::dg_radiation_provenance(upstream);
+        format!(",\"upstream_acoustic_load\":{{\"operator_identity\":\"{}\",\"total_dofs\":{},\"length_m\":{:e},\"inlet_area_m2\":{:e},\"inlet_gas\":{gas},\"scope\":\"original finite material DG duct and terminal histories; acoustic coupling without mean mass or enthalpy advection; pressure observer remains on the downstream duct\"{wall}{radiation}}}",
+            duct.operator_identity().to_hex(), duct.total_dofs(), duct.total_length(), duct.inlet_area_m2())
+    });
     let timing = format!(",\"time_projection\":{{\"physical_interval_s\":{:e},\"declared_physical_intervals\":{},\"declared_physical_duration_s\":{:e},\"observation_rate_hz\":{},\"declared_observation_samples\":{},\"declared_observation_duration_s\":{:e},\"method\":\"conservative overlap of original interval means; direct same-clock path\",\"boundary_control\":\"held value at each physical interval start; event error at most one physical interval\",\"bandlimited_antialias_filter\":false,\"scope\":\"box-average temporal projection requires clock refinement; physical prefix may lead observation by less than one physical interval; shared PCM decimation may truncate an incomplete output interval\"}}",
         load.propagator().dt(), info.physical_intervals,
         load.propagator().dt() * info.physical_intervals as f64,
         info.sample_rate_hz, info.samples, info.samples as f64 / f64::from(info.sample_rate_hz));
-    format!("\"resolved_input\":{{\"schema\":\"frankensim-resolved-dg-performance-v1\",\"blake3\":\"{}\",\"source_owner\":\"original-NsfGrid3-D3Q27\",\"dimensions\":[{},{},{}],\"solid_cells\":{},\"initial_state_cells\":{},\"boundary_segments\":{},\"dx_m\":{:e},\"nsf_dt_s\":{:e},\"substeps\":{},\"source_gas\":{gas},\"bulk_to_shear_ratio\":{:e},\"bulk_ratio_source\":{},\"coupled_area_m2\":{:e},\"maximum_root_evaluations\":{},\"maximum_cell_steps\":{},\"pressure_absolute_tolerance_pa\":{:e},\"pressure_relative_tolerance\":{:e},\"projection_absolute_tolerance_j\":{:e},\"projection_relative_tolerance\":{:e},\"duct_operator_identity\":\"{}\",\"duct_total_dofs\":{},\"pressure_point\":\"{point}\",\"observer_gas\":{propagation},\"model_scope\":\"original resolved fixed-composition fluid and live material DG bore; uniform acoustic interface projection with separate mass/energy flux; stationary voxel walls and two-cell fluid collars; source, geometry, boundary and coupling convergence remain required; no measured flute/reed qualification\"{boundary}{timing}{observer}{radiation}{solid_wall}{gas_sources}}}",
+    format!("\"resolved_input\":{{\"schema\":\"frankensim-resolved-dg-performance-v1\",\"blake3\":\"{}\",\"source_owner\":\"original-NsfGrid3-D3Q27\",\"dimensions\":[{},{},{}],\"solid_cells\":{},\"initial_state_cells\":{},\"boundary_segments\":{},\"dx_m\":{:e},\"nsf_dt_s\":{:e},\"substeps\":{},\"source_gas\":{gas},\"bulk_to_shear_ratio\":{:e},\"bulk_ratio_source\":{},\"coupled_area_m2\":{:e},\"maximum_root_evaluations\":{},\"maximum_cell_steps\":{},\"pressure_absolute_tolerance_pa\":{:e},\"pressure_relative_tolerance\":{:e},\"projection_absolute_tolerance_j\":{:e},\"projection_relative_tolerance\":{:e},\"duct_operator_identity\":\"{}\",\"duct_total_dofs\":{},\"pressure_point\":\"{point}\",\"observer_gas\":{propagation},\"model_scope\":\"original resolved fixed-composition fluid and live material DG bore; uniform acoustic interface projection with separate mass/energy flux; stationary voxel walls and two-cell fluid collars; source, geometry, boundary and coupling convergence remain required; no measured flute/reed qualification\"{boundary}{upstream}{timing}{observer}{radiation}{solid_wall}{gas_sources}}}",
         info.input_hash.to_hex(), info.dimensions[0], info.dimensions[1], info.dimensions[2],
         info.solid_cells, info.initial_state_cells, info.boundary_segments, law.dx_m, law.dt_s,
         limits.substeps, law.bulk_to_shear_ratio, json_string(system.zone().bulk_ratio_source()),

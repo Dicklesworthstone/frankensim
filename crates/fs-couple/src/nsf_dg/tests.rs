@@ -2,6 +2,7 @@
 use super::performance::NsfDgPerformance;
 use super::*;
 mod pressure;
+mod upstream;
 use crate::bernoulli_aperture::performance::ApertureObservation;
 use crate::pcm_wav::observation::PressureRenderer;
 use fs_duct::dg::PortId;

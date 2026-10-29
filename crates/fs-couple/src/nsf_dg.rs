@@ -27,6 +27,26 @@ use fs_material::gas::GasState;
 
 /// Finite physical pressure playback through the shared observer/PCM interface.
 pub mod performance;
+mod upstream;
+pub use upstream::NsfDgUpstreamFrame;
+
+/// Physical drive location and units remain explicit in the coupled source.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NsfDgDrive {
+    /// Prescribed control on an otherwise unloaded original NSF face.
+    Boundary(NsfBoundaryDrive),
+    /// Ideal held pressure rise from a finite upstream DG load into the zone
+    /// [Pa]. This is a series effort, not prescribed absolute face pressure.
+    UpstreamPressureRise(f64),
+}
+impl NsfDgDrive {
+    pub fn is_finite(self) -> bool {
+        match self {
+            Self::Boundary(value) => value.is_finite(),
+            Self::UpstreamPressureRise(value) => value.is_finite(),
+        }
+    }
+}
 
 /// Original owner failures and explicit coupling/refinement refusals.
 #[derive(Debug)]
@@ -132,9 +152,10 @@ pub struct NsfDgFrame {
     pub evaluations: usize,
     /// Accepted incoming characteristic on the coupled face [m/s].
     pub incoming_characteristic_m_s: f64,
-    /// Actual prescribed control on the other original face, including units.
-    /// Pressure is relative to that face's retained reference, never a velocity.
-    pub external_boundary: NsfBoundaryDrive,
+    /// Actual prescribed physical control, including its location and units.
+    pub drive: NsfDgDrive,
+    /// Original finite upstream load and source-work accounts, when attached.
+    pub upstream: Option<NsfDgUpstreamFrame>,
     /// Original NSF face accounts: low, high. Flux/work are summed over all
     /// substeps; pressure and continuum flow are their interval means.
     pub faces: [NsfBoundaryExchange; 2],
@@ -176,6 +197,7 @@ pub struct NsfDg<L: Lattice3<27>> {
     reference: GasState,
     area_m2: f64,
     steps: u64,
+    upstream: Option<upstream::UpstreamLoad>,
 }
 
 fn poll(gate: &CancelGate) -> Result<(), NsfDgError> {
@@ -220,7 +242,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
         {
             return Err(NsfDgError::Input("NSF/DG requires cold matching gas, area and clock, zero reference flow and finite complete work/projection budgets"));
         }
-        Ok(Self { zone, load, limits, high, reference, area_m2: area, steps: 0 })
+        Ok(Self { zone, load, limits, high, reference, area_m2: area, steps: 0, upstream: None })
     }
     /// Original resolved fluid state and thermochemical source.
     pub const fn zone(&self) -> &NsfGrid3<L> { &self.zone }
@@ -234,6 +256,16 @@ impl<L: Lattice3<27>> NsfDg<L> {
     pub const fn limits(&self) -> &NsfDgLimits { &self.limits }
     /// Accepted coupled intervals.
     pub const fn accepted_steps(&self) -> u64 { self.steps }
+
+    /// Advance the explicitly located source against its retained participants.
+    pub fn step_with_drive(&mut self, drive: NsfDgDrive, gate: &CancelGate)
+        -> Result<NsfDgFrame, NsfDgError>
+    {
+        match drive {
+            NsfDgDrive::Boundary(value) => self.step_with_boundary(value, gate),
+            NsfDgDrive::UpstreamPressureRise(value) => self.step_with_upstream_pressure_rise(value, gate),
+        }
+    }
 
     /// Hold the OTHER face's incoming characteristic for one interval [m/s].
     /// The coupled face is solved inside the caller's bracket. No synthetic jet
@@ -255,6 +287,9 @@ impl<L: Lattice3<27>> NsfDg<L> {
         -> Result<NsfDgFrame, NsfDgError>
     {
         poll(gate)?;
+        if self.upstream.is_some() {
+            return Err(NsfDgError::Input("a finite upstream load requires an explicit series pressure-rise control"));
+        }
         if !external_boundary.is_finite() || self.steps >= self.limits.maximum_steps {
             return Err(NsfDgError::Input("resolved interface input is nonfinite or its horizon is exhausted"));
         }
@@ -376,7 +411,8 @@ fn accept_candidate<L: Lattice3<27>>(
     fluid.accept();
     let duct = acoustic.accept();
     Ok(NsfDgFrame {
-        step, evaluations, incoming_characteristic_m_s: incoming, external_boundary, faces, flow,
+        step, evaluations, incoming_characteristic_m_s: incoming,
+        drive: NsfDgDrive::Boundary(external_boundary), upstream: None, faces, flow,
         flow_mass_change_kg: mass_change, flow_energy_change_j: energy_change, duct, terminals,
         inlet_flow_m3_s: q, inlet_pressure_pa: p, pressure_residual_pa: pressure_residual,
         projection_covariance_j: covariance, acoustic_work_residual_j: work_residual,

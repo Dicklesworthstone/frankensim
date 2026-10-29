@@ -12,9 +12,9 @@ fn physical_pressure_records_reach_original_faces_and_keep_callback_identity() {
     let file = read(&text, 8);
     assert!(
         file.renderer()
-            .boundary_history()
+            .drive_history()
             .iter()
-            .all(|&x| x == NsfBoundaryDrive::PressureOffset(20.0))
+            .all(|&x| x == NsfDgDrive::Boundary(NsfBoundaryDrive::PressureOffset(20.0)))
     );
     let (whole, solved) = render(file, 8);
     let (parts, partitioned) = render(read(&text, 3), 3);
@@ -108,9 +108,9 @@ fn data_only_composition_and_calorics_change_flow_at_the_same_blowing_pressure()
         assert_eq!(file.renderer().system().zone().law().dx_m, dx);
         assert!(
             file.renderer()
-                .boundary_history()
+                .drive_history()
                 .iter()
-                .all(|&x| x == NsfBoundaryDrive::PressureOffset(20.0))
+                .all(|&x| x == NsfDgDrive::Boundary(NsfBoundaryDrive::PressureOffset(20.0)))
         );
     }
     let (a, solved) = render(baseline, 8);
@@ -200,8 +200,8 @@ fn canonical_pressure_source_keeps_the_original_exterior_observer() {
     ));
     assert!(file.renderer().baffled_receiver().is_some());
     assert!(file.renderer().observer_gas().is_some());
-    let history = file.renderer().boundary_history();
-    assert_eq!(history[0], NsfBoundaryDrive::PressureOffset(20.0));
-    assert_eq!(history[128], NsfBoundaryDrive::PressureOffset(-20.0));
-    assert_eq!(history[256], NsfBoundaryDrive::PressureOffset(0.0));
+    let history = file.renderer().drive_history();
+    assert_eq!(history[0], NsfDgDrive::Boundary(NsfBoundaryDrive::PressureOffset(20.0)));
+    assert_eq!(history[128], NsfDgDrive::Boundary(NsfBoundaryDrive::PressureOffset(-20.0)));
+    assert_eq!(history[256], NsfDgDrive::Boundary(NsfBoundaryDrive::PressureOffset(0.0)));
 }

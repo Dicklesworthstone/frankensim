@@ -20,7 +20,7 @@ For a zero-velocity reference, the original boundary uses
 
 `J− = u_normal − (p − p_reference)/(rho_reference c_reference)`.
 
-Only the incoming characteristic on the coupled face is solved. For every trial,
+With a prescribed external boundary, only the incoming characteristic on the coupled face is solved. For every trial,
 the original NSF owner advances from the same accepted state while the original
 DG owner supplies its current step-mean law `p_DG = H + Z Q`. The scalar solve
 matches the mean reference-relative NSF face pressure to that law, using the
@@ -63,6 +63,42 @@ airway/reservoir's compliance, thermal capacity or mass inventory. It reflects
 returning acoustic disturbances according to a fixed-pressure condition; it is
 not a nonreflecting boundary. All original source, pressure-perturbation,
 temperature and Mach restrictions still apply.
+
+### Finite upstream acoustic feedback
+
+`NsfDg::with_upstream_load` attaches a second original `DgPortLoad` to the other
+complete NSF face before the first accepted interval. The upstream duct retains
+its original wave, wall, molecular-memory and terminal states. Both duct inlet
+flows point outward from the resolved zone. Returning upstream waves therefore
+change the source-face pressure as well as its flow.
+
+`NsfDgDrive::UpstreamPressureRise(rise_pa)` places an explicit ideal series
+pressure actuator between this duct inlet and the resolved face:
+
+    p_zone = p_upstream + rise_pa
+    source_work = -rise_pa * Q_out * interval
+
+The sign of source work is positive when this actuator supplies acoustic energy
+to the combined system. The drive is a pressure **rise**, not a prescribed face
+pressure. The upstream duct's instantaneous pressure remains solved. This is a
+finite acoustic airway with a declared ideal actuator; it supplies neither an
+anatomical lung model nor a finite reservoir's mass or thermal inventory.
+
+`step_with_upstream_pressure_rise` solves both original incoming characteristics
+against the two live current-interval DG inlet laws. A nested safeguarded scalar
+solve uses one shared root-evaluation and original cell-step allowance. Every
+trial starts from the same accepted NSF state. The final pair is restaged
+through the original owners; both pressure residuals, both original quadrature
+work accounts and cancellation are checked before the fluid and both ducts are
+published together. An inadmissible bracket or exhausted shared allowance
+refuses the whole interval without advancing any owner.
+
+`NsfDgFrame::upstream` retains the upstream original step and terminal frames,
+solved inlet pressure/flow, source work, and that face's pressure, covariance,
+acoustic-work, port-work and mass-projection residuals. Its acoustic work residual
+is `resolved_work_out + source_work - duct_inlet_work`. The existing main-face
+accounts retain their original meaning. Both faces remain acoustic projections:
+neither DG duct acquires NSF advected mass, entropy or enthalpy.
 
 The complete reference gas state, including transport properties, must equal the
 DG inlet gas. The actual complete face area must match inlet area. The DG interval
@@ -129,9 +165,12 @@ physical/numerical delay.
 `new_with_boundary` instead takes a `Vec<NsfBoundaryDrive>` so every control
 value carries its physical kind and units. `new_resampled_with_boundary` uses
 the same typed controls with the independent observation clock below.
-`boundary_history()` exposes those exact original controls; pressure samples are
-never returned as characteristic velocities. The original scalar constructors
-select the characteristic variant and retain their existing physical arithmetic.
+`new_with_drives` and `new_resampled_with_drives` accept `Vec<NsfDgDrive>` for
+either prescribed-boundary or finite-upstream control. `drive_history()` exposes
+the exact typed controls; pressure offsets, series pressure rises and incoming
+velocities retain distinct meanings. The control kind must match the attached
+topology. The original scalar constructors select the characteristic variant and
+retain their existing physical arithmetic.
 
 Call `with_observer_gas(&propagation)` before playback to use the same physical
 atmosphere law as native flute and reed observation. `GasPropagation` selects
@@ -201,6 +240,15 @@ relative to the authored 100 kPa source reference. The flow is solved. Changing
 the source gas or pressure history is a data edit; it does not require changing
 the solver or calculating a replacement characteristic velocity.
 
+For finite upstream acoustic feedback, use:
+
+    music_render resolved crates/fs-couple/examples/resolved-dg-upstream.performance output.wav --decimate --self-contained
+
+This source retains the same resolved constriction and exterior receiver, adds a
+closed upstream duct, and applies a `+20 Pa`, then `−20 Pa`, then zero **series
+pressure rise**. Its face pressure and flow are both solved. Upstream length,
+termination, wall material and admitted gas-memory declarations are source data.
+
 The canonical example observes at 96 kHz; `--decimate` uses the shared pressure
 decimator for 48 kHz PCM. Pressure remains in pascals and the authored full-scale
 value controls PCM conversion; there is no peak normalization. The existing
@@ -235,6 +283,9 @@ coupling MAX_ROOT_EVALUATIONS MAX_CELL_STEPS JMIN_M_S JMAX_M_S PRESSURE_ABS_PA P
 dg_tube [existing shared DgSourceInput fields and subsidiary records]
 [optional dg_molecular declaration from the shared molecular-law reader]
 [optional existing dg_wall material-layout records]
+[optional upstream_dg dg_tube|dg_bore followed by the shared source fields and subsidiary records]
+[optional upstream_molecular declaration from the shared molecular-law reader]
+[optional upstream_wall material-layout records]
 observation inlet-pressure
 [optional existing observer_gas record, only with a baffled observer]
 boundary COUNT
@@ -279,6 +330,16 @@ Alternatives use the same original parsers and owners:
   value. `boundary characteristic COUNT` explicitly names the original m/s
   condition. The existing bare `boundary COUNT` has the same characteristic
   meaning and arithmetic. Unknown kinds and trailing fields refuse.
+- `upstream_dg dg_tube ...` or `upstream_dg dg_bore ...` attaches the second
+  original load. Its subsidiary geometry, regional gas, chimney and radiation
+  records use the same shared parser as the main load. `upstream_molecular` and
+  `upstream_wall` retain the original gas relaxation and material-wall readers.
+  Both loads must match their own complete NSF reference gas, face area and
+  actual coupled interval. An active reciprocal exterior-mouth port is refused
+  at either interface. `boundary upstream-pressure COUNT` then declares series
+  pressure rises in Pa. This control requires the upstream load; the prescribed
+  boundary controls require its absence. The parser does not infer drive location
+  or pressure meaning from a numeric history.
 
 Cell indices are zero-based. Axes are `0`, `1`, `2`; periodic flags are `0` or
 `1`, and the characteristic axis must be nonperiodic. The `low|high` field
@@ -322,7 +383,10 @@ axes, fixed-pressure integrated work, original fluid/DG replay, returned-wave
 and material-dependent flow, typed-history callback identity and transactional
 domain/cancellation refusal. Native cases exercise source-only composition,
 calorics and DG molecular-memory changes through the same pressure-controlled
-path.
+path. Finite-upstream regressions additionally replay both original ducts and
+the original fluid at both face orientations, independently check actuator work,
+change upstream termination/length, verify shared-budget refusal and retry, and
+exercise the canonical two-sided source through the exterior microphone.
 
 Additional regressions live in `fs-lbm/tests/nsf3_open_boundaries.rs`,
 `fs-couple/src/nsf_dg/performance/clock.rs`,

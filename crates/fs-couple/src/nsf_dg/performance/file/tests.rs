@@ -5,6 +5,7 @@ use crate::pcm_wav::observation::PressureRenderer;
 use fs_material::gas_species::input::{ThermochemicalPhase, read_gas_record};
 
 mod pressure;
+mod upstream;
 
 #[path = "../../../render/schedule/reed/field_input/tests/support.rs"]
 mod support;

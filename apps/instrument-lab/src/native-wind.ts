@@ -5,6 +5,7 @@ import flueExampleSource from "../../../crates/fs-couple/examples/flue-nolle.per
 import flueDgSource from "../../../crates/fs-couple/examples/flue-dg-baffled.performance?raw";
 import resolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg.performance?raw";
 import pressureResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-pressure.performance?raw";
+import upstreamResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-upstream.performance?raw";
 import molecularFlueSource from "../../../crates/fs-couple/examples/flue-dg-molecular.performance?raw";
 import nolleMolecularFlueSource from "../../../crates/fs-couple/examples/flue-dg-nolle-molecular.performance?raw";
 import conicalMolecularFlueSource from "../../../crates/fs-couple/examples/flue-dg-conical-molecular.performance?raw";
@@ -75,6 +76,15 @@ const EXAMPLES = [
     decimate: true,
     intro: "Starter: a declared pressure history drives the original resolved gas field and spatial bore. The returning wave and actual gas properties determine inlet flow; the native exterior microphone observes the resulting pressure.",
     help: "boundary pressure gives pascals relative to the original source-face pressure. Change the gas, stationary geometry or pressure history in the source, keeping the declared numerical limits. This is an ideal pressure boundary in the existing local-linear characteristic domain, not finite airway storage or a measured flute. Native decimation preserves the physical solver clock.",
+  },
+  {
+    name: "resolved-dg-upstream.performance",
+    label: "Resolved flow — upstream acoustic feedback",
+    renderer: "resolved",
+    source: upstreamResolvedDgSource,
+    decimate: true,
+    intro: "Starter: a resolved gas source sits between a finite upstream duct and a downstream bore. Change the upstream geometry, gas or pressure-rise history to change the returning waves and the resulting downstream microphone pressure.",
+    help: "upstream_dg declares the original upstream acoustic load. boundary upstream-pressure supplies a pressure rise in pascals between that duct and the resolved zone; both face pressures and flows remain coupled unknowns. Material walls and gas relaxation use the existing source records. This acoustic interface does not transport mean mass or enthalpy into the ducts, and this manufactured fixture does not qualify a complete player airway or flute. Native decimation preserves the 96 kHz solver clock.",
   },
   {
     name: "flue-dg-molecular.performance",

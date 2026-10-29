@@ -5,7 +5,7 @@
 //! The coupled face is still solved against the live DG history.
 //! Initial resolved motion and thermochemical material state are retained.
 
-use super::{NsfDg, NsfDgFrame, same_clock};
+use super::{NsfDg, NsfDgDrive, NsfDgFrame, same_clock};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::performance::ApertureObservation;
 use crate::pcm_wav::baffled::BaffledPressure;
@@ -45,7 +45,7 @@ pub fn source_intervals_for(physical_dt_s: f64, output_rate_hz: u32, output_samp
 /// poisons playback, retaining any already accepted prefix and observer state.
 pub struct NsfDgPerformance<L: Lattice3<27>> {
     system: NsfDg<L>,
-    boundary: Vec<NsfBoundaryDrive>,
+    boundary: Vec<NsfDgDrive>,
     observation: ApertureObservation,
     receiver: Option<BaffledPressure>,
     observer_gas: Option<GasPropagationReport>,
@@ -82,6 +82,16 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
     pub fn new_with_boundary(
         system: NsfDg<L>, observation: ApertureObservation, sample_rate_hz: u32,
         boundary: Vec<NsfBoundaryDrive>, maximum_block: usize, gate: Arc<CancelGate>,
+    ) -> Result<Self, RenderError> {
+        Self::new_with_drives(system, observation, sample_rate_hz,
+            boundary.into_iter().map(NsfDgDrive::Boundary).collect(), maximum_block, gate)
+    }
+
+    /// Bind boundary controls or explicit series pressure rises through a
+    /// retained finite upstream load on the original physical clock.
+    pub fn new_with_drives(
+        system: NsfDg<L>, observation: ApertureObservation, sample_rate_hz: u32,
+        boundary: Vec<NsfDgDrive>, maximum_block: usize, gate: Arc<CancelGate>,
     ) -> Result<Self, RenderError> {
         if !same_clock(system.load().propagator().dt(), 1.0 / f64::from(sample_rate_hz)) {
             return Err(sizing("resolved performance requires its original matching physical clock"));
@@ -126,13 +136,26 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
         boundary: Vec<NsfBoundaryDrive>, output_samples: u64,
         maximum_block: usize, gate: Arc<CancelGate>,
     ) -> Result<Self, RenderError> {
+        Self::new_resampled_with_drives(system, observation, output_rate_hz,
+            boundary.into_iter().map(NsfDgDrive::Boundary).collect(),
+            output_samples, maximum_block, gate)
+    }
+
+    /// Observe the same original two-sided or one-sided physical system without
+    /// retiming source histories or replacing its declared drive location.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_resampled_with_drives(
+        system: NsfDg<L>, observation: ApertureObservation, output_rate_hz: u32,
+        boundary: Vec<NsfDgDrive>, output_samples: u64,
+        maximum_block: usize, gate: Arc<CancelGate>,
+    ) -> Result<Self, RenderError> {
         let dt = system.load().propagator().dt();
         if boundary.len() != source_intervals_for(dt, output_rate_hz, output_samples)? {
             return Err(sizing("resolved boundary data must cover exactly the original physical intervals of its output window"));
         }
         if same_clock(dt, 1.0 / f64::from(output_rate_hz)) {
             if dt.to_bits() == (1.0 / f64::from(output_rate_hz)).to_bits() {
-                return Self::new_with_boundary(system, observation, output_rate_hz,
+                return Self::new_with_drives(system, observation, output_rate_hz,
                     boundary, maximum_block, gate);
             }
             // Existing derived-clock roundoff admission still uses exactly
@@ -149,7 +172,7 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
     #[allow(clippy::too_many_arguments)]
     fn build(
         system: NsfDg<L>, observation: ApertureObservation, sample_rate_hz: u32,
-        boundary: Vec<NsfBoundaryDrive>, output_samples: u64,
+        boundary: Vec<NsfDgDrive>, output_samples: u64,
         maximum_block: usize, gate: Arc<CancelGate>, clock: Option<IntervalClock>,
         projected_observer: bool,
     ) -> Result<Self, RenderError> {
@@ -158,6 +181,8 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
             || boundary.is_empty()
             || boundary.len() as u64 > system.limits().maximum_steps
             || !boundary.iter().all(|x| x.is_finite())
+            || boundary.iter().any(|drive| system.upstream_load().is_some()
+                != matches!(drive, NsfDgDrive::UpstreamPressureRise(_)))
             || output_samples == 0
         {
             return Err(sizing("resolved performance requires a cold matching clock and finite boundary samples/capacity"));
@@ -210,8 +235,8 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
 
     /// Original resolved source, material state and acoustic load.
     pub const fn system(&self) -> &NsfDg<L> { &self.system }
-    /// Physical controls on the noncoupled face, with explicit kinds and units.
-    pub fn boundary_history(&self) -> &[NsfBoundaryDrive] { &self.boundary }
+    /// Original physical controls, with explicit location, kinds and units.
+    pub fn drive_history(&self) -> &[NsfDgDrive] { &self.boundary }
     /// Last accepted physical interval, even if its later observation failed.
     pub const fn last_frame(&self) -> Option<&NsfDgFrame> { self.last.as_ref() }
     /// Physical location of the emitted pressure.
@@ -229,7 +254,7 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
     fn advance_source(&mut self) -> Result<(), RenderError> {
         let boundary = *self.boundary.get(self.system.accepted_steps() as usize)
             .ok_or_else(|| sizing("resolved physical boundary history is exhausted"))?;
-        let frame = self.system.step_with_boundary(boundary, &self.gate)
+        let frame = self.system.step_with_drive(boundary, &self.gate)
             .map_err(|e| RenderError::Voice(AcousticRealizeError::Nonlinear(e.to_string())))?;
         self.last = Some(frame);
         Ok(())

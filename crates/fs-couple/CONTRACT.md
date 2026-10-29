@@ -11135,6 +11135,7 @@ remain outside this owner; a full Cargo/workspace check is separate.
 The original finite-enthalpy spatial response candidate now closes actual E/J and caloric T/liquid mass fraction under voltage, current-density or equipotential total-current drive. Both ordinary and nonlinear held-current paths delegate the same native electrode solver; every thermal trial enforces its authored current inside the source closure. Supplied work uses authored I times solved electrode voltage independently of recovered reaction, while local native E.J remains the deposited heat. All trials share the existing field-solve budget, pinned caloric/source admission, final fresh acceptance and atomic histories. Zero current retains conducting-terminal admission and never invents a potential across disconnected islands. Independent finite-capacity and latent-balance regressions cover both signs, data-only changes, partial/full-melt continuation, zero current and budget/cancellation refusal. Fixed geometry, field-independent caloric storage and bounded memoryless scalar response remain explicit limits.
 
 
+
 ### Directional Kelvin–Maxwell plane-stress constraints
 
 `PlaneStressPoint` admits Kelvin viscosity acting on any subset of the local
@@ -11167,3 +11168,28 @@ This is not full-workspace Cargo/DSR qualification. Singular oblique normal
 blocks without exact coordinate-aligned zero rows continue to refuse when
 their retained block cannot be resolved; no general rank-revealing DAE solver
 is claimed.
+
+### Resolved source with a finite upstream acoustic load
+
+`NsfDg::with_upstream_load` attaches a second original `DgPortLoad` to the
+upstream face of the same `NsfZone`. Both duct inlet orientations point out of
+the zone; a prescribed series pressure rise satisfies
+`p_zone - p_upstream = rise`, with external work `-rise * upstream_flow * dt`.
+Neither face flow nor zone pressure is independently prescribed. The original
+NSF face maps, downstream observer, material wall and molecular histories remain
+their owners. Matching gas, face area, clock, zero reference flow and cold state
+are admission conditions; duplicate or independently driven attachments refuse.
+
+The two characteristic solves share one evaluation/cell-step allowance and
+reserve a final evaluation to restage both ducts and the original source from
+the same accepted state. Pressure residuals, covariance, mass projection and
+both original port-work accounts must pass before all three states publish.
+Failure or cancellation leaves their histories and clocks unchanged. The
+one-load boundary-pressure and boundary-flow paths retain their arithmetic.
+
+The native `upstream_dg`, optional `upstream_molecular`/`upstream_wall`, and
+`boundary upstream-pressure` records reach this owner without a surrogate
+renderer. Frame and CLI provenance retain the drive kind, original upstream
+duct geometry/material identity and separate source work. The 96 kHz Lab
+starter is an acoustic feedback experiment: the DG interfaces do not advect
+mean mass or enthalpy, and the finite duct is not a qualified anatomical airway.
