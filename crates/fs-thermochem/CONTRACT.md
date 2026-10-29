@@ -1131,7 +1131,7 @@ density/temperature Helmholtz equation, using equation 28 and Tables 30–33 of
 the attributed [IAPWS R7-97(2012) release](https://iapws.org/technical-guidance/release/IF97-Rev.download).
 `If97DenseState` returns typed p, rho, T, v, h, u, s, Helmholtz/Gibbs energies,
 Cp, Cv, sound speed and analytic pressure/caloric/volume derivatives. Cached
-integer powers and one compensated coefficient pass evaluate the source without
+integer powers and one coefficient pass evaluate the source without
 allocation or a nonlinear density solve. Existing Region 1/2 APIs retain their
 original operation order and references.
 
@@ -1142,8 +1142,9 @@ polynomial roots; independent outward interval arithmetic verifies that its
 upper boundary lies beyond 100 MPa over the complete source temperature
 interval. The exact critical state refuses its singular response functions.
 No critical neighborhood is smoothed, and no pressure, entropy or energy is
-shifted to join independently fitted regions. This API does not provide a p,T
-density inverse, a Region 3 saturation pair, a mixture lever rule, ice or Region 5.
+shifted to join independently fitted regions. The direct density/temperature API does not itself supply a mixture lever rule,
+ice or Region 5; pressure inversion and high-temperature saturation endpoints
+are supplied by the separate module documented below.
 
 `region3::increments::DenseIsochoricInterval` prepares an immutable fixed-density
 temperature path. Bounded outward interval subdivision establishes its complete
@@ -1170,3 +1171,44 @@ Cv bounds; adjacent-temperature increments; independent Cv and Cv/T integrals;
 additivity, reversal, bounded work and cancellation. The existing 37 unchanged
 source files match the inspected main-tree blobs. Full workspace DSR remains
 unavailable in this environment.
+
+## Pressure-driven dense water and stable caloric changes
+
+`region3::pressure` adds original-equation pressure/temperature inversion and
+Region 3/4 saturation endpoints for 623.15 < T < 647.096 K. Stable outer roots
+are selected using the original saturation equation; temperature powers are
+cached once during safeguarded analytic Newton/bisection. The returned source
+pressure, density, h, u and s remain unmodified. Paired endpoints expose both
+pressure residuals, the requested-pressure/Region 4 inverse residual, latent
+enthalpy and entropy, and the original Gibbs mismatch. A pair is not a bulk
+mixture model or a new caloric reference.
+
+Acceptance requires an explicit pressure tolerance and a numerical density
+bracket width. An outward evaluation verifies positive Cv and isothermal
+stiffness throughout that final bracket. The pressure-sign bracket is a
+floating-point solver diagnostic, not a certified real-arithmetic root-error
+enclosure or an experimental uncertainty. Per-endpoint work is limited to
+1..=256 branch/root iterations, with bounded cancellation checks and no
+allocation on success. Exact critical states, ambiguous saturation, unresolved
+branches/stability, insufficient resolution, exhausted work and unsupported
+source domains refuse. No critical neighborhood is smoothed or admitted by
+widening a source boundary.
+
+`region3::difference::difference` provides stable changes of original h, u, s,
+v, p and p/rho between validated source states with changing density AND
+temperature. Factored integer-power changes and the existing stable entropy
+log-ratio primitive preserve small input increments. Compensated accumulation
+and canonical endpoint ordering give fixed work, exact reversal and exact zero;
+delta_h equals delta_u plus delta(p/rho). These are endpoint differences, not
+evidence that an interpolated thermodynamic path is admissible. Consumers of
+absolute storage must still audit represented endpoint energy and pressure work.
+
+The native original-source thermochemistry suite passes 177 tests. Eight new
+tests cover all Table 33 pressure inversions with printed-value precision;
+liquid/vapor/supercritical round trips and derivatives; distinct high-temperature
+saturation pairs; original pressure/Gibbs residuals; closed 100 MPa and B23
+boundaries; work, domain, resolution and early/late cancellation refusals;
+adjacent-representable density/temperature changes; independent first-law and
+entropy integrals; and agreement with the existing prepared isochore.
+There is no Region 3 mixture transport, automatic Region 1/2/3 caloric stitching,
+ice or Region 5 claim. Full-workspace DSR/Cargo validation remains separate.

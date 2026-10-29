@@ -3,8 +3,9 @@
 //! Equation (28) and Tables 30–32 of IAPWS R7-97(2012) supply every coefficient
 //! and derivative. Attribution: International Association for the Properties
 //! of Water and Steam, <https://iapws.org/technical-guidance/release/IF97-Rev.download>.
-//! The source uses density and temperature directly. It supplies no density
-//! root, two-phase lever rule or metastable continuation.
+//! The source uses density and temperature directly. The separate [`pressure`]
+//! owner provides bounded pressure inversion and paired saturation endpoints;
+//! the source evaluator itself supplies no mixture or metastable continuation.
 //!
 //! Admission requires the original B23/100 MPa pressure bounds, 623.15–863.15 K,
 //! positive Cv and isothermal stiffness, and the stable side of Region 4 below
@@ -32,6 +33,11 @@ use fs_qty::{Density, Pressure, Qty, Temperature, Velocity};
 
 /// Stable fixed-density caloric differences from the same original coefficients.
 pub mod increments;
+
+/// Stable changes between original dense-water states at arbitrary endpoints.
+pub mod difference;
+/// Bounded pressure inversion and original Region 3/4 saturation endpoints.
+pub mod pressure;
 
 /// Original critical density and Helmholtz density reduction [kg/m3], Eq. (4).
 pub const CRITICAL_DENSITY_KG_M3: f64 = 322.0;
