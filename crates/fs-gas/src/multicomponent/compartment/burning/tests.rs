@@ -451,3 +451,156 @@ fn g4_cancellation_zero_oxygen_and_refusals_preserve_owners() {
     assert_eq!((zone.clone(), owner.clone()), original);
     assert_eq!(evaluate(&owner, &zone, 0.1, 0.3), baseline);
 }
+
+fn exhaust_before_burning(zone: &mut TwoZone, duration: Time) {
+    let removed = 0.4 * zone.layer(Layer::Upper).mass_kg();
+    let outflow = zone
+        .carried_rate(Layer::Upper, MassFlowRate::new(removed / duration.value()))
+        .unwrap()
+        .opposite();
+    zone.advance(
+        duration,
+        [LayerRates::default(), outflow],
+        ZoneSolve::default(),
+        || false,
+    )
+    .unwrap();
+}
+
+#[test]
+fn g0_split_burning_uses_transported_oxygen_without_advancing_the_clock() {
+    let mechanism = fixture_mechanism(40.0, 0.0, false);
+    let mut zone = room(&mechanism, FEED, false);
+    let owner = adapter(&zone, &mechanism);
+    let duration = Time::new(0.2);
+    let stale_extent = evaluate(&owner, &zone, 10.0, duration.value())
+        .actual_extent
+        .value();
+    exhaust_before_burning(&mut zone, duration);
+    let transported = zone.clone();
+    let oxygen = transported.layer(Layer::Upper).species_masses()[4];
+    let before_energy = zone.physical_internal_energy().value();
+    let before_mass = zone.layer(Layer::Lower).mass_kg() + zone.layer(Layer::Upper).mass_kg();
+    let report = owner
+        .apply_split(
+            &mut zone,
+            Layer::Upper,
+            Amount::new(10.0),
+            duration,
+            Temperature::new(2.0),
+            ZoneSolve::default(),
+            || false,
+        )
+        .unwrap();
+    assert_eq!(report.burning.limiting_species, Some(4));
+    close(report.burning.actual_extent.value(), oxygen / 64.0, 1e-15);
+    assert!(report.burning.actual_extent.value() < 0.61 * stale_extent);
+    assert!(zone.layer(Layer::Upper).species_masses()[4] >= 0.0);
+    assert!(zone.layer(Layer::Upper).species_masses()[4] <= 1e-13);
+    assert_eq!(
+        zone.time().value().to_bits(),
+        transported.time().value().to_bits()
+    );
+    assert_eq!(zone.time(), duration);
+    assert_eq!(report.relaxation.elapsed, duration);
+    assert_eq!(report.relaxation.pressure, zone.pressure());
+    assert_eq!(
+        report.relaxation.interface_work_j[0],
+        -report.relaxation.interface_work_j[1]
+    );
+    close(
+        zone.physical_internal_energy().value(),
+        before_energy,
+        2e-10,
+    );
+    close(
+        zone.layer(Layer::Lower).mass_kg() + zone.layer(Layer::Upper).mass_kg(),
+        before_mass,
+        2e-13,
+    );
+    for i in 0..5 {
+        close(
+            zone.layer(Layer::Upper).species_masses()[i]
+                - transported.layer(Layer::Upper).species_masses()[i],
+            duration.value() * report.burning.chemical_rates.species_kg_s[i],
+            2e-14,
+        );
+    }
+}
+
+#[test]
+fn g4_split_cancellation_and_caloric_refusal_preserve_the_transported_candidate() {
+    let mechanism = fixture_mechanism(40.0, 0.0, false);
+    let mut transported = room(&mechanism, FEED, false);
+    let owner = adapter(&transported, &mechanism);
+    let duration = Time::new(0.2);
+    exhaust_before_burning(&mut transported, duration);
+    let mut baseline = transported.clone();
+    let mut calls = 0;
+    let expected = owner
+        .apply_split(
+            &mut baseline,
+            Layer::Upper,
+            Amount::new(0.1),
+            duration,
+            Temperature::new(2.0),
+            ZoneSolve::default(),
+            || {
+                calls += 1;
+                false
+            },
+        )
+        .unwrap();
+    assert!(calls > 10);
+    for stop in [1, calls / 2, calls] {
+        let mut candidate = transported.clone();
+        let mut seen = 0;
+        assert_eq!(
+            owner.apply_split(
+                &mut candidate,
+                Layer::Upper,
+                Amount::new(0.1),
+                duration,
+                Temperature::new(2.0),
+                ZoneSolve::default(),
+                || {
+                    seen += 1;
+                    seen == stop
+                },
+            ),
+            Err(BurningError::Cancelled)
+        );
+        assert_eq!(candidate, transported);
+        let accepted = owner
+            .apply_split(
+                &mut candidate,
+                Layer::Upper,
+                Amount::new(0.1),
+                duration,
+                Temperature::new(2.0),
+                ZoneSolve::default(),
+                || false,
+            )
+            .unwrap();
+        assert_eq!(accepted, expected);
+        assert_eq!(candidate, baseline);
+    }
+    let hot_mechanism = fixture_mechanism(10_000.0, 0.0, false);
+    let mut hot = room(&hot_mechanism, FEED, false);
+    let hot_owner = adapter(&hot, &hot_mechanism);
+    exhaust_before_burning(&mut hot, duration);
+    let original = hot.clone();
+    assert_eq!(
+        hot_owner.apply_split(
+            &mut hot,
+            Layer::Upper,
+            Amount::new(10.0),
+            duration,
+            Temperature::new(2.0),
+            ZoneSolve::default(),
+            || false,
+        ),
+        Err(BurningError::Zone(ZoneError::CaloricDomain))
+    );
+    assert_eq!(hot, original);
+}

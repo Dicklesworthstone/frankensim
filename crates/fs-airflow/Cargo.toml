@@ -10,6 +10,10 @@ description = "Typed fan curves, uncertain loss networks, certified operating-po
 [package.metadata.frankensim]
 layer = "L3"
 
+[features]
+default = []
+compartment-fire = ["dep:fs-gas", "dep:fs-la", "dep:fs-thermal", "dep:fs-thermochem"]
+
 [dependencies]
 fs-blake3 = { path = "../fs-blake3" }
 fs-conduction = { path = "../fs-conduction" }
@@ -19,6 +23,10 @@ fs-convection = { path = "../fs-convection" }
 # contract assigns one to the consumer, which is what `conjugate` builds.
 fs-couple = { path = "../fs-couple" }
 fs-evidence = { path = "../fs-evidence" }
+fs-gas = { path = "../fs-gas", features = ["experimental-euler"], optional = true }
+fs-la = { path = "../fs-la", optional = true }
+fs-thermal = { path = "../fs-thermal", optional = true }
+fs-thermochem = { path = "../fs-thermochem", optional = true }
 # Cancellation checkpoints at conjugate outer-iteration boundaries.
 fs-exec = { path = "../fs-exec" }
 fs-ivl = { path = "../fs-ivl" }

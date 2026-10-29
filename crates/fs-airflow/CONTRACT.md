@@ -942,3 +942,56 @@ an isolated leaf build, not the entire airflow/conduction/runtime graph.
 Reference: [NIST TN1889v1, section4.1, equations4.1–4.4](https://doi.org/10.6028/NIST.TN.1889v1).
 This remains a low-Mach wall-opening closure; ceiling exchange, jet entrainment,
 compressible choking and experimental validation require separate owners.
+
+
+## Conservative compartment-fire networks and thermal walls
+
+The optional `compartment-fire` feature composes the existing source-owned
+`fs-gas::multicomponent::compartment` rooms, stratified wall-opening owner,
+`fs-la::prepared_lu`, `fs-thermal::enthalpy` and `fs-convection::fire`.
+The bounded network admits up to 32 source-matched rooms and 512 wall or
+mechanical connections. Each directional vent slab carries its actual donor's
+species and original partial enthalpies, with identical opposite room entries.
+Ambient exchange and explicitly supplied fan work enter the external account.
+Openings may be changed or closed exactly between accepted steps.
+
+A bounded damped Newton solve treats opening pressure implicitly while donor
+temperature, composition and interface geometry are frozen per attempted step.
+All trial rooms are reconstructed from accepted state. Whole-network duration
+retries and cancellation publish no partial rooms. Duration-dependent source
+providers recompute wall candidates once per actual attempted interval; only
+the accepted payload is returned. A subsequent split-source provider operates
+on transported inventories before publication, preserves room identity and
+clocks, and declares its actual additional sources. The report distinguishes
+post-source pressure changes from the transport pressure-equation residual and
+reports net physical external energy, each species source, and balance residuals.
+This remains a first-order estimated operator composition, not a globally
+second-order or fully temperature-implicit scheme or discrete entropy proof.
+
+The wall adapter retains the caller's original borrowed ThermalLaw, original
+DepositionSimulation histories and BackwardEulerStep residual/acceptance gates.
+Uniform through-thickness finite volumes use original series conductances and
+both surface half-cell resistances. The actual material masses and geometry
+remain fixed when layer exposure areas change. Signed gas-contact energy is
+returned identically opposite to the wall exchange; outer convection and
+explicit incident radiant power have separate accounts. Incident fire radiation
+is external wall input, not an additional gas debit. Gas emissivity, soot
+absorption, thermal properties and inverse calorics are never inferred.
+Numerical vectors/LU are reused; original thermal trial maps still allocate
+within explicit cell, Newton and backtracking budgets.
+
+The prescribed-fire helper computes lower-layer density and mass-specific Cp
+from the original current species/caloric inventory, then reuses Heskestad
+entrainment. One identical donor vector moves from lower to upper; convective
+heat enters the upper layer and radiant power is returned separately. An absent
+upper layer can be created by real entrainment. No fuel/products/soot are
+invented, and this prescribed-HRR owner does not consume oxygen. Existing
+upper-layer weak-plume penetration, participating-gas radiation, ceiling vents,
+pyrolysis, and field-resolved flame behavior remain outside this implementation.
+
+Focused native verification passes 30 original-source airflow tests: ten
+stratified vents, seven network/source-composition cases, nine thermal-wall
+cases and four plume cases. These include simultaneous counterflow, independent
+species/enthalpy balance, pressure equilibration, forced complete-step retries,
+matched gas/wall clocks, joint gas-wall energy, latent heat storage, surface
+resistance, implicit conduction beyond the explicit limit, and cancellation.

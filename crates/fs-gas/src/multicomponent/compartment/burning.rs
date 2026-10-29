@@ -11,7 +11,9 @@
 //! Physical internal energy is unchanged. The reported reaction enthalpy is a
 //! diagnostic (or a requested-extent conversion), **not another heat source**.
 
-use super::{Layer, LayerRates, MAX_SPECIES, MixtureGas, TwoZone, sum};
+use super::{
+    Layer, LayerRates, MAX_SPECIES, MixtureGas, TwoZone, ZoneError, ZoneSolve, ZoneStepReport, sum,
+};
 use crate::multicomponent::Error as GasError;
 use fs_qty::{Amount, Energy, Power, Temperature, Time};
 use fs_thermochem::kinetics::IdealGasKineticsV1;
@@ -33,6 +35,8 @@ pub enum BurningError {
     Unrepresentable(&'static str),
     /// The original NASA source refused a thermodynamic evaluation.
     Gas(GasError),
+    /// Original source-domain or moving-interface solve refused the split update.
+    Zone(ZoneError),
     /// Cancellation was observed before a result was returned.
     Cancelled,
 }
@@ -42,6 +46,14 @@ impl core::fmt::Display for BurningError {
     }
 }
 impl std::error::Error for BurningError {}
+impl From<ZoneError> for BurningError {
+    fn from(error: ZoneError) -> Self {
+        match error {
+            ZoneError::Cancelled => Self::Cancelled,
+            other => Self::Zone(other),
+        }
+    }
+}
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), BurningError> {
     if cancelled() {
         Err(BurningError::Cancelled)
@@ -72,6 +84,16 @@ pub struct BurningReport {
     pub released_power: Power,
     /// Actual signed molecular-mass source discrepancy [kg/s], never repaired.
     pub mass_balance_rate_kg_s: f64,
+}
+
+/// One accepted chemical source substep, with no additional physical clock advance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SplitBurningReport {
+    /// Reaction progress and rates evaluated on the actually transported inventory.
+    pub burning: BurningReport,
+    /// Original pressure/interface solve and balances. Its elapsed duration is the
+    /// source integration interval; the room's physical clock is unchanged.
+    pub relaxation: ZoneStepReport,
 }
 
 /// Immutable adapter bound to an already conserved mechanism and original gas.
@@ -307,6 +329,49 @@ impl InventoryLimitedReaction {
         Err(BurningError::Unrepresentable(
             "bounded common-extent admission",
         ))
+    }
+
+    /// Apply chemistry to an unpublished room after its transport substep.
+    ///
+    /// Availability comes only from this actual post-transport inventory, so
+    /// oxygen already removed by a vent cannot also be consumed by the flame.
+    /// Fuel/inflow must already be present; no incoming rates are added here.
+    /// The original two-zone solve handles chemical energy and equal/opposite
+    /// interface work. The physical clock retains its exact pre-call bits, since
+    /// transport already counted this interval. This transport/source composition
+    /// is first order; it does not make vent thermodynamic states fully implicit.
+    ///
+    /// A source, solve, or cancellation refusal preserves the complete supplied
+    /// candidate. No gas bank is cloned. After the original atomic solve succeeds,
+    /// only an infallible clock restoration and report construction remain.
+    pub fn apply_split(
+        &self,
+        room: &mut TwoZone,
+        layer: Layer,
+        requested_extent: Amount,
+        source_duration: Time,
+        reference_temperature: Temperature,
+        controls: ZoneSolve,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<SplitBurningReport, BurningError> {
+        let burning = self.evaluate(
+            room,
+            layer,
+            requested_extent,
+            source_duration,
+            None,
+            reference_temperature,
+            &mut cancelled,
+        )?;
+        let mut rates = [LayerRates::default(); 2];
+        rates[layer.index()] = burning.chemical_rates;
+        let physical_time = room.time;
+        let relaxation = room.advance(source_duration, rates, controls, &mut cancelled)?;
+        room.time = physical_time;
+        Ok(SplitBurningReport {
+            burning,
+            relaxation,
+        })
     }
 
     fn enthalpy(

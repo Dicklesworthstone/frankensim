@@ -809,3 +809,18 @@ explicitly refused by this single-pass adapter. Six focused tests cover oxygen
 exhaustion, atom/mass conservation, analytic variable-Cv formation-energy
 heating, inflow counted exactly once, a one-ULP depletion case, temperature-
 dependent reaction enthalpy, cancellation, and source identity/refusals.
+
+
+### Clock-preserving transport/burning composition
+
+`InventoryLimitedReaction::apply_split` evaluates the actual transported
+inventory with no repeated incoming source, delegates chemical species/energy
+and pressure-interface relaxation to the original atomic TwoZone advance, and
+then restores the physical clock infallibly. The source duration controls the
+reaction increment but does not advance elapsed time twice. This first-order
+split allows prior ventilation withdrawals to reduce oxygen availability before
+burning. The returned chemical source is recorded once by a composing network;
+reported reaction heat is still never an extra energy source. All eight
+original burning tests pass, including two added regressions for post-outflow
+oxygen depletion, fixed clock, paired interface work, physical-energy balance,
+late cancellation, reuse, and caloric-domain refusal of excessive source heating.

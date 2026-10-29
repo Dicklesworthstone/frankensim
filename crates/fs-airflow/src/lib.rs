@@ -11,6 +11,10 @@
 /// Hydrostatic two-layer wall openings with simultaneous directional exchange.
 pub mod stratified;
 
+/// Conservative two-zone rooms, pressure-coupled vents and thermal walls.
+#[cfg(feature = "compartment-fire")]
+pub mod compartment;
+
 pub mod composite;
 pub mod conjugate;
 pub mod graph;
