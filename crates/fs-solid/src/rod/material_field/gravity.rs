@@ -14,6 +14,9 @@ use super::supports::RodSupportReaction;
 use crate::rod::Rod;
 use crate::rod::derivatives::RodEnergy;
 
+mod buoyancy;
+pub use buoyancy::{ReferenceDisplacementVolume, SubmergedFluidLoad};
+
 /// Immutable reference inventory shared by thermal snapshots of one specimen.
 /// Original sections retain the actual density receipts and reference geometry.
 #[derive(Clone, Debug, PartialEq)]
@@ -70,6 +73,7 @@ impl RodReferenceMass {
 pub(super) struct GravityLoad {
     acceleration_m_s2: [f64; 3],
     force_n: Vec<[f64; 3]>,
+    buoyancy: Option<SubmergedFluidLoad>,
 }
 
 impl SpatialMaterialRod {
@@ -78,9 +82,11 @@ impl SpatialMaterialRod {
     pub fn reference_mass(&self) -> &RodReferenceMass { &self.reference_mass }
 
     /// Set an explicit uniform world-frame gravity vector on a new static
-    /// specimen. Zero removes gravity; there is no implicit terrestrial preset.
+    /// specimen. Zero removes its forces; there is no implicit terrestrial preset.
     /// This replaces the old gravity field, never accumulates another weight.
-    /// Reference mass and every support are preserved. No buoyancy is inferred.
+    /// Reference mass and every support are preserved. An explicitly bound
+    /// submerged fluid is retained and its buoyancy follows the new gravity.
+    /// Without that binding no buoyancy is inferred.
     ///
     /// Gravity is a permanent dead load in every equilibrium stage; `steps` in
     /// `solve_static` continues to ramp the separately supplied TIP load only.
@@ -96,8 +102,10 @@ impl SpatialMaterialRod {
         if !acceleration_m_s2.iter().all(|v| v.is_finite()) {
             return Err(SpatialRodError::Invalid("gravity must be finite world-frame acceleration in m/s2"));
         }
+        let fluid = self.submerged_fluid_load()
+            .map(|load| (load.transport_state(), load.volume_model()));
         let mut candidate = self.clone();
-        candidate.gravity = if acceleration_m_s2.iter().all(|v| *v == 0.0) {
+        candidate.gravity = if acceleration_m_s2.iter().all(|v| *v == 0.0) && fluid.is_none() {
             None
         } else {
             let mut masses = self.reference_mass.nodal_mass_kg().to_vec();
@@ -118,8 +126,12 @@ impl SpatialMaterialRod {
                 }
                 force_n.push(force);
             }
-            Some(GravityLoad { acceleration_m_s2, force_n })
+            Some(GravityLoad { acceleration_m_s2, force_n, buoyancy: None })
         };
+        if let Some((transport, volume_model)) = fluid {
+            let load = SubmergedFluidLoad::try_new(&candidate, transport, volume_model, gate)?;
+            candidate.gravity.as_mut().expect("retained fluid keeps its gravity field").buoyancy = Some(load);
+        }
         candidate.equilibrium_energy_for(&candidate.rod)?;
         checkpoint(gate)?;
         Ok(candidate)
@@ -164,11 +176,25 @@ impl SpatialMaterialRod {
     pub(super) fn equilibrium_energy_for(&self, rod: &Rod) -> Result<f64, SpatialRodError> {
         let internal = self.energy_for(rod)?;
         if self.gravity.is_none() { return Ok(internal); }
-        let value = internal + self.gravity_potential_for(rod)?;
+        let value = internal + self.gravity_potential_for(rod)? + self.buoyancy_potential_for(rod)?;
         if !value.is_finite() {
             return Err(SpatialRodError::Invalid("elastic plus gravity potential is unrepresentable"));
         }
         Ok(value)
+    }
+
+    // One endpoint force for the native rotational gradient/tangent and the
+    // independent derivative oracle. The translational terms are assembled
+    // separately from their public nodal force fields, exactly once.
+    pub(super) fn link_body_load_force_n(&self, index: usize) -> Option<[f64; 3]> {
+        self.gravity.as_ref().map(|load| {
+            let weight = load.acceleration_m_s2.map(|g|
+                0.5 * self.tension_links[index].reference_mass_kg() * g);
+            load.buoyancy.as_ref().map_or(weight, |fluid| {
+                let buoyancy = fluid.link_endpoint_forces_n()[index];
+                std::array::from_fn(|axis| weight[axis] + buoyancy[axis])
+            })
+        })
     }
 
     /// Recover root-clamp force and body-frame moment through the SAME
