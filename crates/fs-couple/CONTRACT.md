@@ -724,6 +724,22 @@ cavity (composes with the BEM's outward panel velocities).
   `src/vibroacoustic/viscosity_tests.rs` checks an independent analytic
   two-mode/cavity response, integrated cycle work with radiation, a relative
   dashpot's common-motion nullspace, signed-basis invariance, and truncation.
+- `VibroacousticModel::with_cavity_relaxation` — binds the original gas's
+  molecular reservoirs to the cavity through `fs-material::relaxation`'s
+  complex bulk modulus `K(omega)`. Density and equilibrium sound speed must
+  match the cavity basis exactly; scalar cavity loss must be zero. The pressure
+  mass term becomes `omega^2 rho0 c0^2/K(omega)`, with the original reciprocal
+  inertial boundary forcing retained. Molecular heat is independently evaluated
+  as `omega Lambda Im(1/K) |p|^2 / 2`, including uniform sealed-cavity compression.
+  This is a homogeneous, quiescent molecular constitutive law. Shear viscosity,
+  thermal diffusion, wall boundary layers and mean flow are not inferred from a
+  propagation attenuation coefficient. Per-frequency caloric work is bounded by
+  the original reservoir count and performed once outside the modal loops.
+  `src/vibroacoustic/gas_tests.rs` checks a sealed gas spring, independent Schur
+  elimination, integrated pressure/strain cycle work, reciprocity, modal
+  rescaling/truncation, explicit humid-air species and stale-gas/double-loss
+  refusal. The undamped eigenfrequency diagnostic remains the equilibrium-gas
+  reference; loaded dispersive resonances require the FRF.
 
 - `VibroacousticModel::frf` / `frf_truncated` — dense complex coupled
   solve; every response carries the complete power breakdown with BOTH

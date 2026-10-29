@@ -40,6 +40,19 @@
 //! and exact undamped directions. The structural work audit uses the same
 //! owner's passive channels, including in truncated solves.
 //!
+//! [`VibroacousticModel::with_cavity_relaxation`] instead binds the cavity to
+//! the original gas's molecular reservoirs. Its constitutive bulk modulus
+//! `K(omega) = p cp(omega)/cv(omega)` enters the pressure row as
+//! `omega_q^2 - omega^2 rho0 c0^2/K(omega)`. The reciprocal interface keeps
+//! the original real inertial density and coupling. Molecular heat is
+//! `omega Lambda_q Im(1/K) |a_q|^2 / 2`, including the uniform sealed mode.
+//! This is homogeneous, quiescent molecular relaxation only: wall boundary
+//! layers, shear viscosity and heat diffusion need their own field/boundary
+//! operators. A longitudinal propagation loss is not silently made into a
+//! uniform-compression viscosity. The pressure weak form follows
+//! https://docs.software.vt.edu/abaqusv2025/English/SIMACAETHERefMap/simathe-c-acouststruct.htm
+//! with the source-owned complex compressibility in its pressure mass term.
+//!
 //! POWER ACCOUNTING (the audit surface this module exists to make
 //! real): at every solved frequency the response carries the complete
 //! per-channel steady-state power breakdown —
@@ -66,6 +79,7 @@ use crate::plate_viscosity::ModalPlateViscosity;
 use fs_la::eigen_complex::lu_complex;
 use fs_la::factor::svd_jacobi;
 use fs_material::gas::{GasSpec, GasState};
+use fs_material::relaxation::RelaxationState;
 use fs_math::c64::C64;
 
 const ROOM_TEMPERATURE_K: f64 = 293.15;
@@ -177,6 +191,21 @@ pub struct AcousticMedium {
 }
 
 impl AcousticMedium {
+    /// View one complete material-owned gas without reevaluating its state.
+    ///
+    /// # Errors
+    /// Refuses an incoherent numerical gas snapshot.
+    pub fn try_from_gas(gas: &GasState) -> Result<Self, VibroError> {
+        gas.validate_coherence()
+            .map_err(|_| VibroError::BadParameter {
+                what: "acoustic medium requires one coherent gas state",
+            })?;
+        Ok(Self {
+            rho0: gas.density,
+            c0: gas.sound_speed,
+        })
+    }
+
     /// Dry USSA-1976 air at the declared room state of 293.15 K and 101325 Pa.
     /// Parameterized studies should construct their own [`GasState`] for their
     /// actual temperature, pressure, and gas identity instead of using this
@@ -508,6 +537,8 @@ pub struct VibroacousticModel {
     lambdas: Vec<f64>,
     eta_a: f64,
     rho_c2: f64,
+    medium_a: AcousticMedium,
+    cavity_relaxation: Option<RelaxationState>,
     coupling: Vec<f64>,
     z_modal: Option<Vec<C64>>,
 }
@@ -610,6 +641,11 @@ impl VibroacousticModel {
             lambdas: cavity.lambdas.clone(),
             eta_a: cavity.loss_factor,
             rho_c2,
+            medium_a: AcousticMedium {
+                rho0: cavity.rho0,
+                c0: cavity.c0,
+            },
+            cavity_relaxation: None,
             coupling,
             z_modal,
         })
@@ -651,6 +687,43 @@ impl VibroacousticModel {
         Ok(self)
     }
 
+    /// Use the cavity gas's own frequency-dependent molecular compressibility.
+    ///
+    /// The rigid-wall pressure basis must have been built with this exact gas
+    /// density and equilibrium sound speed. Shapes and norms remain geometric;
+    /// changing gas requires rebuilding the cavity, not scaling an unrelated
+    /// mode table. Reservoirs are evaluated once per FRF, outside modal loops.
+    /// The law affects cavity pressure, structural backreaction and the same
+    /// independent cavity-work account, including all truncated solves.
+    ///
+    /// Set the scalar cavity loss factor to zero before attaching this owner:
+    /// it cannot stand in for an unspecified mixture of molecular and wall
+    /// loss. This method supplies molecular relaxation only, not thermoviscous
+    /// boundary layers, bulk heat diffusion, mean flow or chemical kinetics.
+    /// The equilibrium eigenfrequency diagnostic remains the lossless reference;
+    /// dispersive resonances must be obtained from the loaded FRF.
+    ///
+    /// # Errors
+    /// Refuses a different gas state or an already active scalar cavity loss.
+    pub fn with_cavity_relaxation(
+        mut self,
+        relaxation: RelaxationState,
+    ) -> Result<Self, VibroError> {
+        let medium = AcousticMedium::try_from_gas(relaxation.gas())?;
+        if medium.rho0 != self.medium_a.rho0 || medium.c0 != self.medium_a.c0 {
+            return Err(VibroError::BadParameter {
+                what: "cavity basis and molecular law must use the same gas density and sound speed",
+            });
+        }
+        if self.eta_a != 0.0 {
+            return Err(VibroError::BadParameter {
+                what: "molecular cavity relaxation and scalar cavity loss are exclusive",
+            });
+        }
+        self.cavity_relaxation = Some(relaxation);
+        Ok(self)
+    }
+
     /// Structural mode count.
     #[must_use]
     pub fn structure_count(&self) -> usize {
@@ -671,7 +744,8 @@ impl VibroacousticModel {
     /// squaring its condition number or balancing a nonnormal pressure /
     /// displacement pencil. Rescaling a cavity eigenfunction and its norm
     /// leaves the physical frequencies unchanged. Radiation and loss
-    /// factors are ignored; use the loaded FRF for dissipative resonances.
+    /// factors and molecular relaxation are ignored; this is the equilibrium
+    /// gas reference. Use the loaded FRF for dissipative/dispersive resonances.
     ///
     /// # Errors
     /// [`VibroError::EigenFailure`] if the factor is not representable or
@@ -788,6 +862,33 @@ impl VibroacousticModel {
         }
         let n = keep_s + keep_a;
         let w2 = omega * omega;
+        if !w2.is_finite() || w2 == 0.0 {
+            return Err(VibroError::BadParameter {
+                what: "squared angular frequency is unrepresentable",
+            });
+        }
+        let compliance = self
+            .cavity_relaxation
+            .as_ref()
+            .map(|law| {
+                law.caloric_response(omega)
+                    .map(|response| response.bulk_modulus_pa.recip())
+                    .map_err(|_| VibroError::BadParameter {
+                        what: "cavity molecular compressibility is unrepresentable",
+                    })
+            })
+            .transpose()?;
+        let acoustic_mass =
+            compliance.map_or(C64::from_re(w2), |beta| beta.scale(self.rho_c2).scale(w2));
+        if !acoustic_mass.re.is_finite()
+            || !acoustic_mass.im.is_finite()
+            || acoustic_mass.re <= 0.0
+            || acoustic_mass.im < 0.0
+        {
+            return Err(VibroError::BadParameter {
+                what: "cavity dynamic pressure mass must be finite and passive",
+            });
+        }
         let mut mat = vec![C64::ZERO; n * n];
         for r in 0..keep_s {
             let wr2 = self.omegas_s[r] * self.omegas_s[r];
@@ -798,8 +899,7 @@ impl VibroacousticModel {
             if let Some(viscosity) = &self.structural_viscosity {
                 let c = viscosity.matrix_per_s();
                 for s in 0..keep_s {
-                    mat[r * n + s] = mat[r * n + s]
-                        - C64::new(0.0, omega * c[r * n_s_full + s]);
+                    mat[r * n + s] = mat[r * n + s] - C64::new(0.0, omega * c[r * n_s_full + s]);
                 }
             }
             for q in 0..keep_a {
@@ -817,7 +917,8 @@ impl VibroacousticModel {
         for q in 0..keep_a {
             let wq2 = self.omegas_a[q] * self.omegas_a[q];
             let row = keep_s + q;
-            mat[row * n + row] = C64::new(wq2 - w2, -wq2 * self.eta_a);
+            mat[row * n + row] =
+                C64::new(wq2 - acoustic_mass.re, -wq2 * self.eta_a - acoustic_mass.im);
             let scale = self.rho_c2 / self.lambdas[q] * w2;
             for r in 0..keep_s {
                 mat[row * n + r] = C64::from_re(-scale * self.coupling[r * n_a_full + q]);
@@ -870,7 +971,15 @@ impl VibroacousticModel {
             // in the pressure coordinate: hysteretic dissipation
             // 1/2 omega eta_a (Lambda/(rho c^2)) (omega_q/omega)^2 |a_q|^2.
             let wq2 = self.omegas_a[q] * self.omegas_a[q];
-            cavity += 0.5 * self.eta_a * self.lambdas[q] / self.rho_c2 * wq2 / omega * aq.norm_sq();
+            let coefficient = if let Some(beta) = compliance {
+                // Local pressure work from the constitutive compressibility,
+                // independent of the interface-force accounting above. Unlike
+                // stiffness-proportional loss it includes the uniform mode.
+                0.5 * omega * self.lambdas[q] * beta.im
+            } else {
+                0.5 * self.eta_a * self.lambdas[q] / self.rho_c2 * wq2 / omega
+            };
+            cavity += coefficient * aq.norm_sq();
         }
         let mut radiated = 0.0;
         if let Some(z) = &self.z_modal {
@@ -1529,6 +1638,8 @@ mod review_regressions {
             structural_viscosity: None,
             eta_a: 0.0,
             rho_c2: 1.0,
+            medium_a: AcousticMedium { rho0: 1.0, c0: 1.0 },
+            cavity_relaxation: None,
             coupling,
             z_modal: None,
         }
@@ -1754,3 +1865,6 @@ mod review_regressions {
 
 #[cfg(test)]
 mod viscosity_tests;
+
+#[cfg(test)]
+mod gas_tests;
