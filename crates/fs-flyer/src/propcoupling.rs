@@ -26,6 +26,9 @@ use fs_wing::nonlinear::{
 };
 use fs_wing::{Panel, induced_velocity_free};
 
+#[path = "propcoupling/spatial.rs"]
+pub mod spatial;
+
 /// Aitken candidate A (the Round-3 tuple; family selection is E4.5+).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PropCouplingSolverSpec {
@@ -228,7 +231,7 @@ pub fn coupled_prop_airframe_step(
     warm: Option<[f64; 2]>,
 ) -> Result<CoupledStep, Refusal> {
     coupled_step_impl(
-        op, panels, strips, closure, rotor, disks, freestream, rho, spec, warm, None,
+        op, panels, strips, closure, rotor, disks, freestream, rho, spec, warm, None, None,
     )
 }
 
@@ -272,6 +275,7 @@ pub fn coupled_prop_airframe_step_with_incident(
         spec,
         warm,
         Some(incident),
+        None,
     )
 }
 
@@ -288,6 +292,7 @@ fn coupled_step_impl(
     spec: &PropCouplingSolverSpec,
     warm: Option<[f64; 2]>,
     incident: Option<IncidentInflow<'_>>,
+    spatial: Option<spatial::DiskAxes>,
 ) -> Result<CoupledStep, Refusal> {
     let map_err = |e: fs_wing::Refusal| Refusal {
         code: e.code,
@@ -325,7 +330,10 @@ fn coupled_step_impl(
             ranked_repairs: vec!["sample both disks from the admitted physical atmosphere".into()],
         });
     }
-    let wash = wash_map(strips, panels, disks, rotor.radius_m);
+    let wash = match spatial {
+        Some(axes) => axes.wash_map(strips, panels, disks, rotor.radius_m)?,
+        None => wash_map(strips, panels, disks, rotor.radius_m),
+    };
     let disk_area = core::f64::consts::PI * rotor.radius_m * rotor.radius_m;
     let mut x = warm.unwrap_or([0.5, 0.5]);
     let mut x_prev = x;
@@ -339,12 +347,26 @@ fn coupled_step_impl(
     // disk inflows, BEMT, momentum slipstream.
     type EvalOut = ([f64; 2], [f64; 2], [f64; 2], f64, Vec<f64>);
     let evaluate = |x: &[f64; 2]| -> Result<EvalOut, Refusal> {
-        let du: Vec<f64> = wash
-            .iter()
-            .map(|&factors| strip_wash(factors, *x))
-            .collect();
-        let wing = match incident {
-            Some(flow) => solve_nonlinear_with_incident(
+        let du: Vec<f64> = if spatial.is_none() {
+            wash.iter()
+                .map(|&factors| strip_wash(factors, *x))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let wing = match (incident, spatial) {
+            (Some(flow), Some(axes)) => {
+                let velocity: Vec<_> = flow
+                    .strip_velocity_mps
+                    .iter()
+                    .zip(&wash)
+                    .map(|(&v, &factors)| axes.velocity(v, factors, *x))
+                    .collect();
+                solve_nonlinear_with_incident(
+                    op, panels, strips, freestream, rho, closure, &velocity, None, None,
+                )
+            }
+            (Some(flow), None) => solve_nonlinear_with_incident(
                 op,
                 panels,
                 strips,
@@ -355,7 +377,7 @@ fn coupled_step_impl(
                 Some(&du),
                 None,
             ),
-            None => solve_nonlinear(
+            (None, _) => solve_nonlinear(
                 op,
                 panels,
                 strips,
@@ -373,8 +395,10 @@ fn coupled_step_impl(
         for k in 0..2 {
             let vi = induced_velocity_free(disks[k].center_m, panels, &wing.gamma, freestream);
             let axial = incident.map_or(freestream[0], |flow| flow.disk_velocity_mps[k][0]);
-            let v_disk = if incident.is_some() {
-                let net = axial + vi[0];
+            let v_disk = if let Some(flow) = incident {
+                let net = spatial.map_or(axial + vi[0], |axes| {
+                    axes.axial(k, flow.disk_velocity_mps[k], vi)
+                });
                 if !net.is_finite() || net < 0.0 {
                     return Err(Refusal {
                         code: "disk-inflow-invalid",
@@ -422,6 +446,9 @@ fn coupled_step_impl(
                         .iter()
                         .zip(&wash)
                         .map(|(velocity, factors)| {
+                            if let Some(axes) = spatial {
+                                return axes.velocity(*velocity, *factors, x);
+                            }
                             let mut velocity = *velocity;
                             // `gamma` belongs to the evaluated x, not the next
                             // predictor g returned as the warm-start state.
@@ -432,7 +459,7 @@ fn coupled_step_impl(
                 }),
                 corrections,
                 residual: res,
-                spec_digest: spec.digest(),
+                spec_digest: spatial.map_or_else(|| spec.digest(), |axes| axes.digest(spec)),
             });
         }
         if !unrelaxed_done {

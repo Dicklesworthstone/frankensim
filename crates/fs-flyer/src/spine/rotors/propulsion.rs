@@ -3,7 +3,8 @@
 //! This consumes the current `OpenLoopDesign` aerodynamic geometry and closure,
 //! with caller-supplied PHYSICAL mass/rotor inertias. It does not replace or
 //! recalibrate a historical SimLoop preset. The present actuator-disk field is
-//! axial along body +x: mounts outside that geometry are refused explicitly.
+//! axial along body +x by default; `new_spatial` selects physical disk-plane
+//! overlap and vector wash for arbitrarily oriented, body-fixed shafts.
 //! Motor torque, wind, gravity and canard setting are evaluated at each stage.
 //! No stopped/reversed rotor or reversed axial inflow is silently floored.
 
@@ -12,6 +13,7 @@ use super::geared::{self, GearedAssembly, GearedLoads, GearedState, GearedStep};
 use super::{array, finite, vec};
 use crate::Refusal;
 use crate::aircraft::OpenLoopDesign;
+use crate::propcoupling::spatial::{self, DiskAxes};
 use crate::propcoupling::{
     CoupledStep, IncidentInflow, PropDisk, coupled_prop_airframe_step_with_incident,
 };
@@ -45,8 +47,9 @@ pub struct PropellerMount {
     pub rotor_index: usize,
     /// Blade handedness, independent of signed mechanical gear ratio.
     pub handedness: PropellerHandedness,
-    /// Unit direction of positive BEMT thrust. The current axial coupling
-    /// owner admits exactly body `[1, 0, 0]`; no thrust-direction inference.
+    /// Unit direction of positive BEMT thrust. `new` admits body `[1, 0, 0]`;
+    /// `new_spatial` admits either direction along the physical rotor axis.
+    /// No thrust direction is inferred from gear ratio or handedness.
     pub thrust_direction_body: [f64; 3],
 }
 
@@ -92,6 +95,7 @@ pub struct GearedPropulsion<'a, const N: usize> {
     design: &'a OpenLoopDesign,
     assembly: &'a GearedAssembly<N>,
     mounts: [PropellerMount; 2],
+    spatial_axes: Option<DiskAxes>,
 }
 
 fn reject(code: &'static str, message: &str) -> Refusal {
@@ -124,6 +128,31 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
         assembly: &'a GearedAssembly<N>,
         mounts: [PropellerMount; 2],
     ) -> Result<Self, Refusal> {
+        Self::build(design, assembly, mounts, None)
+    }
+
+    /// Bind canted, fixed propellers using actual three-dimensional disk
+    /// overlap and wash vectors. Each thrust direction must be collinear
+    /// with its mechanical spin axis; its sign is independent of handedness.
+    /// The native BEMT still resolves only axial disk-average inflow.
+    ///
+    /// # Errors
+    /// As [`Self::new`], plus `spatial-disk-invalid` for nonunit directions.
+    pub fn new_spatial(
+        design: &'a OpenLoopDesign,
+        assembly: &'a GearedAssembly<N>,
+        mounts: [PropellerMount; 2],
+    ) -> Result<Self, Refusal> {
+        let axes = DiskAxes::new(mounts.map(|mount| mount.thrust_direction_body))?;
+        Self::build(design, assembly, mounts, Some(axes))
+    }
+
+    fn build(
+        design: &'a OpenLoopDesign,
+        assembly: &'a GearedAssembly<N>,
+        mounts: [PropellerMount; 2],
+        spatial_axes: Option<DiskAxes>,
+    ) -> Result<Self, Refusal> {
         if design.gross_mass_kg != assembly.mass_kg()
             || !finite(vec(design.cg_m))
             || !design.drag_z_m.is_finite()
@@ -147,15 +176,21 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
                     "propeller rotor index is outside the gear assembly",
                 )
             })?;
-            if mount.thrust_direction_body != [1.0, 0.0, 0.0]
-                || rotor.axis_body[1] != 0.0
-                || rotor.axis_body[2] != 0.0
-                || rotor.axis_body[0].abs() != 1.0
-                || !finite(vec(disk.center_m))
-            {
+            let aligned = if spatial_axes.is_some() {
+                vec(mount.thrust_direction_body)
+                    .cross(vec(rotor.axis_body))
+                    .norm()
+                    <= 1e-12
+            } else {
+                mount.thrust_direction_body == [1.0, 0.0, 0.0]
+                    && rotor.axis_body[1] == 0.0
+                    && rotor.axis_body[2] == 0.0
+                    && rotor.axis_body[0].abs() == 1.0
+            };
+            if !aligned || !finite(vec(disk.center_m)) {
                 return Err(reject(
                     "propulsion-assembly-invalid",
-                    "current coupled wash requires body-x shafts and explicit +x thrust",
+                    "thrust must align with a finite physical shaft; legacy wash requires body +x thrust",
                 ));
             }
         }
@@ -185,6 +220,7 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
             design,
             assembly,
             mounts,
+            spatial_axes,
         })
     }
 
@@ -312,22 +348,39 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
             let panel = &panels[strip.panel_indices[0]];
             strip_velocity.push(sample(array((vec(panel.a) + vec(panel.b)).scale(0.5)))?);
         }
-        let coupled = coupled_prop_airframe_step_with_incident(
-            &op,
-            &panels,
-            &strips,
-            &closure,
-            &design.rotor,
-            &disks,
-            freestream,
-            rho,
-            &design.coupling,
-            warm,
-            IncidentInflow {
-                strip_velocity_mps: &strip_velocity,
-                disk_velocity_mps: [sample(disks[0].center_m)?, sample(disks[1].center_m)?],
-            },
-        )?;
+        let incident = IncidentInflow {
+            strip_velocity_mps: &strip_velocity,
+            disk_velocity_mps: [sample(disks[0].center_m)?, sample(disks[1].center_m)?],
+        };
+        let coupled = match self.spatial_axes {
+            Some(axes) => spatial::coupled_step(
+                &axes,
+                &op,
+                &panels,
+                &strips,
+                &closure,
+                &design.rotor,
+                &disks,
+                freestream,
+                rho,
+                &design.coupling,
+                warm,
+                incident,
+            ),
+            None => coupled_prop_airframe_step_with_incident(
+                &op,
+                &panels,
+                &strips,
+                &closure,
+                &design.rotor,
+                &disks,
+                freestream,
+                rho,
+                &design.coupling,
+                warm,
+                incident,
+            ),
+        }?;
         let local = coupled.strip_velocity_mps.as_ref().ok_or_else(|| {
             reject(
                 "propulsion-state-invalid",

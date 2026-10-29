@@ -160,6 +160,37 @@ are unchanged. Full coupled accuracy remains bounded by the declared wing,
 BEMT and coupling tolerances; refinement evidence does not certify physical
 validity or arbitrary operating branches.
 
+### Spatially mounted propellers
+
+`propcoupling::spatial::{DiskAxes, coupled_step}` and
+`GearedPropulsion::new_spatial` extend that consumer to canted, body-fixed
+shafts. Positive-thrust axes are admitted unit vectors, collinear with their
+physical rotor axes; neither gear sign nor blade handedness chooses the
+thrust direction. Native wing-induced velocity and the actual local rigid-body
+incident velocity are projected onto each disk's axis before BEMT. The returned
+thrust acts along that axis at its actual arm, while aerodynamic shaft torque
+acts along the separately signed spin axis, exactly once in total momentum.
+
+Spatial wash measures radius in the full disk plane, including vertical
+separation. Each disk's scalar induced velocity becomes a vector increment
+along its thrust axis at every strip; circulation and full-vector force
+assembly use the same accepted local velocities. Geometry factors are prepared
+once per coupling solve. The existing Aitken solver, per-disk convergence gate,
+momentum root and refusal behavior are shared. The spatial recipe and actual
+axes have a distinct content digest; `new` and the historical axial APIs keep
+their original spanwise model and numerical behavior.
+
+G0/G1/G3 checks in `tests/spatial_propulsion.rs` independently reconstruct
+disk-plane overlap, projected native BEMT thrust/torque, vector wash and global
+angular momentum; verify rotation covariance, the coplanar axial limit, and
+invariance to reversing a mechanical axis and its coordinate signs; and reject
+invalid mounts or a late failed stage without returning partial motion. This
+remains a disk-average, quasi-steady axial model. Transverse disk loads,
+azimuthal harmonics, swirl, contracted/skewed wakes, direct disk-to-disk wake
+interference and gimbal motion are absent. The finite 2R wash window remains
+an explicit model truncation, not a resolved far wake. Canted-mount support
+does not establish a crossflow validity envelope or historical calibration.
+
 ## Canard hinge friction and stops
 
 `canardmech::step` solves one monotone scalar midpoint-velocity equation
