@@ -26,6 +26,9 @@ pub mod radiation;
 /// Cooper shallow ceiling/floor openings with pressure and buoyant counterflow.
 pub mod ceiling;
 
+/// Finite source operators inside the coupled opening-pressure equation.
+pub mod pressure_source;
+
 #[cfg(test)]
 mod tests;
 
@@ -149,13 +152,15 @@ pub struct NetworkStepReport {
     pub halvings: usize,
     /// Accepted pressure iterations.
     pub iterations: usize,
-    /// Largest pressure equation residual [Pa] before an optional split source.
+    /// Largest solved pressure-equation residual [Pa]. Includes operators passed
+    /// to `step_with_pressure_sources`; a subsequent `step_with_stages` source
+    /// has its additional pressure change reported separately.
     pub maximum_pressure_residual_pa: f64,
-    /// Largest pressure change [Pa] caused by an optional split source. This is
-    /// not part of the preceding transport pressure-equation residual.
+    /// Largest pressure change [Pa] after the pressure solve from an optional
+    /// split source. Zero for sources evaluated inside the pressure equation.
     pub maximum_split_pressure_change_pa: f64,
     /// Integrated net authored source and ambient exchange in canonical
-    /// species order [kg], including any declared split-reaction sources.
+    /// species order [kg], including any declared reaction sources.
     pub external_species_change_kg: [f64; MAX_SPECIES],
     /// Integrated net physical energy supplied to gas [J], including ambient
     /// enthalpy, authored heat, wall exchange and deposited mechanical power.
@@ -272,8 +277,9 @@ fn max_abs(x: &[f64]) -> f64 {
 }
 
 /// Reusable multi-room owner, including pressure Jacobian/LU storage and a
-/// complete unpublished candidate. Runtime pressure evaluations allocate no
-/// successful-path vectors, matrices, gas banks, or flow slabs.
+/// complete unpublished candidate. Built-in pressure transport/LU evaluations
+/// reuse vectors, matrices, gas banks and flow slabs. Caller-supplied source
+/// operators and their candidate payloads retain their own allocation budgets.
 pub struct ZoneNetwork {
     rooms: Vec<Room>,
     trial: Vec<Room>,
@@ -597,83 +603,26 @@ impl ZoneNetwork {
                     &mut additional,
                     &mut cancelled,
                 )?;
+                self.admit_source_trial(dt, &additional)?;
                 let mut split_pressure_change = 0.0_f64;
                 for (i, room) in self.trial.iter().enumerate() {
-                    let original = &self.rooms[i];
-                    if room.floor_elevation != original.floor_elevation
-                        || room.gas.gas() != original.gas.gas()
-                        || room.gas.floor_area() != original.gas.floor_area()
-                        || room.gas.height() != original.gas.height()
-                        || room.gas.time().value() != original.gas.time().value() + dt
-                    {
-                        return Err(NetworkError::Invalid(
-                            "split source changed room identity or clock",
-                        ));
-                    }
                     split_pressure_change = split_pressure_change
                         .max((room.gas.pressure().value() - before_split[i]).abs());
-                }
-                if additional.species_kg_s[self.rooms[0].gas.gas().species_count()..]
-                    .iter()
-                    .any(|v| *v != 0.0)
-                {
-                    return Err(NetworkError::Invalid("split source species axis"));
                 }
                 self.external.add(&additional)?;
                 Ok((iterations, residual, split_pressure_change, payload))
             })();
             match candidate {
                 Ok((iterations, residual, split_pressure_change, payload)) => {
-                    let ns = self.rooms[0].gas.gas().species_count();
-                    let mut species = [0.0; MAX_SPECIES];
-                    let mut energy = 0.0;
-                    for i in 0..n {
-                        energy += self.trial[i].gas.sensible_internal_energy().value()
-                            - self.rooms[i].gas.sensible_internal_energy().value();
-                        for layer in [Layer::Lower, Layer::Upper] {
-                            for s in 0..ns {
-                                species[s] += self.trial[i].gas.layer(layer).species_masses()[s]
-                                    - self.rooms[i].gas.layer(layer).species_masses()[s];
-                            }
-                        }
-                    }
-                    energy -= dt * self.external.referenced_energy_w;
-                    for s in 0..ns {
-                        species[s] -= dt * self.external.species_kg_s[s];
-                        energy += species[s] * self.rooms[0].gas.gas().energy_references()[s];
-                    }
-                    let mass = species[..ns].iter().sum();
-                    let mut external_species = [0.0; MAX_SPECIES];
-                    let mut external_energy = self.external.referenced_energy_w;
-                    for s in 0..ns {
-                        external_species[s] = dt * self.external.species_kg_s[s];
-                        external_energy += self.external.species_kg_s[s]
-                            * self.rooms[0].gas.gas().energy_references()[s];
-                    }
-                    external_energy *= dt;
-                    if !energy.is_finite()
-                        || !external_energy.is_finite()
-                        || species[..ns].iter().any(|v| !v.is_finite())
-                    {
-                        return Err(NetworkError::Invalid("network extensive balance"));
-                    }
-                    poll(&mut cancelled)?;
-                    core::mem::swap(&mut self.rooms, &mut self.trial);
-                    return Ok((
-                        NetworkStepReport {
-                            elapsed: Time::new(dt),
-                            halvings: halving,
-                            iterations,
-                            maximum_pressure_residual_pa: residual,
-                            maximum_split_pressure_change_pa: split_pressure_change,
-                            external_species_change_kg: external_species,
-                            external_physical_energy_j: external_energy,
-                            species_residual_kg: species,
-                            mass_residual_kg: mass,
-                            physical_energy_residual_j: energy,
-                        },
-                        payload,
-                    ));
+                    let report = self.publish_trial(
+                        dt,
+                        halving,
+                        iterations,
+                        residual,
+                        split_pressure_change,
+                        &mut cancelled,
+                    )?;
+                    return Ok((report, payload));
                 }
                 Err(NetworkError::Cancelled) => return Err(NetworkError::Cancelled),
                 Err(error) => {
@@ -688,6 +637,86 @@ impl ZoneNetwork {
         })
     }
 
+    fn admit_source_trial(&self, dt: f64, additional: &LayerRates) -> Result<(), NetworkError> {
+        for (room, original) in self.trial.iter().zip(&self.rooms) {
+            if room.floor_elevation != original.floor_elevation
+                || room.gas.gas() != original.gas.gas()
+                || room.gas.floor_area() != original.gas.floor_area()
+                || room.gas.height() != original.gas.height()
+                || room.gas.time().value() != original.gas.time().value() + dt
+            {
+                return Err(NetworkError::Invalid(
+                    "split source changed room identity or clock",
+                ));
+            }
+        }
+        if additional.species_kg_s[self.rooms[0].gas.gas().species_count()..]
+            .iter()
+            .any(|v| *v != 0.0)
+        {
+            return Err(NetworkError::Invalid("split source species axis"));
+        }
+        Ok(())
+    }
+
+    fn publish_trial(
+        &mut self,
+        dt: f64,
+        halving: usize,
+        iterations: usize,
+        residual: f64,
+        split_pressure_change: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<NetworkStepReport, NetworkError> {
+        let ns = self.rooms[0].gas.gas().species_count();
+        let mut species = [0.0; MAX_SPECIES];
+        let mut energy = 0.0;
+        for i in 0..self.rooms.len() {
+            energy += self.trial[i].gas.sensible_internal_energy().value()
+                - self.rooms[i].gas.sensible_internal_energy().value();
+            for layer in [Layer::Lower, Layer::Upper] {
+                for s in 0..ns {
+                    species[s] += self.trial[i].gas.layer(layer).species_masses()[s]
+                        - self.rooms[i].gas.layer(layer).species_masses()[s];
+                }
+            }
+        }
+        energy -= dt * self.external.referenced_energy_w;
+        for s in 0..ns {
+            species[s] -= dt * self.external.species_kg_s[s];
+            energy += species[s] * self.rooms[0].gas.gas().energy_references()[s];
+        }
+        let mass = species[..ns].iter().sum();
+        let mut external_species = [0.0; MAX_SPECIES];
+        let mut external_energy = self.external.referenced_energy_w;
+        for s in 0..ns {
+            external_species[s] = dt * self.external.species_kg_s[s];
+            external_energy +=
+                self.external.species_kg_s[s] * self.rooms[0].gas.gas().energy_references()[s];
+        }
+        external_energy *= dt;
+        if !energy.is_finite()
+            || !external_energy.is_finite()
+            || species[..ns].iter().any(|v| !v.is_finite())
+        {
+            return Err(NetworkError::Invalid("network extensive balance"));
+        }
+        poll(cancelled)?;
+        core::mem::swap(&mut self.rooms, &mut self.trial);
+        Ok(NetworkStepReport {
+            elapsed: Time::new(dt),
+            halvings: halving,
+            iterations,
+            maximum_pressure_residual_pa: residual,
+            maximum_split_pressure_change_pa: split_pressure_change,
+            external_species_change_kg: external_species,
+            external_physical_energy_j: external_energy,
+            species_residual_kg: species,
+            mass_residual_kg: mass,
+            physical_energy_residual_j: energy,
+        })
+    }
+
     fn attempt(
         &mut self,
         dt: f64,
@@ -695,11 +724,34 @@ impl ZoneNetwork {
         controls: NetworkControl,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(usize, f64), NetworkError> {
+        self.attempt_with_evaluation(
+            dt,
+            sources,
+            controls,
+            cancelled,
+            |network, dt, sources, zone, cancelled| network.evaluate(dt, sources, zone, cancelled),
+        )
+    }
+
+    fn attempt_with_evaluation<C: FnMut() -> bool>(
+        &mut self,
+        dt: f64,
+        sources: &[[LayerRates; 2]],
+        controls: NetworkControl,
+        cancelled: &mut C,
+        mut evaluate: impl FnMut(
+            &mut Self,
+            f64,
+            &[[LayerRates; 2]],
+            ZoneSolve,
+            &mut C,
+        ) -> Result<(), NetworkError>,
+    ) -> Result<(usize, f64), NetworkError> {
         let n = self.rooms.len();
         for iteration in 0..controls.maximum_iterations {
             poll(cancelled)?;
             self.perturbation.copy_from_slice(&self.pressures);
-            self.evaluate(dt, sources, controls.zone, cancelled)?;
+            evaluate(self, dt, sources, controls.zone, cancelled)?;
             self.residual.copy_from_slice(&self.evaluated);
             let norm = max_abs(&self.residual);
             if norm <= controls.pressure_tolerance_pa {
@@ -721,7 +773,7 @@ impl ZoneNetwork {
                 if !positive(actual_difference) {
                     return Err(NetworkError::Invalid("unrepresentable pressure difference"));
                 }
-                self.evaluate(dt, sources, controls.zone, cancelled)?;
+                evaluate(self, dt, sources, controls.zone, cancelled)?;
                 for i in 0..n {
                     self.matrix[i * n + j] =
                         (self.evaluated[i] - self.residual[i]) / actual_difference;
@@ -741,7 +793,7 @@ impl ZoneNetwork {
                     self.perturbation[i] = self.pressures[i] + scale * self.delta[i];
                 }
                 if self.perturbation.iter().all(|p| positive(*p)) {
-                    match self.evaluate(dt, sources, controls.zone, cancelled) {
+                    match evaluate(self, dt, sources, controls.zone, cancelled) {
                         Ok(()) if max_abs(&self.evaluated) < norm => {
                             accepted = true;
                             break;

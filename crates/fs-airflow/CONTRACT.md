@@ -969,6 +969,29 @@ reports net physical external energy, each species source, and balance residuals
 This remains a first-order estimated operator composition, not a globally
 second-order or fully temperature-implicit scheme or discrete entropy proof.
 
+`ZoneNetwork::step_with_pressure_sources` also evaluates a finite source inside
+every original Newton, Jacobian and line-search pressure trial. Each evaluation
+first reconstructs the accepted inventories, applies transport, then supplies
+those actual transported inventories to the source callback. The pressure
+equation closes against the source-updated rooms, so chemical heating affects
+opening flow in the same accepted step. It does not burn oxygen that has already
+left through a vent. The original Newton/LU, identity/clock checks, balances and
+transactional publication are shared with the existing entry points.
+
+Preparation data are immutable during each attempted interval; trial diagnostics
+and candidate external states are returned separately, with no cloning
+requirement. Only the converged trial's result is returned. A failure or
+cancellation after a chemical update leaves all accepted rooms unchanged, and
+duration retries rebuild preparation. Its pressure residual includes the source;
+the post-pressure-solve split increment is zero because there is no subsequent
+source stage. Donor temperature, composition and interface geometry in opening
+fluxes remain frozen at the start of the step. This pressure closure does not
+establish full thermochemical implicitness, second-order accuracy, equilibrium
+chemistry or an entropy theorem. Eight focused regressions cover exact sealed
+oxygen capacity, post-outflow availability, an independent reconstruction of
+opening transfer at the accepted chemical pressure, multi-room redistribution,
+retry/cancellation atomicity, source admission and zero-source equivalence.
+
 The wall adapter retains the caller's original borrowed ThermalLaw, original
 DepositionSimulation histories and BackwardEulerStep residual/acceptance gates.
 Uniform through-thickness finite volumes use original series conductances and
