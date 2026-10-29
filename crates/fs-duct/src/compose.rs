@@ -87,7 +87,7 @@ fn poll(cancelled: &mut impl FnMut() -> bool, step: usize) -> Result<(), DuctErr
     }
 }
 impl ComposeOptions {
-    fn validate(self) -> Result<(), DuctError> {
+    pub(crate) fn validate(self) -> Result<(), DuctError> {
         if !self.maximum_condition.is_finite()
             || self.maximum_condition < 1.0
             || self.maximum_blocks == 0
@@ -796,6 +796,59 @@ pub struct PreparedChain {
     pub reference_impedance: f64,
     pub min_shear_number: f64,
 }
+
+/// Incident pressure waves at each block's left/right port, divided by
+/// `reference_impedance * U_in`. Local side branches can recover their work
+/// and mouth flow without dividing by a pressure node or a branch impedance.
+/// The original feedback bounds and logarithmic transmission product apply.
+pub(crate) fn incident_waves_controlled(
+    chain: &PreparedChain,
+    load: Option<C64>,
+    options: ComposeOptions,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<[C64; 2]>, DuctError> {
+    options.validate()?;
+    let n = chain.blocks.len();
+    if n == 0 || n > options.maximum_blocks {
+        return Err(bad("incident-wave reconstruction needs an admitted nonempty chain"));
+    }
+    let reference = chain.reference_impedance;
+    let LoadReflection::Finite(mut reflection) = load_reflection(load, reference)? else {
+        return Err(DuctError::Singular);
+    };
+    let mut after = vec![C64::ZERO; n];
+    let mut transmission = vec![C64::ZERO; n];
+    let mut condition = 1.0_f64;
+    for (i, block) in chain.blocks.iter().enumerate().rev() {
+        poll(cancelled, n - i - 1)?;
+        if block.reference_impedance != reference {
+            return Err(bad("incident-wave ports must share the chain reference"));
+        }
+        after[i] = reflection;
+        let s = block.scattering;
+        let (d, c) = feedback(s[3], reflection);
+        condition = condition.max(c);
+        bound(condition, options.maximum_condition)?;
+        transmission[i] = s[2] / d;
+        reflection = s[0] + s[1] * reflection * transmission[i];
+    }
+    let inlet = C64::ONE - reflection;
+    bound((1.0 + reflection.abs()) / inlet.abs(), options.maximum_condition)?;
+    let mut prefix = Product::new();
+    let mut result = Vec::with_capacity(n);
+    for i in 0..n {
+        poll(cancelled, i)?;
+        let left = prefix.value()? / inlet;
+        prefix.multiply(transmission[i])?;
+        let right = prefix.value()? * after[i] / inlet;
+        if !finite(left) || !finite(right) {
+            return Err(DuctError::Singular);
+        }
+        result.push([left, right]);
+    }
+    Ok(result)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PreparedOpenHole {
     pub block_index: usize,

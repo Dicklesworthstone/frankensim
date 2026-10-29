@@ -1702,7 +1702,8 @@ gas is homogeneous. Existing stable two-port composition solves inlet
 impedance and outlet pressure/flow, including strongly attenuating lines.
 Cone slices retain the local-radius spherical approximation and profiles
 retain their fourth-order Magnus axis. The explicit load owns exterior
-radiation; no exterior medium is inferred. Compact tone-hole branches refuse.
+radiation; no exterior medium is inferred. Molecular tone-hole chimneys use
+explicit mouth loads as described below.
 No mean-flow, evolving-composition, deformable-wall or multidimensional claim
 is added. Wall band admission is the original sampled equilibrium Bessel
 comparison, not a bound for the full coupled molecular response.
@@ -1715,3 +1716,32 @@ the existing gas and relaxation grammars and reports solved impedance,
 through-flow and input/output power across six frequencies. Its terrestrial-air
 invocation composes existing engineering gas and relaxation models; it does
 not establish experimental calibration.
+
+### Molecular finite tone-hole chimneys
+
+`MolecularDuct` now admits open, closed and partially vented compact tone holes.
+The original inner, series and mutual junction corrections retain their
+existing owners. Finite chimneys use the same original gas reservoirs and
+cached radial wall spectra as the bore. Every open/vented mouth needs an
+explicit finite passive pressure/volume-flow load, in authored open-hole order;
+closed holes need no exterior load. `response_with_holes` and its controlled
+variant return physical junction/mouth pressure and flow per unit inlet flow,
+plus independent branch-input, exterior-load and dissipated work coefficients.
+The existing partial-vent admittance weights scale flow and work once.
+
+Decaying homogeneous cylinder coordinates use expm1 and sine/cosine identities
+to preserve low-frequency compliance, quarter-wave pressure nodes and strongly
+attenuating spans without growing exponentials or impedance-pole division.
+The original bounded scattering owner reconstructs incoming waves with its
+logarithmic transmission products. Prepared chains validate the existing
+composition options before assembly; cancellation and complete block caps
+apply to each junction and original propagation block. No loss is clipped.
+
+Independent tests cover finite-line open/closed/vent responses, integrated
+molecular volume work, compact gas-spring limits, three-rung wall refinement,
+long attenuating chimneys, source sensitivity and explicit-load admission.
+Scope remains frozen homogeneous gas, compact junctions, plane-wave chimneys
+and independent scalar exterior mouths. Partial venting retains the existing
+admittance-mixture model; resolved pad motion and exterior mutual radiation
+matrices are not inferred. Original diffusion accuracy and geometry limits
+remain separate from molecular-rate data quality.

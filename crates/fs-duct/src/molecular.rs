@@ -22,8 +22,11 @@
 //! use Webster/Magnus. Molecular data, diffusion poles, cone slices and profile
 //! steps are independent resolution/model choices. The diffusion admission is
 //! against equilibrium Bessel response, not an error bound for the joint
-//! molecular law. Compact tone holes refuse until their full branch law can
-//! consume these same reservoirs. Exterior radiation is an explicit load.
+//! molecular law. Compact tone-hole chimneys consume the same reservoirs and
+//! wall spectra; each open mouth requires an explicit pressure/flow load.
+//! Their original inner/series/mutual corrections and vent-admittance mixture
+//! remain a compact model, without resolved pads or exterior cross-loading.
+//! Exterior radiation is an explicit load, never inferred from the bore gas.
 
 use crate::compose::{self, ChainResult, ComposeOptions, PreparedChain, TwoPort};
 use crate::{ConeSlices, Duct, DuctError, LossModel, Segment, SegmentWave};
@@ -32,6 +35,9 @@ use fs_material::relaxation::RelaxationState;
 use fs_math::{c64::C64, det};
 use fs_phs::ZkDiffusive;
 use std::collections::BTreeMap;
+
+mod holes;
+pub use holes::{MolecularHoleFlow, MolecularHoleSite, MolecularResponse};
 
 /// Original constitutive or propagation refusal, without a fallback gas law.
 #[derive(Debug)]
@@ -87,6 +93,7 @@ struct MaterialPoint {
 enum Piece {
     Wave { geometry: Segment, point: usize },
     Magnus { h: f64, points: [usize; 2] },
+    ToneHole(holes::ToneHole),
 }
 
 /// Prepared harmonic counterpart of the existing molecular DG duct.
@@ -118,7 +125,7 @@ fn poll(cancelled: &mut impl FnMut() -> bool, completed: usize) -> Result<(), Du
 }
 
 impl MolecularDuct {
-    /// Bind the original gas and reservoirs to cylinder/cone/profile geometry.
+    /// Bind the original gas and reservoirs to duct and tone-hole geometry.
     /// `None` selects adiabatic, slip walls; `Some` retains coupled shear and
     /// thermal diffusion. Cone slices and each profile's own RiccatiSteps are
     /// preserved, and `maximum_blocks` is an admission cap, never a clamp.
@@ -163,11 +170,9 @@ impl MolecularDuct {
                     if wall.is_some() { n } else { 1 }
                 }
                 Segment::Profile { steps, .. } => steps.0,
-                Segment::ToneHole { .. } => {
-                    return Err(bad(
-                        "molecular duct compact tone-hole branches are not implemented",
-                    )
-                    .into());
+                Segment::ToneHole { state, .. } => {
+                    holes::opening(*state)?;
+                    3 // two series halves surrounding the projective shunt
                 }
             };
             count = count
@@ -190,6 +195,7 @@ impl MolecularDuct {
             reference_impedance: reference,
         };
         let mut cache = BTreeMap::new();
+        let open_sites = crate::collect_open_hole_sites(duct);
         let mut origin = 0.0;
         let root3 = det::sqrt(3.0);
         for segment in &duct.segments {
@@ -253,7 +259,15 @@ impl MolecularDuct {
                         result.pieces.push(Piece::Magnus { h, points });
                     }
                 }
-                Segment::ToneHole { .. } => unreachable!("admitted above"),
+                Segment::ToneHole { hole_radius, .. } => {
+                    let point = result.point(*hole_radius, origin, wall, &mut cache, cancelled)?;
+                    result.pieces.push(Piece::ToneHole(holes::ToneHole::new(
+                        segment,
+                        point,
+                        origin,
+                        &open_sites,
+                    )?));
+                }
             }
             origin += segment.axial_length();
         }
@@ -306,9 +320,15 @@ impl MolecularDuct {
     pub fn state(&self) -> &RelaxationState {
         &self.state
     }
-    /// Exact number of retained axial propagation blocks.
+    /// Exact number of retained scattering blocks, including three per hole.
     pub fn blocks(&self) -> usize {
-        self.pieces.len()
+        self.pieces
+            .iter()
+            .map(|piece| match piece {
+                Piece::ToneHole(_) => 3,
+                _ => 1,
+            })
+            .sum()
     }
     /// Distinct radii whose wall spectra were prepared once and reused.
     pub fn material_points(&self) -> usize {
@@ -387,9 +407,38 @@ impl MolecularDuct {
         omega: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedChain, MolecularDuctError> {
+        self.prepare_with_holes_controlled(omega, &[], ComposeOptions::default(), cancelled)
+            .map(|(chain, _)| chain)
+    }
+
+    fn prepare_with_holes_controlled(
+        &self,
+        omega: f64,
+        mouth_loads: &[C64],
+        options: ComposeOptions,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(PreparedChain, Vec<holes::PreparedHole>), MolecularDuctError> {
         poll(cancelled, 0)?;
+        options.validate()?;
         if !positive(omega) {
             return Err(bad("molecular duct frequency must be positive and finite").into());
+        }
+        if self.blocks() > options.maximum_blocks {
+            return Err(bad("molecular duct composition block work cap exceeded").into());
+        }
+        let open_count = self
+            .pieces
+            .iter()
+            .filter(|piece| matches!(piece, Piece::ToneHole(hole) if hole.site.open_fraction > 0.0))
+            .count();
+        if mouth_loads.len() != open_count {
+            return Err(bad("each open molecular chimney requires one explicit mouth load").into());
+        }
+        if mouth_loads
+            .iter()
+            .any(|&load| !finite(load) || load.re < 0.0)
+        {
+            return Err(bad("molecular chimney loads must be finite and passive").into());
         }
         let caloric = self.state.caloric_response(omega)?;
         let cp = caloric.cp_j_kg_k;
@@ -411,10 +460,31 @@ impl MolecularDuct {
             waves.push(wave);
         }
         let reference = self.reference_impedance;
-        let mut blocks = Vec::with_capacity(self.pieces.len());
+        let mut blocks = Vec::with_capacity(self.blocks());
+        let mut observations = Vec::new();
+        let mut loads = mouth_loads.iter();
         for (i, piece) in self.pieces.iter().enumerate() {
             poll(cancelled, i)?;
             let block = match piece {
+                Piece::ToneHole(hole) => {
+                    let load = if hole.site.open_fraction > 0.0 {
+                        Some(*loads.next().expect("admitted load count"))
+                    } else {
+                        None
+                    };
+                    let (local, observation) = hole.prepare(
+                        &waves[hole.point],
+                        self.state.gas().density,
+                        omega,
+                        load,
+                        reference,
+                        options,
+                        blocks.len(),
+                    )?;
+                    blocks.extend(local);
+                    observations.push(observation);
+                    continue;
+                }
                 Piece::Wave { geometry, point } => {
                     TwoPort::from_wave(geometry, &waves[*point], reference)?
                 }
@@ -440,11 +510,14 @@ impl MolecularDuct {
             };
             blocks.push(block);
         }
-        Ok(PreparedChain {
-            blocks,
-            reference_impedance: reference,
-            min_shear_number: min_shear,
-        })
+        Ok((
+            PreparedChain {
+                blocks,
+                reference_impedance: reference,
+                min_shear_number: min_shear,
+            },
+            observations,
+        ))
     }
 
     /// Actual terminated pressure/volume-flow response; `None` is a rigid cap,
@@ -467,10 +540,10 @@ impl MolecularDuct {
         options: ComposeOptions,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ChainResult, MolecularDuctError> {
-        if self.pieces.len() > options.maximum_blocks {
+        if self.blocks() > options.maximum_blocks {
             return Err(bad("molecular duct composition block work cap exceeded").into());
         }
-        let chain = self.prepared_chain_controlled(omega, cancelled)?;
+        let (chain, _) = self.prepare_with_holes_controlled(omega, &[], options, cancelled)?;
         Ok(compose::compose_chain_controlled(
             &chain.blocks,
             load,
@@ -482,3 +555,6 @@ impl MolecularDuct {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod holes_tests;

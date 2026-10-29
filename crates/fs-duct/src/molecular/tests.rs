@@ -327,7 +327,11 @@ fn unresolved_bands_branch_models_work_and_cancellation_refuse() {
             state: crate::HoleState::Closed,
         }],
     };
-    assert!(MolecularDuct::new(&holes, state.clone(), None, ConeSlices::Auto, 4).is_err());
+    assert_eq!(
+        MolecularDuct::new(&holes, state.clone(), None, ConeSlices::Auto, 3).unwrap().blocks(),
+        3
+    );
+    assert!(MolecularDuct::new(&holes, state.clone(), None, ConeSlices::Auto, 2).is_err());
     let unresolved = MolecularWallResolution {
         poles_per_field: 1,
         maximum_relative_error: 1e-12,
