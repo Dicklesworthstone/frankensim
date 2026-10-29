@@ -3829,3 +3829,52 @@ compares equal-volume specimens receiving the same heat and checks cooling,
 independent energy integrals and unsupported excursions. The
 [plastic integration](../../../xtask/tests/fsri_plastic_thermal_profiles.rs)
 exercises all four polymer datasets through the same production API.
+
+## Temperature curves for panels, construction materials and metals (2026-10-28)
+
+This increment adds twelve source profiles and 72 claims. Claim counts include
+explicitly separate statistics and apparent/local interpretations; they are not
+counts of independently measured or fully qualified materials.
+
+| Profile | Claims | Thermal use |
+| --- | ---: | --- |
+| `fsri-mdf-unconditioned-2021` | 6 | Native C_vol and published Cp at 10–40 C; k at 30/35/40/45 C |
+| `fsri-osb-unconditioned-2022` | 8 | Native C_vol/Cp at 10–40 C; k at 15/65 C |
+| `fsri-plywood-unconditioned-2021` | 8 | Native C_vol/Cp at 10–40 C; k at 15/45 C |
+| `fsri-particleboard-unconditioned-2021` | 8 | Native C_vol/Cp at 10–40 C; k at 15/45 C |
+| `fsri-fiber-cement-board-unconditioned-2021` | 8 | Cement/pulp board C_vol/Cp and through-thickness k |
+| `fsri-gypsum-wallboard-unconditioned-2021` | 8 | Whole paper-faced board C_vol/Cp and through-thickness k |
+| `fsri-mineral-wool-unconditioned-2021` | 8 | Stone-wool batt C_vol/Cp and through-thickness k |
+| `fsri-frp-panel-unconditioned-2022` | 5 | Fiberglass/polyester C_vol at 10–40 C and k at 15/65 C; no density or Cp claim |
+| `aluminum-3003-f-nist-thermal-reference` | 3 | k/Cp 4–300 K; finite expansion 20–300 K |
+| `aluminum-5083-o-nist-thermal-reference` | 4 | k/Cp 4–300 K; finite expansion 20–300 K; E 2–295 K |
+| `invar-fe36ni-nist-thermal-reference` | 4 | k 4–300 K; Cp 4–20 K; finite expansion 90–300 K; E 3–298 K |
+| `platinum-nist-thermal-reference` | 2 | k 4–295 K; Cp 1–295 K |
+
+FSRI primary experiments and the reduction script are pinned at
+[revision a432697](https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df).
+Each manifest links the material page and original experiment folder.
+Native C_vol stays independent of the source's density normalization and rounded
+Cp. MDF has one heat-capacity specimen, so undefined capacity scatter is absent.
+The gypsum density-header/mass inconsistency, mineral-wool repeated-run
+selection, plywood density header and metadata-versus-test thickness differences
+remain documented. No exact grade, moisture content or coupon match is inferred.
+The conductivity approximation requires `mean-test-temperature-as-local-model=1`;
+the original mean test temperature, 20 K plate difference and direction remain
+available. Sample SD is not measurement uncertainty.
+
+NIST packs retain the original polynomial equations, published coefficients,
+source data/equation domains, fit-error descriptions and finite-strain
+convention. Their 1,403 sampled knots define explicit linear approximations;
+sampled interpolation checks are not continuous certified bounds. Invar's warm
+Cp is unavailable, and no material density is invented. The two aluminum
+profiles share NIST's published Cp relation rather than independent specimens.
+
+`FixedVolumeThermalLaw` now connects prepared C_vol(T) directly to the existing
+thermal timeline under an explicit fixed mass/volume basis. The new
+`FixedVolumeConductionLink` refreshes k(T) on that timeline's actual cell states
+and existing implicit residual. The source/consumer tests are
+`fsri_panel_thermal_profiles`, `fsri_building_thermal_profiles`,
+`nist_metal_thermal_completion` and `material_volumetric_timeline`.
+These bounded additions do not close the full B04/B06/B09/B10/A05/M06/MR11
+qualification tasks.

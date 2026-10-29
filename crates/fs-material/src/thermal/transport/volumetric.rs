@@ -13,6 +13,10 @@ pub use prepared::{
     PreparedVolumetricThermalTransport, VolumetricThermalPathQuery, VolumetricThermalSample,
 };
 
+/// Fixed-reference-volume storage and sourced conduction on the shared timeline.
+#[path = "volumetric/timeline.rs"]
+pub mod timeline;
+
 use super::{ThermalTransportError, admit_temperature_point, source_line, transport_values};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{ClaimSelection, MaterialAnswer, MaterialCard, PropertyKey, QueryPoint};

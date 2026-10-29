@@ -688,3 +688,46 @@ Full workspace Cargo validation remains blocked in the authoring environment by
 the absent sibling frankenscipy/fsci-special manifest; no full-workspace pass is
 claimed. Spatial heat flow, matched thermomechanical qualification, phase
 transitions and complete material laws remain outside this bounded increment.
+
+## 2026-10-28 panel, construction and cryogenic-metal increment
+
+Added **12 profiles / 72 claims** in three directly committed material batches:
+four FSRI wood panels (30 claims), four FSRI construction/insulation/composite
+profiles (29), and four NIST metal reference profiles (13). The FSRI additions
+retain 173 numerical claim values; the NIST approximations retain 1,403
+temperature knots. Counts include source statistics and explicit local-model
+interpretations, and do not establish complete material qualification.
+
+New FSRI profiles cover MDF, OSB, plywood, particleboard, fiber-cement board,
+whole gypsum wallboard, mineral wool and fiberglass/polyester FRP. They add
+native volumetric heat capacity and condition-compatible conductivity over
+explicit measured temperature groups. FRP requires no fabricated rho or Cp.
+MDF retains its single capacity specimen; gypsum source inconsistencies,
+mineral-wool repeated-run selection, per-property sample counts and stock/test
+geometry distinctions stay explicit. Dry counterparts are not silently mixed
+with unconditioned specimens.
+
+New NIST profiles cover 3003-F and 5083-O aluminum, Fe-36Ni Invar and platinum.
+They include supported k/Cp, finite expansion and selected Young-modulus curves.
+NIST's original data limits govern admission: Invar Cp stops at 20 K.
+Finite expansion remains distinct from CTE and preserves the fitted 293 K
+residual. Source density, common-coupon qualification and statistical
+confidence are not supplied.
+
+The production follow-through is
+`fs_material::thermal::transport::volumetric::timeline`:
+`FixedVolumeThermalLaw` expresses the existing C_vol integral in an explicit
+fixed reference mass basis; `FixedVolumeConductionLink` evaluates the original
+source k(T) on the actual thermal cells. Both feed the existing
+`fs_thermal` owner. No second storage update, timeline or nonlinear solver was
+introduced.
+
+Focused native verification passed **13 tests**: three per material batch and
+four source-to-timeline tests. They use the actual material compiler and
+production modules, including independent polynomial/reduction checks,
+source/context/domain refusals, caloric inversion, nonlinear two-cell
+conservation and actual foam/FRP heating. Formatting and scoped whitespace
+checks passed. Full workspace Cargo was not run; the sibling
+`frankenscipy/crates/fsci-special/Cargo.toml` remains unavailable. These
+results are bounded model/compiler tests, not full workspace or experimental
+qualification.

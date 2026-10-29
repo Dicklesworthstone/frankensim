@@ -4267,3 +4267,40 @@ limits therefore survive a change of consumer or coordinate representation.
 The focused regression checks shear-stress parity and identical refusal without
 mutation in both time-domain interfaces. This admits supplied endpoints only;
 it does not enclose strain extrema between time samples or quadrature points.
+
+## Volumetric storage on the shared thermal timeline
+
+`thermal::transport::volumetric::timeline::FixedVolumeThermalLaw` borrows the
+existing prepared volumetric source path and implements the original
+`fs_thermal::enthalpy::ThermalLaw`. Its explicit reference mass/volume ratio
+rho0 and zero-storage datum give h(T) = integral C_vol(T) dT / rho0. A compatible
+cell therefore stores m*h = V0*integral C_vol(T) dT. rho0 is an authored scenario
+basis, not a new measured density, temperature-dependent density or source Cp
+claim. Mass and volume remain fixed. Callers must select a compatible caloric
+constraint; this does not infer pressure work, phase change or moisture exchange.
+
+Preparation retains the original source identity, includes the mass basis and
+datum in the adapter identity, checks representable storage bounds and computes
+an upward-rounded global temperature-slope bound from the minimum affine
+capacity. Runtime storage/inversion reuse the original exact segment integrals.
+`admit_cell` checks actual mass versus reference volume and supported storage;
+its 64-epsilon comparison permits arithmetic roundoff only.
+
+`FixedVolumeConductionLink::try_aligned` binds an existing ordered interface
+to the two original borrowed caloric laws. Each evaluation verifies the active
+link geometry, actual cell mass/volume bases and original material-law objects.
+It evaluates each cell's sourced k at its current temperature, then uses the
+existing series/contact conductance owner. Distances, transfer area, contact
+resistance and alignment are explicit caller inputs. This is a uniform-cell,
+cell-centre conductivity approximation, not an exact nonuniform half-cell
+integral. Return the value through the existing implicit
+`StepCoefficients::conductances_w_k`; the original timeline owns history,
+sources, integration and local/global energy acceptance. Evaluation allocates
+no source tables, queries no card and computes no content hashes.
+
+Four focused G1/G3 tests in `xtask/tests/material_volumetric_timeline.rs`
+cover reference-basis/datum invariance, an independently solved nonlinear
+two-cell balance, original-law/geometry/domain refusals, and actual compiled
+FSRI foam and density-free FRP heating on the existing timeline. The explicit
+authored mass basis cancels from those fixed-volume temperature results.
+No entropy law, experimental qualification or full spatial FEM result is added.
