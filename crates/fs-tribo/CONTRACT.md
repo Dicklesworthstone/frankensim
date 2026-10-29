@@ -121,7 +121,13 @@ principal frame, where its terms are nonnegative. Rotation roundoff in the
 world-frame work is retained in the closure residual, so a valid zero-work
 frictionless direction is not rejected as negative dissipation.
 
-The eight G1/G3 groups in `tests/elliptic_coulomb.rs` compare the response with
+`advance_kinetic` continues an interval whose mechanical owner already admits
+sliding, using the kinetic ellipse without spending the larger static capacity.
+The original full law owns the returned checkpoint. A zero-slip kinetic
+proposal requires a separate physical arrest check in a dynamics consumer;
+the constitutive return map alone does not establish an event time.
+
+The nine G1/G3 groups in `tests/elliptic_coulomb.rs` compare the response with
 an independent constrained-energy minimization and an angular maximum-work
 sweep, and exercise directional breakaway, unequal static/kinetic limits,
 isotropic and frictionless limits, full matrix/multicontact consumers, frame

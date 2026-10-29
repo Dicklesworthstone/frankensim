@@ -2,6 +2,8 @@
 
 #[path = "source_thermal_friction/elliptic.rs"]
 mod elliptic;
+#[path = "source_thermal_friction/query.rs"]
+mod query;
 
 use fs_contact::interface_binding::bind_dry_interface_system_card;
 use fs_contact::interface_binding::thermal_friction::{

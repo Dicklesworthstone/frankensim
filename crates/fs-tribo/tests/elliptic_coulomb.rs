@@ -119,6 +119,35 @@ fn prescribed_sliding_maximizes_dissipation_on_the_entire_ellipse() {
     }
 }
 
+#[test]
+fn kinetic_continuation_preserves_static_capacity_and_frictionless_motion() {
+    let law = law();
+    let original = law.initial_state();
+    let drive = input([0.07, 0.0], 0.01);
+    let moving = law.advance_kinetic(&original, &drive).unwrap();
+    assert_eq!(moving.regime, FrictionRegime::Sliding);
+    close2(moving.traction_n, [6.0, 0.0], 1e-12);
+    close2(moving.slip_increment_m, [0.01, 0.0], 1e-13);
+    close(moving.dissipated_j, 0.06, 1e-12);
+    assert_eq!(moving.iterations, 0);
+    // The kinetic solve returns a checkpoint for the original law, including
+    // its larger static capacity when the mechanics owner later admits rest.
+    let rest = law.advance(&moving.state, &drive).unwrap();
+    assert_eq!(rest.regime, FrictionRegime::Sticking);
+    close2(rest.traction_n, [7.0, 0.0], 1e-12);
+    assert_eq!(rest.state.slip_m(), moving.state.slip_m());
+    assert_eq!(original, law.initial_state());
+
+    let free = EllipticCoulomb::new([0.8, 0.4], [0.6, 0.0], [1.0, 0.0]).unwrap();
+    let preserved = free
+        .advance_kinetic(&free.initial_state(), &input([0.0, 0.03], 0.01))
+        .unwrap();
+    assert_eq!(preserved.slip_increment_m, [0.0, 0.03]);
+    assert_eq!(preserved.traction_n, [0.0; 2]);
+    assert_eq!(preserved.dissipated_j, 0.0);
+    assert!(free.advance_kinetic(&moving.state, &drive).is_err());
+}
+
 // Independent minimization over ellipse angle. Production instead solves its
 // monotone multiplier; this oracle never uses its projection equation.
 fn angular_projection(free: [f64; 2], compliance: [[f64; 2]; 2]) -> [f64; 2] {

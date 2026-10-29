@@ -178,6 +178,24 @@ and heat, directional static breakaway, frame transport followed by coefficient
 refresh, original pressure surfaces, pinned receipts and atomic domain refusal.
 These are synthetic source-integration checks, not measured friction validation.
 
+`SourceThermalCoulomb::resolve_with_query_axes` additionally admits explicit
+surface-temperature, nominal-pressure, sliding-speed and accumulated-path
+coordinates. `advance_at_query` requires the original complete coordinate
+schema and refuses changes to every unowned external condition. Both response
+axes and applicability-only bounds pass the original material owned-coordinate
+checker. The source owner does not evolve these coordinates: mechanics and
+thermal consumers must supply their actual coupled endpoint. The ordinary
+temperature-only entry refuses additional owned axes rather than freezing them.
+
+The directional owner refreshes both principal bundles at that same query and
+retains their original pins, texture and accepted slip. Its explicit kinetic
+mode uses only kinetic resistance for already-moving intervals while retaining
+the full static coefficients in the returned checkpoint. A zero-slip kinetic
+candidate still needs the dynamics owner's independent arrest admission. Four
+groups in `tests/source_thermal_friction/query.rs` exercise two-temperature,
+speed/path source response, preserved breakaway capacity, complete-query and
+source-domain refusal, canonical coordinate ownership and atomic retry.
+
 ### Source-backed Hertz--Mindlin normal loading and recontact
 
 `interface_binding::mindlin::loading::SourceHertzMindlinContact` reuses an

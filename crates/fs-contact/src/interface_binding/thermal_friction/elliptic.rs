@@ -11,6 +11,16 @@ use fs_tribo::tangential::transport::{ObjectiveTangentialLaw, TangentialHistoryR
 
 use super::*;
 
+/// The mechanical owner's admission of the interval's friction branch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EllipticFrictionMode {
+    /// Admit static reaction first, as required for accepted rest.
+    StaticOrSliding,
+    /// Continue accepted motion on the kinetic ellipse. The mechanics owner
+    /// must separately admit any zero-slip result as a physical arrest event.
+    Kinetic,
+}
+
 /// Two sourced principal coefficient pairs with one retained material direction.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SourceThermalEllipticCoulomb {
@@ -62,6 +72,7 @@ impl SourceThermalEllipticCoulomb {
         if principal[0].interface != principal[1].interface
             || principal[0].initial_source.query() != principal[1].initial_source.query()
             || principal[0].axes != principal[1].axes
+            || principal[0].query_axes != principal[1].query_axes
         {
             return Err(SourceThermalCoulombError::Invalid(
                 "directional coefficients require the same ordered interface and source conditions",
@@ -122,13 +133,46 @@ impl SourceThermalEllipticCoulomb {
             self.principal[0].source_at_input(&state.sources[0], input)?,
             self.principal[1].source_at_input(&state.sources[1], input)?,
         ];
+        self.advance_with_sources(state, input, sources, EllipticFrictionMode::StaticOrSliding)
+    }
+
+    /// Advance at the exact query produced by the thermal/mechanical owner.
+    /// Both principal source bundles refresh atomically, including explicitly
+    /// owned surface temperatures, speed and path. Every unowned coordinate
+    /// stays fixed, and the native checkpoint retains its full static limits
+    /// even when the mechanics owner selects an already-moving kinetic branch.
+    pub fn advance_at_query(
+        &self,
+        state: &SourceThermalEllipticState,
+        input: &TangentialStepInput,
+        point: &QueryPoint,
+        mode: EllipticFrictionMode,
+    ) -> Result<TangentialStep<SourceThermalEllipticState>, SourceThermalCoulombError> {
+        self.check(state)?;
+        let sources = [
+            self.principal[0].source_at_query(&state.sources[0], input, point)?,
+            self.principal[1].source_at_query(&state.sources[1], input, point)?,
+        ];
+        self.advance_with_sources(state, input, sources, mode)
+    }
+
+    fn advance_with_sources(
+        &self,
+        state: &SourceThermalEllipticState,
+        input: &TangentialStepInput,
+        sources: [ResolvedInterfaceStatePoint; 2],
+        mode: EllipticFrictionMode,
+    ) -> Result<TangentialStep<SourceThermalEllipticState>, SourceThermalCoulombError> {
         let (static_mu, kinetic_mu) =
             principal_coefficients(&self.principal, [&sources[0], &sources[1]])?;
         let (law, history) =
             state
                 .law
                 .continue_coefficients(&state.constitutive, static_mu, kinetic_mu)?;
-        let step = law.advance(&history, input)?;
+        let step = match mode {
+            EllipticFrictionMode::StaticOrSliding => law.advance(&history, input)?,
+            EllipticFrictionMode::Kinetic => law.advance_kinetic(&history, input)?,
+        };
         Ok(TangentialStep {
             traction_n: step.traction_n,
             slip_increment_m: step.slip_increment_m,

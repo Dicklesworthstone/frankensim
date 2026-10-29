@@ -2,13 +2,17 @@
 //!
 //! Each trial resolves the explicitly selected static and kinetic coefficients
 //! at its contact temperature and, optionally, supplied nominal pressure. The
-//! original claims remain pinned; all other external coordinates stay fixed.
+//! original claims remain pinned. Explicit physical owners may additionally
+//! supply surface temperatures, speed and accumulated path through a complete
+//! query; every undeclared external coordinate stays fixed.
 //! The native set-valued Coulomb law owns the actual traction/compliance solve.
 //! Its zero elastic potential permits coefficient evolution without silently
 //! changing stored energy. This is not a transfer of an elastic contact history.
 
 /// Directional principal coefficients from the same original ordered interface.
 pub mod elliptic;
+mod query;
+pub use query::{FrictionQueryAxis, FrictionQueryAxisKind};
 
 use core::fmt;
 
@@ -47,6 +51,7 @@ pub struct SourceThermalCoulomb {
     static_property: String,
     kinetic_property: String,
     axes: ThermalFrictionAxes,
+    query_axes: Vec<FrictionQueryAxis>,
     identity: ContentHash,
 }
 
@@ -124,7 +129,37 @@ impl SourceThermalCoulomb {
         selection: MaterialPropertySelection,
         axes: ThermalFrictionAxes,
     ) -> Result<Self, SourceThermalCoulombError> {
-        validate_axes(&initial_query, &axes)?;
+        Self::resolve_with_query_axes(
+            interface,
+            initial_query,
+            static_requirement,
+            kinetic_requirement,
+            selection,
+            axes,
+            Vec::new(),
+        )
+    }
+
+    /// Admit additional coordinates supplied by an explicit physical owner.
+    ///
+    /// Surface temperatures, speed and accumulated path may evolve together.
+    /// Every response axis AND applicability bound must be owned here or be a
+    /// fixed external condition. Runtime callers must use `advance_at_query`;
+    /// the temperature-only `TangentialLaw` entry refuses these extra axes.
+    /// This owns source selection, not the thermal or mechanical evolution.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolve_with_query_axes(
+        interface: BoundDryInterfaceSystem,
+        initial_query: QueryPoint,
+        static_requirement: ScalarPropertyRequirement,
+        kinetic_requirement: ScalarPropertyRequirement,
+        selection: MaterialPropertySelection,
+        axes: ThermalFrictionAxes,
+        mut query_axes: Vec<FrictionQueryAxis>,
+    ) -> Result<Self, SourceThermalCoulombError> {
+        query::validate_additional_axes(&initial_query, &axes, &query_axes)?;
+        validate_axes(&initial_query, &axes, &query_axes)?;
+        query_axes.sort_by(|a, b| a.name.cmp(&b.name));
         if static_requirement.quantity() != QuantitySpec::dimensional(Dims::NONE)
             || kinetic_requirement.quantity() != QuantitySpec::dimensional(Dims::NONE)
         {
@@ -149,13 +184,24 @@ impl SourceThermalCoulomb {
             &requirements,
             selection,
         )?;
-        if initial_source
-            .properties()
+        let owned: Vec<_> = query_axes
             .iter()
-            .any(|p| !p.is_static_at_fixed_external_conditions())
-        {
+            .map(|axis| {
+                (
+                    axis.name.as_str(),
+                    initial_query.axis_quantities()[&axis.name],
+                )
+            })
+            .collect();
+        if initial_source.properties().iter().any(|p| {
+            if owned.is_empty() {
+                !p.is_static_at_fixed_external_conditions()
+            } else {
+                !p.has_only_owned_coordinates_and_fixed_external_conditions(&owned)
+            }
+        }) {
             return Err(SourceThermalCoulombError::Invalid(
-                "Coulomb coefficient sources must admit static external conditions",
+                "Coulomb coefficient sources require owned or fixed external conditions",
             ));
         }
         let initial_law = coefficients(&initial_source, &static_property, &kinetic_property)?;
@@ -176,6 +222,14 @@ impl SourceThermalCoulomb {
             hash.update(&(name.len() as u64).to_le_bytes());
             hash.update(name.as_bytes());
         }
+        if !query_axes.is_empty() {
+            hash.update(b"\0explicit-friction-query-axes.v1");
+            for axis in &query_axes {
+                hash.update(&[axis.kind.identity_tag()]);
+                hash.update(&(axis.name.len() as u64).to_le_bytes());
+                hash.update(axis.name.as_bytes());
+            }
+        }
         Ok(Self {
             interface,
             initial_source,
@@ -183,6 +237,7 @@ impl SourceThermalCoulomb {
             static_property,
             kinetic_property,
             axes,
+            query_axes,
             identity: hash.finalize(),
         })
     }
@@ -205,6 +260,13 @@ impl SourceThermalCoulomb {
         &self.axes
     }
 
+    /// Additional evolving coordinates in canonical name order. The primary
+    /// temperature and nominal pressure remain in `axes()`.
+    #[must_use]
+    pub fn query_axes(&self) -> &[FrictionQueryAxis] {
+        &self.query_axes
+    }
+
     /// Original source, selection, coefficient roles, axes and authority identity.
     #[must_use]
     pub const fn identity(&self) -> ContentHash {
@@ -218,6 +280,11 @@ impl SourceThermalCoulomb {
         previous: &ResolvedInterfaceStatePoint,
         input: &TangentialStepInput,
     ) -> Result<ResolvedInterfaceStatePoint, SourceThermalCoulombError> {
+        if !self.query_axes.is_empty() {
+            return Err(SourceThermalCoulombError::Invalid(
+                "owned friction coordinates require the complete physical query",
+            ));
+        }
         let temperature = input
             .contact_temperature_k
             .filter(|t| t.is_finite() && *t > 0.0)
@@ -248,6 +315,55 @@ impl SourceThermalCoulomb {
         }
     }
 
+    fn source_at_query(
+        &self,
+        previous: &ResolvedInterfaceStatePoint,
+        input: &TangentialStepInput,
+        point: &QueryPoint,
+    ) -> Result<ResolvedInterfaceStatePoint, SourceThermalCoulombError> {
+        query::validate_refresh(
+            &self.initial_source.query(),
+            point,
+            &self.axes,
+            &self.query_axes,
+            input,
+        )?;
+        let previous_point = previous.query();
+        if self.query_axes.iter().any(|axis| {
+            axis.kind == FrictionQueryAxisKind::AccumulatedDistance
+                && point.axes()[&axis.name] < previous_point.axes()[&axis.name]
+        }) {
+            return Err(SourceThermalCoulombError::Invalid(
+                "accumulated friction path cannot retreat from its accepted checkpoint",
+            ));
+        }
+        if point == &previous_point {
+            Ok(previous.clone())
+        } else {
+            Ok(self
+                .initial_source
+                .at_query_point(self.interface.card(), point)?)
+        }
+    }
+
+    /// Advance at the physical owner's complete endpoint query, retaining every
+    /// original selected claim. Undeclared coordinate changes and mismatched
+    /// mechanical temperature/pressure inputs refuse before a candidate exists.
+    pub fn advance_at_query(
+        &self,
+        state: &SourceThermalCoulombState,
+        input: &TangentialStepInput,
+        point: &QueryPoint,
+    ) -> Result<TangentialStep<SourceThermalCoulombState>, SourceThermalCoulombError> {
+        if state.owner != self.identity {
+            return Err(SourceThermalCoulombError::Invalid(
+                "thermal Coulomb checkpoint belongs to another original source",
+            ));
+        }
+        let source = self.source_at_query(&state.source, input, point)?;
+        self.advance_with_source(state, input, source)
+    }
+
     /// Prepare one complete candidate with the original material error preserved.
     ///
     /// The supplied temperature and pressure are held for this constitutive
@@ -265,6 +381,15 @@ impl SourceThermalCoulomb {
             ));
         }
         let source = self.source_at_input(&state.source, input)?;
+        self.advance_with_source(state, input, source)
+    }
+
+    fn advance_with_source(
+        &self,
+        state: &SourceThermalCoulombState,
+        input: &TangentialStepInput,
+        source: ResolvedInterfaceStatePoint,
+    ) -> Result<TangentialStep<SourceThermalCoulombState>, SourceThermalCoulombError> {
         let law = coefficients(&source, &self.static_property, &self.kinetic_property)?;
         let step = law.advance(&state.constitutive, input)?;
         Ok(TangentialStep {
@@ -374,6 +499,7 @@ fn coefficients(
 fn validate_axes(
     point: &QueryPoint,
     axes: &ThermalFrictionAxes,
+    query_axes: &[FrictionQueryAxis],
 ) -> Result<(), SourceThermalCoulombError> {
     let temperature_quantity = point.axis_quantities().get(&axes.temperature).copied();
     let semantic_temperature = temperature_quantity
@@ -390,11 +516,12 @@ fn validate_axes(
             .get(&axes.temperature)
             .is_some_and(|t| t.is_finite() && *t > 0.0)
         || point.axes().iter().any(|(axis, &value)| {
-            !is_fixed_external_coordinate(
-                axis,
-                point.axis_quantities().get(axis).copied(),
-                Some(value),
-            )
+            !query_axes.iter().any(|owned| &owned.name == axis)
+                && !is_fixed_external_coordinate(
+                    axis,
+                    point.axis_quantities().get(axis).copied(),
+                    Some(value),
+                )
         })
     {
         return Err(SourceThermalCoulombError::Invalid(

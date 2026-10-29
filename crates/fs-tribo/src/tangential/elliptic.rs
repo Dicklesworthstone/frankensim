@@ -123,6 +123,33 @@ impl EllipticCoulomb {
         Ok((law, next))
     }
 
+    /// Resolve an already sliding interval on the kinetic ellipse.
+    ///
+    /// The mechanical owner selects this branch from its accepted motion. The
+    /// larger static ellipse cannot capture a moving midpoint merely because
+    /// its released reaction lies below the breakaway threshold. Zero solved
+    /// slip is still possible inside the kinetic ellipse; a dynamics owner must
+    /// independently admit arrest with its impulse and event-time checks.
+    /// The returned checkpoint retains this law's ORIGINAL static coefficients.
+    pub fn advance_kinetic(
+        &self,
+        state: &EllipticCoulombState,
+        input: &TangentialStepInput,
+    ) -> Result<TangentialStep<EllipticCoulombState>, TriboError> {
+        self.check(state)?;
+        // Both coefficient pairs have already been validated. This temporary
+        // capacity choice needs no normalization, allocation or source query.
+        let kinetic = Self {
+            static_mu: self.kinetic_mu,
+            ..*self
+        };
+        let mut history = state.clone();
+        history.owner = kinetic;
+        let mut step = kinetic.advance(&history, input)?;
+        step.state.owner = *self;
+        Ok(step)
+    }
+
     fn check(&self, state: &EllipticCoulombState) -> Result<(), TriboError> {
         if state.owner != *self {
             return Err(invalid("elliptic_foreign_checkpoint"));
