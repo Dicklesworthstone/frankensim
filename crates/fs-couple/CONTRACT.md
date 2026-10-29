@@ -11904,3 +11904,33 @@ independent physical equations for an appended flow load, shared piston memory,
 and observation/cancellation refusal. This is a reusable physical composition
 API; each renderer must explicitly consume it. Full workspace qualification
 remains blocked by missing constellation siblings.
+
+### Complete original plate histories in coupled ODE assemblies
+
+`acoustic_realize::realize_coupled_ode` now consumes the bank's original
+`PlateBankImage`. It retains all compact modes alongside the optional Vk body,
+the original full damping and nonlinear storage, complete material/cavity/
+exterior histories, and accepted initial state. It does not rebuild the plate
+from a descriptive constructor or infer its full state extent from mode count.
+The ODE duct starts after the complete original prefix. Its positive inlet
+flow compresses the fluid: the existing ratio-one transformer receives the
+bank's outward-volume port, applies `+A p` on the structure and `-sum(A v)` on
+the duct, and leaves the original point-force port external and independent.
+The observation uses the same signed normalized areas for all compact and Vk
+modes, validates the complete prefix, and introduces no second acoustic debit.
+Any cavity or exterior load already owned by the bank remains counted once.
+
+Quadratic bodies prepare the shared `PreparedExactZoh` once at the rendering
+clock. Every sample reuses its complete transition and independent heat/work
+integrals. Nonlinear storage retains the original Gonzalez equation and
+temporal admission; no unit-vector effort probing establishes a linear model.
+The string's existing held bridge-force coupling is unchanged. This extension
+does not migrate the separate Dirac, blown-duct or reed-specific routes and
+does not enlarge the shared dense-state capacity. Candidate-vector allocation
+remains, and no measured real-time speed or zero-allocation claim is made.
+
+Three focused G0/G1/G3 native tests cover a warm mixed compact/Vk/Maxwell bank
+coupled to an independent physical fluid reference, retention of every warmed
+continuous radiation coordinate and its energy, and exact empty-bank duct
+reduction. State, work, heat, signed pressure observation, complete prefix and
+prepared-clock checks pass using the original numerical and physics owners.

@@ -22,7 +22,7 @@ use crate::reed_bore::{
     blowing_envelope, reed_pressure_face, reed_structural, reed_swept_flow,
 };
 use crate::thin_plate::{
-    PlateBank, PlateChartRadiation, ResolvedPlateChart, VkBody, certified_chart_radiators,
+    PlateBank, PlateBankObservation, PlateChartRadiation, ResolvedPlateChart, VkBody, certified_chart_radiators,
     certified_material_chart_radiators, certified_radiators, vk_plate_phs,
 };
 use crate::unilateral_contact::{
@@ -754,40 +754,16 @@ fn realize_coupled_ode(
         gas,
         duct.wall,
     )?;
-    let body = if has_plate {
-        let plate = if plates.vk.is_some() {
-            vk_plate_phs(
-                assembly
-                    .plate
-                    .ok_or(AcousticRealizeError::InvalidDescription {
-                        what: "von Karman coupled ODE needs the plate description",
-                    })?,
-                true,
-            )?
-        } else {
-            plate_modal_ports(plates, true)?.ok_or(AcousticRealizeError::InvalidDescription {
-                what: "ODE coupled duct expected a linear plate bank",
-            })?
-        };
-        let face = usize::from(inlets == 2);
-        transformer(plate, chain, 1, face, 1.0)
-            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?
-    } else {
-        chain
-    };
+    let (body, mut x_body, plate_observation) = compose_plate_chain(
+        plates, chain, usize::from(inlets == 2), gas, assembly.sample_rate_hz,
+    )?;
     let dt = 1.0 / f64::from(assembly.sample_rate_hz);
     let listener_m = assembly.listener.distance_m;
     let mut texture = TextureDrive::try_new(assembly.contact_texture)?;
     let mass_scale = det::sqrt(string.lin_density_kg_m * string.length_m / 2.0);
-    let n_plate = if !has_plate {
-        0
-    } else if let Some(vk) = plates.vk.as_ref() {
-        2 * vk.areas.len()
-    } else {
-        2 * plates.linear.len()
-    };
-    let mut x_body = vec![0.0; body.state_dim()];
+    let n_plate = plate_observation.as_ref().map_or(0, PlateBankObservation::state_dim);
     let body_linear = prepare_render_linear(&body)?;
+    let body_exact = prepare_chain_exact(&body, &body_linear, dt)?;
     let mut out = vec![0.0; n];
     if string.axial_stiffness_n > 0.0 || string.relaxation_bending.is_some() {
         let mut members = vec![kc_string_member(
@@ -831,6 +807,7 @@ fn realize_coupled_ode(
             let rec = step_string_chain(
                 &body,
                 &body_linear,
+                body_exact.as_ref(),
                 &x_body,
                 fb,
                 n_plate,
@@ -841,7 +818,7 @@ fn realize_coupled_ode(
                 dt,
             )?;
             out[i] = p_string
-                + plate_chain_radiation(plates, &rec.x, &x_body, n_plate, gas, listener_m, dt)
+                + plate_chain_radiation(plate_observation.as_ref(), &rec.x, &x_body, gas, listener_m, dt)?
                 + chain_inlet_pressure(&body, &rec.x, n_plate);
             x_body = rec.x;
         }
@@ -892,6 +869,7 @@ fn realize_coupled_ode(
         let rec = step_string_chain(
             &body,
             &body_linear,
+            body_exact.as_ref(),
             &x_body,
             fb,
             n_plate,
@@ -902,7 +880,7 @@ fn realize_coupled_ode(
             dt,
         )?;
         out[i] = p_string
-            + plate_chain_radiation(plates, &rec.x, &x_body, n_plate, gas, listener_m, dt)
+            + plate_chain_radiation(plate_observation.as_ref(), &rec.x, &x_body, gas, listener_m, dt)?
             + chain_inlet_pressure(&body, &rec.x, n_plate);
         x_body = rec.x;
     }
@@ -913,6 +891,7 @@ fn realize_coupled_ode(
 fn step_string_chain(
     body: &fs_phs::PortHamiltonian,
     linear: &fs_phs::linear_exact::LinearSplit,
+    exact: Option<&fs_phs::linear_exact::PreparedExactZoh<'_>>,
     x: &[f64],
     f_bridge: f64,
     n_plate: usize,
@@ -923,9 +902,9 @@ fn step_string_chain(
     dt: f64,
 ) -> Result<fs_phs::StepRecord, AcousticRealizeError> {
     if n_plate == 0 {
-        return step_chain_inlet(body, linear, x, reed, blow, gas, t, dt);
+        return step_chain_inlet(body, linear, exact, x, reed, blow, gas, t, dt);
     }
-    step_plate_chain(body, linear, x, f_bridge, reed, blow, gas, t, dt)
+    step_plate_chain(body, linear, exact, x, f_bridge, reed, blow, gas, t, dt)
 }
 
 fn chain_inlet_pressure(body: &fs_phs::PortHamiltonian, x: &[f64], n_plate: usize) -> f64 {
@@ -941,6 +920,7 @@ fn chain_inlet_pressure(body: &fs_phs::PortHamiltonian, x: &[f64], n_plate: usiz
 fn step_chain_inlet(
     body: &fs_phs::PortHamiltonian,
     linear: &fs_phs::linear_exact::LinearSplit,
+    exact: Option<&fs_phs::linear_exact::PreparedExactZoh<'_>>,
     x: &[f64],
     reed: Option<BeatingReed>,
     blow: Option<VolumeVelocityPulse>,
@@ -969,13 +949,14 @@ fn step_chain_inlet(
             };
         }
     }
-    fs_phs::linear_exact::step_render(body, linear, x, &u, dt).map_err(render_phs_error)
+    step_chain_flow(body, linear, exact, x, &u, dt)
 }
 
 #[allow(clippy::too_many_arguments)] // one coherent chain step record
 fn step_plate_chain(
     body: &fs_phs::PortHamiltonian,
     linear: &fs_phs::linear_exact::LinearSplit,
+    exact: Option<&fs_phs::linear_exact::PreparedExactZoh<'_>>,
     x: &[f64],
     f_bridge: f64,
     reed: Option<BeatingReed>,
@@ -988,7 +969,7 @@ fn step_plate_chain(
     let y = body.output(x);
     let mut u = vec![0.0; m];
     if m == 0 {
-        return fs_phs::linear_exact::step_render(body, linear, x, &u, dt).map_err(render_phs_error);
+        return step_chain_flow(body, linear, exact, x, &u, dt);
     }
     u[0] = f_bridge;
     if m > 1 {
@@ -1009,7 +990,43 @@ fn step_plate_chain(
             };
         }
     }
-    fs_phs::linear_exact::step_render(body, linear, x, &u, dt).map_err(render_phs_error)
+    step_chain_flow(body, linear, exact, x, &u, dt)
+}
+
+// Reuse the same complete quadratic propagator and independently integrated
+// heat/work for every sample. Nonlinear storage keeps the existing shared
+// Gonzalez owner and its explicit temporal admission.
+fn prepare_chain_exact<'a>(
+    system: &'a fs_phs::PortHamiltonian,
+    linear: &fs_phs::linear_exact::LinearSplit,
+    dt: f64,
+) -> Result<Option<fs_phs::linear_exact::PreparedExactZoh<'a>>, AcousticRealizeError> {
+    if !linear.is_exact_quadratic() { return Ok(None); }
+    fs_phs::linear_exact::PreparedExactZoh::new(system, dt,
+        fs_phs::linear_exact::LinearSplitBudget {
+            max_modes: system.state_dim(), max_omega_dt: core::f64::consts::PI,
+        })
+        .map(Some).map_err(render_phs_error)
+}
+
+fn step_chain_flow(
+    system: &fs_phs::PortHamiltonian,
+    linear: &fs_phs::linear_exact::LinearSplit,
+    exact: Option<&fs_phs::linear_exact::PreparedExactZoh<'_>>,
+    state: &[f64],
+    input: &[f64],
+    dt: f64,
+) -> Result<fs_phs::StepRecord, AcousticRealizeError> {
+    if let Some(exact) = exact {
+        if !core::ptr::eq(exact.system(),system) || exact.duration().to_bits()!=dt.to_bits() {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "prepared duct clock and complete physical system must match",
+            });
+        }
+        exact.step(state,input).map_err(render_phs_error)
+    } else {
+        fs_phs::linear_exact::step_render(system,linear,state,input,dt).map_err(render_phs_error)
+    }
 }
 
 fn prepare_render_linear(
@@ -1025,34 +1042,50 @@ fn prepare_render_linear(
     .map_err(render_phs_error)
 }
 
+// The complete original structural/material/cavity/exterior system occupies
+// the leading block. The duct starts after that COMPLETE extent, not after an
+// inferred number of q/p pairs. Its positive inlet flow compresses the fluid;
+// outward surface flow therefore enters with the opposite sign, while pressure
+// acts on the same area map. External point force remains its independent port.
+fn compose_plate_chain(
+    plates: &mut PlateBank,
+    chain: fs_phs::PortHamiltonian,
+    face: usize,
+    gas: &GasState,
+    sample_rate_hz: u32,
+) -> Result<(fs_phs::PortHamiltonian, Vec<f64>, Option<PlateBankObservation>), AcousticRealizeError> {
+    let Some(image) = plates.physical_image(gas, sample_rate_hz, &fs_exec::CancelGate::default())? else {
+        let state = vec![0.0; chain.state_dim()];
+        return Ok((chain, state, None));
+    };
+    let (plate, mut state, observation) = image.into_parts();
+    let system = transformer(plate, chain, 1, face, 1.0)
+        .map_err(render_phs_error)?;
+    state.resize(system.state_dim(), 0.0);
+    Ok((system, state, Some(observation)))
+}
+
 fn plate_chain_radiation(
-    plates: &PlateBank,
+    observation: Option<&PlateBankObservation>,
     x1: &[f64],
     x0: &[f64],
-    n_plate: usize,
     gas: &GasState,
     listener_m: f64,
     dt: f64,
-) -> f64 {
-    let mut p = 0.0;
-    if let Some(vk) = plates.vk.as_ref() {
-        for (k, &area) in vk.areas.iter().enumerate() {
-            let acc = (x1.get(2 * k + 1).copied().unwrap_or(0.0)
-                - x0.get(2 * k + 1).copied().unwrap_or(0.0))
-                / dt;
-            p += gas.density * area * acc / (2.0 * core::f64::consts::PI * listener_m);
-        }
-        return p;
-    }
-    let n = n_plate / 2;
-    for (k, body) in plates.linear.iter().take(n).enumerate() {
-        let acc = (x1.get(2 * k + 1).copied().unwrap_or(0.0)
-            - x0.get(2 * k + 1).copied().unwrap_or(0.0))
-            / dt;
-        p += body.radiate_mass_normalized(acc, gas.density, listener_m);
-    }
-    p
+) -> Result<f64, AcousticRealizeError> {
+    let Some(observation) = observation else { return Ok(0.0); };
+    let extent = observation.state_dim();
+    let before = x0.get(..extent).ok_or(AcousticRealizeError::InvalidDescription {
+        what: "coupled duct lost the original plate state prefix",
+    })?;
+    let after = x1.get(..extent).ok_or(AcousticRealizeError::InvalidDescription {
+        what: "coupled duct lost the original plate state prefix",
+    })?;
+    observation.pressure_between(before, after, dt, gas.density, listener_m)
 }
+
+#[cfg(test)]
+mod plate_chain_tests;
 
 /// One shared clock: string, plate, and duct exchange force and flow
 /// every sample via the characteristic FIR. Used when the duct is
@@ -5988,10 +6021,11 @@ mod string_observer_tests {
             body.drive_participation *= scale;
             let mut plates = PlateBank::default();
             plates.linear.push(body);
-            let sys = plate_modal_ports(&plates, true).unwrap().unwrap();
-            let zero = vec![0.0; sys.state_dim()];
+            let image = plates.physical_image(&gas, 48_000, &fs_exec::CancelGate::default())
+                .unwrap().unwrap();
+            let (sys, zero, observation) = image.into_parts();
             let rec = step(&sys, &zero, &[force, face_pressure], dt).unwrap();
-            let p = plate_chain_radiation(&plates, &rec.x, &zero, 2, &gas, 1.0, dt);
+            let p = plate_chain_radiation(Some(&observation), &rec.x, &zero, &gas, 1.0, dt).unwrap();
             assert!(
                 (p / expected - 1.0).abs() < 1.0e-10,
                 "mass-normalized pressure {p} vs {expected}"
@@ -6089,10 +6123,10 @@ mod string_observer_tests {
         let linear = prepare_render_linear(&sys).unwrap();
         let gas = gas_state(AmbientGas::sea_level()).unwrap();
         let x = [0.1, 0.02, -0.03, 0.01, 0.04, -0.02];
-        let full = step_plate_chain(&sys, &linear, &x, 0.0, None, None, &gas, 0.0, 0.5).unwrap();
-        let half = step_plate_chain(&sys, &linear, &x, 0.0, None, None, &gas, 0.0, 0.25).unwrap();
+        let full = step_plate_chain(&sys, &linear, None, &x, 0.0, None, None, &gas, 0.0, 0.5).unwrap();
+        let half = step_plate_chain(&sys, &linear, None, &x, 0.0, None, None, &gas, 0.0, 0.25).unwrap();
         let halves =
-            step_plate_chain(&sys, &linear, &half.x, 0.0, None, None, &gas, 0.25, 0.25).unwrap();
+            step_plate_chain(&sys, &linear, None, &half.x, 0.0, None, None, &gas, 0.25, 0.25).unwrap();
         for (a, b) in full.x.iter().zip(halves.x) {
             assert!((a - b).abs() < 1e-12);
         }
