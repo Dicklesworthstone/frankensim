@@ -1,0 +1,146 @@
+frankensim.matdb-source.v1
+observation	identity	fsri-wood-stud-unconditioned-2021	Construction framing wood stud; https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Wood_Stud/material.json	Samples were cut from nominal 2 by 6 inch framing lumber. The metadata describes typical spruce/pine/fir softwood and alternate names include 2x4; neither establishes the tested botanical species, grade or measured stock thickness. The nominal 2x6 source statement is retained separately from actual HFM geometry. Growth-ring orientation, L/R/T mapping, preservative/treatment history and exact moisture content are unreported. No species-specific stiffness or shrinkage is imported from clear-wood handbooks. Capacity and conductivity are different experiments on the same source/conditioning population; matching exact physical coupons and cross-property covariance are not established. This thermal profile supplies no mechanical, fire-performance, moisture-evolution or service-temperature qualification.
+observation	method	fsri-wood-stud-unconditioned-2021	FSRI HFM preparation and experimental method; https://materials.fsri.org/experimentalmethodology	Wet filenames denote unconditioned indoor storage at 22 +/- 3 degC and 40 +/- 20 percent relative humidity, not water saturation. HFM specimens are prepared with planar parallel faces. Conductivity generally follows ASTM C518 with through-thickness upward heat flow; capacity generally follows ASTM C1784-20 equal-plate temperature steps. Applied contact pressure, calibration uncertainty, exact moisture content and material-axis mapping are unreported. Three repeated conductivity cycles on a specimen are not three independent specimens.
+observation	capacity-r1	fsri-wood-stud-unconditioned-2021	Native volume-capacity result; https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Wood_Stud/HFM/Wood_Stud_HFM_Wet_heatcapacity_210908_R1.tst	Instrument thickness 31.460000000000001 mm. Recorded mean temperatures 10,20.010000000000002,30.010000000000002,40.009999999999998 degC have native capacities 463087,497836,516761,536194 J/(m3 K). The instrument labels these Specific Heat but uses volumetric units. Equal-temperature plate steps are 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC. Finite-step averages at mean temperature do not establish infinitesimal calorimetry or mass-specific thermodynamic Cv. Individual-run uncertainty is unreported.
+observation	capacity-r2	fsri-wood-stud-unconditioned-2021	Native volume-capacity result; https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Wood_Stud/HFM/Wood_Stud_HFM_Wet_heatcapacity_210908_R2.tst	Instrument thickness 31.530000000000001 mm. Recorded mean temperatures 10,20.010000000000002,30.010000000000002,40.009999999999998 degC have native capacities 484980,509238,534077,554226 J/(m3 K). The instrument labels these Specific Heat but uses volumetric units. Equal-temperature plate steps are 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC. Finite-step averages at mean temperature do not establish infinitesimal calorimetry or mass-specific thermodynamic Cv. Individual-run uncertainty is unreported.
+observation	capacity-r3	fsri-wood-stud-unconditioned-2021	Native volume-capacity result; https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Wood_Stud/HFM/Wood_Stud_HFM_Wet_heatcapacity_210909_R3.tst	Instrument thickness 31.48 mm. Recorded mean temperatures 10,20.010000000000002,30.010000000000002,40.009999999999998 degC have native capacities 510984,537051,559843,580115 J/(m3 K). The instrument labels these Specific Heat but uses volumetric units. Equal-temperature plate steps are 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC. Finite-step averages at mean temperature do not establish infinitesimal calorimetry or mass-specific thermodynamic Cv. Individual-run uncertainty is unreported.
+observation	capacity-reduction	fsri-wood-stud-unconditioned-2021	Arithmetic reduction following FSRI; https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/02_Scripts/plot_HFM_data_html.py	Round source mean temperatures to 0.1 degC, obtaining 10,20,30,40 degC groups. Native C_vol is the arithmetic mean of three specimen values at each group; add exactly 273.15 for kelvin. Its separate sample SD uses n-1=2. Extra computed digits represent arithmetic, not improved measurement resolution. SD is discrete descriptive scatter, not a confidence interval or calibration uncertainty. Linear interpolation of the mean capacities is an authored approximation between measurements, without an interpolation-error bound or extrapolation. Native C_vol is independent of density normalization.
+observation	density-normalization	fsri-wood-stud-unconditioned-2021	Primary density columns; https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Wood_Stud/HFM; Wood_Stud_Density_Wet_R1.csv,Wood_Stud_Density_Wet_R2.csv,Wood_Stud_Density_Wet_R3.csv	Reported density CSV values 359,370,408 kg/m3 are averaged to 379 kg/m3 following the source script. The corresponding masses are 316.2,322.7,356.1 g and volumes 880.2,873.3,872.4 cm3. The rounded density columns, rather than recomputed mass/volume or metadata density headlines, supply the published Cp normalization. Measurement temperature is unreported; this input is not a continuous rho(T) law.
+observation	specific-heat-reduction	fsri-wood-stud-unconditioned-2021	Published mass-specific heat and scatter; https://materials.fsri.org/materialdetail/wood-stud	Divide mean native C_vol and its sample SD by the condition-mean density, then round each to whole J/(kg K). Published means are 1283,1358,1417,1469 and SD 63,53,57,58 at 10,20,30,40 degC. Density scatter, calibration and covariance are not propagated. Rounded Cp, native C_vol and normalization density are algebraically related, not independent experiments. Linear Cp interpolation is an authored model with no interpolation-error bound.
+observation	conductivity	fsri-wood-stud-unconditioned-2021	Primary final Average Cond rows and published reductions; https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Wood_Stud/HFM; https://materials.fsri.org/materialdetail/wood-stud	Raw Average Cond values in W/(m K): Wood_Stud_HFM_Wet_conductivity_210901_R1.tst (instrument thickness 31.48 mm): 0.089649999999999994,0.090230000000000005,0.090319999999999998 at 15 degC; 0.09493,0.095000000000000001,0.095070000000000002 at 45 degC; Wood_Stud_HFM_Wet_conductivity_210903_R2.tst (instrument thickness 31.41 mm): 0.092799999999999994,0.092910000000000006,0.092960000000000001 at 15 degC; 0.097350000000000006,0.097610000000000002,0.09776 at 45 degC; Wood_Stud_HFM_Wet_conductivity_210907_R3.tst (instrument thickness 31.5 mm): 0.1028,0.1032,0.1032 at 15 degC; 0.10829999999999999,0.1085,0.1085 at 45 degC. All source result means are 15.01/45.01 degC, grouped by integer degC following the source script. Three repeated cycles on each of three specimens produce nine readings per temperature. Upper/lower plate setpoints are 5/25 and 35/55 degC, a 20 K difference with upward flow. Pooled arithmetic means 0.095000000000000001,0.10000000000000001 and sample SD 0.0060000000000000001,0.0060000000000000001 are published rounded to 0.001 W/(m K). A rounded zero SD does not establish zero uncertainty or identical readings. Linear mean-temperature interpolation is an authored approximation without an error bound, in-plane equivalence or isotropy.
+observation	local-model	fsri-wood-stud-unconditioned-2021	Explicit local-model interpretation	Thermal-conductivity requires mean-test-temperature-as-local-model=1, explicitly interpreting finite-gradient apparent through-thickness conductivity as a local scalar coefficient at the same numerical mean temperature. This engineering model does not deconvolve endpoint temperatures or identify a material principal axis. Apparent-thermal-conductivity retains the original test-mean-temperature coordinate.
+curve	mean-volume-capacity	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction	volumetric_capacity	temperature	K	J/m3/K	283.14999999999998:486350.33333333331,293.14999999999998:514708.33333333331,303.14999999999998:536893.66666666663,313.14999999999998:556845	linear
+uncertainty	mean-volume-capacity	unstated	-	-	-	-
+validity	mean-volume-capacity	family	1	1	1
+validity	mean-volume-capacity	unconditioned	1	1	1
+validity	mean-volume-capacity	grade_known	0	0	1
+validity	mean-volume-capacity	formulation_known	0	0	1
+validity	mean-volume-capacity	moisture_known	0	0	1
+validity	mean-volume-capacity	pressure_known	0	0	1
+validity	mean-volume-capacity	axis_known	0	0	1
+validity	mean-volume-capacity	stock_known	0	0	1
+validity	mean-volume-capacity	specimens	3	3	1
+validity	mean-volume-capacity	species_known	0	0	1
+validity	mean-volume-capacity	treatment_known	0	0	1
+validity	mean-volume-capacity	statistic	1	1	1
+validity	mean-volume-capacity	temperature	283.14999999999998	313.14999999999998	K
+curve	published-specific-heat	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction,density-normalization,specific-heat-reduction	specific_heat	temperature	K	J/kg/K	283.14999999999998:1283,293.14999999999998:1358,303.14999999999998:1417,313.14999999999998:1469	linear
+uncertainty	published-specific-heat	unstated	-	-	-	-
+validity	published-specific-heat	family	1	1	1
+validity	published-specific-heat	unconditioned	1	1	1
+validity	published-specific-heat	grade_known	0	0	1
+validity	published-specific-heat	formulation_known	0	0	1
+validity	published-specific-heat	moisture_known	0	0	1
+validity	published-specific-heat	pressure_known	0	0	1
+validity	published-specific-heat	axis_known	0	0	1
+validity	published-specific-heat	stock_known	0	0	1
+validity	published-specific-heat	specimens	3	3	1
+validity	published-specific-heat	species_known	0	0	1
+validity	published-specific-heat	treatment_known	0	0	1
+validity	published-specific-heat	statistic	1	1	1
+validity	published-specific-heat	density_temperature_known	0	0	1
+validity	published-specific-heat	density_header_consistent	1	1	1
+validity	published-specific-heat	temperature	283.14999999999998	313.14999999999998	K
+curve	volume-capacity-scatter	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction	capacity_sd	temperature	K	J/m3/K	283.14999999999998:23977.885902083472,293.14999999999998:20171.699639180963,303.14999999999998:21678.673606411747,313.14999999999998:22077.317115084432	tabulated
+uncertainty	volume-capacity-scatter	unstated	-	-	-	-
+validity	volume-capacity-scatter	family	1	1	1
+validity	volume-capacity-scatter	unconditioned	1	1	1
+validity	volume-capacity-scatter	grade_known	0	0	1
+validity	volume-capacity-scatter	formulation_known	0	0	1
+validity	volume-capacity-scatter	moisture_known	0	0	1
+validity	volume-capacity-scatter	pressure_known	0	0	1
+validity	volume-capacity-scatter	axis_known	0	0	1
+validity	volume-capacity-scatter	stock_known	0	0	1
+validity	volume-capacity-scatter	specimens	3	3	1
+validity	volume-capacity-scatter	species_known	0	0	1
+validity	volume-capacity-scatter	treatment_known	0	0	1
+validity	volume-capacity-scatter	statistic	0	0	1
+validity	volume-capacity-scatter	temperature	283.14999999999998	313.14999999999998	K
+curve	specific-heat-scatter	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction,density-normalization,specific-heat-reduction	specific_heat_sd	temperature	K	J/kg/K	283.14999999999998:63,293.14999999999998:53,303.14999999999998:57,313.14999999999998:58	tabulated
+uncertainty	specific-heat-scatter	unstated	-	-	-	-
+validity	specific-heat-scatter	family	1	1	1
+validity	specific-heat-scatter	unconditioned	1	1	1
+validity	specific-heat-scatter	grade_known	0	0	1
+validity	specific-heat-scatter	formulation_known	0	0	1
+validity	specific-heat-scatter	moisture_known	0	0	1
+validity	specific-heat-scatter	pressure_known	0	0	1
+validity	specific-heat-scatter	axis_known	0	0	1
+validity	specific-heat-scatter	stock_known	0	0	1
+validity	specific-heat-scatter	specimens	3	3	1
+validity	specific-heat-scatter	species_known	0	0	1
+validity	specific-heat-scatter	treatment_known	0	0	1
+validity	specific-heat-scatter	statistic	0	0	1
+validity	specific-heat-scatter	density_temperature_known	0	0	1
+validity	specific-heat-scatter	density_header_consistent	1	1	1
+validity	specific-heat-scatter	temperature	283.14999999999998	313.14999999999998	K
+curve	mean-apparent-conductivity	identity,method,conductivity	apparent_conductivity	test_mean_temperature	K	W/m/K	288.14999999999998:0.095000000000000001,318.14999999999998:0.10000000000000001	linear
+uncertainty	mean-apparent-conductivity	unstated	-	-	-	-
+validity	mean-apparent-conductivity	family	1	1	1
+validity	mean-apparent-conductivity	unconditioned	1	1	1
+validity	mean-apparent-conductivity	grade_known	0	0	1
+validity	mean-apparent-conductivity	formulation_known	0	0	1
+validity	mean-apparent-conductivity	moisture_known	0	0	1
+validity	mean-apparent-conductivity	pressure_known	0	0	1
+validity	mean-apparent-conductivity	axis_known	0	0	1
+validity	mean-apparent-conductivity	stock_known	0	0	1
+validity	mean-apparent-conductivity	specimens	3	3	1
+validity	mean-apparent-conductivity	species_known	0	0	1
+validity	mean-apparent-conductivity	treatment_known	0	0	1
+validity	mean-apparent-conductivity	statistic	1	1	1
+validity	mean-apparent-conductivity	through_thickness	1	1	1
+validity	mean-apparent-conductivity	upward	1	1	1
+validity	mean-apparent-conductivity	plate_delta	20	20	K
+validity	mean-apparent-conductivity	test_mean_temperature	288.14999999999998	318.14999999999998	K
+curve	explicit-local-conductivity	identity,method,conductivity,local-model	local_conductivity	temperature	K	W/m/K	288.14999999999998:0.095000000000000001,318.14999999999998:0.10000000000000001	linear
+uncertainty	explicit-local-conductivity	unstated	-	-	-	-
+validity	explicit-local-conductivity	family	1	1	1
+validity	explicit-local-conductivity	unconditioned	1	1	1
+validity	explicit-local-conductivity	grade_known	0	0	1
+validity	explicit-local-conductivity	formulation_known	0	0	1
+validity	explicit-local-conductivity	moisture_known	0	0	1
+validity	explicit-local-conductivity	pressure_known	0	0	1
+validity	explicit-local-conductivity	axis_known	0	0	1
+validity	explicit-local-conductivity	stock_known	0	0	1
+validity	explicit-local-conductivity	specimens	3	3	1
+validity	explicit-local-conductivity	species_known	0	0	1
+validity	explicit-local-conductivity	treatment_known	0	0	1
+validity	explicit-local-conductivity	statistic	1	1	1
+validity	explicit-local-conductivity	through_thickness	1	1	1
+validity	explicit-local-conductivity	upward	1	1	1
+validity	explicit-local-conductivity	plate_delta	20	20	K
+validity	explicit-local-conductivity	local_model	1	1	1
+validity	explicit-local-conductivity	temperature	288.14999999999998	318.14999999999998	K
+curve	conductivity-scatter	identity,method,conductivity	conductivity_sd	test_mean_temperature	K	W/m/K	288.14999999999998:0.0060000000000000001,318.14999999999998:0.0060000000000000001	tabulated
+uncertainty	conductivity-scatter	unstated	-	-	-	-
+validity	conductivity-scatter	family	1	1	1
+validity	conductivity-scatter	unconditioned	1	1	1
+validity	conductivity-scatter	grade_known	0	0	1
+validity	conductivity-scatter	formulation_known	0	0	1
+validity	conductivity-scatter	moisture_known	0	0	1
+validity	conductivity-scatter	pressure_known	0	0	1
+validity	conductivity-scatter	axis_known	0	0	1
+validity	conductivity-scatter	stock_known	0	0	1
+validity	conductivity-scatter	specimens	3	3	1
+validity	conductivity-scatter	species_known	0	0	1
+validity	conductivity-scatter	treatment_known	0	0	1
+validity	conductivity-scatter	statistic	0	0	1
+validity	conductivity-scatter	through_thickness	1	1	1
+validity	conductivity-scatter	upward	1	1	1
+validity	conductivity-scatter	plate_delta	20	20	K
+validity	conductivity-scatter	test_mean_temperature	288.14999999999998	318.14999999999998	K
+scalar	density-normalization-input	identity,method,density-normalization	normalization_density	379	kg/m3	constant
+uncertainty	density-normalization-input	unstated	-	-	-	-
+validity	density-normalization-input	family	1	1	1
+validity	density-normalization-input	unconditioned	1	1	1
+validity	density-normalization-input	grade_known	0	0	1
+validity	density-normalization-input	formulation_known	0	0	1
+validity	density-normalization-input	moisture_known	0	0	1
+validity	density-normalization-input	pressure_known	0	0	1
+validity	density-normalization-input	axis_known	0	0	1
+validity	density-normalization-input	stock_known	0	0	1
+validity	density-normalization-input	specimens	3	3	1
+validity	density-normalization-input	species_known	0	0	1
+validity	density-normalization-input	treatment_known	0	0	1
+validity	density-normalization-input	statistic	1	1	1
+validity	density-normalization-input	density_temperature_known	0	0	1
+validity	density-normalization-input	density_header_consistent	1	1	1
