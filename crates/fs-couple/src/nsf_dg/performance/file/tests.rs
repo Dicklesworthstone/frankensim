@@ -40,7 +40,7 @@ initial rest\n\
 solids 0\n\
 states 0\n\
 coupling 64 6912 -0.5 0.5 1e-7 1e-9 0 1\n\
-dg_tube 0.1 {radius:.17e} matched 1 2 8 50 2000 0.01 1e-11 256\n\
+dg_tube 0.1 {radius:.17e} matched 1 2 32 50 2000 0.01 1e-11 512\n\
 observation inlet-pressure\n\
 boundary 1\n\
 hold {SAMPLES} -0.1\n\
