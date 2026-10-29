@@ -32,6 +32,9 @@ use fs_material::state_point::MaterialStatePointError;
 
 mod geometry;
 
+/// Dynamic planar wetting with two independent original surface sources.
+pub mod asymmetric_contact_line;
+
 /// Fixed-volume axisymmetric Young--Laplace equilibria between parallel plates.
 pub mod axisymmetric;
 
