@@ -147,13 +147,14 @@ fn elastic_plane_stress_and_quadrature_subdivision_keep_physical_motion() {
 }
 
 #[test]
-fn plane_stress_refuses_unsupported_rate_constraints_and_keeps_failed_history() {
+fn plane_stress_refuses_unresolved_rate_constraints_and_keeps_failed_history() {
     let gate=CancelGate::new_clock_free();let law=law();let columns=[[1.0,0.0,0.0]];
     assert!(PlaneStressPoint::new(&law,&[],1.0,budget(),&gate).is_err());
     assert!(PlaneStressPoint::new(&law,&columns,0.0,budget(),&gate).is_err());
     assert!(PlaneStressPoint::new(&law,&columns,1.0,TensorProjectionBudget{max_scalar_terms:1,..budget()},&gate).is_err());
+    // An oblique rank-one block has no exact coordinate-aligned zero row.
     let kv=TensorProny::new(*law.c_eq(),Some(core::array::from_fn(|i|core::array::from_fn(|j|
-        if i==j && i==2 {1.0} else {0.0}))),vec![],(0.0,f64::MAX)).unwrap();
+        if [2,4].contains(&i) && [2,4].contains(&j) {1.0} else {0.0}))),vec![],(0.0,f64::MAX)).unwrap();
     assert!(PlaneStressPoint::new(&kv,&columns,1.0,budget(),&gate).is_err());
     let cancelled=CancelGate::new_clock_free();cancelled.request();
     assert!(PlaneStressPoint::new(&law,&columns,1.0,budget(),&cancelled).is_err());
@@ -378,4 +379,114 @@ fn kelvin_normal_histories_preserve_quadrature_scaling_and_refused_initializatio
     let before=a.state().to_vec();let cancelled=CancelGate::new_clock_free();cancelled.request();
     assert!(a.advance(&[0.01],0.004,&cancelled).is_err());assert_eq!(a.state(),before);
     assert!(a.advance(&[f64::NAN],0.004,&gate).is_err());assert_eq!(a.state(),before);
+}
+
+#[test]
+fn directional_kelvin_constraints_match_full_physical_dae_motion_and_heat() {
+    let gate=CancelGate::new_clock_free();
+    // Every one- and two-coordinate subset of [zz,yz,zx]. Each fixture has
+    // original in-plane/normal viscous coupling and nonproportional memory.
+    for mask in 1_u32..7 {
+        let selected:Vec<_>=(0..3).filter(|i|mask&(1<<i)!=0).collect();
+        let algebraic:Vec<_>=(0..3).filter(|i|mask&(1<<i)==0).collect();
+        let base=law();let mut factor:Tangent6=[[0.0;6];6];
+        factor[0][0]=1.1;factor[1][1]=1.3;factor[3][3]=1.5;
+        for &i in &selected {
+            let k=[2,4,5][i];factor[k][k]=1.6+0.2*i as f64;
+            factor[0][k]=0.3+0.1*i as f64;factor[1][k]=-0.2;
+        }
+        let viscosity=core::array::from_fn(|i|core::array::from_fn(|j|
+            (0..6).fold(0.0,|s,k|s+factor[k][i]*factor[k][j])));
+        let material=TensorProny::new(*base.c_eq(),Some(viscosity),base.branches().to_vec(),(0.0,f64::MAX)).unwrap();
+        let point=PlaneStressPoint::new(&material,&[[1.0,0.0,0.2],[0.0,1.0,-0.3]],0.2,budget(),&gate).unwrap();
+        assert_eq!(point.normal_strain_coordinates(),selected.len());
+        assert_eq!(point.memory_coordinates(),12+selected.len());
+        let mass=[1.4,0.45,0.45,0.9];let determinant=mass[0]*mass[3]-mass[1]*mass[2];
+        let inverse=[mass[3]/determinant,-mass[1]/determinant,-mass[2]/determinant,mass[0]/determinant];
+        let body=TensorMaterialBody::from_plane_stress_mass_matrix(2,mass.to_vec(),vec![point],body_budget(),&gate).unwrap();
+        let point=&body.plane_stress_points()[0];let source=&point.source;
+        let rows:Vec<_>=source.branches().iter().flat_map(|branch|branch.rows()).collect();
+        let d=5;let states=16+selected.len();
+        let instantaneous:Vec<_>=(0..d*d).map(|k|source.equilibrium_stiffness()[k]
+            +rows.iter().map(|r|r[k/d]*r[k%d]).sum::<f64>()).collect();
+        let normal:Vec<_>=selected.iter().flat_map(|&i|selected.iter().map(move |&j|
+            source.viscosity_matrix()[(2+i)*d+2+j])).collect();
+        let normal_lu=fs_la::factor::lu(&normal,selected.len()).unwrap();
+        let elastic:Vec<_>=algebraic.iter().flat_map(|&i|algebraic.iter().map(|&j|
+            instantaneous[(2+i)*d+2+j]).collect::<Vec<_>>()).collect();
+        let algebraic_lu=fs_la::factor::lu(&elastic,algebraic.len()).unwrap();
+        let mut history=body.history(&[0.001,-0.002],&[0.003,-0.002],InitialMemory::Relaxed,&gate).unwrap();
+        let mut reference=history.state().to_vec();reference[2..4].copy_from_slice(&history.velocity_m_s());
+        reference.extend([0.0,0.0]);
+        for tick in 0..12 {
+            let force=if tick<4 {[0.03,-0.02]} else if tick<8 {[-0.01,0.02]} else {[0.0;2]};
+            // Solve the ORIGINAL 3D traction equations with independent LU,
+            // never reading the condensed energy, normal map or assembled J/R/Q.
+            let rhs=|x:&[f64]| {
+                let mut full=[x[0],x[1],0.0,0.0,0.0];
+                for (k,&i) in selected.iter().enumerate() {full[2+i]=x[16+k];}
+                let mut free:Vec<_>=algebraic.iter().map(|&i|
+                    rows.iter().enumerate().map(|(k,row)|row[2+i]*x[4+k]).sum::<f64>()
+                    -(0..d).map(|j|instantaneous[(2+i)*d+j]*full[j]).sum::<f64>()).collect();
+                algebraic_lu.solve(&mut free);
+                for (k,&i) in algebraic.iter().enumerate() {full[2+i]=free[k];}
+                let mut internal:Vec<_>=(0..d).map(|i|(0..d).map(|j|
+                    source.equilibrium_stiffness()[i*d+j]*full[j]).sum::<f64>()).collect();
+                let mut derivative=vec![0.0;x.len()];derivative[..2].copy_from_slice(&x[2..4]);
+                for (k,row) in rows.iter().enumerate() {
+                    let spring=row.iter().zip(full).map(|(a,e)|a*e).sum::<f64>()-x[4+k];
+                    for i in 0..d {internal[i]+=row[i]*spring;}
+                    let rate=source.branches()[k/6].relaxation_time_s().recip();
+                    derivative[4+k]=rate*spring;derivative[states+1]+=rate*spring*spring;
+                }
+                let mut normal_rate:Vec<_>=selected.iter().map(|&i|-internal[2+i]
+                    -source.viscosity_matrix()[(2+i)*d]*x[2]
+                    -source.viscosity_matrix()[(2+i)*d+1]*x[3]).collect();
+                normal_lu.solve(&mut normal_rate);
+                derivative[16..states].copy_from_slice(&normal_rate);
+                let mut rate=[x[2],x[3],0.0,0.0,0.0];
+                for (k,&i) in selected.iter().enumerate() {rate[2+i]=normal_rate[k];}
+                for i in 0..d {
+                    let viscous=(0..d).map(|j|source.viscosity_matrix()[i*d+j]*rate[j]).sum::<f64>();
+                    derivative[states+1]+=rate[i]*viscous;internal[i]+=viscous;
+                }
+                for i in 0..2 {derivative[2+i]=inverse[2*i]*(force[0]-internal[0])
+                    +inverse[2*i+1]*(force[1]-internal[1]);}
+                derivative[states]=force[0]*x[2]+force[1]*x[3];
+                for traction in &internal[2..] {close(*traction,0.0,1e-12);}
+                derivative
+            };
+            let dt=0.004;let h=dt/200.0;
+            for _ in 0..200 {
+                let k1=rhs(&reference);
+                let stage=|k:&[f64],scale:f64|reference.iter().zip(k).map(|(x,k)|x+scale*k).collect::<Vec<_>>();
+                let k2=rhs(&stage(&k1,0.5*h));let k3=rhs(&stage(&k2,0.5*h));let k4=rhs(&stage(&k3,h));
+                for i in 0..reference.len() {reference[i]+=h*(k1[i]+2.0*k2[i]+2.0*k3[i]+k4[i])/6.0;}
+            }
+            history.advance(&force,dt,&gate).unwrap();
+            for (got,want) in history.displacement_m().iter().chain(&history.velocity_m_s())
+                .chain(&history.state()[4..]).zip(&reference[..states]) {close(*got,*want,3e-11);}
+            for traction in history.plane_stress_normal_stress_pa(0).unwrap() {close(traction,0.0,2e-11);}
+            close(history.supplied_work_j(),reference[states],3e-11);
+            close(history.dissipated_heat_j(),reference[states+1],3e-11);
+            close(history.balance_residual_j(),0.0,3e-11);
+        }
+        assert!(history.dissipated_heat_j()>0.0);
+    }
+}
+
+#[test]
+fn directional_kelvin_keeps_small_positive_viscosity_and_actual_state_capacity() {
+    let gate=CancelGate::new_clock_free();let base=law();
+    let mut viscosity=[[0.0;6];6];viscosity[2][2]=1e-24;
+    let material=TensorProny::new(*base.c_eq(),Some(viscosity),base.branches().to_vec(),(0.0,f64::MAX)).unwrap();
+    let point=PlaneStressPoint::new(&material,&[[1.0,0.0,0.2]],0.2,budget(),&gate).unwrap();
+    assert_eq!(point.normal_strain_coordinates(),1);
+    assert_eq!(point.memory_coordinates(),13);
+    assert!(point.normal_viscosity.as_ref().unwrap().mobility[0]>1e24);
+    assert!(TensorMaterialBody::from_plane_stress(vec![1.0],vec![point.clone()],
+        TensorMaterialBudget{max_state_coordinates:14,..body_budget()},&gate).is_err());
+    let body=TensorMaterialBody::from_plane_stress(vec![1.0],vec![point],
+        TensorMaterialBudget{max_state_coordinates:15,..body_budget()},&gate).unwrap();
+    assert_eq!(body.state_dimension(),15);
 }

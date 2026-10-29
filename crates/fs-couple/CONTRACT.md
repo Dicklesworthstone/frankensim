@@ -11133,3 +11133,37 @@ remain outside this owner; a full Cargo/workspace check is separate.
 ## Phase/field source laws under total-current electrothermal control
 
 The original finite-enthalpy spatial response candidate now closes actual E/J and caloric T/liquid mass fraction under voltage, current-density or equipotential total-current drive. Both ordinary and nonlinear held-current paths delegate the same native electrode solver; every thermal trial enforces its authored current inside the source closure. Supplied work uses authored I times solved electrode voltage independently of recovered reaction, while local native E.J remains the deposited heat. All trials share the existing field-solve budget, pinned caloric/source admission, final fresh acceptance and atomic histories. Zero current retains conducting-terminal admission and never invents a potential across disconnected islands. Independent finite-capacity and latent-balance regressions cover both signs, data-only changes, partial/full-melt continuation, zero current and budget/cancellation refusal. Fixed geometry, field-independent caloric storage and bounded memoryless scalar response remain explicit limits.
+
+
+### Directional Kelvin–Maxwell plane-stress constraints
+
+`PlaneStressPoint` admits Kelvin viscosity acting on any subset of the local
+normal tensor-strain directions [zz,yz,zx]. An eliminated direction must have
+an exactly zero row in the original Kelvin tensor and its projected matrix;
+the retained principal normal block must be positive definite and numerically
+resolved. Every nonzero direction is retained, including small positive
+diagonal entries that can be resolved. No rank tolerance, pseudoinverse,
+penalty stiffness or dropped Maxwell factor row is used.
+
+Undamped normal strains minimize the complete instantaneous equilibrium plus
+Maxwell energy, including coupling to retained normal strains. Damped normals
+satisfy the original massless traction-rate constraint. Their mobility and
+momentum cross-coupling retain symmetric resistance and skew reciprocal work
+in the existing fs-phs runtime. Physical inertia, external force ports, all
+six coordinates per original Maxwell branch, reconstructed normal tractions,
+and one accepted work/heat clock remain intact. Capacity counts the actual
+zero-to-three dynamic normal coordinates at point and membrane admission.
+Initial histories retain the prior finite-work rules; pure-Maxwell relaxation
+images still refuse Kelvin viscosity.
+
+The focused 22-test native target passes, including all six one-/two-direction
+cases against an independent full-material DAE reconstruction with LU
+constraints and RK4 in physical displacement, velocity, original Maxwell
+memory and normal strains. Tests compare consistent inertia, signed forcing,
+all normal tractions, supplied work and Kelvin/Maxwell heat. A 1e-24 positive
+viscosity stays dynamic, and exact state-cap boundaries are exercised.
+Existing plane-stress, membrane, loading and relaxation tests also pass.
+This is not full-workspace Cargo/DSR qualification. Singular oblique normal
+blocks without exact coordinate-aligned zero rows continue to refuse when
+their retained block cannot be resolved; no general rank-revealing DAE solver
+is claimed.

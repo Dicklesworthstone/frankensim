@@ -25,7 +25,7 @@ pub use loading::MembraneEdgeTraction;
 #[derive(Clone, Debug)]
 pub struct MembraneFacetMaterial {
     /// Full 3D law expressed in that facet's ex/ey/ez frame, not global axes.
-    /// Nonzero Kelvin viscosity retains the plane-stress owner's refusal.
+    /// Kelvin viscosity retains the plane-stress owner's directional constraints.
     pub law: TensorProny,
     /// Positive thickness [m]; no geometry-dependent default or averaging.
     pub thickness_m: f64,
@@ -59,8 +59,8 @@ fn poll(gate: &CancelGate) -> Result<()> { super::poll(gate).map_err(MembraneErr
 
 /// Immutable geometry/material assembly and the original force-driven body.
 /// Every free Cartesian displacement and six coordinates of EACH material
-/// branch at EACH triangle survive, with three additional massless normal
-/// strains wherever normal Kelvin viscosity acts. No mode selection or loss fit.
+/// branch at EACH triangle survive, with zero to three additional massless normal
+/// strains in the damped local normal directions. No mode selection or loss fit.
 pub struct TensorMembrane {
     mesh: ShellMesh,
     materials: Vec<MembraneFacetMaterial>,

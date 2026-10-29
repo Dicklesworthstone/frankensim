@@ -273,7 +273,8 @@ pub struct TensorMaterialHistory<'a> {
 impl TensorMaterialHistory<'_> {
     /// Read-only [displacement, momentum, material coordinates]. Full-3D
     /// points use spring z; plane-stress points use viscous a coordinates, then
-    /// three normal tensor strains per point when normal Kelvin viscosity acts.
+    /// zero to three retained normal tensor strains per point where Kelvin
+    /// viscosity acts; exactly undamped local directions remain algebraic.
     pub fn state(&self)->&[f64] {&self.state}
     /// Accepted physical displacements [m].
     pub fn displacement_m(&self)->&[f64] {&self.state[..self.body.coordinates()]}
