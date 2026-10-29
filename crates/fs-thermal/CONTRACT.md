@@ -263,3 +263,72 @@ Both existing isothermal sublimation timelines also jump directly to the next
 event/target while the WHOLE graph is empty, avoiding unbounded tiny pre-birth
 intervals. Two regressions prove a long pre-birth gap with zero thermal work
 allowance. The native sublimation suite passed all 51 selected tests.
+
+## Heat-driven condensed-fuel pyrolysis
+
+`enthalpy::pyrolysis::PyrolysisSimulation` extends the original activated
+thermal cells with separate virgin and char inventories. It retains their
+identity, geometry, contacts, boundary conditions and extensive storage, and
+uses the same conductive/boundary heat operator through a private caloric
+callback. No second conduction graph or alternate transport algebra is used.
+`CondensedCaloric` adds source-owned h(T) to the original `ThermalLaw::T(h)`;
+admission checks that the charts agree. Virgin and char may have distinct
+nonlinear sensible calorics. `VolatileEnthalpy` supplies the escaping gas's
+physical enthalpy on a compatible formation reference.
+
+One first-order non-oxidative reaction converts virgin material into an explicit
+char mass yield and outgoing volatiles. Its accepted endpoint temperature
+determines the backward-Euler inventory, retained char and outgoing enthalpy:
+
+```text
+k(T) = A exp(-E/(R T))
+m_virgin_new = m_virgin_old / (1 + dt k(T_new))
+extent = m_virgin_old - m_virgin_new
+mass_out = (1 - char_yield) extent
+energy_out = mass_out h_volatile(T_new)
+```
+
+The local energy equation balances the change in remaining solid storage plus
+that exact outgoing enthalpy against supplied heat. Reaction enthalpy is already
+in the compatible material references; it is never a second source or debit.
+The independent virgin/char caloric changes and reaction enthalpy differences
+are evaluated before gross formation energies are combined. Per-cell releases
+retain their integrated mass, enthalpy and consumed virgin mass for downstream
+gas coupling, even when emission temperatures change within one advance.
+
+Tiny rate-duration products use stable loss fractions. Published consumption
+is reconciled to actual retained inventory, so an unrepresentable decrement
+cannot emit fictitious mass or heat. The absolute kinetic mass-roundoff and
+reaction-energy equivalents are reported separately and checked against the
+caller budgets; they are numerical discrepancies, not physical transfer streams.
+Local, cumulative absolute and whole-advance mass/energy residuals cannot be
+hidden by cancellation between cells. Errors and cancellation publish no
+candidate. Boundary and conductance changes use original transactional admission.
+
+This initial lane requires endothermic single-step kinetics, monotone sensible
+caloric charts, explicit temperature/source domains and fully activated fixed
+topology. It refuses pending geometry events, exhausted work budgets and
+unrepresentable depletion. It does not seed residual solid mass. Conduction
+retains the original explicit stability bound using the current condensed mass
+and mixture capacity; local reaction is implicit in its final temperature.
+Near depletion this fixed conductive mesh can become stiff. Moving surfaces,
+porosity/permeability, pore-gas transport, oxidation, latent-phase state,
+multi-step wood chemistry and fire-spread closure remain separate capabilities.
+The coupled method is first order, with no unconditional stability or entropy
+theorem. Conductivity changes require an explicit caller-supplied law.
+
+Eleven focused regressions cover independent isothermal and adiabatic
+solutions, distinct char calorics, first-order temperature/mass refinement,
+equivalence to original heat transport with reaction disabled, spatial heat-
+driven mass release, caloric-datum shifts, small-rate representation, and
+domain/cancellation/work-budget refusal. The native full thermal library suite
+passes 164 tests with one existing performance test ignored. This is focused
+native Cargo evidence, not a repository DSR gate or experimental validation.
+
+`heated_pyrolysis_slab` exercises the actual 1D graph with a resolved front
+half-cell heat balance, irradiation, emission and convection. It uses retained
+NIST/MaCFP scalar PMMA inputs in an authored heating scenario; its optional
+20% char sensitivity is explicitly not a wood material fit. `macfp_tga` uses
+the same kinetic update against the retained MaCFP FDS material-temperature
+history. Source data, units, calibration/verification distinctions and commands
+are in `data/reference/compartment_fire/pyrolysis/README.md`.

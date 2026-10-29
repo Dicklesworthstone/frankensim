@@ -43,6 +43,10 @@ pub mod entropy;
 #[path = "enthalpy/sublimation.rs"]
 pub mod sublimation;
 
+/// Heat-driven virgin/char decomposition on these same cells and heat links.
+#[path = "enthalpy/pyrolysis.rs"]
+pub mod pyrolysis;
+
 /// Persistent physical cell identity; distinct from its source segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CellId(pub u64);
@@ -534,6 +538,26 @@ impl<'a> DepositionSimulation<'a> {
         maximum_explicit_dt: f64,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<HeatRates, DepositionError> {
+        self.heat_rates_with_calorics(
+            maximum_explicit_dt,
+            |id, cell| {
+                Ok((
+                    self.temperature_k(id)?,
+                    self.material_temperature_slopes[&cell.material_id],
+                ))
+            },
+            checkpoint,
+        )
+    }
+
+    // Reactive mixtures retain this exact boundary/link owner and actual
+    // extensive storage. Only their composition-dependent caloric query differs.
+    fn heat_rates_with_calorics(
+        &self,
+        maximum_explicit_dt: f64,
+        mut calorics: impl FnMut(CellId, &DepositedCell) -> Result<(f64, f64), DepositionError>,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<HeatRates, DepositionError> {
         // Per-cell rates and outgoing conductances; no quadratic cell searches.
         let mut temperatures = BTreeMap::new();
         let mut rates = BTreeMap::new();
@@ -543,10 +567,14 @@ impl<'a> DepositionSimulation<'a> {
             if i % 256 == 0 {
                 checkpoint()?;
             }
-            temperatures.insert(id, self.temperature_k(id)?);
+            let (temperature, slope) = calorics(id, cell)?;
+            if !positive(temperature) || !nonnegative(slope) {
+                return Err(DepositionError::MaterialDomain);
+            }
+            temperatures.insert(id, temperature);
             covered.insert(id, cell.boundary.reservoir.map_or(0.0, |r| r.area_m2));
             rates.insert(id, 0.0);
-            outgoing.insert(id, 0.0);
+            outgoing.insert(id, (0.0, slope));
         }
         for (i, link) in self.links.values().enumerate() {
             if i % 256 == 0 {
@@ -559,7 +587,7 @@ impl<'a> DepositionSimulation<'a> {
                 let rate = rates.get_mut(&id).ok_or(DepositionError::Arithmetic)?;
                 *rate = finite(*rate + sign * power)?;
                 let g = outgoing.get_mut(&id).ok_or(DepositionError::Arithmetic)?;
-                *g = finite(*g + link.conductance_w_k)?;
+                g.0 = finite(g.0 + link.conductance_w_k)?;
                 let area = covered.get_mut(&id).ok_or(DepositionError::Arithmetic)?;
                 *area = finite(*area + side_area)?;
             }
@@ -577,7 +605,7 @@ impl<'a> DepositionSimulation<'a> {
                 ));
             }
             let ambient_g = finite(area * cell.boundary.htc_w_m2_k)?;
-            let mut g = finite(outgoing[&id] + ambient_g)?;
+            let mut g = finite(outgoing[&id].0 + ambient_g)?;
             let mut external = finite(
                 cell.boundary.source_w + ambient_g * (cell.boundary.ambient_k - temperatures[&id]),
             )?;
@@ -589,7 +617,7 @@ impl<'a> DepositionSimulation<'a> {
             external_w = finite(external_w + external)?;
             let rate = rates.get_mut(&id).ok_or(DepositionError::Arithmetic)?;
             *rate = finite(*rate + external)?;
-            let slope = self.material_temperature_slopes[&cell.material_id];
+            let slope = outgoing[&id].1;
             let decay = finite(g * slope / cell.mass_kg)?;
             if decay > 0.0 {
                 dt = dt.min(0.8 / decay);

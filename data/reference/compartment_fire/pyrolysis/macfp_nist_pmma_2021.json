@@ -1,0 +1,76 @@
+{
+    "Material": "MaCFP PMMA",
+
+    "Lab": "NIST",
+    
+    "Calibration": [
+        {
+            "Model": "FDS",
+            "Method": "Reaction Peak Equations",
+            "Scope": "Kinetics",
+            "Data": {
+                "Type": "TGA",
+                "Heating Rate": 10,
+                "Source": "NIST"
+            }
+        },
+        {
+            "Method": "Literature",
+            "Scope": [
+                "Heat Capcity", 
+                "Heat of Pyrolysis",
+                "Density",
+                "Conductivity"
+            ]
+        },
+        {
+            "Method": "Assumption",
+            "Scope": ["Mass Diffusivity","Absorption","Emissivity"]
+        }
+    ],
+            
+    "Kinetics": {
+        "Number of Reactions": 1,
+        "Reaction Network": "None",
+        "Pre-exponential": 2.85e13,
+        "Activation Energy": 1.91e5,
+        "Reaction Order": 1,
+        "Initial Mass Fraction": 1,
+        "Solid Yield": 0
+    },
+    
+    "Thermodynamics": {
+        "Heat Capacity": {
+            "Form": "Single Value",
+            "Value": 2200 
+        },
+        "Heat of Pyrolysis": {
+            "Form": "Single Value", 
+            "Value": 8.7e5
+        },
+        "Density": {
+            "Form": "Single Value",
+            "Value": 1100 
+        }
+    },
+    
+    "Transport": {
+        "Conductivity": {
+            "Form": "Single Value",
+            "Value": 0.20 
+        },
+        "Mass Diffusivity": {
+            "Form": "Single Value",
+            "Value": 0 
+        },
+        "Absorption": {
+            "Form": "Single Value",
+            "Value": "inf" 
+        },
+        "Emissivity": {
+            "Form": "Single Value",
+            "Value": 0.9
+        }
+    }
+
+}
