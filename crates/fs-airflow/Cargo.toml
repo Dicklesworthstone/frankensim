@@ -59,3 +59,8 @@ required-features = ["compartment-fire"]
 
 [lints]
 workspace = true
+
+[[example]]
+name = "ventilated_compartment_fire"
+path = "examples/ventilated_compartment_fire.rs"
+required-features = ["compartment-fire"]
