@@ -5,6 +5,8 @@
 // EITHER WAY the payload is the frozen v2 layout the native engine
 // digests (fs_flyer::simloop::SNAPSHOT_LEN order, exactly).
 
+import type { AppliedControlTrace } from "./appliedControls.ts";
+
 /** Frozen v1 prefix length; retained for stored-recording fallback. */
 export const PAYLOAD_F64S_V1 = 12;
 /** Frozen v2 payload length (v1 prefix + roll + heading). */
@@ -202,10 +204,17 @@ export function huffmanScenario(seed: bigint, mode: number, member = 0): Scenari
 }
 
 // --- main → worker ----------------------------------------------------------
+export interface ReplayInitialization {
+  readonly runIntentId: string;
+  readonly tick0Digest: string;
+  readonly appliedControls?: AppliedControlTrace;
+}
+
 export type MainToWorker =
   | {
       readonly kind: "init";
       readonly scenario: ScenarioInit;
+      readonly replay?: ReplayInitialization;
       /** Present iff SharedArrayBuffer transport is available. */
       readonly sab?: SharedArrayBuffer;
       readonly slots?: number;
@@ -303,6 +312,9 @@ export type WorkerToMain =
       readonly tick: number;
       readonly envelopeRefusalCode?: string;
       readonly digest: string;
+      /** Exact terminal state, including when no render frame sampled it. */
+      readonly payload: Float64Array;
+      readonly appliedControls?: AppliedControlTrace;
     }
   | {
       /** postMessage fallback transport only (no SAB): one snapshot. */

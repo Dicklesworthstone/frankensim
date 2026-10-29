@@ -12,10 +12,11 @@ import {
   PAYLOAD_F64S,
   payloadLayoutHash,
   type RefusalEnvelope,
+  type ReplayInitialization,
   type ScenarioInit,
   type WorkerToMain,
 } from "./protocol.ts";
-import { FlightRecorder, type FlightRecording } from "./replay.ts";
+import { FlightRecorder, type FlightRecording, recordedToScenario, replayInitialization, scenarioToRecorded } from "./replay.ts";
 import { decodeSnapshot, interpolateSnapshots, type SimSnapshot } from "./snapshotView.ts";
 
 const RING_SLOTS = 4;
@@ -41,6 +42,9 @@ export interface SimClientEvents {
 
 export class SimClient {
   private readonly worker: Worker;
+  private readonly events: SimClientEvents;
+  private replaying = false;
+  private terminalReceived = false;
   private sab: SharedArrayBuffer | null = null;
   private reader: SeqlockReader | null = null;
   private readonly scratch = new Float64Array(PAYLOAD_F64S);
@@ -62,6 +66,7 @@ export class SimClient {
   private checkpointRequestId = 0;
   private readonly pendingCheckpoints = new Map<number, string>();
   constructor(events: SimClientEvents, workerFactory?: () => Worker) {
+    this.events = events;
     this.worker =
       workerFactory !== undefined
         ? workerFactory()
@@ -107,25 +112,41 @@ export class SimClient {
               : this.ready?.runIntentId === msg.runIntentId &&
                 msg.initGeneration === this.initGeneration
           ) {
+            this.ready = null;
+            this.reader = null;
+            this.pendingCheckpoints.clear();
+            this.terminalReceived = true;
             events.onRefusal(msg.stage, msg.refusal);
           }
           break;
         case "terminal":
           if (
             this.ready?.runIntentId !== msg.runIntentId ||
-            msg.initGeneration !== this.initGeneration
+            msg.initGeneration !== this.initGeneration || this.terminalReceived
           ) {
             break;
           }
+          this.terminalReceived = true;
           this.terminalCode = msg.envelopeRefusalCode;
-          if (this.scenario !== null && this.ready !== null && this.recorder.frameCount() > 0) {
-            this.recording = this.recorder.seal({
-              scenario: this.scenario,
-              runIntentId: this.ready.runIntentId,
-              tick0Digest: this.ready.tick0Digest,
-              terminalPhase: msg.phase,
-              finalDigest: msg.digest,
-            });
+          if (this.scenario !== null && this.ready !== null) {
+            try {
+              this.recorder.appendTerminal(msg.tick, msg.payload);
+              this.push(decodeSnapshot(msg.tick, msg.payload));
+              this.recording = this.recorder.seal({
+                scenario: this.scenario,
+                runIntentId: this.ready.runIntentId,
+                tick0Digest: this.ready.tick0Digest,
+                terminalPhase: msg.phase,
+                finalDigest: msg.digest,
+                appliedControls: msg.appliedControls,
+              });
+            } catch (error) {
+              events.onRefusal("step", {
+                code: "recording-incomplete", message: String(error),
+                ranked_repairs: ["start a new flight with a matching worker and native engine"],
+              });
+              break;
+            }
           }
           events.onTerminal(msg);
           break;
@@ -133,7 +154,7 @@ export class SimClient {
           // postMessage fallback transport.
           if (
             this.ready?.runIntentId !== msg.runIntentId ||
-            msg.initGeneration !== this.initGeneration
+            msg.initGeneration !== this.initGeneration || this.terminalReceived
           ) {
             break;
           }
@@ -192,9 +213,32 @@ export class SimClient {
 
   /** Start a run. Uses the SAB ring iff the environment grants SAB. */
   start(scenario: ScenarioInit, runEpoch = 1): void {
+    this.begin(scenario, runEpoch);
+  }
+
+  startReplay(recording: FlightRecording, runEpoch = 1): boolean {
+    const replay = replayInitialization(recording);
+    if ("error" in replay) {
+      this.events.onRefusal("init", {
+        code: "replay-unavailable", message: replay.error,
+        ranked_repairs: ["record a new flight with applied controls before replaying"],
+      });
+      return false;
+    }
+    this.begin(recordedToScenario(recording.scenario), runEpoch, replay);
+    return true;
+  }
+
+  isReplaying(): boolean {
+    return this.replaying;
+  }
+
+  private begin(scenario: ScenarioInit, runEpoch: number, replay?: ReplayInitialization): void {
     this.initGeneration += 1;
     const initGeneration = this.initGeneration;
-    this.scenario = scenario;
+    this.scenario = recordedToScenario(scenarioToRecorded(scenario));
+    this.replaying = replay !== undefined;
+    this.terminalReceived = false;
     this.ready = null;
     this.pendingCheckpoints.clear();
     this.prev = null;
@@ -203,6 +247,9 @@ export class SimClient {
     this.terminalCode = undefined;
     this.recorder = new FlightRecorder();
     this.recording = null;
+    this.sab = null;
+    this.syncSamples.length = 0;
+    this.clockOffsetMs = 0;
     let init: Extract<MainToWorker, { kind: "init" }>;
     if (typeof SharedArrayBuffer !== "undefined" && crossOriginIsolated) {
       const sab = new SharedArrayBuffer(
@@ -219,7 +266,7 @@ export class SimClient {
       this.reader = null;
       init = { kind: "init", scenario, runEpoch, initGeneration };
     }
-    this.worker.postMessage(init);
+    this.worker.postMessage({ ...init, scenario: this.scenario, ...(replay === undefined ? {} : { replay }) });
   }
 
   /** Rebind the reader's anchor once tick0 is known (SAB path): the
@@ -240,7 +287,7 @@ export class SimClient {
    * time; the ping-derived offset translates it into the worker clock. */
   sendControl(leverForceN: number, warpCmdRad: number, sequence: number, deviceMs: number): void {
     const ready = this.ready;
-    if (ready === null) {
+    if (ready === null || this.replaying || this.terminalReceived) {
       return;
     }
     this.worker.postMessage({
@@ -297,7 +344,7 @@ export class SimClient {
    * clock. Returns null before the first snapshot.
    */
   sample(nowMs: number): SimSnapshot | null {
-    if (this.reader !== null) {
+    if (this.reader !== null && !this.terminalReceived) {
       const result = this.reader.read(this.scratch);
       if (typeof result === "number") {
         if (this.latest === null || result > this.latest.tick) {

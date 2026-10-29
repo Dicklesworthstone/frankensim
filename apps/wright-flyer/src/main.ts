@@ -32,7 +32,7 @@ import { exportInstantPhoto, togglePhotoMode } from "./photoMode.ts";
 import { QosGovernor } from "./qos.ts";
 import { LatencyLedger, toPhysical } from "./sim/humanControls.ts";
 import { MODE_FIXED, MODE_HISTORICAL, MODE_HUMAN } from "./sim/protocol.ts";
-import { type FlightRecording, recordedToScenario, replayVerdict } from "./sim/replay.ts";
+import { type FlightRecording, replayInitialization, replayVerdict } from "./sim/replay.ts";
 import { cardLines, computeKpis, kpiRecomputeDivergence } from "./sim/resultsCard.ts";
 import { SimClient } from "./sim/simClient.ts";
 
@@ -286,7 +286,7 @@ function main(): void {
         }
         // Human mode: the run starts at the first admitted control —
         // send neutral so the rail run begins immediately.
-        if (mode === MODE_HUMAN) {
+        if (mode === MODE_HUMAN && !client.isReplaying()) {
           sendHumanControl(NEUTRAL, performance.now());
         }
         console.info(JSON.stringify({ suite: "wright-flyer-app", stage: "sim-ready", ...info }));
@@ -400,7 +400,7 @@ function main(): void {
   let grabY = 0;
   let padOwned = false;
   const sendHumanControl = (cmd: PilotCommand, deviceMs: number): void => {
-    if (simClient === undefined) {
+    if (simClient === undefined || simClient.isReplaying()) {
       return;
     }
     controlSeq += 1;
@@ -411,7 +411,7 @@ function main(): void {
     lastSentMs = performance.now();
   };
   const pumpHuman = (nowMs: number, dtS: number): void => {
-    if (mode !== MODE_HUMAN || simClient === undefined) {
+    if (mode !== MODE_HUMAN || simClient === undefined || simClient.isReplaying()) {
       return;
     }
     let padCmd: PilotCommand | null = null;
@@ -500,11 +500,17 @@ function main(): void {
       if (recording === null) {
         return; // run not finished yet
       }
+      const replay = replayInitialization(recording);
+      if ("error" in replay) {
+        capabilityText.textContent = replay.error;
+        capabilityText.className = "warn";
+        return;
+      }
       resultsCardEl.style.display = "none";
       simClient.dispose();
       simClient = makeClient(recording);
       simStartMs = performance.now();
-      simClient.start(recordedToScenario(recording.scenario));
+      simClient.startReplay(recording);
       renderer.dispose();
       renderer = createFlyerSceneRenderer(app, simClient, recording);
       resize();

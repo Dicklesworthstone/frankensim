@@ -17,7 +17,7 @@ import {
   parseStepEnvelope,
 } from "../src/sim/engineFacade.ts";
 import {
-  dec17Scenario, MODE_FIXED, PAYLOAD_F64S, PAYLOAD_F64S_V1, type SpatialWindInit,
+  dec17Scenario, MODE_FIXED, MODE_HUMAN, PAYLOAD_F64S, PAYLOAD_F64S_V1, type SpatialWindInit,
 } from "../src/sim/protocol.ts";
 import {
   FlightRecorder,
@@ -28,8 +28,10 @@ import {
   RECORDING_SCHEMA_V1,
   RECORDING_SCHEMA_SPATIAL,
   RECORDING_SCHEMA_MATERIAL,
+  RECORDING_SCHEMA_HUMAN,
   recordedToScenario,
   replayVerdict,
+  replayInitialization,
   scenarioToRecorded,
 } from "../src/sim/replay.ts";
 
@@ -228,6 +230,38 @@ test("verdict discriminates", () => {
     assert.equal(bad.expectedDigest, "a".repeat(64));
     assert.equal(bad.observedDigest, "b".repeat(64));
   }
+});
+
+test("human recording round-trips exact applied controls and preserves legacy ghosts", () => {
+  const recorder = new FlightRecorder();
+  recorder.appendTerminal(4, payloadAt(4, 4));
+  recorder.appendTerminal(4, payloadAt(4, 4));
+  assert.equal(recorder.frameCount(), 1, "terminal does not duplicate a sampled frame");
+  const wrong = payloadAt(4, 4); wrong[0] += 1;
+  assert.throws(() => recorder.appendTerminal(4, wrong), /differs/);
+  const meta = { ...sealedFixture(), runIntentId: "b".repeat(64), scenario: dec17Scenario(1903n, MODE_HUMAN) };
+  assert.throws(() => recorder.seal(meta), /complete applied controls/);
+  const sealed = recorder.seal({ ...meta, appliedControls: {
+    endTick: 4, changes: [{ tick: 1, leverForceN: "-0", warpCmdRad: 0.1 }],
+  } });
+  assert.equal(sealed.schema, RECORDING_SCHEMA_HUMAN);
+  const parsed = parseRecording(JSON.stringify(sealed));
+  assert.ok(!("error" in parsed));
+  if ("error" in parsed) throw new Error(parsed.error);
+  assert.deepEqual(replayInitialization(parsed), {
+    runIntentId: sealed.runIntentId, tick0Digest: sealed.tick0Digest, appliedControls: sealed.appliedControls,
+  });
+  const legacy = { ...sealed, schema: RECORDING_SCHEMA, appliedControls: undefined } satisfies FlightRecording;
+  assert.ok(!("error" in parseRecording(JSON.stringify(legacy))));
+  assert.equal(ghostAt(legacy, 4)?.tick, 4);
+  assert.ok("error" in replayInitialization(legacy));
+  for (const broken of [
+    { ...sealed, appliedControls: undefined },
+    { ...sealed, appliedControls: { ...sealed.appliedControls, endTick: 3 } },
+    { ...sealed, schema: RECORDING_SCHEMA },
+    { ...sealed, tick0Digest: "changed" },
+    { ...sealed, scenario: { ...sealed.scenario, mode: MODE_FIXED } },
+  ]) assert.ok("error" in parseRecording(JSON.stringify(broken)), JSON.stringify(broken));
 });
 
 // ---------------------------------------------------------------------------

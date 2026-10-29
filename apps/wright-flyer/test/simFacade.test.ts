@@ -24,6 +24,7 @@ import {
   dec17Scenario,
   type MainToWorker,
   MODE_FIXED,
+  MODE_HUMAN,
   P_ASSIST,
   P_DC_RAD,
   P_GUST_W_MPS,
@@ -47,6 +48,8 @@ import {
   type SpatialWindInit,
 } from "../src/sim/protocol.ts";
 import { SimClient } from "../src/sim/simClient.ts";
+import { RECORDING_SCHEMA, RECORDING_SCHEMA_HUMAN } from "../src/sim/replay.ts";
+import { SeqlockWriter } from "../src/transport/seqlock.ts";
 
 const jlog = (payload: Record<string, unknown>): void => {
   console.info(JSON.stringify({ suite: "wf-e52a-facade", ...payload }));
@@ -428,6 +431,7 @@ test("checkpoint replies bind the request and active run across reinit races", (
     phase: "ended:max-ticks",
     tick: 99,
     digest: "e".repeat(64),
+    payload: new Float64Array(PAYLOAD_F64S),
   });
   assert.equal(client.latestTick(), 0, "queued A snapshot must not enter B view state");
   assert.deepEqual(terminals, [], "queued A terminal must not notify or seal B");
@@ -484,7 +488,72 @@ test("checkpoint replies bind the request and active run across reinit races", (
     checkpoints.map(({ requestId, runIntentId, bytes }) => [requestId, runIntentId, [...bytes]]),
     [[2, runB, [3]]],
   );
+  assert.equal(client.requestCheckpoint(), true);
+  worker.emit({ kind: "checkpoint-refusal", requestId: 3, runIntentId: runB,
+    refusal: { code: "checkpoint-unavailable", message: "save refused", ranked_repairs: [] } });
+  worker.emit({ kind: "snapshot", runIntentId: runB, initGeneration: 2,
+    tick: 10, payload: new Float64Array(PAYLOAD_F64S) });
+  assert.equal(client.latestTick(), 10, "a refused checkpoint must not invalidate continuing flight");
+  assert.equal(client.requestCheckpoint(), true);
   client.dispose();
+});
+
+test("terminal seals human replay without render sampling in fallback and SAB modes", () => {
+  const runIntentId = "a".repeat(64);
+  const tick0Digest = "b".repeat(64);
+  for (const isolated of [false, true]) {
+    (globalThis as { crossOriginIsolated?: boolean }).crossOriginIsolated = isolated;
+    const worker = new FakeWorker();
+    const refusals: string[] = [];
+    let terminals = 0;
+    const client = new SimClient({
+      onReady: () => {}, onRefusal: (_stage, r) => refusals.push(r.code),
+      onTerminal: () => { terminals += 1; },
+    }, () => worker as unknown as Worker);
+    client.start(dec17Scenario(1903n, MODE_HUMAN));
+    const init = worker.sent[0];
+    assert.equal(init?.kind, "init");
+    if (init?.kind !== "init") throw new Error("init missing");
+    worker.emit({ kind: "ready", runIntentId, tick0Digest, trimVMps: 10,
+      layoutHash: payloadLayoutHash(), initGeneration: 1 });
+    client.bindAnchor(tick0Digest);
+    const payload = new Float64Array(PAYLOAD_F64S); payload[P_PHASE] = 4; payload[P_X_M] = 12;
+    if (isolated) {
+      assert.ok(init.sab);
+      new SeqlockWriter(init.sab, { slots: 4, payloadF64s: PAYLOAD_F64S }, 1,
+        payloadLayoutHash(), Number.parseInt(tick0Digest.slice(0, 8), 16) | 0)
+        .publish(3, (out) => out.set(payload));
+    }
+    const terminal = { kind: "terminal", runIntentId, initGeneration: 1,
+      phase: "ended:max-ticks", tick: 3, digest: "c".repeat(64), payload,
+      appliedControls: { endTick: 3, changes: [{ tick: 1, leverForceN: "-0", warpCmdRad: 0.01 }] },
+    } as const;
+    worker.emit(terminal);
+    worker.emit(terminal);
+    const recording = client.takeRecording();
+    assert.ok(recording);
+    assert.equal(recording.schema, RECORDING_SCHEMA_HUMAN);
+    assert.deepEqual(recording.ticks, [3]);
+    assert.equal(client.sample(0)?.xM, 12);
+    assert.equal(terminals, 1);
+    assert.deepEqual(refusals, []);
+    assert.equal(client.startReplay(recording), true);
+    const replay = worker.sent.at(-1);
+    assert.equal(replay?.kind, "init");
+    if (replay?.kind !== "init") throw new Error("replay missing");
+    assert.deepEqual(replay.replay, { runIntentId, tick0Digest, appliedControls: terminal.appliedControls });
+    worker.emit({ kind: "ready", runIntentId, tick0Digest, trimVMps: 10,
+      layoutHash: payloadLayoutHash(), initGeneration: 2 });
+    const posted = worker.sent.length;
+    client.sendControl(220, 0.148, 3, 0);
+    assert.equal(worker.sent.length, posted, "live input cannot contaminate replay");
+    worker.emit(terminal);
+    assert.equal(client.takeRecording(), null, "old terminal cannot seal the replay lifecycle");
+    assert.equal(client.startReplay({ ...recording, schema: RECORDING_SCHEMA, appliedControls: undefined }), false);
+    assert.equal(worker.sent.length, posted, "legacy human trace cannot be guessed");
+    client.dispose();
+  }
+  (globalThis as { crossOriginIsolated?: boolean }).crossOriginIsolated = false;
 });
 
 // --------------------------------------------------------------------------

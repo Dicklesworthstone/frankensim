@@ -20,7 +20,7 @@ import {
   parseInitEnvelope,
   parseStepEnvelope,
 } from "./engineFacade.ts";
-import { ControlHold } from "./humanControls.ts";
+import { AppliedControls, appliedControlTraceError } from "./appliedControls.ts";
 import {
   type MainToWorker,
   MODE_HUMAN,
@@ -50,7 +50,7 @@ let initGeneration = 0;
 let pumpGeneration = 0;
 // E5.3a: Human-mode hold law (ApplyNextEligibleTickAndFlag) + the sim
 // epoch for requested-tick targeting (worker monotonic clock).
-let hold = new ControlHold();
+let controls = new AppliedControls();
 let simEpochMs = 0;
 
 function post(msg: WorkerToMain, transfer?: Transferable[]): void {
@@ -67,50 +67,46 @@ async function loadEngine(): Promise<WasmEngine> {
   return pkg as unknown as WasmEngine;
 }
 
+function refuseStep(runIntentId: string, initGeneration: number, refusal: RefusalEnvelope): false {
+  // Native errors may follow partial advancement. Never resume or checkpoint a
+  // run whose accepted input/snapshot sequence we can no longer establish.
+  invalidateRun();
+  post({ kind: "refusal", stage: "step", runIntentId, initGeneration, refusal });
+  return false;
+}
+
 function runTick(tick: number): boolean {
   const runIntentId = activeRunIntentId;
   const currentInitGeneration = activeInitGeneration;
   if (engine === null || ended || runIntentId === null || currentInitGeneration === null) {
     return false; // wasm still loading / run over: sim time waits
   }
-  // E5.3a Human mode: the ControlHold supplies the zero-order-held
-  // control every tick; before the FIRST admitted control the sim
-  // waits (no step, no refusal spam — the run starts at first touch).
-  let hasInput = false;
-  let lever = 0;
-  let warp = 0;
-  if (mode === MODE_HUMAN) {
-    const held = hold.valueAt(tick);
-    if (held === null) {
-      // H-2: report "did not step" so TickScheduler does not consume
-      // the schedule slot — scheduler ticks stay equal to engine ticks.
-      return false;
-    }
-    hasInput = true;
-    lever = held.leverForceN;
-    warp = held.warpCmdRad;
-  }
-  const json = engine.flyer_engine_step(hasInput, lever, warp);
-  const step = parseStepEnvelope(json);
-  if (step.kind === "refusal") {
-    // Refusal consumes the tick as before (typed receipt posted); only
-    // the pre-first-touch / loading waits return false above.
-    post({
-      kind: "refusal",
-      stage: "step",
-      runIntentId,
-      initGeneration: currentInitGeneration,
-      refusal: step.refusal,
+  const nativeEngine = engine;
+  let step: ReturnType<AppliedControls["step"]>;
+  try {
+    step = mode === MODE_HUMAN
+      ? controls.step(tick, (value) => nativeEngine.flyer_engine_step(true, value.leverForceN, value.warpCmdRad))
+      : parseStepEnvelope(nativeEngine.flyer_engine_step(false, 0, 0));
+  } catch (error) {
+    return refuseStep(runIntentId, currentInitGeneration, {
+      code: "native-step-failed", message: String(error),
+      ranked_repairs: ["restart the scenario with a matching wasm package"],
     });
-    return true;
   }
-  if (step.kind === "malformed") {
-    jlog("malformed-step", { detail: step.detail, tick });
-    return true;
+  if (step.kind === "waiting") return false;
+  if (step.kind === "refusal") {
+    return refuseStep(runIntentId, currentInitGeneration, step.refusal);
+  }
+  if (step.kind === "malformed" || step.tick !== tick) {
+    return refuseStep(runIntentId, currentInitGeneration, {
+      code: "step-envelope-malformed",
+      message: step.kind === "malformed" ? step.detail : "native tick differs from scheduled tick",
+      ranked_repairs: ["restart the scenario with a matching wasm package"],
+    });
   }
   if (writer !== null) {
     writer.publish(step.tick, (payload) => fillPayload(step, payload));
-  } else {
+  } else if (!step.ended) {
     const copy = new Float64Array(PAYLOAD_F64S);
     fillPayload(step, copy);
     post(
@@ -128,6 +124,14 @@ function runTick(tick: number): boolean {
     ended = true;
     running = false;
     const digest = parseDigestEnvelope(engine.flyer_engine_digest());
+    if (typeof digest !== "string") {
+      return refuseStep(runIntentId, currentInitGeneration, {
+        code: "terminal-digest-unavailable", message: "native terminal digest could not be read",
+        ranked_repairs: ["restart the scenario with a matching wasm package"],
+      });
+    }
+    const payload = new Float64Array(PAYLOAD_F64S);
+    fillPayload(step, payload);
     post({
       kind: "terminal",
       runIntentId,
@@ -137,8 +141,10 @@ function runTick(tick: number): boolean {
       ...(step.envelopeRefusalCode !== undefined
         ? { envelopeRefusalCode: step.envelopeRefusalCode }
         : {}),
-      digest: typeof digest === "string" ? digest : "unavailable",
-    });
+      digest,
+      payload,
+      ...(mode === MODE_HUMAN ? { appliedControls: controls.seal() } : {}),
+    }, [payload.buffer]);
     jlog("terminal", { phase: step.phase, tick: step.tick });
   }
   return true;
@@ -171,13 +177,26 @@ async function handleInit(msg: Extract<MainToWorker, { kind: "init" }>): Promise
   // Stop publication before loading or admitting B. A failed B must not leave
   // A's scheduler, ring writer, or checkpoint authority live.
   invalidateRun();
+  if (msg.replay !== undefined) {
+    const { runIntentId, tick0Digest, appliedControls } = msg.replay;
+    const traceError = appliedControls === undefined ? null : appliedControlTraceError(appliedControls);
+    if (![runIntentId, tick0Digest].every((id) => typeof id === "string" && /^[0-9a-f]{64}$/.test(id)) ||
+        (msg.scenario.mode === MODE_HUMAN) !== (appliedControls !== undefined) || traceError !== null ||
+        (appliedControls !== undefined && BigInt(appliedControls.endTick) > msg.scenario.maxTicks)) {
+      postInitRefusal(msg.initGeneration, {
+        code: "replay-input-invalid", message: traceError ?? "replay identity, mode or input extent does not match the scenario",
+        ranked_repairs: ["use a complete recording from this engine and scenario"],
+      });
+      return;
+    }
+  }
   engine = engine ?? (await loadEngine());
   if (generation !== initGeneration) {
     return;
   }
   mode = msg.scenario.mode;
   ended = false;
-  hold = new ControlHold();
+  controls = new AppliedControls(msg.replay?.appliedControls);
   const initJson = initializeScenario(engine, msg.scenario);
   const init = parseInitEnvelope(initJson);
   if (init.kind === "refusal") {
@@ -192,6 +211,14 @@ async function handleInit(msg: Extract<MainToWorker, { kind: "init" }>): Promise
       code: "envelope-malformed",
       message: init.detail,
       ranked_repairs: ["rebuild the wasm pkg (npm run wasm) to match the app protocol"],
+    });
+    return;
+  }
+  if (msg.replay !== undefined && (msg.replay.runIntentId !== init.runIntentId || msg.replay.tick0Digest !== init.tick0Digest)) {
+    postInitRefusal(msg.initGeneration, {
+      code: "replay-identity-mismatch",
+      message: "the initialized native scenario or tick-zero state differs from the recording",
+      ranked_repairs: ["use the original scenario and matching native engine build"],
     });
     return;
   }
@@ -311,7 +338,7 @@ self.addEventListener("message", (event: MessageEvent<MainToWorker>) => {
       // the ApplyNextEligibleTickAndFlag receipt.
       const runIntentId = activeRunIntentId;
       const currentInitGeneration = activeInitGeneration;
-      if (runIntentId === null || currentInitGeneration === null) {
+      if (runIntentId === null || currentInitGeneration === null || !running || ended || mode !== MODE_HUMAN) {
         break;
       }
       if (msg.runIntentId !== runIntentId || msg.initGeneration !== currentInitGeneration) {
@@ -319,12 +346,13 @@ self.addEventListener("message", (event: MessageEvent<MainToWorker>) => {
       }
       const currentTick = scheduler?.currentTick() ?? 0;
       const requested = Math.ceil((msg.deviceWorkerMs - simEpochMs) / TICK_MS) + 1;
-      const receipt = hold.admit(
+      const receipt = controls.admit(
         msg.sequence,
         { leverForceN: msg.leverForceN, warpCmdRad: msg.warpCmdRad },
         requested,
         currentTick,
       );
+      if (receipt === null) break;
       post({
         kind: "control-ack",
         runIntentId,
