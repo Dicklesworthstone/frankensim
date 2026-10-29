@@ -32,7 +32,10 @@ mod heat;
 pub use heat::MaterialHeatStep;
 
 mod plane_stress;
-pub use plane_stress::{PlaneStressPoint, PlaneStressRelaxation};
+pub use plane_stress::{
+    DescriptorPlaneStressBody, DescriptorPlaneStressHistory, DescriptorPlaneStressPoint,
+    PlaneStressPoint, PlaneStressRelaxation,
+};
 
 /// Explicit capacity; the unchanged exact propagator imposes its own dense cap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

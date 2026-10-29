@@ -11934,3 +11934,44 @@ coupled to an independent physical fluid reference, retention of every warmed
 continuous radiation coordinate and its energy, and exact empty-bank duct
 reduction. State, work, heat, signed pressure observation, complete prefix and
 prepared-clock checks pass using the original numerical and physics owners.
+
+### Rank-free Kelvin-Maxwell plane-stress descriptor
+
+`DescriptorPlaneStressPoint` and `DescriptorPlaneStressBody` expose a complete
+alternative for oblique singular Kelvin normal blocks. All three normal tensor
+strains remain stored physical coordinates; three algebraic rate efforts per
+point enforce the original zero-traction equations. The original full Kelvin
+matrix is stamped once as the PSD resistance over physical velocity and normal
+strain-rate efforts. It is never inverted, ranked, clipped or regularized.
+The original equilibrium tensor, all six spring-memory coordinates per Maxwell
+branch, complete SPD mass, signed cross terms and force/velocity ports survive.
+This adds neither normal inertia nor a penalty stiffness or another integrator.
+
+The existing `fs_phs::step_descriptor` owns the second-order Gonzalez/midpoint
+step. The explicit `history_relaxed_at_rest` initialization solves the original
+equilibrium normal block and starts relaxed spring memory and rates at zero.
+Moving preloads and warm continuation require `history_from_state` with every
+coordinate present and original constitutive normal traction consistent. The
+algebraic representatives carry no stored energy and are not an instantaneous
+rate interpolant in undamped constraint directions.
+
+State capacity includes displacement, momentum, every Maxwell coordinate,
+three normal strains and three algebraic efforts per point. Original strain
+domain, finite work/heat, nonnegative computed physical dissipation, normal
+traction and independent energy balance are admitted before atomic publication.
+Cancellation is polled around the existing bounded descriptor solve and before
+commit; interruption inside its Newton solve and allocation-free callbacks are
+not claimed. Energy and traction acceptance do not certify frequency accuracy.
+Callers must refine time; this material API is not automatically admitted to an
+audio render clock and does not use the effort-join-only descriptor pole bound.
+
+Three focused G0/G1/G3/G4 native tests pass. An independent physical DAE/RK4
+reference exercises normal viscosity ranks zero through three, including both
+oblique singular ranks, a full off-diagonal mass and two nonproportional Maxwell
+branches. Motion, external work and heat converge at second order on 20/40/80
+steps: finest state error is below 7.5e-10, work error below 9.3e-13 J and heat
+error below 3.4e-13 J in the authored fixture. Original normal traction remains
+below 2e-10 Pa. Complete restart and changed-clock continuation are reproducible;
+late cancellation, inconsistent moving restart and cap22/cap21 refusal preserve
+accepted history. These are focused actual-owner native builds, not full
+workspace Cargo/DSR qualification or a measured material/real-time certificate.

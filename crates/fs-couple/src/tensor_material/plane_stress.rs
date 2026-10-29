@@ -16,6 +16,8 @@ use fs_math::det;
 
 mod relaxation;
 pub use relaxation::PlaneStressRelaxation;
+mod descriptor;
+pub use descriptor::{DescriptorPlaneStressBody, DescriptorPlaneStressHistory, DescriptorPlaneStressPoint};
 
 /// One homogeneous material quadrature contribution under local z-plane stress.
 /// In-plane columns are [epsilon_xx,epsilon_yy,gamma_xy] per displacement [1/m].
