@@ -1460,6 +1460,12 @@ impl MimoZoh {
     /// interconnection. This diagnostic is always `GridOnly`, even if every
     /// point passes; no gain scaling or residue repair is performed here.
     ///
+    /// A grid eigenvalue of `Z + Z^H` is a violation below `-1e-12` times the
+    /// largest direct-term entry, the floor [`check_mimo_passivity`] applies to
+    /// `D` and `E`. At DC the sampled response is `Z(0)`, whose Hermitian part is
+    /// exactly zero for a radiation load (resistance ~ omega^2); its sign there
+    /// is the rounding of an O(|D|) cancellation. `worst` keeps the raw value.
+    ///
     /// # Panics
     /// Fewer than two grid points.
     #[must_use]
@@ -1469,7 +1475,8 @@ impl MimoZoh {
 
     /// DC-to-Nyquist diagnostic of the exact interval-mean output that exchanges
     /// work with held input. This is still `GridOnly`; changing output quadrature
-    /// does not manufacture a discrete storage certificate.
+    /// does not manufacture a discrete storage certificate. Same violation floor
+    /// as [`Self::sampled_passivity`].
     ///
     /// # Panics
     /// Fewer than two grid points.
@@ -1480,6 +1487,9 @@ impl MimoZoh {
 
     fn output_sampled_passivity(&self, points: usize, mean: bool) -> MimoPassivityReport {
         assert!(points >= 2, "passivity grid needs DC and Nyquist");
+        let scale = self.d.iter().chain(&self.mean_d).chain(&self.e)
+            .fold(0.0f64, |m, v| m.max(v.abs()));
+        let floor = -1.0e-12 * scale;
         let mut worst = (f64::INFINITY, 0.0);
         let mut violation_freqs = Vec::new();
         for i in 0..points {
@@ -1493,7 +1503,7 @@ impl MimoZoh {
             } else {
                 f64::NAN
             };
-            if !lambda.is_finite() || lambda < 0.0 {
+            if !lambda.is_finite() || lambda < floor {
                 violation_freqs.push(w);
             }
             if lambda < worst.0 {

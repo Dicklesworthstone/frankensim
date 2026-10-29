@@ -296,3 +296,28 @@ fn mimo_zoh_step_response_is_exact_at_the_samples_g1() {
     };
     assert!(unstable.zoh(t_s).is_err());
 }
+
+#[test]
+fn sampled_grid_reads_a_zero_dc_resistance_against_the_direct_term_floor() {
+    // Z(s) = 1e8 + r/(s + 1e6) with Z(0) = -delta: a radiation-like load whose
+    // DC resistance is zero up to an O(1e8) cancellation, positive above DC.
+    let model = |delta: f64| MimoModel {
+        ports: 1,
+        poles: vec![PoleTerm::Real { pole: -1.0e6, residue: 0.0 }],
+        residues: vec![vec![C64::from_re(-(1.0e8 + delta) * 1.0e6)]],
+        d: vec![1.0e8],
+        e: vec![0.0],
+        reciprocal: true,
+    };
+    // Floor 1e-12 * 1e8 on the eigenvalue of Z + Z^H, which is -2 delta at DC.
+    for (delta, passive) in [(0.0, true), (1.0e-5, true), (1.0e-3, false)] {
+        let zoh = model(delta).zoh(1.0 / 96_000.0).unwrap();
+        for report in [zoh.sampled_passivity(129), zoh.mean_sampled_passivity(129)] {
+            assert_eq!(report.passive, passive, "delta {delta}: {report:?}");
+            assert!((report.worst.0 + 2.0 * delta).abs() < 1.0e-6, "raw worst kept: {report:?}");
+            if !passive {
+                assert_eq!(report.violation_freqs, [0.0]);
+            }
+        }
+    }
+}
