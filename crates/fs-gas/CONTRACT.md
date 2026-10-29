@@ -873,3 +873,74 @@ stresses or rarefied gas. Soret/Dufour effects and a fully discrete entropy or
 invariant-domain theorem remain outside this operator. Native source-linked
 checks are supplementary: `dsr quality --tool frankensim` is unavailable here
 (`dsr: command not found`), so no workspace DSR verdict is claimed.
+
+## Reacting networks with molecular transport
+
+`ReactingNetwork1d::step_with_dissipation` composes
+`D(dt/2), C(dt/2), A(dt), C(dt/2), D(dt/2)` for every branch cell and finite
+plenum. It reuses the same prepared molecular network operator and original
+constant-volume chemistry update; each molecular half may subcycle, while
+only A advances time. If heat release or diffusion changes the admissible
+acoustic duration, all five stages restart from accepted physical storage at
+the actual duration.
+
+Molecular operator reports remain unpublished through coupled retries and
+cancellation. Complete fields, clocks, reaction/transport/molecular reports and
+the sum of both molecular port transfers publish only after the final check.
+The original C/A/C method remains available without molecular stages. Combined
+balances include both external molecular transfers and original chemical
+species/reference-energy changes; no duplicate heat-release or viscous-heating
+source is introduced. Final molecular temperatures in every branch cell and
+plenum must remain inside the mechanism's possibly narrower caloric interval.
+
+Three new coupled regressions pass: a two-pool analytic reversible
+reaction-plus-diffusion exponential, heat-release-driven complete-duration
+restart with homogeneous chemistry identity, and late cancellation preserving
+both network and separately owned molecular reports followed by successful
+reuse. All 110 staged native gas tests passed, including the earlier
+single-branch molecular/reacting paths and the original compartment tests,
+before the subsequent Maxwell--Stefan trace-gradient scaling correction.
+After that correction, all ten exact-production-module Maxwell--Stefan tests
+and rebuilt 16/64-cell molecular manifold consumers passed. This scoped
+validation does not claim tests added concurrently elsewhere on main or the
+unavailable workspace DSR gate.
+
+The symmetric composition retains the adaptive first-order chemistry base's
+limitations: it is not a global second-order or entropy certificate. The
+molecular operator's constant-area, continuum, explicit mixing-length and
+transport-law applicability limits remain unchanged.
+
+## Molecular N2/O2 shockwave manifold consumer
+
+`cargo run -p fs-gas --features experimental-euler --example mixture_manifold -- 64 molecular`
+evolves the pressure/composition pulse with `DissipatingNetwork1d<KineticTransport>`.
+The existing default remains inviscid and retains its conical daughter. Molecular
+mode explicitly selects three stationary cylinders of lengths 0.6/0.5/0.7 m and
+radii 0.010/0.008/0.008 m, a 30 mL rigid plenum, and a declared 0.010 m plenum-side
+mixing length at each port; each gradient includes the endpoint half-cell width.
+
+Calorics, masses and reference energies remain the original airNASA9 source bank.
+The dilute nonpolar kinetic law uses original Cantera v3.2.0 `data/gri30.yaml`
+collision data (blob `9a62004ec17bbec8ac11e97785932d426dd58610`): N2 sigma
+3.621 angstrom and epsilon/k 97.53 K; O2 sigma 3.458 angstrom and epsilon/k 107.4 K.
+It declares Wilke viscosity, estimated Eucken conductivity, zero bulk viscosity,
+200--1000 K and 1000--1e6 Pa. This does not resolve radial wall friction/heat
+transfer, dense gas, Soret/Dufour or rotational relaxation, and the compact
+mixing distance is a constitutive input rather than a resolved plenum flow.
+
+Fresh native runs with Maxwell--Stefan evaluator version 2 completed 4 ms:
+
+| Cells per branch | Wave steps | Molecular substeps | Maximum species residual (kg) | Physical-energy residual (J) |
+| --- | --- | --- | --- | --- |
+| 16 | 168 | 336 | 1.36e-20 | +5.19e-15 |
+| 64 | 669 | 1338 | 1.09e-19 | +1.43e-14 |
+
+Both runs had zero rejected molecular substeps, coupling retries, HLL fallbacks
+and timestep halvings. Every sampled field was finite, with positive pressure,
+source-admitted temperature, and species fractions in [0,1] summing to one at
+printed precision. The sampled minimum N2 fraction was 0.765013831926 at 16 cells
+and 0.766338161781 at 64 cells, below initial air's 0.76708: these are not
+composition maximum-principle, entropy, convergence-rate or experimental
+accuracy certificates. Both daughters receive pressure/composition waves and
+nonzero conservative molecular port transfers. The rebuilt default 16-cell
+inviscid run retained its prior 149 steps and -3.17e-14 J physical-energy residual.

@@ -4,18 +4,22 @@
 //! Chemistry reuses the original single-cell fixed-U,V update at each actual
 //! physical volume. Changing species references changes stored sensible energy,
 //! never adds a second heat-release source to chemical total energy. This is
-//! an inviscid estimated composition, not a global entropy or order certificate.
+//! an estimated composition, not a global entropy or order certificate. Optional
+//! molecular halves add original-source diffusion, conduction and viscosity.
 
-use super::super::evolve::totals;
+use super::super::dissipation::{
+    ConstantTransport, DissipationControl, DissipationError, TransportLaw,
+};
 pub use super::super::reactive::{ChemistryReport, ReactiveStepControl};
 use super::super::reactive::{ReactiveError, react_cell};
 use super::super::{
-    Cell, Conserved, Error as FlowError, MAX_COMPONENTS, MAX_SPECIES, MixtureEuler1d, MixtureGas,
-    StepReport, allocated, positive, sum,
+    Cell, Error as FlowError, MAX_COMPONENTS, MAX_SPECIES, MixtureEuler1d, MixtureGas, StepReport,
+    allocated, positive, sum,
 };
+use super::coupled::{checked_totals, duplicate, initial_duration, reset};
+use super::dissipation::{NetworkDissipationOperator, SplitNetworkDissipationReport};
 use super::{
-    Accumulator, BranchEnd, MixtureNetwork1d, NetworkStepReport, NetworkTotals, Plenum,
-    PlenumConnection, PortExchange,
+    MixtureNetwork1d, NetworkStepReport, NetworkTotals, Plenum, PlenumConnection, PortExchange,
 };
 use crate::chemistry::{IsochoricKineticsError, IsochoricKineticsSolve, IsochoricReactor};
 use fs_qty::{Amount, Time};
@@ -39,6 +43,8 @@ pub enum ReactiveNetworkError {
     Preparation(IsochoricKineticsError),
     /// Conservative network transport or aggregate storage admission refused.
     Flow(FlowError),
+    /// Original molecular constitutive law or complete diffusive interval refused.
+    Dissipation(DissipationError),
     /// One original per-cell chemistry update or energy reconstruction refused.
     Cell {
         location: ChemistryLocation,
@@ -66,6 +72,14 @@ impl From<FlowError> for ReactiveNetworkError {
         }
     }
 }
+impl From<DissipationError> for ReactiveNetworkError {
+    fn from(value: DissipationError) -> Self {
+        match value {
+            DissipationError::Cancelled => Self::Cancelled,
+            other => Self::Dissipation(other),
+        }
+    }
+}
 
 /// One accepted complete reaction/transport/reaction step.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -79,10 +93,14 @@ pub struct ReactiveNetworkReport {
     pub transport: NetworkStepReport,
     /// Accepted chemistry in all branch cells and all finite plenums.
     pub chemistry: ChemistryReport,
+    /// Both accepted molecular halves, when requested; each spans elapsed/2.
+    pub dissipation: Option<SplitNetworkDissipationReport>,
     /// Original complete branch and plenum inventories.
     pub before: NetworkTotals,
     /// Final complete branch and plenum inventories after the second chemistry half.
     pub after: NetworkTotals,
+    /// External transport plus both molecular boundary transfers.
+    pub boundary_change: NetworkTotals,
     /// Species/gauge-energy residual after external transport and chemistry changes.
     pub conservation_residual: NetworkTotals,
     /// Total mass change minus external transport [kg].
@@ -103,6 +121,8 @@ pub struct ReactingNetwork1d {
     trial: MixtureNetwork1d,
     reactor: IsochoricReactor,
     amounts: Vec<Amount>,
+    molecular_ports: Vec<PortExchange>,
+    trial_molecular_ports: Vec<PortExchange>,
     last_report: Option<ReactiveNetworkReport>,
 }
 impl ReactingNetwork1d {
@@ -157,12 +177,22 @@ impl ReactingNetwork1d {
         }
         let trial = duplicate(&network, &mut cancelled)?;
         let amounts = allocated(network.gas().species_count(), Amount::new(0.0))?;
+        let empty = PortExchange {
+            species_masses_to_plenum: [0.0; MAX_SPECIES],
+            species_count: network.gas().species_count(),
+            momentum_to_plenum: 0.0,
+            energy_to_plenum: 0.0,
+        };
+        let molecular_ports = allocated(network.connections().len(), empty)?;
+        let trial_molecular_ports = allocated(network.connections().len(), empty)?;
         poll(&mut cancelled)?;
         Ok(Self {
             accepted: network,
             trial,
             reactor,
             amounts,
+            molecular_ports,
+            trial_molecular_ports,
             last_report: None,
         })
     }
@@ -208,6 +238,14 @@ impl ReactingNetwork1d {
         self.last_report
             .map(|_| self.accepted.port_exchanges.as_slice())
     }
+    /// Sum of the two accepted molecular halves, in retained connection order.
+    /// This is separate from the advective exchange returned above. Refused
+    /// coupled steps preserve the previously accepted molecular exchange.
+    pub fn accepted_molecular_port_exchanges(&self) -> Option<&[PortExchange]> {
+        self.last_report
+            .and_then(|report| report.dissipation)
+            .map(|_| self.molecular_ports.as_slice())
+    }
     /// Branch balances during transport only, between the two chemistry halves.
     pub fn accepted_branch_transport_reports(&self) -> Option<&[StepReport]> {
         self.last_report
@@ -228,6 +266,46 @@ impl ReactingNetwork1d {
         &mut self,
         maximum_duration: Time,
         controls: ReactiveStepControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveNetworkReport, ReactiveNetworkError> {
+        self.step_impl::<ConstantTransport>(
+            maximum_duration,
+            controls,
+            None,
+            DissipationControl::default(),
+            cancelled,
+        )
+    }
+
+    /// Advance D(dt/2), C(dt/2), A(dt), C(dt/2), D(dt/2) atomically.
+    /// Molecular transport includes every connected plenum and may subcycle;
+    /// every stage uses the actual duration accepted by network advection.
+    /// Prepare the molecular operator from the network before moving that
+    /// network into this owner. Its accepted reports also remain unchanged
+    /// unless the entire five-stage composition succeeds.
+    pub fn step_with_dissipation<L: TransportLaw>(
+        &mut self,
+        operator: &mut NetworkDissipationOperator<L>,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: DissipationControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveNetworkReport, ReactiveNetworkError> {
+        self.step_impl(
+            maximum_duration,
+            controls,
+            Some(operator),
+            dissipation_controls,
+            cancelled,
+        )
+    }
+
+    fn step_impl<L: TransportLaw>(
+        &mut self,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        mut operator: Option<&mut NetworkDissipationOperator<L>>,
+        dissipation_controls: DissipationControl,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ReactiveNetworkReport, ReactiveNetworkError> {
         poll(&mut cancelled)?;
@@ -242,7 +320,9 @@ impl ReactingNetwork1d {
             ));
         }
         let before = checked_totals(&self.accepted, &mut cancelled)?;
-        let mut duration = self.initial_duration(
+        let mut duration = initial_duration(
+            &self.accepted,
+            &mut self.trial,
             maximum_duration.value(),
             controls.transport.cfl,
             &mut cancelled,
@@ -262,6 +342,26 @@ impl ReactingNetwork1d {
             reset(&mut self.trial, &self.accepted, &mut cancelled)?;
             let mut chemistry = ChemistryReport::default();
             let attempt = (|| {
+                let first = match operator.as_deref_mut() {
+                    Some(operator) => {
+                        let report = operator.advance_for_trial(
+                            &mut self.trial,
+                            Time::new(0.5 * duration),
+                            dissipation_controls,
+                            &mut cancelled,
+                        )?;
+                        for (destination, source) in self
+                            .trial_molecular_ports
+                            .iter_mut()
+                            .zip(operator.trial_port_exchanges())
+                        {
+                            poll(&mut cancelled)?;
+                            *destination = *source;
+                        }
+                        Some(report)
+                    }
+                    None => None,
+                };
                 react_network(
                     &mut self.trial,
                     &mut self.reactor,
@@ -274,7 +374,7 @@ impl ReactingNetwork1d {
                     self.trial
                         .step(Time::new(duration), controls.transport, &mut cancelled)?;
                 if transport.elapsed.value() != duration {
-                    return Ok((transport, false));
+                    return Ok((transport, false, None));
                 }
                 react_network(
                     &mut self.trial,
@@ -284,44 +384,115 @@ impl ReactingNetwork1d {
                     &mut chemistry,
                     &mut cancelled,
                 )?;
-                Ok::<_, ReactiveNetworkError>((transport, true))
+                let second = match operator.as_deref_mut() {
+                    Some(operator) => {
+                        let report = operator.advance_for_trial(
+                            &mut self.trial,
+                            Time::new(0.5 * duration),
+                            dissipation_controls,
+                            &mut cancelled,
+                        )?;
+                        for (destination, source) in self
+                            .trial_molecular_ports
+                            .iter_mut()
+                            .zip(operator.trial_port_exchanges())
+                        {
+                            poll(&mut cancelled)?;
+                            for k in 0..destination.species_count {
+                                destination.species_masses_to_plenum[k] +=
+                                    source.species_masses_to_plenum[k];
+                            }
+                            destination.momentum_to_plenum += source.momentum_to_plenum;
+                            destination.energy_to_plenum += source.energy_to_plenum;
+                            if !destination.species_masses_to_plenum[..destination.species_count]
+                                .iter()
+                                .all(|x| x.is_finite())
+                                || !destination.momentum_to_plenum.is_finite()
+                                || !destination.energy_to_plenum.is_finite()
+                            {
+                                return Err(ReactiveNetworkError::Invalid(
+                                    "unrepresentable combined molecular port exchange",
+                                ));
+                            }
+                        }
+                        // Viscous heating after the last chemistry solve must
+                        // still fit the mechanism's possibly narrower interval.
+                        let chemistry_controls = self.reactor.controls();
+                        for (branch, flow) in self.trial.branches.iter().enumerate() {
+                            for cell in 0..flow.cell_count() {
+                                admit_temperature(
+                                    self.trial.gas(),
+                                    flow.cell(cell).expect("admitted cell index"),
+                                    chemistry_controls,
+                                    ChemistryLocation::Branch { branch, cell },
+                                    &mut cancelled,
+                                )?;
+                            }
+                        }
+                        for (plenum, volume) in self.trial.plenums.iter().enumerate() {
+                            admit_temperature(
+                                self.trial.gas(),
+                                volume.state(),
+                                chemistry_controls,
+                                ChemistryLocation::Plenum { plenum },
+                                &mut cancelled,
+                            )?;
+                        }
+                        Some(report)
+                    }
+                    None => None,
+                };
+                let dissipation = first
+                    .zip(second)
+                    .map(|(first, second)| SplitNetworkDissipationReport { first, second });
+                Ok::<_, ReactiveNetworkError>((transport, true, dissipation))
             })();
             match attempt {
-                Ok((transport, false)) => {
+                Ok((transport, false, _)) => {
                     duration = transport.elapsed.value();
                     last = ReactiveNetworkError::Invalid(
                         "network transport shortened the coupled duration",
                     );
                 }
-                Ok((transport, true)) => {
+                Ok((transport, true, dissipation)) => {
                     let after = checked_totals(&self.trial, &mut cancelled)?;
                     let n = self.gas().species_count();
+                    let mut boundary_change = transport.boundary_change;
+                    if let Some(d) = dissipation {
+                        boundary_change.energy +=
+                            d.first.boundary_change.energy + d.second.boundary_change.energy;
+                        for k in 0..n {
+                            boundary_change.species_masses[k] +=
+                                d.first.boundary_change.species_masses[k]
+                                    + d.second.boundary_change.species_masses[k];
+                        }
+                    }
                     let mut residual = NetworkTotals {
                         species_masses: [0.0; MAX_SPECIES],
                         species_count: n,
                         energy: after.energy
                             - before.energy
-                            - transport.boundary_change.energy
+                            - boundary_change.energy
                             - chemistry.referenced_energy_change_j,
                     };
                     for k in 0..n {
                         residual.species_masses[k] = after.species_masses[k]
                             - before.species_masses[k]
-                            - transport.boundary_change.species_masses[k]
+                            - boundary_change.species_masses[k]
                             - chemistry.species_change_kg[k];
                     }
                     let mass_residual_kg = sum((0..n).map(|k| {
                         after.species_masses[k]
                             - before.species_masses[k]
-                            - transport.boundary_change.species_masses[k]
+                            - boundary_change.species_masses[k]
                     }));
                     let absolute_energy_residual_j = sum(core::iter::once(
-                        after.energy - before.energy - transport.boundary_change.energy,
+                        after.energy - before.energy - boundary_change.energy,
                     )
                     .chain((0..n).map(|k| {
                         (after.species_masses[k]
                             - before.species_masses[k]
-                            - transport.boundary_change.species_masses[k])
+                            - boundary_change.species_masses[k])
                             * self.gas().energy_references()[k]
                     })));
                     if !residual.energy.is_finite()
@@ -339,13 +510,19 @@ impl ReactingNetwork1d {
                         coupling_retries: retry,
                         transport,
                         chemistry,
+                        dissipation,
                         before,
                         after,
+                        boundary_change,
                         conservation_residual: residual,
                         mass_residual_kg,
                         absolute_energy_residual_j,
                     };
                     poll(&mut cancelled)?;
+                    if let Some(operator) = operator.as_deref_mut() {
+                        operator.publish_trial_report();
+                        core::mem::swap(&mut self.molecular_ports, &mut self.trial_molecular_ports);
+                    }
                     core::mem::swap(&mut self.accepted, &mut self.trial);
                     self.last_report = Some(report);
                     return Ok(report);
@@ -363,61 +540,6 @@ impl ReactingNetwork1d {
             attempts: controls.maximum_coupling_retries + 1,
             last: Box::new(last),
         })
-    }
-
-    // Bound the first chemical attempt by both original branch acoustics and
-    // compact-volume exchange scales. Actual post-reaction port CFL remains the
-    // network solver's responsibility and can restart this complete composition.
-    fn initial_duration(
-        &mut self,
-        maximum: f64,
-        cfl: f64,
-        cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<f64, ReactiveNetworkError> {
-        let mut rate = 0.0_f64;
-        for branch in &self.accepted.branches {
-            let width = branch.gas.species_count() + 2;
-            for (i, q) in branch.states.chunks_exact(width).enumerate() {
-                let p = branch.gas.decode(q, None, cancelled)?;
-                let area =
-                    0.5 * branch.mesh.face_areas()[i] + 0.5 * branch.mesh.face_areas()[i + 1];
-                let local = (p.velocity.abs() + p.sound_speed) * (area / branch.mesh.volumes()[i]);
-                if !positive(local) {
-                    return Err(ReactiveNetworkError::Invalid(
-                        "unrepresentable reacting branch CFL",
-                    ));
-                }
-                rate = rate.max(local);
-            }
-        }
-        self.trial.work.plenum_signal_rates.fill(0.0);
-        for (i, volume) in self.accepted.plenums.iter().enumerate() {
-            self.trial.work.plenum_primitive[i] = self
-                .accepted
-                .gas()
-                .primitive(volume.state(), &mut *cancelled)?;
-        }
-        for connection in &self.accepted.connections {
-            poll(cancelled)?;
-            let branch = &self.accepted.branches[connection.branch];
-            let face = match connection.end {
-                BranchEnd::Left => 0,
-                BranchEnd::Right => branch.cell_count(),
-            };
-            let local = 0.5
-                * branch.mesh.face_areas()[face]
-                * (self.trial.work.plenum_primitive[connection.plenum].sound_speed
-                    / self.accepted.plenums[connection.plenum].volume_m3);
-            let total = self.trial.work.plenum_signal_rates[connection.plenum] + local;
-            if !positive(local) || !positive(total) {
-                return Err(ReactiveNetworkError::Invalid(
-                    "unrepresentable reacting plenum CFL",
-                ));
-            }
-            self.trial.work.plenum_signal_rates[connection.plenum] = total;
-            rate = rate.max(total);
-        }
-        Ok(maximum.min(0.8 * cfl / rate))
     }
 }
 
@@ -473,96 +595,6 @@ fn react_network(
     poll(cancelled)
 }
 
-fn checked_totals(
-    network: &MixtureNetwork1d,
-    cancelled: &mut impl FnMut() -> bool,
-) -> Result<NetworkTotals, ReactiveNetworkError> {
-    let n = network.gas().species_count();
-    let mut accumulated = Accumulator::new(n);
-    for branch in &network.branches {
-        let value = totals(&branch.states, branch.mesh.volumes(), n, cancelled)?;
-        accumulated.add(&value.species_masses[..n], value.energy)?;
-    }
-    for volume in &network.plenums {
-        poll(cancelled)?;
-        accumulated.add_cell(volume.state(), volume.volume_m3)?;
-    }
-    Ok(accumulated.totals())
-}
-
-fn duplicate(
-    network: &MixtureNetwork1d,
-    cancelled: &mut impl FnMut() -> bool,
-) -> Result<MixtureNetwork1d, ReactiveNetworkError> {
-    let mut branches = Vec::new();
-    branches
-        .try_reserve_exact(network.branches.len())
-        .map_err(|_| FlowError::Allocation)?;
-    for branch in &network.branches {
-        branches.push(branch.duplicate(cancelled)?);
-    }
-    let mut plenums = Vec::new();
-    plenums
-        .try_reserve_exact(network.plenums.len())
-        .map_err(|_| FlowError::Allocation)?;
-    for plenum in &network.plenums {
-        poll(cancelled)?;
-        let mut densities = allocated(plenum.state.partial_densities.len(), 0.0)?;
-        densities.copy_from_slice(&plenum.state.partial_densities);
-        plenums.push(Plenum::new(
-            plenum.volume_m3,
-            Conserved {
-                partial_densities: densities,
-                momentum: plenum.state.momentum,
-                energy: plenum.state.energy,
-            },
-        )?);
-    }
-    let mut connections = Vec::new();
-    connections
-        .try_reserve_exact(network.connections.len())
-        .map_err(|_| FlowError::Allocation)?;
-    connections.extend_from_slice(&network.connections);
-    Ok(MixtureNetwork1d::new(
-        branches,
-        plenums,
-        connections,
-        cancelled,
-    )?)
-}
-
-// These networks were constructed from identical immutable owners and topology.
-// Only their fields and accepted clocks can differ. Reset numerical candidates
-// in bounded copy tiles without allocations or repeated source-bank comparisons.
-fn reset(
-    trial: &mut MixtureNetwork1d,
-    accepted: &MixtureNetwork1d,
-    cancelled: &mut impl FnMut() -> bool,
-) -> Result<(), ReactiveNetworkError> {
-    for (trial, accepted) in trial.branches.iter_mut().zip(&accepted.branches) {
-        for (destination, source) in trial
-            .states
-            .chunks_mut(4096)
-            .zip(accepted.states.chunks(4096))
-        {
-            poll(cancelled)?;
-            destination.copy_from_slice(source);
-        }
-        trial.time = accepted.time;
-    }
-    for (trial, accepted) in trial.plenums.iter_mut().zip(&accepted.plenums) {
-        poll(cancelled)?;
-        trial
-            .state
-            .partial_densities
-            .copy_from_slice(&accepted.state.partial_densities);
-        trial.state.momentum = accepted.state.momentum;
-        trial.state.energy = accepted.state.energy;
-    }
-    trial.last_report = None;
-    Ok(())
-}
-
 fn admit_temperature(
     gas: &MixtureGas,
     state: Cell<'_>,
@@ -576,7 +608,7 @@ fn admit_temperature(
     if !(controls.minimum_temperature_k..=controls.maximum_temperature_k).contains(&p.temperature) {
         return Err(cell_error(
             location,
-            ReactiveError::Invalid("initial network temperature is outside chemistry interval"),
+            ReactiveError::Invalid("network temperature is outside chemistry interval"),
         ));
     }
     Ok(())
