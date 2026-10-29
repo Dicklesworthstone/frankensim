@@ -11491,3 +11491,23 @@ zero acoustic transfers and no material memory or radiation. Normal approach
 is prescribed linearly within a sample. Elastic networks, normal inertia,
 arbitrary vector slip, changing frames and thermal deposition require their
 own trajectory/transfer owners and are not inferred by this adapter.
+
+### Tensor-body refinement with exact shared history coordinates
+
+`loss tensor-maxwell-shared` binds the same complete original tensor laws,
+source point count, strain limits and relaxed/unrelaxed initialization as
+`loss tensor-maxwell`. It selects the material owner's exact equal-time
+coordinate map with a separate factor-work budget. Original area and thickness
+quadrature, full branch factors and every selected mechanical mode remain.
+After static preload, coupled contact and each accepted candidate, the complete
+original point histories are reconstructed before source-strain and normal
+traction admission. Cancellation or source-domain refusal remains atomic.
+The unshared input and complete-history route retain their original behavior.
+
+`tensor-body-shared.body` uses eight triangles, 24 original material points and
+144 reconstructible histories under the existing 36-state allowance. The same
+canonical material-string performance and source packs select it through the
+ordinary body-profile path, including in the Lab. This makes finer source
+meshes admissible without raising the exact structural owner capacity or
+discarding material history. Manufactured cantilever data, fixed thermal state,
+flat-plate geometry and finite modes remain explicit qualification limits.

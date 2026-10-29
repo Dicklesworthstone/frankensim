@@ -194,7 +194,48 @@ geometry are manufactured integration data, not measured wood or a qualified
 violin/cello/bass. This remains fixed-state homogeneous DKT bending; a complete
 tensor shell and large-state propagation remain separate capabilities. Even
 the smallest 2×2 perimeter-supported mesh requires 144 histories for one full
-branch, so it may exceed the current dense exact owner and must refuse.
+branch, so the complete-coordinate selection may exceed the current dense
+exact owner and must refuse.
+
+### Exact shared material-history coordinates
+
+The optional `tensor-maxwell-shared` selection carries the same original
+point laws and histories in exact equal-time coordinates:
+
+```text
+loss tensor-maxwell-shared relaxed STRAIN_PROPERTY COUNT MAX_POINTS MAX_STATES MAX_TERMS MAX_FACTOR_TERMS
+```
+
+Branch rows are unchanged. `MAX_FACTOR_TERMS` is a separate positive work
+budget, at most 67,108,864. `MAX_STATES` still caps evolved coordinates and
+all original exact-network limits remain. `tensor-body-shared.body`, paired
+with the same `tensor-body.material-strings` and material packs above, refines
+the original cantilever from two to eight triangles. It retains 24 original
+material points and reconstructs all 144 original histories while keeping
+the same declared 36-state ceiling:
+
+```bash
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/tensor-body.material-strings" "$demo/tensor-body-shared.wav" \
+  --body-profile crates/fs-couple/examples/material_strings/tensor-body-shared.body
+```
+
+Only bit-identical constrained relaxation times share coordinates. For one
+time family, the original factor satisfies `A = Q R` and `Q^T Q = I`;
+the source histories obey `z = Q y`. Relaxed `z = A q` and unrelaxed `z = 0`
+initial conditions stay in this invariant subspace, so forces, storage and
+heat are unchanged. Every QR direction survives, including rank-deficient
+directions, with explicit original-factor and orthogonality residual checks.
+No nearby times are rounded together and no mechanical modes are removed.
+Every source strain and normal traction still uses the reconstructed
+original point history. Independently authored original histories outside
+this subspace are not accepted by this selection. This is a coordinate
+change within the declared plate model, not additional physical validation.
+
+The complete-coordinate route remains available for direct comparisons.
+The focused native regressions compare actual pressure, original point
+histories, normal traction, energy and callback partition, then exercise the
+refined mesh at the unchanged state cap and its material/work/domain refusals.
 
 Profile input is bounded to 64 KiB; the original source-pack and complete-network
 limits remain. Viscous projection is capped at 16,777,216 operations and 16 body

@@ -1,0 +1,10 @@
+frankensim-string-body-v1
+mesh 2 2
+elastic isotropic
+grain 0.17
+support clamped-x-min
+pretension 0
+window 1 100000000
+bridge 2 1
+loss tensor-maxwell-shared relaxed strain_limit 1 24 36 67108864 1048576
+tensor_branch relaxation_time branch_11 zero_modulus branch_13 zero_modulus branch_15 zero_modulus branch_22 zero_modulus branch_24 zero_modulus zero_modulus branch_33 zero_modulus zero_modulus zero_modulus branch_44 zero_modulus zero_modulus branch_55 zero_modulus branch_66

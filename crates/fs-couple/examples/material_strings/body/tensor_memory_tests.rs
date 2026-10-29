@@ -2,8 +2,7 @@
 use super::*;
 
 fn tensor_pack(c33: f64, time: f64, limit: f64, missing: &str, upper: f64) -> NormalizedPack {
-    let mut claims = ClaimSet::new();
-    for (name, value, dims) in [
+    let values = [
         ("density", 900.0, Density::DIMS),
         ("young_modulus", 4e9, Pressure::DIMS),
         ("poisson_ratio", 0.3, Dims::NONE),
@@ -19,7 +18,28 @@ fn tensor_pack(c33: f64, time: f64, limit: f64, missing: &str, upper: f64) -> No
         ("branch_24", 2e7, Pressure::DIMS),
         ("branch_15", -1e7, Pressure::DIMS),
         ("zero_modulus", 0.0, Pressure::DIMS),
-    ] {
+    ];
+    let raw = format!(
+        "manufactured tensor-body fixture; T=[280,320] K; omega=[0,{upper:.17e}] rad/s\n{}",
+        values.iter().filter(|(name, _, _)| *name != missing)
+            .map(|(name, value, dims)| format!("{name}\t{value:.17e}\t{dims:?}\n"))
+            .collect::<String>()
+    );
+    let artifact = fs_blake3::hash_bytes(raw.as_bytes());
+    let provenance = Provenance {
+        source: "manufactured complete tensor body".into(),
+        license: "CC0-1.0".into(),
+        artifact: Some(artifact),
+    };
+    let mut claims = ClaimSet::new();
+    let observation = claims.register_observation(ObservationDataset {
+        specimen: "synthetic tensor-body integration specimen".into(),
+        method: "explicit manufactured coefficients; no measurement or fit".into(),
+        artifact,
+        caveats: format!("Not measured material data. Retained raw fixture:\n{raw}"),
+        provenance: provenance.clone(),
+    }).unwrap();
+    for (name, value, dims) in values {
         if name == missing {
             continue;
         }
@@ -32,19 +52,15 @@ fn tensor_pack(c33: f64, time: f64, limit: f64, missing: &str, upper: f64) -> No
                     .with("omega", 0.0, upper),
                 uncertainty: UncertaintyModel::Unstated,
                 interpolation: InterpolationPolicy::ConstantWithinValidity,
-                observations: vec![],
-                provenance: Provenance {
-                    source: "manufactured complete tensor body".into(),
-                    license: "CC0-1.0".into(),
-                    artifact: None,
-                },
+                observations: vec![observation.clone()],
+                provenance: provenance.clone(),
             })
             .unwrap();
     }
     NormalizedPack::new(
         "tensor-body",
         "synthetic-v1",
-        fs_blake3::ContentHash([43; 32]),
+        artifact,
         "CC0-1.0",
         claims,
         vec![],
@@ -61,8 +77,11 @@ fn tensor_profile() -> Profile {
     Profile::parse(include_bytes!("../tensor-body.body")).unwrap()
 }
 fn build(cx: &Cx<'_>, gate: &CancelGate, c33: f64, time: f64) -> Ready {
+    build_profile(cx,gate,c33,time,tensor_profile())
+}
+fn build_profile(cx:&Cx<'_>,gate:&CancelGate,c33:f64,time:f64,profile:Profile)->Ready {
     tensor_spec()
-        .compile_with_body(cx, gate, Some(tensor_profile()), |name| {
+        .compile_with_body(cx, gate, Some(profile), |name| {
             Ok(if name == "tensor-blade.fsmatpk" {
                 tensor_pack(c33, time, 0.02, "", 100000.0)
             } else {
@@ -70,6 +89,85 @@ fn build(cx: &Cx<'_>, gate: &CancelGate, c33: f64, time: f64) -> Ready {
             })
         })
         .unwrap()
+}
+
+#[test]
+fn g1_shared_body_coordinates_match_complete_pressure_and_original_point_history() {
+    scoped(|cx,gate| {
+        let shared_text=include_str!("../tensor-body.body")
+            .replace("loss tensor-maxwell ","loss tensor-maxwell-shared ")
+            .replace("1 6 36 67108864","1 6 36 67108864 1048576");
+        let mut full=build(cx,gate,3e8,0.001);
+        let mut shared=build_profile(cx,gate,3e8,0.001,Profile::parse(shared_text.as_bytes()).unwrap());
+        let image=shared.performance.bank().source().bank().material_chart_tensor_relaxation().unwrap();
+        assert_eq!(image.shared_coordinates().unwrap().original_coordinates(),36);
+        assert!(image.coupling_rows_per_s().len()<36);
+        assert_eq!(full.performance.bank().system().components()[1].modes(),
+            shared.performance.bank().system().components()[1].modes());
+        let p=pressure(&mut full,37);let actual=pressure(&mut shared,128);
+        let scale=p.iter().map(|p|p.abs()).fold(0.0_f64,f64::max);
+        assert!(scale>1e-15);
+        assert!(p.iter().zip(&actual).all(|(a,b)|(a-b).abs()<=1e-8*scale));
+        let source=shared.performance.bank().source().bank().material_chart_tensor_relaxation().unwrap();
+        let full_image=full.performance.bank().source().bank().material_chart_tensor_relaxation().unwrap();
+        let full_system=full.performance.bank().system();let system=shared.performance.bank().system();
+        let q:Vec<_>=system.components()[1].states().iter()
+            .map(|s|3.0_f64.sqrt()*s.displacement_m_sqrt_kg).collect();
+        for (i,point) in source.material_points().iter().enumerate() {
+            let complete=full_image.point_memory(i,full_system.material_memory()).unwrap();
+            let reconstructed=source.point_memory(i,system.material_memory()).unwrap();
+            for (a,b) in complete.iter().zip(&reconstructed) {
+                assert!((a-b).abs()<1e-10*(1.0+a.abs()));
+            }
+            let surface:Vec<_>=reconstructed.iter().map(|z|3.0_f64.sqrt()*z).collect();
+            assert!(point.image().strain(&q,&surface).is_ok());
+            assert!(point.image().normal_stress_pa(&q,&surface).unwrap().iter().all(|s|s.abs()<1e-5));
+        }
+        let before=full_system.last_frame().unwrap();let after=system.last_frame().unwrap();
+        assert!((before.network_energy_j-after.network_energy_j).abs()<1e-10);
+        assert!((before.network_dissipation_j-after.network_dissipation_j).abs()<1e-10);
+        assert!(after.energy_residual_j.abs()<=after.energy_tolerance_j);
+        let mut replay=build_profile(cx,gate,3e8,0.001,Profile::parse(shared_text.as_bytes()).unwrap());
+        assert_eq!(actual,pressure(&mut replay,1));
+    });
+}
+
+#[test]
+fn g3_shared_tensor_coordinates_admit_finer_original_mesh_at_unchanged_state_cap() {
+    scoped(|cx,gate| {
+        let text=include_str!("../tensor-body-shared.body");
+        let mut ready=build_profile(cx,gate,3e8,0.001,Profile::parse(text.as_bytes()).unwrap());
+        let image=ready.performance.bank().source().bank().material_chart_tensor_relaxation().unwrap();
+        assert_eq!(image.material_points().len(),24);
+        assert_eq!(image.shared_coordinates().unwrap().original_coordinates(),144);
+        assert_eq!(image.limits().max_memory_states,36);
+        assert!(image.coupling_rows_per_s().len()<=36);
+        assert_eq!(image.mode_count(),2);
+        let p=pressure(&mut ready,37);assert!(p.iter().any(|p|p.abs()>1e-15));
+        for refused in [
+            text.replace("tensor-maxwell-shared","tensor-maxwell").replace(" 1048576",""),
+            text.replace("1 24 36 67108864 1048576","1 23 36 67108864 1048576"),
+            text.replace("1 24 36 67108864 1048576","1 24 0 67108864 1048576"),
+            text.replace("1 24 36 67108864 1048576","1 24 36 67108864 1"),
+        ] {
+            let result=tensor_spec().compile_with_body(cx,gate,
+                Some(Profile::parse(refused.as_bytes()).unwrap()),|name|Ok(if name=="tensor-blade.fsmatpk" {
+                    tensor_pack(3e8,0.001,0.02,"",100000.0)
+                } else {pack(name,1.0,None)}));
+            assert!(result.is_err());
+        }
+        let mut changed=build_profile(cx,gate,8e9,0.001,Profile::parse(text.as_bytes()).unwrap());
+        assert!(p.iter().zip(pressure(&mut changed,128)).any(|(a,b)|(a-b).abs()>1e-15));
+        for (upper,time,limit) in [(100.0,0.001,0.02),(100000.0,1e-9,0.02),(100000.0,0.001,1e-20)] {
+            assert!(tensor_spec().compile_with_body(cx,gate,Some(Profile::parse(text.as_bytes()).unwrap()),
+                |name|Ok(if name=="tensor-blade.fsmatpk" {tensor_pack(3e8,time,limit,"",upper)}
+                    else {pack(name,1.0,None)})).is_err());
+        }
+        for malformed in [text.replace(" 1048576",""),text.replace(" 1048576"," 0"),
+            text.replace(" 1048576"," 67108865"),format!("{text}ignored\n")] {
+            assert!(Profile::parse(malformed.as_bytes()).is_err());
+        }
+    });
 }
 
 #[test]

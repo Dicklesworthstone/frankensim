@@ -4404,6 +4404,26 @@ experimental qualification, phase change and dynamic moisture transport remain
 outside this model.
 
 
+## Exact equal-time material-history coordinates
+
+`visco_tensor::coordinates::RelaxationCoordinates` groups displacement-driven
+history rows only by bit-identical positive relaxation time. For each original
+factor `A`, the existing Householder QR owner supplies `A = Q R`; complete thin
+columns, including rank-deficient and zero directions, remain. With relaxed
+`z = A q` or unrelaxed `z = 0` initialization, `z = Q y` is invariant and
+`y' = (R q - y) / tau` preserves the original force, storage and dissipated
+heat. Nearby poles are not merged and no mechanical mode or material coefficient
+is fitted. Families no larger than the displacement space keep original rows.
+
+Column scaling, orthogonality and source-entry reconstruction checks refuse
+unrepresentable transforms. Explicit state/work budgets and cancellation cause
+refusal rather than truncation. Immutable `RelaxationMemoryMap` slices share one
+complete inverse map and recover every original material-point history for its
+existing constitutive and source-domain checks. Independently authored original
+histories outside this invariant subspace cannot be silently projected into it.
+This is a coordinate representation of the declared original material dynamics,
+not permission to lower spatial, modal or temporal convergence requirements.
+
 ## Joint phase and electrical source coordinates
 
 `ScalarConductorResponse::new_with_liquid_mass_fraction_axis` binds the original enthalpy-derived liquid mass fraction and explicitly owned actual E/J magnitudes together. Complete source requirements, selected claims, typed coordinates and support survive phase, temperature and field refresh. Public static phase admission and generic material refresh remain strict. The existing source data supplies its admitted law; no universal phase mixture rule or higher-dimensional table is invented. Focused source regressions cover retained roles/pins, actual-field queries, phase support and unowned-coordinate refusal.

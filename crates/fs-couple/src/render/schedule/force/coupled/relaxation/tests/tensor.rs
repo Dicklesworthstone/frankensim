@@ -42,6 +42,9 @@ fn g1_zero_coupling_history_is_owned_once_across_disconnected_islands() {
 }
 
 fn tensor_network() -> CoupledModalSystem {
+    tensor_network_coordinates(false)
+}
+fn tensor_network_coordinates(shared:bool) -> CoupledModalSystem {
     let gate = CancelGate::new_clock_free();
     let mut factor = [[0.0; 6]; 6];
     factor[0] = [10.0, 0.0, 4.0, 1.0, 0.0, 0.0];
@@ -66,11 +69,21 @@ fn tensor_network() -> CoupledModalSystem {
     .unwrap()
     .relaxation_image(1_000_000, &gate)
     .unwrap();
-    let branches = image
-        .coupling_rows()
+    let times:Vec<_>=image.relaxation_rates_per_s().iter().map(|rate|rate.recip()).collect();
+    let shared=shared.then(||fs_material::visco_tensor::coordinates::RelaxationCoordinates::new(
+        image.coupling_rows(),&times,1,
+        fs_material::visco_tensor::coordinates::RelaxationCoordinateBudget {
+            maximum_states:6,maximum_scalar_terms:1_000_000,
+        },||false).unwrap());
+    let (rows,times)=match &shared {
+        Some(shared)=>(shared.coupling_rows(),shared.relaxation_times_s()),
+        None=>(image.coupling_rows(),times.as_slice()),
+    };
+    let count=rows.len();
+    let branches = rows
         .iter()
-        .zip(image.relaxation_rates_per_s())
-        .map(|(row, rate)| arm(vec![row[0], 0.0], 1.0, rate.recip()))
+        .zip(times)
+        .map(|(row, time)| arm(vec![row[0], 0.0], 1.0, *time))
         .collect();
     let omega = image.equilibrium_stiffness()[0].sqrt();
     mechanical(48_000, omega, 0.0)
@@ -79,7 +92,8 @@ fn tensor_network() -> CoupledModalSystem {
         .with_plane_stress_material_points(
             vec![ModalPlaneStressPoint {
                 modes: 0..1,
-                memories: 0..6,
+                memories: 0..count,
+                memory_map: shared.as_ref().map(|s|s.memory_map(0..6).unwrap()),
                 strain_scale: 1.0,
                 image,
             }],
@@ -90,8 +104,9 @@ fn tensor_network() -> CoupledModalSystem {
 
 #[test]
 fn g0_tensor_strain_rejects_static_dynamic_and_cancelled_candidates_atomically() {
+    for shared in [false,true] {
     let gate = CancelGate::new_clock_free();
-    let mut system = tensor_network();
+    let mut system = tensor_network_coordinates(shared);
     let before = states(&system);
     let history = system.material_memory().to_vec();
     let error = system
@@ -108,10 +123,11 @@ fn g0_tensor_strain_rejects_static_dynamic_and_cancelled_candidates_atomically()
     let cancelled = CancelGate::new_clock_free();
     cancelled.request();
     assert!(system.step_under_gate(&[1e-4], &cancelled).is_err());
-    let mut clean = tensor_network();
+    let mut clean = tensor_network_coordinates(shared);
     assert_eq!(system.step(&[1e-4]).unwrap(), clean.step(&[1e-4]).unwrap());
     assert_eq!(states(&system), states(&clean));
     assert_eq!(system.material_memory(), clean.material_memory());
+    }
 }
 
 #[test]

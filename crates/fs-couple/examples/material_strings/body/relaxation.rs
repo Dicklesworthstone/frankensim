@@ -18,6 +18,7 @@ pub(super) enum PlateLoss {
         branches: Vec<TensorBranchProperties>,
         initial: InitialPlateMemory,
         limits: TensorPlateRelaxationLimits,
+        sharing: Option<usize>,
     },
 }
 impl PlateLoss {
@@ -27,7 +28,7 @@ impl PlateLoss {
         if fields.next() != Some("loss") { return Err("expected optional body loss record".into()); }
         match fields.next() {
             Some("tensor") if fields.next().is_none() => Ok(Self::Tensor),
-            Some("tensor-maxwell") => {
+            Some(kind @ ("tensor-maxwell" | "tensor-maxwell-shared")) => {
                 let initial=match fields.next() {
                     Some("relaxed")=>InitialPlateMemory::Relaxed,
                     Some("unrelaxed")=>InitialPlateMemory::Unrelaxed,
@@ -38,6 +39,13 @@ impl PlateLoss {
                 let max_material_points:usize=fields.next().ok_or("missing tensor material point limit")?.parse()?;
                 let max_memory_states:usize=fields.next().ok_or("missing tensor history limit")?.parse()?;
                 let max_projection_terms:usize=fields.next().ok_or("missing tensor projection limit")?.parse()?;
+                let sharing=if kind=="tensor-maxwell-shared" {
+                    let work:usize=fields.next().ok_or("missing tensor coordinate-sharing work limit")?.parse()?;
+                    if work==0 || work>67_108_864 {
+                        return Err("tensor coordinate sharing requires a bounded positive factor-work limit".into());
+                    }
+                    Some(work)
+                } else {None};
                 if !(1..=8).contains(&count) || !(1..=4096).contains(&max_material_points)
                     || max_memory_states>256 || max_projection_terms==0
                     || max_projection_terms>67_108_864 || fields.next().is_some() {
@@ -51,7 +59,7 @@ impl PlateLoss {
                     for (out,value) in stiffness_upper.iter_mut().zip(&row[1..]) { *out=key(value)?; }
                     branches.push(TensorBranchProperties {stiffness_upper,relaxation_time});
                 }
-                Ok(Self::TensorMaxwell {strain_limit,branches,initial,limits:TensorPlateRelaxationLimits {
+                Ok(Self::TensorMaxwell {strain_limit,branches,initial,sharing,limits:TensorPlateRelaxationLimits {
                     max_modes:input::MAX_PLATE_BODY_MODES,max_material_points,max_memory_states,max_projection_terms,
                 }})
             },
@@ -83,7 +91,7 @@ impl PlateLoss {
                     max_modes: input::MAX_PLATE_BODY_MODES, max_projection_terms, max_memory_states,
                 } })
             },
-            _ => Err("body loss must be tensor, regional-maxwell or tensor-maxwell".into()),
+            _ => Err("body loss must be tensor, regional-maxwell, tensor-maxwell or tensor-maxwell-shared".into()),
         }
     }
     pub(super) fn is_tensor(&self) -> bool { matches!(self, Self::Tensor) }
@@ -142,11 +150,14 @@ impl PlateLoss {
             Self::Tensor => bank,
             Self::RegionalMaxwell { properties, initial, limits } =>
                 bank.with_material_plate_relaxation(properties, *initial, *limits, gate)?,
-            Self::TensorMaxwell {initial,limits,..} => {
+            Self::TensorMaxwell {initial,limits,sharing,..} => {
                 let chart=bank.source().material_chart().ok_or("tensor body source requires its original regional plate")?;
                 let selections=chart.specimen.regions().iter().map(|region|
                     self.tensor_properties(region.input.model).expect("tensor selection")).collect::<Vec<_>>();
-                bank.with_tensor_material_plate_relaxation(&selections,*initial,*limits,gate)?
+                match sharing {
+                    Some(work)=>bank.with_shared_tensor_material_plate_relaxation(&selections,*initial,*limits,*work,gate)?,
+                    None=>bank.with_tensor_material_plate_relaxation(&selections,*initial,*limits,gate)?,
+                }
             },
         })
     }

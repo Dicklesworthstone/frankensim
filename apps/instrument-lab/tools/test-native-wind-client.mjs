@@ -265,20 +265,19 @@ test("material strings preserve their performer, source, profiles, gas associati
 test("tensor-body starter preserves its canonical profile and declared material paths", async () => {
   const connected = {...status, renderers:{wind:true, strings:true}, maximumAttachments:32,
     maximumAttachmentFileBytes:8388608, maximumAttachmentBytes:33554432, maximumRequestBytes:48000000};
-  const [sourceBytes, profileBytes] = await Promise.all([
-    readFile(new URL("../../../crates/fs-couple/examples/material_strings/tensor-body.material-strings", import.meta.url)),
-    readFile(new URL("../../../crates/fs-couple/examples/material_strings/tensor-body.body", import.meta.url)),
-  ]);
+  const sourceBytes = await readFile(new URL("../../../crates/fs-couple/examples/material_strings/tensor-body.material-strings", import.meta.url));
   const source = sourceBytes.toString("utf8");
   assert.match(source, /^audio 48000 /m);
   assert.match(source, /^body tensor-blade\.fsmatpk /m);
   assert.match(source, /^string wire\.fsmatpk /m);
-  assert.match(profileBytes.toString("utf8"), /^loss tensor-maxwell relaxed /m);
+  for (const profile of ["tensor-body.body", "tensor-body-shared.body"]) {
+  const profileBytes = await readFile(new URL(`../../../crates/fs-couple/examples/material_strings/${profile}`, import.meta.url));
+  assert.match(profileBytes.toString("utf8"), /^loss tensor-maxwell(?:-shared)? relaxed /m);
   // Material bytes are opaque to this transport test; only the native owner decodes them.
-  const attachments = [{path:"tensor-body.body", bytes:profileBytes},
+  const attachments = [{path:profile, bytes:profileBytes},
     {path:"wire.fsmatpk", bytes:new Uint8Array([0, 255, 1])},
     {path:"tensor-blade.fsmatpk", bytes:new Uint8Array([0, 255, 2])}];
-  const stringProfiles = {bodyPath:"tensor-body.body"};
+  const stringProfiles = {bodyPath:profile};
   await renderNativeWindBundle(source, attachments, connected,
     {renderer:"strings", stringProfiles}, undefined, async (_url, options) => {
       const packet = validateInput(Buffer.from(options.body), true);
@@ -290,6 +289,7 @@ test("tensor-body starter preserves its canonical profile and declared material 
         attachments.map(file => ({path:file.path, bytes:Buffer.from(file.bytes)})));
       return audio();
     });
+  }
 });
 
 test("a selected performer or string profile cannot fall back to another native engine", async () => {

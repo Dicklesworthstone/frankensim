@@ -451,6 +451,18 @@ This 48 kHz fixture needs no decimation. Its coarse, fixed-state cantilever
 and material are manufactured data, not measured wood or a complete
 violin, cello or bass.
 
+To refine that same tensor-body experiment, attach `tensor-body-shared.body`
+instead and select it as the body profile. It supplies eight original triangles
+and 24 material points with 144 reconstructible material histories while
+retaining the same 36-state allowance. `loss tensor-maxwell-shared` shares
+coordinates only between exactly equal relaxation times, using the original
+material factors and a checked orthogonal map. Every original point's history
+is reconstructed for source-strain and normal-traction checks; no material
+direction or mechanical mode is dropped. Relaxed or unrelaxed initialization
+is required. This improves available spatial resolution without changing the
+performance file, material packs, renderer or physical clock; mesh, mode and
+time convergence still require their own comparisons.
+
 The **Strings — material plate and exterior microphone** starter exposes the
 canonical `rayleigh-observed.material-strings` performance. Attach its original
 `wire.fsmatpk`, `directional-body.fsmatpk` and `orthotropic.body`, selecting the

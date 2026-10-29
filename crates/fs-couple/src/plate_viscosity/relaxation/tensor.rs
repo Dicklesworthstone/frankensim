@@ -6,6 +6,9 @@ use crate::tensor_material::{PlaneStressPoint, PlaneStressRelaxation, TensorMate
 use core::ops::Range;
 use fs_material::visco_tensor::source::{TensorElasticity, TensorPronyProperties};
 use fs_material::visco_tensor::{TensorProjectionBudget, TensorProny};
+use fs_material::visco_tensor::coordinates::{
+    RelaxationCoordinateBudget, RelaxationCoordinates, RelaxationMemoryMap,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TensorPlateRelaxationLimits {
@@ -20,12 +23,15 @@ pub struct TensorPlateRelaxationLimits {
 pub struct TensorPlateMaterialPoint {
     region: usize,
     memory: Range<usize>,
+    memory_map: Option<RelaxationMemoryMap>,
     image: PlaneStressRelaxation,
 }
 impl TensorPlateMaterialPoint {
     pub const fn region(&self) -> usize {
         self.region
     }
+    /// Original point-history range. Shared-coordinate callers reconstruct
+    /// through `TensorPlateRelaxation::point_memory`, not a global state slice.
     pub fn memory_range(&self) -> Range<usize> {
         self.memory.clone()
     }
@@ -46,6 +52,7 @@ pub struct TensorPlateRelaxation {
     times: Vec<f64>,
     modes: usize,
     limits: TensorPlateRelaxationLimits,
+    shared: Option<RelaxationCoordinates>,
 }
 fn tensor_error(error: TensorMaterialError) -> AcousticRealizeError {
     match error {
@@ -79,6 +86,23 @@ impl TensorPlateRelaxation {
         self.limits
     }
 
+    /// Exact coordinate sharing, when explicitly selected by the caller.
+    pub fn shared_coordinates(&self) -> Option<&RelaxationCoordinates> {
+        self.shared.as_ref()
+    }
+
+    /// Recover every original point history before physical observation.
+    pub fn point_memory(&self, point:usize, memory:&[f64]) -> Result<Vec<f64>,AcousticRealizeError> {
+        if memory.len()!=self.rows.len() || memory.iter().any(|v|!v.is_finite()) {
+            return Err(invalid("tensor plate observation requires its complete finite material history"));
+        }
+        let point=self.points.get(point).ok_or_else(||invalid("unknown tensor plate material point"))?;
+        match &point.memory_map {
+            Some(map)=>map.reconstruct(memory).map_err(owner),
+            None=>Ok(memory[point.memory.clone()].to_vec()),
+        }
+    }
+
     /// Bind original source properties, never authored matrix substitutes.
     /// Equilibrium elasticity remains counted once in the existing plate modes.
     pub(crate) fn from_chart(
@@ -88,6 +112,22 @@ impl TensorPlateRelaxation {
         limits: TensorPlateRelaxationLimits,
         gate: &CancelGate,
     ) -> Result<Self, AcousticRealizeError> {
+        Self::build(chart,basis,properties,limits,None,gate)
+    }
+
+    pub(crate) fn from_chart_shared(
+        chart:&ResolvedPlateChart, basis:&RetainedPlateBasis,
+        properties:&[TensorPronyProperties], limits:TensorPlateRelaxationLimits,
+        max_factor_terms:usize, gate:&CancelGate,
+    ) -> Result<Self,AcousticRealizeError> {
+        Self::build(chart,basis,properties,limits,Some(max_factor_terms),gate)
+    }
+
+    fn build(
+        chart:&ResolvedPlateChart, basis:&RetainedPlateBasis,
+        properties:&[TensorPronyProperties], limits:TensorPlateRelaxationLimits,
+        sharing:Option<usize>, gate:&CancelGate,
+    ) -> Result<Self,AcousticRealizeError> {
         poll(gate)?;
         let n = basis.mass_normalized_modes.len();
         if n == 0
@@ -131,10 +171,16 @@ impl TensorPlateRelaxation {
                 .and_then(|v| states.checked_add(v))
                 .ok_or_else(|| invalid("complete tensor plate history count overflow"))?;
         }
-        if points == 0 || points > limits.max_material_points || states > limits.max_memory_states {
+        if points == 0 || points > limits.max_material_points
+            || sharing.is_none() && states > limits.max_memory_states {
             return Err(invalid(
                 "complete tensor plate quadrature or histories exceed their explicit budget",
             ));
+        }
+        if let Some(work)=sharing {
+            if work==0 || states.checked_mul(n).is_none_or(|v|v>work) {
+                return Err(invalid("original tensor history factors exceed their explicit sharing work budget"));
+            }
         }
         let mut laws = Vec::with_capacity(properties.len());
         let mut bands = Vec::with_capacity(properties.len());
@@ -221,6 +267,7 @@ impl TensorPlateRelaxation {
             images.push(TensorPlateMaterialPoint {
                 region: point.region,
                 memory: start..rows.len(),
+                memory_map: None,
                 image,
             });
         }
@@ -228,6 +275,22 @@ impl TensorPlateRelaxation {
             return Err(invalid(
                 "tensor projection must retain every original material history",
             ));
+        }
+        let shared=sharing.map(|maximum_scalar_terms| {
+            RelaxationCoordinates::new(&rows,&times,n,RelaxationCoordinateBudget {
+                maximum_states:limits.max_memory_states,maximum_scalar_terms,
+            },||gate.is_requested()).map_err(|error|match error {
+                fs_material::visco_tensor::TensorPronyError::Cancelled=>AcousticRealizeError::Cancelled,
+                error=>owner(error),
+            })
+        }).transpose()?;
+        if let Some(shared)=&shared {
+            for point in &mut images {
+                poll(gate)?;
+                point.memory_map=Some(shared.memory_map(point.memory.clone()).map_err(owner)?);
+            }
+            rows=shared.coupling_rows().to_vec();
+            times=shared.relaxation_times_s().to_vec();
         }
         poll(gate)?;
         Ok(Self {
@@ -240,6 +303,7 @@ impl TensorPlateRelaxation {
             times,
             modes: n,
             limits,
+            shared,
         })
     }
 
@@ -271,7 +335,10 @@ impl TensorPlateRelaxation {
             .map(
                 |point| crate::render::schedule::force::coupled::ModalPlaneStressPoint {
                     modes: mode_start..mode_start + self.modes,
-                    memories: memory_start + point.memory.start..memory_start + point.memory.end,
+                    memories: if point.memory_map.is_some() {
+                        memory_start..memory_start+self.rows.len()
+                    } else { memory_start + point.memory.start..memory_start + point.memory.end },
+                    memory_map: point.memory_map.clone(),
                     strain_scale: det::sqrt(3.0),
                     image: point.image.clone(),
                 },

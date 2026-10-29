@@ -2252,6 +2252,12 @@ same source property binding and hereditary normal-traction elimination as
 material reeds, and retains body feedback onto the strings through the
 original bridges. See [complete tensor memory](BODY_PROFILES.md#complete-three-dimensional-tensor-memory)
 for the source-pack recipe, native grammar and explicit model/capacity limits.
+Selecting `tensor-body-shared.body` with the same performance and packs
+refines the original cantilever to eight triangles while retaining all 144
+original material histories through exact equal-time coordinate sharing.
+It keeps the original 36-state ceiling and reconstructs every point's source
+strain before admission. See [shared history coordinates](BODY_PROFILES.md#exact-shared-material-history-coordinates)
+for the optional native selector and its initial-history domain.
 
 ```bash
 cargo test -p fs-couple --example material_strings -- --test-threads=1

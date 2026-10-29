@@ -210,8 +210,8 @@ const EXAMPLES = [
     renderer: "strings",
     source: tensorBodyStringSource,
     decimate: false,
-    intro: "Starter: a material string drives a body with complete three-dimensional tensor relaxation. Build and attach wire.fsmatpk and tensor-blade.fsmatpk using the canonical tensor-body source recipe; attach tensor-body.body and select it as the Body geometry/material profile below.",
-    help: "The native body retains all six source strain histories through shared plane-stress elimination, including out-of-plane material effects on bending and reciprocal reactions on the string. Change branch_33 or relaxation_time in the material source and rebuild its pack to compare sound. The supplied body is a fixed-state manufactured cantilever, not measured wood or a complete violin, cello or bass. Its 48 kHz clock needs no decimation.",
+    intro: "Starter: a material string drives a body with complete three-dimensional tensor relaxation. Build and attach wire.fsmatpk and tensor-blade.fsmatpk using the canonical source recipe, then attach tensor-body.body or the finer tensor-body-shared.body and select it as the Body geometry/material profile below.",
+    help: "The native body retains all six source strain histories, including out-of-plane effects and reciprocal string reactions. The shared profile uses exact equal-time history coordinates so its finer mesh fits the same state cap; every original material-point history remains reconstructible. Change branch_33 or relaxation_time in the source and rebuild its pack to compare pressure. This fixed-state manufactured cantilever is not a measured violin, cello or bass. Its 48 kHz clock needs no decimation.",
   },
   {
     name: "material_strings/rayleigh-observed.material-strings",

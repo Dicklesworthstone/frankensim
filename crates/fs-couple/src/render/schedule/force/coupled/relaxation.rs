@@ -12,6 +12,8 @@ use fs_phs::RelaxationBranch;
 pub struct ModalPlaneStressPoint {
     pub modes: core::ops::Range<usize>,
     pub memories: core::ops::Range<usize>,
+    /// Exact original-history reconstruction for shared equal-time coordinates.
+    pub memory_map: Option<fs_material::visco_tensor::coordinates::RelaxationMemoryMap>,
     pub strain_scale: f64,
     pub image: crate::tensor_material::PlaneStressRelaxation,
 }
@@ -22,8 +24,12 @@ impl ModalPlaneStressPoint {
             .ok_or_else(||invalid("complete tensor material displacement layout changed"))?;
         let z=memory.get(self.memories.clone())
             .ok_or_else(||invalid("complete tensor material history layout changed"))?;
+        let mut z=match &self.memory_map {
+            Some(map)=>map.reconstruct(z).map_err(|_|invalid("complete tensor material history cannot be reconstructed"))?,
+            None=>z.to_vec(),
+        };
         let q:Vec<_>=q.iter().map(|q|self.strain_scale*q).collect();
-        let z:Vec<_>=z.iter().map(|z|self.strain_scale*z).collect();
+        for value in &mut z { *value*=self.strain_scale; }
         self.image.strain(&q,&z).map_err(|_|invalid("complete tensor material surface strain exceeds its original source domain"))?;
         // Recompute through the ORIGINAL complete law, including normal history;
         // never substitute zero by definition or admit nonfinite normal traction.
@@ -51,7 +57,11 @@ impl CoupledModalSystem {
             if point.modes.start>point.modes.end || point.modes.end>self.mode_count()
                 || point.modes.len()!=point.image.point().coordinates()
                 || point.memories.start>point.memories.end || point.memories.end>self.material_memory.len()
-                || point.memories.len()!=point.image.point().memory_coordinates()
+                || match &point.memory_map {
+                    Some(map)=>map.coordinates()!=point.memories.len()
+                        || map.original_coordinates()!=point.image.point().memory_coordinates(),
+                    None=>point.memories.len()!=point.image.point().memory_coordinates(),
+                }
                 || !point.strain_scale.is_finite() || point.strain_scale<=0.0 {
                 return Err(invalid("tensor material point requires complete fixed original coordinate ranges"));
             }
