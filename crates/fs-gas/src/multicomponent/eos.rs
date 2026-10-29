@@ -261,7 +261,7 @@ impl MixtureGas {
         }
         self.decode_cell(cell(values, self.species_count()), guess, cancelled)
     }
-    fn decode_cell(
+    pub(super) fn decode_cell(
         &self,
         state: Cell<'_>,
         guess: Option<f64>,

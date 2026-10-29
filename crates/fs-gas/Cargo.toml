@@ -33,5 +33,9 @@ required-features = ["experimental-euler"]
 name = "reacting_oxygen"
 required-features = ["experimental-euler"]
 
+[[example]]
+name = "mixture_manifold"
+required-features = ["experimental-euler"]
+
 [lints]
 workspace = true

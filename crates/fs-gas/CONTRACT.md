@@ -650,3 +650,48 @@ the existing frozen networks, wall reflections and reacting-flow checks.
 This run precedes the concurrently added molecular-dissipation module and is
 not a full workspace Cargo/DSR verdict. The closure remains an inviscid compact
 reservoir model, without resolved junction mixing or empirical discharge loss.
+
+## Conservative networks with evolving species
+
+`multicomponent::network::MixtureNetwork1d` connects the existing conservative
+mixture branches to finite rigid `Plenum` volumes. Every owner shares the exact
+original species bank, canonical order, caloric path and individual energy
+references; its local composition and temperature may differ. The shared
+characteristic port supplies donor species, pressure impulse and total
+enthalpy once. The corresponding branch-end and plenum accepted exchanges
+are exact opposites for each species and energy.
+
+One global SSPRK2 transaction advances all branches and plenums. Actual port
+speeds constrain branch and compact-volume CFL at both stages; every retry
+restarts all owners. State, clocks and reports publish together after final
+admission/cancellation. Flat numerical/report storage is prepared once and
+reused, and compact-volume temperature inversions use cached guesses. Compact
+storage has no bulk momentum; its fixed support receives the reported local
+port impulse while incoming kinetic energy remains in the energy balance.
+
+Four focused regressions cover different-composition rest in tapered geometry,
+finite-pulse splitting and actual species transport, independent extensive
+species/physical-energy accounting, accepted port exchange, compact-volume CFL,
+source/topology refusal, cancellation/reuse, orientation and formation gauges.
+The integrated native gas build, including the concurrently landed molecular
+and reacting transport modules, passes 88 tests.
+
+`cargo run -p fs-gas --features experimental-euler --example mixture_manifold -- 64`
+runs pressurized N2 into an air surrogate containing N2/O2 through three passages
+and a 30 mL plenum. It retains the original 200--1000 K NASA-9 coefficients from
+Cantera v3.2.0 `data/airNASA9.yaml`, blob
+`5975d1303819332c1bd77a783d9873b66f65c952`, with the declared 1 atm reference.
+The 16/64-cell runs reach 4 ms in 149/593 steps, with no HLL fallbacks or
+halvings. Physical-energy residuals are -3.170523e-14 / 1.919073e-15 J;
+the largest species mass residual is 1.084202e-19 / 1.355253e-20 kg.
+Both daughters receive nitrogen and the final plenum N2 mass fractions are
+0.973409707 / 0.979168255.
+
+All sampled states remain inside physical species bounds and the source path.
+A small composition-extremum undershoot remains in this conservative MUSCL
+baseline (64-cell daughter minimum N2 fraction about 0.766145 versus initial
+air 0.767082); no composition maximum principle or mesh-converged prediction
+is claimed. This network transport owner has no chemical source, resolved
+junction mixing, molecular port diffusion, wall loss or entropy certificate.
+The required `dsr quality --tool frankensim` could not run because DSR is
+unavailable; focused native checks are not the workspace gate.

@@ -18,6 +18,9 @@ mod evolve;
 mod flux;
 mod wall;
 
+/// Conservative shockwaves and species mixing through finite-plenum networks.
+pub mod network;
+
 /// Conservative molecular diffusion, heat conduction and viscous momentum transport.
 pub mod dissipation;
 

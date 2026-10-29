@@ -35,13 +35,13 @@ pub enum BranchEnd {
     Right,
 }
 impl BranchEnd {
-    const fn index(self) -> usize {
+    pub(crate) const fn index(self) -> usize {
         match self {
             Self::Left => 0,
             Self::Right => 1,
         }
     }
-    const fn normal(self) -> f64 {
+    pub(crate) const fn normal(self) -> f64 {
         match self {
             Self::Left => -1.0,
             Self::Right => 1.0,

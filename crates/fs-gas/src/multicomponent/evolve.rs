@@ -79,19 +79,23 @@ pub struct StepReport {
     pub after: Totals,
     /// Area/time-integrated left inflow minus right outflow.
     pub boundary_change: Totals,
+    /// Accepted exchange into the branch through its left end.
+    pub left_boundary_change: Totals,
+    /// Accepted exchange into the branch through its right end.
+    pub right_boundary_change: Totals,
     /// Stationary area-wall pressure impulse [kg m/s].
     pub area_momentum_impulse: f64,
     /// `after - before - boundary_change - area momentum impulse`.
     pub conservation_residual: Totals,
 }
 
-struct Workspace {
-    primitive: Vec<Primitive>,
-    slopes: Vec<f64>,
-    faces: Vec<f64>,
-    face_data: Vec<Face>,
-    stage: Vec<f64>,
-    candidate: Vec<f64>,
+pub(super) struct Workspace {
+    pub(super) primitive: Vec<Primitive>,
+    pub(super) slopes: Vec<f64>,
+    pub(super) faces: Vec<f64>,
+    pub(super) face_data: Vec<Face>,
+    pub(super) stage: Vec<f64>,
+    pub(super) candidate: Vec<f64>,
 }
 
 /// Conservative variable-composition finite-volume flow on a stationary mesh.
@@ -109,7 +113,7 @@ pub struct MixtureEuler1d {
     pub(super) mesh: Mesh1d,
     pub(super) boundaries: Boundaries,
     pub(super) time: f64,
-    work: Workspace,
+    pub(super) work: Workspace,
 }
 impl MixtureEuler1d {
     /// Construct a uniform fixed-area flow from complete conservative cells.
@@ -333,9 +337,16 @@ impl MixtureEuler1d {
                     let after =
                         totals(&self.work.candidate, self.mesh.volumes(), n, &mut cancelled)?;
                     let mut boundary = [0.0; MAX_COMPONENTS];
+                    let mut left = [0.0; MAX_COMPONENTS];
+                    let mut right = [0.0; MAX_COMPONENTS];
                     let mut residual = [0.0; MAX_COMPONENTS];
                     let area_momentum_impulse = 0.5 * dt * (a.area_force + b.area_force);
                     for k in 0..m {
+                        left[k] = 0.5 * dt * self.mesh.face_areas()[0] * (a.left[k] + b.left[k]);
+                        right[k] = -0.5
+                            * dt
+                            * self.mesh.face_areas()[self.cell_count()]
+                            * (a.right[k] + b.right[k]);
                         boundary[k] = 0.5
                             * dt
                             * (self.mesh.face_areas()[0] * (a.left[k] + b.left[k])
@@ -348,6 +359,8 @@ impl MixtureEuler1d {
                     }
                     if !boundary[..m]
                         .iter()
+                        .chain(&left[..m])
+                        .chain(&right[..m])
                         .chain(&residual[..m])
                         .all(|x| x.is_finite())
                         || !area_momentum_impulse.is_finite()
@@ -368,6 +381,8 @@ impl MixtureEuler1d {
                         before,
                         after,
                         boundary_change: Totals::from_values(&boundary[..m], n),
+                        left_boundary_change: Totals::from_values(&left[..m], n),
+                        right_boundary_change: Totals::from_values(&right[..m], n),
                         area_momentum_impulse,
                         conservation_residual: Totals::from_values(&residual[..m], n),
                     });
@@ -408,13 +423,19 @@ fn admit_boundaries(boundaries: Boundaries) -> Result<(), Error> {
 }
 
 #[derive(Clone, Copy)]
-struct Stage {
-    left: [f64; MAX_COMPONENTS],
-    right: [f64; MAX_COMPONENTS],
-    signal_rate: f64,
-    area_force: f64,
-    fallbacks: usize,
-    limited: usize,
+pub(super) struct EndpointFlux<'a> {
+    pub(super) values: &'a [f64],
+    pub(super) data: Face,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct Stage {
+    pub(super) left: [f64; MAX_COMPONENTS],
+    pub(super) right: [f64; MAX_COMPONENTS],
+    pub(super) signal_rate: f64,
+    pub(super) area_force: f64,
+    pub(super) fallbacks: usize,
+    pub(super) limited: usize,
 }
 #[allow(clippy::too_many_arguments)]
 fn attempt(
@@ -440,6 +461,7 @@ fn attempt(
         &mut work.slopes,
         &mut work.faces,
         &mut work.face_data,
+        [None; 2],
         cancelled,
     )?;
     check_cfl(a.signal_rate * dt, cfl)?;
@@ -471,6 +493,7 @@ fn attempt(
         &mut work.slopes,
         &mut work.faces,
         &mut work.face_data,
+        [None; 2],
         cancelled,
     )?;
     check_cfl(b.signal_rate * dt, cfl)?;
@@ -512,7 +535,7 @@ fn check_cfl(observed: f64, maximum: f64) -> Result<(), Error> {
 // and pressure. Thus density and mixture gas constant cannot drift from the
 // species, and no normalization modifies a reconstructed conserved inventory.
 #[allow(clippy::too_many_arguments)]
-fn operator(
+pub(super) fn operator(
     gas: &MixtureGas,
     states: &[f64],
     mesh: &Mesh1d,
@@ -522,6 +545,7 @@ fn operator(
     slopes: &mut [f64],
     faces: &mut [f64],
     face_data: &mut [Face],
+    endpoint_fluxes: [Option<EndpointFlux<'_>>; 2],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Stage, Error> {
     let n = gas.species_count();
@@ -623,6 +647,21 @@ fn operator(
     let mut fallbacks = 0;
     for face in 0..=count {
         poll(cancelled)?;
+        if face == 0 || face == count {
+            if let Some(flux) = endpoint_fluxes[usize::from(face == count)] {
+                if boundaries == Boundaries::Periodic
+                    || flux.values.len() != m
+                    || !positive(flux.data.signal_speed)
+                    || !flux.values.iter().all(|x| x.is_finite())
+                {
+                    return Err(Error::Invalid("invalid physical mixture endpoint flux"));
+                }
+                faces[face * m..(face + 1) * m].copy_from_slice(flux.values);
+                face_data[face] = flux.data;
+                fallbacks += usize::from(flux.data.used_hll_fallback);
+                continue;
+            }
+        }
         if face == count && boundaries == Boundaries::Periodic {
             let (prefix, suffix) = faces.split_at_mut(count * m);
             suffix[..m].copy_from_slice(&prefix[..m]);
@@ -710,7 +749,7 @@ fn minmod(a: f64, b: f64, c: f64) -> f64 {
         0.0
     }
 }
-fn forward(
+pub(super) fn forward(
     q: &[f64],
     i: usize,
     dt: f64,
