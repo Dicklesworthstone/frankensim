@@ -5,6 +5,9 @@
 //! frozen-geometry impulse phase: poses stay fixed, and the surrounding motion
 //! integrator owns configuration advance and normal contact/impact admission.
 
+/// Material-derived rolling loss with finite-body recoil and feasible no slip.
+pub mod rolling;
+
 use crate::{DynamicsError, MassProperties, RigidBodyState, Vec3};
 use fs_contact::tangential::nonsmooth::{
     NonsmoothAudit, NonsmoothContact, NonsmoothContactResult, NonsmoothControls,

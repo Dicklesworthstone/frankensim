@@ -1260,3 +1260,55 @@ split continuation, full-scene rotation with a body torque, isolated
 grazing/departure/return, and atomic budget, cancellation and geometry/model
 refusals. Native selected-source checks are
 separate from the unavailable full Cargo/DSR workspace gate.
+
+## Material-derived two-axis rolling with finite-body recoil
+
+`tangential_friction::rolling::apply_rigid_rolling` consumes the original
+`RollingLossLaw::ViscoelasticSphere`, normal patch, ordered interface, static
+`FrictionLaw`, work key, native rolling checkpoint, rigid-body states and mass
+properties. Both bodies recoil. Their actual arms, orientations and principal
+inertias determine the full four-coordinate shear/rolling mobility. Eliminating
+the two no-slip reactions gives the full two-axis rolling Schur response;
+projected Gram factors avoid cancellation from subtracting inertial matrices.
+The isotropic sphere law acts along the actual tangent relative angular
+velocity. Neither rolling speed nor an effective inertia is supplied by callers.
+
+Original Hertz/material admission checks load, area, radius, temperature,
+frequency and the quasistatic small parameters. The actual sphere arm must equal
+its radius along the contact normal, and both contact points must coincide
+within the explicit geometry gate. A loaded contact requires zero initial and
+final point slip/separation and relative normal-axis spin within the dimensional
+gates. The native static capacity bounds the required traction at initial,
+midpoint and endpoint states. An infeasible reaction refuses instead of forcing
+rolling or substituting an independently saturated friction component.
+
+The material coefficient remains owned by the original card. Each analytic
+two-axis midpoint solve uses its native moment and native heat. The user sets
+the time-resolution ceiling; an additional derived limit
+`c * lambda_max * h <= 1` keeps every rolling eigenmode's decay factor
+nonnegative. Work is bounded by an explicit substep cap. Viscous arrest remains
+asymptotic; zero rate, zero viscosity and zero load give exact zero loss without
+snapping or a velocity regularizer. Only the sphere generates bulk heat. The
+report exports that heat and its original body index without creating a thermal
+reservoir or partitioning it into the rigid plane.
+
+Actual native point impulses and equal/opposite couples independently close
+kinetic change, midpoint work, physical heat, zero static-reaction work, and
+total linear/orbital-plus-spin angular momentum. Candidate bodies and native
+history publish together after the final cancellation poll. Late balance,
+source, mode, traction and budget refusal leaves both unchanged.
+
+This is one held-geometry, held-normal-load pure-rolling phase. The surrounding
+owner still advances poses and normal contact. It does not solve contact
+discovery, lift-off, externally driven no-slip constraints, simultaneous
+microslip/spin, multiple patches, or arbitrary-speed viscoelastic rolling. A
+second shear reaction cannot be superposed on this same phase. Frozen-geometry
+time accuracy is second order; this does not certify a complete trajectory.
+G1/G3/G4 groups in `tests/rolling_friction.rs` use independently eliminated
+principal-direction mechanics for both-body recoil, a three-rung exponential
+motion/heat refinement ladder, nonreversing decay, exact zero limits, world and
+surface-order covariance, source/traction/mode refusal, and loaded checkpoint,
+late audit, cancellation and exact retry.
+All six groups pass in the focused native original-source build. The independent
+8/16/32-step ladders require error-reduction factors in `[3.95, 4.05]` for both
+motion and heat. This is separate from a full Cargo/DSR workspace gate.
