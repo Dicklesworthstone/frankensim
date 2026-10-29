@@ -17,6 +17,11 @@ use crate::Refusal;
 use fs_ga::Vec3;
 use fs_time::lie::gyrostat::{HeldTorque, driven_step};
 
+#[path = "rotors/geared.rs"]
+pub mod geared;
+#[path = "rotors/propulsion.rs"]
+pub mod propulsion;
+
 /// Fixed per-tick rotor-count bound; successful steps allocate no heap storage.
 pub const MAX_ROTORS: usize = 64;
 

@@ -88,6 +88,78 @@ contact are outside this owner. No historical calibration, complete rotor
 checkpoint wire format or integration into the reduced longitudinal SimLoop
 is claimed by this additional six-DOF API.
 
+### Ideal gears and real propeller/airframe motion
+
+`spine::rotors::geared` admits one ideal relative gear coordinate and 1–64
+axisymmetric rotors with explicit signed ratios `g_a`, physical axial inertias
+`J_a`, and body-fixed unit axes `e_a`. The caller supplies the whole assembly's
+mass and full locked inertia tensor, including all rotor inertia. Assembly
+computes `J_eq = sum(J_a g_a²)`, `c = sum(J_a g_a e_a)`, and the SPD Schur
+reduction `I_red = I_locked - c cᵀ/J_eq`. Products of inertia are retained by
+`fs_time::lie::gyrostat::InertiaTensor3`; its principal-axis assembly occurs once.
+State is common relative phase `s`, canonical momentum
+`p = J_eq s_dot + c.dot(omega)`, and the full carrier six-DOF state.
+Total body momentum is `I_red omega + c p/J_eq`. Physical kinetic energy is
+`m |V|²/2 + omega.dot(I_red omega)/2 + p²/(2 J_eq)`; the battery independently
+reconstructs it from the original locked inertia and relative rotor rates.
+
+Internal generalized motor torque changes `p`; aerodynamic torque changes it
+by `sum(g_a tau_a)` and contributes `sum(e_a tau_a)` to total external torque
+exactly once. Carrier moments must exclude those axial shaft torques. Motor
+work is `Q_motor delta_s`; aerodynamic shaft work uses absolute axial rate
+`g_a s_dot + e_a.dot(omega)`. A perfectly balanced counterrotating pair has zero
+`c` and no motor recoil; unequal external shaft torque still changes total
+angular momentum. Signed ratios are never replaced by reflected inertia in
+that cancellation law.
+
+`geared::step_held` is second order for fixed world force/body torques;
+`geared::step` evaluates a smooth load law at the initial state and a half-step
+predictor before accepting a full step with the midpoint loads. The two calls
+occur in deterministic start/midpoint order. The work residual is the actual
+endpoint kinetic change minus declared work, with no artificial dissipation.
+The global angular impulse combines the translation kick's orbital impulse
+with trapezoidal endpoint-frame torque impulses; its residual measures the
+accepted discrete momentum balance. Successful mechanics use fixed-size
+storage. Invalid models/states refuse; input state is immutable, while side
+effects inside caller-owned callbacks remain the caller's responsibility.
+
+`spine::rotors::propulsion::GearedPropulsion` is a concrete consumer: both
+stages run the existing distributed two-way wing/BEMT solve with actual stage
+attitude, velocity, all three angular rates and generalized shaft momentum.
+World-position material-wind samples are converted to body relative incident
+velocities at every strip and both disk centers. The converged circulations
+and accepted local wash drive full vector Kutta–Joukowsky forces, profile drag,
+section moments, existing classical induced drag and parasite ledger, and
+thrust at both disk arms. Gravity is added once in world axes. Force moments
+retain all three components about the same assembly COM. Propeller mounts can
+refer to two rotors inside a larger gear train, so additional engine/flywheel
+inertia is supplied physically by the caller rather than invented.
+
+Gear ratio, rotor axis, blade handedness and positive thrust direction are
+distinct inputs. Handedness maps signed ABSOLUTE spin into the current BEMT
+positive-speed branch; the physical aerodynamic torque reverses with that
+handedness. The current actuator-disk coupling only supports body-x shafts and
+explicit +x thrust. Stopped/opposite blade rotation returns
+`propeller-spin-outside-domain`; reversed net disk flow retains the existing
+`disk-inflow-invalid` refusal. Neither spin nor inflow is floored. Assembly
+and stage defects use `propulsion-assembly-invalid`, `propulsion-state-invalid`
+or existing native refusals. No unconverged/one-way aerodynamic fallback runs.
+
+G0/G1/G3 evidence in `tests/geared_propulsion.rs` covers nonunit gear-ratio
+recoil/phase/work, balanced and unequal torque cases, arbitrary-axis dense
+inertia and independent physical momentum reconstruction, admitted-count and
+state boundaries, current symmetric aerodynamic parity, real asymmetric
+six-DOF motion, absolute-speed/handedness refusal, and second-order refinement
+of both an analytic motor/drag law and real coupled aerodynamic dynamics.
+The aerodynamic tier remains quasi-steady, with existing 2-D section closures,
+axial disk inflow, straight wakes, spanwise wash overlap and Estimated drag.
+It does not add rudder dynamics, propeller crossflow/harmonics, apparent mass,
+shaft compliance/failure, gimbals, contact, checkpoint serialization, or
+historical calibration. Historical preset mass/inertia and SimLoop behavior
+are unchanged. Full coupled accuracy remains bounded by the declared wing,
+BEMT and coupling tolerances; refinement evidence does not certify physical
+validity or arbitrary operating branches.
+
 ## Canard hinge friction and stops
 
 `canardmech::step` solves one monotone scalar midpoint-velocity equation
