@@ -1,6 +1,7 @@
 use super::*;
 use crate::dynamics::tests::gas;
 use crate::dynamics::{Boundaries, Boundary, Euler1d, StepControl};
+use fs_qty::Temperature;
 use fs_qty::{Length, Time};
 
 fn gamma_wave(pressure: f64) -> f64 {

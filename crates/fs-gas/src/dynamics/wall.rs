@@ -57,19 +57,6 @@ impl FrozenGas {
             .stopped_wall(primitive, toward_wall, cancelled)
             .map_err(wall_error)
     }
-
-    /// Source-owned rarefaction integral retained for characteristic boundaries.
-    pub(super) fn rarefaction_integral(
-        &self,
-        low: f64,
-        high: f64,
-        tolerance: f64,
-        cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<f64, Error> {
-        WallSolver::new(self)
-            .rarefaction_integral(low, high, tolerance, cancelled)
-            .map_err(wall_error)
-    }
 }
 
 impl CaloricLaw for FrozenGas {
@@ -134,6 +121,16 @@ impl CaloricLaw for FrozenGas {
     ) -> Result<f64, Error> {
         poll(cancelled)?;
         Ok(self.from_rho_u_p(density, 0.0, pressure)?.sound_speed)
+    }
+    fn primitive(
+        &self,
+        density: f64,
+        velocity: f64,
+        pressure: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Primitive, Error> {
+        poll(cancelled)?;
+        self.from_rho_u_p(density, velocity, pressure)
     }
     fn next_seam(
         &self,

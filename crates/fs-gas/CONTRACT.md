@@ -624,3 +624,29 @@ The transport law's dilute-neutral-gas, Eucken-conductivity, explicit bulk
 viscosity and constant-area restrictions remain in force. This symmetric
 composition does not promote the adaptive first-order chemistry base to a
 proved second-order method or establish a fully discrete entropy inequality.
+
+## Characteristic ports with distinct local compositions
+
+`MixtureGas::reservoir_flux` connects a conservative duct trace to a stationary
+species-bearing reservoir in the same original source bank and per-species
+energy gauges. Local compositions may differ. One shared borrowed-caloric
+solver now supplies both frozen and mixture ports: the duct composition owns
+the outgoing pressure wave, while the reservoir composition owns isentropic
+acceleration and the sonic inlet limit. The advected donor supplies every
+species flux and its total enthalpy; structural species zeros remain zero.
+
+The public output buffer is updated only after the complete port has passed
+source, numerical and cancellation checks. Successful evaluation uses bounded
+stack scratch and no replacement gas owner or heap workspace. A strong inflow
+whose auxiliary velocity bound reaches the full cooling interval locates its
+supported sonic throat before constructing an unused cold endpoint; actual
+port admission remains strict.
+
+Five independent regressions cover two different gamma laws across a port,
+analytic choked inflow and sonic outflow, branch acoustic impedance, donor
+enthalpy, original formation-reference/orientation invariance and unchanged
+output on late cancellation. All 72 focused staged gas tests passed, including
+the existing frozen networks, wall reflections and reacting-flow checks.
+This run precedes the concurrently added molecular-dissipation module and is
+not a full workspace Cargo/DSR verdict. The closure remains an inviscid compact
+reservoir model, without resolved junction mixing or empirical discharge loss.

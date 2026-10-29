@@ -4,7 +4,10 @@
 //! face solve borrows its own current partial densities. Original NASA-9
 //! sources and their energy/entropy differences remain authoritative.
 
-use super::{CaloricDomain, Cell, Error, FaceFlux, MixtureGas, Primitive, poll, positive};
+use super::{
+    CaloricDomain, Cell, Error, FaceFlux, MAX_COMPONENTS, MAX_SPECIES, MixtureGas, Primitive, poll,
+    positive,
+};
 use crate::dynamics::wall::shared::{CaloricLaw, HeatCapacities, WallError, WallSolver};
 use fs_math::det;
 use fs_qty::Temperature;
@@ -33,16 +36,7 @@ impl MixtureGas {
                 "wall normal, interior trace or output dimension",
             ));
         }
-        let (density, concentration) = self.admit_densities(inside.partial_densities)?;
-        let law = LocalCaloric {
-            gas: self,
-            densities: inside.partial_densities,
-            density,
-            gas_constant: (concentration / density) * R,
-        };
-        if !positive(law.gas_constant) {
-            return Err(Error::Invalid("unrepresentable local mixture gas constant"));
-        }
+        let law = LocalCaloric::new(self, inside.partial_densities)?;
         let wall = WallSolver::new(&law)
             .stopped_wall(primitive, outward_normal * primitive.velocity, cancelled)
             .map_err(wall_error)?;
@@ -63,13 +57,45 @@ impl MixtureGas {
 
 /// Borrows an already admitted owner and current trace; construction and all
 /// successful evaluations allocate nothing and never rebuild a frozen owner.
-struct LocalCaloric<'a> {
+pub(super) struct LocalCaloric<'a> {
     gas: &'a MixtureGas,
     densities: &'a [f64],
     density: f64,
     gas_constant: f64,
 }
-impl LocalCaloric<'_> {
+impl<'a> LocalCaloric<'a> {
+    pub(super) fn new(gas: &'a MixtureGas, densities: &'a [f64]) -> Result<Self, Error> {
+        let (density, concentration) = gas.admit_densities(densities)?;
+        let gas_constant = (concentration / density) * R;
+        if !positive(gas_constant) {
+            return Err(Error::Invalid("unrepresentable local mixture gas constant"));
+        }
+        Ok(Self {
+            gas,
+            densities,
+            density,
+            gas_constant,
+        })
+    }
+    /// Original conservative admission for this composition, with bounded stack
+    /// scratch. No temporary species owner or heap allocation is required.
+    pub(super) fn state_at(
+        &self,
+        density: f64,
+        velocity: f64,
+        pressure: f64,
+        out: &mut [f64],
+    ) -> Result<Primitive, Error> {
+        if !positive(density) {
+            return Err(Error::Invalid("invalid local characteristic density"));
+        }
+        let mut densities = [0.0; MAX_SPECIES];
+        for (i, value) in self.densities.iter().enumerate() {
+            densities[i] = density * (*value / self.density);
+        }
+        self.gas
+            .state_at(&densities[..self.densities.len()], velocity, pressure, out)
+    }
     fn temperature(&self, t: f64) -> Result<Temperature, Error> {
         let domain = self.gas.domain();
         if !(domain.minimum_temperature..=domain.maximum_temperature).contains(&t) {
@@ -193,6 +219,22 @@ impl CaloricLaw for LocalCaloric<'_> {
             return Err(Error::Invalid("unrepresentable local mixture sound speed"));
         }
         Ok(det::sqrt(square))
+    }
+    fn primitive(
+        &self,
+        density: f64,
+        velocity: f64,
+        pressure: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Primitive, Error> {
+        poll(cancelled)?;
+        let mut values = [0.0; MAX_COMPONENTS];
+        self.state_at(
+            density,
+            velocity,
+            pressure,
+            &mut values[..self.densities.len() + 2],
+        )
     }
     fn next_seam(
         &self,

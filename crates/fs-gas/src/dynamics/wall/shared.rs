@@ -44,6 +44,15 @@ pub(crate) trait CaloricLaw {
         pressure: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, Self::Error>;
+    /// Construct a physical primitive with the owner's original conservative
+    /// precision and source-path admission, retaining this local composition.
+    fn primitive(
+        &self,
+        density: f64,
+        velocity: f64,
+        pressure: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Primitive, Self::Error>;
     /// First original caloric seam strictly after `start`, or `end`.
     fn next_seam(
         &self,
@@ -54,6 +63,7 @@ pub(crate) trait CaloricLaw {
 }
 
 /// Source failures are returned unchanged to their original owner.
+#[derive(Debug)]
 pub(crate) enum WallError<E> {
     Source(E),
     Invalid(&'static str),

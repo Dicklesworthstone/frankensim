@@ -9,9 +9,10 @@
 //!
 //! Shared boundary types admit periodic, reflecting and transmissive ends here.
 //! A frozen `Boundary::Reservoir` has no species-mass axis or species energy
-//! references and therefore refuses; a mixture reservoir needs its own
-//! species-bearing conservative closure.
+//! references and therefore refuses. Species-bearing compact-reservoir ports
+//! use [`MixtureGas::reservoir_flux`] with the original local compositions.
 
+mod characteristic;
 mod eos;
 mod evolve;
 mod flux;
@@ -85,6 +86,8 @@ pub enum Error {
     CaloricPath(KineticsErrorV1),
     /// A reflected wave leaves the admitted source path or numerical budget.
     WallCaloricPath(&'static str),
+    /// A port wave leaves the admitted source path or numerical budget.
+    CharacteristicPath(&'static str),
     /// Physical mesh admission refused.
     Geometry(crate::dynamics::Error),
     /// Sensible energy falls outside the source temperature interval.
@@ -155,3 +158,6 @@ mod tests;
 
 #[cfg(test)]
 mod wall_tests;
+
+#[cfg(test)]
+mod characteristic_tests;

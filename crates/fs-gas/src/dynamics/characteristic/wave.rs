@@ -4,9 +4,9 @@
 //! invariant. Classical compressive shocks/expansion fans are admitted here;
 //! no gamma-law replacement or unsupported-temperature extension is used.
 
-use super::super::{Error, FrozenGas, Primitive, poll, positive};
+use super::super::{Primitive, positive};
+use crate::dynamics::wall::shared::{CaloricLaw, WallError as Error, WallSolver};
 use fs_math::det;
-use fs_qty::{Pressure, Temperature};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct PressureWave {
@@ -21,12 +21,12 @@ pub(super) struct PressureWave {
     pub(super) tail_speed: f64,
 }
 
-pub(super) fn pressure_wave(
-    gas: &FrozenGas,
+pub(super) fn pressure_wave<L: CaloricLaw>(
+    gas: &L,
     inside: Primitive,
     target_pressure: f64,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<PressureWave, Error> {
+) -> Result<PressureWave, Error<L::Error>> {
     poll(cancelled)?;
     if !positive(target_pressure)
         || !positive(inside.density)
@@ -56,18 +56,18 @@ pub(super) fn pressure_wave(
     }
 }
 
-fn compression(
-    gas: &FrozenGas,
+fn compression<L: CaloricLaw>(
+    gas: &L,
     inside: Primitive,
     pressure: f64,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<PressureWave, Error> {
+) -> Result<PressureWave, Error<L::Error>> {
     let r = gas.gas_constant();
     let ti = inside.temperature;
     let dp = pressure - inside.pressure;
     let vi = 1.0 / inside.density;
     let alpha = dp / pressure;
-    let cp_i = cp(gas, ti, inside.pressure)?;
+    let cp_i = cp(gas, ti, inside.pressure, cancelled)?;
     let maximum = gas.domain().maximum_temperature;
     if ti >= maximum || !positive(vi) {
         return Err(Error::CaloricPath(
@@ -79,7 +79,7 @@ fn compression(
     // Hugoniot: z*(Cp_secant - .5*alpha*R) = .5*(vi + R*Ti/pb).
     let rhs = 0.5 * (vi + r * ti / pressure);
     let residual_tolerance = (gas.domain().relative_energy_tolerance + 64.0 * f64::EPSILON) * vi;
-    let evaluate = |z: f64| -> Result<(f64, f64, f64), Error> {
+    let evaluate = |z: f64, cancelled: &mut _| -> Result<(f64, f64, f64), Error<L::Error>> {
         let raw_t = ti + dp * z;
         // z's upper bound maps to Tmax; remove only endpoint rounding.
         let t = if raw_t > maximum && raw_t - maximum <= 4.0 * f64::EPSILON * maximum {
@@ -94,13 +94,12 @@ fn compression(
         let cp_secant = if delta_t == 0.0 {
             cp_i
         } else {
-            gas.source()
-                .specific_internal_energy_change(Temperature::new(ti), Temperature::new(t))?
-                .value()
+            gas.internal_energy_change(ti, t, cancelled)
+                .map_err(Error::Source)?
                 / delta_t
                 + r
         };
-        let derivative = cp(gas, t, pressure)? - 0.5 * alpha * r;
+        let derivative = cp(gas, t, pressure, cancelled)? - 0.5 * alpha * r;
         let residual = z * (cp_secant - 0.5 * alpha * r) - rhs;
         if !positive(cp_secant) || !positive(derivative) || !residual.is_finite() {
             return Err(Error::CaloricPath(
@@ -112,7 +111,7 @@ fn compression(
     let mut lo = 0.0;
     // Positive Cv implies z < vi/R; this also bounds very weak-shock work.
     let mut hi = ((maximum - ti) / dp).min(vi / r);
-    if !positive(hi) || evaluate(hi)?.0 < -residual_tolerance {
+    if !positive(hi) || evaluate(hi, cancelled)?.0 < -residual_tolerance {
         return Err(Error::CaloricPath(
             "characteristic shock state exceeds source temperature maximum",
         ));
@@ -120,7 +119,7 @@ fn compression(
     let mut z = (rhs / (cp_i - 0.5 * alpha * r)).clamp(lo, hi);
     for _ in 0..gas.domain().maximum_iterations {
         poll(cancelled)?;
-        let (residual, thermal_derivative, t) = evaluate(z)?;
+        let (residual, thermal_derivative, t) = evaluate(z, cancelled)?;
         if residual.abs() <= residual_tolerance {
             let factor = (vi - r * z) / pressure;
             if !positive(factor) {
@@ -130,7 +129,9 @@ fn compression(
             let jump = dp * root;
             let velocity = inside.velocity - jump;
             let density = (pressure / r) / t;
-            let primitive = gas.from_rho_u_p(density, velocity, pressure)?;
+            let primitive = gas
+                .primitive(density, velocity, pressure, cancelled)
+                .map_err(Error::Source)?;
             let vb = r * t / pressure;
             let dt_dp = 0.5 * (vi + vb * (inside.pressure / pressure)) / thermal_derivative;
             let dv_dp = (r / pressure) * (dt_dp - t / pressure);
@@ -148,17 +149,11 @@ fn compression(
                 ));
             }
             let ds = gas
-                .source()
-                .specific_entropy_change(
-                    Temperature::new(ti),
-                    Pressure::new(inside.pressure),
-                    Temperature::new(t),
-                    Pressure::new(pressure),
-                )?
-                .value();
+                .entropy_change(ti, inside.pressure, t, pressure, cancelled)
+                .map_err(Error::Source)?;
             let entropy_tolerance = gas.domain().absolute_energy_tolerance / ti
                 + gas.domain().relative_energy_tolerance * dp * vi / ti
-                + 128.0 * f64::EPSILON * cp_i.max(cp(gas, t, pressure)?);
+                + 128.0 * f64::EPSILON * cp_i.max(cp(gas, t, pressure, cancelled)?);
             if !ds.is_finite() || ds < -entropy_tolerance {
                 return Err(Error::CaloricPath(
                     "characteristic shock has inadmissible entropy production",
@@ -187,29 +182,23 @@ fn compression(
             lo.midpoint(hi)
         };
     }
-    Err(Error::TemperatureIterations)
+    Err(Error::Iterations)
 }
 
-fn expansion(
-    gas: &FrozenGas,
+fn expansion<L: CaloricLaw>(
+    gas: &L,
     inside: Primitive,
     pressure: f64,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<PressureWave, Error> {
+) -> Result<PressureWave, Error<L::Error>> {
     let ti = inside.temperature;
     let r = gas.gas_constant();
-    let cp_i = cp(gas, ti, inside.pressure)?;
+    let cp_i = cp(gas, ti, inside.pressure, cancelled)?;
     // Obtain log(pi/pb) from the source's cancellation-safe pressure entropy
     // change, rather than forming an overflowing or rounded pressure ratio.
     let log_ratio = gas
-        .source()
-        .specific_entropy_change(
-            Temperature::new(ti),
-            Pressure::new(inside.pressure),
-            Temperature::new(ti),
-            Pressure::new(pressure),
-        )?
-        .value()
+        .entropy_change(ti, inside.pressure, ti, pressure, cancelled)
+        .map_err(Error::Source)?
         / r;
     if !positive(log_ratio) || ti <= gas.domain().minimum_temperature {
         return Err(Error::CaloricPath(
@@ -218,7 +207,7 @@ fn expansion(
     }
     // z = (Ti-Tb)/log(pi/pb), using the source Cp/T secant. This preserves
     // the nonzero weak-wave increment if Tb rounds to Ti.
-    let evaluate = |z: f64| -> Result<(f64, f64, f64), Error> {
+    let evaluate = |z: f64, cancelled: &mut _| -> Result<(f64, f64, f64), Error<L::Error>> {
         let raw_t = ti - log_ratio * z;
         let minimum = gas.domain().minimum_temperature;
         let t = if raw_t < minimum && minimum - raw_t <= 4.0 * f64::EPSILON * ti {
@@ -235,17 +224,11 @@ fn expansion(
         let secant = if delta_t == 0.0 {
             cp_i / ti
         } else {
-            -gas.source()
-                .specific_entropy_change(
-                    Temperature::new(ti),
-                    Pressure::new(inside.pressure),
-                    Temperature::new(t),
-                    Pressure::new(inside.pressure),
-                )?
-                .value()
+            -gas.entropy_change(ti, inside.pressure, t, inside.pressure, cancelled)
+                .map_err(Error::Source)?
                 / delta_t
         };
-        let derivative = cp(gas, t, pressure)? / t;
+        let derivative = cp(gas, t, pressure, cancelled)? / t;
         let residual = secant * z - r;
         if !positive(secant) || !positive(derivative) || !residual.is_finite() {
             return Err(Error::CaloricPath(
@@ -257,7 +240,7 @@ fn expansion(
     let residual_tolerance = (gas.domain().relative_energy_tolerance + 64.0 * f64::EPSILON) * r;
     let mut lo = 0.0;
     let mut hi = ((ti - gas.domain().minimum_temperature) / log_ratio).min(ti);
-    if !positive(hi) || evaluate(hi)?.0 < -residual_tolerance {
+    if !positive(hi) || evaluate(hi, cancelled)?.0 < -residual_tolerance {
         return Err(Error::CaloricPath(
             "characteristic rarefaction state below source temperature minimum",
         ));
@@ -265,14 +248,19 @@ fn expansion(
     let mut z = (r * ti / cp_i).clamp(lo, hi);
     for _ in 0..gas.domain().maximum_iterations {
         poll(cancelled)?;
-        let (residual, derivative, t) = evaluate(z)?;
+        let (residual, derivative, t) = evaluate(z, cancelled)?;
         if residual.abs() <= residual_tolerance {
             let delta_t = log_ratio * z;
             let tolerance = base_velocity_tolerance(gas, inside);
             let integral = if t == ti {
                 delta_t * (cp_i / inside.sound_speed)
             } else {
-                let integral = gas.rarefaction_integral(t, ti, 0.25 * tolerance, cancelled)?;
+                let integral = WallSolver::new(gas).rarefaction_integral(
+                    t,
+                    ti,
+                    0.25 * tolerance,
+                    cancelled,
+                )?;
                 if integral == 0.0 {
                     // The square-root quadrature coordinates may coincide for
                     // a one-ulp temperature interval. Its source tangent is
@@ -282,8 +270,14 @@ fn expansion(
                     integral * (delta_t / (ti - t))
                 }
             };
-            let primitive =
-                gas.from_rho_u_p((pressure / r) / t, inside.velocity + integral, pressure)?;
+            let primitive = gas
+                .primitive(
+                    (pressure / r) / t,
+                    inside.velocity + integral,
+                    pressure,
+                    cancelled,
+                )
+                .map_err(Error::Source)?;
             let head = inside.velocity - inside.sound_speed;
             let tail = primitive.velocity - primitive.sound_speed;
             if tail < head - velocity_tolerance(gas, inside, primitive) {
@@ -313,18 +307,18 @@ fn expansion(
             lo.midpoint(hi)
         };
     }
-    Err(Error::TemperatureIterations)
+    Err(Error::Iterations)
 }
 
 /// Sample the one-sided pressure wave at the fixed interface x/t=0.
 /// A supersonic departing wave leaves the interior trace untouched; when a
 /// rarefaction straddles the interface, its sonic state supplies the flux.
-pub(super) fn sample_outflow(
-    gas: &FrozenGas,
+pub(super) fn sample_outflow<L: CaloricLaw>(
+    gas: &L,
     inside: Primitive,
     wave: PressureWave,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<Primitive, Error> {
+) -> Result<Primitive, Error<L::Error>> {
     poll(cancelled)?;
     if wave.head_speed >= 0.0 {
         return Ok(inside);
@@ -352,21 +346,21 @@ pub(super) fn sample_outflow(
             hi = t;
         }
         if lo >= hi || lo.midpoint(hi) == lo || lo.midpoint(hi) == hi {
-            return Err(Error::TemperatureIterations);
+            return Err(Error::Iterations);
         }
     }
-    Err(Error::TemperatureIterations)
+    Err(Error::Iterations)
 }
 
 /// Recover a supported sonic outlet when the requested downstream pressure
 /// would extend an unused part of the expansion fan below the source window.
 /// The admitted cold endpoint must already lie beyond the sonic characteristic;
 /// otherwise even the interface state requires unsupported colder gas.
-pub(super) fn cold_outflow(
-    gas: &FrozenGas,
+pub(super) fn cold_outflow<L: CaloricLaw>(
+    gas: &L,
     inside: Primitive,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<(Primitive, f64), Error> {
+) -> Result<(Primitive, f64), Error<L::Error>> {
     poll(cancelled)?;
     let minimum = gas.domain().minimum_temperature;
     let tolerance = base_velocity_tolerance(gas, inside);
@@ -395,53 +389,64 @@ pub(super) fn cold_outflow(
     ))
 }
 
-fn fan_state(
-    gas: &FrozenGas,
+fn fan_state<L: CaloricLaw>(
+    gas: &L,
     inside: Primitive,
     temperature: f64,
     tolerance: f64,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<Primitive, Error> {
+) -> Result<Primitive, Error<L::Error>> {
     let ds = gas
-        .source()
-        .specific_entropy_change(
-            Temperature::new(inside.temperature),
-            Pressure::new(inside.pressure),
-            Temperature::new(temperature),
-            Pressure::new(inside.pressure),
-        )?
-        .value();
+        .entropy_change(
+            inside.temperature,
+            inside.pressure,
+            temperature,
+            inside.pressure,
+            cancelled,
+        )
+        .map_err(Error::Source)?;
     let pressure = inside.pressure * det::exp(ds / gas.gas_constant());
     let velocity = inside.velocity
-        + gas.rarefaction_integral(temperature, inside.temperature, tolerance, cancelled)?;
-    gas.from_rho_u_p(
+        + WallSolver::new(gas).rarefaction_integral(
+            temperature,
+            inside.temperature,
+            tolerance,
+            cancelled,
+        )?;
+    gas.primitive(
         (pressure / gas.gas_constant()) / temperature,
         velocity,
         pressure,
+        cancelled,
     )
+    .map_err(Error::Source)
 }
 
-fn cp(gas: &FrozenGas, temperature: f64, pressure: f64) -> Result<f64, Error> {
+fn cp<L: CaloricLaw>(
+    gas: &L,
+    temperature: f64,
+    pressure: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, Error<L::Error>> {
     let value = gas
-        .source()
-        .evaluate_properties(Temperature::new(temperature), Pressure::new(pressure))?
-        .mass_specific_cp()
-        .value();
+        .heat_capacities(temperature, pressure, cancelled)
+        .map_err(Error::Source)?
+        .cp;
     if positive(value) {
         Ok(value)
     } else {
         Err(Error::CaloricPath("characteristic wave has nonpositive Cp"))
     }
 }
-fn base_velocity_tolerance(gas: &FrozenGas, state: Primitive) -> f64 {
+fn base_velocity_tolerance<L: CaloricLaw>(gas: &L, state: Primitive) -> f64 {
     let speed = state.velocity.abs() + state.sound_speed;
     gas.domain().absolute_energy_tolerance / speed
         + (gas.domain().relative_energy_tolerance + 128.0 * f64::EPSILON) * speed
 }
-fn velocity_tolerance(gas: &FrozenGas, inside: Primitive, star: Primitive) -> f64 {
+fn velocity_tolerance<L: CaloricLaw>(gas: &L, inside: Primitive, star: Primitive) -> f64 {
     base_velocity_tolerance(gas, inside).max(base_velocity_tolerance(gas, star))
 }
-fn checked_wave(wave: PressureWave) -> Result<PressureWave, Error> {
+fn checked_wave<E>(wave: PressureWave) -> Result<PressureWave, Error<E>> {
     if !wave.jump.is_finite()
         || !positive(wave.derivative)
         || !positive(wave.signal_speed)
@@ -453,6 +458,14 @@ fn checked_wave(wave: PressureWave) -> Result<PressureWave, Error> {
         ));
     }
     Ok(wave)
+}
+
+fn poll<E>(cancelled: &mut impl FnMut() -> bool) -> Result<(), Error<E>> {
+    if cancelled() {
+        Err(Error::Cancelled)
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
