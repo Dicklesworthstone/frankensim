@@ -4062,3 +4062,65 @@ and 7 regressions**. They exercise the real compiler, original data reductions,
 source/context refusals, finite geometry without inserted density, conditioned
 heat storage and the shared conduction solver. Full coupled mechanical, phase,
 drying and experimental qualification remain outside these bounded additions.
+
+## Foam and conditioned-building storage assemblies (2026-10-29)
+
+This increment adds **13 profiles, 50 property claims, 596 numerical values and
+76 source observations**, with source data connected to existing heat-storage
+and conduction consumers. Nominal foam densities identify source columns;
+they are not independently qualified density laws.
+
+| Profile | Claims | Source-supported response |
+| --- | ---: | --- |
+| [Polyurethane, Freon label, 31.88 kg/m3](polyurethane-freon-31p88-nist-thermal-reference/manifest.tsv) | 2 | Conductivity 76–300 K and nominal column density |
+| [Polyurethane, CO2 label, 32.04 kg/m3](polyurethane-co2-32p04-nist-thermal-reference/manifest.tsv) | 2 | Conductivity 100–300 K and nominal column density |
+| [Polyurethane, Freon label, 64.08 kg/m3](polyurethane-freon-64p08-nist-thermal-reference/manifest.tsv) | 2 | Conductivity 88–300 K and nominal column density |
+| [Polystyrene, Freon label, 31.88 kg/m3](polystyrene-freon-31p88-nist-thermal-reference/manifest.tsv) | 2 | Conductivity 90–300 K and nominal column density |
+| [Polystyrene, gas unspecified, 32.04 kg/m3](polystyrene-32p04-nist-thermal-reference/manifest.tsv) | 2 | Conductivity 33–300 K and nominal column density |
+| [Polystyrene, gas unspecified, 49.98 kg/m3](polystyrene-49p98-nist-thermal-reference/manifest.tsv) | 2 | Conductivity 7–300 K and nominal column density |
+| [Polyurethane, air label, 389.25 kg/m3](polyurethane-air-389p25-nist-thermal-reference/manifest.tsv) | 2 | Specific heat 100–300 K and nominal column density |
+| [Polystyrene, 9.93 kg/m3 label](polystyrene-9p93-nist-thermal-reference/manifest.tsv) | 2 | Specific heat 100–300 K; contradictory imperial density label retained |
+| [Polystyrene, 60.07 kg/m3 label](polystyrene-60p07-nist-thermal-reference/manifest.tsv) | 2 | Specific heat 100–300 K and nominal column density |
+| [Dried fiber-cement board](fsri-fiber-cement-board-dried-2021/manifest.tsv) | 8 | Native capacity, published Cp, conductivity, scatter and normalization density |
+| [Dried gypsum wallboard](fsri-gypsum-wallboard-dried-2021/manifest.tsv) | 8 | Separate oven-conditioned whole-board thermal population |
+| [Dried wood stud](fsri-wood-stud-dried-2021/manifest.tsv) | 8 | Separate conditioned lumber population, with density-header conflict retained |
+| [Dried basswood panel](fsri-basswood-panel-dried-2022/manifest.tsv) | 8 | Separate conditioned panel population and original source labeling |
+
+The nine NIST profiles retain 495 sampled curve knots and nine nominal-density
+scalars. All retained intervals intersect the original data and equation ranges.
+Gas labels do not establish exact cell-gas species, pressure or composition;
+Freon is left as the source's unspecified label. No Cp/k join across different
+source populations, density interpolation, or density-versus-temperature law is
+inferred. The 9.93 kg/m3 polystyrene column's parenthetic 0.062 lb/ft3 label is
+inconsistent; its explicit `source-density-unit-labels-consistent=0` condition
+preserves that conflict without silently correcting either printed value.
+
+The four FSRI profiles use the original source pin
+`a432697e4b7d40f642b5cc8f384506439ebb32df`. Native capacity/Cp supports 10–40 C;
+conductivity supports 15–45 C. The 105 C oven conditioning and desiccated storage
+define measured populations, not a reversible moisture-removal law. Gypsum
+dehydration state and kinetics remain unspecified. Wood-stud Dry density
+filenames conflict with WET internal headers; source-script normalization and
+Cp require `source-density-header-consistent=0`, while native capacity does not
+depend on those density files. Each dried population produces lower heat storage
+and conductivity than its unconditioned counterpart in the tested scenarios.
+
+`thermal::transport::storage::PreparedHeatStorage` combines explicit fixed
+masses and reference volumes at a caller-declared common temperature. It needs
+only the selected capacity sources, retains each source's complete context,
+intersects their support and preserves all internal breakpoints. The prepared
+total capacity drives energy integration, a noniterative temperature inverse
+and optional sensible entropy. `HeatStorageThermalLaw` connects the same storage
+to the existing conservative thermal timeline; no second time integrator or
+conductivity mixing rule is introduced. The original volumetric transport and
+the new assembly share the positive-affine caloric kernel.
+
+Focused native verification passes **26 tests: 13 new and 13 regressions**:
+three in each new data suite, four assembly tests, three existing volumetric
+curve tests and ten existing volumetric-timeline tests. Real source consumers
+include six foam conductivity substitutions, dried/unconditioned building
+comparisons, Cp-only foam assemblies, MDF plus acrylic/mineral countertop below
+MDF's conductivity support, and beryllium heating without density or conductivity.
+Full workspace compilation remains unavailable because required sibling
+repositories are missing; the results concern the actual compiler and focused
+production modules, not full coupled or experimental qualification.

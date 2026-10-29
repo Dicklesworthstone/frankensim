@@ -1,0 +1,35 @@
+frankensim.matdb-source.v1
+observation	nist-identity	polyurethane-air-389p25-nist-thermal-reference	NIST specific-heat column identity and reference scope	This profile contains only the Polyurethane specific-heat column labelled 389.25 kg/m3, air filled. Exact grade, process, moisture, pressure, orientation and cross-property coupon correspondence are unknown. Engineering-reference-model=1 accepts the source-family fit and authored interpolation. A supplied mass can use this specific heat directly; no density or conductivity is required for that bounded caloric model. Other density and gas columns are distinct cases; no generic EPS/XPS morphology, product qualification, phase transition, chemical aging or transient gas-exchange law is inferred.
+observation	nist-gas	polyurethane-air-389p25-nist-thermal-reference	Source cell-gas condition	The selected source describes air filled. The air label does not quantify the cell-gas composition, moisture or pressure; an unspecified gas is not assumed to be air. Source-cell-gas-composition-known=0 remains required. No shared coupon with conductivity or expansion data is established.
+observation	nist-capacity	polyurethane-air-389p25-nist-thermal-reference	NIST specific-heat fit; https://trc.nist.gov/cryogenics/materials/Polyurethane/polyurethanerev.html	Published log10(Cp)=sum(a_i*log10(T)^i), T in K, Cp in J/(kg K); a..i=4894.36,-11608.63,10463.31,-3895.8,-40.0053,497.4517,-147.7555,14.19365,0. Data range 100-300 K, equation range 80-300 K; retained support is the intersection 100-300 K. Source fit error relative to data is 2 percent, without a stated confidence level or measurement uncertainty; property uncertainty remains unstated. 28 samples use 70-digit decimal evaluation. Author-selected intervals are bisected until quarter/mid/three-quarter interpolation comparisons are at most 0.008 percent relative difference; maximum observed 0.0078709099221142328 percent. These finite numerical comparisons do not certify a continuous error bound or supply statistical uncertainty.
+observation	nist-density-label	polyurethane-air-389p25-nist-thermal-reference	Nominal density labels are metadata, not a constitutive law	The source specific-heat column has density labels 389.25 kg/m3 and 24.3 lb/ft3. No density measurement temperature, method, uncertainty or temperature dependence is supplied. The nominal scalar has no temperature validity and cannot be used as density(T), to infer thermal expansion, or to pair unmatched conductivity and capacity measurements. The SI and parenthetic customary labels agree to the displayed rounding, recorded as source-density-unit-labels-consistent=1; this does not establish a density measurement law.
+curve	heat-capacity	nist-identity,nist-gas,nist-capacity,nist-density-label	specific_heat_capacity	temperature	K	J/kg/K	100:555.64831283712600,101.5625:561.57325595689338,103.125:567.60144150093648,106.25:579.88834176115960,109.375:592.37995562916039,112.5:604.98579043547388,125:655.60843817199297,137.5:705.87841948850117,150:755.99861414517916,162.5:806.37001651956063,175:857.12711577197497,200:958.95784217265810,206.25:984.20919533815923,212.5:1009.2830132683730,218.75:1034.1434323528192,225:1058.7664474127783,231.25:1083.1424884825445,237.5:1107.2785517102465,250:1154.9514562399408,261.575:1198.7284080349387,273.15:1242.7742334509181,275:1249.8934366682627,279.5375:1267.5027652540066,284.075:1285.3766081929566,288.6125:1303.5880929280480,293.15:1322.2170642020433,296.575:1336.6075925623794,300:1351.3252580288552	linear
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	100	300	K
+validity	heat-capacity	reference	1	1	1
+validity	heat-capacity	family	1	1	1
+validity	heat-capacity	grade_known	0	0	1
+validity	heat-capacity	process_known	0	0	1
+validity	heat-capacity	moisture_known	0	0	1
+validity	heat-capacity	pressure_known	0	0	1
+validity	heat-capacity	matched	0	0	1
+validity	heat-capacity	orientation_known	0	0	1
+validity	heat-capacity	gas_composition_known	0	0	1
+validity	heat-capacity	reference_density	389.25	389.25	kg/m3
+validity	heat-capacity	density_labels_consistent	1	1	1
+validity	heat-capacity	cell_gas_air	1	1	1
+scalar	nominal-density-label	nist-identity,nist-gas,nist-density-label	nominal_density	389.25	kg/m3	constant
+uncertainty	nominal-density-label	unstated	-	-	-	-
+validity	nominal-density-label	reference	1	1	1
+validity	nominal-density-label	family	1	1	1
+validity	nominal-density-label	grade_known	0	0	1
+validity	nominal-density-label	process_known	0	0	1
+validity	nominal-density-label	moisture_known	0	0	1
+validity	nominal-density-label	pressure_known	0	0	1
+validity	nominal-density-label	matched	0	0	1
+validity	nominal-density-label	orientation_known	0	0	1
+validity	nominal-density-label	gas_composition_known	0	0	1
+validity	nominal-density-label	reference_density	389.25	389.25	kg/m3
+validity	nominal-density-label	density_labels_consistent	1	1	1
+validity	nominal-density-label	cell_gas_air	1	1	1
+validity	nominal-density-label	density_temperature_known	0	0	1

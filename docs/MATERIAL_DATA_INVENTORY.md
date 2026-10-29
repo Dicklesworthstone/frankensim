@@ -853,3 +853,36 @@ composition, thermal storage and shared layer conduction. Full workspace Cargo
 validation remains unavailable because the required sibling checkouts are
 missing; this is bounded compiler/model verification, not experimental
 qualification or completion of the broad material-reality program.
+
+## 2026-10-29 foam and conditioned-building storage increment
+
+Added **13 source profiles / 50 property claims / 596 numerical values / 76
+source observations**. Six NIST polyurethane/polystyrene populations add
+conductivity curves (12 claims); three further NIST populations add specific
+heat (6); dried fiber-cement, gypsum, wood-stud and basswood populations add
+native storage and thermal transport data (32). Individual sources, supported
+intervals and material qualifications are linked in the
+[seed catalog](../data/matdb/seed-v1/README.md#foam-and-conditioned-building-storage-assemblies-2026-10-29).
+
+Foam density and gas labels remain source-population identities, with unknown
+measurement temperature and composition retained. The polystyrene 9.93 column's
+inconsistent imperial label is query-visible. The FSRI source pin, oven
+conditioning, independent native capacity, descriptive scatter and exact
+normalization procedure are retained. Dried wood-stud density filenames/internal
+headers conflict, and that ambiguity is required when querying derived Cp.
+
+`PreparedHeatStorage` now makes capacity-only data usable for sensible heating
+and combines multiple fixed-mass or fixed-reference-volume constituents at an
+explicit shared temperature. Source evidence and support remain component-wise;
+only their additive total capacity is prepared. The common caloric kernel
+integrates energy, inverts temperature and computes optional sensible entropy.
+`HeatStorageThermalLaw` binds the result to the existing conservative timeline.
+Conductivity, density, mixture entropy, latent heat, phase behavior and moisture
+evolution are not inferred from those capacities.
+
+All **26 focused native tests pass (13 new, 13 regressions)**. They include the
+actual pack compiler, original source equations/reductions, support refusals,
+layer conduction, conditioned-material substitution, capacity-only heating and
+the unchanged volumetric timeline. Workspace Cargo validation remains blocked
+by the seven missing required sibling repositories; the broad material-reality
+program remains open beyond these bounded capabilities.

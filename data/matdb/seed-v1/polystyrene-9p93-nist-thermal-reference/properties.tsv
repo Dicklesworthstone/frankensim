@@ -1,0 +1,35 @@
+frankensim.matdb-source.v1
+observation	nist-identity	polystyrene-9p93-nist-thermal-reference	NIST specific-heat column identity and reference scope	This profile contains only the Polystyrene specific-heat column labelled 9.93 kg/m3, cell gas unspecified. Exact grade, process, moisture, pressure, orientation and cross-property coupon correspondence are unknown. Engineering-reference-model=1 accepts the source-family fit and authored interpolation. A supplied mass can use this specific heat directly; no density or conductivity is required for that bounded caloric model. Other density and gas columns are distinct cases; no generic EPS/XPS morphology, product qualification, phase transition, chemical aging or transient gas-exchange law is inferred.
+observation	nist-gas	polystyrene-9p93-nist-thermal-reference	Source cell-gas condition	The selected source describes cell gas unspecified. The air label does not quantify the cell-gas composition, moisture or pressure; an unspecified gas is not assumed to be air. Source-cell-gas-composition-known=0 remains required. No shared coupon with conductivity or expansion data is established.
+observation	nist-capacity	polystyrene-9p93-nist-thermal-reference	NIST specific-heat fit; https://trc.nist.gov/cryogenics/materials/Polystyrene/polystyrenerev.html	Published log10(Cp)=sum(a_i*log10(T)^i), T in K, Cp in J/(kg K); a..i=-734.172,1163.613,-135.157,-878.514,791.787,-308.6236,58.6764,-4.4494,0. Data range 100-300 K, equation range 90-300 K; retained support is the intersection 100-300 K. Source fit error relative to data is 1.5 percent, without a stated confidence level or measurement uncertainty; property uncertainty remains unstated. 34 samples use 70-digit decimal evaluation. Author-selected intervals are bisected until quarter/mid/three-quarter interpolation comparisons are at most 0.008 percent relative difference; maximum observed 0.0075174405053571879 percent. These finite numerical comparisons do not certify a continuous error bound or supply statistical uncertainty.
+observation	nist-density-label	polystyrene-9p93-nist-thermal-reference	Nominal density labels are metadata, not a constitutive law	The source specific-heat column has density labels 9.93 kg/m3 and 0.062 lb/ft3. No density measurement temperature, method, uncertainty or temperature dependence is supplied. The nominal scalar has no temperature validity and cannot be used as density(T), to infer thermal expansion, or to pair unmatched conductivity and capacity measurements. The page parenthetically equates 9.93 kg/m3 to 0.062 lb/ft3; those values differ by approximately a factor of ten after unit conversion. The SI label is retained only as a literal source-column identifier, with source-density-unit-labels-consistent=0. The imperial text is preserved here without correcting either value or claiming which label represents the actual specimen. The capacity curve is transcribed from that column and does not require density in a mass-based consumer.
+curve	heat-capacity	nist-identity,nist-gas,nist-capacity,nist-density-label	specific_heat_capacity	temperature	K	J/kg/K	100:521.43478541445778,101.5625:526.67423223588801,103.125:531.80274427980930,106.25:541.78914773178596,109.375:551.50193060294771,112.5:561.02610852967274,118.75:579.75899207639986,125:598.35474435789515,131.25:617.02120775837152,137.5:635.86553296832581,143.75:654.93266975454391,150:674.23053927108935,156.25:693.74641815452491,162.5:713.45754209396900,168.75:733.33789912543898,175:753.36249996415211,187.5:793.76401980299016,200:834.55598581333486,212.5:875.72627139085928,225:917.35207931698072,231.25:938.38103457886197,237.5:959.58618480303912,243.75:980.99579624746720,250:1002.6408897973561,255.7875:1022.9232076880061,261.575:1043.4639984343200,267.3625:1064.2924308131030,273.15:1085.4386570631262,275:1092.2701985242061,279.5375:1109.1832626362114,284.075:1126.3321338864572,288.6125:1143.7322774822515,293.15:1161.3993057071246,300:1188.6106397726383	linear
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	100	300	K
+validity	heat-capacity	reference	1	1	1
+validity	heat-capacity	family	1	1	1
+validity	heat-capacity	grade_known	0	0	1
+validity	heat-capacity	process_known	0	0	1
+validity	heat-capacity	moisture_known	0	0	1
+validity	heat-capacity	pressure_known	0	0	1
+validity	heat-capacity	matched	0	0	1
+validity	heat-capacity	orientation_known	0	0	1
+validity	heat-capacity	gas_composition_known	0	0	1
+validity	heat-capacity	reference_density	9.93	9.93	kg/m3
+validity	heat-capacity	density_labels_consistent	0	0	1
+validity	heat-capacity	cell_gas_known	0	0	1
+scalar	nominal-density-label	nist-identity,nist-gas,nist-density-label	nominal_density	9.93	kg/m3	constant
+uncertainty	nominal-density-label	unstated	-	-	-	-
+validity	nominal-density-label	reference	1	1	1
+validity	nominal-density-label	family	1	1	1
+validity	nominal-density-label	grade_known	0	0	1
+validity	nominal-density-label	process_known	0	0	1
+validity	nominal-density-label	moisture_known	0	0	1
+validity	nominal-density-label	pressure_known	0	0	1
+validity	nominal-density-label	matched	0	0	1
+validity	nominal-density-label	orientation_known	0	0	1
+validity	nominal-density-label	gas_composition_known	0	0	1
+validity	nominal-density-label	reference_density	9.93	9.93	kg/m3
+validity	nominal-density-label	density_labels_consistent	0	0	1
+validity	nominal-density-label	cell_gas_known	0	0	1
+validity	nominal-density-label	density_temperature_known	0	0	1
