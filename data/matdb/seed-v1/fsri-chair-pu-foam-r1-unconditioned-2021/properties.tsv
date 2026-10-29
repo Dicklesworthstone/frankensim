@@ -1,0 +1,69 @@
+frankensim.matdb-source.v1
+observation	identity	fsri-chair-pu-foam-r1-unconditioned-2021	Overstuffed-chair polyurethane foam, selected R1 unconditioned 2021 experiments; https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Overstuffed_Chair_Polyurethane_Foam/material.json	Flexible polyurethane cushion foam removed from an overstuffed chair. Source metadata describes a 0.75 m by 0.75 m by 0.2 m cushion; the stock-thickness coordinate is the original cushion thickness, not HFM sample thickness. This profile selects the R1 experiments only: heat capacity on 2021-04-05 and conductivity on 2021-02-19. The separately recorded R2 capacity sample is 33.11 mm thick, versus 50.96 mm for R1, so it is not pooled into this selected approximately 51 mm sample profile. Specimen labels and similar thickness do not establish exact coupon continuity, equal compression, or identical porosity across dates. No moisture, contact pressure, isotropy, compression-response, aging, strength, expansion, fire/degradation or service-temperature law is inferred from these thermal experiments.
+observation	method	fsri-chair-pu-foam-r1-unconditioned-2021	FSRI HFM preparation and methods; https://materials.fsri.org/experimentalmethodology	The Wet label in raw filenames denotes unconditioned samples kept indoors at 22 +/- 3 degC and relative humidity 40 +/- 20 percent. It does not mean water-saturated, nor does it supply exact sample moisture or zero moisture. These specimens are not assigned the source's separate oven-dried condition. The general conductivity method is ASTM C518 with through-thickness upward heat flow; the general capacity method is ASTM C1784-20 with equal-temperature plate steps. Applied contact pressure, calibrated instrument uncertainty, specimen-axis mapping and cross-property covariance are not provided. Conductivity and capacity are distinct runs; joint thermal use is conditional on treating the selected product/conditioning population as representative, not proof of identical coupons or independent measurements.
+observation	capacity-r1	fsri-chair-pu-foam-r1-unconditioned-2021	Native volume-capacity result R1; https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Overstuffed_Chair_Polyurethane_Foam/HFM/Overstuffed_Chair_Polyurethane_Foam_HFM_Wet_HeatCapacity_210405_R1.tst	Instrument thickness 50.96 mm. Raw result mean temperatures 10,20.01,30.01,40.01 degC give 54854,53861,58335,61219 J/(m3 K). The instrument's Specific Heat column carries volume units, not J/(kg K). Equal-plate heating uses 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC steps. These are finite-step estimates reported at their mean temperatures. No per-run standard uncertainty is supplied.
+observation	capacity-reduction	fsri-chair-pu-foam-r1-unconditioned-2021	Explicit numerical reduction using the source temperature grouping; https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/02_Scripts/plot_HFM_data_html.py	Only the complete R1 capacity result is retained. Source temperatures round to 0.1 degC, giving 10,20,30,40 degC; conversion to kelvin adds exactly 273.15. One selected specimen has no estimable across-specimen sample standard deviation, so no capacity SD or zero-uncertainty claim is created. Linear interpolation of the four native volume-capacity values is an authored local approximation to finite-step measurements, with no extrapolation or quantified interpolation error.
+observation	density-absence	fsri-chair-pu-foam-r1-unconditioned-2021	Source metadata and HFM directory; https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Overstuffed_Chair_Polyurethane_Foam/material.json	The headline metadata density is 31.7 kg/m3, but there are no compatible HFM density CSV inputs or density measurement temperature for the selected R1 runs. It is not silently converted into a density law or used to invent mass-specific heat. Native volumetric heat capacity remains directly usable for volume-based thermal storage.
+observation	conductivity-r1	fsri-chair-pu-foam-r1-unconditioned-2021	Native apparent through-thickness conductivity R1; https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Overstuffed_Chair_Polyurethane_Foam/HFM/Overstuffed_Chair_Polyurethane_Foam_HFM_Wet_Conductivity_210219_R1.tst	Instrument thickness 50.78 mm. Average Cond result rows in W/(m K), grouped by rounded mean temperature: 25 degC: 0.03762; 30 degC: 0.03874; 35 degC: 0.03969; 40 degC: 0.04055; 45 degC: 0.04155. The upper/lower plate setpoints are 15/35,20/40,25/45,30/50,35/55 degC, all a finite nominal 20 K difference with upward heat flow. This does not establish a zero-gradient local conductivity or isotropy.
+observation	conductivity-reduction	fsri-chair-pu-foam-r1-unconditioned-2021	Selected conductivity numerical facts and arithmetic; https://materials.fsri.org/materialdetail/overstuffed-chair-polyurethane-foam; https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/02_Scripts/plot_HFM_data_html.py	Only the five complete R1 Average Cond values are retained at mean temperatures rounded to 25,30,35,40,45 degC. These are the selected raw R1 values, not the website's rounded three-specimen population means. No across-specimen sample SD can be estimated from this single-specimen selection, so none is created. Linear interpolation in mean test temperature is an authored approximation with unknown interpolation error; values outside these five groups are not extrapolated.
+observation	local-model	fsri-chair-pu-foam-r1-unconditioned-2021	Explicit mean-test-temperature to local-conductivity approximation	The thermal-conductivity curve requires mean-test-temperature-as-local-model=1. It explicitly substitutes the finite-gradient apparent HFM conductivity for a local scalar through-thickness coefficient at the same numerical temperature. This is an authored engineering approximation, not deconvolution of the 20 K plate difference, a point measurement or proof of isotropy. The apparent-thermal-conductivity curve retains its native test-mean-temperature axis.
+curve	selected-volume-capacity	identity,method,capacity-r1,capacity-reduction,density-absence	volumetric_capacity	temperature	K	J/m3/K	283.15:54854,293.15:53861,303.15:58335,313.15:61219	linear
+uncertainty	selected-volume-capacity	unstated	-	-	-	-
+validity	selected-volume-capacity	family	1	1	1
+validity	selected-volume-capacity	unconditioned	1	1	1
+validity	selected-volume-capacity	oven_dried	0	0	1
+validity	selected-volume-capacity	grade_known	0	0	1
+validity	selected-volume-capacity	formulation_known	0	0	1
+validity	selected-volume-capacity	moisture_known	0	0	1
+validity	selected-volume-capacity	pressure_known	0	0	1
+validity	selected-volume-capacity	statistic	0	0	1
+validity	selected-volume-capacity	capacity_specimens	1	1	1
+validity	selected-volume-capacity	conductivity_specimens	1	1	1
+validity	selected-volume-capacity	density_specimens	0	0	1
+validity	selected-volume-capacity	selected_r1	1	1	1
+validity	selected-volume-capacity	stock_known	1	1	1
+validity	selected-volume-capacity	stock_thickness	0.2	0.2	m
+validity	selected-volume-capacity	temperature	283.15	313.15	K
+curve	apparent-conductivity	identity,method,conductivity-reduction,conductivity-r1	apparent_conductivity	test_mean_temperature	K	W/m/K	298.15:0.03762,303.15:0.03874,308.15:0.03969,313.15:0.04055,318.15:0.04155	linear
+uncertainty	apparent-conductivity	unstated	-	-	-	-
+validity	apparent-conductivity	family	1	1	1
+validity	apparent-conductivity	unconditioned	1	1	1
+validity	apparent-conductivity	oven_dried	0	0	1
+validity	apparent-conductivity	grade_known	0	0	1
+validity	apparent-conductivity	formulation_known	0	0	1
+validity	apparent-conductivity	moisture_known	0	0	1
+validity	apparent-conductivity	pressure_known	0	0	1
+validity	apparent-conductivity	statistic	0	0	1
+validity	apparent-conductivity	capacity_specimens	1	1	1
+validity	apparent-conductivity	conductivity_specimens	1	1	1
+validity	apparent-conductivity	density_specimens	0	0	1
+validity	apparent-conductivity	selected_r1	1	1	1
+validity	apparent-conductivity	stock_known	1	1	1
+validity	apparent-conductivity	stock_thickness	0.2	0.2	m
+validity	apparent-conductivity	through_thickness	1	1	1
+validity	apparent-conductivity	upward	1	1	1
+validity	apparent-conductivity	plate_delta	20	20	K
+validity	apparent-conductivity	conductivity_readings	1	1	1
+validity	apparent-conductivity	test_mean_temperature	298.15	318.15	K
+curve	local-conductivity	identity,method,conductivity-reduction,conductivity-r1,local-model	local_conductivity	temperature	K	W/m/K	298.15:0.03762,303.15:0.03874,308.15:0.03969,313.15:0.04055,318.15:0.04155	linear
+uncertainty	local-conductivity	unstated	-	-	-	-
+validity	local-conductivity	family	1	1	1
+validity	local-conductivity	unconditioned	1	1	1
+validity	local-conductivity	oven_dried	0	0	1
+validity	local-conductivity	grade_known	0	0	1
+validity	local-conductivity	formulation_known	0	0	1
+validity	local-conductivity	moisture_known	0	0	1
+validity	local-conductivity	pressure_known	0	0	1
+validity	local-conductivity	statistic	0	0	1
+validity	local-conductivity	capacity_specimens	1	1	1
+validity	local-conductivity	conductivity_specimens	1	1	1
+validity	local-conductivity	density_specimens	0	0	1
+validity	local-conductivity	selected_r1	1	1	1
+validity	local-conductivity	stock_known	1	1	1
+validity	local-conductivity	stock_thickness	0.2	0.2	m
+validity	local-conductivity	through_thickness	1	1	1
+validity	local-conductivity	upward	1	1	1
+validity	local-conductivity	plate_delta	20	20	K
+validity	local-conductivity	conductivity_readings	1	1	1
+validity	local-conductivity	local_model	1	1	1
+validity	local-conductivity	temperature	298.15	318.15	K

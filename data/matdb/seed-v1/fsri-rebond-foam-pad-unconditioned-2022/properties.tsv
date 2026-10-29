@@ -1,0 +1,163 @@
+frankensim.matdb-source.v1
+observation	identity	fsri-rebond-foam-pad-unconditioned-2022	Rebond urethane carpet underlay, unconditioned February 2022; https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Rebond_Foam_Carpet_Pad/material.json	Carpet underlay made from reclaimed urethane foam pieces. Source metadata describes 9 mm roll stock; this nominal stock thickness is identity metadata, not the instrument-measured sample thickness or a universal product specification. Exact scrap composition, binder, foam density distribution, blowing agent and manufacturer grade are unknown. No moisture, contact pressure, isotropy, compression-response, aging, strength, expansion, fire/degradation or service-temperature law is inferred from these thermal experiments.
+observation	method	fsri-rebond-foam-pad-unconditioned-2022	FSRI HFM preparation and methods; https://materials.fsri.org/experimentalmethodology	The Wet label in raw filenames denotes unconditioned samples kept indoors at 22 +/- 3 degC and relative humidity 40 +/- 20 percent. It does not mean water-saturated, nor does it supply exact sample moisture or zero moisture. These specimens are not assigned the source's separate oven-dried condition. The general conductivity method is ASTM C518 with through-thickness upward heat flow; the general capacity method is ASTM C1784-20 with equal-temperature plate steps. Applied contact pressure, calibrated instrument uncertainty, specimen-axis mapping and cross-property covariance are not provided. Conductivity and capacity are distinct runs; joint thermal use is conditional on treating the selected product/conditioning population as representative, not proof of identical coupons or independent measurements.
+observation	capacity-r1	fsri-rebond-foam-pad-unconditioned-2022	Native volume-capacity result R1; https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Rebond_Foam_Carpet_Pad/HFM/Rebond_Foam_Carpet_Pad_HFM_Wet_heatcapacity_220210_R1.tst	Instrument thickness 9.58 mm. Raw result mean temperatures 10,20.01,30.01,40.01 degC give 141793,142826,144715,147373 J/(m3 K). The instrument's Specific Heat column carries volume units, not J/(kg K). Equal-plate heating uses 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC steps. These are finite-step estimates reported at their mean temperatures. No per-run standard uncertainty is supplied.
+observation	capacity-r2	fsri-rebond-foam-pad-unconditioned-2022	Native volume-capacity result R2; https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Rebond_Foam_Carpet_Pad/HFM/Rebond_Foam_Carpet_Pad_HFM_Wet_heatcapacity_220211_R2.tst	Instrument thickness 9.58 mm. Raw result mean temperatures 10,20.01,30.01,40.01 degC give 142485,144755,146454,149966 J/(m3 K). The instrument's Specific Heat column carries volume units, not J/(kg K). Equal-plate heating uses 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC steps. These are finite-step estimates reported at their mean temperatures. No per-run standard uncertainty is supplied.
+observation	capacity-r3	fsri-rebond-foam-pad-unconditioned-2022	Native volume-capacity result R3; https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Rebond_Foam_Carpet_Pad/HFM/Rebond_Foam_Carpet_Pad_HFM_Wet_heatcapacity_220211_R3.tst	Instrument thickness 9.49 mm. Raw result mean temperatures 10,20.01,30.01,40.01 degC give 158383,164573,160724,170319 J/(m3 K). The instrument's Specific Heat column carries volume units, not J/(kg K). Equal-plate heating uses 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC steps. These are finite-step estimates reported at their mean temperatures. No per-run standard uncertainty is supplied.
+observation	capacity-reduction	fsri-rebond-foam-pad-unconditioned-2022	Explicit numerical reduction using the source temperature grouping; https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/02_Scripts/plot_HFM_data_html.py	The 3 complete native volume-capacity results are averaged at each source temperature. Temperatures round to 0.1 degC as in the primary reduction, giving 10,20,30,40 degC; conversion to kelvin adds exactly 273.15. Across-specimen sample SD is sqrt(sum((C_i-mean_C)^2)/(3-1)); it is retained as a discrete statistic, not a confidence interval or instrument uncertainty. Extra computed digits are arithmetic, not extra measurement resolution. Linear interpolation of mean C(T) and the published Cp(T) is an authored local approximation to finite-step estimates; interpolation error is unquantified and extrapolation is disallowed.
+observation	density-normalization	fsri-rebond-foam-pad-unconditioned-2022	Density input files; https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Rebond_Foam_Carpet_Pad/HFM/	Rebond_Foam_Carpet_Pad_Density_Wet_R1.csv, Rebond_Foam_Carpet_Pad_Density_Wet_R2.csv and Rebond_Foam_Carpet_Pad_Density_Wet_R3.csv report densities 84,84,89 kg/m3. Corresponding masses are 34.4,34,21.5 g and volumes are 412,406.5,240.1 cm3. The primary reduction averages the reported rounded density column to 85.66666666666667 kg/m3; recomputing mass divided by volume would change that normalization. Density measurement temperature is not stated. This scalar is a reference normalization input without a temperature validity domain, not a measured density(T) curve or a constant density law.
+observation	specific-heat-reduction	fsri-rebond-foam-pad-unconditioned-2022	Published mass-specific means and scatter; https://materials.fsri.org/materialdetail/rebond-foam-carpet-pad	The mean native volume-capacity values divided by mean reported density are rounded to whole J/(kg K): 1722,1759,1758,1820 at 10,20,30,40 degC. Published SD 110,141,103,147 J/(kg K) is native capacity sample SD divided by the same mean density and rounded to whole units. This does not propagate density scatter, covariance or calibration uncertainty. Cp, native C and normalization density are algebraically related, not independent measurements; the rounded published Cp values remain distinct from unrounded native C.
+observation	conductivity-r1	fsri-rebond-foam-pad-unconditioned-2022	Native apparent through-thickness conductivity R1; https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Rebond_Foam_Carpet_Pad/HFM/Rebond_Foam_Carpet_Pad_HFM_Wet_conductivity_220210_R1.tst	Instrument thickness 9.68 mm. Average Cond result rows in W/(m K), grouped by rounded mean temperature: 15 degC: 0.03646,0.03648,0.03646; 65 degC: 0.0436,0.04356,0.04352. The upper/lower plate setpoints are 5/25,55/75 degC, all a finite nominal 20 K difference with upward heat flow. This does not establish a zero-gradient local conductivity or isotropy.
+observation	conductivity-r2	fsri-rebond-foam-pad-unconditioned-2022	Native apparent through-thickness conductivity R2; https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Rebond_Foam_Carpet_Pad/HFM/Rebond_Foam_Carpet_Pad_HFM_Wet_conductivity_220210_R2.tst	Instrument thickness 9.65 mm. Average Cond result rows in W/(m K), grouped by rounded mean temperature: 15 degC: 0.03605,0.0361,0.03606; 65 degC: 0.04298,0.04305,0.043. The upper/lower plate setpoints are 5/25,55/75 degC, all a finite nominal 20 K difference with upward heat flow. This does not establish a zero-gradient local conductivity or isotropy.
+observation	conductivity-r3	fsri-rebond-foam-pad-unconditioned-2022	Native apparent through-thickness conductivity R3; https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Rebond_Foam_Carpet_Pad/HFM/Rebond_Foam_Carpet_Pad_HFM_Wet_conductivity_220210_R3.tst	Instrument thickness 9.63 mm. Average Cond result rows in W/(m K), grouped by rounded mean temperature: 15 degC: 0.03723,0.03726,0.03721; 65 degC: 0.04415,0.0442,0.04415. The upper/lower plate setpoints are 5/25,55/75 degC, all a finite nominal 20 K difference with upward heat flow. This does not establish a zero-gradient local conductivity or isotropy.
+observation	conductivity-reduction	fsri-rebond-foam-pad-unconditioned-2022	Selected conductivity numerical facts and arithmetic; https://materials.fsri.org/materialdetail/rebond-foam-carpet-pad; https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/02_Scripts/plot_HFM_data_html.py	3 specimens each provide three repeated cycles at each mean temperature: 9 readings per temperature, not 9 independent specimens. Raw measured mean temperatures round to 15,65 degC. The primary script pools the readings, rounds means and sample SD to 0.001 W/(m K), and publishes means 0.037,0.044 with SD 0.001,0.001. A printed SD of 0.000 is rounding, not zero uncertainty. Linear interpolation between mean-temperature groups is an authored approximation with unquantified error. Only actual groups are retained; blank cells from aligned condition tables do not create measurements.
+observation	local-model	fsri-rebond-foam-pad-unconditioned-2022	Explicit mean-test-temperature to local-conductivity approximation	The thermal-conductivity curve requires mean-test-temperature-as-local-model=1. It explicitly substitutes the finite-gradient apparent HFM conductivity for a local scalar through-thickness coefficient at the same numerical temperature. This is an authored engineering approximation, not deconvolution of the 20 K plate difference, a point measurement or proof of isotropy. The apparent-thermal-conductivity curve retains its native test-mean-temperature axis.
+curve	mean-volume-capacity	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction	volumetric_capacity	temperature	K	J/m3/K	283.15:147553.66666666666,293.15:150718,303.15:150631,313.15:155886	linear
+uncertainty	mean-volume-capacity	unstated	-	-	-	-
+validity	mean-volume-capacity	family	1	1	1
+validity	mean-volume-capacity	unconditioned	1	1	1
+validity	mean-volume-capacity	oven_dried	0	0	1
+validity	mean-volume-capacity	grade_known	0	0	1
+validity	mean-volume-capacity	formulation_known	0	0	1
+validity	mean-volume-capacity	moisture_known	0	0	1
+validity	mean-volume-capacity	pressure_known	0	0	1
+validity	mean-volume-capacity	statistic	1	1	1
+validity	mean-volume-capacity	capacity_specimens	3	3	1
+validity	mean-volume-capacity	conductivity_specimens	3	3	1
+validity	mean-volume-capacity	density_specimens	3	3	1
+validity	mean-volume-capacity	selected_r1	0	0	1
+validity	mean-volume-capacity	stock_known	1	1	1
+validity	mean-volume-capacity	stock_thickness	0.009	0.009	m
+validity	mean-volume-capacity	temperature	283.15	313.15	K
+curve	published-specific-heat	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction,density-normalization,specific-heat-reduction	specific_heat	temperature	K	J/kg/K	283.15:1722,293.15:1759,303.15:1758,313.15:1820	linear
+uncertainty	published-specific-heat	unstated	-	-	-	-
+validity	published-specific-heat	family	1	1	1
+validity	published-specific-heat	unconditioned	1	1	1
+validity	published-specific-heat	oven_dried	0	0	1
+validity	published-specific-heat	grade_known	0	0	1
+validity	published-specific-heat	formulation_known	0	0	1
+validity	published-specific-heat	moisture_known	0	0	1
+validity	published-specific-heat	pressure_known	0	0	1
+validity	published-specific-heat	statistic	1	1	1
+validity	published-specific-heat	capacity_specimens	3	3	1
+validity	published-specific-heat	conductivity_specimens	3	3	1
+validity	published-specific-heat	density_specimens	3	3	1
+validity	published-specific-heat	selected_r1	0	0	1
+validity	published-specific-heat	stock_known	1	1	1
+validity	published-specific-heat	stock_thickness	0.009	0.009	m
+validity	published-specific-heat	temperature	283.15	313.15	K
+curve	apparent-conductivity	identity,method,conductivity-reduction,conductivity-r1,conductivity-r2,conductivity-r3	apparent_conductivity	test_mean_temperature	K	W/m/K	288.15:0.037,338.15:0.044	linear
+uncertainty	apparent-conductivity	unstated	-	-	-	-
+validity	apparent-conductivity	family	1	1	1
+validity	apparent-conductivity	unconditioned	1	1	1
+validity	apparent-conductivity	oven_dried	0	0	1
+validity	apparent-conductivity	grade_known	0	0	1
+validity	apparent-conductivity	formulation_known	0	0	1
+validity	apparent-conductivity	moisture_known	0	0	1
+validity	apparent-conductivity	pressure_known	0	0	1
+validity	apparent-conductivity	statistic	1	1	1
+validity	apparent-conductivity	capacity_specimens	3	3	1
+validity	apparent-conductivity	conductivity_specimens	3	3	1
+validity	apparent-conductivity	density_specimens	3	3	1
+validity	apparent-conductivity	selected_r1	0	0	1
+validity	apparent-conductivity	stock_known	1	1	1
+validity	apparent-conductivity	stock_thickness	0.009	0.009	m
+validity	apparent-conductivity	through_thickness	1	1	1
+validity	apparent-conductivity	upward	1	1	1
+validity	apparent-conductivity	plate_delta	20	20	K
+validity	apparent-conductivity	conductivity_readings	9	9	1
+validity	apparent-conductivity	test_mean_temperature	288.15	338.15	K
+curve	local-conductivity	identity,method,conductivity-reduction,conductivity-r1,conductivity-r2,conductivity-r3,local-model	local_conductivity	temperature	K	W/m/K	288.15:0.037,338.15:0.044	linear
+uncertainty	local-conductivity	unstated	-	-	-	-
+validity	local-conductivity	family	1	1	1
+validity	local-conductivity	unconditioned	1	1	1
+validity	local-conductivity	oven_dried	0	0	1
+validity	local-conductivity	grade_known	0	0	1
+validity	local-conductivity	formulation_known	0	0	1
+validity	local-conductivity	moisture_known	0	0	1
+validity	local-conductivity	pressure_known	0	0	1
+validity	local-conductivity	statistic	1	1	1
+validity	local-conductivity	capacity_specimens	3	3	1
+validity	local-conductivity	conductivity_specimens	3	3	1
+validity	local-conductivity	density_specimens	3	3	1
+validity	local-conductivity	selected_r1	0	0	1
+validity	local-conductivity	stock_known	1	1	1
+validity	local-conductivity	stock_thickness	0.009	0.009	m
+validity	local-conductivity	through_thickness	1	1	1
+validity	local-conductivity	upward	1	1	1
+validity	local-conductivity	plate_delta	20	20	K
+validity	local-conductivity	conductivity_readings	9	9	1
+validity	local-conductivity	local_model	1	1	1
+validity	local-conductivity	temperature	288.15	338.15	K
+curve	computed-volume-capacity-sd	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction	capacity_sd	temperature	K	J/m3/K	283.15:9384.858088076417,293.15:12037.48433020787,303.15:8783.935165972025,313.15:12566.404776227766	tabulated
+uncertainty	computed-volume-capacity-sd	unstated	-	-	-	-
+validity	computed-volume-capacity-sd	family	1	1	1
+validity	computed-volume-capacity-sd	unconditioned	1	1	1
+validity	computed-volume-capacity-sd	oven_dried	0	0	1
+validity	computed-volume-capacity-sd	grade_known	0	0	1
+validity	computed-volume-capacity-sd	formulation_known	0	0	1
+validity	computed-volume-capacity-sd	moisture_known	0	0	1
+validity	computed-volume-capacity-sd	pressure_known	0	0	1
+validity	computed-volume-capacity-sd	statistic	0	0	1
+validity	computed-volume-capacity-sd	capacity_specimens	3	3	1
+validity	computed-volume-capacity-sd	conductivity_specimens	3	3	1
+validity	computed-volume-capacity-sd	density_specimens	3	3	1
+validity	computed-volume-capacity-sd	selected_r1	0	0	1
+validity	computed-volume-capacity-sd	stock_known	1	1	1
+validity	computed-volume-capacity-sd	stock_thickness	0.009	0.009	m
+validity	computed-volume-capacity-sd	temperature	283.15	313.15	K
+curve	published-specific-heat-sd	identity,method,density-normalization,specific-heat-reduction	specific_heat_sd	temperature	K	J/kg/K	283.15:110,293.15:141,303.15:103,313.15:147	tabulated
+uncertainty	published-specific-heat-sd	unstated	-	-	-	-
+validity	published-specific-heat-sd	family	1	1	1
+validity	published-specific-heat-sd	unconditioned	1	1	1
+validity	published-specific-heat-sd	oven_dried	0	0	1
+validity	published-specific-heat-sd	grade_known	0	0	1
+validity	published-specific-heat-sd	formulation_known	0	0	1
+validity	published-specific-heat-sd	moisture_known	0	0	1
+validity	published-specific-heat-sd	pressure_known	0	0	1
+validity	published-specific-heat-sd	statistic	0	0	1
+validity	published-specific-heat-sd	capacity_specimens	3	3	1
+validity	published-specific-heat-sd	conductivity_specimens	3	3	1
+validity	published-specific-heat-sd	density_specimens	3	3	1
+validity	published-specific-heat-sd	selected_r1	0	0	1
+validity	published-specific-heat-sd	stock_known	1	1	1
+validity	published-specific-heat-sd	stock_thickness	0.009	0.009	m
+validity	published-specific-heat-sd	temperature	283.15	313.15	K
+curve	published-conductivity-sd	identity,method,conductivity-reduction,conductivity-r1,conductivity-r2,conductivity-r3	conductivity_sd	test_mean_temperature	K	W/m/K	288.15:0.001,338.15:0.001	tabulated
+uncertainty	published-conductivity-sd	unstated	-	-	-	-
+validity	published-conductivity-sd	family	1	1	1
+validity	published-conductivity-sd	unconditioned	1	1	1
+validity	published-conductivity-sd	oven_dried	0	0	1
+validity	published-conductivity-sd	grade_known	0	0	1
+validity	published-conductivity-sd	formulation_known	0	0	1
+validity	published-conductivity-sd	moisture_known	0	0	1
+validity	published-conductivity-sd	pressure_known	0	0	1
+validity	published-conductivity-sd	statistic	0	0	1
+validity	published-conductivity-sd	capacity_specimens	3	3	1
+validity	published-conductivity-sd	conductivity_specimens	3	3	1
+validity	published-conductivity-sd	density_specimens	3	3	1
+validity	published-conductivity-sd	selected_r1	0	0	1
+validity	published-conductivity-sd	stock_known	1	1	1
+validity	published-conductivity-sd	stock_thickness	0.009	0.009	m
+validity	published-conductivity-sd	through_thickness	1	1	1
+validity	published-conductivity-sd	upward	1	1	1
+validity	published-conductivity-sd	plate_delta	20	20	K
+validity	published-conductivity-sd	conductivity_readings	9	9	1
+validity	published-conductivity-sd	test_mean_temperature	288.15	338.15	K
+scalar	normalization-density	identity,method,density-normalization	normalization_density	85.66666666666667	kg/m3	constant
+uncertainty	normalization-density	unstated	-	-	-	-
+validity	normalization-density	family	1	1	1
+validity	normalization-density	unconditioned	1	1	1
+validity	normalization-density	oven_dried	0	0	1
+validity	normalization-density	grade_known	0	0	1
+validity	normalization-density	formulation_known	0	0	1
+validity	normalization-density	moisture_known	0	0	1
+validity	normalization-density	pressure_known	0	0	1
+validity	normalization-density	statistic	1	1	1
+validity	normalization-density	capacity_specimens	3	3	1
+validity	normalization-density	conductivity_specimens	3	3	1
+validity	normalization-density	density_specimens	3	3	1
+validity	normalization-density	selected_r1	0	0	1
+validity	normalization-density	stock_known	1	1	1
+validity	normalization-density	stock_thickness	0.009	0.009	m
+validity	normalization-density	density_temperature_known	0	0	1
