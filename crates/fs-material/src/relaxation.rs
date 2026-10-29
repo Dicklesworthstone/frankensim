@@ -56,6 +56,8 @@ use crate::thermochemical_gas::ResolvedThermochemicalGasState;
 
 /// Bounded native declarations of the same species/reservoir laws.
 pub mod input;
+/// Exact positive time-domain compression realization of the same reservoirs.
+pub mod bulk;
 
 /// The ISO terrestrial-air admission policy, shared with
 /// [`crate::iso9613::TerrestrialAir`].
