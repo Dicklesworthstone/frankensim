@@ -40,7 +40,7 @@ pub(super) struct AdmittedThermalTriangle {
     pub(super) identity: ContentHash,
     pub(super) normal: Vec3,
     pub(super) luminance: f64,
-    area: f64,
+    pub(super) area: f64,
     edge_u: Vec3,
     edge_v: Vec3,
     coordinate_scale: f64,

@@ -793,6 +793,16 @@ the separate source/provenance hashes retain container lineage without changing
 Lighting bit-semantics v4 adds physical thermal mesh proposals and their matched
 hit weights. Scenes without these proposals retain their previous numerical
 samples. Thermal spectra never pass through an RGB approximation.
+Lighting bit-semantics v5 adds a deterministic thermal light hierarchy above
+  eight positive mesh faces. Cancellable Morton ordering and balanced spatial
+  partitions produce bounded-depth sampling; node luminance/area/distance
+  heuristics choose proposals only, never approximate emitted spectra. Matched
+  forward and reverse densities use the same branch probabilities. Bounds-pruned
+  endpoint queries sum every overlapping same-primitive proposal; shared edges,
+  coincident proposals and null coplanar subtrees retain their explicit support.
+  The small-source sampler and all nonthermal image streams remain unchanged.
+  Sampling is logarithmic in thermal face count; reverse queries are spatially
+  pruned, with worst-case linear work for fully overlapping source bounds.
 Camera-path transport exposes both balance-heuristic and squared-power-
 heuristic MIS. Both use the same reciprocal proposal densities and partition
 unity; the power variant is an unbiased variance policy, not radiance clipping

@@ -153,9 +153,9 @@ pub const MATERIAL_CONTENT_IDENTITY_DOMAIN: &str = "org.frankensim.render.materi
 /// Bit-affecting semantics of construction-order-independent multi-light and
 /// environment sampling. The legacy one-rectangle/no-environment path remains
 /// under [`TRACER_BIT_SEMANTICS_VERSION`] and keeps its frozen stream.
-// v4 adds exact Planck emitters from static thermal mesh surfaces to the
-// direct-light mixture. Scenes without those surfaces retain their old bits.
-pub const LIGHTING_TRACER_BIT_SEMANTICS_VERSION: u32 = 4;
+// v5 uses a deterministic spatial importance hierarchy above eight positive
+// thermal mesh faces. Smaller and nonthermal scenes retain their old bits.
+pub const LIGHTING_TRACER_BIT_SEMANTICS_VERSION: u32 = 5;
 
 /// Dedicated Philox counter domain for the two lens coordinates. Lens draws
 /// never advance [`PathRng`] and therefore cannot perturb light or BSDF draws.

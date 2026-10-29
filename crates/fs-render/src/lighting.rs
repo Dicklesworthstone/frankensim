@@ -5,6 +5,8 @@
 //! angle subtended at the shading point. A canonical Y-up latitude/longitude
 //! environment uses texel luminance times exact texel solid angle. The same
 //! mixture probabilities are exposed for NEE samples and BSDF-hit MIS.
+//! Larger physical thermal meshes use a spatial importance hierarchy with
+//! matching endpoint-support queries, rather than scanning every face per ray.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
@@ -17,9 +19,11 @@ use fs_math::det;
 use crate::spectral::{LiftedSpectrum, lift_rgb};
 
 mod thermal;
+mod thermal_tree;
 use thermal::AdmittedThermalTriangle;
 pub use thermal::ThermalLightSample;
 pub(crate) use thermal::ThermalTriangleLight;
+use thermal_tree::ThermalLightTree;
 
 const PI: f64 = core::f64::consts::PI;
 const TAU: f64 = core::f64::consts::TAU;
@@ -655,7 +659,8 @@ pub struct LightSelectionEntry {
     pub kind: LightKind,
     /// Stable content identity used for ordering.
     pub identity: ContentHash,
-    /// Unnormalized incident-luminance weight.
+    /// Unnormalized incident-luminance proposal weight. A thermal hierarchy
+    /// reports its root weight times this leaf's conditional probability.
     pub weight: f64,
     /// Normalized selection probability.
     pub probability: f64,
@@ -666,7 +671,9 @@ pub struct LightSelectionEntry {
 pub struct LightSelectionDiagnostics {
     /// Candidates in deterministic content-identity order.
     pub entries: Vec<LightSelectionEntry>,
-    /// Sum of all unnormalized weights.
+    /// Sum of the top-level proposal weights. A thermal hierarchy may retain
+    /// probability for a subtree with no non-coplanar leaf at this point;
+    /// that draw returns no sample rather than conditioning on success.
     pub total_weight: f64,
 }
 
@@ -686,6 +693,8 @@ pub struct AdmittedLighting<'a> {
     // that quadrature and original rectangle indices remain O(1).
     rectangle_luminances: Vec<f64>,
     thermal_triangles: Vec<AdmittedThermalTriangle>,
+    thermal_tree: Option<ThermalLightTree>,
+    nonthermal_candidates: Vec<Candidate>,
     has_positive_thermal: bool,
     environment: Option<&'a EnvironmentMap>,
     candidates: Vec<Candidate>,
@@ -855,6 +864,11 @@ impl<'a> AdmittedLighting<'a> {
             }
             thermal_triangles.push(admitted);
         }
+        // These admission-only maps can be large for a physical mesh. Release
+        // them before allocating the persistent emitter hierarchy.
+        drop(thermal_luminances);
+        drop(thermal_primitive_states);
+        drop(thermal_identity_owners);
         checkpoint()?;
         // A black map still supplies explicit black miss radiance, but it is
         // not a sampling candidate. In particular, adding a black map must not
@@ -891,11 +905,26 @@ impl<'a> AdmittedLighting<'a> {
             checkpoint()?;
             candidates.push(candidate);
         }
+        let thermal_tree = ThermalLightTree::try_new(&thermal_triangles, &mut checkpoint)?;
+        let mut nonthermal_candidates = Vec::new();
+        if thermal_tree.is_some() {
+            nonthermal_candidates
+                .try_reserve_exact(rectangles.len() + usize::from(environment.is_some()))
+                .map_err(|_| LightingError::EnvironmentTooLarge)?;
+            for candidate in &candidates {
+                checkpoint()?;
+                if !matches!(candidate.kind, LightKind::ThermalSurface(_)) {
+                    nonthermal_candidates.push(*candidate);
+                }
+            }
+        }
         checkpoint()?;
         Ok(Self {
             rectangles,
             rectangle_luminances,
             thermal_triangles,
+            thermal_tree,
+            nonthermal_candidates,
             has_positive_thermal,
             environment,
             candidates,
@@ -908,6 +937,9 @@ impl<'a> AdmittedLighting<'a> {
     pub fn sample(&self, origin: Point3, u1: f64, u2: f64) -> Option<LightSample> {
         if !unit_sample(u1) || !unit_sample(u2) {
             return None;
+        }
+        if let Some(tree) = &self.thermal_tree {
+            return self.sample_with_thermal_tree(tree, origin, u1, u2);
         }
         if self.candidates.len() == 1
             && let LightKind::Rectangle(light_index) = self.candidates[0].kind
@@ -950,6 +982,58 @@ impl<'a> AdmittedLighting<'a> {
             u2,
             weight / total_weight,
             total_weight,
+        )
+    }
+
+    fn sample_with_thermal_tree(
+        &self,
+        tree: &ThermalLightTree,
+        origin: Point3,
+        u1: f64,
+        u2: f64,
+    ) -> Option<LightSample> {
+        let total = self.total_weight(origin);
+        if !(total > 0.0 && total.is_finite()) {
+            return None;
+        }
+        let target = u1 * total;
+        let mut cumulative = 0.0;
+        let mut last_positive = None;
+        for candidate in &self.nonthermal_candidates {
+            let weight = self.candidate_weight(*candidate, origin);
+            if weight == 0.0 {
+                continue;
+            }
+            last_positive = Some((*candidate, cumulative, weight));
+            if target < cumulative + weight {
+                return self.sample_candidate(
+                    *candidate,
+                    origin,
+                    clamp_unit_open((target - cumulative) / weight),
+                    u2,
+                    weight / total,
+                    total,
+                );
+            }
+            cumulative += weight;
+        }
+        let weight = tree.weight(&self.thermal_triangles, origin);
+        if weight > 0.0 {
+            let (triangle, residual) = tree.sample(
+                &self.thermal_triangles,
+                origin,
+                clamp_unit_open((target - cumulative) / weight),
+            )?;
+            return self.sample_thermal_triangle(triangle, origin, residual, u2, total);
+        }
+        let (candidate, lower, weight) = last_positive?;
+        self.sample_candidate(
+            candidate,
+            origin,
+            clamp_unit_open((target - lower) / weight),
+            u2,
+            weight / total,
+            total,
         )
     }
 
@@ -1081,23 +1165,7 @@ impl<'a> AdmittedLighting<'a> {
                 self.sample_rectangle(light_index, origin, u1, u2, selection_probability)
             }
             LightKind::ThermalSurface(light_index) => {
-                let triangle = self.thermal_triangles.get(light_index)?;
-                let point = triangle.sample_point(u1, u2);
-                let pdf_solid_angle = self.thermal_mixture_pdf_with_total(
-                    triangle.source.primitive_index,
-                    origin,
-                    point,
-                    total_weight,
-                );
-                (pdf_solid_angle > 0.0 && pdf_solid_angle.is_finite()).then_some(
-                    LightSample::ThermalSurface(ThermalLightSample {
-                        primitive_index: triangle.source.primitive_index,
-                        point,
-                        normal: triangle.normal,
-                        surface: triangle.source.surface,
-                        pdf_solid_angle,
-                    }),
-                )
+                self.sample_thermal_triangle(light_index, origin, u1, u2, total_weight)
             }
             LightKind::Environment => {
                 let mut sample = self.environment?.sample(u1, u2)?;
@@ -1105,6 +1173,33 @@ impl<'a> AdmittedLighting<'a> {
                 Some(LightSample::Environment(sample))
             }
         }
+    }
+
+    fn sample_thermal_triangle(
+        &self,
+        light_index: usize,
+        origin: Point3,
+        u1: f64,
+        u2: f64,
+        total_weight: f64,
+    ) -> Option<LightSample> {
+        let triangle = self.thermal_triangles.get(light_index)?;
+        let point = triangle.sample_point(u1, u2);
+        let pdf_solid_angle = self.thermal_mixture_pdf_with_total(
+            triangle.source.primitive_index,
+            origin,
+            point,
+            total_weight,
+        );
+        (pdf_solid_angle > 0.0 && pdf_solid_angle.is_finite()).then_some(
+            LightSample::ThermalSurface(ThermalLightSample {
+                primitive_index: triangle.source.primitive_index,
+                point,
+                normal: triangle.normal,
+                surface: triangle.source.surface,
+                pdf_solid_angle,
+            }),
+        )
     }
 
     fn sample_rectangle(
@@ -1200,6 +1295,15 @@ impl<'a> AdmittedLighting<'a> {
         hit_point: Point3,
         total: f64,
     ) -> f64 {
+        if let Some(tree) = &self.thermal_tree {
+            return tree.mixture_pdf(
+                &self.thermal_triangles,
+                primitive_index,
+                origin,
+                hit_point,
+                tree.weight(&self.thermal_triangles, origin) / total,
+            );
+        }
         self.candidates
             .iter()
             .filter_map(|candidate| {
@@ -1279,6 +1383,14 @@ impl<'a> AdmittedLighting<'a> {
     }
 
     fn total_weight(&self, origin: Point3) -> f64 {
+        if let Some(tree) = &self.thermal_tree {
+            return self
+                .nonthermal_candidates
+                .iter()
+                .map(|candidate| self.candidate_weight(*candidate, origin))
+                .sum::<f64>()
+                + tree.weight(&self.thermal_triangles, origin);
+        }
         self.candidates
             .iter()
             .map(|candidate| self.candidate_weight(*candidate, origin))
@@ -1294,10 +1406,16 @@ impl<'a> AdmittedLighting<'a> {
                 .map_or(0.0, |(light, luminance)| {
                     *luminance * rectangle_solid_angle(light, origin)
                 }),
-            LightKind::ThermalSurface(light_index) => self
-                .thermal_triangles
-                .get(light_index)
-                .map_or(0.0, |triangle| triangle.weight(origin)),
+            LightKind::ThermalSurface(light_index) => {
+                if let Some(tree) = &self.thermal_tree {
+                    tree.weight(&self.thermal_triangles, origin)
+                        * tree.selection_probability(&self.thermal_triangles, origin, light_index)
+                } else {
+                    self.thermal_triangles
+                        .get(light_index)
+                        .map_or(0.0, |triangle| triangle.weight(origin))
+                }
+            }
             LightKind::Environment => self.environment.map_or(0.0, |map| map.total_weight),
         }
     }
