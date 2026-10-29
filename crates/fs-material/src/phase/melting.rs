@@ -43,7 +43,6 @@ pub struct MeltingSourceQuery<'a> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedMeltingCurve {
     curve: EquilibriumEnthalpyPhaseCurve,
-    receipts: Vec<PropertyUsageReceipt>,
     melting_temperature_k: f64,
     latent_heat_fusion_j_kg: f64,
     plateau_enthalpy_bounds_j_kg: [f64; 2],
@@ -176,9 +175,9 @@ impl ResolvedMeltingCurve {
             identity.update(receipt.content_hash().as_bytes());
         }
         curve.identity = identity.finalize();
+        curve.source_receipts = receipts;
         Ok(Self {
             curve,
-            receipts,
             melting_temperature_k,
             latent_heat_fusion_j_kg,
             plateau_enthalpy_bounds_j_kg: [solid_end_h, liquid_start_h],
@@ -195,7 +194,7 @@ impl ResolvedMeltingCurve {
     /// liquid Cp/density receipts. Conditions and selected claims remain intact.
     #[must_use]
     pub fn receipts(&self) -> &[PropertyUsageReceipt] {
-        &self.receipts
+        self.curve.source_receipts()
     }
 
     #[must_use]

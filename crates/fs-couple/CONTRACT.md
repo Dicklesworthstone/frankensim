@@ -10507,3 +10507,41 @@ Scope: one fixed tangent frame and prescribed normal load, original held-effort
 modal mechanics and backward-Euler conduction. Both time integrations require
 refinement. No moving footprint, evolving normal geometry, temperature-dependent
 elastic entropy closure, measured calibration or full workspace build is claimed.
+
+## Nonlinear spatial conduction and finite material heat share one endpoint
+
+`ConductionThermalNetwork::step_response_candidate` places the original
+`PlanarConductionResponse` inside the SAME material network and finite-cell
+enthalpy residual. Each proposed thermal endpoint refreshes the original
+temperature-dependent conductor bundle, then closes native |E|/|J| through
+the original FEEC solve. Actual local E.J power enters the original receiving
+cells exactly once. Terminal work, constitutive power defects and outer
+thermal residuals remain separate; no iteration defect becomes physical heat.
+
+The original whole-volume routes, caloric instances, material identities,
+selected source roles, fixed external conditions and thermal links remain
+bound. Continuation retains accepted spatial operating coordinates even when
+the original thermal reference query used zero field. Every inner native
+field solve consumes the existing shared work budget, including discarded
+constitutive trials and fresh final thermal admission. A refused source,
+budget, stencil, terminal gate or cancellation publishes neither field/source
+nor thermal history.
+
+This scalar, memoryless, fixed-geometry rung supports native voltage and
+distributed current-density traces. A nonlinear equipotential total-current
+terminal requires its own constraint and refuses here. Thermal conductivity
+response/applicability must be independent of E/J. The original caloric chart's
+retained Cp, density and melting-transition receipts are inspected through their
+EXACT selected claims: E/J-dependent value or applicability refuses before
+using an incorrectly frozen heat-storage law. Categorical phase-branch
+selectors remain legal, and field-name fallback is scoped to the actual
+receiving cell. Explicitly authored h(T,phase) remains the declared independent
+caloric law; electrocaloric storage/work is not inferred. The source adapter's
+existing joint phase/E/J admission limitation also remains explicit.
+
+Independent two-capacity balances exercise nonlinear voltage and current-density
+laws, nonuniform local heat, data-only material swaps, thermal feedback and
+continued accepted state. Regressions include nested work limits, late
+cancellation, source-domain exits, mixed old/new endpoint refusal, conductivity
+applicability, and Cp/rho/latent-heat response/applicability guards with a valid
+ordinary melting-chart control.

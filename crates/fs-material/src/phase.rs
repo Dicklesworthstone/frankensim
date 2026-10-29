@@ -550,7 +550,6 @@ pub struct HeatCapacitySourceQuery<'a> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedHeatCapacityCurve {
     curve: EquilibriumEnthalpyPhaseCurve,
-    receipts: Vec<PropertyUsageReceipt>,
 }
 
 impl ResolvedHeatCapacityCurve {
@@ -628,7 +627,8 @@ impl ResolvedHeatCapacityCurve {
             identity.update(receipt.content_hash().as_bytes());
         }
         curve.identity = identity.finalize();
-        Ok(Self { curve, receipts })
+        curve.source_receipts = receipts;
+        Ok(Self { curve })
     }
 
     /// The source-bound chart accepted by thermal and phase-state consumers.
@@ -640,7 +640,7 @@ impl ResolvedHeatCapacityCurve {
     /// Receipts in increasing temperature order, Cp then density at each knot.
     #[must_use]
     pub fn receipts(&self) -> &[PropertyUsageReceipt] {
-        &self.receipts
+        self.curve.source_receipts()
     }
 }
 
@@ -857,6 +857,7 @@ pub struct EquilibriumEnthalpyPhaseCurve {
     material_card_identity: ContentHash,
     knots: Vec<EnthalpyPhaseKnot>,
     identity: ContentHash,
+    source_receipts: Vec<PropertyUsageReceipt>,
 }
 
 impl EquilibriumEnthalpyPhaseCurve {
@@ -1032,6 +1033,7 @@ impl EquilibriumEnthalpyPhaseCurve {
             material_card_identity,
             identity: phase_curve_identity(material_card_identity, &knots),
             knots,
+            source_receipts: Vec::new(),
         }
     }
 
@@ -1045,6 +1047,19 @@ impl EquilibriumEnthalpyPhaseCurve {
     #[must_use]
     pub const fn identity(&self) -> ContentHash {
         self.identity
+    }
+
+    /// Exact original caloric source usages, retained when a sourced Cp or
+    /// melting chart is passed to a consumer as this plain equilibrium curve.
+    /// Consumers that evolve external conditions must check these original
+    /// claims before treating the fixed chart as independent of those changes.
+    /// Empty only for an explicitly authored chart with no source resolution;
+    /// it does not identify or validate empirical material data. These receipts
+    /// were already included in the sourced chart identity; retention changes
+    /// neither the identity nor the caloric interpolation law.
+    #[must_use]
+    pub fn source_receipts(&self) -> &[PropertyUsageReceipt] {
+        &self.source_receipts
     }
 
     /// Admitted curve knots in ascending specific enthalpy.

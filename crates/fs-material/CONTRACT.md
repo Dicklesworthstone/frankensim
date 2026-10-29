@@ -4151,3 +4151,21 @@ Focused integration tests are `material_expanding_transport`,
 They cover analytic piecewise storage/inverse identities, source and numerical
 refusals, original NIST expansion/Cp/k with an explicitly assumed reference
 density, and real FSRI foam/plastic heating and cooling at fixed volume.
+
+## Caloric source provenance survives the original phase-curve handoff
+
+`EquilibriumEnthalpyPhaseCurve::source_receipts` retains the exact original
+source usages from both `ResolvedHeatCapacityCurve` and
+`ResolvedMeltingCurve`. Cp, density, transition temperature and latent-heat
+selection/context remain available when a thermal consumer receives only the
+plain curve. Existing wrapper `receipts()` methods delegate to this same
+inventory. Source identity hashing and caloric interpolation are unchanged:
+the receipts already contributed to the sourced chart identity.
+
+This closes a loss of source ownership when another subsystem evolves a
+coordinate held fixed while the caloric temperature line was constructed.
+Consumers must inspect the actual selected claims before treating that chart as
+independent of the evolving coordinate. Explicitly authored h(T,phase) charts
+carry no resolved-source receipts and retain their declared law; an empty
+receipt list is not empirical material validation. Tests retain Cp/density and
+melting receipts through the original curve and its clone.

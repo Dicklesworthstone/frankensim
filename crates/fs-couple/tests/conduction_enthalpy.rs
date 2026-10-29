@@ -5,6 +5,8 @@ mod common;
 
 #[path = "conduction_enthalpy/heat.rs"]
 mod heat;
+#[path = "conduction_enthalpy/response.rs"]
+mod response;
 
 use common::{config, initial, material, material_with_electrical_basis, near, point};
 use fs_couple::circuit_enthalpy::{

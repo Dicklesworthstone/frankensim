@@ -9,6 +9,8 @@
 pub mod circuit;
 /// Retained dielectric charge and local conduction heat on this same material network.
 pub mod dielectric;
+/// Source-driven nonlinear spatial current and the original finite heat network.
+pub mod response;
 // The complete sourced heat network enters this same electrical/thermal residual.
 mod heat;
 
@@ -145,6 +147,7 @@ pub enum ConductionThermalError {
     Heat(super::contacts::heat::HeatNetworkError),
     Conductor(ConductorError),
     Field(ConductionError),
+    Response(fs_em::conduction::response::ConductionResponseError),
     Storage(super::field_storage::FieldThermalError),
     Dielectric(fs_em::electrostatic::relaxation::DielectricRelaxationError),
     Invalid(&'static str),
@@ -370,6 +373,25 @@ impl ConductionThermalNetwork<'_> {
         controls: CircuitEnthalpySolve,
         initial_energy_increments_j: &[f64],
     ) -> Result<f64, Error> {
+        self.admit_mesh_step(
+            thermal,
+            target_s,
+            problem.mesh(),
+            assembly,
+            controls,
+            initial_energy_increments_j,
+        )
+    }
+
+    fn admit_mesh_step(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        target_s: f64,
+        mesh: &fs_rep_mesh::TriComplex2,
+        assembly: WeightedAssemblyLimits,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+    ) -> Result<f64, Error> {
         super::admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
         let dt = finite(target_s - thermal.time_s())?;
         if dt <= 0.0 || self.cells.len() != thermal.cells().len() {
@@ -377,11 +399,10 @@ impl ConductionThermalNetwork<'_> {
                 "positive interval and complete thermal material bindings required",
             ));
         }
-        if problem.mesh().faces().len() > assembly.max_cells
-            || problem.mesh().vertices().len() > assembly.max_dofs
-            || problem.mesh().edges().len() > assembly.max_dofs
-            || problem
-                .mesh()
+        if mesh.faces().len() > assembly.max_cells
+            || mesh.vertices().len() > assembly.max_dofs
+            || mesh.edges().len() > assembly.max_dofs
+            || mesh
                 .faces()
                 .len()
                 .checked_mul(9)
@@ -486,20 +507,7 @@ impl ConductionThermalNetwork<'_> {
                 })
             },
             |candidate, _dt, checkpoint| {
-                let mut powers = BTreeMap::new();
-                for (triangle, &power) in candidate.step.cell_power_w.iter().enumerate() {
-                    checkpoint()?;
-                    let cell = routes[triangle];
-                    let previous = *powers.get(&cell).unwrap_or(&0.0);
-                    let combined = finite(previous + power)?;
-                    if power != 0.0 && combined == previous {
-                        return Err(invalid(
-                            "local conductor heat disappeared in receiving-cell sum",
-                        ));
-                    }
-                    powers.insert(cell, combined);
-                }
-                Ok(powers)
+                self.deposit_power(&candidate.step.cell_power_w, &routes, checkpoint)
             },
             || (*cancel.borrow_mut())(),
         )?;
@@ -517,9 +525,18 @@ impl ConductionThermalNetwork<'_> {
         problem: &PlanarConduction<C>,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<Vec<CellId>, Error> {
+        self.admit_mesh_routes(thermal, problem.mesh(), cancel)
+    }
+
+    fn admit_mesh_routes(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        mesh: &fs_rep_mesh::TriComplex2,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<Vec<CellId>, Error> {
         if !self.volume_tolerance_m3.is_finite()
             || self.volume_tolerance_m3 < 0.0
-            || self.regions.len() != problem.mesh().faces().len()
+            || self.regions.len() != mesh.faces().len()
         {
             return Err(invalid(
                 "one heat receiver per electrical triangle and a finite volume tolerance required",
@@ -538,8 +555,7 @@ impl ConductionThermalNetwork<'_> {
                     "duplicate electrical triangle or inactive thermal receiver",
                 ));
             }
-            let volume = problem
-                .mesh()
+            let volume = mesh
                 .face_measure(region.triangle)
                 .ok_or_else(|| invalid("electrical triangle lacks physical volume"))?;
             let sum = volumes.entry(region.cell).or_insert(0.0);
@@ -588,10 +604,46 @@ impl ConductionThermalNetwork<'_> {
         routes: &[CellId],
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<Vec<C>, Error> {
+        self.materials_at_with(
+            problem.conductors(),
+            sample,
+            routes,
+            cancel,
+            |_, binding, original, point| {
+                let snapshot = original
+                    .material()
+                    .at_query_point(binding.point.material, &point)
+                    .map_err(|e| {
+                        material(MaterialNetworkError::Material(
+                            ThermalMaterialError::Material(e),
+                        ))
+                    })?;
+                let conductor = original.with_material(snapshot).map_err(|e| {
+                    CircuitEnthalpyError::Source(ConductionThermalError::Conductor(e))
+                })?;
+                for property in conductor.source_properties() {
+                    binding
+                        .point
+                        .admit_static(property)
+                        .map_err(|e| material(MaterialNetworkError::Material(e)))?;
+                }
+                Ok(conductor)
+            },
+        )
+    }
+
+    fn materials_at_with<C: PlanarConductorMaterial>(
+        &self,
+        originals: &[C],
+        sample: &MaterialNetworkSample,
+        routes: &[CellId],
+        cancel: &RefCell<impl FnMut() -> bool>,
+        resolve: impl Fn(usize, &MaterialCell<'_>, &C, fs_matdb::QueryPoint) -> Result<C, Error>,
+    ) -> Result<Vec<C>, Error> {
         let bindings: BTreeMap<_, _> = self.cells.iter().map(|c| (c.cell, c)).collect();
         let phases: BTreeMap<_, _> = sample.cells.iter().map(|c| (c.cell, c.phase)).collect();
         let mut sources = Vec::with_capacity(routes.len());
-        for (&cell, original) in routes.iter().zip(problem.conductors()) {
+        for (triangle, (&cell, original)) in routes.iter().zip(originals).enumerate() {
             check(cancel)?;
             let binding = bindings
                 .get(&cell)
@@ -615,25 +667,30 @@ impl ConductionThermalNetwork<'_> {
                 .point
                 .at(phase)
                 .map_err(|e| material(MaterialNetworkError::Material(e)))?;
-            let snapshot = original
-                .material()
-                .at_query_point(binding.point.material, &point)
-                .map_err(|e| {
-                    material(MaterialNetworkError::Material(
-                        ThermalMaterialError::Material(e),
-                    ))
-                })?;
-            let conductor = original
-                .with_material(snapshot)
-                .map_err(|e| CircuitEnthalpyError::Source(ConductionThermalError::Conductor(e)))?;
-            for property in conductor.source_properties() {
-                binding
-                    .point
-                    .admit_static(property)
-                    .map_err(|e| material(MaterialNetworkError::Material(e)))?;
-            }
-            sources.push(conductor);
+            sources.push(resolve(triangle, binding, original, point)?);
         }
         Ok(sources)
+    }
+
+    fn deposit_power(
+        &self,
+        cell_power_w: &[f64],
+        routes: &[CellId],
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Error> {
+        let mut powers = BTreeMap::new();
+        for (triangle, &power) in cell_power_w.iter().enumerate() {
+            checkpoint()?;
+            let cell = routes[triangle];
+            let previous = *powers.get(&cell).unwrap_or(&0.0);
+            let combined = finite(previous + power)?;
+            if power != 0.0 && combined == previous {
+                return Err(invalid(
+                    "local conductor heat disappeared in receiving-cell sum",
+                ));
+            }
+            powers.insert(cell, combined);
+        }
+        Ok(powers)
     }
 }

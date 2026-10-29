@@ -237,6 +237,9 @@ fn g1_source_cp_integrals_and_one_latent_jump_drive_original_phase_state() {
     let cooled = curve.advance_specific_energy(hot, -650_000.0).unwrap();
     assert_eq!(cooled, initial);
     assert_eq!(curve.material_card_identity(), source.content_hash());
+    assert!(!curve.source_receipts().is_empty());
+    assert_eq!(curve.source_receipts(), model.receipts());
+    assert_eq!(curve.clone().source_receipts(), model.receipts());
     for receipt in model.receipts() {
         source.claims().verify_receipt(receipt).unwrap();
     }

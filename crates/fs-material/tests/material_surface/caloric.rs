@@ -131,6 +131,9 @@ fn two_coordinate_capacity_retains_crossed_slopes_and_drives_conserved_enthalpy(
     let card = card(false, InterpolationPolicy::LinearInside);
     for reference in [0.0, -1000.0] {
         let law = caloric(&card, 150.0, reference).unwrap();
+        assert!(!law.curve().source_receipts().is_empty());
+        assert_eq!(law.curve().source_receipts(), law.receipts());
+        assert_eq!(law.curve().clone().source_receipts(), law.receipts());
         // Cp is 3→4 over [300,350], then 4→7 over [350,400].
         // Integrating only endpoint values would incorrectly give 500 J/kg.
         near(law.specific_enthalpy_change(300.0, 350.0).unwrap(), 175.0);

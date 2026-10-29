@@ -15,6 +15,17 @@ on:
       - 'scripts/tests/test_import_franken_textiles.py'
       - 'data/matdb/textile-examples/**'
       - 'crates/fs-material/src/thermal.rs'
+      - 'crates/fs-material/src/state_point.rs'
+      - 'crates/fs-material/src/conductor*'
+      - 'crates/fs-material/src/conductor/**'
+      - 'crates/fs-material/src/phase*'
+      - 'crates/fs-material/src/phase/**'
+      - 'crates/fs-material/tests/conductor_response.rs'
+      - 'crates/fs-material/tests/material_surface/caloric.rs'
+      - 'crates/fs-em/src/conduction*'
+      - 'crates/fs-em/src/conduction/**'
+      - 'crates/fs-em/tests/conduction*'
+      - 'crates/fs-em/tests/conduction/**'
       - 'crates/fs-material/src/section_temperature*'
       - 'crates/fs-material/src/section_temperature/**'
       - 'crates/fs-material/src/section/thermal*'
@@ -166,6 +177,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           cargo test -p fs-solver --lib finite_difference -- --test-threads=1
+      - name: Original caloric provenance and nonlinear spatial material response
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p fs-material --lib phase -- --test-threads=1
+          cargo test -p fs-material --test conductor_response -- --test-threads=1
+          cargo test -p fs-material --test material_surface caloric -- --test-threads=1
+          cargo test -p fs-em --test conduction -- --test-threads=1
       - name: Finite circuits and material-bound multi-body heat
         if: ${{ !cancelled() }}
         shell: bash
