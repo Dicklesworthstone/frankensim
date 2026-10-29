@@ -91,7 +91,7 @@ pub struct StringBodyTranslationConnection {
 impl StringBodyTranslationConnection {
     pub(super) fn lower(
         &self, cards: &[BowedStringCard], members: &[MaterialStringMember],
-        bodies: &[ModalAcousticTimeModel],
+        bodies: &[ModalAcousticTimeModel], residual: bool,
     ) -> Result<ModalConnection, ReciprocalStringError> {
         let member = members.get(self.string)
             .ok_or_else(|| invalid("directed bridge names an unknown material string"))?;
@@ -110,11 +110,23 @@ impl StringBodyTranslationConnection {
             return Err(invalid("directed bridge requires an interior station, a nonzero finite body map and a passive law"));
         }
         let shapes = member.source.transverse_shape_along(card, self.station_fraction, self.direction)?;
+        // With residual flexibility the omitted modes sit in series with this spring along its own
+        // axis, as with the scalar bridge (residual.rs): k/(1 + k G), the dashpot to first order.
+        // The caller has refused any connection with a nonzero cross term (assemble_sources).
+        let (stiffness_n_m, damping_n_s_m) = if residual {
+            let [dx, dy] = self.direction.components();
+            let g = (dx*dx + dy*dy)
+                *super::residual::residual_compliance_m_n(card, self.station_fraction, self.station_fraction)?;
+            let condensed = super::residual::condense(g, self.stiffness_n_m, self.damping_n_s_m)?;
+            (condensed.stiffness_n_m, condensed.damping_n_s_m)
+        } else {
+            (self.stiffness_n_m, self.damping_n_s_m)
+        };
         Ok(ModalConnection {
             left: ModalAttachment { component: self.string, shapes },
             right: ModalAttachment { component: cards.len() + self.body.component,
                 shapes: self.body.shapes.clone() },
-            stiffness_n_m: self.stiffness_n_m, damping_n_s_m: self.damping_n_s_m,
+            stiffness_n_m, damping_n_s_m,
             rest_extension_m: self.rest_extension_m,
         })
     }
@@ -134,9 +146,13 @@ impl ReciprocalStringBank {
     /// directions and recompute their projections from the same sources.
     ///
     /// Bind one complete set before string motion or playback and before adding
-    /// nonlinear storage. An empty set is a no-op. Omitted-mode residual bridge
-    /// flexibility currently admits one axis only and refuses this composition.
-    /// A one-plane string refuses any direction with a nonzero second component.
+    /// nonlinear storage. An empty set is a no-op. With omitted-mode residual
+    /// bridge flexibility (before or after this binding), each directed spring
+    /// condenses along its own axis exactly as the scalar bridge does. Only axes
+    /// orthogonal to every other connection on the same string are admitted: the
+    /// omitted modes' cross compliance d_i.d_j G(s_i, s_j) is then zero, and no
+    /// cross term is wired. A one-plane string refuses any direction with a
+    /// nonzero second component.
     /// This does not infer a bridge's anisotropic law, rigid frame, geometry or
     /// unilateral contact from the bulk string material.
     pub fn with_translational_body_connections(
@@ -144,8 +160,8 @@ impl ReciprocalStringBank {
     ) -> Result<Self, ReciprocalStringError> {
         poll(gate)?;
         if connections.is_empty() { return Ok(self); }
-        if self.system.has_nonlinear_potentials() || self.source.residual_flexibility {
-            return Err(invalid("directed bridges bind before nonlinear storage and without scalar residual flexibility"));
+        if self.system.has_nonlinear_potentials() {
+            return Err(invalid("directed bridges bind before nonlinear storage"));
         }
         if self.system.samples_rendered() != 0 || !self.source.translational_body_connections.is_empty()
             || self.system.components()[..self.cards.len()].iter().flat_map(|c| c.states())
@@ -166,7 +182,7 @@ impl ReciprocalStringBank {
             &bridges, &self.source.body_connections, &connections,
             &self.source.rotational_body_connections, self.source.fluid_loading.as_ref(),
             self.source.prepared_linear, &self.source.constant_loss_bridges(),
-            false, self.system.port().law.clone(), &self.source.options, gate)?;
+            self.source.residual_flexibility, self.system.port().law.clone(), &self.source.options, gate)?;
         if let Some(weights) = self.system.acceleration_pressure_weights() {
             system = system.with_acceleration_pressure(weights.to_vec())
                 .map_err(ReciprocalStringError::Friction)?;

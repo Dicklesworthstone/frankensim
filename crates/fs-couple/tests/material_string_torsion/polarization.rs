@@ -169,13 +169,72 @@ fn g0_directed_bridge_refuses_missing_planes_invalid_laws_and_live_rebinding() {
         }
         assert!(make().with_translational_body_connections(vec![good.clone()], gate).unwrap()
             .with_translational_body_connections(vec![good.clone()], gate).is_err());
+        // Residual flexibility admits an axis orthogonal to the string's bridge, in either order,
+        // and refuses one with an omitted-mode cross term to it.
         assert!(make().with_residual_flexibility(gate).unwrap()
-            .with_translational_body_connections(vec![good.clone()], gate).is_err());
+            .with_translational_body_connections(vec![good.clone()], gate).is_ok());
         assert!(make().with_translational_body_connections(vec![good.clone()], gate).unwrap()
+            .with_residual_flexibility(gate).is_ok());
+        let oblique = second_axis(TransverseDirection::try_new([0.6, 0.8]).unwrap());
+        let refused = make().with_residual_flexibility(gate).unwrap()
+            .with_translational_body_connections(vec![oblique.clone()], gate).err().unwrap();
+        assert!(refused.to_string().contains("orthogonal"), "{refused}");
+        assert!(make().with_translational_body_connections(vec![oblique], gate).unwrap()
             .with_residual_flexibility(gate).is_err());
         let mut moving = make();
         moving.step(&vec![0.0; moving.system().mode_count()], drive()).unwrap();
         assert!(moving.with_translational_body_connections(vec![good], gate).is_err());
+    });
+}
+
+// The second plane's directed bridge is the mirror image of the first plane's scalar bridge: same
+// station, law and body map. With residual flexibility both see the same omitted-mode compliance, so
+// a force pattern in plane Y must sound as the same pattern in plane X does. A directed spring left
+// uncondensed is stiffer by 1 + k G and breaks the mirror. The binding order must not matter.
+#[test]
+fn g4_residual_flexibility_condenses_an_orthogonal_directed_bridge_like_its_scalar_mirror() {
+    use fs_couple::bowed_string::runtime::reciprocal::bank::residual::residual_compliance_m_n;
+    with_cx(|cx, gate| {
+        let axes = directions([1.0, 0.0], [1.0, 0.0]);
+        let mirror = StringBodyTranslationConnection { string: 0, station_fraction: 0.8,
+            direction: TransverseDirection::Y, body: ModalAttachment { component: 0, shapes: vec![1.0, 0.25] },
+            stiffness_n_m: 3000.0, damping_n_s_m: 0.1, rest_extension_m: 0.0 };
+        let residual_first = || two_axis_bank(cx, gate, 7800.0, axes).with_residual_flexibility(gate).unwrap()
+            .with_translational_body_connections(vec![mirror.clone()], gate).unwrap();
+        let (mut x, mut y) = (residual_first(), residual_first());
+        let mut late = two_axis_bank(cx, gate, 7800.0, axes)
+            .with_translational_body_connections(vec![mirror.clone()], gate).unwrap()
+            .with_residual_flexibility(gate).unwrap();
+        let kg = 3000.0*residual_compliance_m_n(&x.cards()[0], 0.8, 0.8).unwrap();
+        assert!(kg > 1e-5, "k G = {kg:e} is too small for the mirror to tell condensed from not");
+        let released = FrictionDrive { speed_m_s: 0.0, normal_force_n: 0.0 };
+        let (mut peak, mut work, mut loss) = (0.0_f64, 0.0, 0.0);
+        for n in 0..384 {
+            let pattern = |bank: &ReciprocalStringBank, plane: usize| {
+                let mut force = vec![0.0; bank.system().mode_count()];
+                if n < 32 {
+                    let card = &bank.cards()[0];
+                    let normalization = (0.5*card.length_m*card.linear_density_kg_m).sqrt();
+                    for k in 0..4 {
+                        force[4*plane+k] = 0.01*((k+1) as f64*core::f64::consts::PI*0.3).sin()/normalization;
+                    }
+                }
+                force
+            };
+            let fx = *x.step(&pattern(&x, 0), released).unwrap();
+            let fy = *y.step(&pattern(&y, 1), released).unwrap();
+            let fl = *late.step(&pattern(&late, 1), released).unwrap();
+            near(fx.observer_pressure_pa, fy.observer_pressure_pa, 1e-15);
+            assert_eq!(fy.observer_pressure_pa.to_bits(), fl.observer_pressure_pa.to_bits(), "binding order changed the sound");
+            for frame in [fx, fy] {
+                assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+            }
+            peak = peak.max(fy.observer_pressure_pa.abs());
+            work += fy.external_work_j;
+            loss += fy.network_dissipation_j;
+        }
+        assert!(peak > 1e-8, "plane Y did not reach the body");
+        assert!((y.system().total_energy_j().unwrap()+loss-work).abs() < 2e-10);
     });
 }
 

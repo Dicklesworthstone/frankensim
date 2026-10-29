@@ -359,12 +359,15 @@ impl ReciprocalStringBank {
     /// G_bb is the exact static Green's function of that string's own tension
     /// and EI minus its retained modes' static sum. The source keeps k and c;
     /// later fluid, torsion and cavity rebuilds keep the condensation. Stops
-    /// bound later carry the cross terms. The bow port has no residual yet.
+    /// bound later carry the cross terms. Directed bridges (polarization.rs)
+    /// condense along their own axes, admitted only orthogonal to every other
+    /// connection on their string. The bow port has no residual yet.
     ///
     /// # Errors
     /// After motion, playback or bound nonlinear storage; repeated; beside
-    /// rotational bridges, material bridge interfaces or a string with other
-    /// than one bridge connection; or the original assembly's own refusals.
+    /// rotational bridges, material bridge interfaces, a directed bridge with a
+    /// nonzero cross term or a string with other than one bridge connection; or
+    /// the original assembly's own refusals.
     pub fn with_residual_flexibility(mut self, gate: &CancelGate) -> Result<Self, ReciprocalStringError> {
         poll(gate)?;
         if self.system.has_nonlinear_potentials() || self.source.residual_flexibility
@@ -566,11 +569,27 @@ fn assemble_sources(
         || options.bow.string >= cards.len() || !interior(options.bow.station_fraction) {
         return Err(invalid("reciprocal assembly requires aligned strings, bodies and an interior bow"));
     }
-    if residual && (sources.is_none() || !translational_body_connections.is_empty()
+    if residual && (sources.is_none()
         || !rotational_body_connections.is_empty() || !constant_loss.is_empty()
         || connections.iter().any(|c| c.len() != 1)) {
         // Only a single spring/dashpot bridge per string condenses here.
         return Err(invalid("residual flexibility condenses one plain bridge connection per material string"));
+    }
+    if let (true, Some(members)) = (residual, sources) {
+        // Directed springs condense one by one (polarization.rs), which is exact only when the
+        // omitted modes couple none of a string's connections: d_i.d_j G(s_i, s_j) = 0, so every
+        // axis must be orthogonal to its string's bridge axis and to each other directed axis.
+        for (i, a) in translational_body_connections.iter().enumerate() {
+            let member = members.get(a.string)
+                .ok_or_else(|| invalid("directed bridge names an unknown material string"))?;
+            let others = translational_body_connections.iter().enumerate()
+                .filter(|(j, b)| *j != i && b.string == a.string).map(|(_, b)| b.direction.components());
+            let [ax, ay] = a.direction.components();
+            if core::iter::once(self::residual::directions(&member.source).1).chain(others)
+                .any(|[bx, by]| (ax*bx + ay*by).abs() > 1e-12) {
+                return Err(invalid("with residual flexibility a directed bridge must be orthogonal to its string's other connections"));
+            }
+        }
     }
     let mut components = Vec::with_capacity(cards.len() + bodies.len());
     let mut links = Vec::new();
@@ -626,7 +645,7 @@ fn assemble_sources(
     for connection in translational_body_connections {
         poll(gate)?;
         let members = sources.ok_or_else(|| invalid("a directed bridge requires original material string sources"))?;
-        links.push(connection.lower(cards, members, &bodies)?);
+        links.push(connection.lower(cards, members, &bodies, residual)?);
     }
     for connection in rotational_body_connections {
         poll(gate)?;

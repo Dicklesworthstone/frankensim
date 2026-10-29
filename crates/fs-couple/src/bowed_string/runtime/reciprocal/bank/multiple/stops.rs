@@ -157,6 +157,13 @@ impl MultiBowStringBank {
                 _ => directions(&member.source).0,
             };
             let sign = stop.side.sign();
+            // A directed bridge condenses on its own (bank/polarization.rs); a stop it is not
+            // orthogonal to would need their omitted-mode cross term, which is not wired.
+            if self.source.bank().translational_body_connections().iter()
+                .filter(|t| t.string == stop.location.string).map(|t| t.direction.components())
+                .any(|[tx, ty]| (tx*unsigned[0] + ty*unsigned[1]).abs() > 1e-12) {
+                return Err(error("with residual flexibility a stop must be orthogonal to its string's directed bridges"));
+            }
             ports.push(ResidualStop { string: stop.location.string, station_fraction: stop.location.station_fraction,
                 direction: [sign*unsigned[0], sign*unsigned[1]] });
         }
