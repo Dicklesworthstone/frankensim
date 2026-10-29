@@ -24,6 +24,9 @@ pub mod isochoric;
 /// Dense Region 3 rigid-vessel calorimetry with reusable whole-path Cv bounds.
 pub mod dense;
 
+/// Pressure-controlled Region 3 heating, supercritical fluid and high-temperature boiling.
+pub mod pressure;
+
 use fs_qty::{Pressure, Temperature};
 use fs_thermochem::water::if97::bounds::{
     If97HeatCapacityBound, If97HeatCapacityBoundError, If97HeatCapacityBoundSolve,

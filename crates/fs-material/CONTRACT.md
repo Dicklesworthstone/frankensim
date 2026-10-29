@@ -4603,3 +4603,47 @@ tests also pass with the extracted shared caloric kernel. This addition supplies
 no conductivity homogenization, phase or chemical mixing law, thermal-expansion
 work, moisture evolution, absolute entropy, propagated uncertainty or automatic
 justification of a uniform-temperature body.
+
+## Dense isobaric heating, boiling and supercritical water
+
+`phase::water::pressure::DenseIsobaricWater` binds the original Region 3
+pressure/density solver to a fixed-pressure enthalpy owner. Explicit temperature
+windows stay inside Region 3. Subcritical windows may retain the original
+high-temperature Region 3/4 saturation pair; supercritical states have no
+liquid/vapor quality or invented phase inventories. Original h, u, s and phase
+volumes remain unshifted. Vapor quality is a mass fraction, and mixture volume
+uses the constituent specific volumes.
+
+Temperature, specific-enthalpy and raw-specific-entropy queries share the
+retained chart. Caloric inverses use safeguarded Newton/bisection with original
+Cp or Cp/T, explicit residual tolerances, source work counts, and 1..=128
+outer iterations. Density inversion has its own bounded controls. Authored
+caloric endpoints and latent endpoints are retained exactly. This search
+window is not a global Cp certificate: unresolved interior source queries,
+including near-critical resolution limits, can refuse. No `ThermalLaw`
+stability bound or automatic Region 1/2/3 temperature-path stitching is claimed.
+
+Fixed-mass heat deposition evolves H, with the independent physical balance
+Q=Delta U+p_requested*Delta V. The requested mechanical pressure and actual
+Helmholtz endpoint pressures remain distinct. Reports expose source pressure
+residuals, endpoint h-u-p_requested*v defects, expansion work, actual phase
+masses and volumes, and raw source entropy. The isobar-local entropy primitive
+uses the explicit saturation defect delta_s=(h_v-h_l)/Ts-(s_v-s_l);
+its correction is not an absolute entropy for pressure-changing equipment.
+
+Stable bivariate source differences and latent lever-rule changes avoid
+subtracting large reference energies for small heating steps. Acceptance gates
+both stable and independently represented endpoint versions of Delta H-Q and
+Delta U+p*Delta V-Q. Nonzero heat or phase mass lost to representation,
+unsupported states, chart mismatch, exhausted work and early/late cancellation
+return no partial state or source debit. A numerical residual budget is not a
+physical source uncertainty or a license to replace source pressure.
+
+Six focused native tests pass: 25 MPa dense-liquid/supercritical h and raw-s
+round trips; 20 MPa high-temperature boiling and condensation with distinct
+mass/volume fractions and one latent account; independent Cp and Cp/T integration
+through the pseudocritical peak; subdivided heating/cooling, expansion work and
+small/zero heat; coarse pressure closure rejected by the physical joule budget;
+and domain, ambiguity, work, seam, chart, representability and cancellation
+refusals. No transport coefficient, spatial boiling, moving interface, vessel
+mechanics or reservoir entropy model is supplied by this equilibrium owner.
