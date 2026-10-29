@@ -330,7 +330,7 @@ mod bank;
 mod piston;
 mod prepared;
 mod radiation;
-pub use bank::{PlateBank, PlateBankStep};
+pub use bank::{PlateBank, PlateBankImage, PlateBankObservation, PlateBankStep};
 pub use piston::{BaffledPistonRadiation, PistonRadiationFit};
 pub use cavity::{VkCavityInitial, VkCavityLoad, VkCavityObservation};
 pub use prepared::{PreparedVkBody, PreparedVkStep};

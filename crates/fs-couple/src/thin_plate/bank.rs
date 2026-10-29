@@ -16,6 +16,110 @@ pub(super) struct PlateCavity {
 /// Accepted acoustic observation and complete mechanical/material/air work.
 pub type PlateBankStep = PreparedVkStep;
 
+/// A complete physical snapshot ready for composition with another subsystem.
+///
+/// Port zero is the original force/drive-velocity port. Port one is pressure
+/// acting along the OUTWARD surface map / outward volume flow. The caller
+/// supplies boundary orientation when joining an interior acoustic domain.
+/// All mechanical, material, cavity and radiation coordinates remain in their
+/// original order. Numerical caches are deliberately not part of this image.
+/// A snapshot has its own explicit state; its caller owns the accepted clock.
+pub struct PlateBankImage {
+    system: PortHamiltonian,
+    state: Vec<f64>,
+    observation: PlateBankObservation,
+}
+
+impl PlateBankImage {
+    #[must_use]
+    pub fn system(&self) -> &PortHamiltonian {
+        &self.system
+    }
+    #[must_use]
+    pub fn state(&self) -> &[f64] {
+        &self.state
+    }
+    #[must_use]
+    pub fn state_dim(&self) -> usize {
+        self.state.len()
+    }
+    #[must_use]
+    pub fn observation(&self) -> &PlateBankObservation {
+        &self.observation
+    }
+    #[must_use]
+    pub fn into_parts(self) -> (PortHamiltonian, Vec<f64>, PlateBankObservation) {
+        (self.system, self.state, self.observation)
+    }
+}
+
+/// Physical surface observation of the complete image's original state prefix.
+/// Appended subsystem states do not change its indices or projection. The full
+/// source extent is checked so missing memory cannot masquerade as silence.
+#[derive(Clone, Debug)]
+pub struct PlateBankObservation {
+    extent: usize,
+    areas: Vec<f64>,
+}
+
+impl PlateBankObservation {
+    #[must_use]
+    pub fn state_dim(&self) -> usize {
+        self.extent
+    }
+
+    pub fn volume_velocity(&self, state: &[f64]) -> Result<f64, AcousticRealizeError> {
+        if state.len() < self.extent || state[..self.extent].iter().any(|x| !x.is_finite()) {
+            return Err(invalid(
+                "plate image observation requires its complete finite state prefix",
+            ));
+        }
+        let flow = self
+            .areas
+            .iter()
+            .enumerate()
+            .map(|(k, a)| a * state[2 * k + 1])
+            .sum::<f64>();
+        if !flow.is_finite() {
+            return Err(invalid("plate image volume flow overflow"));
+        }
+        Ok(flow)
+    }
+
+    /// Compact baffled-monopole pressure from the interval-mean acceleration.
+    /// This observes a caller-accepted interval; it advances no physical state.
+    pub fn pressure_between(
+        &self,
+        before: &[f64],
+        after: &[f64],
+        dt: f64,
+        rho: f64,
+        distance_m: f64,
+    ) -> Result<f64, AcousticRealizeError> {
+        if !dt.is_finite()
+            || dt <= 0.0
+            || !rho.is_finite()
+            || rho <= 0.0
+            || !distance_m.is_finite()
+            || distance_m <= 0.0
+        {
+            return Err(invalid(
+                "plate image observation needs positive finite clock, density and distance",
+            ));
+        }
+        self.volume_velocity(before)?;
+        self.volume_velocity(after)?;
+        let pressure = self.areas.iter().enumerate().fold(0.0, |p, (k, a)| {
+            p + rho * a * ((after[2 * k + 1] - before[2 * k + 1]) / dt)
+                / (core::f64::consts::TAU * distance_m)
+        });
+        if !pressure.is_finite() {
+            return Err(invalid("plate image pressure overflow"));
+        }
+        Ok(pressure)
+    }
+}
+
 /// Linear compact surfaces and an optional complete nonlinear plate.
 ///
 /// Cavity and continuous piston reactions share the body's exact/Gonzalez solve.
@@ -44,6 +148,16 @@ struct BankRuntime {
     roots: Vec<f64>,
     vk_identity: Option<usize>,
     vk_areas: Vec<f64>,
+    vk_start: usize,
+    vk_extent: usize,
+    cavity_start: Option<usize>,
+}
+
+struct BankPhysics {
+    system: PortHamiltonian,
+    state: Vec<f64>,
+    areas: Vec<f64>,
+    roots: Vec<f64>,
     vk_start: usize,
     vk_extent: usize,
     cavity_start: Option<usize>,
@@ -87,6 +201,84 @@ fn capacity(n: usize) -> Result<(), AcousticRealizeError> {
 }
 
 impl PlateBank {
+    /// Snapshot the original complete physical system for an assembly solver.
+    /// Pending radiation is realized once with its already declared source;
+    /// absence of a declaration does not silently add an exterior model. The
+    /// existing source gas and sample clock must match. Physical histories are
+    /// copied unchanged, including a bank that has already evolved. Cancellation
+    /// can prepare immutable source data but publishes no evolving state.
+    ///
+    /// Cavity-only islands have no structural drive/volume port and refuse this
+    /// mechanical image; the direct bank clock still supports their evolution.
+    pub fn physical_image(
+        &mut self,
+        gas: &GasState,
+        rate: u32,
+        gate: &CancelGate,
+    ) -> Result<Option<PlateBankImage>, AcousticRealizeError> {
+        if gate.is_requested() {
+            return Err(AcousticRealizeError::Cancelled);
+        }
+        gas.validate_coherence()
+            .map_err(|e| AcousticRealizeError::Ambient(e.to_string()))?;
+        if rate == 0 {
+            return Err(invalid("plate image requires a positive sample clock"));
+        }
+        if let Some((pending_gas, pending_rate, _)) = &self.radiation_pending {
+            if pending_gas != gas || *pending_rate != rate {
+                return Err(invalid(
+                    "plate image differs from the declared radiation gas or clock",
+                ));
+            }
+            self.attach_radiation_loads_controlled(gas, rate, gate)?;
+            self.radiation_pending = None;
+        }
+        if let Some((source_gas, source_rate)) = self.radiation_clock {
+            if source_gas != *gas || source_rate != rate {
+                return Err(invalid(
+                    "plate image must retain its radiation gas and source clock",
+                ));
+            }
+        }
+        self.validate_radiation_source()?;
+        if self.runtime.is_some() {
+            self.validate_runtime()?;
+        }
+        if self.is_empty() {
+            return if self.cavity.is_some() {
+                Err(invalid("cavity-only island has no mechanical plate image"))
+            } else {
+                Ok(None)
+            };
+        }
+        let (system, state, areas) = if let Some(runtime) = self.runtime.as_mut() {
+            (
+                runtime.prototype.share_storage(),
+                runtime.body.state().to_vec(),
+                runtime.areas.clone(),
+            )
+        } else {
+            let physics = self.prepare_physics()?;
+            (physics.system, physics.state, physics.areas)
+        };
+        let extent = state.len();
+        let mut columns = vec![0.0; extent];
+        for (k, &area) in areas.iter().enumerate() {
+            columns[2 * k + 1] = area;
+        }
+        let system = system
+            .with_additional_ports(1, &columns)
+            .map_err(render_step_error)?;
+        if gate.is_requested() {
+            return Err(AcousticRealizeError::Cancelled);
+        }
+        Ok(Some(PlateBankImage {
+            system,
+            state,
+            observation: PlateBankObservation { extent, areas },
+        }))
+    }
+
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.linear.is_empty() && self.vk.is_none()
@@ -504,7 +696,7 @@ impl PlateBank {
         Ok(())
     }
 
-    fn prepare_runtime(&mut self, dt: f64) -> Result<BankRuntime, AcousticRealizeError> {
+    fn prepare_physics(&mut self) -> Result<BankPhysics, AcousticRealizeError> {
         let count = self.linear.len();
         if self.linear.iter().any(|b| b.rad.is_some()) {
             return Err(invalid(
@@ -617,6 +809,27 @@ impl PlateBank {
                 .with_parallel_load_columns(acoustic, &columns)
                 .map_err(render_step_error)?;
         }
+        Ok(BankPhysics {
+            system: sys,
+            state: x,
+            areas,
+            roots,
+            vk_start,
+            vk_extent,
+            cavity_start,
+        })
+    }
+
+    fn prepare_runtime(&mut self, dt: f64) -> Result<BankRuntime, AcousticRealizeError> {
+        let BankPhysics {
+            system: mut sys,
+            state: x,
+            areas,
+            roots,
+            vk_start,
+            vk_extent,
+            cavity_start,
+        } = self.prepare_physics()?;
         let prototype = sys.share_storage();
         let body = VkBody {
             linear: prepare_render_linear(&sys)?,
@@ -678,3 +891,6 @@ impl PlateBank {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod image_tests;

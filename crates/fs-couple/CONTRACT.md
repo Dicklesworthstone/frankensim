@@ -11866,3 +11866,41 @@ intact/open/failed limits, source effects, 5/10/20/40-kHz refinement, kinetic
 occupancy and atomic retry. Nine original reclosure tests also pass. Sources
 and frames remain fixed; global softening uniqueness and intrastep event
 resolution are not asserted by this held-force path.
+
+### Complete PlateBank images for external physical composition
+
+`PlateBank::physical_image` exposes the original complete mechanical, Maxwell,
+nonlinear, cavity and continuous-radiation state to another assembly owner.
+Cold physical assembly is shared with the direct bank renderer; export does not
+first prepare an unused exponential or rebuild a plate from scalar frequencies.
+An already moving bank exports every accepted state coordinate unchanged.
+The immutable original constitutive callbacks remain shared; the image owns its
+explicit state and its caller owns the subsequent accepted clock.
+
+Port 0 retains the original force/drive-velocity projection. Port 1 is pressure
+along the signed outward surface map / outward volume flow. These projections
+are independent. An interior flow domain and an exterior opposing-pressure
+impedance require their respective orientation in the existing transformer.
+The new fs-phs external-column seam retains every original J/R/storage entry.
+No geometry, material, port map or quadratic law is inferred from probes.
+
+`PlateBankObservation` retains the complete source extent and the original
+mass-normalized surface weights. It observes finite complete state prefixes,
+including states followed by an appended subsystem, and returns endpoint
+volume flow or compact pressure from interval-mean surface acceleration.
+It refuses missing histories and invalid observations instead of filling them
+with zeros. It advances no state and adds no acoustic loss.
+
+Only an already declared radiation source is realized during export; no exterior
+model is silently added to an undeclared moving source. Source gas/clock and
+geometry remain checked. Empty banks return no image; a cavity-only island has
+no mechanical interface and refuses this export. Cancellation changes no
+evolving state. The complete-state capacity and physical model limits of the
+direct bank remain, and the receiving assembly must admit its own full state.
+
+Focused G0/G1/G3/G4 native tests cover warmed mixed compact/Vk/full-damping/
+Maxwell/cavity history, independent force and volume ports, exact continuation,
+independent physical equations for an appended flow load, shared piston memory,
+and observation/cancellation refusal. This is a reusable physical composition
+API; each renderer must explicitly consume it. Full workspace qualification
+remains blocked by missing constellation siblings.

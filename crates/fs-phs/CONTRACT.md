@@ -859,3 +859,15 @@ complete J/R/G, energy, effort, quadratic data, nonlinear-remainder delegation
 and actual step/heat/work equivalence. Existing physical load-port regressions
 remain unchanged. This is a composition and numerical-cache reuse seam, not a
 new state integrator, threading guarantee or measured performance certificate.
+
+## Additional physical port columns
+
+`PortHamiltonian::with_additional_ports` appends finite explicit work-conjugate
+columns after the original external ports, preserving all original coordinates,
+J/R matrices and storage callbacks. It is a cold composition operation and
+creates no new storage, damping, state reduction or inferred quadratic model.
+Column dimensions and finite values are checked, and the existing system owner
+admits the resulting structure. The caller supplies physical units and boundary
+orientation. The focused Maxwell-oscillator test verifies that independent
+force leverages reproduce the original motion, memory, energy, loss and total
+physical work, and checks malformed/nonfinite column refusal.

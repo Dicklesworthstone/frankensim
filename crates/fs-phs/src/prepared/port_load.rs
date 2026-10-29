@@ -19,6 +19,30 @@ impl Storage for SharedStorage {
 }
 
 impl PortHamiltonian {
+    /// Expose additional work-conjugate ports without changing the physical law.
+    ///
+    /// `columns` is row-major state-by-additional-port. Original external ports
+    /// remain first, followed by these columns. Every state, structure entry and
+    /// constitutive callback is retained unchanged. This cold composition seam
+    /// neither infers a force/volume map nor creates new storage or dynamics.
+    /// Callers supply the physical units and own subsequent port interconnection.
+    pub fn with_additional_ports(self, additional_ports: usize, columns: &[f64])
+        -> Result<Self, PhsError>
+    {
+        let error = || PhsError::Dimension { what: "additional physical port columns" };
+        if additional_ports == 0 || self.n.checked_mul(additional_ports) != Some(columns.len())
+            || columns.iter().any(|v| !v.is_finite())
+        { return Err(error()); }
+        let m = self.m.checked_add(additional_ports).ok_or_else(error)?;
+        let mut g = vec![0.0; self.n.checked_mul(m).ok_or_else(error)?];
+        for i in 0..self.n {
+            g[i*m..i*m+self.m].copy_from_slice(&self.g[i*self.m..(i+1)*self.m]);
+            g[i*m+self.m..(i+1)*m]
+                .copy_from_slice(&columns[i*additional_ports..(i+1)*additional_ports]);
+        }
+        Self::new(self.n, m, self.j, self.r, g, self.storage)
+    }
+
     /// Read-only constitutive law. Physical histories belong to the explicit x.
     #[must_use]
     pub fn storage(&self) -> &dyn Storage { self.storage.as_ref() }
@@ -160,6 +184,33 @@ impl PortHamiltonian {
 mod tests {
     use super::*;
     use crate::{QuadraticStorage, modal_bank_ports, step};
+    #[test]
+    fn additional_physical_ports_keep_original_memory_and_reciprocal_work() {
+        let make=||crate::mass_spring_damper(2.0,7.0,0.3).unwrap()
+            .with_relaxation_branches(vec![crate::RelaxationBranch {
+                projection:vec![1.0,0.0],stiffness:3.0,relaxation_time_s:0.2,
+            }]).unwrap();
+        let x=[0.25,-0.1,0.03];
+        let source=make();
+        let extended=make().with_additional_ports(2,&[0.0,0.0,-0.5,2.0,0.0,0.0]).unwrap();
+        assert_eq!(extended.state_dim(),source.state_dim());
+        assert_eq!(extended.port_dim(),3);
+        assert_eq!(extended.hamiltonian(&x),source.hamiltonian(&x));
+        assert_eq!(extended.effort(&x),source.effort(&x));
+        let velocity=x[1]/2.0;
+        assert_eq!(extended.output(&x),vec![velocity,-0.5*velocity,2.0*velocity]);
+        // Three physical forces at different work-conjugate leverages give
+        // exactly the same total force 1 - 0.5*2 + 2*3 = 6 on the original mass.
+        let a=step(&extended,&x,&[1.0,2.0,3.0],0.001).unwrap();
+        let b=step(&source,&x,&[6.0],0.001).unwrap();
+        assert_eq!(a.x,b.x);
+        assert_eq!(a.delta_h,b.delta_h);
+        assert_eq!(a.dissipated,b.dissipated);
+        assert!((a.supplied-b.supplied).abs()<1e-15);
+        assert!(make().with_additional_ports(0,&[]).is_err());
+        assert!(make().with_additional_ports(1,&[0.0,1.0]).is_err());
+        assert!(make().with_additional_ports(1,&[0.0,f64::NAN,0.0]).is_err());
+    }
     #[test]
     fn repeated_cold_sharing_preserves_the_complete_storage_without_wrapper_growth() {
         let mut source=crate::mass_spring_damper(2.0,7.0,0.3).unwrap()
