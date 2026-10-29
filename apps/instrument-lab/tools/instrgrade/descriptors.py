@@ -17,6 +17,8 @@ N_ERB = 32
 ERB_FMIN_HZ = 30.0
 ERB_FMAX_HZ = 16000.0
 ERB_RANGE_DB = 50.0  # levels this far under a window's loudest band are clamped (erb_spectrogram_db)
+HNR_MODULATION_HZ = 14.0  # hnr_band: sidebands nearer a partial than this (vibrato, tremolo) are the tone, not noise
+HNR_MOVING_CENTS = 3.0  # flatten_pitch removed at least this much pitch movement: a player sustains the note
 
 
 class GraderRefusalError(ValueError):
@@ -450,6 +452,61 @@ def track_partials(
     return partials
 
 
+def _pitch_reference(partials: list[Partial] | list[tuple[int, float]]) -> Partial | None:
+    low = [p for p in partials if isinstance(p, Partial) and p.k <= 6 and 50.0 <= p.mean_f_hz <= 2000.0]
+    return max(low, key=lambda p: p.mean_level_db) if low else None
+
+
+def _hann_smooth(z: np.ndarray, n: float) -> tuple[np.ndarray, int]:
+    n_odd = max(3, int(n) | 1)
+    ker = np.hanning(n_odd + 2)[1:-1]
+    return np.convolve(z, ker / ker.sum(), mode="same"), n_odd // 2
+
+
+def flatten_pitch(
+    x: np.ndarray,
+    partials: list[Partial] | list[tuple[int, float]],
+    *,
+    sr: int = SR,
+) -> tuple[np.ndarray, float, float]:
+    """x resampled in time so that its strongest low partial holds a steady frequency.
+
+    Returns the warped signal, the steady frequency over that partial's long-term peak, and the largest pitch
+    excursion removed (cents). The instantaneous frequency (heterodyne phase) is smoothed over 50 ms, so vibrato and
+    drift are removed and jitter is kept. Under 0.1 s, or with a track leaving +-1 semitone, x is returned unwarped."""
+    ref = _pitch_reference(partials)
+    if ref is None or len(x) < sr // 10:
+        return x, 1.0, 0.0
+    fr = ref.mean_f_hz
+    t = np.arange(len(x), dtype=np.float64) / sr
+    z, e1 = _hann_smooth(x * np.exp(-2j * math.pi * fr * t), 4.0 * sr * ref.k / fr)  # 4 periods reject the neighbours
+    dev, e2 = _hann_smooth(np.gradient(np.unwrap(np.angle(z))) * sr / (2.0 * math.pi), 0.05 * sr)
+    e = e1 + e2
+    if len(x) <= 2 * e + 8:
+        return x, 1.0, 0.0
+    dev[:e], dev[-e:] = dev[e], dev[-e - 1]
+    f_inst = fr + dev
+    rho = f_inst / f_inst.mean()
+    excursion_c = float(1200.0 * np.max(np.abs(np.log2(rho))))
+    if excursion_c > 100.0:
+        return x, 1.0, 0.0
+    # Output sample n reads input position src[n]; each input sample advances the output by rho
+    tau = np.concatenate([[0.0], np.cumsum(rho[:-1])])
+    src = np.interp(np.arange(int(tau[-1]) + 1, dtype=np.float64), tau, np.arange(len(x), dtype=np.float64))
+    # Kaiser-windowed sinc (32 taps, cutoff 0.47 sr), so the warp adds no noise of its own
+    taps = np.arange(-15, 17)
+    out = np.empty(len(src), dtype=np.float64)
+    for a in range(0, len(src), 32768):
+        pos = src[a : a + 32768]
+        i0 = np.floor(pos).astype(np.int64)
+        u = taps[None, :] - (pos - i0)[:, None]
+        h = 0.94 * np.sinc(0.94 * u) * np.i0(8.6 * np.sqrt(np.clip(1.0 - (u / 16.0) ** 2, 0.0, None))) / np.i0(8.6)
+        idx = i0[:, None] + taps[None, :]
+        inside = (idx >= 0) & (idx < len(x))
+        out[a : a + 32768] = np.sum(np.where(inside, x[np.clip(idx, 0, len(x) - 1)], 0.0) * h, axis=1)
+    return out, float(f_inst.mean() / fr), excursion_c
+
+
 def hnr_band(
     x: np.ndarray,
     partials: list[Partial] | list[tuple[int, float]],
@@ -471,14 +528,45 @@ def hnr_band(
     x = np.asarray(x, dtype=np.float64)
     if len(x) < 64:
         return float("nan")
-    win = blackman_harris(len(x))
-    spec = np.abs(np.fft.rfft(x * win)) ** 2
-    freqs = np.fft.rfftfreq(len(x), 1.0 / sr)
+    # One FFT over the window resolves each partial ever more finely as the window grows, so a mask of fixed bins at the
+    # mean frequency let a few cents of a player's drift or vibrato read as noise (instrgrade-3: a sung C3 measured
+    # -5.0 dB over its 1.4 s sustain and +13.7 dB in 0.1 s pieces). The pitch is held steady first, and the mask is
+    # HNR_MODULATION_HZ wide whatever the window's length. The warp is kept only where it gathers more of the energy
+    # into the partials: a phase jump (a step in a render, a cracked note) reads as a brief pitch excursion, and
+    # warping it away would frequency-modulate every upper partial out of its mask.
+    return max(
+        _hnr_masked(x, 1.0, 0.0, partials, f_lo, f_hi, sr),
+        _hnr_masked(*flatten_pitch(x, partials, sr=sr), partials, f_lo, f_hi, sr),
+    )
+
+
+def _hnr_masked(
+    xw: np.ndarray,
+    scale: float,
+    moving_c: float,
+    partials: list[Partial] | list[tuple[int, float]],
+    f_lo: float,
+    f_hi: float,
+    sr: int,
+) -> float:
+    win = blackman_harris(len(xw))
+    spec = np.abs(np.fft.rfft(xw * win)) ** 2
+    freqs = np.fft.rfftfreq(len(xw), 1.0 / sr)
     df = float(freqs[1] - freqs[0])
+    tracked = [(int(p.k), float(p.mean_f_hz)) if isinstance(p, Partial) else (int(p[0]), float(p[1])) for p in partials]
+    f0 = min((fk / k for k, fk in tracked if k > 0), default=math.inf) * scale
+    half = max(3.5 * df, min(HNR_MODULATION_HZ, 0.25 * f0))
+    ref = _pitch_reference(partials)
     hm = np.zeros_like(freqs, dtype=bool)
-    for p in partials:
-        fk = float(p.mean_f_hz if isinstance(p, Partial) else p[1])
-        hm |= np.abs(freqs - fk) <= 3.5 * df
+    for k, fk in tracked:
+        fc = fk * scale
+        if ref is not None and moving_c >= HNR_MOVING_CENTS:
+            # A sustained player's partials are mode-locked harmonics, and under vibrato a partial's long-term peak sits
+            # near a turning point rather than at its centre: find each flattened line at its harmonic place instead
+            fe = k * ref.mean_f_hz * scale / ref.k
+            sel = np.where(np.abs(freqs - fe) <= min(0.45 * f0, max(3.5 * df, 0.01 * fe)))[0]
+            fc = float(freqs[sel[int(np.argmax(spec[sel]))]]) if len(sel) else fe
+        hm |= np.abs(freqs - fc) <= half
     mask = (freqs >= f_lo) & (freqs <= f_hi)
     h_pow = float(spec[mask & hm].sum()) + 1e-30
     n_pow = float(spec[mask & ~hm].sum()) + 1e-30

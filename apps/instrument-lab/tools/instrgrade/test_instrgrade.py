@@ -74,8 +74,8 @@ class NoAbsolutePaths(unittest.TestCase):
 
 class Identity(unittest.TestCase):
     def test_grader_version_and_links_pinned(self):
-        """G0: GRADER_VERSION is instrgrade-3 and uiowa-links.json is unchanged."""
-        self.assertEqual(ig.GRADER_VERSION, "instrgrade-3")
+        """G0: GRADER_VERSION is instrgrade-4 and uiowa-links.json is unchanged."""
+        self.assertEqual(ig.GRADER_VERSION, "instrgrade-4")
         self.assertTrue((TOOLS / "descriptors.py").is_file())
         self.assertEqual(sha256(TOOLS / "uiowa-links.json"),
                          "46b50e792be079a2b118a3adeb632ef719d2b785f3750a6b71ea2ed14960e74d")
@@ -137,13 +137,13 @@ class Guards(unittest.TestCase):
             self.assertEqual(result.returncode, index, result.stderr)
             row = json.loads((output / "results.json").read_text())[0]
             receipt, terminal = map(json.loads, (output / "receipt.jsonl").read_text().splitlines())
-            self.assertEqual(row["grader_version"], "instrgrade-3")
+            self.assertEqual(row["grader_version"], "instrgrade-4")
             self.assertIn("windows", row)
             self.assertIn("q3", row)
             self.assertIn("descriptors", row)
             self.assertIn("baselines", row)
             self.assertEqual(row["band_split_hz"], 1000.0)
-            self.assertEqual(receipt["grader_version"], "instrgrade-3")
+            self.assertEqual(receipt["grader_version"], "instrgrade-4")
             self.assertEqual(receipt["candidate_wav_sha256"], sha256(wav))
             self.assertEqual(receipt["library_sha256"], sha256(libpath))
             self.assertEqual(receipt["tool_sha256"]["instrgrade.py"], sha256(TOOLS / "instrgrade.py"))
@@ -167,7 +167,7 @@ class Guards(unittest.TestCase):
         diagnostic_row = json.loads(diagnostic.stdout.splitlines()[-1])
         self.assertIs(diagnostic_row["radiated"], True)
         self.assertIs(diagnostic_row["diagnostic_only"], True)
-        self.assertEqual(diagnostic_row["grader_version"], "instrgrade-3")
+        self.assertEqual(diagnostic_row["grader_version"], "instrgrade-4")
         self.assertTrue((diagnostic_dir / "Synthetic.mf.A3-radiated.wav").is_file())
 
 

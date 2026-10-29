@@ -173,6 +173,37 @@ class BlindSpotsAndDescriptors(unittest.TestCase):
         self.assertGreaterEqual(d_sync["cyclo_coherence_kf0"], 0.5)
         self.assertLessEqual(d_stat["cyclo_coherence_kf0"], 0.1)
 
+    def test_hnr_holds_through_vibrato_and_window_length(self):
+        """G1: 196 Hz, 30 harmonics and stationary noise (37 dB steady) with +-30 c vibrato at 5.5 Hz -> band HNR within
+        1.5 dB of the steady tone's and of its own mean over 0.2 s pieces (instrgrade-3: 2.3 dB, 12.2 dB in pieces).
+        A splice (level -4.7 dB, the fundamental's phase +0.8 rad, the others' within +-0.3 rad) reads no noisier than
+        under the mask alone: the warp misreads the jump as 42 c of pitch and read it 4.0 dB lower."""
+        rng = np.random.default_rng(19621)
+        t = np.arange(int(2.5 * ig.SR), dtype=np.float64) / ig.SR
+        f0 = 196.0
+        noise = rng.normal(0.0, 0.02, len(t))
+        hnr = {}
+        for name, depth_c in (("steady", 0.0), ("vibrato", 30.0)):
+            phase = 2.0 * np.pi * np.cumsum(f0 * 2.0 ** (depth_c / 1200.0 * np.sin(2.0 * np.pi * 5.5 * t))) / ig.SR
+            x = sum(np.sin(k * phase) / k for k in range(1, 31)) + noise
+            parts = desc_mod.track_partials(x, f0, kmax=30, t_window=(0.2, 2.3))
+            seg = x[int(0.2 * ig.SR):int(2.3 * ig.SR)]
+            n = int(0.2 * ig.SR)
+            hnr[name] = desc_mod.hnr_band(seg, parts)
+            hnr[name + " pieces"] = float(np.mean([desc_mod.hnr_band(seg[i:i + n], parts) for i in range(0, len(seg) - n + 1, n)]))
+        self.assertLessEqual(abs(hnr["vibrato"] - hnr["steady"]), 1.5, hnr)
+        self.assertLessEqual(abs(hnr["vibrato"] - hnr["vibrato pieces"]), 1.5, hnr)
+        self.assertLessEqual(abs(hnr["steady"] - hnr["steady pieces"]), 1.5, hnr)
+        jump = rng.uniform(-0.3, 0.3, 31)
+        jump[1] = 0.8
+        after = t >= 1.0
+        x = noise + sum(np.sin(2.0 * np.pi * k * f0 * t + after * jump[k]) * np.where(after, 10.0 ** (-4.7 / 20.0), 1.0) / k
+                        for k in range(1, 31))
+        parts = desc_mod.track_partials(x, f0, kmax=30, t_window=(0.2, 2.3))
+        seg = x[int(0.2 * ig.SR):int(2.3 * ig.SR)]
+        mask_only = desc_mod._hnr_masked(seg, 1.0, 0.0, parts, 80.0, 10000.0, ig.SR)
+        self.assertGreaterEqual(desc_mod.hnr_band(seg, parts), mask_only - 0.01, mask_only)
+
     def test_decay_analysed_to_noise_floor(self):
         """G1: 6 s decaying 82.4 Hz (E2) note with tau = 1.2 s over -80 dB floor -> end >= 5 s within 0.1 s of crossing; 3 s refuses AnalysisTooShort."""
         rng = np.random.default_rng(82406)

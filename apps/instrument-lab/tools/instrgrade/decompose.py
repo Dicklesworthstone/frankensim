@@ -540,7 +540,7 @@ METRICS = OrderedDict([
     ("f0_cents", _m("Fundamental frequency", "Hz", "cents", "Distance in cents between the two fitted fundamentals.", SAME_NOTE, "f0_hz")),
     ("inharmonicity_B", _m("Inharmonicity B", "B x 1e-4", "B x 1e-4", "Stiff-string law f_k = k f0 sqrt(1 + B k^2) fitted to the tracked partials; shown in units of 1e-4.", ALL_CATS, "inharmonicity_B", 1e4)),
     ("odd_even_db", _m("Odd/even balance", "dB", "dB", "Level of the odd partials (3, 5, 7, 9) against the even ones (2-10).", ALL_CATS, "odd_even_db")),
-    ("hnr_db", _m("Harmonics-to-noise", "dB", "dB", "Energy at the tracked partials against the energy between them, 80 Hz to 10 kHz.", ALL_CATS, "hnr_db")),
+    ("hnr_db", _m("Harmonics-to-noise", "dB", "dB", "Energy within 14 Hz of the tracked partials against the energy between them, 80 Hz to 10 kHz, with the pitch held steady first, so vibrato and drift count as the tone.", ALL_CATS, "hnr_db")),
     ("attack_log2", _m("Attack time 10-90%", "ms", "octaves of time", "Time for the 5 ms RMS envelope to rise from 10% to 90% of its steady (or peak) level; the gap is log2 of the ratio.", ALL_CATS, "attack_ms")),
     ("decay_db_s", _m("Partial decay rate", "dB/s", "dB/s", "Median over the first partials of the level slope after each partial's peak (decaying notes only).", ALL_CATS, "decay_med_db_s")),
     ("centroid_st", _m("Spectral centroid over time", "Hz", "semitones", "RMS over time of 12 log2(centroid ratio), sounding frames, 80 Hz to 10 kHz.", ALL_CATS, "mean_centroid_hz")),
