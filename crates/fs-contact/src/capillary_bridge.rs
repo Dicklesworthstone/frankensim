@@ -32,6 +32,9 @@ use fs_material::state_point::MaterialStatePointError;
 
 mod geometry;
 
+/// Fixed-volume axisymmetric Young--Laplace equilibria between parallel plates.
+pub mod axisymmetric;
+
 /// Work-conjugate scalar coupling to an original held-force mechanical response.
 pub mod load_line;
 

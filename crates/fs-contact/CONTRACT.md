@@ -1001,3 +1001,30 @@ continuation allocates nothing. Root brackets localize a floating-point
 boundary, not an interval certificate. Partial slip, post-event sliding,
 dynamic landing and conversion of released storage to heat remain outside
 this owner.
+
+## Three-dimensional axisymmetric liquid-bridge equilibrium
+
+`capillary_bridge::axisymmetric::SourceAxisymmetricCapillaryBridge` solves
+the actual fixed-volume Young--Laplace meridian between parallel plates with
+two original, possibly unequal acute Young angles. The original liquid and
+wetting sources remain attached. A first-integral radius formula, bounded
+angular quadrature and scalar gap solve produce the neck, circular contact
+areas, liquid-gas area, pressure, force, energy and branch sensitivities.
+The model admits one-neck nonpositive-pressure profiles on an explicit suction
+interval, with caller-specified continuum, gravity, suction and work limits.
+Runtime shape solves allocate nothing.
+
+Admission additionally requires a conservative sufficient second-variation
+bound for axisymmetric, first-order volume-preserving radial graph
+perturbations with mobile Young contact lines and fixed plates. This is not
+an exact fold or a full three-dimensional/nonlinear/dynamic stability claim;
+lateral translations are neutral. Continued equilibria report their actual
+converged gap and requested-gap residual. Surface-energy differences define
+work-conjugate mean force on that actual gap increment; estimated quadrature
+and energy-subtraction errors are exposed, and unresolved nonzero work is
+refused. These estimates are not interval certificates.
+
+This branch is quasistatic and has no finite-rate liquid or contact-line model.
+Positive pressure, obtuse angles, pinning, evaporation, cavitation, dynamic
+pinch-off and bridge topology changes are outside its scope. A solver or
+stability refusal does not manufacture rupture, surface release or heat.

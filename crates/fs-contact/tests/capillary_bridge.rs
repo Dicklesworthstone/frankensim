@@ -18,6 +18,9 @@ use fs_material::liquid_temperature::LiquidViscosityBasis;
 use fs_material::state_point::MaterialPropertySelection;
 use fs_qty::{Density, Dims};
 
+#[path = "capillary_bridge/axisymmetric.rs"]
+mod axisymmetric;
+
 const VOLUME: f64 = 1e-10;
 const WIDTH: f64 = 1e-3;
 
