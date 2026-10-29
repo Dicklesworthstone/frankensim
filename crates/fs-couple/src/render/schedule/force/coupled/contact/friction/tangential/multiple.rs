@@ -297,6 +297,8 @@ impl<L: TangentialLaw> MultiTangentialModalSystem<L> {
         gate: Option<&CancelGate>,
     ) -> Result<&MultiTangentialModalFrame, MultiTangentialModalError> {
         let candidate = self.stage_candidate(external, drives, gate)?;
+        self.network.validate_staged_material_points(gate)?;
+        poll(gate)?;
         Ok(self.publish_candidate(candidate))
     }
 

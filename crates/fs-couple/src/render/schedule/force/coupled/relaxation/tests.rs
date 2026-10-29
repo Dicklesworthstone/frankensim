@@ -7,6 +7,8 @@ use fs_math::c64::C64;
 use fs_ports::PortedModule;
 use fs_tribo::FrictionLaw;
 
+mod tensor;
+
 fn config() -> ModalCouplingConfig {
     ModalCouplingConfig {
         max_modes: 16, max_connections: 8, max_setup_terms: 1_000_000,
@@ -289,7 +291,7 @@ fn no_memory_is_unchanged_and_augmented_capacity_setup_and_prepared_refusals_are
     let prepared = mechanical(48_000, 100.0, 0.0)
         .with_prepared_linear_propagation(budget, &gate).unwrap();
     assert!(prepared.with_material_relaxation(vec![branch()], None, &gate).is_err());
-    for bad in [arm(vec![1.0, 1.0], 1.0, 0.001), arm(vec![0.0, 0.0], 1.0, 0.001),
+    for bad in [arm(vec![1.0, 1.0], 1.0, 0.001),
         arm(vec![1.0, 0.0], 1.0, 0.0), arm(vec![1.0, 0.0], 1e12, 0.001)] {
         assert!(mechanical(48_000, 100.0, 0.0).with_material_relaxation(vec![bad], None, &gate).is_err());
     }

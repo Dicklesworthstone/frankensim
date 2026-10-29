@@ -4,7 +4,75 @@ use super::*;
 use fs_math::det;
 use fs_phs::RelaxationBranch;
 
+/// A full source tensor tied to original mechanical and material coordinates.
+/// This observes the accepted candidate; it introduces no additional storage,
+/// forces or integration. `strain_scale` maps an energy quadrature point to
+/// the physical surface whose complete source strain must remain admissible.
+#[derive(Clone, Debug)]
+pub struct ModalPlaneStressPoint {
+    pub modes: core::ops::Range<usize>,
+    pub memories: core::ops::Range<usize>,
+    pub strain_scale: f64,
+    pub image: crate::tensor_material::PlaneStressRelaxation,
+}
+
+impl ModalPlaneStressPoint {
+    fn validate(&self, displacement: &[f64], memory: &[f64]) -> Result<(),ModalCouplingError> {
+        let q=displacement.get(self.modes.clone())
+            .ok_or_else(||invalid("complete tensor material displacement layout changed"))?;
+        let z=memory.get(self.memories.clone())
+            .ok_or_else(||invalid("complete tensor material history layout changed"))?;
+        let q:Vec<_>=q.iter().map(|q|self.strain_scale*q).collect();
+        let z:Vec<_>=z.iter().map(|z|self.strain_scale*z).collect();
+        self.image.strain(&q,&z).map_err(|_|invalid("complete tensor material surface strain exceeds its original source domain"))?;
+        // Recompute through the ORIGINAL complete law, including normal history;
+        // never substitute zero by definition or admit nonfinite normal traction.
+        self.image.normal_stress_pa(&q,&z)
+            .map_err(|_|invalid("complete tensor material normal traction is unrepresentable"))?;
+        Ok(())
+    }
+}
+
 impl CoupledModalSystem {
+    /// Attach source-domain checks after the complete material channels exist.
+    /// The fixed geometry/history bindings survive every contact extension.
+    /// Both cold state and each staged physical endpoint are checked before
+    /// publication, including force-loaded equilibrium. No free predictor is
+    /// mistaken for the actual contact-constrained displacement.
+    pub fn with_plane_stress_material_points(mut self, points:Vec<ModalPlaneStressPoint>,
+        gate:&CancelGate) -> Result<Self,ModalCouplingError> {
+        poll(Some(gate))?;
+        if self.samples_rendered()!=0 || !self.plane_stress_material_points.is_empty()
+            || points.len()>4096 {
+            return Err(invalid("tensor material point binding requires one bounded cold attachment"));
+        }
+        for point in &points {
+            poll(Some(gate))?;
+            if point.modes.start>point.modes.end || point.modes.end>self.mode_count()
+                || point.modes.len()!=point.image.point().coordinates()
+                || point.memories.start>point.memories.end || point.memories.end>self.material_memory.len()
+                || point.memories.len()!=point.image.point().memory_coordinates()
+                || !point.strain_scale.is_finite() || point.strain_scale<=0.0 {
+                return Err(invalid("tensor material point requires complete fixed original coordinate ranges"));
+            }
+        }
+        let q:Vec<_>=self.models.iter().flat_map(|m|m.states())
+            .map(|s|s.displacement_m_sqrt_kg).collect();
+        for point in &points { poll(Some(gate))?; point.validate(&q,&self.material_memory)?; }
+        self.plane_stress_material_points=points;
+        Ok(self)
+    }
+
+    fn validate_staged_material_points(&self,gate:Option<&CancelGate>) -> Result<(),ModalCouplingError> {
+        if self.plane_stress_material_points.is_empty() {return Ok(());}
+        let q:Vec<_>=self.candidates.iter().flat_map(|m|m.states())
+            .map(|s|s.displacement_m_sqrt_kg).collect();
+        for point in &self.plane_stress_material_points {
+            poll(gate)?; point.validate(&q,&self.candidate_material_memory)?;
+        }
+        Ok(())
+    }
+
     /// Bind Maxwell arms to the SAME complete held-force propagator, once before
     /// playback. Projections use the original interleaved `[q0,v0,q1,v1,...]`
     /// coordinates; velocity coefficients must be zero. The original modal and
@@ -80,7 +148,6 @@ impl CoupledModalSystem {
                 || !(1.0 / branch.relaxation_time_s).is_finite()
                 || branch.projection.iter().any(|v| !v.is_finite())
                 || branch.projection.iter().skip(1).step_by(2).any(|v| *v != 0.0)
-                || !branch.projection.iter().any(|v| *v != 0.0)
             {
                 return Err(invalid("material branches require finite displacement-only projections and positive stiffness/time"));
             }
@@ -90,7 +157,7 @@ impl CoupledModalSystem {
                 let coupling = finite(root * b)?;
                 norm = finite(norm + coupling * coupling)?;
             }
-            if norm == 0.0 {
+            if norm == 0.0 && branch.projection.iter().any(|v| *v!=0.0) {
                 return Err(invalid("material stiffness projection is not representable"));
             }
             upper_squared = finite(upper_squared + norm)?;

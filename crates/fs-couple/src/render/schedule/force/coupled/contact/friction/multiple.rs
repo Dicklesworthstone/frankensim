@@ -348,6 +348,15 @@ impl MultiFrictionModalSystem {
         if component >= network.models.len() {
             return Err(invalid("restore names a component outside the coupled network").into());
         }
+        if !network.plane_stress_material_points.is_empty() {
+            // A cold restart is still a physical source-domain change. Stage
+            // the complete accepted prefix before exposing this replacement.
+            network.candidates.clone_from(&network.models);
+            network.candidate_material_memory.clone_from(&network.material_memory);
+            network.candidates[component].restore_states(states)
+                .map_err(|source|ModalCouplingError::Component {component,source})?;
+            network.validate_staged_material_points(None)?;
+        }
         network.models[component].restore_states(states)
             .map_err(|source| ModalCouplingError::Component { component, source })?;
         network.candidates[component].restore_states(states)
@@ -493,6 +502,7 @@ impl MultiFrictionModalSystem {
     // Source admission follows all numerical trials, before any publication.
     // The thermal transaction calls this only at its final accepted endpoint.
     fn validate_obstacle_sources(&self, gate: Option<&CancelGate>) -> Result<(), ModalFrictionError> {
+        self.core.network.validate_staged_material_points(gate)?;
         if let Some(obstacles) = &self.obstacles {
             obstacles.validate_sources(&self.core.network.candidates, self.sample_period_s(), gate)?;
         }

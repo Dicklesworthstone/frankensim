@@ -232,6 +232,8 @@ impl FrictionModalSystem {
         checkpoint()?;
         drop(problem);
         let owner = owner.into_inner();
+        owner.network.validate_staged_material_points(Some(gate))
+            .map_err(ModalFrictionError::from)?;
         owner.port.law = staged.law;
         owner.interface = staged.binding;
         owner.load_line = staged.load_line;

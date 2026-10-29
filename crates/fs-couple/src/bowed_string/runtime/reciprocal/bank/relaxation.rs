@@ -283,7 +283,9 @@ impl ReciprocalStringBank {
     ) -> Result<Self, ReciprocalStringError> {
         poll(gate)?;
         let body_count = self.source.material_chart_relaxation.as_ref()
-            .map_or(0, |image| image.coupling_rows_per_s().len());
+            .map_or(0, |image| image.coupling_rows_per_s().len())
+            +self.source.material_chart_tensor_relaxation.as_ref()
+                .map_or(0,|image|image.coupling_rows_per_s().len());
         let existing_count = self.source.source_memory_count(&self.cards, gate)?
             .checked_add(body_count).ok_or_else(|| invalid("complete material history extent overflow"))?;
         if self.system.samples_rendered()!=0 || self.source.string_bending_relaxation.is_some()

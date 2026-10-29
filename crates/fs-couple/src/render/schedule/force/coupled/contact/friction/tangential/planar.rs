@@ -226,6 +226,8 @@ impl<L: TangentialLaw> PlanarTangentialModalSystem<L> {
         gate: Option<&CancelGate>,
     ) -> Result<&PlanarTangentialModalFrame, PlanarTangentialModalError> {
         let candidate = self.stage_candidate(external, drive, gate)?;
+        self.network.validate_staged_material_points(gate)?;
+        poll(gate)?;
         Ok(self.publish_candidate(candidate))
     }
 

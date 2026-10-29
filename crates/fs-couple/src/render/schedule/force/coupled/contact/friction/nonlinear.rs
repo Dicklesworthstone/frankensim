@@ -408,6 +408,9 @@ impl FrictionModalSystem {
             for branch in &mut branches { branch.projection.resize(2 * count, 0.0); }
             network.with_material_relaxation(branches, Some(self.network.material_memory.clone()), gate)?
         };
+        let network=if self.network.plane_stress_material_points.is_empty() {network} else {
+            network.with_plane_stress_material_points(self.network.plane_stress_material_points.clone(),gate)?
+        };
         let network = if let Some(air) = &self.network.radiation {
             // Cold appended mechanical coordinates leave every original body
             // velocity address intact; the same acoustic history remains at rest.

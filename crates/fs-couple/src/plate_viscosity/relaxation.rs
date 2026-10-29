@@ -13,6 +13,9 @@ use fs_material::visco::GeneralizedMaxwell;
 use fs_math::det;
 use fs_qty::{Density, Dims, Pressure, QuantitySpec};
 
+/// Complete source tensors with hereditary normal-traction elimination.
+pub mod tensor;
+
 /// Explicit initial material history, independent of equilibrium displacement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InitialPlateMemory {

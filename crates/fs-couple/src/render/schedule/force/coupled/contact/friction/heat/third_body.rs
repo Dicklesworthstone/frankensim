@@ -192,6 +192,8 @@ impl FrictionModalSystem {
         checkpoint()?;
         drop(problem);
         let owner = owner.into_inner();
+        owner.network.validate_staged_material_points(Some(gate))
+            .map_err(ModalFrictionError::from)?;
         // No fallible work or external callback follows this common boundary.
         owner.port.law = staged.law;
         owner.interface = staged.binding;

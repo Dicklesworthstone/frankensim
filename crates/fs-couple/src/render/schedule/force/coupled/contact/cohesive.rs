@@ -442,6 +442,7 @@ impl<'a> CohesiveModalSystem<'a> {
             iterations: solved.iterations,
             material_evaluations: solved.material_evaluations + 1,
         };
+        self.network.validate_staged_material_points(gate)?;
         poll(gate)?;
         self.network.publish_staged();
         self.point = actual.equilibrium.point;

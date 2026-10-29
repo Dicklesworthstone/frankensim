@@ -289,6 +289,7 @@ impl ContactModalSystem {
             penetration_before_m: (x0-self.contact.law().gaps()[0]).max(0.0),
             penetration_after_m, iterations,
         };
+        self.network.validate_staged_material_points(gate)?;
         poll(gate)?;
         self.network.publish_staged();
         Ok(self.last.insert(accepted))

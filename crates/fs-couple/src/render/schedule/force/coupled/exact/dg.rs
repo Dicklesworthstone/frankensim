@@ -677,6 +677,7 @@ impl PreparedJointDg {
         }
         let port_work_residual_j = finite(acoustic.inlet_work_j() - inlet_work_j)?;
         let mean_flow_m3_s = finite(volume / network.dt)?;
+        network.validate_staged_material_points(Some(gate))?;
         poll(Some(gate))?;
         let duct = acoustic.accept();
         network.publish_staged();

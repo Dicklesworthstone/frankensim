@@ -151,7 +151,10 @@ impl ExactNetwork {
                 .map(|c| indices.iter().map(|&i| c[i]).collect())
                 .collect();
             let memory_indices: Vec<_> = branches.iter().enumerate()
-                .filter(|(_, branch)| indices.iter().any(|&i| branch.projection[2 * i] != 0.0))
+                .filter(|(_, branch)| indices.iter().any(|&i| branch.projection[2 * i] != 0.0)
+                    // A genuine uncoupled material history still stores energy
+                    // and relaxes. Retain it exactly once, on the first island.
+                    || indices[0]==0 && branch.projection.iter().all(|v|*v==0.0))
                 .map(|(i, _)| i).collect();
             let local_branches: Vec<_> = memory_indices.iter().map(|&arm| {
                 let branch = &branches[arm];

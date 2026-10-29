@@ -530,7 +530,7 @@ impl PortHamiltonian {
     /// Existing stepping, energy accounting and interconnections apply unchanged.
     ///
     /// # Errors
-    /// Refuses incompatible dimensions, nonfinite/zero coefficients, and
+    /// Refuses incompatible dimensions, nonfinite or nonpositive stiffness/time, and
     /// unrepresentable matrices or relaxation rates. No constitutive data,
     /// applicability domain or material authority is inferred here (L2).
     pub fn with_relaxation_branches(
@@ -560,10 +560,14 @@ impl PortHamiltonian {
                 return Err(PhsError::RelaxationParameters);
             }
             let scale = det::sqrt(branch.stiffness);
+            // A zero projection is an independent relaxing internal energy
+            // coordinate. Complete source tensors can contain such directions;
+            // they retain storage and heat without adding mechanical stiffness.
             let b: Vec<f64> = branch.projection.iter().map(|b| b * scale).collect();
             let rate = 1.0 / branch.relaxation_time_s;
             if b.iter().any(|v| !v.is_finite())
-                || !b.iter().any(|v| *v != 0.0)
+                || (branch.projection.iter().any(|v| *v != 0.0)
+                    && b.iter().all(|v| *v == 0.0))
                 || !rate.is_finite()
                 || rate <= 0.0
             {

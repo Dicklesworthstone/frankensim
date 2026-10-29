@@ -254,6 +254,8 @@ impl<L: TangentialLaw> PlanarTangentialModalSystem<L> {
         checkpoint()?;
         drop(problem);
         let owner = owner.into_inner();
+        owner.network.validate_staged_material_points(Some(gate))
+            .map_err(PlanarTangentialModalError::from)?;
         let mechanical = staged.mechanical.frame;
         // All fallible work finishes before this joint publication.
         owner.publish_candidate(staged.mechanical);

@@ -206,6 +206,7 @@ impl FrictionModalSystem {
         }
         let trial = (|| {
             let candidate = self.stage_candidate(external, drive, gate)?;
+            self.network.validate_staged_material_points(gate)?;
             poll(gate)?;
             // Last fallible operation: source admission is repeated against the
             // unchanged owner before any accepted mechanics can publish.

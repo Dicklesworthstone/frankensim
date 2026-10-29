@@ -10959,3 +10959,45 @@ Endpoint thermal feedback is first order and needs temporal/spatial refinement;
 root convergence does not establish uniqueness. Expansion, phase change,
 moving footprints, film advection, measured calibration and a full workspace
 validation gate remain outside this composition.
+
+## Complete source tensor memory in the shared string/body network
+
+`TensorPlateRelaxation` binds the same original `TensorPronyProperties` used by
+material valves to every retained DKT body material point. Original equilibrium
+elasticity, density, material axes, complete 21-coefficient Mandel branches,
+relaxation times and strain limits remain source-owned. The equilibrium section
+must reproduce the existing plate stiffness. No additional modal damping or
+frozen viscosity may duplicate this material storage and loss.
+
+The original plane-stress reduction retains all six history directions per
+branch and area point, including histories with zero mechanical coupling. Its
+complete relaxation coordinates enter the existing exact string/body network;
+bridge reaction, friction, cavity and radiation use the same actual state.
+Uncoupled histories retain their own energy and heat and belong to exactly one
+connected mechanical island. Explicit mode, material-point, history, projection,
+coupled-spectrum and clock limits refuse unsupported work without truncation.
+
+`ModalPlaneStressPoint` retains original displacement/history ranges through
+cold construction, component extensions, static preload and cold restart.
+Original complete surface strain and normal traction are reconstructed from the
+actual candidate coordinates and histories. Source admission follows the final
+contact, friction, DG or thermal solve, immediately before publication; numerical
+free-motion predictors and nonlinear trial states are not accepted physical
+endpoints. Refusal leaves accepted mechanics, histories and clocks unchanged.
+The surface mapping follows the original homogeneous bending quadrature; these
+are endpoint and area-quadrature checks, not continuous space/time enclosures.
+
+The native `loss tensor-maxwell` body record names original strain, branch and
+time properties and selects relaxed or unrelaxed history. `clamped-x-min`
+supports an explicit one-edge cantilever without changing perimeter-supported
+profiles. `tensor-body.body` and `tensor-body.material-strings` retain two body
+modes, six original area points and 36 material histories within existing exact
+owner capacities. They are manufactured integration fixtures, not calibrated
+violin, cello or bass bodies. Source thermal evolution, shell thickness modes,
+large strain and arbitrary initial point histories are outside this adapter.
+
+Authored regressions cover tensor-only source changes reaching bridge feedback
+and PCM, complete normal-history reconstruction, block partition identity,
+source/clock/capacity refusal, zero-coupling decay and unique island ownership,
+and atomic strain admission after contact, preload and restart. Native Cargo
+execution remains a separate verification requirement.

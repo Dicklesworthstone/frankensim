@@ -1168,6 +1168,29 @@ mod tests {
     }
 
     #[test]
+    fn uncoupled_material_history_keeps_exact_decay_and_its_own_heat() {
+        let sys=mass_spring_damper(1.0,4.0,0.0).unwrap()
+            .with_relaxation_branches(vec![crate::RelaxationBranch {
+                projection:vec![0.0,0.0],stiffness:1.0,relaxation_time_s:0.3,
+            }]).unwrap();
+        let split=split_quadratic(&sys,budget(3)).unwrap();
+        let record=step_render(&sys,&split,&[0.0,0.0,0.02],&[0.0],0.2).unwrap();
+        let expected=0.02*det::exp(-0.2/0.3);
+        assert_eq!(&record.x[..2],&[0.0,0.0]);
+        assert!((record.x[2]-expected).abs()<1e-14);
+        assert!((record.dissipated-0.5*(0.02_f64.powi(2)-expected.powi(2))).abs()<1e-14);
+        assert!(record.balance_residual().abs()<1e-14);
+        // A genuinely zero source row is admitted above. A nonzero row whose
+        // physical coupling underflows cannot silently become that other law.
+        let underflow=mass_spring_damper(1.0,4.0,0.0).unwrap()
+            .with_relaxation_branches(vec![crate::RelaxationBranch {
+                projection:vec![f64::MIN_POSITIVE,0.0],
+                stiffness:f64::MIN_POSITIVE,relaxation_time_s:0.3,
+            }]);
+        assert!(matches!(underflow,Err(crate::PhsError::RelaxationParameters)));
+    }
+
+    #[test]
     fn quadratic_metadata_survives_relaxation_and_full_galerkin_transport() {
         let base = mass_spring_damper(2.0, 3.0, 0.2).unwrap();
         let expanded = base

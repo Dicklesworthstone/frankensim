@@ -60,15 +60,18 @@ window LAMBDA_LOW LAMBDA_HIGH
 bridge IX IY
 ```
 
-`NX`/`NY` are interval counts in `2..=12`. Node `(IX,IY)` is at
-`(IX*length/NX,IY*width/NY)` and must be interior. This is a physical nodal point
+`NX`/`NY` are interval counts in `2..=12` for perimeter support, or `1..=12`
+for `clamped-x-min`. Node `(IX,IY)` is at
+`(IX*length/NX,IY*width/NY)` and must be an unconstrained transverse node. This is a physical nodal point
 attachment, not a supplied modal vector; all strings currently use this one
 footprint. The separate string records still specify each bridge's stiffness,
 damping and station on its complete span including afterlength.
 
 Elastic models are `isotropic`, `orthotropic12` or `orthotropic21`; the ordered
 plane and grain angle are passed unchanged to the original material chart.
-Support is `simply-supported` or `clamped`. Pretension is nonnegative conservative
+Support is `simply-supported` or `clamped` on the perimeter, or
+`clamped-x-min` on only the x=0 edge; the other three edges are free and may
+carry the declared force footprint. Pretension is nonnegative conservative
 plate force per unit length and does NOT acquire material bending loss. The
 spectral window contains squared angular frequencies in rad²/s², not note names
 or frequencies in Hz. Existing modal/Nyquist/source-band admission still applies.
@@ -129,6 +132,69 @@ string/bridge/PCM output, partition-independent histories, zero-law parity and
 composition with bonded strings, both transverse planes, torsion, gas memory,
 cavity and axial waves. Syntax checks passed in the implementation environment;
 these new native regressions still require execution.
+
+### Complete three-dimensional tensor memory
+
+The same source-bound tensor law used by material reeds can also drive the
+shared string body. All six normal/shear histories per branch and DKT area
+point survive the shared plane-stress elimination. This includes effects of
+out-of-plane coefficients on in-plane hereditary bending; condensing each
+branch separately would lose those effects. The native selection is:
+
+```text
+loss tensor-maxwell relaxed STRAIN_PROPERTY COUNT MAX_POINTS MAX_STATES MAX_TERMS
+tensor_branch TIME C11 C12 C13 C14 C15 C16 C22 C23 C24 C25 C26 C33 C34 C35 C36 C44 C45 C46 C55 C56 C66
+```
+
+Every token after `tensor_branch` is a property name. Coefficients use the
+same Mandel order and Pa units as the canonical `TensorPronyProperties`
+owner, and time is in seconds. A shared explicit zero claim may supply several
+zero entries. `STRAIN_PROPERTY` supplies the full tensor-shear Frobenius strain
+limit. `COUNT` is 1..=8, `MAX_POINTS` is 1..=4096, `MAX_STATES` is 0..=256 and
+`MAX_TERMS` is 1..=67,108,864. The original exact propagator can impose a
+stricter complete-state limit. No modes, points, branches or zero-coupling
+histories are silently removed to meet a budget.
+
+The original chart owns equilibrium stiffness and mass. Tensor memory adds
+only the source's declared excess stiffness; selected or authored viscosity
+cannot also be counted. Isotropic equilibrium uses E and Poisson ratio;
+orthotropic equilibrium requires all three Young moduli, all three Poisson
+ratios and all three shear moduli. A two-axis plate source cannot invent the
+missing third direction. Each original region's axes and grain angle rotate
+the entire law, not just its equilibrium section. The same complete coupled
+frequency band and mechanical clock are checked against source support.
+
+The shared coupled owner checks the full history-dependent strain at the
+physical outer faces before publishing each accepted step or preload.
+Refused strain, energy, source-domain and cancellation trials preserve the
+accepted displacement, internal history and clock. Cold restarts and appended
+internal coordinates retain that same source admission. The force, pressure,
+friction, cavity and nonlinear owners continue to use the original trajectory.
+
+`tensor-body.material-strings` with `tensor-body.body` uses a declared coarse
+cantilever body: two original triangles, two body modes, six physical area
+points and all 36 history coordinates. It reuses the existing manufactured
+tensor material source from the reed fixture; there is no body-specific
+material constant or alternate loss law. After building the wire pack above:
+
+```bash
+cp crates/fs-couple/examples/material_strings/tensor-body.material-strings "$demo/"
+cp crates/fs-couple/examples/material_modal_valve/tensor-blade*.tsv "$demo/"
+cargo run -p xtask -- matdb-pack \
+  --manifest "$demo/tensor-blade-manifest.tsv" --out "$demo/tensor-blade.fsmatpk" \
+  --material-state synthetic solid manufactured 0
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/tensor-body.material-strings" "$demo/tensor-body.wav" \
+  --body-profile crates/fs-couple/examples/material_strings/tensor-body.body
+```
+
+Changing only `branch_33` or `relaxation_time` and rebuilding that pack changes
+the body, reciprocal string reactions and physical pressure. The material and
+geometry are manufactured integration data, not measured wood or a qualified
+violin/cello/bass. This remains fixed-state homogeneous DKT bending; a complete
+tensor shell and large-state propagation remain separate capabilities. Even
+the smallest 2×2 perimeter-supported mesh requires 144 histories for one full
+branch, so it may exceed the current dense exact owner and must refuse.
 
 Profile input is bounded to 64 KiB; the original source-pack and complete-network
 limits remain. Viscous projection is capped at 16,777,216 operations and 16 body

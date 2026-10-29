@@ -378,6 +378,7 @@ impl MultiContactModalSystem {
         if residual.abs() > tolerance {
             return Err(ModalCouplingError::EnergyBalance { residual_j: residual, tolerance_j: tolerance });
         }
+        self.network.validate_staged_material_points(gate)?;
         poll(gate)?;
         self.frame.sample = frame.sample;
         self.frame.observer_pressure_pa = frame.observer_pressure_pa;

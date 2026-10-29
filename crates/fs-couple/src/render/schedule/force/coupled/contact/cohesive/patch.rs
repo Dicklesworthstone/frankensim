@@ -545,6 +545,7 @@ impl<'a> CohesivePatchModalSystem<'a> {
             iterations: solved.iterations,
             material_evaluations: solved.material_evaluations + self.points.len(),
         };
+        self.network.validate_staged_material_points(gate)?;
         poll(gate)?;
         self.network.publish_staged();
         std::mem::swap(&mut self.points, &mut self.staged_points);

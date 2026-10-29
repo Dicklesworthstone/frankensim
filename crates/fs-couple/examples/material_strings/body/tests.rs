@@ -289,3 +289,6 @@ mod assembly_input;
 
 #[path = "relaxation_tests.rs"]
 mod material_memory;
+
+#[path = "tensor_memory_tests.rs"]
+mod tensor_memory;

@@ -308,6 +308,14 @@ impl FrictionModalSystem {
     }
 
     /// Unmodified material projections and coefficients, in memory order.
+    pub fn with_plane_stress_material_points(mut self,
+        points: Vec<super::super::ModalPlaneStressPoint>, gate:&CancelGate,
+    ) -> Result<Self,ModalFrictionError> {
+        self.network=self.network.with_plane_stress_material_points(points,gate)?;
+        Ok(self)
+    }
+
+    /// Unmodified material projections and coefficients, in memory order.
     #[must_use]
     pub fn material_relaxation_branches(&self) -> &[fs_phs::RelaxationBranch] {
         self.network.material_relaxation_branches()
@@ -417,6 +425,7 @@ impl FrictionModalSystem {
         -> Result<&FrictionModalFrame, ModalFrictionError>
     {
         let (accepted, nonlinear_frame) = self.stage_candidate(external, drive, gate)?;
+        self.network.validate_staged_material_points(gate)?;
         poll(gate)?;
         Ok(self.publish_candidate(accepted, nonlinear_frame))
     }

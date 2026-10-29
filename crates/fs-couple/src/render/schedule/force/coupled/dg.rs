@@ -251,6 +251,7 @@ impl PreparedModalDg {
             }
         }
         let modal = modal.clone();
+        network.validate_staged_material_points(Some(gate))?;
         poll(Some(gate))?;
         // Both accepts are infallible. No cancellation or error may separate them.
         let duct = acoustic.accept();

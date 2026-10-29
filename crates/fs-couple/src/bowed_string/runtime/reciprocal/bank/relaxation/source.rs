@@ -213,6 +213,7 @@ impl MaterialStringBankSource {
     ) -> Result<FrictionModalSystem, ReciprocalStringError> {
         poll(gate)?;
         if self.material_chart_relaxation.is_none() && self.string_bending_relaxation.is_none()
+            && self.material_chart_tensor_relaxation.is_none()
             && self.spatial_cavity.as_ref().and_then(|cavity|cavity.thermal_loss()).is_none()
             && self.strings.iter().all(|m| m.source.bending_relaxation().is_none()
                 && m.source.torsional_relaxation().is_none()) {
@@ -231,6 +232,7 @@ impl MaterialStringBankSource {
         }
         system = system.with_material_relaxation(branches, memory, gate)
             .map_err(ReciprocalStringError::Friction)?;
+        system=self.restore_body_tensor_constraints(system,cards,gate)?;
         self.validate_body_memory_frequencies(&system, gate)?;
         self.validate_material_bridge_frequencies(&system, gate)?;
         poll(gate)?;

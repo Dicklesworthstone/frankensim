@@ -167,6 +167,7 @@ pub struct MaterialStringBankSource {
     material_chart_basis: Option<crate::thin_plate::RetainedPlateBasis>,
     material_chart_viscosity: Option<crate::plate_viscosity::ViscousPlateImage>,
     material_chart_relaxation: Option<crate::plate_viscosity::relaxation::ModalPlateRelaxation>,
+    material_chart_tensor_relaxation: Option<crate::plate_viscosity::relaxation::tensor::TensorPlateRelaxation>,
     string_bending_relaxation: Option<relaxation::StringBankBendingRelaxation>,
     material_chart_bridges: Option<chart::PlateBridgeFootprints>,
     material_shell: Option<shell::SharedMaterialShellBody>,
@@ -325,7 +326,7 @@ impl ReciprocalStringBank {
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
         poll(gate)?;
-        let source = MaterialStringBankSource { strings, gas, options, body_connections, material_bridge_interfaces: Vec::new(), translational_body_connections: Vec::new(), rotational_body_connections: Vec::new(), fluid_loading: None, geometric_stretching: None, longitudinal_waves: None, prepared_linear: prepared, material_plate: None, material_chart: None, material_chart_basis: None, material_chart_viscosity: None, material_chart_relaxation: None, string_bending_relaxation: None, material_chart_bridges: None, material_shell: None, material_shell_image: None, material_shell_assembly: None, material_shell_assembly_image: None, material_cavity: None, body_radiation: None, spatial_cavity: None, residual_flexibility: false };
+        let source = MaterialStringBankSource { strings, gas, options, body_connections, material_bridge_interfaces: Vec::new(), translational_body_connections: Vec::new(), rotational_body_connections: Vec::new(), fluid_loading: None, geometric_stretching: None, longitudinal_waves: None, prepared_linear: prepared, material_plate: None, material_chart: None, material_chart_basis: None, material_chart_viscosity: None, material_chart_relaxation: None, material_chart_tensor_relaxation: None, string_bending_relaxation: None, material_chart_bridges: None, material_shell: None, material_shell_image: None, material_shell_assembly: None, material_shell_assembly_image: None, material_cavity: None, body_radiation: None, spatial_cavity: None, residual_flexibility: false };
         let system = source.restore_material_memory(system, &cards, None, gate)?;
         Ok(Self { source, cards, system })
     }

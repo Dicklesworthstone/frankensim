@@ -138,6 +138,7 @@ impl CoupledModalSystem {
         // Settled Maxwell arms have no elastic mismatch. Retain that actual
         // viscous strain on the candidate; publish it only with the equilibrium.
         self.candidate_material_memory = relaxation::relaxed_memory(&self.relaxation_branches, &self.candidates)?;
+        self.validate_staged_material_points(Some(gate))?;
         poll(Some(gate))?;
         Ok(energy)
     }

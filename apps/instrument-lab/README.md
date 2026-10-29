@@ -410,6 +410,23 @@ law; no displacement shape, settling damping or retuning is inserted by the
 browser. The source retains its bonded section, two transverse planes, torsion,
 body/cavity and gas-loading states. This is a manufactured integration specimen.
 
+The **Strings — full tensor body memory** starter opens the canonical
+`tensor-body.material-strings`. Attach `wire.fsmatpk`, `tensor-blade.fsmatpk`
+and `tensor-body.body`, then select `tensor-body.body` as the **Body
+geometry/material profile** under **String specimen profiles**. The
+[complete tensor-memory recipe](../../crates/fs-couple/examples/material_strings/BODY_PROFILES.md#complete-three-dimensional-tensor-memory)
+uses `wire-manifest.tsv` for the wire and the material-reed fixture's
+`tensor-blade-manifest.tsv` for the body; normalize the latter with
+`--material-state synthetic solid manufactured 0` and keep its output filename
+`tensor-blade.fsmatpk` so it resolves the performance's original source path.
+The body retains all six tensor strain histories through the shared
+plane-stress elimination, including out-of-plane effects on bending and
+reciprocal string reactions. Change `branch_33` or `relaxation_time` in the
+source and rebuild its attached pack to compare the resulting pressure.
+This 48 kHz fixture needs no decimation. Its coarse, fixed-state cantilever
+and material are manufactured data, not measured wood or a complete
+violin, cello or bass.
+
 The **Strings — material plate and exterior microphone** starter exposes the
 canonical `rayleigh-observed.material-strings` performance. Attach its original
 `wire.fsmatpk`, `directional-body.fsmatpk` and `orthotropic.body`, selecting the

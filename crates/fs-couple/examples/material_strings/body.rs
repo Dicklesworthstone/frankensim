@@ -227,6 +227,7 @@ struct PlateProfile {
     nx: usize, ny: usize,
     layout: Layout,
     support: EdgeSupport,
+    clamp_x_min: bool,
     pretension_n_m: f64,
     window: (f64, f64),
     loss: PlateLoss,
@@ -256,28 +257,33 @@ impl PlateProfile {
         if version.next().is_some() { return Err("unconsumed body profile version field".into()); }
         let v = input.row("mesh", 2)?;
         let nx: usize = v[0].parse()?; let ny: usize = v[1].parse()?;
-        if !(2..=MAX_GRID).contains(&nx) || !(2..=MAX_GRID).contains(&ny) {
-            return Err("body grid requires 2..=12 intervals along each axis".into());
+        if !(1..=MAX_GRID).contains(&nx) || !(1..=MAX_GRID).contains(&ny) {
+            return Err("body grid requires 1..=12 intervals along each axis".into());
         }
         let uniform=if regional { None } else {
             Some((model(input.row("elastic",1)?[0])?,scalar(input.row("grain",1)?[0])?))
         };
-        let support = match input.row("support", 1)?[0] {
-            "simply-supported" => EdgeSupport::SimplySupported,
-            "clamped" => EdgeSupport::Clamped,
-            _ => return Err("body support must be simply-supported or clamped".into()),
+        let (support,clamp_x_min) = match input.row("support", 1)?[0] {
+            "simply-supported" => (EdgeSupport::SimplySupported,false),
+            "clamped" => (EdgeSupport::Clamped,false),
+            "clamped-x-min" => (EdgeSupport::Clamped,true),
+            _ => return Err("body support must be simply-supported, clamped or clamped-x-min".into()),
         };
+        if !clamp_x_min && (nx<2 || ny<2) {
+            return Err("a perimeter-supported body requires at least 2 intervals along each axis".into());
+        }
         let pretension_n_m = scalar(input.row("pretension", 1)?[0])?;
         if pretension_n_m < 0.0 { return Err("body profile requires nonnegative conservative pretension".into()); }
         let v = input.row("window", 2)?;
         let window = (scalar(v[0])?, scalar(v[1])?);
         if window.0 < 0.0 || window.1 <= window.0 { return Err("body eigenvalue window must be nonnegative and increasing".into()); }
         let layout=if let Some((model,grain_rad))=uniform {
-            Layout::Uniform { model,grain_rad,bridge:read_bridge(&mut input,nx,ny)? }
-        } else { read_regions(&mut input,nx,ny)? };
-        let loss = PlateLoss::parse(input.lines.next())?;
+            Layout::Uniform { model,grain_rad,bridge:read_bridge(&mut input,nx,ny,clamp_x_min)? }
+        } else { read_regions(&mut input,nx,ny,clamp_x_min)? };
+        let record=input.lines.next();
+        let loss = PlateLoss::parse(record,&mut input)?;
         if input.lines.next().is_some() { return Err("unconsumed body profile record".into()); }
-        Ok(Self { nx,ny,layout,support,pretension_n_m,window,loss })
+        Ok(Self { nx,ny,layout,support,clamp_x_min,pretension_n_m,window,loss })
     }
 
     /// Actual length of the ordered point-footprint chord [m]. Its order sets
@@ -338,7 +344,10 @@ impl PlateProfile {
                 thickness_constraint:PlateThicknessConstraint::FixedThickness(thickness),
             });
         }
-        let specimen=compile_plate_material_chart(mesh,PlateMesh::rectangle_boundary(self.nx,self.ny),regions)?;
+        let fixed=if self.clamp_x_min {
+            (0..=self.ny).map(|j|j*(self.nx+1)).collect()
+        } else {PlateMesh::rectangle_boundary(self.nx,self.ny)};
+        let specimen=compile_plate_material_chart(mesh,fixed,regions)?;
         let viscosity = if self.loss.is_tensor() {
             Some(PlateViscosity::from_chart(&specimen,VISCOSITY,gate)?)
         } else { None };
@@ -387,12 +396,14 @@ impl PlateProfile {
     }
 }
 
-fn read_bridge(input:&mut Records<'_>,nx:usize,ny:usize)->Result<(usize,usize)> {
+fn read_bridge(input:&mut Records<'_>,nx:usize,ny:usize,clamp_x_min:bool)->Result<(usize,usize)> {
     let v=input.row("bridge",2)?;let b=(v[0].parse()?,v[1].parse()?);
-    if b.0==0 || b.0>=nx || b.1==0 || b.1>=ny {return Err("body bridge must be an interior grid node".into());}
+    if b.0==0 || b.0>nx || b.1>ny || !clamp_x_min && (b.0==nx || b.1==0 || b.1==ny) {
+        return Err("body bridge must name an actual unconstrained transverse grid node".into());
+    }
     Ok(b)
 }
-fn read_regions(input:&mut Records<'_>,nx:usize,ny:usize)->Result<Layout> {
+fn read_regions(input:&mut Records<'_>,nx:usize,ny:usize,clamp_x_min:bool)->Result<Layout> {
     let n:usize=input.row("regions",1)?[0].parse()?;
     if n==0 || n>16 {return Err("body profile requires 1..=16 explicit regions".into());}
     let mut regions=Vec::<Region>::with_capacity(n);let mut occupied=vec![false;nx*ny];
@@ -423,7 +434,7 @@ fn read_regions(input:&mut Records<'_>,nx:usize,ny:usize)->Result<Layout> {
     }
     let n:usize=input.row("bridges",1)?[0].parse()?;
     if n==0 || n>8 {return Err("body profile requires 1..=8 ordered bridge nodes".into());}
-    let bridges=(0..n).map(|_|read_bridge(input,nx,ny)).collect::<Result<Vec<_>>>()?;
+    let bridges=(0..n).map(|_|read_bridge(input,nx,ny,clamp_x_min)).collect::<Result<Vec<_>>>()?;
     Ok(Layout::Regional {regions,bridges})
 }
 

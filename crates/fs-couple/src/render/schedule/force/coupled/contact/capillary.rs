@@ -321,6 +321,7 @@ impl<'a> CapillaryModalSystem<'a> {
             iterations: solved.iterations,
             evaluations: solved.evaluations + 1,
         };
+        self.network.validate_staged_material_points(Some(gate))?;
         poll(Some(gate))?;
         self.network.publish_staged();
         self.state = actual.state();

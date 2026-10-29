@@ -2239,6 +2239,13 @@ pressure at 1 MPa. These are refusal ceilings, not assertions of model accuracy.
 
 ## Native checks
 
+The complete three-dimensional tensor body path is runnable with
+`tensor-body.material-strings` and selected `tensor-body.body`. It shares the
+same source property binding and hereditary normal-traction elimination as
+material reeds, and retains body feedback onto the strings through the
+original bridges. See [complete tensor memory](BODY_PROFILES.md#complete-three-dimensional-tensor-memory)
+for the source-pack recipe, native grammar and explicit model/capacity limits.
+
 ```bash
 cargo test -p fs-couple --example material_strings -- --test-threads=1
 ```

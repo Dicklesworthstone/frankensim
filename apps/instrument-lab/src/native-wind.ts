@@ -17,6 +17,7 @@ import hereditarySolidReedSource from "../../../crates/fs-couple/examples/materi
 import stringExampleSource from "../../../crates/fs-couple/examples/material_strings/pluck-and-bow.material-strings?raw";
 import nonlinearPreloadStringSource from "../../../crates/fs-couple/examples/material_strings/nonlinear-preload.material-strings?raw";
 import stoppedNonlinearStringSource from "../../../crates/fs-couple/examples/material_strings/nonlinear-stopped-preload.material-strings?raw";
+import tensorBodyStringSource from "../../../crates/fs-couple/examples/material_strings/tensor-body.material-strings?raw";
 import observedStringSource from "../../../crates/fs-couple/examples/material_strings/rayleigh-observed.material-strings?raw";
 import regionalCavityStringSource from "../../../crates/fs-couple/examples/material_strings/regional-cavity.material-strings?raw";
 import layeredStringSource from "../../../crates/fs-couple/examples/material_strings/relaxing-layered-strings.material-strings?raw";
@@ -182,6 +183,15 @@ const EXAMPLES = [
     decimate: false,
     intro: "Starter: a force-loaded layered string equilibrates against the original compliant stop while retaining geometric stretching, torsion, body and cavity motion. Attach wire.fsmatpk, sleeve.fsmatpk, body.fsmatpk and stopped-pluck.stops; select stopped-pluck.stops as the finger/fret/contact profile below.",
     help: "The native solver balances material, support and normal-contact forces together before releasing the declared load at sample zero. Change material sources or the attached stop profile to change the initial shape and ensuing pressure. The supplied stop is manufactured data; material-stop profiles use source-bound normal contact through the same solver. This is not a measured violin, cello or bass.",
+  },
+  {
+    name: "material_strings/tensor-body.material-strings",
+    label: "Strings — full tensor body memory",
+    renderer: "strings",
+    source: tensorBodyStringSource,
+    decimate: false,
+    intro: "Starter: a material string drives a body with complete three-dimensional tensor relaxation. Build and attach wire.fsmatpk and tensor-blade.fsmatpk using the canonical tensor-body source recipe; attach tensor-body.body and select it as the Body geometry/material profile below.",
+    help: "The native body retains all six source strain histories through shared plane-stress elimination, including out-of-plane material effects on bending and reciprocal reactions on the string. Change branch_33 or relaxation_time in the material source and rebuild its pack to compare sound. The supplied body is a fixed-state manufactured cantilever, not measured wood or a complete violin, cello or bass. Its 48 kHz clock needs no decimation.",
   },
   {
     name: "material_strings/rayleigh-observed.material-strings",

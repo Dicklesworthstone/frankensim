@@ -19,6 +19,7 @@ use crate::modal_acoustic_time::{
 
 mod exact;
 mod relaxation;
+pub use relaxation::ModalPlaneStressPoint;
 pub(crate) mod dg;
 pub mod harmonic;
 pub mod radiation;
@@ -240,6 +241,7 @@ pub struct CoupledModalSystem {
     relaxation_branches: Vec<fs_phs::RelaxationBranch>,
     material_memory: Vec<f64>,
     candidate_material_memory: Vec<f64>,
+    plane_stress_material_points: Vec<ModalPlaneStressPoint>,
     radiation: Option<radiation::Binding>,
     radiation_state: Vec<f64>,
     candidate_radiation_state: Vec<f64>,
@@ -457,6 +459,7 @@ impl CoupledModalSystem {
             models, candidates, exact, prepared_budget: prepared, offsets, connections, columns,
             relaxation_branches: Vec::new(), material_memory: Vec::new(),
             candidate_material_memory: Vec::new(),
+            plane_stress_material_points: Vec::new(),
             radiation: None, radiation_state: Vec::new(), candidate_radiation_state: Vec::new(),
             config, dt, linear_frequency_upper_bound_rad_s,
             old_q: vec![0.0; count], free_delta: vec![0.0; count],
@@ -594,6 +597,7 @@ impl CoupledModalSystem {
     ) -> Result<R, E>
     where E: From<ModalCouplingError> + From<fs_ports::CoupleError> {
         self.stage_inner(external, Some(gate)).map_err(E::from)?;
+        self.validate_staged_material_points(Some(gate)).map_err(E::from)?;
         let transfers = self.staged_ports.transfers().ok_or_else(|| {
             self.staged_ports.transfer_error().cloned().map(E::from)
                 .unwrap_or_else(|| E::from(invalid("staged modal port work is unavailable")))
@@ -608,6 +612,7 @@ impl CoupledModalSystem {
         -> Result<&CoupledModalFrame, ModalCouplingError>
     {
         self.stage_inner(external, gate)?;
+        self.validate_staged_material_points(gate)?;
         poll(gate)?;
         self.publish_staged();
         Ok(&self.frame)

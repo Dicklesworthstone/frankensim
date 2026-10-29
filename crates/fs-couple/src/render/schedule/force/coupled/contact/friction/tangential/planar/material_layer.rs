@@ -510,6 +510,8 @@ impl<'a> PlanarMaterialLayerSystem<'a> {
         checkpoint()?;
         drop(problem);
         let mechanics = owner.into_inner();
+        mechanics.network.validate_staged_material_points(Some(gate))
+            .map_err(PlanarTangentialModalError::from)?;
         let mechanical = staged.mechanical.frame;
         // All fallible work precedes joint source/history/body/thermal publication.
         mechanics.law = staged.law;

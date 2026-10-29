@@ -3,6 +3,8 @@ use super::*;
 use crate::plate_viscosity::relaxation::{
     InitialPlateMemory, ModalPlateRelaxation, PlateBendingRelaxation, PlateRelaxationLimits,
 };
+use crate::plate_viscosity::relaxation::tensor::{TensorPlateRelaxation,TensorPlateRelaxationLimits};
+use fs_material::visco_tensor::source::TensorPronyProperties;
 
 impl MaterialStringBankSource {
     /// All original regional spectra and their full same-basis strain factors.
@@ -10,6 +12,11 @@ impl MaterialStringBankSource {
     #[must_use]
     pub const fn material_chart_relaxation(&self) -> Option<&ModalPlateRelaxation> {
         self.material_chart_relaxation.as_ref()
+    }
+
+    /// Complete source tensors and every original normal/shear history.
+    pub const fn material_chart_tensor_relaxation(&self) -> Option<&TensorPlateRelaxation> {
+        self.material_chart_tensor_relaxation.as_ref()
     }
 
     pub(in crate::bowed_string::runtime::reciprocal::bank) fn validate_body_memory_frequencies(
@@ -29,6 +36,10 @@ impl MaterialStringBankSource {
             image.validate_band(system.linear_frequency_upper_bound_rad_s(),
                 1.0 / f64::from(self.options.sample_rate_hz))?;
         }
+        if let Some(image)=&self.material_chart_tensor_relaxation {
+            image.validate_band(system.linear_frequency_upper_bound_rad_s(),
+                1.0/f64::from(self.options.sample_rate_hz)).map_err(ReciprocalStringError::Material)?;
+        }
         Ok(())
     }
 
@@ -39,18 +50,22 @@ impl MaterialStringBankSource {
     ) -> Result<Vec<fs_phs::RelaxationBranch>, ReciprocalStringError> {
         poll(gate)?;
         let mut branches = Vec::new();
-        if let Some(image) = &self.material_chart_relaxation {
+        let image=self.material_chart_relaxation.as_ref().map(|image|
+            (image.mode_count(),image.coupling_rows_per_s(),image.relaxation_times_s()))
+            .or_else(||self.material_chart_tensor_relaxation.as_ref().map(|image|
+                (image.mode_count(),image.coupling_rows_per_s(),image.relaxation_times_s())));
+        if let Some((modes,rows,times)) = image {
             let body = self.strings.len();
             let component = system.components().get(body)
                 .ok_or_else(|| invalid("regional memory lost its original body component"))?;
-            if component.modes().len() != image.mode_count()
+            if component.modes().len() != modes
                 || component.modes().iter().any(|m| m.damping_ratio != 0.0) {
                 return Err(invalid("regional body memory requires the unchanged complete elastic body basis"));
             }
             let start: usize = system.components()[..body].iter().map(|c| c.modes().len()).sum();
             let dimension = system.mode_count().checked_mul(2)
                 .ok_or_else(|| invalid("body memory state embedding overflow"))?;
-            branches.extend(image.coupling_rows_per_s().iter().zip(image.relaxation_times_s())
+            branches.extend(rows.iter().zip(times)
                 .map(|(row, &time)| {
                     let mut projection = vec![0.0; dimension];
                     for (i, &value) in row.iter().enumerate() { projection[2*(start+i)] = value; }
@@ -59,6 +74,16 @@ impl MaterialStringBankSource {
         }
         poll(gate)?;
         Ok(branches)
+    }
+
+    pub(in crate::bowed_string::runtime::reciprocal::bank) fn restore_body_tensor_constraints(
+        &self,system:FrictionModalSystem,cards:&[BowedStringCard],gate:&CancelGate,
+    ) -> Result<FrictionModalSystem,ReciprocalStringError> {
+        let Some(image)=&self.material_chart_tensor_relaxation else {return Ok(system);};
+        let start:usize=system.components()[..self.strings.len()].iter().map(|c|c.modes().len()).sum();
+        let memory=self.source_memory_count(cards,gate)?;
+        system.with_plane_stress_material_points(image.bindings(start,memory),gate)
+            .map_err(ReciprocalStringError::Friction)
     }
 }
 
@@ -93,6 +118,7 @@ impl ReciprocalStringBank {
         poll(gate)?;
         let source_count = self.source.source_memory_count(&self.cards, gate)?;
         if self.system.samples_rendered() != 0 || self.source.material_chart_relaxation.is_some()
+            || self.source.material_chart_tensor_relaxation.is_some()
             || self.source.material_chart_viscosity.is_some()
             || self.source.string_bending_relaxation.is_some()
             || self.system.material_relaxation_branches().len() != source_count {
@@ -119,6 +145,51 @@ impl ReciprocalStringBank {
             .map_err(ReciprocalStringError::Friction)?;
         self.source.validate_body_memory_frequencies(&self.system, gate)?;
         self.source.validate_material_bridge_frequencies(&self.system, gate)?;
+        poll(gate)?;
+        Ok(self)
+    }
+
+    /// Attach complete source-derived 3D tensor memory to the original body.
+    /// The shared DKT quadrature and plane-stress constraint owners retain all
+    /// six histories per branch/point, including uncoupled histories. The exact
+    /// original string/body/bridge/friction solve carries their force and heat.
+    /// Surface strain is admitted atomically at each physical endpoint, through
+    /// static preload, nonlinear contacts, thermal feedback and pressure output.
+    /// This fixed-state homogeneous plate model does not infer shell, wet wood,
+    /// finite-strain or temperature evolution; original source/capacity limits apply.
+    pub fn with_tensor_material_plate_relaxation(mut self,
+        properties:&[TensorPronyProperties], initial:InitialPlateMemory,
+        limits:TensorPlateRelaxationLimits, gate:&CancelGate,
+    ) -> Result<Self,ReciprocalStringError> {
+        poll(gate)?;
+        let source_count=self.source.source_memory_count(&self.cards,gate)?;
+        if self.system.samples_rendered()!=0 || self.source.material_chart_relaxation.is_some()
+            || self.source.material_chart_tensor_relaxation.is_some()
+            || self.source.material_chart_viscosity.is_some()
+            || self.source.string_bending_relaxation.is_some()
+            || self.system.material_relaxation_branches().len()!=source_count {
+            return Err(invalid("complete tensor body memory requires one cold binding without duplicate intrinsic damping"));
+        }
+        let body=self.source.material_chart.as_ref()
+            .ok_or_else(||invalid("complete tensor body memory requires its original regional plate chart"))?;
+        let basis=self.source.material_chart_basis.as_ref()
+            .ok_or_else(||invalid("complete tensor body memory requires its original full DKT basis"))?;
+        if body.reduction.damping_ratio!=0.0 || body.specimen.bending_viscosity().is_some() {
+            return Err(invalid("complete tensor body memory cannot duplicate authored or selected intrinsic decay"));
+        }
+        let image=TensorPlateRelaxation::from_chart(&body.specimen,basis,properties,limits,gate)
+            .map_err(ReciprocalStringError::Material)?;
+        let memory=match initial {
+            InitialPlateMemory::Relaxed=>None,
+            InitialPlateMemory::Unrelaxed=>Some(vec![0.0;image.coupling_rows_per_s().len()]),
+        };
+        self.source.material_chart_tensor_relaxation=Some(image);
+        let branches=self.source.body_memory_branches(&self.system,gate)?;
+        self.system=self.system.with_additional_material_relaxation(branches,memory,gate)
+            .map_err(ReciprocalStringError::Friction)?;
+        self.system=self.source.restore_body_tensor_constraints(self.system,&self.cards,gate)?;
+        self.source.validate_body_memory_frequencies(&self.system,gate)?;
+        self.source.validate_material_bridge_frequencies(&self.system,gate)?;
         poll(gate)?;
         Ok(self)
     }

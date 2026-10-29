@@ -805,3 +805,19 @@ resolution of repeated/defective modes.
 `PortHamiltonian::with_parallel_load_columns` accepts the complete finite host-state-by-load-port matrix B. The load receives B^T grad(H_host), and the host receives the reciprocal reaction -B y_load through the existing `interconnect` owner. Every original state, constitutive law and external drive port remains in order. This permits a surface-volume-flow or distributed-velocity port to differ from a point-force drive without changing internal work. Signed, repeated and nonorthogonal columns are retained. The existing indexed `with_parallel_load` delegates to the same owner.
 
 Callers supply physical units and explicit work/state capacities; this is no new integrator, reduction or impedance fit. Three focused native G0/G1 tests check signed reciprocal work, independent force work and total storage/loss, undriven-coordinate reaction, malformed projections, and exact structure equivalence of the indexed API. Full-workspace qualification is not asserted.
+
+## Material histories with zero mechanical projection
+
+`with_relaxation_branches` admits an exactly zero finite projection while still
+requiring strictly positive finite branch stiffness and relaxation time. Such a
+branch is an independent internal energy coordinate: its initial history stores
+energy and decays into its own physical heat through the original relaxation
+law. It adds no mechanical stiffness or work. Complete tensor material sources
+can contain these directions; a zero observed force does not authorize dropping
+their storage or histories. Dimensions, finite coefficients, relaxation-rate
+representability and existing time/energy admission remain unchanged.
+
+The authored exact-flow regression checks exponential decay of a nonzero
+uncoupled history, unchanged mechanical coordinates, independently integrated
+heat and the original energy balance. Native execution remains unverified for
+this increment.
