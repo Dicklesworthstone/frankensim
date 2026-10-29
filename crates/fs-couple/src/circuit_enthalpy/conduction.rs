@@ -77,48 +77,36 @@ impl ConductionDrive<'_> {
                 positive,
                 negative,
                 current_a,
+            } => problem
+                .solve_current(positive, negative, current_a, controls, cancelled)
+                .map_err(field_error),
+        }
+    }
+
+    // Ideal total-current work uses the authored current, independently of its
+    // recovered reaction. Other traces retain the original native work account.
+    fn supplied_power_w(
+        self,
+        voltage_v: &[f64],
+        power_w: f64,
+        power_balance_residual_w: f64,
+    ) -> Result<f64, Error> {
+        match self {
+            Self::Current {
+                positive,
+                negative,
+                current_a,
             } => {
-                if !current_a.is_finite() {
-                    return Err(invalid("prescribed total electrode current must be finite"));
-                }
-                // The native two-terminal field extraction includes the exact
-                // geometry and all regional sigma(T). Its unit solution also
-                // admits both electrode traces, including at zero current.
-                let resistance = problem
-                    .resistance(positive, negative, controls, cancelled)
-                    .map_err(field_error)?;
-                let voltage = finite(current_a * resistance.resistance_ohm())?;
-                if current_a != 0.0 && voltage == 0.0 {
-                    return Err(invalid(
-                        "prescribed current lost its representable electrode voltage",
-                    ));
-                }
-                let field = resistance
-                    .field_at_voltage(
-                        voltage,
-                        controls.current_tolerance_a,
-                        controls.power_tolerance_w,
-                        cancelled,
-                    )
-                    .map_err(field_error)?;
-                // Check the actual recovered current independently of I*R.
-                let mut actual = 0.0;
-                for &vertex in positive {
-                    if cancelled() {
-                        return Err(CircuitEnthalpyError::Cancelled);
-                    }
-                    let current = field.nodal_boundary_current_a()[vertex].ok_or_else(|| {
-                        invalid("current electrode lost its native terminal reaction")
-                    })?;
-                    actual = finite(actual + current)?;
-                }
-                if finite(actual - current_a)?.abs() > controls.current_tolerance_a {
-                    return Err(invalid(
-                        "recovered electrode current does not match its prescribed total",
-                    ));
-                }
-                Ok(field)
+                let potential = |terminal: &[usize]| {
+                    terminal
+                        .first()
+                        .and_then(|&vertex| voltage_v.get(vertex))
+                        .copied()
+                        .ok_or_else(|| invalid("current electrode lost its actual potential"))
+                };
+                finite(current_a * finite(potential(positive)? - potential(negative)?)?)
             }
+            _ => finite(power_w - power_balance_residual_w),
         }
     }
 }
@@ -291,9 +279,9 @@ impl ConductionThermalNetwork<'_> {
     /// Solve actual spatial current redistribution, local heating and thermal
     /// transport at ONE common endpoint. Either the electrode voltages or the
     /// total two-terminal current or distributed current density is held for
-    /// the interval. Total-current drive uses
-    /// the native material/geometry resistance extraction at EVERY trial; its
-    /// voltage and local heat therefore evolve with the same accepted material.
+    /// the interval. Total-current drive uses the original native electrode
+    /// solve at EVERY trial; voltage and local heat therefore evolve with the
+    /// same accepted material. Its source work uses authored I times solved V.
     /// The existing enthalpy owner supplies the nonlinear residual,
     /// event rules, finite-difference/Newton budgets and final energy acceptance.
     /// `maximum_circuit_trials` bounds these field solves, including the final
@@ -470,8 +458,13 @@ impl ConductionThermalNetwork<'_> {
                     .map_err(field_error)?;
                 let field = drive.solve(&next, field_controls, &mut || (*cancel.borrow_mut())())?;
                 let heat_j = finite(dt * field.power_w())?;
-                let supplied_work_j =
-                    finite(dt * finite(field.power_w() - field.power_balance_residual_w())?)?;
+                let supplied_work_j = finite(
+                    dt * drive.supplied_power_w(
+                        field.voltage_v(),
+                        field.power_w(),
+                        field.power_balance_residual_w(),
+                    )?,
+                )?;
                 if (field.power_w() > 0.0 && heat_j == 0.0)
                     || (heat_j - supplied_work_j).abs() > controls.total_energy_tolerance_j
                 {

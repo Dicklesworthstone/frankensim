@@ -251,6 +251,67 @@ fn constant_source_limit_uses_the_original_native_current_owner() {
 
 #[test]
 fn total_current_rejection_and_late_cancellation_keep_the_original_source_owner() {
+    // A prescribed zero current must retain the same conducting-terminal
+    // admission as every nonzero drive, rather than set arbitrary island V=0.
+    let disconnected = TriComplex2::from_indexed_triangles(
+        "disconnected-current-electrodes",
+        vec![
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 1.0],
+            [0.0, 1.0],
+            [2.0, 0.0],
+            [3.0, 0.0],
+            [3.0, 1.0],
+            [2.0, 1.0],
+        ],
+        vec![[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7]],
+        Metric2::planar(0.3).unwrap(),
+    )
+    .unwrap();
+    let native = PlanarConduction::new(
+        disconnected.clone(),
+        vec![conductor(1.0, ElectricalPropertyBasis::Conductivity); 4],
+        limits(),
+        &mut || false,
+    )
+    .unwrap();
+    let response = PlanarConductionResponse::new(
+        disconnected,
+        vec![
+            response(
+                ElectricalPropertyBasis::Conductivity,
+                ConductorMagnitude::ElectricField,
+                1.0,
+                0.2,
+                20.0
+            );
+            4
+        ],
+        limits(),
+        &mut || false,
+    )
+    .unwrap();
+    for current in [0.0, 0.6] {
+        assert!(
+            native
+                .solve_current(&[1, 2], &[4, 7], current, controls(), &mut || false)
+                .is_err()
+        );
+        assert!(
+            response
+                .solve_current_candidate(
+                    &[1, 2],
+                    &[4, 7],
+                    current,
+                    limits(),
+                    controls(),
+                    policy(),
+                    &mut || false
+                )
+                .is_err()
+        );
+    }
     let model = current_model(1.0);
     let original = model.conductors().to_vec();
     for (positive, negative, current) in [

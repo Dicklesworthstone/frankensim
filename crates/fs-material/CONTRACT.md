@@ -4391,3 +4391,8 @@ entropy account. All ten tests in that file pass in the focused native build.
 These are bounded constitutive and timeline results; spatial convergence,
 experimental qualification, phase change and dynamic moisture transport remain
 outside this model.
+
+
+## Joint phase and electrical source coordinates
+
+`ScalarConductorResponse::new_with_liquid_mass_fraction_axis` binds the original enthalpy-derived liquid mass fraction and explicitly owned actual E/J magnitudes together. Complete source requirements, selected claims, typed coordinates and support survive phase, temperature and field refresh. Public static phase admission and generic material refresh remain strict. The existing source data supplies its admitted law; no universal phase mixture rule or higher-dimensional table is invented. Focused source regressions cover retained roles/pins, actual-field queries, phase support and unowned-coordinate refusal.

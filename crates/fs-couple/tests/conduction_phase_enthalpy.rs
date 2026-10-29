@@ -4,6 +4,8 @@
 mod common;
 #[path = "conduction_phase_enthalpy/dielectric.rs"]
 mod dielectric;
+#[path = "conduction_phase_enthalpy/response.rs"]
+mod response;
 
 use common::{config, near};
 use fs_blake3::ContentHash;

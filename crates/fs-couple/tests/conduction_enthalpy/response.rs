@@ -546,7 +546,7 @@ fn nested_work_budget_late_cancellation_and_source_refusal_keep_both_original_hi
             &original,
             ConductionDrive::Current {
                 positive: &[2, 5],
-                negative: &[0, 3],
+                negative: &[0, 5],
                 current_a: 2.0
             },
             limits(),
@@ -557,7 +557,7 @@ fn nested_work_budget_late_cancellation_and_source_refusal_keep_both_original_hi
             || false
         ),
         Err(CircuitEnthalpyError::Source(
-            ConductionThermalError::Invalid(_)
+            ConductionThermalError::Response(_)
         ))
     ));
     assert!(
@@ -894,4 +894,147 @@ fn original_melting_receipts_prevent_frozen_field_dependent_fusion_energy() {
             assert_eq!(thermal.time_s(), 0.0);
         }
     }
+}
+
+#[test]
+fn total_current_electrodes_close_source_field_temperature_and_authored_work_together() {
+    let coordinate = ConductorMagnitude::ElectricField;
+    let beta = [0.05, 0.08];
+    let mut heats = Vec::new();
+    for first in [1.0, 2.0] {
+        let r = [first, 2.0];
+        let (a, ca) = material(r[0], CP[0], ALPHA[0], beta[0], coordinate, false);
+        let (b, cb) = material(r[1], CP[1], ALPHA[1], beta[1], coordinate, false);
+        let (cards, curves) = ([a, b], [ca, cb]);
+        let thermal = initial(&curves, 999.0, None);
+        let original = problem(&cards, coordinate);
+        let context = point(300.0, coordinate);
+        let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
+        let bindings = cells(&cards, &curves, &context, &key);
+        let layout = network(&bindings);
+        for current in [2.0_f64, -2.0] {
+            let drive = ConductionDrive::Current {
+                positive: &[2, 5],
+                negative: &[0, 3],
+                current_a: current,
+            };
+            let next = layout
+                .step_response_candidate(
+                    &thermal,
+                    0.1,
+                    &original,
+                    drive,
+                    limits(),
+                    field_controls(),
+                    controls(),
+                    config(),
+                    &[0.0; 2],
+                    || false,
+                )
+                .unwrap();
+            let (theta, e) = endpoint_at_current(current.abs(), 0.1, [0.0; 2], r, beta, true);
+            let step = &next.report().electrical;
+            let voltage = current.signum() * (e[0] + e[1]);
+            near(step.field.voltage_v[2], voltage);
+            near(step.field.voltage_v[5], voltage);
+            near(
+                [2, 5]
+                    .into_iter()
+                    .map(|v| step.field.nodal_boundary_current_a[v].unwrap())
+                    .sum(),
+                current,
+            );
+            near(
+                [0, 3]
+                    .into_iter()
+                    .map(|v| step.field.nodal_boundary_current_a[v].unwrap())
+                    .sum(),
+                -current,
+            );
+            assert!(
+                step.field
+                    .nodal_applied_current_a
+                    .iter()
+                    .all(Option::is_none)
+            );
+            for (i, cell) in [CellId(30), CellId(10)].into_iter().enumerate() {
+                near(
+                    next.thermal().temperature_k(cell).unwrap(),
+                    300.0 + theta[i],
+                );
+                for triangle in 2 * i..2 * i + 2 {
+                    near(
+                        step.field.electric_field_v_m[triangle][0],
+                        -current.signum() * e[i],
+                    );
+                    near(step.field.current_density_a_m2[triangle][0], -current);
+                    near(
+                        step.field.cell_power_w[triangle],
+                        0.5 * e[i] * current.abs(),
+                    );
+                    let source = &step.field.evaluated[triangle].conductor;
+                    near(source.material().query().axes()["T"], 300.0 + theta[i]);
+                    near(source.material().query().axes()["operating"], e[i]);
+                    assert_eq!(
+                        source.source_property().answer().receipt.selected,
+                        original.conductors()[triangle]
+                            .source_property()
+                            .answer()
+                            .receipt
+                            .selected
+                    );
+                }
+            }
+            near(step.supplied_work_j, 0.1 * current * voltage);
+            near(step.heat_j, step.supplied_work_j);
+            near(
+                next.thermal().energy_j() - thermal.energy_j(),
+                CP[0] * theta[0] + CP[1] * theta[1],
+            );
+            near(next.report().deposited_joule_j, step.heat_j);
+            near(next.report().source.links[0].conductance_w_k, 1.0);
+            assert!(
+                next.report().total_energy_residual_j.abs() < config().total_energy_tolerance_j
+            );
+            let continued = layout
+                .step_response_candidate(
+                    next.thermal(),
+                    0.2,
+                    next.problem(),
+                    drive,
+                    limits(),
+                    field_controls(),
+                    controls(),
+                    config(),
+                    &[0.0; 2],
+                    || false,
+                )
+                .unwrap();
+            let (theta2, e2) = endpoint_at_current(current.abs(), 0.1, theta, r, beta, true);
+            for (i, cell) in [CellId(30), CellId(10)].into_iter().enumerate() {
+                near(
+                    continued.thermal().temperature_k(cell).unwrap(),
+                    300.0 + theta2[i],
+                );
+            }
+            near(
+                continued.report().electrical.field.voltage_v[2],
+                current.signum() * (e2[0] + e2[1]),
+            );
+            near(
+                continued.report().electrical.supplied_work_j,
+                0.1 * current.abs() * (e2[0] + e2[1]),
+            );
+            if current > 0.0 {
+                heats.push(step.heat_j);
+            }
+        }
+        assert_eq!(thermal.time_s(), 0.0);
+        assert_eq!(context.axes()["operating"], 0.0);
+        assert_eq!(
+            original.conductors()[0].material().query().axes()["operating"],
+            0.0
+        );
+    }
+    assert!(heats[1] > heats[0]);
 }

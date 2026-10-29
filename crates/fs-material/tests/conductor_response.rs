@@ -1,4 +1,7 @@
 //! Original source roles, units and state context survive spatial E/J refresh.
+#[path = "conductor_response/phase.rs"]
+mod phase;
+
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,

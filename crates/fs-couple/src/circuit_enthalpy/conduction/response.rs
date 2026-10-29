@@ -85,7 +85,7 @@ impl<'t> ConductionResponseEnthalpyCandidate<'t> {
 }
 
 impl ConductionThermalNetwork<'_> {
-    /// Close source sigma/rho(T, |E|, |J|), nonuniform spatial current and finite
+    /// Close source sigma/rho(T, phase, |E|, |J|), spatial current and finite
     /// heat at one common backward-Euler endpoint. Every thermal stencil starts
     /// from the original accepted state and refreshes the SAME complete pinned
     /// conductor bundle; the native response owner closes its E/J coordinates.
@@ -94,8 +94,9 @@ impl ConductionThermalNetwork<'_> {
     /// constitutive iterations and the final fresh thermal admission.
     ///
     /// Voltage and distributed inward current density retain their native trace
-    /// meanings. Total-current equipotential electrodes are refused: their
-    /// nonlinear terminal constraint cannot be replaced by unit-R scaling.
+    /// meanings. Total-current electrodes use the original equipotential solve
+    /// inside EVERY constitutive iteration. Source work is authored I times
+    /// solved electrode voltage; accepted nonlinear fields are never rescaled.
     /// Original geometry, chart identity, source roles/pins and fixed external
     /// conditions remain bound. Source-derived caloric charts retain their
     /// original Cp/density/transition receipts; E/J-dependent response or
@@ -103,8 +104,9 @@ impl ConductionThermalNetwork<'_> {
     /// field independence. This path supplies no reversible field/caloric work.
     /// Thermal conductivity is refreshed at each
     /// proposed T/phase, with field-dependent response/applicability refused.
-    /// Existing source phase admission remains authoritative; this adds no
-    /// joint phase/E/J source constructor. This bounded memoryless scalar
+    /// A phase-aware scalar response retains its declared mass-fraction axis,
+    /// supplied by the SAME enthalpy chart at every trial. Its source support
+    /// and interpolation remain authoritative. This bounded memoryless scalar
     /// closure is not a convergence, uniqueness or material-validation claim.
     #[allow(clippy::too_many_arguments)]
     pub fn step_response_candidate<'t>(
@@ -127,15 +129,6 @@ impl ConductionThermalNetwork<'_> {
         if !(1..=MAX_RESPONSE_ITERATIONS).contains(&response.maximum_iterations) {
             return Err(invalid("invalid bounded spatial response iteration limit"));
         }
-        let (voltage, currents) = match drive {
-            ConductionDrive::Voltage(voltage) => (voltage, &[][..]),
-            ConductionDrive::CurrentDensity { voltage, currents } => (voltage, currents),
-            ConductionDrive::Current { .. } => {
-                return Err(invalid(
-                    "nonlinear total-current electrodes require an explicit terminal constraint",
-                ));
-            }
-        };
         let dt = self.admit_mesh_step(
             thermal,
             target_s,
@@ -184,28 +177,58 @@ impl ConductionThermalNetwork<'_> {
                     maximum_iterations: response.maximum_iterations.min(remaining),
                     ..response
                 };
-                let candidate = problem
-                    .solve_with_materials_candidate(
+                let candidate = match drive {
+                    ConductionDrive::Voltage(voltage) => problem.solve_with_materials_candidate(
                         sources,
                         voltage,
-                        currents,
+                        &[],
                         assembly,
                         field_controls,
                         bounded,
                         &mut || (*cancel.borrow_mut())(),
-                    )
-                    .map_err(|error| match error {
-                        ConductionResponseError::NotConverged { .. }
-                            if bounded.maximum_iterations < response.maximum_iterations =>
-                        {
-                            CircuitEnthalpyError::CircuitBudget
-                        }
-                        other => response_error(other),
-                    })?;
+                    ),
+                    ConductionDrive::CurrentDensity { voltage, currents } => problem
+                        .solve_with_materials_candidate(
+                            sources,
+                            voltage,
+                            currents,
+                            assembly,
+                            field_controls,
+                            bounded,
+                            &mut || (*cancel.borrow_mut())(),
+                        ),
+                    ConductionDrive::Current {
+                        positive,
+                        negative,
+                        current_a,
+                    } => problem.solve_current_with_materials_candidate(
+                        sources,
+                        positive,
+                        negative,
+                        current_a,
+                        assembly,
+                        field_controls,
+                        bounded,
+                        &mut || (*cancel.borrow_mut())(),
+                    ),
+                }
+                .map_err(|error| match error {
+                    ConductionResponseError::NotConverged { .. }
+                        if bounded.maximum_iterations < response.maximum_iterations =>
+                    {
+                        CircuitEnthalpyError::CircuitBudget
+                    }
+                    other => response_error(other),
+                })?;
                 let (next, field) = candidate.into_parts();
                 let heat_j = finite(dt * field.power_w)?;
-                let supplied_work_j =
-                    finite(dt * finite(field.power_w - field.power_balance_residual_w)?)?;
+                let supplied_work_j = finite(
+                    dt * drive.supplied_power_w(
+                        &field.voltage_v,
+                        field.power_w,
+                        field.power_balance_residual_w,
+                    )?,
+                )?;
                 if (field.power_w > 0.0 && heat_j == 0.0)
                     || (heat_j - supplied_work_j).abs() > controls.total_energy_tolerance_j
                 {

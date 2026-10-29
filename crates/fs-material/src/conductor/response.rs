@@ -40,6 +40,28 @@ fn invalid(quantity: &'static str) -> ConductorError {
 }
 
 impl ScalarConductorResponse {
+    /// Bind a liquid MASS fraction supplied by a physical enthalpy owner while
+    /// this response owner supplies the actual spatial E/J magnitudes. The
+    /// source's existing dimensional phase coordinate must lie in [0,1].
+    /// This retains the original source roles, pins and support; it neither
+    /// invents a mixing law nor adds a higher-dimensional source table.
+    pub fn new_with_liquid_mass_fraction_axis(
+        card: &MaterialCard,
+        original: ResolvedConductorState,
+        axes: &[(&str, ConductorMagnitude)],
+        phase_axis: impl Into<String>,
+    ) -> Result<Self, ConductorError> {
+        if axes.len() > 2 {
+            return Err(invalid("at most two conductor operating coordinates"));
+        }
+        let owned: Vec<_> = axes
+            .iter()
+            .map(|(axis, magnitude)| (*axis, magnitude.quantity()))
+            .collect();
+        let original = original.with_phase_axis_and_coordinates(phase_axis.into(), &owned)?;
+        Self::new(card, original, axes)
+    }
+
     /// At most one electric-field and one current-density magnitude coordinate.
     /// Empty axes retain an ordinary source in a mixed nonlinear specimen. Each
     /// field coordinate already present in the complete query must be owned;
@@ -189,7 +211,14 @@ impl ScalarConductorResponse {
         point: &QueryPoint,
     ) -> Result<ResolvedConductorState, ConductorError> {
         let material = self.original.material().at_query_point(&self.card, point)?;
-        let conductor = self.original.with_material(material)?;
+        let owned: Vec<_> = self
+            .axes
+            .iter()
+            .map(|(axis, magnitude)| (axis.as_str(), magnitude.quantity()))
+            .collect();
+        let conductor = self
+            .original
+            .with_material_and_coordinates(material, &owned)?;
         self.admit(&conductor)?;
         Ok(conductor)
     }

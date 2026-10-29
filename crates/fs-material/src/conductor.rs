@@ -221,22 +221,31 @@ impl ResolvedConductorState {
     /// Missing, mistyped or out-of-range phase coordinates, a changed declared
     /// axis, or another source-dependent coordinate without a static owner.
     pub fn with_liquid_mass_fraction_axis(
-        mut self,
+        self,
         axis: impl Into<String>,
     ) -> Result<Self, ConductorError> {
-        let axis = axis.into();
+        self.with_phase_axis_and_coordinates(axis.into(), &[])
+    }
+
+    // Only a physical response owner may admit additional changing coordinates.
+    // The ordinary phase snapshot and public refresh remain strictly static.
+    fn with_phase_axis_and_coordinates(
+        mut self,
+        axis: String,
+        additional: &[(&str, QuantitySpec)],
+    ) -> Result<Self, ConductorError> {
         validate_liquid_mass_fraction_axis(&self.material, &axis)?;
+        let mut owned = vec![(axis.as_str(), QuantitySpec::dimensional(Dims([0; 6])))];
+        owned.extend_from_slice(additional);
         if self
             .liquid_mass_fraction_axis
             .as_ref()
             .is_some_and(|old| old != &axis)
-            || !self.source_property().has_only_owned_and_fixed_external_conditions(
-                &axis,
-                QuantitySpec::dimensional(Dims([0; 6])),
-            )
+            || !self.source_property()
+                .has_only_owned_coordinates_and_fixed_external_conditions(&owned)
         {
             return Err(ConductorError::InvalidInput {
-                quantity: "phase conductor requires one retained phase axis and otherwise static source conditions",
+                quantity: "phase conductor requires one retained phase axis and admitted owned source conditions",
             });
         }
         self.liquid_mass_fraction_axis = Some(axis);
@@ -269,11 +278,19 @@ impl ResolvedConductorState {
         &self,
         material: ResolvedMaterialStatePoint,
     ) -> Result<Self, ConductorError> {
+        self.with_material_and_coordinates(material, &[])
+    }
+
+    fn with_material_and_coordinates(
+        &self,
+        material: ResolvedMaterialStatePoint,
+        additional: &[(&str, QuantitySpec)],
+    ) -> Result<Self, ConductorError> {
         let next = Self::try_from_material_with_property(
             material, self.source_basis, &self.source_key,
         )?;
         match self.liquid_mass_fraction_axis() {
-            Some(axis) => next.with_liquid_mass_fraction_axis(axis),
+            Some(axis) => next.with_phase_axis_and_coordinates(axis.to_owned(), additional),
             None => Ok(next),
         }
     }

@@ -340,15 +340,8 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
         if !current_a.is_finite() {
             return Err(ConductionError::Invalid("finite total current required"));
         }
-        if current_a == 0.0 {
-            let boundary = scalar_potential::terminal_boundary(
-                &self.mesh,
-                &[positive_terminal, negative_terminal],
-                &[0.0, 0.0],
-                cancelled,
-            )?;
-            return self.solve(&boundary, controls, cancelled);
-        }
+        // Zero current still requires a defined conducting terminal pair. A
+        // zero-voltage solve alone would accept disconnected, floating pieces.
         let resistance =
             self.resistance(positive_terminal, negative_terminal, controls, cancelled)?;
         let mut unit_current_a = 0.0;
@@ -368,7 +361,7 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
         }
         let voltage_v = finite(current_a / unit_current_a)?;
         let source_power_w = finite(current_a * voltage_v)?;
-        if voltage_v == 0.0 || !positive(source_power_w) {
+        if current_a != 0.0 && (voltage_v == 0.0 || !positive(source_power_w)) {
             return Err(ConductionError::Invalid(
                 "total-current source is not representable",
             ));
