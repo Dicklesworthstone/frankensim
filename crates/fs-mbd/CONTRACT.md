@@ -1174,6 +1174,52 @@ the seven shared broad-phase groups pass separately. This selected-source
 native verification uses the pinned nightly. It does not establish a full
 Cargo/DSR workspace gate; the required sibling constellation was unavailable.
 
+## Sustained loaded articulated contact
+
+`articulated_contacts::step::step_articulated_frictional_contacts` adds a
+first-order force/contact/drift composition on the original free-floating
+articulated states. Held internal joint efforts, link-frame wrenches, and
+uniform gravity produce one coupled ABA impulse response at the actual
+configuration. Gravity acts at each original link COM, including its moment
+about the link origin. The original force/state validator checks joint effort
+limits before conversion to impulses. The simultaneous normal/circular-Coulomb
+owner then resolves every supplied contact together; the native unforced Lie
+midpoint owner advances every base and joint with those accepted velocities.
+Internal actuator and dynamic-contact reactions retain native whole-tree recoil.
+
+The actual initial and endpoint signed gaps must be nonnegative. A mandatory
+geometry callback admits the entire candidate drift path, feature coverage,
+and continued applicability of the frozen material witnesses and normals.
+It may query the original numerical path; finite sampling and endpoint tests
+alone are not CCD. Prescribed planes translate once at their declared velocity.
+No position or velocity projection repairs overlap, late path refusal, contact
+failure, or cancellation. All models and input states are borrowed; publication
+of every endpoint and the caller's geometry receipt is atomic.
+
+Reports retain the original load/contact responses, exact kick work, signed
+support work, native unallocated contact loss, and independently measured final
+linear/orbital-plus-spin angular balances. Exact held-joint displacement work
+and uniform-gravity COM-displacement work expose their separate first-order
+splitting defects. The gravity angular splitting term compares the initial kick
+with its exact integral along the accepted linear whole-tree COM drift. A
+rotating body-frame wrench's continuous path work is not inferred from endpoint
+poses. Native contact loss includes the force/contact splitting loss when a
+support removes the free load kick; it is not automatically continuum friction
+heat. Unforced drift error remains separately measured. Independent user gates
+bound per-tree/aggregate drift energy and complete-step work/momentum error.
+
+The lane admits at most 128 trees, 4096 total links, and the native 21-contact
+cap, with bounded cancellation polls and O(links) tree passes. It adds sustained
+resting/sliding contact for caller-admitted paths, not automatic arbitrary-shape
+collision discovery, a general Moreau--Jean integrator, exact continuous-force
+motion, or heat partition. Numerical activation resolution remains explicit,
+and time-step refinement is necessary. Both broad contact and MBD beads remain
+open. Focused G1/G3/G4 tests in `tests/articulated_contact_step.rs` exercise a
+supported actuated carriage, sliding with independently conserved carriage
+momentum and first-order trajectory refinement, multi-tree load transfer,
+moving-support work, contact permutation, full-scene rotation, native effort
+limits, and late geometry/cancellation/penetration refusal.
+
 ## Event-aware articulated trajectories
 
 `articulated_contacts::trajectory::advance_articulated_events` composes the

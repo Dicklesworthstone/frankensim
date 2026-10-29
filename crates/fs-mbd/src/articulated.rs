@@ -1776,7 +1776,7 @@ fn propagate_aba_accelerations(
     Ok((generalized_acceleration, acceleration))
 }
 
-fn validate_forward_dynamics_header(
+pub(super) fn validate_forward_dynamics_header(
     model: &ArticulatedModel,
     base_twist_body: Twist,
     joint_position: &[f64],
@@ -1798,7 +1798,9 @@ fn validate_forward_dynamics_header(
     Ok(())
 }
 
-fn validate_external_wrenches(external_body_wrench: &[Wrench]) -> Result<(), ArticulatedError> {
+pub(super) fn validate_external_wrenches(
+    external_body_wrench: &[Wrench],
+) -> Result<(), ArticulatedError> {
     for wrench in external_body_wrench {
         validate_wrench(*wrench, "external_body_wrench")?;
     }

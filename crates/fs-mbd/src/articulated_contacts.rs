@@ -15,6 +15,9 @@ pub mod tangential;
 /// Continuous free trajectories joined by caller-located simultaneous impacts.
 pub mod trajectory;
 
+/// Configuration-admitted sustained contact under joint, body, and gravity loads.
+pub mod step;
+
 use core::fmt;
 use fs_contact::frictional_multicontact::FrictionalContactError;
 use fs_contact::multicontact::{
