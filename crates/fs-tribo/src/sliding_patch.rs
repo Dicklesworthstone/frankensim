@@ -26,6 +26,9 @@ use fs_math::det;
 
 use crate::{TriboError, nonnegative_finite, positive_finite};
 
+/// Coupled static/sliding contact with full translational and torsional recoil.
+pub mod contact;
+
 fn finite(value: f64, field: &'static str) -> Result<f64, TriboError> {
     crate::finite(value, field)?;
     Ok(value)

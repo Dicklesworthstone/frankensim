@@ -262,6 +262,49 @@ limits, coupled capacity reduction, arbitrary tangent rotation/reflection,
 positive velocity scaling down to tiny speeds, small-spin asymptotics, branch
 continuity, deterministic replay, rest/frictionless selections and refusals.
 
+### Coupled Hertz static and sliding wrench
+
+`sliding_patch::contact::HertzWrenchContact` solves a candidate held force and
+normal-axis moment against the full three-coordinate body response. It uses
+the original analytic Hertz support function, including its stable small-spin
+series. Radius-scaled conjugates are `x = (du_x, du_y, a dtheta)` and
+`w = (F_x, F_y, M/a)`; their pairing has units of work. Mechanical owners supply
+the complete response, including translation/spin cross terms, and retain
+responsibility for contact geometry, normal evolution and integration accuracy.
+
+A feasible global zero-slip reaction has priority under the original local
+static coefficient, which must be at least the kinetic coefficient. Static
+membership uses the true axisymmetric joint Hertz surface: bounded inversion
+maintains inner/outer force-moment brackets. This is numerical admission using
+the original analytic integral, not a formal rounding certificate; unresolved
+boundary membership refuses instead of choosing a kinetic branch. Separate
+pure-force and pure-moment limits do not define the joint friction surface.
+An admitted static reaction that exceeds the caller's force or moment budget
+also refuses; kinetic friction cannot conceal that budget error.
+
+Sliding minimizes the strictly convex body-response energy over the original
+kinetic wrench set. A deterministic fully corrective support iteration retains
+at most four feasible vertices generated from Hertz support atoms and solves
+their constant-size affine faces. At the objective's rounding floor, bounded
+convex combinations refine the native wrench residual in the body-compliance
+metric; all candidates remain feasible. Explicit support/iteration limits,
+native force/moment residuals, dual gap, original-matrix compatibility and actual
+physical work gates govern acceptance. The original local sliding integral is
+reported as unpartitioned heat. Work/duality/compatibility residuals remain
+separate and are never thermalized. Allocation-free arithmetic admits positive
+definite response above the declared pivot floor and exact zero response;
+general singular mobility is refused without added physical compliance.
+
+The law is immutable and candidate-only, with bounded cancellation polls and
+no elastic history to mutate. It adds no partial-slip memory, rolling loss,
+adhesion, thermal partition or source authority. An existing elastic contact's
+stored energy cannot be discarded when choosing this separate rigid-patch rung.
+`tests/hertz_wrench_contact.rs` checks static priority and joint-capacity
+rejection, analytical translation/spin limits, independent anisotropic Coulomb
+KKT, full cross-response/local work against spatial Hertz quadrature with a live
+three-rung convergence check, frame covariance, dimensional similarity, exact
+zero limits, and atomic cancellation/refusal/retry.
+
 ### Partial-slip return-map rung
 
 `partial_slip` is a solver-independent, two-region Jenkins/Iwan
