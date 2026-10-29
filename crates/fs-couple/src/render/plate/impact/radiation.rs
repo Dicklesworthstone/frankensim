@@ -12,8 +12,13 @@ pub mod fit;
 
 /// Maximum complete velocity ports admitted by the passive fit and model: a
 /// soundboard's complete 128-mode image. Callers keep their own work ceilings
-/// (the joint impact solve still admits at most 256 poles and 1024 states).
+/// (the joint impact solve admits poles only within `MAX_JOINT_STATES`).
 pub const MAX_PORTS: usize = 128;
+
+/// The joint impact solve's work envelope: at most 1024 scalar states, mechanical
+/// and acoustic together, in its dense step. Each pole adds two of them, so this
+/// envelope, not a separate pole count, is the load's admission ceiling.
+pub const MAX_JOINT_STATES: usize = 1024;
 
 /// Maximum acoustic oscillators in one model. A travel-time-resolved fit of a
 /// complete 128-mode soundboard load to 2.4 kHz needs about 11,600.
@@ -106,8 +111,9 @@ impl ImpactSystem {
     /// observer input. All loss/work/energy gates and full-state rollback apply.
     ///
     /// Distinct source_modes bind model columns without reordering or truncating
-    /// them. At most 256 poles and 1024 total scalar states are admitted here;
-    /// maximum_poles is the caller's additional explicit cold-work ceiling.
+    /// them. Poles are admitted while all scalar states stay within
+    /// `MAX_JOINT_STATES`; maximum_poles is the caller's additional explicit
+    /// cold-work ceiling, itself at most half that envelope.
     /// Poles obey the existing Nyquist guard; coupling infinity-norm * dt <= .25
     /// is a separate resolution guard, not a temporal error bound. A completely
     /// zero load preserves the original trajectory and state dimensions exactly.
@@ -119,13 +125,13 @@ impl ImpactSystem {
         -> Result<Self,ImpactError>
     {
         model.validate().map_err(ImpactError::Owner)?;
-        if self.sample!=0 || self.radiation.is_some() || maximum_poles>256
+        if self.sample!=0 || self.radiation.is_some() || maximum_poles>MAX_JOINT_STATES/2
             || model.poles.len()>maximum_poles || source_modes.len()!=model.ports
             || source_modes.iter().enumerate().any(|(i,&k)|k>=self.modes||source_modes[..i].contains(&k)) {
-            return Err(invalid("radiation load needs one cold complete mapping within its 256-pole ceiling"));
+            return Err(invalid("radiation load needs one cold complete mapping within its pole ceiling"));
         }
         let dim=self.x.len().checked_add(2*model.poles.len()).ok_or_else(||invalid("radiation state overflow"))?;
-        if dim>1024 {return Err(invalid("radiation load exceeds the joint 1024-state work envelope"));}
+        if dim>MAX_JOINT_STATES {return Err(invalid("radiation load exceeds the joint 1024-state work envelope"));}
         let mut col_sum=vec![0.;model.ports];let mut row_max=0.0_f64;
         for p in &model.poles {
             if !p.omega.powi(2).is_finite() || !(2.*p.zeta*p.omega).is_finite()

@@ -90,6 +90,19 @@ fn radiation_and_felt_history_retry_exactly_with_reference_and_analytic_executio
     retry.set_iteration_limit(50).unwrap();retry.step(&[0.1],&gate).unwrap();clean.step(&[0.1],&gate).unwrap();assert_eq!(retry.state(),clean.state());
 }
 #[test]
+fn pole_ceiling_is_the_joint_state_envelope() {
+    let poles=|count:usize|Model{ports:1,poles:(0..count).map(|k|Pole{omega:100.+k as f64,zeta:0.1,coupling:vec![0.1]}).collect()};
+    let ceiling=MAX_JOINT_STATES/2;
+    // Kettle B's 17-port exterior fit has 317 poles: 2 + 634 states on one free mass.
+    assert!(bare(1e-5).with_radiation_load(&poles(317),&[0],ceiling).is_ok());
+    // The envelope binds, not a pole count: 2 + 2*511 = 1024 states admit, one more pole refuses.
+    assert!(bare(1e-5).with_radiation_load(&poles(511),&[0],ceiling).is_ok());
+    assert!(bare(1e-5).with_radiation_load(&poles(512),&[0],ceiling).is_err());
+    // A caller's own ceiling still binds, and cannot exceed the envelope's.
+    assert!(bare(1e-5).with_radiation_load(&poles(317),&[0],316).is_err());
+    assert!(bare(1e-5).with_radiation_load(&poles(1),&[0],ceiling+1).is_err());
+}
+#[test]
 fn malformed_late_or_underresolved_loads_refuse_and_zero_load_preserves_bits() {
     for modes in [vec![],vec![1],vec![usize::MAX]] {assert!(bare(0.001).with_radiation_load(&model(0.2),&modes,1).is_err());}
     assert!(bare(0.001).with_radiation_load(&model(0.2),&[0],0).is_err());
