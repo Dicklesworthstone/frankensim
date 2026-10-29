@@ -29,6 +29,9 @@ pub mod ceiling;
 /// Finite source operators inside the coupled opening-pressure equation.
 pub mod pressure_source;
 
+/// Original NASA volatile calorics and conservative solid-to-gas source transfer.
+pub mod pyrolysis;
+
 #[cfg(test)]
 mod tests;
 
@@ -190,6 +193,8 @@ pub enum NetworkError {
     Fire(fire::PrescribedFireError),
     /// Participating gas/surface radiation refused its geometry or solve.
     Radiation(radiation::RadiationError),
+    /// Condensed-fuel release refused its original gas source or transfer balance.
+    Pyrolysis(pyrolysis::VolatileGasError),
     /// The original inventory-limited reaction adapter refused a split source.
     Burning(fs_gas::multicomponent::compartment::burning::BurningError),
     /// Pressure closure exhausted its bounded nonlinear budget.
@@ -250,6 +255,14 @@ impl From<radiation::RadiationError> for NetworkError {
         match e {
             radiation::RadiationError::Cancelled => Self::Cancelled,
             other => Self::Radiation(other),
+        }
+    }
+}
+impl From<pyrolysis::VolatileGasError> for NetworkError {
+    fn from(e: pyrolysis::VolatileGasError) -> Self {
+        match e {
+            pyrolysis::VolatileGasError::Cancelled => Self::Cancelled,
+            other => Self::Pyrolysis(other),
         }
     }
 }

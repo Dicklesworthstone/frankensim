@@ -1132,6 +1132,44 @@ exercise the original enclosure's signed surface/gas exchange at four soot
 loadings as well as the independent spectral integral.
 
 
+### Conservative solid-to-gas volatile transfer
+
+`compartment::pyrolysis::VolatileMixture` binds an explicit volatile mass
+composition to the complete original `MixtureGas` species bank, caloric domain
+and energy references. Its `VolatileEnthalpy` implementation uses the original
+frozen NASA-mixture evaluator, including formation enthalpies. A reactive solid
+must use this same model for its outgoing stream and must supply virgin/char
+calorics with compatible physical formation references. An independently fitted
+effective heat-of-pyrolysis chart is not silently interchangeable with that
+physical gas enthalpy. No fuel composition is inferred from a material name.
+
+`release_rates` preserves both time-integrated volatile mass and enthalpy from
+the original `fs-thermal` pyrolysis owner, including releases produced over
+different temperatures. It maps the mass onto the original canonical species
+axis and subtracts those species' original internal-energy references to form
+`LayerRates`. It does not substitute a final solid temperature or add another
+heat of pyrolysis or combustion. The complete receiver gas must match the bound
+source. The carried mean enthalpy must remain inside its original caloric
+domain; actual rate-integrated mass and reconstructed physical enthalpy must
+satisfy explicit numerical gates without repairing the source integrals.
+
+The existing `ZoneNetwork::step_with_sources` provider prepares a solid
+candidate for each attempted interval and adds these rates to the receiving
+layer once. They already enter the original network pressure equation. The
+caller installs the returned solid candidate only after network acceptance;
+rejected or cancelled attempts publish neither owner, and shorter retries
+recompute the release from the accepted solid. Subsequent gas chemistry uses
+the existing source-inclusive pressure-stage API. A raw thermal release record
+cannot authenticate its material model, so correct per-cell model binding and
+routing remain explicit caller obligations.
+
+Seven integration tests cover original NASA enthalpy and reference conversion,
+variable-temperature integrated release, source/domain refusals, cancellation,
+joint solid/gas mass and physical-energy closure, and a forced network retry
+with source-inclusive pressure. This supplies conservative transfer, not a
+volatile-composition predictor, soot model, combustion closure or calibrated
+material dataset; those models remain separately owned.
+
 ### Runnable two-zone public-case comparison and pressure linearization
 
 The `compartment_fire` example composes original NASA9 N2/O2 calorics,
