@@ -944,3 +944,54 @@ composition maximum-principle, entropy, convergence-rate or experimental
 accuracy certificates. Both daughters receive pressure/composition waves and
 nonzero conservative molecular port transfers. The rebuilt default 16-cell
 inviscid run retained its prior 149 steps and -3.17e-14 J physical-energy residual.
+
+## Stationary wall drag and finite wall heat storage
+
+`multicomponent::wall_exchange` applies a source interval to one original
+mixture cell without changing species or the flow clock. Linear drag uses its
+exact frozen-rate exponential; Darcy drag uses its exact frozen-factor
+quadratic decay with an explicit hydraulic diameter. The gas retains total
+energy while lost kinetic energy becomes sensible energy, and the stationary
+support receives the opposite signed axial impulse. No second viscous-heating
+term is added to total energy.
+
+Thermal contacts may be adiabatic, a prescribed-temperature reservoir, or a
+finite lumped wall with explicit heat capacity in J/K. A contact's conductance
+is the complete exposed h*A in W/K. A safeguarded backward-Euler temperature
+solve evaluates the original mixture's NASA-9 energy and Cv rather than a
+frozen-gamma substitute. Finite-wall storage is eliminated in the scalar solve
+and its actual represented temperature change is included in the energy audit.
+Reservoir heat is external; gas/finite-wall exchange is internal. The step
+refuses source-domain or residual-budget violations rather than clipping gas
+temperature or creating heat.
+
+`network::wall_exchange::NetworkWallOperator` binds one distinct contact to
+every branch cell and finite plenum. It stages all momentum/energy and wall
+temperature updates in prepared buffers, preserves each species exactly, and
+publishes the entire source interval only after its final cancellation check.
+Failure leaves accepted gas, walls, clocks and reports intact. Its accepted
+support impulses remain per branch axis. A successful standalone source update
+clears an old advection report that no longer describes the changed fields.
+The source operator accepts the existing stationary mesh geometry; the separate
+molecular operator retains its constant-area restriction.
+
+The network has a shared finite-wall trial workspace for complete coupled
+retries. Candidate walls start from accepted storage once per trial, retain
+both wall half steps, and publish only when the composing owner accepts every
+stage. The report separates heat into gas, actual finite-wall energy change,
+external reservoir heat, kinetic energy thermalized, and numerical residuals.
+
+These are Estimated lumped/averaged closures with explicitly supplied
+coefficients. They do not resolve developing, turbulent or unsteady shock
+boundary layers; solid conduction between contacts; shared multi-cell walls;
+radiation; moving-wall work; or a thermodynamic/entropy theorem. Backward-Euler
+heat integration is first order even when surrounded by symmetric source
+composition. No throughput or experimental-accuracy claim is made.
+
+Focused Rust regressions accompany the source/network implementation for an
+independent two-body heat solution and timestep refinement, exact linear/Darcy
+drag and support impulses, reservoir exchange/source refusal, and late
+cancellation followed by reuse. Native compilation and execution are blocked in
+this session: the execution environment has no usable connection. Consequently
+these new regressions have not been run, and no DSR, Cargo, native-suite or
+physical-consumer pass is claimed for this extension.

@@ -30,6 +30,9 @@ pub mod dissipation;
 /// Atomic finite-rate chemistry coupled to conservative species transport.
 pub mod reactive;
 
+/// Stationary wall drag and conservative heat exchange with finite wall storage.
+pub mod wall_exchange;
+
 pub use crate::dynamics::{
     Boundaries, Boundary, CaloricDomain, Mesh1d, Primitive, Reconstruction, StepControl,
 };

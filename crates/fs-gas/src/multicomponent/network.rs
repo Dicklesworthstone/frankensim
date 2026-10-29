@@ -34,6 +34,9 @@ pub mod dissipating;
 /// Atomic finite-rate chemistry in every branch cell and compact gas volume.
 pub mod reactive;
 
+/// Clock-preserving radial drag and conservative heat exchange with wall storage.
+pub mod wall_exchange;
+
 /// Finite, stationary, perfectly mixed gas volume with evolving species.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plenum {
