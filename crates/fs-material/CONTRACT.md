@@ -4543,3 +4543,42 @@ The whole-path preparation uses 113 interval evaluations for its 649–751 K
 source window, reused over 40 heat steps. Maximum complete-history numerical
 energy discrepancy is 1.47e-6 J. Source uncertainty, reservoir entropy and a
 container-strength prediction are outside that numerical balance claim.
+
+## Compositional sensible heat storage (2026-10-29)
+
+`thermal::transport::storage::PreparedHeatStorage` prepares one or more explicit
+constituents at a shared temperature. `HeatStorageAmount::MassKg` multiplies a
+source specific capacity; `ReferenceVolumeM3` multiplies native volumetric
+capacity. Neither requires conductivity or an inferred density. Each component
+retains its immutable card, exact claim selection, typed fixed conditions,
+original source line, uncertainty and physical amount. The caller declares
+compatible caloric/work constraints and the shared-temperature approximation.
+
+Preparation intersects the selected temperature supports and retains every
+source breakpoint inside that intersection. Constituent IDs must be unique;
+sorting them before compensated summation and hashing makes input permutation
+irrelevant. Capacity amounts must be positive, finite and dimensionally matched.
+Preparation admits at most 64 constituents and 262,144 union knots. Runtime
+capacity needs one binary search; energy, inverse temperature and optional
+sensible entropy use the shared positive-affine caloric kernel. Successful
+evaluation allocates nothing and performs no source query, content hashing or
+numerical root iteration. Integrals traverse relative temperature intervals to
+retain small changes; finite representability limits can still refuse.
+
+`HeatStorageThermalLaw` binds this total storage to the existing thermal
+timeline's specific-energy coordinate with an explicit total mass and datum.
+Mass-only assemblies must match their known total mass; mixed assemblies require
+additional positive mass for their volume-based constituents. Call `admit_cell`
+before inserting a birth event, since the generic `ThermalLaw` evaluation cannot
+inspect cell mass. The timeline continues to own power, evolution, cancellation
+and energy acceptance. Sensible entropy is opt-in and changes the law identity.
+
+Four focused assembly tests exercise independent mass/volume integrals,
+inversion, entropy, amount scaling, source choice, permutation, domain refusals
+and actual thermal timelines. Compiled MDF plus acrylic/mineral countertop works
+below MDF's conductivity support; beryllium heats from its Cp source alone.
+The three existing volumetric-curve tests and ten existing volumetric-timeline
+tests also pass with the extracted shared caloric kernel. This addition supplies
+no conductivity homogenization, phase or chemical mixing law, thermal-expansion
+work, moisture evolution, absolute entropy, propagated uncertainty or automatic
+justification of a uniform-temperature body.

@@ -1,0 +1,33 @@
+frankensim.matdb-source.v1
+observation	nist-identity	polystyrene-32p04-nist-thermal-reference	NIST foam column identity and engineering-reference scope	This profile retains only the Polystyrene conductivity column labelled 32.04 kg/m3 and Cell gas unspecified. Exact polymer grade, manufacturing and conditioning history, moisture, pressure and orientation are unspecified. Engineering-reference-model=1 explicitly accepts this source-family fit and authored piecewise-linear interpolation. It is not a qualification of a commercial foam, an arbitrary density family, generic EPS/XPS morphology, or a matched specimen for heat capacity or expansion. No specific heat, bulk density(T), expansion, elasticity, porosity evolution, phase transition, gas diffusion or transient thermal law is inferred.
+observation	nist-gas	polystyrene-32p04-nist-thermal-reference	Cell-gas label and composition boundary	The selected source cell-gas label is: Cell gas unspecified. This is the reported column identity, not a measured cell-gas composition or pressure. Freon is a source trade-name label and does not specify a refrigerant species, blend, or concentration. Other gas and density columns are independent source cases; there is no gas-exchange law or interpolation across nominal density.
+observation	nist-conductivity	polystyrene-32p04-nist-thermal-reference	NIST conductivity fit; https://trc.nist.gov/cryogenics/materials/Polystyrene/polystyrenerev.html	Published log10(k)=sum(a_i*log10(T)^i), T in K and k in W/(m K); a..i=-1145.45,4086.02,-6234.293,5260.106,-2649.914,797.0372,-132.5244,9.3968,0. Data range 33-300 K, equation range 25-300 K; retained support is their intersection 33-300 K. NIST reports 2 percent fit error relative to data, with no confidence level or measurement uncertainty definition; uncertainty remains unstated. 52 knots were independently evaluated with 70-digit decimal arithmetic. Author-selected intervals were bisected until quarter/mid/three-quarter comparisons to the original equation were at most 0.008 percent relative difference; largest observed comparison 0.0079655017455523139 percent. This finite set of numerical comparisons does not certify a global interpolation-error bound and is neither source fit error nor statistical uncertainty. No extrapolation is provided.
+observation	nist-density-label	polystyrene-32p04-nist-thermal-reference	Source conductivity column nominal-density label	The source column labels density as 32.04 kg/m3. Its measurement temperature, method, uncertainty, and temperature evolution are not supplied. This scalar is nominal source metadata only, has no temperature validity, and must not be substituted for density in volumetric heat storage, diffusivity, or free-expansion calculations.
+curve	conductivity	nist-identity,nist-gas,nist-conductivity	thermal_conductivity	temperature	K	W/m/K	33:0.0042414315865700083,33.4375:0.0042992188508318010,33.875:0.0043558315006951132,34.3125:0.0044113782000492541,34.75:0.0044659591705810989,35.1875:0.0045196666824007237,35.625:0.0045725855455177149,36.5:0.0046763621598599084,37.375:0.0047778363564695150,38.25:0.0048774654978106797,39.125:0.0049756298421038471,40:0.0050726439756940424,41.25:0.0052097434734374589,42.5:0.0053456098740445705,45:0.0056152867056038766,50:0.0061526185411351514,56.25:0.0068264575843001844,62.5:0.0075019861448943443,68.75:0.0081761739267350062,75:0.0088472025299832242,77:0.0090612058512610794,80:0.0093816297893191617,90:0.010446688741098045,100:0.011513304741558172,106.25:0.012184521972827202,112.5:0.012861487317120297,118.75:0.013545674176057839,125:0.014238180238818621,131.25:0.014939730930055769,137.5:0.015650705759966996,143.75:0.016371177312998460,150:0.017100956350184065,156.25:0.017839639003397668,162.5:0.018586653651699934,168.75:0.019341306076345754,175:0.020102822103353851,181.25:0.020870387307482906,187.5:0.021643183566381585,193.75:0.022420422381017870,200:0.023201374956961758,212.5:0.024771962970074380,225:0.026351256532751635,237.5:0.027937929893252744,250:0.029533477742122014,261.575:0.031022843134116670,267.3625:0.031773704165995134,273.15:0.032529986910863066,275:0.032773067424732172,284.075:0.033976687036262135,288.6125:0.034586684450523998,293.15:0.035203175723283935,300:0.036148077846676516	linear
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	33	300	K
+validity	conductivity	reference	1	1	1
+validity	conductivity	family	1	1	1
+validity	conductivity	grade_known	0	0	1
+validity	conductivity	process_known	0	0	1
+validity	conductivity	moisture_known	0	0	1
+validity	conductivity	pressure_known	0	0	1
+validity	conductivity	matched	0	0	1
+validity	conductivity	orientation_known	0	0	1
+validity	conductivity	gas_composition_known	0	0	1
+validity	conductivity	reference_density	32.04	32.04	kg/m3
+validity	conductivity	cell_gas_known	0	0	1
+scalar	nominal-density-label	nist-identity,nist-gas,nist-density-label	nominal_density	32.04	kg/m3	constant
+uncertainty	nominal-density-label	unstated	-	-	-	-
+validity	nominal-density-label	reference	1	1	1
+validity	nominal-density-label	family	1	1	1
+validity	nominal-density-label	grade_known	0	0	1
+validity	nominal-density-label	process_known	0	0	1
+validity	nominal-density-label	moisture_known	0	0	1
+validity	nominal-density-label	pressure_known	0	0	1
+validity	nominal-density-label	matched	0	0	1
+validity	nominal-density-label	orientation_known	0	0	1
+validity	nominal-density-label	gas_composition_known	0	0	1
+validity	nominal-density-label	reference_density	32.04	32.04	kg/m3
+validity	nominal-density-label	cell_gas_known	0	0	1
+validity	nominal-density-label	density_temperature_known	0	0	1

@@ -268,14 +268,31 @@ as separate accounts. Native stages enforce a creeping-flow bound; endpoints
 enforce the declared viscosity-change limit. Every source, budget, mechanical,
 thermal or cancellation refusal leaves the accepted coupled history intact.
 
-The film is massless, isothermal and quasisteady with prescribed concentric
-geometry. No pressure-supported load, eccentricity, cavitation, turbulence,
-end effects, film thermal storage or spin-up is claimed. The thermal/mechanical
-split remains first order. Four G1/G3/G4 tests in
+`with_expanding_journal_bearings` additionally binds each cylinder to its exact
+child/parent material region. Its reference cylinders are coaxial with, and
+centered on, the revolute joint; their free-expansion fixed points must match
+that joint in their own frames. Each endpoint takes the original regions'
+integrated expansion receipts, scales the original radii and takes the shorter
+expanded axial overlap. The same geometry drives resistance, torque, Reynolds
+admission and the next interval's integrated heat. A closed gap or excessive
+geometric resistance change at an endpoint refuses the entire coupled step.
+Geometry never compounds across updates, and each cylinder retains its own
+temperature. These sampled checks do not localize intermediate contact events;
+the caller's timestep and model regime must exclude unresolved gap closure.
+
+The film is massless, isothermal and quasisteady. Geometry is either explicitly
+prescribed or follows this declared free-expansion model; it is not inferred
+from inertia moments. No pressure-supported load, eccentricity, cavitation,
+turbulence, end effects, film thermal storage or spin-up is claimed. Radial
+motion/squeeze-film work and constrained bearing stress are outside this
+circumferential-shear model; callers must justify neglecting them. The
+thermal/mechanical split remains first order. G1/G3/G4 tests in
 `tests/heated_articulated_viscous_motion.rs` cover analytic spin-down/local heat,
 two-link angular momentum, source-only viscosity feedback and refinement,
-continuation, and late rollback. Native execution remains required for
-numerical qualification.
+source expansion through clearance/motion/heat, independent cylinder heating,
+continuation, gap closure, coefficient budgets and late rollback. Link inertia
+parameter work remains separate from viscous heat; expanding a film does not
+create a second heat or mechanical-work account.
 
 ### Material dry joint brakes and two-body thermal feedback
 

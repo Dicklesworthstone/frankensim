@@ -24,6 +24,14 @@ pub mod expansion;
 #[path = "transport/expanding.rs"]
 pub mod expanding;
 
+/// Additive sensible heat storage for explicitly co-temperature constituents.
+#[path = "transport/storage.rs"]
+pub mod storage;
+
+// Shared affine-capacity integration and inversion, independent of its units.
+#[path = "transport/capacity.rs"]
+mod capacity;
+
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{
     ClaimSelection, MaterialCard, PropertyKey, PropertyLineSlice, PropertySupportError, QueryPoint,

@@ -33,7 +33,13 @@ impl SpatialEnergy<'_> {
                 assembly.add_node(node,join(vector(force).scale(-1.0),Vec3::new(0.0,0.0,0.0)),[[0.0;6];6]);
             }
         }
-        for link in &self.owner.tension_links {
+        if let Some(fluid)=self.owner.submerged_fluid_load() {
+            for (node,&force) in fluid.nodal_forces_n().iter().enumerate() {
+                checkpoint()?;
+                assembly.add_node(node,join(vector(force).scale(-1.0),Vec3::new(0.0,0.0,0.0)),[[0.0;6];6]);
+            }
+        }
+        for (index,link) in self.owner.tension_links.iter().enumerate() {
             checkpoint()?;
             let state=link.state_for(rod)?;
             let attachments=link.attachments();
@@ -81,10 +87,10 @@ impl SpatialEnergy<'_> {
             let response=PairResponse {gradient,tangent:matrix};
             response.check()?;
             assembly.add_pair(nodes,&response);
-            // Centerline gravity already includes the link inventory. Only
+            // Centerline weight and buoyancy include the link inventory. Only
             // rotating-offset moments (and their derivatives) remain here.
-            if let Some(acceleration)=self.owner.gravity_m_s2() {
-                let force=vector(acceleration).scale(0.5*link.reference_mass_kg());
+            if let Some(force)=self.owner.link_body_load_force_n(index) {
+                let force=vector(force);
                 for side in 0..2 {
                     let body=rotations[side].transpose().apply(force);
                     let moment=offsets[side].cross(body).scale(-1.0);

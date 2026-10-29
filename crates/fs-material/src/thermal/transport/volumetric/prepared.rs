@@ -5,7 +5,10 @@
 //! body's energy: the caller supplies the caloric constraint and geometry.
 //! No mechanical work, latent heat, moisture transport or phase change is added.
 
-use super::super::{positive, source_value};
+use super::super::{
+    capacity::{CapacityCurve, CapacityKnot},
+    source_value,
+};
 use super::{
     ThermalTransportError, admit_keys, admit_temperature_point, source_line, transport_values,
 };
@@ -63,6 +66,15 @@ impl VolumetricThermalSample {
 struct Knot {
     temperature: f64,
     values: [f64; 2],
+}
+
+impl CapacityKnot for Knot {
+    fn temperature(&self) -> f64 {
+        self.temperature
+    }
+    fn capacity(&self) -> f64 {
+        self.values[0]
+    }
 }
 
 /// Immutable source-line preparation for repeated transport and caloric queries.
@@ -186,36 +198,7 @@ impl PreparedVolumetricThermalTransport {
         initial_k: f64,
         final_k: f64,
     ) -> Result<f64, ThermalTransportError> {
-        self.check_temperature(initial_k)?;
-        self.check_temperature(final_k)?;
-        if initial_k == final_k {
-            return Ok(0.0);
-        }
-        let (low, high, sign) = if initial_k < final_k {
-            (initial_k, final_k, 1.0)
-        } else {
-            (final_k, initial_k, -1.0)
-        };
-        let mut i = self.segment(low);
-        let mut current = low;
-        let mut sum = 0.0;
-        let mut correction = 0.0;
-        while current < high {
-            let end = high.min(self.knots[i + 1].temperature);
-            let amount = self.segment_storage(i, current, end)?;
-            let corrected = amount - correction;
-            let next = sum + corrected;
-            if !positive(next) {
-                return Err(invalid(
-                    "volumetric storage is not finite and representable",
-                ));
-            }
-            correction = (next - sum) - corrected;
-            sum = next;
-            current = end;
-            i += 1;
-        }
-        Ok(sign * sum)
+        CapacityCurve::new(&self.knots).energy_change(initial_k, final_k)
     }
 
     /// Relative sensible thermal entropy `integral C_vol(T)/T dT` [J/(m3 K)].
@@ -236,41 +219,7 @@ impl PreparedVolumetricThermalTransport {
         initial_k: f64,
         final_k: f64,
     ) -> Result<f64, ThermalTransportError> {
-        self.check_temperature(initial_k)?;
-        self.check_temperature(final_k)?;
-        if initial_k == final_k {
-            return Ok(0.0);
-        }
-        let (low, high, sign) = if initial_k < final_k {
-            (initial_k, final_k, 1.0)
-        } else {
-            (final_k, initial_k, -1.0)
-        };
-        let mut index = self.segment(low);
-        let mut current = low;
-        let mut sum = 0.0;
-        let mut correction = 0.0;
-        while current < high {
-            let end = high.min(self.knots[index + 1].temperature);
-            let [cold_weight, hot_weight] = entropy_weights(current, end);
-            let amount = self.on_segment(index, current)[0] * cold_weight
-                + self.on_segment(index, end)[0] * hot_weight;
-            if !positive(cold_weight) || !positive(hot_weight) || !positive(amount) {
-                return Err(invalid(
-                    "sensible entropy increment is not positive and representable",
-                ));
-            }
-            let corrected = amount - correction;
-            let next = sum + corrected;
-            if !positive(next) {
-                return Err(invalid("sensible entropy is not finite and representable"));
-            }
-            correction = (next - sum) - corrected;
-            sum = next;
-            current = end;
-            index += 1;
-        }
-        Ok(sign * sum)
+        CapacityCurve::new(&self.knots).entropy_change(initial_k, final_k)
     }
 
     /// Invert the same fixed-volume storage change for heating or cooling.
@@ -284,104 +233,7 @@ impl PreparedVolumetricThermalTransport {
         initial_k: f64,
         change_j_m3: f64,
     ) -> Result<f64, ThermalTransportError> {
-        self.check_temperature(initial_k)?;
-        if !change_j_m3.is_finite() {
-            return Err(invalid("storage change must be finite"));
-        }
-        if change_j_m3 == 0.0 {
-            return Ok(initial_k);
-        }
-        let heating = change_j_m3 > 0.0;
-        let span = self.temperature_span_k();
-        let boundary = if heating { span[1] } else { span[0] };
-        let target = change_j_m3.abs();
-        // Exact finite endpoint targets retain their original temperature.
-        // A nonrepresentable full-interval integral does not preclude a small
-        // representable change inside it; the bounded traversal still decides.
-        if let Ok(available) = self.storage_change_j_m3(initial_k, boundary) {
-            let available = available.abs();
-            if target > available {
-                return Err(invalid(
-                    "storage target exceeds the original source temperature support",
-                ));
-            }
-            if target == available {
-                return Ok(boundary);
-            }
-        }
-        let mut current = initial_k;
-        let mut cumulative = 0.0;
-        let mut correction = 0.0;
-        let mut i = if heating {
-            self.segment(initial_k)
-        } else {
-            self.knots
-                .partition_point(|k| k.temperature < initial_k)
-                .saturating_sub(1)
-        };
-        for _ in 0..self.knots.len() - 1 {
-            let end = if heating {
-                self.knots[i + 1].temperature
-            } else {
-                self.knots[i].temperature
-            };
-            let start_c = self.on_segment(i, current)[0];
-            let end_c = self.on_segment(i, end)[0];
-            let mean_c = 0.5 * start_c + 0.5 * end_c;
-            let width = (end - current).abs();
-            let amount = mean_c * width;
-            if amount.is_nan() || amount <= 0.0 {
-                return Err(invalid(
-                    "storage inverse encountered an unrepresentable segment",
-                ));
-            }
-            let corrected = amount - correction;
-            let next = cumulative + corrected;
-            if target <= next {
-                if target == next {
-                    return Ok(end);
-                }
-                let fraction_energy = if amount.is_finite() {
-                    (target - cumulative) / amount
-                } else {
-                    ((target - cumulative) / mean_c) / width
-                };
-                let scale = start_c.max(end_c);
-                let a = start_c / scale;
-                let b = end_c / scale;
-                // A convex combination of endpoint squares avoids cancellation
-                // for decreasing capacity near its supported cold/hot endpoint.
-                let root = ((1.0 - fraction_energy) * a * a + fraction_energy * b * b).sqrt();
-                let fraction = fraction_energy * (a + b) / (a + root);
-                let temperature = current + fraction * (end - current);
-                if !fraction.is_finite()
-                    || !(0.0..=1.0).contains(&fraction)
-                    || !temperature.is_finite()
-                    || temperature == initial_k
-                    || temperature < current.min(end)
-                    || temperature > current.max(end)
-                {
-                    return Err(invalid(
-                        "storage inverse is not representable at this temperature scale",
-                    ));
-                }
-                return Ok(temperature);
-            }
-            correction = (next - cumulative) - corrected;
-            cumulative = next;
-            current = end;
-            if current == boundary {
-                break;
-            }
-            if heating {
-                i += 1;
-            } else {
-                i -= 1;
-            }
-        }
-        Err(invalid(
-            "storage inverse exceeded its bounded source traversal",
-        ))
+        CapacityCurve::new(&self.knots).temperature_after_energy_change(initial_k, change_j_m3)
     }
 
     #[must_use]
@@ -447,48 +299,6 @@ impl PreparedVolumetricThermalTransport {
         self.check_temperature(temperature)?;
         Ok(self.on_segment(self.segment(temperature), temperature))
     }
-    fn segment_storage(
-        &self,
-        index: usize,
-        low: f64,
-        high: f64,
-    ) -> Result<f64, ThermalTransportError> {
-        let mean = 0.5 * self.on_segment(index, low)[0] + 0.5 * self.on_segment(index, high)[0];
-        let amount = mean * (high - low);
-        if !positive(amount) {
-            return Err(invalid(
-                "volumetric storage increment is not positive and representable",
-            ));
-        }
-        Ok(amount)
-    }
-}
-
-// C(T) is the convex interpolation of its two endpoint capacities. Integrating
-// its two basis functions divided by T gives positive weights whose sum is
-// ln(high/low). With r=(high-low)/low, w_hot=1-ln(1+r)/r. The short-interval
-// series avoids subtracting nearly equal values in that expression.
-fn entropy_weights(low: f64, high: f64) -> [f64; 2] {
-    let width = high - low;
-    let ratio = width / low;
-    let logarithm = if ratio.is_finite() {
-        ratio.ln_1p()
-    } else {
-        // The temperature ratio may overflow while its logarithm stays finite.
-        high.ln() - low.ln()
-    };
-    let hot = if ratio < 0.125 {
-        let mut sum = 0.0;
-        let mut power = ratio;
-        for n in 1..=18 {
-            sum += power / f64::from(n + 1);
-            power *= -ratio;
-        }
-        sum
-    } else {
-        1.0 - (low / width) * logarithm
-    };
-    [logarithm - hot, hot]
 }
 
 fn invalid(reason: &'static str) -> ThermalTransportError {

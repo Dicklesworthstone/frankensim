@@ -65,10 +65,13 @@ impl RodEnergy<SpatialRodError> for SpatialEnergy<'_> {
             if let Some(forces) = self.owner.gravity_nodal_forces_n() {
                 result -= forces[node][component];
             }
-        } else if let Some(acceleration) = self.owner.gravity_m_s2() {
+            if let Some(fluid) = self.owner.submerged_fluid_load() {
+                result -= fluid.nodal_forces_n()[node][component];
+            }
+        } else {
             for &(index, side) in &self.links[node] {
                 let link = &self.owner.tension_links[index];
-                let force = acceleration.map(|g| 0.5 * link.reference_mass_kg() * g);
+                let Some(force) = self.owner.link_body_load_force_n(index) else { continue; };
                 let body = base.frames[node].inverse()
                     .rotate(Vec3::new(force[0], force[1], force[2]))
                     .map_err(crate::rod::group_error)?;
@@ -272,8 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn g3_complete_spatial_tangent_covers_heterogeneity_nonlocal_links_and_rotating_weight() {
-        use fs_ga::So3Tangent;
+    fn g3_complete_spatial_tangent_covers_heterogeneity_links_weight_and_buoyancy() {
         let gate = CancelGate::new();
         let sections = [0.3, 2.0, 0.7, 1.4].map(section_scaled).to_vec();
         let link = MaterialTensionLink::try_new(section().elastic().clone(), [
@@ -283,13 +285,23 @@ mod tests {
         let owner = SpatialMaterialRod::try_straight(1.0, sections).unwrap()
             .with_tension_links(vec![link], &gate).unwrap()
             .with_gravity([1.0, -9.0, 0.3], &gate).unwrap();
+        check_complete_tangent(&owner);
+        let fluid = fs_material::fluid_transport::FluidTransportState::try_new(
+            1300.0, 4200.0, 0.6, 0.001).unwrap();
+        let wet = owner.with_submerged_fluid(&fluid,
+            super::super::gravity::ReferenceDisplacementVolume::FloodedVoids, &gate).unwrap();
+        check_complete_tangent(&wet);
+    }
+
+    fn check_complete_tangent(owner: &SpatialMaterialRod) {
+        use fs_ga::So3Tangent;
         let mut base = owner.rod.clone();
         for node in 1..=4 {
             base.positions[node][1] += 0.001 * (node * node) as f64;
             base.frames[node] = base.frames[node].body_plus(So3Tangent::new(
                 Vec3::new(0.02*node as f64,-0.01*node as f64,0.03*node as f64))).unwrap();
         }
-        let model = SpatialEnergy::new(&owner);
+        let model = SpatialEnergy::new(owner);
         let exact = model.linearize(&base, &owner.free_dofs, true, &|| Ok(())).unwrap().unwrap();
         let matrix = exact.tangent.as_ref().unwrap();
         for col in 0..24 {

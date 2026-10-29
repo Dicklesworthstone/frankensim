@@ -13,6 +13,8 @@ use fs_solid::rod::TipLoad;
 use fs_solid::rod::material_field::{SpatialMaterialRod, SpatialRodError};
 use fs_solid::rod::material_field::supports::RodSupport;
 use fs_solid::rod::material_field::thermal::source::{RodLayerSource, RodSegmentSource, RodMaterialSource};
+use fs_material::fluid_transport::FluidTransportState;
+use fs_solid::rod::material_field::gravity::ReferenceDisplacementVolume;
 
 fn card(rho: f64, hot_density_scale: f64, hot_stiffness_scale: f64) -> MaterialCard {
     let mut claims = ClaimSet::new();
@@ -209,4 +211,190 @@ fn g1_small_thermal_member_probes_do_not_exceed_the_material_strain_limit() {
     assert!(rod.support_reactions(&TipLoad::default(), &gate).unwrap().free_residual_norm < 1e-7);
     near(rod.root_support_reaction(&gate).unwrap().force_n[0].unwrap(),
         -10.0*rod.reference_mass().total_mass_kg(), 2e-5);
+}
+
+fn fluid(density: f64) -> FluidTransportState {
+    FluidTransportState::try_new(density, 4200.0, 0.6, 0.001).unwrap()
+}
+
+#[test]
+fn g1_g3_fluid_material_swap_changes_equilibrium_and_neutral_buoyancy() {
+    let gate = CancelGate::new();
+    let material = section(&card(1000.0, 1.0, 1.0));
+    let dry = SpatialMaterialRod::try_straight(1.0, vec![material.clone(); 2]).unwrap()
+        .with_gravity([0.1, 0.0, 0.0], &gate).unwrap();
+    for density in [500.0, 1000.0, 2000.0] {
+        let mut submerged = dry.with_submerged_fluid(&fluid(density),
+            ReferenceDisplacementVolume::FloodedVoids, &gate).unwrap();
+        assert_eq!(submerged.reference_mass(), dry.reference_mass());
+        assert_eq!(submerged.gravity_nodal_forces_n(), dry.gravity_nodal_forces_n());
+        submerged.solve_static(&TipLoad::default(), 1, 1e-8, &gate).unwrap();
+        // Independent small-strain bar solution: u(L)=(rho_s-rho_f)g L²/(2E).
+        let expected_extension = (1000.0 - density) * 0.1 / (2.0 * 1e7);
+        let extension = submerged.positions_m()[2][0] - 1.0;
+        near(extension, expected_extension, 2e-5);
+        let reaction = submerged.root_support_reaction(&gate).unwrap();
+        let expected_force = -(1000.0 - density) * material.elastic().area_m2() * 0.1;
+        near(reaction.force_n[0].unwrap(), expected_force, 2e-5);
+        assert!(submerged.support_reactions(&TipLoad::default(), &gate).unwrap()
+            .free_residual_norm < 1e-8);
+    }
+}
+
+#[test]
+fn g1_layered_and_hollow_geometry_retains_volume_and_first_moment() {
+    let gate = CancelGate::new();
+    let core = section(&card(3000.0, 1.0, 1.0)).elastic().layers()[0].material.clone();
+    let skin = section(&card(8000.0, 1.0, 1.0)).elastic().layers()[0].material.clone();
+    let layered = ConcentricElasticSection::try_new(0.0, vec![
+        ConcentricMaterialLayer { outer_radius_m: 0.02, material: core },
+        ConcentricMaterialLayer { outer_radius_m: 0.05, material: skin.clone() },
+    ]).unwrap().with_shear_modulus("shear_modulus", 0.8).unwrap();
+    let hollow = ConcentricElasticSection::try_new(0.01, vec![
+        ConcentricMaterialLayer { outer_radius_m: 0.03, material: skin },
+    ]).unwrap().with_shear_modulus("shear_modulus", 0.8).unwrap();
+    let gravity = [0.3, -0.7, 1.1];
+    let rod = SpatialMaterialRod::try_straight(1.0, vec![layered, hollow]).unwrap()
+        .with_gravity(gravity, &gate).unwrap();
+    let rho = 750.0;
+    for model in [ReferenceDisplacementVolume::FloodedVoids, ReferenceDisplacementVolume::SealedEnvelope] {
+        let submerged = rod.with_submerged_fluid(&fluid(rho), model, &gate).unwrap();
+        let load = submerged.submerged_fluid_load().unwrap();
+        let v0 = 0.5 * std::f64::consts::PI * 0.05_f64.powi(2);
+        let v1 = 0.5 * std::f64::consts::PI * (0.03_f64.powi(2)
+            - if model == ReferenceDisplacementVolume::FloodedVoids { 0.01_f64.powi(2) } else { 0.0 });
+        near(load.total_volume_m3(), v0 + v1, 2e-15);
+        near(load.nodal_volumes_m3().iter().enumerate().map(|(i,v)| 0.5*i as f64*v).sum(),
+            0.25*v0 + 0.75*v1, 2e-15);
+        for axis in 0..3 {
+            near(load.nodal_forces_n().iter().map(|f| f[axis]).sum(),
+                -rho*(v0+v1)*gravity[axis], 2e-15);
+        }
+        assert_eq!(submerged.reference_mass(), rod.reference_mass());
+        assert_eq!(submerged.buoyancy_potential_j().unwrap(), 0.0);
+    }
+}
+
+#[test]
+fn g3_shared_gas_pressure_changes_buoyancy_without_redefining_solid_mass() {
+    use fs_material::gas::{GasSpec, GasState};
+    let gate = CancelGate::new();
+    let rod = SpatialMaterialRod::try_straight(1.0, vec![section(&card(1000.0, 1.0, 1.0))]).unwrap()
+        .with_gravity([0.0, 0.0, -1.0], &gate).unwrap();
+    let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 300.0, 1e5).unwrap();
+    let compressed = GasState::try_new(&GasSpec::dry_air_ussa1976(), 300.0, 2e5).unwrap();
+    let a = rod.with_submerged_fluid(&gas, ReferenceDisplacementVolume::SealedEnvelope, &gate).unwrap();
+    let b = a.with_submerged_fluid(&compressed, ReferenceDisplacementVolume::SealedEnvelope, &gate).unwrap();
+    for (left, right) in a.submerged_fluid_load().unwrap().nodal_forces_n().iter()
+        .zip(b.submerged_fluid_load().unwrap().nodal_forces_n()) {
+        near(right[2], 2.0*left[2], 2e-15);
+    }
+    assert_eq!(a.gravity_nodal_forces_n(), b.gravity_nodal_forces_n());
+    let mut corrupt = gas;
+    corrupt.density *= 2.0;
+    assert!(b.with_submerged_fluid(&corrupt, ReferenceDisplacementVolume::FloodedVoids, &gate).is_err());
+    assert_eq!(b.reference_mass(), rod.reference_mass());
+}
+
+#[test]
+fn g3_heated_sources_keep_reference_displacement_volume_and_solid_inventory() {
+    let gate = CancelGate::new();
+    let data = card(1000.0, 0.5, 0.5);
+    let source = source(&data, 2);
+    let cold = source.resolve_at(&[300.0; 2], &gate).unwrap()
+        .with_gravity([0.1, 0.0, 0.0], &gate).unwrap()
+        .with_submerged_fluid(&fluid(750.0), ReferenceDisplacementVolume::FloodedVoids, &gate).unwrap();
+    let hot = source.resolve_at(&[400.0; 2], &gate).unwrap()
+        .with_gravity([0.1, 0.0, 0.0], &gate).unwrap()
+        .with_submerged_fluid(&fluid(750.0), ReferenceDisplacementVolume::FloodedVoids, &gate).unwrap();
+    assert_ne!(cold.sections(), hot.sections());
+    assert_eq!(cold.reference_mass(), hot.reference_mass());
+    assert_eq!(cold.submerged_fluid_load(), hot.submerged_fluid_load());
+}
+
+#[test]
+fn g1_eccentric_strands_transmit_buoyant_force_moment_and_work_to_native_motion() {
+    use fs_ga::{So3Tangent, Vec3};
+    use fs_solid::rod::material_field::motion::RodRootBoundary;
+    use fs_solid::rod::material_field::tension::{MaterialTensionLink, TensionLinkAttachment};
+    let gate = CancelGate::new();
+    let section = section(&card(1000.0, 1.0, 1.0));
+    let link = MaterialTensionLink::try_new(section.elastic().clone(), [
+        TensionLinkAttachment { node: 0, offset_body_m: [0.0, 0.1, 0.0] },
+        TensionLinkAttachment { node: 2, offset_body_m: [0.0, 0.1, 0.0] },
+    ], 1.0, 2, 0.1).unwrap();
+    let dry = SpatialMaterialRod::try_straight(1.0, vec![section.clone(); 2]).unwrap()
+        .with_tension_links(vec![link.clone()], &gate).unwrap()
+        .with_gravity([0.0, 0.0, -0.1], &gate).unwrap();
+    let wet = dry.with_submerged_fluid(&fluid(500.0), ReferenceDisplacementVolume::FloodedVoids, &gate).unwrap();
+    let endpoint_force = 500.0 * section.elastic().area_m2() * 1.0 * 0.1;
+    let moments = wet.buoyancy_nodal_moments_body_nm().unwrap().unwrap();
+    near(moments[0][0], 0.1*endpoint_force, 2e-15);
+    near(moments[2][0], 0.1*endpoint_force, 2e-15);
+    let dry_model = dry.into_spatial_motion_model(RodRootBoundary::Free, &gate).unwrap();
+    let wet_model = wet.into_spatial_motion_model(RodRootBoundary::Free, &gate).unwrap();
+    assert_eq!(dry_model.inertia(), wet_model.inertia());
+    let mut pose = wet_model.initial_pose();
+    for (position, frame) in pose.positions_m.iter_mut().zip(&mut pose.frames) {
+        position[2] += 0.01;
+        *frame = frame.body_plus(So3Tangent::new(Vec3::new(0.1, 0.0, 0.0))).unwrap();
+    }
+    let dry_response = dry_model.evaluate(&pose, &gate).unwrap();
+    let wet_response = wet_model.evaluate(&pose, &gate).unwrap();
+    let load = wet_model.source().submerged_fluid_load().unwrap();
+    for node in 0..3 {
+        near(wet_response.force_n[node][2] - dry_response.force_n[node][2],
+            load.nodal_forces_n()[node][2], 1e-10);
+    }
+    let expected = -500.0 * load.total_volume_m3() * 0.1 * 0.01
+        - 2.0 * endpoint_force * 0.1 * 0.1_f64.sin();
+    near(wet_response.potential_energy_j - dry_response.potential_energy_j, expected, 1e-9);
+    // The original analytical gradient must include the rotating pressure lever.
+    let h = 1e-6;
+    let mut plus = pose.clone();
+    let mut minus = pose.clone();
+    plus.frames[0] = plus.frames[0].body_plus(So3Tangent::new(Vec3::new(h, 0.0, 0.0))).unwrap();
+    minus.frames[0] = minus.frames[0].body_plus(So3Tangent::new(Vec3::new(-h, 0.0, 0.0))).unwrap();
+    let energy_difference = |p| wet_model.evaluate(p, &gate).unwrap().potential_energy_j
+        - dry_model.evaluate(p, &gate).unwrap().potential_energy_j;
+    let torque = wet_response.torque_body_nm[0][0] - dry_response.torque_body_nm[0][0];
+    near(-(energy_difference(&plus)-energy_difference(&minus))/(2.0*h), torque, 1e-6);
+    // Installing strands after the fluid must rebuild both volume and weight.
+    let reordered = SpatialMaterialRod::try_straight(1.0, vec![section; 2]).unwrap()
+        .with_gravity([0.0, 0.0, -0.1], &gate).unwrap()
+        .with_submerged_fluid(&fluid(500.0), ReferenceDisplacementVolume::FloodedVoids, &gate).unwrap()
+        .with_tension_links(vec![link], &gate).unwrap();
+    assert_eq!(reordered.submerged_fluid_load(), wet_model.source().submerged_fluid_load());
+}
+
+#[test]
+fn g0_g4_hydrostatic_replacement_zero_gravity_and_cancellation_are_transactional() {
+    let gate = CancelGate::new();
+    let bare = SpatialMaterialRod::try_straight(1.0, vec![section(&card(1000.0, 1.0, 1.0))]).unwrap();
+    let unforced = bare.with_submerged_fluid(&fluid(1000.0), ReferenceDisplacementVolume::FloodedVoids, &gate).unwrap();
+    assert!(unforced.submerged_fluid_load().unwrap().nodal_forces_n().iter().flatten().all(|&v| v == 0.0));
+    let dry = bare.with_gravity([0.0, 0.0, -1.0], &gate).unwrap();
+    let wet = dry.with_submerged_fluid(&fluid(1000.0), ReferenceDisplacementVolume::FloodedVoids, &gate).unwrap();
+    let fluid_first = unforced.with_gravity([0.0, 0.0, -1.0], &gate).unwrap();
+    assert_eq!(fluid_first.submerged_fluid_load(), wet.submerged_fluid_load());
+    let reversed = wet.with_gravity([0.0, 0.0, 2.0], &gate).unwrap();
+    for (old, new) in wet.submerged_fluid_load().unwrap().nodal_forces_n().iter()
+        .zip(reversed.submerged_fluid_load().unwrap().nodal_forces_n()) {
+        near(new[2], -2.0*old[2], 2e-15);
+    }
+    let zero = wet.with_gravity([0.0; 3], &gate).unwrap();
+    assert!(zero.submerged_fluid_load().unwrap().nodal_forces_n().iter().flatten().all(|&v| v == 0.0));
+    let resumed = zero.with_gravity([0.0, 0.0, -1.0], &gate).unwrap();
+    assert_eq!(resumed.submerged_fluid_load(), wet.submerged_fluid_load());
+    let removed = wet.without_submerged_fluid(&gate).unwrap();
+    assert!(removed.submerged_fluid_load().is_none());
+    assert_eq!(removed.gravity_nodal_forces_n(), dry.gravity_nodal_forces_n());
+    let before = wet.submerged_fluid_load().unwrap().clone();
+    gate.request();
+    assert!(matches!(wet.with_submerged_fluid(&fluid(500.0), ReferenceDisplacementVolume::FloodedVoids, &gate),
+        Err(SpatialRodError::Cancelled)));
+    assert!(matches!(wet.without_submerged_fluid(&gate), Err(SpatialRodError::Cancelled)));
+    assert!(matches!(wet.with_gravity([0.0; 3], &gate), Err(SpatialRodError::Cancelled)));
+    assert_eq!(wet.submerged_fluid_load(), Some(&before));
+    assert_eq!(wet.positions_m(), dry.positions_m());
 }

@@ -1,0 +1,33 @@
+frankensim.matdb-source.v1
+observation	nist-identity	polyurethane-freon-64p08-nist-thermal-reference	NIST foam column identity and engineering-reference scope	This profile retains only the Polyurethane conductivity column labelled 64.08 kg/m3 and Freon filled; exact refrigerant identity unspecified. Exact polymer grade, manufacturing and conditioning history, moisture, pressure and orientation are unspecified. Engineering-reference-model=1 explicitly accepts this source-family fit and authored piecewise-linear interpolation. It is not a qualification of a commercial foam, an arbitrary density family, generic EPS/XPS morphology, or a matched specimen for heat capacity or expansion. No specific heat, bulk density(T), expansion, elasticity, porosity evolution, phase transition, gas diffusion or transient thermal law is inferred.
+observation	nist-gas	polyurethane-freon-64p08-nist-thermal-reference	Cell-gas label and composition boundary	The selected source cell-gas label is: Freon filled; exact refrigerant identity unspecified. This is the reported column identity, not a measured cell-gas composition or pressure. Freon is a source trade-name label and does not specify a refrigerant species, blend, or concentration. Other gas and density columns are independent source cases; there is no gas-exchange law or interpolation across nominal density.
+observation	nist-conductivity	polyurethane-freon-64p08-nist-thermal-reference	NIST conductivity fit; https://trc.nist.gov/cryogenics/materials/Polyurethane/polyurethanerev.html	Published log10(k)=sum(a_i*log10(T)^i), T in K and k in W/(m K); a..i=789.79,-2347.94,3024.61,-2206.78,989.238,-273.18,43.065,-2.9863,0. Data range 88-300 K, equation range 55-300 K; retained support is their intersection 88-300 K. NIST reports 2 percent fit error relative to data, with no confidence level or measurement uncertainty definition; uncertainty remains unstated. 69 knots were independently evaluated with 70-digit decimal arithmetic. Author-selected intervals were bisected until quarter/mid/three-quarter comparisons to the original equation were at most 0.008 percent relative difference; largest observed comparison 0.0062434707845061200 percent. This finite set of numerical comparisons does not certify a global interpolation-error bound and is neither source fit error nor statistical uncertainty. No extrapolation is provided.
+observation	nist-density-label	polyurethane-freon-64p08-nist-thermal-reference	Source conductivity column nominal-density label	The source column labels density as 64.08 kg/m3. Its measurement temperature, method, uncertainty, and temperature evolution are not supplied. This scalar is nominal source metadata only, has no temperature validity, and must not be substituted for density in volumetric heat storage, diffusivity, or free-expansion calculations.
+curve	conductivity	nist-identity,nist-gas,nist-conductivity	thermal_conductivity	temperature	K	W/m/K	88:0.010425417027072257,91:0.010763586349479716,94:0.011104881167914990,100:0.011792340206530022,106.25:0.012509306255149269,112.5:0.013221886304894148,115.625:0.013575376467247258,118.75:0.013926555192337225,121.875:0.014275168507302232,125:0.014621011541288051,128.125:0.014963918630794499,131.25:0.015303755015105148,134.375:0.015640409861240038,137.5:0.015973790406884005,140.625:0.016303817047682070,143.75:0.016630419225153064,146.875:0.016953531995327157,150:0.017273093177520478,153.125:0.017589040998463144,156.25:0.017901312160053674,159.375:0.018209840269884012,162.5:0.018514554582787624,165.625:0.018815379009332218,168.75:0.019112231353660823,171.875:0.019405022748579945,175:0.019693657260461488,178.125:0.019978031640496433,181.25:0.020258035202219793,184.375:0.020533549808106929,187.5:0.020804449950495080,190.625:0.021070602914173294,193.75:0.021331869009761633,196.875:0.021588101868511368,200:0.021839148790440117,203.125:0.022084851138802087,206.25:0.022325044774811874,209.375:0.022559560527314525,212.5:0.022788224692745580,215.625:0.023010859561270285,218.75:0.023227283965446512,221.875:0.023437313848134326,225:0.023640762846688126,228.125:0.023837442890724710,231.25:0.024027164810971028,234.375:0.024209738956866357,237.5:0.024384975820731408,240.625:0.024552686666427231,243.75:0.024712684160514531,246.875:0.024864783003993291,250:0.025008800562757250,252.89375:0.025134798391536595,255.7875:0.025253573465757515,258.68125:0.025364989657719355,261.575:0.025468914551947904,264.46875:0.025565219853264111,267.3625:0.025653781787648789,270.25625:0.025734481494923476,273.15:0.025807205412279639,275:0.025849469058252209,277.26875:0.025896749205558345,279.5375:0.025938972375554912,281.80625:0.025976093552987314,284.075:0.026008070288216507,286.34375:0.026034862792733741,288.6125:0.026056434031282488,290.88125:0.026072749810435553,293.15:0.026083778863479552,296.575:0.026090352221879510,300:0.026084729553119778	linear
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	88	300	K
+validity	conductivity	reference	1	1	1
+validity	conductivity	family	1	1	1
+validity	conductivity	grade_known	0	0	1
+validity	conductivity	process_known	0	0	1
+validity	conductivity	moisture_known	0	0	1
+validity	conductivity	pressure_known	0	0	1
+validity	conductivity	matched	0	0	1
+validity	conductivity	orientation_known	0	0	1
+validity	conductivity	gas_composition_known	0	0	1
+validity	conductivity	reference_density	64.08	64.08	kg/m3
+validity	conductivity	cell_gas_freon	1	1	1
+scalar	nominal-density-label	nist-identity,nist-gas,nist-density-label	nominal_density	64.08	kg/m3	constant
+uncertainty	nominal-density-label	unstated	-	-	-	-
+validity	nominal-density-label	reference	1	1	1
+validity	nominal-density-label	family	1	1	1
+validity	nominal-density-label	grade_known	0	0	1
+validity	nominal-density-label	process_known	0	0	1
+validity	nominal-density-label	moisture_known	0	0	1
+validity	nominal-density-label	pressure_known	0	0	1
+validity	nominal-density-label	matched	0	0	1
+validity	nominal-density-label	orientation_known	0	0	1
+validity	nominal-density-label	gas_composition_known	0	0	1
+validity	nominal-density-label	reference_density	64.08	64.08	kg/m3
+validity	nominal-density-label	cell_gas_freon	1	1	1
+validity	nominal-density-label	density_temperature_known	0	0	1

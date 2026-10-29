@@ -1,0 +1,170 @@
+frankensim.matdb-source.v1
+observation	identity	fsri-basswood-panel-dried-2022	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Basswood_Panel/material.json	Basswood craft board cut from nominal 19 mm thick stock. Botanical species, grade, treatment and grain-axis mapping are unreported. Nominal metadata density is 391 kg/m3, separate from the Dry normalization population. The 2022 instrument filenames and labels spell Basswod; the source directory and density records spell Basswood. These literal source identities are retained. No generic basswood species, untreated status or material-axis isotropy is inferred. Capacity, conductivity and density describe one source population; exact same-coupon correspondence and cross-property covariance are unreported.
+observation	method	fsri-basswood-panel-dried-2022	https://materials.fsri.org/experimentalmethodology	Dry samples were oven conditioned at 105 degC for at least 48 hours with mass monitoring, then kept over desiccant until testing. The protocol does not establish an exact residual moisture, unchanged chemistry or a reversible drying law. The conditioning temperature is not a service-temperature limit. HFM capacity generally follows ASTM C1784-20 equal-plate temperature steps; conductivity generally follows ASTM C518 through thickness with upward heat flow. Contact pressure and axis mapping are unreported. Unconditioned source populations are stored separately.
+observation	capacity-r1	fsri-basswood-panel-dried-2022	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Basswood_Panel/HFM/Basswod_Panel_HFM_Dry_HeatCapacity_220126_R1.tst	Instrument label Basswod_Panel_HFM_Dry_HeatCapacity_220126_R1; thickness 19.04mm, obtained from instrument. Recorded mean temperatures 10,20.010000000000002,30.010000000000002,40.009999999999998 degC; native volumetric capacity 448474,464623,482775,498593 J/(m3 K). The instrument Specific Heat label has volumetric units. Results average finite equal-plate steps 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC; no infinitesimal or thermodynamic Cv interpretation is inferred.
+observation	capacity-r2	fsri-basswood-panel-dried-2022	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Basswood_Panel/HFM/Basswod_Panel_HFM_Dry_HeatCapacity_220127_R2.tst	Instrument label Basswod_Panel_HFM_Dry_HeatCapacity_220127_R2; thickness 19.06mm, obtained from instrument. Recorded mean temperatures 10,20.010000000000002,30.010000000000002,40.009999999999998 degC; native volumetric capacity 460440,477574,495618,510579 J/(m3 K). The instrument Specific Heat label has volumetric units. Results average finite equal-plate steps 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC; no infinitesimal or thermodynamic Cv interpretation is inferred.
+observation	capacity-r3	fsri-basswood-panel-dried-2022	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Basswood_Panel/HFM/Basswod_Panel_HFM_Dry_HeatCapacity_220127_R3.tst	Instrument label Basswod_Panel_HFM_Dry_HeatCapacity_220127_R3; thickness 18.86mm, obtained from instrument. Recorded mean temperatures 10,20.010000000000002,30.010000000000002,40.009999999999998 degC; native volumetric capacity 462490,474985,491051,507697 J/(m3 K). The instrument Specific Heat label has volumetric units. Results average finite equal-plate steps 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC; no infinitesimal or thermodynamic Cv interpretation is inferred.
+observation	capacity-reduction	fsri-basswood-panel-dried-2022	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/02_Scripts/plot_HFM_data_html.py	Group source mean temperatures to 0.1 degC, then convert to kelvin by adding 273.15. Native capacity is the arithmetic mean across three specimens; sample standard deviation uses n-1=2. No density is required for these original volumetric measurements. Scatter is a discrete descriptive statistic, not a confidence/calibration uncertainty or interpolation error. Linear interpolation of means is an authored approximation; no extrapolation is supplied.
+observation	density-normalization	fsri-basswood-panel-dried-2022	https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Basswood_Panel/HFM	Basswood_Panel_Density_Dry_R1.csv: header Basswood_Panel_DRY_1, mass 146.4 g, volume 393.5 cm3, reported density 372 kg/m3; Basswood_Panel_Density_Dry_R2.csv: header Basswood_Panel_DRY_2, mass 150.2 g, volume 393.2 cm3, reported density 382 kg/m3; Basswood_Panel_Density_Dry_R3.csv: header Basswood_Panel_DRY_3, mass 148.6 g, volume 392.1 cm3, reported density 379 kg/m3. The pinned script classifies by filename and averages the reported rounded density columns to 377.66666666666669 kg/m3, without recomputing mass/volume or substituting metadata density. Measurement temperature is unreported. This normalization scalar is not a current installed density or rho(T) law.
+observation	specific-heat-reduction	fsri-basswood-panel-dried-2022	https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/02_Scripts/plot_HFM_data_html.py	Divide population-mean native capacity and its sample SD by the common condition-mean density, then round to whole J/(kg K), matching the primary reduction. Cp means at 10,20,30,40 degC: 1210,1251,1297,1339; descriptive SD: 20,18,17,17. Density scatter and calibration uncertainty are not propagated. Cp, C_vol and normalization density are algebraically related; no per-specimen normalization is substituted.
+observation	conductivity	fsri-basswood-panel-dried-2022	https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Basswood_Panel/HFM	Basswod_Panel_HFM_Dry_Conductivity_220125_R1.tst: label Basswod_Panel_HFM_Dry_Conductivity_220125_R1, instrument thickness 18.97mm, mean temperatures 15.01,45.009999999999998,15.01,45.009999999999998,15.01,45.009999999999998 degC, Average Cond 0.085349999999999995,0.089590000000000003,0.085470000000000004,0.089529999999999998,0.085470000000000004,0.089620000000000005 W/(m K); Basswod_Panel_HFM_Dry_Conductivity_220125_R2.tst: label Basswod_Panel_HFM_Dry_Conductivity_220125_R2, instrument thickness 19.02mm, mean temperatures 15.01,45.009999999999998,15.01,45.009999999999998,15.01,45.009999999999998 degC, Average Cond 0.085000000000000006,0.089319999999999997,0.085089999999999999,0.089349999999999999,0.085120000000000001,0.089380000000000001 W/(m K); Basswod_Panel_HFM_Dry_Conductivity_220126_R3.tst: label Basswod_Panel_HFM_Dry_Conductivity_220126_R3, instrument thickness 18.86mm, mean temperatures 15.01,45.009999999999998,15.01,45.009999999999998,15.01,45.009999999999998 degC, Average Cond 0.086330000000000004,0.090459999999999999,0.086379999999999998,0.090459999999999999,0.086370000000000002,0.090509999999999993 W/(m K). The pinned script groups integer mean temperature, pools three cycles from each of three specimens, and rounds arithmetic mean and sample SD (n-1=8) to 0.001 W/(m K). Nine readings are not nine independent specimens. Plate setpoints 5/25 and 35/55 degC impose nominal 20 K upward through-thickness gradients. Means are 0.086,0.09; SD 0.001,0.001. Finite-gradient values do not establish isotropy or another material-axis conductivity.
+observation	local-model	fsri-basswood-panel-dried-2022	Explicit finite-gradient interpretation	The thermal-conductivity key requires mean-test-temperature-as-local-model=1 to interpret apparent finite-gradient conductivity at its numerical mean temperature as a local through-thickness scalar law. The original apparent-thermal-conductivity retains test-mean-temperature. Linear interpolation is authored, without deconvolution, measured interpolation error or resolution of unknown layer structure.
+curve	mean-volume-capacity	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction	volumetric_capacity	temperature	K	J/m3/K	283.15:457134.66666666669,293.15:472394,303.15:489814.66666666669,313.15:505623	linear
+uncertainty	mean-volume-capacity	unstated	-	-	-	-
+validity	mean-volume-capacity	family	1	1	1
+validity	mean-volume-capacity	unconditioned	0	0	1
+validity	mean-volume-capacity	dried	1	1	1
+validity	mean-volume-capacity	grade_known	0	0	1
+validity	mean-volume-capacity	formulation_known	0	0	1
+validity	mean-volume-capacity	moisture_known	0	0	1
+validity	mean-volume-capacity	pressure_known	0	0	1
+validity	mean-volume-capacity	axis_known	0	0	1
+validity	mean-volume-capacity	matched	0	0	1
+validity	mean-volume-capacity	specimens	3	3	1
+validity	mean-volume-capacity	stock_known	1	1	1
+validity	mean-volume-capacity	stock_thickness	0.019	0.019	m
+validity	mean-volume-capacity	species_known	0	0	1
+validity	mean-volume-capacity	treatment_known	0	0	1
+validity	mean-volume-capacity	statistic	1	1	1
+validity	mean-volume-capacity	temperature	283.15	313.15	K
+curve	published-specific-heat	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction,density-normalization,specific-heat-reduction	specific_heat	temperature	K	J/kg/K	283.15:1210,293.15:1251,303.15:1297,313.15:1339	linear
+uncertainty	published-specific-heat	unstated	-	-	-	-
+validity	published-specific-heat	family	1	1	1
+validity	published-specific-heat	unconditioned	0	0	1
+validity	published-specific-heat	dried	1	1	1
+validity	published-specific-heat	grade_known	0	0	1
+validity	published-specific-heat	formulation_known	0	0	1
+validity	published-specific-heat	moisture_known	0	0	1
+validity	published-specific-heat	pressure_known	0	0	1
+validity	published-specific-heat	axis_known	0	0	1
+validity	published-specific-heat	matched	0	0	1
+validity	published-specific-heat	specimens	3	3	1
+validity	published-specific-heat	stock_known	1	1	1
+validity	published-specific-heat	stock_thickness	0.019	0.019	m
+validity	published-specific-heat	species_known	0	0	1
+validity	published-specific-heat	treatment_known	0	0	1
+validity	published-specific-heat	statistic	1	1	1
+validity	published-specific-heat	density_temperature_known	0	0	1
+validity	published-specific-heat	density_header_consistent	1	1	1
+validity	published-specific-heat	temperature	283.15	313.15	K
+curve	volume-capacity-scatter	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction	capacity_sd	temperature	K	J/m3/K	283.15:7570.0716861423007,293.15:6853.2518558710508,303.15:6510.1499470698318,313.15:6256.3692346280204	tabulated
+uncertainty	volume-capacity-scatter	unstated	-	-	-	-
+validity	volume-capacity-scatter	family	1	1	1
+validity	volume-capacity-scatter	unconditioned	0	0	1
+validity	volume-capacity-scatter	dried	1	1	1
+validity	volume-capacity-scatter	grade_known	0	0	1
+validity	volume-capacity-scatter	formulation_known	0	0	1
+validity	volume-capacity-scatter	moisture_known	0	0	1
+validity	volume-capacity-scatter	pressure_known	0	0	1
+validity	volume-capacity-scatter	axis_known	0	0	1
+validity	volume-capacity-scatter	matched	0	0	1
+validity	volume-capacity-scatter	specimens	3	3	1
+validity	volume-capacity-scatter	stock_known	1	1	1
+validity	volume-capacity-scatter	stock_thickness	0.019	0.019	m
+validity	volume-capacity-scatter	species_known	0	0	1
+validity	volume-capacity-scatter	treatment_known	0	0	1
+validity	volume-capacity-scatter	statistic	0	0	1
+validity	volume-capacity-scatter	temperature	283.15	313.15	K
+curve	specific-heat-scatter	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction,density-normalization,specific-heat-reduction	specific_heat_sd	temperature	K	J/kg/K	283.15:20,293.15:18,303.15:17,313.15:17	tabulated
+uncertainty	specific-heat-scatter	unstated	-	-	-	-
+validity	specific-heat-scatter	family	1	1	1
+validity	specific-heat-scatter	unconditioned	0	0	1
+validity	specific-heat-scatter	dried	1	1	1
+validity	specific-heat-scatter	grade_known	0	0	1
+validity	specific-heat-scatter	formulation_known	0	0	1
+validity	specific-heat-scatter	moisture_known	0	0	1
+validity	specific-heat-scatter	pressure_known	0	0	1
+validity	specific-heat-scatter	axis_known	0	0	1
+validity	specific-heat-scatter	matched	0	0	1
+validity	specific-heat-scatter	specimens	3	3	1
+validity	specific-heat-scatter	stock_known	1	1	1
+validity	specific-heat-scatter	stock_thickness	0.019	0.019	m
+validity	specific-heat-scatter	species_known	0	0	1
+validity	specific-heat-scatter	treatment_known	0	0	1
+validity	specific-heat-scatter	statistic	0	0	1
+validity	specific-heat-scatter	density_temperature_known	0	0	1
+validity	specific-heat-scatter	density_header_consistent	1	1	1
+validity	specific-heat-scatter	temperature	283.15	313.15	K
+curve	apparent-k	identity,method,conductivity	apparent_conductivity	test_mean_temperature	K	W/m/K	288.15:0.085999999999999993,318.15:0.089999999999999997	linear
+uncertainty	apparent-k	unstated	-	-	-	-
+validity	apparent-k	family	1	1	1
+validity	apparent-k	unconditioned	0	0	1
+validity	apparent-k	dried	1	1	1
+validity	apparent-k	grade_known	0	0	1
+validity	apparent-k	formulation_known	0	0	1
+validity	apparent-k	moisture_known	0	0	1
+validity	apparent-k	pressure_known	0	0	1
+validity	apparent-k	axis_known	0	0	1
+validity	apparent-k	matched	0	0	1
+validity	apparent-k	specimens	3	3	1
+validity	apparent-k	stock_known	1	1	1
+validity	apparent-k	stock_thickness	0.019	0.019	m
+validity	apparent-k	species_known	0	0	1
+validity	apparent-k	treatment_known	0	0	1
+validity	apparent-k	statistic	1	1	1
+validity	apparent-k	through_thickness	1	1	1
+validity	apparent-k	upward	1	1	1
+validity	apparent-k	plate_delta	20	20	K
+validity	apparent-k	test_mean_temperature	288.15	318.15	K
+curve	local-k	identity,method,conductivity,local-model	local_conductivity	temperature	K	W/m/K	288.15:0.085999999999999993,318.15:0.089999999999999997	linear
+uncertainty	local-k	unstated	-	-	-	-
+validity	local-k	family	1	1	1
+validity	local-k	unconditioned	0	0	1
+validity	local-k	dried	1	1	1
+validity	local-k	grade_known	0	0	1
+validity	local-k	formulation_known	0	0	1
+validity	local-k	moisture_known	0	0	1
+validity	local-k	pressure_known	0	0	1
+validity	local-k	axis_known	0	0	1
+validity	local-k	matched	0	0	1
+validity	local-k	specimens	3	3	1
+validity	local-k	stock_known	1	1	1
+validity	local-k	stock_thickness	0.019	0.019	m
+validity	local-k	species_known	0	0	1
+validity	local-k	treatment_known	0	0	1
+validity	local-k	statistic	1	1	1
+validity	local-k	through_thickness	1	1	1
+validity	local-k	upward	1	1	1
+validity	local-k	plate_delta	20	20	K
+validity	local-k	local_model	1	1	1
+validity	local-k	temperature	288.15	318.15	K
+curve	conductivity-scatter	identity,method,conductivity	conductivity_sd	test_mean_temperature	K	W/m/K	288.15:0.001,318.15:0.001	tabulated
+uncertainty	conductivity-scatter	unstated	-	-	-	-
+validity	conductivity-scatter	family	1	1	1
+validity	conductivity-scatter	unconditioned	0	0	1
+validity	conductivity-scatter	dried	1	1	1
+validity	conductivity-scatter	grade_known	0	0	1
+validity	conductivity-scatter	formulation_known	0	0	1
+validity	conductivity-scatter	moisture_known	0	0	1
+validity	conductivity-scatter	pressure_known	0	0	1
+validity	conductivity-scatter	axis_known	0	0	1
+validity	conductivity-scatter	matched	0	0	1
+validity	conductivity-scatter	specimens	3	3	1
+validity	conductivity-scatter	stock_known	1	1	1
+validity	conductivity-scatter	stock_thickness	0.019	0.019	m
+validity	conductivity-scatter	species_known	0	0	1
+validity	conductivity-scatter	treatment_known	0	0	1
+validity	conductivity-scatter	statistic	0	0	1
+validity	conductivity-scatter	through_thickness	1	1	1
+validity	conductivity-scatter	upward	1	1	1
+validity	conductivity-scatter	plate_delta	20	20	K
+validity	conductivity-scatter	test_mean_temperature	288.15	318.15	K
+scalar	density-normalization	identity,method,density-normalization	normalization_density	377.66666666666669	kg/m3	constant
+uncertainty	density-normalization	unstated	-	-	-	-
+validity	density-normalization	family	1	1	1
+validity	density-normalization	unconditioned	0	0	1
+validity	density-normalization	dried	1	1	1
+validity	density-normalization	grade_known	0	0	1
+validity	density-normalization	formulation_known	0	0	1
+validity	density-normalization	moisture_known	0	0	1
+validity	density-normalization	pressure_known	0	0	1
+validity	density-normalization	axis_known	0	0	1
+validity	density-normalization	matched	0	0	1
+validity	density-normalization	specimens	3	3	1
+validity	density-normalization	stock_known	1	1	1
+validity	density-normalization	stock_thickness	0.019	0.019	m
+validity	density-normalization	species_known	0	0	1
+validity	density-normalization	treatment_known	0	0	1
+validity	density-normalization	statistic	1	1	1
+validity	density-normalization	density_temperature_known	0	0	1
+validity	density-normalization	density_header_consistent	1	1	1

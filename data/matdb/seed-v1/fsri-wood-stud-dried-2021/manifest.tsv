@@ -1,0 +1,36 @@
+frankensim.matdb-manifest.v3
+pack_id	fsri-wood-stud-dried-2021
+redistribution	permitted	Selected attributed numerical facts with original annotations and explicit arithmetic reductions. No source photographs, instrument files, prose or table layouts are redistributed. Public availability is not asserted to grant a source-document license.
+citation	McKinnon, Weinschenk, Dow, DiDomizio and Madrzykowski, Materials and Products Database, FSRI, UL Research Institutes (2023); Wood_Stud Dry HFM experiments; https://materials.fsri.org/materialdetail/wood-stud; pinned source https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Wood_Stud; method https://materials.fsri.org/experimentalmethodology; reduction https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/02_Scripts/plot_HFM_data_html.py; accessed 2026-10-29.
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	fsri-hfm	properties.tsv	material-tsv-v1
+property	volumetric_capacity	volumetric-heat-capacity	dimensional
+property	specific_heat	specific-heat-capacity	dimensional
+property	apparent_conductivity	apparent-thermal-conductivity	thermal-conductivity
+property	local_conductivity	thermal-conductivity	thermal-conductivity
+property	capacity_sd	computed-volumetric-heat-capacity-sample-standard-deviation	dimensional
+property	specific_heat_sd	reported-specific-heat-capacity-standard-deviation	dimensional
+property	conductivity_sd	reported-apparent-thermal-conductivity-standard-deviation	dimensional
+property	normalization_density	reference-normalization-density	dimensional
+axis	family	source-fsri-wood-stud	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	test_mean_temperature	test-mean-temperature	absolute-temperature
+axis	local_model	mean-test-temperature-as-local-model	dimensional
+axis	unconditioned	source-unconditioned	dimensional
+axis	dried	source-dried	dimensional
+axis	grade_known	source-grade-known	dimensional
+axis	formulation_known	source-formulation-known	dimensional
+axis	moisture_known	source-moisture-content-known	dimensional
+axis	pressure_known	source-contact-pressure-known	dimensional
+axis	axis_known	source-material-axis-known	dimensional
+axis	matched	source-specimens-matched	dimensional
+axis	stock_known	source-metadata-stock-thickness-known	dimensional
+axis	statistic	source-statistic-is-mean	dimensional
+axis	specimens	source-specimen-count	dimensional
+axis	through_thickness	source-hfm-through-thickness	dimensional
+axis	upward	source-hfm-upward-heat-flow	dimensional
+axis	plate_delta	source-hfm-temperature-difference	temperature-difference
+axis	density_temperature_known	source-density-temperature-known	dimensional
+axis	density_header_consistent	source-density-header-consistent	dimensional
+axis	species_known	source-botanical-species-known	dimensional
+axis	treatment_known	source-treatment-known	dimensional
