@@ -74,8 +74,8 @@ class NoAbsolutePaths(unittest.TestCase):
 
 class Identity(unittest.TestCase):
     def test_grader_version_and_links_pinned(self):
-        """G0: GRADER_VERSION is instrgrade-2 and uiowa-links.json is unchanged."""
-        self.assertEqual(ig.GRADER_VERSION, "instrgrade-2")
+        """G0: GRADER_VERSION is instrgrade-3 and uiowa-links.json is unchanged."""
+        self.assertEqual(ig.GRADER_VERSION, "instrgrade-3")
         self.assertTrue((TOOLS / "descriptors.py").is_file())
         self.assertEqual(sha256(TOOLS / "uiowa-links.json"),
                          "46b50e792be079a2b118a3adeb632ef719d2b785f3750a6b71ea2ed14960e74d")
@@ -137,13 +137,13 @@ class Guards(unittest.TestCase):
             self.assertEqual(result.returncode, index, result.stderr)
             row = json.loads((output / "results.json").read_text())[0]
             receipt, terminal = map(json.loads, (output / "receipt.jsonl").read_text().splitlines())
-            self.assertEqual(row["grader_version"], "instrgrade-2")
+            self.assertEqual(row["grader_version"], "instrgrade-3")
             self.assertIn("windows", row)
             self.assertIn("q3", row)
             self.assertIn("descriptors", row)
             self.assertIn("baselines", row)
             self.assertEqual(row["band_split_hz"], 1000.0)
-            self.assertEqual(receipt["grader_version"], "instrgrade-2")
+            self.assertEqual(receipt["grader_version"], "instrgrade-3")
             self.assertEqual(receipt["candidate_wav_sha256"], sha256(wav))
             self.assertEqual(receipt["library_sha256"], sha256(libpath))
             self.assertEqual(receipt["tool_sha256"]["instrgrade.py"], sha256(TOOLS / "instrgrade.py"))
@@ -167,7 +167,7 @@ class Guards(unittest.TestCase):
         diagnostic_row = json.loads(diagnostic.stdout.splitlines()[-1])
         self.assertIs(diagnostic_row["radiated"], True)
         self.assertIs(diagnostic_row["diagnostic_only"], True)
-        self.assertEqual(diagnostic_row["grader_version"], "instrgrade-2")
+        self.assertEqual(diagnostic_row["grader_version"], "instrgrade-3")
         self.assertTrue((diagnostic_dir / "Synthetic.mf.A3-radiated.wav").is_file())
 
 
@@ -188,20 +188,23 @@ class Reproduce(unittest.TestCase):
         return scratch, wavdir, dict(target, desc=live), library
 
     def test_reed_sustained_row(self):
-        """G2: original tracked WAV vs E3 mf under instrgrade-2 (24.8430 dB vs W1 23.5407 dB)."""
+        """G2: original tracked WAV vs E3 mf under instrgrade-3 (23.5612 dB, instrgrade-2 24.8430 dB, W1 23.5407 dB)."""
         scratch, wavdir, target, library = self.inputs("E3")
         wav = required_file(ROOT / "data" / "listening" / "reed-sustained.wav")
         hint = ig.hz_of(ig.midi_of("E3"))
         x = ig.highpass(ig.load(wav), hint)
         desc = ig.describe(x[ig.onset(x):], f0_hint=hint)
         observed = ig.distance(desc, target["desc"])["spec_db"]
-        self.assertAlmostEqual(observed, 24.842951885919266, delta=0.1)
+        self.assertAlmostEqual(observed, 23.561156089943047, delta=0.1)
         print(json.dumps(dict(grader_version=ig.GRADER_VERSION, test=self.id(), spec_db=observed,
-                              w1_spec_db=23.540685215529912, expected_db=24.842951885919266, tolerance_db=0.1,
+                              w1_spec_db=23.540685215529912, expected_db=23.561156089943047, tolerance_db=0.1,
                               candidate_wav_sha256=sha256(wav))))
 
     def test_clarinet_bore_row(self):
-        """G2: native D3 mf row under instrgrade-2 (26.2623 dB vs W1 26.3501 dB); radiation diagnostic record-only."""
+        """G2: native D3 mf row under instrgrade-3 (26.3714 dB vs W1 26.3501 dB); radiation diagnostic record-only.
+
+        Pinned on the native render at 30fa619b4816 (instrgrade-2 on that render: 26.5457 dB; on the 10-16 render
+        at aeb0c36ee it was 26.2623 dB)."""
         scratch, wavdir, target, library = self.inputs("D3")
         wav = required_file(required_env("IRP_CLARINET_BORE_WAV"))
         render_sha = required_env("IRP_CLARINET_RENDER_SHA")
@@ -212,14 +215,14 @@ class Reproduce(unittest.TestCase):
         x = x[ig.onset(x):]
         raw = ig.describe(x, f0_hint=hint)
         grade = ig.distance(raw, target["desc"])["spec_db"]
-        self.assertAlmostEqual(grade, 26.26233115120559, delta=0.1)
+        self.assertAlmostEqual(grade, 26.37142108676846, delta=0.1)
         y, _, _ = radiate.apply(x, [("cyl", 0.0073, 0.57)], True)
         diagnostic = ig.distance(ig.describe(y, f0_hint=146.8), target["desc"])["spec_db"]
         self.assertTrue(diagnostic == diagnostic and 0.0 < diagnostic < 200.0, diagnostic)
         print(json.dumps(dict(grader_version=ig.GRADER_VERSION, test=self.id(), spec_db=grade,
                               w1_spec_db=26.35009379703497, diagnostic_only_spec_db=diagnostic, diagnostic_only=True,
-                              expected_db=26.26233115120559, diagnostic_expected_db=None,
-                              expected_source="v5-scale-results.json#reed-scale-D3 (re-graded under instrgrade-2)", tolerance_db=0.1,
+                              expected_db=26.37142108676846, diagnostic_expected_db=None,
+                              expected_source="native render at 30fa619b4816, graded under instrgrade-3", tolerance_db=0.1,
                               render_git_sha=render_sha, candidate_wav_sha256=sha256(wav))))
 
 

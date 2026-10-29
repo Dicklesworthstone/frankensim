@@ -16,6 +16,7 @@ SR = 48000
 N_ERB = 32
 ERB_FMIN_HZ = 30.0
 ERB_FMAX_HZ = 16000.0
+ERB_RANGE_DB = 50.0  # levels this far under a window's loudest band are clamped (erb_spectrogram_db)
 
 
 class GraderRefusalError(ValueError):
@@ -132,21 +133,30 @@ def windows(
     if not sus_mask.any():
         sus_mask = t_rms >= 0.15
     plateau_db = float(np.percentile(rms_db[sus_mask], 80)) if sus_mask.any() else float(np.max(rms_db))
+    # upper half only: on a short note the mask reaches into the release, which must not count as ripple
+    ripple_db = plateau_db - float(np.percentile(rms_db[sus_mask], 50)) if sus_mask.any() else 0.0
     post_t0 = np.where(t_rms >= 0.20)[0]
     t1 = min(1.10, max(0.25, dur - 0.10))
-    if len(post_t0) > 4:
-        dropped = rms_db[post_t0] < (plateau_db - 1.0)
-        for idx_rel in range(len(dropped)):
-            if dropped[idx_rel] and np.all(dropped[idx_rel : min(len(dropped), idx_rel + 5)]):
-                # Backtrack to the last plateau frame before the release begins, minus half the 50 ms window
-                k_knee = idx_rel
-                while k_knee > 0 and rms_db[post_t0[k_knee]] < (plateau_db - 0.02):
-                    k_knee -= 1
-                t_knee = float(t_rms[post_t0[k_knee]])
-                t1 = max(0.20, t_knee - 0.030)
-                break
-    post_t1 = np.where((t_rms >= t1) & (rms_db <= thr_db))[0]
-    t_floor = float(t_rms[int(post_t1[0])]) if len(post_t1) else dur
+    # The release begins at the last frame where the note is still on its plateau, within tol, twice the plateau's own
+    # ripple (80th minus 50th percentile; 0.02 dB for a clean tone, at most 1 dB), minus 30 ms of the 50 ms RMS window.
+    # It is a release only if at least five frames (25 ms) follow below it; otherwise the note sustains to the end of
+    # the signal. The first 1 dB drop after 0.20 s is not the release: a note still rising to its plateau, or dipping
+    # mid-note, would end its sustain there. A fixed 0.02 dB tolerance on a note with 0.1 dB ripple moves the knee by
+    # tens of ms. The crossing is interpolated between frames: snapped to the 5 ms grid, it jumps a whole frame when a
+    # pitch shift moves the level near the knee by a hundredth of a dB.
+    knee_db = plateau_db - min(1.0, max(0.02, 2.0 * ripple_db))
+    at_plateau = post_t0[rms_db[post_t0] >= knee_db]
+    if len(at_plateau) and int(at_plateau[-1]) + 5 < len(rms_db):
+        j = int(at_plateau[-1])
+        frac = (rms_db[j] - knee_db) / (rms_db[j] - rms_db[j + 1])
+        t1 = max(0.20, float(t_rms[j] + frac * (t_rms[j + 1] - t_rms[j])) - 0.030)
+    # The note has ended where its level stays at the floor (+3 dB) for 0.10 s, or to the end of the signal. A
+    # reverberant tail touches the floor in brief dips; ending at the first one moved a UIowa violin A3's release end
+    # from 3.15 s to 3.63 s when the floor estimate moved by 2 dB.
+    below = rms_db <= thr_db
+    hold = 20  # 0.10 s of 5 ms frames
+    ended = [k for k in np.where((t_rms >= t1) & below)[0] if below[k : k + hold].all()]
+    t_floor = float(t_rms[ended[0]]) if ended else dur
     if t_floor <= t1:
         t_floor = dur
     return dict(attack=(0.0, 0.15), sustain=(t0, t1), release=(t1, t_floor))
@@ -160,20 +170,17 @@ def _erb_filterbank(freqs: np.ndarray, n_bands: int = N_ERB, fmin: float = ERB_F
         return (10.0 ** (np.asarray(e, dtype=np.float64) / 21.4) - 1.0) / 0.00437
 
     e_edges = np.linspace(hz_to_erb(fmin), hz_to_erb(fmax), n_bands + 2)
-    f_edges = erb_to_hz(e_edges)
-    centers = f_edges[1:-1]
-    weights = np.zeros((n_bands, len(freqs)), dtype=np.float64)
-    for b in range(n_bands):
-        flo, fcen, fhi = f_edges[b], f_edges[b + 1], f_edges[b + 2]
-        up = (freqs >= flo) & (freqs <= fcen)
-        dn = (freqs > fcen) & (freqs <= fhi)
-        if fcen > flo:
-            weights[b, up] = (freqs[up] - flo) / (fcen - flo)
-        if fhi > fcen:
-            weights[b, dn] = (fhi - freqs[dn]) / (fhi - fcen)
-        s = weights[b].sum()
-        if s > 0:
-            weights[b] /= s
+    centers = erb_to_hz(e_edges)[1:-1]
+    # Rounded-exponential auditory filters, W(g) = (1 + p g) exp(-p g) with g = |f - fc| / fc and p = 4 fc / ERB(fc)
+    # (Glasberg & Moore 1990). Their skirts are smooth, so a partial moving by 20 cents changes a band it reaches only
+    # through a skirt by about 1 dB. A finite-support triangle on FFT bins does not: a partial just outside its edge is
+    # read through the analysis window's leakage, and moving it 25 Hz changed one band by 26 dB (2026-10-28).
+    freqs = np.asarray(freqs, dtype=np.float64)
+    erb_hz = 24.7 * (4.37 * centers / 1000.0 + 1.0)
+    pg = (4.0 * centers / erb_hz)[:, None] * np.abs(freqs[None, :] - centers[:, None]) / centers[:, None]
+    weights = (1.0 + pg) * np.exp(-pg)
+    # Each band is the weighted mean of its bins, as before, so levels keep their scale against the -80 dB floor.
+    weights /= weights.sum(axis=1, keepdims=True)
     return centers, weights
 
 
@@ -210,17 +217,19 @@ def erb_spectrogram_db(
     erb_pow = fb @ power  # (N_ERB, n_time)
     if ref_power is None or ref_power <= 0:
         ref_power = float(np.max(erb_pow)) + 1e-30
+    # Average power into n_frames_out equal time cells, each frame weighted by its overlap with the cell, so windows of
+    # slightly different durations compare cleanly. Sampling the frames at n_frames_out points instead aliases: a 60 ms
+    # event lands on a sample point or between two, and a 1.2 % time scale (a 20 c transposition) decides which.
+    cells = np.arange(erb_pow.shape[1], dtype=np.float64)[:, None]
+    edges = np.linspace(0.0, erb_pow.shape[1], n_frames_out + 1)[None, :]
+    overlap = np.clip(np.minimum(cells + 1.0, edges[:, 1:]) - np.maximum(cells, edges[:, :-1]), 0.0, None)
+    erb_pow = erb_pow @ (overlap / overlap.sum(axis=0, keepdims=True))
     erb_db = 10.0 * np.log10(erb_pow / ref_power + 1e-30)
-    erb_db = np.maximum(erb_db, -80.0)
-    # Resample time axis to fixed n_frames_out so windows of slightly different durations compare cleanly
-    if erb_db.shape[1] == n_frames_out:
-        return erb_db
-    tau_in = np.linspace(0.0, 1.0, erb_db.shape[1])
-    tau_out = np.linspace(0.0, 1.0, n_frames_out)
-    out = np.zeros((N_ERB, n_frames_out), dtype=np.float64)
-    for b_idx in range(N_ERB):
-        out[b_idx] = np.interp(tau_out, tau_in, erb_db[b_idx])
-    return out
+    # Levels more than ERB_RANGE_DB under the window's loudest band are clamped there: such a band reads only the far
+    # skirts of louder partials (masked, and a restatement of their frequency that a 20 c transposition moves by 2-5 dB
+    # per band at f0 = 880 Hz) or noise. The floor is one per window: a per-frame floor follows a decaying tail's
+    # loudest band, and every clamped band then inherits that band's change (a violin B3 release moved 0.85 -> 1.67 dB).
+    return np.maximum(erb_db, max(float(erb_db.max()) - ERB_RANGE_DB, -80.0))
 
 
 def compute_window_erb_profiles(x: np.ndarray, win_dict: dict[str, tuple[float, float]], sr: int = SR) -> dict[str, list[list[float]]]:

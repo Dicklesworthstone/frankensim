@@ -51,7 +51,7 @@ from descriptors import (  # noqa: E402
     windows,
 )
 
-GRADER_VERSION = "instrgrade-2"
+GRADER_VERSION = "instrgrade-3"
 SR = 48000
 NOTE = {"C": 0, "Db": 1, "D": 2, "Eb": 3, "E": 4, "F": 5, "Gb": 6, "G": 7, "Ab": 8, "A": 9, "Bb": 10, "B": 11}
 NAMES = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]

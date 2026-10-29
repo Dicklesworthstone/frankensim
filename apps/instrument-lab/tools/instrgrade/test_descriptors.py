@@ -197,22 +197,58 @@ class BlindSpotsAndDescriptors(unittest.TestCase):
             ig.describe(x3, kind="decaying", f0_hint=f0, noise_floor_db=-80.0)
 
     def test_pitch_shift_invariance(self):
-        """G3: +20 cent resample of a note -> spec_db < 1 dB."""
-        self.assertIsNotNone(desc_mod, "descriptors module required")
-        t = np.arange(2 * ig.SR, dtype=np.float64) / ig.SR
-        f0 = 220.0
-        ratio = 2.0 ** (20.0 / 1200.0)
-        x = sum(np.sin(2.0 * np.pi * k * f0 * t) / (k ** 1.2) for k in range(1, 20))
-        n_shift = int(round(len(x) / ratio))
-        X = np.fft.rfft(x)
-        Y = np.zeros(n_shift // 2 + 1, dtype=complex)
-        m = min(len(X), len(Y))
-        Y[:m] = X[:m]
-        x_shifted = np.fft.irfft(Y, n_shift) * (n_shift / len(x))
+        """G3: a note resampled +-20 cents moves spec_db and the attack, sustain and release ERB distances < 1 dB.
 
-        da = ig.describe(x, kind="sustained", f0_hint=f0)
-        db = ig.describe(x_shifted, kind="sustained", f0_hint=f0 * ratio)
-        self.assertLess(ig.distance(da, db)["spec_db"], 1.0)
+        The notes have what real ones have: a 30 ms attack, 0.1 dB rms slow amplitude ripple, a release at 1.6 s and a
+        -80 dB noise floor. Triangular ERB bands read a partial just outside their edge through window leakage (one
+        band moved 26 dB), bands far below f0 read only a partial's filter skirt, and a knee picked within 0.02 dB of
+        the plateau jittered by tens of ms: at 330 and 587 Hz these distances moved 3.4-7.4 dB while spec_db stayed
+        below 1 dB."""
+        self.assertIsNotNone(desc_mod, "descriptors module required")
+        for f0 in (147.0, 330.0, 587.0):
+            rng = np.random.default_rng(20261028)
+            t = np.arange(int(2.4 * ig.SR), dtype=np.float64) / ig.SR
+            tone = sum(np.sin(2.0 * np.pi * k * f0 * t + rng.uniform(0.0, 2.0 * np.pi)) / (k ** 1.2) for k in range(1, 20))
+            slow = np.convolve(rng.normal(size=len(t)), np.hanning(int(0.1 * ig.SR)), "same")
+            env = np.minimum(t / 0.03, 1.0) * np.where(t <= 1.6, 1.0, np.exp(-(t - 1.6) / 0.15))
+            x = tone * env * 10.0 ** (0.1 * slow / slow.std() / 20.0)
+            x = 0.5 * x / np.abs(x).max() + rng.normal(0.0, 0.5e-4, len(t))
+            da = ig.describe(x, kind="sustained", f0_hint=f0)
+            for cents in (20.0, -20.0):
+                ratio = 2.0 ** (cents / 1200.0)
+                n_shift = int(round(len(x) / ratio))
+                X = np.fft.rfft(x)
+                Y = np.zeros(n_shift // 2 + 1, dtype=complex)
+                m = min(len(X), len(Y))
+                Y[:m] = X[:m]
+                x_shifted = np.fft.irfft(Y, n_shift) * (n_shift / len(x))
+                d = ig.distance(da, ig.describe(x_shifted, kind="sustained", f0_hint=f0 * ratio))
+                for key in ("spec_db", "attack_erb_distance_db", "sustain_erb_distance_db", "release_erb_distance_db"):
+                    self.assertLess(d[key], 1.0, f"{f0:.0f} Hz {cents:+.0f} c: {key}")
+
+    def test_sustained_windows_follow_the_note(self):
+        """G1: a sustained note released at 1.6 s keeps its sustain to the release whether it rises 1.5 dB over its
+        first 0.7 s or dips 2 dB for 60 ms mid-note (the first 1 dB drop after 0.20 s ended it at 0.20 s and 0.745 s;
+        80 % of UIowa sustained notes got a sustain of 0.10 s or less). A release tail that touches the floor in brief
+        dips ends where it stays there, not at the first dip."""
+        self.assertIsNotNone(desc_mod, "descriptors module required")
+        t = np.arange(int(2.4 * ig.SR), dtype=np.float64) / ig.SR
+        tone = sum(np.sin(2.0 * np.pi * 220.0 * k * t) / k for k in range(1, 11))
+        gate = np.minimum(t / 0.03, 1.0) * np.where(t <= 1.6, 1.0, np.exp(-(t - 1.6) / 0.15))
+        rise = 10.0 ** (np.clip((t - 0.15) / 0.55, 0.0, 1.0) * 1.5 / 20.0)
+        dip = 10.0 ** (-2.0 * ((t > 0.8) & (t < 0.86)) / 20.0)
+        for name, env in (("rise", rise), ("dip", dip)):
+            w = desc_mod.windows(tone * gate * env, "sustained", noise_floor_db=-80.0)
+            self.assertAlmostEqual(w["sustain"][1], 1.6 - 0.05, delta=0.05, msg=name)
+        # A tail 3 dB over the floor threshold (-37 dB rms against -40 dB) from 1.6 s, with three 40 ms dips under it at
+        # 1.8, 2.0 and 2.2 s, and at the floor from 2.6 s.
+        t3 = np.arange(int(3.0 * ig.SR), dtype=np.float64) / ig.SR
+        level_db = np.where(t3 <= 1.6, 0.0, np.where(t3 <= 2.6, -34.0, -60.0))
+        for t_dip in (1.8, 2.0, 2.2):
+            level_db[(t3 > t_dip) & (t3 < t_dip + 0.04)] = -60.0
+        tail = np.sin(2.0 * np.pi * 220.0 * t3) * 10.0 ** (level_db / 20.0)
+        w = desc_mod.windows(tail, "sustained", noise_floor_db=-43.0)
+        self.assertAlmostEqual(w["release"][1], 2.6, delta=0.05)
 
     def test_identity_and_symmetry(self):
         """G0: self-distance 0; symmetric within 1e-12."""
