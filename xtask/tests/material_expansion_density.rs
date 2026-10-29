@@ -12,8 +12,8 @@ use fs_matdb::{
 use fs_material::thermal::transport::{
     ThermalTransportError,
     expansion::{
-        FreeExpansionBasis, FreeExpansionSourceQuery, FreeExpansionStrainSources,
-        PreparedFreeExpansionDensity,
+        FreeExpansionBasis, FreeExpansionGeometryQuery, FreeExpansionSourceQuery,
+        FreeExpansionStrainSources, PreparedFreeExpansion, PreparedFreeExpansionDensity,
     },
 };
 use fs_qty::{
@@ -656,4 +656,377 @@ fn g1_g3_compiled_nist_relative_length_uses_an_explicitly_assumed_reference_dens
         )
         .is_err()
     );
+}
+
+fn geometry_query<'a>(
+    keys: &'a [PropertyKey; 4],
+    lower: &'a QueryPoint,
+    upper: &'a QueryPoint,
+    reference: &'a QueryPoint,
+) -> FreeExpansionGeometryQuery<'a> {
+    FreeExpansionGeometryQuery {
+        reference,
+        strains: FreeExpansionStrainSources::Isotropic {
+            strain: &keys[1],
+            selection: POLICY,
+        },
+        temperature_axis: "temperature",
+        lower,
+        upper,
+    }
+}
+
+#[test]
+fn g1_g3_free_geometry_needs_no_density_and_retains_independent_principal_sources() {
+    let keys = keys();
+    let card = card([
+        curve(&keys[1], vec![(280.0, -0.1), (300.0, 0.0), (360.0, 0.3)]),
+        curve(&keys[2], vec![(280.0, 0.05), (340.0, -0.01), (360.0, 0.03)]),
+        curve(&keys[3], vec![(280.0, 0.2), (360.0, 0.04)]),
+    ]);
+    assert!(card.claims().claims_for("density").is_empty());
+    let (lower, upper, reference) = (point(280.0), point(360.0), point(310.0));
+    let q = FreeExpansionGeometryQuery {
+        strains: FreeExpansionStrainSources::FixedPrincipal {
+            frame: FRAME,
+            strains: [&keys[1], &keys[2], &keys[3]],
+            selections: [POLICY; 3],
+        },
+        ..geometry_query(&keys, &lower, &upper, &reference)
+    };
+    let prepared = PreparedFreeExpansion::try_new(&card, q).unwrap();
+    assert_eq!(prepared.material_card_identity(), card.content_hash());
+    assert_eq!(prepared.query_endpoints(), [&lower, &upper]);
+    assert_eq!(prepared.reference_query_point(), &reference);
+    assert_eq!(prepared.temperature_axis(), "temperature");
+    assert_eq!(
+        prepared.basis(),
+        FreeExpansionBasis::FixedPrincipal { frame: FRAME }
+    );
+    assert_eq!(
+        prepared.temperatures_k().collect::<Vec<_>>(),
+        [280.0, 300.0, 310.0, 340.0, 360.0]
+    );
+    assert_eq!(
+        prepared
+            .source_lines()
+            .iter()
+            .map(|s| s.knots.len())
+            .collect::<Vec<_>>(),
+        [3, 3, 2]
+    );
+    for source in prepared.source_lines() {
+        for (_, answer) in &source.knots {
+            card.claims().verify_receipt(&answer.receipt).unwrap();
+        }
+    }
+    // Independently evaluate the three declared affine branches. The reference
+    // strains are [.05,.02,.14], not zero, and the y branch changes slope at 340 K.
+    for t in [280.0, 295.0, 310.0, 315.0, 345.0, 360.0] {
+        let strains = [
+            0.005 * (t - 300.0),
+            if t <= 340.0 {
+                0.05 - 0.001 * (t - 280.0)
+            } else {
+                -0.01 + 0.002 * (t - 340.0)
+            },
+            0.2 - 0.002 * (t - 280.0),
+        ];
+        let expected =
+            std::array::from_fn::<_, 3, _>(|i| (1.0 + strains[i]) / [1.05, 1.02, 1.14][i]);
+        let sample = prepared.at_temperature(t).unwrap();
+        for (actual, expected) in sample.principal_stretches().into_iter().zip(expected) {
+            close(actual, expected);
+        }
+        close(sample.relative_volume(), expected.into_iter().product());
+        assert_eq!(sample.path_identity(), prepared.identity());
+        assert_eq!(sample.temperature_k(), t);
+    }
+    let datum = prepared.at_temperature(310.0).unwrap();
+    assert_eq!(datum.principal_stretches(), [1.0; 3]);
+    assert_eq!(datum.relative_volume(), 1.0);
+    // A density-free geometry identity must still distinguish its reference.
+    let shifted = PreparedFreeExpansion::try_new(
+        &card,
+        FreeExpansionGeometryQuery {
+            reference: &point(320.0),
+            ..q
+        },
+    )
+    .unwrap();
+    assert_ne!(shifted.identity(), prepared.identity());
+    assert_ne!(
+        shifted.at_temperature(315.0).unwrap(),
+        prepared.at_temperature(315.0).unwrap()
+    );
+    assert!(
+        PreparedFreeExpansionDensity::try_from_expansion(&card, prepared.clone(), &keys[0], POLICY)
+            .is_err()
+    );
+    assert_eq!(prepared.at_temperature(310.0).unwrap(), datum);
+}
+
+#[test]
+fn g1_g3_optional_density_composes_original_geometry_and_keeps_exact_card_binding() {
+    let keys = keys();
+    let strain = || curve(&keys[1], vec![(280.0, -0.04), (360.0, 0.12)]);
+    let card = card([density(310.0, 998.25), strain()]);
+    let (lower, upper, reference) = (point(280.0), point(360.0), point(310.0));
+    let q = geometry_query(&keys, &lower, &upper, &reference);
+    let geometry = PreparedFreeExpansion::try_new(&card, q).unwrap();
+    let composed =
+        PreparedFreeExpansionDensity::try_from_expansion(&card, geometry.clone(), &keys[0], POLICY)
+            .unwrap();
+    let ordinary =
+        PreparedFreeExpansionDensity::try_new(&card, query(&keys, &lower, &upper, &reference))
+            .unwrap();
+    assert_eq!(composed, ordinary);
+    assert_eq!(composed.expansion(), &geometry);
+    assert_eq!(composed.source_lines(), geometry.source_lines());
+    assert_eq!(
+        composed.reference_query_point(),
+        geometry.reference_query_point()
+    );
+    card.claims()
+        .verify_receipt(&composed.reference_density_answer().receipt)
+        .unwrap();
+    for t in [280.0, 295.0, 310.0, 345.0, 360.0] {
+        let free = geometry.at_temperature(t).unwrap();
+        let sample = composed.at_temperature(t).unwrap();
+        assert_eq!(sample.principal_stretches(), free.principal_stretches());
+        assert_eq!(sample.relative_volume(), free.relative_volume());
+        close(sample.density_kg_m3() * sample.relative_volume(), 998.25);
+        assert_eq!(sample.path_identity(), composed.identity());
+    }
+    assert_ne!(geometry.identity(), composed.identity());
+    let selected = ClaimSelection::Pinned(composed.reference_density_answer().receipt.selected);
+    let pinned = PreparedFreeExpansionDensity::try_from_expansion(
+        &card,
+        geometry.clone(),
+        &keys[0],
+        selected,
+    )
+    .unwrap();
+    assert_ne!(pinned.identity(), composed.identity());
+    assert_eq!(pinned.expansion(), &geometry);
+    assert_eq!(
+        pinned.at_temperature(310.0).unwrap().density_kg_m3(),
+        998.25
+    );
+    let other = self::card([density(310.0, 999.0), strain()]);
+    assert!(
+        PreparedFreeExpansionDensity::try_from_expansion(
+            &other,
+            geometry.clone(),
+            &keys[0],
+            POLICY
+        )
+        .is_err()
+    );
+    assert!(
+        PreparedFreeExpansionDensity::try_from_expansion(&card, geometry.clone(), &keys[1], POLICY)
+            .is_err()
+    );
+    // Geometry can use any supported reference; density needs its own evidence
+    // there. A scalar at 310 K must not become a density curve at 315 K.
+    let shifted = PreparedFreeExpansion::try_new(
+        &card,
+        FreeExpansionGeometryQuery {
+            reference: &point(315.0),
+            ..q
+        },
+    )
+    .unwrap();
+    assert!(
+        PreparedFreeExpansionDensity::try_from_expansion(&card, shifted.clone(), &keys[0], POLICY)
+            .is_err()
+    );
+    assert_eq!(
+        shifted.at_temperature(315.0).unwrap().relative_volume(),
+        1.0
+    );
+    assert_eq!(composed.expansion(), &geometry);
+}
+
+#[test]
+fn g0_density_free_geometry_still_requires_supported_finite_length_changes() {
+    let keys = keys();
+    let (lower, upper, reference) = (point(280.0), point(360.0), point(310.0));
+    let q = geometry_query(&keys, &lower, &upper, &reference);
+    let strain = || curve(&keys[1], vec![(280.0, -0.04), (360.0, 0.12)]);
+    let supported = card([strain()]);
+    let geometry = PreparedFreeExpansion::try_new(&supported, q).unwrap();
+    let original = geometry.clone();
+    for t in [279.0, 361.0, f64::NAN, f64::INFINITY] {
+        assert!(geometry.at_temperature(t).is_err());
+    }
+    assert_eq!(geometry, original);
+    let mut discrete = strain();
+    discrete.interpolation = InterpolationPolicy::TabulatedOnly;
+    assert!(PreparedFreeExpansion::try_new(&card([discrete]), q).is_err());
+    let gapped = card([
+        curve(&keys[1], vec![(280.0, -0.04), (300.0, 0.0)]),
+        curve(&keys[1], vec![(340.0, 0.08), (360.0, 0.12)]),
+    ]);
+    assert!(PreparedFreeExpansion::try_new(&gapped, q).is_err());
+    for value in [-1.0, -1.1] {
+        let invalid = card([curve(&keys[1], vec![(280.0, value), (360.0, 0.12)])]);
+        assert!(PreparedFreeExpansion::try_new(&invalid, q).is_err());
+    }
+    let coefficient = PropertyKey::new(
+        "instantaneous-linear-expansion-coefficient",
+        Dims([0, 0, 0, -1, 0, 0]),
+    );
+    let coefficient_card = card([curve(&coefficient, vec![(280.0, 1e-5), (360.0, 2e-5)])]);
+    assert!(
+        PreparedFreeExpansion::try_new(
+            &coefficient_card,
+            FreeExpansionGeometryQuery {
+                strains: FreeExpansionStrainSources::Isotropic {
+                    strain: &coefficient,
+                    selection: POLICY
+                },
+                ..q
+            },
+        )
+        .is_err()
+    );
+    for t in [279.0, 361.0] {
+        assert!(
+            PreparedFreeExpansion::try_new(
+                &supported,
+                FreeExpansionGeometryQuery {
+                    reference: &point(t),
+                    ..q
+                },
+            )
+            .is_err()
+        );
+    }
+    let other_condition = reference.clone().with("moisture", 0.1).unwrap();
+    assert!(
+        PreparedFreeExpansion::try_new(
+            &supported,
+            FreeExpansionGeometryQuery {
+                reference: &other_condition,
+                ..q
+            },
+        )
+        .is_err()
+    );
+    assert!(
+        PreparedFreeExpansion::try_new(
+            &supported,
+            FreeExpansionGeometryQuery {
+                strains: FreeExpansionStrainSources::FixedPrincipal {
+                    frame: ContentHash([0; 32]),
+                    strains: [&keys[1]; 3],
+                    selections: [POLICY; 3],
+                },
+                ..q
+            },
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn g1_g3_compiled_nist_geometry_changes_dimensions_without_a_density_assumption() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let output = std::env::temp_dir().join(format!(
+        "nist-free-geometry-{}-{nonce}.fsmatpk",
+        std::process::id()
+    ));
+    let result = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args(["matdb-pack", "--manifest"])
+        .arg(workspace.join("data/matdb/seed-v1/stainless-304-nist-cryogenic/manifest.tsv"))
+        .arg("--out")
+        .arg(&output)
+        .env("CARGO_WORKSPACE_DIR", workspace)
+        .current_dir(workspace)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let pack = NormalizedPack::from_bytes(&std::fs::read(output).unwrap()).unwrap();
+    let card = material(pack.claims().clone());
+    assert!(card.claims().claims_for("density").is_empty());
+    let context = |t| {
+        point(t)
+            .with_quantity(
+                "source-pressure-known",
+                QuantitySpec::dimensional(Dims::NONE),
+                0.0,
+            )
+            .unwrap()
+    };
+    let key = PropertyKey::new("linear-expansion-relative-to-293k", Dims::NONE);
+    let (lower, upper, reference) = (context(77.0), context(300.0), context(293.0));
+    // This scenario explicitly selects an isotropic free-expansion model. The
+    // source's finite length law supplies geometry without an authored rho.
+    let geometry = PreparedFreeExpansion::try_new(
+        &card,
+        FreeExpansionGeometryQuery {
+            reference: &reference,
+            strains: FreeExpansionStrainSources::Isotropic {
+                strain: &key,
+                selection: POLICY,
+            },
+            temperature_axis: "temperature",
+            lower: &lower,
+            upper: &upper,
+        },
+    )
+    .unwrap();
+    assert_eq!(geometry.source_lines()[0].knots.len(), 11);
+    let epsilon = |t: f64| {
+        1e-5 * (-295.54
+            + t * (-0.39811 + t * (0.0092683 + t * (-0.000020261 + t * 0.000000017127))))
+    };
+    let reference_length = 1.0 + 7.4646191727e-7;
+    for t in [77.0, 100.0, 150.0, 200.0, 250.0, 293.0, 300.0] {
+        let stretch = (1.0 + epsilon(t)) / reference_length;
+        let sample = geometry.at_temperature(t).unwrap();
+        for actual in sample.principal_stretches() {
+            close(actual, stretch);
+        }
+        // A 0.5 m edge and a 0.001 m³ reference volume change from the same source.
+        close(0.5 * sample.principal_stretches()[0], 0.5 * stretch);
+        close(0.001 * sample.relative_volume(), 0.001 * stretch.powi(3));
+    }
+    let interior =
+        (1.0 + epsilon(77.0) + (epsilon(100.0) - epsilon(77.0)) * 10.0 / 23.0) / reference_length;
+    close(
+        geometry.at_temperature(87.0).unwrap().principal_stretches()[0],
+        interior,
+    );
+    assert_eq!(
+        geometry
+            .at_temperature(293.0)
+            .unwrap()
+            .principal_stretches(),
+        [1.0; 3]
+    );
+    for (_, answer) in &geometry.source_lines()[0].knots {
+        assert!(answer.receipt.observation_backed);
+        card.claims().verify_receipt(&answer.receipt).unwrap();
+    }
+    assert!(
+        PreparedFreeExpansionDensity::try_from_expansion(
+            &card,
+            geometry.clone(),
+            &keys()[0],
+            POLICY
+        )
+        .is_err()
+    );
+    assert!(geometry.at_temperature(76.0).is_err());
+    assert_eq!(card.claims(), pack.claims());
 }

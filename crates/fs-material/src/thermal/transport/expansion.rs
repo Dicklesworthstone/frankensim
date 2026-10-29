@@ -1,13 +1,15 @@
-//! Constant-mass density from explicitly selected free engineering length changes.
+//! Free geometry and optional constant-mass density from engineering length changes.
 //!
 //! Source epsilon is `(L(T)-L_datum)/L_datum`, with a fixed datum for each
 //! direction. It is neither a thermal expansion coefficient nor an arbitrary
-//! infinitesimal strain tensor. Normalize each source at the density reference:
+//! infinitesimal strain tensor. Normalize each source at the declared reference:
 //! `s_i(T) = (1+epsilon_i(T))/(1+epsilon_i(T_ref))`, then `J = s_1*s_2*s_3`
-//! and `rho(T) = rho_ref/J`. A nonzero fitted datum residual is preserved.
+//! and, when a compatible reference density exists, `rho(T) = rho_ref/J`.
+//! Dimensional change itself requires no density. A fitted datum residual is preserved.
 //!
-//! The caller declares isotropy or three fixed orthogonal principal directions,
-//! fixed mass and unconstrained free expansion. This adapter does not infer
+//! The caller declares isotropy or three fixed orthogonal principal directions
+//! and unconstrained free expansion. Density composition also requires fixed mass.
+//! This adapter does not infer
 //! matched specimens, rotating directions, shear, phase changes, mass loss,
 //! moisture evolution or constrained thermoelastic response. Source uncertainty
 //! survives unchanged; no covariance or propagated uncertainty is invented.
@@ -59,17 +61,27 @@ pub struct FreeExpansionSourceQuery<'a> {
     pub upper: &'a QueryPoint,
 }
 
-/// Derived geometry and density, not an independently measured property claim.
+/// Continuous free dimensional change with an explicit reference and source basis.
+/// Density is not an input to length ratios or their volume ratio.
+#[derive(Clone, Copy, Debug)]
+pub struct FreeExpansionGeometryQuery<'a> {
+    pub reference: &'a QueryPoint,
+    pub strains: FreeExpansionStrainSources<'a>,
+    pub temperature_axis: &'a str,
+    pub lower: &'a QueryPoint,
+    pub upper: &'a QueryPoint,
+}
+
+/// Derived free geometry, not an independently measured property claim.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct FreeExpansionDensitySample {
+pub struct FreeExpansionGeometrySample {
     path_identity: ContentHash,
     temperature_k: f64,
     principal_stretches: [f64; 3],
     relative_volume: f64,
-    density_kg_m3: f64,
 }
 
-impl FreeExpansionDensitySample {
+impl FreeExpansionGeometrySample {
     #[must_use]
     pub const fn path_identity(&self) -> ContentHash {
         self.path_identity
@@ -78,19 +90,15 @@ impl FreeExpansionDensitySample {
     pub const fn temperature_k(&self) -> f64 {
         self.temperature_k
     }
-    /// Length ratios relative to the density reference, in declared axis order.
+    /// Length ratios relative to the declared reference, in principal-axis order.
     #[must_use]
     pub const fn principal_stretches(&self) -> [f64; 3] {
         self.principal_stretches
     }
-    /// Exact finite volume ratio `V(T)/V(T_ref)` of the declared free expansion.
+    /// Finite volume ratio `V(T)/V(T_ref)` of the declared free expansion.
     #[must_use]
     pub const fn relative_volume(&self) -> f64 {
         self.relative_volume
-    }
-    #[must_use]
-    pub const fn density_kg_m3(&self) -> f64 {
-        self.density_kg_m3
     }
 }
 
@@ -101,31 +109,30 @@ struct StrainKnot {
 }
 
 /// Immutable source-backed reduction. Only engineering strains interpolate;
-/// stretches, their product and density are derived at evaluation time.
+/// stretches and their product are derived at evaluation time. Missing density
+/// does not block the geometry supported by these original strain measurements.
 #[derive(Clone, Debug, PartialEq)]
-pub struct PreparedFreeExpansionDensity {
+pub struct PreparedFreeExpansion {
     material_card: ContentHash,
     basis: FreeExpansionBasis,
     temperature_axis: String,
     lower: QueryPoint,
     upper: QueryPoint,
     reference: QueryPoint,
-    density: MaterialAnswer,
     sources: Vec<PropertyLineSlice>,
     reference_lengths: [f64; 3],
     knots: Vec<StrainKnot>,
     identity: ContentHash,
 }
 
-impl PreparedFreeExpansionDensity {
-    /// Admit each original source through canonical typed selection. Density
-    /// needs support only at its explicit reference; strain sources must support
+impl PreparedFreeExpansion {
+    /// Admit each original strain source through canonical typed selection over
     /// the full interval. The reference shares every fixed condition and lies
     /// inside that interval. Unsupported spans and changing selections refuse.
     /// Each source explicitly bounds temperature. No datum value is guessed.
     pub fn try_new(
         card: &MaterialCard,
-        query: FreeExpansionSourceQuery<'_>,
+        query: FreeExpansionGeometryQuery<'_>,
     ) -> Result<Self, ThermalTransportError> {
         let invalid = ThermalTransportError::Invalid;
         let (basis, selected) = match query.strains {
@@ -148,13 +155,12 @@ impl PreparedFreeExpansionDensity {
                 )
             }
         };
-        if !scalar_role(query.density, super::DENSITY)
-            || selected
-                .iter()
-                .any(|(key, _)| !scalar_role(key, Dims::NONE))
+        if selected
+            .iter()
+            .any(|(key, _)| !scalar_role(key, Dims::NONE))
         {
             return Err(invalid(
-                "density and engineering length changes require scalar density and dimensionless source roles",
+                "engineering length changes require dimensionless scalar source roles",
             ));
         }
         for point in [query.lower, query.upper, query.reference] {
@@ -175,23 +181,8 @@ impl PreparedFreeExpansionDensity {
         let reference_t = query.reference.axes()[query.temperature_axis];
         if low >= high || reference_t < low || reference_t > high {
             return Err(invalid(
-                "density reference must lie inside a positive-width temperature interval",
+                "free expansion reference must lie inside a positive-width temperature interval",
             ));
-        }
-        let density = source_line(
-            card,
-            query.density,
-            query.temperature_axis,
-            query.reference,
-            query.reference,
-            query.density_selection,
-        )?
-        .knots
-        .pop()
-        .expect("canonical point line is nonempty")
-        .1;
-        if !positive(density.evidence.value.value) {
-            return Err(invalid("reference density must be finite and positive"));
         }
         let sources: Vec<_> = selected
             .into_iter()
@@ -226,38 +217,19 @@ impl PreparedFreeExpansionDensity {
             ));
         }
         let material_card = card.content_hash();
-        let mut identity =
-            DomainHasher::new("org.frankensim.fs-material.prepared-free-expansion-density.v1");
-        identity.update(material_card.as_bytes());
-        identity.update(&(query.temperature_axis.len() as u64).to_le_bytes());
-        identity.update(query.temperature_axis.as_bytes());
-        match basis {
-            FreeExpansionBasis::Isotropic => {
-                identity.update(&[0]);
-            }
-            FreeExpansionBasis::FixedPrincipal { frame } => {
-                identity.update(&[1]);
-                identity.update(frame.as_bytes());
-            }
-        }
-        identity.update(density.receipt.content_hash().as_bytes());
-        for source in &sources {
-            identity.update(&(source.knots.len() as u64).to_le_bytes());
-            for (_, answer) in &source.knots {
-                identity.update(answer.receipt.content_hash().as_bytes());
-            }
-        }
+        let mut identity = identity_prefix(
+            "org.frankensim.fs-material.prepared-free-expansion.v1",
+            material_card,
+            query.temperature_axis,
+            basis,
+        );
+        identity.update(&reference_t.to_bits().to_le_bytes());
+        hash_sources(&mut identity, &sources);
         let identity = identity.finalize();
         let mut knots = Vec::with_capacity(temperatures.len());
         for temperature in temperatures {
             let strains = strains_at(temperature);
-            checked_sample(
-                identity,
-                temperature,
-                strains,
-                reference_lengths,
-                density.evidence.value.value,
-            )?;
+            checked_geometry(identity, temperature, strains, reference_lengths)?;
             knots.push(StrainKnot {
                 temperature,
                 strains,
@@ -270,7 +242,6 @@ impl PreparedFreeExpansionDensity {
             lower: query.lower.clone(),
             upper: query.upper.clone(),
             reference: query.reference.clone(),
-            density,
             sources,
             reference_lengths,
             knots,
@@ -280,14 +251,14 @@ impl PreparedFreeExpansionDensity {
 
     /// One binary search; no allocation, hashing, query, mutation or extrapolation.
     /// Interpolate the independent engineering strains, then form normalized
-    /// stretches and their product. The reference is a union knot, so its density
-    /// is returned exactly even when the original fitted datum residual is nonzero.
+    /// stretches and their product. The reference is a union knot, so its unit
+    /// stretches are exact even when the original fitted datum residual is nonzero.
     /// Preparation checks all knots, but extreme interior products or ratios can
     /// still overflow or underflow; that sample refuses without modifying the path.
     pub fn at_temperature(
         &self,
         temperature_k: f64,
-    ) -> Result<FreeExpansionDensitySample, ThermalTransportError> {
+    ) -> Result<FreeExpansionGeometrySample, ThermalTransportError> {
         let span = self.temperature_span_k();
         if !temperature_k.is_finite() || temperature_k < span[0] || temperature_k > span[1] {
             return Err(ThermalTransportError::Invalid(
@@ -308,12 +279,11 @@ impl PreparedFreeExpansionDensity {
                 lower.strains[i] + weight * (upper.strains[i] - lower.strains[i])
             })
         };
-        checked_sample(
+        checked_geometry(
             self.identity,
             temperature_k,
             strains,
             self.reference_lengths,
-            self.density.evidence.value.value,
         )
     }
 
@@ -341,11 +311,6 @@ impl PreparedFreeExpansionDensity {
     pub const fn reference_query_point(&self) -> &QueryPoint {
         &self.reference
     }
-    /// Original density answer, including selection, uncertainty and receipt.
-    #[must_use]
-    pub const fn reference_density_answer(&self) -> &MaterialAnswer {
-        &self.density
-    }
     /// Original isotropic line, or three principal lines in declared axis order.
     #[must_use]
     pub fn source_lines(&self) -> &[PropertyLineSlice] {
@@ -358,10 +323,238 @@ impl PreparedFreeExpansionDensity {
             self.knots[self.knots.len() - 1].temperature,
         ]
     }
-    /// Union of original source breakpoints plus the exact density reference.
+    /// Union of original source breakpoints plus the exact geometry reference.
     pub fn temperatures_k(&self) -> impl ExactSizeIterator<Item = f64> + '_ {
         self.knots.iter().map(|knot| knot.temperature)
     }
+}
+
+/// Constant-mass density composed with the original free geometry.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FreeExpansionDensitySample {
+    path_identity: ContentHash,
+    geometry: FreeExpansionGeometrySample,
+    density_kg_m3: f64,
+}
+
+impl FreeExpansionDensitySample {
+    #[must_use]
+    pub const fn path_identity(&self) -> ContentHash {
+        self.path_identity
+    }
+    #[must_use]
+    pub const fn temperature_k(&self) -> f64 {
+        self.geometry.temperature_k
+    }
+    #[must_use]
+    pub const fn principal_stretches(&self) -> [f64; 3] {
+        self.geometry.principal_stretches
+    }
+    #[must_use]
+    pub const fn relative_volume(&self) -> f64 {
+        self.geometry.relative_volume
+    }
+    #[must_use]
+    pub const fn density_kg_m3(&self) -> f64 {
+        self.density_kg_m3
+    }
+    /// Original geometry result retains its own source-path identity.
+    #[must_use]
+    pub const fn geometry(&self) -> FreeExpansionGeometrySample {
+        self.geometry
+    }
+}
+
+/// Optional density composition; geometric expansion remains independently usable.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreparedFreeExpansionDensity {
+    expansion: PreparedFreeExpansion,
+    density: MaterialAnswer,
+    identity: ContentHash,
+}
+
+impl PreparedFreeExpansionDensity {
+    /// Prepare the original free geometry and resolve density only at its exact
+    /// reference. This preserves the existing constructor and density identity.
+    pub fn try_new(
+        card: &MaterialCard,
+        query: FreeExpansionSourceQuery<'_>,
+    ) -> Result<Self, ThermalTransportError> {
+        let expansion = PreparedFreeExpansion::try_new(
+            card,
+            FreeExpansionGeometryQuery {
+                reference: query.reference,
+                strains: query.strains,
+                temperature_axis: query.temperature_axis,
+                lower: query.lower,
+                upper: query.upper,
+            },
+        )?;
+        Self::try_from_expansion(card, expansion, query.density, query.density_selection)
+    }
+
+    /// Reuse already prepared geometry without re-querying any strain source.
+    /// Density must belong to the same immutable card and support the geometry's
+    /// complete reference context. This does not assert matched specimens or
+    /// manufacture a missing density, phase law, mass loss or covariance model.
+    pub fn try_from_expansion(
+        card: &MaterialCard,
+        expansion: PreparedFreeExpansion,
+        density_key: &PropertyKey,
+        selection: ClaimSelection,
+    ) -> Result<Self, ThermalTransportError> {
+        if card.content_hash() != expansion.material_card_identity()
+            || !scalar_role(density_key, super::DENSITY)
+        {
+            return Err(ThermalTransportError::Invalid(
+                "density composition requires the original card and a scalar density source",
+            ));
+        }
+        let reference = expansion.reference_query_point();
+        let density = source_line(
+            card,
+            density_key,
+            expansion.temperature_axis(),
+            reference,
+            reference,
+            selection,
+        )?
+        .knots
+        .pop()
+        .expect("canonical point line is nonempty")
+        .1;
+        if !positive(density.evidence.value.value) {
+            return Err(ThermalTransportError::Invalid(
+                "reference density must be finite and positive",
+            ));
+        }
+        // Preserve the established density identity byte order and domain.
+        let mut identity = identity_prefix(
+            "org.frankensim.fs-material.prepared-free-expansion-density.v1",
+            expansion.material_card_identity(),
+            expansion.temperature_axis(),
+            expansion.basis(),
+        );
+        identity.update(density.receipt.content_hash().as_bytes());
+        hash_sources(&mut identity, expansion.source_lines());
+        for knot in &expansion.knots {
+            let geometry = checked_geometry(
+                expansion.identity,
+                knot.temperature,
+                knot.strains,
+                expansion.reference_lengths,
+            )?;
+            density_from_geometry(&geometry, density.evidence.value.value)?;
+        }
+        Ok(Self {
+            expansion,
+            density,
+            identity: identity.finalize(),
+        })
+    }
+
+    /// One original geometry evaluation followed by rho_ref/J. No allocation,
+    /// database query or hashing occurs during successful evaluation.
+    pub fn at_temperature(
+        &self,
+        temperature_k: f64,
+    ) -> Result<FreeExpansionDensitySample, ThermalTransportError> {
+        let geometry = self.expansion.at_temperature(temperature_k)?;
+        let density_kg_m3 = density_from_geometry(&geometry, self.density.evidence.value.value)?;
+        Ok(FreeExpansionDensitySample {
+            path_identity: self.identity,
+            geometry,
+            density_kg_m3,
+        })
+    }
+
+    #[must_use]
+    pub const fn expansion(&self) -> &PreparedFreeExpansion {
+        &self.expansion
+    }
+    #[must_use]
+    pub const fn identity(&self) -> ContentHash {
+        self.identity
+    }
+    #[must_use]
+    pub const fn material_card_identity(&self) -> ContentHash {
+        self.expansion.material_card_identity()
+    }
+    #[must_use]
+    pub const fn basis(&self) -> FreeExpansionBasis {
+        self.expansion.basis()
+    }
+    #[must_use]
+    pub fn temperature_axis(&self) -> &str {
+        self.expansion.temperature_axis()
+    }
+    #[must_use]
+    pub fn query_endpoints(&self) -> [&QueryPoint; 2] {
+        self.expansion.query_endpoints()
+    }
+    #[must_use]
+    pub const fn reference_query_point(&self) -> &QueryPoint {
+        self.expansion.reference_query_point()
+    }
+    #[must_use]
+    pub const fn reference_density_answer(&self) -> &MaterialAnswer {
+        &self.density
+    }
+    #[must_use]
+    pub fn source_lines(&self) -> &[PropertyLineSlice] {
+        self.expansion.source_lines()
+    }
+    #[must_use]
+    pub fn temperature_span_k(&self) -> [f64; 2] {
+        self.expansion.temperature_span_k()
+    }
+    pub fn temperatures_k(&self) -> impl ExactSizeIterator<Item = f64> + '_ {
+        self.expansion.temperatures_k()
+    }
+}
+
+fn identity_prefix(
+    domain: &str,
+    card: ContentHash,
+    axis: &str,
+    basis: FreeExpansionBasis,
+) -> DomainHasher {
+    let mut identity = DomainHasher::new(domain);
+    identity.update(card.as_bytes());
+    identity.update(&(axis.len() as u64).to_le_bytes());
+    identity.update(axis.as_bytes());
+    match basis {
+        FreeExpansionBasis::Isotropic => {
+            identity.update(&[0]);
+        }
+        FreeExpansionBasis::FixedPrincipal { frame } => {
+            identity.update(&[1]);
+            identity.update(frame.as_bytes());
+        }
+    }
+    identity
+}
+
+fn hash_sources(identity: &mut DomainHasher, sources: &[PropertyLineSlice]) {
+    for source in sources {
+        identity.update(&(source.knots.len() as u64).to_le_bytes());
+        for (_, answer) in &source.knots {
+            identity.update(answer.receipt.content_hash().as_bytes());
+        }
+    }
+}
+
+fn density_from_geometry(
+    geometry: &FreeExpansionGeometrySample,
+    reference_density: f64,
+) -> Result<f64, ThermalTransportError> {
+    let density = reference_density / geometry.relative_volume;
+    if !positive(density) {
+        return Err(ThermalTransportError::Invalid(
+            "derived free expansion density must be finite and positive",
+        ));
+    }
+    Ok(density)
 }
 
 fn scalar_role(key: &PropertyKey, dims: Dims) -> bool {
@@ -372,34 +565,31 @@ fn scalar_role(key: &PropertyKey, dims: Dims) -> bool {
         && key.stress_component().is_none()
 }
 
-fn checked_sample(
+fn checked_geometry(
     identity: ContentHash,
     temperature_k: f64,
     strains: [f64; 3],
     reference_lengths: [f64; 3],
-    density: f64,
-) -> Result<FreeExpansionDensitySample, ThermalTransportError> {
+) -> Result<FreeExpansionGeometrySample, ThermalTransportError> {
     let principal_stretches = std::array::from_fn(|i| (1.0 + strains[i]) / reference_lengths[i]);
     // Multiply the smallest and largest first: principal-axis order must not
     // create intermediate overflow/underflow when the final J is representable.
     let mut ordered = principal_stretches;
     ordered.sort_unstable_by(f64::total_cmp);
     let relative_volume = (ordered[0] * ordered[2]) * ordered[1];
-    let density_kg_m3 = density / relative_volume;
     if !principal_stretches
         .into_iter()
-        .chain([relative_volume, density_kg_m3])
+        .chain([relative_volume])
         .all(positive)
     {
         return Err(ThermalTransportError::Invalid(
-            "free expansion stretches, volume and density must be finite and positive",
+            "free expansion stretches and volume must be finite and positive",
         ));
     }
-    Ok(FreeExpansionDensitySample {
+    Ok(FreeExpansionGeometrySample {
         path_identity: identity,
         temperature_k,
         principal_stretches,
         relative_volume,
-        density_kg_m3,
     })
 }

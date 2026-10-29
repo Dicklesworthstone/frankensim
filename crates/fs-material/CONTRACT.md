@@ -4396,3 +4396,38 @@ outside this model.
 ## Joint phase and electrical source coordinates
 
 `ScalarConductorResponse::new_with_liquid_mass_fraction_axis` binds the original enthalpy-derived liquid mass fraction and explicitly owned actual E/J magnitudes together. Complete source requirements, selected claims, typed coordinates and support survive phase, temperature and field refresh. Public static phase admission and generic material refresh remain strict. The existing source data supplies its admitted law; no universal phase mixture rule or higher-dimensional table is invented. Focused source regressions cover retained roles/pins, actual-field queries, phase support and unowned-coordinate refusal.
+
+## Free dimensional change without a density requirement (2026-10-29)
+
+`thermal::transport::expansion::PreparedFreeExpansion` consumes original finite
+engineering length-change sources with an explicit reference temperature. The
+new `FreeExpansionGeometryQuery` selects either an authored isotropic
+interpretation or three fixed orthogonal principal directions. No density or
+mass input is needed to compute the supported dimensional change.
+
+At temperature T, each principal stretch is
+`(1 + epsilon_i(T)) / (1 + epsilon_i(T_ref))`; the relative volume is their
+product. Source breakpoints, nonzero fitted datum residuals, complete typed
+query context and original receipts remain intact. The reference is retained as
+an exact union knot. Only the independent source strains interpolate; stretches
+and volume are derived from them. The identity includes the reference, frame,
+original card and source receipts. Evaluation uses one binary search and
+allocates nothing, queries no card and computes no hash.
+
+`PreparedFreeExpansionDensity::try_from_expansion` optionally attaches a density
+answer at that same reference and computes `rho_ref / J` under the caller's
+constant-mass assumption. It requires the original immutable card and full
+reference context, and reuses the prepared strain lines. The existing density
+constructor, public sample accessors and v1 density identity byte order are
+preserved. Existing expanding thermal transport continues to consume this
+composition without separately interpolating density products.
+
+Four additional tests in `xtask/tests/material_expansion_density.rs` exercise
+independent anisotropic geometry, reference-dependent identities, optional
+density composition, source/domain/frame/length refusals, and compiled NIST 304
+dimensional change without an inserted density claim. All eight tests in that
+suite and three existing expanding-transport tests pass in the focused native
+build. Thermal coefficients retain their distinct dimensions and are refused
+by this finite-strain API; mean and differential coefficients are not inferred
+from one another. Constrained mechanics, changing directions, phase transitions
+and uncertainty propagation remain separate model requirements.
