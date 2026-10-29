@@ -5,6 +5,8 @@ use crate::material_circuit::thermal::{CircuitHeatingError, CircuitThermalSolve,
 use crate::cavity_phs::piston::thermal::ThermalPistonError;
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 use fs_phs::circuit::{Branch, CircuitGraph};
+use crate::material_circuit::conductivity::{ConductionAxis, ConductionCoordinate,
+    ConductivitySolve};
 
 fn electrical() -> CircuitThermalSolve {
     CircuitThermalSolve { circuit:MaterialCircuitSolve {energy_tolerance_j:1e-8,power_tolerance_w:1e-9},
@@ -203,4 +205,163 @@ fn conductivity_only_card_drives_actual_circuit_body_gas_and_piston_transaction(
     assert!((electrical.stored_after_j+electrical.heat_j-10.0).abs()<1e-8);
     assert!(next.total_energy_residual_j().abs()<1e-6);
     assert_eq!(circuit,saved);
+}
+
+const FIELD_DIMS: Dims = Dims([1, 1, -3, 0, -1, 0]);
+const FIELD_AXES: [ConductionAxis<'static>; 1] = [ConductionAxis {
+    name: "field", coordinate: ConductionCoordinate::ElectricFieldMagnitude,
+}];
+
+fn field_point(t: f64) -> QueryPoint {
+    point(t).with_quantity("field", QuantitySpec::dimensional(FIELD_DIMS), 0.0).unwrap()
+}
+
+fn field_fixture(slope: f64) -> (MaterialCard, ResolvedHeatCapacityCurve) {
+    let basis = ElectricalPropertyBasis::Resistivity;
+    let cp = PropertyKey::new("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS);
+    let density = PropertyKey::new("density", Density::DIMS);
+    let mut claims = ClaimSet::new();
+    for (key, value) in [
+        (cp.clone(), PropertyValue::Scalar { value: 500.0, dims: SPECIFIC_HEAT_CAPACITY_DIMS }),
+        (density.clone(), PropertyValue::Scalar { value: 4000.0, dims: Density::DIMS }),
+        (PropertyKey::new(basis.property_name(), basis.dimensions()), PropertyValue::Surface2D {
+            axes: ["T".into(), "field".into()], axis_dims: [Temperature::DIMS, FIELD_DIMS],
+            samples: [[200.0, 0.0], [800.0, 0.0], [200.0, 20000.0], [800.0, 20000.0]]
+                .into_iter().map(|at| (at, 0.00005 * at[0] + slope * at[1])).collect(),
+            triangles: vec![[0, 1, 2], [1, 3, 2]], dims: basis.dimensions(),
+        }),
+    ] {
+        let interpolation = if matches!(value, PropertyValue::Scalar { .. }) {
+            InterpolationPolicy::ConstantWithinValidity
+        } else { InterpolationPolicy::LinearInside };
+        claims.insert_claim(PropertyClaim { key, value, interpolation,
+            validity: ValidityDomain::unconstrained()
+                .with_quantity("T", quantity(QuantityKind::AbsoluteTemperature), 200.0, 800.0)
+                .with_quantity("field", QuantitySpec::dimensional(FIELD_DIMS), 0.0, 20000.0),
+            uncertainty: UncertaintyModel::Unstated, observations: vec![],
+            provenance: Provenance { source: "manufactured rho(T,E), not a measured material".into(),
+                license: "CC0-1.0".into(), artifact: None },
+        }).unwrap();
+    }
+    let card = MaterialCard::assemble(MaterialStateId { chemistry: "authored nonlinear resistor".into(),
+        phase: "solid".into(), process: "analytic thermal/field fixture".into(), revision: 0 },
+        claims, vec![]).unwrap();
+    let caloric = ResolvedHeatCapacityCurve::try_new(&card, HeatCapacitySourceQuery {
+        heat_capacity: &cp, density: &density, temperature_axis: "T",
+        lower: &field_point(200.0), upper: &field_point(800.0),
+        selection: SelectionPolicy::SingleClaimOnly,
+    }, SolidLiquidPhase::Solid, 0.0, 1e-5).unwrap();
+    (card, caloric)
+}
+
+fn field_capacitor(heater: &MaterialOhmicBody<'_>, thermal: UniformEnthalpyStepInput<'_>) -> MaterialCircuit {
+    let conductor = resolve_uniform_conductor(heater.material.material,
+        &heater.material.at(thermal.initial).unwrap(), MaterialPropertySelection::SingleClaimOnly,
+        heater.length_m, heater.area_m2).unwrap();
+    MaterialCircuit::new(CircuitGraph { node_count: 2, branches: vec![
+        (1, 0, Branch::Capacitor { farads: 0.002 }), (1, 0, Branch::Resistor { ohms: 1.0 }),
+    ], transformers: vec![] }, vec![MaterialResistor { branch: 1, conductor }],
+        vec![], vec![0.2], &[]).unwrap()
+}
+
+fn nonlinear() -> ConductivitySolve {
+    ConductivitySolve { maximum_iterations: 32, absolute_resistance_tolerance_ohm: 1e-10,
+        relative_resistance_tolerance: 1e-12 }
+}
+
+fn nonlinear_electrical() -> CircuitThermalSolve {
+    CircuitThermalSolve { maximum_circuit_trials: 4096, ..electrical() }
+}
+
+#[test]
+fn operating_field_and_temperature_close_inside_the_native_gas_piston_transaction() {
+    let mut results = Vec::new();
+    for slope in [0.0, 1e-6] {
+        let (card, caloric) = field_fixture(slope);
+        let context = field_point(300.0);
+        let ohmic = heater(&card, &context, OhmicDrive::Current(0.0)).ohmic_body();
+        let thermal = body(caloric.curve(), 100000.0);
+        let circuit = field_capacitor(&ohmic, thermal);
+        let saved = circuit.clone();
+        let piston = old_piston();
+        let supply = || CircuitThermalSource { circuit: &circuit, resistor_branch: 1,
+            body: ohmic.clone(), inputs: &[] };
+        assert!(piston.circuit_thermal_candidate(drive(0.0), thermal, controls(), bounds(), bounds(),
+            supply(), electrical(), link, || false).is_err());
+        let candidate = piston.circuit_conductivity_thermal_candidate(
+            drive(0.0), thermal, controls(), bounds(), bounds(), supply(), nonlinear_electrical(),
+            &FIELD_AXES, nonlinear(), link, || false,
+        ).unwrap();
+        let midpoint = candidate.coupled().step().thermal_midpoint.temperature_k();
+        let electrical = candidate.electrical().step();
+        let sample = &electrical.evaluated[0];
+        let native = &electrical.electrical;
+        let field = sample.point.electric_field_v_m;
+        let resistance = 400.0 * (0.00005 * midpoint + slope * field.abs());
+        assert!((sample.conductor.resistance_ohm() - resistance).abs() < 1e-10);
+        // Independent RC midpoint identities, with the SAME solved R(T,E).
+        let current = 0.2 / (0.002 * resistance + 0.5 * thermal.duration_s);
+        assert!((sample.point.current_a - current).abs() < 1e-8);
+        assert!((sample.point.voltage_v / ohmic.length_m - field).abs() < 1e-8);
+        assert!((native.heat_j - thermal.duration_s * current.powi(2) * resistance).abs() < 1e-9);
+        assert!((native.stored_after_j + native.heat_j - 10.0).abs() < 1e-8);
+        assert!(sample.power_defect_w.abs() <= nonlinear_electrical().circuit.power_tolerance_w);
+        let point = sample.conductor.material().query_point();
+        assert_eq!(point.iter().find(|(key, _)| key == "T").map(|(_, value)| *value), Some(midpoint));
+        assert_eq!(point.iter().find(|(key, _)| key == "field").map(|(_, value)| *value), Some(field.abs()));
+        assert_eq!(circuit, saved);
+        let (next_piston, next_body, next_circuit, report) = candidate.into_parts();
+        assert!(report.total_energy_residual_j.abs() < 1e-6);
+        assert!(report.circuit_trials >= report.electrical.iterations);
+        assert!((report.power.evaluated_energy_j - report.electrical.electrical.heat_j).abs() < 1e-12);
+        results.push((report.electrical.electrical.heat_j, next_body.state.temperature_k(),
+            next_piston.gas().state().state().temperature, next_piston.velocity_m_s(),
+            next_circuit.charges_c()[0]));
+    }
+    // A material-only operating-field response changes the ACTUAL current,
+    // finite supply drain, body/gas temperatures and pressure-driven motion.
+    assert!(results[0].0 > results[1].0);
+    assert!(results[0].1 > results[1].1);
+    assert!(results[0].2 > results[1].2);
+    assert!(results[0].3 > results[1].3);
+    assert!(results[0].4 < results[1].4);
+}
+
+#[test]
+fn nonlinear_thermal_work_failure_and_late_cancellation_preserve_all_accepted_owners() {
+    let (card, caloric) = field_fixture(1e-6);
+    let context = field_point(300.0);
+    let ohmic = heater(&card, &context, OhmicDrive::Current(0.0)).ohmic_body();
+    let thermal = body(caloric.curve(), 100000.0);
+    let circuit = field_capacitor(&ohmic, thermal);
+    let saved = circuit.clone();
+    let piston = old_piston();
+    let saved_piston = piston.clone();
+    let supply = || CircuitThermalSource { circuit: &circuit, resistor_branch: 1,
+        body: ohmic.clone(), inputs: &[] };
+    let run = |work, solve, axes: &[ConductionAxis<'_>], cancel: &mut dyn FnMut() -> bool| {
+        piston.circuit_conductivity_thermal_candidate(drive(0.0), thermal, controls(), bounds(), bounds(),
+            supply(), work, axes, solve, link, cancel)
+    };
+    assert!(matches!(run(CircuitThermalSolve { maximum_circuit_trials: 1, ..nonlinear_electrical() },
+        nonlinear(), &FIELD_AXES, &mut || false),
+        Err(ThermalPistonError::Interface(CircuitHeatingError::Budget))));
+    assert!(matches!(run(nonlinear_electrical(), ConductivitySolve { maximum_iterations: 1, ..nonlinear() },
+        &FIELD_AXES, &mut || false),
+        Err(ThermalPistonError::Interface(CircuitHeatingError::Circuit(
+            crate::material_circuit::MaterialCircuitError::ConductivityConvergence { .. })))));
+    assert!(run(nonlinear_electrical(), nonlinear(), &[], &mut || false).is_err());
+    let outside = context.clone().with("field", 30000.0).unwrap();
+    let bad = CircuitThermalSource { circuit: &circuit, resistor_branch: 1,
+        body: MaterialOhmicBody { material: ThermalMaterialPoint { context: &outside, ..ohmic.material },
+            ..ohmic.clone() }, inputs: &[] };
+    assert!(piston.circuit_conductivity_thermal_candidate(drive(0.0), thermal, controls(), bounds(), bounds(),
+        bad, nonlinear_electrical(), &FIELD_AXES, nonlinear(), link, || false).is_err());
+    let mut count = 0;
+    run(nonlinear_electrical(), nonlinear(), &FIELD_AXES, &mut || { count += 1; false }).unwrap();
+    let mut calls = 0;
+    assert!(matches!(run(nonlinear_electrical(), nonlinear(), &FIELD_AXES,
+        &mut || { calls += 1; calls == count }), Err(ThermalPistonError::Cancelled)));
+    assert_eq!(circuit, saved);
+    assert_eq!(piston, saved_piston);
 }

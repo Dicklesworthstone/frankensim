@@ -10321,6 +10321,33 @@ clock/observer admission, early and late cancellation, and retry after refusal.
 These checks exercise the production numerical owners through the focused
 native target; they do not assert full workspace qualification.
 
+## Nonlinear electrical material response in the thermal piston
+
+`GasPiston::circuit_conductivity_thermal_candidate` composes the existing
+`MaterialCircuit::conductivity_with_materials_candidate` with the existing
+powered body/gas/piston feedback. The body enthalpy midpoint updates temperature
+and any declared phase coordinate; the native electrical midpoint updates each
+explicitly bound electric-field/current-density coordinate. The original full
+material bundle, selected source claims, geometry and conductivity/resistivity
+basis remain bound throughout both iterations.
+
+Acceptance requires the original electrical constitutive and power residuals,
+thermal/source residuals, and complete circuit/body/gas/kinetic energy balance.
+Only native circuit Joule heat enters the body. Evaluated material power defects
+remain separate residuals; capacitor/inductor depletion is not counted again as
+heat. Every trial starts from the same accepted charge/flux and thermal history.
+The global work cap counts discarded native electrical iterates as well as the
+last iterate. Refusal, nonconvergence, budget exhaustion and cancellation return
+no partially accepted physical state.
+
+The existing circuit thermal tests exercise a manufactured two-coordinate
+resistivity surface, independent RC midpoint identities, actual body/gas/motion
+sensitivity, unbound/out-of-domain operating axes, electrical nonconvergence,
+global work exhaustion and final cancellation. This retains the fixed C/L and
+geometry, one-whole-resistor, uniform thermal body and prescribed nonthermal
+context restrictions. It adds no contact refresh, carrier transport, hysteresis,
+spatial temperature field or uniqueness/time-accuracy certificate.
+
 
 ### Frozen-composition caloric limit of reactive owners
 
