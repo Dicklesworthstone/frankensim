@@ -175,6 +175,27 @@ The joint accepted-state energy balance includes every layer and the finite gas.
 
 ## Pressure-driven gas exchange from data
 
+Uniform fixed-tension, uniform fixed-support thermoelastic and bonded strings
+all accept the same finite-reservoir `nozzle` input. Their existing electrical
+drive and reciprocal conductive exchange remain active during species flow.
+`heated-flow.string` adds a reservoir to the first uniform heated-string example,
+using the original `string.pack` and nitrogen packs compiled above:
+
+```bash
+cp "$demo/heated-flow.string" "$demo/nitrogen-reservoir.gas" "$run_dir/"
+cargo run --release -p fs-couple --bin finite_gas_string -- \
+  "$run_dir/heated-flow.string" "$run_dir/string.pack" "$run_dir/heated-flow.wav" \
+  --gas-record crates/fs-couple/examples/self_heating_vibration/nitrogen.gas \
+  --gas-component "$run_dir/nitrogen.species" "$run_dir/nitrogen.nasa9" "$run_dir/nitrogen.transport" \
+  --gas-water none --gas-phase frozen > "$run_dir/heated-flow.csv"
+```
+
+The same `nozzle` row can be placed after `gas` in `expanding.string` to retain
+its fixed-support thermal expansion and elastic feedback while the atmosphere
+changes. Select `drive none` for an unpowered string or retain either the
+explicit signed current or voltage drive. A material string does not need a
+second solid layer to exchange gas with a reservoir.
+
 `bonded-flow.string` adds a finite second reservoir through the existing
 source-resolved converging-nozzle owner. It uses the same core, sleeve and
 nitrogen packs compiled above. Copy its explicit reservoir record beside the
@@ -204,12 +225,12 @@ flags. Material names supply no missing properties. The initial local mixture
 need not contain the injected species. Both volumes retain the original source
 laws and formation-energy references after mixing.
 
-Each sample first advances the original layer/electrical/heat transaction,
+Each sample first advances the original solid/electrical/heat transaction,
 then transfers upstream species and enthalpy through the native nozzle. Actual
 post-heating pressures choose the direction; reversing the pressure difference
 reverses transfer without a different simulation. The final surrounding
 composition, density, viscosity and sound speed reach subsequent drag and the
-same continuing pressure observer. Modal states and layer temperatures persist.
+same continuing pressure observer. Modal states and solid temperatures persist.
 Nozzle closure is explicit zero area or zero discharge coefficient.
 
 The nozzle and both parcel inversions reuse the authored `gas` temperature
@@ -220,7 +241,7 @@ excess withdrawal, pressure-order overshoot or a failed combined energy check
 refuses the trajectory; neither a hidden reservoir nor automatic clipping repairs
 it. These limits do not estimate time-discretization error.
 
-With flow enabled, columns after the existing layer temperatures expose both
+With flow enabled, columns after the existing 27 fields and any layer temperatures expose both
 masses, both extensive internal energies `m*u`, reservoir temperature/pressure,
 their combined internal energy, signed mass rate into the surroundings,
 cumulative signed mass/enthalpy transfer, and each parcel's storage change.
@@ -236,11 +257,14 @@ thermal/flow allowance. The first 27 columns and existing layer-temperature
 columns retain their order; omitting `nozzle` preserves the old output schema
 and heat-only route.
 
-This option currently requires the bonded path. The uniform flow API does not
-yet compose this example's conductive/electrical transaction, so uniform
-scenarios with a nozzle explicitly refuse. This remains first-order
-heat-then-flow composition of well-mixed, fixed-volume inventories. It adds no
-resolved jet momentum, spatial mixing, chamber resonance or radiation load.
+The string, local parcel, reservoir and observer publish together only after
+thermal, flow, electrical and energy admission. A late refusal returns no
+partial trajectory. Electrical source work enters solid heat once; conductive
+heat and transported enthalpy cancel internally in the combined energy account.
+Uniform strings retain their original initial-state Joule quadrature; bonded
+strings retain endpoint Joule quadrature. This remains first-order heat-then-flow
+composition of well-mixed, fixed-volume inventories. It adds no resolved jet
+momentum, spatial mixing, chamber resonance or radiation load.
 
 ## Explicit scenario
 
@@ -256,7 +280,7 @@ records are refused. All physical values use SI units.
 | `listener` | compact-observer distance [m] |
 | `solid` | initial temperature [K], minimum and maximum caloric temperatures [K], source query angular frequency [rad/s], enthalpy interpolation allowance [J/kg], maximum temperature change per sample [K] |
 | `gas` | fixed volume [m³], minimum and maximum energy-inversion temperatures [K], specific internal-energy tolerance [J/kg], maximum iterations, maximum temperature change per sample [K] |
-| `nozzle` (optional, bonded only) | reservoir gas-record path, reservoir volume [m³], flow area [m²], discharge coefficient [0,1], mass tolerance [kg], extensive energy tolerance [J], maximum donor fraction (0,1) |
+| `nozzle` (optional, uniform or bonded) | reservoir gas-record path, reservoir volume [m³], flow area [m²], discharge coefficient [0,1], mass tolerance [kg], extensive energy tolerance [J], maximum donor fraction (0,1) |
 | `conduction` | exchange area [m²], gas layer distance [m], solid layer distance [m] |
 | `exchange` | maximum absolute transfer per sample [J], source residual tolerance [J], energy tolerance [J], maximum iterations |
 | `drive` | `none`, `current A`, or `voltage V` |
@@ -360,7 +384,7 @@ fixed-tension path keeps Young's modulus constant. The fixed-support path
 admits scalar thermal expansion and globally affine Young's modulus with the
 corresponding reversible heat. Slack/compression, large strain, moving supports,
 radial contraction and melting refuse or require a different model. The
-well-mixed, fixed-volume gas is a thermal inventory. The optional bonded nozzle
+well-mixed, fixed-volume gas is a thermal inventory. The optional nozzle on either string path
 uses the existing upstream-enthalpy flow work account; moving-volume pressure
 work, resolved jets, chamber acoustics and phase change remain outside this example.
 The compact pressure observer supplies no reciprocal radiation load.

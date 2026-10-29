@@ -302,9 +302,6 @@ impl Spec {
     pub fn validate(&self) -> super::Result<()> {
         self.gas_solve.validate()?;
         if let Some(nozzle) = &self.nozzle {
-            if self.bonded.is_none() {
-                return Err("nozzle exchange requires the bonded layered thermal path".into());
-            }
             if nozzle.reservoir_record.is_empty() || nozzle.reservoir_record.len() > 512
                 || !std::path::Path::new(&nozzle.reservoir_record).components()
                     .all(|part| matches!(part, std::path::Component::Normal(_)))

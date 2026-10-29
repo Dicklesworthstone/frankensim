@@ -214,8 +214,8 @@ fn continuous_pressure_replays_and_matches_independent_three_storage_energy() {
                 .iter()
                 .any(|state| state.displacement_m_sqrt_kg != 0.0)
         );
-        let a = simulate(cx, &spec, &card, gas.clone()).unwrap();
-        let b = simulate(cx, &spec, &card, gas).unwrap();
+        let a = simulate(cx, &spec, &card, gas.clone(), None).unwrap();
+        let b = simulate(cx, &spec, &card, gas, None).unwrap();
         assert_eq!(a.pressure_pa, b.pressure_pa);
         assert_eq!(a.records, b.records);
         assert_eq!(a.records.len(), spec.samples);
@@ -247,6 +247,7 @@ fn continuous_pressure_replays_and_matches_independent_three_storage_energy() {
             &one,
             &card,
             parcel("surroundings", 0.028, 3.5, one.gas_volume_m3),
+            None,
         )
         .unwrap();
         let area = std::f64::consts::PI * one.radius_m.powi(2);
@@ -299,8 +300,8 @@ fn sourced_expansion_changes_live_tension_pitch_and_pressure_through_the_same_in
         let thermal = spec.thermoelastic.unwrap();
         let card = source_law(1.0, Some(2e-5));
         let gas = parcel("surroundings", 0.028, 3.5, spec.gas_volume_m3);
-        let history = simulate(cx, &spec, &card, gas.clone()).unwrap();
-        let without_expansion = simulate(cx, &spec, &source_law(1.0, Some(0.0)), gas).unwrap();
+        let history = simulate(cx, &spec, &card, gas.clone(), None).unwrap();
+        let without_expansion = simulate(cx, &spec, &source_law(1.0, Some(0.0)), gas, None).unwrap();
         assert_ne!(history.pressure_pa, without_expansion.pressure_pa);
         let area = std::f64::consts::PI * spec.radius_m.powi(2);
         let second_moment = area * spec.radius_m.powi(2) / 4.0;
@@ -337,6 +338,7 @@ fn material_species_inventory_and_drive_changes_reach_the_same_sound() {
             &spec,
             &card,
             parcel("surroundings", 0.028, 3.5, spec.gas_volume_m3),
+            None,
         )
         .unwrap();
         let changed_card = source(2.0);
@@ -346,6 +348,7 @@ fn material_species_inventory_and_drive_changes_reach_the_same_sound() {
             &spec,
             &changed_card,
             parcel("surroundings", 0.028, 3.5, spec.gas_volume_m3),
+            None,
         )
         .unwrap();
         let species = simulate(
@@ -353,6 +356,7 @@ fn material_species_inventory_and_drive_changes_reach_the_same_sound() {
             &spec,
             &card,
             parcel("light-source", 0.004, 2.5, spec.gas_volume_m3),
+            None,
         )
         .unwrap();
         let mut large = spec.clone();
@@ -362,6 +366,7 @@ fn material_species_inventory_and_drive_changes_reach_the_same_sound() {
             &large,
             &card,
             parcel("surroundings", 0.028, 3.5, large.gas_volume_m3),
+            None,
         )
         .unwrap();
         let mut no_drive = spec.clone();
@@ -371,6 +376,7 @@ fn material_species_inventory_and_drive_changes_reach_the_same_sound() {
             &no_drive,
             &card,
             parcel("surroundings", 0.028, 3.5, no_drive.gas_volume_m3),
+            None,
         )
         .unwrap();
         for different in [&viscosity, &species, &inventory, &unpowered] {
@@ -400,13 +406,13 @@ fn source_exit_excess_heat_and_cancellation_return_no_partial_history() {
         assert!(build(cx, &unsupported, &card, &gas).is_err());
         let mut overheat = spec.clone();
         overheat.solid_power_w = 1e12;
-        assert!(simulate(cx, &overheat, &card, gas.clone()).is_err());
+        assert!(simulate(cx, &overheat, &card, gas.clone(), None).is_err());
         let mut excluded_gas = spec.clone();
         excluded_gas.gas_solve.minimum_temperature_k = 310.0;
-        assert!(simulate(cx, &excluded_gas, &card, gas.clone()).is_err());
+        assert!(simulate(cx, &excluded_gas, &card, gas.clone(), None).is_err());
         gate.request();
         assert!(build(cx, &spec, &card, &gas).is_err());
-        assert!(simulate(cx, &spec, &card, gas).is_err());
+        assert!(simulate(cx, &spec, &card, gas, None).is_err());
     });
 }
 

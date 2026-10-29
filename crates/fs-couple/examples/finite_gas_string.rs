@@ -21,7 +21,9 @@ use json::json_string;
 
 use fs_couple::acoustic_realize::{
     LinearMaterialStringRuntime, StringPointForce, ThermalMaterialStringRuntime,
-    finite_gas::{FiniteGasStringHeat, FiniteGasStringSolve},
+    finite_gas::{
+        FiniteGasStringHeat, FiniteGasStringSolve, flow::FiniteGasStringFlowDirection,
+    },
 };
 use fs_couple::cavity_phs::piston::thermal::layers::MaterialConductionLayers;
 use fs_couple::pcm_wav::encode_pcm16_wav;
@@ -247,7 +249,21 @@ fn simulate(
     spec: &input::Spec,
     card: &MaterialCard,
     mut gas: IsochoricGasParcel,
+    mut reservoir: Option<ClosedGasParcel>,
 ) -> Result<History> {
+    spec.validate()?;
+    let valid_reservoir = match (&spec.nozzle, &reservoir) {
+        (None, None) => true,
+        (Some(nozzle), Some(parcel)) => {
+            parcel.volume_m3().to_bits() == nozzle.reservoir_volume_m3.to_bits()
+                && (spec.gas_solve.minimum_temperature_k..=spec.gas_solve.maximum_temperature_k)
+                    .contains(&parcel.state().state().temperature)
+        }
+        _ => false,
+    };
+    if !valid_reservoir {
+        return Err("nozzle data requires its original finite reservoir and admitted initial temperature".into());
+    }
     let mut live = build(cx, spec, card, &gas)?;
     let initial_mechanical_j = live.mechanical_internal_energy_j()?;
     let initial_enthalpy_j_kg = live.thermal().specific_enthalpy_j_kg();
@@ -257,13 +273,24 @@ fn simulate(
     let prestress = if spec.thermoelastic.is_some() {
         "fixed supports, sourced thermal expansion and affine stiffness with reversible heat"
     } else { "fixed tension and constant elastic modulus" };
-    let description = format!(
+    let mut description = format!(
         "material_card={}, caloric_curve={}, solid_mass_kg={solid_mass_kg:e}, gas_mass_kg={gas_mass_kg:e}, gas_volume_m3={:e}, initial_mechanical_internal_energy_j={initial_mechanical_j:e}; fully solid, fixed geometry/density, {prestress}, temperature-dependent loss/resistivity/conduction; first-order frozen-law samples; finite gas is a thermal inventory, not a chamber; diagnostic compact pressure supplies no radiation loading; source identity is not measured validation{}",
         card.content_hash().to_hex(),
         live.thermal().phase_curve_identity().to_hex(),
         gas.volume_m3(),
         thermochemical::provenance(&[GasRecord::Thermochemical(gas.state().clone())]),
     );
+    let mut gas_flow = reservoir
+        .as_ref()
+        .map(|parcel| flow::History::new(&gas, parcel, spec.samples));
+    if let (Some(nozzle), Some(parcel)) = (&spec.nozzle, &reservoir) {
+        description.push_str(&format!(
+            "; nozzle={:?}, reservoir_volume_m3={:e}; first-order heat-then-flow, finite well-mixed volumes, no jet momentum or chamber load; reservoir{}",
+            nozzle.geometry,
+            parcel.volume_m3(),
+            thermochemical::provenance(&[GasRecord::Thermochemical(parcel.state().clone())]),
+        ));
+    }
     let point = context(spec.solid_temperature_k, spec.query_omega_rad_s)?;
     let quantity = card
         .claims()
@@ -311,8 +338,42 @@ fn simulate(
             }],
         )?;
         let epoch = live.mechanical().epoch();
-        let (frame, supplied_joule, current, final_current, resistance, final_resistance) =
-            if let Some(drive) = spec.drive {
+        let (frame, electrical, flux) =
+            if let (Some(nozzle), Some(parcel)) = (&spec.nozzle, reservoir.as_mut()) {
+                let (report, electrical) = if let Some(drive) = spec.drive {
+                    let report = live.step_with_drive_and_isochoric_gas_nozzle_conduction(
+                        cx, epoch, &forces, drive, &mut gas, parcel, heat, controls,
+                        spec.exchange, &layers, nozzle.geometry, nozzle.controls(spec.gas_solve),
+                    )?;
+                    let electrical = [
+                        report.joule_heat_j,
+                        report.current_a,
+                        report.final_current_a,
+                        report.conductor_before.resistance_ohm(),
+                        report.conductor_after.resistance_ohm(),
+                    ];
+                    (report.coupled, electrical)
+                } else {
+                    (
+                        live.step_with_isochoric_gas_nozzle_conduction(
+                            cx, epoch, &forces, &mut gas, parcel, heat, controls,
+                            spec.exchange, &layers, nozzle.geometry, nozzle.controls(spec.gas_solve),
+                        )?,
+                        [0.0; 5],
+                    )
+                };
+                let sign = match report.direction {
+                    FiniteGasStringFlowDirection::IntoSurroundings => 1.0,
+                    FiniteGasStringFlowDirection::OutOfSurroundings => -1.0,
+                };
+                let flux = (
+                    sign * report.flow.mass_flow_kg_s,
+                    sign * report.transfer.transferred_mass_kg,
+                    sign * report.transfer.transferred_enthalpy_j,
+                    report.energy_tolerance_j,
+                );
+                (report.thermal, electrical, Some(flux))
+            } else if let Some(drive) = spec.drive {
                 let report = live.step_with_drive_and_isochoric_gas_conduction(
                     cx,
                     epoch,
@@ -324,21 +385,14 @@ fn simulate(
                     spec.exchange,
                     &layers,
                 )?;
-                let values = (
+                let electrical = [
                     report.joule_heat_j,
                     report.current_a,
                     report.final_current_a,
                     report.conductor_before.resistance_ohm(),
                     report.conductor_after.resistance_ohm(),
-                );
-                (
-                    report.coupled,
-                    values.0,
-                    values.1,
-                    values.2,
-                    values.3,
-                    values.4,
-                )
+                ];
+                (report.coupled, electrical, None)
             } else {
                 (
                     live.step_with_isochoric_gas_conduction(
@@ -351,13 +405,11 @@ fn simulate(
                         spec.exchange,
                         &layers,
                     )?,
-                    0.0,
-                    0.0,
-                    0.0,
-                    0.0,
-                    0.0,
+                    [0.0; 5],
+                    None,
                 )
             };
+        let [supplied_joule, current, final_current, resistance, final_resistance] = electrical;
         let coupled = &frame.coupled;
         let vibration = &coupled.string.vibration;
         material_heat += vibration.dissipation.material_heat_j;
@@ -369,15 +421,28 @@ fn simulate(
         work += vibration.acoustic.input_work_j;
         other_loss +=
             vibration.dissipation.authored_loss_j + vibration.dissipation.roundoff_residual_j;
-        allowance += coupled.energy_tolerance_j;
+        allowance += flux.as_ref().map_or(coupled.energy_tolerance_j, |flux| flux.3);
         reversible_heat += coupled.string.reversible_heat_j;
         axial_change += coupled.string.axial_free_energy_change_j;
         entropy_energy_change += coupled.string.mechanical_entropy_energy_change_j;
-        // Measure all three actual storage changes from their accepted states,
-        // independently of the step reports' claimed energy residuals.
-        let stored_change = live.mechanical_internal_energy_j()? - initial_mechanical_j
-            + solid_mass_kg * (live.thermal().specific_enthalpy_j_kg() - initial_enthalpy_j_kg)
-            + gas_mass_kg * (gas.state().specific_internal_energy_j_kg() - initial_gas_energy_j_kg);
+        // Measure accepted storage independently of the step reports. With
+        // transport, both extensive inventories replace the fixed-mass term.
+        let solid_and_motion = live.mechanical_internal_energy_j()? - initial_mechanical_j
+            + solid_mass_kg * (live.thermal().specific_enthalpy_j_kg() - initial_enthalpy_j_kg);
+        let (stored_change, gas_reference_scale) =
+            if let (Some(history), Some(parcel)) = (&gas_flow, &reservoir) {
+                let changes = history.energy_changes(&gas, parcel);
+                (
+                    solid_and_motion + changes[0] + changes[1],
+                    history.reference_energy_scale(&gas, parcel),
+                )
+            } else {
+                (
+                    solid_and_motion
+                        + gas_mass_kg * (gas.state().specific_internal_energy_j_kg() - initial_gas_energy_j_kg),
+                    0.0,
+                )
+            };
         let defect = stored_change + other_loss - work - joule_heat - solid_heat - gas_heat;
         let tolerance = allowance
             + 64.0
@@ -389,7 +454,8 @@ fn simulate(
                     + joule_heat.abs()
                     + solid_heat.abs()
                     + gas_heat.abs()
-                    + initial_mechanical_j.abs());
+                    + initial_mechanical_j.abs()
+                    + gas_reference_scale);
         if !defect.is_finite()
             || !tolerance.is_finite()
             || defect.abs() > tolerance
@@ -433,6 +499,9 @@ fn simulate(
         if record.iter().any(|value| !value.is_finite()) {
             return Err("nonfinite trajectory observation".into());
         }
+        if let (Some(history), Some(parcel), Some(flux)) = (&mut gas_flow, &reservoir, flux) {
+            history.record(&gas, parcel, flux.0, flux.1, flux.2)?;
+        }
         records.push(record);
         pressure_pa.push(pressure);
     }
@@ -442,7 +511,7 @@ fn simulate(
         pressure_pa,
         records,
         layer_temperatures: Vec::new(),
-        gas_flow: None,
+        gas_flow,
     })
 }
 
@@ -481,7 +550,7 @@ fn run(args: &[String]) -> Result<()> {
         if spec.bonded.is_some() {
             layered::simulate(&cx, &spec, &cards, gas, reservoir)
         } else {
-            simulate(&cx, &spec, &cards[0], gas)
+            simulate(&cx, &spec, &cards[0], gas, reservoir)
         }
     })?;
     let (wav, clips) = encode_pcm16_wav(
