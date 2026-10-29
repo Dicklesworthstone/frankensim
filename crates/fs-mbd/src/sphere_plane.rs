@@ -1,7 +1,8 @@
 //! Event-resolved isotropic sphere motion against one prescribed plane.
 //!
 //! The plane normal, velocity and applied centre force are constant. Ideal
-//! Coulomb friction has equal static/kinetic coefficients. Persistent contact
+//! Coulomb support admits distinct static and kinetic coefficients. The impact
+//! coefficient remains a separate instantaneous disk law. Persistent contact
 //! admits driven rolling and collinear sliding with exact slip-arrest events.
 //! Changing-direction sliding uses explicitly bounded implicit Coulomb steps,
 //! with first-order continuum convergence and timestep-resolved slip arrest.
@@ -41,7 +42,9 @@ pub struct SpherePlane {
     pub force_world: Vec3,
     /// Newton normal restitution in [0,1].
     pub restitution: f64,
-    /// Common nonnegative static and kinetic Coulomb coefficient.
+    /// Nonnegative instantaneous impact coefficient. The default advance also
+    /// uses it for static and kinetic support; the explicit support-law entry
+    /// point can provide distinct coefficients without changing impact physics.
     pub friction_coefficient: f64,
 }
 
@@ -259,6 +262,8 @@ struct Ledger {
 struct Engine {
     scene: SpherePlane,
     config: SpherePlaneConfig,
+    support_static_mu: f64,
+    support_kinetic_mu: f64,
     n: Vec3,
     tangent: [Vec3; 2],
     mass: f64,
@@ -275,7 +280,21 @@ struct Engine {
     velocity_scale: f64,
 }
 impl Engine {
-    fn new(scene: SpherePlane, config: SpherePlaneConfig) -> Result<Self, SpherePlaneError> {
+    fn new(
+        scene: SpherePlane,
+        config: SpherePlaneConfig,
+        support_friction: &FrictionLaw,
+    ) -> Result<Self, SpherePlaneError> {
+        support_friction
+            .validate()
+            .map_err(CoulombImpulseError::Constitutive)?;
+        let FrictionLaw::Coulomb {
+            static_mu,
+            kinetic_mu,
+        } = *support_friction
+        else {
+            return Err(CoulombImpulseError::UnsupportedLaw.into());
+        };
         scene.properties.validate()?;
         if !(scene.radius.is_finite() && scene.radius > 0.0)
             || !(scene.restitution.is_finite() && (0.0..=1.0).contains(&scene.restitution))
@@ -323,6 +342,8 @@ impl Engine {
         Ok(Self {
             scene,
             config,
+            support_static_mu: static_mu,
+            support_kinetic_mu: kinetic_mu,
             n,
             tangent: [t0, t1],
             mass,
@@ -397,6 +418,7 @@ impl Engine {
         &self,
         slip: [f64; 2],
         normal_impulse: f64,
+        coefficient: f64,
     ) -> Result<CoulombImpulseResult, SpherePlaneError> {
         Ok(solve_isotropic_coulomb_impulse(
             CoulombImpulseInput {
@@ -405,8 +427,8 @@ impl Engine {
                 inverse_tangent_mass: self.inverse_tangent_mass,
             },
             &FrictionLaw::Coulomb {
-                static_mu: self.scene.friction_coefficient,
-                kinetic_mu: self.scene.friction_coefficient,
+                static_mu: coefficient,
+                kinetic_mu: coefficient,
             },
         )?)
     }
@@ -441,7 +463,8 @@ impl Engine {
             inverse_effective_mass: self.mass.recip(),
             restitution: self.scene.restitution,
         })?;
-        let friction = self.friction(slip, normal.normal_impulse)?;
+        let friction =
+            self.friction(slip, normal.normal_impulse, self.scene.friction_coefficient)?;
         let tangent = self.tangent_vector(friction.tangent_impulse);
         let impulse = self.n.scale(normal.normal_impulse).add(tangent);
         let arm_body = body.pose().orientation().rotate_world_to_body(self.arm);
@@ -567,10 +590,14 @@ impl Engine {
         let slip_speed = finite(slip[0].hypot(slip[1]))?;
         let acceleration = self.acceleration_tangent;
         let acceleration_speed = finite(acceleration[0].hypot(acceleration[1]))?;
-        let capacity = finite(self.scene.friction_coefficient * normal_force)?;
+        // A transverse trajectory cannot reach zero in finite time against a
+        // drive at or above the kinetic limit, even if static traction could hold a
+        // separately supplied resting state. Do not promote a coarse endpoint
+        // projection into a fabricated capture in that hysteresis band.
+        let capacity = finite(self.support_kinetic_mu * normal_force)?;
         let can_hold = self.inverse_tangent_mass > 1.0
             && capacity > f64::MAX / self.inverse_tangent_mass
-            || acceleration_speed <= self.inverse_tangent_mass * capacity;
+            || acceleration_speed < self.inverse_tangent_mass * capacity;
         let mut h = remaining.min(self.config.max_sliding_step_s);
         let (friction, arrested) = loop {
             poll(cancelled)?;
@@ -583,7 +610,11 @@ impl Engine {
                 finite(acceleration[0].mul_add(h, slip[0]))?,
                 finite(acceleration[1].mul_add(h, slip[1]))?,
             ];
-            let friction = self.friction(free_slip, finite(normal_force * h)?)?;
+            let friction = self.friction(
+                free_slip,
+                finite(normal_force * h)?,
+                self.support_kinetic_mu,
+            )?;
             let after = friction.relative_tangent_velocity_after;
             let after_speed = finite(after[0].hypot(after[1]))?;
             let arrested = after_speed <= 4096.0 * f64::EPSILON * self.velocity_scale;
@@ -690,6 +721,42 @@ pub fn advance_sphere_plane(
     state: SpherePlaneState,
     duration_s: f64,
     config: SpherePlaneConfig,
+    cancelled: impl FnMut() -> bool,
+) -> Result<SpherePlaneAdvance, SpherePlaneError> {
+    advance_sphere_plane_with_support_friction(
+        scene,
+        state,
+        &FrictionLaw::Coulomb {
+            static_mu: scene.friction_coefficient,
+            kinetic_mu: scene.friction_coefficient,
+        },
+        duration_s,
+        config,
+        cancelled,
+    )
+}
+
+/// Advance with distinct static and kinetic Coulomb support coefficients.
+///
+/// The original constitutive owner validates `0 <= kinetic_mu <= static_mu`.
+/// Static traction is used only for a resolved zero-slip rolling state; moving
+/// contact uses the kinetic coefficient until the actual slip-arrest event.
+/// A collinear drive then either re-establishes rolling inside the static limit
+/// or starts reverse sliding with the kinetic limit. This retains breakaway
+/// hysteresis without adding velocity smoothing or using a static impulse disk
+/// to arrest an already sliding contact prematurely.
+///
+/// `scene.friction_coefficient` still owns instantaneous impacts, independently
+/// of this support law. Velocity-dependent laws are refused: their force-driven
+/// time evolution needs a different constitutive solve. All geometry, work,
+/// cancellation and curved-trajectory refinement limits of the default entry
+/// point remain in force.
+pub fn advance_sphere_plane_with_support_friction(
+    scene: &SpherePlane,
+    state: SpherePlaneState,
+    support_friction: &FrictionLaw,
+    duration_s: f64,
+    config: SpherePlaneConfig,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<SpherePlaneAdvance, SpherePlaneError> {
     poll(&mut cancelled)?;
@@ -702,7 +769,7 @@ pub fn advance_sphere_plane(
     if end_time == state.time_s {
         return Err(SpherePlaneError::NoProgress);
     }
-    let mut engine = Engine::new(*scene, config)?;
+    let mut engine = Engine::new(*scene, config, support_friction)?;
     engine.velocity_scale = state.velocity_scale;
     let initial_energy = state.body.kinetic_energy(scene.properties)?;
     let mut body = state.body;
@@ -754,10 +821,22 @@ pub fn advance_sphere_plane(
             let normal_force = finite(-scene.force_world.dot(engine.n))?;
             let rolling = slip_speed == 0.0
                 || (mode == SpherePlaneMode::Rolling && slip_speed <= velocity_allowance);
-            let friction_force = finite(scene.friction_coefficient * normal_force)?;
             let acceleration = engine.acceleration_tangent;
             let acceleration_speed = finite(acceleration[0].hypot(acceleration[1]))?;
-            if friction_force == 0.0 {
+            let static_capacity = finite(engine.support_static_mu * normal_force)?;
+            // Compare in acceleration units without overflowing a large finite
+            // traction capacity. Only the finite demand is used for rolling.
+            let holds_rolling = rolling
+                && (engine.inverse_tangent_mass > 1.0
+                    && static_capacity > f64::MAX / engine.inverse_tangent_mass
+                    || acceleration_speed <= engine.inverse_tangent_mass * static_capacity);
+            let coefficient = if holds_rolling {
+                engine.support_static_mu
+            } else {
+                engine.support_kinetic_mu
+            };
+            let friction_force = finite(coefficient * normal_force)?;
+            if static_capacity == 0.0 {
                 // No traction means no restriction on the direction of driving.
                 // Integrate the actual force, even when starting with zero slip.
                 if rolling && acceleration_speed > 0.0 {
@@ -779,12 +858,6 @@ pub fn advance_sphere_plane(
                 elapsed = duration_s;
                 continue;
             }
-            // Compare in acceleration units without overflowing a large finite
-            // traction capacity. Only the finite demand is used for rolling.
-            let holds_rolling = rolling
-                && (engine.inverse_tangent_mass > 1.0
-                    && friction_force > f64::MAX / engine.inverse_tangent_mass
-                    || acceleration_speed <= engine.inverse_tangent_mass * friction_force);
             let mut stopping_time = f64::INFINITY;
             let mut transverse_acceleration = 0.0;
             if !holds_rolling {
@@ -867,7 +940,7 @@ pub fn advance_sphere_plane(
                 finite(acceleration[0].mul_add(h, admitted_slip[0]))?,
                 finite(acceleration[1].mul_add(h, admitted_slip[1]))?,
             ];
-            let friction = engine.friction(free_slip, finite(normal_force * h)?)?;
+            let friction = engine.friction(free_slip, finite(normal_force * h)?, coefficient)?;
             let tangent_force = engine
                 .tangent_vector(friction.tangent_impulse)
                 .scale(h.recip());

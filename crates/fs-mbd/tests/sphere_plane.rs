@@ -9,6 +9,9 @@ use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 #[path = "sphere_plane/curved.rs"]
 mod curved;
 
+#[path = "sphere_plane/support_friction.rs"]
+mod support_friction;
+
 const MASS: f64 = 2.0;
 const RADIUS: f64 = 0.5;
 const INERTIA: f64 = 0.2;
