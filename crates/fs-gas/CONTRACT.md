@@ -576,3 +576,51 @@ Estimated continuum operator: the parabolic estimate is not a spectral or
 fully discrete entropy/invariant-domain proof. Soret/Dufour effects, nonideal
 phases, Knudsen transport and variable-area viscous stresses remain separate
 closures.
+
+
+## Reacting Navier-Stokes composition with original-source molecular transport
+
+`ReactingEuler1d::step_with_dissipation` composes exact-duration molecular and
+chemistry half steps around conservative advection:
+`D(dt/2), C(dt/2), A(dt), C(dt/2), D(dt/2)`. Each D stage may subcycle its
+parabolic update. Only A advances the clock. If heat release changes acoustic
+stability and A accepts a shorter duration, all five stages restart from the
+accepted field at that duration. Cancellation, source refusal and exhausted
+retries cannot publish a partly reacted or diffused field.
+
+The final D endpoint is checked through the original caloric owner against
+the reactor's declared temperature interval before publication. Viscous
+heating or species enthalpy transport may otherwise leave a narrower chemistry
+interval even while the molecular/flow source still admits the state; this
+condition triggers bounded complete-step halving without temperature clipping.
+
+The returned optional `SplitDissipationReport` retains both accepted molecular
+halves. Whole-step species, momentum, mass and physical total-energy residuals
+include both molecular boundary transfers, advection/area terms, and chemical
+species/reference-energy changes. No extra chemical or viscous heat source
+is added to conservative total energy. The existing `step` method retains
+the chemistry/advection/chemistry path with no molecular stages.
+
+Five coupled native tests pass: analytic advection/diffusion/isomerization with
+mesh refinement; heat-release-driven duration restarts; closed-wall molecular
+traction and zero wall energy work; late cancellation and reused workspaces;
+and viscous heating against a narrower chemistry interval, including atomic
+refusal and successful shorter replay. The analytic concentration L1 errors
+are 6.60993650e-5 / 2.03342713e-5 at 40/80 cells. The complete isolated native
+source-linked suites pass 132 thermochemistry and 79 gas unit tests; these
+results are scoped to those owner builds, not the full runtime dependency graph.
+
+`cargo run -p fs-gas --features experimental-euler --example reacting_oxygen -- 40 molecular`
+enables the complete original-source path in the O/O2 example. Calorics,
+reaction and Lennard-Jones parameters retain Cantera v3.2.0 GRI3 attribution
+and original blob 9a62004ec17bbec8ac11e97785932d426dd58610. At 40 cells over
+1 ms the native run accepted 113 coupled steps / 226 molecular substeps,
+with mass residual -4.336809e-19 kg, physical total-energy residual
+-6.274981e-13 J, and zero reported momentum residual. Atomic oxygen mass
+falls from 4.237578e-5 to 3.380238e-5 kg. These are numerical consistency
+checks of an isolated reaction, not an experimentally validated air mechanism.
+
+The transport law's dilute-neutral-gas, Eucken-conductivity, explicit bulk
+viscosity and constant-area restrictions remain in force. This symmetric
+composition does not promote the adaptive first-order chemistry base to a
+proved second-order method or establish a fully discrete entropy inequality.

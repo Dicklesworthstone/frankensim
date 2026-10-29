@@ -1,4 +1,6 @@
 use super::*;
+
+mod molecular;
 use crate::chemistry::advance_adiabatic;
 use crate::multicomponent::tests::{bank, source};
 use crate::multicomponent::{Boundaries, CaloricDomain, MixtureGas};

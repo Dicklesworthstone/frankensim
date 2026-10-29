@@ -2,10 +2,16 @@
 //!
 //! Chemistry advances each physical cell at fixed volume, momentum and total
 //! chemical energy. A symmetric chemistry/transport/chemistry composition uses
-//! the actual accepted transport duration. The chemistry solver's implicit
+//! the actual accepted transport duration. Optional molecular half steps enclose
+//! that composition, and their final state must retain the chemistry interval.
+//! The chemistry solver's implicit
 //! first-order base still limits temporal accuracy; this composition alone is
 //! not a second-order or entropy-stability certificate.
 
+use super::dissipation::{
+    ConstantTransport, DissipationControl, DissipationError, DissipationOperator,
+    DissipationReport, TransportLaw,
+};
 use super::{
     Error as FlowError, MAX_COMPONENTS, MAX_SPECIES, MixtureEuler1d, StepControl,
     StepReport as TransportStepReport, Totals, allocated, positive, sum,
@@ -71,6 +77,15 @@ impl Default for ChemistryReport {
     }
 }
 
+/// Molecular transport on both sides of the chemistry/flow composition.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SplitDissipationReport {
+    /// Complete molecular half step before chemistry and advection.
+    pub first: DissipationReport,
+    /// Complete molecular half step after chemistry and advection.
+    pub second: DissipationReport,
+}
+
 /// One published reacting-flow step, with actual source/boundary balances.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ReactiveStepReport {
@@ -82,6 +97,8 @@ pub struct ReactiveStepReport {
     pub transport: TransportStepReport,
     /// Accepted chemistry work and changes.
     pub chemistry: ChemistryReport,
+    /// Molecular species, heat and momentum transport when explicitly enabled.
+    pub dissipation: Option<SplitDissipationReport>,
     /// Original complete field.
     pub before: Totals,
     /// Final complete field.
@@ -102,6 +119,8 @@ pub enum ReactiveError {
     Invalid(&'static str),
     /// Conservative transport or caloric reconstruction refused.
     Flow(FlowError),
+    /// Molecular transport refused before the complete step could publish.
+    Dissipation(DissipationError),
     /// One original-source finite-rate cell solve refused.
     Chemistry {
         /// Zero-based physical cell index.
@@ -139,6 +158,14 @@ impl From<FlowError> for ReactiveError {
         match value {
             FlowError::Cancelled => Self::Cancelled,
             other => Self::Flow(other),
+        }
+    }
+}
+impl From<DissipationError> for ReactiveError {
+    fn from(value: DissipationError) -> Self {
+        match value {
+            DissipationError::Cancelled => Self::Cancelled,
+            other => Self::Dissipation(other),
         }
     }
 }
@@ -242,6 +269,47 @@ impl ReactingEuler1d {
         &mut self,
         maximum_duration: Time,
         controls: ReactiveStepControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveStepReport, ReactiveError> {
+        self.step_impl::<ConstantTransport>(
+            maximum_duration,
+            controls,
+            None,
+            DissipationControl::default(),
+            cancelled,
+        )
+    }
+
+    /// Advance molecular diffusion, viscosity and heat conduction together with
+    /// conservative gas transport and finite-rate chemistry.
+    ///
+    /// The symmetric composition is D(dt/2), C(dt/2), A(dt), C(dt/2), D(dt/2).
+    /// Each molecular half step may take bounded parabolic substeps but must
+    /// complete its exact duration. A shorter acoustic step restarts all five
+    /// stages. Only the accepted advection step advances the physical clock.
+    pub fn step_with_dissipation<L: TransportLaw>(
+        &mut self,
+        operator: &mut DissipationOperator<L>,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: DissipationControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveStepReport, ReactiveError> {
+        self.step_impl(
+            maximum_duration,
+            controls,
+            Some(operator),
+            dissipation_controls,
+            cancelled,
+        )
+    }
+
+    fn step_impl<L: TransportLaw>(
+        &mut self,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        mut operator: Option<&mut DissipationOperator<L>>,
+        dissipation_controls: DissipationControl,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ReactiveStepReport, ReactiveError> {
         poll(&mut cancelled)?;
@@ -283,6 +351,15 @@ impl ReactingEuler1d {
             self.trial.copy_physical_from(&self.accepted)?;
             let mut report = ChemistryReport::default();
             let attempt = (|| {
+                let first = match operator.as_deref_mut() {
+                    Some(operator) => Some(operator.advance_for(
+                        &mut self.trial,
+                        Time::new(0.5 * duration),
+                        dissipation_controls,
+                        &mut cancelled,
+                    )?),
+                    None => None,
+                };
                 react_cells(
                     &mut self.trial,
                     &mut self.reactor,
@@ -295,7 +372,7 @@ impl ReactingEuler1d {
                     self.trial
                         .step(Time::new(duration), controls.transport, &mut cancelled)?;
                 if transport.elapsed.value() != duration {
-                    return Ok((transport, false));
+                    return Ok((transport, false, None));
                 }
                 react_cells(
                     &mut self.trial,
@@ -305,43 +382,91 @@ impl ReactingEuler1d {
                     &mut report,
                     &mut cancelled,
                 )?;
-                Ok::<_, ReactiveError>((transport, true))
+                let second = match operator.as_deref_mut() {
+                    Some(operator) => Some(operator.advance_for(
+                        &mut self.trial,
+                        Time::new(0.5 * duration),
+                        dissipation_controls,
+                        &mut cancelled,
+                    )?),
+                    None => None,
+                };
+                if second.is_some() {
+                    // The molecular source bank can admit a wider temperature
+                    // path than the reactor. In particular, viscous heating
+                    // after the last chemistry solve can leave that path.
+                    // Reject this whole attempt before publishing such a state.
+                    let chemistry = self.reactor.controls();
+                    for i in 0..self.trial.cell_count() {
+                        poll(&mut cancelled)?;
+                        let primitive = self.trial.gas().primitive(
+                            self.trial.cell(i).expect("admitted cell index"),
+                            &mut cancelled,
+                        )?;
+                        if !(chemistry.minimum_temperature_k..=chemistry.maximum_temperature_k)
+                            .contains(&primitive.temperature)
+                        {
+                            return Err(ReactiveError::Invalid(
+                                "final molecular state is outside chemistry interval",
+                            ));
+                        }
+                    }
+                }
+                let dissipation = first
+                    .zip(second)
+                    .map(|(first, second)| SplitDissipationReport { first, second });
+                Ok::<_, ReactiveError>((transport, true, dissipation))
             })();
             match attempt {
-                Ok((transport, false)) => {
+                Ok((transport, false, _)) => {
                     duration = transport.elapsed.value();
                     last = ReactiveError::Invalid("transport shortened the coupled duration");
                 }
-                Ok((transport, true)) => {
+                Ok((transport, true, dissipation)) => {
                     let after = self.trial.totals();
                     let n = self.trial.gas.species_count();
                     let mut residual = [0.0; MAX_COMPONENTS];
+                    let mut molecular_boundary = [0.0; MAX_COMPONENTS];
+                    if let Some(d) = dissipation {
+                        for k in 0..n + 2 {
+                            molecular_boundary[k] =
+                                d.first.boundary_change.get(k) + d.second.boundary_change.get(k);
+                        }
+                    }
                     for k in 0..n {
                         residual[k] = after.species_masses[k]
                             - before.species_masses[k]
                             - transport.boundary_change.species_masses[k]
+                            - molecular_boundary[k]
                             - report.species_change_kg[k];
                     }
                     residual[n] = after.momentum
                         - before.momentum
                         - transport.boundary_change.momentum
+                        - molecular_boundary[n]
                         - transport.area_momentum_impulse;
                     residual[n + 1] = after.energy
                         - before.energy
                         - transport.boundary_change.energy
+                        - molecular_boundary[n + 1]
                         - report.referenced_energy_change_j;
                     let mass_residual_kg = sum((0..n).map(|k| {
                         after.species_masses[k]
                             - before.species_masses[k]
                             - transport.boundary_change.species_masses[k]
+                            - molecular_boundary[k]
                     }));
                     let absolute_energy_residual_j = sum(core::iter::once(
-                        after.energy - before.energy - transport.boundary_change.energy,
+                        after.energy
+                            - before.energy
+                            - transport.boundary_change.energy
+                            - molecular_boundary[n + 1],
                     )
                     .chain((0..n).map(|k| {
                         (after.species_masses[k]
                             - before.species_masses[k]
-                            - transport.boundary_change.species_masses[k])
+                            - transport.boundary_change.species_masses[k]
+                            - molecular_boundary[k])
                             * self.trial.gas.energy_references()[k]
                     })));
                     if !residual[..n + 2].iter().all(|x| x.is_finite())
@@ -360,6 +485,7 @@ impl ReactingEuler1d {
                         coupling_retries: retry,
                         transport,
                         chemistry: report,
+                        dissipation,
                         before,
                         after,
                         conservation_residual: Totals::from_values(&residual[..n + 2], n),
