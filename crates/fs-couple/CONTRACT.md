@@ -4874,6 +4874,27 @@ basis and measured violin/cello/bass fidelity remain separate requirements.
 
 The film is frozen, incompressible, Newtonian, no-slip and quasistatic. Caller-declared thin-gap, pressure and applicable inertia/cavitation/rarefaction restrictions remain; no continuous viscosity-temperature feedback, added fluid inertia, phase-changing geometry or implicit wall/fluid heat partition is inferred. Compressible-film free-energy loss and unrelated mechanical/acoustic losses are not relabelled finite heat. The source binding remains inspectable while mechanics owns its immutable compiled pressure operator. Regression sources cover data-only liquid viscosity/caloric swaps, analytic pressure/work, unchanged mechanical stepping, finite temperature and network conduction, and atomic refusals. Native execution was unavailable in this session; the independent numerical reduction is not a Rust test pass.
 
+### Material relaxation through finite heat and transport
+
+`HeatedImpactSystem::new_with_losses` also binds explicit `RelaxationHeatRoute`
+destinations for the original Maxwell arms, including arms projected from shell
+bending spectra. Each selected arm deposits `dt * e_z * (e_z / tau)` from the
+successful `StepWorkspace` discrete effort. That effort retains the complete
+nonlinear Gonzalez correction and is unavailable after a failed numerical
+attempt. Endpoint power, total energy deficits, and stored branch energy are
+not substituted for the arm's irreversible work.
+
+Branches are routed once in canonical order into existing `CaloricReservoir`
+stores; unselected losses remain outside that thermal boundary. The same route
+feeds uniform transport and the original subcycled enthalpy network. Material
+history, motion, heat, and accepted time publish together, with no second
+mechanical loss debit. Caloric-domain or solver refusal retains all accepted
+states. Constitutive coefficients stay frozen over this coupling: it does not
+infer temperature-dependent modulus, relaxation-time feedback, spatial heat
+allocation, or measured material validity. `material_relaxation_heat` exercises
+an independent nonlinear polynomial-work oracle, selective routing, retained
+history, physical conduction, common clocks, and transactional refusal.
+
 ### Source-driven thermoelectric transport
 
 `circuit_enthalpy::thermoelectric::step_candidate` composes the existing prepared

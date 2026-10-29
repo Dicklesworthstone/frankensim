@@ -201,14 +201,15 @@ impl PreparedImpactSystem {
     /// The same input, budget, membrane-slope, felt-densification and energy
     /// refusals as the reference, plus typed prepared-solver/cancellation errors.
     pub fn step(&mut self, external: &[f64], gate: &CancelGate) -> Result<ImpactFrame, ImpactError> {
-        self.step_checked(external, gate, |_,_,_,_|Ok(()))
+        self.step_checked(external, gate, |_,_,_,_,_|Ok(()))
     }
 
     // Stage dependent physical states before our common acceptance gate.
-    // The callback receives the actual generalized port velocity used by fs-phs,
-    // including its Gonzalez correction. It must not mutate accepted histories.
+    // The callback receives the actual generalized port velocity AND complete
+    // discrete effort used by fs-phs, including the Gonzalez correction. It
+    // must not mutate accepted histories.
     pub(super) fn step_checked(&mut self, external: &[f64], gate: &CancelGate,
-        check: impl FnOnce(&ImpactSystem, &[f64], &[f64], PreparedStepRecord) -> Result<(),ImpactError>,
+        check: impl FnOnce(&ImpactSystem, &[f64], &[f64], &[f64], PreparedStepRecord) -> Result<(),ImpactError>,
     ) -> Result<ImpactFrame, ImpactError> {
         let inner = &mut self.inner;
         if gate.is_requested() { return Err(ImpactError::Cancelled); }
@@ -249,7 +250,9 @@ impl PreparedImpactSystem {
             PreparedStepError::Cancelled => ImpactError::Cancelled,
             PreparedStepError::Solver(error) => ImpactError::PreparedSolve(error),
         })?;
-        check(inner, &self.candidate, &self.output, ledger)?;
+        let effort = self.workspace.last_step_discrete_effort()
+            .ok_or_else(|| invalid("successful impact step is missing its discrete effort"))?;
+        check(inner, &self.candidate, &self.output, effort, ledger)?;
         inner.accept_step(&mut self.candidate, &mut self.histories, before, ledger, gate)
     }
 }

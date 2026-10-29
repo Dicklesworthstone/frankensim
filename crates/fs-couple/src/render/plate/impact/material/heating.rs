@@ -1,8 +1,8 @@
 //! Selected physical dissipation -> finite material enthalpy on one time step.
 //!
 //! Contact force/storage and stepping remain with fs-dcontact/fs-phs. Thermal
-//! charts remain with fs-material. Selected contact and incompressible film
-//! losses use their original owners at the actual discrete-gradient effort.
+//! charts remain with fs-material. Selected contact, incompressible film and
+//! Maxwell-arm losses use their original owners at the actual discrete-gradient effort.
 //! Modal damping, felt crush, radiation and compressible-film free-energy loss
 //! are not relabelled heat. No dissipation is charged to mechanics twice.
 //! The mechanical constitutive state is frozen: this is one-way thermalization,
@@ -110,6 +110,22 @@ pub struct SqueezeFilmHeatRoute {
 #[derive(Clone, Copy)]
 struct FilmRoute { film: usize, a: usize, b: usize, fraction: f64 }
 
+/// Destination of one original Maxwell arm's irreversible material work.
+/// Branch indices follow `ImpactSystem::with_relaxation_branches` insertion
+/// order, including arms compiled from a material shell spectrum. A branch's
+/// heat belongs to one explicitly modeled caloric specimen; neither a material
+/// name nor a mechanical mode determines that destination. Several arms may
+/// heat the same store, and unselected arms remain outside the thermal boundary.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RelaxationHeatRoute {
+    /// Existing scalar material-memory branch, not a mechanical mode index.
+    pub branch: usize,
+    /// Stable key of the finite thermal destination.
+    pub to: String,
+}
+#[derive(Clone, Copy)]
+struct MemoryRoute { branch: usize, to: usize }
+
 /// Combined accepted mechanics and thermal accounting. Mechanical dissipation
 /// is still reported by its original owner; deposited heat must NOT be counted
 /// as an additional loss from the combined system.
@@ -117,7 +133,7 @@ struct FilmRoute { film: usize, a: usize, b: usize, fraction: f64 }
 pub struct HeatedImpactFrame {
     /// Unmodified accepted mechanical result, including every loss channel.
     pub mechanical: ImpactFrame,
-    /// Selected contact and viscous-film loss deposited this step [J].
+    /// Selected contact, viscous-film and material-memory loss this step [J].
     pub deposited_heat_j: f64,
     /// Actual sum of mass times chart enthalpy changes this step [J].
     pub thermal_energy_change_j: f64,
@@ -138,6 +154,7 @@ pub struct HeatedImpactSystem<'a> {
     stores: Vec<CaloricReservoir<'a>>,
     routes: Vec<Route>,
     film_routes: Vec<FilmRoute>,
+    memory_routes: Vec<MemoryRoute>,
     candidate: Vec<EquilibriumPhaseState>,
     next_received: Vec<f64>,
     next_correction: Vec<f64>,
@@ -167,10 +184,31 @@ impl<'a> HeatedImpactSystem<'a> {
         stores: Vec<CaloricReservoir<'a>>, routes: Vec<ContactHeatRoute>,
         film_routes: Vec<SqueezeFilmHeatRoute>, heat_tolerance_j: f64,
     ) -> Result<Self, ImpactError> {
-        if stores.is_empty() || stores.len()>64 || (routes.is_empty() && film_routes.is_empty())
-            || routes.len()>32 || film_routes.len()>4
+        Self::new_with_losses(mechanics, stores, routes, film_routes, Vec::new(), heat_tolerance_j)
+    }
+
+    /// Route selected physical loss channels through the same accepted step.
+    ///
+    /// Material-memory heat uses `dt * (1/tau) * discrete_effort_z^2` from the
+    /// original Maxwell resistance and the successful time owner's COMPLETE
+    /// discrete gradient. It includes the nonlinear Gonzalez correction; it is
+    /// neither endpoint power nor a mechanical energy-deficit estimate. The
+    /// arm's stored energy stays in mechanics and is never deposited as heat.
+    ///
+    /// A memory-only system is supported. Each arm is routed at most once.
+    /// This thermalizes an admitted constitutive law without changing its
+    /// coefficients: temperature-dependent modulus/relaxation feedback and
+    /// spatial heat allocation require their own explicit physical binding.
+    pub fn new_with_losses(mechanics: PreparedImpactSystem,
+        stores: Vec<CaloricReservoir<'a>>, routes: Vec<ContactHeatRoute>,
+        film_routes: Vec<SqueezeFilmHeatRoute>, memory_routes: Vec<RelaxationHeatRoute>,
+        heat_tolerance_j: f64,
+    ) -> Result<Self, ImpactError> {
+        if stores.is_empty() || stores.len()>64
+            || (routes.is_empty() && film_routes.is_empty() && memory_routes.is_empty())
+            || routes.len()>32 || film_routes.len()>4 || memory_routes.len()>256
             || !positive(heat_tolerance_j) {
-            return Err(invalid("mechanical heating needs 1..64 stores, up to 32 contacts and four films, at least one route and a positive joule allowance"));
+            return Err(invalid("mechanical heating needs 1..64 stores, up to 32 contacts, four films and 256 material arms, at least one route and a positive joule allowance"));
         }
         for (i,s) in stores.iter().enumerate() {
             if stores[..i].iter().any(|old|old.key==s.key) {
@@ -205,11 +243,22 @@ impl<'a> HeatedImpactSystem<'a> {
             compiled_films.push(FilmRoute {film:route.film,a,b,fraction:route.fraction_to_a});
         }
         compiled_films.sort_by_key(|r|r.film);
+        let mut compiled_memory: Vec<MemoryRoute> = Vec::with_capacity(memory_routes.len());
+        for route in memory_routes {
+            if route.branch >= mechanics.relaxation_branch_count()
+                || compiled_memory.iter().any(|r|r.branch == route.branch) {
+                return Err(invalid("material heat must name an existing relaxation arm exactly once"));
+            }
+            let to=stores.iter().position(|s|s.key==route.to)
+                .ok_or_else(||invalid("unknown material-memory heat store"))?;
+            compiled_memory.push(MemoryRoute {branch:route.branch,to});
+        }
+        compiled_memory.sort_by_key(|r|r.branch);
         let candidate=stores.iter().map(|s|s.state).collect();
         let next_received=stores.iter().map(|s|s.received_heat_j).collect();
         let next_correction=stores.iter().map(|s|s.received_correction_j).collect();
         let heat=vec![0.0;stores.len()];
-        Ok(Self {mechanics,stores,routes:compiled,film_routes:compiled_films,
+        Ok(Self {mechanics,stores,routes:compiled,film_routes:compiled_films,memory_routes:compiled_memory,
             candidate,next_received,next_correction,heat,heat_tolerance_j})
     }
     /// Read-only mechanics: callers cannot advance it behind the thermal clock.
@@ -227,14 +276,14 @@ impl<'a> HeatedImpactSystem<'a> {
         (self.mechanics,self.stores)
     }
     /// Advance motion and thermal storage exactly once, or neither. Heat uses
-    /// the original contact/film loss at the solver midpoint and its ACTUAL port
-    /// velocity (Gonzalez effort), not endpoint power times dt. Thermal limits
+    /// the original selected loss at the solver midpoint and its ACTUAL
+    /// discrete effort, not endpoint power times dt. Thermal limits
     /// and rounding are checked before mechanical history/state publication.
     pub fn step(&mut self, forces: &[f64], gate: &CancelGate) -> Result<HeatedImpactFrame, ImpactError> {
-        let Self {mechanics,stores,routes,film_routes,candidate,next_received,next_correction,heat,heat_tolerance_j}=self;
+        let Self {mechanics,stores,routes,film_routes,memory_routes,candidate,next_received,next_correction,heat,heat_tolerance_j}=self;
         let mut deposited=0.0; let mut thermal_change=0.0;
-        let mechanical=mechanics.step_checked(forces,gate,|system,next,velocity,record| {
-            deposited=stage_heat(system,next,velocity,record,routes,film_routes,heat)?;
+        let mechanical=mechanics.step_checked(forces,gate,|system,next,velocity,effort,record| {
+            deposited=stage_heat(system,next,velocity,effort,record,routes,film_routes,memory_routes,heat)?;
             thermal_change=0.0;
             for (i,store) in stores.iter().enumerate() {
                 if gate.is_requested() {return Err(ImpactError::Cancelled);}
@@ -279,8 +328,8 @@ impl<'a> HeatedImpactSystem<'a> {
 fn positive(v:f64)->bool {v.is_finite() && v>0.0}
 fn key_valid(key:&str)->bool {!key.trim().is_empty() && key.len()<=128}
 
-fn stage_heat(system:&ImpactSystem, next:&[f64], velocity:&[f64], record:PreparedStepRecord,
-    routes:&[Route], film_routes:&[FilmRoute], heat:&mut[f64]) -> Result<f64,ImpactError> {
+fn stage_heat(system:&ImpactSystem, next:&[f64], velocity:&[f64], effort:&[f64], record:PreparedStepRecord,
+    routes:&[Route], film_routes:&[FilmRoute], memory_routes:&[MemoryRoute], heat:&mut[f64]) -> Result<f64,ImpactError> {
     let n=system.modes;
     let mut midpoint=[0.0;2*MAX_IMPACT_MODES];let mut power=[0.0;32];
     for i in 0..2*n {midpoint[i]=0.5*(system.x[i]+next[i]);}
@@ -313,6 +362,18 @@ fn stage_heat(system:&ImpactSystem, next:&[f64], velocity:&[f64], record:Prepare
             }
             let a=q*r.fraction;
             heat[r.a]+=a;heat[r.b]+=q-a;deposited+=q;
+        }
+    }
+    if !memory_routes.is_empty() {
+        let memory=system.relaxation.as_ref()
+            .ok_or_else(||invalid("material heat requires the original relaxation owner"))?;
+        for r in memory_routes {
+            let power=memory.branch_dissipated_power(effort,r.branch)?;
+            let q=system.config.dt_s*power;
+            if !q.is_finite() || q<0.0 || (power>0.0 && q==0.0) {
+                return Err(invalid("material relaxation heat is unrepresentable"));
+            }
+            heat[r.to]+=q;deposited+=q;
         }
     }
     let roundoff=256.0*f64::EPSILON*(record.dissipated.abs()+deposited.abs());

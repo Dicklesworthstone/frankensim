@@ -101,6 +101,7 @@ pub struct StepWorkspace {
     trial: Vec<f64>,
     midpoint: Vec<f64>,
     effort: Vec<f64>,
+    effort_valid: bool,
     nonlinear_loss: Vec<f64>,
     nonlinear_effort: Vec<f64>,
     residual: Vec<f64>,
@@ -173,7 +174,7 @@ impl StepWorkspace {
             n, m, max_iterations: NEWTON_MAX, solve_budget: None,
             backtracking_halvings: 0, backtracking_work: (0, 0),
             x: zeroed(n)?, best: zeroed(n)?, trial: zeroed(n)?,
-            midpoint: zeroed(n)?, effort: zeroed(n)?, residual: zeroed(n)?,
+            midpoint: zeroed(n)?, effort: zeroed(n)?, effort_valid: false, residual: zeroed(n)?,
             nonlinear_loss: zeroed(n)?, nonlinear_effort: zeroed(n)?,
             plus: zeroed(n)?, minus: zeroed(n)?, forcing: zeroed(n)?,
             delta: zeroed(n)?, jacobian: zeroed(square)?, output: zeroed(m)?,
@@ -221,6 +222,23 @@ impl StepWorkspace {
     /// work, residuals, LU and finite-difference probes; saturates at usize::MAX.
     /// This is a work count, not an elapsed-time or real-time qualification.
     pub fn jacobian_flow_product_count(&self) -> usize { self.jacobian_flow_products }
+
+    /// Complete Gonzalez effort used by the most recent successful step.
+    ///
+    /// This is the same vector used in the state equation, port output and
+    /// dissipation ledger, including the nonlinear storage correction. It is
+    /// neither the endpoint gradient nor merely the midpoint gradient. Physical
+    /// consumers can attribute existing resistance work without reconstructing
+    /// another force law or allocating another gradient buffer.
+    ///
+    /// Returns None before the first success and after ANY unsuccessful step
+    /// attempt, including cancellation or invalid input. The borrowed view adds
+    /// no allocation and remains valid only until another mutable workspace call.
+    /// Numerical success does not replace the consumer's physical acceptance gate.
+    #[must_use]
+    pub fn last_step_discrete_effort(&self) -> Option<&[f64]> {
+        self.effort_valid.then_some(self.effort.as_slice())
+    }
 
     /// Set a bounded Newton-update budget (at most the reference path's budget).
     /// Zero permits only a state already satisfying the step equation.
@@ -386,6 +404,7 @@ impl StepWorkspace {
         dissipation: Option<Dissipation<'_>>,
         mut cancelled: F,
     ) -> Result<PreparedStepRecord, PreparedStepError> {
+        self.effort_valid = false;
         self.linear_solves=(0, 0);
         self.backtracking_work=(0, 0);
         self.jacobian_flow_products=0;
@@ -536,8 +555,11 @@ impl StepWorkspace {
             for row in 0..n { self.output[port] += sys.g[row * self.m + port] * self.effort[row]; }
         }
         let supplied = dt * u.iter().zip(&self.output).map(|(a, b)| a * b).sum::<f64>();
+        // The storage-difference owner may overwrite its gradient scratch with
+        // grad H(midpoint). Keep the accepted Gonzalez effort intact for actual
+        // constitutive work attribution; FD probe scratch is no longer needed.
         let delta_h = crate::storage_energy_change(sys.storage.as_ref(), x0, &self.x,
-            &mut self.midpoint, &mut self.effort);
+            &mut self.midpoint, &mut self.plus);
         norm(&self.output)?;
         norm(&[delta_h, dissipated, supplied, solver_residual])?;
         let record = PreparedStepRecord {
@@ -551,6 +573,7 @@ impl StepWorkspace {
         poll()?;
         x_next.copy_from_slice(&self.x);
         y.copy_from_slice(&self.output);
+        self.effort_valid = true;
         Ok(record)
     }
 }

@@ -1,4 +1,4 @@
-//! Contact heat is an internal source in the existing uniform thermal carrier.
+//! Selected physical loss is an internal source in the existing thermal carrier.
 //! A transport owner proposes all stores before either physical owner commits.
 use super::*;
 use fs_contact::normal_patch::PointNormalPatchReceipt;
@@ -132,12 +132,12 @@ impl<'a> HeatedImpactSystem<'a> {
         mut transport:impl FnMut(ImpactThermalTrial<'_>)
             -> Result<CoupledThermalStep<R>,ImpactError>,
     ) -> Result<TransportedImpactFrame<R>,ImpactError> {
-        let Self {mechanics,stores,routes,film_routes,heat,heat_tolerance_j,..}=self;
+        let Self {mechanics,stores,routes,film_routes,memory_routes,heat,heat_tolerance_j,..}=self;
         let mut proposals=Vec::new();
         let mut inventories=Vec::with_capacity(stores.len());
         let (mut deposited,mut change,mut boundary)=(0.0,0.0,0.0);
-        let mechanical=mechanics.step_checked(forces,gate,|system,next,velocity,record| {
-            deposited=stage_heat(system,next,velocity,record,routes,film_routes,heat)?;
+        let mechanical=mechanics.step_checked(forces,gate,|system,next,velocity,effort,record| {
+            deposited=stage_heat(system,next,velocity,effort,record,routes,film_routes,memory_routes,heat)?;
             if gate.is_requested() {return Err(ImpactError::Cancelled);}
             let inputs:Vec<_>=stores.iter().enumerate().map(|(i,s)|ReservoirThermalInput {
                 key:&s.key,thermal:UniformEnthalpyStepInput {

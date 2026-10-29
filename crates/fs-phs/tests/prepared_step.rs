@@ -156,6 +156,7 @@ fn cancellation_at_publication_does_not_leak_a_converged_candidate() {
     let error = work.step_into_controlled(&sys, &[0.2, -0.4], &[0.8], 0.003,
         &mut next, &mut y, || { polls += 1; polls == total_polls }).unwrap_err();
     assert_eq!(error, fs_phs::PreparedStepError::Cancelled);
+    assert!(work.last_step_discrete_effort().is_none());
     assert_eq!(next, [123.0; 2]);
     assert_eq!(y, [456.0]);
 }
@@ -194,6 +195,86 @@ fn prepared_maxwell_history_retains_reference_storage_and_work() {
         reference = expected.x;
     }
     assert_ne!(x[2], 0.0);
+}
+
+struct DatumQuartic(f64);
+impl Storage for DatumQuartic {
+    fn hamiltonian(&self, x: &[f64]) -> f64 { self.0 + 0.25*x[0].powi(4) }
+    fn gradient(&self, x: &[f64], out: &mut [f64]) { out[0] = x[0].powi(3); }
+    fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
+        let (left, right, m) = (a[0]-mid[0], b[0]-mid[0], mid[0]);
+        Some(1.5*m*m*(right*right-left*left) + m*(right.powi(3)-left.powi(3))
+            + 0.25*(right.powi(4)-left.powi(4)))
+    }
+}
+
+#[test]
+fn retained_effort_preserves_nonlinear_work_and_large_energy_datum() {
+    let hessian = |x: &[f64], d: &[f64], out: &mut [f64]| {
+        out[0] = 3.0*x[0]*x[0]*d[0]; true
+    };
+    for datum in [0.0, 1e30] { for analytic in [false, true] {
+        let sys = PortHamiltonian::new(1,1,vec![0.0],vec![0.7],vec![1.0],
+            Box::new(DatumQuartic(datum))).unwrap();
+        let mut work = StepWorkspace::new(&sys).unwrap();
+        assert!(work.last_step_discrete_effort().is_none());
+        let initial = [1.0]; let input = [0.2]; let dt = 0.1;
+        let (mut next, mut y) = ([0.0], [0.0]);
+        let record = if analytic {
+            work.step_into_analytic(&sys,&initial,&input,dt,&mut next,&mut y,&hessian)
+        } else { work.step_into(&sys,&initial,&input,dt,&mut next,&mut y) }.unwrap();
+        let effort = work.last_step_discrete_effort().unwrap()[0];
+        // Independent secant of x^4/4, without subtracting either datum or
+        // neighboring endpoint energies. In one dimension this is the DG.
+        let exact = 0.25*(initial[0]+next[0])
+            *(initial[0]*initial[0]+next[0]*next[0]);
+        assert!((effort-exact).abs() < 3e-14);
+        assert!((effort-f64::midpoint(initial[0],next[0]).powi(3)).abs() > 1e-5,
+            "exercise the correction overwritten by storage-energy scratch");
+        assert_eq!(effort.to_bits(),y[0].to_bits());
+        assert!((record.dissipated-dt*0.7*effort*effort).abs() < 3e-15);
+        assert!((record.supplied-dt*input[0]*effort).abs() < 3e-15);
+        assert!((record.delta_h-exact*(next[0]-initial[0])).abs() < 3e-15);
+    }}
+}
+
+#[test]
+fn failed_attempts_hide_old_effort_and_retry_publishes_current_constitutive_work() {
+    let sys = oscillator(0.7);
+    let mut work = StepWorkspace::new(&sys).unwrap();
+    let initial = [0.2,-0.4];
+    let (mut next, mut y) = ([0.0;2],[0.0]);
+    for failure in 0..4 {
+        work.set_iteration_limit(50).unwrap();
+        work.step_into(&sys,&initial,&[0.8],0.003,&mut next,&mut y).unwrap();
+        assert!(work.last_step_discrete_effort().is_some());
+        let accepted = (next,y);
+        let refused = match failure {
+            0 => work.step_into_controlled(&sys,&initial,&[0.8],0.003,
+                &mut next,&mut y,||true),
+            1 => work.step_into_controlled(&sys,&initial[..1],&[0.8],0.003,
+                &mut next,&mut y,||false),
+            2 => work.step_into_controlled(&sys,&initial,&[0.8],f64::NAN,
+                &mut next,&mut y,||false),
+            _ => {
+                work.set_iteration_limit(0).unwrap();
+                work.step_into_controlled(&sys,&initial,&[0.8],0.003,
+                    &mut next,&mut y,||false)
+            }
+        };
+        assert!(refused.is_err());
+        assert!(work.last_step_discrete_effort().is_none());
+        assert_eq!((next,y),accepted);
+    }
+    work.set_iteration_limit(50).unwrap();
+    let passive = |_: &[f64], e: &[f64], out: &mut [f64]| {
+        out[0]=0.0; out[1]=0.3*e[1]; true
+    };
+    let record = work.step_into_dissipative_controlled(&sys,&initial,&[0.8],0.003,
+        &mut next,&mut y,&passive,None,None,||false).unwrap();
+    let effort = work.last_step_discrete_effort().unwrap();
+    assert_eq!(effort[1].to_bits(),y[0].to_bits());
+    assert!((record.dissipated-0.003*effort[1]*effort[1]).abs()<1e-15);
 }
 
 // Synthetic, mass-normalized striker/two-receiver fixture. It deliberately

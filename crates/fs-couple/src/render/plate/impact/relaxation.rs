@@ -35,6 +35,30 @@ pub(super) struct Memory {
     rates: Vec<f64>,
 }
 impl Memory {
+    pub(crate) fn branch_count(&self) -> usize { self.rates.len() }
+
+    /// Original diagonal Maxwell resistance at the time owner's FULL discrete
+    /// effort. Appended acoustic coordinates are allowed; missing material
+    /// coordinates and unrepresentable nonzero power are refused.
+    pub(crate) fn branch_dissipated_power(&self, discrete_effort: &[f64], branch: usize)
+        -> Result<f64, ImpactError>
+    {
+        if discrete_effort.len() < self.base_dim + self.rates.len() {
+            return Err(invalid("material heat requires the complete discrete effort"));
+        }
+        let rate = *self.rates.get(branch)
+            .ok_or_else(|| invalid("material heat names an absent relaxation arm"))?;
+        let effort = discrete_effort[self.base_dim + branch];
+        // Keep the original e^T R e multiplication order, not an inferred
+        // endpoint power or a mechanical energy deficit.
+        let power = effort * (rate * effort);
+        if !effort.is_finite() || !power.is_finite() || power < 0.0
+            || (effort != 0.0 && power == 0.0) {
+            return Err(invalid("material relaxation heat is unrepresentable"));
+        }
+        Ok(power)
+    }
+
     pub(super) fn add_hessian(&self, direction: &[f64], output: &mut [f64]) {
         output[self.base_dim..].fill(0.0);
         for (i, row) in self.rows.iter().enumerate() {
@@ -55,6 +79,12 @@ impl Memory {
     }
 }
 impl ImpactSystem {
+    /// Original attached Maxwell arms, in their unchanged insertion order.
+    /// Each arm has one physical loss channel; zero means no memory attachment.
+    pub fn relaxation_branch_count(&self) -> usize {
+        self.relaxation.as_ref().map_or(0, Memory::branch_count)
+    }
+
     /// Append declared hereditary material arms BEFORE starting the instrument.
     ///
     /// Reuses `fs_phs::PortHamiltonian::with_relaxation_branches` verbatim:

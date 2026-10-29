@@ -125,3 +125,46 @@ fn invalid_arms_or_late_attachment_refuse_and_empty_selection_preserves_motion()
     let mut original=bare(0.001);let mut empty=bare(0.001).with_relaxation_branches(vec![],InitialMemory::Unrelaxed,0).unwrap();
     for _ in 0..10 {original.step(&[0.0],&gate).unwrap();empty.step(&[0.0],&gate).unwrap();assert_eq!(original.state(),empty.state());}
 }
+
+#[test]
+fn material_arm_heat_uses_the_same_discrete_effort_as_the_native_step() {
+    let gate=CancelGate::new_clock_free();
+    let mut model=relaxing(0.01,InitialMemory::Unrelaxed).prepare_analytic().unwrap();
+    assert_eq!(model.relaxation_branch_count(),1);
+    assert_eq!(bare(0.01).relaxation_branch_count(),0);
+    let mut routed=0.0;
+    let mut last_endpoint_power=0.0;
+    for _ in 0..10 {
+        let frame=model.step_checked(&[0.2],&gate,|system,next,velocity,effort,record| {
+            let memory=system.relaxation.as_ref().unwrap();
+            assert_eq!(memory.branch_count(),1);
+            let power=memory.branch_dissipated_power(effort,0)?;
+            // This quadratic fixture's exact arm effort is independently its
+            // midpoint elastic strain; the complete solver owns the interval.
+            let mismatch=2.0*f64::midpoint(system.state()[0],next[0])
+                -f64::midpoint(system.state()[2],next[2]);
+            assert!((power-5.0*mismatch*mismatch).abs()<1e-12);
+            assert_eq!(velocity[0].to_bits(),effort[1].to_bits());
+            routed=system.config.dt_s*power;
+            last_endpoint_power=5.0*(2.0*next[0]-next[2]).powi(2);
+            assert!((routed-record.dissipated).abs()<1e-14);
+            Ok(())
+        }).unwrap();
+        assert!((frame.dissipated_energy_j-routed).abs()<1e-14);
+    }
+    assert!((routed-0.01*last_endpoint_power).abs()>1e-5,
+        "endpoint-power heat would change the actual native work");
+}
+
+#[test]
+fn material_arm_heat_refuses_bad_coordinates_and_unrepresentable_power() {
+    let model=relaxing(0.001,InitialMemory::Unrelaxed);
+    let memory=model.relaxation.as_ref().unwrap();
+    assert!(memory.branch_dissipated_power(&[0.0;2],0).is_err());
+    assert!(memory.branch_dissipated_power(&[0.0;3],1).is_err());
+    for bad in [f64::NAN,f64::INFINITY,1e200,1e-200] {
+        assert!(memory.branch_dissipated_power(&[0.0,0.0,bad],0).is_err());
+    }
+    assert_eq!(memory.branch_dissipated_power(&[0.0;3],0).unwrap(),0.0);
+    assert_eq!(memory.branch_dissipated_power(&[0.0,0.0,-0.2,7.0],0).unwrap(),0.2);
+}
