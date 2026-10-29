@@ -27,6 +27,7 @@ import {
   RECORDING_SCHEMA,
   RECORDING_SCHEMA_V1,
   RECORDING_SCHEMA_SPATIAL,
+  RECORDING_SCHEMA_MATERIAL,
   recordedToScenario,
   replayVerdict,
   scenarioToRecorded,
@@ -110,6 +111,42 @@ test("spatial recording preserves mode and every field parameter without aliasin
   assert.equal(sealed.schema, RECORDING_SCHEMA_SPATIAL, "older readers must refuse before dropping the wind mode");
   assert.ok("error" in parseRecording(JSON.stringify({ ...sealed, schema: RECORDING_SCHEMA })));
   assert.ok("error" in parseRecording(JSON.stringify({ ...sealed, scenario: sealedFixture().scenario })));
+});
+
+test("material recording preserves gas-law inputs and refuses discarded or downgraded atmospheres", () => {
+  const air = { temperatureK: 293.15, pressurePa: 98000, relativeHumidity: 0.6 };
+  const scenario = {
+    ...dec17Scenario(1903n, MODE_FIXED), materialAir: air,
+    spatialWind: {
+      sampling: "distributed" as const, roughnessLengthM: 0.003, displacementHeightM: 0,
+      referenceHeightM: 2.4, sigmaMps: 0.3, lengthM: 20, advectionMps: 11,
+      correlationTimesS: [1.8, 2.1],
+    },
+  };
+  const recorder = new FlightRecorder();
+  recorder.append(1, payloadAt(1));
+  const sealed = recorder.seal({ ...sealedFixture(), scenario });
+  assert.equal(sealed.schema, RECORDING_SCHEMA_MATERIAL);
+  assert.notEqual(sealed.scenario.materialAir, air);
+  const parsed = parseRecording(JSON.stringify(sealed));
+  assert.ok(!("error" in parsed), JSON.stringify(parsed));
+  if ("error" in parsed) throw new Error(parsed.error);
+  const restored = recordedToScenario(parsed.scenario);
+  assert.deepEqual(restored, scenario);
+  assert.notEqual(restored.materialAir, parsed.scenario.materialAir);
+  air.pressurePa = 85000;
+  assert.equal(sealed.scenario.materialAir?.pressurePa, 98000);
+  for (const schema of [RECORDING_SCHEMA_V1, RECORDING_SCHEMA, RECORDING_SCHEMA_SPATIAL]) {
+    assert.ok("error" in parseRecording(JSON.stringify({ ...sealed, schema })));
+  }
+  for (const broken of [
+    { ...sealed.scenario, materialAir: undefined },
+    { ...sealed.scenario, spatialWind: undefined },
+    { ...sealed.scenario, materialAir: null },
+    { ...sealed.scenario, materialAir: { ...air, relativeHumidity: -0.1 } },
+  ]) {
+    assert.ok("error" in parseRecording(JSON.stringify({ ...sealed, scenario: broken })));
+  }
 });
 
 test("spatial recording refuses missing, invalid or excessive field parameters", () => {

@@ -94,6 +94,49 @@ test("spatial initialization routes the complete field and refuses a legacy-only
   assert.equal(spatialCalls, 2, "invalid fields never reach WASM");
 });
 
+test("material atmosphere reaches its own native initializer without a scalar-density fallback", () => {
+  const wind: SpatialWindInit = {
+    sampling: "distributed", roughnessLengthM: 0.003, displacementHeightM: 0,
+    referenceHeightM: 2.4, sigmaMps: 0.3, lengthM: 20, advectionMps: 11,
+    correlationTimesS: [1.8, 2.1],
+  };
+  const air = { temperatureK: 293.15, pressurePa: 98000, relativeHumidity: 0.6 };
+  const scenario = { ...dec17Scenario(1903n, MODE_FIXED), spatialWind: wind, materialAir: air };
+  let calls = 0;
+  let received: unknown[] = [];
+  const engine: EngineInitializationApi = {
+    flyer_engine_init() { throw new Error("material atmosphere cannot use legacy density"); },
+    flyer_engine_init_spatial_wind() { throw new Error("material atmosphere cannot lose its gas inputs"); },
+    flyer_engine_init_material_air(...args) { calls += 1; received = args; return "material"; },
+  };
+  for (const sampling of ["cg", "distributed"] as const) {
+    assert.equal(initializeScenario(engine, { ...scenario, spatialWind: { ...wind, sampling } }), "material");
+    assert.deepEqual(received.slice(0, 11), [
+      scenario.seed, air.temperatureK, air.pressurePa, air.relativeHumidity,
+      scenario.headwindMps, scenario.mode, scenario.member, scenario.railLengthM,
+      scenario.maxTicks, scenario.assist, scenario.catapult,
+    ]);
+    assert.deepEqual(received.slice(11, 18), [sampling === "distributed", 0.003, 0, 2.4, 0.3, 20, 11]);
+    assert.deepEqual(received[18], Float64Array.from(wind.correlationTimesS));
+  }
+  const unavailable = parseInitEnvelope(initializeScenario({
+    flyer_engine_init: engine.flyer_engine_init,
+    flyer_engine_init_spatial_wind: engine.flyer_engine_init_spatial_wind,
+  }, scenario));
+  assert.equal(unavailable.kind, "refusal");
+  if (unavailable.kind === "refusal") assert.equal(unavailable.refusal.code, "material-atmosphere-unavailable");
+  for (const invalid of [null, {}, { ...air, temperatureK: NaN },
+    { ...air, pressurePa: 0 }, { ...air, relativeHumidity: 1.1 }]) {
+    const result = parseInitEnvelope(initializeScenario(engine, { ...scenario, materialAir: invalid as never }));
+    assert.equal(result.kind, "refusal");
+    if (result.kind === "refusal") assert.equal(result.refusal.code, "material-atmosphere-invalid");
+  }
+  assert.equal(parseInitEnvelope(initializeScenario(engine, {
+    ...dec17Scenario(1903n, MODE_FIXED), materialAir: air,
+  })).kind, "refusal");
+  assert.equal(calls, 2, "malformed or unavailable material runs cannot initialize physics");
+});
+
 const STEP_OK =
   '{"ok":{"tick":42,"phase":"airborne","x_m":10.5,"h_m":3.25,"u_mps":13.5,"w_mps":0.5,' +
   '"q_rad_s":0.1,"theta_rad":0.08,"dc_rad":0.12,"warp_rad":0.01,"omega_prop_rad_s":50.5,' +

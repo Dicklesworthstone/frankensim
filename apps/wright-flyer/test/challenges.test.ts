@@ -107,6 +107,24 @@ test("lookup fails closed for unknown challenge ids", () => {
   assert.equal(challengeById("unknown"), null);
 });
 
+test("challenge identity retains the actual prescribed material atmosphere", () => {
+  const base = challengeScenario(CHALLENGE_PRESETS[0]!);
+  const wind = {
+    sampling: "distributed" as const, roughnessLengthM: 0.003, displacementHeightM: 0,
+    referenceHeightM: 2.4, sigmaMps: 0.3, lengthM: 20, advectionMps: 11,
+    correlationTimesS: [1.8, 2.1],
+  };
+  const air = { temperatureK: 293.15, pressurePa: 98000, relativeHumidity: 0.6 };
+  const scenario = { ...base, spatialWind: wind, materialAir: air };
+  const identity = scenarioConfigIdentity(scenario);
+  assert.notEqual(identity, scenarioConfigIdentity(base));
+  assert.notEqual(identity, scenarioConfigIdentity({ ...scenario, materialAir: { ...air, pressurePa: 95000 } }));
+  assert.notEqual(identity, scenarioConfigIdentity({ ...scenario, spatialWind: { ...wind, sigmaMps: 0.2 } }));
+  assert.equal(identity, scenarioConfigIdentity({
+    ...scenario, materialAir: { relativeHumidity: 0.6, pressurePa: 98000, temperatureK: 293.15 },
+  }), "object property order cannot change physical configuration identity");
+});
+
 test("hostile URL combinations cannot leak assist or missions into unsupported modes/sites", () => {
   const fixedAssist = scenarioFromQuery(new URLSearchParams("mode=fixed&assist=1&flight=1"));
   assert.equal(fixedAssist.assist, false);

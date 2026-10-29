@@ -8,6 +8,7 @@
 
 import {
   PAYLOAD_F64S, PAYLOAD_F64S_V1, type ScenarioInit, type SpatialWindInit, spatialWindError,
+  type MaterialAirInit, materialAirError,
 } from "./protocol.ts";
 import { decodeSnapshot, type SimSnapshot } from "./snapshotView.ts";
 
@@ -15,6 +16,8 @@ export const RECORDING_SCHEMA_V1 = "org.frankensim.wf.flight-recording.v1";
 export const RECORDING_SCHEMA = "org.frankensim.wf.flight-recording.v2";
 /** Spatial recordings require a reader that preserves their force model. */
 export const RECORDING_SCHEMA_SPATIAL = "org.frankensim.wf.flight-recording.v3";
+/** Material recordings require a reader that retains the gas-law inputs. */
+export const RECORDING_SCHEMA_MATERIAL = "org.frankensim.wf.flight-recording.v4";
 
 /** Scenario identity fields (bigints carried as decimal strings). */
 export interface RecordedScenario {
@@ -28,10 +31,12 @@ export interface RecordedScenario {
   readonly assist: boolean;
   readonly catapult: boolean;
   readonly spatialWind?: SpatialWindInit;
+  readonly materialAir?: MaterialAirInit;
 }
 
 export interface FlightRecording {
-  readonly schema: typeof RECORDING_SCHEMA | typeof RECORDING_SCHEMA_V1 | typeof RECORDING_SCHEMA_SPATIAL;
+  readonly schema: typeof RECORDING_SCHEMA | typeof RECORDING_SCHEMA_V1 |
+    typeof RECORDING_SCHEMA_SPATIAL | typeof RECORDING_SCHEMA_MATERIAL;
   readonly scenario: RecordedScenario;
   readonly runIntentId: string;
   readonly tick0Digest: string;
@@ -66,6 +71,7 @@ export function scenarioToRecorded(s: ScenarioInit): RecordedScenario {
     ...(s.spatialWind === undefined ? {} : {
       spatialWind: { ...s.spatialWind, correlationTimesS: [...s.spatialWind.correlationTimesS] },
     }),
+    ...(s.materialAir === undefined ? {} : { materialAir: { ...s.materialAir } }),
   };
 }
 
@@ -83,6 +89,7 @@ export function recordedToScenario(r: RecordedScenario): ScenarioInit {
     ...(r.spatialWind === undefined ? {} : {
       spatialWind: { ...r.spatialWind, correlationTimesS: [...r.spatialWind.correlationTimesS] },
     }),
+    ...(r.materialAir === undefined ? {} : { materialAir: { ...r.materialAir } }),
   };
 }
 
@@ -120,7 +127,8 @@ export class FlightRecorder {
       throw new RangeError("empty recording cannot be sealed");
     }
     return {
-      schema: meta.scenario.spatialWind === undefined ? RECORDING_SCHEMA : RECORDING_SCHEMA_SPATIAL,
+      schema: meta.scenario.materialAir !== undefined ? RECORDING_SCHEMA_MATERIAL :
+        meta.scenario.spatialWind === undefined ? RECORDING_SCHEMA : RECORDING_SCHEMA_SPATIAL,
       scenario: scenarioToRecorded(meta.scenario),
       runIntentId: meta.runIntentId,
       tick0Digest: meta.tick0Digest,
@@ -163,18 +171,27 @@ export function parseRecording(json: string): FlightRecording | { readonly error
     return { error: "not an object" };
   }
   const r = value as Record<string, unknown>;
-  if (r.schema !== RECORDING_SCHEMA && r.schema !== RECORDING_SCHEMA_V1 && r.schema !== RECORDING_SCHEMA_SPATIAL) {
+  if (r.schema !== RECORDING_SCHEMA && r.schema !== RECORDING_SCHEMA_V1 &&
+      r.schema !== RECORDING_SCHEMA_SPATIAL && r.schema !== RECORDING_SCHEMA_MATERIAL) {
     return { error: `unsupported schema ${String(r.schema)}` };
   }
   if (typeof r.scenario !== "object" || r.scenario === null || Array.isArray(r.scenario)) {
     return { error: "scenario missing or malformed" };
   }
   const scenario = r.scenario as Record<string, unknown>;
-  if ((r.schema === RECORDING_SCHEMA_SPATIAL) !== (scenario.spatialWind !== undefined)) {
-    return { error: "spatial recordings require the v3 schema and their complete wind configuration" };
+  const hasSpatialModel = r.schema === RECORDING_SCHEMA_SPATIAL || r.schema === RECORDING_SCHEMA_MATERIAL;
+  if (hasSpatialModel !== (scenario.spatialWind !== undefined)) {
+    return { error: "spatial recordings require a spatial schema and their complete wind configuration" };
   }
   if (scenario.spatialWind !== undefined) {
     const error = spatialWindError(scenario.spatialWind);
+    if (error !== null) return { error };
+  }
+  if ((r.schema === RECORDING_SCHEMA_MATERIAL) !== (scenario.materialAir !== undefined)) {
+    return { error: "material recordings require the v4 schema and their complete air configuration" };
+  }
+  if (scenario.materialAir !== undefined) {
+    const error = materialAirError(scenario.materialAir);
     if (error !== null) return { error };
   }
   if (

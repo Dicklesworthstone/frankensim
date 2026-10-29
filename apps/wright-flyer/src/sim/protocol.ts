@@ -114,6 +114,36 @@ export function spatialWindError(value: unknown): string | null {
   return null;
 }
 
+/** Prescribed homogeneous moist air, evaluated by the native material owner.
+ * Its derived density replaces rhoKgM3 before trim. This requires spatialWind;
+ * it does not introduce thermal evolution or Reynolds-dependent polars. */
+export interface MaterialAirInit {
+  readonly temperatureK: number;
+  readonly pressurePa: number;
+  /** Fraction [0, 1], relative to saturation over liquid water. */
+  readonly relativeHumidity: number;
+}
+
+/** Basic wire admission. Gas-law, saturation and flight-envelope checks remain
+ * with the native owners; the browser never computes a second air density. */
+export function materialAirError(value: unknown): string | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return "materialAir must be an explicit parameter object";
+  }
+  const air = value as Record<string, unknown>;
+  for (const key of ["temperatureK", "pressurePa", "relativeHumidity"]) {
+    if (typeof air[key] !== "number" || !Number.isFinite(air[key])) {
+      return `materialAir ${key} must be finite`;
+    }
+  }
+  const state = value as MaterialAirInit;
+  if (state.temperatureK <= 0 || state.pressurePa <= 0 ||
+      state.relativeHumidity < 0 || state.relativeHumidity > 1) {
+    return "materialAir requires positive temperature/pressure and humidity in [0, 1]";
+  }
+  return null;
+}
+
 export interface ScenarioInit {
   readonly seed: bigint;
   readonly rhoKgM3: number;
@@ -128,6 +158,8 @@ export interface ScenarioInit {
   readonly catapult: boolean;
   /** Omitted selects the unchanged legacy scalar-OU flight model. */
   readonly spatialWind?: SpatialWindInit;
+  /** When present, the shared gas law supplies density for all flight owners. */
+  readonly materialAir?: MaterialAirInit;
 }
 
 /** The Dec-17 reference scenario (mirror of dec17_scenario). */

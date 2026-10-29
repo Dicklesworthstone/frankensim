@@ -39,5 +39,12 @@ declare module "*/wasm-pkg/fs_flyer_wasm.js" {
     correlation_times_s: Float64Array,
   ): string;
   export function flyer_engine_digest(): string;
+  export function flyer_engine_init_material_air(
+    seed: bigint, temperature_k: number, pressure_pa: number, relative_humidity: number,
+    headwind_mps: number, mode: number, member: number, rail_length_m: number,
+    max_ticks: bigint, assist: boolean, catapult: boolean, distributed: boolean,
+    z0_m: number, displacement_m: number, reference_height_m: number, sigma_mps: number,
+    length_m: number, advection_mps: number, correlation_times_s: Float64Array,
+  ): string;
   export function flyer_engine_checkpoint(): string;
 }

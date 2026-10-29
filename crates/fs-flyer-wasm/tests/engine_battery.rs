@@ -57,6 +57,111 @@ fn init_spatial(slot: &mut EngineSlot, distributed: bool, wind: &SpatialWindSpec
     )
 }
 
+fn init_material(
+    slot: &mut EngineSlot,
+    distributed: bool,
+    temperature: f64,
+    pressure: f64,
+    humidity: f64,
+    times: &[f64],
+) -> String {
+    let wind = explicit_wind();
+    slot.init_with_material_air(
+        1903,
+        temperature,
+        pressure,
+        humidity,
+        DEC17.1,
+        MODE_FIXED,
+        0,
+        DEC17.2,
+        DEC17.3,
+        false,
+        false,
+        distributed,
+        wind.mean.scenario_effective_z0_m,
+        wind.mean.displacement_height_m,
+        wind.mean.reference_height_m,
+        wind.sigma_mps,
+        wind.length_m,
+        wind.advection_mps,
+        times,
+    )
+}
+
+#[test]
+fn material_air_boundary_matches_native_flight_and_retains_complete_checkpoints() {
+    for distributed in [false, true] {
+        let wind = explicit_wind();
+        let medium = fs_material::gas::GasState::try_new_moist_air(293.15, 98000.0, 0.6).unwrap();
+        let mut slot = EngineSlot::default();
+        let output = init_material(
+            &mut slot,
+            distributed,
+            medium.temperature,
+            medium.pressure,
+            0.6,
+            &wind.correlation_times_s,
+        );
+        let mut scenario = fs_flyer::simloop::dec17_scenario(1903, PilotMode::FixedControls);
+        scenario.max_ticks = DEC17.3;
+        let mut native = if distributed {
+            SimLoop::init_with_material_distributed_spatial_wind(scenario, wind, medium)
+        } else {
+            SimLoop::init_with_material_spatial_wind(scenario, wind, medium)
+        }
+        .unwrap();
+        assert!(output.contains(&native.run_intent_id), "{output}");
+        assert!(output.contains(&native.tick0().digest), "{output}");
+        assert_ne!(native.scenario().rho_kg_m3, DEC17.0);
+        for tick in 0..=4 {
+            if tick > 0 {
+                assert!(slot.step(false, 0.0, 0.0).starts_with("{\"ok\":{"));
+                native.step(None).unwrap();
+            }
+            let bytes = native.save_checkpoint().unwrap();
+            assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 5);
+            let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+            assert!(slot.checkpoint().contains(&hex));
+            assert!(slot.digest().contains(&native.digest_hex()));
+        }
+    }
+}
+
+#[test]
+fn material_air_refusals_invalidate_previous_flight_instead_of_using_reference_density() {
+    let mut slot = EngineSlot::default();
+    for (temperature, pressure, humidity, times, code) in [
+        (293.15, 0.0, 0.5, vec![1.0], "material-atmosphere-invalid"),
+        (
+            293.15,
+            101325.0,
+            1.1,
+            vec![1.0],
+            "material-atmosphere-invalid",
+        ),
+        (
+            f64::NAN,
+            101325.0,
+            0.0,
+            vec![1.0],
+            "material-atmosphere-invalid",
+        ),
+        (293.15, 101325.0, 0.5, vec![], "mode-count-invalid"),
+        (293.15, 101325.0, 0.5, vec![1.0; 257], "mode-count-invalid"),
+        (293.15, 10000.0, 0.0, vec![1.0], "scenario-invalid"),
+    ] {
+        assert!(init_short(&mut slot, 1903, MODE_FIXED, 0).starts_with("{\"ok\":{"));
+        let output = init_material(&mut slot, true, temperature, pressure, humidity, &times);
+        assert!(output.contains(code), "{output}");
+        assert!(slot.checkpoint().contains("engine-not-initialized"));
+        assert!(
+            slot.step(false, 0.0, 0.0)
+                .contains("engine-not-initialized")
+        );
+    }
+}
+
 #[test]
 fn spatial_initializer_matches_native_modes_and_live_checkpoints() {
     let mut identities = Vec::new();

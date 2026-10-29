@@ -575,6 +575,58 @@ mod js {
         })
     }
 
+    /// Initialize the shared material atmosphere before flight trim. Humidity
+    /// is a fraction relative to liquid water; density comes from that model.
+    /// The wind parameters and CG/distributed semantics match the spatial API.
+    #[wasm_bindgen]
+    #[must_use]
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+    pub fn flyer_engine_init_material_air(
+        seed: u64,
+        temperature_k: f64,
+        pressure_pa: f64,
+        relative_humidity: f64,
+        headwind_mps: f64,
+        mode: u32,
+        member: u32,
+        rail_length_m: f64,
+        max_ticks: u64,
+        assist: bool,
+        catapult: bool,
+        distributed: bool,
+        z0_m: f64,
+        displacement_m: f64,
+        reference_height_m: f64,
+        sigma_mps: f64,
+        length_m: f64,
+        advection_mps: f64,
+        correlation_times_s: &[f64],
+    ) -> String {
+        ENGINE.with(|e| {
+            e.borrow_mut().init_with_material_air(
+                seed,
+                temperature_k,
+                pressure_pa,
+                relative_humidity,
+                headwind_mps,
+                mode,
+                member,
+                rail_length_m,
+                max_ticks,
+                assist,
+                catapult,
+                distributed,
+                z0_m,
+                displacement_m,
+                reference_height_m,
+                sigma_mps,
+                length_m,
+                advection_mps,
+                correlation_times_s,
+            )
+        })
+    }
+
     /// One 120 Hz engine step. `has_input` gates whether (lever, warp)
     /// is a ControlInput (Human mode requires it every tick).
     #[wasm_bindgen]

@@ -75,6 +75,21 @@ export function scenarioConfigIdentity(scenario: ScenarioInit): string {
     maxTicks: scenario.maxTicks.toString(),
     assist: scenario.assist,
     catapult: scenario.catapult,
+    ...(scenario.spatialWind === undefined ? {} : { spatialWind: {
+      sampling: scenario.spatialWind.sampling,
+      roughnessLengthM: scenario.spatialWind.roughnessLengthM,
+      displacementHeightM: scenario.spatialWind.displacementHeightM,
+      referenceHeightM: scenario.spatialWind.referenceHeightM,
+      sigmaMps: scenario.spatialWind.sigmaMps,
+      lengthM: scenario.spatialWind.lengthM,
+      advectionMps: scenario.spatialWind.advectionMps,
+      correlationTimesS: scenario.spatialWind.correlationTimesS,
+    } }),
+    ...(scenario.materialAir === undefined ? {} : { materialAir: {
+      temperatureK: scenario.materialAir.temperatureK,
+      pressurePa: scenario.materialAir.pressurePa,
+      relativeHumidity: scenario.materialAir.relativeHumidity,
+    } }),
   });
 }
 

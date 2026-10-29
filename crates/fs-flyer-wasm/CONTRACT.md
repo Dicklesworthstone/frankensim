@@ -158,6 +158,37 @@ against independently initialized `SimLoop` states, digests and complete live
 checkpoints. Browser adapter/recording tests cover parameter routing, mode
 preservation and refusal without fallback.
 
+### Material atmosphere through the same browser lifecycle
+
+`EngineSlot::init_with_material_air` and `flyer_engine_init_material_air` accept
+temperature in kelvin, absolute pressure in pascals and relative humidity as a
+fraction referenced to liquid water. They call the original shared moist-air
+owner once and initialize native material-bound spatial flight. Density is
+derived before trim; there is no independently authored density input on this
+entry. Gas/source-domain and flight-envelope refusals invalidate the old slot.
+The original native V5 checkpoint retains every gas coefficient and sampling
+mode, and the normal snapshot/digest/checkpoint interfaces continue to work.
+
+The existing worker selects this path when `ScenarioInit.materialAir` is present,
+together with `spatialWind`. For the example above, add:
+
+```ts
+materialAir: { temperatureK: 293.15, pressurePa: 98000, relativeHumidity: 0.6 }
+```
+
+The legacy `rhoKgM3` field is ignored by this explicit material entry. Recordings
+retain the three defining gas inputs and complete wind configuration under
+`flight-recording.v4`. Older readers refuse that schema. Missing gas/wind data,
+invalid basic inputs or a loaded engine without the material entry refuse
+without substituting legacy density. Configuration identities include both
+physical inputs, so changed weather cannot inherit a challenge's reference
+configuration. Native tests compare actual stepped checkpoints with `SimLoop`;
+browser tests cover dispatch, copying, replay admission and configuration identity.
+
+This remains a prescribed homogeneous gas with the existing incompressible,
+Reynolds-independent force laws. It does not add thermodynamic evolution,
+source-backed historical weather, Reynolds corrections or acoustic propagation.
+
 ## No-claim boundaries
 
 - The hello kernel is a torque-free rigid body. It makes **no aerodynamic,

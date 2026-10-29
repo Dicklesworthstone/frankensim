@@ -25,6 +25,7 @@ use fs_flyer::simloop::{
     ControlInput, Phase, PilotMode, ScenarioSpec, SimLoop, SimStateOut, SpatialWindSpec,
     TerminalEvent,
 };
+use fs_material::gas::GasState;
 
 /// Pilot-mode words at the ABI (frozen v1).
 pub const MODE_FIXED: u32 = 0;
@@ -47,6 +48,44 @@ fn map_refusal(e: fs_flyer::Refusal) -> Refusal {
         message: e.message,
         ranked_repairs: e.ranked_repairs,
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spatial_wind(
+    headwind_mps: f64,
+    z0_m: f64,
+    displacement_m: f64,
+    reference_height_m: f64,
+    sigma_mps: f64,
+    length_m: f64,
+    advection_mps: f64,
+    correlation_times_s: &[f64],
+) -> Result<SpatialWindSpec, Refusal> {
+    if !(1..=fs_atmo::MAX_MODES).contains(&correlation_times_s.len()) {
+        return Err(Refusal {
+            code: "mode-count-invalid",
+            message: format!(
+                "{} modes outside [1, {}]",
+                correlation_times_s.len(),
+                fs_atmo::MAX_MODES
+            ),
+            ranked_repairs: vec![
+                "supply one correlation time per mode within the admitted mode cap".into(),
+            ],
+        });
+    }
+    Ok(SpatialWindSpec {
+        mean: fs_atmo::FlatSiteLogLaw {
+            scenario_effective_z0_m: z0_m,
+            displacement_height_m: displacement_m,
+            reference_height_m,
+            reference_speed_mps: headwind_mps,
+        },
+        sigma_mps,
+        length_m,
+        advection_mps,
+        correlation_times_s: correlation_times_s.to_vec(),
+    })
 }
 
 fn not_initialized() -> String {
@@ -228,30 +267,18 @@ impl EngineSlot {
         correlation_times_s: &[f64],
     ) -> String {
         self.sim = None;
-        if !(1..=fs_atmo::MAX_MODES).contains(&correlation_times_s.len()) {
-            return refusal_envelope(&Refusal {
-                code: "mode-count-invalid",
-                message: format!(
-                    "{} modes outside [1, {}]",
-                    correlation_times_s.len(),
-                    fs_atmo::MAX_MODES
-                ),
-                ranked_repairs: vec![
-                    "supply one correlation time per mode within the admitted mode cap".into(),
-                ],
-            });
-        }
-        let wind = SpatialWindSpec {
-            mean: fs_atmo::FlatSiteLogLaw {
-                scenario_effective_z0_m: z0_m,
-                displacement_height_m: displacement_m,
-                reference_height_m,
-                reference_speed_mps: headwind_mps,
-            },
+        let wind = match spatial_wind(
+            headwind_mps,
+            z0_m,
+            displacement_m,
+            reference_height_m,
             sigma_mps,
             length_m,
             advection_mps,
-            correlation_times_s: correlation_times_s.to_vec(),
+            correlation_times_s,
+        ) {
+            Ok(wind) => wind,
+            Err(error) => return refusal_envelope(&error),
         };
         self.init_configured(
             seed,
@@ -263,7 +290,71 @@ impl EngineSlot {
             max_ticks,
             assist,
             catapult,
-            Some((wind, distributed)),
+            Some((wind, distributed, None)),
+        )
+    }
+
+    /// Initialize prescribed moist air through the shared material owner.
+    /// Temperature [K], pressure [Pa] and liquid-relative humidity [0, 1]
+    /// determine density before trim; no independent density is accepted.
+    /// The complete gas is retained in the native V5 checkpoint. Existing
+    /// incompressible, Reynolds-independent force laws remain unchanged.
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+    pub fn init_with_material_air(
+        &mut self,
+        seed: u64,
+        temperature_k: f64,
+        pressure_pa: f64,
+        relative_humidity: f64,
+        headwind_mps: f64,
+        mode: u32,
+        member: u32,
+        rail_length_m: f64,
+        max_ticks: u64,
+        assist: bool,
+        catapult: bool,
+        distributed: bool,
+        z0_m: f64,
+        displacement_m: f64,
+        reference_height_m: f64,
+        sigma_mps: f64,
+        length_m: f64,
+        advection_mps: f64,
+        correlation_times_s: &[f64],
+    ) -> String {
+        self.sim = None;
+        let gas = match GasState::try_new_moist_air(temperature_k, pressure_pa, relative_humidity) {
+            Ok(gas) => gas,
+            Err(error) => return refusal_envelope(&Refusal {
+                code: "material-atmosphere-invalid",
+                message: error.to_string(),
+                ranked_repairs: vec!["supply temperature, pressure and humidity inside the shared moist-air model's domain".into()],
+            }),
+        };
+        let wind = match spatial_wind(
+            headwind_mps,
+            z0_m,
+            displacement_m,
+            reference_height_m,
+            sigma_mps,
+            length_m,
+            advection_mps,
+            correlation_times_s,
+        ) {
+            Ok(wind) => wind,
+            Err(error) => return refusal_envelope(&error),
+        };
+        self.init_configured(
+            seed,
+            gas.density,
+            headwind_mps,
+            mode,
+            member,
+            rail_length_m,
+            max_ticks,
+            assist,
+            catapult,
+            Some((wind, distributed, Some(gas))),
         )
     }
 
@@ -279,7 +370,7 @@ impl EngineSlot {
         max_ticks: u64,
         assist: bool,
         catapult: bool,
-        wind: Option<(SpatialWindSpec, bool)>,
+        wind: Option<(SpatialWindSpec, bool, Option<GasState>)>,
     ) -> String {
         // A failed replacement must never leave the previous lifecycle
         // checkpointable. Clear before validating the new request so every
@@ -317,8 +408,14 @@ impl EngineSlot {
         };
         let initialized = match wind {
             None => SimLoop::init(spec),
-            Some((wind, false)) => SimLoop::init_with_spatial_wind(spec, wind),
-            Some((wind, true)) => SimLoop::init_with_distributed_spatial_wind(spec, wind),
+            Some((wind, false, None)) => SimLoop::init_with_spatial_wind(spec, wind),
+            Some((wind, true, None)) => SimLoop::init_with_distributed_spatial_wind(spec, wind),
+            Some((wind, false, Some(gas))) => {
+                SimLoop::init_with_material_spatial_wind(spec, wind, gas)
+            }
+            Some((wind, true, Some(gas))) => {
+                SimLoop::init_with_material_distributed_spatial_wind(spec, wind, gas)
+            }
         };
         match initialized {
             Ok(sim) => {

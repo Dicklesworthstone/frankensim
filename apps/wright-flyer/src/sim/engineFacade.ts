@@ -24,6 +24,7 @@ import {
   type RefusalEnvelope,
   type ScenarioInit,
   spatialWindError,
+  materialAirError,
 } from "./protocol.ts";
 
 /** The initialization ABI, with an explicit capability check for old bundles. */
@@ -39,6 +40,13 @@ export interface EngineInitializationApi {
     referenceHeightM: number, sigmaMps: number, lengthM: number,
     advectionMps: number, correlationTimesS: Float64Array,
   ): string;
+  flyer_engine_init_material_air?(
+    seed: bigint, temperatureK: number, pressurePa: number, relativeHumidity: number,
+    headwind: number, mode: number, member: number, railM: number, maxTicks: bigint,
+    assist: boolean, catapult: boolean, distributed: boolean, roughnessM: number,
+    displacementM: number, referenceHeightM: number, sigmaMps: number, lengthM: number,
+    advectionMps: number, correlationTimesS: Float64Array,
+  ): string;
 }
 
 /** Route the real force model explicitly; an old bundle cannot downgrade wind. */
@@ -49,6 +57,16 @@ export function initializeScenario(engine: EngineInitializationApi, scenario: Sc
     scenario.catapult,
   ] as const;
   const wind = scenario.spatialWind;
+  const air = scenario.materialAir;
+  if (air !== undefined) {
+    const error = materialAirError(air) ?? (wind === undefined ? "materialAir requires explicit spatialWind" : null);
+    if (error !== null) {
+      return JSON.stringify({ refusal: {
+        code: "material-atmosphere-invalid", message: error,
+        ranked_repairs: ["supply material air and the complete spatial wind configuration"],
+      } });
+    }
+  }
   if (wind === undefined) return engine.flyer_engine_init(...args);
   const error = spatialWindError(wind);
   if (error !== null) {
@@ -57,6 +75,25 @@ export function initializeScenario(engine: EngineInitializationApi, scenario: Sc
       ranked_repairs: ["supply the complete admitted spatial wind configuration"],
     } });
   }
+  const windArgs = [
+    wind.sampling === "distributed", wind.roughnessLengthM, wind.displacementHeightM,
+    wind.referenceHeightM, wind.sigmaMps, wind.lengthM, wind.advectionMps,
+    Float64Array.from(wind.correlationTimesS),
+  ] as const;
+  if (air !== undefined) {
+    if (typeof engine.flyer_engine_init_material_air !== "function") {
+      return JSON.stringify({ refusal: {
+        code: "material-atmosphere-unavailable",
+        message: "the loaded engine does not implement the requested material atmosphere",
+        ranked_repairs: ["rebuild the wasm package with material atmosphere support"],
+      } });
+    }
+    return engine.flyer_engine_init_material_air(
+      scenario.seed, air.temperatureK, air.pressurePa, air.relativeHumidity,
+      scenario.headwindMps, scenario.mode, scenario.member, scenario.railLengthM,
+      scenario.maxTicks, scenario.assist, scenario.catapult, ...windArgs,
+    );
+  }
   if (typeof engine.flyer_engine_init_spatial_wind !== "function") {
     return JSON.stringify({ refusal: {
       code: "spatial-wind-unavailable",
@@ -64,11 +101,7 @@ export function initializeScenario(engine: EngineInitializationApi, scenario: Sc
       ranked_repairs: ["rebuild the wasm package with spatial wind support"],
     } });
   }
-  return engine.flyer_engine_init_spatial_wind(
-    ...args, wind.sampling === "distributed", wind.roughnessLengthM,
-    wind.displacementHeightM, wind.referenceHeightM, wind.sigmaMps,
-    wind.lengthM, wind.advectionMps, Float64Array.from(wind.correlationTimesS),
-  );
+  return engine.flyer_engine_init_spatial_wind(...args, ...windArgs);
 }
 
 export interface EngineInitOk {
