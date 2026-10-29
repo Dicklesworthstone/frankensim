@@ -1,6 +1,10 @@
 // About: what the badges and measures mean, where every number comes from, and how to rebuild.
 import { h, badge, BADGES } from '../app.js';
 
+export function title() {
+  return 'About';
+}
+
 export async function render(root) {
   root.replaceChildren(h('article.about', null,
     h('h1', null, 'About this explorer'),
@@ -24,7 +28,7 @@ export async function render(root) {
       h('li', null, 'Milestones, bead closes and progress: the beads tracker export. Timelines: git history of origin/main.'),
       h('li', null, 'Work in progress (drum renders, the assembled violin): renders by lanes that have not been committed or graded yet. They are labelled as such.')),
     h('h2', null, 'Licences'),
-    h('p', null, 'The recordings are kept on this machine and are never committed: the University of Iowa samples are for this project\'s grading use only, and several web recordings carry no redistribution licence. Recordings under CC BY need their credit shown, which each References tab does.'),
+    h('p', null, 'No recording is ever committed to the repository. The University of Iowa Musical Instrument Samples are free to use without restriction. Recordings under CC BY are played with their credit, shown in each instrument\'s References section. Recordings whose licence does not allow redistribution (YouTube videos under the standard licence) were used only to grade: they are listed with their source link and are not played here.'),
     h('h2', null, 'Rebuilding'),
     h('pre', null, 'apps/instrument-explorer/tools/sync.sh           # mirror renders, grades and recordings\npython3 apps/instrument-explorer/tools/build.py  # build the site data\npython3 apps/instrument-explorer/tools/serve.py  # http://localhost:8742')));
 }

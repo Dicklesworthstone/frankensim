@@ -1,0 +1,423 @@
+{
+ "about": "The decisions that steer the instrument program. Owner decisions are the owner's own words or choices; rulings are the orchestrator's calls under the owner's delegation; findings are measured facts that changed the plan; method entries change how sound is judged. Sources: COMPREHENSIVE_PLAN_FOR_INDISTINGUISHABLE_INSTRUMENTS.md, the beads tracker and the commits named in each entry.",
+ "entries": [
+  {
+   "date": "2026-08-08",
+   "kind": "owner",
+   "title": "An instrument is a description, never code",
+   "decided": "Bottom-up physics only, built from universal primitives that live inside FrankenSim's layers. Materials, geometry and air are all parameters. There is never a clarinet crate or a clarinet code path: an instrument is a typed description that composes the generic physics crates. Plucking a guitar string is a contact event whose indenter is a fingertip material card.",
+   "why": "\"A true universal integrated simulation: that's the entire conceit and premise of FrankenSim.\"",
+   "effect": "Every family on this site is a description file plus generic solvers. Hard-coded air (1.204 kg/m3, 343 m/s) became a defect to retire."
+  },
+  {
+   "date": "2026-10-15",
+   "kind": "owner",
+   "title": "No reduced engines; the test is the spectrogram",
+   "decided": "\"We are NOT interested in 'reduced' engines, EVER, like even a bit. This project is about THE MOST ACCURATE POSSIBLE, even if it can't be done in real-time or even close to it. The true test is that a spectrogram of our purely synthetic/simulated instrument is basically indistinguishable to a well-recorded sample of a real instrument.\"",
+   "why": "A cheap model that sounds acceptable is the opposite of the goal.",
+   "effect": "Rejected outright: fitted loss or reflection filters, Karplus-Strong and fitted waveguides, one-mode bodies with typed constants, internal pressure presented as sound, authored noise, and any parameter adjusted to make a recording match. A live (browser) engine must run the same physics as the offline render.",
+   "refs": [
+    "plan 1.1-1.2"
+   ]
+  },
+  {
+   "date": "2026-10-15",
+   "kind": "method",
+   "title": "Grade every note against real recordings, with real-vs-real rulers",
+   "decided": "Each render is compared with a University of Iowa recording of the same note and dynamic on 15 measures. The tolerance for each measure is how far real recordings of the instrument differ from each other (another take, another dynamic, the neighbouring notes), not a number someone picked. Qualification climbs a ladder of gates: passive chain (QP), speaks (Q1), alive (Q2), inside the ruler (Q3), owner blind test (Q4), phrases (Q5).",
+   "why": "\"Indistinguishable\" has to mean something measurable per measure. The spread between real recordings is the only honest tolerance.",
+   "effect": "The first baseline put every family outside the real spread on most measures. See How we grade.",
+   "refs": [
+    "plan 7.1-7.2"
+   ]
+  },
+  {
+   "date": "2026-10-15",
+   "kind": "owner",
+   "title": "Defaults: the public site waits for the blind test; closures only accelerate",
+   "decided": "OD1: a family appears on frankensim.org after it passes the owner blind test (Q4). OD2: no reduced live discretization. OD11: a fixed closure (a jet-drive law, a contraction coefficient) may speed a render up but is never the shipped render; it is checked against a resolved reference.",
+   "why": "Defaults set in the plan; they apply unless the owner overrides them.",
+   "effect": "That is why only the piano and the drums are on the public music page, and why this explorer is local.",
+   "refs": [
+    "pexfp.1",
+    "plan 12"
+   ]
+  },
+  {
+   "date": "2026-10-21",
+   "kind": "owner",
+   "title": "All renders rejected: start again from first principles",
+   "decided": "The owner listened and called every render \"horrendously bad and artificial\". Orders: real geometry, measured materials, the excitation modelled where it physically happens, real player gestures. Stop ranking the grader's gaps and adding a mechanism for each one: that is hill climbing with citations. The grader becomes the final validation, not the objective.",
+   "why": "Mechanisms added to close a measured gap can raise the score without making the instrument more real.",
+   "effect": "Tuning experiments were parked. Each lane filed a facts-only census: what the code simulates (file and line), where every number comes from, what the real object has that the model lacks, and what measured data exists. Renders built on reduced physics are labelled diagnostic baselines (the bowed strings' one-oscillator body, for example).",
+   "refs": [
+    "corpus/census"
+   ]
+  },
+  {
+   "date": "2026-10-21",
+   "kind": "owner",
+   "title": "fs-string approved; figure readings allowed with a stated error",
+   "decided": "OD10: a new crate fs-string owns all string and rod physics; interior acoustics extends fs-feec; old entry points are removed only after bitwise parity is proven. OD17: a number read off a published figure may be used when its reading error is stated or bounded.",
+   "why": "Much published instrument data exists only as plots.",
+   "effect": "Ledger rows from figures carry the reading procedure and its error; a row without one is refused.",
+   "refs": [
+    "pexfp.2",
+    "c6fcec467"
+   ]
+  },
+  {
+   "date": "2026-10-22",
+   "kind": "method",
+   "title": "\"Alive\" (Q2) means spectral flux after the attack",
+   "decided": "The old Q2 test (an identity margin of 3 dB) was retired. It passed only 1 of 46 real recordings from a second library and 28 of 56 frozen copies with the life removed, so it could not tell a real instrument from a dead one. The registered test: a sustained note's mean spectral flux after the attack lies inside the spread of its instrument's real recordings within 2 semitones, on at least 80 % of graded notes.",
+   "why": "A gate is only useful if real recordings pass it and lifeless signals fail it.",
+   "effect": "Validity run: real recordings from a second library 36 of 43 (83.7 %); all five null signals fail (0 of 44 each); a +20 cent shift moves no margin by more than 0.49 dB. Struck and plucked families get no Q2 until a decay measure is registered (pexfp.360).",
+   "refs": [
+    "pexfp.357",
+    "d58180bd0",
+    "c1570b790"
+   ]
+  },
+  {
+   "date": "2026-10-22",
+   "kind": "finding",
+   "title": "The Q2 test fails real clarinets",
+   "decided": "Clarinet stays out of Q2 until this is understood.",
+   "why": "Real clarinet recordings from the second library pass 0 of 4. The reference sets already hold 9 to 15 recordings each, so this is not a data gap: either the two libraries differ in post-attack flux for reed tone, or the measure does not suit reeds.",
+   "effect": "Filed as pexfp.361; it blocks the clarinet Q2 milestone.",
+   "refs": [
+    "pexfp.361"
+   ]
+  },
+  {
+   "date": "2026-10-23",
+   "kind": "owner",
+   "title": "Materials and gas are data on every render path",
+   "decided": "Every render path takes its materials and its gas from data packs: the air's composition, temperature and humidity, the string alloys (gold and silver included), the soundboard and the felt. Every family gets screened reference recordings.",
+   "why": "The audit found fixed air on the plate, string, bowed, percussion and piano paths, piano strings on an effective per-key table, and the board and felt hard-coded.",
+   "effect": "Beads .362 (gas everywhere), .363 (piano strings from packs, gold), .364 (board and felt), .365 (references for every family), .366 (violin body).",
+   "refs": [
+    "pexfp.362",
+    "pexfp.363",
+    "pexfp.364",
+    "pexfp.365",
+    "pexfp.366"
+   ]
+  },
+  {
+   "date": "2026-10-23",
+   "kind": "finding",
+   "title": "No render applies the air's relaxation absorption; the kit's decay was read off recordings",
+   "decided": "Reality check six hours into the unification work.",
+   "why": "Winds, brass and voice use the gas inside the bore, but piano, bowed strings and kit hear it only at the receiver, as a density and sound-speed gain. The relaxation law had no caller outside tests, so oxygen and humidity barely reached the sound. The drum heads' decay times were taken from recordings: a breach of data, never fitting.",
+   "effect": "Relaxation absorption went to lane L9; the drum-head loss from material data became pexfp.370.",
+   "refs": [
+    "pexfp.18",
+    "pexfp.370"
+   ]
+  },
+  {
+   "date": "2026-10-23",
+   "kind": "finding",
+   "title": "The violin body's \"modes at 0.6x\" came from a stale table",
+   "decided": "Correct the inputs, never tune toward the bands.",
+   "why": "The defect report used tables from a cracked model. On the repaired model: A0 243.2 Hz, CBR 476.7 Hz, breathing mode 530.7 Hz. Two input errors were found on the way: the maple density was the oven-dry 563 kg/m3 instead of 626 (two rows named 'density', the later one kept), and the bridge grain ran across the bridge instead of along it.",
+   "effect": "Norway spruce packs from Viala 2020 added; each correction moves CBR by 3 % or less.",
+   "refs": [
+    "pexfp.366",
+    "4f9abefe1",
+    "18a7dc86b"
+   ]
+  },
+  {
+   "date": "2026-10-23",
+   "kind": "finding",
+   "title": "The f-holes' conductance, computed from the CT scan",
+   "decided": "Quote the computed number for A0; never adjust it toward a target band.",
+   "why": "A boundary-element solve of the scanned f-holes in a baffle gives 45.29 mm for the pair: 0.930 of the ellipse-neck value in the body table, not the +33 % the A0 band would need. Each hole alone is within 2 % of its equivalent ellipse; together they carry 0.918 of the sum.",
+   "effect": "Rigid A0 moves about -3.6 %. The closed-cavity side is the next solve.",
+   "refs": [
+    "b224d16a6"
+   ]
+  },
+  {
+   "date": "2026-10-23",
+   "kind": "finding",
+   "title": "The assembled violin renders at about 310 seconds per second of sound",
+   "decided": "Speed work must leave the pressure bit-identical.",
+   "why": "The full violin (strings, il Cannone body, enclosed air) took 19.5 ms per sample, about 935 s per second of audio. 82 % of that was one matrix exponential per loss channel.",
+   "effect": "Five bit-identical speed-ups: 306 to 319 s per audio second (target 900); the Esteso guitar 511 s.",
+   "refs": [
+    "pexfp.358",
+    "b8d7fb34a"
+   ]
+  },
+  {
+   "date": "2026-10-23",
+   "kind": "ruling",
+   "title": "Drum heads: loss from material data, refusals for what is missing",
+   "decided": "Land the refusal, the film material pack and the radiation and air loss together. The film pack has density and modulus only, with no loss claim; a missing film loss refuses by name unless the performance declares it a stated unknown, and then the receipt says the decay times above the first two modes are upper bounds. Model the film's frequency-dependent loss as a generalized Maxwell solid. The browser kit keeps its current heads until the sourced path lands.",
+   "why": "A number that is not measured must not be invented, and a missing one must be visible.",
+   "effect": "The work-in-progress kit renders ring about ten times longer than the recorded drums: the sourced loss alone is not yet enough.",
+   "refs": [
+    "pexfp.370"
+   ]
+  },
+  {
+   "date": "2026-10-23",
+   "kind": "ruling",
+   "title": "Cymbal loss: modal damping on the shell",
+   "decided": "Use a rank-R modal damping operator built from the cymbal's computed rest modes (R2), opt-in behind a feature.",
+   "why": "The plate-viscosity form (R1) fails on shells.",
+   "effect": "Bell-bronze loss from van Houten 1997; the felt clamp's share computed per mode.",
+   "refs": [
+    "pexfp.372",
+    "803ea34cc",
+    "8bd187c5a"
+   ]
+  },
+  {
+   "date": "2026-10-23",
+   "kind": "ruling",
+   "title": "Rosin: a generic third-body law, checked against Smith and Woodhouse",
+   "decided": "The rosin layer's shear strength against temperature is tabulated so the generic law reproduces the Smith-Woodhouse 2000 friction model at its points. The temperature shift needs real shift constants; every field that source does not give is flagged as an assumption, never a measurement.",
+   "why": "The bow's friction is the head of the bowed-string chain; the law must be generic (brake films use it too), not bow code.",
+   "effect": "Unblocks the layer-in-contact and bow fixtures that every bowed Q2 and Q5 waits on.",
+   "refs": [
+    "pexfp.29"
+   ]
+  },
+  {
+   "date": "2026-10-24",
+   "kind": "finding",
+   "title": "What each family can actually play, pitch-checked",
+   "decided": "Render every note each family can play today and measure the pitch it really sounds.",
+   "why": "A grade of 'inside on 11 of 14 measures' says nothing about whether the scale works.",
+   "effect": "In tune: the four bowed families on open strings, the voice at six pitches, the trumpet's four valves-up notes. Pan pipes: right notes, about 20 cents flat. Tin whistle: 33 to 100 cents sharp, worse going up. Clarinet: 2 of 21 fingerings sound their note; the rest squeak near E6. Flute: 1 of 3. Recorder: 0 of 4. See How we grade.",
+   "refs": [
+    "eaf6e6539"
+   ]
+  },
+  {
+   "date": "2026-10-24",
+   "kind": "method",
+   "title": "The pitch detector's first answers were wrong, twice",
+   "decided": "Take candidate periods from the autocorrelation and let the spectrum choose: the lowest candidate whose harmonics stand out from the spectrum between them (harmonic contrast) as well as the best one does.",
+   "why": "The highest autocorrelation peak reported the trumpet a fourth to an octave low: on clean tones the peaks at two and three periods are as tall as the first. Taking the first tall peak instead reported the low bowed notes at a harmonic (the bass's E1 as D4), because a body resonance near 290 Hz dominates their waveform. Neither was true.",
+   "effect": "The final detector agrees with the grader's partial tracker on all 8 graded cello and bass notes and finds the trumpet in tune within 9 cents. On notes that are already wrong (clarinet squeaks, the recorder) the octave stays uncertain."
+  },
+  {
+   "date": "2026-10-26",
+   "kind": "ruling",
+   "title": "Kit settings chosen by sounding closer to the recordings are being replaced",
+   "decided": "Every kit setting that was adopted on 2026-10-14 because it graded closer to the Salamander strokes gets a measured value or a declared estimate instead: the head tensions, strike points, the stick's contact loss, the snare wires' tension, preload and contact, the kick beater's felt, the ride's shell and the hi-hat's rim chatter. A head may still be tuned to the recording's pitch, computed from the membrane, as a drummer tunes a drum.",
+   "why": "Choosing a number because it brings the render closer to the recording it is then compared with is fitting. The 2026-10-21 pivot forbids it, and the kit page compares against those same strokes, so its closeness was partly built in.",
+   "effect": "Until the replacements land, every kit comparison on this site carries a warning naming the fitted settings. The snare's wires already changed: a recording-fitted decay time gave way to coils of steel music wire with measured stiffness and loss, and the snare moved further from the recording (balance gap 4.0 to 5.3 dB), as a fit removed should.",
+   "refs": [
+    "96ccf8f1b",
+    "3974f9764",
+    "pexfp.372"
+   ]
+  },
+  {
+   "date": "2026-10-26",
+   "kind": "method",
+   "title": "Recordings at other sample rates are resampled with a filter",
+   "decided": "Every recording and render that is not at 48 kHz is brought to 48 kHz by a windowed-sinc resampler (ffmpeg's, 64 taps) before the phrases are joined and measured.",
+   "why": "Plain linear interpolation had been used. Most of the Iowa clips are 44.1 kHz, where it cost 3 dB at 15 kHz, and 99 are 96 kHz, where it folded everything above 24 kHz back into the band at full level. The real notes were measured duller or noisier than they are.",
+   "effect": "Only phrases rebuilt from those clips moved: the trumpet's timbre distance went from 14.2 to 14.9 dB (fanfare) and 14.4 to 15.8 dB (slur), the tin whistle's by up to 0.5 dB, the pan pipes' by 0.3 dB. The simulations did not change; the recordings they are measured against are now heard as they are."
+  },
+  {
+   "date": "2026-10-26",
+   "kind": "finding",
+   "title": "The flutes, recorder and whistle have no even harmonics",
+   "decided": "Give the jet the offset and angle that real players and makers use, from published data: the flute's from one flutist measured by Schlieren imaging (jet aimed 39 degrees, its centre about 0.3 mm outside the edge; Onogi, Yokoyama and Iida 2021), and the recorder's derived from its maker's measured step under the edge (Bouterse 2010). This lands as its own step, after the jet's computed response.",
+   "why": "In every flue render the labium edge sat exactly in the middle of the jet, because its position was unpublished and set to zero. A symmetric cut of the jet makes odd harmonics only: the second harmonic measured 89 to 117 dB under the fundamental, where real flutes, recorders and whistles have strong even harmonics. That, with an authored jet gain that drove the jet into a square wave, is most of why these families sound like synthesisers.",
+   "effect": "The jet's computed response (replacing the authored gain of 90) comes first, so each change can be heard and measured on its own. The tin whistle's edge position is still unpublished and stays at zero."
+  },
+  {
+   "date": "2026-10-26",
+   "kind": "ruling",
+   "title": "The violin's scale and melody are now the whole instrument",
+   "decided": "Each note of the violin's scale and melody is rendered on the assembled violin: Dominant strings on the il Cannone body from its CT scan, with its enclosed air and f-holes, and the finger as a spring on the string. A note the solver refuses stays silent and is named with the solver's own message; nothing else is put in its place. The double stops keep their earlier renders for now, because three of the four were refused.",
+   "why": "The earlier notes were each string's open-string description with the string shortened by a rigid stop, played without the instrument's body geometry. The assembled violin is the instrument the program is building, every part from geometry and material data, so the site plays it as soon as it speaks, including where it does not yet do well.",
+   "effect": "Scale: timbre distance 14.4 to 11.5 dB, and the noise between harmonics went from 37.5 dB too clean to 8.7, but several notes take 150 to 210 ms to settle (a player's take 0 to 30) and B3 and C4 were refused. Melody: 7.7 to 9.0 dB, duller than the recording (the body is solved only up to 5 kHz), and the stopped notes sound 7 to 26 cents sharp while the finger's stiffness is not converged; the earlier rigid stop was in tune. The refusals were traced to a solver defect, a final check with no headroom. A fix that leaves every accepted sample unchanged is being made, and the refused notes and the double stops will be rendered again with it."
+  },
+  {
+   "date": "2026-10-26",
+   "kind": "ruling",
+   "title": "The violin's refused notes and three of its four double stops now play on the whole violin",
+   "decided": "The solver fix landed (commit 4edc4e58c: a stop that misses its tolerance at the step's actual endpoint is solved again with headroom, the tolerance unchanged, and every sample accepted before is unchanged). B3 and C4 of the scale were rendered again and now speak, and the double stops moved to the assembled violin like the scale and melody. Three of the four speak. The last, G4 with B4, is still refused: its slot stays silent and is labelled with the solver's message.",
+   "why": "The earlier entry kept the double stops on their old renders only because three of the four were refused. With three speaking, that entry's rule applies: the site plays the whole instrument as soon as it speaks, and a refusal stays visible as a silent, labelled slot rather than being filled with an older render.",
+   "effect": "Double stops against the recordings: the noise between harmonics went from 48.1 dB too clean to 2.0 dB, the partials' distance from 26.2 to 12.0 dB, and the brightness from half the recording's to 0.91 of it, while the timbre distance moved from 9.3 to 9.7 dB. G4 with B4 fails because its two stops are pressed by opposed contacts, which the solver's coordinate sweep converges on slowly: after 3951 iterations it still missed its tolerance by 15 %. Solving each opposed pair together removes that stall. It is part of the stopped-note correction now under test, which also targets the stopped notes' 7 to 26 cents sharpness: the finger is pressed against too few string modes, which makes the stop stiffer than it is, and the correction adds the missing modes' static flexibility."
+  },
+  {
+   "date": "2026-10-26",
+   "kind": "ruling",
+   "title": "The recorder's and whistle's window now radiates; its typed-in loss is gone",
+   "decided": "The window of the recorder and the tin whistle, the opening between the windway and the labium edge, now loses energy as an opening in the head's outer wall does. Its sound radiation is computed from the head's outer cylinder (commit e7efcfe72), and the window loss that had been typed into both families' descriptions is gone. Both families were rendered again with that commit. The flute and the pan pipes keep the typed-in loss, because their geometry has no window face to radiate from, and their status says so. Rendered again with the same binary, they came out bit for bit identical, so their audio stands.",
+   "why": "A typed-in loss is a number someone chose. The window is a hole in a cylinder of known size, in air of known density and sound speed, and what it radiates follows from those, as the 2026-10-21 restart requires. The typed-in value was most of the resistance the jet worked against at the sounding pitch, so it set how far the jet pulled each note off the tube's own resonance.",
+   "effect": "Measured here on the site's own renders, the pitch moves agree with those reported at the landing to within 3 cents. Most of the whistle's notes dropped, by 1 to 39 cents (B5 rose 4), and moved toward equal temperament: F#5 from 80 to 42 cents sharp, A5 from 46 to 16; D5, E5, G5 and D6 now sit within 6 cents. The fundamental gained 3 to 10 dB, so the share of sound above 2.8 kHz fell. What remains there is the jet's square-wave cut, the next change on this path. The recorder's held B-flat and B had sounded their fourth mode (about 1.45 kHz); they now sound their first (429 and 454 Hz). They reach it by coming back down from a higher register as the blowing pressure rises, which a real recorder does not do, and the recorder's status says so.",
+   "refs": [
+    "e7efcfe72",
+    "pexfp.335"
+   ]
+  },
+  {
+   "date": "2026-10-26",
+   "kind": "ruling",
+   "title": "The kit is rendered again with no setting chosen for sounding closer to the recordings",
+   "decided": "All nine kit pieces were rendered again at commit d3395f98f. It carries two kit changes. The drums keep none of the values adopted on 2026-10-14 for grading closer to the recordings (e655d1834). The heads' film loss now follows a curve derived from a published measurement of thin PET film, read at each head mode's own frequency (18f58894c). One value per drum still comes from the recordings: the head tension, set so the drum's lowest mode sits at the recording's late pitch, as a drummer tunes a head. The strike points, the stick's and beater's contact, the kick's felt and pillow, the snare wires' setting, the hi-hat rims, the ride's shell and the cymbals' decay times are declared estimates. The warning that named the fitted settings is replaced by one that names these.",
+   "why": "This carries out the earlier ruling: a setting chosen because it made the render closer to the recording it is then graded against is fitting, and fitting is not allowed.",
+   "effect": "Timbre distance from the recordings, before and after: kick 5.5 to 10.0 dB, snare 5.3 to 4.9, snare with wires off 10.5 to 10.4, 12-inch tom 5.3 to 5.4, 14-inch tom 5.5 to 5.0, closed hi-hat 9.9 to 10.7, open hi-hat 8.7 to 8.9, crash 5.9 to 5.9, ride 9.2 to 8.9. Removing fitted values was expected to move some pieces away, and the kick moved most. Its lowest mode now has the recording's pitch, gliding from about 50 down to 43 Hz as the real drum's does from 49 to 41. But a higher mode, gliding from about 127 down to 107 Hz, is about 10 dB louder than it, where in the recording the lowest mode is the loudest by 10 to 15 dB. Which declared estimate sets that balance is being looked into; it will be changed only with a measured value. The film loss shortens the kick's upper bands (its 1 kHz band now falls 20 dB in 30 ms, the recording's in 80 ms). The other drums still ring far longer than the real ones in most bands: the toms ring for well over a second where the real ones fall 20 dB in 0.05 to 0.9 s. The loss at the head's edge, hoop and shell has no published measurement and enters as zero.",
+   "refs": [
+    "e655d1834",
+    "18f58894c",
+    "pexfp.372",
+    "pexfp.370"
+   ]
+  },
+  {
+   "date": "2026-10-27",
+   "kind": "ruling",
+   "title": "The violin's strings now feel the modes they leave out, and are tuned to pitch",
+   "decided": "Every note of the violin's phrases was rendered again at commit c6854036b. Each string's model keeps a finite set of bending modes. At the bridge and under a finger, each string now also carries the static compliance of the modes it leaves out, computed exactly from the string's own static response. Before, a point support acted only through the modes kept, which makes it stiffer than the real string and the note sharp: keeping 50 modes instead of 25 lowered the probe notes by 3 to 9 cents. With this change the pitch moves by less than 0.01 cents between the two. The open strings were then tuned to equal temperament (A4 = 440 Hz) the way a player tunes them, against that pitch standard and never against a recording, from the instrument's own response to a pulse: the tensions were multiplied by 1.00100 (G), 1.00182 (D), 1.00302 (A) and 0.99945 (E).",
+   "why": "A pitch that depends on how many modes the model keeps belongs to the model, not to the violin. The correction is exact for the static part of the omitted modes and needs no chosen value. It was checked first against an independent solution of a stopped string: all twelve cases came within half a cent.",
+   "effect": "The melody now has 14 of its 15 notes within 10 cents of the written note, against 4 before. Most of its stopped notes had been 14 to 26 cents sharp; now every note is within 12 cents. The fourth double stop (G4 with B4), which the solver had refused, now renders, so all four chords play. Two notes of the scale got worse. C4 on the G string and the open D4 lost much of their fundamental against the second harmonic, by about 4 and 19 dB. C4's fundamental now sits 22 dB under its second harmonic and its third and fifth about 45 dB under it, so its pitch reads an octave high, and the open D4's pitch reading lands between harmonics. The scale has 12 of its 15 notes in tune, against 13. Why the change weakens these two fundamentals is being looked into. Timbre distance from the recordings: melody 9.0 to 10.4 dB, scale 11.6 to 11.3, chords 9.7 to 9.3. Still open: the bow's own contact does not yet feel the omitted modes; how the attack converges in the finger's stiffness was measured only before this change; and the string's internal loss is a stated unknown, entered as zero. The four open strings in the list of notes the violin can play had still been rendered by the earlier one-string engine; they are now renders of the assembled violin at the same commit, and all four sound within 3 cents of their note.",
+   "refs": [
+    "c6854036b",
+    "pexfp.299"
+   ]
+  },
+  {
+   "date": "2026-10-27",
+   "kind": "ruling",
+   "title": "The snare wires' contact and the hi-hat rims' friction now come from the materials",
+   "decided": "The snare and both hi-hats were rendered again at commit 5e02f4af0; the other six pieces are unchanged. Each turn of the snare's wire coils now presses the bottom head as a contact whose stiffness is computed from the coil's shape and the elastic moduli of the steel and of the head's film. It replaces a stiffness that had been typed in, and is about ten times stiffer. The hi-hat rims now rub with a published friction coefficient for tin bronze sliding on itself, 0.6 (Buckley 1972); published values for bronze on bronze run from 0.2 to 0.6 depending on the contact. The open hi-hat opens by a declared 8 mm, because the recording's pedal position is unknown.",
+   "why": "A contact stiffness or friction coefficient someone types in is a chosen number. These follow from the parts' dimensions and from measured material properties, as the 2026-10-21 restart requires.",
+   "effect": "Timbre distance from the recordings, before and after: snare 4.9 to 4.5 dB, closed hi-hat 10.7 to 10.6, open hi-hat 8.9 to 9.4. The snare's decay is unchanged: its 1 and 2 kHz bands still ring for more than 0.95 s, where the recording's fall 20 dB in 0.09 to 0.17 s. The closed hi-hat is far too dark: 25 % of its energy lies above 1 kHz, against 98 % in the recording, and its spectral centre sits at 1.9 kHz against 11 kHz. (Corrected on 2026-10-27: the first version of this sentence had the render and the recording the other way round.) Above 2 kHz it falls 20 dB in 20 to 50 ms, the recording's in 80 to 110 ms. The open hi-hat now dies away faster above 500 Hz (in 0.2 to 0.29 s, against 0.24 to 0.34 s before), where the recording rings for 0.3 to 1.6 s. This entry first said the change came from the rim losing energy twice; it did not, because the open hi-hat's rims never touch while it rings (see the later entry on the hi-hat rims). It comes from the declared 8 mm opening. The closed hi-hat's rims did lose energy twice; that has been fixed.",
+   "refs": [
+    "5e02f4af0",
+    "pexfp.372"
+   ]
+  },
+  {
+   "date": "2026-10-27",
+   "kind": "ruling",
+   "title": "The violin's graded notes now come from the assembled violin, not the one-oscillator stand-in",
+   "decided": "The four graded open strings (G3, D4, A4 and E5) were graded again, now on the assembled violin: four material strings on the il Cannone body and its enclosed air (commit c6854036b), the same renders the violin's playable notes use. Until now they were graded on the earlier one-string reader with a one-oscillator body (commit 8dc554240), which the page labelled a diagnostic baseline. The grader is the committed one at c263e2af0. The earlier gradings stay in each note's history.",
+   "why": "A grade says how close the simulation is to real recordings only if it grades the simulation the page plays. The reduced reader was kept as a stand-in until the assembled violin could play all four strings at pitch; since 2026-10-27 it can.",
+   "effect": "Graded by the same grader on both renders, each of the 15 measures falls either inside or outside the spread between real recordings of the same note. 38 measures were inside before and 40 are now. G3 went from 11 to 12, D4 from 8 to 12, A4 from 10 to 7, and E5 stayed at 9. Against the stricter same-note ruler, 38 were inside both times, with D4 at 10. The page's earlier figure, 37, came from an older grader that put one more E5 measure outside. Gained: G3's and D4's spectral distance and third-octave band envelope moved inside the real spread, as did D4's spectrogram and cepstral envelope. Every note's spectral flux moved toward the recordings'; the stand-in's notes barely changed from moment to moment. Lost or still out: G3's sound rises in 11 ms, against 112 ms in the recording, although the render's bow takes 80 ms to reach its full speed. A4 and E5 are too dark: their spectral centroid is 556 and 741 Hz, against 1340 and 1726 Hz in the recordings. A4's odd harmonics stand 9 dB above its even ones, where the recording's are level, which suggests a bowing pattern other than plain Helmholtz motion rather than a fault of the body. G3, D4 and E5 are now noisier than their recordings (harmonics-to-noise 17 to 23 dB, against 30 to 32). D4's partials are stretched (inharmonicity 0.44 x 10^-4, where the recording's measures zero) by the string's bending stiffness, which the stand-in set to zero. The graded renders are the playable notes' renders, on the body's 6 mm mesh; the committed render.sh uses the 8 mm one. The status card above still describes the stand-in; a replacement is being checked.",
+   "refs": [
+    "c6854036b",
+    "pexfp.298",
+    "pexfp.299"
+   ]
+  },
+  {
+   "date": "2026-10-27",
+   "kind": "ruling",
+   "title": "The flute's notes now come from the window row, and D4 and G4 are graded again",
+   "decided": "The flute's three held notes (D4, G4 and A5) were rendered again from the committed cards of the window row (commit c263e2af0), with a music_render built at commit 8a3a8c909 and no local changes. In the window row the embouchure radiates from its solved window under the player's lip, and the cards' authored window loss is gone. The page's commit moved to 8a3a8c909, so the flute's status card describes this row. D4, G4 and A5 were graded again by the committed grader (commit c263e2af0), and the earlier gradings stay in each note's history.",
+   "why": "The window row changed the flute's cards on 2026-10-26, but the repository did not build again until commit 96e0f5b21 on 2026-10-27. Until then the page kept the notes rendered at ae5c3abdb rather than play renders from a binary with local changes.",
+   "effect": "Pitch: D4 now sounds 3 cents flat (it was 10 cents sharp), and G4 39 cents sharp (it was 50). A5 sounds B-flat 4, 37 cents flat, an octave below the note (it was 9 cents flat), because the jet still finds only the first register there, so the grader refuses it. D4 was not graded before; it now has 3 of 15 measures inside the spread between real recordings (2 against the stricter same-note ruler). G4 went from 2 to 5 (1 to 4 strict). Graded by the same grader, the earlier notes had D4 at 1 and G4 at 2. Gained: both notes' attacks are now inside, as are D4's pitch and G4's partial trajectories and spectral centroid. Still out: both notes have almost no even harmonics; their odd harmonics stand 33 and 35 dB above the even ones, where the recordings' even harmonics are 5 and 9 dB stronger. D4 is too bright (spectral centroid 1707 Hz, against 607 Hz in the recording) and noisier (harmonics-to-noise 18 dB, against 34). G4 is cleaner than the recording (56 dB, against 35). Both notes are steadier from moment to moment than the recordings. Next on this lane: the player's face and the lip on one side of the mouth-hole, from published measurements, predicted to lower the notes by 11 to 22 cents before any render.",
+   "refs": [
+    "c263e2af0",
+    "96e0f5b21",
+    "8a3a8c909",
+    "frankensim-5kfrn"
+   ]
+  },
+  {
+   "date": "2026-10-27",
+   "kind": "ruling",
+   "title": "The hi-hat rims lose energy at the rim once, and the cymbal shells' loss bookkeeping is corrected",
+   "decided": "All nine kit pieces were rendered again at commit 7d5cef9c3. It carries two changes since the snare and hi-hats were rendered earlier today (5e02f4af0). First, the cymbal shells' loss bookkeeping now treats a state of zero as a real value and credits only the net work done by viscous loss (6d6f0c790). It reaches only the shells, so the five drums render identical to the byte. Second, the hi-hat rims no longer carry a typed-in contact loss on top of their friction (7d5cef9c3, ruling 7865). That loss, set on 2026-10-14, stood in for rim friction before friction was its own term, so the rims lost that energy twice. Rim friction, a published value for tin bronze (Buckley 1972), is now their only loss at the rim. Both hi-hats were also rendered with the first change alone, so each change's effect can be told apart.",
+   "why": "A loss counted twice is wrong whichever way it moves the sound, and a bookkeeping change should be seen separately from a change to the physics.",
+   "effect": "The closed hi-hat moves toward the recording. Its timbre distance falls from 10.6 to 10.0 dB, its spectral centre rises from 1.9 to 3.3 kHz (the recording's sits at 11 kHz), and the share of its energy above 1 kHz rises from 25 to 32 % (98 % in the recording). Its 1 kHz band now falls 20 dB in 90 ms, as the recording's does, and its 4 kHz band in 30 ms, against 80 ms. All of that change comes from the rim fix: rendered with the bookkeeping change alone, the closed hi-hat measures exactly as before (10.6 dB, 1.9 kHz). The open hi-hat, crash and ride keep their timbre distances (9.4, 5.9 and 8.9 dB) and every band's decay time to within 10 ms; the bookkeeping changes their samples only slightly. The open hi-hat's render is identical to the byte with and without the rim's contact loss, so its rims never touch while it rings. The faster decay noted for it earlier today therefore came from its declared 8 mm opening, not from the rim. That entry also had the closed hi-hat's brightness the wrong way round, and has been corrected. Still out: the closed hi-hat is far darker than the recording, and the open one dies away in 0.2 to 0.3 s above 500 Hz where the recording rings for 0.3 to 1.6 s.",
+   "refs": [
+    "6d6f0c790",
+    "7d5cef9c3",
+    "pexfp.372"
+   ]
+  },
+  {
+   "date": "2026-10-27",
+   "kind": "ruling",
+   "title": "The flute player's face and lip are in the embouchure, and the notes moved flat as predicted",
+   "decided": "The flute's three held notes were rendered again at commit 29b7a3088, with a music_render built there and no local changes. That commit puts the player's lower lip on the player's side of the mouth-hole, where the earlier cards had it centred, and stands the player's face, a rigid plane, 1.8 mm behind the lip's edge. In his fit of the jet's length, Fletcher (1975, p.235) treats the first 1.8 mm after the jet leaves the lips as shielded from the sound field, inside the 1 to 2 mm his players' photographs show. The lane rendered both ends of that range as checks. Before any render, the lane predicted from its solved loads how far each note would move. D4, G4 and A5 were graded again by the committed grader (commit c263e2af0), and the earlier gradings stay in each note's history.",
+   "why": "A flutist's lip covers the mouth-hole from one side and the face stands just behind it. A centred lip with nothing behind it was a stated simplification, and it left the notes sharp.",
+   "effect": "The predictions were 11.1, 15.2 and 21.6 cents flat for D4, G4 and A5; the lane's renders moved 10.8, 15.0 and 21.3 cents, all 12 of its predictions within 5 cents. On this page D4 now sounds 14 cents flat (it was 3 cents flat) and G4 24 cents sharp (it was 39). A5 still sounds an octave below the note, now as A4 39 cents sharp (it was B-flat 4, 37 cents flat), so the grader still refuses it. The counts of measures inside the spread between real recordings did not change: D4 has 3 of 15 (2 against the stricter same-note ruler) and G4 5 (4 strict). G4's pitch is closer to the recording (397.8 Hz, against 393.5 Hz; it was 401.3) but still outside. D4's spectral centroid fell from 1707 to 1452 Hz (607 Hz in the recording) and its harmonics-to-noise rose from 18 to 20 dB (34 in the recording). Still out: both notes have almost no even harmonics, their odd harmonics 33 and 35 dB above the even ones, where the recordings' even harmonics are 5 and 9 dB stronger. The lane traced this to the source: the even harmonics are already missing from the air flow at the mouth-hole and at every open hole, so they are not lost on the way to the listener. The jet is the suspect, and the test is a jet with its physical gain in place of the demonstrator's gain of 90. The head's end correction is now 32 to 38 mm, against the 43 to 60 mm Vauthrin (2015) measured with a player, so the face's real angle and shape, the lip's thickness and the lip plate, none of them yet measured, are still worth tens of cents flat.",
+   "refs": [
+    "29b7a3088",
+    "frankensim-5kfrn"
+   ]
+  },
+  {
+   "date": "2026-10-27",
+   "kind": "ruling",
+   "title": "The guitar plays on the 1964 Esteso body built from its plan, with the bridge the plan prints",
+   "decided": "The guitar's five notes now play on the body of the 1964 Esteso classical guitar, assembled from the plan Zimmer and Mores published in 2024: the braced top, the barred back, the ribs, the air inside and the sound hole, 20 shell parts in all. Before, the notes played on a flat cedar plate. The five notes are G3, B3 and E4 on open strings, and F#4 and F5 stopped on the B string. The strings and the pluck are unchanged: Lynch-Aird and Woodhouse's (2017) measured nylon at D'Addario's gauges, with the tensions set on the plate by tuning the model's own fundamental to equal temperament (A4 = 440 Hz). No recording sets a tension. The committed body table leaves the bridge out. Its own generator can build it, though, so the bridge is in: the printed 182.8 x 28 mm, 8.7 mm high with scooped ends, standing on the top as a solid rosewood wall. The plan names no bridge wood, so rosewood is an assumption. The plan prints no bridge position either. The string drives the top midway between the two braces either side of the bridge. In a check on the body without its bridge, driving E4 instead at the saddle line found from the printed 650 mm scale, 8 mm away, moved it by less than 0.1 Hz. Rendered with material_strings at commit 29b7a3088. F5 is rendered at 96 kHz, because at 48 kHz its coupled stiffness fails the solver's stability screen; the same physics needs a finer clock. Graded by the committed grader (commit c263e2af0). The flat plate's gradings stay in each note's history.",
+   "why": "A real guitar sounds through a closed, braced box of air, and the flat plate was only a stand-in for one. The bridge goes in because leaving it out was measurably wrong. Without it, the string drives one point of the bare 2.5 mm top. The body's own mode solve then makes that point far too light: 17 to 36 g at the strings in the first top mode with the sound hole sealed, where Wright (1996) measured 54 to 62 g on a classical guitar's bridge the same way. With the bridge it is 77 to 147 g. Rendered without the bridge, the notes were pulled up to 38 cents flat, and their upper partials died two to four times faster than the recordings'. The grader scored that body worse than the flat plate on 9 to 13 of 16 measures per note. It is not on this page.",
+   "effect": "The body's two lowest resonances land near the ones measured on this guitar: the air at 94 Hz (98 Hz measured), and top and back moving together at 192 Hz (200 Hz). The first four notes sound within 3.3 cents of where they were on the plate: G3 196.1 Hz, B3 246.7, E4 329.4 and F#4 369.3. They stay 7 to 23 cents sharp of the recordings, which sit 10 to 28 cents flat of equal temperament. F5 is at 694.1 Hz, 12 cents below the plate's F5, which kept 12 string modes where this one keeps 24. Overall the grader puts it slightly behind the plate: 32 measures fall outside the spread between real recordings, against 27. Per note, they went from 7 to 10 for G3 and from 5 to 6 for B3 and for F#4, and stayed at 5 for E4 and for F5. It is better on spectral centre: E4 353 Hz and F#4 373 Hz, against the recordings' 359 and 388, where the plate gave 519 and 683. It is also better on harmonics-to-noise for four of the five notes. It is worse on the shape of the spectral envelope, for every note, and on the attack of G3, B3 and F#4. Still out: most partials ring too long. Over the first eight partials, this render's decay rates are 0.4 to 0.55 times the recording's for E4 (partial 2 aside), 0.2 to 1.1 times for B3 and 0.5 to 1.6 times for G3. The string loses energy to the air, to the nylon's measured bending loss and to the body; its loss through the tension enters as zero. Woodhouse (2017) accounted for measured nylon strings on a guitar with air, body and bending loss alone, and this render's partials already decay at least 1.3 times faster than that account gives, so a tension loss term is not the missing piece. The recordings' strings and the Raimundo's body are unknown. A clearer flaw is the pluck. It is one point released 160 mm from the saddle, an estimate, which is close to a quarter of the open string. So partials 4, 8 and 12 nearly vanish: partial 4 sits 22 to 35 dB lower, against the loudest partial, than in the recordings, which show no such gaps. Measured plucking positions come next. A finger or nail about a centimetre wide would not fill a gap this low in the series.",
+   "refs": [
+    "29b7a3088",
+    "frankensim-irp-v5-instrument-realism-pexfp.377",
+    "frankensim-irp-v5-instrument-realism-pexfp.203"
+   ]
+  },
+  {
+   "date": "2026-10-27",
+   "kind": "ruling",
+   "title": "The clarinet's open holes all lose energy by one measured orifice law, and F5 and G5 now overblow",
+   "decided": "The clarinet's 21 fingerings were rendered again at commit e60c12cf3, with a music_render built there and no local changes. Two changes since the last renders (ruling 8058, commit bad91f2ec). First, the bore's linear tone-hole model no longer carries a vortex resistance worked out in advance for an assumed playing level; that model is now strictly linear, with only the air's viscous and thermal losses and radiation. Second, every open hole sheds energy through one time-domain law: the pressure drop of flow through a sharp-edged orifice, with the contraction coefficient 0.61 that Atig, Dalmont, Gilbert and Picart measured (2004). No hole is singled out. Commit e60c12cf3 adds a method the landing left out; origin did not build between the two. All 21 renders are identical to the byte to the ones the lane graded before landing. Graded by the committed grader (commit c263e2af0); the earlier gradings stay in each note's history.",
+   "why": "A resistance computed for one assumed amplitude is a fitted constant in disguise: it cannot follow the real flow through the hole as the note grows and decays. The orifice law is measured and acts on the actual flow, sample by sample.",
+   "effect": "Seventeen notes are graded. On those, the measures inside the spread between real recordings rose from 115 to 121: eight notes improved, four lost one measure and five held. Four notes are refused. F5 and G5 now speak at the clarinet's third resonance, 1160 and 1257 Hz, instead of the second, so the grader does not hear the named note. The old fixed resistance had damped that third resonance enough to suppress it. D5 and A5 sound at their pitch, but they take 70 and 50 ms to settle into the upper register, and the grader cannot align their onsets with the recordings'. The open question is what physical loss above 1 kHz the bore and reed lack. The candidates are the tone-hole lattice above its cutoff, the pads close over their holes, the reed's own damping, and viscous and thermal loss in the holes' chimneys. The lane predicts first, then renders.",
+   "refs": [
+    "bad91f2ec",
+    "e60c12cf3",
+    "frankensim-irp-v5-instrument-realism-pexfp.235"
+   ]
+  },
+  {
+   "date": "2026-10-27",
+   "kind": "ruling",
+   "title": "The guitar is plucked 120 mm from the saddle, the normal position in the literature",
+   "decided": "The guitar's five notes were rendered again with two changes. First, the pluck moves from 160 mm to 120 mm from the saddle. The 160 mm station was an estimate, close to a quarter of the open string, and it silenced partials 4, 8 and 12. 120 mm is the normal plucking position in Traube's 2004 thesis on classical guitar timbre. It was not measured on the recordings' player, and no recording set it. Before rendering, the lane wrote down how every partial's level should move, and the result is published whichever way the grade moved. Second, F5's tension had been carried over from the plate render with 12 string modes, at 57.368 N. It is now the B string's own setup tension at 24 modes, 57.893 N, the same as F#4. The body is unchanged: the bridged 1964 Esteso. Rendered with material_strings at commit 29b7a3088. Graded by the committed grader (commit c263e2af0); the 160 mm gradings stay in each note's history.",
+   "why": "The gaps at partials 4, 8 and 12 were the clearest flaw in the last render, and the recordings show no such gaps. A point pluck at a fraction p of the string's length scales partial n by sin(n pi p), so moving the station predicts each partial's change before any grade is run. Grading only after that prediction is written keeps the station from becoming a knob turned against the recordings.",
+   "effect": "The render moved as predicted, partial by partial. Pitch held: the open strings and F#4 moved by less than 0.1 cent, and F5 rose 7.8 cents with its tension, where 7.9 was predicted. Most partials were expected to change level only a little. On those 41 partials, the measured change differs from the predicted one by 0.9 dB at the median and 6.8 dB at most. Partials 4 and 8 of the open strings rose 17 to 21 dB (22 to 26 predicted). Partial 4 now sits where the recordings have it: 26 dB below the fundamental on G3, against the recordings' 24, and 24.4 dB on E4, against 24. Decay rates did not change; that was predicted too, since the pluck sets how much each partial gets, not how fast it loses it. The grader's count went from 32 measures outside the spread between real recordings to 33. B3 and F#4 each gained one measure (B3 its spectrum, F#4 its partial trajectories); G3 and E4 held. F5 lost three: its spectrum, its harmonic levels and its balance of odd and even partials. Stopped at the 18th fret, F5's string is 230 mm long, so 120 mm from the saddle is near its middle. Partial 2 fell 17 dB (18 predicted), to 36 dB below the fundamental, and the other even partials fell with it. The recordings' F5 has its even partials; whether that player plucked high notes elsewhere is not known. Still out: the upper partials ring about twice as long as the recordings', and F5's pitch gap to the recordings grew from 17 to 25 cents.",
+   "refs": [
+    "29b7a3088",
+    "c263e2af0",
+    "frankensim-irp-v5-instrument-realism-pexfp.377"
+   ]
+  },
+  {
+   "date": "2026-10-27",
+   "kind": "ruling",
+   "title": "The kick has its own overhead microphone, which hears its batter head only",
+   "decided": "The kick was rendered again at commit ec88d6850, with a kit binary built there and no local changes. Its overhead microphone is now its own declared estimate, 1 m above the top edge of the shell, over a floor under the hoops. Before, it borrowed the snare's overhead, and a floor that, for a drum lying on its side, stood like a wall behind the resonant head. The microphone hears the batter head only: the resonant head faces away from it, and that head's sound around the shell, and the cancellation of the two heads moving together, are not modelled. The other eight pieces are unchanged (commit 7d5cef9c3). The kit is compared with the Salamander Drumkit, not graded.",
+   "why": "The old placement gave the kick a microphone and a floor that were not its own. Fixing what the microphone can hear comes first; the resonant head's own sound is a separate piece of physics, not yet built.",
+   "effect": "Before rendering, the lane wrote down how the balance between the kick's two strongest lines should move. The line near 120 Hz now stands 4.5, 3.5 and 3.0 dB above the line near 45 Hz over the first 0.1 s, 0.1 to 0.4 s and 0.4 to 1 s, against 10 dB before and 1.8, 3.5 and 2.9 dB predicted. In the recording the 45 Hz line is 12 to 16 dB on top. The grader's balance gap fell from 9.97 to 8.92 dB, near the predicted 9.0, but partly through errors that cancel: the 63 Hz octave rose 4.2 dB rather than 6.2, and the 250 and 500 Hz octaves fell 3.2 and 1.5 dB where no change was assumed. The kick's fundamental stays on the 119.6 Hz line, where the recording's is 44.5 Hz.",
+   "refs": [
+    "dec1d645c",
+    "ec88d6850",
+    "frankensim-irp-v5-instrument-realism-pexfp.378"
+   ]
+  },
+  {
+   "date": "2026-10-28",
+   "kind": "ruling",
+   "title": "The windway with momentum feeds the jet back at the same delay as the steady one; the notes speak 3 to 8 ms later and hold the same",
+   "decided": "The optional unsteady windway gives the air in the recorder's and whistle's windway its momentum. It read the jet's feedback at the labium. Since commit 1718d79fb, the default steady windway has read it earlier, by the lag of the jet model's filters. The unsteady loop was therefore longer: 88 to 114 degrees of jet phase on recorder a1 and f1 and whistle D5. Commit f1629dacc makes the unsteady windway read at the same delay. Every render with the default steady windway is byte-identical before and after. The site's cards keep the steady windway; no card changes on this comparison.",
+   "why": "Comparing the two windways was meant to measure what the windway's momentum does to the attack. With different delays, it would have measured the delay instead.",
+   "effect": "Before rendering, the lane wrote ten predictions (mail 8727) for recorder a1 and f1 and whistle D5 at a 48 kHz control rate. With the momentum, the held notes are unchanged: pitch within 0.04 cents, and the first three harmonics within 0.02 dB. The notes speak later, by 3.0, 3.2 and 7.9 ms. Seven predictions were met and three missed. Recorder a1's -30 dB point came 2.7 ms later, against 3 to 5 ms predicted. Whistle D5 spoke 7.9 ms later, against 3 to 6 ms predicted. That prediction used how late the jet speed arrives at the crossing times, but on the whistle the whole growth of the note moves, so it underestimated the delay. In the release, weak lines stood 2.3 to 6.3 dB above their neighbours, against at most 2 dB predicted; they are not at the control staircase's frequencies. Recorder f1 was graded as registered. Under the registered convergence check, recorder a1 and whistle D5 stay ungraded. That check compared the two coarsest windway meshes, which differ by 0.115 cents on a1, just over the 0.1 cent limit. On D5 it compared a harmonic below the 16-bit file's floor of -57.6 dB. They were re-graded under ruling 8730, on the finer mesh pair, which agrees within 0.03 cents with that harmonic excluded.",
+   "refs": [
+    "f1629dacc",
+    "1718d79fb",
+    "frankensim-irp-v5-instrument-realism-pexfp.135"
+   ]
+  }
+ ]
+}

@@ -65,8 +65,10 @@ export function stackedBars(rows, keys, colors, { height = 220, yLabel = '' } = 
   const bw = (W - L - 10) / Math.max(rows.length, 1);
   const y = v => T + (H - T - B) * (1 - v / ymax);
   const kids = [];
-  for (let i = 0; i <= 4; i++) {
-    const v = (ymax * i) / 4;
+  // counts: whole-number ticks (a 25 top gives 0, 5 … 25, not 6.25 and 18.75)
+  const p = 10 ** Math.floor(Math.log10(ymax / 4));
+  const step = [1, 2, 2.5, 5, 10].map(k => k * p).find(st => Number.isInteger(st) && ymax / st <= 5) || Math.max(1, ymax / 4);
+  for (let v = 0; v <= ymax + 1e-9; v += step) {
     kids.push(s('line.grid', { x1: L, x2: W - 10, y1: y(v), y2: y(v) }), s('text.axis', { x: L - 6, y: y(v) + 4, 'text-anchor': 'end' }, String(v)));
   }
   rows.forEach((r, i) => {
@@ -90,10 +92,14 @@ export function legend(keys, colors) {
   return h('div.legend', null, keys.map(k => h('span', null, h('i', { style: { background: colors[k] } }), k)));
 }
 
-/** Inside fraction over grading snapshots, one line per note. series: [{name, points: [{t: Date, y, label}]}] */
+/**
+ * Inside fraction over grading snapshots, one line per note. series: [{name, points: [{t: Date, y, label}], muted?, color?}];
+ * a muted series is a thin grey line with no end label (its points keep their titles), for when there are too many to colour.
+ */
 export function historyChart(series, { height = 200 } = {}) {
-  const W = 900;
-  const H = height;
+  // a phone draws it narrower, so its text is not scaled down to unreadable; tall enough for every end label 12 apart
+  const W = (window.innerWidth || 1200) < 760 ? 420 : 900;
+  const H = Math.max(height, series.filter(x => !x.muted).length * 12 + 16);
   const L = 44;
   const B = 30;
   const T = 10;
@@ -113,22 +119,41 @@ export function historyChart(series, { height = 200 } = {}) {
     kids.push(s('line.grid', { x1: L, x2: W - R, y1: y(v), y2: y(v) }), s('text.axis', { x: L - 6, y: y(v) + 4, 'text-anchor': 'end' }, `${v * 100}%`));
   }
   const days = Math.ceil((t1 - t0) / 864e5);
-  for (let d = 0; d <= days; d++) {
+  // a date label needs about 48 units, so a long span labels every few days
+  const every = Math.max(1, Math.ceil((days * 48) / (W - L - R)));
+  for (let d = 0; d <= days; d += every) {
+    // local midnights: fmt.date labels in local time, as the grading times in the cards are
     const t = new Date(t0);
-    t.setUTCHours(0, 0, 0, 0);
-    t.setUTCDate(t.getUTCDate() + d);
+    t.setHours(0, 0, 0, 0);
+    t.setDate(t.getDate() + d);
     if (t < t0 || t > t1) continue;
     kids.push(s('line.grid.v', { x1: x(t), x2: x(t), y1: T, y2: H - B }), s('text.axis', { x: x(t), y: H - B + 16, 'text-anchor': 'middle' }, fmt.date(t.toISOString())));
   }
   const palette = ['#4c6ef5', '#e64980', '#12b886', '#f59f00', '#7950f2', '#15aabf', '#fd7e14', '#82c91e', '#be4bdb', '#868e96'];
-  series.forEach((ser, i) => {
-    const c = palette[i % palette.length];
+  const ends = [];
+  let k = 0;
+  // muted series first, so the coloured lines draw over them
+  for (const ser of [...series.filter(x => x.muted), ...series.filter(x => !x.muted)]) {
     const pts = ser.points.slice().sort((a, b) => a.t - b.t);
-    if (pts.length > 1) kids.push(s('polyline', { points: pts.map(p => `${x(p.t)},${y(p.y)}`).join(' '), fill: 'none', stroke: c, 'stroke-width': 2 }));
-    for (const p of pts) kids.push(s('circle', { cx: x(p.t), cy: y(p.y), r: 3.5, fill: c }, title(`${ser.name} ${p.label}`)));
-    const last = pts[pts.length - 1];
-    kids.push(s('text.axis', { x: W - R + 8, y: y(last.y) + 4, fill: c }, ser.name));
-  });
+    // a step: a grading's score holds until the next grading replaces it, so nothing slopes between them
+    const line = pts.map((p, i) => (i ? `${x(p.t)},${y(pts[i - 1].y)} ` : '') + `${x(p.t)},${y(p.y)}`).join(' ');
+    if (ser.muted) {
+      if (pts.length > 1) kids.push(s('polyline.faint', { points: line }));
+      for (const p of pts) kids.push(s('circle.faint', { cx: x(p.t), cy: y(p.y), r: 2.5 }, title(`${ser.name} ${p.label}`)));
+      continue;
+    }
+    // as a style, so a CSS variable works as well as a hex colour
+    const c = ser.color || palette[k++ % palette.length];
+    if (pts.length > 1) kids.push(s('polyline', { points: line, fill: 'none', 'stroke-width': 2, style: `stroke: ${c}` }));
+    for (const p of pts) kids.push(s('circle', { cx: x(p.t), cy: y(p.y), r: 3.5, style: `fill: ${c}` }, title(`${ser.name} ${p.label}`)));
+    ends.push({ name: ser.name, c, y: y(pts[pts.length - 1].y) + 4 });
+  }
+  // End labels in their line's colour (as a style: the .axis rule would override a fill attribute), pushed at least
+  // 12 px apart so lines that finish at the same value stay readable.
+  ends.sort((a, b) => a.y - b.y);
+  for (let i = 1; i < ends.length; i++) ends[i].y = Math.max(ends[i].y, ends[i - 1].y + 12);
+  const over = ends.length ? ends[ends.length - 1].y - (H - 4) : 0;
+  for (const e of ends) kids.push(s('text.axis', { x: W - R + 8, y: over > 0 ? e.y - over : e.y, style: `fill: ${e.c}` }, e.name));
   return s('svg.chart', { viewBox: `0 0 ${W} ${H}` }, kids);
 }
 

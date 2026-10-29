@@ -1,0 +1,17 @@
+// The Instrument Explorer under frankensim.org/instrument-tests, served by an assets-only Worker.
+// Build first:  python3 apps/instrument-explorer/tools/publish.py
+// then:         npx wrangler deploy --config apps/instrument-explorer/cloudflare/wrangler.jsonc
+// Everything outside /instrument-tests keeps going where it went before (the site, /music).
+{
+  "name": "frankensim-instrument-tests",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "../dist-cf",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "none"
+  },
+  "routes": [
+    { "pattern": "frankensim.org/instrument-tests", "zone_name": "frankensim.org" },
+    { "pattern": "frankensim.org/instrument-tests/*", "zone_name": "frankensim.org" }
+  ]
+}

@@ -1,0 +1,7 @@
+# The public build (tools/publish.py): audio and images, never committed.
+dist-cf/
+# Share cards, drawn by tools/share/card.py (see the README).
+share/*.png
+.wrangler/
+__pycache__/
+.ruff_cache/

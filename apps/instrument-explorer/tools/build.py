@@ -8,8 +8,9 @@ Inputs (nothing is typed by hand except the FAMILIES crosswalk below):
   --mirror  a fresh mirror made by tools/sync.sh (default: the newest ~/.local/share/instrument-explorer/mirror-*):
             analysis/<family>/<note>/{pair.json, ours.wav, real.wav, *.webp, superseded/<UTC>/pair.json}
             (frankensim.instrument-pair.v1, written by the grader decompose.py), piano-pairs/out-*/piano/<note>/ (same
-            schema), u4/clips/<family>/<clip id>.wav (screened reference recordings), kit-dw3/ and renders/ (extra
-            renders with their logs or provenance sidecars).
+            schema), u4/clips/<family>/<clip id>.wav (screened reference recordings), kit/ (the kit's renders, with the
+            commit of each piece in source.json, graded piece by piece by kitgrade.py) and renders/ (extra renders with
+            their logs or provenance sidecars).
   the repo  committed files read with `git show <ref>:<path>` (never the shared working tree, which holds other agents'
             unfinished work): data/instruments/descriptions/<family>/status.json, references-screened.json,
             grades/, geometry/violin-cannone-guarneri-1743-esrf2026/body-mode-*.tsv, instrument-claims.json,
@@ -28,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures as cf
+import hashlib
 import json
 import os
 import re
@@ -82,6 +84,27 @@ SECTIONS = ["Reeds", "Flutes and pipes", "Brass", "Bowed strings", "Plucked stri
 LISTENING_FIXTURES = {
     "brass-emergent": "trumpet", "guitar-strum": "guitar", "piano-ladder": "piano", "reed-sustained": "clarinet",
     "vowel-ladder": "voice", "xylophone-strike": "xylophone", "electric-clean-vs-driven": "guitar-steel",
+}
+
+# Every note each family can play today (sync.sh PLAYABLE), in playing order: (title, file stems).
+# An empty stem list means "every hold-t<tension> render, by tension": brass pitch emerges from lip tension.
+# The titles say only what is played. How well each note lands is measured at build time from the mirror's pitch.json
+# (pitch_summary); a hand-typed verdict here went stale as soon as the renders changed.
+PLAYABLE = {
+    "tin-whistle": ("D-major fingerings, D5 to D6", ["d5", "e5", "fs5", "g5", "a5", "b5", "cs6", "d6"]),
+    "pan-pipes": ("Five tubes, D3 to B4", ["d3", "g3", "d4", "g4", "b4"]),
+    "recorder": ("Four first-register fingerings, F4 to B4", ["f1", "a1", "bb1", "b1"]),
+    "flute": ("Three fingerings: D4, G4, A5", ["d4", "g4", "a5"]),
+    "clarinet": ("Chromatic fingerings, concert D3 to Bb5",
+                 ["01-D3", "02-Eb3", "03-F3", "04-G3", "05-Ab3", "06-Bb3", "07-C4", "08-D4", "09-Eb4", "10-F4", "11-Gb4",
+                  "12-G4", "13-A4", "14-Bb4", "15-C5", "16-D5", "17-Eb5", "18-F5", "19-G5", "20-A5", "21-Bb5"]),
+    "voice": ("Vowel /a/ at six pitches, C3 to F4", ["a-C3", "a-Ds3", "a-A3", "a-C4", "a-D4", "a-F4"]),
+    "violin": ("Four open strings, G3 D4 A4 E5", [f"violin-arco-mf-open-{n}" for n in ("G3", "D4", "A4", "E5")]),
+    "viola": ("Four open strings, C3 G3 D4 A4", [f"viola-arco-mf-open-{n}" for n in ("C3", "G3", "D4", "A4")]),
+    "cello": ("Four open strings, C2 G2 D3 A3", [f"cello-arco-mf-open-{n}" for n in ("C2", "G2", "D3", "A3")]),
+    "double-bass": ("Four open strings, E1 A1 D2 G2", [f"double-bass-arco-mf-open-{n}" for n in ("E1", "A1", "D2", "G2")]),
+    "trumpet": ("Valves up: four lip tensions aimed at Bb3, F4, Bb4 and D5", []),
+    "trombone": ("Slide in first position: the partials the lip finds at six lip tensions (no target pitch)", []),
 }
 
 UIOWA_CREDIT = "University of Iowa Electronic Music Studios, Musical Instrument Samples"
@@ -162,31 +185,61 @@ def wav_info(path: Path) -> dict:
 
 
 class Media:
-    """Collects (source, destination) pairs and makes them in parallel: WAV to lossless FLAC, images copied."""
+    """Collects (source, destination) pairs and makes them in parallel: WAV to lossless FLAC, images copied.
+
+    The paths handed back carry ?v=<hash of the source's bytes>: a re-render keeps its path, and audio and images are
+    served with a day's max-age, so without the version a visitor would hear the old render for up to a day. The hash is
+    of the content, not the mtime, because a phrase join rewrites every phrase, and an unchanged one must not be fetched
+    again. Hashes are kept in _cache/versions.json against each source's size and mtime, so a build hashes only what
+    changed."""
 
     def __init__(self, out: Path):
         self.out = out
         self.jobs: dict[Path, Path] = {}
+        self.versions_path = out / "_cache" / "versions.json"
+        try:
+            self.versions = json.loads(self.versions_path.read_text())
+        except (OSError, ValueError):
+            self.versions = {}
+        self.used: set[str] = set()
+
+    def versioned(self, src: Path, rel: str) -> str:
+        st = src.stat()
+        key = f"{src}|{st.st_size}|{st.st_mtime_ns}"
+        if key not in self.versions:
+            with open(src, "rb") as f:
+                self.versions[key] = hashlib.file_digest(f, "sha1").hexdigest()[:10]
+        self.used.add(key)
+        return f"{rel}?v={self.versions[key]}"
+
+    def save_versions(self) -> None:
+        self.versions_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.versions_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({k: self.versions[k] for k in self.used}, sort_keys=True))
+        tmp.replace(self.versions_path)
 
     def audio(self, src: Path, rel: str) -> str | None:
         if not src.is_file() or src.stat().st_size < 1000:
             return None
         rel = rel if rel.endswith(".flac") else rel + ".flac"
         self.jobs[self.out / rel] = src
-        return rel
+        return self.versioned(src, rel)
 
     def image(self, src: Path, rel: str) -> str | None:
         if not src.is_file():
             return None
         self.jobs[self.out / rel] = src
-        return rel
+        return self.versioned(src, rel)
 
     def run(self, workers: int) -> list[str]:
         failures = []
 
         def make(item):
+            # Each made file takes its source's mtime, and is remade whenever the two differ: a replacement source can be
+            # older than the file made from its predecessor (a re-graded directory swapped in), so "newer" is not enough.
             dst, src = item
-            if dst.exists() and dst.stat().st_mtime >= src.stat().st_mtime:
+            st = src.stat()
+            if dst.exists() and dst.stat().st_mtime_ns == st.st_mtime_ns:
                 return None
             dst.parent.mkdir(parents=True, exist_ok=True)
             if dst.suffix != ".flac":
@@ -197,6 +250,7 @@ class Media:
                                   "-sample_fmt", "s32", "-compression_level", "5", str(tmp)], capture_output=True)
             if res.returncode != 0:
                 return f"{src}: {res.stderr.decode(errors='replace')[:200]}"
+            os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
             tmp.replace(dst)
             return None
 
@@ -220,6 +274,7 @@ def inside(gap, values):
 
 def metric_view(m: dict, has_ours: bool) -> dict:
     gap = r(m.get("gap")) if has_ours else None
+    raw = m["gap"] if gap is not None else None  # the verdict compares unrounded values, as the grader does
     loose = [e["value"] for e in (m.get("ruler") or []) if r(e.get("value")) is not None]
     strict = None if m.get("ruler_strict") is None else [e["value"] for e in m["ruler_strict"] if r(e.get("value")) is not None]
     return {
@@ -228,8 +283,8 @@ def metric_view(m: dict, has_ours: bool) -> dict:
         "ruler": [{"label": e["label"], "value": r(e["value"])} for e in (m.get("ruler") or []) if r(e.get("value")) is not None],
         "ruler_max": r(max(loose)) if loose else None,
         "ruler_strict_max": r(max(strict)) if strict else None,
-        "inside": inside(gap, loose),
-        "inside_strict": None if strict is None else inside(gap, strict),
+        "inside": inside(raw, loose),
+        "inside_strict": None if strict is None else inside(raw, strict),
     }
 
 
@@ -249,6 +304,44 @@ def stamp_of(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
 
 
+def sounds_text(s: str) -> str:
+    """The pitch check's "G3-1c" as "G3 −1¢"."""
+    m = re.fullmatch(r"([A-G][#b]?\d)([+-]\d+)c", s)
+    if not m:
+        return s
+    c = int(m[2])
+    return f"{m[1]} {'±' if c == 0 else '+' if c > 0 else '−'}{abs(c)}¢"
+
+
+def pitch_summary(entries: list[dict]) -> str:
+    """How a family's notes land, from the pitch check: "all 21 sound their note, median 9¢ off" or "none sounds its note".
+    A note sounds its note when its pitch is within 50 cents of the target; notes without a target are not counted."""
+    graded = [e for e in entries if e.get("target")]
+    if not graded:
+        return ""
+    hit = [abs(e["cents_off"]) for e in graded if e.get("cents_off") is not None and abs(e["cents_off"]) <= 50]
+    if not hit:
+        return "none sounds its note" if len(graded) > 1 else "it does not sound its note"
+    hit.sort()
+    mid = round(hit[len(hit) // 2] if len(hit) % 2 else (hit[len(hit) // 2 - 1] + hit[len(hit) // 2]) / 2)
+    if len(hit) == len(graded):
+        return f"all {len(hit)} sound their note, median {mid}¢ off" if len(hit) > 1 else f"it sounds its note, {mid}¢ off"
+    return f"{len(hit)} of {len(graded)} sound their note, those a median {mid}¢ off"
+
+
+def join_wavs(wavs: list[Path], dst: Path) -> bool:
+    """Join renders end to end, as 48 kHz mono, into one WAV; remade only when a source is newer."""
+    if dst.is_file() and all(dst.stat().st_mtime >= w.stat().st_mtime for w in wavs):
+        return True
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    inputs = [a for w in wavs for a in ("-i", str(w))]
+    chain = "".join(f"[{i}:a]aresample=48000,aformat=channel_layouts=mono[a{i}];" for i in range(len(wavs)))
+    chain += "".join(f"[a{i}]" for i in range(len(wavs))) + f"concat=n={len(wavs)}:v=0:a=1[joined]"
+    res = subprocess.run(["ffmpeg", "-nostdin", "-y", "-v", "error", *inputs, "-filter_complex", chain,
+                          "-map", "[joined]", str(dst)], capture_output=True)
+    return res.returncode == 0
+
+
 def history_of(note_dir: Path, current: dict) -> list[dict]:
     snaps = []
     sup = note_dir / "superseded"
@@ -257,9 +350,9 @@ def history_of(note_dir: Path, current: dict) -> list[dict]:
         for d in sorted(sup.iterdir()):
             pj = d / "pair.json"
             if pj.is_file():
-                m = re.match(r"(\d{8})T(\d{4})", d.name)
-                when = f"{m.group(1)[:4]}-{m.group(1)[4:6]}-{m.group(1)[6:]}T{m.group(2)[:2]}:{m.group(2)[2:]}Z" if m else d.name
-                entries.append((when, pj, False))
+                # The directory is named for when the grading was replaced; the file keeps the time it was made.
+                entries.append((stamp_of(pj), pj, False))
+    entries.sort(key=lambda e: e[0])
     entries.append((stamp_of(note_dir / "pair.json"), note_dir / "pair.json", True))
     for when, pj_path, is_current in entries:
         try:
@@ -277,6 +370,52 @@ def history_of(note_dir: Path, current: dict) -> list[dict]:
             "ratios": {v["id"]: (r(v["gap"] / v["ruler_max"], 3) if v["gap"] is not None and v["ruler_max"] else None) for v in views},
         })
     return snaps
+
+
+def score_history(items: list[tuple[str, dict]]) -> list[dict]:
+    """Share of measures inside the real spread after each grading, every note counted at its latest grading so far.
+    A refused grading takes its note out until it is graded again."""
+    events = sorted(((s["when"], f"{fid}/{p['id']}", s.get("tally")) for fid, p in items for s in p["history"]),
+                    key=lambda e: (e[0], e[1]))
+    state: dict[str, tuple[int, int]] = {}
+    points = []
+    for when, key, t in events:
+        if t and t["loose"]["inside"] + t["loose"]["outside"]:
+            state[key] = (t["loose"]["inside"], t["loose"]["outside"])
+        else:
+            state.pop(key, None)
+        if state:
+            i = sum(a for a, _ in state.values())
+            points.append({"when": when, "inside": i, "measured": i + sum(b for _, b in state.values()), "notes": len(state)})
+    # One point per hour (its last state): a regrading batch lands many snapshots within minutes.
+    by_hour = {p["when"][:13]: p for p in points}
+    return list(by_hour.values())
+
+
+def measure_table(family_docs: dict) -> list[dict]:
+    """Every grader measure over every current graded note: how often it is inside, how far off it is (gap over the
+    largest real-vs-real distance), and which families miss it. Hardest first."""
+    acc: dict[str, dict] = {}
+    for doc in family_docs.values():
+        for p in doc["pairs"]:
+            for m in p["metrics"] if p["kind"] == "graded" else []:
+                if m["gap"] is None or m["inside"] is None:
+                    continue
+                e = acc.setdefault(m["id"], {"id": m["id"], "label": m["label"], "unit": m["unit"], "graded": 0, "inside": 0,
+                                             "ratios": [], "missed_by": Counter()})
+                e["graded"] += 1
+                e["inside"] += m["inside"]
+                if m["ruler_max"]:
+                    e["ratios"].append(m["gap"] / m["ruler_max"])
+                if not m["inside"]:
+                    e["missed_by"][doc["title"]] += 1
+    rows = []
+    for e in acc.values():
+        rs = sorted(e.pop("ratios"))
+        e["median_ratio"] = r(rs[len(rs) // 2], 3) if rs else None
+        e["missed_by"] = dict(e["missed_by"].most_common())
+        rows.append(e)
+    return sorted(rows, key=lambda e: e["inside"] / e["graded"])
 
 
 def build_pair(fid: str, note_id: str, note_dir: Path, media: Media, origin: str) -> dict | None:
@@ -336,11 +475,102 @@ def build_pair(fid: str, note_id: str, note_dir: Path, media: Media, origin: str
     }
 
 
+SALAMANDER = {"credit": "Salamander Drumkit by Alexander Holm", "licence": "CC BY-SA 3.0",
+              "url": "https://archive.org/details/SalamanderDrumkit"}
+# 96ccf8f1b (2026-10-14) adopted the kit edits that graded closer to these Salamander strokes; the card route still uses them
+# (ruling 7486 replaces them). Shown with every kit comparison until it lands, because it compares against the same strokes.
+KIT_FITTED_CAVEAT = ("Several of this kit's settings were chosen on 2026-10-14 (commit 96ccf8f1b) because they made it sound "
+                     "closer to these same Salamander recordings: the head tensions, strike points, the stick's contact loss, "
+                     "the kick beater's felt, the snare wires' tension, preload and contact, the ride's shell and the hi-hat's "
+                     "rim chatter. That is fitting, which this project does not allow, so closeness here is not evidence. "
+                     "They are being replaced with measured values or declared estimates.")
+# verisim.py's diverging map (its DIV stops), which differs from the grader's: the key must show the colours drawn
+VERISIM_DIFF_KEY = ("linear-gradient(90deg, rgb(58,120,190), rgb(24,40,60) 42%, rgb(14,15,18) 50%, "
+                    "rgb(70,34,20) 58%, rgb(232,106,60))")
+
+
+def kit_commit(src: dict, pid: str) -> str:
+    """The commit a kit piece was rendered at: source.json's "commit", unless "pieces" names a later one for that piece
+    (a piece re-rendered after its own physics landed). The groove carries every piece, so it names them all."""
+    pieces = src.get("pieces") or {}
+    if pid == "groove" and pieces:
+        return f"{src['commit']} ({', '.join(f'{p} at {c}' for p, c in pieces.items())})"
+    return pieces.get(pid, src["commit"])
+
+
+def kit_pairs(kit: Path, media: Media) -> list[dict]:
+    """The kit grade (kitgrade.py on renders at known commits): each piece beside one Salamander stroke, level-matched,
+    with the grader's descriptors and its real-vs-real ruler. Compared, not graded: the kit has no grade gate."""
+    try:
+        grade = json.loads((kit / "grade" / "data" / "kit.json").read_text())
+        src = json.loads((kit / "source.json").read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        log(f"kit grade: {e}")
+        return []
+    out = []
+    for g in grade["pairs"]:
+        pid, d, im = g["id"], g["descriptors"], g["images"]
+        base = f"kit9/{pid}"
+        audio = {side: media.audio(kit / "grade" / Path(g["audio"][side]).with_suffix(".wav"), f"audio/{base}/{side}") for side in ("ours", "real")}
+        imgs = {side: media.image(kit / "grade" / im[side], f"img/{base}/{side}.webp") for side in ("real", "ours", "diff")}
+        out.append({
+            # "14x6" -> "14×6": Inter's contextual alternates already draw the list's x as a times sign, Fraunces does not
+            "id": f"kit9-{pid}", "note": re.sub(r"(\d)x(\d)", "\\1×\\2", g["title"]), "dynamic": None, "kind": "compared",
+            "duration_s": g["duration_s"],
+            "origin": "kit9", "audio": {k: v for k, v in audio.items() if v}, "level_match": g["audio"]["level_match"],
+            "figures": {"spectrogram": {"img": {k: v for k, v in imgs.items() if v}, "f_lo_hz": im["f_lo"], "f_hi_hz": im["f_hi"],
+                                        "span_db": im["span_db"], "diff_range_db": im["diff_range_db"], "diff_key": VERISIM_DIFF_KEY}},
+            "ours": {"git_sha": kit_commit(src, pid), "observer": g["ours"]["label"], "recipe": f"kit {pid} (fs-vkplate)", "sample_rate": 48000},
+            "real": {"reference_id": g["real"]["file"], "file": f"{g['real']['file']}.wav", "segment_s": None, **SALAMANDER},
+            "no_reference": None, "refused": None,
+            "f0_hz": {"ours": d["fundamental_hz"]["ours"], "real": d["fundamental_hz"]["real"]},
+            "metrics": [], "tally": None, "history": [],
+            "compare": {"descriptors": {k: {"ours": v["ours"], "real": v["real"], "note": v["note"]} for k, v in d.items()
+                                        if k in ("centroid_hz", "above_1k_pct", "above_4k_pct")},
+                        "balance_gap_db": d["balance_gap_db"]["rms_gap_db"], "ruler": g["ruler"],
+                        "caveat": src.get("caveat", KIT_FITTED_CAVEAT)},
+        })
+    return out
+
+
+def kit_decay_evidence(kit: Path) -> list[dict]:
+    """Per-octave 20 dB decays of the kit renders against their Salamander strokes (kitdecays.py), drums and cymbals
+    apart so each chart keeps one colour per piece."""
+    try:
+        d = json.loads((kit / "grade" / "data" / "decays.json").read_text())
+        src = json.loads((kit / "source.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+    cymbal = lambda p: p["id"].startswith(("hihat", "crash", "ride"))  # noqa: E731
+    how = ("Time for each octave band to fall 20 dB after its peak. Grey dots are two strokes of the real one at the same "
+           "dynamic. A triangle means the render was still ringing when the excerpt ended, so its value is a lower bound: "
+           "the time from the band's peak to the end of the excerpt. ")
+    charts = (
+        # a kit whose renders carry a sourced loss term says so in source.json's "drum_loss"
+        ("Drum decay per octave band: renders against recordings", lambda p: not cymbal(p),
+         how + src.get("drum_loss", "The heads' film and edge loss enter these renders as a stated unknown (zero). No "
+                       "measurement of a drumhead's edge, hoop or shell loss has been found, and fitting one to these "
+                       "recordings is not allowed, so the drums ring longer than the real ones.")),
+        ("Cymbal decay per octave band: renders against recordings", cymbal,
+         how + "The cymbals' loss is still each preset's declared decay time at 500 Hz and 10 kHz, an estimate rather than "
+               "material data; lane .372 is replacing it with the felt clamp and air loss from data."),
+    )
+    out = []
+    for title, keep, caption in charts:
+        pieces = [{"piece": p["id"], "what": f"{p['title']}; recording {p['real']['id']}, excerpt {p['duration_s']} s",
+                   "render_decays": p["ours"], "references": [p["real"], p["real_again"]]} for p in d["pieces"] if keep(p)]
+        if pieces:
+            out.append({"kind": "band-decays", "title": title, "bands_hz": d["bands_hz"], "pieces": pieces, "caption": caption,
+                        "source": f"kitdecays.py on renders at commit {kit_commit(src, 'groove')} and the Salamander Drumkit overheads ({d['method']})"})
+    return out
+
+
 def judge(pairs: list[dict], status: dict | None) -> dict:
     graded = [p for p in pairs if p["kind"] == "graded"]
     listening = [p for p in pairs if p["kind"] == "listening"]
     refused = [p for p in pairs if p["kind"] == "refused"]
     counts = {"graded": len(graded), "listening": len(listening), "refused": len(refused),
+              "compared": sum(p["kind"] == "compared" for p in pairs),
               "reference_only": sum(p["kind"] == "reference-only" for p in pairs)}
     li = sum(p["tally"]["loose"]["inside"] for p in graded)
     lo = sum(p["tally"]["loose"]["outside"] for p in graded)
@@ -350,7 +580,7 @@ def judge(pairs: list[dict], status: dict | None) -> dict:
     if not graded:
         if listening:
             badge = "listening"
-        elif refused:
+        elif refused or counts["compared"]:
             badge = "ungraded"
         else:
             badge = "none"
@@ -374,6 +604,8 @@ def derived_summary(counts: dict, n_extras: int, n_fixtures: int, n_refs: int) -
         facts.append(f"{plural(counts['listening'], 'listening pair')} not graded")
     if counts["refused"]:
         facts.append(f"{plural(counts['refused'], 'render')} the grader refused")
+    if counts.get("compared"):
+        facts.append(f"{plural(counts['compared'], 'piece')} compared with a recording, not graded")
     if n_extras:
         facts.append(f"{plural(n_extras, 'other render')} not graded")
     if n_fixtures:
@@ -389,8 +621,8 @@ def build_references(refs: dict, mirror: Path, media: Media) -> dict[str, list[d
     lic = {l["id"]: l for l in refs.get("licences", [])}
     out: dict[str, list[dict]] = defaultdict(list)
     for f in refs["files"]:
-        groups = [(f, f.get("clips") or [])] + [(m, m.get("clips") or []) for m in f.get("members") or []]
-        for owner, clips in groups:
+        # Archive members carry no licence or author of their own: every clip is credited from its file `f`.
+        for clips in [f.get("clips") or []] + [m.get("clips") or [] for m in f.get("members") or []]:
             for c in clips:
                 if c.get("status") != "VALID":
                     continue
@@ -488,7 +720,8 @@ def milestones_for(labels: list[str], beads: list[dict], beads_by_id: dict) -> l
 
 
 def load_commits(ref: str) -> list[dict]:
-    raw = git("log", ref, f"--since={PROGRAM_START}", "--format=%h%x1f%at%x1f%s%x1e").decode(errors="replace")
+    # a bare date in --since means that day at the current time of day, so the boundary moved with each build's hour
+    raw = git("log", ref, f"--since={PROGRAM_START} 00:00:00 +0000", "--format=%h%x1f%at%x1f%s%x1e").decode(errors="replace")
     out = []
     for rec in raw.split("\x1e"):
         rec = rec.strip()
@@ -592,8 +825,15 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=HOME_DATA / "site")
     ap.add_argument("--ref", default="origin/main", help="git ref for committed tables and history (default origin/main)")
     ap.add_argument("--jobs", type=int, default=max(2, (os.cpu_count() or 4) - 2))
+    ap.add_argument("--phrases", type=Path, default=None,
+                    help="a phrasekit output (phrases.json + WAV + webp); default the newest phrases-<UTC> next to the mirrors")
     args = ap.parse_args()
     mirror = args.mirror or newest_mirror()
+    # Every input below is optional when absent, so a mistyped path would build a site with no grades at all
+    if not (mirror / "analysis").is_dir():
+        raise SystemExit(f"{mirror} is not a mirror (no analysis/ in it); run tools/sync.sh or pass --mirror")
+    if args.phrases is not None and not (args.phrases / "phrases.json").is_file():
+        raise SystemExit(f"{args.phrases} has no phrases.json")
     out = args.out
     out.mkdir(parents=True, exist_ok=True)
     media = Media(out)
@@ -630,18 +870,8 @@ def main() -> int:
                               "era": "August 2026 listening fixture (before the 2026-10-21 first-principles pivot)",
                               "provenance": {k: prov.get(k) for k in ("fixture", "sample_rate", "git_sha", "command") if k in prov}})
 
-    # Extra renders: the kit lane's work-in-progress renders, and ungraded flute renders.
+    # Extra renders: ungraded violin and flute renders.
     extras: dict[str, list[dict]] = defaultdict(list)
-    kit_dir = mirror / "kit-dw3" / "renders"
-    if kit_dir.is_dir():
-        decays = mirror / "kit-dw3" / "dw3-decays.json"
-        for wav in sorted(kit_dir.glob("*.wav")):
-            extras["kit"].append({"id": wav.stem, "title": wav.stem.replace("dw3-", "").replace("tom", "tom ").strip(),
-                                  "audio": media.audio(wav, f"audio/extra/kit/{wav.stem}"), "date": stamp_of(wav),
-                                  "era": "Work in progress (lane .370, head loss from data); not yet committed or graded",
-                                  "detail": "fs-vkplate kit pieces with the drum heads' loss taken from material data. "
-                                            "Per-octave decays against the reference recordings are in the lane's "
-                                            f"{decays.name}." if decays.is_file() else ""})
     va = mirror / "renders" / "violin-assembled"
     for wav in sorted(va.glob("*.wav")) if va.is_dir() else []:
         extras["violin"].append({"id": wav.stem, "title": "Assembled violin, G3 (2 s)", "audio": media.audio(wav, f"audio/extra/violin/{wav.stem}"),
@@ -652,6 +882,84 @@ def main() -> int:
         for wav in sorted(fl.glob("*/*.wav")):
             extras["flute"].append({"id": wav.stem, "title": wav.stem, "audio": media.audio(wav, f"audio/extra/flute/{wav.stem}"),
                                     "date": stamp_of(wav), "era": f"Ungraded render with the flute's exterior body (commit {wav.parent.name[:9]})"})
+
+    # Every note a family can play today, joined into one phrase, then each note on its own.
+    playable = mirror / "renders" / "playable"
+    pitch_doc = json.loads((playable / "pitch.json").read_text()) if (playable / "pitch.json").is_file() else {}
+    pitch = {(n["family"], n["stem"]): n for n in pitch_doc.get("notes") or []}
+    pitch_table: dict[str, list[dict]] = {}
+    pitch_sha: dict[str, str] = {}
+    for fid, (title, stems) in PLAYABLE.items():
+        d = playable / fid
+        if not d.is_dir():
+            continue
+        if stems:
+            notes = [d / f"{s}.wav" for s in stems if (d / f"{s}.wav").is_file()]
+        else:
+            notes = sorted(d.glob("hold-t*.wav"), key=lambda w: float(w.stem.removeprefix("hold-t").split("-p")[0]))
+        if not notes:
+            continue
+        # each family's notes may come from a different commit: its own source.json first, then the set's
+        src = d / "source.json" if (d / "source.json").is_file() else playable / "source.json"
+        source = json.loads(src.read_text()) if src.is_file() else {}
+        # identical_at: a later origin binary re-rendered one of these inputs and matched it byte for byte;
+        # engine: what rendered them when it is not music_render (the assembled violin is the material_strings example)
+        same = source.get("identical_at") or {}
+        era = "Listening render, not graded: everything this family can play today" + (
+            f" ({source.get('engine', 'music_render')} at commit {source['sha']}" + (
+                f"; a note re-rendered at {same['sha']} on {same['date']} came out byte-identical" if same.get("sha") else "")
+            + ")" if source.get("sha") else "")
+        if source.get("sha"):
+            pitch_sha[fid] = source["sha"]
+        joined = out / "_cache" / "playable" / f"{fid}.wav"
+        if join_wavs(notes, joined):
+            missing = f", {len(stems) - len(notes)} not rendered" if stems and len(notes) < len(stems) else ""
+            landed = pitch_summary([pitch.get((fid, w.stem)) or {} for w in notes])
+            extras[fid].append({"id": "playable", "title": f"{title} ({len(notes)} notes joined{missing}{f'; {landed}' if landed else ''})",
+                                "audio": media.audio(joined, f"audio/extra/{fid}/playable"), "date": stamp_of(notes[-1]), "era": era})
+        for wav in notes:
+            pm = pitch.get((fid, wav.stem)) or {}
+            label = pm.get("target") or wav.stem
+            heard = f": sounds {sounds_text(pm['sounds'])}" if pm.get("sounds") else ""
+            # the two pitch trackers disagree and the reading of record misses the asked note: no single clear pitch. (When the
+            # reading of record IS the asked note, the other tracker has taken a harmonic, as on the bowed bass's open strings.)
+            alt = pm.get("sounds_alt") if not (pm.get("cents_off") is not None and abs(pm["cents_off"]) <= 50) else None
+            if heard and alt:
+                heard += f" (a second pitch tracker reads {sounds_text(alt)})"
+            extras[fid].append({"id": f"playable-{wav.stem}", "title": f"Note {label}{heard}", "pitch": pm or None,
+                                "audio": media.audio(wav, f"audio/extra/{fid}/playable-{wav.stem}"), "date": stamp_of(wav), "era": era})
+            if pm:
+                pitch_table.setdefault(fid, []).append({"label": label, "sounds_alt": alt,
+                                                        **{k: pm.get(k) for k in ("target", "sounds", "f0_hz", "cents_off")}})
+
+    # Phrases: scales, double stops, melodies, grooves and rows of notes, joined by phrasekit with a spectrogram and
+    # every note's measured pitch.
+    phrase_dir = args.phrases or max(HOME_DATA.glob("phrases-*"), default=None)
+    phrases: dict[str, list[dict]] = defaultdict(list)
+    if phrase_dir and (phrase_dir / "phrases.json").is_file():
+        for p in json.loads((phrase_dir / "phrases.json").read_text())["phrases"]:
+            p["audio"] = media.audio(phrase_dir / p["audio"], f"audio/phrases/{p['id']}")
+            p["map"] = media.image(phrase_dir / p["map"], f"img/phrases/{p['id']}.webp")
+            if not (p["audio"] and p["map"]):
+                log(f"phrase {p['id']}: no audio or map in {phrase_dir.name}, left out")
+                continue
+            if p.get("real"):
+                p["real"]["audio"] = media.audio(phrase_dir / p["real"]["audio"], f"audio/phrases/{p['id']}-real")
+                p["real"]["map"] = media.image(phrase_dir / p["real"]["map"], f"img/phrases/{p['id']}-real.webp")
+                if not (p["real"]["audio"] and p["real"]["map"]):
+                    p.pop("real")
+            if p.get("ref"):  # the phrase rebuilt from real single-note recordings (analyze.py)
+                p["ref"]["audio"] = media.audio(phrase_dir / p["ref"]["audio"], f"audio/phrases/{p['id']}-ref")
+                p["ref"]["map"] = media.image(phrase_dir / p["ref"]["map"], f"img/phrases/{p['id']}-ref.webp")
+                if not (p["ref"]["audio"] and p["ref"]["map"]):
+                    p.pop("ref")
+            an = phrase_dir / (p.pop("analysis", None) or f"{p['id']}.analysis.json")
+            if an.is_file():
+                (out / "phrase").mkdir(parents=True, exist_ok=True)
+                (out / "phrase" / f"{p['id']}.json").write_text(an.read_text())
+                p["analysis"] = f"phrase/{p['id']}.json"
+            phrases[p["family"]].append(p)
+        log(f"phrases {phrase_dir.name}: {sum(map(len, phrases.values()))}")
 
     # Grading pairs: the analysis tree plus the piano pairs.
     pair_dirs: dict[str, list[tuple[str, Path, str]]] = defaultdict(list)
@@ -670,8 +978,16 @@ def main() -> int:
     for fid, title, section, labels, fillings, words in FAMILIES:
         status_raw = git_show(args.ref, f"data/instruments/descriptions/{fid}/status.json")
         status = json.loads(status_raw.decode()) if status_raw else None
+        draft = HERE.parent / "status-drafts" / f"{fid}.json"  # a card awaiting its commit; it says so on the page
+        if draft.is_file():
+            status = json.loads(draft.read_text())
+            if not status.get("draft"):
+                sys.exit(f"{draft}: a status draft must say why it is not the committed card (its 'draft' field)")
         pairs = [p for p in (build_pair(fid, nid, nd, media, origin) for nid, nd, origin in pair_dirs.get(fid, [])) if p]
         pairs.sort(key=lambda p: ({"graded": 0, "listening": 1, "refused": 2, "reference-only": 3}[p["kind"]], note_key(p["note"]), p["id"]))
+        kit_dir = mirror / "kit" if (mirror / "kit").is_dir() else mirror / "kit9"  # mirrors before 2026-10-26T03:30Z
+        if fid == "kit":
+            pairs += kit_pairs(kit_dir, media)
         verdict = judge(pairs, status)
         if verdict["badge"] == "none" and (extras.get(fid) or fixtures.get(fid)):
             verdict.update(badge="ungraded", label=BADGE_LABEL["ungraded"])
@@ -696,15 +1012,8 @@ def main() -> int:
             b = bars_before_after(args.ref)
             if b:
                 evidence.append(b)
-        kd = mirror / "kit-dw3" / "dw3-decays.json"
-        if fid == "kit" and kd.is_file():
-            d = json.loads(kd.read_text())
-            evidence.append({"kind": "band-decays", "title": "Drum decay per octave band: renders against recordings",
-                             "source": "lane .370 dw3-decays.json (work in progress)", "bands_hz": d.get("bands_hz"),
-                             "caption": "Time for each octave band to fall 20 dB after its peak. '>' means the render was "
-                                        "still ringing when the clip ended. The renders ring roughly ten times longer than the "
-                                        "recorded drums: the head loss from data is not yet enough.",
-                             "pieces": d.get("pieces")})
+        if fid == "kit":
+            evidence += kit_decay_evidence(kit_dir)
         base = baseline.get(fid)
         cov = coverage.get(fid) or {}
         doc = {
@@ -718,12 +1027,18 @@ def main() -> int:
                 "real_strict": (base.get("real_recordings") or {}).get("strict"),
                 "ours": (base.get("our_renders_same_notes") or {}).get("loose"),
                 "ours_strict": (base.get("our_renders_same_notes") or {}).get("strict")},
-            "fixtures": fixtures.get(fid, []), "extras": extras.get(fid, []),
-            "milestones": ms, "beads": dict(bead_status), "closes": closes[:60],
+            "fixtures": fixtures.get(fid, []), "extras": extras.get(fid, []), "phrases": phrases.get(fid, []),
+            "milestones": ms, "beads": dict(sorted(bead_status.items())), "closes": closes[:60],
             "timeline": timeline[:400], "timeline_total": len(timeline),
             "claims": claims_for(claims, fillings), "evidence": evidence,
         }
         doc["summary"] = (status or {}).get("summary")
+        if not doc["summary"] and fid == "kit":
+            # the kit has no status file; its render set describes itself in source.json's "summary"
+            try:
+                doc["summary"] = json.loads((kit_dir / "source.json").read_text()).get("summary")
+            except (OSError, json.JSONDecodeError):
+                pass
         doc["summary_derived"] = not doc["summary"]
         if doc["summary_derived"]:
             doc["summary"] = derived_summary(verdict["counts"], len(extras.get(fid, [])), len(fixtures.get(fid, [])),
@@ -734,8 +1049,8 @@ def main() -> int:
             "id": fid, "title": title, "section": section, "badge": verdict["badge"], "label": verdict["label"],
             "counts": verdict["counts"], "blocked": verdict["blocked"],
             "summary": doc["summary"], "summary_derived": doc["summary_derived"],
-            "renders": sum(p["kind"] in ("graded", "listening", "refused") for p in pairs) + len(extras.get(fid, [])) + len(fixtures.get(fid, [])),
-            "references": len(references.get(fid, [])),
+            "renders": sum(p["kind"] in ("graded", "listening", "refused", "compared") for p in pairs) + len(extras.get(fid, [])) + len(fixtures.get(fid, [])),
+            "references": len(references.get(fid, [])), "phrases": len(phrases.get(fid, [])),
             "milestones": [{"code": m["code"], "gate": m["gate"], "status": m["status"], "closed": m["prereq"]["closed"], "total": m["prereq"]["total"]} for m in ms],
             "commits": len(timeline), "last_activity": last,
             "baseline_real_inside": (doc["baseline"] or {}).get("real", {}).get("inside_fraction") if doc["baseline"] else None,
@@ -760,11 +1075,32 @@ def main() -> int:
         "since": PROGRAM_START, "commits_total": len(commits), "commits_irp": len(irp),
         "commits_by_day": [{"date": d, "by": dict(by_day[d])} for d in sorted(by_day)],
         "closes_by_day": [{"date": d, "n": closes_by_day[d]} for d in sorted(closes_by_day) if d >= PROGRAM_START],
-        "beads": dict(status_all), "beads_total": len(beads),
+        "beads": dict(sorted(status_all.items())), "beads_total": len(beads),
         "labels": dict(Counter(l for b in beads for l in b.get("labels") or [] if l in ("batch-pending", "rework", "owner-decision", "irp-milestone", "irp-data", "irp-experiment"))),
         "feed": [c for c in commits if c["type"] in ("feat", "fix", "data", "test", "perf")][:150],
         "sections": SECTIONS,
+        # The grading method page: the score over time, the measures, the rulers' own check, and the pitch of every
+        # note each family can play today.
+        "program_score": score_history([(fid, p) for fid, doc in family_docs.items() for p in doc["pairs"]]),
+        "scores": {fid: pts for fid, doc in family_docs.items() if (pts := score_history([(fid, p) for p in doc["pairs"]]))},
+        "titles": {fid: doc["title"] for fid, doc in family_docs.items()},
+        "measures": measure_table(family_docs),
+        "calibration": [{"id": fid, "title": doc["title"], "source": doc["baseline"]["source"],
+                         "recordings": doc["baseline"]["recordings"], "real": doc["baseline"]["real"]["inside_fraction"],
+                         "ours": (doc["baseline"]["ours"] or {}).get("inside_fraction")}
+                        for fid, doc in family_docs.items() if doc["baseline"] and doc["baseline"].get("real")],
+        "pitch": [{"id": fid, "title": family_docs[fid]["title"], "sha": pitch_sha.get(fid), "notes": rows}
+                  for fid, rows in pitch_table.items() if fid in family_docs],
+        "pitch_method": pitch_doc.get("method"),
     }
+    # The decision log: the hand-written record next to this tool, plus the owner-decision beads as the tracker has them.
+    log_path = HERE.parent / "decisions.json"
+    decisions = json.loads(log_path.read_text()) if log_path.is_file() else {"entries": []}
+    decisions["owner_beads"] = sorted(({"id": b["id"], "title": re.sub(r"^\[IRP\]\s*", "", b["title"]), "status": b["status"],
+                                        "created": (b.get("created_at") or "")[:10], "closed": (b.get("closed_at") or "")[:10] or None,
+                                        "reason": (b.get("close_reason") or "")[:600]}
+                                       for b in beads if "owner-decision" in (b.get("labels") or [])),
+                                      key=lambda b: (b["status"] == "closed", b["created"]))
     index = {
         "built_utc": process["built_utc"], "ref": args.ref, "ref_sha": ref_sha, "mirror": mirror.name,
         "sections": SECTIONS, "families": families_index,
@@ -783,10 +1119,14 @@ def main() -> int:
     }
 
     failures = media.run(args.jobs)
+    media.save_versions()
     (out / "family").mkdir(exist_ok=True)
     for fid, doc in family_docs.items():
         (out / "family" / f"{fid}.json").write_text(json.dumps(doc, separators=(",", ":")))
     (out / "process.json").write_text(json.dumps(process, separators=(",", ":")))
+    (out / "decisions.json").write_text(json.dumps(decisions, separators=(",", ":")))
+    (out / "phrases.json").write_text(json.dumps({"phrases": [p for fid, *_ in FAMILIES for p in phrases.get(fid, [])],
+                                                  "titles": {fid: title for fid, title, *_ in FAMILIES}}, separators=(",", ":")))
     (out / "index.json").write_text(json.dumps(index, indent=1))
     log(f"built {len(family_docs)} families, {index['totals']['graded_notes']} graded notes, "
         f"{index['totals']['references']} reference clips; {len(failures)} media failures")

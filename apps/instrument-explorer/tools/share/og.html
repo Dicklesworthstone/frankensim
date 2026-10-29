@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Instrument tests share image</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,600;1,9..144,500&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap">
+<style>
+  :root { --bg: #0b0d10; --panel: #14181e; --line: #2a313b; --ink: #ece8e1; --ink2: #c9c4ba; --muted: #9a958c; --sim: #e0a95b; --sim2: #f3c886; --real: #5fc3ad; --real2: #8fe0cd; }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { width: 1200px; height: var(--h, 630px); overflow: hidden; background: var(--bg); }
+  body { position: relative; color: var(--ink); font-family: Inter, system-ui, sans-serif; -webkit-font-smoothing: antialiased;
+    background:
+      radial-gradient(760px 420px at 96% -6%, rgba(224, 169, 91, 0.22), transparent 62%),
+      radial-gradient(640px 420px at -8% 108%, rgba(95, 195, 173, 0.18), transparent 60%),
+      var(--bg); }
+  /* faint staff lines: the page is a score */
+  .staff { position: absolute; inset: 0; background: repeating-linear-gradient(180deg, transparent 0 41px, rgba(255, 255, 255, 0.025) 41px 42px); mask-image: linear-gradient(90deg, #000, transparent 55%); }
+  .left { position: absolute; left: 64px; top: 58px; bottom: 54px; width: 520px; display: flex; flex-direction: column; }
+  .brand { display: flex; align-items: center; gap: 12px; color: var(--sim); font-size: 15px; font-weight: 600; letter-spacing: 0.16em; text-transform: uppercase; }
+  .brand svg { width: 34px; height: 34px; }
+  h1 { font-family: Fraunces, Georgia, serif; font-weight: 600; font-size: 57px; line-height: 1.04; letter-spacing: -0.02em; margin-top: 28px; }
+  .short h1 { font-size: 53px; margin-top: 22px; }
+  .short p.sub { margin-top: 16px; font-size: 19px; }
+  h1 em { font-style: italic; font-weight: 500; color: var(--sim2); }
+  h1 .real { color: var(--real2); }
+  p.sub { margin-top: 20px; font-size: 20px; line-height: 1.42; color: var(--ink2); max-width: 30rem; }
+  .foot { margin-top: auto; display: flex; flex-direction: column; gap: 14px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chips span { font-size: 14px; font-weight: 500; color: var(--ink2); border: 1px solid #363e4a; border-radius: 999px; padding: 5px 12px; background: rgba(20, 24, 30, 0.7); }
+  .url { font: 500 17px "JetBrains Mono", monospace; color: var(--muted); letter-spacing: 0.01em; }
+  .url b { color: var(--ink); font-weight: 500; }
+
+  .card { position: absolute; right: 52px; top: 50px; bottom: 50px; width: 548px; padding: 16px; border-radius: 22px;
+    background: linear-gradient(180deg, rgba(26, 31, 39, 0.96), rgba(20, 24, 30, 0.96)); border: 1px solid #363e4a;
+    box-shadow: 0 40px 90px -30px rgba(0, 0, 0, 0.9), 0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+    display: flex; flex-direction: column; gap: 8px; }
+  .cardhead { display: flex; justify-content: space-between; align-items: baseline; padding: 0 4px 2px; }
+  .cardhead b { font-family: Fraunces, Georgia, serif; font-size: 21px; font-weight: 600; }
+  .cardhead span { font-size: 13px; color: var(--muted); }
+  .map { position: relative; flex: 1 1 0; min-height: 0; border-radius: 12px; overflow: hidden; background: #000; box-shadow: 0 0 0 1px var(--line) inset; }
+  .map img { width: 100%; height: 100%; object-fit: fill; display: block; }
+  .tag { position: absolute; left: 10px; top: 9px; font-size: 13px; font-weight: 600; color: #fff; background: rgba(0, 0, 0, 0.6); padding: 3px 10px; border-radius: 6px; }
+  .tag.sim { box-shadow: inset 4px 0 0 var(--sim); }
+  .tag.real { box-shadow: inset 4px 0 0 var(--real); }
+  .stats { display: flex; gap: 30px; margin-bottom: 8px; }
+  .stats div { display: flex; flex-direction: column; gap: 2px; }
+  .stats b { font-family: Fraunces, Georgia, serif; font-size: 34px; font-weight: 600; line-height: 1; color: var(--ink); letter-spacing: -0.01em; }
+  .stats span { font-size: 13px; font-weight: 500; color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; }
+  .dot { position: absolute; width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px; border-radius: 50%; z-index: 2; }
+  .dot.s { background: var(--sim2); box-shadow: 0 0 0 2px #0f1216, 0 0 12px 3px rgba(224, 169, 91, 0.75); }
+  .dot.r { background: var(--real2); box-shadow: 0 0 0 2px #0f1216, 0 0 12px 3px rgba(95, 195, 173, 0.75); }
+  .lanes { height: 150px; flex: none; border-radius: 12px; background: #0f1216; box-shadow: 0 0 0 1px var(--line) inset; position: relative; overflow: hidden; }
+  .lanes svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .lanelabel { position: absolute; left: 10px; font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; }
+  .lanekey { position: absolute; right: 10px; top: 6px; display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); z-index: 1; }
+  .lanekey i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-left: 8px; }
+  .lanekey i.s { background: var(--sim); }
+  .lanekey i.r { background: var(--real); }
+  /* the card's content box: left 600 + 16 padding, 516 wide; the line crosses both maps and the lanes */
+  .playhead { position: absolute; top: 102px; bottom: 66px; width: 2px; margin-left: -1px; left: calc(616px + var(--ph, 0.63) * 516px); background: #fff; box-shadow: 0 0 14px 3px rgba(255, 255, 255, 0.6); border-radius: 2px; }
+</style>
+</head>
+<body>
+  <div class="staff"></div>
+  <section class="left">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M3 17h4l3-9 4 17 4-13 3 7 2-2h6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      FrankenSim · instrument tests
+    </div>
+    <h1>Instruments computed from <em>physics</em>, played next to <span class="real">the real thing</span></h1>
+    <p class="sub">Strings, bores, reeds, lips, plates and air, solved in time. No samples, nothing fitted. Every note measured against real recordings.</p>
+    <div class="foot">
+      <div class="stats"><div><b id="st-i">27</b><span>instruments</span></div><div><b id="st-r">1,055</b><span>real recordings</span></div><div><b id="st-p">30</b><span>phrases, side by side</span></div></div>
+      <div class="url"><b>frankensim.org</b>/instrument-tests</div>
+    </div>
+  </section>
+  <section class="card">
+    <div class="cardhead"><b id="title">Cello · scale</b><span id="sub">simulation above, real notes below</span></div>
+    <div class="map"><img id="simimg" alt=""><span class="tag sim">Simulation</span></div>
+    <div class="map"><img id="refimg" alt=""><span class="tag real">Real instrument</span></div>
+    <div class="lanes">
+      <span class="lanelabel" style="top:7px">Pitch</span>
+      <span class="lanelabel" style="top:85px">Loudness</span>
+      <span class="lanekey"><i class="s"></i>simulation<i class="r"></i>real</span>
+      <svg id="lanes" viewBox="0 0 516 128" preserveAspectRatio="none"></svg>
+    </div>
+  </section>
+  <div class="playhead" id="ph"></div>
+<script>
+// og.html?h=630&d=data.json, written by card.py: {title, sub, sim, ref, playhead, hop, duration, stats: {i, r, p},
+//   notes: [{at, dur, target_hz}], frames: {sim: {f0, level}, ref: {f0, level}}}
+const q = new URLSearchParams(location.search);
+document.documentElement.style.setProperty('--h', `${q.get('h') || 630}px`);
+if ((+q.get('h') || 630) < 620) document.body.classList.add('short');
+fetch(q.get('d') || 'data.json').then(r => r.json()).then(d => {
+  document.getElementById('title').textContent = d.title;
+  document.getElementById('sub').textContent = d.sub;
+  document.getElementById('simimg').src = d.sim;
+  document.getElementById('refimg').src = d.ref;
+  const svg = document.getElementById('lanes');
+  const W = 516, n = Math.round(d.duration / d.hop);
+  const path = (arr, y) => {
+    let s = '', pen = false;
+    for (let i = 0; i < Math.min(arr.length, n); i++) {
+      const v = arr[i];
+      if (v === null) { pen = false; continue; }
+      const yy = y(v);
+      if (yy === null) { pen = false; continue; }
+      s += `${pen ? 'L' : 'M'}${(i / n * W).toFixed(1)},${yy.toFixed(1)}`;
+      pen = true;
+    }
+    return s;
+  };
+  // pitch: the notes asked for as faint score bars, the measured pitch of both tracks over them (log frequency)
+  const tg = d.notes.filter(n => n.target_hz).map(n => Math.log2(n.target_hz));
+  const lo = Math.min(...tg) - 0.25, hi = Math.max(...tg) + 0.25;
+  const P0 = 22, P1 = 60;  // pitch band in the 128-high lane box
+  const py = hz => { if (!hz) return null; const v = Math.log2(hz); return v < lo - 0.1 || v > hi + 0.1 ? null : P1 - (v - lo) / (hi - lo) * (P1 - P0); };
+  const ly = v => 122 - Math.max(0, Math.min(1, (v + 50) / 50)) * 40;
+  const NS = 'http://www.w3.org/2000/svg';
+  const el = (tag, attrs) => { const e = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v); e.setAttribute('vector-effect', 'non-scaling-stroke'); svg.append(e); return e; };
+  const add = (dd, color, w, op) => el('path', { d: dd, fill: 'none', stroke: color, 'stroke-width': w, 'stroke-opacity': op, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' });
+  el('line', { x1: 0, x2: W, y1: 68, y2: 68, stroke: '#2a313b' });
+  for (const n of d.notes) {
+    const y = py(n.target_hz);
+    if (y === null) continue;
+    el('rect', { x: (n.at / d.duration * W).toFixed(1), y: (y - 2.5).toFixed(1), width: Math.max(2, n.dur / d.duration * W - 3).toFixed(1), height: 5, rx: 2.5, fill: 'rgba(236,232,225,0.13)' });
+  }
+  // pitch only where a note sounds (within 30 dB of the track's loudest frame): the gaps between notes have none
+  const sounding = (f0, lv) => { const top = Math.max(...lv); return f0.map((v, i) => (lv[i] >= top - 30 ? v : null)); };
+  d.frames.ref.f0 = sounding(d.frames.ref.f0, d.frames.ref.level);
+  d.frames.sim.f0 = sounding(d.frames.sim.f0, d.frames.sim.level);
+  add(path(d.frames.ref.f0, py), '#5fc3ad', 2.2, 0.95);
+  add(path(d.frames.sim.f0, py), '#e0a95b', 2.4, 1);
+  add(path(d.frames.ref.level, ly), '#5fc3ad', 1.6, 0.9);
+  add(path(d.frames.sim.level, ly), '#e0a95b', 2, 1);
+  const ph = d.playhead || 0.63;
+  document.documentElement.style.setProperty('--ph', ph);
+  if (d.stats) for (const [k, v] of Object.entries(d.stats)) document.getElementById(`st-${k}`).textContent = v;
+  // where the playhead crosses each line: the value of the nearest frame that has one
+  const lanes = svg.parentElement, sy = lanes.clientHeight / 128, k0 = Math.round(ph * n);
+  const near = arr => { for (let r = 0; r < 12; r++) for (const k of [k0 - r, k0 + r]) if (arr[k] !== null && arr[k] !== undefined) return arr[k]; return null; };
+  for (const [arr, fy, cls] of [[d.frames.ref.f0, py, 'r'], [d.frames.sim.f0, py, 's'], [d.frames.ref.level, ly, 'r'], [d.frames.sim.level, ly, 's']]) {
+    const v = near(arr), y = v === null ? null : fy(v);
+    if (y === null) continue;
+    const dot = document.createElement('i');
+    dot.className = `dot ${cls}`;
+    dot.style.left = `${ph * W}px`;
+    dot.style.top = `${y * sy}px`;
+    lanes.append(dot);
+  }
+  document.body.dataset.ready = '1';
+});
+</script>
+</body>
+</html>

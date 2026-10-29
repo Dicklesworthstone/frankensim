@@ -10,30 +10,124 @@ function hzLabel(f) {
   return f >= 1000 ? `${f / 1000}k` : String(f);
 }
 
-/** Wrap a map element (img or canvas) with ticks and a playhead that follows `player`; a click seeks. */
-export function mapFrame(mapEl, { fLo, fHi, duration, player, label }) {
+/** How far a measured note is from its target: in tune (10 cents), near (50 cents), out, or no target. */
+/** A note whose waveform has no stable period (autocorrelation peak under 0.5) has no pitch to compare: it counts
+ *  as a miss, and its measured "f0" is not drawn or quoted. */
+export function unpitched(n) {
+  return Boolean(n && n.target_hz && n.periodicity !== undefined && n.periodicity !== null && n.periodicity < 0.5);
+}
+
+export function pitchClass(n) {
+  if (n && n.refused) return 'refused';  // the solver refused this note: its slot is silent, its message kept
+  if (unpitched(n)) return 'out';
+  if (!n || n.cents === null || n.cents === undefined) return 'none';
+  const c = Math.abs(n.cents);
+  return c <= 10 ? 'in' : c <= 50 ? 'near' : 'out';
+}
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+/** The notes a phrase asks for, drawn on its map: a dashed line at each target pitch (coloured by how far the render
+ *  lands from it) and, when the render is more than 50 cents away, a solid line where it actually sounds. */
+function noteOverlay(notes, { fLo, fHi, duration }) {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('class', 'overlay');
+  svg.setAttribute('viewBox', '0 0 1000 1000');
+  svg.setAttribute('preserveAspectRatio', 'none');
+  svg.setAttribute('aria-hidden', 'true');
+  const y = f => 1000 * (1 - Math.log(f / fLo) / Math.log(fHi / fLo));
+  const line = (cls, x0, x1, yy) => {
+    const l = document.createElementNS(SVG_NS, 'line');
+    l.setAttribute('class', cls);
+    l.setAttribute('x1', x0);
+    l.setAttribute('x2', x1);
+    l.setAttribute('y1', yy);
+    l.setAttribute('y2', yy);
+    svg.append(l);
+  };
+  for (const n of notes) {
+    const x0 = (1000 * n.at) / duration;
+    const x1 = (1000 * (n.at + n.dur)) / duration;
+    line('sep', x0, x0, 0);
+    const sep = svg.lastChild;
+    sep.setAttribute('y2', 1000);
+    const cls = pitchClass(n);
+    if (n.target_hz && n.target_hz > fLo && n.target_hz < fHi) line(`tgt c-${cls}`, x0 + 2, x1 - 2, y(n.target_hz));
+    if (n.f0_hz && n.f0_hz > fLo && n.f0_hz < fHi && !unpitched(n) && (cls === 'out' || !n.target_hz)) line(`got c-${n.target_hz ? 'out' : 'none'}`, x0 + 2, x1 - 2, y(n.f0_hz));
+  }
+  return svg;
+}
+
+/** Wrap a map element (img or canvas) with ticks and a playhead that follows `player`; a click seeks.
+ *  `notes` (optional) draws the phrase's target pitches; `side` ('sim' | 'real') marks the label. */
+export function mapFrame(mapEl, { fLo, fHi, duration, player, label, notes, side, tall, seekAndPlay = true }) {
+  const labelled = Boolean(notes && notes.length && notes.length <= 40);
   const ticks = h('div.ticks');
   for (const f of TICKS_HZ) {
     if (f <= fLo * 1.05 || f >= fHi * 0.95) continue;
     const y = 100 * (1 - Math.log(f / fLo) / Math.log(fHi / fLo));
+    if ((labelled && y < 9) || y > 92) continue; // note names run along the top, time ticks along the bottom
     ticks.append(h('span.ftick', { style: { top: `${y}%` } }, hzLabel(f)));
   }
-  const step = duration > 6 ? 1 : 0.5;
-  for (let t = step; t < duration - 0.05; t += step) {
-    ticks.append(h('span.ttick', { style: { left: `${(100 * t) / duration}%` } }, `${t.toFixed(t % 1 ? 1 : 0)} s`));
+  const step = duration > 12 ? 2 : duration > 6 ? 1 : 0.5;
+  for (let t = step, i = 1; t < duration - 0.05; t += step, i++) {
+    // every other time tick drops out on a narrow map
+    ticks.append(h(`span.ttick${i % 2 ? '.alt' : ''}`, { style: { left: `${(100 * t) / duration}%` } }, `${t.toFixed(t % 1 ? 1 : 0)} s`));
   }
   const head = h('div.playhead');
-  const frame = h('div.mapframe', null, mapEl, ticks, head, label ? h('span.maplabel', null, label) : null);
+  const overlay = notes && notes.length ? noteOverlay(notes, { fLo, fHi, duration }) : null;
+  const labels = labelled
+    ? h('div.notelabels', null, notes.map(n => h('span', { style: { left: `${(100 * n.at) / duration}%` } }, n.note.replace(/^lip /, ''))))
+    : null;
+  // a note the solver refused leaves its slot silent: say so on the simulation's map (never on the recording's)
+  const refused = side !== 'real' && notes ? notes.filter(n => n.refused).map(n => h('div.refusedslot',
+    { style: { left: `${(100 * n.at) / duration}%`, width: `${(100 * n.dur) / duration}%` } }, h('span', null, 'refused'))) : [];
+  const tag = label ? h(`span.maplabel${side ? `.${side}` : ''}`, null, label) : null;
+  const frame = h(`div.mapframe${tall ? '.tall' : ''}`, null, mapEl, overlay, refused, labels, ticks, head, tag);
+  if (typeof ResizeObserver === 'function') {
+    // Note names need ~30 px per note; on a narrow map they would run into each other (the note strip still lists them).
+    const shortest = labels ? Math.min(...notes.map(n => n.dur)) / duration : 1;
+    new ResizeObserver(([e]) => {
+      frame.classList.toggle('crowded', Boolean(labels) && e.contentRect.width * shortest < 30);
+      frame.classList.toggle('narrow', e.contentRect.width < 560);
+      if (tag && labels) {
+        // the map's name sits top right, in the row of note names: drop it a row when a name would run under it
+        frame.classList.remove('tagdown');
+        const t = tag.getBoundingClientRect();
+        frame.classList.toggle('tagdown', !frame.classList.contains('crowded') && [...labels.children].some(s => {
+          const r = s.getBoundingClientRect();
+          return r.right > t.left - 4 && r.left < t.right;
+        }));
+      }
+    }).observe(frame);
+  }
   if (player) {
     const move = p => {
       head.style.left = `${(100 * Math.min(p.position, duration)) / duration}%`;
       head.style.opacity = p.playing || p.position > 0 ? '1' : '0';
     };
-    player.on(move);
+    player.on(move, frame);
     frame.addEventListener('click', e => {
       const r = frame.getBoundingClientRect();
-      player.seek(((e.clientX - r.left) / r.width) * duration);
-      player.play();
+      const t = ((e.clientX - r.left) / r.width) * duration;
+      player.load().then(() => {
+        player.seek(t);
+        if (seekAndPlay) player.play();
+      }, () => {});
+    });
+    frame.tabIndex = 0;
+    frame.setAttribute('role', 'slider');
+    frame.setAttribute('aria-label', `${label || 'Spectrogram'}: arrow keys move the playhead, Enter plays`);
+    frame.setAttribute('aria-valuemin', '0');
+    frame.setAttribute('aria-valuemax', String(duration));
+    frame.addEventListener('keydown', e => {
+      if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+        e.preventDefault();
+        player.seek(player.position + (e.key === 'ArrowRight' ? 1 : -1) * (e.shiftKey ? 5 : 0.5));
+      } else if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        player.toggle();
+      }
     });
     frame.title = 'Click to play from here';
   }

@@ -2,22 +2,39 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Instrument Explorer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Instrument tests · FrankenSim</title>
+  <meta name="description" content="Musical instruments computed from physics — strings, bores, reeds, lips, plates and air — played next to real recordings, with spectrograms, measured pitch and the grading behind every verdict.">
+  <meta name="theme-color" content="#0b0d10">
+  <meta property="og:title" content="Instrument tests · FrankenSim">
+  <meta property="og:description" content="Physics-simulated instruments next to real recordings: scales, chords, melodies and grooves, with spectrograms and honest grades.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
   <link rel="stylesheet" href="css/app.css">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M4 16h3l3-9 4 18 4-14 3 8 2-3h5' fill='none' stroke='%234c6ef5' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0d10'/%3E%3Cpath d='M5 17h3l3-9 4 17 4-13 3 7 2-2h3' fill='none' stroke='%23e0a95b' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 </head>
 <body>
-  <header>
-    <a class="brand" href="#/">Instrument Explorer <span>FrankenSim</span></a>
-    <nav>
-      <a href="#/" data-view="home">Instruments</a>
-      <a href="#/process" data-view="process">Process</a>
-      <a href="#/about" data-view="about">About</a>
-    </nav>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site">
+    <div class="wrap bar">
+      <a class="brand" href="#/" aria-label="Instrument tests, home">
+        <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M3 17h4l3-9 4 17 4-13 3 7 2-2h6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span><b>Instrument tests</b><small>FrankenSim</small></span>
+      </a>
+      <nav aria-label="Main">
+        <a href="#/" data-view="home">Listen</a>
+        <a href="#/instruments" data-view="instruments">Instruments</a>
+        <a href="#/method" data-view="method">How we grade</a>
+        <a href="#/decisions" data-view="decisions">Decisions</a>
+        <a href="#/process" data-view="process">Activity</a>
+        <a href="#/about" data-view="about">About</a>
+      </nav>
+    </div>
   </header>
-  <main id="main"></main>
-  <footer><span id="built"></span></footer>
+  <main id="main" tabindex="-1"></main>
+  <footer class="site"><div class="wrap"><span id="built"></span></div></footer>
+  <div id="nowplaying" class="nowplaying" hidden></div>
   <script type="module" src="js/app.js"></script>
 </body>
 </html>

@@ -5,6 +5,10 @@ import { stackedBars, legend, SECTION_COLORS } from '../charts.js';
 
 const GATES = ['QP1', 'Q2', 'Q3', 'Q4', 'Q5'];
 
+export function title() {
+  return 'Activity';
+}
+
 export async function render(root) {
   const [proc, idx] = await Promise.all([getJSON('process.json'), getJSON('index.json')]);
   const keys = [...proc.sections, 'Several families', 'Shared physics and tools'];
@@ -22,8 +26,10 @@ export async function render(root) {
       h('p.small.muted', null, 'A commit counts toward a section when its subject or bead names a family of that section; "Shared physics and tools" names none (solvers, materials, meshing, infrastructure).')),
     h('section', null, h('h2', null, 'Beads closed per day'),
       stackedBars(closeRows, ['closed'], { closed: '#2f9e44' }, { height: 160, yLabel: 'closes' }),
-      h('div.statusbar', null, statusOrder.filter(k => b[k]).map(k => h(`span.st-${k}`, { style: { flex: String(b[k]) }, title: `${b[k]} ${k.replace('_', ' ')}` }, `${b[k]} ${k.replace('_', ' ')}`))),
-      h('p.small.muted', null, `${statusTotal} program beads by status. Labels: ${Object.entries(proc.labels).map(([k, v]) => `${v} ${k}`).join(', ')}. A bead is closed only after its evidence is verified on the build host.`)),
+      // the bar carries counts only where a segment has room for them; the caption names every status
+      h('div.statusbar', null, statusOrder.filter(k => b[k]).map(k => h(`span.st-${k}`, { style: { flex: String(b[k]) }, title: `${b[k]} ${k.replace('_', ' ')}` },
+        b[k] / statusTotal >= 0.06 ? String(b[k]) : ''))),
+      h('p.small.muted', null, `${statusTotal} program beads by status: ${statusOrder.filter(k => b[k]).map(k => `${b[k]} ${k.replace('_', ' ')}`).join(', ')}. Labels: ${Object.entries(proc.labels).map(([k, v]) => `${v} ${k}`).join(', ')}. A bead is closed only after its evidence is verified on the build host.`)),
     h('section', null, h('h2', null, 'Qualification milestones'),
       h('p.small.muted', null, 'Rows are families, columns the gates from "speaks" to "plays phrases". Each cell shows how much of the work the milestone depends on is closed. No milestone is qualified until it closes.'),
       h('div.tablewrap', null, h('table.matrix', null,
@@ -35,7 +41,8 @@ export async function render(root) {
             if (!m) return h('td.absent', null, '');
             const frac = m.total ? m.closed / m.total : 0;
             return h(`td.st-${m.status}`, { title: `${m.code}: ${m.status}, ${m.closed}/${m.total} prerequisites closed` },
-              h('div.cellbar', null, h('span', { style: { width: `${100 * frac}%` } })), h('span.small', null, `${m.closed}/${m.total}`));
+              // a narrow phone may break "37/122" after the slash rather than push Q5 off the screen
+              h('div.cellbar', null, h('span', { style: { width: `${100 * frac}%` } })), h('span.small', null, `${m.closed}/`, h('wbr'), `${m.total}`));
           }))))))),
     h('section', null, h('h2', null, 'Newest findings'),
       h('ol.timeline', null, proc.feed.map(c => h('li.commit', null, h('span.when', null, fmt.datetime(c.when)), chip(c.type, `t-${c.type}`),
