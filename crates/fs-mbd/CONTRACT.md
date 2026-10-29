@@ -818,6 +818,45 @@ and unchanged whole-system retry after late refusal or cancellation.
 All six and the twenty-seven prior contact groups pass in the focused native
 original-source build; this does not establish a full Cargo/DSR workspace gate.
 
+### Objective transport of retained articulated shear
+
+`articulated_contacts::tangential::planar::transport` adds framed single and
+simultaneous contact proposals. Each site borrows an accepted
+`FramedTangentialState`, declares its endpoint contact frame and supplies an
+integrated **common material spin** angle. The shared original `fs-tribo`
+transport rotates retained elastic, plastic and dry accumulated-slip vectors
+isometrically, preserving native state ownership and scalar history. A tangent
+gauge change does not rotate the physical preload; common spin is not relative
+spin and adds no slip, traction, work or heat by itself. Antipodal normal changes
+refuse instead of selecting an arbitrary material rotation.
+
+After transport, the unchanged original single or simultaneous articulated
+proposal assembles its full ABA contact mobility and applies one accumulated
+impulse. The result moves each original candidate history into its endpoint
+frame once. All bodies and framed histories return together; refusal or
+cancellation at any stage leaves the accepted inputs unchanged. Count/matrix
+caps precede transport allocation. Per-contact and global actual-state work
+checks include transport energy roundoff under the existing mechanical energy
+allowance, even when the separate transport allowance is larger.
+
+This operation is an explicit transport-then-shear split at supplied frozen
+endpoint geometry. The shared minimum-normal rotation followed by common spin
+is an endpoint path approximation; endpoint normals and a scalar spin integral
+do not reconstruct arbitrary noncommuting frame motion. The enclosing owner
+supplies material/contact identity, pose/normal evolution, the spin integral
+and refinement across changing frames or constitutive reversals. No contact
+discovery, normal solve, relative-spin friction, rolling law or thermal store
+is introduced, and scalar Mindlin gains no unsupported two-axis transport.
+
+Six G1/G3/G4 groups in `tests/articulated_contacts/planar/transport.rs` exercise
+world-force invariance under tangent gauge changes with plastic memory,
+independent tilted-preload recoil, common-spin and three-dimensional world
+covariance, zero fictitious spin slip/heat, distinct simultaneous frame
+transports against a dense elastic oracle, and exact retry after frame/source
+or late mechanical/cancellation refusal.
+All six and the thirty-three prior contact groups pass in the focused native
+original-source build; this does not establish a full Cargo/DSR workspace gate.
+
 ## Native rigid-body finite-patch tangential impulses
 
 `tangential_friction::apply_rigid_friction` binds supplied positive normal

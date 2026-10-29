@@ -16,6 +16,10 @@
 #[path = "planar/multiple.rs"]
 pub mod multiple;
 
+/// Objective transport of accepted shear before single or simultaneous contact.
+#[path = "planar/transport.rs"]
+pub mod transport;
+
 use super::{ArticulatedTangentialConfig, ArticulatedTangentialDrive, admit};
 use crate::articulated::FreeFloatingImpulseResponse;
 use crate::articulated_contacts::{

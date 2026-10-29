@@ -132,6 +132,8 @@ pub enum ArticulatedContactError {
     TangentialMatrix(fs_tribo::tangential::matrix::MatrixTangentialError),
     /// Shared simultaneous retained-history tangential solve refused.
     TangentialContacts(fs_tribo::tangential::multiple::MultipleTangentialError),
+    /// Original retained history could not be transported to the contact frame.
+    TangentialTransport(fs_tribo::tangential::transport::TangentialTransportError),
     /// Redundant impulses do not determine work between independently moving
     /// supports. A common support translation has determined total work.
     UnresolvedSupportWork,
@@ -160,6 +162,7 @@ impl fmt::Display for ArticulatedContactError {
             Self::TangentialLaw(error) => write!(f, "stateful tangential contact: {error}"),
             Self::TangentialMatrix(error) => write!(f, "two-axis tangential contact: {error}"),
             Self::TangentialContacts(error) => write!(f, "coupled tangential contacts: {error}"),
+            Self::TangentialTransport(error) => write!(f, "tangential frame transport: {error}"),
             Self::UnresolvedSupportWork => {
                 f.write_str("redundant impulses do not determine moving-support work")
             }
@@ -221,6 +224,19 @@ impl From<fs_tribo::tangential::multiple::MultipleTangentialError> for Articulat
             Self::Cancelled
         } else {
             Self::TangentialContacts(error)
+        }
+    }
+}
+
+impl From<fs_tribo::tangential::transport::TangentialTransportError> for ArticulatedContactError {
+    fn from(error: fs_tribo::tangential::transport::TangentialTransportError) -> Self {
+        if matches!(
+            error,
+            fs_tribo::tangential::transport::TangentialTransportError::Cancelled
+        ) {
+            Self::Cancelled
+        } else {
+            Self::TangentialTransport(error)
         }
     }
 }

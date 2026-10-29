@@ -1,5 +1,8 @@
 //! G1/G3/G4: simultaneous retained histories on shared native bodies.
 
+#[path = "transport.rs"]
+mod transport;
+
 use super::*;
 use fs_mbd::articulated_contacts::tangential::planar::multiple::{
     ArticulatedMultiTangentialConfig, ArticulatedMultiTangentialResult, ArticulatedTangentialSite,
