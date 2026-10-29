@@ -32,6 +32,8 @@ struct GradientEntry {
 struct OrderedGradient {
     ptr: Vec<usize>,
     entries: Vec<GradientEntry>,
+    surface: Vec<f64>,
+    force: Vec<f64>,
 }
 
 impl OrderedGradient {
@@ -69,17 +71,29 @@ impl OrderedGradient {
             entries.extend(row);
             ptr.push(entries.len());
         }
-        Ok(Self { ptr, entries })
+        Ok(Self {
+            ptr,
+            entries,
+            surface: Vec::with_capacity(nodes),
+            force: Vec::with_capacity(terms.len()),
+        })
     }
 
-    fn add(&self, w: &[f64], z: &[f64], f: &[f64], h2: f64, g: &mut [f64]) {
+    fn add(&mut self, w: &[f64], z: &[f64], f: &[f64], h2: f64, g: &mut [f64]) {
+        // Refresh both input expressions every evaluation. Retain allocations,
+        // never values: the geometry, force, displacement and scale may change.
+        // The original multiplication is (h2 * fc) * weight, unchanged here.
+        self.surface.clear();
+        self.surface.extend(w.iter().zip(z).map(|(w, z)| w + z));
+        self.force.clear();
+        self.force.extend(f.iter().map(|fc| h2 * fc));
         for (node, range) in self.ptr.windows(2).enumerate() {
             let mut value = g[node];
             for t in &self.entries[range[0]..range[1]] {
                 // Preserve the original terms.iter().zip(f) short-force behavior.
-                if let Some(&fc) = f.get(t.row as usize) {
-                    let scale = h2 * fc * t.weight;
-                    value += scale * (w[t.other as usize] + z[t.other as usize]);
+                if let Some(&fc) = self.force.get(t.row as usize) {
+                    let scale = fc * t.weight;
+                    value += scale * self.surface[t.other as usize];
                 }
             }
             g[node] = value;
@@ -392,7 +406,7 @@ impl AnnularMembrane {
             .sum::<f64>()
     }
 
-    pub(super) fn gradient(&self, w: &[f64], z: &[f64], f: &[f64], h2: f64, g: &mut [f64]) {
+    pub(super) fn gradient(&mut self, w: &[f64], z: &[f64], f: &[f64], h2: f64, g: &mut [f64]) {
         self.gradient_rows.add(w, z, f, h2, g);
     }
 
@@ -501,7 +515,7 @@ mod tests {
                 for curved in [false, true] {
                     let body = plate(h, hole, curved);
                     let vk = body.vk.as_ref().unwrap();
-                    let a = vk.annulus.as_ref().unwrap();
+                    let mut a = vk.annulus.as_ref().unwrap().clone();
                     assert!(a.terms.iter().flatten().any(|t| t.a == t.b));
                     for (phase, rest_scale, gain) in [
                         (0.0, 1.0, 1.0),
@@ -561,7 +575,7 @@ mod tests {
             b: 0,
             weight: 1.0,
         }]];
-        let rows = OrderedGradient::new(&terms, 2).unwrap();
+        let mut rows = OrderedGradient::new(&terms, 2).unwrap();
         let initial = [9007199254740992.0_f64, -0.0];
         let mut old = initial;
         let mut new = initial;
@@ -586,7 +600,7 @@ mod tests {
                 }]
             })
             .collect();
-        let rows = OrderedGradient::new(&terms, 2).unwrap();
+        let mut rows = OrderedGradient::new(&terms, 2).unwrap();
         let f = [9007199254740992.0, -9007199254740992.0, 1.0];
         let mut old = [0.0; 2];
         let mut new = old;
@@ -604,6 +618,35 @@ mod tests {
             &mut reordered,
         );
         assert_ne!(new.map(f64::to_bits), reordered.map(f64::to_bits));
+    }
+
+    #[test]
+    fn reused_gradient_inputs_follow_scale_and_force_length_changes() {
+        let terms = vec![
+            vec![MembraneTerm {
+                a: 0,
+                b: 1,
+                weight: 0.125,
+            }],
+            vec![MembraneTerm {
+                a: 1,
+                b: 1,
+                weight: -0.75,
+            }],
+        ];
+        let mut rows = OrderedGradient::new(&terms, 2).unwrap();
+        for (h2, force, z) in [
+            (0.25, vec![2.0, -1.0], [1.0, -2.0]),
+            (-0.125, vec![2.0], [0.5, 4.0]),
+            (1e-100, vec![], [-3.0, 1.0]),
+            (2.0, vec![-7.0, 9.0, 11.0], [2.0, -0.5]),
+        ] {
+            let mut actual = [0.125, -0.25];
+            let mut expected = actual;
+            scatter(&terms, &[0.75, -0.5], &z, &force, h2, &mut expected);
+            rows.add(&[0.75, -0.5], &z, &force, h2, &mut actual);
+            assert_eq!(actual.map(f64::to_bits), expected.map(f64::to_bits));
+        }
     }
 
     #[test]
