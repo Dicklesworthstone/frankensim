@@ -86,8 +86,13 @@ fn both_exact_ducts_share_actual_face_pressure_flow_and_signed_work() {
         assert_eq!(frame.upstream_work_j, drive.upstream_pressure_pa * (through * dt));
         assert_eq!(frame.body_work_j, frame.aperture.bore_pressure_pa * (drive.body_flow_m3_s * dt));
         let pressure_work = tract.pressure_drop_pa * (through * dt);
+        // The drop is a difference of the two face pressures, so its rounding
+        // scales with them, not with the (possibly nanopascal) drop itself.
+        let faces = (frame.aperture.bore_pressure_pa.abs()
+            + tract.upstream_face_pressure_pa.abs()) * (through * dt).abs();
         assert!((frame.aperture.pressure_work_j - pressure_work).abs()
-            <= 1e-10 * (frame.aperture.pressure_work_j.abs() + pressure_work.abs()).max(1e-24));
+            <= 1e-10 * (frame.aperture.pressure_work_j.abs() + pressure_work.abs() + faces)
+                .max(1e-24));
         assert_eq!(frame.aperture.step, model.load().state().step_count());
         assert_eq!(frame.aperture.step, model.upstream_load().unwrap().state().step_count());
         assert_eq!(frame.aperture.bore_pressure_pa, frame.duct.port_outputs[0].conjugate_rate);
