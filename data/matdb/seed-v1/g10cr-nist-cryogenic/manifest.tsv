@@ -9,3 +9,10 @@ property	specific_heat_capacity	specific-heat-capacity	dimensional
 axis	temperature	temperature	absolute-temperature
 axis	conductivity_direction	conductivity-direction	dimensional
 axis	source_pressure_known	source-pressure-known	dimensional
+property	linear_expansion_normal	linear-expansion-normal-relative-to-293k	dimensional
+property	linear_expansion_warp	linear-expansion-warp-relative-to-293k	dimensional
+axis	reference	engineering-reference-model	dimensional
+axis	matched	source-specimens-matched	dimensional
+axis	cure	source-cure-known	dimensional
+axis	fraction	source-fiber-volume-fraction-known	dimensional
+axis	formulation	source-resin-formulation-known	dimensional

@@ -1,0 +1,16 @@
+frankensim.matdb-manifest.v3
+pack_id	glass-mat-epoxy-continuous-nist-expansion-reference
+redistribution	permitted	Numerical fits from unmarked NIST public-information pages with attribution and original annotations; reuse policy https://www.nist.gov/copyrights-disclaimers
+citation	National Institute of Standards and Technology, Cryogenic Material Properties: Glass mat-epoxy continuous strand; https://trc.nist.gov/cryogenics/materials/Glassmat-epoxy/GlassMat_epoxy_rev.htm; reference list https://trc.nist.gov/cryogenics/materials/references.htm; accessed 2026-10-28.
+license	NIST-Public-Information-Attribution-Requested
+source	nist-composite-fit	properties.tsv	material-tsv-v1
+property	strain	linear-expansion-test-direction-relative-to-293k	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	reference	engineering-reference-model	dimensional
+axis	pressure	source-pressure-known	dimensional
+axis	matched	source-specimens-matched	dimensional
+axis	cure	source-cure-known	dimensional
+axis	fraction	source-fiber-volume-fraction-known	dimensional
+axis	formulation	source-resin-formulation-known	dimensional
+axis	orientation	source-test-direction-known	dimensional
+axis	family	source-family-glass-mat-epoxy-continuous-nist-expansion-reference	dimensional

@@ -257,7 +257,7 @@ fn crystal_heat_conduction_requires_the_actual_principal_direction() {
 
 #[test]
 fn g10cr_keeps_directional_equation_ranges_and_unstated_uncertainty() {
-    let pack = compile("g10cr-nist-cryogenic", 3);
+    let pack = compile("g10cr-nist-cryogenic", 5);
     let source = [("source-pressure-known", 0.0)];
     sample(
         &pack,

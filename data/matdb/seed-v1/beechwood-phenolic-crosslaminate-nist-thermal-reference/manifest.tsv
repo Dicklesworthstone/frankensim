@@ -1,0 +1,18 @@
+frankensim.matdb-manifest.v3
+pack_id	beechwood-phenolic-crosslaminate-nist-thermal-reference
+redistribution	permitted	Numerical fits from unmarked NIST public-information pages with attribution and original annotations; reuse policy https://www.nist.gov/copyrights-disclaimers
+citation	National Institute of Standards and Technology, Cryogenic Material Properties: Beechwood-Phenolic cross-laminate [0/90]; https://trc.nist.gov/cryogenics/materials/Beechwood_Phenolic/beechwood_rev.htm; reference list https://trc.nist.gov/cryogenics/materials/references.htm; accessed 2026-10-28.
+license	NIST-Public-Information-Attribution-Requested
+source	nist-composite-fit	properties.tsv	material-tsv-v1
+property	k	thermal-conductivity	thermal-conductivity
+property	grain	linear-expansion-grain-relative-to-293k	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	reference	engineering-reference-model	dimensional
+axis	pressure	source-pressure-known	dimensional
+axis	matched	source-specimens-matched	dimensional
+axis	cure	source-cure-known	dimensional
+axis	fraction	source-fiber-volume-fraction-known	dimensional
+axis	formulation	source-resin-formulation-known	dimensional
+axis	direction	conductivity-direction	dimensional
+axis	layup	source-cross-laminate-0-90	dimensional
+axis	family	source-family-beechwood-phenolic-crosslaminate-nist-thermal-reference	dimensional
