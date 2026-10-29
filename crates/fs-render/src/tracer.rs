@@ -30,8 +30,9 @@
 //! ways); materials are Lambertian, legacy Schlick-GGX, exact-Fresnel rough
 //! conductors, and smooth/rough spectral dielectrics. With `volumes`, the
 //! `render_absorbing` entry integrates borrowed physical absorption/emission
-//! fields on the same camera and shadow paths; dielectric/volume connectors
-//! and scattering remain unsupported. There is no Russian roulette (fixed
+//! fields on the same camera and shadow paths. `render_scattering` adds
+//! spectral free flight, multiple scattering and phase-function/light MIS.
+//! Dielectric/volume connectors remain unsupported. There is no Russian roulette (fixed
 //! depth keeps work deterministic).
 
 use crate::animated_instances::{AnimatedGeometryInstance, AnimatedInstanceError};
@@ -121,9 +122,17 @@ pub use bdpt::{
 };
 #[cfg(feature = "volumes")]
 mod absorbing;
+#[cfg(feature = "volumes")]
+mod scattering;
+#[cfg(feature = "volumes")]
+use scattering::PathMedium;
 mod thermal_lighting;
 #[cfg(feature = "volumes")]
 pub use absorbing::{AbsorbingFilm, render_absorbing, render_absorbing_range};
+#[cfg(feature = "volumes")]
+pub use scattering::{
+    SCATTERING_TRACER_SEMANTICS_VERSION, ScatteringFilm, render_scattering, render_scattering_range,
+};
 mod transport;
 
 /// Bit-affecting semantic surface version of the tracer (see
@@ -2833,7 +2842,7 @@ pub enum TracerError {
     /// Borrowed density/temperature transport refused a ray, field or budget.
     #[cfg(feature = "volumes")]
     Volume(crate::volumes::transport::VolumeTransportError),
-    /// Straight absorbing-cell transport cannot yet follow the curved
+    /// Participating-cell transport cannot yet follow the curved
     /// multi-interface paths used by the dielectric NEE connectors.
     #[cfg(feature = "volumes")]
     VolumeDielectricUnsupported,
@@ -2937,9 +2946,8 @@ impl core::fmt::Display for TracerError {
             #[cfg(feature = "volumes")]
             Self::Volume(error) => write!(formatter, "scene medium refused: {error}"),
             #[cfg(feature = "volumes")]
-            Self::VolumeDielectricUnsupported => formatter.write_str(
-                "absorbing scene media do not yet support dielectric boundary transport",
-            ),
+            Self::VolumeDielectricUnsupported => formatter
+                .write_str("physical scene media do not yet support dielectric boundary transport"),
             Self::MediumStackMismatch {
                 boundary_primitive,
                 active_boundary,
@@ -12624,7 +12632,7 @@ fn trace_path_with_medium(
     capture_primary: bool,
     path_sobol: Option<&Sobol>,
     resume: Option<SpectralPathState>,
-    #[cfg(feature = "volumes")] medium: Option<&crate::volumes::transport::AbsorbingGrid<'_>>,
+    #[cfg(feature = "volumes")] medium: Option<PathMedium<'_, '_>>,
 ) -> Result<PathTraceSample, TracerError> {
     let legacy_light_weights = lighting.is_legacy_compatibility_path();
     // The frozen surface-only estimator predates terminal-vertex NEE weights.
@@ -12726,14 +12734,93 @@ fn trace_path_with_medium(
                 };
                 (direction, distance)
             });
-            let transport = medium.transport(cx, segment_origin, direction, distance, &lambdas)?;
+            let transport = medium.sample_segment(
+                cx,
+                segment_origin,
+                direction,
+                distance,
+                &lambdas,
+                &mut rng,
+                path_sobol,
+                depth,
+            )?;
             for lane in 0..PACKET {
                 let emitted = throughput[lane] * transport.emission_w_m2_sr_nm[lane];
                 radiance[lane] += emitted;
                 if let Some(contributions) = &mut contribution_radiance {
                     contributions.record(emissive_contribution_class(depth), lane, emitted);
                 }
-                throughput[lane] *= transport.transmittance[lane];
+                throughput[lane] *= transport.weight[lane];
+            }
+            if let Some(event) = transport.event {
+                // A volume collision replaces the surface vertex at this
+                // depth. Its phase function uses the same direct-light and
+                // continuation MIS as an ordinary surface, without a cosine.
+                let phase = medium.phase().ok_or(TracerError::InvalidInput)?;
+                if throughput.iter().all(|value| *value == 0.0) {
+                    break;
+                }
+                if s.strategy != DirectStrategy::BsdfOnly {
+                    let (u1, u2) = rng.path_pair(path_sobol, depth, 0);
+                    if let Some(light) = lighting.sample(event.position, u1, u2) {
+                        let direct = scattering::direct_contribution(
+                            scene,
+                            cx,
+                            ray_time,
+                            s,
+                            depth,
+                            medium,
+                            phase,
+                            event.position,
+                            direction,
+                            light,
+                            &lambdas,
+                        )?;
+                        for lane in 0..PACKET {
+                            let contribution = throughput[lane] * direct[lane];
+                            radiance[lane] += contribution;
+                            if let Some(contributions) = &mut contribution_radiance {
+                                contributions.record(
+                                    direct_contribution_class(depth),
+                                    lane,
+                                    contribution,
+                                );
+                            }
+                        }
+                    }
+                }
+                if depth + 1 == s.max_depth {
+                    break;
+                }
+                let (u1, u2) = rng.path_pair(path_sobol, depth, 1);
+                let sampled_phase = phase.sample(direction, u1, u2)?;
+                let next_direction = sampled_phase.direction;
+                let pdf = sampled_phase.pdf;
+                previous_bsdf = Some(PreviousBsdf {
+                    pdf: DirectionalPdfPair::continuous(pdf, pdf)
+                        .ok_or(TracerError::InvalidInput)?,
+                    opaque_source_geometric_normal: None,
+                    smooth_slab: None,
+                });
+                prev_origin = event.position;
+                segment_origin = event.position;
+                ray = Ray {
+                    origin: event.position,
+                    dir: next_direction,
+                };
+                continue;
+            }
+            // The continuation technique must also survive this segment.
+            // Direct-light MIS uses the same packet escape probability on
+            // its shadow segment; comparing only one side would bias energy.
+            if let Some(previous) = &mut previous_bsdf
+                && !previous.pdf.is_delta()
+            {
+                previous.pdf = DirectionalPdfPair::continuous(
+                    previous.pdf.forward_solid_angle() * transport.escape_probability,
+                    previous.pdf.reverse_solid_angle() * transport.escape_probability,
+                )
+                .ok_or(TracerError::InvalidInput)?;
             }
         }
         let Some(intersection) = intersection else {
@@ -13349,6 +13436,23 @@ fn trace_path_with_medium(
                                 let wo = ray.dir.scale(-1.0);
                                 let bsdf_pdf =
                                     bsdf_pdf(&prim.material, n, wo, wi, brushed_frame.as_ref());
+                                #[cfg(feature = "volumes")]
+                                let volume_transmittance = if let Some(medium) = medium {
+                                    let distance = match direct.target {
+                                        DirectLightTarget::Rectangle { distance_m, .. } => {
+                                            distance_m
+                                        }
+                                        DirectLightTarget::Environment => f64::INFINITY,
+                                    };
+                                    medium.transmittance(cx, hit.point, wi, distance, &lambdas)?
+                                } else {
+                                    [1.0; PACKET]
+                                };
+                                #[cfg(feature = "volumes")]
+                                let bsdf_pdf = bsdf_pdf
+                                    * medium.map_or(1.0, |medium| {
+                                        medium.escape_probability(&volume_transmittance)
+                                    });
                                 let weight = match s.strategy {
                                     DirectStrategy::Mis | DirectStrategy::PowerMis
                                         if depth + 1 == s.max_depth && !legacy_light_weights =>
@@ -13403,19 +13507,6 @@ fn trace_path_with_medium(
                                         }
                                     }
                                 } else {
-                                    #[cfg(feature = "volumes")]
-                                    let volume_transmittance = if let Some(medium) = medium {
-                                        let distance = match direct.target {
-                                            DirectLightTarget::Rectangle { distance_m, .. } => {
-                                                distance_m
-                                            }
-                                            DirectLightTarget::Environment => f64::INFINITY,
-                                        };
-                                        medium
-                                            .transmittance(cx, hit.point, wi, distance, &lambdas)?
-                                    } else {
-                                        [1.0; PACKET]
-                                    };
                                     // Keep the ambient opaque tracer-v1 arithmetic
                                     // bit-for-bit identical to its frozen path.
                                     for (k, &l) in lambdas.iter().enumerate() {

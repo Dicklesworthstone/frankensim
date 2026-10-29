@@ -17,6 +17,9 @@ use fs_render::volumes::transport::{
     AbsorbingGrid, AbsorbingGridBudget, MassAbsorptionSpectrum, VolumeTransportError,
 };
 
+#[path = "absorbing_transport/scattering.rs"]
+mod scattering;
+
 fn with_cx<R>(operation: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
     let gate = CancelGate::new_clock_free();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());

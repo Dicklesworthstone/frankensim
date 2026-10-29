@@ -91,7 +91,7 @@ pub(super) fn direct_contribution(
     boundary: Option<BoundaryMedia>,
     brushed: Option<&crate::surface_detail::ShadingFrame>,
     wavelengths: &[f64; PACKET],
-    #[cfg(feature = "volumes")] medium: Option<&crate::volumes::transport::AbsorbingGrid<'_>>,
+    #[cfg(feature = "volumes")] medium: Option<PathMedium<'_, '_>>,
 ) -> Result<[f64; PACKET], TracerError> {
     let mut result = [0.0; PACKET];
     let displacement = light.point.delta_from(point);
@@ -105,38 +105,15 @@ pub(super) fn direct_contribution(
         return Ok(result);
     }
     let shadow_origin = dielectric_spawn_origin(point, frame.geometric, incoming);
-    let shadow_displacement = light.point.delta_from(shadow_origin);
-    let shadow_distance = shadow_displacement.norm();
-    if !(shadow_distance > 0.0 && shadow_distance.is_finite()) {
-        return Ok(result);
-    }
-    let shadow = Ray {
-        origin: shadow_origin,
-        dir: shadow_displacement.scale(1.0 / shadow_distance),
-    };
-    let Some(hit) = intersect(scene, cx, &shadow, ray_time)? else {
-        return Ok(result);
-    };
-    // Compare actual world points: another face of this same body may occlude
-    // the sampled face. Primitive identity alone would leak light through it.
-    let coordinate_scale = [
-        point.x,
-        point.y,
-        point.z,
-        light.point.x,
-        light.point.y,
-        light.point.z,
-    ]
-    .into_iter()
-    .map(f64::abs)
-    .fold(distance, f64::max);
-    // The shifted shadow ray aims at the exact target, so its origin offset
-    // does not become an endpoint error. A metric RAY_EPS allowance here
-    // would let a nearby opaque face of the same body reveal the hidden face.
-    let tolerance = 128.0 * f64::EPSILON * coordinate_scale;
-    if hit.primitive_index != light.primitive_index
-        || hit.hit.point.delta_from(light.point).norm() > tolerance
-    {
+    if !visible_endpoint(
+        scene,
+        cx,
+        ray_time,
+        point,
+        shadow_origin,
+        light.point,
+        light.primitive_index,
+    )? {
         return Ok(result);
     }
     let shadow_medium = boundary.map_or_else(
@@ -191,6 +168,11 @@ pub(super) fn direct_contribution(
         if value <= 0.0 {
             continue;
         }
+        #[cfg(feature = "volumes")]
+        let competing_pdf = competing_pdf
+            * medium.map_or(1.0, |medium| {
+                medium.escape_probability(&volume_transmittance)
+            });
         let weight = if depth + 1 == settings.max_depth {
             // No BSDF ray will be traced beyond the final admitted vertex.
             1.0
@@ -220,4 +202,38 @@ pub(super) fn direct_contribution(
         }
     }
     Ok(result)
+}
+
+/// Trace an exact sampled endpoint, rejecting hidden faces of the same body.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn visible_endpoint(
+    scene: &Scene,
+    cx: &Cx<'_>,
+    ray_time: Option<&PathTime>,
+    source: Point3,
+    shadow_origin: Point3,
+    target: Point3,
+    primitive_index: usize,
+) -> Result<bool, TracerError> {
+    let displacement = target.delta_from(shadow_origin);
+    let distance = displacement.norm();
+    if !(distance > 0.0 && distance.is_finite()) {
+        return Ok(false);
+    }
+    let ray = Ray {
+        origin: shadow_origin,
+        dir: displacement.scale(1.0 / distance),
+    };
+    let Some(hit) = intersect(scene, cx, &ray, ray_time)? else {
+        return Ok(false);
+    };
+    let coordinate_scale = [source.x, source.y, source.z, target.x, target.y, target.z]
+        .into_iter()
+        .map(f64::abs)
+        .fold(target.delta_from(source).norm(), f64::max);
+    // Aimed-at-target origin offsets cause no endpoint bias. A metric
+    // RAY_EPS allowance here would leak a nearby hidden face of the same body.
+    let tolerance = 128.0 * f64::EPSILON * coordinate_scale;
+    Ok(hit.primitive_index == primitive_index
+        && hit.hit.point.delta_from(target).norm() <= tolerance)
 }

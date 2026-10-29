@@ -94,71 +94,14 @@ pub fn render_absorbing_range(
     {
         return Err(TracerError::InvalidInput);
     }
-    if !medium.is_vacuum() {
-        for primitive in &scene.primitives {
-            cx.checkpoint()?;
-            if matches!(primitive.material, Material::Dielectric { .. }) {
-                return Err(TracerError::VolumeDielectricUnsupported);
-            }
-        }
-    }
-    let lighting =
-        validate_scene_with_medium_emission(scene, cx, None, medium.has_thermal_emission())?;
-    if from == to {
-        return Ok(());
-    }
-    let mut staged = Vec::new();
-    staged
-        .try_reserve_exact(film.film.xyz.len())
-        .map_err(|_| TracerError::InvalidInput)?;
-    for chunk in film.film.xyz.chunks(4096) {
-        cx.checkpoint()?;
-        staged.extend_from_slice(chunk);
-    }
-    let key = [
-        (settings.seed & 0xffff_ffff) as u32,
-        (settings.seed >> 32) as u32,
-    ];
-    let sobol = pixel_sobol(settings.sampler, settings.seed);
-    let path_sobol = path_sobol(settings.sampler);
-    let kn = 1.0 / y_integral();
-    let render_cx = cx.with_stream_seed(settings.seed);
-    let medium = (!medium.is_vacuum()).then_some(medium);
-    for (pixel, slot) in staged.iter_mut().enumerate() {
-        let pixel = u32::try_from(pixel).map_err(|_| TracerError::InvalidInput)?;
-        for sample in from..to {
-            cx.checkpoint()?;
-            let (jx, jy, ul) = pixel_dims(settings, sobol.as_ref(), key, pixel, sample)?;
-            let xyz = trace_path_with_medium(
-                scene,
-                &lighting,
-                &render_cx,
-                settings,
-                kn,
-                pixel,
-                sample,
-                jx,
-                jy,
-                ul,
-                None,
-                CameraPath::Legacy,
-                false,
-                path_sobol.as_ref(),
-                None,
-                medium,
-            )?
-            .xyz;
-            for channel in 0..3 {
-                slot[channel] += xyz[channel];
-                if !slot[channel].is_finite() {
-                    return Err(TracerError::InvalidInput);
-                }
-            }
-        }
-    }
-    cx.checkpoint()?;
-    film.film.xyz = staged;
-    film.film.spp_done = to;
-    film.film.time_mode = FilmTimeMode::Static;
-    Ok(())
+    scattering::render_medium_range(
+        scene,
+        cx,
+        settings,
+        &mut film.film,
+        (!medium.is_vacuum()).then_some(PathMedium::Absorbing(medium)),
+        medium.has_thermal_emission(),
+        from,
+        to,
+    )
 }

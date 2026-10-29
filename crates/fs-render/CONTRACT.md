@@ -499,10 +499,35 @@ differentiable lift). Pure Rust throughout.
   including a single rectangular light. `AbsorbingFilm` binds the medium snapshot
   and all sample settings, caps progressive samples and commits whole ranges
   transactionally. Callers retain the same scene between appends. This surface
-  adds no scattering, volume-light NEE, dynamic-field exposure interpolation,
+  adds no volume-light NEE, dynamic-field exposure interpolation,
   thermal-state debit or measured-property authority. G1/G3/G4/G5 tests compare
   slabs, shadow paths and hot-cell emission to independent integrals, exercise
   boundary/refinement/unit changes, and verify replay and refusal rollback.
+- **Physical participating cells (`tracer,volumes`):**
+  `volumes::transport::scattering::ScatteringGrid` extends the same accepted
+  borrowed density/temperature snapshot with independent mass-scattering
+  coefficients and a reciprocal isotropic, Henyey--Greenstein or unpolarized
+  Rayleigh phase law. Spectral extinction is `rho * (kappa_a + kappa_s)`.
+  Exact cell crossings invert exponential free flight without fixed marching
+  steps, density copies, global majorants or null-collision loops. A uniformly
+  selected packet lane proposes distance; complete spectral-mixture densities
+  weight every collision and escape, including zero-extinction lanes. LTE
+  emission uses absorption as its source coefficient and total extinction for
+  attenuation. Its complete segment integral is added before stochastic path
+  weighting, so a sampled collision cannot erase an unsampled source term.
+  `render_scattering` and its progressive range entry integrate surface and
+  multiple-scattering vertices in the same path loop. Rectangle, environment
+  and thermal-mesh NEE evaluate the phase law and exact shadow transmittance;
+  light-hit and direct-sample MIS include the same packet escape probability.
+  Final vertices retain full direct weight. `ScatteringFilm` binds field,
+  coefficients, phase and settings, and publishes each sample range atomically.
+  Zero-scattering snapshots retain deterministic absorption; vacuum retains
+  the original surface path. This is one finite, index-one grid with global
+  spectral coefficients/phase, not overlapping-medium composition, dielectric
+  transport, volume-emitter NEE, polarization, or thermal-energy mutation.
+  Focused regressions cover independent single-scatter source integrals,
+  thermal spectra, surface shadow extinction, spectral furnace conservation,
+  phase normalization/moments, exact progressive replay and bounded refusals.
 
 ## Invariants
 
@@ -813,7 +838,7 @@ original light-selection draws and estimator. Tracer bit-semantics v2
 deliberately changes reflective GGX sample/PDF bits from NDF sampling to
 isotropic visible-normal sampling while preserving the same BSDF integral in
 expectation.
-Current no-claims: no general scattering-volume coupling, no Russian roulette, reflective GGX
+Current no-claims: no dielectric/scattering-volume coupling, no Russian roulette, reflective GGX
 and conductor sampling is isotropic-only, conductor and rough-dielectric GGX
 are single-scattering without multiple-scattering compensation, and standalone
 RGB emitters do not reflect. Thermal emitters retain their reciprocal diffuse

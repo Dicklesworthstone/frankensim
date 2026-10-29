@@ -1,0 +1,148 @@
+//! Reciprocal phase functions using the propagation-direction convention.
+
+use super::{VolumeTransportError, unit_variate};
+use fs_blake3::DomainHasher;
+use fs_geom::Vec3;
+use fs_math::det;
+
+const INV_FOUR_PI: f64 = 1.0 / (4.0 * core::f64::consts::PI);
+
+/// Normalized phase probability per solid angle. Both directions describe
+/// forward path travel: positive HG asymmetry scatters along the incoming ray,
+/// unlike a surface convention with both vectors pointing away from a vertex.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PhaseFunction {
+    /// Uniform direction, probability `1 / (4 pi)`.
+    Isotropic,
+    /// HG anisotropy `-1 < g < 1`; its mean scattering cosine is exactly `g`.
+    HenyeyGreenstein {
+        /// Signed mean forward cosine, independent of wavelength.
+        g: f64,
+    },
+    /// Unpolarized Rayleigh law `3 (1 + cos²(theta)) / (16 pi)`.
+    Rayleigh,
+}
+
+/// An importance-sampled unit travel direction and its solid-angle density.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PhaseSample {
+    /// Unit outgoing direction in world space.
+    pub direction: Vec3,
+    /// Matched phase probability per steradian.
+    pub pdf: f64,
+}
+
+impl PhaseFunction {
+    /// Construct the HG model with explicit finite, nonsingular asymmetry.
+    pub fn henyey_greenstein(g: f64) -> Result<Self, VolumeTransportError> {
+        let result = Self::HenyeyGreenstein { g };
+        result.validate()?;
+        Ok(result)
+    }
+
+    pub(super) fn validate(self) -> Result<(), VolumeTransportError> {
+        if let Self::HenyeyGreenstein { g } = self
+            && (!g.is_finite() || g.abs() >= 1.0)
+        {
+            return Err(VolumeTransportError::Phase);
+        }
+        Ok(())
+    }
+
+    pub(super) fn hash_into(self, hash: &mut DomainHasher) {
+        match self {
+            Self::Isotropic => hash.update(&[0]),
+            Self::HenyeyGreenstein { g } => {
+                hash.update(&[1]);
+                hash.update(&g.to_bits().to_le_bytes());
+            }
+            Self::Rayleigh => hash.update(&[2]),
+        }
+    }
+
+    /// Evaluate using `incoming_travel.dot(outgoing_travel)`; the result is
+    /// both the physical phase value and the sampling PDF. Tiny dot-product
+    /// roundoff outside the unit interval clamps, while invalid angles refuse.
+    pub fn eval_cos(self, cos_theta: f64) -> Result<f64, VolumeTransportError> {
+        self.validate()?;
+        if !cos_theta.is_finite() || cos_theta.abs() > 1.0 + 2.0e-10 {
+            return Err(VolumeTransportError::Phase);
+        }
+        let c = cos_theta.clamp(-1.0, 1.0);
+        Ok(match self {
+            Self::Isotropic => INV_FOUR_PI,
+            Self::HenyeyGreenstein { g } => {
+                let a = g.abs();
+                // Keep the forward/backward peak stable as |g| approaches one.
+                let denominator = if g >= 0.0 {
+                    (1.0 - a) * (1.0 - a) + 2.0 * a * (1.0 - c)
+                } else {
+                    (1.0 - a) * (1.0 - a) + 2.0 * a * (1.0 + c)
+                };
+                (1.0 - a) * (1.0 + a) * INV_FOUR_PI / (denominator * det::sqrt(denominator))
+            }
+            Self::Rayleigh => 0.75 * INV_FOUR_PI * (1.0 + c * c),
+        })
+    }
+
+    /// Sample the exact angular CDF and a uniform azimuth from `[0,1)` variates.
+    /// No small-anisotropy isotropic approximation is used.
+    pub fn sample(
+        self,
+        incoming_travel: Vec3,
+        u_cos: f64,
+        u_azimuth: f64,
+    ) -> Result<PhaseSample, VolumeTransportError> {
+        self.validate()?;
+        let norm2 = incoming_travel.dot(incoming_travel);
+        if !norm2.is_finite()
+            || (norm2 - 1.0).abs() > 2.0e-10
+            || !unit_variate(u_cos)
+            || !unit_variate(u_azimuth)
+        {
+            return Err(VolumeTransportError::Phase);
+        }
+        let w = incoming_travel.scale(1.0 / det::sqrt(norm2));
+        let cosine = match self {
+            Self::Isotropic => 2.0f64.mul_add(u_cos, -1.0),
+            Self::HenyeyGreenstein { g } => {
+                // Algebraic HG inversion without subtracting nearly equal
+                // terms then dividing by g; exact also at g=0 and small |g|.
+                let a = g.abs();
+                let u = if g < 0.0 { 1.0 - u_cos } else { u_cos };
+                let q = (1.0 - a) / ((1.0 - a) + 2.0 * a * u);
+                let c = 1.0 - 2.0 * q * q * (1.0 - u) * (1.0 + a * u);
+                if g < 0.0 { -c } else { c }
+            }
+            Self::Rayleigh => {
+                // Invert c³+3c=8u-4 using 2*sinh(asinh(4u-2)/3).
+                // Deterministic expm1 avoids Cardano cancellation near zero.
+                let r = 4.0f64.mul_add(u_cos, -2.0);
+                let t = det::ln(r.abs() + det::sqrt(r * r + 1.0)) / 3.0;
+                let e = det::expm1(t);
+                (e * (2.0 + e) / (1.0 + e)).copysign(r)
+            }
+        }
+        .clamp(-1.0, 1.0);
+        let sine = det::sqrt(((1.0 - cosine) * (1.0 + cosine)).max(0.0));
+        let (sin_phi, cos_phi) = det::sin_cos(core::f64::consts::TAU * u_azimuth);
+        // Stable orthonormal frame, including both poles (Duff et al. 2017).
+        let sign = 1.0f64.copysign(w.z);
+        let a = -1.0 / (sign + w.z);
+        let b = w.x * w.y * a;
+        let tangent = Vec3::new(1.0 + sign * w.x * w.x * a, sign * b, -sign * w.x);
+        let bitangent = Vec3::new(b, sign + w.y * w.y * a, -w.y);
+        let x = sine * cos_phi;
+        let y = sine * sin_phi;
+        let raw = Vec3::new(
+            tangent.x * x + bitangent.x * y + w.x * cosine,
+            tangent.y * x + bitangent.y * y + w.y * cosine,
+            tangent.z * x + bitangent.z * y + w.z * cosine,
+        );
+        let direction = raw.scale(1.0 / det::sqrt(raw.dot(raw)));
+        Ok(PhaseSample {
+            direction,
+            pdf: self.eval_cos(w.dot(direction))?,
+        })
+    }
+}

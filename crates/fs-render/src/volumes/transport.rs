@@ -15,6 +15,10 @@ use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
+mod cells;
+/// Spectral free flights and phase functions for physical participating media.
+pub mod scattering;
+
 const MAX_KNOTS: usize = 16;
 
 /// Validated visible-band mass absorption coefficient, in m²/kg.
@@ -100,6 +104,12 @@ pub enum VolumeTransportError {
     Temperature,
     /// Invalid spectral knots or negative/non-finite mass absorption.
     AbsorptionSpectrum,
+    /// Invalid spectral knots or negative/non-finite mass scattering.
+    ScatteringSpectrum,
+    /// Invalid phase asymmetry, direction, or scattering angle.
+    Phase,
+    /// A free-flight packet is empty or a random variate is outside [0, 1).
+    Sample,
     /// Wavelength lies outside 380–780 nm.
     Wavelength,
     /// Ray direction is not finite and unit, or distance is negative/NaN.
@@ -112,7 +122,7 @@ pub enum VolumeTransportError {
 
 impl core::fmt::Display for VolumeTransportError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "absorbing-volume transport refused: {self:?}")
+        write!(f, "volume transport refused: {self:?}")
     }
 }
 impl core::error::Error for VolumeTransportError {}
@@ -270,15 +280,7 @@ impl<'a> AbsorbingGrid<'a> {
         wavelengths: &[f64; N],
     ) -> Result<SegmentTransport<N>, VolumeTransportError> {
         checkpoint(cx)?;
-        let o = [origin.x, origin.y, origin.z];
-        let d = [direction.x, direction.y, direction.z];
-        if o.iter().chain(d.iter()).any(|v| !v.is_finite())
-            || (direction.dot(direction) - 1.0).abs() > 2.0e-10
-            || distance.is_nan()
-            || distance < 0.0
-        {
-            return Err(VolumeTransportError::Ray);
-        }
+        cells::validate_ray(origin, direction, distance)?;
         let mut kappa = [0.0; N];
         for lane in 0..N {
             kappa[lane] = self.absorption.at(wavelengths[lane])?;
@@ -290,74 +292,16 @@ impl<'a> AbsorbingGrid<'a> {
         if self.vacuum || distance == 0.0 {
             return Ok(result);
         }
-        let (lo, hi) = self.grid.bounds();
-        let (mut enter, mut exit) = (0.0_f64, distance);
-        let mut collapsed_interval = false;
-        for a in 0..3 {
-            if d[a] == 0.0 {
-                if o[a] < lo[a] || o[a] >= hi[a] {
-                    return Ok(result);
-                }
-            } else {
-                let t1 = (lo[a] - o[a]) / d[a];
-                let t2 = (hi[a] - o[a]) / d[a];
-                collapsed_interval |= t1 == t2;
-                enter = enter.max(t1.min(t2));
-                exit = exit.min(t1.max(t2));
-            }
-        }
-        if exit < enter {
+        let Some(mut ray) =
+            cells::CellRay::clip(&self.grid, origin, direction, distance, self.max_steps)?
+        else {
             return Ok(result);
-        }
-        if exit == enter {
-            return if collapsed_interval {
-                Err(VolumeTransportError::Unrepresentable)
-            } else {
-                Ok(result)
-            };
-        }
-        if !enter.is_finite() || !exit.is_finite() {
-            return Err(VolumeTransportError::Unrepresentable);
-        }
-        // Rebase at entry so far-away camera parameters do not accumulate in
-        // each cell length. Recompute crossings from integer cell boundaries.
-        let start =
-            std::array::from_fn::<_, 3, _>(|a| d[a].mul_add(enter, o[a]).clamp(lo[a], hi[a]));
-        let mut end = exit - enter;
-        for a in 0..3 {
-            if d[a] != 0.0 {
-                let far = if d[a] > 0.0 { hi[a] } else { lo[a] };
-                end = end.min((far - start[a]) / d[a]);
-            }
-        }
-        let mut index = [0usize; 3];
-        for a in 0..3 {
-            let q = (start[a] - lo[a]) / self.grid.cell[a];
-            let floor = q.floor();
-            let cell = if d[a] < 0.0 && q == floor {
-                floor - 1.0
-            } else {
-                floor
-            };
-            index[a] = cell.clamp(0.0, (self.grid.dims[a] - 1) as f64) as usize;
-        }
-        let crossing = |a: usize, i: usize| {
-            if d[a] == 0.0 {
-                return f64::INFINITY;
-            }
-            let boundary = if d[a] > 0.0 { i + 1 } else { i };
-            let coordinate = (boundary as f64).mul_add(self.grid.cell[a], lo[a]);
-            (coordinate - start[a]) / d[a]
         };
-        let mut next = std::array::from_fn::<_, 3, _>(|a| crossing(a, index[a]));
-        let mut current = 0.0;
         let mut optical_depth = [0.0; N];
         let mut source_cache = [(f64::NAN, 0.0); N];
-        for _ in 0..self.max_steps {
-            checkpoint(cx)?;
-            let stop = next.into_iter().fold(end, f64::min).max(current);
-            let length = stop - current;
-            let cell = index[0] + self.grid.dims[0] * (index[1] + self.grid.dims[1] * index[2]);
+        while let Some(segment) = ray.next(cx)? {
+            let length = segment.length_m;
+            let cell = segment.cell;
             let density = self.grid.data[cell];
             if length > 0.0 && density > 0.0 {
                 for lane in 0..N {
@@ -389,30 +333,11 @@ impl<'a> AbsorbingGrid<'a> {
                     optical_depth[lane] += tau;
                 }
             }
-            current = stop;
-            if current >= end {
-                for lane in 0..N {
-                    result.transmittance[lane] = det::exp(-optical_depth[lane]);
-                }
-                return Ok(result);
-            }
-            for a in 0..3 {
-                if next[a] <= stop {
-                    if (d[a] < 0.0 && index[a] == 0)
-                        || (d[a] > 0.0 && index[a] + 1 == self.grid.dims[a])
-                    {
-                        return Err(VolumeTransportError::Unrepresentable);
-                    }
-                    if d[a] > 0.0 {
-                        index[a] += 1;
-                    } else {
-                        index[a] -= 1;
-                    }
-                    next[a] = crossing(a, index[a]);
-                }
-            }
         }
-        Err(VolumeTransportError::Budget)
+        for lane in 0..N {
+            result.transmittance[lane] = det::exp(-optical_depth[lane]);
+        }
+        Ok(result)
     }
 }
 
@@ -421,8 +346,9 @@ fn checkpoint(cx: &Cx<'_>) -> Result<(), VolumeTransportError> {
 }
 
 fn positive_product(a: f64, b: f64, c: f64) -> f64 {
-    let product = a * b * c;
-    if product > 0.0 && product.is_finite() {
+    let ab = a * b;
+    let product = ab * c;
+    if ab >= f64::MIN_POSITIVE && product > 0.0 && product.is_finite() {
         product
     } else {
         det::exp(det::ln(a) + det::ln(b) + det::ln(c))
