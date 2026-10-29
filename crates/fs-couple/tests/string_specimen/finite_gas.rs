@@ -458,3 +458,5 @@ mod electrical;
 mod exchange;
 #[path = "finite_gas/flow.rs"]
 mod flow;
+#[path = "finite_gas/reactive.rs"]
+mod reactive;

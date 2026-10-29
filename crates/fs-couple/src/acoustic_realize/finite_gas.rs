@@ -17,6 +17,8 @@ pub mod electrical;
 pub mod exchange;
 /// Source-resolved pressure-driven species exchange on the continuing string.
 pub mod flow;
+/// Source-resolved endpoint chemistry on the continuing string and finite gas.
+pub mod reactive;
 
 use super::{
     AcousticRealizeError, ThermalMaterialStringFrame, ThermalMaterialStringRuntime,
@@ -54,6 +56,8 @@ pub enum FiniteGasStringError {
     String(ThermalStringError),
     /// Original gas/source inversion refusal.
     Gas(GasEnergyError),
+    /// Original chemical mechanism, source, nonlinear or consumption refusal.
+    Reaction(crate::cavity_phs::piston::reactive::GasReactionError),
 }
 impl core::fmt::Display for FiniteGasStringError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -69,6 +73,11 @@ impl From<ThermalStringError> for FiniteGasStringError {
 impl From<GasEnergyError> for FiniteGasStringError {
     fn from(error: GasEnergyError) -> Self {
         Self::Gas(error)
+    }
+}
+impl From<crate::cavity_phs::piston::reactive::GasReactionError> for FiniteGasStringError {
+    fn from(error: crate::cavity_phs::piston::reactive::GasReactionError) -> Self {
+        Self::Reaction(error)
     }
 }
 

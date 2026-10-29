@@ -5642,6 +5642,34 @@ independent endpoint pressure with the new sound-speed coefficient,
 frozen-initial-medium staging, and atomic refusal. Synthetic source data test
 numerical coupling, not experimental gas/material fidelity.
 
+### Reacting finite gas on a continuing material string
+
+`acoustic_realize::finite_gas::reactive` feeds the native string sample's
+aerodynamic dissipation and prescribed gas heat into the existing
+`GasReaction::heated_implicit_candidate`. Every declared reaction rate sees
+the same source-backed endpoint temperature and composition. The chemical
+interval is exactly one native audio sample; there is no second physical step,
+reaction-only subcycle or inferred mechanism. The original implicit mechanism,
+caloric, species, consumption, entropy and work limits remain authoritative.
+
+Formation energies stay inside the gas internal-energy datum and are not
+added as an external heat release. The original finite-gas publisher measures
+actual mechanical, solid and gas storage, rebuilds drag and compact pressure
+from the final mixture and preserves the preceding accepted acceleration.
+Gas, thermal string, modal history and sample position publish at one epoch.
+Source, nonlinear, temperature-limit, energy, observer and cancellation failures
+leave both accepted owners unchanged and permit an identical retry.
+
+This remains a first-order frozen-initial-mechanics split around simultaneous
+heated chemistry in a uniform fixed-volume inventory. It does not resolve flame
+or chamber propagation, pressure work, reciprocal conductive exchange or
+acoustic radiation loading. The microphone remains a diagnostic observer.
+G1/G3/G4 definitions in `tests/string_specimen/finite_gas/reactive.rs` check
+independent isomer extent/caloric/pressure balances, formation-energy accounting,
+continued mixture-dependent drag and sound, repeated species evolution and
+atomic chemical/late-publication refusal. Synthetic sources establish numerical
+integration behavior, not experimental chemical or acoustic fidelity.
+
 ### Reciprocal thermal exchange with finite surrounding gas
 
 The original `step_with_isochoric_gas` remains the insulated solid/gas API.
