@@ -29,6 +29,11 @@ pub use partial_saturation::{
     PartialSaturationBody3, PartialSaturationBodyExchange3, PartialSaturationError3,
     PartialSaturationExchange3,
 };
+mod body_motion;
+pub use body_motion::{
+    BodyFrameEllipsoid3, BodyFrameSampler3, BodyFrameShape3, MovingPartialSaturationBody3,
+    MovingPartialSaturationExchange3,
+};
 
 /// Bit-semantics version for the D3Q19 boundary surface.
 ///

@@ -104,6 +104,11 @@ pub enum PartialSaturationError3 {
         /// Native diagnostic.
         source: CollisionError3,
     },
+    /// Refusal from the native body-frame rotation owner.
+    Motion {
+        /// Native group or time-integration diagnostic.
+        source: fs_time::lie::LieStepError,
+    },
 }
 
 impl core::fmt::Display for PartialSaturationError3 {
@@ -115,6 +120,7 @@ impl core::fmt::Display for PartialSaturationError3 {
             Self::Collision { cell, source } => {
                 write!(f, "D3Q19 collision at {cell:?}: {source:?}")
             }
+            Self::Motion { source } => write!(f, "D3Q19 body motion: {source}"),
         }
     }
 }
@@ -123,11 +129,11 @@ impl std::error::Error for PartialSaturationError3 {}
 
 type Result<T> = core::result::Result<T, PartialSaturationError3>;
 
-fn invalid(reason: &'static str) -> PartialSaturationError3 {
+pub(super) fn invalid(reason: &'static str) -> PartialSaturationError3 {
     PartialSaturationError3::Invalid { reason }
 }
 
-fn checkpoint(gate: &CancelGate) -> Result<()> {
+pub(super) fn checkpoint(gate: &CancelGate) -> Result<()> {
     if gate.is_requested() {
         Err(PartialSaturationError3::Cancelled)
     } else {
@@ -135,7 +141,7 @@ fn checkpoint(gate: &CancelGate) -> Result<()> {
     }
 }
 
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+pub(super) fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [
         a[1].mul_add(b[2], -a[2] * b[1]),
         a[2].mul_add(b[0], -a[0] * b[2]),
@@ -143,16 +149,16 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     ]
 }
 
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+pub(super) fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0].mul_add(b[0], a[1].mul_add(b[1], a[2] * b[2]))
 }
 
-fn point_velocity(velocity: [f64; 3], omega: [f64; 3], r: [f64; 3]) -> [f64; 3] {
+pub(super) fn point_velocity(velocity: [f64; 3], omega: [f64; 3], r: [f64; 3]) -> [f64; 3] {
     let rotation = cross(omega, r);
     core::array::from_fn(|axis| velocity[axis] + rotation[axis])
 }
 
-fn low_mach(velocity: [f64; 3]) -> bool {
+pub(super) fn low_mach(velocity: [f64; 3]) -> bool {
     velocity.into_iter().all(f64::is_finite) && dot(velocity, velocity) < 0.03
 }
 
@@ -211,6 +217,33 @@ impl BoundaryGrid3 {
         moment_origin: [f64; 3],
         gate: &CancelGate,
     ) -> Result<PartialSaturationBodyExchange3> {
+        self.step_with_partial_saturation_body_checked(
+            solid_fractions,
+            body,
+            external_impulse,
+            moment_origin,
+            gate,
+            |_, _, _| Ok(()),
+        )
+        .map(|(exchange, ())| exchange)
+    }
+
+    // The motion owner completes its final drift, admission and diagnostics
+    // here, while every population still belongs to the previous state.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(super) fn step_with_partial_saturation_body_checked<T>(
+        &mut self,
+        solid_fractions: &[f64],
+        body: &mut PartialSaturationBody3,
+        external_impulse: [f64; 6],
+        moment_origin: [f64; 3],
+        gate: &CancelGate,
+        finish: impl FnOnce(
+            &Self,
+            &PartialSaturationBody3,
+            &PartialSaturationBodyExchange3,
+        ) -> Result<T>,
+    ) -> Result<(PartialSaturationBodyExchange3, T)> {
         checkpoint(gate)?;
         let CollisionModel3::Bgk { tau } = self.collision_model else {
             return Err(invalid("finite-inertia immersed coupling requires BGK"));
@@ -515,12 +548,12 @@ impl BoundaryGrid3 {
             self.next = Some(next);
             return Err(error);
         }
-        core::mem::swap(&mut self.f, &mut next);
-        self.next = Some(next);
-        self.topology_locked = true;
-        body.velocity = after;
-        body.angular_velocity = omega_after;
-        Ok(PartialSaturationBodyExchange3 {
+        let proposed_body = PartialSaturationBody3 {
+            velocity: after,
+            angular_velocity: omega_after,
+            ..*body
+        };
+        let receipt = PartialSaturationBodyExchange3 {
             hydrodynamic: exchange,
             walls,
             velocity_midpoint: midpoint,
@@ -528,6 +561,22 @@ impl BoundaryGrid3 {
             kinetic_energy_change,
             external_work,
             momentum_residual,
-        })
+        };
+        let final_value = match finish(self, &proposed_body, &receipt) {
+            Ok(value) => value,
+            Err(error) => {
+                self.next = Some(next);
+                return Err(error);
+            }
+        };
+        if let Err(error) = checkpoint(gate) {
+            self.next = Some(next);
+            return Err(error);
+        }
+        core::mem::swap(&mut self.f, &mut next);
+        self.next = Some(next);
+        self.topology_locked = true;
+        *body = proposed_body;
+        Ok((receipt, final_value))
     }
 }

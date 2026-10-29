@@ -25,6 +25,7 @@ fs-conduction = { package = "fs-thermal", path = "../fs-thermal", optional = tru
 fs-blake3 = { path = "../fs-blake3" }
 fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }
+fs-ga = { path = "../fs-ga" }
 fs-la = { path = "../fs-la" }
 fs-matdb = { path = "../fs-matdb" }
 fs-material = { path = "../fs-material" }
@@ -33,6 +34,7 @@ fs-mesh = { path = "../fs-mesh" }
 fs-qty = { path = "../fs-qty" }
 fs-sparse = { path = "../fs-sparse" }
 fs-solver = { path = "../fs-solver", optional = true }
+fs-time = { path = "../fs-time" }
 
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }

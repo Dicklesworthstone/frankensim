@@ -4527,6 +4527,74 @@ fractions; and checks invalid-model/input/cancellation refusal and bit-identical
 retry. These are discrete balance/conformance checks, not a continuum error or
 performance certification, and do not close the full moving-boundary bead.
 
+### Moving spatial bodies on the native fluid and rotation owners
+
+`BoundaryGrid3::step_with_moving_partial_saturation_body` advances a body's
+center, proper `So3` orientation, world linear velocity and body-frame spin
+angular momentum, together with the actual native D3Q19 populations. Fixed
+body inertia is an admitted `fs_time::lie::gyrostat::InertiaTensor3`; its native
+principal-frame representation is cached at construction, not diagonalized on
+every tick. The integrator composes a free half-tick, the existing six-velocity
+implicit midpoint exchange, and a second free half-tick. Each free translation
+is parallel to its own momentum; native rotation transports body momentum with
+the inverse attitude increment and preserves spatial spin to roundoff. At the
+midpoint, the body tensor is rotated into world axes and its rounded triangle
+is mirrored for the existing exactly symmetric Cholesky admission. The native
+coupling's actual representable angular-velocity increment supplies the spin
+impulse; that impulse is rotated back and added to the retained body momentum.
+Zero exchange does not gratuitously rebuild momentum from angular velocity.
+
+`BodyFrameShape3` supplies membership in a fixed body frame and a positive
+bounding radius about the center. Custom shapes must honor that bound and
+return deterministic, unchanged geometry throughout a step.
+`BodyFrameEllipsoid3` supplies checked positive semiaxes, including a sphere
+constructor, with the largest semiaxis as its enclosing radius.
+`BodyFrameSampler3` reuses one row-major fraction field and samples equally
+spaced subcell midpoints, with 1 through 8 samples per axis. Only the midpoint
+pose's fractions drive collision. The receipt also measures raw sampled solid
+volumes at the initial and final poses: quadrature variation remains visible
+and is never hidden by rescaling fractions, inserting mass or changing density.
+Standalone sampling clips to the domain; an accepted motion step cannot clip.
+Each half-step's swept enclosing ball must remain within the interior domain
+halo and its enclosing box must avoid every fixed solid voxel. This deliberately
+conservative admission encloses intermediate rotations too, can refuse a
+non-contacting elongated shape near a wall, and supplies no collision response.
+
+Hydrodynamic impulses and work remain measurements of the original population
+correction. All force arms, including the supplied external world linear
+impulse's arm, use the midpoint center. The final receipt independently measures
+actual endpoint body linear and total orbital-plus-spin angular momentum about
+the requested fixed origin. Stationary wall reactions remain in the existing
+separate receipt; periodic fluid angular transport must be accounted for by a
+caller making a global angular-balance claim. Body kinetic-energy change is
+measured from its endpoints. Energy changes in the two native free rotations
+are reported separately from midpoint coupling work; the symmetric free map is
+not an exact energy integrator. A work residual exposes the remaining rounded
+frame/velocity-conversion defect rather than asserting an exact energy identity.
+
+The original fluid coupling now has a private final-validation callback before
+its population swap. The moving owner completes the second free drift, swept
+support admission, endpoint low-Mach and geometry checks, all receipts and a
+final cancellation check inside that transaction. Any refusal publishes neither
+fluid nor body nor topology admission; reusable scratch may change. Sampling,
+buffer clearing and swept-support checks poll at most every 64 cells, with at
+most 512 membership queries per cell. Native collision and streaming retain
+their existing tile checkpoints. Scratch allocation itself is not interruptible.
+
+This is one force-free BGK immersed body in lattice `dx=dt=1`, with solid inertia
+additional to all retained interior fluid. It supplies no displaced-fluid
+physical-density closure, moving-mask/fresh-cell remap, discrete GCL, exact
+cell-intersection volume, wall contact, periodic body wrapping, overlapping
+bodies, lubrication, free surfaces, calibrated three-dimensional drag or
+full-coupled temporal-order qualification. The broad moving-boundary bead stays
+open. `tests/moving_partial_saturation_body3.rs` covers body-frame quadrature and
+proper-axis rotation, actual moving ellipsoid geometry over repeated native
+steps, sampled-volume variation, exact replay, independent full-domain
+fluid/body linear and angular balances with nonzero wall reaction, body kinetic
+accounts, zero-occupancy equivalence to the native free map and ordinary BGK,
+quadrature/primitive admission, endpoint swept-support refusal, late cancellation,
+fixed-obstacle refusal and deterministic retry after refusal (G0/G3/G4/G5).
+
 ## Prescribed pressure on original NSF characteristic faces
 
 `NsfBoundaryDrive` distinguishes an incoming acoustic characteristic [m/s]

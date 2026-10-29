@@ -1951,6 +1951,7 @@ dependencies = [
  "fs-evidence",
  "fs-exec",
  "fs-fft",
+ "fs-ga",
  "fs-la",
  "fs-ladder",
  "fs-matdb",
@@ -1963,6 +1964,7 @@ dependencies = [
  "fs-solver",
  "fs-sparse",
  "fs-thermal",
+ "fs-time",
 ]
 
 [[package]]
