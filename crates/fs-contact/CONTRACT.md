@@ -1028,3 +1028,22 @@ This branch is quasistatic and has no finite-rate liquid or contact-line model.
 Positive pressure, obtuse angles, pinning, evaporation, cavitation, dynamic
 pinch-off and bridge topology changes are outside its scope. A solver or
 stability refusal does not manufacture rupture, surface release or heat.
+
+## Axisymmetric capillary work against actual mechanical compliance
+
+`capillary_bridge::axisymmetric::load_line::AxisymmetricBridgeLoadLine`
+couples the original sourced axisymmetric Young--Laplace bridge to a caller's
+complete projected held-force compliance. It solves the mechanical load line
+using the original work-conjugate energy-secant force and actual converged
+profile gap. Source identity, admitted branch, stability, quadrature, root,
+work and physical increment limits remain active on every proposal.
+
+Independent force-error and compatibility-error estimates accompany bounded
+cancellation-aware continuation. An unresolved nonzero energy difference or
+nonpositive admitted compatibility slope refuses without changing accepted
+state. Runtime continuation allocates nothing. `advance_actual` supplies the
+same constitutive and accuracy checks for the receiving mechanics' final
+staged-motion audit. Numerical estimates and a positive local slope do not
+certify global uniqueness, interval accuracy or physical trajectory accuracy.
+The liquid model remains quasistatic; no rupture, topology release, heat or
+liquid inertia is inferred.

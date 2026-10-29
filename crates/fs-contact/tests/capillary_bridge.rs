@@ -26,6 +26,9 @@ const WIDTH: f64 = 1e-3;
 
 #[path = "capillary_bridge/load_line.rs"]
 mod load_line;
+
+#[path = "capillary_bridge/axisymmetric_load_line.rs"]
+mod axisymmetric_load_line;
 fn claim(name: &str, value: f64, dims: Dims) -> PropertyClaim {
     PropertyClaim {
         key: PropertyKey::new(name, dims),

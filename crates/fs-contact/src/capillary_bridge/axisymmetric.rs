@@ -46,6 +46,9 @@ use fs_math::det;
 
 mod numerics;
 
+/// Work-conjugate coupling to the original mechanical held-force compliance.
+pub mod load_line;
+
 /// Explicit suction branch; q=-Delta_p*a/gamma, a the actual neck radius.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AxisymmetricBranch {
@@ -375,6 +378,15 @@ impl SourceAxisymmetricCapillaryBridge {
     #[must_use]
     pub const fn identity(&self) -> ContentHash {
         self.identity
+    }
+
+    /// Authenticate and read an accepted equilibrium without solving it again.
+    pub fn evaluate(
+        &self,
+        state: AxisymmetricState,
+    ) -> Result<AxisymmetricProfile, AxisymmetricError> {
+        self.require_state(state)?;
+        Ok(state.profile)
     }
 
     /// Direct branch-parameter initialization, also useful for continuation decks.
