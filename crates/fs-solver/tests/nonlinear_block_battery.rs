@@ -1374,3 +1374,35 @@ fn controlled_solvers_latch_one_shot_mutable_cancellation_predicates() {
             .converged
     );
 }
+
+#[test]
+fn newton_relative_tolerance_zero_stops_on_the_absolute_tolerance_alone() {
+    let absolute_only = NewtonKrylovConfig {
+        absolute_tolerance: 1.0e-12,
+        relative_tolerance: 0.0,
+        ..NewtonKrylovConfig::default()
+    };
+    let mut state = NewtonKrylovState::new(&SquareRootTwo, vec![1.5], absolute_only)
+        .expect("absolute-only checkpoint");
+    let report = state.run(&SquareRootTwo, 12);
+    assert!(report.converged, "absolute-only Newton: {report:?}");
+    let mut residual = [0.0];
+    SquareRootTwo.residual(&state.x, &mut residual);
+    assert!(residual[0].abs() <= 1.0e-12, "residual {:e}", residual[0]);
+    for (absolute_tolerance, relative_tolerance) in
+        [(0.0, 0.0), (1.0e-12, -1.0e-3), (1.0e-12, 1.5), (1.0e-12, f64::NAN)]
+    {
+        let config = NewtonKrylovConfig {
+            absolute_tolerance,
+            relative_tolerance,
+            ..NewtonKrylovConfig::default()
+        };
+        assert!(
+            matches!(
+                NewtonKrylovState::new(&SquareRootTwo, vec![1.5], config),
+                Err(NewtonError::InvalidConfig(_))
+            ),
+            "({absolute_tolerance:e}, {relative_tolerance:e}) must refuse"
+        );
+    }
+}

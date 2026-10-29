@@ -988,7 +988,8 @@ pub enum Globalization {
 pub struct NewtonKrylovConfig {
     /// Absolute residual tolerance.
     pub absolute_tolerance: f64,
-    /// Relative residual tolerance against the initial norm.
+    /// Relative residual tolerance against the initial norm; 0 stops on the
+    /// absolute tolerance alone.
     pub relative_tolerance: f64,
     /// FGMRES restart length.
     pub linear_restart: usize,
@@ -1767,11 +1768,17 @@ fn validate_newton_config(config: NewtonKrylovConfig) -> Result<(), NewtonError>
         ));
     }
     if !config.relative_tolerance.is_finite()
-        || config.relative_tolerance <= 0.0
+        || config.relative_tolerance < 0.0
         || config.relative_tolerance > 1.0
     {
         return Err(NewtonError::InvalidConfig(
-            "relative_tolerance must be finite and in (0,1]",
+            "relative_tolerance must be finite and in [0,1]",
+        ));
+    }
+    // The stopping target is max(absolute, relative * initial norm): it must be positive.
+    if config.absolute_tolerance == 0.0 && config.relative_tolerance == 0.0 {
+        return Err(NewtonError::InvalidConfig(
+            "absolute_tolerance and relative_tolerance cannot both be zero",
         ));
     }
     if config.linear_restart == 0 || config.max_linear_cycles == 0 {
