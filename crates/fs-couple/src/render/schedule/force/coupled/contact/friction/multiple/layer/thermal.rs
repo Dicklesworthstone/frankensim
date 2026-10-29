@@ -326,6 +326,38 @@ impl LayerThermalCell<'_> {
     }
 }
 
+/// Original source and retained strain at one proposed finite-cell endpoint.
+/// This is a proposal carrier; no source or mechanical history is published.
+pub(in crate::render::schedule::force::coupled::contact::friction) struct ContinuedMaterialLayer {
+    pub source: ResolvedShearLayer,
+    pub law: ThirdBodyLayerContact,
+    pub state: ThirdBodyLayerState,
+    pub coefficient_free_energy_change_j: f64,
+}
+
+/// Reuse the exact material/card/caloric/geometry admission for vector consumers.
+pub(in crate::render::schedule::force::coupled::contact::friction) fn continue_material_layer<E>(
+    source: &ResolvedShearLayer,
+    state: &ThirdBodyLayerState,
+    binding: LayerThermalCell<'_>,
+    thermal: &DepositionSimulation<'_>,
+) -> Result<ContinuedMaterialLayer, LayerThermalError<E>> {
+    let mut original = MaterialShearLayer::new(source.clone())?;
+    original.state = state.clone();
+    if !original.energy_j().is_finite() || original.energy_j() < 0.0 {
+        return Err(LayerThermalError::Invalid(
+            "material layer and accepted constitutive history must have the same owner",
+        ));
+    }
+    let (next, coefficient_free_energy_change_j) = binding.at(&original, thermal)?;
+    Ok(ContinuedMaterialLayer {
+        source: next.source,
+        law: next.law,
+        state: next.state,
+        coefficient_free_energy_change_j,
+    })
+}
+
 impl MultiFrictionModalSystem {
     /// Advance the SAME modal/contact state and finite layer network together.
     ///
@@ -783,7 +815,7 @@ impl MultiFrictionModalSystem {
 // One source insertion rule for signed reversible exchange and positive
 // physical losses. It checks the ACTUAL representable increment in each cell,
 // including multiple mechanical sources sharing one finite receiving body.
-fn deposit_heat<E>(sources_w: &mut BTreeMap<CellId, f64>, cell: CellId,
+pub(in crate::render::schedule::force::coupled::contact::friction) fn deposit_heat<E>(sources_w: &mut BTreeMap<CellId, f64>, cell: CellId,
     heat_j: f64, dt: f64, tolerance_j: f64) -> Result<f64, LayerThermalError<E>> {
     let power = number(heat_j / dt)?;
     if heat_j != 0.0 && power == 0.0 {

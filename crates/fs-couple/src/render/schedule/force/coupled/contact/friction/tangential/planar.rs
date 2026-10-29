@@ -26,6 +26,10 @@ use fs_tribo::{FrictionRegime, TangentialLaw, TangentialSolveConfig, TangentialS
 #[path = "planar/heat.rs"]
 pub mod heat;
 
+/// Original source-bound layer with affine elastic temperature dependence.
+#[path = "planar/material_layer.rs"]
+pub mod material_layer;
+
 /// Held driver motion in the same two physical axes as the attachment shapes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlanarTangentialModalDrive {
@@ -231,7 +235,21 @@ impl<L: TangentialLaw> PlanarTangentialModalSystem<L> {
         drive: PlanarTangentialModalDrive,
         gate: Option<&CancelGate>,
     ) -> Result<PlanarTangentialModalCandidate<L::State>, PlanarTangentialModalError> {
+        self.stage_candidate_with_law(external, drive, gate, None)
+    }
+
+    // Thermal continuation supplies an admitted endpoint law and the SAME
+    // retained strain rebound by its original source owner. Accepted fields
+    // remain untouched throughout nonlinear/Jacobian probes.
+    fn stage_candidate_with_law(
+        &mut self,
+        external: &[f64],
+        drive: PlanarTangentialModalDrive,
+        gate: Option<&CancelGate>,
+        constitutive: Option<(&L, &L::State)>,
+    ) -> Result<PlanarTangentialModalCandidate<L::State>, PlanarTangentialModalError> {
         poll(gate)?;
+        let (law, state) = constitutive.unwrap_or((&self.law, &self.state));
         if drive.speed_m_s.iter().any(|v| !v.is_finite())
             || !drive.normal_force_n.is_finite()
             || drive.normal_force_n < 0.0
@@ -245,7 +263,7 @@ impl<L: TangentialLaw> PlanarTangentialModalSystem<L> {
             return Err(invalid("planar drive requires finite physical contact inputs").into());
         }
         let network_before = self.network.total_energy_j()?;
-        let contact_before = finite(self.law.stored_energy_j(&self.state))?;
+        let contact_before = finite(law.stored_energy_j(state))?;
         self.network.prepare_prediction(external, gate)?;
         let mut drive_distance = [0.0; 2];
         let mut free_slip = [0.0; 2];
@@ -255,8 +273,8 @@ impl<L: TangentialLaw> PlanarTangentialModalSystem<L> {
                 finite(drive_distance[i] - dot(&self.columns[i], &self.network.free_delta)?)?;
         }
         let result = advance_with_matrix_compliance(
-            &self.law,
-            &self.state,
+            law,
+            state,
             &TangentialStepInput {
                 normal_n: drive.normal_force_n,
                 slip_increment_m: free_slip,
@@ -311,7 +329,7 @@ impl<L: TangentialLaw> PlanarTangentialModalSystem<L> {
             finite(det::hypot(slip[0], slip[1]) / self.network.dt)?,
             self.config.maximum_slip_speed_m_s,
         )?;
-        let contact_after = finite(self.law.stored_energy_j(&step.state))?;
+        let contact_after = finite(law.stored_energy_j(&step.state))?;
         let loss = finite(step.dissipated_j)?;
         if contact_before < 0.0 || contact_after < 0.0 || loss < 0.0 {
             return Err(invalid("planar storage and friction heat must be nonnegative").into());

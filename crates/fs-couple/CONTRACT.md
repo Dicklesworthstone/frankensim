@@ -10911,3 +10911,51 @@ Focused regressions exercise an independent tetrahedral compliance/work identity
 material-only changes reaching actual DG/microphone state, complete viscosity
 and causal memory, partition identity, source/clock/capacity refusals and atomic
 strain rejection. Native execution remains a separate verification requirement.
+
+## Source-bound planar layer thermoelasticity
+
+`friction::tangential::planar::material_layer::PlanarMaterialLayerSystem`
+continues the original resolved third-body layer in both tangent directions
+on the existing modal network and one explicitly bound finite film cell.
+The same `ResolvedShearLayer`, source/card/caloric admission and native
+`ThirdBodyLayerContact` own the material and elastic/plastic history. The
+original full two-axis network response and combined body effort are reused.
+The thermal cell must retain its actual mass rho*A*h, reference density,
+original caloric object and solid phase. No receiving capacity is invented.
+
+The original source owner admits one affine G(T) over the complete caloric
+interval and checks static and sample Nyquist coverage. Its stiffness slope
+is cached once; every endpoint refresh pins the same selected claims, geometry
+and elastic domain. The initial source is canonicalized to pinned selection
+without mistaking a changed policy receipt for changed physical coefficients.
+Caller-supplied temperature refuses, and any supplied pressure must equal N/A.
+Compression is retained; the native law remains pressure independent.
+
+For psi=k(T)|e|^2/2, mechanical entropy is s=-k'|e|^2/2 and internal energy is
+U=psi+T*s. The original isothermal mechanical trial uses endpoint coefficients
+and accepted strain. The original cell receives plastic loss minus coefficient
+free-energy work minus delta(T*s). This signed reversible exchange is never
+classified as frictional heat. The returned report retains plastic heat,
+reversible exchange, coefficient work, entropy energy and actual delta(U)
+separately. Original other heat and conductances retain their thermal owners.
+
+Each bounded nonlinear or Jacobian trial starts from the same accepted two-axis
+history and original finite cells. Final restaging, cell/network acceptance,
+a direct endpoint internal-energy balance, the reconstructed mechanical balance
+and cancellation checks all precede joint source/law/history/body/thermal
+publication. No additional accepted history or thermal reservoir is created.
+
+Five focused groups in `tests/modal_planar_tangential/material_layer.rs`
+verify an independent loaded two-axis thermoelastic root under heating and
+cooling, nonproportional plastic motion and complete physical energy balance,
+constant-modulus recovery of original mechanics, source/geometry/domain refusal,
+and loaded late-failure/cancellation with exact retry. All five and the eleven
+prior planar mechanics/heat groups pass through the original native source
+and material, numerical and thermal dependency implementations.
+
+Scope: a fixed homogeneous film and tangent frame, small elastic shear,
+prescribed compressive load and affine temperature-dependent stiffness.
+Endpoint thermal feedback is first order and needs temporal/spatial refinement;
+root convergence does not establish uniqueness. Expansion, phase change,
+moving footprints, film advection, measured calibration and a full workspace
+validation gate remain outside this composition.

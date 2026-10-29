@@ -18,6 +18,9 @@ use fs_tribo::{FrictionLaw, FrictionRegime, TangentialLaw};
 #[path = "modal_planar_tangential/heat.rs"]
 mod heat;
 
+#[path = "modal_planar_tangential/material_layer.rs"]
+mod material_layer;
+
 const OMEGAS: [[f64; 2]; 2] = [[800.0, 1100.0], [1700.0, 2200.0]];
 const SHAPES: [[[f64; 2]; 2]; 2] = [[[8.0, 2.0], [3.0, 6.0]], [[4.0, -1.0], [2.0, 5.0]]];
 

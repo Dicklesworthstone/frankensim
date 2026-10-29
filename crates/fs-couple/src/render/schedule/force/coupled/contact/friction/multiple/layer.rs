@@ -17,6 +17,13 @@ use fs_material::state_point::ResolvedShearLayer;
 use fs_tribo::layer_contact::{ThirdBodyLayerContact, ThirdBodyLayerState};
 use fs_tribo::{TangentialLaw, TangentialSolveConfig, TangentialStep, TangentialStepInput};
 
+/// Share the original source-to-law admission with the two-axis modal owner.
+pub(in crate::render::schedule::force::coupled::contact::friction) fn material_layer_law(
+    source: &ResolvedShearLayer,
+) -> Result<ThirdBodyLayerContact, ModalFrictionError> {
+    Ok(MaterialShearLayer::new(source.clone())?.law)
+}
+
 /// Independent reversible storage and physical plastic loss of one material
 /// layer. The parent port's dissipation is this loss, never all traction work.
 #[derive(Clone, Copy, Debug, PartialEq)]
