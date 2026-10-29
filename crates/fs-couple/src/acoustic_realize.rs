@@ -1342,6 +1342,7 @@ pub(crate) fn map_drive(err: crate::driving_point::DrivingPointError) -> Acousti
             }
         }
         crate::driving_point::DrivingPointError::Duct(d) => AcousticRealizeError::Duct(d),
+        crate::driving_point::DrivingPointError::Material(e) => AcousticRealizeError::Ambient(e.to_string()),
         crate::driving_point::DrivingPointError::Realize(_) => AcousticRealizeError::Reed {
             what: "characteristic realization refused",
         },

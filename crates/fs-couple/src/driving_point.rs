@@ -7,6 +7,8 @@
 pub mod regional;
 /// Explicitly terminated generic acoustic-network frequency-domain ports.
 pub mod network;
+/// Material molecular reservoirs in the same characteristic-port realization.
+pub mod molecular;
 /// Mouth volume flow of a duct from the wave incident on its inlet.
 pub mod outlet;
 mod baked;
@@ -137,6 +139,8 @@ pub enum DrivingPointError {
     },
     /// TMM refusal.
     Duct(DuctError),
+    /// Original constitutive-state refusal from a material-backed line.
+    Material(fs_material::MaterialError),
     /// Vector-fit / bilinear refusal.
     Realize(RealizeError),
     /// Discrete runtime refusal.
@@ -160,6 +164,7 @@ impl core::fmt::Display for DrivingPointError {
                  peak_shift_cents={peak_shift_cents:.4} (tol={peak_tol_cents:.4})"
             ),
             Self::Duct(e) => write!(f, "{e}"),
+            Self::Material(e) => write!(f, "{e}"),
             Self::Realize(e) => write!(f, "{e}"),
             Self::Discrete(e) => write!(f, "{e}"),
         }
@@ -167,6 +172,19 @@ impl core::fmt::Display for DrivingPointError {
 }
 
 impl std::error::Error for DrivingPointError {}
+
+impl From<DuctError> for DrivingPointError {
+    fn from(error: DuctError) -> Self { Self::Duct(error) }
+}
+
+impl From<fs_duct::molecular::MolecularDuctError> for DrivingPointError {
+    fn from(error: fs_duct::molecular::MolecularDuctError) -> Self {
+        match error {
+            fs_duct::molecular::MolecularDuctError::Duct(error) => Self::Duct(error),
+            fs_duct::molecular::MolecularDuctError::Material(error) => Self::Material(error),
+        }
+    }
+}
 
 fn duct_axial_length(physics: &Duct) -> f64 {
     physics
@@ -550,15 +568,18 @@ pub(crate) fn duct_reflectance(
 
 /// `reflectance_at(omega)` is R referenced to `zc`, never an impedance: a
 /// characteristic line must stay realizable at lossless Z poles.
-pub(crate) fn realize_characteristic_response(
+pub(crate) fn realize_characteristic_response<E>(
     geo_delay: f64,
     termination: impl Into<LineDc>,
     sample_rate_hz: u32,
     zc: f64,
     pole_states: Vec<PoleState>,
     ladder: &LineLadder,
-    mut reflectance_at: impl FnMut(f64) -> Result<C64, DuctError>,
-) -> Result<(DelayedFilter, LineRealization), DrivingPointError> {
+    mut reflectance_at: impl FnMut(f64) -> Result<C64, E>,
+) -> Result<(DelayedFilter, LineRealization), DrivingPointError>
+where
+    DrivingPointError: From<E>,
+{
     if sample_rate_hz == 0 || !zc.is_finite() || zc <= 0.0 {
         return Err(DrivingPointError::Invalid {
             what: "positive sample rate and finite positive port impedance required",
@@ -625,7 +646,7 @@ pub(crate) fn realize_characteristic_response(
         if r_pos.is_empty() {
             for (k, slot) in next_r_pos.iter_mut().enumerate().skip(1) {
                 let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
-                *slot = reflectance_at(omega).map_err(DrivingPointError::Duct)?;
+                *slot = reflectance_at(omega).map_err(DrivingPointError::from)?;
             }
         } else {
             // Reuse even bins from the previous rung (bit-identical frequencies).
@@ -634,7 +655,7 @@ pub(crate) fn realize_characteristic_response(
             }
             for k in (1..half).step_by(2) {
                 let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
-                next_r_pos[k] = reflectance_at(omega).map_err(DrivingPointError::Duct)?;
+                next_r_pos[k] = reflectance_at(omega).map_err(DrivingPointError::from)?;
             }
         }
         r_pos = next_r_pos;

@@ -270,6 +270,7 @@ pub struct ReedObserverParts {
 pub struct ReedBoreVoice {
     line: fs_vfit::discretize::DelayedFilter,
     line_realization: crate::driving_point::LineRealization,
+    molecular_driving_point: Option<Box<crate::driving_point::molecular::MolecularDrivingPoint>>,
     register_shunt: Option<crate::driving_point::regional::outlet::RegisterHoleShuntLine>,
     plates: PlateBank,
     reed: BeatingReed,
@@ -511,6 +512,44 @@ impl ReedBoreVoice {
         )
     }
 
+    /// Build the same pressure/structure junction with the original gas's
+    /// molecular reservoirs participating in bore feedback. The prepared
+    /// constitutive source and exterior load remain available on the voice;
+    /// no observer attenuation is substituted for the interior material law.
+    ///
+    /// This retains the existing reed mechanics, contact and compact-jet
+    /// observation, whose gas is the inlet state. A separately bound exterior
+    /// belongs to terminal loading and the physical baffled outlet receiver.
+    /// Source refinement and the FIR ladder remain independent
+    /// requirements; it is not a new nonlinear-gas or bell-radiation model.
+    pub fn new_with_molecular_driving_point(
+        driving_point: crate::driving_point::molecular::MolecularDrivingPoint,
+        termination: fs_duct::Termination,
+        reed: BeatingReed,
+        plates: PlateBank,
+        listener_m: f64,
+        sample_rate_hz: u32,
+        ladder: &crate::driving_point::LineLadder,
+    ) -> Result<Self, AcousticRealizeError> {
+        let mut voice = Self::with_inlet_line(
+            || Ok(driving_point.inlet_radius_m()),
+            driving_point.inlet_gas(), reed, plates, listener_m, sample_rate_hz,
+            |zc| driving_point.realize_line(termination, sample_rate_hz, zc, ladder)
+                .map_err(crate::acoustic_realize::map_drive),
+        )?;
+        voice.molecular_driving_point = Some(Box::new(driving_point));
+        Ok(voice)
+    }
+
+    /// Source gas, molecular reservoirs, geometry and exterior retained by the
+    /// material-backed characteristic path. Legacy paths retain their own laws.
+    #[must_use]
+    pub fn molecular_driving_point(
+        &self,
+    ) -> Option<&crate::driving_point::molecular::MolecularDrivingPoint> {
+        self.molecular_driving_point.as_deref()
+    }
+
     fn with_line(
         physics: &Duct,
         gas: &GasState,
@@ -596,6 +635,7 @@ impl ReedBoreVoice {
         Ok(Self {
             line,
             line_realization,
+            molecular_driving_point: None,
             register_shunt: None,
             plates,
             reed,

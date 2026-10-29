@@ -28,14 +28,10 @@ fn a_matched_delay_becomes_the_exact_delayed_physical_difference_not_a_wrapped_e
     let delay = 40;
     let zc = 2.0e6;
     let time = delay as f64 / f64::from(rate);
-    let (kernel, actual_delay) = acceleration_kernel(rate, 256, time, zc, |omega| {
+    let (kernel, actual_delay) = acceleration_kernel(rate, 256, time, |omega| {
         // Independent matched-line solution: Zin=Zc; Qin=p+/Zc;
         // Qout(t)=Qin(t-tau). No use of the implementation's transfer formula.
-        Ok(DuctResponse { omega, impedance: C64::new(zc, 0.0),
-            min_shear_number: f64::INFINITY, mouth_ka: 0.0,
-            u_mouth_over_u_in: C64::new((omega*time).cos(), (omega*time).sin()),
-            p_mouth_over_u_in: C64::new(0.0, 0.0),
-            condition_estimate:1.0,composition:fs_duct::compose::CompositionMode::ImpedanceRecursion })
+        Ok(C64::new((omega*time).cos(), (omega*time).sin()).scale(1.0 / zc))
     }).unwrap();
     assert_eq!(actual_delay, delay);
     assert_eq!(kernel.len(), 256 + delay);

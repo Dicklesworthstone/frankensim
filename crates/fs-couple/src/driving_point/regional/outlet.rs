@@ -87,6 +87,37 @@ pub struct OutletPressure {
 }
 
 impl OutletPressure {
+    /// Shared cold realization of a physical terminal observer. The callback
+    /// supplies the original owner's `Qout/p+` [m^3/(Pa s)] with exp(-i omega t),
+    /// using the same terminal load and inlet wave reference as its feedback.
+    /// This keeps the derivative, delay factoring and Rayleigh radiation in one
+    /// place for equilibrium and molecular constitutive owners.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_flow_response(
+        gas: GasState,
+        radius_m: f64,
+        sample_rate_hz: u32,
+        fft_samples: usize,
+        one_way_time_s: f64,
+        receiver: CircularOutletReceiver,
+        delay_speed_m_s: f64,
+        flow: impl FnMut(f64) -> Result<C64, DrivingPointError>,
+    ) -> Result<Self, OutletError> {
+        let mic = BaffledPressure::circular_outlet(radius_m, sample_rate_hz, receiver,
+            RayleighMedium { density: gas.density, sound_speed: delay_speed_m_s })
+            .map_err(OutletError::Receiver)?;
+        let exterior_delay_samples = mic.delay_samples;
+        let (kernel, axial_delay_samples) = acceleration_kernel(
+            sample_rate_hz, fft_samples, one_way_time_s, flow)?;
+        let dt = 1.0 / f64::from(sample_rate_hz);
+        let acceleration = DelayedFilter::from_impulse_response(dt, kernel)
+            .map_err(DrivingPointError::Discrete)?;
+        let radiation = rayleigh_acceleration_filter(mic, sample_rate_hz)?;
+        Ok(Self { acceleration, radiation, poisoned: false,
+            info: OutletReceiverInfo { gas, radius_m, receiver, sample_rate_hz,
+                fft_samples, axial_delay_samples, exterior_delay_samples } })
+    }
+
     /// Original media, geometry, clocks and delay support.
     #[must_use]
     pub const fn info(&self) -> OutletReceiverInfo { self.info }
@@ -273,22 +304,18 @@ impl RegionalDuct {
         let terminal = self.regions.last().expect("admitted nonempty regional duct");
         let radius_m = terminal.duct.segments.last().expect("admitted axial terminal").outlet_radius();
         let gas = *self.exterior_gas();
-        // Geometry/medium/phase/history admission belongs to the shared receiver.
-        let mic = BaffledPressure::circular_outlet(radius_m, sample_rate_hz, receiver,
-            RayleighMedium { density: gas.density, sound_speed: delay_speed_m_s })
-            .map_err(OutletError::Receiver)?;
-        let exterior_delay_samples = mic.delay_samples;
-        let (kernel, axial_delay_samples) = acceleration_kernel(sample_rate_hz, fft_samples,
-            self.one_way_time_s(), self.inlet_impedance(), |omega| {
-                self.response_with_wall(omega, LossModel::Bessel, Termination::FlangedOpen, wall)
-            })?;
-        let dt = 1.0 / f64::from(sample_rate_hz);
-        let acceleration = DelayedFilter::from_impulse_response(dt, kernel)
-            .map_err(DrivingPointError::Discrete)?;
-        let radiation = rayleigh_acceleration_filter(mic, sample_rate_hz)?;
-        Ok(OutletPressure { acceleration, radiation, poisoned: false,
-            info: OutletReceiverInfo { gas, radius_m, receiver, sample_rate_hz,
-                fft_samples, axial_delay_samples, exterior_delay_samples } })
+        let zc = self.inlet_impedance();
+        if !zc.is_finite() || zc <= 0.0 {
+            return Err(invalid("outlet transfer requires finite positive inlet impedance").into());
+        }
+        OutletPressure::from_flow_response(gas, radius_m, sample_rate_hz, fft_samples,
+            self.one_way_time_s(), receiver, delay_speed_m_s, |omega| {
+                let response = self.response_with_wall(
+                    omega, LossModel::Bessel, Termination::FlangedOpen, wall)?;
+                let denominator = C64::new(response.impedance.re + zc, response.impedance.im);
+                Ok(C64::new(response.u_mouth_over_u_in.re, response.u_mouth_over_u_in.im)
+                    .scale(2.0) * denominator.recip())
+            })
     }
 
     /// [`Self::baffled_outlet_delayed_at`] plus one baffled circular-disk observer
@@ -556,12 +583,12 @@ fn invalid(what: &'static str) -> DrivingPointError { DrivingPointError::Invalid
 
 // Sample the derivative DIRECTLY. Sampling flow with an invented zero-frequency
 // value would add a spurious finite-length step/echo after differentiation.
-fn acceleration_kernel(sample_rate_hz: u32, n: usize, one_way_time_s: f64, zc: f64,
-    mut response: impl FnMut(f64) -> Result<DuctResponse, DuctError>)
+fn acceleration_kernel(sample_rate_hz: u32, n: usize, one_way_time_s: f64,
+    mut flow_response: impl FnMut(f64) -> Result<C64, DrivingPointError>)
     -> Result<(Vec<f64>, usize), DrivingPointError> {
     if sample_rate_hz == 0 || !(256..=MAX_OUTLET_FFT_SAMPLES).contains(&n) || !n.is_power_of_two()
-        || !zc.is_finite() || zc <= 0.0 || !one_way_time_s.is_finite() || one_way_time_s <= 0.0 {
-        return Err(invalid("outlet transfer requires physical clock, impedance, travel time and a power-of-two grid in 256..=65536"));
+        || !one_way_time_s.is_finite() || one_way_time_s <= 0.0 {
+        return Err(invalid("outlet transfer requires physical clock, travel time and a power-of-two grid in 256..=65536"));
     }
     let rate = f64::from(sample_rate_hz);
     let delay = (one_way_time_s * rate).floor();
@@ -573,10 +600,7 @@ fn acceleration_kernel(sample_rate_hz: u32, n: usize, one_way_time_s: f64, zc: f
     let mut spectrum = vec![FftC64::new(0.0, 0.0); n];
     for k in 1..=n / 2 {
         let theta = core::f64::consts::TAU * k as f64 / n as f64;
-        let r = response(theta * rate).map_err(DrivingPointError::Duct)?;
-        let denominator = C64::new(r.impedance.re + zc, r.impedance.im);
-        let flow = C64::new(r.u_mouth_over_u_in.re, r.u_mouth_over_u_in.im)
-            .scale(2.0) * denominator.recip();
+        let flow = flow_response(theta * rate)?;
         // Acoustic e^{-iwt}: conjugate of the digital backward difference.
         let derivative = C64::new(rate * (1.0 - det::cos(theta)), -rate * det::sin(theta));
         let acceleration = flow * derivative;

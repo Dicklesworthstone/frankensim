@@ -2,6 +2,7 @@
 use super::*;
 use crate::acoustic_realize::map_drive;
 use crate::driving_point::{DrivingPointError, regional::RegionalDuct};
+use crate::driving_point::molecular::MolecularDrivingPoint;
 use crate::driving_point::regional::outlet::OutletPressure;
 use crate::pcm_wav::baffled::CircularOutletReceiver;
 
@@ -103,6 +104,51 @@ impl ObservationInput {
         let regional = RegionalDuct::new(duct, gases)
             .map_err(|error| ReedPerformanceError::Model(map_drive(DrivingPointError::Duct(error))))?;
         self.build_regional(duct, regional, reed, termination, rate, samples, delay_speed_m_s)
+    }
+
+    /// Original molecular constitutive owner in both pressure feedback and
+    /// physical terminal flow. There is no equilibrium reconstruction at the
+    /// observation boundary and no independent reed state or material law.
+    pub(super) fn build_molecular(self, point: MolecularDrivingPoint, reed: BeatingReed,
+        termination: Termination, rate: u32, samples: usize, delay_speed_m_s: f64)
+        -> Result<(ReedBoreVoice, Option<TerminalObservation>), ReedPerformanceError> {
+        let delay = 2.0 * point.one_way_wavefront_s() * f64::from(rate);
+        if !(delay >= 2.0 && delay < samples as f64 - 2.0) {
+            return Err(ReedPerformanceError::Model(map_drive(DrivingPointError::Invalid {
+                what: "round-trip delay does not fit the realized history",
+            })));
+        }
+        match &self {
+            Self::Legacy(_) if point.exterior_gas() != point.inlet_gas() => {
+                return Err(ReedPerformanceError::Model(map_drive(DrivingPointError::Invalid {
+                    what: "the compact reed proxy requires the same inlet and exterior gas",
+                })));
+            }
+            Self::Baffled { exterior, .. } => {
+                if termination != Termination::FlangedOpen
+                    || exterior.is_some_and(|gas| gas != *point.exterior_gas()) {
+                    return Err(ReedPerformanceError::Model(map_drive(DrivingPointError::Invalid {
+                        what: "molecular outlet observation and feedback require the same flanged exterior load",
+                    })));
+                }
+            }
+            Self::Legacy(_) => {}
+        }
+        let voice = ReedBoreVoice::new_with_molecular_driving_point(point, termination, reed,
+            PlateBank::default(), self.range_m(), rate, &crate::driving_point::LineLadder::default())
+            .map_err(ReedPerformanceError::Model)?;
+        let Self::Baffled { receiver, .. } = self else {
+            return Ok((voice, None));
+        };
+        let mut pressure = voice.molecular_driving_point()
+            .expect("molecular constructor retains its original source")
+            .baffled_outlet_delayed_at(rate, voice.line.history().len(), receiver, delay_speed_m_s)
+            .map_err(ReedPerformanceError::Outlet)?;
+        // The outlet receives the identical sample -1 already in feedback.
+        pressure.step(voice.p_plus_prev).map_err(ReedPerformanceError::Outlet)?;
+        Ok((voice, Some(TerminalObservation {
+            pressure, holes: Vec::new(), failure: None,
+        })))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -267,3 +313,90 @@ impl ReedPerformance {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod molecular_tests {
+    use super::*;
+    use fs_duct::compose::ComposeOptions;
+    use fs_duct::molecular::MolecularWallResolution;
+    use fs_material::gas::GasSpec;
+    use fs_material::relaxation::{RelaxingMedium, input::read_relaxation};
+    use fs_thermochem::SpeciesId;
+
+    fn gas(temperature_k: f64) -> GasState {
+        GasState::try_new(&GasSpec::dry_air_ussa1976(), temperature_k, 101325.0).unwrap()
+    }
+
+    fn point(exterior: GasState) -> MolecularDrivingPoint {
+        // Synthetic reservoir data exercise source coupling, not measured air.
+        let data = "declared 1 synthetic 1 vibration 1 1300 1 power 2 293.15 0 200 500";
+        let law = read_relaxation(&mut data.split_ascii_whitespace()).unwrap();
+        let medium = RelaxingMedium::new(gas(293.15),
+            vec![(SpeciesId::new("synthetic").unwrap(), 1.0)]).unwrap();
+        MolecularDrivingPoint::new(&Duct { segments: vec![Segment::Cylinder {
+            radius: 0.001, length: 0.15,
+        }] }, law.evaluate(&medium).unwrap(), Some(MolecularWallResolution {
+            poles_per_field: 16, band_rad_s: [1e-4, 30000.0], maximum_relative_error: 0.05,
+        }), fs_duct::ConeSlices::Fixed(8), ComposeOptions::default(), exterior).unwrap()
+    }
+
+    fn reed() -> BeatingReed {
+        BeatingReed { rest_opening_m: 4e-4, width_m: 0.003, closing_pressure_pa: 6000.0,
+            blowing_pressure_pa: 2800.0, attack_s: 0.008,
+            mass_kg: 0.0, stiffness_n_m: 0.0, damping_ratio: 0.0 }
+    }
+
+    fn receiver() -> CircularOutletReceiver {
+        CircularOutletReceiver { position_m: [0.0, 0.0, 1.0], radial_rings: 2,
+            angular_points: 8, maximum_frequency_hz: 800.0 }
+    }
+
+    #[test]
+    fn molecular_observer_uses_the_same_prime_and_leaves_reed_feedback_unchanged() {
+        let gas = gas(293.15);
+        let source = point(gas);
+        let (mut proxy, no_terminal) = ObservationInput::Legacy(1.0)
+            .build_molecular(source.clone(), reed(), Termination::FlangedOpen,
+                8000, 1024, gas.sound_speed).unwrap();
+        assert!(no_terminal.is_none());
+        let (mut physical, terminal) = ObservationInput::Baffled {
+            receiver: receiver(), exterior: Some(gas),
+        }.build_molecular(source, reed(), Termination::FlangedOpen,
+            8000, 1024, gas.sound_speed).unwrap();
+        let mut terminal = terminal.unwrap();
+        assert!(terminal.holes.is_empty());
+        let mut expected = physical.molecular_driving_point().unwrap()
+            .baffled_outlet(8000, physical.line.history().len(), receiver()).unwrap();
+        expected.step(proxy.p_plus_prev).unwrap();
+        let mut moved = false;
+        for _ in 0..512 {
+            proxy.step_block(&mut [0.0]).unwrap();
+            physical.step_block(&mut [0.0]).unwrap();
+            let actual = terminal.pressure.step(physical.p_plus_prev).unwrap();
+            let original = expected.step(proxy.p_plus_prev).unwrap();
+            assert_eq!(actual.to_bits(), original.to_bits());
+            assert_eq!(physical.p_plus_prev.to_bits(), proxy.p_plus_prev.to_bits());
+            assert_eq!(physical.reed_y.to_bits(), proxy.reed_y.to_bits());
+            assert_eq!(physical.reed_v.to_bits(), proxy.reed_v.to_bits());
+            moved |= actual != 0.0;
+        }
+        assert!(moved);
+        assert_eq!(physical.line.history(), proxy.line.history());
+    }
+
+    #[test]
+    fn molecular_observer_refuses_a_different_load_or_undeclared_proxy_medium() {
+        let source = point(gas(320.0));
+        assert!(ObservationInput::Legacy(1.0).build_molecular(
+            source.clone(), reed(), Termination::FlangedOpen,
+            8000, 1024, gas(320.0).sound_speed).is_err());
+        for (exterior, termination) in [
+            (Some(gas(293.15)), Termination::FlangedOpen),
+            (Some(gas(320.0)), Termination::UnflangedOpen),
+        ] {
+            assert!(ObservationInput::Baffled { receiver: receiver(), exterior }
+                .build_molecular(source.clone(), reed(), termination,
+                    8000, 1024, gas(320.0).sound_speed).is_err());
+        }
+    }
+}
