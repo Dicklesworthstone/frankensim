@@ -17,6 +17,9 @@ use fs_qty::{Area, Energy, Length, MassFlowRate, Power, Pressure, Temperature, T
 /// Original-source, reactant-inventory-limited global burning increments.
 pub mod burning;
 
+/// Finite-rate homogeneous chemistry with original pressure/interface relaxation.
+pub mod kinetics;
+
 #[cfg(test)]
 mod tests;
 

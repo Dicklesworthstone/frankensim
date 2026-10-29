@@ -1039,3 +1039,36 @@ or executed in this session: `dsr quality --tool frankensim` could not launch
 because the execution environment is unavailable. No native/DSR pass, measured
 wall attenuation, global second-order accuracy or full entropy certificate is
 claimed.
+
+## Finite-rate chemistry in common-pressure gas layers
+
+`multicomponent::compartment::kinetics::ZoneKinetics` binds the complete original
+gas/kinetic source and a prepared room geometry. Each selected present layer
+uses the existing `IsochoricReactor` at its actual volume and physical internal
+energy, including formation terms. The resulting time-integrated species
+changes become canonical `LayerRates`; their only energy term converts the
+original numerical species references. No second combustion-heat source is
+added. Both layers then use the original simultaneous pressure/interface-work
+solve. The enclosing transport owner advances the physical clock once.
+
+The prepared reactor and room candidate are reused. Actual rate reconstruction,
+mass and physical-energy residuals are checked before publication. Gas/source
+and geometry mismatches, exhausted work, domain failures and late cancellation
+leave the accepted room unchanged. The kinetic temperature interval is checked
+again after mechanical relaxation: compression can invalidate a layer even
+when its homogeneous reactor endpoint was admissible. A shorter retry starts
+from the supplied accepted state, independent of previous workspace contents.
+
+The chemistry report retains original per-layer entropy, conservation, local
+error and adaptive-work diagnostics. This is first-order fixed-volume chemistry
+followed by mechanical relaxation; the homogeneous entropy check is not a
+fully discrete theorem for the moving-interface or ventilated system. Supplied
+mechanisms retain their own source and validity limitations. No ignition,
+flame-structure, CO/soot-yield or experimental accuracy claim is inferred.
+
+Eight new regressions cover analytic finite-time reversible relaxation,
+unequal reacting layers with variable heat capacities and actual interface
+work, disabled/absent layers, trial replay, formation-reference invariance,
+source/domain/work refusals, post-relaxation domain rejection and late
+cancellation. All 23 focused native compartment tests passed; that is separate
+from the unavailable full-workspace DSR gate.
