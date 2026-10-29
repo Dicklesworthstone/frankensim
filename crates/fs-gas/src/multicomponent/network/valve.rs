@@ -26,6 +26,11 @@ use fs_qty::{Area, Time};
 
 mod flow;
 mod pair;
+mod network;
+/// Reusable clock-preserving valve source with transactional accepted receipts.
+pub mod operator;
+pub use network::{ValvedNetwork1d, ValvedNetworkReport};
+pub use operator::{NetworkValveOperator, SplitNetworkValveReport, ValveSolve, ValveSourceReport};
 
 /// Maximum explicit inter-plenum links in this bounded source owner.
 pub const MAX_VALVE_LINKS: usize = 4096;
@@ -133,7 +138,7 @@ impl ValveFlow {
     }
 }
 
-/// Actual integrated transfer, summed over both accepted valve half sweeps.
+/// Actual integrated transfer, summed over the accepted valve source intervals.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ValveExchange {
     /// Canonical species masses transferred from first to second [kg].
@@ -142,9 +147,9 @@ pub struct ValveExchange {
     pub species_count: usize,
     /// Referenced energy transferred first-to-second [J], including jet energy.
     pub energy_to_second_j: f64,
-    /// Total accepted scalar mass-root iterations across the two half sweeps.
+    /// Total accepted scalar mass-root iterations across the source intervals.
     pub iterations: usize,
-    /// Number of accepted half-sweep endpoints with a sonic throat (0, 1 or 2).
+    /// Number of accepted source endpoints with a sonic throat.
     pub choked_endpoints: usize,
     /// Maximum absolute endpoint mass-equation residual [kg].
     pub maximum_mass_residual_kg: f64,
@@ -196,11 +201,10 @@ impl Default for ValveControl {
 }
 impl ValveControl {
     fn validate(self) -> Result<(), ValveError> {
-        if !positive(self.absolute_mass_tolerance_kg) || !positive(self.relative_mass_tolerance)
-            || self.relative_mass_tolerance > 1e-3 || !(1..=128).contains(&self.maximum_iterations)
-            || self.maximum_coupling_retries > 32 || !positive(self.transport.cfl)
+        ValveSolve::from(self).validate()?;
+        if self.maximum_coupling_retries > 32 || !positive(self.transport.cfl)
             || self.transport.cfl > 0.45 || self.transport.maximum_halvings > 32
-        { return Err(ValveError::Invalid("valve root, transport or retry controls")); }
+        { return Err(ValveError::Invalid("valve transport or retry controls")); }
         Ok(())
     }
 }
@@ -234,187 +238,6 @@ impl core::fmt::Display for ValveError {
 impl std::error::Error for ValveError {}
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), ValveError> {
     if cancelled() { Err(ValveError::Cancelled) } else { Ok(()) }
-}
-
-/// Complete accepted valve/wave composition. Valve exchange is internal.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ValvedNetworkReport {
-    /// Duration shared by transport and both valve half sweeps together.
-    pub elapsed: Time,
-    /// Complete discarded compositions before this accepted step.
-    pub coupling_retries: usize,
-    /// Intermediate branch/plenum advection balance, not the complete endpoint.
-    pub transport: NetworkStepReport,
-    /// Initial complete gas storage.
-    pub before: NetworkTotals,
-    /// Final complete gas storage after all valve transfers.
-    pub after: NetworkTotals,
-    /// After minus before minus transport's external boundary change.
-    pub conservation_residual: NetworkTotals,
-    /// Physical-energy residual including each original species reference [J].
-    pub absolute_energy_residual_j: f64,
-}
-
-/// Prepared valved shockwave network, with one atomic publication point.
-///
-/// Each link connects two finite plenums. Resolved branches retain their original
-/// characteristic ports and wave propagation. The half sweeps run in opposite
-/// retained link orders; individual endpoint mass solves are still first order.
-/// Construction allocates all network/report storage. Successful steps reuse it.
-pub struct ValvedNetwork1d {
-    accepted: MixtureNetwork1d,
-    trial: MixtureNetwork1d,
-    links: Vec<ValveLink>,
-    exchanges: Vec<ValveExchange>,
-    trial_exchanges: Vec<ValveExchange>,
-    last_report: Option<ValvedNetworkReport>,
-}
-impl ValvedNetwork1d {
-    /// Bind explicit inter-plenum topology. Parallel links are permitted and are
-    /// split in caller order. Self-links and absent plenum indices refuse.
-    pub fn new(
-        network: MixtureNetwork1d,
-        links: Vec<ValveLink>,
-        mut cancelled: impl FnMut() -> bool,
-    ) -> Result<Self, ValveError> {
-        poll(&mut cancelled)?;
-        if links.len() > MAX_VALVE_LINKS { return Err(ValveError::Invalid("valve link count")); }
-        for link in &links {
-            poll(&mut cancelled)?;
-            if link.first == link.second || link.first >= network.plenums.len()
-                || link.second >= network.plenums.len()
-            { return Err(ValveError::Invalid("valve plenum topology")); }
-        }
-        let trial = duplicate(&network, &mut cancelled)?;
-        let empty = ValveExchange::zero(network.gas().species_count());
-        let exchanges = allocated(links.len(), empty)?;
-        let trial_exchanges = allocated(links.len(), empty)?;
-        poll(&mut cancelled)?;
-        Ok(Self { accepted: network, trial, links, exchanges, trial_exchanges, last_report: None })
-    }
-    /// Exact original common source bank and energy references.
-    pub fn gas(&self) -> &MixtureGas { self.accepted.gas() }
-    /// Accepted original branches; no independent mutable handle is exposed.
-    pub fn branches(&self) -> &[MixtureEuler1d] { self.accepted.branches() }
-    /// Accepted original compact volumes, including valve-connected plenums.
-    pub fn plenums(&self) -> &[Plenum] { self.accepted.plenums() }
-    /// Retained deterministic valve topology and current settings.
-    pub fn links(&self) -> &[ValveLink] { &self.links }
-    /// Common accepted physical clock.
-    pub fn time(&self) -> Time { self.accepted.time() }
-    /// Complete accepted species and energy storage.
-    pub fn totals(&self) -> NetworkTotals { self.accepted.totals() }
-    /// Last complete accepted report, unchanged after a refused trial.
-    pub const fn last_report(&self) -> Option<ValvedNetworkReport> { self.last_report }
-    /// Integrated inter-plenum transfers from both accepted half sweeps.
-    pub fn accepted_valve_exchanges(&self) -> Option<&[ValveExchange]> {
-        self.last_report.map(|_| self.exchanges.as_slice())
-    }
-    /// Intermediate advective branch/plenum exchanges, excluding valve links.
-    pub fn accepted_port_exchanges(&self) -> Option<&[PortExchange]> {
-        self.last_report.map(|_| self.accepted.port_exchanges.as_slice())
-    }
-    /// Intermediate branch advection balances, before the final valve half.
-    pub fn accepted_branch_transport_reports(&self) -> Option<&[StepReport]> {
-        self.last_report.map(|_| self.accepted.branch_reports.as_slice())
-    }
-    /// Change one admitted setting exactly between accepted steps. No field or
-    /// clock changes; prior reports continue to describe the previous interval.
-    pub fn set_orifice(&mut self, index: usize, orifice: Orifice) -> Result<(), ValveError> {
-        let link = self.links.get_mut(index).ok_or(ValveError::Invalid("valve index"))?;
-        link.orifice = orifice;
-        Ok(())
-    }
-    /// Release the physical network, clearing its intermediate advection report.
-    pub fn into_network(mut self) -> MixtureNetwork1d {
-        self.accepted.last_report = None;
-        self.accepted
-    }
-    /// Advance V(dt/2), A(dt), V(dt/2). Source-domain failures and a shorter
-    /// acoustic duration restart the entire composition from accepted fields.
-    /// Only A advances the clock; no species clipping or separate jet heat is used.
-    pub fn step(
-        &mut self,
-        maximum_duration: Time,
-        controls: ValveControl,
-        mut cancelled: impl FnMut() -> bool,
-    ) -> Result<ValvedNetworkReport, ValveError> {
-        poll(&mut cancelled)?;
-        controls.validate()?;
-        if !positive(maximum_duration.value()) { return Err(ValveError::Invalid("valve duration")); }
-        let before = checked_totals(&self.accepted, &mut cancelled)?;
-        let mut dt = initial_duration(&self.accepted, &mut self.trial,
-            maximum_duration.value(), controls.transport.cfl, &mut cancelled)?;
-        let mut last = ValveError::Invalid("no admitted valve composition");
-        for retry in 0..=controls.maximum_coupling_retries {
-            poll(&mut cancelled)?;
-            let time = self.time().value();
-            if !positive(dt) || !positive(time + dt - time) || !(time + dt).is_finite()
-                || !positive(0.5 * dt)
-            { return Err(ValveError::Invalid("valve increment cannot advance represented clock")); }
-            reset(&mut self.trial, &self.accepted, &mut cancelled)?;
-            self.trial_exchanges.fill(ValveExchange::zero(self.accepted.gas().species_count()));
-            let attempt = (|| {
-                self.sweep(0.5 * dt, false, controls, &mut cancelled)?;
-                let transport = self.trial.step(Time::new(dt), controls.transport, &mut cancelled)?;
-                if transport.elapsed.value() != dt { return Ok((transport, false)); }
-                self.sweep(0.5 * dt, true, controls, &mut cancelled)?;
-                Ok::<_, ValveError>((transport, true))
-            })();
-            match attempt {
-                Ok((transport, false)) => {
-                    dt = transport.elapsed.value();
-                    last = ValveError::Invalid("advection shortened valve composition");
-                }
-                Ok((transport, true)) => {
-                    let after = checked_totals(&self.trial, &mut cancelled)?;
-                    let n = self.gas().species_count();
-                    let mut residual = NetworkTotals { species_masses: [0.0; MAX_SPECIES],
-                        species_count: n, energy: after.energy - before.energy - transport.boundary_change.energy };
-                    for k in 0..n {
-                        residual.species_masses[k] = after.species_masses[k] - before.species_masses[k]
-                            - transport.boundary_change.species_masses[k];
-                    }
-                    let physical = residual.absolute_energy(self.gas())?;
-                    if !residual.energy.is_finite()
-                        || !residual.species_masses[..n].iter().all(|x| x.is_finite())
-                    { return Err(ValveError::Invalid("complete valve balance overflow")); }
-                    let report = ValvedNetworkReport { elapsed: Time::new(dt), coupling_retries: retry,
-                        transport, before, after, conservation_residual: residual,
-                        absolute_energy_residual_j: physical };
-                    poll(&mut cancelled)?;
-                    core::mem::swap(&mut self.accepted, &mut self.trial);
-                    core::mem::swap(&mut self.exchanges, &mut self.trial_exchanges);
-                    self.last_report = Some(report);
-                    return Ok(report);
-                }
-                Err(ValveError::Cancelled) => return Err(ValveError::Cancelled),
-                Err(error) => { last = error; dt *= 0.5; }
-            }
-        }
-        Err(ValveError::RetryLimit { attempts: controls.maximum_coupling_retries + 1, last: Box::new(last) })
-    }
-    fn sweep(
-        &mut self, dt: f64, reverse: bool, controls: ValveControl,
-        cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<(), ValveError> {
-        for j in 0..self.links.len() {
-            poll(cancelled)?;
-            let index = if reverse { self.links.len() - 1 - j } else { j };
-            let link = self.links[index];
-            let update = pair::solve(self.trial.gas(),
-                [&self.trial.plenums[link.first], &self.trial.plenums[link.second]],
-                link.orifice, dt, controls, cancelled)?;
-            self.trial_exchanges[index].add(update.exchange)?;
-            let n = self.trial.gas().species_count();
-            for (side, plenum) in [link.first, link.second].into_iter().enumerate() {
-                self.trial.plenums[plenum].state.partial_densities.copy_from_slice(&update.states[side][..n]);
-                self.trial.plenums[plenum].state.energy = update.states[side][n + 1];
-            }
-        }
-        self.trial.last_report = None;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
