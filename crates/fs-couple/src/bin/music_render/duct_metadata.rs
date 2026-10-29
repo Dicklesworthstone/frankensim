@@ -189,13 +189,17 @@ fn dg_molecular_provenance(duct: &fs_duct::dg::DgDuct) -> String {
         return format!(",\"molecular_gas\":{{\"model\":\"shared-heat-capacity-reservoirs-v1\",\"medium\":\"original-axial-thermochemical-field\",\"stations_m\":[{stations}],\"scope\":\"same DG exponential; original local composition and temperature determine every molecular and radial thermal reservoir; integrated frozen pressure mass and power-preserving port coordinates; original Bessel error is not a combined-law certificate; no mean flow, axial conduction or live material transfer\"}}");
     }
     let Some(state) = duct.molecular_relaxation() else { return String::new(); };
-    let reservoirs = state.processes().iter().map(|process| format!(
+    let reservoirs = molecular_reservoirs(state);
+    format!(",\"molecular_gas\":{{\"model\":\"shared-heat-capacity-reservoirs-v1\",\"frozen_cv_j_kg_k\":{:e},\"frozen_sound_speed_m_s\":{:e},\"reservoirs\":[{reservoirs}],\"scope\":\"same DG exponential and original uniform equilibrium gas; coupled molecular and local radial thermal states at original nodal or spatial quadrature coordinates; original Bessel error is not a combined-law certificate; no axial conduction, additional bulk SK term or live chemistry\"}}",
+        state.frozen_cv_j_kg_k(), state.frozen_sound_speed_m_s())
+}
+
+fn molecular_reservoirs(state: &fs_material::relaxation::RelaxationState) -> String {
+    state.processes().iter().map(|process| format!(
         "{{\"species\":{},\"reservoir\":{},\"heat_capacity_j_kg_k\":{:e},\"relaxation_time_s\":{:e}}}",
         super::json_string(process.species.as_str()), process.index,
         process.heat_capacity_j_kg_k, process.relaxation_time_s,
-    )).collect::<Vec<_>>().join(",");
-    format!(",\"molecular_gas\":{{\"model\":\"shared-heat-capacity-reservoirs-v1\",\"frozen_cv_j_kg_k\":{:e},\"frozen_sound_speed_m_s\":{:e},\"reservoirs\":[{reservoirs}],\"scope\":\"same DG exponential and original uniform equilibrium gas; coupled molecular and local radial thermal states at original nodal or spatial quadrature coordinates; original Bessel error is not a combined-law certificate; no axial conduction, additional bulk SK term or live chemistry\"}}",
-        state.frozen_cv_j_kg_k(), state.frozen_sound_speed_m_s())
+    )).collect::<Vec<_>>().join(",")
 }
 
 // Both existing wind owners observe this same accepted DG terminal and record.
@@ -396,8 +400,21 @@ pub(super) fn reed_provenance(p: &fs_couple::render::schedule::reed::ReedPerform
     };
     let regions: Vec<_> = p.segment_gases().iter().map(gas_state).collect();
     let field = reed_field_provenance(p);
-    format!(",\"pressure_point\":\"{point}\",\"model_scope\":\"{scope}\",\"observation_scope\":\"{observation_scope}\",\"ambient_gas\":{},\"segment_gases\":[{}]{receiver}{field}",
+    let molecular = reed_molecular_provenance(p);
+    let scope = if p.molecular_driving_point().is_some() && p.outlet_receiver().is_some() {
+        "terminal-only Rayleigh pressure; same original molecular duct and flanged exterior load in feedback and observation; finite-history sampled approximation; no tone-hole, jet, structural or room radiation; not measured calibration"
+    } else { scope };
+    format!(",\"pressure_point\":\"{point}\",\"model_scope\":\"{scope}\",\"observation_scope\":\"{observation_scope}\",\"ambient_gas\":{},\"segment_gases\":[{}]{receiver}{field}{molecular}",
         gas_state(p.ambient_gas()),regions.join(","))
+}
+
+fn reed_molecular_provenance(p: &fs_couple::render::schedule::reed::ReedPerformance) -> String {
+    let Some(point) = p.molecular_driving_point() else { return String::new(); };
+    let state = point.material().state();
+    let reservoirs = molecular_reservoirs(state);
+    format!(",\"molecular_gas\":{{\"model\":\"shared-heat-capacity-reservoirs-v1\",\"frozen_cv_j_kg_k\":{:e},\"frozen_sound_speed_m_s\":{:e},\"one_way_wavefront_s\":{:e},\"propagation_blocks\":{},\"material_points\":{},\"exterior_gas\":{},\"reservoirs\":[{reservoirs}],\"scope\":\"original homogeneous gas reservoirs and declared wall diffusion in characteristic feedback and terminal flow; shared converged FIR and Rayleigh owners; observer propagation remains a separate declared law; no live chemistry, regional molecular field, compact tone-hole branch or measured source-data claim\"}}",
+        state.frozen_cv_j_kg_k(), state.frozen_sound_speed_m_s(), point.one_way_wavefront_s(),
+        point.material().blocks(), point.material().material_points(), gas_state(point.exterior_gas()))
 }
 
 // Serialize actual admitted states only; never re-resolve names or reconstruct

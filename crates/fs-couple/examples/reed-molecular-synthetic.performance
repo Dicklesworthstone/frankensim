@@ -1,0 +1,22 @@
+frankensim-reed-performance-v1
+audio 48000 9606 2
+ambient mixture 293.15 101325 mole 2 N2 0.7 O2 0.3
+reed 0.0004 0.003 6000 0 0 0.35
+baffled_outlet 0 0 1 2 8 800
+observer_law none
+termination flanged
+segments 1
+cylinder 0.001 0.15
+molecular declared 2 N2 1 vibration 1 1300 1 power 2.0265 293.15 0 200 500 O2 1 vibration 1 1900 1 power 32.424 293.15 0 200 500
+molecular_resolution 8 4096
+molecular_wall diffusive 32 0.0001 160000 0.05
+compile_limits 100000 1024
+schedule
+frankensim-gesture-schedule-v1
+control_rate_hz	700
+tracks	1
+track	blow	blowing-pressure
+initial	pressure-pa	0e0
+events	2
+event	0e0	1e-2	pressure-pa	2.8e3
+event	1e-1	5e-3	pressure-pa	0e0

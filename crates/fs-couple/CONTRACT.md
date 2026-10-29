@@ -11481,6 +11481,56 @@ unavailable constellation siblings. No measured real-time performance, spatial
 cavity standing waves, mutual radiation between separate faces, or continuum
 frequency-error certificate is claimed by this adapter.
 
+### Molecular material state in characteristic pressure feedback
+
+`driving_point::molecular::MolecularDrivingPoint` connects the original
+`fs-duct::molecular::MolecularDuct` to the shared characteristic-line FIR
+realizer. The same gas reservoirs and wall diffusion determine storage,
+attenuation and dispersion at every sampled frequency; they are not reapplied
+as an observer filter. The original frozen molecular sound speed sets the
+wavefront-time estimate, while the inlet's equilibrium gas remains the real
+pressure/volume-flow reference. The explicitly supplied exterior gas enters
+the existing terminal-radiation law. Scattering reflection remains finite at
+lossless impedance poles. Source and near-DC band refusals propagate.
+
+`ReedBoreVoice::new_with_molecular_driving_point` feeds that line into the same
+reed/contact/pressure stepper and retains its original material and geometry.
+Changing only reservoir data therefore changes the internal bore pressure,
+before any listener absorption. G1/G3 tests cover the independent analytical
+cylinder response, the existing lossless limit and its impedance pole, actual
+reed pressure sensitivity, exact block replay and source-domain refusals.
+The adapter retains frozen homogeneous linear plane-wave acoustics, explicit
+rigid/slip or diffusive walls, the sampled FIR approximation and the existing
+compact-jet observer. It adds no nonlinear gas evolution, compliant walls,
+compact tone holes, measured molecular data or experimental instrument claim.
+
+The molecular path also supplies actual flanged outlet flow to the existing
+`OutletPressure` observer. Its original chain and radiation load determine
+`Qout/p+`; equilibrium and molecular paths share one flow differentiation,
+axial-delay factoring and Rayleigh realization. Feedback and receiver retain
+the same explicitly bound, pressure-matched exterior. Tests compare molecular
+outlet flow to an independent loaded-cylinder solution and exercise reservoir
+data changes in physical receiver pressure after the frozen wavefront. The
+scheduled adapter primes the observer with the same initial characteristic
+wave as the reed. A diagnostic compact proxy requires identical inlet and
+exterior gases; the physical baffled receiver can use a distinct exterior.
+
+`ReedPerformance` exposes this same owner through optional `molecular`,
+`molecular_resolution` and `molecular_wall` records before `compile_limits`.
+The shared material reader evaluates the law against the original ambient
+species record. Cone slices, composition blocks, diffusion poles and the
+angular-frequency band are explicit data. The same resolved inlet drives the
+reed flow, and the same exterior drives terminal loading and observation.
+Native sidecars retain the actual reservoirs, frozen sound speed and source
+wavefront time. Observer absorption remains a separate declared exterior law.
+Legacy gas without species, per-segment overrides, axial or steady-generated
+fields and tone holes refuse on this homogeneous molecular route; no law is
+silently dropped. Existing files without these records keep their prior path.
+The runnable `examples/reed-molecular-synthetic.performance` uses authored
+synthetic coefficients, not measured N2/O2 material data. Focused file tests
+exercise data-only rate changes, physical pressure, exact block replay and
+unsupported-source admission.
+
 ### Material-solid surface contact in the shared aperture solve
 
 `ModalAperture::with_solid_surface_closure` maps each retained original solid

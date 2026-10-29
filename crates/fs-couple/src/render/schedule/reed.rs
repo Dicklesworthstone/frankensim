@@ -6,6 +6,10 @@
 //! temperatures and mole fractions through explicitly loaded source packs.
 //! An alternative gas_steady block generates that same field from the existing
 //! conservative thermal/species owner, using the authored bore geometry.
+//! A homogeneous explicit-species source can instead declare `molecular`,
+//! `molecular_resolution` and `molecular_wall` records before `compile_limits`.
+//! The shared molecular reservoirs then reach both pressure feedback and the
+//! physical outlet, independently of the listener's exterior absorption law.
 //! It does not infer material identity
 //! or turn a pitch into a medium property. Pressure commands replace the fixture
 //! attack envelope; all retained reed and bore state survives release and resume.
@@ -40,6 +44,7 @@ use fs_material::gas_species::input::{
 use fs_scenario::{BeatingReed, gesture::GestureSchedule};
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 mod field_input;
+mod molecular_input;
 mod outlet;
 use super::{
     GestureCompileError, PressureGestureBinding, ScheduledControl, ScheduledRenderer,
@@ -772,6 +777,14 @@ impl ReedPerformance {
                 )?);
             }
         }
+        let molecular = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("molecular") {
+            if explicit_segment_gas || gas_field.is_some() || holes > 0 {
+                return Err(bad(r.line + 1,
+                    "molecular bore propagation requires homogeneous ambient species, no segment gas or axial field, and no tone holes"));
+            }
+            Some(molecular_input::read(&mut r, &gas_records[0])?)
+        } else { None };
         let mut row = r.row("compile_limits")?;
         let max_work: u64 = row.parse()?;
         let max_controls = row.count(MAX_CONTROLS)?;
@@ -858,7 +871,19 @@ impl ReedPerformance {
         let duct = Duct { segments };
         let outlet_radius_m = duct.segments.last().map_or(0.0, Segment::outlet_radius);
         let band_top_hz = observer_band_top_hz(observation.declared_band_hz(), rate);
-        let (voice, terminal, observer, observer_omission) = if let Some((field, resolution)) = &gas_field {
+        let (voice, terminal, observer, observer_omission) = if let Some(molecular) = molecular {
+            let medium = observer_medium(baffled, &air, &air);
+            let observer =
+                observer_filter(declared_law, &medium, &gas_records, observer_range_m, rate)?;
+            admit_receiver_delay(&observer, baffled, outlet_radius_m, medium.sound_speed)?;
+            let omission = observer_omission(&medium, &gas_records, observer_range_m, band_top_hz);
+            let point = molecular.bind(&duct, medium)?;
+            let (voice, terminal) = observation.build_molecular(
+                point, reed, termination, rate, samples as usize,
+                observer.receipt().delay_speed_m_s.unwrap_or(medium.sound_speed),
+            )?;
+            (voice, terminal, observer, omission)
+        } else if let Some((field, resolution)) = &gas_field {
             use crate::driving_point::regional::{RegionalDuct, field::GasFieldDuctError};
             let regional = match resolution {
                 GasFieldResolution::Midpoint(cells) => {
@@ -1001,6 +1026,16 @@ impl ReedPerformance {
     /// The field inlet can differ from the first propagation cell's midpoint.
     pub fn viscous_slit(&self) -> Option<&crate::bernoulli_aperture::viscous::ViscousSlit> {
         self.renderer.context().reed_voice(0).and_then(ReedBoreVoice::viscous_slit)
+    }
+    /// Original molecular gas, wall and geometry owner used for both bore
+    /// feedback and physical outlet pressure. None preserves the existing
+    /// equilibrium regional or axial-field path.
+    #[must_use]
+    pub fn molecular_driving_point(
+        &self,
+    ) -> Option<&crate::driving_point::molecular::MolecularDrivingPoint> {
+        self.renderer.context().reed_voice(0)
+            .and_then(ReedBoreVoice::molecular_driving_point)
     }
     /// The immutable default medium. Segments without `gas` inherit this state;
     /// explicit segment records may override it. No air-only absorption is added.
