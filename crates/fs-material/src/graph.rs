@@ -25,6 +25,9 @@ use std::fmt;
 use fs_matdb::{ConstitutiveModelCard, LawId};
 use fs_qty::Dims;
 
+mod linearized;
+pub use linearized::GraphLinearization;
+
 /// The seven constitutive roles. The first two are structural anchors
 /// owned by other crates; nodes claiming them are declarable (so a
 /// graph can NAME its balance/storage context) but never executable.
@@ -199,6 +202,8 @@ pub trait LawNode {
 /// the law, and the failed obligation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GraphError {
+    /// A caller checkpoint interrupted evaluation before any state was published.
+    Cancelled,
     /// A declaration field is structurally incomplete.
     IncompleteDeclaration {
         /// The node id (registry/graph name).
@@ -339,6 +344,7 @@ pub enum GraphError {
 impl fmt::Display for GraphError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            GraphError::Cancelled => write!(f, "constitutive graph evaluation cancelled"),
             GraphError::IncompleteDeclaration {
                 node,
                 law,
@@ -1235,59 +1241,6 @@ impl ConstitutiveGraph {
         state: &[f64],
         external: &BTreeMap<(String, String), f64>,
     ) -> Result<GraphOutput, GraphError> {
-        let schema = self.state_schema();
-        let mut node_states = schema.decode(state_version, state)?;
-        let order = self.topological_order()?;
-        let mut produced: BTreeMap<(String, String), f64> = BTreeMap::new();
-        let mut total_dissipation = 0.0;
-        for node_id in &order {
-            let node = &self.nodes[node_id];
-            let declaration = node.declaration();
-            let mut inputs = Vec::with_capacity(declaration.inputs.len());
-            for port in &declaration.inputs {
-                let driven = self
-                    .edges
-                    .iter()
-                    .find(|e| &e.to == node_id && e.to_port == port.name)
-                    .map(|e| produced[&(e.from.clone(), e.from_port.clone())]);
-                let value = driven
-                    .or_else(|| external.get(&(node_id.clone(), port.name.clone())).copied())
-                    .ok_or_else(|| GraphError::UnfedPort {
-                        node: node_id.clone(),
-                        port: port.name.clone(),
-                    })?;
-                inputs.push(value);
-            }
-            let slot = self
-                .order
-                .iter()
-                .position(|o| o == node_id)
-                .expect("node exists");
-            let result = node.evaluate(&node_states[slot], &inputs)?;
-            if let Some(rate) = result.dissipation_rate {
-                if matches!(
-                    declaration.energy,
-                    EnergyBehavior::NonNegativeDissipation | EnergyBehavior::StorageAndDissipation
-                ) && rate < 0.0
-                {
-                    return Err(GraphError::NegativeDissipation {
-                        node: node_id.clone(),
-                        rate,
-                    });
-                }
-                total_dissipation += rate;
-            }
-            for (port, value) in declaration.outputs.iter().zip(&result.outputs) {
-                produced.insert((node_id.clone(), port.name.clone()), *value);
-            }
-            node_states[slot] = result.next_state;
-        }
-        let per_node: Vec<&[f64]> = node_states.iter().map(Vec::as_slice).collect();
-        let (_, next_state) = schema.encode(&per_node)?;
-        Ok(GraphOutput {
-            outputs: produced,
-            next_state,
-            total_dissipation,
-        })
+        self.execute_cancellable(state_version, state, external, || false)
     }
 }
