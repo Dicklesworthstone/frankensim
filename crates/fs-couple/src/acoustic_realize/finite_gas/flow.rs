@@ -5,16 +5,22 @@
 //! second finite, well-mixed volume. Final drag and pressure observation use
 //! that same conserved mixture. No new gas, flow or caloric law is supplied.
 
+use super::exchange::{FiniteGasStringExchangeError, FiniteGasStringExchangeFrame};
 use super::{
-    FiniteGasStringError, FiniteGasStringHeat, FiniteGasStringSolve, ThermalMaterialStringFrame,
+    FiniteGasStringError, FiniteGasStringFrame, FiniteGasStringHeat, FiniteGasStringSolve,
     ThermalMaterialStringRuntime, check,
 };
+use crate::cavity_phs::piston::thermal::{
+    HeatExchangeSolve,
+    layers::{LayerConductionError, MaterialConductionLayers},
+};
+use fs_material::state_point::ResolvedMaterialStatePoint;
+use fs_material::thermochemical_gas::energy::IsochoricGasParcel;
 use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 use fs_material::thermochemical_gas::energy::parcel::transfer::GasMassTransferStep;
 use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::{
     GasNozzle, GasNozzleFlow, GasNozzleStepSolve,
 };
-use fs_material::thermochemical_gas::energy::{GasHeatStep, IsochoricGasParcel};
 
 /// Direction selected from the actual pressures after the heating substep.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,16 +33,12 @@ pub enum FiniteGasStringFlowDirection {
 
 /// One sample of solid motion, heat and conservative atmospheric exchange.
 #[derive(Debug)]
-pub struct FiniteGasStringFlowFrame {
-    /// Original solid/vibration account; its observer uses the FINAL mixture.
-    pub string: ThermalMaterialStringFrame,
-    /// Fixed-mass gas heating BEFORE the separate species/enthalpy transfer.
-    /// This is prescribed gas heat plus the aerodynamic loss, exactly once.
-    pub heating: GasHeatStep,
-    /// Internal mechanical-to-gas transfer already included in `heating` [J].
-    pub drag_heat_j: f64,
-    /// Prescribed gas heat only; excludes drag and transported enthalpy [J].
-    pub external_gas_heat_j: f64,
+pub struct FiniteGasStringFlowFrame<R = FiniteGasStringFrame> {
+    /// Original thermal proposal, including any reciprocal exchange/source
+    /// receipt. Gas heating and conductance describe the PRE-transfer endpoint;
+    /// the contained string observer uses the FINAL conserved mixture. Thermal
+    /// and transported enthalpy accounts are not additional external sources.
+    pub thermal: R,
     /// Upstream/downstream ownership for `flow` and `transfer`. Equal pressures
     /// select `IntoSurroundings` with zero transferred mass.
     pub direction: FiniteGasStringFlowDirection,
@@ -95,17 +97,112 @@ impl ThermalMaterialStringRuntime {
         nozzle: GasNozzle,
         flow_controls: GasNozzleStepSolve,
     ) -> Result<FiniteGasStringFlowFrame, FiniteGasStringError> {
-        self.admit_finite_gas_step(cx, expected_epoch, gas, heat, thermal_controls)?;
-        let mut candidate = self.clone();
-        let mut heated_gas = gas.clone();
-        let mut heated = candidate.step_with_isochoric_gas(
+        self.step_with_finite_gas_nozzle(
             cx,
             expected_epoch,
             forces,
-            &mut heated_gas,
+            gas,
+            reservoir,
             heat,
             thermal_controls,
-        )?;
+            nozzle,
+            flow_controls,
+            |candidate, gas, heat| {
+                candidate.step_with_isochoric_gas(
+                    cx,
+                    expected_epoch,
+                    forces,
+                    gas,
+                    heat,
+                    thermal_controls,
+                )
+            },
+            |thermal| thermal,
+        )
+    }
+
+    /// Evolve reciprocal material/gas conduction and pressure-driven exchange
+    /// in one accepted sample. The original source-bound thermal solve runs
+    /// first; the original nozzle then transports species and upstream enthalpy
+    /// over the SAME interval. Solid heat, gas heat and mechanical loss retain
+    /// their original owners, while the final medium drives drag and pressure.
+    ///
+    /// Layer source/geometry/Biot admissions are unchanged. The typed thermal
+    /// report retains its pre-flow endpoint and signed internal transfer. This
+    /// is first-order heat-then-flow splitting; timestep refinement is required
+    /// for simultaneous heat/transport dynamics. It supplies no resolved jet
+    /// momentum, chamber resonance or time-varying propagation path.
+    /// Failure after either proposal preserves all three accepted owners.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_isochoric_gas_nozzle_conduction(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        expected_epoch: u64,
+        forces: &[f64],
+        gas: &mut IsochoricGasParcel,
+        reservoir: &mut ClosedGasParcel,
+        heat: FiniteGasStringHeat,
+        thermal_controls: FiniteGasStringSolve,
+        exchange: HeatExchangeSolve,
+        layers: &MaterialConductionLayers<'_>,
+        nozzle: GasNozzle,
+        flow_controls: GasNozzleStepSolve,
+    ) -> Result<
+        FiniteGasStringFlowFrame<FiniteGasStringExchangeFrame<ResolvedMaterialStatePoint>>,
+        FiniteGasStringExchangeError<LayerConductionError>,
+    > {
+        self.step_with_finite_gas_nozzle(
+            cx,
+            expected_epoch,
+            forces,
+            gas,
+            reservoir,
+            heat,
+            thermal_controls,
+            nozzle,
+            flow_controls,
+            |candidate, gas, heat| {
+                candidate.step_with_isochoric_gas_conduction(
+                    cx,
+                    expected_epoch,
+                    forces,
+                    gas,
+                    heat,
+                    thermal_controls,
+                    exchange,
+                    layers,
+                )
+            },
+            |thermal| &mut thermal.coupled,
+        )
+    }
+
+    // One flow/accounting/publication owner for every thermal proposal. The
+    // accessor only exposes the original shared finite-gas account; extension
+    // reports and their source receipts stay attached to the same proposal.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn step_with_finite_gas_nozzle<R, E>(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        expected_epoch: u64,
+        forces: &[f64],
+        gas: &mut IsochoricGasParcel,
+        reservoir: &mut ClosedGasParcel,
+        heat: FiniteGasStringHeat,
+        thermal_controls: FiniteGasStringSolve,
+        nozzle: GasNozzle,
+        flow_controls: GasNozzleStepSolve,
+        advance: impl FnOnce(&mut Self, &mut IsochoricGasParcel, FiniteGasStringHeat) -> Result<R, E>,
+        account: impl FnOnce(&mut R) -> &mut FiniteGasStringFrame,
+    ) -> Result<FiniteGasStringFlowFrame<R>, E>
+    where
+        E: From<FiniteGasStringError>,
+    {
+        self.admit_finite_gas_step(cx, expected_epoch, gas, heat, thermal_controls)?;
+        let mut candidate = self.clone();
+        let mut heated_gas = gas.clone();
+        let mut thermal = advance(&mut candidate, &mut heated_gas, heat)?;
+        let heated = account(&mut thermal);
         let local = ClosedGasParcel::from_isochoric(heated_gas);
         let into = reservoir.state().state().pressure >= local.state().state().pressure;
         let (donor, receiver) = if into {
@@ -113,13 +210,15 @@ impl ThermalMaterialStringRuntime {
         } else {
             (&local, &*reservoir)
         };
-        let (proposal, flow) = donor.through_nozzle_to(
-            receiver,
-            nozzle,
-            self.mechanical.member.model.sample_period_s(),
-            flow_controls,
-            || cx.checkpoint().is_err(),
-        )?;
+        let (proposal, flow) = donor
+            .through_nozzle_to(
+                receiver,
+                nozzle,
+                self.mechanical.member.model.sample_period_s(),
+                flow_controls,
+                || cx.checkpoint().is_err(),
+            )
+            .map_err(FiniteGasStringError::from)?;
         let (next_donor, next_receiver, transfer) = proposal.into_parts();
         let (next_gas, next_reservoir, direction) = if into {
             (
@@ -139,7 +238,7 @@ impl ThermalMaterialStringRuntime {
         {
             return Err(FiniteGasStringError::Admission(
                 "gas heating and species exchange exceeded the per-sample temperature-increment limit",
-            ));
+            ).into());
         }
         self.refresh_finite_gas_medium(
             cx,
@@ -160,8 +259,12 @@ impl ThermalMaterialStringRuntime {
             + (next_gas.mass_kg() - gas.mass_kg()) * gas_u;
         let reservoir_energy_change_j = next_reservoir.mass_kg() * (next_reservoir_u - reservoir_u)
             + (next_reservoir.mass_kg() - reservoir.mass_kg()) * reservoir_u;
-        let mechanical_before = self.mechanical_internal_energy_j()?;
-        let mechanical_after = candidate.mechanical_internal_energy_j()?;
+        let mechanical_before = self
+            .mechanical_internal_energy_j()
+            .map_err(FiniteGasStringError::from)?;
+        let mechanical_after = candidate
+            .mechanical_internal_energy_j()
+            .map_err(FiniteGasStringError::from)?;
         let mechanical_storage = mechanical_after - mechanical_before;
         let solid_storage = self.mechanical.specimen().mass_kg()
             * (candidate.thermal.specific_enthalpy_j_kg() - self.thermal.specific_enthalpy_j_kg());
@@ -191,7 +294,8 @@ impl ThermalMaterialStringRuntime {
         if !residual.is_finite() || !tolerance.is_finite() || residual.abs() > tolerance {
             return Err(FiniteGasStringError::Admission(
                 "independently measured string/solid/two-volume gas energy balance did not close",
-            ));
+            )
+            .into());
         }
         check(cx)?;
         // All three exclusive owners publish before any old owner is dropped.
@@ -199,10 +303,7 @@ impl ThermalMaterialStringRuntime {
         let _old_gas = core::mem::replace(gas, next_gas);
         let _old_reservoir = core::mem::replace(reservoir, next_reservoir);
         Ok(FiniteGasStringFlowFrame {
-            string: heated.string,
-            heating: heated.gas,
-            drag_heat_j: heated.drag_heat_j,
-            external_gas_heat_j: heat.gas_heat_j,
+            thermal,
             direction,
             flow,
             transfer,

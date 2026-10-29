@@ -9,6 +9,9 @@ use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::{
     GasNozzle, GasNozzleStepSolve,
 };
 
+#[path = "flow/conduction.rs"]
+mod conduction;
+
 fn nozzle() -> GasNozzle {
     GasNozzle {
         area_m2: 1e-4,
@@ -93,11 +96,11 @@ fn conserved_inlet_mixture_drives_loading_and_observer_without_resetting_history
         assert_eq!(frame.flow, native_flow);
         assert_eq!(gas, expected_gas.into_isochoric());
         assert_eq!(reservoir, expected_reservoir);
-        assert_eq!(frame.heating, heated.gas);
-        assert_eq!(frame.drag_heat_j, heated.drag_heat_j);
+        assert_eq!(frame.thermal.gas, heated.gas);
+        assert_eq!(frame.thermal.drag_heat_j, heated.drag_heat_j);
         assert_eq!(
-            frame.heating.supplied_heat_j,
-            heat.gas_heat_j + frame.drag_heat_j
+            frame.thermal.gas.supplied_heat_j,
+            heat.gas_heat_j + frame.thermal.drag_heat_j
         );
         assert!(frame.transfer.transferred_mass_kg > 0.0);
         assert_eq!(gas.state().components().len(), 2);
@@ -122,14 +125,20 @@ fn conserved_inlet_mixture_drives_loading_and_observer_without_resetting_history
                 - original.thermal().specific_enthalpy_j_kg());
         let mechanical_storage = live.mechanical_internal_energy_j().unwrap()
             - original.mechanical_internal_energy_j().unwrap();
-        let defect =
-            heat.string_heat_j + heat.gas_heat_j + frame.string.vibration.acoustic.input_work_j
-                - (local_storage
-                    + reservoir_storage
-                    + solid_storage
-                    + mechanical_storage
-                    + frame.string.vibration.dissipation.authored_loss_j
-                    + frame.string.vibration.dissipation.roundoff_residual_j);
+        let defect = heat.string_heat_j
+            + heat.gas_heat_j
+            + frame.thermal.string.vibration.acoustic.input_work_j
+            - (local_storage
+                + reservoir_storage
+                + solid_storage
+                + mechanical_storage
+                + frame.thermal.string.vibration.dissipation.authored_loss_j
+                + frame
+                    .thermal
+                    .string
+                    .vibration
+                    .dissipation
+                    .roundoff_residual_j);
         assert!(defect.abs() <= frame.energy_tolerance_j);
         assert!(frame.energy_balance_residual_j.abs() <= frame.energy_tolerance_j);
         assert!((local_storage - frame.surrounding_energy_change_j).abs() < 1e-10);
@@ -155,11 +164,11 @@ fn conserved_inlet_mixture_drives_loading_and_observer_without_resetting_history
                 * (acceleration[1] - previous[1])
                 * 48000.0;
         close(
-            frame.string.vibration.acoustic.observer_pressure_pa,
+            frame.thermal.string.vibration.acoustic.observer_pressure_pa,
             pressure,
         );
         assert_ne!(
-            frame.string.vibration.acoustic.observer_pressure_pa,
+            frame.thermal.string.vibration.acoustic.observer_pressure_pa,
             heated.string.vibration.acoustic.observer_pressure_pa
         );
         live.step(cx, 17, &[0.0; 2], 0.0).unwrap();
@@ -216,8 +225,8 @@ fn source_data_only_species_substitution_changes_the_continuing_motion_and_sound
             assert!(left.energy_balance_residual_j.abs() <= left.energy_tolerance_j);
             assert!(right.energy_balance_residual_j.abs() <= right.energy_tolerance_j);
             final_pressure = (
-                left.string.vibration.acoustic.observer_pressure_pa,
-                right.string.vibration.acoustic.observer_pressure_pa,
+                left.thermal.string.vibration.acoustic.observer_pressure_pa,
+                right.thermal.string.vibration.acoustic.observer_pressure_pa,
             );
         }
         assert_eq!(light.mechanical().accepted_samples(), 32);
@@ -290,7 +299,7 @@ fn reverse_pressure_uses_native_upstream_owner_and_closed_nozzle_matches_heat_on
             assert_eq!(actual.mechanical().ambient(), actual_gas.state().state());
             if area == 0.0 {
                 assert_eq!(frame.transfer.transferred_mass_kg, 0.0);
-                assert_eq!(frame.string, heated.string);
+                assert_eq!(frame.thermal.string, heated.string);
                 assert_eq!(actual_gas, heated_gas);
                 assert_eq!(actual_reservoir, reservoir);
             } else {

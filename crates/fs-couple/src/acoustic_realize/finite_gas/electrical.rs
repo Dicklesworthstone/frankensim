@@ -6,6 +6,7 @@
 //! electrical law is also admitted. No circuit or transport law is duplicated.
 
 use super::exchange::{FiniteGasStringExchangeError, FiniteGasStringExchangeFrame};
+use super::flow::FiniteGasStringFlowFrame;
 use super::{
     FiniteGasStringError, FiniteGasStringFrame, FiniteGasStringHeat, FiniteGasStringSolve,
 };
@@ -17,6 +18,10 @@ use crate::cavity_phs::piston::thermal::{
 use fs_material::conductor::{OhmicDrive, ResolvedConductor};
 use fs_material::state_point::ResolvedMaterialStatePoint;
 use fs_material::thermochemical_gas::energy::IsochoricGasParcel;
+use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
+use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::{
+    GasNozzle, GasNozzleStepSolve,
+};
 
 /// Original coupled report and the electrical source work it already includes.
 #[derive(Debug)]
@@ -134,6 +139,70 @@ impl ThermalMaterialStringRuntime {
         )
     }
 
+    /// Electrical work, reciprocal material conduction and conservative
+    /// atmospheric exchange on one continuing string. The source-resolved
+    /// conductor supplies Joule work once; the original conduction and nozzle
+    /// owners advance over the same sample duration. The nested flow report
+    /// closes the combined solid/mechanical/two-gas energy balance.
+    ///
+    /// Endpoint electrical admission happens AFTER both thermal and transport
+    /// proposals. A late conductor refusal or cancellation leaves the string,
+    /// local gas, reservoir and observer history at their previous accepted
+    /// states. No source or transferred inventory is consumed on retry.
+    /// Electrical/mechanical coefficients are frozen initially and heat precedes
+    /// flow; this retains the original first-order partitioned model.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_drive_and_isochoric_gas_nozzle_conduction(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        expected_epoch: u64,
+        forces: &[f64],
+        drive: OhmicDrive,
+        gas: &mut IsochoricGasParcel,
+        reservoir: &mut ClosedGasParcel,
+        heat: FiniteGasStringHeat,
+        controls: FiniteGasStringSolve,
+        exchange: HeatExchangeSolve,
+        layers: &MaterialConductionLayers<'_>,
+        nozzle: GasNozzle,
+        flow_controls: GasNozzleStepSolve,
+    ) -> Result<
+        FiniteGasElectrothermalStringFrame<
+            FiniteGasStringFlowFrame<FiniteGasStringExchangeFrame<ResolvedMaterialStatePoint>>,
+        >,
+        FiniteGasStringExchangeError<LayerConductionError>,
+    > {
+        let mut next_reservoir = reservoir.clone();
+        let (candidate, next_gas, frame) = self.propose_drive_and_finite_gas(
+            cx,
+            expected_epoch,
+            drive,
+            gas,
+            heat,
+            |candidate, gas, heat| {
+                candidate.step_with_isochoric_gas_nozzle_conduction(
+                    cx,
+                    expected_epoch,
+                    forces,
+                    gas,
+                    &mut next_reservoir,
+                    heat,
+                    controls,
+                    exchange,
+                    layers,
+                    nozzle,
+                    flow_controls,
+                )
+            },
+        )?;
+        super::check(cx)?;
+        // Retain all old owners until the complete exclusive-state publication.
+        let _old_string = core::mem::replace(self, candidate);
+        let _old_gas = core::mem::replace(gas, next_gas);
+        let _old_reservoir = core::mem::replace(reservoir, next_reservoir);
+        Ok(frame)
+    }
+
     fn step_with_drive_and_finite_gas<R, E>(
         &mut self,
         cx: &fs_exec::Cx<'_>,
@@ -143,6 +212,36 @@ impl ThermalMaterialStringRuntime {
         heat: FiniteGasStringHeat,
         advance: impl FnOnce(&mut Self, &mut IsochoricGasParcel, FiniteGasStringHeat) -> Result<R, E>,
     ) -> Result<FiniteGasElectrothermalStringFrame<R>, E>
+    where
+        E: From<ThermalStringError> + From<FiniteGasStringError>,
+    {
+        let (candidate, next_gas, frame) =
+            self.propose_drive_and_finite_gas(cx, expected_epoch, drive, gas, heat, advance)?;
+        super::check(cx)?;
+        let _old_string = core::mem::replace(self, candidate);
+        let _old_gas = core::mem::replace(gas, next_gas);
+        Ok(frame)
+    }
+
+    // The same electrical proposal can accompany two- or three-owner thermal
+    // transactions. Nothing accepted is published before the final conductor
+    // law and current have been resolved successfully.
+    fn propose_drive_and_finite_gas<R, E>(
+        &self,
+        cx: &fs_exec::Cx<'_>,
+        expected_epoch: u64,
+        drive: OhmicDrive,
+        gas: &IsochoricGasParcel,
+        heat: FiniteGasStringHeat,
+        advance: impl FnOnce(&mut Self, &mut IsochoricGasParcel, FiniteGasStringHeat) -> Result<R, E>,
+    ) -> Result<
+        (
+            Self,
+            IsochoricGasParcel,
+            FiniteGasElectrothermalStringFrame<R>,
+        ),
+        E,
+    >
     where
         E: From<ThermalStringError> + From<FiniteGasStringError>,
     {
@@ -173,19 +272,19 @@ impl ThermalMaterialStringRuntime {
         let final_current_a = conductor_after
             .current_a_for_drive(drive)
             .map_err(ThermalStringError::Electrical)?;
-        super::check(cx)?;
-        // Delay both destructors until the complete exclusive-state publication.
-        let _old_string = core::mem::replace(self, candidate);
-        let _old_gas = core::mem::replace(gas, next_gas);
-        Ok(FiniteGasElectrothermalStringFrame {
-            coupled,
-            drive,
-            current_a,
-            final_current_a,
-            joule_heat_j,
-            external_string_heat_j: heat.string_heat_j,
-            conductor_before,
-            conductor_after,
-        })
+        Ok((
+            candidate,
+            next_gas,
+            FiniteGasElectrothermalStringFrame {
+                coupled,
+                drive,
+                current_a,
+                final_current_a,
+                joule_heat_j,
+                external_string_heat_j: heat.string_heat_j,
+                conductor_before,
+                conductor_after,
+            },
+        ))
     }
 }

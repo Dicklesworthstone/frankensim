@@ -8010,10 +8010,30 @@ The G1/G3/G4 regressions in `tests/string_specimen/finite_gas/flow.rs` cover nat
 transfer endpoints, independent energy/pressure expressions, data-only species
 substitution, retained motion/history, reverse flow and transactional failure.
 
-This first-order, well-mixed fixed-volume split requires timestep refinement.
-It adds no resolved jet or wind force, conductive solid/gas exchange, chamber
-radiation loading or propagation through a varying medium. The compact pressure
-observer remains diagnostic; no experimental material qualification is implied.
+`step_with_isochoric_gas_nozzle_conduction` supplies the original source-bound
+reciprocal thermal proposal to that SAME flow/accounting/publication owner.
+`FiniteGasStringFlowFrame<R>::thermal` retains the original typed thermal report,
+including its conductance/source receipt and pre-transfer gas heat endpoint;
+its contained string observer is refreshed to the final transported mixture.
+The insulated route uses `R = FiniteGasStringFrame`. Internal conduction heat
+and transported enthalpy both cancel from the enclosing energy balance.
+
+`step_with_drive_and_isochoric_gas_nozzle_conduction` also uses the original
+conductor's current and Joule work. Its final resistance/current are admitted
+after the complete thermal/flow proposal; a late electrical refusal preserves
+the reservoir as well as the string and local gas. All three old owners remain
+alive until their replacements have been published, with no fallible work
+between them. The electrical and flow adapters share proposal owners instead
+of duplicating conductor, thermal, nozzle or caloric laws. Focused regressions
+in `tests/string_specimen/finite_gas/flow/conduction.rs` cover powered conduction
+with bidirectional transport, complete storage accounting, zero-area parity,
+retained sound history and late three-owner rollback/retry.
+
+This first-order heat-then-flow, well-mixed fixed-volume split requires timestep
+refinement; it does not solve simultaneous transport and conduction. It adds no
+resolved jet or wind force, chamber radiation loading or propagation through a
+varying medium. The compact pressure observer remains diagnostic; no experimental
+material qualification is implied.
 
 ### Distributed current injection on the common electrothermal drive
 

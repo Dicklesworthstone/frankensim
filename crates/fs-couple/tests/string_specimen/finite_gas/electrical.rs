@@ -8,9 +8,9 @@ use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve};
 use fs_material::state_point::THERMAL_CONDUCTIVITY_DIMS;
 
 const RATE: u32 = 48000;
-const CP: f64 = 0.001; // Deliberately tiny manufactured capacity; no measured material claim.
+pub(super) const CP: f64 = 0.001; // Deliberately tiny manufactured capacity; no measured material claim.
 
-fn conducting_string(
+pub(super) fn conducting_string(
     cx: &fs_exec::Cx<'_>,
     gas: &fs_material::gas::GasState,
     temperature: f64,
@@ -177,7 +177,7 @@ fn conducting_string(
     )
 }
 
-fn controls() -> HeatExchangeSolve {
+pub(super) fn controls() -> HeatExchangeSolve {
     HeatExchangeSolve {
         heat_bracket_j: [-2e-5, 2e-5],
         source_tolerance_j: 1e-13,
