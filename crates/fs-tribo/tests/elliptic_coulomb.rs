@@ -146,6 +146,17 @@ fn kinetic_continuation_preserves_static_capacity_and_frictionless_motion() {
     assert_eq!(preserved.traction_n, [0.0; 2]);
     assert_eq!(preserved.dissipated_j, 0.0);
     assert!(free.advance_kinetic(&moving.state, &drive).is_err());
+
+    let rotated = EllipticCoulomb::new([0.8, 0.4], [0.6, 0.2], [3.0, 4.0]).unwrap();
+    let prescribed = input([0.003, 0.007], 0.0);
+    let exact = rotated
+        .advance_kinetic(&rotated.initial_state(), &prescribed)
+        .unwrap();
+    assert_eq!(exact.slip_increment_m, prescribed.slip_increment_m);
+    assert_eq!(exact.compatibility_residual_m, [0.0; 2]);
+    let work = exact.traction_n[0] * prescribed.slip_increment_m[0]
+        + exact.traction_n[1] * prescribed.slip_increment_m[1];
+    close(exact.dissipated_j - work, exact.closure_residual_j, 1e-18);
 }
 
 // Independent minimization over ellipse angle. Production instead solves its

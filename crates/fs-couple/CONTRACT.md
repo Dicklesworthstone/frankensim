@@ -479,6 +479,36 @@ segment mean speed; thermal transport remains first order. No normal motion,
 anisotropic material law, within-stick thermal event localization, or real
 material calibration is inferred.
 
+### Directional material friction with finite heat and inertia
+
+`tribothermal::directional` retains the original four directional coefficient
+claims, ordered material/phase identities and finite caloric cells. Each thermal
+trial refreshes declared surface/mean temperatures, nominal pressure, sliding
+speed and unsigned path; undeclared source conditions stay fixed. The native
+associated ellipse supplies actual traction/slip work, partitioned explicitly
+between the two bodies and any named outside destination.
+`DirectionalPair::from_material_bodies` also retains the original source mass,
+density and geometry receipts.
+
+Force-driven planar candidates use midpoint compliance `h²/(2 m_reduced)` and
+the native scalar ellipse projection. Only speed/path-dependent sources need
+an additional bounded scalar consistency root. Accepted source path never
+exceeds actual accumulated motion. Static capacity applies only from accepted
+rest; moving segments use kinetic coefficients. Full-vector arrest, turning
+subdivision and rank-one partial arrest retain motion along a frictionless
+material axis, including widely separated component scales. Independent
+per-body impulse and whole-system work/heat gates precede joint publication;
+cancellation or exhausted budgets leave all original owners unchanged.
+
+Fixed normal load, nominal area and tangent/material frame are required.
+General turning and temperature/speed/path dependence require timestep
+refinement; endpoint thermal transport is first order, and arbitrary weakening
+is not claimed to have a unique solution. No normal, rotational or
+evolving-patch dynamics or experimental calibration is inferred. Nine focused
+synthetic test groups cover source ownership, finite inertia/heat, independent
+continuous turning refinement, static/kinetic separation, temperature and motion
+feedback, partial arrest, monotone continuation and atomic refusal.
+
 ### Material contact loads on a field actuator
 
 `tribothermal::field_motion` closes the existing dry-contact active-set/enthalpy

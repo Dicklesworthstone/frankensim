@@ -21,6 +21,8 @@
 //! accuracy, uniqueness or experimental-validation certificate.
 
 pub mod material;
+/// Source-driven directional Coulomb friction on the original finite caloric bodies.
+pub mod directional;
 /// Force-driven finite-body motion using the same material/thermal contact.
 pub mod dynamics;
 /// Native electric/magnetic field motion with material guide friction and heat.
@@ -75,6 +77,7 @@ pub enum SlidingError<E = Infallible> {
     Material(ThermalMaterialError),
     Phase(PhaseStateError),
     Tribology(TriboError),
+    DirectionalSource(fs_contact::interface_binding::thermal_friction::SourceThermalCoulombError),
     Thermal(DepositionError),
     Source(E),
     Newton(NewtonError),
@@ -96,6 +99,13 @@ impl<E> From<DepositionError> for SlidingError<E> {
 impl<E> From<TriboError> for SlidingError<E> {
     fn from(e: TriboError) -> Self {
         Self::Tribology(e)
+    }
+}
+impl<E> From<fs_contact::interface_binding::thermal_friction::SourceThermalCoulombError>
+    for SlidingError<E>
+{
+    fn from(error: fs_contact::interface_binding::thermal_friction::SourceThermalCoulombError) -> Self {
+        Self::DirectionalSource(error)
     }
 }
 impl<E> From<ThermalMaterialError> for SlidingError<E> {

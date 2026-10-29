@@ -3,6 +3,8 @@
 mod collinear;
 #[path = "dynamics/planar.rs"]
 mod planar;
+#[path = "dynamics/directional.rs"]
+mod directional;
 
 use super::*;
 use fs_ga::Vec3;

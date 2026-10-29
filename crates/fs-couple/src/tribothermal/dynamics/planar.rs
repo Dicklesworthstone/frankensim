@@ -142,13 +142,37 @@ fn dot<E>(a: [f64; 2], b: [f64; 2]) -> Result<f64, SlidingError<E>> {
 }
 
 /// The residual always has impulse units, for both speed and event-time roots.
-fn root<T, E>(
+pub(crate) fn root<T, E>(
+    upper: f64,
+    lower_residual: f64,
+    upper_candidate: T,
+    upper_residual: f64,
+    controls: PlanarMotionSolve,
+    time_root: bool,
+    evaluate: impl FnMut(f64) -> Result<(T, f64), SlidingError<E>>,
+) -> Result<(T, f64), SlidingError<E>> {
+    root_side(
+        upper,
+        lower_residual,
+        upper_candidate,
+        upper_residual,
+        controls,
+        time_root,
+        false,
+        evaluate,
+    )
+}
+
+/// Lower-side acceptance prevents a source path from exceeding actual motion.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn root_side<T, E>(
     mut upper: f64,
     mut lower_residual: f64,
     upper_candidate: T,
     mut upper_residual: f64,
     controls: PlanarMotionSolve,
     time_root: bool,
+    lower_side: bool,
     mut evaluate: impl FnMut(f64) -> Result<(T, f64), SlidingError<E>>,
 ) -> Result<(T, f64), SlidingError<E>> {
     if !upper.is_finite()
@@ -189,6 +213,7 @@ fn root<T, E>(
         number::<E>(residual)?;
         if residual == 0.0
             || (residual.abs() <= tolerance
+                && (!lower_side || residual < 0.0)
                 && (!time_root || width <= controls.event_time_tolerance_s))
         {
             return Ok((candidate, middle));

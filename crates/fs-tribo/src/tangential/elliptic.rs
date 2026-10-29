@@ -104,10 +104,8 @@ impl EllipticCoulomb {
 
     /// Continue explicit coefficient changes without advancing slip or texture.
     ///
-    /// This zero-storage law has no elastic parameter-work port. The external
-    /// material owner must authorize new coefficients and retain their source
-    /// identity; this method only checks the native ranges and exact old owner.
-    /// Both returned values form one candidate, leaving the old checkpoint intact.
+    /// The source owner authorizes these zero-storage coefficient changes.
+    /// Native ranges and checkpoint identity are checked atomically.
     pub fn continue_coefficients(
         &self,
         state: &EllipticCoulombState,
@@ -199,7 +197,12 @@ impl TangentialLaw for EllipticCoulomb {
         let kinetic_caps = capacities(self.kinetic_mu, input.normal_n)?;
         let (force, slip, regime, iterations) = resolve(free, static_caps, kinetic_caps, input)?;
         let traction_n = from_principal(state.axis, force)?;
-        let slip_increment_m = from_principal(state.axis, slip)?;
+        let slip_increment_m = if input.compliance_m_per_n == 0.0 {
+            // Preserve the exact prescribed kinematic boundary and source path.
+            input.slip_increment_m
+        } else {
+            from_principal(state.axis, slip)?
+        };
         let force_norm = det::hypot(traction_n[0], traction_n[1]);
         if !force_norm.is_finite() || force_norm > input.solve.maximum_force_n {
             return Err(invalid("elliptic_maximum_force_n"));
