@@ -1,0 +1,17 @@
+frankensim.matdb-manifest.v3
+pack_id	titanium-ti6al4v-nist-thermal-reference
+redistribution	permitted	Numerical fits from unmarked NIST public-information pages, with attribution and original sampled evaluations; reuse policy https://www.nist.gov/copyrights-disclaimers
+citation	National Institute of Standards and Technology, Cryogenic Material Properties: Ti-6Al-4V titanium alloy; https://trc.nist.gov/cryogenics/materials/Ti6Al4V/Ti6Al4V_rev.htm; references https://trc.nist.gov/cryogenics/materials/references.htm; accessed 2026-10-29.
+license	NIST-Public-Information-Attribution-Requested
+source	nist-engineering-alloy-thermal-reference	properties.tsv	material-tsv-v1
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	linear_expansion	linear-expansion-relative-to-293k	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	reference	engineering-reference-model	dimensional
+axis	family	source-family-nist-titanium-ti6al4v	dimensional
+axis	process	source-processing-known	dimensional
+axis	pressure	source-pressure-known	dimensional
+axis	matched	source-specimens-matched	dimensional
+axis	orientation	source-orientation-known	dimensional
+axis	form	source-product-form-known	dimensional
+axis	temper	source-temper-known	dimensional
