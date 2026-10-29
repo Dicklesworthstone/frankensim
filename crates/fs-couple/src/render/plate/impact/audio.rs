@@ -22,6 +22,9 @@
 
 use super::{ImpactError, ImpactFrame, ImpactSystem};
 use super::linear::{LinearImpactFrame, LinearImpactSystem};
+use super::material::heating::{HeatedImpactFrame, HeatedImpactSystem};
+use super::material::heating::feedback::MaterialFeedbackFrame;
+use super::material::heating::liquid_film::LiquidFilmImpactSystem;
 use crate::broadband_radiation::{
     BroadbandRadiationArtifact, BroadbandRadiationControls, BroadbandRadiationError,
     BroadbandRadiationRuntime, SampledRadiationData, build_broadband_radiation_artifact,
@@ -173,10 +176,48 @@ impl ImpactSource for LinearImpactSystem {
     }
 }
 
+// These images retain their own atomic mechanical/thermal step. The observer
+// reads velocity only after heat and source-domain admission; it neither
+// replays dissipated work nor maintains a second thermal or physical clock.
+impl ImpactSource for HeatedImpactSystem<'_> {
+    type Frame = HeatedImpactFrame;
+    fn state(&self) -> &[f64] { ImpactSource::state(self.mechanics()) }
+    fn mode_count(&self) -> usize { ImpactSource::mode_count(self.mechanics()) }
+    fn samples_rendered(&self) -> u64 { ImpactSource::samples_rendered(self.mechanics()) }
+    fn sample_period_s(&self) -> f64 { ImpactSource::sample_period_s(self.mechanics()) }
+    fn remaining_steps(&self) -> u64 { ImpactSource::remaining_steps(self.mechanics()) }
+    fn maximum_generalized_force(&self) -> f64 {
+        ImpactSource::maximum_generalized_force(self.mechanics())
+    }
+    fn advance(&mut self, forces: &[f64], gate: &CancelGate) -> Result<Self::Frame, ImpactError> {
+        self.step(forces, gate)
+    }
+}
+
+impl ImpactSource for LiquidFilmImpactSystem<'_> {
+    type Frame = MaterialFeedbackFrame<()>;
+    fn state(&self) -> &[f64] { ImpactSource::state(self.system()) }
+    fn mode_count(&self) -> usize { ImpactSource::mode_count(self.system()) }
+    fn samples_rendered(&self) -> u64 { ImpactSource::samples_rendered(self.system()) }
+    fn sample_period_s(&self) -> f64 { ImpactSource::sample_period_s(self.system()) }
+    fn remaining_steps(&self) -> u64 { ImpactSource::remaining_steps(self.system()) }
+    fn maximum_generalized_force(&self) -> f64 {
+        ImpactSource::maximum_generalized_force(self.system())
+    }
+    fn advance(&mut self, forces: &[f64], gate: &CancelGate) -> Result<Self::Frame, ImpactError> {
+        self.step(forces, gate)
+    }
+}
+
 /// Retained mechanics -> causal radiation -> geometric travel -> pressure [Pa].
 /// Implements the existing stream surface; no second WAV encoder or scheduler.
 /// Attach at sample zero with explicitly quiescent prior acoustics. Retaining
 /// this object retains mechanical, felt, radiation and propagation histories.
+/// Heated sources retain finite caloric state as well: `HeatedImpactSystem`
+/// advances its adiabatic stores, and `LiquidFilmImpactSystem` also refreshes
+/// the original film viscosity from their accepted temperature. Their complete
+/// thermal diagnostics remain available through `last_mechanical_frame`.
+/// This does not add a spatial heat network or acoustic back-reaction.
 /// A failed callback poisons this host because a physical prefix may have run.
 /// Callers must discard the failed callback's output, as PressureRenderer requires.
 pub struct ImpactPressureRenderer<'a, M: ImpactSource = ImpactSystem> {
@@ -280,7 +321,8 @@ impl<'a, M: ImpactSource> ImpactPressureRenderer<'a, M> {
     /// The exact travel and observation approximation actually used.
     #[must_use]
     pub const fn timing(&self) -> ImpactObservationTiming { self.timing }
-    /// Last accepted mechanical sample; not a fluid-energy or radiation audit.
+    /// Last accepted source frame, retaining that image's mechanical and thermal
+    /// diagnostics. The observer adds no radiation-energy audit.
     #[must_use]
     pub const fn last_mechanical_frame(&self) -> Option<&M::Frame> { self.last_frame.as_ref() }
     /// Atomically replace held physical forces without erasing vibration/history.
