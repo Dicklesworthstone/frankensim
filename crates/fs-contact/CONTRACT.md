@@ -1130,3 +1130,35 @@ partial slip, changing shear-stage motion or empirical mixed-mode toughness.
 Six focused original-source tests recover the pure-normal finite-spring limit,
 check complete energy gradients/stiffness and independent normal-work
 quadrature, retain release across subdivision, and cover source/refusal/retry.
+
+## Dynamic wetting, contact-line pinning and mechanical adhesion
+
+`capillary_bridge::contact_line::SourceContactLineBridge` evolves the actual
+wetted footprint of the original symmetric planar, fixed-volume bridge. The
+original ordered liquid/substrate sources supply surface tension, equilibrium
+wetting, line friction and separate advancing/receding thresholds. A bounded
+low-speed line law admits pinned, advancing and receding states; bulk liquid
+viscosity is not substituted for the independently sourced line coefficient.
+
+The same circular geometry and surface energy supply normal force, footprint
+force and their analytic derivatives. A symmetric discrete gradient transfers
+work between gap motion, surface storage and separately reported viscous-line
+and pinning losses. Bounded quadrature avoids cancellation from subtracting
+nearly equal energies. Geometry and quadrature estimates enter both force and
+energy admission. Immutable source-bound states, fixed-size storage and explicit
+geometry/iteration/evaluation limits preserve allocation-free atomic trials.
+
+`contact_line::load_line::ContactLineBridgeLoadLine` couples this history to
+finite mechanical compliance. Every probe advances the same old state over the
+same physical timestep; nonlinear iteration cannot add physical relaxation.
+The original implicit force derivative, compatibility slope, propagated force
+uncertainty and actual-motion replay remain part of mechanical admission.
+
+Six focused original-source tests cover equilibrium reduction, independently
+integrated geometry, relaxation, pinning/depinning, analytic tangents and
+second-order refinement against an independent physical ODE. This is a
+two-dimensional connected bridge with frozen coefficients and a bounded
+near-equilibrium contact-line law. Bulk-flow dissipation, liquid inertia,
+asymmetric wetting, evaporation and resolved pinch-off remain outside it.
+Numerical uncertainty estimates are not interval certificates, and loss of
+admitted geometry does not manufacture rupture or a heat destination.

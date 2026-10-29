@@ -35,6 +35,9 @@ mod geometry;
 /// Fixed-volume axisymmetric Young--Laplace equilibria between parallel plates.
 pub mod axisymmetric;
 
+/// Sourced dynamic contact-line friction and advancing/receding pinning.
+pub mod contact_line;
+
 /// Work-conjugate scalar coupling to an original held-force mechanical response.
 pub mod load_line;
 
