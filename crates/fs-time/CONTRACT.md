@@ -74,6 +74,23 @@ where claimed below.
   covariance, reversibility, replay, rest, rigid reduction and admission.
   No exact-energy, arbitrary-step accuracy, gimbaled-rotor, rotor-flexibility,
   changing-inertia, or discrete-adjoint claim is made for this extension.
+- `lie::gyrostat::InertiaTensor3` admits a full symmetric positive-definite
+  inertia in the caller's fixed body frame. `new(Mat3)` uses the existing
+  native 3-by-3 Jacobi eigensolver once and checks the principal-frame
+  reconstruction; `from_principal` accepts an already known principal frame
+  without allocation. Cached momentum/velocity transforms and free/driven
+  integration then have constant work and no allocation or factorization.
+  The free map conjugates the native rotation increment and transports the
+  original body momentum by its inverse, avoiding repeated full-state basis
+  roundtrips. Body/spatial external torque conventions and internal rotor
+  momentum remain explicit; strictly diagonal input retains the original
+  map's arithmetic. `tests/gyrostat_tensor.rs` checks independent dense Euler
+  dynamics (second-order refinement), 10,000-step spatial momentum balance,
+  full-tensor reconstruction and inversion across scales, recoil and external
+  impulses, world-frame covariance, reversal, replay and refusal. Admission
+  and its reconstruction residual are numerical, not an interval eigenvalue
+  certificate or geometric realizability proof. The tensor must remain fixed;
+  this does not supply changing-mass, deforming-body or gimbaled-axis transport.
 - `galpha::GeneralizedAlpha::new(m, c, k, n, h, rho_inf)` +
   `galpha_step(ga, q, v, a, f_next)` — Chung–Hulbert: αm = (2ρ−1)/(ρ+1),
   αf = ρ/(ρ+1), γ = ½ − αm + αf, β = ¼(1 − αm + αf)²; one prefactored

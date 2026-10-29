@@ -22,6 +22,10 @@ use super::{
 };
 use fs_ga::{So3, So3Tangent, Vec3};
 
+#[path = "gyrostat/tensor.rs"]
+mod tensor;
+pub use tensor::InertiaTensor3;
+
 /// Frame in which the externally applied torque is held over the step.
 /// Internal motor torques belong in the rotor momentum change, not here.
 #[derive(Clone, Copy, Debug, PartialEq)]
