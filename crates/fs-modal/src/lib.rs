@@ -537,8 +537,18 @@ fn lanczos_sweep(
         let breakdown = beta == 0.0
             || (operator_scale.is_finite() && beta <= (16.0 * f64::EPSILON) * operator_scale);
 
-        // Ritz extraction on the tridiagonal T_j (small dense; j ≤ budget).
+        // The Jacobi extraction below costs O(j^3) a step, O(j^4) a sweep: skip
+        // it on steps where the exact test provably cannot stop the sweep.
         let jn = basis.len();
+        let forced = breakdown || jn == n || iters == budget;
+        if !forced && !ritz_screen_may_stop(&alphas, &betas, beta, sigma, window, tol, need) {
+            betas.push(beta);
+            for (slot, wv) in v.iter_mut().zip(&w) {
+                *slot = *wv / beta;
+            }
+            continue;
+        }
+        // Ritz extraction on the tridiagonal T_j (small dense; j ≤ budget).
         let mut t = vec![0.0f64; jn * jn];
         for (i, &a) in alphas.iter().enumerate() {
             t[i * jn + i] = a;
@@ -594,6 +604,156 @@ fn lanczos_sweep(
         }
     }
     SweepOutcome { accepted, iters }
+}
+
+/// Looseness of [`ritz_screen_may_stop`] against the exact Ritz test.
+const RITZ_SCREEN_SLACK: f64 = 1e3;
+
+/// Can the exact test in [`lanczos_sweep`] accept `need` Ritz pairs on
+/// T_j = tridiag(betas, alphas, betas)? Its eigenvalues and the last row of
+/// its eigenvectors come from implicit QL carrying that one row, O(j^2)
+/// against the dense Jacobi's O(j^3). It over-counts the exact test: the
+/// tolerance is [`RITZ_SCREEN_SLACK`] times looser, each last-row component is
+/// lowered by a perturbation bound `64 eps ||T|| / gap`, and the window is
+/// widened by 1e-6 of its span. `false` therefore means the exact test cannot
+/// stop this step. An unconverged QL or a non-finite value answers `true`.
+fn ritz_screen_may_stop(
+    alphas: &[f64],
+    betas: &[f64],
+    beta: f64,
+    sigma: f64,
+    window: Option<(f64, f64)>,
+    tol: f64,
+    need: usize,
+) -> bool {
+    let Some((theta, last)) = tridiagonal_values_and_last_row(alphas, betas) else {
+        return true;
+    };
+    let jn = theta.len();
+    let norm = theta.iter().fold(0.0f64, |acc, th| acc.max(th.abs()));
+    let mut order: Vec<usize> = (0..jn).collect();
+    order.sort_by(|&x, &y| theta[x].total_cmp(&theta[y]).then(x.cmp(&y)));
+    let mut count = 0usize;
+    for (slot, &ri) in order.iter().enumerate() {
+        let th = theta[ri];
+        if th == 0.0 {
+            continue;
+        }
+        if let Some((lo, hi)) = window {
+            let lambda = sigma + 1.0 / th;
+            let widen = 1e-6 * ((hi - lo) + lo.abs() + hi.abs());
+            if !(lambda > lo - widen && lambda <= hi + widen) {
+                continue;
+            }
+        }
+        let below = slot.checked_sub(1).map_or(f64::INFINITY, |s| th - theta[order[s]]);
+        let above = order.get(slot + 1).map_or(f64::INFINITY, |&r| theta[r] - th);
+        let gap = below.min(above);
+        let blur = 64.0 * f64::EPSILON * norm / gap.max(f64::MIN_POSITIVE);
+        let est = beta * (last[ri].abs() - blur).max(0.0);
+        if est <= RITZ_SCREEN_SLACK * tol * th.abs().max(f64::MIN_POSITIVE) {
+            count += 1;
+        }
+    }
+    count >= need
+}
+
+/// Eigenvalues (unordered) of the symmetric tridiagonal with diagonal
+/// `alphas` and off-diagonal `betas[..alphas.len() - 1]`, with the last row of
+/// its orthonormal eigenvector matrix in the same order: EISPACK tql2 started
+/// from V = I, carrying only V's last row. `None` if an eigenvalue takes more
+/// than 64 QL iterations or a value is not finite.
+#[allow(clippy::many_single_char_names)]
+fn tridiagonal_values_and_last_row(alphas: &[f64], betas: &[f64]) -> Option<(Vec<f64>, Vec<f64>)> {
+    let n = alphas.len();
+    if n == 0 {
+        return Some((Vec::new(), Vec::new()));
+    }
+    let mut d = alphas.to_vec();
+    let mut e = vec![0.0f64; n];
+    e[..n - 1].copy_from_slice(&betas[..n - 1]);
+    let mut z = vec![0.0f64; n];
+    z[n - 1] = 1.0;
+    let pythag = |a: f64, b: f64| {
+        let (x, y) = (a.abs(), b.abs());
+        if x > y {
+            let r = y / x;
+            x * (1.0 + r * r).sqrt()
+        } else if y > 0.0 {
+            let r = x / y;
+            y * (1.0 + r * r).sqrt()
+        } else {
+            0.0
+        }
+    };
+    let mut f = 0.0f64;
+    let mut tst1 = 0.0f64;
+    let eps = f64::EPSILON;
+    for l in 0..n {
+        tst1 = tst1.max(d[l].abs() + e[l].abs());
+        let mut m = l;
+        while m < n - 1 && e[m].abs() > eps * tst1 {
+            m += 1;
+        }
+        if m > l {
+            let mut iterations = 0;
+            loop {
+                iterations += 1;
+                if iterations > 64 {
+                    return None;
+                }
+                let mut g = d[l];
+                let mut p = (d[l + 1] - g) / (2.0 * e[l]);
+                let mut r = pythag(p, 1.0);
+                if p < 0.0 {
+                    r = -r;
+                }
+                d[l] = e[l] / (p + r);
+                d[l + 1] = e[l] * (p + r);
+                let dl1 = d[l + 1];
+                let mut h = g - d[l];
+                for di in &mut d[l + 2..n] {
+                    *di -= h;
+                }
+                f += h;
+                p = d[m];
+                let mut c = 1.0;
+                let mut c2 = c;
+                let mut c3 = c;
+                let el1 = e[l + 1];
+                let mut s = 0.0;
+                let mut s2 = 0.0;
+                for i in (l..m).rev() {
+                    c3 = c2;
+                    c2 = c;
+                    s2 = s;
+                    g = c * e[i];
+                    h = c * p;
+                    r = pythag(p, e[i]);
+                    e[i + 1] = s * r;
+                    s = e[i] / r;
+                    c = p / r;
+                    p = c * d[i] - s * g;
+                    d[i + 1] = h + s * (c * g + s * d[i]);
+                    let zi1 = z[i + 1];
+                    z[i + 1] = s * z[i] + c * zi1;
+                    z[i] = c * z[i] - s * zi1;
+                }
+                p = -s * s2 * c3 * el1 * e[l] / dl1;
+                e[l] = s * p;
+                d[l] = c * p;
+                if e[l].abs() <= eps * tst1 {
+                    break;
+                }
+            }
+        }
+        d[l] += f;
+        e[l] = 0.0;
+    }
+    if d.iter().chain(&z).any(|x| !x.is_finite()) {
+        return None;
+    }
+    Some((d, z))
 }
 
 // ---------------------------------------------------------------------------
@@ -2369,5 +2529,110 @@ mod tests {
         for (mode, &radius) in report.modes.iter().zip(&radii) {
             assert_eq!(radius.to_bits(), mode.residual.to_bits());
         }
+    }
+
+    /// Dense symmetric matrix of the tridiagonal (alphas, betas), row-major.
+    fn dense_tridiagonal(alphas: &[f64], betas: &[f64]) -> Vec<f64> {
+        let jn = alphas.len();
+        let mut t = vec![0.0f64; jn * jn];
+        for (i, &a) in alphas.iter().enumerate() {
+            t[i * jn + i] = a;
+        }
+        for i in 0..jn.saturating_sub(1) {
+            t[i * jn + (i + 1)] = betas[i];
+            t[(i + 1) * jn + i] = betas[i];
+        }
+        t
+    }
+
+    #[test]
+    fn tridiagonal_ql_matches_jacobi_values_and_last_row() {
+        let n = 50;
+        let (mut alphas, mut betas) = (vec![0.0; n], vec![0.0; n - 1]);
+        lcg_fill(&mut alphas, 3);
+        lcg_fill(&mut betas, 4);
+        let (values, last) = tridiagonal_values_and_last_row(&alphas, &betas).expect("ql");
+        let (exact, y) = jacobi_eigh(&dense_tridiagonal(&alphas, &betas), n);
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|&a, &b| values[a].total_cmp(&values[b]));
+        let sorted: Vec<f64> = order.iter().map(|&i| values[i]).collect();
+        for (slot, (&a, &b)) in sorted.iter().zip(&exact).enumerate() {
+            assert!((a - b).abs() <= 1e-13, "value {slot}: {a} vs {b}");
+            let z = last[order[slot]].abs();
+            let reference = y[(n - 1) * n + slot].abs();
+            assert!((z - reference).abs() <= 1e-11, "last row {slot}: {z} vs {reference}");
+        }
+        assert_eq!(tridiagonal_values_and_last_row(&[2.5], &[]), Some((vec![2.5], vec![1.0])));
+    }
+
+    /// The screen must never skip a step the exact test would stop on. Along a
+    /// real Lanczos run (diagonal operator: a spread spectrum, a dense cluster
+    /// and a pair split by 1e-9), every step's exact ready count passes the
+    /// screen, with and without a window; and it does skip the early steps.
+    #[test]
+    fn ritz_screen_never_skips_a_step_the_exact_test_stops() {
+        let n = 240;
+        let mut spectrum: Vec<f64> = (0..n)
+            .map(|i| {
+                let x = i as f64 / n as f64;
+                1.0 / (1.0 + 40.0 * x * x)
+            })
+            .collect();
+        spectrum[7] = spectrum[6] * (1.0 + 1e-9);
+        for s in &mut spectrum[100..140] {
+            *s = 0.05 + 1e-6 * *s;
+        }
+        let mut v = vec![0.0f64; n];
+        lcg_fill(&mut v, 11);
+        let norm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+        v.iter_mut().for_each(|x| *x /= norm);
+        let (mut basis, mut alphas, mut betas): (Vec<Vec<f64>>, Vec<f64>, Vec<f64>) =
+            (Vec::new(), Vec::new(), Vec::new());
+        let (mut checked, mut skipped_early) = (0usize, 0usize);
+        for step in 0..170 {
+            basis.push(v.clone());
+            let mut w: Vec<f64> = v.iter().zip(&spectrum).map(|(a, s)| a * s).collect();
+            alphas.push(w.iter().zip(&v).map(|(a, b)| a * b).sum());
+            for _pass in 0..2 {
+                for b in &basis {
+                    let c: f64 = w.iter().zip(b).map(|(a, x)| a * x).sum();
+                    w.iter_mut().zip(b).for_each(|(a, x)| *a -= c * x);
+                }
+            }
+            let beta = w.iter().map(|x| x * x).sum::<f64>().sqrt();
+            let jn = alphas.len();
+            let (theta, y) = jacobi_eigh(&dense_tridiagonal(&alphas, &betas), jn);
+            for &tol in &[1e-6, 1e-10, 1e-13] {
+                for (sigma, window) in [(0.0, None), (0.0, Some((1.5, 20.0)))] {
+                    let exact = theta
+                        .iter()
+                        .enumerate()
+                        .filter(|&(ri, &th)| {
+                            th != 0.0
+                                && window.is_none_or(|(lo, hi): (f64, f64)| {
+                                    let lambda = sigma + 1.0 / th;
+                                    lambda > lo && lambda <= hi
+                                })
+                                && beta * y[(jn - 1) * jn + ri].abs()
+                                    <= tol * th.abs().max(f64::MIN_POSITIVE)
+                        })
+                        .count();
+                    if exact > 0 {
+                        checked += 1;
+                        assert!(
+                            ritz_screen_may_stop(&alphas, &betas, beta, sigma, window, tol, exact),
+                            "step {step} tol {tol:e} window {window:?}: the screen skips {exact} ready"
+                        );
+                    }
+                }
+            }
+            if step < 10 && !ritz_screen_may_stop(&alphas, &betas, beta, 0.0, None, 1e-13, 1) {
+                skipped_early += 1;
+            }
+            betas.push(beta);
+            v = w.iter().map(|x| x / beta).collect();
+        }
+        assert!(checked > 500, "only {checked} exact stops were checked");
+        assert_eq!(skipped_early, 10, "the screen must skip steps that cannot stop");
     }
 }
