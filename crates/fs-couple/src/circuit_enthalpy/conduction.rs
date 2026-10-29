@@ -91,7 +91,7 @@ impl ConductionDrive<'_> {
         power_w: f64,
         power_balance_residual_w: f64,
     ) -> Result<f64, Error> {
-        match self {
+        Ok(match self {
             Self::Current {
                 positive,
                 negative,
@@ -107,7 +107,7 @@ impl ConductionDrive<'_> {
                 finite(current_a * finite(potential(positive)? - potential(negative)?)?)
             }
             _ => finite(power_w - power_balance_residual_w),
-        }
+        }?)
     }
 }
 
