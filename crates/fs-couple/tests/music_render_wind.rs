@@ -48,6 +48,20 @@ fn success(output: Output) {
     assert!(output.status.success(), "stdout={} stderr={}",
         String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 }
+// music_render reports a refusal as one JSON line on stdout; this is its decoded `what`.
+fn refusal_what(output: &Output) -> String {
+    let line = String::from_utf8_lossy(&output.stdout);
+    let what = line.split_once("\"verdict\":\"refused\",\"what\":\"").map_or("", |(_, w)| w);
+    let (mut text, mut chars) = (String::new(), what.chars());
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => break,
+            '\\' => match chars.next() { Some('n') => text.push('\n'), Some(e) => text.push(e), None => break },
+            _ => text.push(c),
+        }
+    }
+    text
+}
 
 #[test]
 fn wind_command_writes_exact_physical_pcm_on_native_and_explicitly_decimated_clocks() {
@@ -174,10 +188,10 @@ fn self_contained_dg_wall_refuses_before_opening_missing_or_existing_source_pack
             .arg("wind").arg(&input).arg(&output)
             .args(["--decimate", "--self-contained"]).output().unwrap();
         assert!(!result.status.success());
-        let stderr = String::from_utf8_lossy(&result.stderr);
-        assert!(stderr.contains("--self-contained refuses external material-card pack \"wall.pack\""),
-            "{stderr}");
-        assert!(!stderr.contains("open failed"), "{stderr}");
+        let refusal = refusal_what(&result);
+        assert!(refusal.contains("--self-contained refuses external material-card pack \"wall.pack\""),
+            "{refusal}");
+        assert!(!refusal.contains("open failed"), "{refusal}");
         assert!(!output.exists());
         assert!(!output.with_extension("provenance.json").exists());
 
@@ -186,10 +200,10 @@ fn self_contained_dg_wall_refuses_before_opening_missing_or_existing_source_pack
         let ordinary = dir.join(format!("ordinary-wall-{present}.wav"));
         let result = run(&input, &ordinary, 37, true);
         assert!(!result.status.success());
-        let stderr = String::from_utf8_lossy(&result.stderr);
-        assert!(stderr.contains("material-card pack \"wall.pack\""), "{stderr}");
-        assert!(!stderr.contains("--self-contained"), "{stderr}");
-        assert_eq!(stderr.contains("open failed"), !present, "{stderr}");
+        let refusal = refusal_what(&result);
+        assert!(refusal.contains("material-card pack \"wall.pack\""), "{refusal}");
+        assert!(!refusal.contains("--self-contained"), "{refusal}");
+        assert_eq!(refusal.contains("open failed"), !present, "{refusal}");
         assert!(!ordinary.exists());
         assert!(!ordinary.with_extension("provenance.json").exists());
     }
@@ -214,8 +228,8 @@ fn self_contained_duplicate_and_external_gas_options_refuse_before_source_file_a
         let result = Command::new(env!("CARGO_BIN_EXE_music_render"))
             .arg("wind").arg(&input).arg(&output).args(flags).output().unwrap();
         assert!(!result.status.success());
-        let stderr = String::from_utf8_lossy(&result.stderr);
-        assert!(stderr.contains(*expected), "{stderr}");
+        let refusal = refusal_what(&result);
+        assert!(refusal.contains(*expected), "{refusal}");
         assert!(!output.exists());
         assert!(!output.with_extension("provenance.json").exists());
     }
@@ -262,11 +276,11 @@ fn attached_materials_are_explicit_and_cannot_enable_ambient_source_callbacks() 
         let result = Command::new(env!("CARGO_BIN_EXE_music_render"))
             .arg("wind").arg(&input).arg(&output).arg("--decimate").args(flags).output().unwrap();
         assert!(!result.status.success());
-        let stderr = String::from_utf8_lossy(&result.stderr);
-        assert!(stderr.contains(expected), "{stderr}");
+        let refusal = refusal_what(&result);
+        assert!(refusal.contains(expected), "{refusal}");
         if index == 2 {
-            assert!(!stderr.contains("--self-contained refuses"), "{stderr}");
-            assert!(!stderr.contains("open failed"), "{stderr}");
+            assert!(!refusal.contains("--self-contained refuses"), "{refusal}");
+            assert!(!refusal.contains("open failed"), "{refusal}");
         }
         assert!(!output.exists());
         assert!(!output.with_extension("provenance.json").exists());

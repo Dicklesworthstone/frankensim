@@ -435,10 +435,12 @@ fn load_with_gas_sources(
                 super::duct_metadata::provenance(&p),super::thermochemical::provenance(p.gas_records()),
                 super::plate_input::section_sources_json(p.section_provenance()));
             // An active microphone uses the same actual bound exterior as its
-            // reaction/observer. Internal traces retain the explicit-file policy.
+            // reaction/observer; without one it hears its section's sourced gas.
+            // Internal traces retain the explicit-file policy.
             let listener = match p.renderer().baffled_medium() {
                 Some(medium) => receiver_listener(
-                    medium, super::duct_metadata::aperture_exterior_gas(&p),
+                    medium, super::duct_metadata::aperture_exterior_gas(&p)
+                        .or_else(|| p.renderer().baffled_gas()),
                 )?,
                 None => p.exterior_gas().map_or(
                     Listener::Unconstrained("internal trace; no declared exterior"),

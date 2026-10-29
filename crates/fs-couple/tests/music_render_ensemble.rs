@@ -177,9 +177,12 @@ fn the_receipt_names_the_one_listener_gas_and_each_unconstrained_part() {
     let row = "ambient 293.15 101325 0\n";
     assert_eq!(PLATE.matches(row).count(), 1);
     std::fs::write(&thin, PLATE.replace(row, "ambient 293.15 70927.5 0\n")).unwrap();
+    // The plate declares its complete ambient state, so the receipt names all of it.
     let medium = |gas: GasState, first: usize, rest: &str| format!(
-        "\"listener_medium\":{{\"density_kg_m3\":{:e},\"sound_speed_m_s\":{:e},\"set_by_part\":{first},\"unconstrained_parts\":[{rest}]}}",
-        gas.density, gas.sound_speed);
+        "\"listener_medium\":{{\"medium\":{{\"density_kg_m3\":{:e},\"sound_speed_m_s\":{:e},\"state_authority\":\"complete_gas_state\",\"temperature_k\":{:e},\"pressure_pa\":{:e},\"dynamic_viscosity_pa_s\":{:e},\"thermal_conductivity_w_m_k\":{:e},\"heat_capacity_ratio\":{:e},\"specific_gas_constant_j_kg_k\":{:e},\"specific_heat_cp_j_kg_k\":{:e},\"prandtl\":{:e},\"characteristic_impedance_pa_s_m\":{:e},\"water_mole_fraction\":{:e}}},\"set_by_part\":{first},\"unconstrained_parts\":[{rest}]}}",
+        gas.density, gas.sound_speed, gas.temperature, gas.pressure, gas.dynamic_viscosity,
+        gas.thermal_conductivity, gas.gamma, gas.specific_gas_constant, gas.specific_heat_cp,
+        gas.prandtl, gas.characteristic_impedance, gas.water_mole_fraction);
     let receipt = |out: &Path| std::fs::read_to_string(out.with_extension("provenance.json")).unwrap();
     // One gas, bit for bit, set by the first part.
     let same = dir.join("one-gas.wav");

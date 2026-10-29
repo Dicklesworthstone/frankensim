@@ -374,6 +374,21 @@ impl AperturePerformance {
             _ => None,
         }
     }
+    /// The complete gas behind [`Self::baffled_medium`], when the receiver hears a
+    /// sourced state: the bound exterior, or the observed network section's own
+    /// gas. The legacy tube spec and a coefficient-only network carry none.
+    #[must_use]
+    pub fn baffled_gas(&self) -> Option<&GasState> {
+        self.receiver.as_ref()?;
+        if let Some(gas) = self.exterior_gas.as_ref() { return Some(gas); }
+        match (&self.system, self.observation) {
+            (CoupledAperture::Network(n), ApertureObservation::NetworkBaffled {node, ..}) => {
+                let index = n.spec().sections.iter().position(|s| s.nodes.contains(&node))?;
+                n.section_gases()?.get(index)
+            }
+            _ => None,
+        }
+    }
     /// Controls committed with successful mechanical samples, never ahead of them.
     #[must_use]
     pub fn applied_controls(&self) -> &[ScheduledControl] { &self.controls[..self.next] }
