@@ -21,7 +21,7 @@ use std::cell::RefCell;
 
 /// Material-driven journal loss and its receiving thermal control volume.
 pub mod viscous;
-use viscous::{BoundBearing, JournalBearing, JournalBearingState};
+use viscous::{BoundBearing, ExpandingJournalBearing, JournalBearing, JournalBearingState};
 
 /// Source-bound dry sliding, generalized resisting effort and two-body heating.
 pub mod dry;
@@ -252,6 +252,45 @@ impl<'a> HeatedArticulatedMotion<'a> {
             candidate.motion.bearings.push(BoundBearing::new(
                 bearing,
                 self.configuration().model(),
+                &self.thermal,
+                &self.motion.velocity,
+            )?);
+        }
+        checkpoint()?;
+        Ok(candidate)
+    }
+
+    /// Attach concentric films whose clearance follows the SAME source-owned
+    /// region expansion as the material mechanism's inertia. Both surfaces are
+    /// centered at their revolute joint; the shorter expanded cylinder sets the
+    /// overlapping length. Source bindings and original reference geometry stay
+    /// immutable, while actual geometry is retained in each bearing state.
+    ///
+    /// The existing mechanical stages freeze viscosity and geometry over one
+    /// capped thermal step. The accepted endpoint refreshes both together; a
+    /// closed gap, excessive geometry change or source refusal rolls back the
+    /// complete coupled step. This is quasisteady circumferential shear, not
+    /// squeeze-film pressure/work, end leakage or a constrained expansion solve.
+    /// Radial-motion effects must be negligible in the caller's regime. Link
+    /// inertia parameter work remains separate from the film's dissipated heat.
+    pub fn with_expanding_journal_bearings(
+        &self,
+        bearings: Vec<ExpandingJournalBearing<'a>>,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, Error> {
+        checkpoint()?;
+        if !self.motion.bearings.is_empty()
+            || bearings.is_empty()
+            || bearings.len() + self.motion.brakes.len() > 64
+        {
+            return Err(Error::Invalid("attach 1..=64 journal films exactly once"));
+        }
+        let mut candidate = self.clone();
+        for bearing in bearings {
+            checkpoint()?;
+            candidate.motion.bearings.push(BoundBearing::new_expanding(
+                bearing,
+                self.configuration(),
                 &self.thermal,
                 &self.motion.velocity,
             )?);
@@ -713,7 +752,7 @@ impl DepositionObserver for Motion<'_> {
         let parameter = after.change_from(after_motion)?;
         for bearing in &mut self.bearings {
             checkpoint()?;
-            bearing.refresh(thermal, &next_velocity)?;
+            bearing.refresh(thermal, &next_velocity, &self.expansion.configuration)?;
         }
         for (brake, loss) in self.brakes.iter_mut().zip(dry_steps) {
             brake.accept(loss, thermal, &next_velocity, checkpoint)?;

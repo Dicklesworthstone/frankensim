@@ -10,13 +10,16 @@
 //! A film has negligible mass/thermal storage and equilibrates to its explicit
 //! receiving wall cell. No pressure-supported bearing load, eccentricity,
 //! cavitation, turbulence, end effects or finite-time fluid spin-up is modeled.
-//! Geometry is prescribed even when link inertia thermally expands. Its
-//! slenderness and quasisteady validity remain caller modeling obligations.
+//! Geometry may be prescribed or follow the same source-resolved free thermal
+//! expansion as the two cylindrical material regions. Its slenderness and
+//! quasisteady validity remain caller modeling obligations.
 //! The creeping-flow limit is checked at every native mechanical RK stage.
-//! Viscosity is frozen only within one explicitly capped thermal substep, then
-//! refreshed from the same liquid claims at the accepted wall temperature.
+//! Viscosity and geometry are frozen only within one explicitly capped thermal
+//! substep, then refreshed from the same accepted material configuration.
 
 use super::{ArticulatedModel, CellId, DepositionSimulation, Error, finite, positive};
+use crate::thermal::{ExpandedArticulated, ExpandedRegion};
+use fs_ga::Vec3;
 use fs_matdb::ClaimSelection;
 use fs_material::liquid::ResolvedLiquidState;
 use fs_material::liquid_temperature::LiquidTemperatureLaw;
@@ -57,11 +60,38 @@ pub struct JournalBearing<'a> {
     pub liquid: LiquidTemperatureLaw<'a>,
 }
 
+/// Bind reference cylinder dimensions to the original two material regions.
+///
+/// The inner cylinder belongs to the journal's child link and the outer cylinder
+/// to its direct parent. Both are coaxial with the revolute joint and have the
+/// reference `JournalGeometry.length_m` centered at that joint. Their expansion
+/// fixed points must coincide with the joint origin in their own body frames.
+/// This declared cylindrical geometry is not inferred from volume moments.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThermalJournalBinding {
+    pub inner_region: String,
+    pub outer_region: String,
+    /// Maximum fractional change of the geometric resistance factor in one
+    /// thermal substep, positive and at most one. Viscosity has its own bound.
+    pub maximum_relative_geometry_factor_change: f64,
+}
+
+/// Existing film law with optional source-owned cylindrical expansion enabled.
+#[derive(Clone, Debug)]
+pub struct ExpandingJournalBearing<'a> {
+    /// Geometry is at the original material reference state, not the current
+    /// temperature. Repeated updates always use these same reference dimensions.
+    pub bearing: JournalBearing<'a>,
+    pub expansion: ThermalJournalBinding,
+}
+
 /// Material and physical observations at the actual accepted joint endpoint.
 #[derive(Clone, Debug, PartialEq)]
 pub struct JournalBearingState {
     pub link: usize,
     pub heat_cell: CellId,
+    /// Actual admitted cylindrical radii and overlapping axial length [m].
+    pub geometry: JournalGeometry,
     pub liquid: ResolvedLiquidState,
     pub resistance_nm_s: f64,
     pub resisting_torque_nm: f64,
@@ -75,6 +105,7 @@ pub(super) struct BoundBearing<'a> {
     pub dof: usize,
     pub state: JournalBearingState,
     geometry_factor_m3: f64,
+    expansion: Option<ThermalJournalBinding>,
 }
 
 impl<'a> BoundBearing<'a> {
@@ -84,13 +115,44 @@ impl<'a> BoundBearing<'a> {
         thermal: &DepositionSimulation<'_>,
         velocity: &[f64],
     ) -> Result<Self, Error> {
-        let g = definition.geometry;
+        let geometry = definition.geometry;
+        Self::with_geometry(definition, model, thermal, velocity, geometry, None)
+    }
+
+    pub fn new_expanding(
+        definition: ExpandingJournalBearing<'a>,
+        configuration: &ExpandedArticulated<'_>,
+        thermal: &DepositionSimulation<'_>,
+        velocity: &[f64],
+    ) -> Result<Self, Error> {
+        // Admit the reference as well: an initially heated configuration cannot
+        // turn an overlapping or nonphysical authored journal into a valid one.
+        geometry_factor(definition.bearing.geometry)?;
+        let geometry = definition.expansion.resolve(
+            definition.bearing.link,
+            definition.bearing.geometry,
+            configuration,
+        )?;
+        Self::with_geometry(
+            definition.bearing,
+            configuration.model(),
+            thermal,
+            velocity,
+            geometry,
+            Some(definition.expansion),
+        )
+    }
+
+    fn with_geometry(
+        definition: JournalBearing<'a>,
+        model: &ArticulatedModel,
+        thermal: &DepositionSimulation<'_>,
+        velocity: &[f64],
+        geometry: JournalGeometry,
+        expansion: Option<ThermalJournalBinding>,
+    ) -> Result<Self, Error> {
         let limits = definition.limits;
-        if ![g.inner_radius_m, g.outer_radius_m, g.length_m]
-            .into_iter()
-            .all(positive)
-            || g.outer_radius_m <= g.inner_radius_m
-            || !positive(limits.maximum_gap_reynolds)
+        if !positive(limits.maximum_gap_reynolds)
             || limits.maximum_gap_reynolds > 1.0
             || !positive(limits.maximum_relative_viscosity_change)
             || limits.maximum_relative_viscosity_change > 1.0
@@ -110,18 +172,7 @@ impl<'a> BoundBearing<'a> {
         let dof = model
             .dof_index(definition.link)
             .ok_or(Error::Invalid("journal joint has no motion coordinate"))?;
-        // Avoid subtracting squared nearly equal radii in a narrow gap.
-        let factor = 4.0
-            * core::f64::consts::PI
-            * g.length_m
-            * g.inner_radius_m.powi(2)
-            * g.outer_radius_m.powi(2)
-            / ((g.outer_radius_m - g.inner_radius_m) * (g.outer_radius_m + g.inner_radius_m));
-        if !positive(factor) {
-            return Err(Error::Invalid(
-                "journal geometry resistance is unrepresentable",
-            ));
-        }
+        let factor = geometry_factor(geometry)?;
         let reference = definition.liquid.reference_state();
         if reference
             .material()
@@ -141,6 +192,7 @@ impl<'a> BoundBearing<'a> {
         let state = JournalBearingState {
             link: definition.link,
             heat_cell: definition.heat_cell,
+            geometry,
             resistance_nm_s: factor * liquid.dynamic_viscosity_pa_s(),
             liquid,
             resisting_torque_nm: 0.0,
@@ -157,6 +209,7 @@ impl<'a> BoundBearing<'a> {
             dof,
             state,
             geometry_factor_m3: factor,
+            expansion,
         };
         result.update_rate(velocity[dof])?;
         Ok(result)
@@ -164,7 +217,7 @@ impl<'a> BoundBearing<'a> {
 
     /// This exact resistance supplies both native torque and heat derivative.
     pub fn response(&self, rate: f64) -> Result<(f64, f64, f64), Error> {
-        let g = self.definition.geometry;
+        let g = self.state.geometry;
         let reynolds = finite(
             rate.abs() * g.inner_radius_m * (g.outer_radius_m - g.inner_radius_m)
                 / self.state.liquid.kinematic_viscosity_m2_s(),
@@ -192,6 +245,7 @@ impl<'a> BoundBearing<'a> {
         &mut self,
         thermal: &DepositionSimulation<'_>,
         velocity: &[f64],
+        configuration: &ExpandedArticulated<'_>,
     ) -> Result<(), Error> {
         let temperature = thermal.temperature_k(self.definition.heat_cell)?;
         let liquid = self
@@ -206,16 +260,123 @@ impl<'a> BoundBearing<'a> {
                 "journal viscosity change requires a smaller thermal substep",
             ));
         }
-        let resistance = self.geometry_factor_m3 * liquid.dynamic_viscosity_pa_s();
+        let geometry = match &self.expansion {
+            Some(binding) => binding.resolve(
+                self.definition.link,
+                self.definition.geometry,
+                configuration,
+            )?,
+            None => self.definition.geometry,
+        };
+        let factor = geometry_factor(geometry)?;
+        if let Some(binding) = &self.expansion {
+            let change =
+                finite((factor - self.geometry_factor_m3).abs() / self.geometry_factor_m3)?;
+            if change > binding.maximum_relative_geometry_factor_change {
+                return Err(Error::Budget(
+                    "journal clearance change requires a smaller thermal substep",
+                ));
+            }
+        }
+        let resistance = factor * liquid.dynamic_viscosity_pa_s();
         if !positive(resistance) {
             return Err(Error::Invalid(
                 "journal material resistance is unrepresentable",
             ));
         }
         self.state.liquid = liquid;
+        self.state.geometry = geometry;
         self.state.resistance_nm_s = resistance;
+        self.geometry_factor_m3 = factor;
         self.update_rate(velocity[self.dof])
     }
+}
+
+fn geometry_factor(g: JournalGeometry) -> Result<f64, Error> {
+    if ![g.inner_radius_m, g.outer_radius_m, g.length_m]
+        .into_iter()
+        .all(positive)
+        || g.outer_radius_m <= g.inner_radius_m
+    {
+        return Err(Error::Invalid(
+            "journal needs positive dimensions and an open radial gap",
+        ));
+    }
+    // Avoid subtracting squared nearly equal radii in a narrow gap.
+    let factor = 4.0
+        * core::f64::consts::PI
+        * g.length_m
+        * g.inner_radius_m.powi(2)
+        * g.outer_radius_m.powi(2)
+        / ((g.outer_radius_m - g.inner_radius_m) * (g.outer_radius_m + g.inner_radius_m));
+    if !positive(factor) {
+        return Err(Error::Invalid(
+            "journal geometry resistance is unrepresentable",
+        ));
+    }
+    Ok(factor)
+}
+
+impl ThermalJournalBinding {
+    fn resolve(
+        &self,
+        link: usize,
+        reference: JournalGeometry,
+        configuration: &ExpandedArticulated<'_>,
+    ) -> Result<JournalGeometry, Error> {
+        if !positive(self.maximum_relative_geometry_factor_change)
+            || self.maximum_relative_geometry_factor_change > 1.0
+        {
+            return Err(Error::Invalid(
+                "journal geometry-change bound must lie in (0,1]",
+            ));
+        }
+        let child = configuration
+            .model()
+            .links()
+            .get(link)
+            .ok_or(Error::Invalid("journal child link does not exist"))?;
+        let parent = child.parent().ok_or(Error::Invalid(
+            "expanding journal requires a material parent link",
+        ))?;
+        let inner = region(configuration, link, &self.inner_region)?;
+        let outer = region(configuration, parent, &self.outer_region)?;
+        if inner.fixed_point_m() != Vec3::default()
+            || outer.fixed_point_m() != child.parent_from_child_zero().translation()
+        {
+            return Err(Error::Invalid(
+                "expanding cylinders must share the revolute-joint expansion fixed point",
+            ));
+        }
+        // The same integrated source strains have already configured link
+        // geometry and inertia. Do not query another alpha or compound stretch.
+        let inner_stretch = 1.0 + inner.expansion().free_linear_strain();
+        let outer_stretch = 1.0 + outer.expansion().free_linear_strain();
+        let geometry = JournalGeometry {
+            inner_radius_m: reference.inner_radius_m * inner_stretch,
+            outer_radius_m: reference.outer_radius_m * outer_stretch,
+            length_m: reference.length_m * inner_stretch.min(outer_stretch),
+        };
+        geometry_factor(geometry)?;
+        Ok(geometry)
+    }
+}
+
+fn region<'s>(
+    configuration: &'s ExpandedArticulated<'_>,
+    link: usize,
+    key: &str,
+) -> Result<&'s ExpandedRegion, Error> {
+    let body = configuration
+        .bodies()
+        .get(link)
+        .ok_or(Error::Invalid("journal material link does not exist"))?;
+    body.regions()
+        .iter()
+        .find(|region| body.reference().regions()[region.reference_index()].key() == key)
+        .ok_or(Error::Invalid(
+            "journal material region does not exist on its cylinder link",
+        ))
 }
 
 // Ask the original source owner for continuous support of EVERY retained role;

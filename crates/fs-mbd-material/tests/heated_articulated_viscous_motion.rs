@@ -18,7 +18,7 @@ use fs_material::state_point::{
 use fs_mbd::articulated::JointModel;
 use fs_mbd_material::articulated::{MaterialLink, ResolvedArticulated, resolve_articulated};
 use fs_mbd_material::thermal::heating::articulated_motion::viscous::{
-    JournalBearing, JournalGeometry, JournalLimits,
+    ExpandingJournalBearing, JournalBearing, JournalGeometry, JournalLimits, ThermalJournalBinding,
 };
 use fs_mbd_material::thermal::heating::articulated_motion::{
     Controls, Error, HeatedArticulatedMotion,
@@ -132,6 +132,18 @@ fn moving<'a>(
     speed: Vec<f64>,
     dt: f64,
 ) -> HeatedArticulatedMotion<'a> {
+    moving_with_heat(reference, solid, heat, speed, dt, &[], 0.)
+}
+
+fn moving_with_heat<'a>(
+    reference: &'a ResolvedArticulated,
+    solid: &'a MaterialCard,
+    heat: &'a ResolvedHeatCapacityCurve,
+    speed: Vec<f64>,
+    dt: f64,
+    powers_w: &[f64],
+    parameter_work_j: f64,
+) -> HeatedArticulatedMotion<'a> {
     let bindings = reference
         .model()
         .links()
@@ -139,7 +151,13 @@ fn moving<'a>(
         .enumerate()
         .map(|(i, link)| LinkHeating {
             link: link.name(),
-            regions: vec![region(solid, heat, "a", i as u64, 0.)],
+            regions: vec![region(
+                solid,
+                heat,
+                "a",
+                i as u64,
+                powers_w.get(i).copied().unwrap_or(0.),
+            )],
         })
         .collect();
     let heated =
@@ -160,7 +178,7 @@ fn moving<'a>(
             maximum_rk_attempts_per_substep: 256,
             relative_momentum_tolerance: 1e-11,
             absolute_momentum_tolerance: vec![1e-12; n],
-            maximum_parameter_work_j: 0.,
+            maximum_parameter_work_j: parameter_work_j,
             maximum_numerical_energy_change_j: 1e-8,
         },
         || Ok(()),
@@ -191,6 +209,23 @@ fn bearing(oil: &MaterialCard, link: usize, cell: u64) -> JournalBearing<'_> {
         )
         .unwrap(),
     }
+}
+
+fn expanding_bearing(oil: &MaterialCard) -> ExpandingJournalBearing<'_> {
+    ExpandingJournalBearing {
+        bearing: bearing(oil, 1, 1),
+        expansion: ThermalJournalBinding {
+            inner_region: "a".into(),
+            outer_region: "a".into(),
+            maximum_relative_geometry_factor_change: 0.5,
+        },
+    }
+}
+
+fn resistance(g: JournalGeometry, viscosity: f64) -> f64 {
+    // Independent concentric-cylinder Couette expression.
+    4. * core::f64::consts::PI * viscosity * g.length_m
+        / (g.inner_radius_m.recip().powi(2) - g.outer_radius_m.recip().powi(2))
 }
 
 #[test]
@@ -416,4 +451,185 @@ fn source_domain_and_late_cancellation_leave_mechanics_heat_and_source_state_unc
         bounded.advance_to(1., config(), || Ok(())),
         Err(Error::Budget(_))
     ));
+}
+
+#[test]
+fn g3_source_expansion_updates_live_clearance_motion_and_local_heat_without_compounding() {
+    let oil = lubricant([1., 1.], 500.);
+    let mut final_rates = Vec::new();
+    for alpha in [0., 0.02] {
+        let solid = card(10., alpha, 500.);
+        let heat = caloric(&solid, 1e5, SolidLiquidPhase::Solid);
+        let reference = mechanism(&solid, false);
+        let unbound =
+            moving_with_heat(&reference, &solid, &heat, vec![3.], 0.0625, &[0., 20.], 10.);
+        let original = unbound
+            .with_expanding_journal_bearings(vec![expanding_bearing(&oil)], || Ok(()))
+            .unwrap();
+        let prescribed = unbound
+            .with_journal_bearings(vec![bearing(&oil, 1, 1)], || Ok(()))
+            .unwrap();
+        let (next, audit) = original.advance_to(0.5, config(), || Ok(())).unwrap();
+        let (fixed, fixed_audit) = prescribed.advance_to(0.5, config(), || Ok(())).unwrap();
+        let state = next.journal_bearings().next().unwrap();
+        let temperature = next.thermal().temperature_k(CellId(1)).unwrap();
+        let stretch = 1. + alpha * (temperature - 300.);
+        close(state.geometry.inner_radius_m, 0.1 * stretch);
+        close(state.geometry.outer_radius_m, 0.11);
+        close(state.geometry.length_m, 0.2);
+        close(state.resistance_nm_s, resistance(state.geometry, 1.));
+        close(
+            state.resisting_torque_nm,
+            -state.resistance_nm_s * next.joint_velocity()[0],
+        );
+        close(
+            state.dissipated_power_w,
+            state.resistance_nm_s * next.joint_velocity()[0].powi(2),
+        );
+        close(
+            state.gap_reynolds,
+            2. * next.joint_velocity()[0].abs()
+                * state.geometry.inner_radius_m
+                * (state.geometry.outer_radius_m - state.geometry.inner_radius_m),
+        );
+        close(20. * (temperature - 300.), 10. + audit.viscous_heat_j);
+        close(audit.thermal.external_heat_j, 10. + audit.viscous_heat_j);
+        close(audit.combined_residual_j, 0.);
+        assert_eq!(
+            next.configuration().bodies()[1].inertia().mass(),
+            reference.bodies()[1].inertia().mass()
+        );
+        if alpha == 0. {
+            assert_eq!(next.joint_velocity(), fixed.joint_velocity());
+            assert_eq!(audit, fixed_audit);
+        } else {
+            assert!(
+                state.resistance_nm_s > fixed.journal_bearings().next().unwrap().resistance_nm_s
+            );
+            assert!(next.joint_velocity()[0] < fixed.joint_velocity()[0]);
+            assert!((audit.viscous_heat_j - fixed_audit.viscous_heat_j).abs() > 1e-5);
+            assert!(audit.parameter_work_j < 0.);
+        }
+        // Restart continues from one original dimensional reference; thermal
+        // stretches are not repeatedly multiplied into already expanded radii.
+        let (half, first) = original.advance_to(0.25, config(), || Ok(())).unwrap();
+        let (split, second) = half.advance_to(0.5, config(), || Ok(())).unwrap();
+        assert_eq!(next.joint_position(), split.joint_position());
+        assert_eq!(next.joint_velocity(), split.joint_velocity());
+        assert_eq!(state, split.journal_bearings().next().unwrap());
+        close(
+            audit.viscous_heat_j,
+            first.viscous_heat_j + second.viscous_heat_j,
+        );
+        final_rates.push(next.joint_velocity()[0]);
+    }
+    assert!(final_rates[1] < final_rates[0]);
+}
+
+#[test]
+fn g1_each_cylinder_uses_its_own_temperature_and_shorter_expanded_overlap() {
+    let solid = card(10., 0.02, 500.);
+    let heat = caloric(&solid, 1e5, SolidLiquidPhase::Solid);
+    let reference = mechanism(&solid, false);
+    let oil = lubricant([1., 1.], 500.);
+    let old = moving_with_heat(&reference, &solid, &heat, vec![3.], 0.0625, &[20., 0.], 10.)
+        .with_expanding_journal_bearings(vec![expanding_bearing(&oil)], || Ok(()))
+        .unwrap();
+    let original_resistance = old.journal_bearings().next().unwrap().resistance_nm_s;
+    let (next, audit) = old.advance_to(0.5, config(), || Ok(())).unwrap();
+    let inner = 1. + 0.02 * (next.thermal().temperature_k(CellId(1)).unwrap() - 300.);
+    let outer = 1. + 0.02 * (next.thermal().temperature_k(CellId(0)).unwrap() - 300.);
+    assert!(outer > inner);
+    let state = next.journal_bearings().next().unwrap();
+    close(state.geometry.inner_radius_m, 0.1 * inner);
+    close(state.geometry.outer_radius_m, 0.11 * outer);
+    close(state.geometry.length_m, 0.2 * inner);
+    close(state.resistance_nm_s, resistance(state.geometry, 1.));
+    assert!(state.resistance_nm_s < original_resistance);
+    close(audit.combined_residual_j, 0.);
+}
+
+#[test]
+fn g4_closed_gap_geometry_budget_and_late_cancellation_preserve_all_accepted_state() {
+    let solid = card(10., 0.2, 500.);
+    let heat = caloric(&solid, 1e5, SolidLiquidPhase::Solid);
+    let reference = mechanism(&solid, false);
+    let oil = lubricant([1., 1.], 500.);
+    let moving = moving_with_heat(
+        &reference,
+        &solid,
+        &heat,
+        vec![3.],
+        0.0625,
+        &[0., 400.],
+        10.,
+    );
+    let old = moving
+        .with_expanding_journal_bearings(vec![expanding_bearing(&oil)], || Ok(()))
+        .unwrap();
+    let snapshot = old.journal_bearings().next().unwrap().clone();
+    assert!(matches!(
+        old.advance_to(0.0625, config(), || Ok(())),
+        Err(Error::Invalid(
+            "journal needs positive dimensions and an open radial gap"
+        ))
+    ));
+    assert_eq!(old.thermal().time_s(), 0.);
+    assert_eq!(old.joint_position(), &[0.]);
+    assert_eq!(old.joint_velocity(), &[3.]);
+    assert_eq!(old.journal_bearings().next().unwrap(), &snapshot);
+
+    let moving = moving_with_heat(&reference, &solid, &heat, vec![3.], 0.0625, &[0., 1.], 10.);
+    let mut bounded = expanding_bearing(&oil);
+    bounded.expansion.maximum_relative_geometry_factor_change = 1e-9;
+    let bounded = moving
+        .with_expanding_journal_bearings(vec![bounded], || Ok(()))
+        .unwrap();
+    assert!(matches!(
+        bounded.advance_to(0.0625, config(), || Ok(())),
+        Err(Error::Budget(
+            "journal clearance change requires a smaller thermal substep"
+        ))
+    ));
+    assert_eq!(bounded.thermal().time_s(), 0.);
+    let old = moving
+        .with_expanding_journal_bearings(vec![expanding_bearing(&oil)], || Ok(()))
+        .unwrap();
+    let snapshot = old.journal_bearings().next().unwrap().clone();
+    let mut calls = 0;
+    old.advance_to(0.125, config(), || {
+        calls += 1;
+        Ok(())
+    })
+    .unwrap();
+    let mut count = 0;
+    assert!(
+        old.advance_to(0.125, config(), || {
+            count += 1;
+            if count == calls - 1 {
+                Err(DepositionError::Cancelled)
+            } else {
+                Ok(())
+            }
+        })
+        .is_err()
+    );
+    assert_eq!(old.journal_bearings().next().unwrap(), &snapshot);
+    assert_eq!(old.thermal().time_s(), 0.);
+    assert_eq!(old.joint_velocity(), &[3.]);
+
+    let mut missing = expanding_bearing(&oil);
+    missing.expansion.outer_region = "not-the-parent-material".into();
+    assert!(
+        moving
+            .with_expanding_journal_bearings(vec![missing], || Ok(()))
+            .is_err()
+    );
+    let mut invalid = expanding_bearing(&oil);
+    invalid.expansion.maximum_relative_geometry_factor_change = f64::NAN;
+    assert!(
+        moving
+            .with_expanding_journal_bearings(vec![invalid], || Ok(()))
+            .is_err()
+    );
 }
