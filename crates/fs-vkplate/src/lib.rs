@@ -3167,8 +3167,10 @@ impl Body {
 }
 
 // --------------------------------------------------------------------- decimation
+const DECIMATION_RADIUS_FRAMES: usize = 16;
+
 fn decimation_kernel(factor: usize) -> Vec<f64> {
-    let taps = 32 * factor + 1;
+    let taps = 2 * DECIMATION_RADIUS_FRAMES * factor + 1;
     let fc = 0.46 / factor as f64; // cycles per input sample: 0.92 x output Nyquist
     let mid = (taps / 2) as f64;
     (0..taps)
@@ -3209,13 +3211,24 @@ impl StreamingDecimator {
 
 /// Windowed-sinc low-pass then keep every `factor`-th sample.
 pub fn decimate(x: &[f64], factor: usize) -> Vec<f64> {
-    if factor == 1 { return x.to_vec(); }
+    decimate_from(x, factor, 0)
+}
+
+/// Filter the complete trajectory, emitting samples starting at `start`.
+/// Earlier samples remain available to the FIR instead of being replaced by
+/// silence when removing settling time. Output phase is relative to `start`;
+/// the frame count is `(x.len() - start) / factor`, as for decimating the crop.
+/// A start at or beyond the end returns no frames. `factor` must be positive.
+pub fn decimate_from(x: &[f64], factor: usize, start: usize) -> Vec<f64> {
+    assert!(factor > 0, "decimation factor must be positive");
+    if start >= x.len() { return Vec::new(); }
+    if factor == 1 { return x[start..].to_vec(); }
     let h = decimation_kernel(factor);
     let taps = h.len();
     let half = taps / 2;
-    (0..x.len() / factor)
+    (0..(x.len() - start) / factor)
         .map(|o| {
-            let c = o * factor;
+            let c = start + o * factor;
             let mut acc = 0.0;
             for (j, hj) in h.iter().enumerate() {
                 let idx = c as i64 + j as i64 - half as i64;
@@ -3226,6 +3239,58 @@ pub fn decimate(x: &[f64], factor: usize) -> Vec<f64> {
             acc
         })
         .collect()
+}
+
+#[cfg(test)]
+mod settling_decimation_tests {
+    use super::*;
+
+    #[test]
+    fn settled_constant_does_not_acquire_a_startup_transient() {
+        for factor in [2, 3, 4, 6, 8] {
+            let input = vec![1.0; 100 * factor];
+            let output = decimate_from(&input, factor, 32 * factor);
+            let dc = decimation_kernel(factor).iter().sum::<f64>();
+            assert_eq!(output[0].to_bits(), dc.to_bits());
+            assert!((decimate(&input[32 * factor..], factor)[0] - dc).abs() > 0.2);
+        }
+    }
+
+    #[test]
+    fn crop_preserves_continuous_filter_history_phase_and_frame_count() {
+        for factor in [2, 3, 4, 6, 8] {
+            let input: Vec<_> = (0..200 * factor + 1)
+                .map(|i| (0.17 * i as f64).sin() + 0.3 * (0.79 * i as f64).cos())
+                .collect();
+            for start in [0, 1, 5, 32 * factor, 32 * factor + 1] {
+                let output = decimate_from(&input, factor, start);
+                assert_eq!(output.len(), (input.len() - start) / factor);
+                let mut filter = StreamingDecimator::new(factor);
+                let delay = DECIMATION_RADIUS_FRAMES * factor;
+                let mut expected = Vec::new();
+                for i in 0..input.len() + delay {
+                    filter.push(input.get(i).copied().unwrap_or(0.0));
+                    if i >= start + delay && (i - start - delay) % factor == 0
+                        && expected.len() < output.len() {
+                        expected.push(filter.value());
+                    }
+                }
+                assert_eq!(output, expected, "factor {factor}, start {start}");
+            }
+        }
+    }
+
+    #[test]
+    fn identity_and_empty_crops_keep_their_boundaries() {
+        let input = [-0.0, 0.25, -0.5];
+        assert_eq!(decimate_from(&input, 1, 1), input[1..]);
+        assert_eq!(decimate(&input, 1)[0].to_bits(), (-0.0_f64).to_bits());
+        for factor in [1, 2, 6] {
+            assert!(decimate_from(&input, factor, input.len()).is_empty());
+            assert!(decimate_from(&input, factor, usize::MAX).is_empty());
+            assert!(decimate_from(&[], factor, 0).is_empty());
+        }
+    }
 }
 
 /// Float32 WAV bytes, interleaved channels.

@@ -329,7 +329,7 @@ fn render_chunked(name: &str, hits: &[(f64, f64)], secs: f64, o: &Opts) -> Vec<V
         let i1 = if c + 1 < n { (join[c + 1] + h).min(len) } else { len };
         let start = (starts[c] * sr).round() as usize;
         for m in 0..nm {
-            let x = fs_vkplate::decimate(&raw[c][m][skip.min(raw[c][m].len())..], pieces[c].oversample);
+            let x = fs_vkplate::decimate_from(&raw[c][m], pieces[c].oversample, skip);
             for (g, yi) in y[m].iter_mut().enumerate().take(i1).skip(i0) {
                 let mut w = 1.0;
                 if c > 0 && g < join[c] + h {
@@ -367,7 +367,7 @@ fn write_audio(channels: &[Vec<f64>], out: &str) -> f64 {
 }
 
 fn finish(p: &Piece, raw: &[Vec<f64>], skip: usize, out: &str) {
-    let ch: Vec<Vec<f64>> = raw.iter().map(|c| fs_vkplate::decimate(&c[skip.min(c.len())..], p.oversample)).collect();
+    let ch: Vec<Vec<f64>> = raw.iter().map(|c| fs_vkplate::decimate_from(c, p.oversample, skip)).collect();
     let peak = write_audio(&ch, out);
     eprintln!("{out}: peak {peak:.3} Pa");
 }

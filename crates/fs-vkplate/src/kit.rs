@@ -1072,11 +1072,14 @@ pub fn render(p: &mut Piece, seconds: f64, mut progress: impl FnMut(f64)) -> Vec
     let nm = ins.mics.len();
     let total = ((seconds + p.settle) * ins.rate).round() as usize;
     let skip = (p.settle * ins.rate).round() as usize;
-    let mut raw = vec![Vec::with_capacity(total - skip); nm];
+    // Keep the FIR's left support across the settling boundary. No additional
+    // physical steps or output latency are introduced.
+    let retained_from = skip.saturating_sub(DECIMATION_RADIUS_FRAMES * p.oversample);
+    let mut raw = vec![Vec::with_capacity(total - retained_from); nm];
     let mut buf = vec![0.0; nm];
     for s in 0..total {
         ins.step(&mut buf);
-        if s >= skip {
+        if s >= retained_from {
             for (c, v) in raw.iter_mut().zip(&buf) {
                 c.push(*v);
             }
@@ -1085,5 +1088,40 @@ pub fn render(p: &mut Piece, seconds: f64, mut progress: impl FnMut(f64)) -> Vec
             progress(s as f64 / total as f64);
         }
     }
-    raw.iter().map(|c| decimate(c, p.oversample)).collect()
+    raw.iter().map(|c| decimate_from(c, p.oversample, skip - retained_from)).collect()
+}
+
+#[cfg(test)]
+mod settling_render_tests {
+    use super::*;
+
+    #[test]
+    fn output_is_a_crop_of_the_continuously_filtered_physical_trajectory() {
+        let mut p = hihat_scaled(0.002, 0.0, &[(0.0, 2.5)], 8.0).unwrap();
+        // The small test mesh normally needs no oversampling. Refine its
+        // clock before the first step so this test actually exercises the FIR.
+        p.oversample *= 2;
+        p.instrument.rate = OUT_RATE * p.oversample as f64;
+        let skip_frames = 1024;
+        p.settle = skip_frames as f64 / OUT_RATE;
+        let seconds = 512.0 / OUT_RATE;
+        let mut control = p.instrument.clone();
+        let total = ((seconds + p.settle) * control.rate).round() as usize;
+        let mut raw = vec![Vec::new(); control.mics.len()];
+        let mut buf = vec![0.0; raw.len()];
+        for _ in 0..total {
+            control.step(&mut buf);
+            for (channel, value) in raw.iter_mut().zip(&buf) { channel.push(*value); }
+        }
+        let actual = render(&mut p, seconds, |_| {});
+        assert_eq!(p.instrument.step_index, control.step_index);
+        assert!(actual[0][..16].iter().any(|x| x.abs() > 1e-12));
+        for (channel, output) in raw.iter().zip(&actual) {
+            let continuous = decimate(channel, p.oversample);
+            let skip = skip_frames * p.oversample;
+            assert!(channel[skip - 16 * p.oversample..skip].iter().any(|x| x.abs() > 1e-12));
+            assert_ne!(decimate(&channel[skip..], p.oversample), continuous[skip_frames..]);
+            assert_eq!(output, &continuous[skip_frames..]);
+        }
+    }
 }
