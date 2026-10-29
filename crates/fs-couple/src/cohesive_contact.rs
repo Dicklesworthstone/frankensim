@@ -387,3 +387,6 @@ pub mod objective;
 
 /// Residual frictional reclosure retaining completely failed bond history.
 pub mod reclosure;
+
+/// Damaged-area rigid friction during progressive cohesive degradation.
+pub mod frictional_damage;

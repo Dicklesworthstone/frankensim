@@ -11740,3 +11740,30 @@ pinning, actual source exchange, reciprocal work/momentum and late accuracy
 rollback. The five symmetric-wetting and six existing planar/axisymmetric
 native tests also pass. The liquid owner remains a connected planar bridge;
 topology release and a thermal recipient are not inferred.
+
+## Friction while adhesive cohesion is only partially damaged
+
+`cohesive_contact::frictional_damage::DamageFrictionLoadLine` adds an explicit
+damaged-area rigid-Coulomb specialization: surviving bonds retain the original
+cohesive/viscous traction, while damaged area carries independently sourced
+compression-only friction. The original material path analytically integrates
+damage times compression pressure through initiation, reversals and failure.
+It is queried through `trial_over_time_with_damage_weighted_compression`; damage
+is not frozen at an endpoint or advanced a second time.
+
+This declared mixture adds no elastic friction storage. Original compression,
+bond energy, fracture dissipation and physical viscosity keep their existing
+ownership; friction adds a separate nonnegative loss. The full reciprocal
+normal/two-tangent compliance and original cohesive Newton solve remain active
+under one aggregate material-evaluation budget. This is a rigid-friction member
+of a damage/friction model family, not the full elastic-slip Alfano-Sacco law.
+
+`CohesiveModalSystem::enable_frictional_damage` retains original bodies, sources,
+clock and canonical damage history. The final audit uses actual body motion
+and endpoint velocity before joint publication. Partial-damage friction and
+the older full-failure reclosure mode are mutually exclusive. Three material
+and eight core/native tests cover independent quadrature/work, evolving damage,
+intact/open/failed limits, source effects, 5/10/20/40-kHz refinement, kinetic
+occupancy and atomic retry. Nine original reclosure tests also pass. Sources
+and frames remain fixed; global softening uniqueness and intrastep event
+resolution are not asserted by this held-force path.

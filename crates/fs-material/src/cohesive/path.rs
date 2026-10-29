@@ -9,6 +9,8 @@ use super::{
     outward_crossing, positive,
 };
 
+mod friction;
+
 impl<'a> CohesivePoint<'a> {
     /// Return the original endpoint trial and the mean equilibrium traction
     /// `integral_0^1 t(g_old + s * (g_new-g_old)) ds`, in Pa. Its dot product

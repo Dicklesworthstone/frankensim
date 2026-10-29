@@ -31,7 +31,7 @@ impl<'a> CohesiveModalSystem<'a> {
         gate: &CancelGate,
     ) -> Result<(), CohesiveModalError> {
         poll(Some(gate))?;
-        if self.residual.is_some() {
+        if self.residual.is_some() || self.damage_friction.is_some() {
             return Err(invalid("an existing residual interface cannot be replaced").into());
         }
         if !self.point.failed() {
@@ -231,6 +231,7 @@ impl<'a> CohesiveModalSystem<'a> {
             residual_friction_dissipation_j: friction,
             residual_friction_regime: Some(actual.regime),
             residual_friction_work_defect_j: actual.work_residual_j,
+            damage_friction: None,
             cohesive_work_j: finite(area * actual.material.total_work_j_m2())?,
             energy_residual_j: residual,
             energy_tolerance_j: tolerance,
