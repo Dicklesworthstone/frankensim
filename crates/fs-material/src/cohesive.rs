@@ -97,6 +97,9 @@ impl BilinearCohesive {
     pub fn strength_pa(&self) -> f64 { self.strength }
     #[must_use]
     pub fn fracture_energy_j_m2(&self) -> f64 { self.fracture_energy }
+    /// Original undamaged compression penalty, retained after complete failure.
+    #[must_use]
+    pub fn compression_stiffness_pa_m(&self) -> f64 { self.compression_stiffness }
     /// Magnitude of the pure-opening negative softening tangent, Pa/m.
     /// For a mixed-mode law this is not a bound on every coupled tangent.
     #[must_use]

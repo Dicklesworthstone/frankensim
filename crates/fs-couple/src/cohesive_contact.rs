@@ -384,3 +384,6 @@ pub mod patch;
 
 /// Objective cohesive transport and exact finite-rotation work ports.
 pub mod objective;
+
+/// Residual frictional reclosure retaining completely failed bond history.
+pub mod reclosure;

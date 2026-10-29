@@ -11094,3 +11094,32 @@ occupied kinetic continuation, a zero-net-slip reversal, timestep refinement
 and atomic retry. This adapter retains the straight-path constitutive model;
 it does not resolve intrastep stick/slip events, evolving contact frames,
 partial-slip elasticity, JKR peeling, heat destination or bond healing.
+
+## Frictional reclosure of completely failed cohesive interfaces
+
+`cohesive_contact::reclosure` continues the original fully failed material
+point with its undamaged compression penalty and separately sourced residual
+static/kinetic Coulomb coefficients. Ordered interface identity, original law
+and irreversible fracture history remain attached. A wholly open path carries
+no friction, and reclosure does not restore cohesion.
+
+All entries of the reciprocal positive-definite 3-by-3 compliance enter the
+normal/two-tangent solve. Exact straight-path mean compression supplies both
+normal work and residual friction capacity. A conservative sufficient feedback
+screen rejects configurations whose scalar sliding monotonicity has not been
+established. Fixed-size arrays and bounded continuation avoid runtime allocation;
+floating-point residuals do not claim interval or global uniqueness proofs.
+
+The existing `CohesiveModalSystem::enable_frictional_reclosure` performs an
+in-place source-checked handoff after complete failure. Original bodies, source,
+sample clock and prior observation survive. The native owner reevaluates the
+original material at actual staged motion and publishes jointly after force,
+work, total-energy, material and cancellation checks. It keeps residual friction
+loss separate from fracture dissipation and uses actual endpoint velocity to
+retain kinetic occupancy when zero net slip conceals a moving endpoint.
+
+Nine focused original-source tests cover full coupling, manufactured work,
+entry/exit, tangent rotation, source/history checks, actual rupture-to-reclosure
+handoff, velocity occupancy and atomic retry. Partial-damage friction, rebonding,
+evolving sources, evolving frames, heat recipients and exact stopping events
+remain outside this owner; a full Cargo/workspace check is separate.

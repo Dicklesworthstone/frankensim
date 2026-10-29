@@ -27,6 +27,9 @@ use fs_material::state_point::MaterialStatePointError;
 /// A finite bonded interface with coupled opening, shear and progressive peeling.
 pub mod patch;
 
+/// In-place residual friction after the original source bond has fully failed.
+pub mod reclosure;
+
 /// Bounded constitutive solve plus the independent actual-body force gate.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CohesiveModalConfig {
@@ -46,6 +49,7 @@ pub enum CohesiveModalError {
     Contact(CohesiveContactError),
     Material(CohesiveError),
     Source(MaterialStatePointError),
+    Reclosure(crate::cohesive_contact::reclosure::ReclosureError),
     JumpMismatch {
         component: usize,
         residual_m: f64,
@@ -69,6 +73,7 @@ impl std::error::Error for CohesiveModalError {
             Self::Contact(e) => Some(e),
             Self::Material(e) => Some(e),
             Self::Source(e) => Some(e),
+            Self::Reclosure(e) => Some(e),
             _ => None,
         }
     }
@@ -93,6 +98,11 @@ impl From<MaterialStatePointError> for CohesiveModalError {
         Self::Source(error)
     }
 }
+impl From<crate::cohesive_contact::reclosure::ReclosureError> for CohesiveModalError {
+    fn from(error: crate::cohesive_contact::reclosure::ReclosureError) -> Self {
+        Self::Reclosure(error)
+    }
+}
 
 /// Last accepted complete mechanical and cohesive work account.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -111,13 +121,19 @@ pub struct CohesiveModalFrame {
     pub fracture_dissipation_j: f64,
     /// Separately integrated physical surviving-bond dashpot loss [J].
     pub viscous_dissipation_j: f64,
-    /// Actual constitutive path work on all three local jump components [J].
+    /// Separately sourced residual sliding after complete failure; no heat
+    /// destination is inferred. Zero before an explicit residual handoff.
+    pub residual_friction_dissipation_j: f64,
+    pub residual_friction_regime: Option<crate::cohesive_contact::reclosure::ReclosureRegime>,
+    pub residual_friction_work_defect_j: f64,
+    /// Original bond/compression path work on all local jump components [J].
     pub cohesive_work_j: f64,
     pub energy_residual_j: f64,
     pub energy_tolerance_j: f64,
     /// Held force actually applied through the complete work columns [N].
     pub mean_force_n: [f64; 3],
-    /// Timed endpoint traction, distinct from the force driving the bodies [Pa].
+    /// Original bond/compression endpoint traction, distinct from the held
+    /// total force driving bodies. Residual friction is reported separately.
     pub endpoint_traction_pa: [f64; 3],
     pub jump_m: [f64; 3],
     pub damage: f64,
@@ -144,6 +160,7 @@ pub struct CohesiveModalSystem<'a> {
     config: CohesiveModalConfig,
     forces: Vec<f64>,
     last: Option<CohesiveModalFrame>,
+    residual: Option<reclosure::ReclosureBinding<'a>>,
 }
 
 impl<'a> CohesiveModalSystem<'a> {
@@ -196,6 +213,7 @@ impl<'a> CohesiveModalSystem<'a> {
             load_line,
             config,
             last: None,
+            residual: None,
         };
         limit(
             "total initial energy including cohesive bond",
@@ -307,6 +325,9 @@ impl<'a> CohesiveModalSystem<'a> {
         prescribed_rate: [f64; 3],
         gate: Option<&CancelGate>,
     ) -> Result<&CohesiveModalFrame, CohesiveModalError> {
+        if self.residual.is_some() {
+            return self.step_reclosure(external, prescribed_rate, gate);
+        }
         poll(gate)?;
         let before = self.total_energy_j()?;
         let old = self.point.jump_m();
@@ -428,6 +449,9 @@ impl<'a> CohesiveModalSystem<'a> {
             network_dissipation_j: network_loss,
             fracture_dissipation_j: fracture,
             viscous_dissipation_j: viscous,
+            residual_friction_dissipation_j: 0.0,
+            residual_friction_regime: None,
+            residual_friction_work_defect_j: 0.0,
             cohesive_work_j: finite(area * actual.total_work_j_m2())?,
             energy_residual_j: residual,
             energy_tolerance_j: tolerance,
