@@ -18,6 +18,9 @@
 /// Finite-mass normal motion with original contact work and explicit damping.
 #[path = "dmt/dynamics.rs"]
 pub mod dynamics;
+/// Simultaneous normal adhesion and sourced two-dimensional junction friction.
+#[path = "dmt/coupled.rs"]
+pub mod coupled;
 #[path = "dmt/energy.rs"]
 mod energy;
 /// Stable loading-machine branches and finite-range snap events.

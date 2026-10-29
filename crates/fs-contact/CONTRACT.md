@@ -1047,3 +1047,28 @@ staged-motion audit. Numerical estimates and a positive local slope do not
 certify global uniqueness, interval accuracy or physical trajectory accuracy.
 The liquid model remains quasistatic; no rupture, topology release, heat or
 liquid inertia is inferred.
+
+## Coupled sourced DMT adhesion and real-area junction shear
+
+`normal_patch::dmt::coupled::DmtCoupledLoadLine` solves normal adhesion and
+both tangential reactions against the complete reciprocal positive-definite
+3-by-3 held-force compliance. The original sourced DMT potential supplies
+normal work. An analytic integral of actual contact area along the same
+straight normal path supplies the original source-bound static and kinetic
+junction capacities. Attraction across a gap supplies no fictitious shear
+area or pressure-derived Coulomb force.
+
+Static Schur elimination and bounded sliding Newton continuation retain all
+cross-axis compliance entries. Analytic derivatives, preallocated fixed-size
+LU workspaces and a sufficient mechanical monotonicity screen support
+allocation-free runtime trials. Source identity, physical range, work,
+iteration, evaluation and cancellation gates apply before an accepted state
+can be returned. Native receiving mechanics can audit the original law at
+actual motion and reconcile occupancy with authenticated endpoint velocity.
+A moving endpoint does not regain the larger static capacity merely because
+the sample has zero net slip.
+
+This is a constant-junction-strength, straight-coordinate-path DMT model.
+Work closure is not proof of physical trajectory accuracy or event-resolved
+stopping. Mixed-mode JKR peeling, partial-slip elastic storage, evolving frames,
+plasticity, wear, heat destination and bond healing remain outside this owner.
