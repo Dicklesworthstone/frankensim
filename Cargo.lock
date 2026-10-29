@@ -956,7 +956,9 @@ dependencies = [
  "fs-couple",
  "fs-evidence",
  "fs-exec",
+ "fs-gas",
  "fs-ivl",
+ "fs-la",
  "fs-ladder",
  "fs-matdb",
  "fs-material",
@@ -968,6 +970,7 @@ dependencies = [
  "fs-solver",
  "fs-sparse",
  "fs-thermal",
+ "fs-thermochem",
 ]
 
 [[package]]
