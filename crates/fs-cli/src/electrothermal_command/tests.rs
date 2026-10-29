@@ -5,13 +5,24 @@ use super::*;
 use fs_blake3::hash_bytes;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
-    ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedPack, PropertyClaim,
-    PropertyKey, PropertyValue, Provenance, UncertaintyModel,
+    ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedPack, ObservationDataset,
+    PropertyClaim, PropertyKey, PropertyValue, Provenance, UncertaintyModel,
 };
 use fs_material::conductor::{ELECTRICAL_RESISTIVITY_DIMS, ELECTRICAL_RESISTIVITY_PROPERTY};
 use fs_material::state_point::{THERMAL_CONDUCTIVITY_DIMS, THERMAL_CONDUCTIVITY_PROPERTY};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Registers the one raw observation a compiled pack must retain. For these
+/// fixtures it is the authored analytic law itself, not a measurement.
+pub(super) fn authored_observation(claims: &mut ClaimSet, source: &str) {
+    claims.register_observation(ObservationDataset {
+        specimen: "authored synthetic fixture".into(), method: "analytic law, authored for tests".into(),
+        artifact: hash_bytes(source.as_bytes()), caveats: "not measured; test data only".into(),
+        provenance: Provenance { source: source.into(), license: "CC0: authored synthetic test data".into(),
+            artifact: None },
+    }).unwrap();
+}
 
 fn material_bytes(rho: f64, k: f64, a: f64, b: f64, maximum_k: f64) -> Vec<u8> {
     let mut claims = ClaimSet::new();
@@ -37,6 +48,7 @@ fn material_bytes(rho: f64, k: f64, a: f64, b: f64, maximum_k: f64) -> Vec<u8> {
             },
         }).unwrap();
     }
+    authored_observation(&mut claims, "authored analytic resistor-network fixture, not measured metal");
     let pack = NormalizedPack::new(
         "synthetic-electrothermal-fixture", "test-fixture-v1", hash_bytes(b"synthetic analytic data"),
         "CC0: authored synthetic test data", claims, Vec::new(), Vec::new(),

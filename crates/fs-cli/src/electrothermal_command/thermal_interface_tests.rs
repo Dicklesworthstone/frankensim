@@ -52,7 +52,8 @@ fn provenance() -> Provenance {
     Provenance { source: "synthetic analytic thermal-joint fixture, not measured material".into(),
         license: "CC0: authored test data".into(), artifact: None }
 }
-fn pack(name: &str, claims: ClaimSet) -> NormalizedPack {
+fn pack(name: &str, mut claims: ClaimSet) -> NormalizedPack {
+    super::tests::authored_observation(&mut claims, "synthetic analytic thermal-joint fixture, not measured material");
     NormalizedPack::new(name, "thermal-joint-test-v1", hash_bytes(b"synthetic fixture"),
         "CC0: authored test data", claims, Vec::new(), Vec::new()).unwrap()
 }

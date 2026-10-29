@@ -669,7 +669,8 @@ mod tests {
         assert_eq!(rows[0].classification(), "same");
         assert_eq!(rows[0].delta, Some(0.0));
         assert_eq!(rows[0].rel_delta, Some(0.0));
-        assert!(diff_qoi(&receipt(&qoi("q", "1e999", "W")), &receipt(&qoi("q", "1", "W"))).is_err());
+        // A non-finite spelling never reaches the diff: the receipt reader refuses it.
+        assert!(JsonValue::parse(&format!("{{\"qoi\":[{}],\"requirements\":[]}}", qoi("q", "1e999", "W"))).is_err());
     }
 
     #[test]

@@ -51,6 +51,7 @@ fn material(eps: f64, slope: f64, maximum_surface: f64) -> Vec<u8> {
                 license: "CC0: authored test data".into(), artifact: None },
         }).unwrap();
     }
+    super::tests::authored_observation(&mut claims, "authored synthetic radiation fixture");
     let pack = NormalizedPack::new("radiation-fixture", "test-v1", hash_bytes(b"authored radiation fixture"),
         "CC0: authored test data", claims, Vec::new(), Vec::new()).unwrap();
     NormalizedMaterialCardPack::new(MaterialStateId { chemistry: "synthetic radiating conductor".into(),

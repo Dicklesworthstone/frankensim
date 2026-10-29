@@ -40,6 +40,7 @@ fn pack(density: f64, nonlinear: bool, include_capacity: bool) -> Vec<u8> {
             },
         }).unwrap();
     }
+    super::tests::authored_observation(&mut claims, "authored transient resistor-network fixture");
     let claims = NormalizedPack::new("synthetic-transient", "test-v1", hash_bytes(b"authored thermal storage"),
         "CC0: authored test data", claims, Vec::new(), Vec::new()).unwrap();
     NormalizedMaterialCardPack::new(MaterialStateId {

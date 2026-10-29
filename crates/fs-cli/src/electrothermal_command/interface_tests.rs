@@ -52,7 +52,8 @@ fn provenance() -> Provenance {
         license: "CC0: synthetic test data".into(), artifact: None }
 }
 
-fn pack(claims: ClaimSet, name: &str) -> NormalizedPack {
+fn pack(mut claims: ClaimSet, name: &str) -> NormalizedPack {
+    super::tests::authored_observation(&mut claims, "authored analytic contact fixture, not measurements");
     NormalizedPack::new(name, "contact-test-v1", hash_bytes(b"authored contact fixture"),
         "CC0: synthetic test data", claims, Vec::new(), Vec::new()).unwrap()
 }

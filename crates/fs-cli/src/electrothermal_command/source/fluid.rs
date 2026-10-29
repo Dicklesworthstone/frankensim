@@ -164,6 +164,7 @@ mod tests {
                     license: "test-only".into(), artifact: None },
             }).unwrap();
         }
+        crate::electrothermal_command::tests::authored_observation(&mut claims, "synthetic conducting fluid");
         let pack = NormalizedPack::new("fluid-fixture", "test-v1", hash_bytes(b"synthetic fluid"),
             "test-only", claims, vec![], vec![]).unwrap();
         let pack = NormalizedMaterialCardPack::new(MaterialStateId {

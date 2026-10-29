@@ -13,6 +13,24 @@ use std::process::Command;
 #[path = "cooling_cht/sgs.rs"]
 mod sgs;
 
+/// Registers the one raw observation a compiled pack must retain. For these
+/// fixtures it is the authored synthetic law itself, not a measurement.
+fn authored_observation(claims: &mut fs_matdb::ClaimSet, source: &str) {
+    claims
+        .register_observation(fs_matdb::ObservationDataset {
+            specimen: "authored synthetic fixture".into(),
+            method: "analytic law, authored for tests".into(),
+            artifact: fs_blake3::hash_bytes(source.as_bytes()),
+            caveats: "not measured; test data only".into(),
+            provenance: fs_matdb::Provenance {
+                source: source.into(),
+                license: "CC0 synthetic data".into(),
+                artifact: None,
+            },
+        })
+        .unwrap();
+}
+
 fn scratch(name: &str, scene: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("fs-cooling-cht-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -106,6 +124,13 @@ fn thermal_pack_with_frequency(k: f64, cp: f64, frequency: bool) -> Vec<u8> {
         DENSITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_DIMS, SPECIFIC_HEAT_CAPACITY_PROPERTY,
         THERMAL_CONDUCTIVITY_DIMS, THERMAL_CONDUCTIVITY_PROPERTY,
     };
+    use fs_qty::semantic::{FrequencyConvention, QuantityKind, SemanticType, ValueForm};
+    // Typed as the scene types its `f` coordinate, so the query reaches the
+    // static-coefficient refusal instead of an axis-meaning mismatch.
+    let cyclic_frequency = fs_qty::QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::Frequency(FrequencyConvention::Cyclic),
+        ValueForm::Static,
+    ));
     let mut claims = ClaimSet::new();
     for (name, dims, value) in [
         (DENSITY_PROPERTY, fs_qty::Density::DIMS, 2.0),
@@ -118,7 +143,7 @@ fn thermal_pack_with_frequency(k: f64, cp: f64, frequency: bool) -> Vec<u8> {
     ] {
         let validity = ValidityDomain::unconstrained().with("T", 290.0, 350.0);
         let validity = if frequency {
-            validity.with("f", 1.0, 100.0)
+            validity.with_quantity("f", cyclic_frequency, 1.0, 100.0)
         } else {
             validity
         };
@@ -138,6 +163,7 @@ fn thermal_pack_with_frequency(k: f64, cp: f64, frequency: bool) -> Vec<u8> {
             })
             .unwrap();
     }
+    authored_observation(&mut claims, "authored CHT thermal fixture");
     let pack = NormalizedPack::new(
         "cht-thermal-fixture",
         "v1",
@@ -355,6 +381,7 @@ mod evolving_materials {
                     license: "CC0 synthetic data".into(), artifact: None },
             }).unwrap();
         }
+        authored_observation(&mut claims, "synthetic coupled CHT source law, not measurements");
         let pack = NormalizedPack::new("evolving-cht-fixture", "v1",
             fs_blake3::hash_bytes(b"synthetic coupled CHT source law"), "CC0 synthetic data",
             claims, vec![], vec![]).unwrap();

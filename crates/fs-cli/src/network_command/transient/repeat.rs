@@ -425,7 +425,10 @@ mod enthalpy_policy_tests {
         let policy=Config::parse_for_storage(&fixed,4,false,true).unwrap().enthalpy_policy().unwrap();
         assert_eq!(policy.cycles,3);
         assert!(policy.periodic.is_none());
-        let controlled=J::parse(r#"{"cycles":3,"max_total_steps":12,"fan_controller":{}}"#).unwrap();
-        assert!(Config::parse_for_storage(&controlled,4,false,true).unwrap_err().message.contains("does not admit repeat.fan_controller"));
+        // Enthalpy storage admits the hysteretic fan controller; an incomplete one still refuses.
+        let empty=J::parse(r#"{"cycles":3,"max_total_steps":12,"fan_controller":{}}"#).unwrap();
+        assert!(Config::parse_for_storage(&empty,4,false,true).is_err());
+        let controlled=J::parse(r#"{"cycles":3,"max_total_steps":12,"fan_controller":{"sensor_vertex":0,"low_temperature_k":300,"high_temperature_k":310,"low_speed_multiplier":0.5,"high_speed_multiplier":1.5,"initial_speed_multiplier":1}}"#).unwrap();
+        assert!(Config::parse_for_storage(&controlled,4,false,true).unwrap().controller.is_some());
     }
 }
