@@ -178,6 +178,16 @@ fn joint_mouth_reaction_reaches_the_source_and_one_shared_physical_microphone() 
     let joint = base().with_mutual_mouth_reaction(&gate).unwrap();
     let load = joint.voice().dg().unwrap().load();
     let record = load.radiation_record().unwrap();
+    // The selected fit is passive either unchanged or after an M2.5-W3b residue
+    // repair inside a tenth of the allowance (order 4 alone, at origin
+    // f9d059919, was -0.31 at 332 Hz against a data scale of 1.2e8).
+    let report = record.report();
+    let allowance = record.options().maximum_relative_error;
+    let selected = report.rungs.iter().find(|r| r.order == report.selected_order).unwrap();
+    assert!(selected.repair_relative_change.map_or(selected.continuous_passive,
+        |change| !selected.continuous_passive && change <= 0.1 * allowance), "{selected:?}");
+    assert!(report.continuous.passive && report.sampled.passive);
+    assert!(report.maximum_fit_relative_error <= allowance);
     assert_eq!(record.driven_mouth().unwrap().center_m, mouth.center_m);
     assert_eq!(record.driven_mouth().unwrap().size_m, [0.002, 0.001]);
     assert_eq!(record.gas_record().state(), original.voice().dg().unwrap().load()

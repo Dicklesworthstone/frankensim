@@ -8,7 +8,11 @@
 //! both continuous and actual interval-mean ZOH passivity admission. These
 //! sampled errors do not certify unsampled frequencies, closed-loop accuracy,
 //! discrete stored energy, or the complete M2.5-W3b instrument qualification.
-//! No passivity repair, clipping, added damping or global gain is applied.
+//! A fit that is not continuously passive gets the M2.5-W3b residue repair
+//! (poles, D and E fixed). Its in-band change must stay within a tenth of the
+//! error allowance, and the repaired fit passes the same error and passivity
+//! gates. An order that passes unchanged is still preferred to any repaired
+//! order. No clipping, added damping or global gain is applied.
 
 /// Mixed rectangular and circular flow sources through the same fitting owner.
 pub mod mixed;
@@ -25,7 +29,9 @@ use fs_material::gas::GasState;
 use fs_math::{c64::C64, det};
 use fs_vfit::{FitOptions, PoleTerm, WeightPreset};
 use fs_vfit::causality::{CausalityError, CausalityOptions, check_mimo_causality};
-use fs_vfit::mimo::{MimoModel, MimoPassivityReport, check_mimo_passivity, mimo_vector_fit};
+use fs_vfit::mimo::{
+    MimoModel, MimoPassivityReport, check_mimo_passivity, mimo_vector_fit, repair_mimo_passivity,
+};
 
 /// Maximum circular openings admitted by this bounded dense cold-build route.
 pub const MAX_BAFFLED_MIMO_PORTS: usize = 8;
@@ -64,16 +70,21 @@ pub struct BaffledMimoBakeRung {
     pub held_out_relative_error: Option<f64>,
     /// True only if the continuous owner admitted this unchanged fit.
     pub continuous_passive: bool,
+    /// Largest in-band matrix-relative change of an applied residue repair.
+    /// The errors above and the sampled result are then the repaired fit's.
+    pub repair_relative_change: Option<f64>,
     /// True only if the actual interval-mean sampled owner admitted this fit.
     pub sampled_passive: bool,
     /// Original fit, error, discretization or passivity refusal, if any.
     pub refusal: Option<String>,
 }
 
-/// Numerical diagnostics of the selected unchanged physical-source fit.
+/// Numerical diagnostics of the selected physical-source fit (repaired only
+/// when its rung records a residue repair).
 #[derive(Clone, Debug)]
 pub struct BaffledMimoBakeReport {
-    /// Smallest requested order passing every gate, after inspecting all three.
+    /// Smallest requested order passing every gate unchanged, after inspecting
+    /// all three; only if none does, the smallest passing after residue repair.
     pub selected_order: usize,
     /// Number of original physical training samples.
     pub frequency_samples: usize,
@@ -85,7 +96,7 @@ pub struct BaffledMimoBakeReport {
     pub maximum_held_out_relative_error: f64,
     /// Worst dispersion-relation miss divided by its declared error bound.
     pub maximum_causality_ratio: f64,
-    /// Original continuous passivity result; its actual certificate class is retained.
+    /// Selected model's continuous passivity result; its certificate class is retained.
     pub continuous: MimoPassivityReport,
     /// Actual mean-output ZOH grid result; this remains `GridOnly`.
     pub sampled: MimoPassivityReport,
@@ -111,7 +122,7 @@ pub enum BaffledMimoBakeError {
         source: HelmholtzError },
     /// Original source-data causality consistency test refused.
     Causality(CausalityError),
-    /// None of the bounded three orders passed unchanged.
+    /// None of the bounded three orders passed, with or without residue repair.
     NoConvergedFit { /// Original diagnostics in requested order.
         rungs: Vec<BaffledMimoBakeRung> },
     /// Cancellation before publishing an admitted result.
@@ -219,13 +230,13 @@ fn fit_source(
         &vec![0.0; n * n], &options.causality).map_err(BaffledMimoBakeError::Causality)?;
     let maximum_causality_ratio = causality.iter().map(|r| r.worst_ratio).fold(0.0, f64::max);
     let mut rungs = Vec::with_capacity(3);
-    let mut selected = None;
+    let (mut selected, mut repaired) = (None, None);
     let band = (core::f64::consts::TAU * band_hz[0], core::f64::consts::TAU * band_hz[1]);
     for order in options.orders {
         poll(gate)?;
         let mut rung = BaffledMimoBakeRung { order,
-            fit_relative_error: None, held_out_relative_error: None,
-            continuous_passive: false, sampled_passive: false, refusal: None };
+            fit_relative_error: None, held_out_relative_error: None, continuous_passive: false,
+            repair_relative_change: None, sampled_passive: false, refusal: None };
         let result = (|| -> Result<_, String> {
             let fit = FitOptions { order, iterations: options.fit_iterations,
                 weights: WeightPreset::InverseMagnitude, fit_d: true, fit_e: false };
@@ -241,9 +252,31 @@ fn fit_source(
             if training_error > options.maximum_relative_error || held_error > options.maximum_relative_error {
                 return Err("unchanged fit exceeds training or withheld matrix error allowance".into());
             }
-            let continuous = check_mimo_passivity(&model, band).map_err(|e| e.to_string())?;
+            let mut continuous = check_mimo_passivity(&model, band).map_err(|e| e.to_string())?;
             rung.continuous_passive = continuous.passive;
-            if !continuous.passive { return Err("unchanged continuous fit is not passive".into()); }
+            let (model, training_error, held_error) = if continuous.passive {
+                (model, training_error, held_error)
+            } else {
+                // M2.5-W3b residue repair, counted in the operator-error budget.
+                let (repaired, repair) = repair_mimo_passivity(&model, band).map_err(|e|
+                    format!("unchanged continuous fit is not passive and its residue repair refused: {e}"))?;
+                rung.repair_relative_change = Some(repair.max_relative_change);
+                if !finite_model(&repaired)
+                    || !(repair.max_relative_change <= 0.1 * options.maximum_relative_error)
+                {
+                    return Err("residue repair exceeds a tenth of the matrix error allowance".into());
+                }
+                let training_error = relative_error(&repaired, &train_omega, &training)?;
+                let held_error = relative_error(&repaired, &held_omega, &held_out)?;
+                rung.fit_relative_error = Some(training_error);
+                rung.held_out_relative_error = Some(held_error);
+                if training_error > options.maximum_relative_error || held_error > options.maximum_relative_error {
+                    return Err("repaired fit exceeds training or withheld matrix error allowance".into());
+                }
+                continuous = check_mimo_passivity(&repaired, band).map_err(|e| e.to_string())?;
+                if !continuous.passive { return Err("repaired continuous fit is not passive".into()); }
+                (repaired, training_error, held_error)
+            };
             let sampled = model.zoh(1.0 / f64::from(mechanics_rate_hz))
                 .map_err(|e| e.to_string())?.mean_sampled_passivity(limits.sampled_passivity_points);
             rung.sampled_passive = sampled.passive;
@@ -252,14 +285,15 @@ fn fit_source(
         })();
         poll(gate)?;
         match result {
-            Ok(candidate) if selected.is_none() => selected = Some(candidate),
-            Ok(_) => {},
+            Ok(candidate) if rung.repair_relative_change.is_none() => { selected.get_or_insert(candidate); }
+            Ok(candidate) => { repaired.get_or_insert(candidate); }
             Err(reason) => rung.refusal = Some(reason),
         }
         rungs.push(rung);
     }
+    // An order that passes unchanged is preferred to any repaired order.
     let Some((impedance, continuous, sampled, maximum_fit_relative_error,
-        maximum_held_out_relative_error)) = selected else {
+        maximum_held_out_relative_error)) = selected.or(repaired) else {
         return Err(BaffledMimoBakeError::NoConvergedFit { rungs });
     };
     let report = BaffledMimoBakeReport { selected_order: impedance.order(),
