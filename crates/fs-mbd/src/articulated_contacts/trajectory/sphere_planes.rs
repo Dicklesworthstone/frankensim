@@ -8,6 +8,9 @@
 //! articulated owners. This is floating analytic sphere/plane geometry, not an
 //! interval CCD certificate or a sustained-contact integrator.
 
+/// Automatic inelastic landing and sustained support with native articulated recoil.
+pub mod support;
+
 use super::{
     ArticulatedTrajectoryConfig, ArticulatedTrajectoryError, ArticulatedTrajectoryEventResult,
     ArticulatedTrajectoryResult, ArticulatedTrajectorySystem, Impulses, admission, finite_vector,

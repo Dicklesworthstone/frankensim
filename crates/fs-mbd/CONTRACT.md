@@ -1520,3 +1520,49 @@ small loss under large translation, and atomic limits/cancellation/retry.
 The existing nine rocket attitude/staging cases remain applicable. These are
 floating numerical balances, not exact arithmetic or a complete hybrid-event,
 material-calibration, interval-enclosure, or whole-workspace qualification.
+
+
+## Automatic sustained spherical articulated support
+
+`articulated_contacts::trajectory::sphere_planes::support::advance_supported_carrier_planes`
+advances the original balanced spherical carrier through automatically discovered
+inelastic landing and sustained support. It reuses the original carrier model
+admission, radial material witnesses, simultaneous circular Coulomb response,
+and native force/contact/Lie-drift step. Internal actuator effort retains base
+recoil; uniform gravity and held link-body torques retain their momentum and
+work accounting.
+
+All nearby planes enter one simultaneous solve. Every declared translating
+plane, including inactive planes, receives the complete real-arithmetic affine
+numerical-model COM-path check plus the actual rounded endpoint check.
+Co-located link origins and COMs make the native zero-load momentum-coordinate
+update affine independently of joint and attitude evolution. The check uses
+the native arithmetic `X0 + R(M*v_body)*(h/M)`. Fractional-time floating
+evaluations have no interval enclosure; observed negative gaps still refuse
+without projection. A crossing trial halves privately; an accepted approach
+within the explicit activation band receives regenerated contact witnesses on
+the next step. Plane positions are supplied at the window start and translate
+once. No configuration, contact arm, or velocity is projected.
+
+The window exposes accumulated original momentum, external impulses,
+actuator/gravity/body-torque impulse work, actuator/gravity displacement work,
+prescribed-support work, contact loss, and native drift defects. Physical gates
+apply both to individual steps and to the complete window. Late numerical,
+geometry, budget, and cancellation failures publish no state. At most 21 planes,
+4096 links, 4096 attempted native steps, and one million plane observations are
+admitted.
+
+This is first-order inelastic support with finite spatial activation resolution.
+Every plane must declare zero restitution; bouncing remains with the original
+event owner. Floating affine-model observations are not interval enclosures or
+exact event-time certificates. General articulated collision discovery,
+arbitrary external link forces, shape-enclosure certification, configuration
+projection, and a complete Moreau--Jean method remain outside this owner.
+Native contact loss includes supported-load splitting loss and does not by
+itself define frictional heat.
+
+Seven focused native cases establish reaction-wheel-driven rolling against
+independent constrained mechanics, sliding-to-rolling impulse balance,
+automatic landing, discovery of an inactive wall during existing support,
+moving-conveyor/elevator work, simultaneous corner support, world-coordinate
+and plane-order consistency, and atomic failure/retry.
