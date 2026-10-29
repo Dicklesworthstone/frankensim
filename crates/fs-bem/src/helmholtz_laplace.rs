@@ -4,6 +4,11 @@
 //! this module introduces no boundary discretization or passivity repair.
 use super::*;
 
+/// Two-sided complex-frequency continuation and analytic wavenumber derivatives
+/// for exterior resonance pencils. Unlike CQ, this explicitly admits Im(k)<0.
+#[path = "helmholtz_complex.rs"]
+pub mod complex;
+
 #[derive(Clone, Copy)]
 pub(crate) struct DampedWaveNumber {
     pub(crate) k: C64,
