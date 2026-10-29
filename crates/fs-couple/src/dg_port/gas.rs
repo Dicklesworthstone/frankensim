@@ -22,6 +22,26 @@ pub enum DgGasRefresh {
     },
 }
 
+/// One accepted source-gas intervention in the complete represented load.
+/// Rational exterior storage is not inferred by this account.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DgPortGasUpdate {
+    /// Original native main-bore transfer, including wall/diffusion memory.
+    pub duct: DgGasMaterialUpdate,
+    /// Native channel transfers in original attachment order. Independently
+    /// sourced branch channels retain their gas and have zero parameter work.
+    pub terminal_channels: Vec<DgTerminalChannelGasUpdate>,
+    /// Bore, finite-branch and finite-channel storage before the change [J].
+    pub energy_before_j: f64,
+    /// The same represented storage after the change [J].
+    pub energy_after_j: f64,
+    /// Signed sum of the native bore and channel storage changes [J].
+    pub parameter_work_j: f64,
+    /// Sum of absolute native interventions charged to the work allowance [J].
+    /// Opposite signed transfers cannot conceal an excessive intervention.
+    pub absolute_parameter_work_j: f64,
+}
+
 fn duct_error(error: fs_duct::DuctError) -> AcousticRealizeError {
     match error {
         fs_duct::DuctError::Cancelled { .. } => AcousticRealizeError::Cancelled,
@@ -120,12 +140,15 @@ impl DgPortLoad {
     /// pole state: changing the interior does not redefine the exterior gas.
     /// Branch junctions and computed exterior openings must still share the
     /// original equilibrium pressure; an unsupported pressure jump refuses.
-    /// An attached finite gap whose local gas would change refuses, because
-    /// its transverse momentum transfer is not represented by this operation.
-    /// Independently supplied branch gaps whose gas stays equal remain valid.
+    /// Attached slit/circular channels follow their actual local gas. Their
+    /// original native owners retain every transverse/radial cell momentum,
+    /// refresh viscous response and report kinetic parameter work separately.
+    /// Independently supplied branch gaps retain their gas and physical state.
+    /// Rigid closures retain their source without inventing fluid storage.
     ///
-    /// Actual main-bore storage change is separately reported and charged once
-    /// as parameter work. The owner prescribing the background owes that work
+    /// Actual main-bore and channel storage changes are separately reported and
+    /// charged once as parameter work. The sum of absolute interventions must
+    /// fit the supplied work allowance. The background owner owes signed work
     /// and any heat/species balance. This does not solve transport or add mean
     /// pressure traction. Every source, state, propagator and algebraic coupling
     /// publishes together after all checks; failure preserves the entire load.
@@ -135,8 +158,9 @@ impl DgPortLoad {
         refresh: DgGasRefresh,
         maximum_absolute_parameter_work_j: f64,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<DgGasMaterialUpdate, AcousticRealizeError> {
-        let (duct, state, propagator, report) = prepare_dg_gas(
+    ) -> Result<DgPortGasUpdate, AcousticRealizeError> {
+        let energy_before_j = self.stored_energy_j();
+        let (duct, state, propagator, duct_report) = prepare_dg_gas(
             &self.duct,
             &self.state,
             &self.propagator,
@@ -179,14 +203,30 @@ impl DgPortLoad {
                 ));
             }
         }
+        let mut terminal_channels = Vec::with_capacity(self.terminal_channels.len());
+        let mut channel_reports = Vec::with_capacity(self.terminal_channels.len());
+        let mut parameter_work_j = duct_report.parameter_work_j;
+        let mut absolute_parameter_work_j = parameter_work_j.abs();
         for channel in &self.terminal_channels {
             poll(cancelled)?;
             let gas = terminal_gas(channel.input().port)?;
-            if gas != *channel.gas() {
+            let (candidate, report) =
+                channel.prepare_gas(&gas, maximum_absolute_parameter_work_j, cancelled)?;
+            let work = report
+                .transfer
+                .map_or(0.0, |transfer| transfer.parameter_work_j);
+            parameter_work_j += work;
+            absolute_parameter_work_j += work.abs();
+            if !parameter_work_j.is_finite()
+                || !absolute_parameter_work_j.is_finite()
+                || absolute_parameter_work_j > maximum_absolute_parameter_work_j
+            {
                 return Err(invalid(
-                    "live bore gas change requires physical transfer of the attached terminal channel gas and momentum",
+                    "live bore and terminal gas changes exceed the total absolute parameter-work allowance",
                 ));
             }
+            terminal_channels.push(candidate);
+            channel_reports.push(report);
         }
         let response = propagator.multiport_response(&state).map_err(duct_error)?;
         let branch_coupling = if self.branches.is_empty() {
@@ -205,7 +245,7 @@ impl DgPortLoad {
                 previous.ports.clone(),
                 terminal,
                 previous.driven_mouth,
-                &self.terminal_channels,
+                &terminal_channels,
             )?),
             (None, None) => None,
             _ => {
@@ -217,7 +257,7 @@ impl DgPortLoad {
         let impedance = match (&self.terminal, &terminal_coupling) {
             (Some(terminal), Some(coupling)) => {
                 coupling
-                    .relation(response, terminal, &self.terminal_channels)?
+                    .relation(response, terminal, &terminal_channels)?
                     .inlet
                     .impedance_pa_s_m3
             }
@@ -233,14 +273,50 @@ impl DgPortLoad {
                 "live DG gas update requires strictly positive exact mean-port impedance",
             ));
         }
+        let duct_energy = self
+            .branches
+            .iter()
+            .fold(state.stored_energy_j(), |sum, branch| {
+                sum + branch.state().stored_energy_j()
+            });
+        let energy_after_j = terminal_channels
+            .iter()
+            .fold(duct_energy, |sum, channel| sum + channel.stored_energy_j());
+        if !energy_before_j.is_finite() || !energy_after_j.is_finite() {
+            return Err(invalid("live DG/channel gas storage cannot be represented"));
+        }
+        let report = DgPortGasUpdate {
+            duct: duct_report,
+            terminal_channels: channel_reports,
+            energy_before_j,
+            energy_after_j,
+            parameter_work_j,
+            absolute_parameter_work_j,
+        };
         poll(cancelled)?;
         self.duct = duct;
         self.state = state;
         self.propagator = propagator;
         self.branch_coupling = branch_coupling;
         self.terminal_coupling = terminal_coupling;
+        self.terminal_channels = terminal_channels;
         self.impedance_pa_s_m3 = impedance;
         Ok(report)
+    }
+
+    /// Signed parameter work accumulated in all represented duct/channel
+    /// owners [J]. Pressure work, viscous heat and numerical loss stay separate.
+    #[must_use]
+    pub fn cumulative_parameter_work_j(&self) -> f64 {
+        let ducts = self
+            .branches
+            .iter()
+            .fold(self.state.cumulative_parameter_work_j(), |sum, branch| {
+                sum + branch.state().cumulative_parameter_work_j()
+            });
+        self.terminal_channels.iter().fold(ducts, |sum, channel| {
+            sum + channel.cumulative_parameter_work_j()
+        })
     }
 }
 

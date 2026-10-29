@@ -10,7 +10,7 @@ use fs_couple::bernoulli_aperture::paired::{
 use fs_couple::bernoulli_aperture::tube::TubeDrive;
 use fs_couple::bernoulli_aperture::two_sided::LoadedAperture;
 use fs_couple::bernoulli_aperture::viscous::ViscousSlit;
-use fs_couple::dg_port::{DgGasRefresh, DgPortLoad};
+use fs_couple::dg_port::{DgGasRefresh, DgPortLoad, DgTerminalChannelInput, DgTerminalChannelKind};
 use fs_dcontact::Obstacle;
 use fs_duct::dg::{DgBoundary, DgDuct, DgMesh, DgState, MAX_DG_PROPAGATOR_DOFS, PortId};
 use fs_duct::{Duct, Segment};
@@ -659,5 +659,153 @@ fn g3_series_refresh_keeps_two_loaded_tracts_and_source_on_one_gas_epoch() {
                 + frame.upstream_work_j.abs()
                 + frame.inferred_total_dissipation_j,
         );
+    }
+}
+
+#[test]
+fn g1_g4_live_gas_reaches_moving_aperture_and_finite_terminal_momentum_together() {
+    let cold = field(300.0, 1.0, 101_325.0, LENGTH);
+    let hot = field(420.0, 0.2, 150_000.0, LENGTH);
+    let old_gas = *cold.uniform_state().unwrap().state();
+    let new_gas = *hot.uniform_state().unwrap().state();
+    for kind in [
+        DgTerminalChannelKind::Slit {
+            width_m: 0.002,
+            height_m: 4e-5,
+            length_m: 0.001,
+            transverse_cells: 8,
+            maximum_mach: 0.2,
+        },
+        DgTerminalChannelKind::Circular {
+            radius_m: 4e-5,
+            length_m: 0.001,
+            radial_cells: 8,
+            maximum_mach: 0.2,
+        },
+    ] {
+        let build = || {
+            let load = load(&cold, false)
+                .with_terminal_channels(
+                    vec![DgTerminalChannelInput {
+                        port: PortId(1),
+                        kind,
+                    }],
+                    8,
+                )
+                .unwrap();
+            ApertureDg::new(aperture(&load, load.impedance_pa_s_m3()), load).unwrap()
+        };
+        let mut changed = build();
+        let mut clean = build();
+        for sample in 0..24 {
+            assert_eq!(
+                changed.step(drive(sample)).unwrap(),
+                clean.step(drive(sample)).unwrap()
+            );
+        }
+        let old_state = changed.duct_state().clone();
+        let old_motion = changed.aperture().state();
+        let channel = &changed.load().terminal_channels()[0];
+        let old_velocity = channel.channel().unwrap().velocities_m_s().to_vec();
+        let old_channel_step = channel.channel().unwrap().last_step();
+        let old_channel_energy = channel.stored_energy_j();
+        let old_energy = changed.load().stored_energy_j();
+        let old_poles = changed.load().terminal().unwrap().pole_states().to_vec();
+        assert!(old_channel_energy > 0.0);
+        let mut polls = 0;
+        let report = clean
+            .rebind_gas_field_controlled(&hot, DgGasRefresh::Lossless, 1.0, &mut || {
+                polls += 1;
+                false
+            })
+            .unwrap();
+        let mut calls = 0;
+        assert!(
+            changed
+                .rebind_gas_field_controlled(&hot, DgGasRefresh::Lossless, 1.0, &mut || {
+                    calls += 1;
+                    calls == polls
+                },)
+                .is_err()
+        );
+        assert_eq!(calls, polls);
+        assert_eq!(changed.duct_state(), &old_state);
+        assert_eq!(changed.aperture().state(), old_motion);
+        assert_eq!(changed.load().terminal_channels()[0].gas(), &old_gas);
+        assert_eq!(
+            changed.load().terminal_channels()[0]
+                .channel()
+                .unwrap()
+                .velocities_m_s(),
+            old_velocity
+        );
+        assert_eq!(
+            changed
+                .rebind_gas_field_controlled(&hot, DgGasRefresh::Lossless, 1.0, &mut || false,)
+                .unwrap(),
+            report
+        );
+        let channel = &changed.load().terminal_channels()[0];
+        assert_eq!(channel.gas(), &new_gas);
+        assert_eq!(channel.channel().unwrap().gas(), &new_gas);
+        assert_eq!(channel.channel().unwrap().last_step(), old_channel_step);
+        assert_eq!(changed.aperture().state(), old_motion);
+        assert_eq!(changed.aperture().spec().density_kg_m3, new_gas.density);
+        assert_eq!(changed.load().terminal().unwrap().pole_states(), old_poles);
+        assert_eq!(report.terminal_channels.len(), 1);
+        let momentum_scale = old_velocity
+            .iter()
+            .map(|v| (old_gas.density * v).abs())
+            .fold(0.0_f64, f64::max);
+        for (&before, &after) in old_velocity
+            .iter()
+            .zip(channel.channel().unwrap().velocities_m_s())
+        {
+            close(
+                new_gas.density * after,
+                old_gas.density * before,
+                momentum_scale,
+            );
+        }
+        let expected_channel_energy = old_channel_energy * old_gas.density / new_gas.density;
+        close(
+            channel.stored_energy_j(),
+            expected_channel_energy,
+            expected_channel_energy,
+        );
+        close(
+            report.parameter_work_j,
+            changed.load().stored_energy_j() - old_energy,
+            old_energy + changed.load().stored_energy_j(),
+        );
+        close(
+            report.parameter_work_j - report.duct.parameter_work_j,
+            expected_channel_energy - old_channel_energy,
+            old_channel_energy + expected_channel_energy,
+        );
+        for sample in 24..48 {
+            let frame = changed.step(drive(sample)).unwrap();
+            assert_eq!(frame, clean.step(drive(sample)).unwrap());
+            close(
+                frame.duct.ledger.cumulative_parameter_work_j,
+                report.parameter_work_j,
+                report.absolute_parameter_work_j,
+            );
+            close(
+                frame.balance_residual_j(),
+                0.0,
+                frame.stored_energy_j
+                    + frame.upstream_work_j.abs()
+                    + frame.inferred_total_dissipation_j,
+            );
+            close(
+                frame.duct.ledger.energy_balance_residual_j,
+                0.0,
+                frame.duct.ledger.stored_energy_j
+                    + frame.duct.ledger.cumulative_port_work_j.abs()
+                    + frame.duct.ledger.cumulative_dissipated_j
+                    + report.absolute_parameter_work_j,
+            );
+        }
     }
 }

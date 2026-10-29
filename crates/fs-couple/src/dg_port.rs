@@ -12,7 +12,7 @@ pub mod input;
 pub mod radiation;
 
 mod gas;
-pub use gas::DgGasRefresh;
+pub use gas::{DgGasRefresh, DgPortGasUpdate};
 pub(crate) use gas::prepare_dg_gas;
 
 mod terminal;
@@ -28,7 +28,7 @@ use branch::BranchCoupling;
 
 mod channel;
 pub use channel::{
-    DgTerminalChannelFrame, DgTerminalChannelInput, DgTerminalChannelKind,
+    DgTerminalChannelFrame, DgTerminalChannelGasUpdate, DgTerminalChannelInput, DgTerminalChannelKind,
     DgTerminalChannelLoad, MAX_DG_TERMINAL_TRANSVERSE_CELLS,
 };
 

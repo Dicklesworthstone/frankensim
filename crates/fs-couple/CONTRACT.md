@@ -8125,9 +8125,23 @@ work. A refresh consumes no sample and preserves accepted output frames.
 Independently sourced branches and exterior loads retain their gas and causal
 history. Their junction and terminal eliminations are rebuilt against the new
 bore. Common static-pressure and computed-opening admissions remain active.
-An attached finite gap whose gas changes refuses until its transverse momentum
-transfer is represented. All source, state, propagator and algebraic coupling
-changes publish together after work, source and cancellation checks.
+Attached planar and circular channels refresh their actual local gas through
+the original native momentum transfer. Each resolved cell retains momentum,
+new source viscosity drives its next implicit response, and the retained Mach
+ceiling applies to the remapped field. Independent branch channels retain
+their original gas. Rigid closures update their source without fluid storage.
+All source, state, propagator and algebraic coupling changes publish together
+after work, source and cancellation checks.
+
+`DgPortGasUpdate` retains the original main-bore report and each identified
+channel's native kinetic transfer, plus aggregate represented storage and
+signed parameter work. The work allowance bounds the sum of absolute native
+interventions, including every channel; opposite transfers cannot cancel an
+excess. Each channel's separate cumulative parameter-work account enters the
+aggregate ledger once and is subtracted from its storage/work residual.
+Pressure work, wall heat, numerical dissipation and rational exterior exchange
+remain distinct. Historical channel frames survive a zero-duration refresh;
+subsequent steps start from current kinetic storage.
 
 This prescribed fixed-geometry intervention advances MR33/MR67 and the MR05
 atomic-state requirement. It does not solve mean flow, heat/species transport,
@@ -8147,11 +8161,21 @@ For a valve between two continuing ducts,
 `rebind_series_gas_fields_controlled` takes explicit upstream/downstream fields
 on their own geometries and prepares both before publishing either. The
 complete inlet gas must agree, and the valve receives the sum of the new exact
-mean impedances. The work allowance bounds the sum of absolute interventions;
-opposite signed transfers cannot hide an exceeded budget. Independent pressure,
+mean impedances. The work allowance bounds all absolute interventions in both
+ducts and their finite channels; opposite signed transfers cannot hide an
+exceeded budget. Independent pressure,
 viscous/Bernoulli flow, continuum storage, two-blade oscillator and exact-retry
 regressions cover source changes after nonzero mechanical/acoustic histories.
 This does not add a density-changing mass-flow junction or a new gas-energy law.
+
+Focused regressions also exercise a moving aperture, both finite channel
+geometries and retained causal terminal history in one continuing source-gas
+transaction, with independent cell momentum/kinetic work and atomic retry.
+The exact pinned compiler checked the complete production graph and the
+`channel_gas` and `dg_gas_rebind` integration targets successfully. Runtime
+test execution remains unverified: dependency code generation was interrupted
+under sustained shared memory pressure before a test binary ran. This is not
+complete constellation qualification or measured acoustic validation.
 
 ## Continuing spatial dielectric charge through thermal phase change
 

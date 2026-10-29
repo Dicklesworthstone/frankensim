@@ -8,7 +8,7 @@
 
 use super::*;
 use crate::bernoulli_aperture::slit_channel::{
-    FixedChannel, SlitChannel, SlitChannelSpec, SlitChannelStep, SlitExit,
+    ChannelGasUpdate, FixedChannel, SlitChannel, SlitChannelSpec, SlitChannelStep, SlitExit,
     circular::{CircularChannel, CircularChannelSpec},
 };
 use fs_material::gas::GasState;
@@ -117,6 +117,15 @@ pub struct DgTerminalChannelLoad {
     cumulative_pressure_work_j: f64,
     cumulative_viscous_dissipation_j: f64,
     cumulative_numerical_dissipation_j: f64,
+    cumulative_parameter_work_j: f64,
+}
+
+/// One terminal's original physical gas transfer. Rigid closures have no
+/// fluid storage and return no fabricated channel transfer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DgTerminalChannelGasUpdate {
+    pub port: PortId,
+    pub transfer: Option<ChannelGasUpdate>,
 }
 
 impl DgTerminalChannelLoad {
@@ -124,7 +133,11 @@ impl DgTerminalChannelLoad {
     pub const fn gas(&self) -> &GasState { &self.gas }
     pub const fn channel(&self) -> Option<&FixedChannel> { self.channel.as_ref() }
     pub fn stored_energy_j(&self) -> f64 {
-        self.channel.as_ref().map_or(0.0, |channel| channel.last_step().kinetic_energy_j)
+        self.channel.as_ref().map_or(0.0, FixedChannel::stored_energy_j)
+    }
+    /// Signed gas-intervention work, separate from pressure work and heat [J].
+    pub const fn cumulative_parameter_work_j(&self) -> f64 {
+        self.cumulative_parameter_work_j
     }
     pub const fn cumulative_pressure_work_j(&self) -> f64 { self.cumulative_pressure_work_j }
     pub const fn cumulative_viscous_dissipation_j(&self) -> f64 {
@@ -140,6 +153,35 @@ impl DgTerminalChannelLoad {
         -> Result<Option<crate::bernoulli_aperture::slit_channel::SlitChannelLoad>, AcousticRealizeError>
     {
         self.channel.as_ref().map(FixedChannel::pressure_load).transpose()
+    }
+
+    pub(super) fn prepare_gas(
+        &self, gas: &GasState, maximum_absolute_parameter_work_j: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Self, DgTerminalChannelGasUpdate), AcousticRealizeError> {
+        if cancelled() { return Err(AcousticRealizeError::Cancelled); }
+        gas.validate_coherence().map_err(|_| invalid("live terminal channel requires a coherent complete gas"))?;
+        let mut candidate = self.clone();
+        let transfer = if let Some(channel) = &mut candidate.channel {
+            let transfer = channel.rebind_gas_controlled(
+                gas, maximum_absolute_parameter_work_j, cancelled,
+            )?;
+            let maximum_mach = self.input.kind.maximum_mach()
+                .ok_or_else(|| invalid("live terminal channel lost its physical kind"))?;
+            if channel.velocities_m_s().iter().any(|speed|
+                speed.abs() > maximum_mach * gas.sound_speed)
+            {
+                return Err(invalid("live terminal gas transfer exceeds the retained resolved-speed Mach limit"));
+            }
+            candidate.cumulative_parameter_work_j += transfer.parameter_work_j;
+            if !candidate.cumulative_parameter_work_j.is_finite() {
+                return Err(invalid("live terminal gas work cannot be represented"));
+            }
+            Some(transfer)
+        } else { None };
+        candidate.gas = *gas;
+        if cancelled() { return Err(AcousticRealizeError::Cancelled); }
+        Ok((candidate, DgTerminalChannelGasUpdate { port: self.input.port, transfer }))
     }
 }
 
@@ -248,7 +290,7 @@ impl DgPortLoad {
             };
             channels.push(DgTerminalChannelLoad { input, gas, channel,
                 cumulative_pressure_work_j: 0.0, cumulative_viscous_dissipation_j: 0.0,
-                cumulative_numerical_dissipation_j: 0.0 });
+                cumulative_numerical_dissipation_j: 0.0, cumulative_parameter_work_j: 0.0 });
         }
         let terminal = self.terminal.as_ref().expect("admitted complete terminal group");
         let response = self.multiport_response()?;
@@ -336,19 +378,23 @@ pub(super) fn include_channel_ledgers(
         output.ledger.port_work_step_j += step.pressure_work_j;
         output.ledger.cumulative_port_work_j += channel.cumulative_pressure_work_j;
         output.ledger.cumulative_dissipated_j += channel.cumulative_dissipated_j();
+        output.ledger.cumulative_parameter_work_j += channel.cumulative_parameter_work_j;
         // Original DG cumulative sign is E - W + D, opposite the channel's
         // per-step pressure-work residual. Keep each owner's convention.
         output.ledger.energy_balance_residual_j += step.kinetic_energy_j
-            - channel.cumulative_pressure_work_j + channel.cumulative_dissipated_j();
+            - channel.cumulative_pressure_work_j + channel.cumulative_dissipated_j()
+            - channel.cumulative_parameter_work_j;
     }
     if !channels.is_empty() {
         output.ledger.relative_energy_drift = output.ledger.energy_balance_residual_j.abs()
-            / output.ledger.cumulative_port_work_j.abs().max(1e-300);
+            / (output.ledger.cumulative_port_work_j.abs()
+                + output.ledger.cumulative_parameter_work_j.abs()).max(1e-300);
     }
     let ledger = &output.ledger;
     if ![ledger.stored_energy_j, ledger.port_work_step_j, ledger.cumulative_port_work_j,
         ledger.cumulative_dissipated_j, ledger.energy_balance_residual_j,
-        ledger.relative_energy_drift].iter().all(|value| value.is_finite())
+        ledger.relative_energy_drift, ledger.cumulative_parameter_work_j]
+        .iter().all(|value| value.is_finite())
     {
         return Err(invalid("DG aggregate channel storage/work ledger is not finite"));
     }

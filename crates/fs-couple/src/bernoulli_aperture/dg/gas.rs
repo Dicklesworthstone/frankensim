@@ -9,8 +9,7 @@
 use super::{ApertureDg, ApertureDgLoad, invalid};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::two_sided::LoadedAperture;
-use crate::dg_port::DgGasRefresh;
-use fs_duct::dg::DgGasMaterialUpdate;
+use crate::dg_port::{DgGasRefresh, DgPortGasUpdate};
 use fs_material::gas_field::AxialGasField;
 
 fn prepare_single<A>(
@@ -19,7 +18,7 @@ fn prepare_single<A>(
     refresh: DgGasRefresh,
     maximum_absolute_parameter_work_j: f64,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<(ApertureDgLoad, DgGasMaterialUpdate), AcousticRealizeError> {
+) -> Result<(ApertureDgLoad, DgPortGasUpdate), AcousticRealizeError> {
     if model.upstream.is_some() {
         return Err(invalid(
             "live two-sided DG gas refresh requires both explicit gas fields in one transaction",
@@ -62,7 +61,7 @@ impl ApertureDg {
         refresh: DgGasRefresh,
         maximum_absolute_parameter_work_j: f64,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<DgGasMaterialUpdate, AcousticRealizeError> {
+    ) -> Result<DgPortGasUpdate, AcousticRealizeError> {
         let (load, report) = prepare_single(
             self,
             field,
@@ -92,7 +91,7 @@ impl ApertureDg<LoadedAperture> {
         refresh: DgGasRefresh,
         maximum_absolute_parameter_work_j: f64,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<DgGasMaterialUpdate, AcousticRealizeError> {
+    ) -> Result<DgPortGasUpdate, AcousticRealizeError> {
         let (load, report) = prepare_single(
             self,
             field,
@@ -125,7 +124,7 @@ impl ApertureDg<LoadedAperture> {
         refresh: [DgGasRefresh; 2],
         maximum_absolute_parameter_work_j: f64,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<[DgGasMaterialUpdate; 2], AcousticRealizeError> {
+    ) -> Result<[DgPortGasUpdate; 2], AcousticRealizeError> {
         let Some(upstream) = &self.upstream else {
             return Err(invalid(
                 "live series gas refresh requires an original upstream DG tract",
@@ -150,7 +149,8 @@ impl ApertureDg<LoadedAperture> {
         )?;
         let gas = *down.duct().inlet_gas();
         let impedance = up.impedance_pa_s_m3() + down.impedance_pa_s_m3();
-        let absolute_work = up_report.parameter_work_j.abs() + down_report.parameter_work_j.abs();
+        let absolute_work =
+            up_report.absolute_parameter_work_j + down_report.absolute_parameter_work_j;
         if up.duct().inlet_gas() != &gas
             || !impedance.is_finite()
             || impedance <= 0.0
