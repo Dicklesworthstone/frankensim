@@ -27,7 +27,7 @@ fn warm_gas(temperature_k: f64) -> IsochoricGasParcel {
 
 // Reuse the existing synthetic mechanical/enthalpy fixture and append a
 // source-owned conductivity curve. Tiny cp is intentional test data.
-fn quiet_body(
+pub(super) fn quiet_body(
     cx: &fs_exec::Cx<'_>,
     gas: &fs_material::gas::GasState,
     temperature_k: f64,

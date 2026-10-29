@@ -83,9 +83,10 @@ pub struct FiniteGasStringExchangeFrame<R> {
     pub trials: usize,
 }
 
-struct ExchangeCandidate<R> {
+struct ExchangeCandidate<R, G> {
     gas: IsochoricGasParcel,
     gas_step: GasHeatStep,
+    gas_report: G,
     solid: EquilibriumPhaseState,
     heat_j: f64,
     sample: ConductanceSample<R>,
@@ -95,6 +96,44 @@ struct ExchangeCandidate<R> {
 }
 fn gas_error<E>(error: GasEnergyError) -> ThermalPistonError<E> {
     PistonError::from(error).into()
+}
+
+fn feedback_error<E>(
+    error: feedback::ScalarError<FiniteGasStringExchangeError<E>>,
+) -> FiniteGasStringExchangeError<E> {
+    use feedback::ScalarError;
+    let error = match error {
+        ScalarError::Evaluation(error) => return error,
+        ScalarError::Invalid(_) => ThermalPistonError::Invalid("nonfinite physical energy feedback residual"),
+        ScalarError::Cancelled => ThermalPistonError::Cancelled,
+        ScalarError::OutsideBracket { lower, upper } => ThermalPistonError::OutsideBracket {
+            lower_residual_j: lower, upper_residual_j: upper,
+        },
+        ScalarError::NotConverged { iterations, residual } => ThermalPistonError::NotConverged {
+            iterations, residual_j: residual,
+        },
+    };
+    error.into()
+}
+
+pub(super) fn resolve_conduction(
+    layers: &MaterialConductionLayers<'_>,
+    volume: f64,
+    gas: &ResolvedThermochemicalGasState,
+    solid: EquilibriumPhaseState,
+) -> Result<ConductanceSample<ResolvedMaterialStatePoint>, LayerConductionError> {
+    let sample = layers.resolve(gas, solid)?;
+    let conductivity = sample.source.property_by_key(layers.conductivity)
+        .ok_or(LayerConductionError::Invalid("resolved layer conductivity is absent"))?
+        .value_si();
+    let biot = if sample.conductance_w_k == 0.0 { 0.0 }
+        else { sample.conductance_w_k * (volume / layers.area_m2) / layers.area_m2 / conductivity };
+    if !biot.is_finite() || biot > fs_conduction::lumped::LUMPED_BIOT_CEILING {
+        return Err(LayerConductionError::Invalid(
+            "source conduction exceeds the lumped solid Biot limit; use spatial transport",
+        ));
+    }
+    Ok(sample)
 }
 
 impl ThermalMaterialStringRuntime {
@@ -137,11 +176,42 @@ impl ThermalMaterialStringRuntime {
         heat: FiniteGasStringHeat,
         controls: FiniteGasStringSolve,
         exchange: HeatExchangeSolve,
-        mut resolve: impl FnMut(
+        resolve: impl FnMut(
             &ResolvedThermochemicalGasState,
             EquilibriumPhaseState,
         ) -> Result<ConductanceSample<R>, E>,
     ) -> Result<FiniteGasStringExchangeFrame<R>, FiniteGasStringExchangeError<E>> {
+        self.step_with_isochoric_gas_exchange_endpoint(
+            cx, expected_epoch, forces, gas, heat, controls, exchange, resolve,
+            |initial, heat_j, _, cancelled| {
+                let mut next = initial.clone();
+                let step = next.add_heat(heat_j, controls.gas, cancelled).map_err(gas_error)?;
+                Ok((next, step, ()))
+            },
+        ).map(|(frame, ())| frame)
+    }
+
+    // One thermal proposal/feedback/publication owner for both frozen and
+    // reacting gas. Every endpoint is proposed from the accepted inventory;
+    // rejected heat trials cannot consume species or advance mechanical state.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn step_with_isochoric_gas_exchange_endpoint<R, E, G>(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        expected_epoch: u64,
+        forces: &[f64],
+        gas: &mut IsochoricGasParcel,
+        heat: FiniteGasStringHeat,
+        controls: FiniteGasStringSolve,
+        exchange: HeatExchangeSolve,
+        mut resolve: impl FnMut(
+            &ResolvedThermochemicalGasState,
+            EquilibriumPhaseState,
+        ) -> Result<ConductanceSample<R>, E>,
+        mut endpoint: impl FnMut(
+            &IsochoricGasParcel, f64, f64, &mut dyn FnMut() -> bool,
+        ) -> Result<(IsochoricGasParcel, GasHeatStep, G), FiniteGasStringExchangeError<E>>,
+    ) -> Result<(FiniteGasStringExchangeFrame<R>, G), FiniteGasStringExchangeError<E>> {
         self.admit_finite_gas_step(cx, expected_epoch, gas, heat, controls)?;
         feedback::admit::<E>(exchange)?;
         let mut mechanical = self.mechanical.clone();
@@ -171,9 +241,11 @@ impl ThermalMaterialStringRuntime {
                         "solid thermal sources overflow when combined",
                     ).into());
                 }
-                let solved = feedback::solve(
-                    exchange,
-                    |q, trials, cancelled| {
+                let solved = feedback::solve_scalar(
+                    exchange.heat_bracket_j,
+                    exchange.source_tolerance_j,
+                    exchange.maximum_iterations,
+                    |q, trials, cancelled| -> Result<_, FiniteGasStringExchangeError<E>> {
                         let solid_heat = solid_source - q;
                         let gas_heat = gas_source + q;
                         if !solid_heat.is_finite()
@@ -182,14 +254,14 @@ impl ThermalMaterialStringRuntime {
                         {
                             return Err(ThermalPistonError::Invalid(
                                 "exchange heat overflows or disappears in either reservoir",
-                            ));
+                            ).into());
                         }
                         let solid = input.curve
-                            .advance_specific_energy(input.initial, solid_heat / input.mass_kg)?;
-                        let mut next = gas.clone();
-                        let gas_step = next
-                            .add_heat(gas_heat, controls.gas, &mut *cancelled)
-                            .map_err(gas_error)?;
+                            .advance_specific_energy(input.initial, solid_heat / input.mass_kg)
+                            .map_err(ThermalPistonError::from)?;
+                        let (next, gas_step, gas_report) = endpoint(
+                            gas, gas_heat, input.duration_s, cancelled,
+                        )?;
                         let sample = resolve(next.state(), solid).map_err(ThermalPistonError::Interface)?;
                         let g = sample.conductance_w_k;
                         let delta = solid.temperature_k() - next.state().state().temperature;
@@ -211,7 +283,7 @@ impl ThermalMaterialStringRuntime {
                         {
                             return Err(ThermalPistonError::Invalid(
                                 "endpoint interface heat law is negative, nonfinite or unrepresentable",
-                            ));
+                            ).into());
                         }
                         if !solid_residual.is_finite()
                             || !energy_residual.is_finite()
@@ -220,12 +292,13 @@ impl ThermalMaterialStringRuntime {
                         {
                             return Err(ThermalPistonError::Invalid(
                                 "finite solid/gas thermal storage does not close its energy allowance",
-                            ));
+                            ).into());
                         }
                         Ok((
                             ExchangeCandidate {
                                 gas: next,
                                 gas_step,
+                                gas_report,
                                 solid,
                                 heat_j: q,
                                 sample,
@@ -237,7 +310,7 @@ impl ThermalMaterialStringRuntime {
                         ))
                     },
                     &mut || cx.checkpoint().is_err(),
-                )?;
+                ).map_err(feedback_error)?;
                 let difference = solved.solid.temperature_k() - solved.gas.state().state().temperature;
                 if (solved.heat_j > 0.0 && difference < 0.0)
                     || (solved.heat_j < 0.0 && difference > 0.0)
@@ -264,6 +337,7 @@ impl ThermalMaterialStringRuntime {
         let ExchangeCandidate {
             gas: next_gas,
             gas_step,
+            gas_report,
             heat_j: q,
             sample,
             source_residual_j,
@@ -298,7 +372,7 @@ impl ThermalMaterialStringRuntime {
                 gas_step,
             },
         )?;
-        Ok(FiniteGasStringExchangeFrame {
+        Ok((FiniteGasStringExchangeFrame {
             coupled,
             external_string_heat_j: heat.string_heat_j,
             solid_to_gas_heat_j: q,
@@ -307,7 +381,7 @@ impl ThermalMaterialStringRuntime {
             thermal_energy_residual_j: energy_residual_j,
             source: sample.source,
             trials: total_trials,
-        })
+        }, gas_report))
     }
 
     /// Source-bound series conduction using the SAME solid card/conditions and
@@ -337,6 +411,18 @@ impl ThermalMaterialStringRuntime {
         FiniteGasStringExchangeFrame<ResolvedMaterialStatePoint>,
         FiniteGasStringExchangeError<LayerConductionError>,
     > {
+        let volume = self.admit_finite_gas_conduction(cx, layers)?;
+        self.step_with_isochoric_gas_exchange(
+            cx, expected_epoch, forces, gas, heat, controls, exchange,
+            |gas_end, solid_end| resolve_conduction(layers, volume, gas_end, solid_end),
+        )
+    }
+
+    pub(super) fn admit_finite_gas_conduction(
+        &self,
+        cx: &fs_exec::Cx<'_>,
+        layers: &MaterialConductionLayers<'_>,
+    ) -> Result<f64, FiniteGasStringExchangeError<LayerConductionError>> {
         super::check(cx)?;
         let specimen = self.mechanical.specimen();
         let radius = specimen.radius_m();
@@ -368,22 +454,6 @@ impl ThermalMaterialStringRuntime {
                 "conduction layers must retain the solid card/conditions, T axis and an actual surface area",
             ).into());
         }
-        self.step_with_isochoric_gas_exchange(
-            cx, expected_epoch, forces, gas, heat, controls, exchange,
-            |gas_end, solid_end| {
-                let sample = layers.resolve(gas_end, solid_end)?;
-                let conductivity = sample.source.property_by_key(layers.conductivity)
-                    .ok_or(LayerConductionError::Invalid("resolved layer conductivity is absent"))?
-                    .value_si();
-                let biot = if sample.conductance_w_k == 0.0 { 0.0 }
-                    else { sample.conductance_w_k * (volume / layers.area_m2) / layers.area_m2 / conductivity };
-                if !biot.is_finite() || biot > fs_conduction::lumped::LUMPED_BIOT_CEILING {
-                    return Err(LayerConductionError::Invalid(
-                        "source conduction exceeds the lumped solid Biot limit; use spatial transport",
-                    ));
-                }
-                Ok(sample)
-            },
-        )
+        Ok(volume)
     }
 }

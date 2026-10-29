@@ -5713,8 +5713,8 @@ Gas, thermal string, modal history and sample position publish at one epoch.
 Source, nonlinear, temperature-limit, energy, observer and cancellation failures
 leave both accepted owners unchanged and permit an identical retry.
 
-This remains a first-order frozen-initial-mechanics split around simultaneous
-heated chemistry in a uniform fixed-volume inventory. It does not resolve flame
+The insulated reacting entry remains a first-order frozen-initial-mechanics split
+around simultaneous heated chemistry in a uniform fixed-volume inventory. It does not resolve flame
 or chamber propagation, pressure work, reciprocal conductive exchange or
 acoustic radiation loading. The microphone remains a diagnostic observer.
 G1/G3/G4 definitions in `tests/string_specimen/finite_gas/reactive.rs` check
@@ -5722,6 +5722,21 @@ independent isomer extent/caloric/pressure balances, formation-energy accounting
 continued mixture-dependent drag and sound, repeated species evolution and
 atomic chemical/late-publication refusal. Synthetic sources establish numerical
 integration behavior, not experimental chemical or acoustic fidelity.
+
+The `reactive::exchange` entry points also close reciprocal thermal exchange
+with the reacting gas. They use the SAME bounded exchange/thermal-proposal
+owner as ordinary finite-gas conduction, replacing only the endpoint gas
+proposal with the original heated implicit reaction owner. Each proposed Q
+restarts from accepted species, supplies +Q to gas and -Q to solid, and evaluates
+the interface using the final reacting temperature/composition. Chemical heat
+is never a second source. The concrete conduction path shares solid source,
+condition, geometry, conductivity-selection and pointwise Biot admission.
+The original nested reaction/exchange/thermoelastic work ceilings remain explicit;
+there is no additional time advance per trial. Original chemical and thermal
+reports publish with final drag, pressure and the one accepted physical state.
+Focused `reactive/exchange.rs` regressions independently solve both endpoint
+equations, check composition-dependent conductance, insulated trajectory parity,
+late publication refusal, identical retry and cancellation after gas proposal.
 
 ### Reciprocal thermal exchange with finite surrounding gas
 

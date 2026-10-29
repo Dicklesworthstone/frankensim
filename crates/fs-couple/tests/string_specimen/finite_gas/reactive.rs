@@ -16,6 +16,9 @@ use fs_thermochem::*;
 #[allow(dead_code)]
 mod source;
 
+#[path = "reactive/exchange.rs"]
+mod exchange;
+
 const RATE: f64 = 200_000.0;
 const RELEASE: f64 = 3000.0;
 const DT: f64 = 1.0 / 48000.0;
@@ -31,7 +34,7 @@ fn law(release: f64) -> GasReaction {
                 (
                     "thermal_conductivity",
                     fs_material::state_point::THERMAL_CONDUCTIVITY_DIMS,
-                    0.03,
+                    if name == "A" { 0.03 } else { 0.09 },
                 ),
             ] {
                 claims

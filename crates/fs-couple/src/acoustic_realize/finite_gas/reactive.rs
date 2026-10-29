@@ -6,6 +6,9 @@
 //! drag and compact pressure from the accepted mixture. No extra chemical heat
 //! is added: species formation energy is already part of gas internal energy.
 
+/// Simultaneous endpoint chemistry and reciprocal solid/gas thermal exchange.
+pub mod exchange;
+
 use super::{
     FiniteGasStringCandidate, FiniteGasStringError, FiniteGasStringFrame, FiniteGasStringHeat,
     FiniteGasStringSolve, ThermalMaterialStringRuntime,
