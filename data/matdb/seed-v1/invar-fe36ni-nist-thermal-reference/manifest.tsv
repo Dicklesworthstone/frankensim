@@ -1,0 +1,19 @@
+frankensim.matdb-manifest.v3
+pack_id	invar-fe36ni-nist-thermal-reference
+redistribution	permitted	Numerical fits from unmarked NIST public-information pages, with attribution and original sampled evaluations; reuse policy https://www.nist.gov/copyrights-disclaimers
+citation	National Institute of Standards and Technology, Cryogenic Material Properties: Invar Fe-36Ni (UNS K93600); https://trc.nist.gov/cryogenics/materials/Invar(Fe-36Ni)/Invar_rev.htm; accessed 2026-10-28. Named alloy/temper identity follows https://trc.nist.gov/cryogenics/materials/materialproperties.htm; 5083-O also https://www.nist.gov/mml/acmd/aluminum-5083-o-uns-a95083
+license	NIST-Public-Information-Attribution-Requested
+source	nist-metal-thermal-reference	properties.tsv	material-tsv-v1
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	linear_expansion	linear-expansion-relative-to-293k	dimensional
+property	young_modulus	young-modulus	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	reference	engineering-reference-model	dimensional
+axis	family	source-family-nist-invar-fe36ni	dimensional
+axis	process	source-processing-known	dimensional
+axis	pressure	source-pressure-known	dimensional
+axis	matched	source-specimens-matched	dimensional
+axis	orientation	source-orientation-known	dimensional
+axis	form	source-product-form-known	dimensional
+axis	temper	source-temper-known	dimensional
