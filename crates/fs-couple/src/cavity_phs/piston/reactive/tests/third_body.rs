@@ -177,9 +177,15 @@ fn collider_pressure_composition_and_normalization_follow_independent_rate_equat
                     1e-15,
                 );
                 assert_eq!(candidate.step().species[2].stoichiometric_change_mol, 0.0);
-                assert_eq!(
-                    candidate.step().species[2].initial_mol,
-                    candidate.step().species[2].final_mol
+                // The endpoint amounts are rebuilt from the new parcel's own
+                // composition, so the inert collider keeps its amount to rounding.
+                let collider = &candidate.step().species[2];
+                assert!(
+                    (collider.final_mol - collider.initial_mol).abs()
+                        <= 4.0 * f64::EPSILON * collider.initial_mol,
+                    "inert collider amount changed: {} -> {}",
+                    collider.initial_mol,
+                    collider.final_mol
                 );
                 let resolved = candidate.step().rate_material.as_ref().unwrap();
                 assert_eq!(resolved.property("collision_I").unwrap().value_si(), 4.0);
