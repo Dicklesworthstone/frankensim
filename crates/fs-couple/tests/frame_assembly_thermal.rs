@@ -9,7 +9,7 @@ use fs_couple::circuit_enthalpy::{
 use fs_couple::frame_vibration::{
     FrameVibrationBasis, FrameVibrationBudget,
     thermal::{FrameLayerCell, FrameThermalSolve},
-    thermoelastic::{FrameThermoelasticBinding, FrameThermoelasticSystem},
+    thermoelastic::{FrameThermoelasticBinding, FrameThermoelasticSystem, FrameConnectionHeatDestination},
 };
 use fs_couple::modal_acoustic_time::{ModalAcousticState, ModalAcousticTimeBudget};
 use fs_couple::render::schedule::force::coupled::{
@@ -384,12 +384,16 @@ fn shared_failure_preserves_every_frame_heat_clock_and_retry_independent_of_bind
     fixture(specs(true), true, |bases, mut thermal, source| {
         let gate = CancelGate::new_clock_free();
         let mut replay_thermal = thermal.clone();
-        let mut actual = assembled(bases, &thermal, source, true, true, false);
-        let mut replay = assembled(bases, &replay_thermal, source, true, true, true);
+        let mut actual = assembled(bases, &thermal, source, true, true, false)
+            .with_connection_heat(&thermal, heat_routes(), 2, &gate).unwrap();
+        let mut reversed_routes = heat_routes(); reversed_routes.reverse();
+        let mut replay = assembled(bases, &replay_thermal, source, true, true, true)
+            .with_connection_heat(&replay_thermal, reversed_routes, 2, &gate).unwrap();
         for _ in 0..3 {
             let a = actual.step(&mut thermal, &[0.0; 2], controls(), &[0.0; 2], &gate).unwrap();
             let b = replay.step(&mut replay_thermal, &[0.0; 2], controls(), &[0.0; 2], &gate).unwrap();
             assert_eq!(a.mechanical, b.mechanical); assert_eq!(a.layers, b.layers);
+            assert_eq!(a.connection_heat, b.connection_heat);
         }
         let state = physical_state(&actual);
         let cells = thermal.cells().clone(); let time = thermal.time_s();
@@ -412,6 +416,7 @@ fn shared_failure_preserves_every_frame_heat_clock_and_retry_independent_of_bind
         let a = actual.step(&mut thermal, &[0.0; 2], controls(), &[0.0; 2], &gate).unwrap();
         let b = replay.step(&mut replay_thermal, &[0.0; 2], controls(), &[0.0; 2], &gate).unwrap();
         assert_eq!(a.mechanical, b.mechanical); assert_eq!(a.layers, b.layers);
+            assert_eq!(a.connection_heat, b.connection_heat);
         assert_eq!(thermal.cells(), replay_thermal.cells());
     });
 }
@@ -433,5 +438,119 @@ fn duplicate_frames_and_foreign_thermal_networks_are_not_silently_coowned() {
         let (mut foreign, _) = parts(bases, &thermal, &other, true, false);
         bindings[1] = foreign.remove(1);
         assert!(FrameThermoelasticBinding::into_shared_system(bindings, mechanical, &thermal, &gate).is_err());
+    });
+}
+
+fn heat_routes() -> Vec<FrameConnectionHeatDestination> {
+    // Deliberately reverse cell order; setup canonicalizes the authored map.
+    vec![
+        FrameConnectionHeatDestination { connection: 6, cell: CELLS[1], fraction: 0.75 },
+        FrameConnectionHeatDestination { connection: 6, cell: CELLS[0], fraction: 0.25 },
+    ]
+}
+
+#[test]
+fn connector_loss_heats_declared_material_cells_without_depositing_elastic_work_twice() {
+    let s = specs(false);
+    for cached in [false, true] {
+        fixture(s, true, |bases, mut thermal, source| {
+            let gate = CancelGate::new_clock_free();
+            let mut owner = assembled(bases, &thermal, source, true, cached, true)
+                .with_connection_heat(&thermal, heat_routes(), 2, &gate).unwrap();
+            assert_eq!(owner.connection_heat_destinations()[0].cell, CELLS[0]);
+            let initial_energy = owner.mechanical_internal_energy_j().unwrap() + thermal.energy_j();
+            let capacity = s.map(|s| s.rho * area() * LENGTH * s.cp);
+            let dt = 1.0 / f64::from(RATE);
+            let g = dt * LINK_G;
+            let determinant = capacity[0] * capacity[1] + g * (capacity[0] + capacity[1]);
+            let mut excess = [0.0; 2];
+            let mut y = [INITIAL[0], INITIAL[1], INITIAL[2], INITIAL[3], 0.0, 0.0, 0.0];
+            for _ in 0..32 {
+                let next = reference_interval(s, [300.0; 2], true, y, dt);
+                let bridge_heat = next[6] - y[6];
+                let shares = [0.25, 0.75];
+                let heat: [f64; 2] = std::array::from_fn(|i| next[4 + i] - y[4 + i] + shares[i] * bridge_heat);
+                let rhs = [capacity[0] * excess[0] + heat[0], capacity[1] * excess[1] + heat[1]];
+                excess = [((capacity[1] + g) * rhs[0] + g * rhs[1]) / determinant,
+                    (g * rhs[0] + (capacity[0] + g) * rhs[1]) / determinant];
+                let report = owner.step(&mut thermal, &[0.0; 2], controls(), &[0.0; 2], &gate).unwrap();
+                assert_eq!(report.connection_heat.len(), 2);
+                for i in 0..2 {
+                    assert_eq!(report.connection_heat[i].cell, CELLS[i]);
+                    assert_eq!(report.connection_heat[i].connection, 6);
+                    near(report.connection_heat[i].heat_j, shares[i] * bridge_heat, 2e-11);
+                    near(thermal.temperature_k(CELLS[i]).unwrap(), 300.0 + excess[i], 2e-7);
+                    near(report.layers[i].material_heat_j, next[4 + i] - y[4 + i], 2e-11);
+                }
+                for (a, b) in physical_state(&owner).iter().zip(&next[..4]) { near(*a, *b, 2e-9); }
+                near(report.deposited_material_heat_j, heat.iter().sum(), 2e-11);
+                near(report.external_mechanical_loss_j, 0.0, 2e-12);
+                near(report.entropy.material_loss_generation_j_k,
+                    heat[0] / (300.0 + excess[0]) + heat[1] / (300.0 + excess[1]), 2e-13);
+                near(owner.mechanical_internal_energy_j().unwrap() + thermal.energy_j(), initial_energy, 2e-9);
+                y = next;
+            }
+            assert!(y[6] > 0.0);
+        });
+    }
+}
+
+#[test]
+fn connector_heating_changes_live_materials_and_the_next_native_motion() {
+    fixture(specs(true), true, |bases, mut hot_thermal, source| {
+        let gate = CancelGate::new_clock_free();
+        let mut sink_thermal = hot_thermal.clone();
+        let mut hot = assembled(bases, &hot_thermal, source, true, true, false)
+            .with_connection_heat(&hot_thermal, heat_routes(), 2, &gate).unwrap();
+        let mut sink = assembled(bases, &sink_thermal, source, true, true, false);
+        let initial_energy = hot.mechanical_internal_energy_j().unwrap() + hot_thermal.energy_j();
+        for sample in 0..32 {
+            let report = hot.step(&mut hot_thermal, &[0.0; 2], controls(), &[0.0; 2], &gate).unwrap();
+            sink.step(&mut sink_thermal, &[0.0; 2], controls(), &[0.0; 2], &gate).unwrap();
+            near(report.external_mechanical_loss_j, 0.0, 2e-12);
+            near(hot.mechanical_internal_energy_j().unwrap() + hot_thermal.energy_j(), initial_energy, 3e-9);
+            if sample == 0 {
+                // The first frozen-T motion is unchanged. Only its accepted
+                // heat destinations differ; later material feedback is real.
+                assert_eq!(physical_state(&hot), physical_state(&sink));
+                for cell in CELLS {
+                    assert!(hot_thermal.temperature_k(cell).unwrap() > sink_thermal.temperature_k(cell).unwrap());
+                }
+            }
+        }
+        assert!((physical_state(&hot)[2] - physical_state(&sink)[2]).abs() > 1e-9);
+        for i in 0..2 {
+            assert_ne!(hot.mechanical().connection_damping_n_s_m(STARTS[i]),
+                sink.mechanical().connection_damping_n_s_m(STARTS[i]));
+        }
+    });
+}
+
+#[test]
+fn incomplete_duplicate_or_already_owned_connector_heat_is_refused() {
+    fixture(specs(false), true, |bases, thermal, source| {
+        let gate = CancelGate::new_clock_free();
+        let route = |connection, cell, fraction| FrameConnectionHeatDestination { connection, cell, fraction };
+        let cases = vec![
+            (vec![], 2),
+            (vec![route(6, CELLS[0], 0.9)], 2),
+            (vec![route(6, CELLS[0], 0.5), route(6, CELLS[0], 0.5)], 2),
+            (vec![route(6, CellId(999), 1.0)], 2),
+            (vec![route(0, CELLS[0], 1.0)], 2),
+            (vec![route(13, CELLS[0], 1.0)], 2),
+            (vec![route(6, CELLS[0], f64::NAN)], 2),
+            (vec![route(6, CELLS[0], -1.0)], 2),
+            (heat_routes(), 1),
+        ];
+        let original = thermal.cells().clone();
+        for (routes, bound) in cases {
+            let owner = assembled(bases, &thermal, source, true, false, false);
+            assert!(owner.with_connection_heat(&thermal, routes, bound, &gate).is_err());
+        }
+        let owner = assembled(bases, &thermal, source, true, false, false)
+            .with_connection_heat(&thermal, heat_routes(), 2, &gate).unwrap();
+        assert!(owner.with_connection_heat(&thermal, heat_routes(), 2, &gate).is_err());
+        assert_eq!(thermal.cells(), &original);
+        assert_eq!(thermal.time_s(), 0.0);
     });
 }
