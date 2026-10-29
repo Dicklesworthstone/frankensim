@@ -1647,6 +1647,9 @@ fn connect_s1(
         .map(|(direction, _)| direction)
         .ok_or(TracerError::InvalidInput)?;
     match light_sample {
+        // Admission already refuses thermal light subpaths. Keep this boundary
+        // explicit if this shared sampler grows a new physical source family.
+        LightSample::ThermalSurface(_) => Err(TracerError::ThermalSurfaceUnsupported),
         LightSample::Environment(sample) => {
             let f = surface_scattering(
                 scene,
@@ -3546,20 +3549,39 @@ mod tests {
             let (mut scene, camera, shutter) = direct_emitter_scene(true);
             scene.primitives[0].material = Material::GrayDiffuseThermal {
                 surface: crate::thermal_surface::GrayDiffuseThermalSurface::try_new(
-                    1800.0, 0.4, fs_blake3::ContentHash([40; 32]),
-                ).unwrap(),
+                    1800.0,
+                    0.4,
+                    fs_blake3::ContentHash([40; 32]),
+                )
+                .unwrap(),
             };
             scene.primitives[0].emission = None;
             scene.lights.clear();
             let settings = Settings {
-                width: 1, height: 1, spp: 1, max_depth: 2,
-                sampler: Sampler::Iid, strategy: DirectStrategy::Mis, seed: 40,
+                width: 1,
+                height: 1,
+                spp: 1,
+                max_depth: 2,
+                sampler: Sampler::Iid,
+                strategy: DirectStrategy::Mis,
+                seed: 40,
             };
-            for strategy_set in [BidirectionalStrategySet::Complete,
-                BidirectionalStrategySet::CameraConnected] {
-                assert!(matches!(render_cinematic_bidirectional_with_strategy_set(
-                    &scene, &camera, CutSide::After, cx, &settings, shutter, strategy_set,
-                ), Err(TracerError::ThermalSurfaceUnsupported)));
+            for strategy_set in [
+                BidirectionalStrategySet::Complete,
+                BidirectionalStrategySet::CameraConnected,
+            ] {
+                assert!(matches!(
+                    render_cinematic_bidirectional_with_strategy_set(
+                        &scene,
+                        &camera,
+                        CutSide::After,
+                        cx,
+                        &settings,
+                        shutter,
+                        strategy_set,
+                    ),
+                    Err(TracerError::ThermalSurfaceUnsupported)
+                ));
             }
         });
     }

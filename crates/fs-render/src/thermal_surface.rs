@@ -99,18 +99,8 @@ impl GrayDiffuseThermalSurface {
         if self.emissivity == 0.0 {
             return Ok(0.0);
         }
-        let x = (C2_NM_K / wavelength_nm) / self.temperature_k;
-        // Log evaluation avoids lambda^-5 overflowing before the Wien tail
-        // vanishes. The small-x branch is the representable Rayleigh--Jeans
-        // limit; x>=50 makes log(expm1(x)) indistinguishable from x in f64.
-        let log_b = if x == 0.0 {
-            det::ln(2.0 * LIGHT_M_S * BOLTZMANN_J_K * 1.0e27) + det::ln(self.temperature_k)
-                - 4.0 * det::ln(wavelength_nm)
-        } else {
-            let log_denominator = if x >= 50.0 { x } else { det::ln(det::expm1(x)) };
-            det::ln(C1_NM) - 5.0 * det::ln(wavelength_nm) - log_denominator
-        };
-        let value = self.emissivity * det::exp(log_b);
+        let value =
+            self.emissivity * planck_radiance_w_m2_sr_nm(self.temperature_k, wavelength_nm)?;
         if value.is_finite() && value >= 0.0 {
             Ok(value)
         } else {
@@ -126,6 +116,36 @@ impl GrayDiffuseThermalSurface {
         h.update(&self.temperature_k.to_bits().to_le_bytes());
         h.update(&self.emissivity.to_bits().to_le_bytes());
         h.finalize()
+    }
+}
+
+/// Shared SI blackbody source law for surfaces and absorbing/emitting media.
+pub(crate) fn planck_radiance_w_m2_sr_nm(
+    temperature_k: f64,
+    wavelength_nm: f64,
+) -> Result<f64, ThermalSurfaceError> {
+    if !temperature_k.is_finite() || temperature_k <= 0.0 {
+        return Err(ThermalSurfaceError::Temperature);
+    }
+    if !wavelength_nm.is_finite() || wavelength_nm <= 0.0 {
+        return Err(ThermalSurfaceError::Wavelength);
+    }
+    let x = (C2_NM_K / wavelength_nm) / temperature_k;
+    // Log evaluation avoids lambda^-5 overflowing before the Wien tail
+    // vanishes. The small-x branch is the representable Rayleigh--Jeans
+    // limit; x>=50 makes log(expm1(x)) indistinguishable from x in f64.
+    let log_b = if x == 0.0 {
+        det::ln(2.0 * LIGHT_M_S * BOLTZMANN_J_K * 1.0e27) + det::ln(temperature_k)
+            - 4.0 * det::ln(wavelength_nm)
+    } else {
+        let log_denominator = if x >= 50.0 { x } else { det::ln(det::expm1(x)) };
+        det::ln(C1_NM) - 5.0 * det::ln(wavelength_nm) - log_denominator
+    };
+    let value = det::exp(log_b);
+    if value.is_finite() && value >= 0.0 {
+        Ok(value)
+    } else {
+        Err(ThermalSurfaceError::Unrepresentable)
     }
 }
 

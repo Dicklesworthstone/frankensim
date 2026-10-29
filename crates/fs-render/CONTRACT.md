@@ -80,14 +80,25 @@ differentiable lift). Pure Rust throughout.
   Emission into an active dielectric medium refuses: this law describes a
   vacuum/exterior-air side, with no inferred refractive-index correction.
   The observer integrates the visible band under the existing normalized CIE
-  convention; conduction retains the full bolometric cooling budget. Thermal
-  emitters are sampled by camera paths only, so their hit weight is one under
-  every direct-light strategy and an otherwise dark scene is admitted without
-  inventing an NEE source. Separate `Primitive::emission` is refused for this
-  material. BDPT refuses it before film publication until a physical thermal
+  convention; conduction retains the full bolometric cooling budget. Actual
+  static thermal mesh faces, including rigid mesh instances and accepted body
+  boundaries, participate in NEE with their original Planck spectra. Source
+  selection caches visible CIE luminance per thermal state and weights each
+  triangle by its subtended solid angle; the conditional proposal is exact
+  uniform area. Forward and reverse mixture PDFs include all overlapping
+  same-primitive triangle proposals. Thermal hits use the corresponding MIS
+  weight and continue through the reciprocal reflection law. The last admitted
+  bounce gives NEE full weight because no competing continuation is evaluated.
+  Charts, animated thermal geometry and paths through smooth dielectric
+  connectors retain camera-path emission without a fictitious NEE competitor.
+  Separate `Primitive::emission` is refused for this material. BDPT refuses it
+  before film publication until a physical thermal
   light-subpath proposal exists. Focused regressions cover the Planck integral
   against Stefan--Boltzmann, emitted pixel intensity/color, retained reflection,
-  original cooling flux, material swaps and mismatched-state refusals. These
+  original cooling flux, material swaps and mismatched-state refusals. The
+  thermal lighting battery also compares diffuse illumination against independent
+  area quadrature under NEE, BSDF, balance MIS and power MIS, and verifies
+  occlusion, emissivity scaling and construction-order/progressive replay. These
   are numerical consistency checks, not experimental spectral validation.
 
 - `charts` module (plan §10.2, beads qfx.2 + 8ll9; [S], default-on through
@@ -750,6 +761,9 @@ the separate source/provenance hashes retain container lineage without changing
   that same branch and area-to-solid-angle Jacobian. At a
   lighting-v1 path's final permitted bounce, NEE has weight one because no
   competing BSDF continuation is evaluated.
+Lighting bit-semantics v4 adds physical thermal mesh proposals and their matched
+hit weights. Scenes without these proposals retain their previous numerical
+samples. Thermal spectra never pass through an RGB approximation.
 Camera-path transport exposes both balance-heuristic and squared-power-
 heuristic MIS. Both use the same reciprocal proposal densities and partition
 unity; the power variant is an unbiased variance policy, not radiance clipping
@@ -762,8 +776,9 @@ isotropic visible-normal sampling while preserving the same BSDF integral in
 expectation.
 Current no-claims: no volumetric coupling, no Russian roulette, reflective GGX
 and conductor sampling is isotropic-only, conductor and rough-dielectric GGX
-are single-scattering without multiple-scattering compensation, and emitters
-do not reflect. Dielectric tracer bit-semantics v14 retains v13's isotropic
+are single-scattering without multiple-scattering compensation, and standalone
+RGB emitters do not reflect. Thermal emitters retain their reciprocal diffuse
+reflection. Dielectric tracer bit-semantics v14 retains v13's isotropic
 view-conditioned visible-normal rough-dielectric proposal, exact environment
 endpoint, finite-rectangle one-internal-reflection manifold connector,
 coplanar-interface canonicalization, and support-preserving `T-R-T` cone cull.

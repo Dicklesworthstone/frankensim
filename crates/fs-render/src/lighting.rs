@@ -16,6 +16,11 @@ use fs_math::det;
 
 use crate::spectral::{LiftedSpectrum, lift_rgb};
 
+mod thermal;
+use thermal::AdmittedThermalTriangle;
+pub use thermal::ThermalLightSample;
+pub(crate) use thermal::ThermalTriangleLight;
+
 const PI: f64 = core::f64::consts::PI;
 const TAU: f64 = core::f64::consts::TAU;
 const RECTANGLE_IDENTITY_DOMAIN: &str = "org.frankensim.fs-render.rect-light.v1";
@@ -64,6 +69,24 @@ pub enum LightingError {
         /// Repeated primitive index.
         primitive_index: usize,
     },
+    /// A thermal emitter triangle has invalid or degenerate geometry, or its
+    /// physical visible-band radiance cannot be represented.
+    InvalidThermalTriangle {
+        /// Input triangle index.
+        light_index: usize,
+    },
+    /// Triangles naming one physical primitive disagree about thermal state.
+    InconsistentThermalSurface {
+        /// Repeated primitive index.
+        primitive_index: usize,
+    },
+    /// Identical thermal-emitter geometry was attached to different primitives.
+    DuplicateThermalTriangle {
+        /// First input triangle index.
+        first: usize,
+        /// Second input triangle index.
+        second: usize,
+    },
     /// Environment dimensions were zero, overflowed, or disagreed with the
     /// supplied pixel count.
     InvalidEnvironmentDimensions,
@@ -101,6 +124,20 @@ impl core::fmt::Display for LightingError {
             Self::DuplicatePrimitive { primitive_index } => write!(
                 formatter,
                 "multiple rectangular emitters name primitive {primitive_index}"
+            ),
+            Self::InvalidThermalTriangle { light_index } => {
+                write!(
+                    formatter,
+                    "invalid thermal emitter triangle at index {light_index}"
+                )
+            }
+            Self::InconsistentThermalSurface { primitive_index } => write!(
+                formatter,
+                "thermal emitter triangles disagree about primitive {primitive_index}"
+            ),
+            Self::DuplicateThermalTriangle { first, second } => write!(
+                formatter,
+                "thermal emitter triangles {first} and {second} duplicate physical geometry"
             ),
             Self::InvalidEnvironmentDimensions => {
                 formatter.write_str("invalid environment-map dimensions or pixel count")
@@ -594,6 +631,8 @@ pub struct EnvironmentEvaluation {
 pub enum LightSample {
     /// Finite rectangular source.
     Rectangle(RectLightSample),
+    /// Finite physical gray/diffuse thermal surface.
+    ThermalSurface(ThermalLightSample),
     /// Infinite environment source.
     Environment(EnvironmentLightSample),
 }
@@ -603,6 +642,8 @@ pub enum LightSample {
 pub enum LightKind {
     /// Rectangular source; carries the original input index.
     Rectangle(usize),
+    /// Thermal triangle; carries the admitted input-triangle index.
+    ThermalSurface(usize),
     /// Environment source.
     Environment,
 }
@@ -644,6 +685,8 @@ pub struct AdmittedLighting<'a> {
     // admitted scalar in input order so hot mixture-PDF paths never repeat
     // that quadrature and original rectangle indices remain O(1).
     rectangle_luminances: Vec<f64>,
+    thermal_triangles: Vec<AdmittedThermalTriangle>,
+    has_positive_thermal: bool,
     environment: Option<&'a EnvironmentMap>,
     candidates: Vec<Candidate>,
 }
@@ -655,7 +698,7 @@ impl<'a> AdmittedLighting<'a> {
         rectangles: &'a [RectLight],
         environment: Option<&'a EnvironmentMap>,
     ) -> Result<Self, LightingError> {
-        Self::try_new_controlled(rectangles, environment, false, || Ok(()))
+        Self::try_new_controlled(rectangles, environment, Vec::new(), false, || Ok(()))
     }
 
     /// Cancellable form of [`Self::try_new`] used by production render
@@ -667,33 +710,44 @@ impl<'a> AdmittedLighting<'a> {
         rectangles: &'a [RectLight],
         environment: Option<&'a EnvironmentMap>,
     ) -> Result<Self, LightingError> {
-        Self::try_new_controlled(rectangles, environment, false, || {
+        Self::try_new_controlled(rectangles, environment, Vec::new(), false, || {
             cx.checkpoint().map_err(|_| LightingError::Cancelled)
         })
     }
 
-    /// The scene has already admitted a physical thermal emitter sampled only
-    /// by camera paths. No fake rectangle/environment is added to the proposal
-    /// distribution; an empty NEE distribution simply returns no light sample.
-    pub(crate) fn with_unsampled_surface_emission(
+    /// Admit actual static thermal surface triangles into the same light
+    /// mixture as rectangles and the environment. Emitted spectra remain the
+    /// source-bound physical Planck laws; cached visible luminance is used only
+    /// to choose a proposal. Other thermal shapes may retain camera-hit-only
+    /// emission through `has_unsampled_surface_emission`.
+    pub(crate) fn with_thermal_surface_emission(
         cx: &Cx<'_>,
         rectangles: &'a [RectLight],
         environment: Option<&'a EnvironmentMap>,
+        triangles: Vec<ThermalTriangleLight>,
+        has_unsampled_surface_emission: bool,
     ) -> Result<Self, LightingError> {
-        Self::try_new_controlled(rectangles, environment, true, || {
-            cx.checkpoint().map_err(|_| LightingError::Cancelled)
-        })
+        Self::try_new_controlled(
+            rectangles,
+            environment,
+            triangles,
+            has_unsampled_surface_emission,
+            || cx.checkpoint().map_err(|_| LightingError::Cancelled),
+        )
     }
 
     fn try_new_controlled(
         rectangles: &'a [RectLight],
         environment: Option<&'a EnvironmentMap>,
+        triangles: Vec<ThermalTriangleLight>,
         has_unsampled_surface_emission: bool,
         mut checkpoint: impl FnMut() -> Result<(), LightingError>,
     ) -> Result<Self, LightingError> {
         checkpoint()?;
         let candidate_capacity = rectangles
             .len()
+            .checked_add(triangles.len())
+            .ok_or(LightingError::EnvironmentTooLarge)?
             .checked_add(usize::from(environment.is_some()))
             .ok_or(LightingError::EnvironmentTooLarge)?;
         // Ordered insertion avoids handing an unbounded caller-owned light
@@ -739,6 +793,68 @@ impl<'a> AdmittedLighting<'a> {
                 },
             );
         }
+        let mut thermal_triangles = Vec::new();
+        thermal_triangles
+            .try_reserve_exact(triangles.len())
+            .map_err(|_| LightingError::EnvironmentTooLarge)?;
+        let mut thermal_luminances = BTreeMap::new();
+        let mut thermal_primitive_states = BTreeMap::new();
+        let mut thermal_identity_owners = BTreeMap::new();
+        let mut has_positive_thermal = false;
+        for (light_index, triangle) in triangles.into_iter().enumerate() {
+            checkpoint()?;
+            if primitives.contains(&triangle.primitive_index) {
+                return Err(LightingError::DuplicatePrimitive {
+                    primitive_index: triangle.primitive_index,
+                });
+            }
+            let state_identity = triangle.surface.identity();
+            if thermal_primitive_states
+                .insert(triangle.primitive_index, state_identity)
+                .is_some_and(|previous| previous != state_identity)
+            {
+                return Err(LightingError::InconsistentThermalSurface {
+                    primitive_index: triangle.primitive_index,
+                });
+            }
+            let luminance = if let Some(&cached) = thermal_luminances.get(&state_identity) {
+                cached
+            } else {
+                let value = thermal::visible_luminance(triangle.surface, &mut checkpoint).map_err(
+                    |error| match error {
+                        LightingError::Cancelled => error,
+                        _ => LightingError::InvalidThermalTriangle { light_index },
+                    },
+                )?;
+                thermal_luminances.insert(state_identity, value);
+                value
+            };
+            let admitted = AdmittedThermalTriangle::try_new(triangle, luminance)
+                .ok_or(LightingError::InvalidThermalTriangle { light_index })?;
+            let identity = admitted.identity;
+            if let Some(&(first, primitive_index)) = thermal_identity_owners.get(&identity) {
+                if primitive_index != admitted.source.primitive_index {
+                    return Err(LightingError::DuplicateThermalTriangle {
+                        first,
+                        second: light_index,
+                    });
+                }
+            } else {
+                thermal_identity_owners
+                    .insert(identity, (light_index, admitted.source.primitive_index));
+            }
+            if luminance > 0.0 {
+                has_positive_thermal = true;
+                ordered_candidates.insert(
+                    (identity, 2_u8, light_index),
+                    Candidate {
+                        kind: LightKind::ThermalSurface(light_index),
+                        identity,
+                    },
+                );
+            }
+            thermal_triangles.push(admitted);
+        }
         checkpoint()?;
         // A black map still supplies explicit black miss radiance, but it is
         // not a sampling candidate. In particular, adding a black map must not
@@ -762,6 +878,7 @@ impl<'a> AdmittedLighting<'a> {
         }
         if !has_unsampled_surface_emission
             && rectangles.is_empty()
+            && !has_positive_thermal
             && environment.is_none_or(EnvironmentMap::is_black)
         {
             return Err(LightingError::NoFiniteEmitter);
@@ -778,6 +895,8 @@ impl<'a> AdmittedLighting<'a> {
         Ok(Self {
             rectangles,
             rectangle_luminances,
+            thermal_triangles,
+            has_positive_thermal,
             environment,
             candidates,
         })
@@ -817,13 +936,21 @@ impl<'a> AdmittedLighting<'a> {
                     residual,
                     u2,
                     weight / total_weight,
+                    total_weight,
                 );
             }
             cumulative = upper;
         }
         let (candidate, lower, weight) = last_positive?;
         let residual = clamp_unit_open((target - lower) / weight);
-        self.sample_candidate(candidate, origin, residual, u2, weight / total_weight)
+        self.sample_candidate(
+            candidate,
+            origin,
+            residual,
+            u2,
+            weight / total_weight,
+            total_weight,
+        )
     }
 
     /// Sample a finite rectangular emitter as the endpoint of a light
@@ -947,10 +1074,30 @@ impl<'a> AdmittedLighting<'a> {
         u1: f64,
         u2: f64,
         selection_probability: f64,
+        total_weight: f64,
     ) -> Option<LightSample> {
         match candidate.kind {
             LightKind::Rectangle(light_index) => {
                 self.sample_rectangle(light_index, origin, u1, u2, selection_probability)
+            }
+            LightKind::ThermalSurface(light_index) => {
+                let triangle = self.thermal_triangles.get(light_index)?;
+                let point = triangle.sample_point(u1, u2);
+                let pdf_solid_angle = self.thermal_mixture_pdf_with_total(
+                    triangle.source.primitive_index,
+                    origin,
+                    point,
+                    total_weight,
+                );
+                (pdf_solid_angle > 0.0 && pdf_solid_angle.is_finite()).then_some(
+                    LightSample::ThermalSurface(ThermalLightSample {
+                        primitive_index: triangle.source.primitive_index,
+                        point,
+                        normal: triangle.normal,
+                        surface: triangle.source.surface,
+                        pdf_solid_angle,
+                    }),
+                )
             }
             LightKind::Environment => {
                 let mut sample = self.environment?.sample(u1, u2)?;
@@ -1030,6 +1177,46 @@ impl<'a> AdmittedLighting<'a> {
             .position(|light| light.prim == primitive_index)
     }
 
+    /// Full NEE density for a thermal surface hit. All same-primitive triangle
+    /// proposals whose area support contains the hit participate in this sum;
+    /// coincident triangles must not acquire an unmatched component-only PDF.
+    pub(crate) fn thermal_mixture_pdf(
+        &self,
+        primitive_index: usize,
+        origin: Point3,
+        hit_point: Point3,
+    ) -> f64 {
+        let total = self.total_weight(origin);
+        if !(total > 0.0 && total.is_finite()) {
+            return 0.0;
+        }
+        self.thermal_mixture_pdf_with_total(primitive_index, origin, hit_point, total)
+    }
+
+    fn thermal_mixture_pdf_with_total(
+        &self,
+        primitive_index: usize,
+        origin: Point3,
+        hit_point: Point3,
+        total: f64,
+    ) -> f64 {
+        self.candidates
+            .iter()
+            .filter_map(|candidate| {
+                let LightKind::ThermalSurface(index) = candidate.kind else {
+                    return None;
+                };
+                let triangle = &self.thermal_triangles[index];
+                if triangle.source.primitive_index != primitive_index {
+                    return None;
+                }
+                let weight = triangle.weight(origin);
+                let conditional_pdf = triangle.directional_pdf(origin, hit_point);
+                Some((weight / total) * conditional_pdf)
+            })
+            .sum()
+    }
+
     /// Environment radiance and full mixture PDF for a BSDF-sampled miss.
     #[must_use]
     pub fn environment_evaluation(
@@ -1080,7 +1267,9 @@ impl<'a> AdmittedLighting<'a> {
     /// estimator rather than the separately versioned lighting extension.
     #[must_use]
     pub(crate) fn is_legacy_compatibility_path(&self) -> bool {
-        self.rectangles.len() == 1 && self.environment.is_none_or(EnvironmentMap::is_black)
+        self.rectangles.len() == 1
+            && !self.has_positive_thermal
+            && self.environment.is_none_or(EnvironmentMap::is_black)
     }
 
     fn total_weight(&self, origin: Point3) -> f64 {
@@ -1099,6 +1288,10 @@ impl<'a> AdmittedLighting<'a> {
                 .map_or(0.0, |(light, luminance)| {
                     *luminance * rectangle_solid_angle(light, origin)
                 }),
+            LightKind::ThermalSurface(light_index) => self
+                .thermal_triangles
+                .get(light_index)
+                .map_or(0.0, |triangle| triangle.weight(origin)),
             LightKind::Environment => self.environment.map_or(0.0, |map| map.total_weight),
         }
     }
@@ -1115,7 +1308,7 @@ impl<'a> AdmittedLighting<'a> {
             .iter()
             .filter_map(|candidate| match candidate.kind {
                 LightKind::Rectangle(light_index) => self.rectangle_emission_weight(light_index),
-                LightKind::Environment => None,
+                LightKind::Environment | LightKind::ThermalSurface(_) => None,
             })
             .sum()
     }
@@ -1583,14 +1776,15 @@ mod tests {
         // storage. These pins keep both phases bounded without timing races.
         for cancellation_poll in [4, 6] {
             let mut polls = 0;
-            let result = AdmittedLighting::try_new_controlled(&lights, None, false, || {
-                polls += 1;
-                if polls == cancellation_poll {
-                    Err(LightingError::Cancelled)
-                } else {
-                    Ok(())
-                }
-            });
+            let result =
+                AdmittedLighting::try_new_controlled(&lights, None, Vec::new(), false, || {
+                    polls += 1;
+                    if polls == cancellation_poll {
+                        Err(LightingError::Cancelled)
+                    } else {
+                        Ok(())
+                    }
+                });
             assert_eq!(
                 result.unwrap_err(),
                 LightingError::Cancelled,
@@ -1926,6 +2120,7 @@ mod tests {
                             * rectangle_solid_angle(&lights[light_index], origin)
                     }
                     LightKind::Environment => environment.total_weight,
+                    LightKind::ThermalSurface(_) => panic!("no thermal source in this fixture"),
                 })
                 .collect();
             for (candidate, direct) in admitted.candidates.iter().zip(&direct_weights) {
@@ -2165,6 +2360,7 @@ mod tests {
                     "unexpected primitive {} at deterministic sample {index}",
                     sample.primitive_index
                 ),
+                LightSample::ThermalSurface(_) => panic!("no thermal source in this fixture"),
             };
             counts[kind] += 1;
         }
@@ -2240,6 +2436,7 @@ mod tests {
                     );
                     saw[2] = true;
                 }
+                LightSample::ThermalSurface(_) => panic!("no thermal source in this fixture"),
             }
         }
         assert!(

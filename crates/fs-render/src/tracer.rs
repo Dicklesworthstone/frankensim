@@ -117,6 +117,7 @@ pub use bdpt::{
     render_cinematic_bidirectional_with_execution_and_strategy_set,
     render_cinematic_bidirectional_with_strategy_set,
 };
+mod thermal_lighting;
 mod transport;
 
 /// Bit-affecting semantic surface version of the tracer (see
@@ -146,7 +147,9 @@ pub const MATERIAL_CONTENT_IDENTITY_DOMAIN: &str = "org.frankensim.render.materi
 /// Bit-affecting semantics of construction-order-independent multi-light and
 /// environment sampling. The legacy one-rectangle/no-environment path remains
 /// under [`TRACER_BIT_SEMANTICS_VERSION`] and keeps its frozen stream.
-pub const LIGHTING_TRACER_BIT_SEMANTICS_VERSION: u32 = 3;
+// v4 adds exact Planck emitters from static thermal mesh surfaces to the
+// direct-light mixture. Scenes without those surfaces retain their old bits.
+pub const LIGHTING_TRACER_BIT_SEMANTICS_VERSION: u32 = 4;
 
 /// Dedicated Philox counter domain for the two lens coordinates. Lens draws
 /// never advance [`PathRng`] and therefore cannot perturb light or BSDF draws.
@@ -669,6 +672,9 @@ fn prepare_direct_light(origin: Point3, sample: LightSample) -> Option<PreparedD
             pdf_solid_angle: sample.pdf_solid_angle,
             target: DirectLightTarget::Environment,
         },
+        // Thermal emission has a physical spectrum and a continuing reflective
+        // surface; it is evaluated by thermal_lighting, without an RGB lift.
+        LightSample::ThermalSurface(_) => return None,
     };
     (prepared.pdf_solid_angle > 0.0
         && prepared.pdf_solid_angle.is_finite()
@@ -2898,15 +2904,12 @@ impl core::fmt::Display for TracerError {
             Self::BrushedConductorUnsupported => {
                 formatter.write_str("bidirectional transport does not support brushed conductors")
             }
-            Self::ThermalSurfaceUnsupported => formatter.write_str(
-                "bidirectional transport does not support gray/diffuse thermal sources",
-            ),
-            Self::ThermalSurfaceMediumUnsupported => formatter.write_str(
-                "gray/diffuse thermal emission requires an exterior vacuum/air side",
-            ),
-            Self::DuplicateThermalEmission => formatter.write_str(
-                "a gray/diffuse thermal surface must own its primitive's emission",
-            ),
+            Self::ThermalSurfaceUnsupported => formatter
+                .write_str("bidirectional transport does not support gray/diffuse thermal sources"),
+            Self::ThermalSurfaceMediumUnsupported => formatter
+                .write_str("gray/diffuse thermal emission requires an exterior vacuum/air side"),
+            Self::DuplicateThermalEmission => formatter
+                .write_str("a gray/diffuse thermal surface must own its primitive's emission"),
             Self::AnimatedLightUnsupported => {
                 formatter.write_str("animated area-light geometry is unsupported")
             }
@@ -12865,15 +12868,22 @@ fn trace_path(
             if medium_stack.len() != 0 {
                 return Err(TracerError::ThermalSurfaceMediumUnsupported);
             }
-            // These surfaces have no separate NEE light proposal. Every camera
-            // path hit contributes with unit weight, including NeeOnly, then
-            // continues through the SAME reciprocal diffuse reflection law.
-            // The observer never subtracts emitted energy from thermal storage.
+            // Only straight thermal connections compete with this hit. A path
+            // through smooth refractive interfaces has no thermal manifold
+            // proposal and retains its full camera-path contribution.
+            let weight = thermal_lighting::hit_weight(
+                lighting,
+                s.strategy,
+                previous_bsdf,
+                prim_idx,
+                prev_origin,
+                hit.point,
+            );
             for (lane, &lambda) in lambdas.iter().enumerate() {
                 let emitted = surface
                     .radiance_w_m2_sr_nm(lambda)
                     .map_err(|_| TracerError::InvalidInput)?;
-                let contribution = throughput[lane] * emitted;
+                let contribution = throughput[lane] * emitted * weight;
                 radiance[lane] += contribution;
                 if let Some(contributions) = &mut contribution_radiance {
                     contributions.record(emissive_contribution_class(depth), lane, contribution);
@@ -12902,9 +12912,38 @@ fn trace_path(
                     if let Some(alpha) = surface.roughness_alpha() {
                         let boundary = dielectric_boundary.ok_or(TracerError::InvalidInput)?;
                         let (u1, u2) = rng.path_pair(path_sobol, depth, 0);
-                        if let Some(direct) = lighting
-                            .sample(hit.point, u1, u2)
-                            .and_then(|sample| prepare_direct_light(hit.point, sample))
+                        let light_sample = lighting.sample(hit.point, u1, u2);
+                        if let Some(LightSample::ThermalSurface(light)) = light_sample {
+                            let values = thermal_lighting::direct_contribution(
+                                scene,
+                                cx,
+                                ray_time,
+                                s,
+                                depth,
+                                light,
+                                &prim.material,
+                                hit.point,
+                                frame,
+                                ray.dir.scale(-1.0),
+                                &medium_stack,
+                                dielectric_boundary,
+                                brushed_frame.as_ref(),
+                                &lambdas,
+                            )?;
+                            for lane in 0..PACKET {
+                                let contribution = throughput[lane] * values[lane];
+                                radiance[lane] += contribution;
+                                if let Some(contributions) = &mut contribution_radiance {
+                                    contributions.record(
+                                        direct_contribution_class(depth),
+                                        lane,
+                                        contribution,
+                                    );
+                                }
+                            }
+                        }
+                        if let Some(direct) =
+                            light_sample.and_then(|sample| prepare_direct_light(hit.point, sample))
                         {
                             let wi = direct.direction;
                             let cos_s = n.dot(wi).abs();
@@ -13032,9 +13071,38 @@ fn trace_path(
                     // expression-for-expression so the frozen Cornell path is
                     // unaffected by enabling dielectric support.
                     let (u1, u2) = rng.path_pair(path_sobol, depth, 0);
-                    if let Some(direct) = lighting
-                        .sample(hit.point, u1, u2)
-                        .and_then(|sample| prepare_direct_light(hit.point, sample))
+                    let light_sample = lighting.sample(hit.point, u1, u2);
+                    if let Some(LightSample::ThermalSurface(light)) = light_sample {
+                        let values = thermal_lighting::direct_contribution(
+                            scene,
+                            cx,
+                            ray_time,
+                            s,
+                            depth,
+                            light,
+                            &prim.material,
+                            hit.point,
+                            frame,
+                            ray.dir.scale(-1.0),
+                            &medium_stack,
+                            dielectric_boundary,
+                            brushed_frame.as_ref(),
+                            &lambdas,
+                        )?;
+                        for lane in 0..PACKET {
+                            let contribution = throughput[lane] * values[lane];
+                            radiance[lane] += contribution;
+                            if let Some(contributions) = &mut contribution_radiance {
+                                contributions.record(
+                                    direct_contribution_class(depth),
+                                    lane,
+                                    contribution,
+                                );
+                            }
+                        }
+                    }
+                    if let Some(direct) =
+                        light_sample.and_then(|sample| prepare_direct_light(hit.point, sample))
                     {
                         let wi = direct.direction;
                         let cos_s = n.dot(wi);
@@ -14469,10 +14537,12 @@ fn validate_scene<'scene>(
         }
     }
     let lighting = if thermal_emission {
-        AdmittedLighting::with_unsampled_surface_emission(
+        AdmittedLighting::with_thermal_surface_emission(
             cx,
             &scene.lights,
             scene.environment.as_ref(),
+            thermal_lighting::triangles(scene, cx)?,
+            true,
         )?
     } else {
         AdmittedLighting::try_new_cancellable(cx, &scene.lights, scene.environment.as_ref())?

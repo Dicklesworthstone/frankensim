@@ -13,6 +13,9 @@ use fs_render::tracer::{
     render,
 };
 
+#[path = "thermal_surface/lighting.rs"]
+mod lighting;
+
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new_clock_free();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());

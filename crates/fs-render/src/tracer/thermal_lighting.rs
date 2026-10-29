@@ -1,0 +1,212 @@
+//! Physical thermal emission in the existing surface-path estimator.
+//!
+//! The proposal uses actual static mesh faces, including rigidly placed body
+//! boundaries. Thermal charts and moving bodies retain camera-path support.
+//! No spectrum is converted through RGB, and observing light never updates
+//! the thermal owner's stored energy.
+
+use super::*;
+use crate::lighting::{ThermalLightSample, ThermalTriangleLight};
+
+pub(super) fn triangles(
+    scene: &Scene,
+    cx: &Cx<'_>,
+) -> Result<Vec<ThermalTriangleLight>, TracerError> {
+    let mut lights = Vec::new();
+    for (primitive_index, primitive) in scene.primitives.iter().enumerate() {
+        cx.checkpoint()?;
+        let Material::GrayDiffuseThermal { surface } = primitive.material else {
+            continue;
+        };
+        if surface.emissivity() == 0.0 {
+            continue;
+        }
+        let (mesh, placement) = match &primitive.shape {
+            Shape::Mesh(mesh) => (mesh, None),
+            Shape::Instance(instance) => match instance.geometry() {
+                SharedGeometry::Mesh(mesh) => (mesh.as_ref(), Some(instance.transform())),
+                SharedGeometry::Chart(_) => continue,
+            },
+            Shape::Chart(_) | Shape::AnimatedInstance(_) => continue,
+        };
+        lights
+            .try_reserve(mesh.triangles.len())
+            .map_err(|_| TracerError::Lighting(LightingError::EnvironmentTooLarge))?;
+        for triangle in &mesh.triangles {
+            cx.checkpoint()?;
+            let mut vertices = [Point3::new(0.0, 0.0, 0.0); 3];
+            for (corner, &index) in vertices.iter_mut().zip(triangle) {
+                let vertex = mesh
+                    .vertices
+                    .get(index as usize)
+                    .ok_or(TracerError::InvalidInput)?;
+                let local = Point3::new(vertex[0], vertex[1], vertex[2]);
+                *corner = placement.map_or(local, |transform| transform.transform_point(local));
+            }
+            lights.push(ThermalTriangleLight {
+                vertices,
+                primitive_index,
+                surface,
+            });
+        }
+    }
+    Ok(lights)
+}
+
+pub(super) fn hit_weight(
+    lighting: &AdmittedLighting<'_>,
+    strategy: DirectStrategy,
+    previous: Option<PreviousBsdf>,
+    primitive_index: usize,
+    origin: Point3,
+    point: Point3,
+) -> f64 {
+    let Some(previous) = previous else { return 1.0 };
+    if previous.pdf.is_delta() || previous.smooth_slab.is_some() {
+        return 1.0;
+    }
+    let pdf = lighting.thermal_mixture_pdf(primitive_index, origin, point);
+    if pdf > 0.0 {
+        emissive_hit_weight(strategy, Some(previous), Some(pdf))
+    } else {
+        // An unsupported shape or direction has no competing proposal,
+        // including in the NEE-only diagnostic mode.
+        1.0
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn direct_contribution(
+    scene: &Scene,
+    cx: &Cx<'_>,
+    ray_time: Option<&PathTime>,
+    settings: &Settings,
+    depth: u32,
+    light: ThermalLightSample,
+    material: &Material,
+    point: Point3,
+    frame: SurfaceFrame,
+    outgoing: Vec3,
+    media: &MediumStack,
+    boundary: Option<BoundaryMedia>,
+    brushed: Option<&crate::surface_detail::ShadingFrame>,
+    wavelengths: &[f64; PACKET],
+) -> Result<[f64; PACKET], TracerError> {
+    let mut result = [0.0; PACKET];
+    let displacement = light.point.delta_from(point);
+    let distance = displacement.norm();
+    if !(distance > 0.0 && distance.is_finite() && light.pdf_solid_angle > 0.0) {
+        return Ok(result);
+    }
+    let incoming = displacement.scale(1.0 / distance);
+    let cosine = frame.oriented.dot(incoming);
+    if cosine == 0.0 || (boundary.is_none() && cosine < 0.0) {
+        return Ok(result);
+    }
+    let shadow_origin = dielectric_spawn_origin(point, frame.geometric, incoming);
+    let shadow_displacement = light.point.delta_from(shadow_origin);
+    let shadow_distance = shadow_displacement.norm();
+    if !(shadow_distance > 0.0 && shadow_distance.is_finite()) {
+        return Ok(result);
+    }
+    let shadow = Ray {
+        origin: shadow_origin,
+        dir: shadow_displacement.scale(1.0 / shadow_distance),
+    };
+    let Some(hit) = intersect(scene, cx, &shadow, ray_time)? else {
+        return Ok(result);
+    };
+    // Compare actual world points: another face of this same body may occlude
+    // the sampled face. Primitive identity alone would leak light through it.
+    let coordinate_scale = [
+        point.x,
+        point.y,
+        point.z,
+        light.point.x,
+        light.point.y,
+        light.point.z,
+    ]
+    .into_iter()
+    .map(f64::abs)
+    .fold(distance, f64::max);
+    // The shifted shadow ray aims at the exact target, so its origin offset
+    // does not become an endpoint error. A metric RAY_EPS allowance here
+    // would let a nearby opaque face of the same body reveal the hidden face.
+    let tolerance = 128.0 * f64::EPSILON * coordinate_scale;
+    if hit.primitive_index != light.primitive_index
+        || hit.hit.point.delta_from(light.point).norm() > tolerance
+    {
+        return Ok(result);
+    }
+    let shadow_medium = boundary.map_or_else(
+        || media.last().map(|entry| entry.glass),
+        |boundary| {
+            if cosine > 0.0 {
+                boundary.incident
+            } else {
+                boundary.transmitted
+            }
+        },
+    );
+    if shadow_medium.is_some() {
+        return Err(TracerError::ThermalSurfaceMediumUnsupported);
+    }
+    for (lane, &wavelength) in wavelengths.iter().enumerate() {
+        let (value, competing_pdf) = match *material {
+            Material::Dielectric { surface, .. } => {
+                let Some(alpha) = surface.roughness_alpha() else {
+                    continue;
+                };
+                let boundary = boundary.ok_or(TracerError::InvalidInput)?;
+                let evaluation = evaluate_rough_dielectric(
+                    frame.oriented,
+                    outgoing,
+                    incoming,
+                    medium_ior(boundary.incident, wavelength)?,
+                    medium_ior(boundary.transmitted, wavelength)?,
+                    alpha,
+                )?;
+                (evaluation.value, evaluation.pdf)
+            }
+            _ => (
+                opaque_bsdf_eval(
+                    material,
+                    frame.oriented,
+                    outgoing,
+                    incoming,
+                    wavelength,
+                    None,
+                    brushed,
+                )?,
+                bsdf_pdf(material, frame.oriented, outgoing, incoming, brushed),
+            ),
+        };
+        if value <= 0.0 {
+            continue;
+        }
+        let weight = if depth + 1 == settings.max_depth {
+            // No BSDF ray will be traced beyond the final admitted vertex.
+            1.0
+        } else {
+            match settings.strategy {
+                DirectStrategy::Mis => {
+                    balance_heuristic(1, light.pdf_solid_angle, 1, competing_pdf)
+                }
+                DirectStrategy::PowerMis => {
+                    power_heuristic(1, light.pdf_solid_angle, 1, competing_pdf)
+                }
+                DirectStrategy::NeeOnly => 1.0,
+                DirectStrategy::BsdfOnly => return Err(TracerError::InvalidInput),
+            }
+        };
+        let emitted = light
+            .surface
+            .radiance_w_m2_sr_nm(wavelength)
+            .map_err(|_| TracerError::InvalidInput)?;
+        result[lane] = value * cosine.abs() * emitted / light.pdf_solid_angle * weight;
+        if !result[lane].is_finite() || result[lane] < 0.0 {
+            return Err(TracerError::InvalidInput);
+        }
+    }
+    Ok(result)
+}
