@@ -1210,8 +1210,14 @@ impl<'a> AdmittedLighting<'a> {
                 if triangle.source.primitive_index != primitive_index {
                     return None;
                 }
-                let weight = triangle.weight(origin);
                 let conditional_pdf = triangle.directional_pdf(origin, hit_point);
+                if conditional_pdf == 0.0 {
+                    // Most faces of a body cannot generate this endpoint.
+                    // Reject their area support before the three normalized
+                    // directions and solid-angle transcendental evaluation.
+                    return None;
+                }
+                let weight = triangle.weight(origin);
                 Some((weight / total) * conditional_pdf)
             })
             .sum()

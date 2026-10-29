@@ -76,6 +76,10 @@ name = "thermal_surface"
 required-features = ["tracer"]
 
 [[test]]
+name = "absorbing_transport"
+required-features = ["tracer", "volumes"]
+
+[[test]]
 name = "dielectric_battery"
 required-features = ["tracer"]
 

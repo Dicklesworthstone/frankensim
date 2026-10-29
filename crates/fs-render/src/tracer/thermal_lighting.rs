@@ -91,6 +91,7 @@ pub(super) fn direct_contribution(
     boundary: Option<BoundaryMedia>,
     brushed: Option<&crate::surface_detail::ShadingFrame>,
     wavelengths: &[f64; PACKET],
+    #[cfg(feature = "volumes")] medium: Option<&crate::volumes::transport::AbsorbingGrid<'_>>,
 ) -> Result<[f64; PACKET], TracerError> {
     let mut result = [0.0; PACKET];
     let displacement = light.point.delta_from(point);
@@ -151,6 +152,12 @@ pub(super) fn direct_contribution(
     if shadow_medium.is_some() {
         return Err(TracerError::ThermalSurfaceMediumUnsupported);
     }
+    #[cfg(feature = "volumes")]
+    let volume_transmittance = if let Some(medium) = medium {
+        medium.transmittance(cx, point, incoming, distance, wavelengths)?
+    } else {
+        [1.0; PACKET]
+    };
     for (lane, &wavelength) in wavelengths.iter().enumerate() {
         let (value, competing_pdf) = match *material {
             Material::Dielectric { surface, .. } => {
@@ -204,6 +211,10 @@ pub(super) fn direct_contribution(
             .radiance_w_m2_sr_nm(wavelength)
             .map_err(|_| TracerError::InvalidInput)?;
         result[lane] = value * cosine.abs() * emitted / light.pdf_solid_angle * weight;
+        #[cfg(feature = "volumes")]
+        {
+            result[lane] *= volume_transmittance[lane];
+        }
         if !result[lane].is_finite() || result[lane] < 0.0 {
             return Err(TracerError::InvalidInput);
         }

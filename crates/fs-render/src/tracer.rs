@@ -28,9 +28,11 @@
 //! importance-sampled independently of caller construction order. Rectangular
 //! lights are also scene geometry so BSDF paths find them (MIS-weighted both
 //! ways); materials are Lambertian, legacy Schlick-GGX, exact-Fresnel rough
-//! conductors, and smooth/rough spectral dielectrics; no volumetric media (the
-//! `volumes` module is separate); no Russian roulette (fixed depth keeps work
-//! deterministic).
+//! conductors, and smooth/rough spectral dielectrics. With `volumes`, the
+//! `render_absorbing` entry integrates borrowed physical absorption/emission
+//! fields on the same camera and shadow paths; dielectric/volume connectors
+//! and scattering remain unsupported. There is no Russian roulette (fixed
+//! depth keeps work deterministic).
 
 use crate::animated_instances::{AnimatedGeometryInstance, AnimatedInstanceError};
 use crate::aov::{
@@ -117,7 +119,11 @@ pub use bdpt::{
     render_cinematic_bidirectional_with_execution_and_strategy_set,
     render_cinematic_bidirectional_with_strategy_set,
 };
+#[cfg(feature = "volumes")]
+mod absorbing;
 mod thermal_lighting;
+#[cfg(feature = "volumes")]
+pub use absorbing::{AbsorbingFilm, render_absorbing, render_absorbing_range};
 mod transport;
 
 /// Bit-affecting semantic surface version of the tracer (see
@@ -2824,6 +2830,13 @@ pub enum TracerError {
     Conductor(ConductorError),
     /// Lighting artifact, selection, or probability admission refused.
     Lighting(LightingError),
+    /// Borrowed density/temperature transport refused a ray, field or budget.
+    #[cfg(feature = "volumes")]
+    Volume(crate::volumes::transport::VolumeTransportError),
+    /// Straight absorbing-cell transport cannot yet follow the curved
+    /// multi-interface paths used by the dielectric NEE connectors.
+    #[cfg(feature = "volumes")]
+    VolumeDielectricUnsupported,
     /// An encountered dielectric boundary violated strict LIFO nesting or was
     /// oriented as an exit while the path remained in ambient air.
     MediumStackMismatch {
@@ -2921,6 +2934,12 @@ impl core::fmt::Display for TracerError {
             Self::Dielectric(error) => write!(formatter, "dielectric transport refused: {error}"),
             Self::Conductor(error) => write!(formatter, "conductor transport refused: {error}"),
             Self::Lighting(error) => write!(formatter, "scene lighting refused: {error}"),
+            #[cfg(feature = "volumes")]
+            Self::Volume(error) => write!(formatter, "scene medium refused: {error}"),
+            #[cfg(feature = "volumes")]
+            Self::VolumeDielectricUnsupported => formatter.write_str(
+                "absorbing scene media do not yet support dielectric boundary transport",
+            ),
             Self::MediumStackMismatch {
                 boundary_primitive,
                 active_boundary,
@@ -3042,6 +3061,16 @@ impl From<LightingError> for TracerError {
         match error {
             LightingError::Cancelled => Self::Cancelled,
             other => Self::Lighting(other),
+        }
+    }
+}
+
+#[cfg(feature = "volumes")]
+impl From<crate::volumes::transport::VolumeTransportError> for TracerError {
+    fn from(error: crate::volumes::transport::VolumeTransportError) -> Self {
+        match error {
+            crate::volumes::transport::VolumeTransportError::Cancelled => Self::Cancelled,
+            other => Self::Volume(other),
         }
     }
 }
@@ -12557,6 +12586,46 @@ fn trace_path(
     path_sobol: Option<&Sobol>,
     resume: Option<SpectralPathState>,
 ) -> Result<PathTraceSample, TracerError> {
+    trace_path_with_medium(
+        scene,
+        lighting,
+        cx,
+        s,
+        kn,
+        pixel,
+        sample,
+        jx,
+        jy,
+        ul,
+        ray_time,
+        camera_path,
+        capture_primary,
+        path_sobol,
+        resume,
+        #[cfg(feature = "volumes")]
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn trace_path_with_medium(
+    scene: &Scene,
+    lighting: &AdmittedLighting<'_>,
+    cx: &Cx<'_>,
+    s: &Settings,
+    kn: f64,
+    pixel: u32,
+    sample: u32,
+    jx: f64,
+    jy: f64,
+    ul: f64,
+    ray_time: Option<&PathTime>,
+    camera_path: CameraPath<'_>,
+    capture_primary: bool,
+    path_sobol: Option<&Sobol>,
+    resume: Option<SpectralPathState>,
+    #[cfg(feature = "volumes")] medium: Option<&crate::volumes::transport::AbsorbingGrid<'_>>,
+) -> Result<PathTraceSample, TracerError> {
     let key = [(s.seed & 0xffff_ffff) as u32, (s.seed >> 32) as u32];
     let rng = PathRng {
         pixel,
@@ -12634,7 +12703,34 @@ fn trace_path(
     let remaining_smooth_dielectric_splits = state.remaining_smooth_dielectric_splits;
     for depth in state.next_depth..s.max_depth {
         cx.checkpoint()?;
-        let Some(intersection) = intersect(scene, cx, &ray, ray_time)? else {
+        let intersection = intersect(scene, cx, &ray, ray_time)?;
+        #[cfg(feature = "volumes")]
+        if let Some(medium) = medium {
+            // The numerical ray starts off the surface to avoid self-hits.
+            // Integrate between the retained physical endpoints, including
+            // thin cells next to the terminal surface, rather than extending
+            // that offset direction from a different origin.
+            let (direction, distance) = intersection.map_or((ray.dir, f64::INFINITY), |hit| {
+                let displacement = hit.hit.point.delta_from(segment_origin);
+                let distance = displacement.norm();
+                let direction = if distance > 0.0 {
+                    displacement.scale(1.0 / distance)
+                } else {
+                    ray.dir
+                };
+                (direction, distance)
+            });
+            let transport = medium.transport(cx, segment_origin, direction, distance, &lambdas)?;
+            for lane in 0..PACKET {
+                let emitted = throughput[lane] * transport.emission_w_m2_sr_nm[lane];
+                radiance[lane] += emitted;
+                if let Some(contributions) = &mut contribution_radiance {
+                    contributions.record(emissive_contribution_class(depth), lane, emitted);
+                }
+                throughput[lane] *= transport.transmittance[lane];
+            }
+        }
+        let Some(intersection) = intersection else {
             if let Some(active) = medium_stack.last() {
                 return Err(unclosed_medium_error(
                     active.boundary_primitive,
@@ -12929,6 +13025,8 @@ fn trace_path(
                                 dielectric_boundary,
                                 brushed_frame.as_ref(),
                                 &lambdas,
+                                #[cfg(feature = "volumes")]
+                                medium,
                             )?;
                             for lane in 0..PACKET {
                                 let contribution = throughput[lane] * values[lane];
@@ -13088,6 +13186,8 @@ fn trace_path(
                             dielectric_boundary,
                             brushed_frame.as_ref(),
                             &lambdas,
+                            #[cfg(feature = "volumes")]
+                            medium,
                         )?;
                         for lane in 0..PACKET {
                             let contribution = throughput[lane] * values[lane];
@@ -13298,6 +13398,19 @@ fn trace_path(
                                         }
                                     }
                                 } else {
+                                    #[cfg(feature = "volumes")]
+                                    let volume_transmittance = if let Some(medium) = medium {
+                                        let distance = match direct.target {
+                                            DirectLightTarget::Rectangle { distance_m, .. } => {
+                                                distance_m
+                                            }
+                                            DirectLightTarget::Environment => f64::INFINITY,
+                                        };
+                                        medium
+                                            .transmittance(cx, hit.point, wi, distance, &lambdas)?
+                                    } else {
+                                        [1.0; PACKET]
+                                    };
                                     // Keep the ambient opaque tracer-v1 arithmetic
                                     // bit-for-bit identical to its frozen path.
                                     for (k, &l) in lambdas.iter().enumerate() {
@@ -13311,10 +13424,13 @@ fn trace_path(
                                             brushed_frame.as_ref(),
                                         )?;
                                         let before = radiance[k];
-                                        radiance[k] +=
+                                        let contribution =
                                             throughput[k] * f * cos_s * espec.eval(l) * escale
                                                 / pdf_nee
                                                 * weight;
+                                        #[cfg(feature = "volumes")]
+                                        let contribution = contribution * volume_transmittance[k];
+                                        radiance[k] += contribution;
                                         if let Some(contributions) = &mut contribution_radiance {
                                             contributions.record(
                                                 direct_contribution_class(depth),
@@ -14526,6 +14642,15 @@ fn validate_scene<'scene>(
     cx: &Cx<'_>,
     shutter: Option<ShutterInterval>,
 ) -> Result<AdmittedLighting<'scene>, TracerError> {
+    validate_scene_with_medium_emission(scene, cx, shutter, false)
+}
+
+fn validate_scene_with_medium_emission<'scene>(
+    scene: &'scene Scene,
+    cx: &Cx<'_>,
+    shutter: Option<ShutterInterval>,
+    has_medium_emission: bool,
+) -> Result<AdmittedLighting<'scene>, TracerError> {
     let mut thermal_emission = false;
     for primitive in &scene.primitives {
         cx.checkpoint()?;
@@ -14536,7 +14661,7 @@ fn validate_scene<'scene>(
             thermal_emission |= surface.bolometric_exitance_w_m2() > 0.0;
         }
     }
-    let lighting = if thermal_emission {
+    let lighting = if thermal_emission || has_medium_emission {
         AdmittedLighting::with_thermal_surface_emission(
             cx,
             &scene.lights,

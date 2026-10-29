@@ -13,6 +13,10 @@
 
 use fs_rand::StreamKey;
 
+/// SI absorption and local-equilibrium emission along surface-tracer rays.
+#[cfg(feature = "tracer")]
+pub mod transport;
+
 /// Bit-semantics version for scalar-transfer emission/absorption rendering.
 ///
 /// Bump this when transfer interpolation, stream keying, ray placement, or

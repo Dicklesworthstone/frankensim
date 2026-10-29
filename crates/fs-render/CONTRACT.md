@@ -475,6 +475,33 @@ differentiable lift). Pure Rust throughout.
   budgets before rendering. Its bit contract is
   `TRANSFER_RENDER_SEMANTICS_VERSION = 1`.
 
+- `volumes::transport` (features `volumes,tracer`) connects borrowed simulation
+  density and temperature snapshots to physical scene transport. `AbsorbingGrid`
+  requires kg/m³ density, metre geometry and an explicit visible-band mass
+  absorption spectrum in m²/kg; raw lattice density is not silently interpreted
+  as a physical optical coefficient. Each crossed constant cell integrates
+  Beer--Lambert attenuation and, when a kelvin field is supplied, local-equilibrium
+  emission `sigma_a * B_lambda(T)` using the same SI Planck owner as thermal
+  surfaces. Front-to-back emission has correct intervening absorption, stable
+  optically thin `expm1` evaluation and a repeated-temperature packet cache.
+  Admission validates and hashes borrowed fields once. Ray traversal allocates
+  nothing, visits intersected cells through DDA, checks cancellation and enforces
+  the caller's cell-scan/segment-step limits. Shadow transport skips Planck
+  evaluation and performs one final exponential per wavelength.
+  `render_absorbing` and `render_absorbing_range` use the existing surface
+  integrator, including its spectral BSDFs, lights and counter-based sampling;
+  camera, reflected, RGB/thermal direct-light and environment segments all
+  consume the same medium. This is a static-camera, absorption/emission,
+  refractive-index-one model. Nonzero media with dielectric geometry refuse
+  until their curved connection segments are integrated; vacuum grids preserve
+  the ordinary tracer's exact results. `AbsorbingFilm` binds the medium snapshot
+  and all sample settings, caps progressive samples and commits whole ranges
+  transactionally. Callers retain the same scene between appends. This surface
+  adds no scattering, volume-light NEE, dynamic-field exposure interpolation,
+  thermal-state debit or measured-property authority. G1/G3/G4/G5 tests compare
+  slabs, shadow paths and hot-cell emission to independent integrals, exercise
+  boundary/refinement/unit changes, and verify replay and refusal rollback.
+
 ## Invariants
 
 - FURNACE: `furnace_radiance` returns exactly `albedo·incident` (energy
@@ -774,7 +801,7 @@ original light-selection draws and estimator. Tracer bit-semantics v2
 deliberately changes reflective GGX sample/PDF bits from NDF sampling to
 isotropic visible-normal sampling while preserving the same BSDF integral in
 expectation.
-Current no-claims: no volumetric coupling, no Russian roulette, reflective GGX
+Current no-claims: no general scattering-volume coupling, no Russian roulette, reflective GGX
 and conductor sampling is isotropic-only, conductor and rough-dielectric GGX
 are single-scattering without multiple-scattering compensation, and standalone
 RGB emitters do not reflect. Thermal emitters retain their reciprocal diffuse
@@ -994,8 +1021,8 @@ its prior 872c freeze was four-quadrant, and 8ll9 requires current-tree replay.
   time-invariant.
 - v1 includes the scalar-BVH spectral path tracer. Wide-BVH SIMD traversal,
   watertight ray-triangle tests, a LIGHT-BVH for large emitter populations,
-  heterogeneous volume/surface coupling, ray-stream sorting, and progressive
-  tile streaming to HELM remain staged.
+  heterogeneous scattering/dielectric coupling, ray-stream sorting, and
+  progressive tile streaming to HELM remain staged.
 - The free `render_*_with_execution` functions and
   `render_cinematic_with_aovs_execution` are one-job convenience APIs and
   construct a scoped worker lane per call. Sustained frame sequences must use
@@ -1154,10 +1181,10 @@ its prior 872c freeze was four-quadrant, and 8ll9 requires current-tree replay.
 - Progressive live tiles with ledger artifact pinning (frame-consistent
   snapshots of evolving fields) — staged with the vessel flagship's
   render lane; the smoke tier renders a paused simulation's buffer.
-- Refractive free-surface rendering (fill-fraction interface
-  reconstruction) and MIS integration of phase functions into the full
-  tracer — successors; the phase samplers and their moment gates ship
-  now.
+- Refractive free-surface rendering (fill-fraction interface reconstruction),
+  dielectric/volume connectors and MIS integration of phase functions into the
+  full tracer remain successors. The borrowed absorption/emission scene path
+  above is implemented; the separate phase samplers retain their moment gates.
 - The zero-copy claim at smoke tier is BORROW SEMANTICS (the API takes
   `&[f64]`; the battery binds a live `FreeSurface` mass buffer); the
   FrankenNumpy membrane view protocol is the fuller deliverable.
