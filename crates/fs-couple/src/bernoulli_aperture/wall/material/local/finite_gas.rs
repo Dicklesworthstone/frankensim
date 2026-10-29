@@ -236,7 +236,7 @@ fn prepare<S, E, C: FnMut() -> bool>(
             let refresh_kind = match controls.loss {
                 FiniteGasDgLoss::Lossless => GasRefresh::Lossless,
                 FiniteGasDgLoss::UniformViscothermal { maximum_relative_error } =>
-                    GasRefresh::UniformDiffusion(maximum_relative_error),
+                    GasRefresh::UniformDiffusion { maximum_relative_error },
             };
             let (next_duct, mut next_state, next_propagator, refresh) = prepare_gas(
                 duct, &marched, propagator, &replacement, refresh_kind, maximum_work, cancelled,

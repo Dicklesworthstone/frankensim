@@ -11,6 +11,10 @@ pub mod input;
 /// Computed exterior radiation from the actual endpoint geometry and gas.
 pub mod radiation;
 
+mod gas;
+pub use gas::DgGasRefresh;
+pub(crate) use gas::prepare_dg_gas;
+
 mod terminal;
 mod continuous;
 pub(crate) use continuous::{DgJunctionTrajectory, DgTerminalTrajectory};

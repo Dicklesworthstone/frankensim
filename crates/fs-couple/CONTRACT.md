@@ -8082,6 +8082,34 @@ This advances MR08/MR33/MR34 while their wider spatial/history requirements
 remain open. Native execution and measured acoustic validation remain
 separate gates.
 
+## Live gas changes through the shared acoustic port
+
+`DgPortLoad::rebind_gas_field_controlled` extends the original material-gas
+transfer to a continuing bore with finite branches and causal exterior loads.
+`DgGasRefresh` selects the existing uniform lossless, uniform viscothermal or
+spatial viscothermal transfer. Source-bound uniform/regional walls and their
+finite gas evolution use the same preparation path. No replacement storage
+law or memory fit is introduced.
+
+Compression, momentum, wall motion and admitted diffusion/Maxwell histories
+survive. Pressure, volume flow and the exact mean inlet impedance follow the
+new gas. The original native storage difference enters parameter work once;
+the enclosing background owner owes its heat/species balance and that signed
+work. A refresh consumes no sample and preserves accepted output frames.
+
+Independently sourced branches and exterior loads retain their gas and causal
+history. Their junction and terminal eliminations are rebuilt against the new
+bore. Common static-pressure and computed-opening admissions remain active.
+An attached finite gap whose gas changes refuses until its transverse momentum
+transfer is represented. All source, state, propagator and algebraic coupling
+changes publish together after work, source and cancellation checks.
+
+This prescribed fixed-geometry intervention advances MR33/MR67 and the MR05
+atomic-state requirement. It does not solve mean flow, heat/species transport,
+static pressure traction or an exterior gas change. Independent-source
+branch/terminal histories and late refusal are covered by authored focused
+regressions; native execution remains a separate verification gate.
+
 ## Continuing spatial dielectric charge through thermal phase change
 
 `ConductionThermalNetwork::step_dielectric_candidate` connects the native

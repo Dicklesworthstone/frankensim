@@ -6,6 +6,7 @@ use fs_duct::dg::{
     DgWallRelaxationTransfer,
 };
 use fs_material::gas_field::AxialGasField;
+pub(super) use crate::dg_port::{DgGasRefresh as GasRefresh, prepare_dg_gas as prepare_gas};
 
 fn duct_error(error: fs_duct::DuctError) -> AcousticRealizeError {
     match error {
@@ -171,67 +172,6 @@ fn prepare(
     })
 }
 
-pub(super) enum GasRefresh {
-    Lossless,
-    UniformDiffusion(f64),
-    SpatialDiffusion(f64),
-}
-
-/// Prepare the same live gas transfer and certified clock for either wall
-/// source layout. Native wall coordinates and all immutable source assignments
-/// remain with their existing owner; the new field retains its gas catalog.
-pub(super) fn prepare_gas(
-    duct: &DgDuct,
-    state: &DgState,
-    propagator: &DgPropagator,
-    field: &AxialGasField,
-    refresh: GasRefresh,
-    maximum_absolute_parameter_work_j: f64,
-    cancelled: &mut impl FnMut() -> bool,
-) -> Result<(DgDuct, DgState, DgPropagator, DgGasMaterialUpdate), AcousticRealizeError> {
-    if cancelled() {
-        return Err(AcousticRealizeError::Cancelled);
-    }
-    let mut next_state = state.clone();
-    propagator.sync_nodal(&mut next_state).map_err(duct_error)?;
-    let mut next_duct = duct.clone();
-    let report = match refresh {
-        GasRefresh::UniformDiffusion(error) => next_duct.rebind_uniform_viscothermal_gas_field(
-            &mut next_state,
-            field,
-            error,
-            maximum_absolute_parameter_work_j,
-            cancelled,
-        ).map_err(duct_error),
-        GasRefresh::SpatialDiffusion(error) => next_duct.rebind_spatial_viscothermal_gas_field(
-            &mut next_state,
-            field,
-            error,
-            maximum_absolute_parameter_work_j,
-            cancelled,
-        ).map_err(|error| match error {
-            fs_duct::profile::gas_field::GasFieldDuctError::Duct(error) => duct_error(error),
-            error => AcousticRealizeError::Nonlinear(error.to_string()),
-        }),
-        GasRefresh::Lossless => next_duct.rebind_uniform_gas_field(
-            &mut next_state,
-            field,
-            maximum_absolute_parameter_work_j,
-            cancelled,
-        ).map_err(duct_error),
-    }?;
-    if cancelled() {
-        return Err(AcousticRealizeError::Cancelled);
-    }
-    let next_propagator = next_duct
-        .propagator(propagator.dt(), propagator.tolerance())
-        .map_err(duct_error)?;
-    if cancelled() {
-        return Err(AcousticRealizeError::Cancelled);
-    }
-    Ok((next_duct, next_state, next_propagator, report))
-}
-
 impl MaterialWallDg {
     /// Refresh the continuing uniform gas from its complete shared source field.
     ///
@@ -295,7 +235,7 @@ impl MaterialWallDg {
             state,
             propagator,
             field,
-            GasRefresh::UniformDiffusion(maximum_relative_error),
+            GasRefresh::UniformDiffusion { maximum_relative_error },
             maximum_absolute_parameter_work_j,
             cancelled,
         )?;
@@ -325,7 +265,7 @@ impl MaterialWallDg {
     ) -> Result<DgGasMaterialUpdate, AcousticRealizeError> {
         let (duct, next, stepping, report) = prepare_gas(
             &self.duct, state, propagator, field,
-            GasRefresh::SpatialDiffusion(maximum_relative_error),
+            GasRefresh::SpatialDiffusion { maximum_relative_error },
             maximum_absolute_parameter_work_j, cancelled,
         )?;
         let _old_duct = core::mem::replace(&mut self.duct, duct);
@@ -439,7 +379,7 @@ impl RegionalMaterialWallDg {
             state,
             propagator,
             field,
-            GasRefresh::UniformDiffusion(maximum_relative_error),
+            GasRefresh::UniformDiffusion { maximum_relative_error },
             maximum_absolute_parameter_work_j,
             cancelled,
         )?;
@@ -463,7 +403,7 @@ impl RegionalMaterialWallDg {
     ) -> Result<DgGasMaterialUpdate, AcousticRealizeError> {
         let (duct, next, stepping, report) = prepare_gas(
             &self.duct, state, propagator, field,
-            GasRefresh::SpatialDiffusion(maximum_relative_error),
+            GasRefresh::SpatialDiffusion { maximum_relative_error },
             maximum_absolute_parameter_work_j, cancelled,
         )?;
         let _old_duct = core::mem::replace(&mut self.duct, duct);
