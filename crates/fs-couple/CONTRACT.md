@@ -11695,3 +11695,30 @@ ordinary body-profile path, including in the Lab. This makes finer source
 meshes admissible without raising the exact structural owner capacity or
 discarding material history. Manufactured cantilever data, fixed thermal state,
 flat-plate geometry and finite modes remain explicit qualification limits.
+
+## Native elastic connections with resolved adhesive stick/slip
+
+`contact::adhesive_elastic_events::AdhesiveElasticEventModalSystem` binds the
+original elastic event law to one actual native spring/damper connection and
+its complete signed column. Original free body modes, rest extension, stiffness
+and Kelvin-Voigt resistance are retained. This exact scalar reduction preserves
+common motion while actual spring loading changes the adhesive stopping and
+restart history. Normal indentation and the original anchor remain fixed;
+external modal forces may change each sample.
+
+The original free and connected event adapters share preallocated native
+impulse/time-moment propagation and native account staging. Actual represented
+body travel, spring extension and endpoint velocity are checked against the
+original event path. Independent integrated total-reaction work closes spring
+storage, physical damper loss and junction loss. Original connection ports
+retain their actual spring/damper work; friction crosses the body-network
+boundary once. Numerical propagation uncertainty must fit inside the combined
+energy budget. Full-sample passive force bounds preserve original connection
+limits, and rejected steps publish neither body nor contact history.
+
+Six focused native tests check independent connected-oscillator and dashpot
+solutions, original ports, stop/hold/restart, center-of-mass motion, numerical
+work accuracy and atomic
+retry; all six prior free-body event tests also pass. Arbitrary connection
+networks, elastic component modes, moving anchors in this native adapter,
+normal inertia and vector-slip events remain outside this reduction.
