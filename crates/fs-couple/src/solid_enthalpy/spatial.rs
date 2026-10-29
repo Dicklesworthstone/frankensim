@@ -27,7 +27,9 @@ use fs_conduction::bc::ThermalBoundary;
 use fs_conduction::field::ScalarField;
 use fs_conduction::interface::ThermalInterfaces;
 use fs_conduction::material::{ElementMaterials, MaterialId, MaterialTable};
-use fs_conduction::transient::enthalpy::heterogeneous::HeterogeneousEnthalpyBackwardEuler;
+use fs_conduction::transient::enthalpy::heterogeneous::{
+    EnthalpyHeatStep, EnthalpyRadiation, HeterogeneousEnthalpyBackwardEuler,
+};
 use fs_conduction::transient::enthalpy::{EnthalpyError, EnthalpyStepConfig, EnthalpyStepSolution};
 use fs_conduction::{ConductionError, ConductionProblem};
 use fs_exec::Cx;
@@ -413,6 +415,47 @@ impl<'a, 'm: 'a, 'c: 'a> SpatialSolidEnthalpy<'a, 'm, 'c> {
         })
     }
 
+    /// Native ambient or closed-enclosure radiation heats the same solid.
+    ///
+    /// The selected mean/pointwise operator remains owned by conduction.
+    /// Its complete physical heat report survives the mechanical handoff;
+    /// radiation is never converted into an extra source or convection port.
+    /// Material, phase, strain or load refusal returns neither endpoint.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_radiation(
+        &self,
+        old_specific_h: &[f64],
+        dt_s: f64,
+        boundary: &ThermalBoundary,
+        interfaces: Option<&ThermalInterfaces>,
+        source: &ScalarField,
+        thermal_config: EnthalpyStepConfig,
+        radiation: EnthalpyRadiation<'_>,
+        loads: &TetLoadCase3<'_, '_>,
+        fixed_dofs: &[usize],
+        solve: SolidEquilibriumConfig,
+        cx: &Cx<'_>,
+    ) -> Result<SpatialSolidCandidate<'_, EnthalpyHeatStep>, SpatialSolidEnthalpyError> {
+        let thermal = self.advance_thermal_with_radiation(
+            old_specific_h,
+            dt_s,
+            boundary,
+            interfaces,
+            source,
+            thermal_config,
+            radiation,
+            cx,
+        )?;
+        let state = self.resolve(&thermal.conduction().specific_enthalpy_j_kg, cx)?;
+        let equilibrium = state.solve(loads, fixed_dofs, solve, cx)?;
+        poll(cx)?;
+        Ok(SpatialSolidCandidate {
+            thermal,
+            state,
+            equilibrium,
+        })
+    }
+
     // Shared by the quasistatic and continuing-modal consumers. Neither can
     // substitute an independent conductivity or a second thermal inventory.
     #[allow(clippy::too_many_arguments)]
@@ -441,6 +484,37 @@ impl<'a, 'm: 'a, 'c: 'a> SpatialSolidEnthalpy<'a, 'm, 'c> {
             old_specific_h,
             dt_s,
             thermal_config,
+        )?)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_thermal_with_radiation(
+        &self,
+        old_specific_h: &[f64],
+        dt_s: f64,
+        boundary: &ThermalBoundary,
+        interfaces: Option<&ThermalInterfaces>,
+        source: &ScalarField,
+        thermal_config: EnthalpyStepConfig,
+        radiation: EnthalpyRadiation<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<EnthalpyHeatStep, SpatialSolidEnthalpyError> {
+        self.resolve(old_specific_h, cx)?;
+        let problem = ConductionProblem {
+            mesh: self.thermal.mesh(),
+            boundary,
+            material: self.conductivity.model_for(0)?,
+            element_materials: Some(&self.conductivity),
+            source,
+        };
+        Ok(self.thermal.advance_with_radiation(
+            cx,
+            problem,
+            interfaces,
+            old_specific_h,
+            dt_s,
+            thermal_config,
+            radiation,
         )?)
     }
 }
@@ -526,8 +600,8 @@ impl SpatialSolidState<'_> {
 
 /// The original caloric report and native mechanical response are both present
 /// only after all gates accept. They are separate energy accounts on this rung.
-pub struct SpatialSolidCandidate<'a> {
-    pub thermal: EnthalpyStepSolution,
+pub struct SpatialSolidCandidate<'a, Thermal = EnthalpyStepSolution> {
+    pub thermal: Thermal,
     pub state: SpatialSolidState<'a>,
     pub equilibrium: SolidEquilibrium,
 }

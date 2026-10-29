@@ -200,6 +200,18 @@ complete reflected spatial tangent and its genuine transpose. Tests in
 reflected derivatives, nonuniform nodal balances, finite latent heat transfer,
 and a strong-self-view case with a negative exact diagonal.
 
+`transient::enthalpy::heterogeneous::EnthalpyRadiation` selects the existing
+prescribed, mean ambient, mean enclosure, pointwise ambient or pointwise
+enclosure owner through `advance_with_radiation`. The selection borrows the
+original prepared operators and retains the same reference masses, phase
+charts, conductivity, contacts and immutable history. It introduces no new
+iteration or heat law. `EnthalpyHeatStep` preserves the complete original
+result: mean-patch physical residual/energy and separated convection accounts
+remain available beside their applied inner boundary; pointwise reports remain
+inside the native step. `conduction()` is a state/inner-solve view, while
+`physical_energy_residual_j()` selects the authoritative complete heat audit.
+Consumers must not send a mean-patch combined Robin heat into a coolant port.
+
 Both pointwise assemblies expose `tangent_apply_transpose` and
 `parameter_pullback`. The latter contracts a caller-supplied full nodal
 outward-load weight with absolute surface emissivity and, for ambient exchange,

@@ -13,6 +13,9 @@
 
 use std::fmt;
 
+mod radiation;
+pub use radiation::{EnthalpyHeatStep, EnthalpyRadiation};
+
 use fs_exec::Cx;
 use fs_material::phase::EquilibriumEnthalpyPhaseCurve;
 

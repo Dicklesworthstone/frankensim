@@ -40,6 +40,8 @@ const FREE: [usize; 6] = [0, 1, 2, 4, 5, 8];
 
 #[path = "spatial_solid_enthalpy/motion.rs"]
 mod motion;
+#[path = "spatial_solid_enthalpy/radiation.rs"]
+mod radiation;
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new();
