@@ -100,7 +100,8 @@ pub struct NetworkControl {
     pub minimum_step_s: f64,
     /// Maximum absolute pressure-equation residual [Pa].
     pub pressure_tolerance_pa: f64,
-    /// Forward finite-difference pressure increment for the bounded Jacobian [Pa].
+    /// Maximum nominal forward pressure difference [Pa]. It shrinks with the
+    /// pressure residual, with a representable-increment floor at the trial pressure.
     pub pressure_difference_pa: f64,
     /// Original per-room moving-interface solve controls.
     pub zone: ZoneSolve,
@@ -616,11 +617,23 @@ impl ZoneNetwork {
             for j in 0..n {
                 poll(cancelled)?;
                 self.perturbation.copy_from_slice(&self.pressures);
-                self.perturbation[j] += controls.pressure_difference_pa;
+                // A fixed pressure difference can span a nearby neutral-plane
+                // transition and leave a biased Jacobian even at convergence.
+                // Tighten the linearization with the actual closure residual,
+                // while retaining a representable difference at the pressure scale.
+                let difference = controls
+                    .pressure_difference_pa
+                    .min(0.1 * norm)
+                    .max(64.0 * f64::EPSILON * self.pressures[j].abs());
+                self.perturbation[j] += difference;
+                let actual_difference = self.perturbation[j] - self.pressures[j];
+                if !positive(actual_difference) {
+                    return Err(NetworkError::Invalid("unrepresentable pressure difference"));
+                }
                 self.evaluate(dt, sources, controls.zone, cancelled)?;
                 for i in 0..n {
                     self.matrix[i * n + j] =
-                        (self.evaluated[i] - self.residual[i]) / controls.pressure_difference_pa;
+                        (self.evaluated[i] - self.residual[i]) / actual_difference;
                 }
             }
             for i in 0..n {

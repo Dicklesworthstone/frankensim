@@ -995,3 +995,25 @@ cases and four plume cases. These include simultaneous counterflow, independent
 species/enthalpy balance, pressure equilibration, forced complete-step retries,
 matched gas/wall clocks, joint gas-wall energy, latent heat storage, surface
 resistance, implicit conduction beyond the explicit limit, and cancellation.
+
+
+### Runnable two-zone public-case comparison and pressure linearization
+
+The `compartment_fire` example composes original NASA9 N2/O2 calorics,
+Heskestad entrainment, a bidirectional stratified doorway and three original
+thermal-wall profiles. Both convection coefficients are required explicit
+inputs. The complete six-case Steckler comparison and dt refinement are in
+`data/reference/compartment_fire/steckler_1982_two_zone_example.json`; inputs,
+run command, source distinctions and all upper/lower/interface discrepancies
+are documented alongside the example. Prescribed heat is not an implicit
+claim of oxygen consumption or combustion-product generation.
+
+The pressure Jacobian now shrinks its nominal forward difference with the
+actual pressure residual and divides by the actual representable increment.
+This prevents the fixed difference from spanning a nearby neutral-plane
+transition at convergence. In the retained Test 14 scenario it reduces
+whole-step halvings from 10,858 to 2 while changing the late-time mean upper
+layer temperature by less than 3e-8 K. All six public runs complete with the
+final solver; upper-layer-rise errors remain +4.28% to +37.79%, and interfaces
+remain systematically too high. Numerical convergence is not promoted to
+physical validation, and no coefficient has been fitted to these observations.

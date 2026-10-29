@@ -30,7 +30,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         !line.is_empty() && !line.starts_with('#')
     });
     let (_, header) = rows.next().ok_or("CSV contains no header")?;
-    if header.trim() != HEADER {
+    let columns_expected = if header.trim() == HEADER {
+        9
+    } else if header.trim()
+        == format!("{HEADER},reduced_lower_temperature_k,interface_height_above_floor_m")
+    {
+        11
+    } else {
+        0
+    };
+    if columns_expected == 0 {
         return Err(format!("expected fixed CSV header: {HEADER}").into());
     }
     println!(
@@ -58,8 +67,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     for (index, row) in rows {
         let line = index + 1;
         let columns: Vec<_> = row.split(',').map(str::trim).collect();
-        if columns.len() != 9 || columns[0].is_empty() || row.contains('"') {
-            return Err(format!("line {line}: expected nine unquoted CSV fields").into());
+        if columns.len() != columns_expected || columns[0].is_empty() || row.contains('"') {
+            return Err(format!("line {line}: unexpected number of unquoted CSV fields").into());
         }
         let mut values = [0.0; 8];
         for (index, value) in values.iter_mut().enumerate() {

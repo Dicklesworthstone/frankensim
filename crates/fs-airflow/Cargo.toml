@@ -53,5 +53,9 @@ fs-phs = { path = "../fs-phs" }
 fs-matdb = { path = "../fs-matdb" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
 
+[[example]]
+name = "compartment_fire"
+required-features = ["compartment-fire"]
+
 [lints]
 workspace = true
