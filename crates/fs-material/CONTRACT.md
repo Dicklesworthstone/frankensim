@@ -4219,3 +4219,40 @@ enthalpy and positive modeled entropy production. The runnable
 accepted thermal interval with material calorimetry. This establishes a bounded
 liquid/vapor consumer for bead `frankensim-7sga6.2.7`, not its complete ice and
 all-regime scope.
+
+## IF97 adiabatic pressure devices
+
+`phase::water::flow` supplies steady throttles, liquid pumps, vapor compressors
+and steam expanders on the same original IF97 charts. All quantities are per
+kilogram of throughput. Pressure directions are explicit; kinetic/potential
+changes, transient machine dynamics and flow-rate laws are outside this owner.
+
+A throttle resolves h_out=h_in at a lower pressure, admitting compressed liquid,
+wet or superheated outlets where the prepared source chart supports them.
+A shaft device first resolves the original isentropic outlet from
+s_out=s_in. Positive shaft work is outward: an expander gives
+w=eta*(h_in-h_isentropic), while a compressor/pump gives
+w=(h_in-h_isentropic)/eta. Efficiency is an explicit input in (0,1], with no
+invented empirical default. The actual outlet follows from h_out=h_in-w.
+For eta=1 the admitted isentropic source state is reused directly, avoiding an
+unnecessary second inverse and cancellation in reconstructed target enthalpy.
+
+Each result independently admits delta_h+w and delta_u+delta(p*v)+w against
+the caller's unchanged numerical energy budget. Flow work is p_out*v_out minus
+p_in*v_in, not p_out*delta_v, and is not added again to shaft work. Cross-pressure
+entropy always uses original source s. Its signed change and each chart's
+saturation matching defect are reported separately; the fixed-pressure thermal
+entropy correction is never used as a global reference. Source-domain failures,
+lost nonzero work or efficiency loss, entropy decrease outside the caller's
+roundoff allowance, budget failures and cancellation publish no partial result.
+
+Five focused native device tests pass alongside the six material tests. They
+cover liquid/steam throttles, pump work against independent integration of
+v*dp along a raw-source isentrope, superheated compression, wet turbine outlets,
+a complete Rankine cycle, and physical/domain/cancellation refusals.
+`cargo run -p fs-material --example water_rankine` exercises a 10 kPa
+condenser, a 4 MPa boiler at 773.15 K, pump efficiency 0.80 and turbine efficiency
+0.85. It reports states and all four process balances, including a separate
+internal-energy/flow-work cycle check. Its approximately 31.22% efficiency is
+the result for those illustrative inputs, not a calibrated plant prediction.
+Heat-exchanger reservoir entropy and pressure losses are not supplied.

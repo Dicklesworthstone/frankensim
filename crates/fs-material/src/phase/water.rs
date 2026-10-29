@@ -13,6 +13,9 @@
 //! reference heat-exchange geometry; constant-pressure expansion is reported
 //! separately and must not be interpreted as a rigid sealed vessel.
 
+/// Adiabatic throttles and shaft devices using original entropy across pressures.
+pub mod flow;
+
 use fs_qty::{Pressure, Temperature};
 use fs_thermochem::water::if97::bounds::{
     If97HeatCapacityBound, If97HeatCapacityBoundError, If97HeatCapacityBoundSolve,
