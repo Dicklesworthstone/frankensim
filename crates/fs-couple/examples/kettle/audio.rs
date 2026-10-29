@@ -107,6 +107,36 @@ fn admit_power(z:&[C64], n:usize)->Result<(),Error> {
     fs_phs::QuadraticStorage::new(h,m).map_err(|e|format!("exterior multiport power refused: {e}"))?;
     Ok(())
 }
+/// Reciprocity makes the exact modal radiation impedance complex symmetric
+/// (Z = Z^T for real mode shapes); collocation breaks it by its discretisation
+/// error. Keep the reciprocal part (Z+Z^T)/2 in place and return the stated
+/// asymmetry |Z-Z^T|/|Z| (Frobenius), refused above the load fit's own 0.02
+/// complex RMS limit, with the lowest eigenvalue of the power form Re Z_r over
+/// |Z|. That eigenvalue must be indistinguishable from zero at the stated
+/// error, at least -asymmetry*|Z|; nothing is clipped.
+fn reciprocal_part(z:&mut [C64], n:usize)->Result<(f64,f64),String> {
+    if n==0 || n>32 || z.len()!=n*n || z.iter().any(|v|!v.re.is_finite() || !v.im.is_finite()) {
+        return Err("incomplete or nonfinite exterior impedance".into());
+    }
+    let (mut norm,mut skew)=(0.0_f64,0.0_f64);
+    for i in 0..n { for j in 0..n {
+        norm=norm.hypot(z[i*n+j].abs()); skew=skew.hypot((z[i*n+j]-z[j*n+i]).abs());
+    }}
+    if norm==0.0 { return Ok((0.0,0.0)); }
+    let asymmetry=skew/norm;
+    if !(asymmetry<=0.02) {
+        return Err(format!("exterior impedance is not reciprocal: |Z-Z^T|/|Z|={asymmetry:.3e} exceeds 0.02"));
+    }
+    for i in 0..n { for j in 0..i {
+        let v=(z[i*n+j]+z[j*n+i]).scale(0.5); z[i*n+j]=v; z[j*n+i]=v;
+    }}
+    let power:Vec<f64>=z.iter().map(|v|v.re).collect();
+    let lowest=fs_la::eigen::householder_eigh(&power,n).0.into_iter().fold(f64::INFINITY,f64::min)/norm;
+    if !lowest.is_finite() || lowest < -asymmetry {
+        return Err(format!("exterior multiport power refused: lowest eigenvalue of Re((Z+Z^T)/2) is {lowest:.3e}|Z|, below -{asymmetry:.3e}|Z|"));
+    }
+    Ok((asymmetry,lowest))
+}
 /// One set of BEM source solutions supplies BOTH acoustic work and observation.
 pub fn bake(spec:&Spec,film:&TensionedDisk,modes:&[ModePair],settings:Settings,gate:&CancelGate)
     ->Result<(radiation::Model,Bake),Error> {
@@ -133,6 +163,9 @@ pub fn bake(spec:&Spec,film:&TensionedDisk,modes:&[ModePair],settings:Settings,g
     let formulation=if (k_max*boundary.minimum_box_width_m).next_up()<PI.next_down() {
         Formulation::PlainCbie
     } else { Formulation::BurtonMiller };
+    // Largest extent D of the closed surface: its load has detail every c/D in frequency.
+    let extent=boundary.triangles.iter().flatten().flat_map(|a|boundary.triangles.iter().flatten()
+        .map(move |b|(a[0]-b[0]).hypot(a[1]-b[1]).hypot(a[2]-b[2]))).fold(0.0_f64,f64::max);
     let surface=SpherePanels::from_triangles(boundary.triangles)?;
     let geometry=if formulation==Formulation::PlainCbie {
         Some(PreparedCbieGeometry::new_with_cancel(&surface,k_max,
@@ -141,6 +174,8 @@ pub fn bake(spec:&Spec,film:&TensionedDisk,modes:&[ModePair],settings:Settings,g
     let mut values=vec![vec![C64::ZERO;samples];n];
     let mut impedance=vec![vec![C64::ZERO;n*n];samples];
     let mut ppw=f64::INFINITY;
+    // Largest asymmetry, and the power eigenvalue with the least headroom above -asymmetry.
+    let (mut asymmetry,mut worst)=(0.0_f64,(f64::INFINITY,0.0,0.0));
     for index in (0..samples).rev() {
         if gate.is_requested() { return Err("exterior frequency sweep cancelled".into()); }
         let w=omega[index]; let k=w/medium.sound_speed;
@@ -166,17 +201,24 @@ pub fn bake(spec:&Spec,film:&TensionedDisk,modes:&[ModePair],settings:Settings,g
                 impedance[index][i*n+j]=force*C64::new(0.0,-w);
             }
         }
-        admit_power(&impedance[index],n)?;
+        let (skew,lowest)=reciprocal_part(&mut impedance[index],n).map_err(|e|format!("{e} at {:.2} Hz",w/TAU))?;
+        asymmetry=asymmetry.max(skew);
+        if lowest+skew<worst.0 { worst=(lowest+skew,lowest,w/TAU); }
     }
+    eprintln!("exterior reciprocity: max |Z-Z^T|/|Z|={asymmetry:.3e} (refused above 0.02); reciprocal part Re((Z+Z^T)/2) lowest eigenvalue {:.3e}|Z| at {:.2} Hz, {:.3e}|Z| above that frequency's -|Z-Z^T|/|Z| refusal",
+        worst.1,worst.2,worst.0);
     if gate.is_requested() { return Err("exterior fit cancelled".into()); }
-    let fitted=fit::fit(&omega,&impedance,n)?;
+    // The fixed log-spaced dictionary cannot follow that detail over the band; the
+    // travel-time dictionary does, under the same unchanged error limits.
+    let spacing=(TAU*medium.sound_speed/(6.0*extent)).min(omega[samples-1]-omega[0]);
+    let fitted=fit::fit_resolved(&omega,&impedance,n,spacing)?;
     let mut filters=Vec::with_capacity(n);
     for row in &values {
         if gate.is_requested() { return Err("pressure fit cancelled".into()); }
         filters.push(observer(&omega,row,settings.order)?);
     }
-    eprintln!("closed kettle BEM: panels={panels}, sources={n}, samples={samples}, min_panels_per_wavelength={ppw}, formulation={formulation:?}, band_hz={:?}; passive_load_poles={}, complex_peak/RMS={}/{}, resistance_peak/RMS={}/{}",
-        settings.band_hz,fitted.model.poles.len(),fitted.peak_error,fitted.rms_error,
+    eprintln!("closed kettle BEM: panels={panels}, sources={n}, samples={samples}, min_panels_per_wavelength={ppw}, formulation={formulation:?}, band_hz={:?}; extent_m={extent}, load_resonator_spacing_hz={}, passive_load_poles={}, complex_peak/RMS={}/{}, resistance_peak/RMS={}/{}",
+        settings.band_hz,spacing/TAU,fitted.model.poles.len(),fitted.peak_error,fitted.rms_error,
         fitted.resistance_peak_error,fitted.resistance_rms_error);
     Ok((fitted.model,Bake {filters,delay_s}))
 }
@@ -234,6 +276,22 @@ mod tests {
         assert!(admit_power(&positive,2).is_ok());
         let active=vec![C64::from_re(1.0),C64::from_re(2.0),C64::from_re(2.0),C64::from_re(1.0)];
         assert!(admit_power(&active,2).is_err()); // both individual diagonals are positive
+    }
+    #[test]
+    fn reciprocal_part_admits_collocation_skew_and_refuses_beyond_it() {
+        // A passive symmetric pair; collocation adds a small skew reactance.
+        let pair=|r22:f64,skew:f64| vec![C64::new(2.0,-30.0),C64::new(0.0,-4.0+skew),
+            C64::new(0.0,-4.0-skew),C64::new(r22,-20.0)];
+        let mut z=pair(1e-6,0.1);
+        assert!(admit_power(&z,2).is_err()); // the skew alone makes the Hermitian part indefinite
+        let (skew,lowest)=reciprocal_part(&mut z,2).unwrap();
+        assert!((0.007..0.008).contains(&skew) && lowest>0.0);
+        assert!(z.iter().zip(pair(1e-6,0.0)).all(|(a,b)|(*a-b).abs()<1e-15));
+        // A negative eigenvalue within the stated error is admitted and reported, not clipped.
+        let (_,lowest)=reciprocal_part(&mut pair(-1e-3,0.1),2).unwrap();
+        assert!(lowest<0.0 && (lowest*36.55+1e-3).abs()<1e-5);
+        assert!(reciprocal_part(&mut pair(-1.0,0.1),2).is_err());
+        assert!(reciprocal_part(&mut pair(1e-6,1.0),2).is_err());
     }
     #[test]
     fn zero_training_cannot_hide_unseen_audit_pressure() {

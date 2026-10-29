@@ -70,6 +70,19 @@ fn nonlinear_head_air_and_felt_preserve_history_on_cancel_and_force_refusal() {
     assert!(a.mechanics.step(&a.force,&gate).is_err()); assert_eq!(a.mechanics.state(),before);
 }
 #[test]
+fn hysteresis_free_felt_law_strikes_the_head() {
+    // F = K x^p unloading on its own curve (crush 0, q = p), as Rhaouti, Chaigne and Joly's mallet.
+    let mut s=uniform(); s.felt=[100000.0,0.2,2.2,2.2,0.0,0.7,0.0];
+    let gate=CancelGate::new_clock_free();
+    let mut m=Model::new(&s,800,&gate).unwrap();
+    let initial=m.mechanics.stored_energy_j(); let mut loss=0.0;
+    for _ in 0..800 { loss+=m.mechanics.step(&m.force,&gate).unwrap().dissipated_energy_j; }
+    assert!(m.mechanics.felt_history(0).unwrap().eps_max>0.0);
+    assert!((m.mechanics.stored_energy_j()+loss-initial).abs()<1e-6);
+    s.felt[3]=3.0; // crush 0 is the law's limit only when q = p
+    assert!(Model::new(&s,800,&gate).is_err());
+}
+#[test]
 fn an_explicit_zero_exterior_load_preserves_the_unloaded_model_exactly() {
     use fs_couple::render::plate::impact::radiation::{Model as Load,Pole};
     let s=uniform();let gate=CancelGate::new_clock_free();

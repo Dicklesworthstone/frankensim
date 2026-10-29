@@ -99,7 +99,7 @@ impl Model {
         let n=head_end+usize::from(tensioner.is_some());
         let air = MeridianCavity::new(spec.profile.clone(), AcousticMedium { rho0: spec.air[0], c0: spec.air[1] },
             Budget { radial_intervals: spec.air_mesh[0], maximum_azimuthal_order: spec.air_mesh[1],
-                maximum_frequency_hz: spec.air_maximum_hz, maximum_modes: 8, maximum_nodes: 512,
+                maximum_frequency_hz: spec.air_maximum_hz, maximum_modes: 256, maximum_nodes: 512,
                 maximum_matrix_entries: 2_000_000, relative_tolerance: 1e-7 }, gate)?;
         let (basis,mut overlaps) = interface(&film,&modes,&air,gate)?;
         // Fixed-reference radial edge motion sweeps no cavity volume directly.
@@ -140,7 +140,8 @@ impl Model {
                 energy_absolute_tolerance_j: 1e-9, energy_relative_tolerance: 1e-6,
                 maximum_generalized_force: 1e6 },gate)?;
         let reference = match bake(&film,&modes)? {
-            Some(load) => cavity.attach_exterior_radiation(reference,&load,&(1..head_end).collect::<Vec<_>>(),256)?,
+            Some(load) => cavity.attach_exterior_radiation(reference,&load,&(1..head_end).collect::<Vec<_>>(),
+                fs_couple::render::plate::impact::radiation::MAX_JOINT_STATES/2)?,
             None => reference,
         };
         if gate.is_requested() { return Err("kettle preparation cancelled before publication".into()); }

@@ -75,10 +75,23 @@ never become exterior radiation sources.
 
 One closed-boundary triangle BEM sweep supplies BOTH the finite-point receiver
 pressure and the complete resisting force/velocity matrix. Transposed source
-rows project those same pressure traces into signed cross-mode work. The whole
-Hermitian power form is checked; negative source power and asymmetry are not
-silently repaired. The shared positive-real matrix fitter retains all accepted
-residues. `attach_exterior_radiation` adds the resulting poles to the SAME
+rows project those same pressure traces into signed cross-mode work.
+Reciprocity makes the exact modal impedance symmetric (Z = Z^T for real mode
+shapes); collocation breaks it by its discretisation error, about 0.5 % on the
+illustrative card, and the skew part of the large reactance then shows up as
++/- eigenvalue pairs of the Hermitian form. The load and the power form
+therefore use the reciprocal part Z_r = (Z+Z^T)/2, whose whole power form
+Re Z_r is checked. The receipt states the largest asymmetry |Z-Z^T|/|Z| and
+the lowest power eigenvalue. A sweep refuses when the asymmetry exceeds 0.02,
+the load fit's own complex RMS limit, or when that eigenvalue lies below
+-asymmetry*|Z|; nothing is clipped. `--reciprocal-air` is symmetric by
+construction. The shared positive-real matrix fitter retains all accepted
+residues. Its dictionary is the travel-time one (`fit_resolved`): resonators
+every c/(6D) across the band, D the closed surface's largest extent, because a
+kettle's load has detail every c/D in frequency that the fixed 32-term
+log-spaced dictionary cannot follow (on the illustrative card it refuses at
+complex RMS 0.033 against the unchanged 0.02 limit). `attach_exterior_radiation`
+adds the resulting poles to the SAME
 nonlinear equation before numerical preparation. Acoustic storage and damping
 are already in the total energy ledger, not a post-step force or output EQ.
 
@@ -101,8 +114,18 @@ so it does not promise cross-owner rollback or resumable failed audio exports.
 ## Limits and validation status
 
 Construction retains complete requested mode sets or refuses: at most 32 head
-modes, 8 cavity modes, 512 cavity nodes and 2048 exterior panels here. Existing
-256-pole / 1024-scalar-state and acoustic coupling/clock limits still apply.
+modes, 256 cavity modes, 512 cavity nodes and 2048 exterior panels here. The
+interior air's near-field mass on a head mode comes from cavity modes far above
+it, so `air_maximum_hz` must reach well past the head band: on kettle B a
+480 Hz cut keeps no cavity mode of azimuthal order 2 or more, and the (2,1),
+(3,1) and (4,1) head modes then feel no interior air at all; with a 1500 Hz
+cut (68 modes) the coupled (2,1)..(5,1) ratios lie 0.5 to 1.1 % above a
+2500 Hz basis. Exterior poles
+are admitted while the joint state stays within 1024 scalars
+(`radiation::MAX_JOINT_STATES`); acoustic coupling/clock limits still apply.
+Each pole adds two states to the dense step, so the exterior dominates its
+cost: 0.107 s per step on the illustrative card's 230 poles against about 2 ms
+without them (pexfp.376.2 is the structural fix).
 The head and axisymmetric pressure discretizations independently approach the
 same circular interface under refinement. Four-site contact is not a resolved
 moving pressure patch. The 20 J energy ceiling, 1e6 generalized-force ceiling,
@@ -123,7 +146,11 @@ inner/outer head flux agreed to 2.78e-17 in a kinematic fixture. These are NOT
 execution of the Rust implementation or measurements. Authored native tests
 cover input/rim/enclosure refusal, uniform pressure work, felt impact/retry,
 complete source power, transfer phase/audits, zero-load parity and passive load
-state/history integration. A full BEM-to-WAV render has not been observed here.
+state/history integration. The audio command above rendered natively on trj
+(single-threaded, 8602 s; 29b7a3088 plus this example's pexfp.376 changes):
+4800 frames, peak 0.586 Pa, max |Z-Z^T|/|Z| = 8.06e-3, lowest power
+eigenvalue +1.03e-6|Z| at 305.9 Hz, 230 load poles at complex RMS 0.0071.
+`data/instruments/descriptions/timpani/` holds the measured card.
 
 ## Preserved zero-thickness comparison surface
 

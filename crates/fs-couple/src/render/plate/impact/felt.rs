@@ -37,8 +37,10 @@ pub struct FeltPad {
 impl FeltPad {
     pub(super) fn validate(&self, modes: usize) -> Result<(), ImpactError> {
         let l=&self.law;
-        if ![self.area_m2,self.thickness_m,l.f_ref,l.eps_ref,l.p,l.q,l.crush_fraction,l.eps_densify]
+        // The law's own admitted region: crush 0 only as its hysteresis-free q = p case.
+        if ![self.area_m2,self.thickness_m,l.f_ref,l.eps_ref,l.p,l.q,l.eps_densify]
             .iter().all(|v|v.is_finite() && *v>0.0)
+            || !(l.crush_fraction>0.0 || (l.crush_fraction==0.0 && l.q==l.p))
             || !self.precompression_m.is_finite() || !self.prior_maximum_strain.is_finite()
             || self.prior_maximum_strain<0.0 || self.prior_maximum_strain>l.eps_densify
             || l.p<=1.0 || l.q<l.p || l.crush_fraction>=1.0 || l.eps_densify<=l.eps_ref
