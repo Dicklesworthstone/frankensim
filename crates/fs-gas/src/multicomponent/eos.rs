@@ -86,6 +86,9 @@ impl MixtureGas {
     pub fn energy_references(&self) -> &[f64] {
         &self.references
     }
+    pub(super) fn maximum_sensible_energies(&self) -> &[f64] {
+        &self.maximum_energies
+    }
     pub(super) fn inverse_molar_masses(&self) -> &[f64] {
         &self.inverse_masses
     }

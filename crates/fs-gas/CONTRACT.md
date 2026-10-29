@@ -739,3 +739,43 @@ Molecular junction diffusion, wall heat/loss, valves and resolved mixing remain
 separate closures. The chemistry entropy diagnostic is not a network entropy
 certificate, and symmetric splitting does not prove second-order convergence
 for the adaptive first-order chemistry base.
+
+
+## Two-layer compartments with conservative moving-interface work
+
+`multicomponent::compartment::TwoZone` adds a reusable two-zone control volume
+for issue #2. It retains the original `MixtureGas` species bank and source-path
+admission. Each layer stores canonical species masses, sensible internal energy
+in that bank's gauge, physical volume and temperature. A layer may initially
+be absent exactly; real entrainment and heat can create it without artificial
+mass, species or temperature seeds.
+
+A source increment carries heat and advected partial enthalpies. The fixed room
+volume is partitioned by common pressure and the actual variable-Cp ideal-gas
+EOS. The implicit midpoint interface work is
+`W = (p_old+p_new)/2 * (V_lower_new-V_lower_old)`; the other layer receives
+exactly `-W`. A bounded scalar energy-partition solve recovers both temperatures
+through the original gas inversion. Its derivative is positive on the admitted
+positive-Cv source paths. Neither fixed gamma nor a new caloric surrogate is
+introduced. The total sensible-energy source is conserved by construction;
+physical-energy reports retain the original species formation references.
+
+`inflow` and `carried_rate` provide canonical enthalpy-bearing source rates.
+The same transfer is added to the receiver and negated for the donor.
+`advance` completes exactly one supplied-source duration atomically; a network
+or time-quadrature owner must recompute its rates when retrying. Prepared rooms
+can copy accepted physical state only when their source and geometry agree.
+Cancellation, negative inventory, unsupported calorics, an out-of-room interface,
+or a bounded solve failure publishes nothing and leaves the clock unchanged.
+
+Seven native tests pass: the constant-Cp CFAST pressure reduction and adiabatic
+interface refinement; independently integrated variable-Cp heating; conservative
+unequal-species enthalpy exchange; formation of an initially absent upper layer;
+original EOS, composition and interface checks; cancellation/refusal/reuse;
+and representability admission including nonbinary room volumes. The governing
+mass, energy, ideal-gas and fixed-volume equations are documented in
+[NIST TN1889v1, chapter2](https://doi.org/10.6028/NIST.TN.1889v1).
+This is an Estimated well-mixed low-Mach compartment owner, not a flame,
+ceiling-jet, acoustic, soot-radiation or experimental-validation claim. Prescribed
+source rates are frozen over a step; the midpoint work alone does not make the
+complete source/network integration second order.
