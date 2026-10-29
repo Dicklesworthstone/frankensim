@@ -1179,3 +1179,53 @@ Moving-plane positions are supplied at each event and are not advanced twice.
 Smooth step size still requires refinement. Native world-origin angular
 impulses are translated to the selected origin, so distant-origin floating
 cancellation remains a numerical limitation rather than a hidden projection.
+
+## Automatic spherical articulated carriers against translating planes
+
+`articulated_contacts::trajectory::sphere_planes::advance_carrier_planes`
+advances one declared spherical carrier with its original internal articulated
+rotors through automatically discovered plane impacts. Every link origin and
+centre of mass must coincide with the base origin; only fixed/revolute joints
+are admitted. Link mass second moments must fit the declared spherical radius.
+That consistency check does not prove enclosure of an unknown shape: the caller
+declares the sphere as the exposed surface enclosing all internal links. External
+link forces are refused; internal actuator efforts and body torque loads remain
+supported. Uniform gravity then supplies the whole-system COM acceleration.
+
+Each original Lie-midpoint step is limited by the earliest closing root from
+the native ballistic gap owner over all supplied planes. Every accepted segment
+checks the complete quadratic sphere/plane gap, including interior minima, and
+the actual native endpoint. Fixed-normal planes translate once from their
+declared window-start position. Isolated grazing needs no impulse; an initially
+departing contact can return. Floating roots whose actual surface witnesses
+overlap retry up to 64 earlier floating times, with no position/velocity repair.
+The observation is floating analytic geometry, not an interval CCD certificate.
+
+At an event the actual radial root-link material arms are rebuilt from native
+orientation. Nearby planes enter one simultaneous original circular Coulomb
+solve in stable-ID order. That solve retains shell spin, joint/base recoil,
+original inertia, global passivity and signed translating-support work. All
+smooth actuator/external work, impact loss, numerical work defects and spatial
+momentum accounts remain separate in the original trajectory receipt. Spatial
+activation resolution permits early impulses only at nonnegative gaps within
+that resolution; no penetrating configuration becomes admissible by tolerance.
+
+The complete requested window is private until the final cancellation poll.
+At most 21 planes, 4096 links, 4096 attempted native steps and 64 impacts are
+admitted, with caller-owned geometry and event budgets. Failed/retried native
+steps count toward the work cap. Loaded slow contact, unresolved same-time
+events, exhausted event budgets (including chatter/Zeno), impossible geometry,
+and cancellation return no partially advanced state. Sustained support requires
+a different contact lane. There is no claim for other-body collision coverage,
+protruding internals, rotating planes, rolling constraints, certified rotational
+error, or general Moreau-Jean dynamics. Both broad contact and multibody beads
+remain open.
+
+Focused G1/G3/G4 cases in `tests/articulated_carrier_planes.rs` cover analytic
+gravity rebound, a hidden interior collision between separated endpoints,
+motor-driven rotor recoil with frictional shell spin, simultaneous corner
+contact and plane permutation, translating-conveyor work, repeated rebound and
+split continuation, full-scene rotation with a body torque, isolated
+grazing/departure/return, and atomic budget, cancellation and geometry/model
+refusals. Native selected-source checks are
+separate from the unavailable full Cargo/DSR workspace gate.

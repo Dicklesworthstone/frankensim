@@ -6,6 +6,9 @@
 //! remain the geometry/contact owner's responsibility; a supplied event list
 //! is not a no-missed-collision certificate.
 
+/// Automatic ballistic plane encounters for spherical carriers with balanced rotors.
+pub mod sphere_planes;
+
 use super::friction::{
     ArticulatedFrictionalContact, ArticulatedFrictionalContactResult,
     resolve_articulated_frictional_contacts,
