@@ -4,9 +4,10 @@ Sitka-spruce loss pack (Qiu 2026).
 
 Stiffness: handbook values (static, about 12 percent moisture) used at audio frequency.
 Loss: directional loss factors eta_c (measured on other specimens) are turned into the nine Kelvin-Voigt viscosities the shell owner
-consumes by V = D^(1/2) Q D^(1/2) / omega_ref (Q the reduced stiffness, D = diag(eta_L, eta_R, eta_LR)), omega_ref = 2 pi 200 rad/s. The shell's
-viscosity is Kelvin-Voigt, so its loss factor grows with frequency; a CONSTANT loss factor is recovered per mode by the exact identity
-C_hyst(omega) = (omega_ref / omega) C_KV (guitar_body_modes does this when it reports Q).
+consumes by V = D^(1/2) Q D^(1/2) / omega_ref (Q the reduced stiffness, D = diag(eta_L, eta_R, eta_LR)), omega_ref = 2 pi 200 rad/s. Each pack
+states omega_ref as constant_loss_reference_omega, so the shell reduction applies the loss factors at every mode's own frequency
+(fs_couple::shear_shell::constant_loss). Read without it, the same viscosities are Kelvin-Voigt, and a mode's loss factor
+grows as omega / omega_ref.
 
 usage: python3 -I gen_wood_packs.py REPO_ROOT
 Prints every derived number with its arithmetic; writes data/matdb/seed-v1/<pack>/{manifest.tsv,properties.tsv}.
@@ -92,7 +93,7 @@ LOSS_NOTE = (
     "Loss: five dimensionless loss factors loss_factor_1 (L), loss_factor_2 (R), loss_factor_12 (L-R shear), loss_factor_13 (L-T shear) and loss_factor_23 (R-T shear) in the material axes, valid for 2 pi 50 to 2 pi 1000 rad/s (a band declared by the pack author, not measured), for the constant-loss-factor shell path; "
     "and the nine Kelvin-Voigt viscosities built from the same loss factors as eta x stiffness / omega_ref with omega_ref = 2 pi 200 rad/s (1256.64 rad/s): plane_stress_viscosity_11, _22, _66 and the through-thickness shears are eta_L, eta_R, eta_LR, eta_LT, eta_RT times the corresponding stiffness over omega_ref, "
     "the Poisson cross term _12 uses the ARITHMETIC mean of eta_L and eta_R times Q12 / omega_ref (the Adams-Bacon split of the stiffness by loss channel, so both realisations agree on every entry), and the 16 and 26 entries are zero by the orthotropic axes. "
-    "A Kelvin-Voigt viscosity makes the loss factor proportional to frequency; wood's loss factor is nearly constant, so a consumer of the viscosity rows must rescale per mode by omega_ref/omega (guitar_body_modes does) or use the loss_factor rows. "
+    "Wood's loss factor is nearly constant, so the pack states omega_ref as constant_loss_reference_omega, and the shell reduction applies each loss factor at every mode's own frequency; read as Kelvin-Voigt, the same viscosities would make the loss factor proportional to frequency. "
     "The loss factors are measured on other specimens and are NOT a measurement of the Esteso guitar."
 )
 
@@ -158,6 +159,9 @@ def rows_for(obs, vals, visc, eta):
     # dimensionless loss factors in the material axes for the constant-loss-factor shell path (same source observation as the viscosities)
     loss_obs = obs[VISC_ORDER[0]] if isinstance(obs, dict) else obs
     out += [(k, loss_obs, k, eta[axis], "1") for k, axis in LOSS_FACTOR_ROWS]
+    # The angular frequency at which the nine viscosities above were written: a reader applies each loss factor at every
+    # mode's own frequency with it (fs_couple::shear_shell::CONSTANT_LOSS_REFERENCE_OMEGA); without it they are Kelvin-Voigt.
+    out.append(("constant_loss_reference_omega", loss_obs, "constant_loss_reference_omega", OMEGA_REF, "rad/s"))
     return out
 
 
