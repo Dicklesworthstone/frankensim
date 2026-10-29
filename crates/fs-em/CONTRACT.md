@@ -1225,3 +1225,8 @@ Independent regressions exercise two-region nonlinear series continuity,
 current-driven resistivity, simultaneous E/J dependence, data-only source swaps,
 local E.J power, rotation/reversal/gauge invariance, constant-source identity,
 separate power admission, continuation and refusal rollback.
+
+
+## Total-current electrodes with original source response
+
+`PlanarConduction::solve_current` imposes signed total current on complete equipotential electrodes using the original frozen FEEC operator. Actual-amplitude recovery checks both terminal currents and authored I*V independently; source-dependent callers repeat this constraint inside the existing E/J closure. `PlanarConductionResponse` supplies ordinary and thermally refreshed current candidates without unit-field material queries or scaling accepted nonlinear fields. Actual local E.J remains heat; constitutive defects remain numerical residuals. Six manufactured regression groups cover series and parallel heterogeneous specimens, nonuniform electrode reaction, data-only source changes, both signs/zero, constant-law parity, source/work gates and cancellation/retry. Bounds remain fixed geometry and memoryless scalar response; convergence and uniqueness are not guaranteed.

@@ -1,5 +1,8 @@
 //! Native spatial solutions against independently reduced nonlinear specimens.
 use super::*;
+
+#[path = "response/current.rs"]
+mod current;
 use fs_em::conduction::response::{
     ConductionResponseControls, ConductionResponseError, PlanarConductionResponse,
 };

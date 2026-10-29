@@ -39,7 +39,7 @@ use crate::scalar_potential::{self, PotentialError};
 #[derive(Clone, Copy, Debug)]
 pub struct ConductionControls {
     pub linear: CheckedCgConfig,
-    /// Absolute net terminal current and free-node current residual [A].
+    /// Absolute net/controlled terminal current and free-node current residual [A].
     pub current_tolerance_a: f64,
     /// Absolute terminal-work balance tolerance [W]. With prescribed motion,
     /// this includes signed mechanical power as well as irreversible heat.
@@ -315,6 +315,102 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
             report,
             cancelled,
         )
+    }
+
+    /// Solve an ideal equipotential electrode at the authored total current.
+    /// Positive current enters `positive_terminal`; `negative_terminal` is the
+    /// zero-potential reference. The original field determines the distribution
+    /// of electrode reaction, rather than an assumed uniform current density.
+    ///
+    /// Each frozen linear operator requires one unit-voltage FEEC solve, then
+    /// actual-drive field recovery. Both terminal currents and authored I*V are
+    /// checked again at the actual amplitude. The recovered field has no Krylov
+    /// report: the unit solve's report is not an actual-amplitude solve report.
+    /// Nonlinear callers must repeat this solve inside their source closure;
+    /// scaling an already accepted nonlinear response is not valid.
+    pub fn solve_current(
+        &self,
+        positive_terminal: &[usize],
+        negative_terminal: &[usize],
+        current_a: f64,
+        controls: ConductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ConductionField<'_, C>, ConductionError> {
+        poll(cancelled)?;
+        if !current_a.is_finite() {
+            return Err(ConductionError::Invalid("finite total current required"));
+        }
+        if current_a == 0.0 {
+            let boundary = scalar_potential::terminal_boundary(
+                &self.mesh,
+                &[positive_terminal, negative_terminal],
+                &[0.0, 0.0],
+                cancelled,
+            )?;
+            return self.solve(&boundary, controls, cancelled);
+        }
+        let resistance =
+            self.resistance(positive_terminal, negative_terminal, controls, cancelled)?;
+        let mut unit_current_a = 0.0;
+        for &vertex in positive_terminal {
+            poll(cancelled)?;
+            unit_current_a = finite(
+                unit_current_a
+                    + resistance.field.nodal_boundary_current_a[vertex].ok_or(
+                        ConductionError::Invalid("lost original current-controlled electrode"),
+                    )?,
+            )?;
+        }
+        if !positive(unit_current_a) {
+            return Err(ConductionError::Invalid(
+                "positive terminal conductance required",
+            ));
+        }
+        let voltage_v = finite(current_a / unit_current_a)?;
+        let source_power_w = finite(current_a * voltage_v)?;
+        if voltage_v == 0.0 || !positive(source_power_w) {
+            return Err(ConductionError::Invalid(
+                "total-current source is not representable",
+            ));
+        }
+        let field = resistance.field_at_voltage(
+            voltage_v,
+            controls.current_tolerance_a,
+            controls.power_tolerance_w,
+            cancelled,
+        )?;
+        let mut maximum_terminal_defect = 0.0_f64;
+        for (terminal, expected) in [
+            (positive_terminal, current_a),
+            (negative_terminal, -current_a),
+        ] {
+            let mut reaction = 0.0;
+            for &vertex in terminal {
+                poll(cancelled)?;
+                reaction = finite(
+                    reaction
+                        + field.nodal_boundary_current_a[vertex].ok_or(
+                            ConductionError::Invalid("lost actual current-controlled electrode"),
+                        )?,
+                )?;
+            }
+            let defect = finite(reaction - expected)?;
+            if defect.abs() > maximum_terminal_defect.abs() {
+                maximum_terminal_defect = defect;
+            }
+        }
+        let source_power_defect = finite(field.power_w - source_power_w)?;
+        if maximum_terminal_defect.abs() > controls.current_tolerance_a
+            || source_power_defect.abs() > controls.power_tolerance_w
+        {
+            return Err(ConductionError::Balance {
+                current_residual_a: maximum_terminal_defect,
+                maximum_free_current_residual_a: field.maximum_free_current_residual_a,
+                power_residual_w: source_power_defect,
+            });
+        }
+        poll(cancelled)?;
+        Ok(field)
     }
 
     fn validate_controls(

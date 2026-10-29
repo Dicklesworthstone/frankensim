@@ -73,8 +73,9 @@ impl From<ConductorError> for ConductionResponseError {
 }
 
 /// Same geometry and original sources; no independent circuit or thermal state.
-/// A frozen linearization is private: nonlinear fields cannot be obtained by
-/// scaling a unit-voltage resistance or silently freezing an operating point.
+/// A frozen linearization is private. Its actual-amplitude solve is repeated
+/// inside the source closure; accepted nonlinear fields cannot be scaled to a
+/// different excitation or obtained by silently freezing an operating point.
 #[derive(Clone)]
 pub struct PlanarConductionResponse {
     native: PlanarConduction,
@@ -133,6 +134,19 @@ impl ConductionResponseCandidate {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ResponseDrive<'a> {
+    Traces {
+        voltage: &'a [(usize, f64)],
+        currents: &'a [ConductionCurrentTrace],
+    },
+    Current {
+        positive: &'a [usize],
+        negative: &'a [usize],
+        current_a: f64,
+    },
+}
+
 impl PlanarConductionResponse {
     /// Bind one source law per original triangle. Every source is a positive
     /// memoryless scalar conductor with explicitly owned magnitude coordinates.
@@ -175,8 +189,8 @@ impl PlanarConductionResponse {
 
     /// Solve the original voltage/current traces at this fixed external context.
     /// Prescribed current density uses actual native boundary loads, never a
-    /// scaled unit solution. An ideal equipotential TOTAL-current electrode
-    /// needs an additional nonlinear terminal constraint and is not inferred.
+    /// scaled unit solution. Equipotential total-current electrodes use
+    /// [`Self::solve_current_candidate`] and its actual terminal constraint.
     #[allow(clippy::too_many_arguments)]
     pub fn solve_candidate(
         &self,
@@ -214,6 +228,80 @@ impl PlanarConductionResponse {
         controls: ConductionResponseControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ConductionResponseCandidate, ConductionResponseError> {
+        self.solve_driven_with_materials_candidate(
+            seeds,
+            ResponseDrive::Traces { voltage, currents },
+            assembly,
+            field_controls,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Close source response under an ideal equipotential total-current drive.
+    /// Every frozen FEEC trial enforces the authored current on the original
+    /// electrode geometry, then evaluates source data at its actual E and J.
+    /// No unit-field source query or post-convergence amplitude scaling occurs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_current_candidate(
+        &self,
+        positive: &[usize],
+        negative: &[usize],
+        current_a: f64,
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: ConductionResponseControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ConductionResponseCandidate, ConductionResponseError> {
+        self.solve_current_with_materials_candidate(
+            self.conductors().to_vec(),
+            positive,
+            negative,
+            current_a,
+            assembly,
+            field_controls,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// The same total-current closure at an explicitly refreshed original
+    /// thermal/phase context. Source roles, pins and geometry remain original.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_current_with_materials_candidate(
+        &self,
+        seeds: Vec<ResolvedConductorState>,
+        positive: &[usize],
+        negative: &[usize],
+        current_a: f64,
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: ConductionResponseControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ConductionResponseCandidate, ConductionResponseError> {
+        self.solve_driven_with_materials_candidate(
+            seeds,
+            ResponseDrive::Current {
+                positive,
+                negative,
+                current_a,
+            },
+            assembly,
+            field_controls,
+            controls,
+            cancelled,
+        )
+    }
+
+    fn solve_driven_with_materials_candidate(
+        &self,
+        seeds: Vec<ResolvedConductorState>,
+        drive: ResponseDrive<'_>,
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: ConductionResponseControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ConductionResponseCandidate, ConductionResponseError> {
         poll(cancelled)?;
         controls.validate()?;
         if seeds.len() != self.sources.len() || seeds.len() > assembly.max_cells {
@@ -238,7 +326,21 @@ impl PlanarConductionResponse {
                 |_| true,
             )?;
             let field =
-                native.solve_with_current_traces(voltage, currents, field_controls, cancelled)?;
+                match drive {
+                    ResponseDrive::Traces { voltage, currents } => native
+                        .solve_with_current_traces(voltage, currents, field_controls, cancelled)?,
+                    ResponseDrive::Current {
+                        positive,
+                        negative,
+                        current_a,
+                    } => native.solve_current(
+                        positive,
+                        negative,
+                        current_a,
+                        field_controls,
+                        cancelled,
+                    )?,
+                };
             let mut evaluated = Vec::with_capacity(seeds.len());
             let mut next = Vec::with_capacity(seeds.len());
             let mut converged = true;
