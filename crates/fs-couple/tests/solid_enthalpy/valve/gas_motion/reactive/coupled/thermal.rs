@@ -1,6 +1,7 @@
 //! G1/G3/G4 definitions: material heat feeds the same reaction/elastic endpoint.
 //! Synthetic source data and independent caloric/kinetic/structural equations;
 //! no empirical engine, flame or thermal-expansion qualification is implied.
+#[path = "thermal/exchange.rs"]
 mod exchange;
 use super::*;
 use fs_couple::cavity_phs::modal::reactive::thermal::{

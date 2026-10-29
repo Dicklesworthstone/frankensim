@@ -1,5 +1,7 @@
 //! Finite source gas loads the real elastic modes and shares their volume work.
+#[path = "gas_motion/reactive.rs"]
 mod reactive;
+#[path = "gas_motion/exchange.rs"]
 mod exchange;
 
 use super::*;

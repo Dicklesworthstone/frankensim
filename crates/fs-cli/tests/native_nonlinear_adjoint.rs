@@ -4,7 +4,7 @@
 mod json_read;
 use json_read::JsonValue;
 use std::path::{Path, PathBuf};
-use fs_cli::cards::{CardPackKind, CardPackSet, RawCardPack};
+use fs_cli::{CardPackKind, CardPackSet, RawCardPack};
 use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedMaterialCardPack,
     NormalizedPack, ObservationDataset, PropertyClaim, PropertyKey, PropertyValue,
     Provenance, UncertaintyModel};

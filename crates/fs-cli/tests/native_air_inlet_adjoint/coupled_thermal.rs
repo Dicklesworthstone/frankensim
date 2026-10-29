@@ -1,7 +1,7 @@
 //! Native combined-physics regressions: the original import/flow/thermal path,
 //! not a replacement solver. Keep the selected vertex for all physical twins.
 use super::*;
-use fs_cli::cards::{CardPackKind, CardPackSet, RawCardPack};
+use fs_cli::{CardPackKind, CardPackSet, RawCardPack};
 use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedMaterialCardPack,
     NormalizedPack, ObservationDataset, PropertyClaim, PropertyKey, PropertyValue,
     Provenance, UncertaintyModel};

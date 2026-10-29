@@ -1,7 +1,7 @@
 //! Actual import, native FEM field and retained continuum mean enclosure.
 #[path = "../src/json_read.rs"]
 mod json_read;
-use fs_cli::cards::{CardPackKind, CardPackSet, RawCardPack};
+use fs_cli::{CardPackKind, CardPackSet, RawCardPack};
 use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedMaterialCardPack, NormalizedPack,
     ObservationDataset, PropertyClaim, PropertyKey, PropertyValue, Provenance, UncertaintyModel,

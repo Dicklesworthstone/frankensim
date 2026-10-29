@@ -1,5 +1,6 @@
 //! Joint endpoint chemistry, native elastic work and conservative continuation.
 //! Equal-mass synthetic isomers give an independent scalar elimination oracle.
+#[path = "coupled/thermal.rs"]
 mod thermal;
 
 use super::*;

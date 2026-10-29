@@ -1,6 +1,7 @@
 //! G1/G3/G4: source chemistry drives the original mesh mode, with an independent
 //! constant-cv pressure/work oracle and transactional refusal controls.
 //! All coefficients are synthetic; these are not empirical combustion checks.
+#[path = "reactive/coupled.rs"]
 mod coupled;
 
 use super::*;
