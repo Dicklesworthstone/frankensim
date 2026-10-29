@@ -5,6 +5,8 @@ use fs_qty::{Amount, Area};
 use fs_thermochem::ReactionId;
 use std::cell::Cell;
 
+mod kinetics;
+
 // Reuse the exact original NASA bank exercised by the public reacting example.
 #[path = "../../../examples/ventilated_compartment_fire/nasa9.rs"]
 mod nasa9;

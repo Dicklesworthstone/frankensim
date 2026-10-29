@@ -1170,6 +1170,60 @@ with source-inclusive pressure. This supplies conservative transfer, not a
 volatile-composition predictor, soot model, combustion closure or calibrated
 material dataset; those models remain separately owned.
 
+### Finite-rate chemistry inside the opening-pressure equation
+
+`fs-gas::multicomponent::compartment::kinetics::ZoneKinetics` can now run in
+`step_with_pressure_sources`: apply the prepared operator to each transported
+trial room and add its two chemical rate arrays to the callback's `additional`
+account exactly once. Original adaptive homogeneous chemistry, species calorics
+and common-pressure/interface work remain in their existing owners. The network
+residual includes the resulting chemical pressure change; no combustion heat is
+added separately. `NetworkError::Kinetics` retains typed refusals and maps
+cancellation directly to the network cancellation path.
+
+A two-room regression uses original NASA sources and a separately declared
+synthetic reversible law to check finite progress, pressure-driven transfer,
+element/physical-energy closure and exactly-once source accounting. It rejects
+a complete chemical trial and verifies bitwise replay against a direct step
+of the actual accepted shorter duration. This exercises the production owners;
+the synthetic law is not methane-kinetics validation or a global entropy theorem.
+
+### Pressure-dependent fan ventilation
+
+`compartment::mechanical::FanModel` binds the original `FanBank`/`FanCurve` and
+`LossNetwork` to their common reference density, a per-fan outlet area, total
+efficiency, heat-rejection assumption and explicit density/pressure-ratio
+domain. The original fan curve is static pressure. Its outlet velocity pressure
+is added before matching total duct losses and actual endpoint backpressure,
+including series/parallel bank scaling. Fan rise and quadratic loss scale with
+actual donor density. The source convention follows ASHRAE Handbook 2016,
+chapter 21, sections 5 and 10; supplied losses must include the appropriate
+installation and outlet/mixing effects for that fan rating.
+
+`ZoneNetwork::set_fan_vents` admits same-elevation point ports atomically. Each
+attempt selects the actual present donor/receiver layer. Every pressure trial
+recomputes the bounded operating point and transports original species and
+enthalpy. Shaft input is `Q * total_pressure_rise / total_efficiency`; the
+declared fraction of shaft-minus-aerodynamic loss may be rejected externally,
+and the remaining power enters the receiving gas. Original enthalpy already
+carries pressure-flow work, so duct dissipation is not added again. Exhaust fan
+work deposited downstream into ambient does not heat an upstream room.
+
+Only accepted operating-point diagnostics publish with room state. Nonmonotone
+fan/system combinations, missing forward roots, unmodeled zero-flow power,
+out-of-curve operation, domain failures and bounded-solve exhaustion refuse.
+Closing a connection explicitly stops its fan and closes an ideal damper.
+This is a nominal quasisteady low-pressure model with frozen inlet state during
+each pressure solve, negligible endpoint kinetic storage and caller-supplied
+efficiency. It does not resolve ducts, reverse flow, stall/surge or windmilling,
+and retained source tolerances are not promoted to propagated uncertainty bounds.
+
+Seven new test groups cover independent operating-point algebra, density/speed/
+bank affinity, static-to-total correction, power/rejection accounting, physical
+room and ambient transfers, absent-layer ports, pressure closure, cancellation
+and retry. The focused mechanical filter passed eight tests including the
+existing prescribed-transfer regression; full-workspace validation is separate.
+
 ### Runnable two-zone public-case comparison and pressure linearization
 
 The `compartment_fire` example composes original NASA9 N2/O2 calorics,

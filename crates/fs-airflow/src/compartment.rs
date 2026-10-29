@@ -32,6 +32,9 @@ pub mod pressure_source;
 /// Original NASA volatile calorics and conservative solid-to-gas source transfer.
 pub mod pyrolysis;
 
+/// Pressure-dependent fan curves, density-aware duct flow and gas work.
+pub mod mechanical;
+
 #[cfg(test)]
 mod tests;
 
@@ -195,8 +198,12 @@ pub enum NetworkError {
     Radiation(radiation::RadiationError),
     /// Condensed-fuel release refused its original gas source or transfer balance.
     Pyrolysis(pyrolysis::VolatileGasError),
+    /// An original fan source, operating point or applicability gate refused.
+    Fan(mechanical::FanError),
     /// The original inventory-limited reaction adapter refused a split source.
     Burning(fs_gas::multicomponent::compartment::burning::BurningError),
+    /// Original finite-rate chemistry refused a source-bound zone candidate.
+    Kinetics(fs_gas::multicomponent::compartment::kinetics::ZoneKineticsError),
     /// Pressure closure exhausted its bounded nonlinear budget.
     PressureIterations,
     /// All bounded complete-network attempts failed.
@@ -266,12 +273,29 @@ impl From<pyrolysis::VolatileGasError> for NetworkError {
         }
     }
 }
+impl From<mechanical::FanError> for NetworkError {
+    fn from(e: mechanical::FanError) -> Self {
+        match e {
+            mechanical::FanError::Cancelled => Self::Cancelled,
+            other => Self::Fan(other),
+        }
+    }
+}
 impl From<fs_gas::multicomponent::compartment::burning::BurningError> for NetworkError {
     fn from(e: fs_gas::multicomponent::compartment::burning::BurningError) -> Self {
         use fs_gas::multicomponent::compartment::burning::BurningError;
         match e {
             BurningError::Cancelled => Self::Cancelled,
             other => Self::Burning(other),
+        }
+    }
+}
+impl From<fs_gas::multicomponent::compartment::kinetics::ZoneKineticsError> for NetworkError {
+    fn from(e: fs_gas::multicomponent::compartment::kinetics::ZoneKineticsError) -> Self {
+        use fs_gas::multicomponent::compartment::kinetics::ZoneKineticsError;
+        match e {
+            ZoneKineticsError::Cancelled => Self::Cancelled,
+            other => Self::Kinetics(other),
         }
     }
 }
@@ -301,6 +325,9 @@ pub struct ZoneNetwork {
     walls: Vec<WallVent>,
     ceilings: Vec<CeilingVent>,
     mechanical: Vec<MechanicalVent>,
+    fans: Vec<mechanical::FanVent>,
+    fan_flows: Vec<Option<mechanical::FanTransfer>>,
+    fan_trials: Vec<Option<mechanical::FanTransfer>>,
     gravity: Acceleration,
     rates: Vec<[LayerRates; 2]>,
     external: LayerRates,
@@ -424,6 +451,9 @@ impl ZoneNetwork {
             mechanical,
             gravity,
             rates: vec![[LayerRates::default(); 2]; n],
+            fans: Vec::new(),
+            fan_flows: Vec::new(),
+            fan_trials: Vec::new(),
             external: LayerRates::default(),
             pressures: vec![0.0; n],
             perturbation: vec![0.0; n],
@@ -716,6 +746,7 @@ impl ZoneNetwork {
         }
         poll(cancelled)?;
         core::mem::swap(&mut self.rooms, &mut self.trial);
+        self.fan_flows.copy_from_slice(&self.fan_trials);
         Ok(NetworkStepReport {
             elapsed: Time::new(dt),
             halvings: halving,
@@ -974,6 +1005,7 @@ impl ZoneNetwork {
                 self.external.add_heat(vent.deposited_power)?;
             }
         }
+        self.evaluate_fans(cancelled)?;
         for i in 0..self.rooms.len() {
             poll(cancelled)?;
             self.trial[i].gas.copy_state_from(&self.rooms[i].gas)?;
