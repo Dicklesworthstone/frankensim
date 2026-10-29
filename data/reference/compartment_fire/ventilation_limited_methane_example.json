@@ -1,9 +1,11 @@
 {
-  "description": "Actual native G0/G1 reacting-compartment runs; estimated well-mixed instantaneous complete-oxidation closure, not experimental validation.",
-  "verification_scope": "Authored example compiled with rustc against existing original-source native libraries; not a full-workspace Cargo/DSR pass.",
+  "description": "Actual native G0/G1 reacting-compartment runs: closed, restricted ventilation and adequate ventilation. Estimated well-mixed instantaneous complete oxidation; not experimental validation.",
+  "verification_scope": "Original-source selected-owner native Cargo example build and 66 fs-airflow library tests; not a full-workspace Cargo or DSR pass.",
+  "reproduction": "cargo run -p fs-airflow --features compartment-fire --example ventilated_compartment_fire -- 60 <maximum_dt_s> <coupled|split>",
   "runs": [
     {
       "model": "estimated well-mixed ideal-gas inventory-limited complete methane oxidation",
+      "source_coupling": "pressure-coupled",
       "source_commit": "2f79a647e85737742fb08a127da00d1ea1d069da",
       "source_blob": "5ddeb5b213701d0e8b79dbda7b48ede14e31404a",
       "species": [
@@ -57,6 +59,10 @@
           "duration_s": 60.0,
           "steps": 3000,
           "halvings": 0,
+          "opening_width_m": 0,
+          "accepted_pressure_iterations": 6000,
+          "source_evaluations": 12000,
+          "last_step_s": 0.01999999999622,
           "temperature_k": 2493.122425258789,
           "pressure_pa": 997107.9188043849,
           "final_species_kg": [
@@ -97,42 +103,98 @@
           "maximum_mass_residual_kg": 2.61292723569e-17,
           "maximum_species_residual_kg": 2.512638534735e-17,
           "maximum_pressure_residual_pa": 0.0,
-          "maximum_split_pressure_change_pa": 797.2620825427,
+          "maximum_split_pressure_change_pa": 0.0,
+          "maximum_fraction_sum_error": 2.22044604925e-16
+        },
+        {
+          "case": "restricted-ventilation",
+          "duration_s": 60.0,
+          "steps": 3000,
+          "halvings": 0,
+          "opening_width_m": 0.02,
+          "accepted_pressure_iterations": 6708,
+          "source_evaluations": 14125,
+          "last_step_s": 0.01999999999622,
+          "temperature_k": 1660.925889105906,
+          "pressure_pa": 101321.90595532104,
+          "final_species_kg": [
+            0.026355515958596414,
+            0.02381234141943238,
+            0.01949515437015513,
+            0.11404054419940951,
+            0.0
+          ],
+          "net_boundary_species_kg": [
+            0.06899018988440524,
+            -0.09314794285977827,
+            -0.07626018346233938,
+            -0.7849478528595251,
+            -0.10288857386652173
+          ],
+          "species_balance_kg": [
+            -2.8449465006019636e-16,
+            -3.0531133177191805e-16,
+            -1.3877787807814457e-17,
+            1.5543122344752192e-15,
+            -1.0269562977782698e-15
+          ],
+          "element_balance_mol": [
+            -2.4868995751603507e-14,
+            -7.283063041541027e-14,
+            1.1096919577596572e-13,
+            -7.993605777301127e-14
+          ],
+          "injected_fuel_kg": 0.12,
+          "reacted_fuel_kg": 0.042634673926,
+          "initial_oxygen_limited_fuel_kg": 0.068426044707,
+          "first_oxygen_limited_s": 8.96,
+          "last_released_power_w": 23429.525432889455,
+          "released_enthalpy_j": 2132839.7110429844,
+          "physical_energy_balance_j": 7.275957614183e-10,
+          "maximum_chemical_energy_defect_j": 2.328306436539e-10,
+          "maximum_mass_residual_kg": 1.078374585808e-16,
+          "maximum_species_residual_kg": 5.551115123126e-17,
+          "maximum_pressure_residual_pa": 9.999945177697e-06,
+          "maximum_split_pressure_change_pa": 0.0,
           "maximum_fraction_sum_error": 2.22044604925e-16
         },
         {
           "case": "doorway-ventilated",
           "duration_s": 60.0,
-          "steps": 3009,
-          "halvings": 18,
-          "temperature_k": 1160.910333074753,
-          "pressure_pa": 101939.15273179983,
+          "steps": 3000,
+          "halvings": 0,
+          "opening_width_m": 0.2,
+          "accepted_pressure_iterations": 5804,
+          "source_evaluations": 11412,
+          "last_step_s": 0.01999999999622,
+          "temperature_k": 1160.910333073837,
+          "pressure_pa": 101321.7020658695,
           "final_species_kg": [
             0.0,
-            0.016162115265032147,
-            0.013231917285669317,
-            0.2255955253703745,
-            0.044997421957453786
+            0.016064220505572678,
+            0.01315177088536053,
+            0.22422908172612388,
+            0.044724870269531994
           ],
           "net_boundary_species_kg": [
             0.11999999999998824,
-            -0.3130355264931283,
-            -0.25628205999710124,
-            -0.6733928716885587,
-            0.25073951894598107
+            -0.31313342125258853,
+            -0.2563622063974087,
+            -0.674759315332811,
+            0.25046696725805934
           ],
           "species_balance_kg": [
             -1.0130785099704553e-15,
-            1.1324274851176597e-14,
-            1.3433698597964394e-14,
-            2.220446049250313e-16,
-            -2.7922109069322687e-14
+            1.2045919817182948e-14,
+            1.2101430968414206e-14,
+            1.887379141862766e-15,
+            -2.8033131371785203e-14
           ],
           "element_balance_mol": [
-            1.9451107391432743e-13,
-            1.2398970739013748e-12,
-            1.5852742253709388e-14,
-            -4.831690603168681e-13
+            2.1049828546892968e-13,
+            1.0906830993917538e-12,
+            1.347483091565298e-13,
+            -5.329070518200751e-13
           ],
           "injected_fuel_kg": 0.12,
           "reacted_fuel_kg": 0.12,
@@ -140,18 +202,19 @@
           "first_oxygen_limited_s": null,
           "last_released_power_w": 100051.88334520724,
           "released_enthalpy_j": 6003113.0007118415,
-          "physical_energy_balance_j": -1.037915353663e-08,
+          "physical_energy_balance_j": -1.057560439222e-08,
           "maximum_chemical_energy_defect_j": 5.820766091347e-11,
-          "maximum_mass_residual_kg": 6.421187366545e-17,
-          "maximum_species_residual_kg": 5.507747036226e-17,
-          "maximum_pressure_residual_pa": 9.525712812319e-06,
-          "maximum_split_pressure_change_pa": 797.1879026338,
+          "maximum_mass_residual_kg": 1.023215800283e-16,
+          "maximum_species_residual_kg": 5.551115123126e-17,
+          "maximum_pressure_residual_pa": 9.947078069672e-06,
+          "maximum_split_pressure_change_pa": 0.0,
           "maximum_fraction_sum_error": 2.22044604925e-16
         }
       ]
     },
     {
       "model": "estimated well-mixed ideal-gas inventory-limited complete methane oxidation",
+      "source_coupling": "pressure-coupled",
       "source_commit": "2f79a647e85737742fb08a127da00d1ea1d069da",
       "source_blob": "5ddeb5b213701d0e8b79dbda7b48ede14e31404a",
       "species": [
@@ -205,6 +268,376 @@
           "duration_s": 60.0,
           "steps": 6001,
           "halvings": 0,
+          "opening_width_m": 0,
+          "accepted_pressure_iterations": 12002,
+          "source_evaluations": 24004,
+          "last_step_s": 0.005000000001687,
+          "temperature_k": 2493.122425258166,
+          "pressure_pa": 997107.9188041743,
+          "final_species_kg": [
+            0.05157395529293149,
+            0.1877141046033936,
+            0.15368146215611564,
+            0.898988397058933,
+            0.0
+          ],
+          "net_boundary_species_kg": [
+            0.12000000000002213,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "species_balance_kg": [
+            -2.027544798721692e-14,
+            -3.4416913763379853e-15,
+            1.3572476476042539e-14,
+            0.0,
+            9.048317650695026e-15
+          ],
+          "element_balance_mol": [
+            -1.3420375921668892e-12,
+            -3.5491609651217004e-12,
+            0.0,
+            1.1617373729677638e-12
+          ],
+          "injected_fuel_kg": 0.12,
+          "reacted_fuel_kg": 0.068426044707,
+          "initial_oxygen_limited_fuel_kg": 0.068426044707,
+          "first_oxygen_limited_s": 34.220000000002,
+          "last_released_power_w": 0.0,
+          "released_enthalpy_j": 3423077.3214028478,
+          "physical_energy_balance_j": -9.237555786967e-07,
+          "maximum_chemical_energy_defect_j": 9.313225746155e-10,
+          "maximum_mass_residual_kg": 1.65340831304e-17,
+          "maximum_species_residual_kg": 1.315950386854e-17,
+          "maximum_pressure_residual_pa": 0.0,
+          "maximum_split_pressure_change_pa": 0.0,
+          "maximum_fraction_sum_error": 2.22044604925e-16
+        },
+        {
+          "case": "restricted-ventilation",
+          "duration_s": 60.0,
+          "steps": 6001,
+          "halvings": 0,
+          "opening_width_m": 0.02,
+          "accepted_pressure_iterations": 12912,
+          "source_evaluations": 26735,
+          "last_step_s": 0.005000000001687,
+          "temperature_k": 1660.966479560471,
+          "pressure_pa": 101321.90594703614,
+          "final_species_kg": [
+            0.026352829668763452,
+            0.02381229185331142,
+            0.019495113790391726,
+            0.11404030682050914,
+            0.0
+          ],
+          "net_boundary_species_kg": [
+            0.06900446591529873,
+            -0.09319452539241876,
+            -0.07629832056312918,
+            -0.7849480902384196,
+            -0.10282090669970742
+          ],
+          "species_balance_kg": [
+            6.800116025829084e-16,
+            7.91033905045424e-16,
+            -2.0816681711721685e-16,
+            -4.218847493575595e-15,
+            2.275957200481571e-15
+          ],
+          "element_balance_mol": [
+            6.084022174945858e-14,
+            1.474376176702208e-13,
+            -3.012021028204784e-13,
+            1.6697754290362354e-13
+          ],
+          "injected_fuel_kg": 0.12,
+          "reacted_fuel_kg": 0.042651636247,
+          "initial_oxygen_limited_fuel_kg": 0.068426044707,
+          "first_oxygen_limited_s": 8.97,
+          "last_released_power_w": 23429.592862290257,
+          "released_enthalpy_j": 2133688.2671102914,
+          "physical_energy_balance_j": 5.529727786779e-10,
+          "maximum_chemical_energy_defect_j": 2.328306436539e-10,
+          "maximum_mass_residual_kg": 7.874695904034e-17,
+          "maximum_species_residual_kg": 5.551115123126e-17,
+          "maximum_pressure_residual_pa": 6.772810593247e-06,
+          "maximum_split_pressure_change_pa": 0.0,
+          "maximum_fraction_sum_error": 2.22044604925e-16
+        },
+        {
+          "case": "doorway-ventilated",
+          "duration_s": 60.0,
+          "steps": 6001,
+          "halvings": 0,
+          "opening_width_m": 0.2,
+          "accepted_pressure_iterations": 11025,
+          "source_evaluations": 21073,
+          "last_step_s": 0.005000000001687,
+          "temperature_k": 1160.910333074132,
+          "pressure_pa": 101321.70206586299,
+          "final_species_kg": [
+            0.0,
+            0.016064220505584377,
+            0.013151770885369434,
+            0.22422908172604422,
+            0.044724870269491575
+          ],
+          "net_boundary_species_kg": [
+            0.12000000000002213,
+            -0.31313342125262345,
+            -0.2563622063974273,
+            -0.6747593153328894,
+            0.25046696725807416
+          ],
+          "species_balance_kg": [
+            -2.1760371282653068e-14,
+            2.2648549702353193e-14,
+            1.0103029524088925e-14,
+            5.551115123125783e-16,
+            -3.086420008457935e-14
+          ],
+          "element_balance_mol": [
+            -8.428813202954188e-13,
+            -4.305888978706207e-12,
+            3.9631855634273474e-14,
+            -3.410605131648481e-13
+          ],
+          "injected_fuel_kg": 0.12,
+          "reacted_fuel_kg": 0.12,
+          "initial_oxygen_limited_fuel_kg": 0.068426044707,
+          "first_oxygen_limited_s": null,
+          "last_released_power_w": 100051.88334520724,
+          "released_enthalpy_j": 6003113.00071216,
+          "physical_energy_balance_j": -1.870648702607e-08,
+          "maximum_chemical_energy_defect_j": 8.73114913702e-11,
+          "maximum_mass_residual_kg": 8.304988641239e-17,
+          "maximum_species_residual_kg": 5.551115123126e-17,
+          "maximum_pressure_residual_pa": 9.959097951651e-06,
+          "maximum_split_pressure_change_pa": 0.0,
+          "maximum_fraction_sum_error": 2.22044604925e-16
+        }
+      ]
+    }
+  ],
+  "split_comparison_scope": "Actual two-case closed and adequate-ventilation runs from the same implementation before adding the restricted-ventilation case. The current split CLI also emits the restricted case; its results are not included in these retained two-case baselines.",
+  "split_baselines": [
+    {
+      "model": "estimated well-mixed ideal-gas inventory-limited complete methane oxidation",
+      "source_coupling": "post-pressure-solve-split",
+      "source_commit": "2f79a647e85737742fb08a127da00d1ea1d069da",
+      "source_blob": "5ddeb5b213701d0e8b79dbda7b48ede14e31404a",
+      "species": [
+        "CH4",
+        "CO2",
+        "H2O",
+        "N2",
+        "O2"
+      ],
+      "elements": [
+        "C",
+        "H",
+        "N",
+        "O"
+      ],
+      "maximum_dt_s": 0.02,
+      "fuel_rate_kg_s": 0.002,
+      "room_volume_m3": 1.0,
+      "ambient_temperature_k": 300,
+      "caloric_anchor_k": 300.0,
+      "high_region_corrections": [
+        {
+          "species": "CH4",
+          "enthalpy_j_mol": 0.000200147202122,
+          "entropy_j_mol_k": 2.877102929233e-07
+        },
+        {
+          "species": "CO2",
+          "enthalpy_j_mol": -0.0001199127873406,
+          "entropy_j_mol_k": -1.256444761566e-07
+        },
+        {
+          "species": "H2O",
+          "enthalpy_j_mol": -0.0003416435210966,
+          "entropy_j_mol_k": -2.610946125969e-08
+        },
+        {
+          "species": "N2",
+          "enthalpy_j_mol": -3.875382390106e-06,
+          "entropy_j_mol_k": -6.080011871745e-08
+        },
+        {
+          "species": "O2",
+          "enthalpy_j_mol": -3.506012217258e-05,
+          "entropy_j_mol_k": 1.476905708842e-09
+        }
+      ],
+      "cases": [
+        {
+          "case": "closed",
+          "duration_s": 60.0,
+          "steps": 3000,
+          "halvings": 0,
+          "accepted_pressure_iterations": 6000,
+          "source_evaluations": 3000,
+          "last_step_s": 0.01999999999622,
+          "temperature_k": 2493.122425258789,
+          "pressure_pa": 997107.9188043849,
+          "final_species_kg": [
+            0.051573955292922906,
+            0.18771410460338636,
+            0.15368146215609488,
+            0.898988397058933,
+            0.0
+          ],
+          "net_boundary_species_kg": [
+            0.11999999999998824,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "species_balance_kg": [
+            8.049116928532385e-16,
+            8.881784197001252e-16,
+            2.275957200481571e-15,
+            0.0,
+            -7.771561172376096e-15
+          ],
+          "element_balance_mol": [
+            7.105427357601002e-14,
+            4.547473508864641e-13,
+            0.0,
+            -3.197442310920451e-13
+          ],
+          "injected_fuel_kg": 0.12,
+          "reacted_fuel_kg": 0.068426044707,
+          "initial_oxygen_limited_fuel_kg": 0.068426044707,
+          "first_oxygen_limited_s": 34.22,
+          "last_released_power_w": 0.0,
+          "released_enthalpy_j": 3423077.321402795,
+          "physical_energy_balance_j": 4.154862836003e-07,
+          "maximum_chemical_energy_defect_j": 4.656612873077e-10,
+          "maximum_mass_residual_kg": 2.61292723569e-17,
+          "maximum_species_residual_kg": 2.512638534735e-17,
+          "maximum_pressure_residual_pa": 0.0,
+          "maximum_split_pressure_change_pa": 797.2620825427,
+          "maximum_fraction_sum_error": 2.22044604925e-16
+        },
+        {
+          "case": "doorway-ventilated",
+          "duration_s": 60.0,
+          "steps": 3009,
+          "halvings": 18,
+          "accepted_pressure_iterations": 24417,
+          "source_evaluations": 3009,
+          "last_step_s": 0.01999999999622,
+          "temperature_k": 1160.910333074753,
+          "pressure_pa": 101939.15273179983,
+          "final_species_kg": [
+            0.0,
+            0.016162115265032147,
+            0.013231917285669317,
+            0.2255955253703745,
+            0.044997421957453786
+          ],
+          "net_boundary_species_kg": [
+            0.11999999999998824,
+            -0.3130355264931283,
+            -0.25628205999710124,
+            -0.6733928716885587,
+            0.25073951894598107
+          ],
+          "species_balance_kg": [
+            -1.0130785099704553e-15,
+            1.1324274851176597e-14,
+            1.3433698597964394e-14,
+            2.220446049250313e-16,
+            -2.7922109069322687e-14
+          ],
+          "element_balance_mol": [
+            1.9451107391432743e-13,
+            1.2398970739013748e-12,
+            1.5852742253709388e-14,
+            -4.831690603168681e-13
+          ],
+          "injected_fuel_kg": 0.12,
+          "reacted_fuel_kg": 0.12,
+          "initial_oxygen_limited_fuel_kg": 0.068426044707,
+          "first_oxygen_limited_s": null,
+          "last_released_power_w": 100051.88334520724,
+          "released_enthalpy_j": 6003113.0007118415,
+          "physical_energy_balance_j": -1.037915353663e-08,
+          "maximum_chemical_energy_defect_j": 5.820766091347e-11,
+          "maximum_mass_residual_kg": 6.421187366545e-17,
+          "maximum_species_residual_kg": 5.507747036226e-17,
+          "maximum_pressure_residual_pa": 9.525712812319e-06,
+          "maximum_split_pressure_change_pa": 797.1879026338,
+          "maximum_fraction_sum_error": 2.22044604925e-16
+        }
+      ]
+    },
+    {
+      "model": "estimated well-mixed ideal-gas inventory-limited complete methane oxidation",
+      "source_coupling": "post-pressure-solve-split",
+      "source_commit": "2f79a647e85737742fb08a127da00d1ea1d069da",
+      "source_blob": "5ddeb5b213701d0e8b79dbda7b48ede14e31404a",
+      "species": [
+        "CH4",
+        "CO2",
+        "H2O",
+        "N2",
+        "O2"
+      ],
+      "elements": [
+        "C",
+        "H",
+        "N",
+        "O"
+      ],
+      "maximum_dt_s": 0.01,
+      "fuel_rate_kg_s": 0.002,
+      "room_volume_m3": 1.0,
+      "ambient_temperature_k": 300,
+      "caloric_anchor_k": 300.0,
+      "high_region_corrections": [
+        {
+          "species": "CH4",
+          "enthalpy_j_mol": 0.000200147202122,
+          "entropy_j_mol_k": 2.877102929233e-07
+        },
+        {
+          "species": "CO2",
+          "enthalpy_j_mol": -0.0001199127873406,
+          "entropy_j_mol_k": -1.256444761566e-07
+        },
+        {
+          "species": "H2O",
+          "enthalpy_j_mol": -0.0003416435210966,
+          "entropy_j_mol_k": -2.610946125969e-08
+        },
+        {
+          "species": "N2",
+          "enthalpy_j_mol": -3.875382390106e-06,
+          "entropy_j_mol_k": -6.080011871745e-08
+        },
+        {
+          "species": "O2",
+          "enthalpy_j_mol": -3.506012217258e-05,
+          "entropy_j_mol_k": 1.476905708842e-09
+        }
+      ],
+      "cases": [
+        {
+          "case": "closed",
+          "duration_s": 60.0,
+          "steps": 6001,
+          "halvings": 0,
+          "accepted_pressure_iterations": 12002,
+          "source_evaluations": 6001,
+          "last_step_s": 0.005000000001687,
           "temperature_k": 2493.122425258166,
           "pressure_pa": 997107.9188041743,
           "final_species_kg": [
@@ -253,6 +686,9 @@
           "duration_s": 60.0,
           "steps": 6007,
           "halvings": 12,
+          "accepted_pressure_iterations": 43032,
+          "source_evaluations": 6007,
+          "last_step_s": 0.005000000001687,
           "temperature_k": 1161.28017860029,
           "pressure_pa": 101475.98997121735,
           "final_species_kg": [

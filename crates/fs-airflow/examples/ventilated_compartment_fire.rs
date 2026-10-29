@@ -1,12 +1,14 @@
 //! Oxygen-limited methane burning coupled to the original pressure/vent network.
 //!
 //! cargo run -p fs-airflow --features compartment-fire --example ventilated_compartment_fire --
-//!   [end-s=60] [maximum-dt-s=0.02]
+//!   [end-s=60] [maximum-dt-s=0.02] [coupling=coupled|split]
 //!
 //! This is a G0/G1 balance and ventilation demonstration, not an experimental
 //! fire prediction. It uses the well-mixed, one-active-layer limit of TwoZone,
 //! adiabatic rigid walls, a continuous explicitly supplied methane feed, and
-//! instantaneous inventory-limited complete oxidation after transport.
+//! instantaneous inventory-limited complete oxidation after transport. By
+//! default the source participates in every opening-pressure trial; the older
+//! post-pressure-solve split remains available for a direct numerical comparison.
 //! There is no prescribed combustion heat. Original formation energies release
 //! sensible heat exactly once. No ignition, flame structure, CO/soot production,
 //! dissociation, radiation, or building-failure prediction is made.
@@ -14,12 +16,14 @@
 #[path = "ventilated_compartment_fire/nasa9.rs"]
 mod nasa9;
 
-use fs_airflow::compartment::{Ambient, Endpoint, NetworkControl, Room, WallVent, ZoneNetwork};
+use fs_airflow::compartment::{
+    Ambient, Endpoint, NetworkControl, NetworkError, Room, WallVent, ZoneNetwork,
+};
 use fs_airflow::stratified::{DischargeCoefficient, WallOpening};
 use fs_airflow::{SourceProvenance, ToleranceBasis};
 use fs_gas::multicomponent::MixtureGas;
 use fs_gas::multicomponent::compartment::burning::InventoryLimitedReaction;
-use fs_gas::multicomponent::compartment::{Layer, TwoZone};
+use fs_gas::multicomponent::compartment::{Layer, LayerRates, TwoZone, ZoneSolve};
 use fs_qty::{
     Acceleration, Amount, Area, Dimensionless, Length, MassFlowRate, Pressure, Temperature, Time,
 };
@@ -30,6 +34,20 @@ const FUEL_RATE_KG_S: f64 = 0.002;
 const AMBIENT_K: f64 = 300.0;
 const ROOM_AREA_M2: f64 = 1.0;
 const ROOM_HEIGHT_M: f64 = 1.0;
+
+#[derive(Clone, Copy)]
+enum SourceCoupling {
+    Coupled,
+    Split,
+}
+impl SourceCoupling {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Coupled => "pressure-coupled",
+            Self::Split => "post-pressure-solve-split",
+        }
+    }
+}
 
 #[derive(Default)]
 struct AcceptedChemistry {
@@ -44,9 +62,13 @@ struct AcceptedChemistry {
 
 struct RunReport {
     name: &'static str,
+    opening_width_m: f64,
     duration_s: f64,
     steps: usize,
     halvings: usize,
+    accepted_pressure_iterations: usize,
+    source_evaluations: usize,
+    last_step_s: f64,
     temperature_k: f64,
     pressure_pa: f64,
     final_species_kg: [f64; 5],
@@ -74,6 +96,67 @@ fn inventory(room: &TwoZone) -> [f64; 5] {
     })
 }
 
+fn prepare_feed(
+    rooms: &[Room],
+    _duration: Time,
+    rates: &mut [[LayerRates; 2]],
+    _cancelled: &mut dyn FnMut() -> bool,
+) -> Result<(), NetworkError> {
+    // Original partial ENTHALPY, including the retained formation-energy gauge.
+    // This physical source enters once; pressure trials reuse the prepared rate.
+    let feed = rooms[0].gas.inflow(
+        MassFlowRate::new(FUEL_RATE_KG_S),
+        &[1.0, 0.0, 0.0, 0.0, 0.0],
+        Temperature::new(AMBIENT_K),
+    )?;
+    rates[0][Layer::Upper.index()].add(&feed)?;
+    Ok(())
+}
+
+fn react(
+    burning: &InventoryLimitedReaction,
+    rooms: &mut [Room],
+    dt: Time,
+    additional: &mut LayerRates,
+    controls: ZoneSolve,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<AcceptedChemistry, NetworkError> {
+    let room = &mut rooms[0].gas;
+    let before = room.physical_internal_energy().value();
+    // Availability is evaluated AFTER the actual trial inflow and outflow.
+    // Inventory that has left through a vent cannot also feed this reaction.
+    let requested = room.layer(Layer::Upper).species_masses()[0] / nasa9::MASSES[0];
+    let accepted = burning.apply_split(
+        room,
+        Layer::Upper,
+        Amount::new(requested),
+        dt,
+        Temperature::new(AMBIENT_K),
+        controls,
+        &mut *cancelled,
+    )?;
+    let source = accepted.burning.chemical_rates;
+    additional.add(&source)?;
+    let chemical_physical_source_j = dt.value()
+        * (source.referenced_energy_w
+            + source.species_kg_s[..5]
+                .iter()
+                .zip(room.gas().energy_references())
+                .map(|(m, e)| m * e)
+                .sum::<f64>());
+    Ok(AcceptedChemistry {
+        extent_mol: accepted.burning.actual_extent.value(),
+        released_enthalpy_j: accepted.burning.released_enthalpy.value(),
+        released_power_w: accepted.burning.released_power.value(),
+        chemical_species_change_kg: std::array::from_fn(|s| dt.value() * source.species_kg_s[s]),
+        chemical_physical_source_j,
+        chemical_physical_energy_defect_j: room.physical_internal_energy().value()
+            - before
+            - chemical_physical_source_j,
+        oxygen_limited: accepted.burning.limiting_species == Some(4),
+    })
+}
+
 fn run(
     name: &'static str,
     width_m: f64,
@@ -82,6 +165,7 @@ fn run(
     air: &[f64],
     end_s: f64,
     maximum_dt_s: f64,
+    coupling: SourceCoupling,
 ) -> Result<RunReport, Box<dyn Error>> {
     let room = TwoZone::new(
         gas.clone(),
@@ -132,9 +216,13 @@ fn run(
     let controls = NetworkControl::default();
     let mut out = RunReport {
         name,
+        opening_width_m: width_m,
         duration_s: 0.0,
         steps: 0,
         halvings: 0,
+        accepted_pressure_iterations: 0,
+        source_evaluations: 0,
+        last_step_s: 0.0,
         temperature_k: AMBIENT_K,
         pressure_pa: 101325.0,
         final_species_kg: initial_species,
@@ -171,60 +259,41 @@ fn run(
             } else {
                 maximum_dt_s.min(remaining)
             };
-        let (report, chemistry) = network.step_with_stages(
-            Time::new(duration),
-            controls,
-            |rooms, _dt, rates, _cancelled| {
-                // The inlet supplies original partial ENTHALPY, including the
-                // feed's retained formation-energy gauge. It enters once.
-                let feed = rooms[0].gas.inflow(
-                    MassFlowRate::new(FUEL_RATE_KG_S),
-                    &[1.0, 0.0, 0.0, 0.0, 0.0],
-                    Temperature::new(AMBIENT_K),
+        let mut source_evaluations = 0;
+        let (report, chemistry) = match coupling {
+            SourceCoupling::Coupled => {
+                let (report, (), chemistry) = network.step_with_pressure_sources(
+                    Time::new(duration),
+                    controls,
+                    prepare_feed,
+                    |rooms, dt, _, additional, cancelled| {
+                        source_evaluations += 1;
+                        react(burning, rooms, dt, additional, controls.zone, cancelled)
+                    },
+                    || false,
                 )?;
-                rates[0][Layer::Upper.index()].add(&feed)?;
-                Ok(AcceptedChemistry::default())
-            },
-            |rooms, dt, payload, additional, cancelled| {
-                let room = &mut rooms[0].gas;
-                let before = room.physical_internal_energy().value();
-                // Availability is evaluated AFTER inflow and outflow. Inventory
-                // that has left through a vent cannot also feed the reaction.
-                let requested = room.layer(Layer::Upper).species_masses()[0] / nasa9::MASSES[0];
-                let accepted = burning.apply_split(
-                    room,
-                    Layer::Upper,
-                    Amount::new(requested),
-                    dt,
-                    Temperature::new(AMBIENT_K),
-                    controls.zone,
-                    &mut *cancelled,
-                )?;
-                let source = accepted.burning.chemical_rates;
-                additional.add(&source)?;
-                payload.extent_mol = accepted.burning.actual_extent.value();
-                payload.released_enthalpy_j = accepted.burning.released_enthalpy.value();
-                payload.released_power_w = accepted.burning.released_power.value();
-                payload.oxygen_limited = accepted.burning.limiting_species == Some(4);
-                for s in 0..5 {
-                    payload.chemical_species_change_kg[s] = dt.value() * source.species_kg_s[s];
-                }
-                payload.chemical_physical_source_j = dt.value()
-                    * (source.referenced_energy_w
-                        + source.species_kg_s[..5]
-                            .iter()
-                            .zip(room.gas().energy_references())
-                            .map(|(m, e)| m * e)
-                            .sum::<f64>());
-                payload.chemical_physical_energy_defect_j = room.physical_internal_energy().value()
-                    - before
-                    - payload.chemical_physical_source_j;
-                Ok(())
-            },
-            || false,
-        )?;
+                (report, chemistry)
+            }
+            SourceCoupling::Split => network.step_with_stages(
+                Time::new(duration),
+                controls,
+                |rooms, dt, rates, cancelled| {
+                    prepare_feed(rooms, dt, rates, cancelled)?;
+                    Ok(AcceptedChemistry::default())
+                },
+                |rooms, dt, payload, additional, cancelled| {
+                    source_evaluations += 1;
+                    *payload = react(burning, rooms, dt, additional, controls.zone, cancelled)?;
+                    Ok(())
+                },
+                || false,
+            )?,
+        };
         out.steps += 1;
         out.halvings += report.halvings;
+        out.accepted_pressure_iterations += report.iterations;
+        out.source_evaluations += source_evaluations;
+        out.last_step_s = report.elapsed.value();
         out.injected_fuel_kg += FUEL_RATE_KG_S * report.elapsed.value();
         total_extent_mol += chemistry.extent_mol;
         out.released_enthalpy_j += chemistry.released_enthalpy_j;
@@ -322,6 +391,11 @@ impl RunReport {
             "  \"case\": \"{}\", \"duration_s\": {:.12}, \"steps\": {}, \"halvings\": {},",
             self.name, self.duration_s, self.steps, self.halvings
         );
+        println!("  \"opening_width_m\": {},", self.opening_width_m);
+        println!(
+            "  \"accepted_pressure_iterations\": {}, \"source_evaluations\": {}, \"last_step_s\": {:.12e},",
+            self.accepted_pressure_iterations, self.source_evaluations, self.last_step_s
+        );
         println!(
             "  \"temperature_k\": {:.12}, \"pressure_pa\": {:.12},",
             self.temperature_k, self.pressure_pa
@@ -391,8 +465,8 @@ fn positive(value: &str) -> Result<f64, Box<dyn Error>> {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
-    if args.len() > 2 {
-        return Err("usage: ventilated_compartment_fire [end-s=60] [maximum-dt-s=0.02]".into());
+    if args.len() > 3 {
+        return Err("usage: ventilated_compartment_fire [end-s=60] [maximum-dt-s=0.02] [coupling=coupled|split]".into());
     }
     let end_s = args
         .first()
@@ -404,6 +478,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|s| positive(s))
         .transpose()?
         .unwrap_or(0.02);
+    let coupling = match args.get(2).map(String::as_str).unwrap_or("coupled") {
+        "coupled" => SourceCoupling::Coupled,
+        "split" => SourceCoupling::Split,
+        _ => return Err("coupling must be coupled or split".into()),
+    };
     if end_s > 120.0 || !(0.001..=0.25).contains(&maximum_dt_s) {
         return Err("supported demonstration: end <=120 s, maximum dt 0.001..=0.25 s".into());
     }
@@ -421,7 +500,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         InventoryLimitedReaction::new(&gas, mechanism, &ReactionId::new(nasa9::REACTION)?, || {
             false
         })?;
-    let closed = run("closed", 0.0, &gas, &burning, &air, end_s, maximum_dt_s)?;
+    let closed = run(
+        "closed",
+        0.0,
+        &gas,
+        &burning,
+        &air,
+        end_s,
+        maximum_dt_s,
+        coupling,
+    )?;
+    let restricted = run(
+        "restricted-ventilation",
+        0.02,
+        &gas,
+        &burning,
+        &air,
+        end_s,
+        maximum_dt_s,
+        coupling,
+    )?;
     let ventilated = run(
         "doorway-ventilated",
         0.2,
@@ -430,11 +528,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         &air,
         end_s,
         maximum_dt_s,
+        coupling,
     )?;
     println!("{{");
     println!(
         "\"model\": \"estimated well-mixed ideal-gas inventory-limited complete methane oxidation\","
     );
+    println!("\"source_coupling\": \"{}\",", coupling.name());
     println!(
         "\"source_commit\": \"{}\", \"source_blob\": \"{}\",",
         nasa9::SOURCE_COMMIT,
@@ -462,6 +562,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     println!("], \"cases\": [");
     closed.print_json();
+    println!(",");
+    restricted.print_json();
     println!(",");
     ventilated.print_json();
     println!("]}}");
