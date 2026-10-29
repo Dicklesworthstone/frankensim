@@ -58,6 +58,9 @@ use crate::{
 /// admits up to [`certified_mode_cap`].
 pub const MAX_MODES: usize = 8;
 
+/// Mouth modal flow from the same loaded staircase reflection recurrence.
+pub mod outlet;
+
 /// Continuous multimodal propagation on smooth profiles (M2.1-W3b).
 mod riccati;
 pub use riccati::{
@@ -239,7 +242,7 @@ pub struct ModalResponse {
     /// Magnus steps.
     pub steps_used: usize,
     /// Continuous image only: `|Z00(N) - Z00(N/2)|` [Pa s/m^3], the
-    /// mode-truncation tail indicator (`None` for N = 1 and the staircase).
+    /// mode-truncationation tail indicator (`None` for N = 1 and the staircase).
     pub tail_bound_estimate: Option<f64>,
 }
 
@@ -642,8 +645,7 @@ pub fn mm_input_impedance_flanged(
     mm_core(duct, state, omega, loss, MmLoad::Flanged(exterior), n_modes, extra_slices)
 }
 
-#[allow(clippy::too_many_lines)] // one recursion, kept whole on purpose
-#[allow(clippy::needless_pass_by_value)] // small load spec by value keeps call sites clean
+#[allow(clippy::needless_pass_by_value)]
 fn mm_core(
     duct: &Duct,
     state: &GasState,
@@ -653,6 +655,22 @@ fn mm_core(
     n_modes: usize,
     extra_slices: usize,
 ) -> Result<ModalResponse, DuctError> {
+    mm_evaluate(duct, state, omega, loss, load, n_modes, extra_slices, false)
+        .map(|response| response.input)
+}
+
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+#[allow(clippy::needless_pass_by_value)] // small load spec by value keeps call sites clean
+fn mm_evaluate(
+    duct: &Duct,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    load: MmLoad<'_>,
+    n_modes: usize,
+    extra_slices: usize,
+    observe_mouth: bool,
+) -> Result<outlet::MouthResponse, DuctError> {
     if n_modes == 0 {
         return Err(DuctError::BadParameter {
             what: "at least one mode (the plane wave)",
@@ -711,21 +729,23 @@ fn mm_core(
         // Higher-mode diagonal stays ZERO: matched into their own Zc.
         r
     };
+    let mut mouth_flow = observe_mouth.then(|| outlet::terminal_flow(&r_load, &mouth_wave.zc, n));
 
     // Recurse from the mouth backward: load -> propagate through the
     // last station -> (junction -> propagate) for every earlier station.
-    let propagate = |r: &mut Vec<C64>, wave: &ModalWave, length: f64| -> Result<(), DuctError> {
+    let propagate = |r: &mut Vec<C64>, flow: &mut Option<Vec<C64>>, wave: &ModalWave, length: f64| -> Result<(), DuctError> {
         let e: Vec<C64> = wave
             .k
             .iter()
             .map(|&kn| crate::exp_i(kn.scale(length)))
             .collect();
+        outlet::propagate(flow, &e, n);
         crate::compose::propagate_reflection(r, &e)
     };
     let mut wave_here = mouth_wave;
     let mut r = r_load;
     let last = stations.len() - 1;
-    propagate(&mut r, &wave_here, stations[last].length)?;
+    propagate(&mut r, &mut mouth_flow, &wave_here, stations[last].length)?;
     for idx in (0..last).rev() {
         let st = &stations[idx];
         let wave_up = modal_wave(state, st.radius, omega, loss, &gammas)?;
@@ -736,21 +756,24 @@ fn mm_core(
                 // Expansion along propagation: upstream is the SMALL side.
                 let f = junction_projection(st.radius, wave_here.radius, &gammas, n);
                 let ft = transpose(&f, n);
+                outlet::junction(&mut mouth_flow, &r, &wave_here.zc, &wave_up.zc, &f, true, n)?;
                 mat_mul(&mat_mul(&f, &z_down, n), &ft, n)
             } else {
                 // Contraction along propagation: downstream is SMALL.
                 let f = junction_projection(wave_here.radius, st.radius, &gammas, n);
                 let ft = transpose(&f, n);
                 let z_inv = mat_inv(&z_down, n)?;
+                outlet::junction(&mut mouth_flow, &r, &wave_here.zc, &wave_up.zc, &f, false, n)?;
                 mat_inv(&mat_mul(&mat_mul(&ft, &z_inv, n), &f, n), n)?
             };
             r = reflection_from_impedance(&z_up, &wave_up.zc, n)?;
         }
-        propagate(&mut r, &wave_up, st.length)?;
+        propagate(&mut r, &mut mouth_flow, &wave_up, st.length)?;
         wave_here = wave_up;
     }
 
     let z_in = impedance_from_reflection(&r, &wave_here.zc, n)?;
+    let flow_map = outlet::finish(mouth_flow, &z_in, &wave_here.zc, n)?;
     let throat = stations
         .iter()
         .map(|s| s.radius)
@@ -759,16 +782,21 @@ fn mm_core(
         .iter()
         .map(|g| state.sound_speed * g / (core::f64::consts::TAU * throat))
         .collect();
-    Ok(ModalResponse {
-        omega,
-        n_modes: n,
-        plane_impedance: z_in[0],
-        impedance_matrix: z_in,
-        min_shear_number: min_shear,
-        mouth_ka,
-        cutoffs_at_throat_hz: cutoffs,
-        steps_used: stations.len(),
-        tail_bound_estimate: None,
+    Ok(outlet::MouthResponse {
+        inlet_radius_m: wave_here.radius,
+        mouth_radius_m: mouth,
+        flow_map,
+        input: ModalResponse {
+            omega,
+            n_modes: n,
+            plane_impedance: z_in[0],
+            impedance_matrix: z_in,
+            min_shear_number: min_shear,
+            mouth_ka,
+            cutoffs_at_throat_hz: cutoffs,
+            steps_used: stations.len(),
+            tail_bound_estimate: None,
+        },
     })
 }
 
