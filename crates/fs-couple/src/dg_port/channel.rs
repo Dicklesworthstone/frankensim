@@ -212,9 +212,15 @@ impl DgPortLoad {
             if let Some((channel_area, transverse_cells)) = input.kind.section() {
                 cells = cells.checked_add(transverse_cells)
                     .ok_or_else(|| invalid("DG terminal transverse state count overflow"))?;
-                if self.terminal_area_m2(input.port)?.is_some_and(|area|
-                    channel_area > area * (1.0 + 64.0 * f64::EPSILON))
-                {
+                // A flush side port has no aperture area of its own; its passage
+                // still cannot exceed the bore section it is cut into.
+                let attached_area = match self.terminal_area_m2(input.port)? {
+                    Some(area) => area,
+                    None => self.duct.side_port_source(input.port)
+                        .map_err(|_| invalid("DG terminal lost its original side-port geometry"))?
+                        .bore_area_m2,
+                };
+                if channel_area > attached_area * (1.0 + 64.0 * f64::EPSILON) {
                     return Err(invalid("DG terminal channel area exceeds its actual attached duct area"));
                 }
             }
