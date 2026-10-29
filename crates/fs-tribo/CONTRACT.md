@@ -93,6 +93,34 @@ reactions, and residual embedding.
   normalized to an explicit RMS height. Its seed selects spatial phase only;
   it creates no temporal/audio spectrum or apparatus-specific frequency.
 
+### Directional static and kinetic Coulomb friction
+
+`tangential::elliptic::EllipticCoulomb` implements the shared `TangentialLaw`
+with explicit principal static/kinetic coefficients and a retained material
+texture direction. A feasible zero-slip reaction is tested against the static
+ellipse before solving sliding on the kinetic ellipse. Sliding follows the
+associated maximum-dissipation law, so traction need not be parallel to slip;
+independent axis clamps or a scalar coefficient sampled by direction are not
+substitutes. Zero principal coefficients retain frictionless directions.
+
+The scalar body load line reduces to a bounded monotone ellipse projection.
+It uses fixed-size arithmetic with no solver allocations, honors the original
+force and iteration budgets, and exports actual `F dot du` as heat with zero
+elastic storage. The existing full-matrix and simultaneous-contact adapters
+consume it directly, including off-diagonal and cross-contact body recoil.
+Objective history transport rotates both the material direction and accumulated
+slip without time advancement, heat, or source replacement. Foreign native
+checkpoints and unresolved roots refuse before publication.
+
+The seven G1/G3 groups in `tests/elliptic_coulomb.rs` compare the response with
+an independent constrained-energy minimization and an angular maximum-work
+sweep, and exercise directional breakaway, unequal static/kinetic limits,
+isotropic and frictionless limits, full matrix/multicontact consumers, frame
+changes and atomic retry. Coefficients and the effective texture axes are
+caller data. These tests establish the numerical associated elliptical model,
+not measured directional behavior, elastic microslip, wear, or a rule for
+combining two differently textured surfaces.
+
 ### Full two-axis tangential body compliance
 
 `tangential::matrix::advance_with_matrix_compliance` couples the original
