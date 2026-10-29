@@ -868,6 +868,17 @@ They enter one exact complex `c_v(omega)`, and `k = omega/c(omega) + i alpha_SK`
 Stokes-Kirchhoff is counted once, there is no separate bulk viscosity, and the
 strengths are not linearized.
 
+`RelaxationState::caloric_response` exposes that same bounded, allocation-free
+reservoir sum as complex mass-specific `cv`, `cp = cv + R`, and bulk modulus
+`K = p cp/cv`, including the equilibrium DC limit. Under `exp(-i omega t)`,
+`Im(K) <= 0`; the cycle-mean compressional work is
+`-omega Im(K) |strain|^2 / 2` per volume for peak phasors. Duct wall thermodynamics
+and coupled cavity pressure use this constitutive owner directly. It adds no
+shear/thermal propagation attenuation, boundary-layer loss or second bulk
+viscosity. Single-reservoir real-arithmetic rational response, DC/frozen limits,
+the original wavenumber relation and the zero-reservoir lossless limit are
+checked in `tests/relaxation_absorption.rs`.
+
 Relaxation times are data: Landau-Teller collision-partner rates with a linear
 mole-fraction rule, a partner-independent power law, or ISO 9613-1's `f_rO`
 and `f_rN` (`iso9613_relaxation_frequencies_hz`, bit-identical to the ISO

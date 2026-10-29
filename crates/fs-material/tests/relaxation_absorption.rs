@@ -100,6 +100,66 @@ fn g0_classical_limit_is_stokes_kirchhoff_bitwise() {
     );
 }
 
+#[test]
+fn caloric_response_matches_independent_single_reservoir_bulk_modulus() {
+    let gas = test_gas(1.25, 293.15, 101_325.0);
+    let tau = 0.002;
+    let law = RelaxationAbsorption::new(vec![species("A", vec![rot(2, timed(tau, gas.pressure))])])
+        .unwrap();
+    let state = law.evaluate(&medium(gas, &[("A", 1.0)])).unwrap();
+    let cv0 = gas.specific_heat_cp - gas.specific_gas_constant;
+    let cvi = cv0 - gas.specific_gas_constant;
+    let cp0 = gas.specific_heat_cp;
+    let cpi = cvi + gas.specific_gas_constant;
+    for omega in [0.0, 1e-7, 10.0, 500.0, 3000.0, 1e8] {
+        let response = state.caloric_response(omega).unwrap();
+        // Independently eliminate the one reservoir's temperature from
+        // (1 - i w tau) cv(w) = cv0 - i w tau cvi, using real arithmetic.
+        let y = omega * tau;
+        let denominator = cv0 * cv0 + y * y * cvi * cvi;
+        let re = gas.pressure * (cp0 * cv0 + y * y * cpi * cvi) / denominator;
+        let im = gas.pressure * y * (cp0 * cvi - cpi * cv0) / denominator;
+        assert!((response.bulk_modulus_pa.re - re).abs() <= 3e-15 * re);
+        assert!((response.bulk_modulus_pa.im - im).abs() <= 3e-14 * im.abs());
+        assert_eq!(response.cp_j_kg_k.im, response.cv_j_kg_k.im);
+        assert!(
+            (response.cp_j_kg_k.re - response.cv_j_kg_k.re - gas.specific_gas_constant).abs()
+                < 2e-13
+        );
+        assert!(response.bulk_modulus_pa.im <= 0.0);
+        if omega > 0.0 {
+            let k = state.relaxing_wavenumber(omega).unwrap();
+            let identity =
+                (k * k * response.bulk_modulus_pa).scale(1.0 / (gas.density * omega * omega));
+            assert!((identity.re - 1.0).abs() < 2e-15 && identity.im.abs() < 2e-15);
+        }
+    }
+    let dc = state.caloric_response(0.0).unwrap();
+    assert!((dc.bulk_modulus_pa.re / gas.pressure - gas.gamma).abs() < 5e-16);
+    assert_eq!(dc.bulk_modulus_pa.im, 0.0);
+    let frozen = state.caloric_response(f64::MAX).unwrap();
+    assert!((frozen.bulk_modulus_pa.re / gas.pressure - cpi / cvi).abs() < 5e-16);
+    assert!(frozen.bulk_modulus_pa.im <= 0.0);
+}
+
+#[test]
+fn caloric_response_does_not_invent_viscous_bulk_loss_or_accept_bad_frequency() {
+    let gas = test_gas(1.4, 293.15, 101_325.0);
+    let state = RelaxationAbsorption::new(vec![species("A", vec![])])
+        .unwrap()
+        .evaluate(&medium(gas, &[("A", 1.0)]))
+        .unwrap();
+    for omega in [0.0, 20.0, 1e5, f64::MAX] {
+        let response = state.caloric_response(omega).unwrap();
+        assert_eq!(response.bulk_modulus_pa.im, 0.0);
+        assert!((response.bulk_modulus_pa.re / gas.pressure - gas.gamma).abs() < 5e-16);
+    }
+    assert!(gas.stokes_kirchhoff_absorption(1e5) > 0.0);
+    for omega in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(state.caloric_response(omega).is_err());
+    }
+}
+
 /// Exact single relaxation in an otherwise frozen gas. With `e^{-iwt}`,
 /// `c_v(w) = (c_v0 - i w tau c_vinf)/(1 - i w tau)` and likewise for `c_p`, so
 /// `k^2 = (w/c0)^2 (1 - i w tau_v)/(1 - i w tau_p)` with

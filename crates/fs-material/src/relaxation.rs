@@ -210,6 +210,21 @@ pub struct RelaxationState {
     processes: Vec<EvaluatedProcess>,
 }
 
+/// The same molecular reservoirs viewed as a local acoustic constitutive law.
+/// Phasors use `exp(-i omega t)`: heat capacities have nonnegative imaginary
+/// parts and the passive bulk modulus has a nonpositive imaginary part.
+/// These are molecular losses only. Shear viscosity, heat conduction and
+/// wall boundary layers remain separate physical owners.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RelaxationCaloricResponse {
+    /// Dynamic mass-specific isochoric heat capacity [J/(kg K)].
+    pub cv_j_kg_k: C64,
+    /// Dynamic mass-specific isobaric heat capacity, `cv + R_specific` [J/(kg K)].
+    pub cp_j_kg_k: C64,
+    /// Dynamic adiabatic bulk modulus, `p cp/cv` [Pa].
+    pub bulk_modulus_pa: C64,
+}
+
 fn check_temperature_range(t_min_k: f64, t_max_k: f64, what: &str) -> Result<(), MaterialError> {
     if positive(t_min_k) && t_max_k.is_finite() && t_min_k < t_max_k {
         Ok(())
@@ -733,6 +748,57 @@ impl RelaxationState {
         det::sqrt(r_s * self.gas.temperature * (self.cv_frozen + r_s) / self.cv_frozen)
     }
 
+    /// Evaluate the original reservoir sum for a duct, cavity or pressure port.
+    ///
+    /// `cv = cv_frozen + sum C_j/(1 - i omega tau_j)`, `cp = cv + R`,
+    /// and `K = p cp/cv`. At zero frequency the reservoirs are equilibrated;
+    /// at high frequency they freeze. The density remains the original
+    /// equilibrium density: the constitutive response is not a second EOS.
+    /// In particular, a propagation attenuation coefficient is not converted
+    /// into fictitious compressional loss for a uniformly breathing cavity.
+    /// Work against this modulus dissipates `-omega Im(K) |strain|^2 / 2`
+    /// per unit volume for peak-amplitude phasors.
+    ///
+    /// Evaluation is allocation-free and bounded by the admitted reservoir
+    /// count. It retains the same fixed summation order as wave propagation.
+    ///
+    /// # Errors
+    /// Refuses negative/nonfinite frequency or an unrepresentable response.
+    pub fn caloric_response(&self, omega: f64) -> Result<RelaxationCaloricResponse, MaterialError> {
+        if !omega.is_finite() || omega < 0.0 {
+            return Err(parameters(
+                "caloric response requires finite nonnegative omega",
+            ));
+        }
+        let r_s = self.gas.specific_gas_constant;
+        let mut cv = C64::from_re(self.cv_frozen);
+        for process in &self.processes {
+            let (re, im) = debye(omega * process.relaxation_time_s);
+            let c = process.heat_capacity_j_kg_k;
+            cv = cv + C64::new(c * re, c * im);
+        }
+        let cp = cv + C64::from_re(r_s);
+        // 1 + R/cv avoids cancellation of cv.im in (cv + R)/cv when
+        // a reservoir's loss is tiny, retaining its passive sign.
+        let bulk = (C64::ONE + cv.recip().scale(r_s)).scale(self.gas.pressure);
+        if !(positive(cv.re)
+            && cv.im.is_finite()
+            && cv.im >= 0.0
+            && positive(cp.re)
+            && cp.im.is_finite()
+            && positive(bulk.re)
+            && bulk.im.is_finite()
+            && bulk.im <= 0.0)
+        {
+            return Err(state_error("molecular caloric response is unrepresentable"));
+        }
+        Ok(RelaxationCaloricResponse {
+            cv_j_kg_k: cv,
+            cp_j_kg_k: cp,
+            bulk_modulus_pa: bulk,
+        })
+    }
+
     /// Complex wavenumber of the relaxing reservoirs alone, `ω/c(ω)` [1/m],
     /// without the viscothermal term.
     ///
@@ -745,15 +811,8 @@ impl RelaxationState {
                 "relaxation omega {omega} must be positive and finite"
             )));
         }
-        let r_s = self.gas.specific_gas_constant;
-        let mut cv = C64::from_re(self.cv_frozen);
-        for process in &self.processes {
-            let (re, im) = debye(omega * process.relaxation_time_s);
-            let c = process.heat_capacity_j_kg_k;
-            cv = cv + C64::new(c * re, c * im);
-        }
-        let cp = cv + C64::from_re(r_s);
-        let c2 = (cp / cv).scale(r_s * self.gas.temperature);
+        let response = self.caloric_response(omega)?;
+        let c2 = response.bulk_modulus_pa.scale(1.0 / self.gas.density);
         let k = c2.sqrt().recip().scale(omega);
         if !(k.re.is_finite() && k.re > 0.0 && k.im.is_finite()) {
             return Err(state_error("relaxing wavenumber is unrepresentable"));
