@@ -740,3 +740,297 @@ fn g1_g3_sourced_entropy_retains_native_capacity_and_unclassified_heat() {
         }
     }
 }
+
+const LAYER_CONFIG: fs_material::thermal::conduction::LayerConductionConfig =
+    fs_material::thermal::conduction::LayerConductionConfig {
+        max_iterations: 128,
+        absolute_heat_tolerance_w: 1e-12,
+        relative_heat_tolerance: 1e-12,
+    };
+
+#[test]
+fn g1_integrated_layers_resolve_affine_conduction_interfaces_and_tangents() {
+    let card = analytic_card(2e6, 20000.0, 0.2, 0.01);
+    let p = path(&card, &point(290.0), &point(340.0));
+    let law = FixedVolumeThermalLaw::try_new(&p, 1000.0, 300.0).unwrap();
+    let raw = ThermalLink {
+        id: 7,
+        a: CellId(1),
+        b: CellId(2),
+        area_m2: 0.01,
+        conductance_w_k: 0.0,
+    };
+    let sampled = FixedVolumeConductionLink::try_aligned(&raw, [&law; 2], [0.01; 2], 0.0).unwrap();
+    let integrated = sampled.clone().into_integrated_layers().unwrap();
+    assert_eq!(integrated.id(), raw.id);
+    assert!(
+        integrated
+            .source_paths()
+            .into_iter()
+            .all(|source| std::ptr::eq(source, &p))
+    );
+    let initial = timeline(
+        vec![cell(&law, 1, 300.0, 0.001), cell(&law, 2, 330.0, 0.001)],
+        &[(MaterialId(1), &law), (MaterialId(2), &law)],
+        Some(raw),
+    );
+    let result = integrated
+        .evaluate(&initial, LAYER_CONFIG, || Ok(()))
+        .unwrap();
+    // Independent Kirchhoff primitive: integral_300^330 [0.2+0.01*(T-300)] dT = 10.5.
+    // Equal layer lengths put half that integral on either side of the interface.
+    let interface = 300.0 + 2.0 * 5.25 / (0.2 + (0.2_f64 * 0.2 + 2.0 * 0.01 * 5.25).sqrt());
+    close(result.power_a_to_b_w, -5.25, 2e-11);
+    close(result.conductance_w_k, 0.175, 1e-12);
+    for t in result.interface_temperature_k {
+        close(t, interface, 2e-11);
+    }
+    close(result.endpoint_derivative_w_k[0], 0.1, 2e-13);
+    close(result.endpoint_derivative_w_k[1], -0.25, 2e-13);
+    close(result.layer_heat_residual_w, 0.0, 2e-11);
+    // The original cell-centre approximation remains an explicit, distinct choice.
+    let sampled_power = -30.0 * sampled.conductance_w_k(&initial).unwrap();
+    close(
+        sampled_power,
+        -30.0 * 0.01 / (0.01 / 0.2 + 0.01 / 0.5),
+        1e-14,
+    );
+    assert!((sampled_power - result.power_a_to_b_w).abs() > 0.9);
+    assert_eq!(initial.time_s(), 0.0);
+    assert_eq!(initial.links()[&7], raw);
+
+    let card = analytic_card(1e6, 0.0, 0.4, 0.0);
+    let p = path(&card, &point(290.0), &point(340.0));
+    let law = FixedVolumeThermalLaw::try_new(&p, 1000.0, 300.0).unwrap();
+    let second_card = analytic_card(1.5e6, 0.0, 0.8, 0.0);
+    let second_path = path(&second_card, &point(290.0), &point(340.0));
+    let second_law = FixedVolumeThermalLaw::try_new(&second_path, 500.0, 300.0).unwrap();
+    let raw = ThermalLink {
+        area_m2: 0.02,
+        ..raw
+    };
+    let layers =
+        FixedVolumeConductionLink::try_aligned(&raw, [&law, &second_law], [0.01, 0.02], 0.05)
+            .unwrap()
+            .into_integrated_layers()
+            .unwrap();
+    let sources = layers.source_paths();
+    assert!(std::ptr::eq(sources[0], &p));
+    assert!(std::ptr::eq(sources[1], &second_path));
+    let initial = timeline(
+        vec![
+            cell(&law, 1, 330.0, 0.001),
+            cell(&second_law, 2, 300.0, 0.001),
+        ],
+        &[(MaterialId(1), &law), (MaterialId(2), &second_law)],
+        Some(raw),
+    );
+    let result = layers.evaluate(&initial, LAYER_CONFIG, || Ok(())).unwrap();
+    // Constant-k series resistance: R_area = .01/.4 + .02/.8 + .05 = .1 m²K/W.
+    close(result.power_a_to_b_w, 6.0, 2e-11);
+    close(result.interface_temperature_k[0], 322.5, 2e-11);
+    close(result.interface_temperature_k[1], 307.5, 2e-11);
+    close(result.endpoint_derivative_w_k[0], 0.2, 2e-13);
+    close(result.endpoint_derivative_w_k[1], -0.2, 2e-13);
+    close(result.contact_temperature_residual_k, 0.0, 2e-11);
+}
+
+#[test]
+fn g0_g4_integrated_layers_keep_source_binding_geometry_and_work_limits() {
+    let card = analytic_card(2e6, 20000.0, 0.2, 0.01);
+    let p = path(&card, &point(290.0), &point(340.0));
+    let law = FixedVolumeThermalLaw::try_new(&p, 1000.0, 300.0).unwrap();
+    let raw = ThermalLink {
+        id: 7,
+        a: CellId(1),
+        b: CellId(2),
+        area_m2: 0.01,
+        conductance_w_k: 0.0,
+    };
+    let initial = timeline(
+        vec![cell(&law, 1, 300.0, 0.001), cell(&law, 2, 330.0, 0.001)],
+        &[(MaterialId(1), &law), (MaterialId(2), &law)],
+        Some(raw),
+    );
+    let layers = FixedVolumeConductionLink::try_aligned(&raw, [&law; 2], [0.01; 2], 0.0)
+        .unwrap()
+        .into_integrated_layers()
+        .unwrap();
+    let energy = initial.energy_j();
+    assert!(matches!(
+        layers.evaluate(&initial, LAYER_CONFIG, || Err(DepositionError::Cancelled)),
+        Err(DepositionError::Cancelled)
+    ));
+    assert!(matches!(
+        layers.evaluate(
+            &initial,
+            fs_material::thermal::conduction::LayerConductionConfig {
+                max_iterations: 1,
+                ..LAYER_CONFIG
+            },
+            || Ok(())
+        ),
+        Err(DepositionError::Budget(_))
+    ));
+    let zero_area = ThermalLink {
+        area_m2: 0.0,
+        ..raw
+    };
+    assert!(
+        FixedVolumeConductionLink::try_aligned(&zero_area, [&law; 2], [0.01; 2], 0.0)
+            .unwrap()
+            .into_integrated_layers()
+            .is_err()
+    );
+    let unbound_clone = law.clone();
+    let wrong =
+        FixedVolumeConductionLink::try_aligned(&raw, [&unbound_clone, &law], [0.01; 2], 0.0)
+            .unwrap()
+            .into_integrated_layers()
+            .unwrap();
+    assert!(wrong.evaluate(&initial, LAYER_CONFIG, || Ok(())).is_err());
+    let altered_link = ThermalLink {
+        area_m2: 0.02,
+        ..raw
+    };
+    let wrong = FixedVolumeConductionLink::try_aligned(&altered_link, [&law; 2], [0.01; 2], 0.0)
+        .unwrap()
+        .into_integrated_layers()
+        .unwrap();
+    assert!(wrong.evaluate(&initial, LAYER_CONFIG, || Ok(())).is_err());
+    let mut wrong_cell = cell(&law, 1, 300.0, 0.001);
+    wrong_cell.mass_kg *= 1.1;
+    let wrong = timeline(
+        vec![wrong_cell, cell(&law, 2, 330.0, 0.001)],
+        &[(MaterialId(1), &law), (MaterialId(2), &law)],
+        Some(raw),
+    );
+    assert!(layers.evaluate(&wrong, LAYER_CONFIG, || Ok(())).is_err());
+
+    // Both individual endpoint temperatures are supported, but neither prepared
+    // layer covers the WHOLE 300..330 K interval required by the shared kernel.
+    let pa = path(&card, &point(290.0), &point(320.0));
+    let pb = path(&card, &point(310.0), &point(340.0));
+    let la = FixedVolumeThermalLaw::try_new(&pa, 1000.0, 300.0).unwrap();
+    let lb = FixedVolumeThermalLaw::try_new(&pb, 1000.0, 330.0).unwrap();
+    let narrow = timeline(
+        vec![cell(&la, 1, 300.0, 0.001), cell(&lb, 2, 330.0, 0.001)],
+        &[(MaterialId(1), &la), (MaterialId(2), &lb)],
+        Some(raw),
+    );
+    let sampled = FixedVolumeConductionLink::try_aligned(&raw, [&la, &lb], [0.01; 2], 0.0).unwrap();
+    assert!(sampled.conductance_w_k(&narrow).is_ok());
+    assert!(
+        sampled
+            .into_integrated_layers()
+            .unwrap()
+            .evaluate(&narrow, LAYER_CONFIG, || Ok(()))
+            .is_err()
+    );
+    assert_eq!(initial.energy_j(), energy);
+    assert_eq!(initial.time_s(), 0.0);
+}
+
+#[test]
+fn g1_g3_fsri_pp_layers_share_the_original_implicit_energy_and_entropy_account() {
+    let pack = compiled("fsri-pp-unconditioned-2021");
+    let card = pack.card();
+    let p = path(
+        card,
+        &source_point(card, 288.15),
+        &source_point(card, 313.15),
+    );
+    let original = p.clone();
+    // Authored reference mass basis; this is not a measured density claim.
+    let law = FixedVolumeThermalLaw::try_new(&p, 1000.0, 293.15)
+        .unwrap()
+        .with_sensible_entropy();
+    let raw = ThermalLink {
+        id: 7,
+        a: CellId(1),
+        b: CellId(2),
+        area_m2: 0.01,
+        conductance_w_k: 0.0,
+    };
+    let sampled = FixedVolumeConductionLink::try_aligned(&raw, [&law; 2], [0.01; 2], 0.0).unwrap();
+    let layers = sampled.clone().into_integrated_layers().unwrap();
+    let initial = timeline(
+        vec![cell(&law, 1, 293.15, 0.001), cell(&law, 2, 303.15, 0.001)],
+        &[(MaterialId(1), &law), (MaterialId(2), &law)],
+        Some(raw),
+    );
+    // Literal FSRI Cvol means at 20/30 C and published k at 15/45 C.
+    // The oracle integrates these affine laws independently of the prepared
+    // storage inverse, layer solver, source sampler and implicit residual.
+    let c0 = 1563841.0;
+    let capacity_slope = (1641098.0 - c0) / 10.0;
+    let k_slope = (0.151 - 0.137) / 30.0;
+    let k20 = 0.137 + k_slope * 5.0;
+    let initial_hot_energy = 0.001 * (c0 * 10.0 + 0.5 * capacity_slope * 100.0);
+    let inverse = |energy: f64| {
+        let ev = energy / 0.001;
+        293.15 + 2.0 * ev / (c0 + (c0 * c0 + 2.0 * capacity_slope * ev).sqrt())
+    };
+    let duration = 5000.0;
+    let endpoint = |q: f64| {
+        let ta = inverse(q);
+        let tb = inverse(initial_hot_energy - q);
+        let integral_k = (tb - ta) * (k20 + 0.5 * k_slope * ((ta - 293.15) + (tb - 293.15)));
+        (ta, tb, q - duration * 0.01 / 0.02 * integral_k)
+    };
+    let (mut lo, mut hi) = (0.0, 0.5 * initial_hot_energy);
+    for _ in 0..80 {
+        let q = 0.5 * (lo + hi);
+        if endpoint(q).2 > 0.0 {
+            hi = q;
+        } else {
+            lo = q;
+        }
+    }
+    let q = 0.5 * (lo + hi);
+    let (ta, tb, _) = endpoint(q);
+    let step = BackwardEulerStep::new(&initial, duration, || Ok(())).unwrap();
+    let trial = step
+        .evaluate_with_entropy(
+            &[q, -q],
+            |candidate| {
+                let response = layers.evaluate(candidate, LAYER_CONFIG, || Ok(()))?;
+                Ok::<_, DepositionError>(StepCoefficients {
+                    sources_w: BTreeMap::new(),
+                    conductances_w_k: BTreeMap::from([(7, response.conductance_w_k)]),
+                    payload: response,
+                })
+            },
+            || Ok(()),
+        )
+        .unwrap();
+    close(trial.payload().power_a_to_b_w, -q / duration, 2e-11);
+    assert!(trial.maximum_cell_residual_j() < 1e-7);
+    let entropy = *trial.entropy_audit().unwrap();
+    let ds = |a: f64, b: f64| {
+        0.001 * (capacity_slope * (b - a) + (c0 - capacity_slope * 293.15) * ((b - a) / a).ln_1p())
+    };
+    let expected_entropy = ds(293.15, ta) + ds(303.15, tb);
+    let generation = q * (1.0 / ta - 1.0 / tb);
+    close(entropy.thermal_storage_change_j_k, expected_entropy, 2e-10);
+    close(entropy.conduction_generation_j_k, generation, 2e-10);
+    close(
+        entropy.temporal_defect_j_k,
+        expected_entropy - generation,
+        2e-10,
+    );
+    assert!(entropy.thermal_storage_change_j_k > 0.0 && entropy.conduction_generation_j_k > 0.0);
+    assert!(entropy.temporal_defect_j_k > 0.0);
+    assert_eq!(entropy.reservoir_entropy_input_j_k, 0.0);
+    assert!(!entropy.has_unclassified_sources);
+    let (accepted, response, energy) = trial.accept(1e-7, 1e-7, || Ok(())).unwrap();
+    close(accepted.temperature_k(CellId(1)).unwrap(), ta, 1e-12);
+    close(accepted.temperature_k(CellId(2)).unwrap(), tb, 1e-12);
+    close(accepted.energy_j(), initial.energy_j(), 1e-8);
+    close(response.power_a_to_b_w, -q / duration, 2e-11);
+    close(energy.external_heat_j, 0.0, 0.0);
+    assert!((q - duration * sampled.conductance_w_k(&accepted).unwrap() * (tb - ta)).abs() > 0.01);
+    assert_eq!(accepted.links()[&7], raw);
+    assert_eq!(initial.time_s(), 0.0);
+    assert_eq!(p, original);
+}

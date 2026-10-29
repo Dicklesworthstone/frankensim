@@ -778,3 +778,41 @@ Full workspace Cargo remains blocked by the unavailable sibling
 `frankenscipy/crates/fsci-special/Cargo.toml`. These results establish the
 bounded compiler/model behaviors above, not full workspace, experimental
 qualification, nonlinear foam mechanics or complete orthotropic closure.
+
+## 2026-10-29 engineering alloys, lumber, acrylic and dried-panel increment
+
+Added **12 source profiles / 72 property claims / 1,575 numerical values**:
+6063-T5 aluminum, Ti-6Al-4V, Inconel 718 and Fe-9Ni steel (12 claims);
+black PMMA, wood stud, pallet wood and basswood panel (32); and separately
+conditioned MDF, OSB, plywood and particleboard (28). Exact source manifests,
+ranges and distinctions are in the
+[seed catalog](../data/matdb/seed-v1/README.md#engineering-alloys-acrylic-solid-wood-and-dried-panels-2026-10-29).
+Counts include statistics and explicit model interpretations, rather than
+independent measurements or fully qualified material laws.
+
+The alloy profiles preserve NIST equations, data/equation intersections,
+finite-expansion convention, plateau branches, fitted residuals and unresolved
+source labels. The FSRI profiles preserve native volumetric capacity separately
+from published Cp and reference-density reductions. Unknown species, grade,
+moisture, grain axes, specimen correspondence and density-header conflicts stay
+explicit. Dried MDF lacks a dried capacity experiment and supports conduction
+without claiming transient caloric completeness.
+
+`FixedVolumeLayerConduction` connects these prepared volumetric laws to the
+existing temperature-integrated two-layer conduction solver. It retains the
+original source paths and actual thermal-cell binding, resolves contact
+temperatures and endpoint derivatives, and supplies the original implicit
+energy/entropy owner. Preparation copies the two bounded conductivity charts;
+successful evaluation performs no allocation, database query or content hash.
+This is the declared quasi-steady one-dimensional layer closure, with the
+original fixed-volume storage model and explicit source-domain restrictions.
+
+Focused native verification passes **19 tests: 12 new and 7 regressions**.
+The three data suites each pass three tests, and all ten volumetric-timeline
+tests pass. They exercise the real pack compiler and production modules,
+independent source reductions and equations, original-context refusals,
+different materials across a contact, analytic flux/derivative oracles and
+actual sourced implicit conservation and sensible entropy. Full workspace
+Cargo validation is unavailable in this authoring environment: the required
+seven sibling checkouts fail the repository's constellation preflight. No
+full-workspace or experimental qualification is claimed.

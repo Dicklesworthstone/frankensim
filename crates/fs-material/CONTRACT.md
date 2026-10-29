@@ -4353,3 +4353,41 @@ reference-basis/datum invariance, default refusal and opt-in identity, an
 isolated implicit conduction balance, and actual compiled FSRI PP/mattress
 foam heating. All seven timeline tests pass, including the prior four
 energy/storage regressions.
+
+## Integrated conductivity layers on the volumetric timeline (2026-10-29)
+
+`FixedVolumeConductionLink::into_integrated_layers` explicitly selects the
+existing quasi-steady, one-dimensional layer model. The returned
+`FixedVolumeLayerConduction` copies each original conductivity line once,
+preserving its knots and temperature support. The borrowed caloric paths retain
+their source receipts, fixed reference mass basis, datum and entropy selection.
+It integrates k(T) through both legs using the shared `TwoLayerConduction`
+kernel; the kernel's public API and numerical equations remain unchanged.
+
+Every evaluation admits the actual active link, ordered endpoints, transfer
+area, original material-law objects, mass/volume bases and stored-energy
+coordinates. Both conductivity charts must cover the full endpoint-temperature
+interval. Positive lengths and area, nonnegative area-specific contact
+resistance, an iteration budget and numerical tolerances are explicit inputs.
+The caller declares homogeneous, internally source-free legs and alignment of
+the selected scalar k with heat flow. This does not establish isotropy or source
+qualification for unmeasured conditions.
+
+The response carries one signed heat transfer, a secant conductance, both
+contact temperatures, endpoint derivatives and continuity diagnostics. Feed
+its conductance into the original implicit `StepCoefficients` callback on every
+candidate state. The secant conductance is distinct from the returned endpoint
+Newton derivatives. The existing timeline owns storage, acceptance, sources,
+energy conservation and optional sensible entropy. No layer storage or second
+time integration is introduced. Successful runtime evaluation allocates no
+memory, performs no database query and computes no content hash; work remains
+bounded by the retained knots and the existing solver's iteration budget.
+
+Three additional tests in `xtask/tests/material_volumetric_timeline.rs` cover
+independent affine-conductivity integrals and derivatives, contact between two
+different materials, source/geometry/domain refusals, cancellation and budget
+exhaustion, and compiled FSRI polypropylene on the original implicit energy and
+entropy account. All ten tests in that file pass in the focused native build.
+These are bounded constitutive and timeline results; spatial convergence,
+experimental qualification, phase change and dynamic moisture transport remain
+outside this model.

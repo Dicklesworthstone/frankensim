@@ -3937,3 +3937,57 @@ Focused tests are `fsri_polyolefin_polyamide_profiles`,
 and `material_volumetric_timeline`, plus the existing G-10 regression.
 Full nonlinear foam mechanics, complete composite qualification and
 general coupled thermodynamic closure remain outside these bounded additions.
+
+## Engineering alloys, acrylic, solid wood and dried panels (2026-10-29)
+
+This increment adds **12 profiles, 72 property claims and 1,575 numerical
+ordinates/scalars**. Counts include separate published statistics and explicit
+apparent/local conductivity interpretations.
+
+| Profile | Claims | Added source coverage |
+| --- | ---: | --- |
+| [6063-T5 aluminum](aluminum-6063-t5-nist-thermal-reference/manifest.tsv) | 1 | Conductivity at 4–295 K |
+| [Ti-6Al-4V](titanium-ti6al4v-nist-thermal-reference/manifest.tsv) | 3 | Conductivity at 23–300 K; finite thermal expansion and separate low-temperature plateau |
+| [Inconel 718](inconel-718-nist-thermal-reference/manifest.tsv) | 3 | Conductivity at 6–275 K; finite expansion and separate plateau |
+| [Fe-9Ni steel](nickel-steel-fe9ni-nist-thermal-reference/manifest.tsv) | 5 | Conductivity, specific heat, Young modulus and finite expansion with original data limits |
+| [Black PMMA](fsri-black-pmma-unconditioned-2021/manifest.tsv) | 8 | Native volumetric capacity, published Cp, conductivity, scatter and density normalization |
+| [Wood stud](fsri-wood-stud-unconditioned-2021/manifest.tsv) | 8 | Source specimen's caloric and through-thickness conductivity curves |
+| [Pallet wood](fsri-pallet-wood-unconditioned-2022/manifest.tsv) | 8 | Separate native capacity and density-dependent published reduction |
+| [Basswood panel](fsri-basswood-panel-unconditioned-2021/manifest.tsv) | 8 | Native capacity and conductivity for the reported panel population |
+| [Dried MDF](fsri-mdf-dried-2021/manifest.tsv) | 4 | Conductivity and normalization density; dried capacity is unavailable |
+| [Dried OSB](fsri-osb-dried-2022/manifest.tsv) | 8 | Condition-specific capacity and conductivity |
+| [Dried plywood](fsri-plywood-dried-2021/manifest.tsv) | 8 | Condition-specific capacity and conductivity |
+| [Dried particleboard](fsri-particleboard-dried-2021/manifest.tsv) | 8 | Condition-specific capacity and conductivity |
+
+The NIST profiles retain 1,404 sampled curve knots and three plateau scalars.
+Finite expansion is `(L(T)-L293)/L293`; fitted residuals and strict branch
+inequalities are preserved. An undefined joining temperature remains
+unsupported. Data/equation intersections govern every curve, including Fe-9Ni
+specific heat beginning at 60 K and expansion ending at 265 K. Source UNS-label
+inconsistencies remain recorded. No density, missing caloric law, matched coupon
+or isotropic qualification is inferred.
+
+FSRI experiments remain pinned to
+`a432697e4b7d40f642b5cc8f384506439ebb32df`. Native capacity spans 10–40 C where
+available; all complete new prepared capacity/conductivity paths span 15–40 C.
+The dried profiles require their distinct conditioning coordinates. Dried MDF
+has conductivity at 30 and 45 C and deliberately refuses a capacity-dependent
+transient consumer. The source's 105 C drying procedure is not a service
+temperature or a measured moisture content.
+
+PMMA stock and HFM thicknesses, unknown lumber species/grade/grain axes and
+moisture, and misleading density-file headers stay explicit in the observations.
+Pallet Cp/density normalization requires the source-header inconsistency flag;
+native capacity remains independent. Dried plywood retains its R3 density
+header discrepancy. Rounded zero sample scatter remains separate from
+measurement uncertainty. Local use of mean-temperature conductivity still
+requires `mean-test-temperature-as-local-model=1`.
+
+The consumer follow-through is `FixedVolumeLayerConduction`: original native
+capacity paths now use the existing temperature-integrated two-layer flux
+solver, with contact resistance, interface temperatures and endpoint derivatives
+on the original thermal timeline. The three data suites
+`nist_engineering_alloy_thermal_profiles`, `fsri_acrylic_lumber_thermal_profiles`
+and `fsri_dried_panel_thermal_profiles` contain nine focused tests. The existing
+`material_volumetric_timeline` suite now has ten tests, including three new
+layer/timeline checks. Together they pass 19 tests in the focused native build.
