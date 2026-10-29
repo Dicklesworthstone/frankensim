@@ -72,26 +72,23 @@ fn path(card: &MaterialCard, lower: &QueryPoint, upper: &QueryPoint) -> PathMode
     )
     .unwrap()
 }
-fn analytic_card(c0: f64, slope: f64, k0: f64, kslope: f64) -> MaterialCard {
+fn tabulated_card(capacity: &[(f64, f64)], conductivity: &[(f64, f64)]) -> MaterialCard {
     let mut claims = ClaimSet::new();
-    for (i, (base, derivative)) in [(c0, slope), (k0, kslope)].into_iter().enumerate() {
+    for (i, knots) in [capacity, conductivity].into_iter().enumerate() {
         claims
             .insert_claim(PropertyClaim {
                 key: keys()[i].clone(),
                 value: PropertyValue::Curve {
                     abscissa: "temperature".into(),
                     abscissa_dims: Temperature::DIMS,
-                    knots: [290.0, 300.0, 320.0, 340.0]
-                        .into_iter()
-                        .map(|t| (t, base + derivative * (t - 300.0)))
-                        .collect(),
+                    knots: knots.to_vec(),
                     dims: [C, Dims([1, 1, -3, -1, 0, 0])][i],
                 },
                 validity: ValidityDomain::unconstrained().with_quantity(
                     "temperature",
                     quantity(QuantityKind::AbsoluteTemperature),
-                    290.0,
-                    340.0,
+                    knots[0].0,
+                    knots.last().unwrap().0,
                 ),
                 interpolation: InterpolationPolicy::LinearInside,
                 uncertainty: UncertaintyModel::Unstated,
@@ -106,6 +103,13 @@ fn analytic_card(c0: f64, slope: f64, k0: f64, kslope: f64) -> MaterialCard {
     }
     MaterialCard::assemble(state("analytic volumetric law"), claims, vec![]).unwrap()
 }
+fn analytic_card(c0: f64, slope: f64, k0: f64, kslope: f64) -> MaterialCard {
+    let knots = |base: f64, derivative: f64| {
+        [290.0, 300.0, 320.0, 340.0].map(|t| (t, base + derivative * (t - 300.0)))
+    };
+    tabulated_card(&knots(c0, slope), &knots(k0, kslope))
+}
+
 fn close(actual: f64, expected: f64, absolute: f64) {
     assert!(
         (actual - expected).abs() <= absolute,
@@ -462,4 +466,277 @@ fn g1_g3_real_frp_capacity_drives_original_timeline_without_a_density_or_cp_clai
         ],
         [1000.0, 2000.0],
     );
+}
+
+#[test]
+fn g1_sensible_entropy_integrates_source_breaks_and_resolves_small_changes() {
+    // Independent slope/intercept primitive, including decreasing capacity.
+    for slope in [-20000.0, 0.0, 20000.0] {
+        let card = analytic_card(2e6, slope, 0.2, 0.001);
+        let p = path(&card, &point(290.0), &point(340.0));
+        let original = p.clone();
+        for (a, b) in [(290.0, 340.0), (297.25, 330.5), (340.0, 292.5)] {
+            let expected = slope * (b - a) + (2e6 - 300.0 * slope) * (b / a).ln();
+            let actual = p.sensible_entropy_change_j_m3_k(a, b).unwrap();
+            close(actual, expected, 2e-9);
+            assert_eq!(p.sensible_entropy_change_j_m3_k(b, a).unwrap(), -actual);
+        }
+        // Adjacent floats straddle an actual retained knot. The integral is
+        // bounded independently by endpoint C and reciprocal temperature.
+        let a = 300.0_f64.next_down();
+        let b = 300.0_f64.next_up();
+        let capacity_a = 2e6 + slope * (a - 300.0);
+        let capacity_b = 2e6 + slope * (b - 300.0);
+        let entropy = p.sensible_entropy_change_j_m3_k(a, b).unwrap();
+        let lower = capacity_a.min(capacity_b) / b * (b - a);
+        let upper = capacity_a.max(capacity_b) / a * (b - a);
+        assert!(entropy > 0.0 && entropy >= lower * (1.0 - 8.0 * f64::EPSILON));
+        assert!(entropy <= upper * (1.0 + 8.0 * f64::EPSILON));
+        close(
+            entropy,
+            p.sensible_entropy_change_j_m3_k(a, 300.0).unwrap()
+                + p.sensible_entropy_change_j_m3_k(300.0, b).unwrap(),
+            1e-23,
+        );
+        assert_eq!(p.sensible_entropy_change_j_m3_k(300.0, 300.0).unwrap(), 0.0);
+        for outside in [0.0, 289.0, 341.0, f64::INFINITY, f64::NAN] {
+            assert!(p.sensible_entropy_change_j_m3_k(outside, 300.0).is_err());
+            assert!(p.sensible_entropy_change_j_m3_k(300.0, outside).is_err());
+        }
+        assert_eq!(p, original);
+    }
+    // Capacity and conductivity have DIFFERENT breaks; cross all of them.
+    let card = tabulated_card(
+        &[(290.0, 1e6), (310.0, 3e6), (340.0, 1.5e6)],
+        &[(290.0, 0.1), (300.0, 0.2), (320.0, 0.3), (340.0, 0.4)],
+    );
+    let p = path(&card, &point(290.0), &point(340.0));
+    let expected = 100000.0 * 20.0 - 28e6 * (310.0_f64 / 290.0).ln() - 50000.0 * 30.0
+        + 18.5e6 * (340.0_f64 / 310.0).ln();
+    close(
+        p.sensible_entropy_change_j_m3_k(290.0, 340.0).unwrap(),
+        expected,
+        1e-8,
+    );
+    // The entropy can be representable even when T_high/T_low and the energy
+    // integral overflow. This is a source-path query, not an admitted timeline.
+    let card = tabulated_card(
+        &[(1e-300, 1e100), (1e300, 1e100)],
+        &[(1e-300, 1e-100), (1e300, 1e-100)],
+    );
+    let p = path(&card, &point(1e-300), &point(1e300));
+    assert!(p.storage_change_j_m3(1e-300, 1e300).is_err());
+    let actual = p.sensible_entropy_change_j_m3_k(1e-300, 1e300).unwrap();
+    close(actual / 1e100, 600.0 * 10.0_f64.ln(), 1e-12);
+}
+
+#[test]
+fn g1_g3_opt_in_entropy_closes_the_existing_implicit_conduction_account() {
+    let affine = analytic_card(2e6, 20000.0, 0.2, 0.002);
+    let affine_path = path(&affine, &point(290.0), &point(340.0));
+    let expected = 20000.0 * (337.5 - 297.25) - 4e6 * (337.5_f64 / 297.25).ln();
+    for rho in [200.0, 1000.0] {
+        for datum in [290.0, 300.0, 315.0, 340.0] {
+            let plain = FixedVolumeThermalLaw::try_new(&affine_path, rho, datum).unwrap();
+            let law = plain.clone().with_sensible_entropy();
+            assert!(!plain.sensible_entropy_enabled());
+            assert!(law.sensible_entropy_enabled());
+            assert_ne!(plain.identity(), law.identity());
+            assert_eq!(
+                law.identity(),
+                law.clone().with_sensible_entropy().identity()
+            );
+            assert_eq!(plain.path(), law.path());
+            let hi = law.specific_storage_j_kg(297.25).unwrap();
+            let hf = law.specific_storage_j_kg(337.5).unwrap();
+            assert_eq!(plain.specific_entropy_change_j_kg_k(hi, hf).unwrap(), None);
+            close(
+                law.specific_entropy_change_j_kg_k(hi, hf).unwrap().unwrap() * rho,
+                expected,
+                3e-9,
+            );
+            assert!(law.specific_entropy_change_j_kg_k(f64::NAN, hf).is_err());
+            assert!(
+                law.specific_entropy_change_j_kg_k(
+                    hi,
+                    law.specific_storage_span_j_kg()[1].next_up()
+                )
+                .is_err()
+            );
+        }
+    }
+    let card = analytic_card(1e6, 0.0, 0.5, 0.0);
+    let p = path(&card, &point(290.0), &point(340.0));
+    let plain = FixedVolumeThermalLaw::try_new(&p, 1000.0, 300.0).unwrap();
+    let unavailable = timeline(
+        vec![cell(&plain, 1, 300.0, 0.001)],
+        &[(MaterialId(1), &plain)],
+        None,
+    );
+    assert!(
+        unavailable
+            .advance_to_with_entropy(1.0, CONFIG, || Ok(()))
+            .is_err()
+    );
+    assert_eq!(unavailable.time_s(), 0.0);
+    let law = plain.with_sensible_entropy();
+    // Distinct stored coordinates can round to one T: do not erase their heat.
+    let hi = law.specific_storage_j_kg(310.0).unwrap();
+    let hf = hi.next_up();
+    let t = law.temperature_k(hi).unwrap();
+    assert_eq!(t, law.temperature_k(hf).unwrap());
+    let ds = law.specific_entropy_change_j_kg_k(hi, hf).unwrap().unwrap();
+    assert_eq!(ds, (hf - hi) / t);
+    assert!(ds > 0.0);
+    assert_eq!(
+        law.specific_entropy_change_j_kg_k(hf, hi).unwrap(),
+        Some(-ds)
+    );
+
+    let raw_link = ThermalLink {
+        id: 7,
+        a: CellId(1),
+        b: CellId(2),
+        area_m2: 0.01,
+        conductance_w_k: 0.0,
+    };
+    let link =
+        FixedVolumeConductionLink::try_aligned(&raw_link, [&law; 2], [0.01; 2], 0.0).unwrap();
+    let initial = timeline(
+        vec![cell(&law, 1, 300.0, 0.001), cell(&law, 2, 330.0, 0.001)],
+        &[(MaterialId(1), &law), (MaterialId(2), &law)],
+        Some(raw_link),
+    );
+    // Closed-form backward Euler for two constant 1000 J/K cells, independently
+    // using k=0.5, area=0.01 and a total conduction length of 0.02 metres.
+    let g = 0.5 * 0.01 / 0.02;
+    let duration = 2000.0;
+    let q = duration * g * 30.0 / (1.0 + duration * g * 2.0 / 1000.0);
+    let ta = 300.0 + q / 1000.0;
+    let tb = 330.0 - q / 1000.0;
+    let step = BackwardEulerStep::new(&initial, duration, || Ok(())).unwrap();
+    let trial = step
+        .evaluate_with_entropy(
+            &[q, -q],
+            |candidate| {
+                Ok::<_, DepositionError>(StepCoefficients {
+                    sources_w: BTreeMap::new(),
+                    conductances_w_k: BTreeMap::from([(7, link.conductance_w_k(candidate)?)]),
+                    payload: (),
+                })
+            },
+            || Ok(()),
+        )
+        .unwrap();
+    let entropy = *trial.entropy_audit().unwrap();
+    let state_entropy = 1000.0 * ((ta / 300.0_f64).ln() + (tb / 330.0_f64).ln());
+    let production = q * (1.0 / ta - 1.0 / tb);
+    close(entropy.thermal_storage_change_j_k, state_entropy, 2e-12);
+    close(entropy.conduction_generation_j_k, production, 2e-14);
+    close(
+        entropy.temporal_defect_j_k,
+        state_entropy - production,
+        2e-12,
+    );
+    assert!(entropy.thermal_storage_change_j_k > 0.0);
+    assert!(entropy.conduction_generation_j_k > 0.0);
+    assert!(entropy.temporal_defect_j_k > 0.0);
+    assert_eq!(entropy.reservoir_entropy_input_j_k, 0.0);
+    assert_eq!(entropy.unclassified_source_at_cell_j_k, 0.0);
+    assert!(!entropy.has_unclassified_sources);
+    let (accepted, (), energy) = trial.accept(1e-8, 1e-8, || Ok(())).unwrap();
+    close(accepted.temperature_k(CellId(1)).unwrap(), ta, 6e-14);
+    close(accepted.temperature_k(CellId(2)).unwrap(), tb, 6e-14);
+    close(accepted.energy_j(), initial.energy_j(), 1e-8);
+    assert_eq!(energy.external_heat_j, 0.0);
+    assert_eq!(initial.time_s(), 0.0);
+}
+
+#[test]
+fn g1_g3_sourced_entropy_retains_native_capacity_and_unclassified_heat() {
+    // Literal primary FSRI means at 20/30 C; no query supplies the oracle.
+    for (slug, capacities, ratios) in [
+        (
+            "fsri-pp-unconditioned-2021",
+            [1563841.0, 1641098.0],
+            [800.0, 1600.0],
+        ),
+        (
+            "fsri-puf-mattress-pad-unconditioned-2022",
+            [40175.666666666664, 34740.333333333336],
+            [50.0, 100.0],
+        ),
+    ] {
+        let pack = compiled(slug);
+        let card = pack.card();
+        let p = path(
+            card,
+            &source_point(card, 288.15),
+            &source_point(card, 313.15),
+        );
+        let original = p.clone();
+        let c0 = capacities[0];
+        let slope = (capacities[1] - c0) / 10.0;
+        let delta_at = |heat_j: f64| {
+            let density = heat_j / 0.002;
+            2.0 * density / (c0 + (c0 * c0 + 2.0 * slope * density).sqrt())
+        };
+        let delta = delta_at(600.0);
+        assert!((0.0..10.0).contains(&delta));
+        let expected = 0.002 * (slope * delta + (c0 - slope * 293.15) * (delta / 293.15).ln_1p());
+        let source_at_cell: f64 = (0..20)
+            .map(|i| 30.0 / (293.15 + delta_at(30.0 * f64::from(i))))
+            .sum();
+        for rho in ratios {
+            // This ratio is an authored reference mass basis, not a density measurement.
+            let law = FixedVolumeThermalLaw::try_new(&p, rho, 293.15)
+                .unwrap()
+                .with_sensible_entropy();
+            let mut heated_cell = cell(&law, 1, 293.15, 0.002);
+            heated_cell.boundary.source_w = 30.0;
+            let initial = timeline(vec![heated_cell], &[(MaterialId(1), &law)], None);
+            let (heated, energy, entropy) = initial
+                .advance_to_with_entropy(20.0, CONFIG, || Ok(()))
+                .unwrap();
+            let (ordinary, ordinary_energy) = initial.advance_to(20.0, CONFIG, || Ok(())).unwrap();
+            assert_eq!(
+                heated.cells()[&CellId(1)].specific_h_j_kg,
+                ordinary.cells()[&CellId(1)].specific_h_j_kg
+            );
+            assert_eq!(energy, ordinary_energy);
+            close(
+                heated.temperature_k(CellId(1)).unwrap(),
+                293.15 + delta,
+                1e-12,
+            );
+            close(energy.stored_energy_change_j, 600.0, 1e-9);
+            close(entropy.thermal_storage_change_j_k, expected, 1e-10);
+            close(
+                entropy.unclassified_source_at_cell_j_k,
+                source_at_cell,
+                1e-12,
+            );
+            close(
+                entropy.temporal_defect_j_k,
+                expected - source_at_cell,
+                1e-10,
+            );
+            assert!(entropy.has_unclassified_sources);
+            assert_eq!(entropy.reservoir_entropy_input_j_k, 0.0);
+            assert_eq!(entropy.conduction_generation_j_k, 0.0);
+            assert!(entropy.temporal_defect_j_k < 0.0);
+            assert!(
+                initial
+                    .advance_to_with_entropy(20.0, CONFIG, || Err(DepositionError::Cancelled))
+                    .is_err()
+            );
+            assert_eq!(initial.time_s(), 0.0);
+        }
+        assert_eq!(p, original);
+        for source in p.source_lines() {
+            for (_, answer) in &source.knots {
+                card.claims().verify_receipt(&answer.receipt).unwrap();
+            }
+        }
+    }
 }

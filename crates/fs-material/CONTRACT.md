@@ -4303,4 +4303,53 @@ cover reference-basis/datum invariance, an independently solved nonlinear
 two-cell balance, original-law/geometry/domain refusals, and actual compiled
 FSRI foam and density-free FRP heating on the existing timeline. The explicit
 authored mass basis cancels from those fixed-volume temperature results.
-No entropy law, experimental qualification or full spatial FEM result is added.
+An entropy interpretation is available only through the explicit opt-in below.
+No experimental qualification or full spatial FEM result is added.
+
+## Sensible entropy from the retained volumetric path (2026-10-28)
+
+`PreparedVolumetricThermalTransport::sensible_entropy_change_j_m3_k`
+integrates the retained piecewise-affine capacity as
+`integral C_vol(T)/T dT` in J/(m3 K). Calling it explicitly selects a
+reversible sensible-caloric interpretation at fixed work/composition
+coordinates and the source reference-volume convention. An apparent
+experimental capacity does not automatically become thermodynamic Cv.
+No absolute entropy datum, latent heat, pressure work, chemistry, moisture
+exchange or hysteresis is supplied.
+
+Each crossed segment uses positive endpoint weights for its analytic
+logarithmic integral. A bounded small-interval series avoids cancellation;
+compensated accumulation retains the original source breaks. Reversal is
+antisymmetric. Unsupported temperatures and unrepresentable arithmetic
+refuse without changing the source path. Runtime traversal is bounded by
+the original knots, allocates nothing, queries no card and hashes nothing.
+The platform logarithm remains subject to floating-point roundoff; no
+cross-ISA transcendental or measurement-uncertainty guarantee is added.
+
+`FixedVolumeThermalLaw::with_sensible_entropy` opts the SAME borrowed source
+law into the existing `ThermalLaw::specific_entropy_change_j_kg_k` account.
+Default bindings still report entropy unavailable. Opt-in changes the
+binding identity exactly once, retaining the source receipts, authored
+reference mass/volume ratio and storage datum. The caller must justify
+the capacity's caloric/work constraint. In exact arithmetic,
+`m * delta_s = V0 * integral C_vol(T)/T dT`; the authored reference mass basis
+cancels.
+
+The adapter uses the actual stored enthalpy increment and a capacity-weighted
+mean reciprocal temperature. Distinct enthalpy coordinates that round to
+one temperature retain their nonzero `delta_h/T` increment. Existing
+storage/inversion admission remains active: even finite endpoint
+coordinates may refuse if their difference or another required intermediate
+is unrepresentable. No broad all-finite-input success guarantee is made.
+
+The original `fs_thermal` explicit and backward-Euler owners continue to
+own heat flux, state acceptance, reservoir entropy, conductive generation,
+unclassified source watts and temporal defects. The adapter neither
+reclassifies a source as boundary heat nor counts numerical entropy as
+material production. Three additional tests in
+`xtask/tests/material_volumetric_timeline.rs` cover independent analytic
+integrals, distinct source breaks, adjacent-temperature/enthalpy increments,
+reference-basis/datum invariance, default refusal and opt-in identity, an
+isolated implicit conduction balance, and actual compiled FSRI PP/mattress
+foam heating. All seven timeline tests pass, including the prior four
+energy/storage regressions.

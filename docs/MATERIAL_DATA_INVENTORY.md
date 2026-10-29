@@ -731,3 +731,50 @@ checks passed. Full workspace Cargo was not run; the sibling
 `frankenscipy/crates/fsci-special/Cargo.toml` remains unavailable. These
 results are bounded model/compiler tests, not full workspace or experimental
 qualification.
+
+## 2026-10-28 plastics, flexible foams, composite expansion and sensible entropy
+
+**12 new source profiles plus an expanded G-10 profile; 68 new claims.**
+The increment contains 166 FSRI scalar/knot values and 1,420 NIST
+curve knots. Profiles preserve source conditioning, construction,
+direction, medium, specimen counts and missing conditions.
+
+- Four FSRI plastics: PP, LDPE, PET and nylon (32 claims).
+- Four FSRI foam profiles: unconditioned/dried rebond, PUF mattress pad
+  and selected R1 chair PU foam (24 claims).
+- Existing G-10 normal/warp expansion plus glass-fabric/polyester,
+  chopped/continuous glass-mat epoxy and [0/90] beechwood/phenolic
+  cross-laminate data (12 claims).
+
+FSRI snapshot `a432697e4b7d40f642b5cc8f384506439ebb32df` supplies the original
+instrument rows, density-normalization files, published reductions and
+metadata. Native C_vol is not decomposed into missing density and Cp.
+The chair profile deliberately excludes a much thinner capacity specimen;
+mattress density/Cp remain unavailable. NIST finite expansion is not CTE,
+and neither a missing direction nor an unsupported temperature is filled
+by inference.
+
+The functional addition is relative sensible thermal entropy from the
+same prepared capacity path. It integrates `C_vol(T)/T` analytically per
+affine segment, using positive weights, a short-interval series and
+compensated accumulation without allocations or source queries.
+`FixedVolumeThermalLaw::with_sensible_entropy` explicitly enables the
+existing `fs_thermal` entropy account. Default laws retain their prior
+behavior. The original owner still controls state, energy acceptance,
+reservoir input, conductive production and numerical defect; applied watts
+remain unclassified unless their owner supplies heat/work semantics.
+
+Focused native verification passed **17 tests: 12 new and 5 regressions**.
+The three data suites each passed three tests, the existing G-10 check
+passed, and all seven material/timeline tests passed. Tests use the actual
+material compiler, production modules, independent primary equations and
+reductions, source/context refusals, expansion and thermal consumers,
+analytic entropy oracles, an implicit two-cell balance, and actual sourced
+PP/mattress heating. The entropy harness compiled the exact production
+modules and integration test source together. The ordinary energy results
+were unchanged when entropy accounting was enabled.
+
+Full workspace Cargo remains blocked by the unavailable sibling
+`frankenscipy/crates/fsci-special/Cargo.toml`. These results establish the
+bounded compiler/model behaviors above, not full workspace, experimental
+qualification, nonlinear foam mechanics or complete orthotropic closure.
