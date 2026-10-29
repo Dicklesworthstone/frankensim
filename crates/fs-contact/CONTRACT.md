@@ -981,3 +981,23 @@ Monotone-gap proposals integrate connected-branch work analytically and return i
 `capillary_bridge::load_line::PlanarBridgeLoadLine` borrows the original sourced bridge and the caller's complete projected held-force compliance. It solves `gap = free_gap + compliance * mean_force` with the original analytic connected-path force, including rupture and coalescence. `BridgeStep` now provides the exact derivative of that mean force with respect to the endpoint gap; it is distinct from the endpoint-force tangent and stays factored at short connected intervals. The solver allocates nothing and uses bounded damped Newton continuation from accepted geometry, with original source, rate, geometry and energy admission on every proposal. A caller-selected positive compatibility-slope margin refuses unresolved attractive branches for timestep refinement; this local solve does not certify global root uniqueness or trajectory accuracy.
 
 No proposal publishes accepted history. Native mechanics must independently reevaluate actual endpoint motion and the complete work account. Four focused source tests extend the six original bridge groups: independent mean-force derivatives on each topology branch; 700 exact held-force two-body steps with conserved momentum and kinetic/surface/release energy through rupture; prescribed and compliant coalescence; and source, range, budget, unstable-slope and cancellation refusal/replay.
+
+## Finite tangential apparatus and first slip/peel boundary
+
+`normal_patch::adhesive::mixed_mode::loading::JkrShearSpringFixture` couples
+the original conservative full-stick JKR owner to an explicit tangential spring
+at fixed normal approach. Its actual stage load line, contact-plus-spring
+potential, apparatus-relaxed radius curvature and stage tangent use the same
+equilibrium. Each candidate obtains static capacity from the original resolved
+shear law on its actual shrinking contact area and repulsive load; no junction
+strength is inferred from work of adhesion or bulk material properties.
+
+The immutable source-bound checkpoint follows reversible loading, unloading
+and reversal, ending at the first gross-slip capacity or apparatus-radius
+instability. It reports the admitted boundary, physical storage, prescribed
+stage work and signed untraversed travel. Iteration and operating-range limits
+are explicit; failed proposals leave the accepted checkpoint unchanged and
+continuation allocates nothing. Root brackets localize a floating-point
+boundary, not an interval certificate. Partial slip, post-event sliding,
+dynamic landing and conversion of released storage to heat remain outside
+this owner.

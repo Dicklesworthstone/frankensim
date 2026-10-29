@@ -18,6 +18,9 @@
 //! dependent fold; subsequent sliding, nucleation or dynamic separation needs
 //! the caller's physical owner, not an invented zero-area equilibrium or heat.
 
+/// Finite tangential apparatus stiffness and competing sourced slip/peel limits.
+pub mod loading;
+
 use super::{JkrError, SourceJkrSphereContact};
 use core::f64::consts::PI;
 use fs_blake3::{ContentHash, DomainHasher};
