@@ -1,27 +1,32 @@
 //! Run `cargo run -p fs-gas --features experimental-euler --example mixture_manifold -- 64`.
 //! Append `molecular` for cylindrical passages with species diffusion, heat
 //! conduction and viscous transport across the finite-plenum connections.
+//! Use `molecular-wall` to add Darcy drag and finite-capacity wall heat exchange.
 //!
 //! Pressurized nitrogen expands into an air-filled compact plenum and two daughter
 //! passages. Compression waves, reflected waves and the composition front evolve
-//! together; the closed system retains each species and physical total energy.
+//! together; the closed gas-plus-wall system retains each species and physical energy.
 //! The 200--1000 K N2/O2 NASA-9 coefficients are retained from Cantera v3.2.0
 //! data/airNASA9.yaml, blob 5975d1303819332c1bd77a783d9873b66f65c952:
 //! https://github.com/Cantera/cantera/blob/v3.2.0/data/airNASA9.yaml
 //!
-//! Both modes use a rigid perfectly mixed 30 mL plenum and an N2/O2 air surrogate.
+//! All modes use a rigid perfectly mixed 30 mL plenum and an N2/O2 air surrogate.
 //! The default inviscid mode retains one conical daughter. Molecular mode uses
 //! three cylinders and an explicit 10 mm plenum-side mixing distance at each
 //! port; this compact closure does not resolve three-dimensional junction mixing.
 //! Original N2/O2 collision parameters are retained from Cantera v3.2.0
 //! data/gri30.yaml, blob 9a62004ec17bbec8ac11e97785932d426dd58610:
 //! https://github.com/Cantera/cantera/blob/v3.2.0/data/gri30.yaml
-//! Neither mode adds reaction, empirical junction/wall loss or experimental
-//! validation. The molecular Eucken conductivity is an estimated closure.
+//! The wall mode uses explicit illustrative Darcy and heat-transfer coefficients,
+//! with one lumped wall per gas cell. No mode adds reaction or an empirical
+//! junction loss. Eucken conductivity and wall coefficients are Estimated;
+//! no transient boundary-layer or experimental validation is implied.
 
 use fs_evidence::ValidityDomain;
 use fs_gas::multicomponent::dissipation::KineticTransport;
 use fs_gas::multicomponent::network::dissipating::{DissipatingNetwork1d, DissipatingStepControl};
+use fs_gas::multicomponent::network::wall_exchange::NetworkWallOperator;
+use fs_gas::multicomponent::wall_exchange::{WallContact, WallControl, WallDrag, WallThermal};
 use fs_gas::multicomponent::network::{
     BranchEnd, MixtureNetwork1d, NetworkTotals, Plenum, PlenumConnection,
 };
@@ -46,6 +51,11 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const AMBIENT_PRESSURE: f64 = 101_325.0;
 const PLENUM_VOLUME: f64 = 30.0e-6;
 const PLENUM_MIXING_LENGTH: f64 = 0.010;
+const WALL_INITIAL_TEMPERATURE_K: f64 = 300.0;
+const WALL_HEAT_TRANSFER_W_M2_K: f64 = 50.0;
+const WALL_AREAL_CAPACITY_J_M2_K: f64 = 2000.0;
+const WALL_DARCY_FACTOR: f64 = 0.02;
+const PLENUM_WALL_AREA_M2: f64 = 0.005;
 const SNAPSHOTS: [f64; 5] = [0.0, 0.0005, 0.001, 0.002, 0.004];
 
 fn main() -> Result<()> {
@@ -55,13 +65,16 @@ fn main() -> Result<()> {
         .map(|value| value.parse::<usize>())
         .transpose()?
         .unwrap_or(64);
-    let molecular = match arguments.next().as_deref() {
-        None => false,
-        Some("molecular") => true,
-        Some(_) => return Err("usage: mixture_manifold [cell_count] [molecular]".into()),
+    let (molecular, wall_loss) = match arguments.next().as_deref() {
+        None => (false, false),
+        Some("molecular") => (true, false),
+        Some("molecular-wall") => (true, true),
+        Some(_) => {
+            return Err("usage: mixture_manifold [cell_count] [molecular|molecular-wall]".into());
+        }
     };
     if arguments.next().is_some() {
-        return Err("usage: mixture_manifold [cell_count] [molecular]".into());
+        return Err("usage: mixture_manifold [cell_count] [molecular|molecular-wall]".into());
     }
     if !(16..=2048).contains(&cells) {
         return Err("cell count per branch must be in 16..=2048".into());
@@ -117,6 +130,14 @@ fn main() -> Result<()> {
         ],
         || false,
     )?;
+    let mut walls = if wall_loss {
+        eprintln!(
+            "Wall model: stationary Darcy factor={WALL_DARCY_FACTOR}, h_w_m2_k={WALL_HEAT_TRANSFER_W_M2_K}, areal_capacity_j_m2_k={WALL_AREAL_CAPACITY_J_M2_K}, initial_temperature_k={WALL_INITIAL_TEMPERATURE_K}, plenum_wall_area_m2={PLENUM_WALL_AREA_M2}. These are illustrative fixed Estimated inputs, not resolved shock boundary layers or material calibration."
+        );
+        Some(finite_walls(&network, &profiles)?)
+    } else {
+        None
+    };
     let mut network = if molecular {
         let law = nitrogen_oxygen_transport(gas.source().clone())?;
         eprintln!(
@@ -151,6 +172,11 @@ fn main() -> Result<()> {
     let mut molecular_n2_to_plenum = [0.0; 3];
     let mut molecular_energy_to_plenum = [0.0; 3];
     let mut daughter_snapshot_peak_overpressure = [0.0; 2];
+    let mut wall_heat_to_gas = 0.0;
+    let mut reported_wall_energy_change = 0.0;
+    let mut external_wall_heat = 0.0;
+    let mut wall_drag_heating = 0.0;
+    let mut wall_support_impulses = [0.0; 3];
     let mut output = BufWriter::new(std::io::stdout().lock());
     writeln!(
         output,
@@ -168,8 +194,32 @@ fn main() -> Result<()> {
                     (report, report.boundary_change)
                 }
                 Manifold::Molecular(owner) => {
-                    let report =
-                        owner.step(duration, DissipatingStepControl::default(), || false)?;
+                    let report = if let Some(wall) = walls.as_mut() {
+                        owner.step_with_wall(
+                            wall,
+                            duration,
+                            DissipatingStepControl::default(),
+                            WallControl::default(),
+                            || false,
+                        )?
+                    } else {
+                        owner.step(duration, DissipatingStepControl::default(), || false)?
+                    };
+                    if let Some(wall_report) = report.wall {
+                        for half in [wall_report.first, wall_report.second] {
+                            wall_heat_to_gas += half.heat_to_gas_j;
+                            reported_wall_energy_change += half.wall_energy_change_j;
+                            external_wall_heat += half.external_heat_to_gas_j;
+                            wall_drag_heating += half.drag_heating_j;
+                        }
+                        let impulses = walls
+                            .as_ref()
+                            .and_then(NetworkWallOperator::accepted_branch_impulses)
+                            .ok_or("missing accepted wall impulse report")?;
+                        for (total, impulse) in wall_support_impulses.iter_mut().zip(impulses) {
+                            *total += *impulse;
+                        }
+                    }
                     coupling_retries += report.coupling_retries;
                     for half in [report.molecular.first, report.molecular.second] {
                         molecular_steps += half.accepted_steps;
@@ -218,6 +268,17 @@ fn main() -> Result<()> {
             .zip(gas.energy_references())
             .map(|(dm, e)| dm * e)
             .sum::<f64>();
+    if let Some(wall) = &walls {
+        let (wall_energy_change, minimum_wall_t, maximum_wall_t) =
+            wall_storage_change(wall, branches.len())?;
+        let combined_residual = physical_energy_residual + wall_heat_to_gas
+            + wall_energy_change - external_wall_heat;
+        let wall_storage_residual = wall_energy_change - reported_wall_energy_change;
+        eprintln!(
+            "Gas-plus-wall balance: gas_plus_wall_energy_residual_j={combined_residual:.6e}, wall_storage_residual_j={wall_storage_residual:.6e}, wall_energy_change_j={wall_energy_change:.6e}, heat_to_gas_j={wall_heat_to_gas:.6e}, external_wall_heat_j={external_wall_heat:.6e}, kinetic_energy_thermalized_j={wall_drag_heating:.6e}, final_wall_temperature_k=[{minimum_wall_t:.6},{maximum_wall_t:.6}], support_impulse_ns_by_branch=[{:.6e},{:.6e},{:.6e}]",
+            wall_support_impulses[0], wall_support_impulses[1], wall_support_impulses[2],
+        );
+    }
     let plenum = plenums[0].state();
     let plenum_primitive = gas.primitive(plenum, || false)?;
     let daughter_max_n2 = std::array::from_fn::<_, 2, _>(|i| {
@@ -325,6 +386,75 @@ fn write_cell(
         q.partial_densities[1] / p.density
     )?;
     Ok(p.pressure)
+}
+
+fn finite_walls(
+    network: &MixtureNetwork1d,
+    profiles: &[(f64, f64, f64); 3],
+) -> Result<NetworkWallOperator> {
+    let thermal = |area: f64| WallThermal::Lumped {
+        temperature_k: WALL_INITIAL_TEMPERATURE_K,
+        heat_capacity_j_per_k: WALL_AREAL_CAPACITY_J_M2_K * area,
+        conductance_w_per_k: WALL_HEAT_TRANSFER_W_M2_K * area,
+    };
+    let mut contacts = Vec::with_capacity(network.branches().len());
+    for (branch, &(length, radius, outlet)) in network.branches().iter().zip(profiles) {
+        if radius != outlet {
+            return Err("wall example requires its declared cylindrical passages".into());
+        }
+        let area = 2.0 * std::f64::consts::PI * radius * length / branch.cell_count() as f64;
+        contacts.push(vec![
+            WallContact {
+                drag: WallDrag::Darcy {
+                    friction_factor: WALL_DARCY_FACTOR,
+                    hydraulic_diameter_m: 2.0 * radius,
+                },
+                thermal: thermal(area),
+            };
+            branch.cell_count()
+        ]);
+    }
+    Ok(NetworkWallOperator::new(
+        network,
+        contacts,
+        vec![WallContact {
+            drag: WallDrag::None,
+            thermal: thermal(PLENUM_WALL_AREA_M2),
+        }],
+        || false,
+    )?)
+}
+
+// Integrate actual retained wall temperatures independently of source reports.
+// Differences from the initial temperature avoid subtracting large reference energies.
+fn wall_storage_change(
+    wall: &NetworkWallOperator,
+    branches: usize,
+) -> Result<(f64, f64, f64)> {
+    let mut energy = 0.0;
+    let mut minimum = f64::INFINITY;
+    let mut maximum = f64::NEG_INFINITY;
+    for contacts in (0..branches)
+        .map(|i| wall.branch_contacts(i).expect("admitted wall branch"))
+        .chain(std::iter::once(wall.plenum_contacts()))
+    {
+        for contact in contacts {
+            match contact.thermal {
+                WallThermal::Lumped {
+                    temperature_k,
+                    heat_capacity_j_per_k,
+                    ..
+                } => {
+                    energy += heat_capacity_j_per_k
+                        * (temperature_k - WALL_INITIAL_TEMPERATURE_K);
+                    minimum = minimum.min(temperature_k);
+                    maximum = maximum.max(temperature_k);
+                }
+                _ => return Err("wall example requires finite thermal storage".into()),
+            }
+        }
+    }
+    Ok((energy, minimum, maximum))
 }
 
 fn nitrogen_oxygen_transport(source: IdealGasEquilibriumV1) -> Result<KineticTransport> {

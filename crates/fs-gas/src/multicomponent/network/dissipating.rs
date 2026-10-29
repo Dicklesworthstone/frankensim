@@ -4,14 +4,18 @@
 //! the same source-bound operator in branches and finite-plenum connections.
 //! Every half step covers the actual accepted advection duration. A shortened
 //! transport step restarts the entire composition from the accepted network.
+//! Optional wall halves include conservative finite-wall heat storage and
+//! stationary-wall drag in the same complete transaction.
 
 use super::super::dissipation::{DissipationControl, DissipationError, TransportLaw};
+use super::super::wall_exchange::{WallControl, WallExchangeError};
 use super::super::{
     Error as FlowError, MAX_SPECIES, MixtureEuler1d, MixtureGas, StepControl, StepReport,
     allocated, positive, sum,
 };
 use super::coupled::{checked_totals, duplicate, initial_duration, reset};
 use super::dissipation::{NetworkDissipationOperator, SplitNetworkDissipationReport};
+use super::wall_exchange::{NetworkWallOperator, SplitNetworkWallReport};
 use super::{
     MixtureNetwork1d, NetworkStepReport, NetworkTotals, Plenum, PlenumConnection, PortExchange,
 };
@@ -46,6 +50,8 @@ pub enum DissipatingNetworkError {
     Flow(FlowError),
     /// Original molecular, Maxwell--Stefan or transport-property owner refused.
     Molecular(DissipationError),
+    /// Original-source wall drag, heat or finite-wall storage update refused.
+    Wall(WallExchangeError),
     /// No complete composition remained within the retry budget.
     RetryLimit {
         attempts: usize,
@@ -77,7 +83,16 @@ impl From<DissipationError> for DissipatingNetworkError {
     }
 }
 
-/// Accepted D(dt/2), network(dt), D(dt/2) physical storage and exchange.
+impl From<WallExchangeError> for DissipatingNetworkError {
+    fn from(value: WallExchangeError) -> Self {
+        match value {
+            WallExchangeError::Cancelled => Self::Cancelled,
+            other => Self::Wall(other),
+        }
+    }
+}
+
+/// Accepted D(dt/2), network(dt), D(dt/2), optionally enclosed by wall halves.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DissipatingNetworkReport {
     /// Duration covered by transport and the two molecular halves together.
@@ -88,11 +103,15 @@ pub struct DissipatingNetworkReport {
     pub transport: NetworkStepReport,
     /// Accepted original-source molecular intervals before and after transport.
     pub molecular: SplitNetworkDissipationReport,
+    /// Both wall halves, including finite-wall storage and reservoir heat.
+    pub wall: Option<SplitNetworkWallReport>,
     /// Complete initial storage across branches and plenums.
     pub before: NetworkTotals,
     /// Complete final storage across branches and plenums.
     pub after: NetworkTotals,
-    /// All external molecular and advective exchange, signed into the network.
+    /// All molecular, advective and wall exchange, signed into the gas network.
+    /// Finite-wall heat is external to gas storage; the wall report separately
+    /// closes gas plus finite-wall energy against reservoir heat only.
     pub boundary_change: NetworkTotals,
     /// `after - before - boundary_change`, per species and referenced energy.
     pub conservation_residual: NetworkTotals,
@@ -208,6 +227,39 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
         &mut self,
         maximum_duration: Time,
         controls: DissipatingStepControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<DissipatingNetworkReport, DissipatingNetworkError> {
+        self.step_impl(maximum_duration, controls, None, cancelled)
+    }
+
+    /// Advance W(dt/2), D(dt/2), A(dt), D(dt/2), W(dt/2) atomically.
+    /// Prepare the wall operator from the raw network before moving the network
+    /// into this owner. Both finite-wall temperature halves use the actual
+    /// accepted transport duration and restart on every complete retry.
+    /// Stationary drag thermalizes kinetic energy without adding total energy;
+    /// wall heat enters the gas balance once, with opposite finite-wall storage.
+    /// The underlying wall heat solve retains its declared temporal accuracy.
+    pub fn step_with_wall(
+        &mut self,
+        wall: &mut NetworkWallOperator,
+        maximum_duration: Time,
+        controls: DissipatingStepControl,
+        wall_controls: WallControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<DissipatingNetworkReport, DissipatingNetworkError> {
+        self.step_impl(
+            maximum_duration,
+            controls,
+            Some((wall, wall_controls)),
+            cancelled,
+        )
+    }
+
+    fn step_impl(
+        &mut self,
+        maximum_duration: Time,
+        controls: DissipatingStepControl,
+        mut wall: Option<(&mut NetworkWallOperator, WallControl)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<DissipatingNetworkReport, DissipatingNetworkError> {
         poll(&mut cancelled)?;
@@ -220,6 +272,9 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
             return Err(DissipatingNetworkError::Invalid(
                 "molecular network duration, CFL or retry controls",
             ));
+        }
+        if let Some((_, wall_controls)) = &wall {
+            wall_controls.validate()?;
         }
         let before = checked_totals(&self.accepted, &mut cancelled)?;
         let mut duration = initial_duration(
@@ -243,6 +298,18 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
             }
             reset(&mut self.trial, &self.accepted, &mut cancelled)?;
             let attempt = (|| {
+                let first_wall = match wall.as_mut() {
+                    Some((operator, control)) => {
+                        operator.begin_trial(&mut cancelled)?;
+                        Some(operator.advance_for_trial(
+                            &mut self.trial,
+                            Time::new(0.5 * duration),
+                            *control,
+                            &mut cancelled,
+                        )?)
+                    }
+                    None => None,
+                };
                 let first = self.molecular.advance_for_trial(
                     &mut self.trial,
                     Time::new(0.5 * duration),
@@ -291,9 +358,21 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
                         ));
                     }
                 }
+                let second_wall = match wall.as_mut() {
+                    Some((operator, control)) => Some(operator.advance_for_trial(
+                        &mut self.trial,
+                        Time::new(0.5 * duration),
+                        *control,
+                        &mut cancelled,
+                    )?),
+                    None => None,
+                };
+                let wall_report = first_wall
+                    .zip(second_wall)
+                    .map(|(first, second)| SplitNetworkWallReport { first, second });
                 Ok::<_, DissipatingNetworkError>((
                     transport,
-                    Some(SplitNetworkDissipationReport { first, second }),
+                    Some((SplitNetworkDissipationReport { first, second }, wall_report)),
                 ))
             })();
             match attempt {
@@ -303,7 +382,7 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
                         "network transport shortened the molecular composition",
                     );
                 }
-                Ok((transport, Some(molecular))) => {
+                Ok((transport, Some((molecular, wall_report)))) => {
                     let after = checked_totals(&self.trial, &mut cancelled)?;
                     let n = self.gas().species_count();
                     let mut boundary_change = NetworkTotals {
@@ -315,6 +394,13 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
                             molecular.second.boundary_change.energy,
                         ]),
                     };
+                    if let Some(w) = wall_report {
+                        boundary_change.energy = sum([
+                            boundary_change.energy,
+                            w.first.heat_to_gas_j,
+                            w.second.heat_to_gas_j,
+                        ]);
+                    }
                     let mut residual = NetworkTotals {
                         species_masses: [0.0; MAX_SPECIES],
                         species_count: n,
@@ -353,6 +439,7 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
                         coupling_retries: retry,
                         transport,
                         molecular,
+                        wall: wall_report,
                         before,
                         after,
                         boundary_change,
@@ -361,6 +448,9 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
                         absolute_energy_residual_j,
                     };
                     poll(&mut cancelled)?;
+                    if let Some((operator, _)) = wall.as_mut() {
+                        operator.publish_trial_report();
+                    }
                     self.molecular.publish_trial_report();
                     core::mem::swap(&mut self.accepted, &mut self.trial);
                     core::mem::swap(&mut self.molecular_ports, &mut self.trial_molecular_ports);

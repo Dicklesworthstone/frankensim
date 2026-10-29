@@ -995,3 +995,47 @@ cancellation followed by reuse. Native compilation and execution are blocked in
 this session: the execution environment has no usable connection. Consequently
 these new regressions have not been run, and no DSR, Cargo, native-suite or
 physical-consumer pass is claimed for this extension.
+
+## Wall sources composed with molecular and reacting networks
+
+`DissipatingNetwork1d::step_with_wall` performs W/2, D/2, A, D/2, W/2.
+`ReactingNetwork1d::step_with_wall` performs W/2, C/2, A, C/2, W/2;
+`step_with_dissipation_and_wall` surrounds the existing D/2, C/2, A, C/2, D/2
+composition with both wall halves. The existing methods continue without W.
+Every half covers the actual accepted wave duration. A shorter advection step
+or a refused source stage resets gas fields and finite wall storage before
+retrying the complete composition.
+
+Both wall heat transfers enter the gas boundary-energy balance. The wall report
+separately retains actual finite-wall storage changes and external reservoir
+heat, so a gas-plus-wall audit can distinguish internal exchange from external
+energy supply. Stationary-wall kinetic thermalization is diagnostic only and
+does not enter the total-energy source a second time. Final branch and plenum
+temperatures must still fit the chemistry mechanism's admitted interval after
+the final wall half. Gas, molecular reports, wall temperatures and both wall
+halves' aggregate support impulses publish only after the final cancellation
+check.
+
+The manifold example accepts `molecular-wall`:
+
+```bash
+cargo run -p fs-gas --features experimental-euler --example mixture_manifold -- 64 molecular-wall
+```
+
+It retains the original N2/O2 caloric and kinetic sources, and adds explicitly
+illustrative fixed inputs: Darcy factor 0.02, h=50 W/(m² K), wall areal capacity
+2000 J/(m² K), initial wall temperature 300 K, cylindrical sidewall areas and an
+authored 0.005 m² plenum wall area. It independently integrates final retained
+wall temperatures to report a complete gas-plus-wall energy balance alongside
+gas-only and molecular-port budgets. These coefficients are not a named
+material calibration or an unsteady shock-layer model.
+
+Focused coupled regressions exercise closed gas-plus-wall storage, zero-wall
+identity, exact half-duration accounting and late cancellation/reuse. Additional
+cases check an independently integrated nonconstant mixture Cv polynomial and
+simultaneous reaction, molecular transport and finite-wall energy storage.
+These new Rust tests and the new example mode are committed but have not been compiled
+or executed in this session: `dsr quality --tool frankensim` could not launch
+because the execution environment is unavailable. No native/DSR pass, measured
+wall attenuation, global second-order accuracy or full entropy certificate is
+claimed.

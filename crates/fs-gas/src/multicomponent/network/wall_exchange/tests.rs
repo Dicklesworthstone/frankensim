@@ -334,3 +334,40 @@ fn late_wall_cancellation_preserves_storage_temperatures_and_reports_then_reuses
     assert_eq!(n.time(), reference.time());
     assert!(n.last_report().is_none(), "stale advection report survived source mutation");
 }
+
+#[test]
+fn thermal_exchange_uses_original_variable_mixture_heat_capacity() {
+    use crate::multicomponent::wall_exchange::exchange_cell;
+    let g = gas(2, true, 5.0);
+    let q = g.conserved(&[0.6, 0.4], 0.0, 1.6).unwrap();
+    let update = exchange_cell(
+        &g,
+        q.as_cell(),
+        0.2,
+        Time::new(1.0),
+        WallContact {
+            drag: WallDrag::None,
+            thermal: WallThermal::Reservoir {
+                temperature_k: 10.0,
+                conductance_w_per_k: 2.0,
+            },
+        },
+        controls(),
+        || false,
+    ).unwrap();
+    // Independent integration of the fixture's two original polynomials:
+    // rho*Cv(T)=2.16+0.07*T and T0=2, so the BE equation is
+    // 0.007*T²+2.432*T-20.892=0. Use a cancellation-safe positive root.
+    let expected = 2.0 * 20.892 / (2.432 + (2.432_f64.powi(2) + 4.0 * 0.007 * 20.892).sqrt());
+    let after = crate::multicomponent::Cell {
+        partial_densities: &q.partial_densities,
+        momentum: update.momentum,
+        energy: update.energy,
+    };
+    close(g.primitive(after, || false).unwrap().temperature, expected, 2e-9);
+    let expected_heat = 2.0 * (10.0 - expected);
+    close((update.energy - q.energy) * 0.2, expected_heat, 2e-10);
+    close(update.report.thermal_residual_j, 0.0, 2e-10);
+}
+
+mod coupled;

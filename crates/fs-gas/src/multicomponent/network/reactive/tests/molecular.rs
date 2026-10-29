@@ -268,3 +268,83 @@ fn late_five_stage_cancellation_preserves_operator_and_network_publication() {
         close(actual.energy, expected.energy, 2e-6);
     }
 }
+
+#[test]
+fn reacting_molecular_wall_composition_closes_independent_gas_and_wall_energy() {
+    use crate::multicomponent::network::wall_exchange::NetworkWallOperator;
+    use crate::multicomponent::wall_exchange::{
+        WallContact, WallControl, WallDrag, WallThermal,
+    };
+    let mechanism = mechanism(4.0, 10.0, 2.0);
+    let initial = network(&mechanism, 4, true, 1.4);
+    let contact = WallContact {
+        drag: WallDrag::Linear { rate_per_s: 0.4 },
+        thermal: WallThermal::Lumped {
+            temperature_k: 3.0,
+            heat_capacity_j_per_k: 0.2,
+            conductance_w_per_k: 0.03,
+        },
+    };
+    let mut wall = NetworkWallOperator::new(
+        &initial,
+        initial.branches().iter().map(|b| vec![contact; b.cell_count()]).collect(),
+        vec![WallContact { drag: WallDrag::None, ..contact }; initial.plenums().len()],
+        || false,
+    ).unwrap();
+    let mut molecular = operator(&initial, 0.02, 0.001, 0.01);
+    let mut flow = ReactingNetwork1d::new(initial, mechanism, chemistry(), || false).unwrap();
+    let inventory = |flow: &ReactingNetwork1d, wall: &NetworkWallOperator| {
+        let mut mass = 0.0;
+        let mut energy = 0.0;
+        for branch in flow.branches() {
+            for (i, volume) in branch.mesh().volumes().iter().enumerate() {
+                let q = branch.cell(i).unwrap();
+                mass += volume * q.density();
+                energy += volume * flow.gas().absolute_energy_density(q).unwrap();
+            }
+        }
+        for plenum in flow.plenums() {
+            mass += plenum.volume_m3() * plenum.state().density();
+            energy += plenum.volume_m3()
+                * flow.gas().absolute_energy_density(plenum.state()).unwrap();
+        }
+        for contacts in (0..flow.branches().len())
+            .map(|i| wall.branch_contacts(i).unwrap())
+            .chain(core::iter::once(wall.plenum_contacts()))
+        {
+            for contact in contacts {
+                if let WallThermal::Lumped {
+                    temperature_k, heat_capacity_j_per_k, ..
+                } = contact.thermal
+                {
+                    energy += heat_capacity_j_per_k * (temperature_k - 3.0);
+                }
+            }
+        }
+        (mass, energy)
+    };
+    let before = inventory(&flow, &wall);
+    for _ in 0..4 {
+        let report = flow.step_with_dissipation_and_wall(
+            &mut molecular,
+            &mut wall,
+            Time::new(0.01),
+            ReactiveStepControl::default(),
+            DissipationControl::default(),
+            WallControl::default(),
+            || false,
+        ).unwrap();
+        let halves = report.wall.unwrap();
+        assert_eq!(halves.first.elapsed.value(), 0.5 * report.elapsed.value());
+        assert_eq!(halves.second.elapsed, halves.first.elapsed);
+        assert_eq!(wall.last_report().unwrap().elapsed, report.elapsed);
+        assert!(report.dissipation.is_some());
+        assert!(report.chemistry.species_change_kg[0].abs() > 0.0);
+        assert!(halves.first.heat_to_gas_j.abs() > 0.0);
+        assert_eq!(wall.last_report().unwrap().external_heat_to_gas_j, 0.0);
+        let after = inventory(&flow, &wall);
+        close(after.0, before.0, 3e-11);
+        close(after.1, before.1, 3e-8);
+        close(report.absolute_energy_residual_j, 0.0, 3e-9);
+    }
+}

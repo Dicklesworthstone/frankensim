@@ -6,18 +6,22 @@
 //! never adds a second heat-release source to chemical total energy. This is
 //! an estimated composition, not a global entropy or order certificate. Optional
 //! molecular halves add original-source diffusion, conduction and viscosity.
+//! Optional outer wall halves exchange heat with reservoirs or finite wall
+//! storage and thermalize drag at unchanged chemical total energy.
 
 use super::super::dissipation::{
     ConstantTransport, DissipationControl, DissipationError, TransportLaw,
 };
 pub use super::super::reactive::{ChemistryReport, ReactiveStepControl};
 use super::super::reactive::{ReactiveError, react_cell};
+use super::super::wall_exchange::{WallControl, WallExchangeError};
 use super::super::{
     Cell, Error as FlowError, MAX_COMPONENTS, MAX_SPECIES, MixtureEuler1d, MixtureGas, StepReport,
     allocated, positive, sum,
 };
 use super::coupled::{checked_totals, duplicate, initial_duration, reset};
 use super::dissipation::{NetworkDissipationOperator, SplitNetworkDissipationReport};
+use super::wall_exchange::{NetworkWallOperator, SplitNetworkWallReport};
 use super::{
     MixtureNetwork1d, NetworkStepReport, NetworkTotals, Plenum, PlenumConnection, PortExchange,
 };
@@ -45,6 +49,8 @@ pub enum ReactiveNetworkError {
     Flow(FlowError),
     /// Original molecular constitutive law or complete diffusive interval refused.
     Dissipation(DissipationError),
+    /// Stationary-wall drag, heat exchange or finite-wall storage refused.
+    Wall(WallExchangeError),
     /// One original per-cell chemistry update or energy reconstruction refused.
     Cell {
         location: ChemistryLocation,
@@ -81,7 +87,16 @@ impl From<DissipationError> for ReactiveNetworkError {
     }
 }
 
-/// One accepted complete reaction/transport/reaction step.
+impl From<WallExchangeError> for ReactiveNetworkError {
+    fn from(value: WallExchangeError) -> Self {
+        match value {
+            WallExchangeError::Cancelled => Self::Cancelled,
+            other => Self::Wall(other),
+        }
+    }
+}
+
+/// One accepted reaction/transport step with any requested source halves.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ReactiveNetworkReport {
     /// Exact duration used by transport and the two chemistry half steps.
@@ -95,11 +110,15 @@ pub struct ReactiveNetworkReport {
     pub chemistry: ChemistryReport,
     /// Both accepted molecular halves, when requested; each spans elapsed/2.
     pub dissipation: Option<SplitNetworkDissipationReport>,
+    /// Both accepted wall halves, each using elapsed/2 and its actual wall state.
+    pub wall: Option<SplitNetworkWallReport>,
     /// Original complete branch and plenum inventories.
     pub before: NetworkTotals,
-    /// Final complete branch and plenum inventories after the second chemistry half.
+    /// Final complete branch and plenum inventories after all source stages.
     pub after: NetworkTotals,
-    /// External transport plus both molecular boundary transfers.
+    /// External transport, molecular transfers and heat into the gas from walls.
+    /// Add finite-wall storage from the wall report when closing the combined
+    /// gas/solid balance; only reservoir heat then remains externally supplied.
     pub boundary_change: NetworkTotals,
     /// Species/gauge-energy residual after external transport and chemistry changes.
     pub conservation_residual: NetworkTotals,
@@ -273,6 +292,7 @@ impl ReactingNetwork1d {
             controls,
             None,
             DissipationControl::default(),
+            None,
             cancelled,
         )
     }
@@ -296,6 +316,55 @@ impl ReactingNetwork1d {
             controls,
             Some(operator),
             dissipation_controls,
+            None,
+            cancelled,
+        )
+    }
+
+    /// Advance W(dt/2), C(dt/2), A(dt), C(dt/2), W(dt/2) atomically.
+    /// Finite-wall states and gas states restart together if heating changes
+    /// the accepted acoustic duration. No molecular operator is required.
+    pub fn step_with_wall(
+        &mut self,
+        wall: &mut NetworkWallOperator,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        wall_controls: WallControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveNetworkReport, ReactiveNetworkError> {
+        self.step_impl::<ConstantTransport>(
+            maximum_duration,
+            controls,
+            None,
+            DissipationControl::default(),
+            Some((wall, wall_controls)),
+            cancelled,
+        )
+    }
+
+    /// Enclose D/C/A/C/D in two stationary-wall half steps.
+    /// Prepare both operators from the raw network before moving it into this
+    /// owner. Gas fields, finite-wall temperatures and both external operators'
+    /// accepted reports publish only after the complete composition succeeds.
+    /// Drag does not add a second heat source to chemical total energy, and
+    /// the wall heat solve retains its declared temporal accuracy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_dissipation_and_wall<L: TransportLaw>(
+        &mut self,
+        operator: &mut NetworkDissipationOperator<L>,
+        wall: &mut NetworkWallOperator,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: DissipationControl,
+        wall_controls: WallControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveNetworkReport, ReactiveNetworkError> {
+        self.step_impl(
+            maximum_duration,
+            controls,
+            Some(operator),
+            dissipation_controls,
+            Some((wall, wall_controls)),
             cancelled,
         )
     }
@@ -306,6 +375,7 @@ impl ReactingNetwork1d {
         controls: ReactiveStepControl,
         mut operator: Option<&mut NetworkDissipationOperator<L>>,
         dissipation_controls: DissipationControl,
+        mut wall: Option<(&mut NetworkWallOperator, WallControl)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ReactiveNetworkReport, ReactiveNetworkError> {
         poll(&mut cancelled)?;
@@ -318,6 +388,9 @@ impl ReactingNetwork1d {
             return Err(ReactiveNetworkError::Invalid(
                 "reacting network duration, CFL or retry controls",
             ));
+        }
+        if let Some((_, wall_controls)) = &wall {
+            wall_controls.validate()?;
         }
         let before = checked_totals(&self.accepted, &mut cancelled)?;
         let mut duration = initial_duration(
@@ -342,6 +415,18 @@ impl ReactingNetwork1d {
             reset(&mut self.trial, &self.accepted, &mut cancelled)?;
             let mut chemistry = ChemistryReport::default();
             let attempt = (|| {
+                let first_wall = match wall.as_mut() {
+                    Some((operator, control)) => {
+                        operator.begin_trial(&mut cancelled)?;
+                        Some(operator.advance_for_trial(
+                            &mut self.trial,
+                            Time::new(0.5 * duration),
+                            *control,
+                            &mut cancelled,
+                        )?)
+                    }
+                    None => None,
+                };
                 let first = match operator.as_deref_mut() {
                     Some(operator) => {
                         let report = operator.advance_for_trial(
@@ -374,7 +459,7 @@ impl ReactingNetwork1d {
                     self.trial
                         .step(Time::new(duration), controls.transport, &mut cancelled)?;
                 if transport.elapsed.value() != duration {
-                    return Ok((transport, false, None));
+                    return Ok((transport, false, None, None));
                 }
                 react_network(
                     &mut self.trial,
@@ -415,46 +500,60 @@ impl ReactingNetwork1d {
                                 ));
                             }
                         }
-                        // Viscous heating after the last chemistry solve must
-                        // still fit the mechanism's possibly narrower interval.
-                        let chemistry_controls = self.reactor.controls();
-                        for (branch, flow) in self.trial.branches.iter().enumerate() {
-                            for cell in 0..flow.cell_count() {
-                                admit_temperature(
-                                    self.trial.gas(),
-                                    flow.cell(cell).expect("admitted cell index"),
-                                    chemistry_controls,
-                                    ChemistryLocation::Branch { branch, cell },
-                                    &mut cancelled,
-                                )?;
-                            }
-                        }
-                        for (plenum, volume) in self.trial.plenums.iter().enumerate() {
-                            admit_temperature(
-                                self.trial.gas(),
-                                volume.state(),
-                                chemistry_controls,
-                                ChemistryLocation::Plenum { plenum },
-                                &mut cancelled,
-                            )?;
-                        }
                         Some(report)
                     }
                     None => None,
                 };
+                let second_wall = match wall.as_mut() {
+                    Some((operator, control)) => Some(operator.advance_for_trial(
+                        &mut self.trial,
+                        Time::new(0.5 * duration),
+                        *control,
+                        &mut cancelled,
+                    )?),
+                    None => None,
+                };
+                // Every final source, including wall heat and drag, must fit
+                // the mechanism's possibly narrower caloric interval.
+                if operator.is_some() || wall.is_some() {
+                    let chemistry_controls = self.reactor.controls();
+                    for (branch, flow) in self.trial.branches.iter().enumerate() {
+                        for cell in 0..flow.cell_count() {
+                            admit_temperature(
+                                self.trial.gas(),
+                                flow.cell(cell).expect("admitted cell index"),
+                                chemistry_controls,
+                                ChemistryLocation::Branch { branch, cell },
+                                &mut cancelled,
+                            )?;
+                        }
+                    }
+                    for (plenum, volume) in self.trial.plenums.iter().enumerate() {
+                        admit_temperature(
+                            self.trial.gas(),
+                            volume.state(),
+                            chemistry_controls,
+                            ChemistryLocation::Plenum { plenum },
+                            &mut cancelled,
+                        )?;
+                    }
+                }
                 let dissipation = first
                     .zip(second)
                     .map(|(first, second)| SplitNetworkDissipationReport { first, second });
-                Ok::<_, ReactiveNetworkError>((transport, true, dissipation))
+                let wall_report = first_wall
+                    .zip(second_wall)
+                    .map(|(first, second)| SplitNetworkWallReport { first, second });
+                Ok::<_, ReactiveNetworkError>((transport, true, dissipation, wall_report))
             })();
             match attempt {
-                Ok((transport, false, _)) => {
+                Ok((transport, false, _, _)) => {
                     duration = transport.elapsed.value();
                     last = ReactiveNetworkError::Invalid(
                         "network transport shortened the coupled duration",
                     );
                 }
-                Ok((transport, true, dissipation)) => {
+                Ok((transport, true, dissipation, wall_report)) => {
                     let after = checked_totals(&self.trial, &mut cancelled)?;
                     let n = self.gas().species_count();
                     let mut boundary_change = transport.boundary_change;
@@ -466,6 +565,13 @@ impl ReactingNetwork1d {
                                 d.first.boundary_change.species_masses[k]
                                     + d.second.boundary_change.species_masses[k];
                         }
+                    }
+                    if let Some(w) = wall_report {
+                        boundary_change.energy = sum([
+                            boundary_change.energy,
+                            w.first.heat_to_gas_j,
+                            w.second.heat_to_gas_j,
+                        ]);
                     }
                     let mut residual = NetworkTotals {
                         species_masses: [0.0; MAX_SPECIES],
@@ -511,6 +617,7 @@ impl ReactingNetwork1d {
                         transport,
                         chemistry,
                         dissipation,
+                        wall: wall_report,
                         before,
                         after,
                         boundary_change,
@@ -519,6 +626,9 @@ impl ReactingNetwork1d {
                         absolute_energy_residual_j,
                     };
                     poll(&mut cancelled)?;
+                    if let Some((operator, _)) = wall.as_mut() {
+                        operator.publish_trial_report();
+                    }
                     if let Some(operator) = operator.as_deref_mut() {
                         operator.publish_trial_report();
                         core::mem::swap(&mut self.molecular_ports, &mut self.trial_molecular_ports);
