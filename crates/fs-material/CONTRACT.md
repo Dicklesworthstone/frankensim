@@ -4442,3 +4442,41 @@ build. Thermal coefficients retain their distinct dimensions and are refused
 by this finite-strain API; mean and differential coefficients are not inferred
 from one another. Constrained mechanics, changing directions, phase transitions
 and uncertainty propagation remain separate model requirements.
+
+## Rigid water vessels with evolving pressure
+
+`phase::water::isochoric::IsochoricWater` closes equilibrium water at fixed
+specific volume with internal energy as the storage coordinate. Original IF97
+Regions 1, 2 and 4 supply compressed liquid, liquid/vapor coexistence and
+superheated vapor over a declared 273.16–623.15 K window, with declared pressure
+bounds through 100 MPa. Saturation quality follows the actual phase volumes.
+Off saturation, a safeguarded pressure inverse uses the original analytic
+volume derivative. A second safeguarded inverse resolves u(v,T); its derivative
+is the actual isochoric heat capacity, including phase conversion and the
+original Region 4 pressure derivative. It does not substitute the approximate
+Clapeyron identity for that independently fitted source equation.
+
+Every heat step keeps mass and vessel volume fixed, admits Q=delta_U and
+Q=delta_H-V*delta_p independently, and reports zero boundary work. The pressure
+part of enthalpy is not an additional heat source or wall work. Original-source
+endpoint volumes, volume residuals, phase inventories, entropy and saturation
+Gibbs mismatch remain visible; caloric values are not patched to fit budgets.
+Nonzero heat or phase mass lost to representation refuses. Controls bound
+volume/energy residuals, pressure/temperature iterations and source windows;
+cancellation or refusal leaves the accepted state unchanged.
+
+The temperature window is a bounded inverse search interval, not a certified
+global Cv enclosure. Unsupported intermediate source queries refuse. This
+owner does not claim Region 3, ice, mass flow, wall compliance, phase kinetics
+or a spatially resolved vessel.
+
+Six focused native tests pass: original p/v/u round trips; analytic two-phase
+Cv against independent finite differences; sealed evaporation/condensation;
+liquid pressurization and the cold-water density anomaly; heat subdivision and
+small increments; domain, work, energy and cancellation refusals. The runnable
+`cargo run -p fs-material --example water_rigid_vessel` heats 50 g in 5 L from
+300 to 600 K and back. Pressure rises from approximately 3.54 kPa to 2.61 MPa,
+with maximum complete-history energy discrepancy 5.27e-8 J and zero wall work.
+These are numerical balance checks, not source-fit uncertainty estimates.
+This advances the bounded phase-transition consumer in
+`frankensim-7sga6.2.7`.

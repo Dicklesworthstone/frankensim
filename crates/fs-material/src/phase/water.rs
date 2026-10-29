@@ -16,6 +16,9 @@
 /// Adiabatic throttles and shaft devices using original entropy across pressures.
 pub mod flow;
 
+/// Sealed rigid-vessel heating with internal-energy storage and evolving pressure.
+pub mod isochoric;
+
 use fs_qty::{Pressure, Temperature};
 use fs_thermochem::water::if97::bounds::{
     If97HeatCapacityBound, If97HeatCapacityBoundError, If97HeatCapacityBoundSolve,
