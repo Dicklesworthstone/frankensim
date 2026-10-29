@@ -16,6 +16,9 @@ use super::{
 
 type Result<T> = core::result::Result<T, PartialSaturationError3>;
 
+mod multiple;
+pub use multiple::MovingPartialSaturationBodiesExchange3;
+
 /// Fixed geometry expressed relative to the body's center in BODY axes.
 ///
 /// Both queries must be deterministic and unchanged during a step. All points
@@ -438,7 +441,7 @@ fn native<T>(value: core::result::Result<T, impl Into<LieStepError>>) -> Result<
     })
 }
 
-fn shape_radius(shape: &impl BodyFrameShape3) -> Result<f64> {
+fn shape_radius(shape: &(impl BodyFrameShape3 + ?Sized)) -> Result<f64> {
     let radius = shape.bounding_radius();
     if !(radius.is_finite() && radius > 0.0) {
         return Err(invalid(
@@ -514,7 +517,7 @@ fn sample_geometry(
     samples: usize,
     center: [f64; 3],
     orientation: So3,
-    shape: &impl BodyFrameShape3,
+    shape: &(impl BodyFrameShape3 + ?Sized),
     velocity: Option<([f64; 3], [f64; 3])>,
     mut fractions: Option<&mut [f64]>,
     gate: &CancelGate,

@@ -4595,6 +4595,62 @@ accounts, zero-occupancy equivalence to the native free map and ordinary BGK,
 quadrature/primitive admission, endpoint swept-support refusal, late cancellation,
 fixed-obstacle refusal and deterministic retry after refusal (G0/G3/G4/G5).
 
+### Simultaneous immersed rigid assemblies
+
+`BoundaryGrid3::step_with_partial_saturation_bodies` advances `N > 0`
+frozen rigid velocity states with one collision and one streaming pass on the
+original populations. For total cell occupancy `epsilon = sum_a epsilon_a`,
+the declared multi-solid extension uses
+`B_a = epsilon_a (tau-1/2)/(1-epsilon+tau-1/2)` and population correction
+`sum_a B_a (Omega_s,a - Omega_f)`. Each fraction must be in `[0,1]`, positive
+only in fluid cells, and the sum must not exceed one. Fractions represent
+disjoint occupied subvolumes; arbitrary callers own that geometry obligation.
+There is no clipping or overlap renormalization. The combined weight is the
+original Noble–Torczynski weight of the total occupied volume, including its
+fully occupied limit. The multi-solid collision sum follows the usual PSM
+decomposition; the total-occupancy weight and implicit body update are the
+specific law implemented here, not a claim to reproduce every PSM variant
+(see Kemmler et al., 2025, equations 18–22,
+<https://doi.org/10.1177/10943420241313385>).
+
+Holding incoming fluid populations fixed gives one independent symmetric
+six-by-six midpoint block per body, with the same full world inertia,
+translation/rotation cross terms and additional-inertia interpretation as the
+single-body owner. Hydrodynamic interaction passes through the shared fluid;
+there is no artificial dense cross-body inertia or sequential per-body stream.
+Each body reports its actual population-correction impulse, center and world
+torque, midpoint work and accepted momentum/kinetic-energy defects. Stationary
+wall reaction is measured once from the composite outgoing populations. The
+assembly additionally measures composite-population mass, linear and angular
+roundoff relative to the sum of attributed corrections. A singleton delegates
+to the existing owner, preserving its numerical operation order and bits.
+
+`step_with_moving_partial_saturation_bodies` composes these blocks with each
+body's existing native SO(3) free half-steps and midpoint geometry sampler.
+The fixed inertia may be a full body-frame tensor. Each half-step has affine
+center motion; pair admission minimizes the relative center distance on the
+same interval and requires strictly separated enclosing spheres, including a
+floating-point grazing margin. This conservative numerical check can reject
+separated elongated shapes and is not interval-certified CCD. Existing
+wall/halo support restrictions remain. All final shapes, velocities, work and
+momentum accounts and cancellation checks precede fluid or body publication;
+a late failure in the last body rolls back the entire assembly. Nested
+per-body trajectory wall fields are zero: the assembly owns the wall account.
+
+There is one reusable fraction field per body and one shared fluid scratch
+pair, with fixed-size `O(N)` body work and two small native Cholesky allocations
+per body. Sampling/clearing and fraction traversal are `O(N * grid cells)`;
+pair separation is `O(N^2)`. This is a small-assembly path, not a sparse
+million-particle implementation. Input order pins reductions; permutation
+invariance is to roundoff, not a bitwise claim. Cancellation is checked at
+native lattice tiles, body iterations and bounded pair/fraction batches.
+`tests/partial_saturation_bodies3.rs` checks an independent shared-cell formula,
+full-tensor world momentum/work with nonzero wall reaction, permutation and
+zero occupancy, moving-body replay and spatial balances, exact singleton
+compatibility, overfill refusal, late pair collision and finalization
+cancellation. No displaced-fluid closure, contact/lubrication model, remap/GCL,
+full-system order, suspension rheology or continuum-force accuracy is claimed.
+
 ## Prescribed pressure on original NSF characteristic faces
 
 `NsfBoundaryDrive` distinguishes an incoming acoustic characteristic [m/s]

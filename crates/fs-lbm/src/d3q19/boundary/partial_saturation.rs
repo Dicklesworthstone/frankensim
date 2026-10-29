@@ -17,6 +17,9 @@ use super::{
     equilibrium3,
 };
 
+mod multiple;
+pub use multiple::{PartialSaturationBodiesExchange3, PartialSaturationBodyResponse3};
+
 /// Frozen spatial rigid-body state in lattice units (`dx = dt = 1`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PartialSaturationBody3 {
