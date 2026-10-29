@@ -1072,3 +1072,26 @@ This is a constant-junction-strength, straight-coordinate-path DMT model.
 Work closure is not proof of physical trajectory accuracy or event-resolved
 stopping. Mixed-mode JKR peeling, partial-slip elastic storage, evolving frames,
 plasticity, wear, heat destination and bond healing remain outside this owner.
+
+## Event-resolved collinear adhesive sliding
+
+`normal_patch::dmt::events::DmtSlipEvents` resolves junction stopping, static
+support, breakaway and geometric contact entry/exit for a finite relative mass
+under held tangential force and linearly prescribed normal approach. The
+original DMT endpoint areas anchor piecewise affine source-backed static and
+kinetic capacities, retaining the original frozen-source threshold exactly.
+
+Analytical event roots and polynomial segment integrals expose signed friction
+impulse, its first time moment, total absolute slip, frictional loss, external
+work and original prescribed normal work. A zero-net-displacement reversal
+retains its positive slip and dissipation. Only an analytically located stop
+publishes zero velocity. Fixed-size storage, explicit event/time/physical
+budgets, interior extrema checks, work/impulse gates and cancellation preserve
+transactional replay without runtime allocation.
+
+This lane assumes a fixed tangent direction and prescribed normal trajectory.
+It does not infer arbitrary vector stopping, normal inertia, mixed-mode peeling,
+shear elasticity, evolving sources or a heat destination. Floating-point event
+gates do not provide interval certificates for nearly multiple roots. Nine
+focused original-source tests cover actual stopping, reversal, breakaway,
+entry/exit, partition invariance, two-body reconstruction and atomic refusals.

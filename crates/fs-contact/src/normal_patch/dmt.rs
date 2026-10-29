@@ -15,14 +15,17 @@
 //! Roughness, viscoelasticity, fluid bridges, mixed-mode fracture and changes
 //! of the frozen source conditions require other owners.
 
-/// Finite-mass normal motion with original contact work and explicit damping.
-#[path = "dmt/dynamics.rs"]
-pub mod dynamics;
 /// Simultaneous normal adhesion and sourced two-dimensional junction friction.
 #[path = "dmt/coupled.rs"]
 pub mod coupled;
+/// Finite-mass normal motion with original contact work and explicit damping.
+#[path = "dmt/dynamics.rs"]
+pub mod dynamics;
 #[path = "dmt/energy.rs"]
 mod energy;
+/// Exact collinear stick/slip events for prescribed linear normal motion.
+#[path = "dmt/events.rs"]
+pub mod events;
 /// Stable loading-machine branches and finite-range snap events.
 #[path = "dmt/fixture.rs"]
 pub mod fixture;
