@@ -1,5 +1,36 @@
 # CONTRACT: fs-couple
 
+## Constitutive feedback through public material equations
+
+`constitutive_graph::MaterialGraphResidual` closes caller-authored, dimensioned
+balances of original law inputs and outputs on the existing Newton--Krylov
+solver. Scaled unknowns and residuals keep physical units explicit. Jacobian
+actions use the material graph's exact chain rule at the same committed
+history as each residual; graph-internal edges remain acyclic. A finite work
+budget, latched original source errors, cancellation and independent final
+equation tolerances precede returning a complete candidate. No physical
+history mutates during a trial or failed solve. The native registered
+hyperelastic material-card consumer and a closed two-variable electrothermal
+reference exercise this API. Convergence of arbitrary caller balances does
+not confer conservation, passivity, calibration or a time-discretization law.
+
+## Source-integrated conductivity in composed heat transfer
+
+`PreparedHeatNetwork::with_integrated_conduction` routes the existing material
+owner's integrated k(T) layer fluxes through the same circuit, thermal and
+observer callbacks. Each selected link retains its original conductivity
+property/claim, material card, caloric object, fixed conditions and distances.
+The native conductance map and reported link secants both contain the applied
+flux. Internal heat still transfers once between the original cells; no extra
+source or time integrator is introduced. Immutable correspondence is admitted
+once, while the original layer owner checks actual phase, support and geometry
+on every trial. A separate thermal-contact owner on the same link refuses,
+and topology changes require explicit rebinding. The admitted layer model is
+quasi-steady, homogeneous, isotropic and pure-phase; it adds no within-layer
+storage, tensor transport or moving phase boundary. Focused synthetic tests
+compare the nonlinear flux with an independent linear-k integral and verify
+that data-only conductivity changes reach finite heat and electrical history.
+
 M4.1-W1 extends `unilateral_contact` with explicit physical span measures [m],
 per-length stiffness, static/kinetic coefficients and a declared friction ramp
 speed (mandatory for nonzero kinetic friction). No 1/n normalization or hidden
@@ -291,6 +322,28 @@ the original loaded two-coordinate solve, and accepted-time work closure.
 This preserves local Debye reservoirs and the original constant Fourier
 conductivity; separate molecular-energy diffusion, finite wall conductivity,
 nonuniform pressure, flow and changing background state are outside this lane.
+
+### Molecular cavity compression
+
+`SharedCavity::new_with_molecular_relaxation` maps the original material
+`RelaxationState::bulk_relaxation` spectrum through the actual cavity volume
+and neck area into the existing reciprocal modal solve. Internal pressure,
+compression storage, molecular loss, harmonic response and accepted histories
+use the same source gas. Original surfaces, neck viscous memory, downstream DG
+and exterior radiation retain their owners and work accounts. The supplied
+material law must match the complete gas snapshot; missing/extra history,
+setup-budget failures and cancellation refuse publication. Independent
+internal-temperature dynamics and thermodynamic availability check the
+time-domain pressure/energy; direct caloric response checks harmonic pressure
+and dissipation in `cavity_modal::shared::molecular::tests`.
+
+The medium is frozen, the compact pressure spatially uniform, and the cavity
+wall adiabatic. Molecular loss is acoustic availability dissipation, without a
+second gas-heat deposit. For a conducting cylindrical wall, use
+`SharedCavity::new_with_cylindrical_molecular_wall` above: its joint caloric law
+replaces the adiabatic specialization. The two compression owners cannot be
+added as independent shunts. No measured instrument fidelity or evolving gas
+chemistry is inferred.
 
 ### Accelerating material-fiber supports
 

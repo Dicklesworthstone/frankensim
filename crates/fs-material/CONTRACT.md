@@ -879,6 +879,16 @@ viscosity. Single-reservoir real-arithmetic rational response, DC/frozen limits,
 the original wavenumber relation and the zero-reservoir lossless limit are
 checked in `tests/relaxation_absorption.rs`.
 
+`RelaxationState::bulk_relaxation` realizes that same finite caloric law as
+equilibrium bulk storage plus positive Maxwell compression arms. It uses the
+existing symmetric Jacobi owner on the diagonal-plus-rank-one caloric matrix,
+checks eigenpairs and static/frozen limits, and retains every original source
+reservoir. Equal molecular times combine exactly; no fitting, pole truncation,
+propagation loss or new gas-specific constitutive law is introduced. The work
+is bounded by the original 32-reservoir cap. Single-reservoir analytic
+elimination, multi-reservoir complex response, equal-time/zero-strength limits
+and pressure/rate scaling are checked in `relaxation::bulk::tests`.
+
 Relaxation times are data: Landau-Teller collision-partner rates with a linear
 mole-fraction rule, a partner-independent power law, or ISO 9613-1's `f_rO`
 and `f_rN` (`iso9613_relaxation_frequencies_hz`, bit-identical to the ISO
@@ -1979,6 +1989,17 @@ owns the seven-role decomposition as an executable protocol:
   wrapped around the graph, never a hidden fixed point inside it.
   Execution audits declared-dissipative nodes for non-negative reported
   rates and totals the dissipation.
+
+`ConstitutiveGraph::linearize` uses this same value evaluator and propagates
+directional derivatives through every declared consistent tangent, without
+assembling a global Jacobian or advancing committed history during a probe.
+`execute_cancellable` and `linearize` poll before and after each law callback;
+individual law work must remain bounded. Arity, finite input/output/state,
+finite tangent actions and dissipation are admitted before returning any
+candidate. External directions cannot drive an internally connected input.
+The four `graph_linearized` regressions compare a composed history-dependent
+chain against analytic and independent central-difference derivatives, and
+exercise sparse directions, cancellation and malformed-law refusal.
 
 GRAPH NO-CLAIMS: single-pass execution is not equilibrium; the
 dissipation audit checks REPORTED rates (a law that misreports is

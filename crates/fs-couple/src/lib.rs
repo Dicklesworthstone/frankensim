@@ -48,6 +48,8 @@ pub mod cavity_modal;
 pub mod cinematic_stem;
 /// Finite electrical storage and per-resistor heating on the shared thermal network.
 pub mod circuit_enthalpy;
+/// Typed material-law residuals and exact graph tangents on the shared nonlinear solver.
+pub mod constitutive_graph;
 /// Full opening/shear path work coupled to the actual mechanical compliance.
 pub mod cohesive_contact;
 /// Original hereditary material history coupled to inertia and finite self-heating.

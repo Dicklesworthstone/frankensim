@@ -1469,6 +1469,38 @@ mass, gravity work, slack and refusal preservation. The existing
 natural-length/offset/strand-count record and reports its physical observations;
 its separately cold 300 K member is not a horsehair material preset.
 
+### Shared material fluid loading on submerged rods
+
+`SpatialMaterialRod::with_submerged_fluid` consumes the existing
+`fs-material::FluidTransport` interface and the specimen's explicit gravity.
+The uniform hydrostatic pressure resultant is `-rho_fluid V g`; its reference
+volume uses the original layered section geometry rather than an effective
+material density. `ReferenceDisplacementVolume` explicitly distinguishes flooded
+central voids (annular material volume) from sealed cavities (outer envelope).
+Solid mass, density receipts and native motion inertia remain unchanged.
+
+The original shape-function integration retains total displaced volume and its
+first moment, including clamped nodes. Attached strands use their natural-length
+volume and strand count. Their rotating offsets contribute a separate buoyant
+potential, force, moment and analytical tangent through the same rod Newton,
+support-reaction and motion owners. Replacing fluid, gravity or links rebuilds
+the load without accumulation; zero gravity retains an explicitly bound fluid.
+The original material sources retain measurement authority; the shared numerical
+transport snapshot does not invent a source receipt.
+
+All represented bodies must be fully immersed with nonoverlapping displaced
+volumes. This is an explicit fixed-reference-volume approximation: current
+solid density does not redefine mass or displacement volume during thermal
+resolution. No partial immersion, free surface, radial expansion, fluid
+inventory in sealed cavities, capillarity, drag, added mass or compressible
+hydrostatic profile is inferred. Material-fluid replacement is static specimen
+construction, not a conservative time-dependent environment update.
+Focused `rod_gravity` regressions cover density-driven equilibrium and neutral
+buoyancy, layered/hollow volume and first moments, gas-pressure changes, thermal
+reference inventory, eccentric strand work/moments, motion inertia, and atomic
+load replacement/cancellation. These synthetic checks make no measured-fluid
+or experimentally validated material-response claim.
+
 ## Invariants
 
 1. Patch tests exact: linear displacement fields are reproduced to
