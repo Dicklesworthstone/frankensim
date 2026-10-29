@@ -42,8 +42,11 @@ use fs_math::det;
 pub mod tensor;
 /// Zener thermoelastic damping of solid circular sections (exact thermal-mode series).
 pub mod circular_ted;
+/// Bounded two-exponent fractional law, including measured violin-varnish spectra.
+pub mod modified_zener;
 pub mod source;
 pub mod stress_control;
+pub use modified_zener::ModifiedFractionalZener;
 pub use tensor::{Mandel6, PronyBranch, TensorProny, TensorPronyState};
 
 /// Typed refusals of the viscoelastic layer. Display strings carry stable
@@ -504,6 +507,11 @@ pub struct LoweredModel {
     pub band: (f64, f64),
     /// Measured `sup |E*_prony − E*_frac| / |E*_frac|` over the grid.
     pub sup_rel_err: f64,
+    /// Measured supremum relative storage-modulus error on the same grid.
+    pub sup_rel_storage_err: f64,
+    /// Measured supremum relative loss-modulus error on the same grid.
+    /// This is normalized by loss, so weak damping cannot hide behind storage.
+    pub sup_rel_loss_err: f64,
     /// Number of verification grid points.
     pub verification_points: usize,
 }
@@ -612,7 +620,39 @@ pub fn lower_to_prony(
     n_terms: usize,
     tol: f64,
 ) -> Result<LoweredModel, ViscoError> {
-    const MARGIN: f64 = 10.0; // one decade each side (broad fractional kernels)
+    lower_scalar_to_prony(
+        |omega| Ok(fz.modulus(omega)),
+        fz.e0,
+        (f_lo, f_hi),
+        n_terms,
+        10.0,
+        ScalarLoweringTolerance {
+            complex: Some(tol),
+            storage: None,
+            loss: None,
+        },
+    )
+}
+
+/// Component gates are separate from the original complex-error API. A small
+/// complex residual alone says little about accuracy of a weak loss modulus.
+struct ScalarLoweringTolerance {
+    complex: Option<f64>,
+    storage: Option<f64>,
+    loss: Option<f64>,
+}
+
+/// One positive-Prony solver for both fractional parameterizations. The target
+/// supplies its own applicability checks; no sampled value is extrapolated.
+#[allow(clippy::too_many_lines)]
+fn lower_scalar_to_prony(
+    target: impl Fn(f64) -> Result<(f64, f64), ViscoError>,
+    equilibrium: f64,
+    (f_lo, f_hi): (f64, f64),
+    n_terms: usize,
+    margin: f64,
+    tolerance: ScalarLoweringTolerance,
+) -> Result<LoweredModel, ViscoError> {
     if !(f_lo > 0.0 && f_hi > f_lo && f_lo.is_finite() && f_hi.is_finite()) {
         return Err(ViscoError::Parameters {
             what: "lowering band needs 0 < f_lo < f_hi",
@@ -623,12 +663,26 @@ pub fn lower_to_prony(
             what: "term count must be in 1..=64",
         });
     }
+    if !(equilibrium > 0.0 && equilibrium.is_finite() && margin >= 1.0 && margin.is_finite())
+        || [tolerance.complex, tolerance.storage, tolerance.loss]
+            .into_iter()
+            .flatten()
+            .any(|value| !(value > 0.0 && value.is_finite()))
+    {
+        return Err(ViscoError::Parameters {
+            what: "lowering requires finite positive equilibrium and tolerances, margin >= 1",
+        });
+    }
     let two_pi = 2.0 * core::f64::consts::PI;
     let w_lo = two_pi * f_lo;
     let w_hi = two_pi * f_hi;
-    // Relaxation ladder spanning the band with half-decade margins.
-    let tau_hi = MARGIN / w_lo;
-    let tau_lo = 1.0 / (w_hi * MARGIN);
+    let tau_hi = margin / w_lo;
+    let tau_lo = (1.0 / w_hi) / margin;
+    if !(w_lo > 0.0 && w_hi.is_finite() && tau_lo > 0.0 && tau_hi.is_finite()) {
+        return Err(ViscoError::Parameters {
+            what: "lowering band and relaxation ladder must remain finite and positive",
+        });
+    }
     let taus: Vec<f64> = (0..n_terms)
         .map(|j| {
             let t = if n_terms == 1 {
@@ -642,51 +696,144 @@ pub fn lower_to_prony(
     // Sample matrix: rows = [E′(ω_i) − E0 ; E″(ω_i)], columns = branches.
     let m_samples = (8 * n_terms).max(48);
     let omegas: Vec<f64> = (0..m_samples)
-        .map(|i| {
-            let t = i as f64 / (m_samples - 1) as f64;
-            det::exp(det::ln(w_lo) + t * (det::ln(w_hi) - det::ln(w_lo)))
-        })
+        .map(|i| lowering_grid_frequency(w_lo, w_hi, i, m_samples))
         .collect();
     let rows = 2 * m_samples;
     let mut a = vec![0.0f64; rows * n_terms];
     let mut rhs = vec![0.0f64; rows];
     for (i, &w) in omegas.iter().enumerate() {
-        let (fe, fi) = fz.modulus(w);
-        // Relative weighting: the certificate is a RELATIVE modulus error,
-        // and |E″| ≪ |E′| for lightly damped materials — unweighted LS
-        // would sacrifice the loss part (measured: 2.5% vs 1.x% sup error).
-        let weight = 1.0 / det::sqrt(fe * fe + fi * fi);
-        rhs[i] = (fe - fz.e0) * weight;
-        rhs[m_samples + i] = fi * weight;
+        let (fe, fi) = target(w)?;
+        if !(fe > 0.0 && fe.is_finite() && fi >= 0.0 && fi.is_finite()) {
+            return Err(ViscoError::Parameters {
+                what: "lowering target must have finite positive storage and nonnegative loss",
+            });
+        }
+        // Weight storage and loss separately. Scaling both by |E*| allows a
+        // nearly elastic target to lose all damping while appearing accurate.
+        // The floor keeps zero/sub-roundoff loss rows numerically bounded;
+        // the final loss gate still measures loss itself, not this floor.
+        let storage_scale = fe;
+        let loss_scale = fi.max(fe * 1.0e-12).max(1.0e-300);
+        rhs[i] = (fe - equilibrium) / storage_scale;
+        rhs[m_samples + i] = fi / loss_scale;
         for (j, &tau) in taus.iter().enumerate() {
             let wt = w * tau;
-            let den = 1.0 + wt * wt;
-            a[i * n_terms + j] = wt * wt / den * weight;
-            a[(m_samples + i) * n_terms + j] = wt / den * weight;
+            let (storage, loss) = if wt <= 1.0 {
+                let den = 1.0 + wt * wt;
+                (wt * wt / den, wt / den)
+            } else {
+                let inv = 1.0 / wt;
+                let den = 1.0 + inv * inv;
+                (1.0 / den, inv / den)
+            };
+            a[i * n_terms + j] = storage / storage_scale;
+            a[(m_samples + i) * n_terms + j] = loss / loss_scale;
         }
     }
-    let coeffs = nnls(&a, &rhs, rows, n_terms);
+    // NNLS uses an absolute gradient threshold. Unit-norm columns make its
+    // decisions independent of whether moduli are Pa, MPa, or another scale.
+    let mut norms = vec![0.0; n_terms];
+    for j in 0..n_terms {
+        let scale = (0..rows)
+            .map(|i| a[i * n_terms + j].abs())
+            .fold(0.0_f64, f64::max);
+        let norm = scale
+            * det::sqrt(
+                (0..rows)
+                    .map(|i| {
+                        let value = a[i * n_terms + j] / scale;
+                        value * value
+                    })
+                    .sum(),
+            );
+        if !(norm > 0.0 && norm.is_finite()) {
+            return Err(ViscoError::Parameters {
+                what: "lowering matrix has a nonrepresentable column norm",
+            });
+        }
+        norms[j] = norm;
+        for i in 0..rows {
+            a[i * n_terms + j] /= norm;
+        }
+    }
+    let mut coeffs = nnls(&a, &rhs, rows, n_terms);
+    for (coefficient, norm) in coeffs.iter_mut().zip(norms) {
+        *coefficient /= norm;
+        if !coefficient.is_finite() || *coefficient < 0.0 {
+            return Err(ViscoError::Parameters {
+                what: "lowering returned a nonfinite or negative Prony modulus",
+            });
+        }
+    }
     let terms: Vec<(f64, f64)> = coeffs
         .iter()
         .zip(&taus)
         .filter(|pair| *pair.0 > 0.0)
         .map(|(&e, &tau)| (e, tau))
         .collect();
-    let model = GeneralizedMaxwell::new(fz.e0, terms)?;
+    let model = GeneralizedMaxwell::new(equilibrium, terms)?;
     let verification_points = 512;
-    let sup_rel_err = sup_rel_modulus_error(fz, &model, w_lo, w_hi, verification_points);
-    if !(sup_rel_err <= tol) {
-        return Err(ViscoError::FitTolerance {
-            achieved: sup_rel_err,
-            required: tol,
-        });
+    let mut errors = [0.0_f64; 3];
+    for i in 0..verification_points {
+        let w = lowering_grid_frequency(w_lo, w_hi, i, verification_points);
+        let (fe, fi) = target(w)?;
+        let (ge, gi) = model.modulus(w);
+        let storage_error = (ge - fe) / fe;
+        let loss_error = (gi - fi) / fi.abs().max(1.0e-300);
+        let imaginary_relative = (gi - fi) / fe;
+        let loss_ratio = fi / fe;
+        let complex_error = det::sqrt(
+            (storage_error * storage_error + imaginary_relative * imaginary_relative)
+                / (1.0 + loss_ratio * loss_ratio),
+        );
+        for (worst, error) in
+            errors
+                .iter_mut()
+                .zip([complex_error, storage_error.abs(), loss_error.abs()])
+        {
+            if !error.is_finite() {
+                return Err(ViscoError::FitTolerance {
+                    achieved: f64::INFINITY,
+                    required: tolerance
+                        .loss
+                        .or(tolerance.storage)
+                        .or(tolerance.complex)
+                        .unwrap_or(0.0),
+                });
+            }
+            *worst = worst.max(error);
+        }
+    }
+    for (achieved, required) in
+        errors
+            .into_iter()
+            .zip([tolerance.complex, tolerance.storage, tolerance.loss])
+    {
+        if let Some(required) = required {
+            if achieved > required {
+                return Err(ViscoError::FitTolerance { achieved, required });
+            }
+        }
     }
     Ok(LoweredModel {
         model,
         band: (w_lo, w_hi),
-        sup_rel_err,
+        sup_rel_err: errors[0],
+        sup_rel_storage_err: errors[1],
+        sup_rel_loss_err: errors[2],
         verification_points,
     })
+}
+
+fn lowering_grid_frequency(lo: f64, hi: f64, index: usize, points: usize) -> f64 {
+    if index == 0 {
+        lo
+    } else if index + 1 == points {
+        hi
+    } else {
+        let fraction = index as f64 / (points - 1) as f64;
+        det::exp(det::ln(lo) + fraction * (det::ln(hi) - det::ln(lo))).clamp(lo, hi)
+    }
 }
 
 /// Lawson–Hanson non-negative least squares (dense, deterministic): solve
