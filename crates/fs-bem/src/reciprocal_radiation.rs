@@ -213,17 +213,7 @@ impl<'s> Prepared<'s> {
             }
         }}
         let waves=self.waves(k,cancelled)?;
-        for wave in &waves {
-            poll(cancelled)?;
-            let scale=k*wave.weight/(8.0*PI*PI); // antipodal pair
-            for i in 0..n {
-                poll(cancelled)?;
-                for j in i..n {
-                    h[i*n+j].im+=scale*(wave.coefficients[i].conj()*wave.coefficients[j]).re;
-                    h[j*n+i]=h[i*n+j];
-                }
-            }
-        }
+        add_gram(&mut h,n,k,&waves,cancelled)?;
         for row in h.chunks_exact(n) {
             poll(cancelled)?;
             if row.iter().any(|v|!finite(*v)) {return Err(bad("nonfinite reciprocal frequency operator"));}
@@ -347,6 +337,38 @@ impl Prepared<'_> {
         if out.iter().any(|v|!finite(*v)) {return Err(bad("reciprocal plane-wave integration overflow"));}
         Ok(out)
     }
+}
+
+/// Upper-triangle rows and columns per Gram tile. One tile's entries stay in
+/// cache while every direction updates them, instead of the whole n^2 operator
+/// streaming through memory once per direction.
+const GRAM_TILE:usize=64;
+
+/// Add the plane-wave identity for Im G to the symmetric operator. Every upper
+/// entry takes the directions in their declared order, with the same scalar
+/// operations as a direction-by-direction sweep, so the tiling changes no bit.
+/// The lower triangle is mirrored once at the end. Polls once per tile.
+fn add_gram(h:&mut [C64],n:usize,k:f64,waves:&[Wave],cancelled:&mut impl FnMut()->bool)->Result<(),HelmholtzError> {
+    let scales:Vec<f64>=waves.iter().map(|wave|k*wave.weight/(8.0*PI*PI)).collect(); // antipodal pairs
+    for i0 in (0..n).step_by(GRAM_TILE) {
+        let i1=(i0+GRAM_TILE).min(n);
+        for j0 in (i0..n).step_by(GRAM_TILE) {
+            poll(cancelled)?;
+            let j1=(j0+GRAM_TILE).min(n);
+            for (wave,&scale) in waves.iter().zip(&scales) {
+                let c=&wave.coefficients;
+                for i in i0..i1 {
+                    let ci=c[i].conj();
+                    for j in j0.max(i)..j1 {h[i*n+j].im+=scale*(ci*c[j]).re;}
+                }
+            }
+        }
+    }
+    for i in 0..n {
+        poll(cancelled)?;
+        for j in i+1..n {h[j*n+i]=h[i*n+j];}
+    }
+    Ok(())
 }
 
 #[cfg(test)]

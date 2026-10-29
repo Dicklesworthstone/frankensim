@@ -618,14 +618,27 @@ fn path_option<'a>(args:&'a [std::ffi::OsString],name:&str)->Result<(Option<&'a 
 }
 fn main()->Result<()> {
     let raw=std::env::args_os().collect::<Vec<_>>();
-    run(&raw)
+    let (workers,raw)=workers_option(&raw)?;
+    fs_bem::helmholtz::with_dense_workers(workers,|| run(&raw))
+}
+/// Take `--workers N` (threads for the dense BEM air loads; 1 when absent) out
+/// of the arguments. A scheduling budget only: every load is bit-identical.
+fn workers_option(raw:&[std::ffi::OsString])->Result<(usize,Vec<std::ffi::OsString>)> {
+    let (mut workers,mut rest,mut args)=(None,Vec::with_capacity(raw.len()),raw.iter());
+    while let Some(arg)=args.next() {
+        if arg!="--workers" { rest.push(arg.clone()); continue; }
+        if workers.is_some() { return Err("--workers cannot be repeated".into()); }
+        workers=Some(args.next().and_then(|n|n.to_str()).and_then(|n|n.parse::<usize>().ok())
+            .filter(|n|(1..=256).contains(n)).ok_or("--workers needs a thread count from 1 to 256")?);
+    }
+    Ok((workers.unwrap_or(1),rest))
 }
 fn run(raw:&[std::ffi::OsString])->Result<()> {
     if raw.get(1).is_some_and(|a| a=="assemble-shell") { return assemble_shell(&raw[2..]); }
     let (args, gas_options)=thermochemical::Options::extract_os(raw)?;
     let (args, source_options)=native_input::SourceOptions::extract(&args)?;
     if args.len()<3 {
-        return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav [--body-profile PROFILE] [--stop-profile PROFILE] [--observer-store DIR] [--bow-trace NEW_FILE] [--contact-thermal PROFILE] [--decimate] [--self-contained --attached-source RELATIVE_PATH ...] [--gas-component SPECIES NASA9 TRANSPORT --gas-water none|ID --gas-phase frozen|liquid-water]".into());
+        return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav [--body-profile PROFILE] [--stop-profile PROFILE] [--observer-store DIR] [--bow-trace NEW_FILE] [--contact-thermal PROFILE] [--decimate] [--workers N] [--self-contained --attached-source RELATIVE_PATH ...] [--gas-component SPECIES NASA9 TRANSPORT --gas-water none|ID --gas-phase frozen|liquid-water]".into());
     }
     if gas_options.record.is_some() {
         return Err("material-string gas records belong in the performance file".into());

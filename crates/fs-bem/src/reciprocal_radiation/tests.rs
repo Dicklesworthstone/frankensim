@@ -128,3 +128,36 @@ fn g4_refused_preparation_and_batches_do_not_poison_retry_or_publish_partial_sou
     let zero=vec![C64::ZERO;surface.areas().len()];let rest=geometry.solve_batch(0.5,medium(),&[&zero],||false).unwrap();
     assert_eq!(rest[0].outgoing_power_w,0.0);assert!(rest[0].pressure.iter().all(|p|p.abs()==0.0));
 }
+
+#[test]
+fn tiled_gram_term_is_bit_identical_to_the_direction_by_direction_sweep() {
+    let surface=SpherePanels::icosphere(1.0,2).unwrap();
+    let geometry=Prepared::new(&surface,1.0,budget(),||false).unwrap();
+    let n=geometry.unknowns();
+    assert!(n>2*GRAM_TILE && n%GRAM_TILE!=0,"several tiles and a partial one");
+    let k=0.7;
+    let waves=geometry.waves(k,&mut ||false).unwrap();
+    // A symmetric start whose imaginary parts are already nonzero, so every
+    // accumulation step shows in the bits.
+    let mut tiled:Vec<C64>=(0..n*n).map(|e|{
+        let (a,b)=((e/n).min(e%n),(e/n).max(e%n));
+        C64::new(((7*a+3*b)%101) as f64*0.01-0.5,((5*a+11*b)%97) as f64*1e-3)
+    }).collect();
+    let mut sweep=tiled.clone();
+    // The direction-by-direction sweep add_gram replaced, verbatim.
+    for wave in &waves {
+        let scale=k*wave.weight/(8.0*PI*PI);
+        for i in 0..n {for j in i..n {
+            sweep[i*n+j].im+=scale*(wave.coefficients[i].conj()*wave.coefficients[j]).re;
+            sweep[j*n+i]=sweep[i*n+j];
+        }}
+    }
+    let mut polls=0;
+    add_gram(&mut tiled,n,k,&waves,&mut ||{polls+=1;false}).unwrap();
+    assert_eq!(tiled.iter().map(|c|(c.re.to_bits(),c.im.to_bits())).collect::<Vec<_>>(),
+        sweep.iter().map(|c|(c.re.to_bits(),c.im.to_bits())).collect::<Vec<_>>());
+    let tiles=n.div_ceil(GRAM_TILE);
+    assert_eq!(polls,tiles*(tiles+1)/2+n);
+    let mut calls=0;
+    assert!(matches!(add_gram(&mut tiled,n,k,&waves,&mut ||{calls+=1;calls==2}),Err(HelmholtzError::Cancelled)));
+}

@@ -115,9 +115,11 @@ std::thread_local! {
 
 /// Run `f` with `workers` (at least one) threads declared for this thread's
 /// dense operator assembly and its LU factorization
-/// ([`fs_la::eigen_complex::with_lu_workers`]), then restore the previous
-/// declaration, also on unwind. This is a scheduling budget only: every
-/// matrix entry and factor is bit-identical for every worker count.
+/// ([`fs_la::eigen_complex::with_lu_workers`]), and for the frequencies of a
+/// reciprocal modal-loading sweep
+/// ([`crate::modal_loading::modal_radiation_loading_reciprocal`]), then restore
+/// the previous declaration, also on unwind. This is a scheduling budget only:
+/// every matrix entry and factor is bit-identical for every worker count.
 pub fn with_dense_workers<R>(workers: usize, f: impl FnOnce() -> R) -> R {
     struct Restore(usize);
     impl Drop for Restore {
@@ -127,6 +129,11 @@ pub fn with_dense_workers<R>(workers: usize, f: impl FnOnce() -> R) -> R {
     }
     let _restore = Restore(DENSE_WORKERS.with(|w| w.replace(workers.max(1))));
     fs_la::eigen_complex::with_lu_workers(workers, f)
+}
+
+/// This thread's declared [`with_dense_workers`] count; 1 when undeclared.
+pub(crate) fn dense_workers() -> usize {
+    DENSE_WORKERS.with(core::cell::Cell::get)
 }
 
 /// Maximum number of boundary-velocity fields solved against one shared

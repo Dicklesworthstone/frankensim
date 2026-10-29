@@ -30,6 +30,12 @@ pub struct ReciprocalLoadingBake {
 /// The caller's per-frequency budget bounds preparation and the complete batch;
 /// the returned sweep work additionally counts every declared frequency.
 /// This is the original owner's bounded, below-resonance chart, with no fallback.
+///
+/// Inside [`helmholtz::with_dense_workers`] the frequencies are solved on the
+/// declared workers; the result, and the refusal returned, are bit-identical
+/// for every count. Each frequency in flight holds its own dense operator and
+/// factor, about 32 n^2 bytes for n [`ReciprocalLoadingDiagnostics::unknowns`].
+/// The caller's cancellation is then polled about every 20 ms while they run.
 #[allow(clippy::too_many_arguments)]
 pub fn modal_radiation_loading_reciprocal(
     surface: &SpherePanels, shapes: &[Vec<f64>], omegas: &[f64], medium: Medium,
@@ -81,22 +87,92 @@ pub fn modal_radiation_loading_reciprocal(
         maximum_backward_residual:0.0,maximum_flux_balance:0.0,
     };
     let mut rows = reserved(omegas.len())?;
+    // One frequency's whole work: its solutions' checks, in order, and its row.
+    let frequency = |omega:f64,cancelled:&mut dyn FnMut()->bool|
+        -> Result<(Vec<[f64;3]>,ModalLoadingRow),ModalLoadingError> {
+        let source = owner.solve_velocity_ports(omega/medium.sound_speed,medium,&refs,cancelled)?;
+        let checks = source.solutions().iter().map(|solution|
+            [solution.panels_per_wavelength,solution.backward_residual,solution.flux_balance]).collect();
+        Ok((checks,assess(omega,source.impedance().to_vec(),modes,None)?))
+    };
+    let workers = helmholtz::dense_workers().min(omegas.len());
+    let mut solved = if workers > 1 {
+        on_workers(omegas,workers,&mut cancelled,&frequency)?
+    } else { Vec::new() }.into_iter();
     for &omega in omegas {
-        poll(&mut cancelled)?;
-        let source = owner.solve_velocity_ports(omega/medium.sound_speed,medium,&refs,&mut cancelled)?;
-        for solution in source.solutions() {
+        let (checks,row) = if workers > 1 {
+            solved.next().expect("every frequency up to the first failure has its outcome")?
+        } else {
+            poll(&mut cancelled)?;
+            frequency(omega,&mut cancelled)?
+        };
+        for [panels_per_wavelength,backward_residual,flux_balance] in checks {
             diagnostics.minimum_panels_per_wavelength = diagnostics.minimum_panels_per_wavelength
-                .min(solution.panels_per_wavelength);
+                .min(panels_per_wavelength);
             diagnostics.maximum_backward_residual = diagnostics.maximum_backward_residual
-                .max(solution.backward_residual);
-            diagnostics.maximum_flux_balance = diagnostics.maximum_flux_balance.max(solution.flux_balance);
+                .max(backward_residual);
+            diagnostics.maximum_flux_balance = diagnostics.maximum_flux_balance.max(flux_balance);
         }
-        rows.push(assess(omega,source.impedance().to_vec(),modes,None)?);
+        rows.push(row);
     }
     poll(&mut cancelled)?;
     Ok(ReciprocalLoadingBake {
         loading:ModalLoadingBake {modes,declaration_hash:hash.finalize(),rows},diagnostics,
     })
+}
+
+/// `solve` every frequency on `workers` scoped threads, each taking the lowest
+/// unclaimed frequency. Outcomes return in frequency order, up to and including
+/// the first failure. That is the failure the serial loop returns: a failure
+/// abandons only higher frequencies. Spare workers go to each frequency's
+/// factorization. This thread polls the caller's cancellation while it waits;
+/// a cancellation stops every frequency and returns `Cancelled`.
+fn on_workers<T:Send>(omegas:&[f64],workers:usize,cancelled:&mut impl FnMut()->bool,
+    solve:&(impl Fn(f64,&mut dyn FnMut()->bool)->Result<T,ModalLoadingError>+Sync))
+    ->Result<Vec<Result<T,ModalLoadingError>>,ModalLoadingError> {
+    use std::sync::atomic::{AtomicBool,AtomicUsize,Ordering::Relaxed};
+    use std::sync::mpsc::{RecvTimeoutError,channel};
+    let (next,first_failure,stop)=(AtomicUsize::new(0),AtomicUsize::new(usize::MAX),AtomicBool::new(false));
+    let (next,first_failure,stop)=(&next,&first_failure,&stop);
+    let inner=helmholtz::dense_workers()/workers;
+    let mut outcomes:Vec<Option<Result<T,ModalLoadingError>>>=omegas.iter().map(|_|None).collect();
+    std::thread::scope(|scope| {
+        // Nothing is sent: the channel disconnects when every worker is done.
+        let (running,finished)=channel::<()>();
+        let handles:Vec<_>=(0..workers).map(|_| {
+            let running=running.clone();
+            scope.spawn(move || {
+                let _running=running;
+                let mut mine=Vec::new();
+                loop {
+                    let index=next.fetch_add(1,Relaxed);
+                    if index>=omegas.len() || index>first_failure.load(Relaxed) {break mine;}
+                    let outcome=helmholtz::with_dense_workers(inner,||
+                        solve(omegas[index],&mut || stop.load(Relaxed) || index>first_failure.load(Relaxed)));
+                    if outcome.is_err() {first_failure.fetch_min(index,Relaxed);}
+                    mine.push((index,outcome));
+                }
+            })
+        }).collect();
+        drop(running);
+        loop {
+            if !stop.load(Relaxed) && cancelled() {stop.store(true,Relaxed);}
+            if let Err(RecvTimeoutError::Disconnected)=finished.recv_timeout(std::time::Duration::from_millis(20)) {break;}
+        }
+        for handle in handles {
+            let mine=handle.join().unwrap_or_else(|panic|std::panic::resume_unwind(panic));
+            for (index,outcome) in mine {outcomes[index]=Some(outcome);}
+        }
+    });
+    if stop.load(Relaxed) {return Err(HelmholtzError::Cancelled.into());}
+    let mut ordered=Vec::with_capacity(omegas.len());
+    for outcome in outcomes {
+        let outcome=outcome.expect("every frequency below the first failure ran");
+        let failed=outcome.is_err();
+        ordered.push(outcome);
+        if failed {break;}
+    }
+    Ok(ordered)
 }
 
 #[cfg(test)]
@@ -126,5 +202,36 @@ mod tests {
         assert_eq!(bake.diagnostics.sweep_work,2*bake.diagnostics.frequency_work);
         assert_eq!(bake.diagnostics.unknowns,owner.unknowns());
         assert_eq!(bake.diagnostics.cache_bytes,owner.cache_bytes());
+    }
+
+    #[test]
+    fn declared_workers_solve_the_frequencies_with_the_same_bits_and_cancel_cleanly() {
+        let surface = SpherePanels::icosphere(0.1,0).unwrap();
+        let mut shapes = vec![vec![0.0;20];3];
+        shapes[0][0] = 1.0; shapes[1][7] = -0.7; shapes[2][12] = 0.4;
+        let budget = Budget {maximum_unknowns:64,maximum_cache_bytes:1_000_000,
+            maximum_work:100_000_000,angular_refinement:1};
+        let omega = [200.0,350.0,500.0,650.0,800.0];
+        let medium = Medium::air();
+        let bake = |cancelled:&mut dyn FnMut()->bool| modal_radiation_loading_reciprocal(&surface,&shapes,
+            &omega,medium,budget,fs_blake3::hash_domain("reciprocal-loading-test",b"declared workers"),45,cancelled);
+        let bits = |bake:&ReciprocalLoadingBake| (bake.loading.declaration_hash.as_bytes().to_vec(),
+            bake.loading.rows().iter().map(|row|row.impedance().iter()
+                .map(|z|(z.re.to_bits(),z.im.to_bits())).collect::<Vec<_>>()).collect::<Vec<_>>(),
+            [bake.diagnostics.minimum_panels_per_wavelength,bake.diagnostics.maximum_backward_residual,
+                bake.diagnostics.maximum_flux_balance].map(f64::to_bits));
+        let serial = bits(&bake(&mut ||false).unwrap());
+        for workers in [2,3,5,8] {
+            let parallel = helmholtz::with_dense_workers(workers,|| bake(&mut ||false)).unwrap();
+            assert_eq!(bits(&parallel),serial,"{workers} workers");
+        }
+        // Cancelled once the sweep has started: no bake, and the next one is unchanged.
+        let mut preamble = 0;
+        Prepared::new(&surface,omega[4]/medium.sound_speed,budget,|| {preamble+=1;false}).unwrap();
+        let mut calls = 0;
+        let cancelled = helmholtz::with_dense_workers(3,|| bake(&mut || {calls+=1;calls>1+preamble}));
+        assert!(matches!(cancelled,Err(ModalLoadingError::Helmholtz(HelmholtzError::Cancelled))));
+        assert_eq!(calls,2+preamble);
+        assert_eq!(bits(&helmholtz::with_dense_workers(3,|| bake(&mut ||false)).unwrap()),serial);
     }
 }

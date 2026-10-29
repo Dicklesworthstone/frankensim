@@ -154,6 +154,13 @@ pressure decimation, so its indices and row count retain the mechanical clock.
 Only the microphone pressure is resampled. Trace I/O failure refuses the output
 without pretending that already accepted mechanical steps were rolled back.
 
+`--workers N` (1 to 256; default 1) declares threads for the dense BEM air
+loads computed before the render. A `body-radiation skin` load solves its
+frequencies on them, and dense factorizations share them. It is a scheduling
+budget only: every load, and so every output sample, is bit-identical for every
+count. Each skin frequency in flight holds its own dense operator and factor,
+about 32 n^2 bytes for n reciprocal unknowns (0.37 GB at n = 3389).
+
 ### Material shear layers in the original contact solve
 
 `shear-layer-bow.material-strings` selects an isothermal elastic-plastic layer
