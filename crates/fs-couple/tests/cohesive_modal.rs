@@ -18,6 +18,7 @@ const MB: f64 = 3.0;
 const AREA: f64 = 1e-6;
 const RATE: u32 = 5_000;
 
+#[path = "cohesive_modal/patch.rs"]
 mod patch;
 
 fn law() -> BilinearCohesive {

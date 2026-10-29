@@ -446,3 +446,6 @@ pub mod friction;
 
 /// Irreversible three-component cohesive debonding on the original modal network.
 pub mod cohesive;
+
+/// Source-bound liquid-bridge work on the original native mechanical network.
+pub mod capillary;

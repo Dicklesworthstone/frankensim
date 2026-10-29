@@ -10659,3 +10659,27 @@ general singular DAE, finite-strain shell or full-workspace qualification.
 Accepted mechanical, material and other appended host histories stay an identical prefix; only the new acoustic coordinates begin at rest. A moving attachment explicitly starts a new quiescent exterior at that instant, rather than inferring past acoustic memory. Total loss includes acoustic damping once and must not be credited again as material heat. Every physical exterior needs a single ownership declaration. The original complete dense-render cap and caller pole allowance refuse oversized requests without discarding modes or histories. Cancellation is checked around the bounded original setup owners.
 
 The producer remains responsible for geometry, gas, basis and fitted-band validity. A passive authored pole model is not acoustic-fidelity evidence. Existing compact pressure observations remain distinct from a finite-wavelength receiver transfer. Three focused native G1/G3 tests compare complete linear/nonlinear, full-damping, Maxwell-memory and two-pole mutual-radiation trajectories with an independently assembled velocity-space RK4 system, independently check stored energy and force work/heat, measure second-order time convergence over three clocks, and cover moving-history preservation, zero loading, capacities, invalid physics and cancellation. Native tests use original numerical owners and a narrow source-extracted plate/model/cancellation seam; they do not establish full workspace or instrument qualification.
+
+## Native modal mechanics driven by original liquid-bridge work
+
+`render::schedule::force::coupled::contact::capillary::CapillaryModalSystem`
+couples the original planar fixed-volume liquid-bridge source to the complete
+native mechanical network. The gap column and its transpose map actual
+mechanical motion and work-conjugate mean force reciprocally. The original
+network's held-force compliance enters the bounded bridge load-line solve;
+all native modes, connections, force limits and propagation remain active.
+The two receiving substrate identities must match the ordered original
+wetting sources, and the liquid source is borrowed throughout.
+
+Every step stages the actual native motion and reevaluates the original
+bridge on that motion. Gap and constitutive-force gates precede an independent
+combined mechanical/surface energy account. The signed surface potential
+retains its dry-substrate reference; prescribed opening work, external work,
+native dissipation and topology release are separate. A final cancellation
+check precedes joint publication of body, bridge and observation successors.
+The evaluation budget reserves this actual-motion constitutive check;
+runtime scratch is preallocated. A refused proposal retains all accepted
+states and observations. The fixed-direction bridge remains the declared
+planar quasistatic model with its own rate/geometry screens; native body
+inertia does not add resolved liquid inertia, 3-D end curvature or pinch-off.
+No topology release is automatically deposited as heat.
