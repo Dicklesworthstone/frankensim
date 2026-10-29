@@ -145,7 +145,7 @@ fn varnish() -> ResolvedCoating {
     ResolvedCoating::from_material(state, 0.3, 0.0003).unwrap()
 }
 
-fn coupon(gate: &CancelGate) -> (ResolvedShearShell, NodalDirectors, Vec<ShellConstraint>) {
+pub(crate) fn coupon(gate: &CancelGate) -> (ResolvedShearShell, NodalDirectors, Vec<ShellConstraint>) {
     let n = 3;
     let mut nodes = Vec::new();
     let mut tris = Vec::new();
@@ -196,14 +196,14 @@ fn coupon(gate: &CancelGate) -> (ResolvedShearShell, NodalDirectors, Vec<ShellCo
     )
 }
 
-fn budget(shell: &ResolvedShearShell) -> MitcBudget {
+pub(crate) fn budget(shell: &ResolvedShearShell) -> MitcBudget {
     MitcBudget {
         max_nodes: shell.mesh().nodes.len(),
         max_triangles: shell.mesh().tris.len(),
     }
 }
 
-fn layer(side: CoatingSide, thickness_m: f64) -> ShellCoating {
+pub(crate) fn layer(side: CoatingSide, thickness_m: f64) -> ShellCoating {
     ShellCoating {
         region: "wood".into(),
         material: varnish(),
@@ -255,6 +255,113 @@ fn modes(
         .map(|p| model.expand(&p.phi).unwrap())
         .collect();
     (omega, physical)
+}
+
+fn memory_options() -> fs_couple::shear_shell::coating::relaxation::CoatingRelaxationOptions {
+    fs_couple::shear_shell::coating::relaxation::CoatingRelaxationOptions {
+        terms: 16, storage_relative_tolerance: 0.001, loss_relative_tolerance: 0.001,
+        max_memory_coordinates: 128,
+    }
+}
+
+#[test]
+fn g1_hereditary_coating_uses_equilibrium_once_and_preserves_physical_mass() {
+    let gate = CancelGate::new_clock_free();
+    let (bare, directors, supports) = coupon(&gate);
+    let sliced = bare.with_coatings(vec![layer(CoatingSide::Positive, 20e-6)], &gate).unwrap();
+    let shell = sliced.with_coating_relaxation(memory_options(), &gate).unwrap();
+    near(shell.mass_kg(), sliced.mass_kg(), 1e-14);
+    assert_eq!(shell.coatings()[0].faces_m(), sliced.coatings()[0].faces_m());
+    assert_eq!(shell.coatings()[0].reference_storage_pa(), 20e6);
+    assert!(sliced.coatings()[0].reference_storage_pa() > 30.0 * 20e6);
+    let (omega, physical) = modes(&shell, &directors, &supports);
+    let c = shell.project_material_viscosity(&directors, &physical, &omega,
+        budget(&shell), usize::MAX, &gate).unwrap();
+    let mut wood_matrix = project_viscosity(shell.mesh(), &directors, shell.sections(),
+        shell.substrate_viscosities(), &physical, budget(&shell), usize::MAX, || false).unwrap();
+    let anchor = shell.regions()[0].constant_loss_reference_omega_rad_s().unwrap();
+    let spectrum = ConstantLossSpectrum::fit();
+    for i in 0..omega.len() { for j in 0..omega.len() {
+        let ratio = (anchor / omega[i] * spectrum.shape(omega[i])
+            * anchor / omega[j] * spectrum.shape(omega[j])).sqrt();
+        wood_matrix[i * omega.len() + j] *= ratio;
+    }}
+    for (&a, &b) in c.iter().zip(&wood_matrix) { near(a, b, 2e-13); }
+    let rebound = shell.with_region_material("wood", &wood(), &gate).unwrap();
+    assert_eq!(rebound.coating_relaxation_options(), Some(memory_options()));
+    assert_eq!(rebound.coatings()[0].reference_storage_pa(), 20e6);
+    assert_eq!(rebound.coatings()[0].faces_m(), shell.coatings()[0].faces_m());
+}
+
+#[test]
+fn g1_full_coating_memory_reconstructs_source_storage_and_loss_without_per_film_state_growth() {
+    let gate = CancelGate::new_clock_free();
+    let (bare, directors, supports) = coupon(&gate);
+    let shell = bare.with_coatings(vec![layer(CoatingSide::Positive, 20e-6),
+        layer(CoatingSide::Negative, 15e-6)], &gate).unwrap()
+        .with_coating_relaxation(memory_options(), &gate).unwrap();
+    let (omega, mut physical) = modes(&shell, &directors, &supports);
+    // A rotated mass-orthonormal retained basis makes the cross terms live.
+    let (a, b) = (physical[0].clone(), physical[1].clone());
+    for i in 0..a.len() {
+        physical[0][i] = (a[i] + b[i]) / 2.0_f64.sqrt();
+        physical[1][i] = (b[i] - a[i]) / 2.0_f64.sqrt();
+    }
+    let image = shell.project_coating_relaxation(&directors, &physical, &omega,
+        budget(&shell), usize::MAX, &gate).unwrap().unwrap();
+    assert_eq!(image.films().len(), 2);
+    assert_eq!(image.fit_certificates().len(), 1);
+    let fit = &image.fit_certificates()[0];
+    assert!(image.relaxation_times_s().len() <= omega.len() * fit.model.terms.len());
+    let n = omega.len();
+    let mut h = vec![0.0; n*n];
+    for film in image.films() {
+        for (total, value) in h.iter_mut().zip(film.unit_stiffness_per_pa_s2()) { *total += value; }
+    }
+    assert!(h[1].abs() > 1e-6 * h[0].abs());
+    for hz in [100.0, 200.0, 500.0, 1000.0, 2000.0, 4000.0] {
+        let w = TAU * hz;
+        let (storage, loss) = shell.coatings()[0].input().material.law().modulus(w).unwrap();
+        let mut kr: Vec<_> = h.iter().map(|v| 20e6 * v).collect();
+        let mut ki = vec![0.0; n*n];
+        for (row, tau) in image.coupling_rows_per_s().iter().zip(image.relaxation_times_s()) {
+            let x = w*tau;
+            let re = x*x / (1.0+x*x); let im = x / (1.0+x*x);
+            for i in 0..n { for j in 0..n {
+                kr[i*n+j] += row[i]*row[j]*re;
+                ki[i*n+j] += row[i]*row[j]*im;
+            }}
+        }
+        for k in 0..n*n {
+            near(kr[k], storage*h[k], 0.0011);
+            near(ki[k], loss*h[k], 0.0011);
+        }
+        for vector in [[1.0, -2.0, 0.3], [-3.0, 0.4, 0.1]] {
+            let loss: f64 = (0..n).flat_map(|i| (0..n).map(move |j| (i,j)))
+                .map(|(i,j)| vector[i] * ki[i*n+j] * vector[j]).sum();
+            assert!(loss >= 0.0);
+        }
+    }
+}
+
+#[test]
+fn g0_coating_memory_refuses_fit_work_and_state_overruns_without_changing_the_source() {
+    let gate = CancelGate::new_clock_free();
+    let (bare, directors, supports) = coupon(&gate);
+    let sliced = bare.with_coatings(vec![layer(CoatingSide::Positive, 20e-6)], &gate).unwrap();
+    let mut options = memory_options(); options.terms = 0;
+    assert!(sliced.with_coating_relaxation(options, &gate).is_err());
+    options = memory_options(); options.max_memory_coordinates = 1;
+    let shell = sliced.with_coating_relaxation(options, &gate).unwrap();
+    let (omega, physical) = modes(&shell, &directors, &supports);
+    assert!(shell.project_coating_relaxation(&directors, &physical, &omega,
+        budget(&shell), usize::MAX, &gate).is_err());
+    assert!(shell.project_coating_relaxation(&directors, &physical, &omega,
+        budget(&shell), 1, &gate).is_err());
+    assert!(sliced.coating_relaxation_options().is_none());
+    assert!(sliced.coatings()[0].reference_storage_pa() > 20e6);
+    let cancelled = CancelGate::new_clock_free(); cancelled.request();
+    assert!(sliced.with_coating_relaxation(memory_options(), &cancelled).is_err());
 }
 
 #[test]

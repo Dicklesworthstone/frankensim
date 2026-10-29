@@ -67,6 +67,7 @@ pub struct MaterialShellImage {
     radiators: Vec<CompactBody>,
     damping: ModalPlateViscosity,
     interface_columns: Vec<Vec<f64>>,
+    coating_relaxation: Option<super::coating::relaxation::ShellCoatingRelaxation>,
 }
 impl MaterialShellImage {
     /// Exact original material, section and midsurface sources.
@@ -88,6 +89,11 @@ impl MaterialShellImage {
     pub fn eigenvalue_intervals(&self) -> &[(f64,f64)] { &self.intervals }
     /// Complete symmetric modal C and passive connection realization.
     pub const fn damping(&self) -> &ModalPlateViscosity { &self.damping }
+    /// Complete film memory on this equilibrium basis, when explicitly selected.
+    /// Its film loss is excluded from `damping()` and must be attached exactly once.
+    pub fn coating_relaxation(&self) -> Option<&super::coating::relaxation::ShellCoatingRelaxation> {
+        self.coating_relaxation.as_ref()
+    }
     /// Work-conjugate interface rows in original source order and this mode basis.
     pub fn interface_columns(&self) -> &[Vec<f64>] { &self.interface_columns }
     /// Original interface viscosity as separate exact passive channels. Elastic
@@ -205,12 +211,14 @@ impl ResolvedShearShell {
         let matrix=self.project_material_viscosity(directors,&physical_modes,&omega,
             options.assembly_budget,budget.max_projection_terms,gate)?;
         let damping=ModalPlateViscosity::factor(matrix,n,budget.reference_resistance_n_s_m,gate)?;
+        let coating_relaxation=self.project_coating_relaxation(directors,&physical_modes,&omega,
+            options.assembly_budget,budget.max_projection_terms,gate)?;
         let radiators=omega.iter().enumerate().map(|(i,&w)|
             CompactBody::from_mass_normalized_projection(w,volume_shapes[i],projected[0][i],pressure.exterior.area_m2()))
             .collect::<Result<Vec<_>,_>>()?;
         poll(gate)?;
         Ok(MaterialShellImage { source:self.clone(),physical_modes,force_ports:projected,
-            volume_shapes,cavity_volume_shapes,intervals,radiators,damping,interface_columns })
+            volume_shapes,cavity_volume_shapes,intervals,radiators,damping,interface_columns,coating_relaxation })
     }
 }
 

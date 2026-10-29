@@ -196,7 +196,7 @@ pub(crate) fn factor(form: &[f64], n: usize, gate: &CancelGate)
     -> Result<Vec<Vec<f64>>, AcousticRealizeError>
 {
     poll(gate)?;
-    if n == 0 || n > 64 || form.len() != n*n || form.iter().any(|v| !v.is_finite()) {
+    if n == 0 || n > crate::shear_shell::MAX_SHELL_MODES || form.len() != n*n || form.iter().any(|v| !v.is_finite()) {
         return Err(invalid("regional bending factor needs a finite complete bounded square form"));
     }
     let active: Vec<_> = (0..n).filter(|&i| form[n*i..n*(i+1)].iter().any(|v| *v != 0.0)).collect();

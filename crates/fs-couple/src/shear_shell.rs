@@ -122,6 +122,7 @@ pub struct ResolvedShearShell {
     viscosity: Vec<ShearShellViscosity>,
     coatings: Vec<ResolvedShellCoating>,
     coating_viscosity: Vec<Vec<ShearShellViscosity>>,
+    coating_relaxation: Option<coating::relaxation::CoatingRelaxationOptions>,
     budget: MitcBudget,
     mass_kg: f64,
     interfaces: Vec<connections::ResolvedShellConnection>,
@@ -180,7 +181,7 @@ impl ResolvedShearShell {
         inputs[index].region.material = material.clone();
         let rebuilt = compile_material_shear_shell(self.mesh.clone(), inputs, self.budget, gate)?;
         let rebuilt = coating::apply_coatings(rebuilt,
-            self.coatings.iter().map(|c| c.input().clone()).collect(), gate)?;
+            self.coatings.iter().map(|c| c.input().clone()).collect(), self.coating_relaxation, gate)?;
         let mut rebuilt = rebuilt.with_interfaces(self.interfaces.iter().map(|i| i.input().clone()).collect(),
             self.interface_budget, gate)?;
         // Pressure geometry is unchanged by a material rebind. Retain both the
@@ -322,7 +323,7 @@ pub fn compile_material_shear_shell(mesh: ShellMesh, inputs: Vec<ShellRegionMate
     let mass_kg:f64=sections.iter().zip(element_areas).map(|(s,a)|s.areal_mass_kg_m2()*a).sum();
     if !mass_kg.is_finite() || mass_kg<=0.0 { return Err(invalid("total shell mass is unrepresentable")); }
     Ok(ResolvedShearShell { mesh,regions,element_regions:assigned,sections,viscosity,
-        coatings:Vec::new(),coating_viscosity:Vec::new(),budget,mass_kg,
+        coatings:Vec::new(),coating_viscosity:Vec::new(),coating_relaxation:None,budget,mass_kg,
         interfaces:Vec::new(), interface_budget:fs_plate::shell::mitc::connections::ShellConnectionBudget {
             max_connections:0, max_terms:0, max_work:0,
         }, pressure_surfaces:None })

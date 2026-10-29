@@ -97,6 +97,7 @@ pub struct MaterialShellAssemblyImage {
     damping: ModalPlateViscosity,
     interface_columns: Vec<Vec<Vec<f64>>>,
     tie_receipt: TieReceipt,
+    coating_relaxation: Option<super::coating::relaxation::ShellCoatingRelaxation>,
 }
 
 impl MaterialShellAssemblyImage {
@@ -128,6 +129,11 @@ impl MaterialShellAssemblyImage {
     /// Complete sum of component modal viscosity matrices, including cross terms.
     pub const fn damping(&self) -> &ModalPlateViscosity {
         &self.damping
+    }
+    /// Source-fitted film memory after equal-time aggregation across the whole
+    /// assembled body. Wood and glue viscosity remain in `damping()` once.
+    pub fn coating_relaxation(&self) -> Option<&super::coating::relaxation::ShellCoatingRelaxation> {
+        self.coating_relaxation.as_ref()
     }
     /// Component-major material-interface rows, in each component's source order.
     pub fn interface_columns(&self) -> &[Vec<Vec<f64>>] {
@@ -245,6 +251,25 @@ impl MaterialShellAssembly {
             ));
         }
         let mut names = std::collections::BTreeSet::new();
+        // All films in one body must have one explicit constitutive selection;
+        // a hidden mixture of frozen and hereditary coatings is not admitted.
+        let mut coating_options = None;
+        let mut sliced_coatings = false;
+        for part in &self.components {
+            if part.specimen.coatings.is_empty() { continue; }
+            match part.specimen.coating_relaxation {
+                Some(options) => {
+                    if coating_options.is_some_and(|old| old != options) {
+                        return Err(invalid("assembled coating memory requires one common explicit fit/state policy"));
+                    }
+                    coating_options = Some(options);
+                }
+                None => sliced_coatings = true,
+            }
+        }
+        if coating_options.is_some() && sliced_coatings {
+            return Err(invalid("an assembled body cannot mix sliced and hereditary coating selections"));
+        }
         let mut total_nodes = 0usize;
         let mut total_triangles = 0usize;
         let mut work = Some(4 * n * n * n);
@@ -475,6 +500,7 @@ impl MaterialShellAssembly {
             )?;
         }
         let mut interface_columns = Vec::with_capacity(self.components.len());
+        let mut coating_forms = Vec::new();
         let mut exterior_area = 0.0;
         for (i, part) in self.components.iter().enumerate() {
             poll(gate)?;
@@ -502,6 +528,9 @@ impl MaterialShellAssembly {
             add(&mut matrix, &source.project_material_viscosity(&part.directors,
                 &physical_modes[i], &omega, part.assembly_budget,
                 budget.max_projection_terms, gate)?)?;
+            coating_forms.extend(source.project_coating_forms(&part.directors,
+                &physical_modes[i], &omega, part.assembly_budget,
+                budget.max_projection_terms, gate)?);
             let laws: Vec<_> = source.interfaces.iter().map(|i| i.law().clone()).collect();
             interface_columns.push(
                 models[i]
@@ -535,6 +564,11 @@ impl MaterialShellAssembly {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let coating_relaxation = match coating_options {
+            Some(options) => super::coating::relaxation::ShellCoatingRelaxation::from_projected(
+                coating_forms, &omega, options, budget.max_projection_terms, gate)?,
+            None => None,
+        };
         poll(gate)?;
         Ok(MaterialShellAssemblyImage {
             source: self.clone(),
@@ -547,6 +581,7 @@ impl MaterialShellAssembly {
             damping,
             interface_columns,
             tie_receipt: tied.receipt,
+            coating_relaxation,
         })
     }
 

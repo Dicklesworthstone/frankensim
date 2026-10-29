@@ -112,6 +112,23 @@ impl ResolvedCoating {
     /// Authored small-strain envelope.
     pub const fn strain_limit(&self) -> f64 { self.strain_limit }
 
+    /// Equilibrium layer of the declared fitted constitutive model. This uses
+    /// its explicit E0 coefficient, not an out-of-band evaluation of E*(omega).
+    /// Transient use is an authored causal continuation; the original measured
+    /// fit band and conditioning remain unchanged on `source` and `law`.
+    pub fn equilibrium_layer(&self, thickness_m: f64) -> Result<LaminaLayer, MaterialError> {
+        if !thickness_m.is_finite() || thickness_m <= 0.0 {
+            return Err(invalid("coating layer thickness must be finite and positive"));
+        }
+        let e = self.law.equilibrium_modulus_pa();
+        let g = e / (2.0 * (1.0 + self.poisson_ratio));
+        let elastic = OrthotropicElastic::new([e; 3], [self.poisson_ratio; 3],
+            [g; 3], self.strain_limit)?;
+        Ok(LaminaLayer { thickness_m, orientation_rad: 0.0,
+            density_kg_m3: self.density_kg_m3, material: Some(self.source.clone()),
+            law: LayerLaw::Elastic(elastic) })
+    }
+
     /// Form a passive equivalent elastic/viscous section at one explicitly
     /// selected frequency. Layer geometry remains an independent input.
     pub fn at_frequency(&self, thickness_m: f64, omega: f64)

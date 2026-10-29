@@ -5,6 +5,8 @@
 //! a positive diagonal congruence preserves modal cross-loss passivity. This
 //! geometric-mean off-diagonal reading is a modal approximation, not a full
 //! hereditary time-domain shell or a frequency-dependent eigenproblem.
+//! The explicitly selected [`relaxation`] path instead builds equilibrium
+//! sections and projects the complete passive coating memory on that basis.
 
 use super::{
     AcousticRealizeError, PlateMaterialModel, ResolvedShearShell, compile_material_shear_shell,
@@ -19,6 +21,9 @@ use fs_plate::shell::mitc::{
     viscosity::{ShearShellViscosity, project_viscosity, projection_terms},
 };
 use fs_qty::Pressure;
+
+/// Equilibrium sections and source-fitted passive Maxwell memory.
+pub mod relaxation;
 
 /// Cold-work ceiling for the complete coating stack across one shell.
 pub const MAX_SHELL_COATINGS: usize = 64;
@@ -88,7 +93,8 @@ impl ResolvedShellCoating {
     pub const fn faces_m(&self) -> (f64, f64) {
         (self.z_bottom_m, self.z_top_m)
     }
-    /// Frozen storage modulus [Pa]; not a fitted instrument frequency.
+    /// Actual basis storage [Pa]: source E'(reference) for a slice, or the
+    /// declared model's E0 when hereditary coating dynamics are selected.
     pub const fn reference_storage_pa(&self) -> f64 {
         self.reference_storage_pa
     }
@@ -156,7 +162,7 @@ impl ResolvedShearShell {
             self.budget,
             gate,
         )?;
-        let coated = apply_coatings(substrate, inputs, gate)?;
+        let coated = apply_coatings(substrate, inputs, self.coating_relaxation, gate)?;
         let mut coated = coated.with_interfaces(
             self.interfaces.iter().map(|i| i.input().clone()).collect(),
             self.interface_budget,
@@ -177,7 +183,13 @@ impl ResolvedShearShell {
         for film in &self.coatings {
             for &w in omega {
                 poll(gate)?;
-                film.loss_scale(w)?;
+                if self.coating_relaxation.is_some() {
+                    if !w.is_finite() || w < film.omega_band.0 || w > film.omega_band.1 {
+                        return Err(invalid("retained hereditary shell mode lies outside coating/source fit support"));
+                    }
+                } else {
+                    film.loss_scale(w)?;
+                }
             }
         }
         poll(gate)
@@ -189,8 +201,13 @@ impl ResolvedShearShell {
             .iter()
             .map(|r| r.loss_reference_omega.map(f64::to_bits))
             .collect();
-        projection_terms(self.mesh.nodes.len(), self.mesh.tris.len(), modes)?
-            .checked_mul(distinct.len().checked_add(self.coatings.len())?)
+        let projected = projection_terms(self.mesh.nodes.len(), self.mesh.tris.len(), modes)?
+            .checked_mul(distinct.len().checked_add(self.coatings.len())?)?;
+        // In the hereditary path the film forms are projected once instead of
+        // frozen film C. Include complete branch accumulation and factor work.
+        let memory = self.coating_relaxation.map_or(Some(0), |options|
+            options.projection_terms(modes, self.coatings.len()))?;
+        projected.checked_add(memory)
     }
 
     /// Project all substrate and film loss on the SAME physical mode vectors.
@@ -257,7 +274,8 @@ impl ResolvedShearShell {
                 }
             }
         }
-        for (film, viscosity) in self.coatings.iter().zip(&self.coating_viscosity) {
+        for (film, viscosity) in self.coatings.iter().zip(&self.coating_viscosity)
+            .filter(|_| self.coating_relaxation.is_none()) {
             poll(gate)?;
             let scales: Vec<_> = omega
                 .iter()
@@ -308,10 +326,13 @@ fn admit_extent(coatings: usize, elements: usize) -> Result<(), AcousticRealizeE
 pub(super) fn apply_coatings(
     mut shell: ResolvedShearShell,
     inputs: Vec<ShellCoating>,
+    relaxation: Option<relaxation::CoatingRelaxationOptions>,
     gate: &CancelGate,
 ) -> Result<ResolvedShearShell, AcousticRealizeError> {
     poll(gate)?;
     admit_extent(inputs.len(), shell.mesh.tris.len())?;
+    if let Some(options) = relaxation { options.validate()?; }
+    shell.coating_relaxation = relaxation;
     if inputs.is_empty() {
         return Ok(shell);
     }
@@ -342,15 +363,19 @@ pub(super) fn apply_coatings(
                 "coating reference must lie within substrate and film source support",
             ));
         }
-        let slice = input
+        let mut slice = input
             .material
             .at_frequency(input.thickness_m, input.reference_omega_rad_s)
             .map_err(owner)?;
-        let (storage, loss) = input
+        let (mut storage, loss) = input
             .material
             .law()
             .modulus(input.reference_omega_rad_s)
             .map_err(owner)?;
+        if relaxation.is_some() {
+            slice.layer = input.material.equilibrium_layer(input.thickness_m).map_err(owner)?;
+            storage = input.material.law().equilibrium_modulus_pa();
+        }
         let area_m2 = shell.regions[r].area_m2;
         let mass_kg = input.material.density_kg_m3() * input.thickness_m * area_m2;
         if !mass_kg.is_finite() || mass_kg <= 0.0 {
