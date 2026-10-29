@@ -11300,3 +11300,28 @@ signs and zero coupling, check a loaded small-ka pole/decay limit, and exercise
 density scaling, held-out weak-loss corruption, capacities and refusals. These
 use actual numerical/gas/piston/fit owners with narrow source extraction; the
 large BEM fixture and whole-workspace Cargo/DSR qualification were not run.
+
+## Native moving-body adhesion with dynamic wetting and pinning
+
+`capillary::ContactLineCapillaryModalSystem::new_contact_line` binds the
+original dynamic-footprint bridge to the existing native modal transaction.
+Actual bodies, springs, dampers, external forces and prescribed support motion
+share the original network compliance. Contact-line relaxation changes the
+mechanical force, while pinning retains the physical footprint until a sourced
+advancing or receding threshold is reached.
+
+The original wetting law is replayed on actual staged gap motion before
+publication. Body motion, footprint history, physical gap, clock and frame
+advance together only after source, compatibility, force, energy and
+cancellation checks. Source geometry/work uncertainty must fit inside the
+combined energy tolerance; a small algebraic residual alone is insufficient.
+This energy-accuracy admission also retains the original axisymmetric bridge's
+reported work uncertainty. Surface storage, external/prescribed work, native
+network loss, physical contact-line loss and topology release remain separate.
+
+Five focused original-source tests cover reciprocal moving-body mechanics,
+physical pinning, sourced rate dependence, spring/damper and external/prescribed
+work, numerical energy uncertainty, and atomic refusal/retry. The six existing
+planar/axisymmetric native tests also pass. The new path retains the original
+symmetric two-dimensional, connected, contact-line-dominated liquid regime;
+it does not resolve bulk liquid motion, pinch-off or thermal deposition.

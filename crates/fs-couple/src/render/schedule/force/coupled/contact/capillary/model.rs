@@ -14,13 +14,15 @@ use fs_contact::capillary_bridge::{BridgeState, BridgeStep, SourcePlanarCapillar
 use fs_exec::CancelGate;
 use fs_matdb::MaterialStateId;
 
+mod contact_line;
+
 mod sealed {
     pub trait Sealed {}
     impl Sealed for super::PlanarBridgeLoadLine<'_> {}
     impl Sealed for super::AxisymmetricBridgeLoadLine<'_> {}
 }
 
-/// The two original capillary models admitted by the native mechanics owner.
+/// The original capillary models admitted by the native mechanics owner.
 /// This sealed contract keeps one mechanical transaction for planar bridges
 /// with topology changes and axisymmetric bridges of fixed topology.
 pub trait NativeCapillaryModel<'a>: sealed::Sealed + Sized {
@@ -136,7 +138,9 @@ impl<'a> NativeCapillaryModel<'a> for PlanarBridgeLoadLine<'a> {
             gap_m: step.state().gap_m(),
             surface_energy_j: step.profile.surface_free_energy_j,
             mean_force_n: step.mean_normal_force_n,
+            contact_line_dissipation_j: 0.0,
             topology_release_j: step.irreversible_release_j,
+            estimated_energy_error_j: 0.0,
         }
     }
     fn force_error(
@@ -214,8 +218,10 @@ impl<'a> NativeCapillaryModel<'a> for AxisymmetricBridgeLoadLine<'a> {
             gap_m: state.profile().gap_m,
             surface_energy_j: state.profile().surface_free_energy_j,
             mean_force_n: step.mean_normal_force_n,
+            contact_line_dissipation_j: 0.0,
             // The original axisymmetric owner has no topology transition.
             topology_release_j: 0.0,
+            estimated_energy_error_j: step.estimated_work_error_j,
         }
     }
     fn force_error(

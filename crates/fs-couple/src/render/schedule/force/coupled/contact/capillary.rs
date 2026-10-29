@@ -7,7 +7,8 @@
 //! connections and original energy/force limits. Only an accepted joint
 //! mechanics/surface account publishes the bridge and body successors.
 //!
-//! The planar and axisymmetric models share this SAME mechanical transaction.
+//! The planar, axisymmetric and dynamic contact-line models share this SAME
+//! mechanical transaction. Contact-line friction has a distinct loss port.
 //! Each original liquid owner retains its geometric and numerical scope.
 //! Body inertia does not add liquid inertia or dynamic contact-line physics;
 //! the axisymmetric branch requires caller-established quasistatic applicability
@@ -22,6 +23,12 @@ use fs_contact::capillary_bridge::axisymmetric::load_line::{
 };
 use fs_contact::capillary_bridge::axisymmetric::{
     AxisymmetricError, AxisymmetricState, AxisymmetricStep, SourceAxisymmetricCapillaryBridge,
+};
+use fs_contact::capillary_bridge::contact_line::load_line::{
+    ContactLineBridgeLoadLine, ContactLineLoadLineConfig, ContactLineLoadLineError,
+};
+use fs_contact::capillary_bridge::contact_line::{
+    ContactLineError, ContactLineState, ContactLineStep, SourceContactLineBridge,
 };
 use fs_contact::capillary_bridge::load_line::{
     BridgeLoadLineConfig, BridgeLoadLineError, PlanarBridgeLoadLine,
@@ -50,6 +57,8 @@ pub enum CapillaryModalError {
     Bridge(BridgeError),
     Axisymmetric(AxisymmetricError),
     AxisymmetricContact(AxisymmetricLoadLineError),
+    ContactLine(ContactLineError),
+    ContactLineContact(ContactLineLoadLineError),
     GapMismatch {
         residual_m: f64,
         tolerance_m: f64,
@@ -68,6 +77,11 @@ pub enum CapillaryModalError {
         estimated_error_n: f64,
         tolerance_n: f64,
     },
+    EnergyAccuracy {
+        residual_j: f64,
+        estimated_error_j: f64,
+        tolerance_j: f64,
+    },
 }
 impl core::fmt::Display for CapillaryModalError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -82,6 +96,8 @@ impl std::error::Error for CapillaryModalError {
             Self::Bridge(e) => Some(e),
             Self::Axisymmetric(e) => Some(e),
             Self::AxisymmetricContact(e) => Some(e),
+            Self::ContactLine(e) => Some(e),
+            Self::ContactLineContact(e) => Some(e),
             _ => None,
         }
     }
@@ -111,6 +127,16 @@ impl From<AxisymmetricLoadLineError> for CapillaryModalError {
         Self::AxisymmetricContact(value)
     }
 }
+impl From<ContactLineError> for CapillaryModalError {
+    fn from(value: ContactLineError) -> Self {
+        Self::ContactLine(value)
+    }
+}
+impl From<ContactLineLoadLineError> for CapillaryModalError {
+    fn from(value: ContactLineLoadLineError) -> Self {
+        Self::ContactLineContact(value)
+    }
+}
 
 /// Complete accepted sample. Topology release has no automatic heat recipient.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -124,9 +150,15 @@ pub struct CapillaryModalFrame<S = BridgeStep> {
     /// -F_mean times the caller-prescribed opening increment.
     pub prescribed_work_j: f64,
     pub network_dissipation_j: f64,
+    /// Physical contact-line friction loss, separate from topology release.
+    /// A thermal recipient is not inferred by the mechanical owner.
+    pub contact_line_dissipation_j: f64,
     pub topology_release_j: f64,
     pub energy_residual_j: f64,
     pub energy_tolerance_j: f64,
+    /// Original numerical estimate admitted inside the combined energy budget.
+    /// Zero for the analytic equilibrium planar law; never an interval claim.
+    pub estimated_constitutive_energy_error_j: f64,
     pub applied_mean_force_n: f64,
     /// Independent original constitutive proposal on actual staged body motion.
     pub bridge: S,
@@ -162,7 +194,9 @@ pub struct CapillaryStepView<S> {
     gap_m: f64,
     surface_energy_j: f64,
     mean_force_n: f64,
+    contact_line_dissipation_j: f64,
     topology_release_j: f64,
+    estimated_energy_error_j: f64,
 }
 
 /// Native 3-D capillary mechanics with the same network and work audit as the
@@ -171,6 +205,12 @@ pub type AxisymmetricCapillaryModalSystem<'a> =
     CapillaryModalSystem<'a, AxisymmetricBridgeLoadLine<'a>>;
 pub type AxisymmetricCapillaryModalConfig = CapillaryModalConfig<AxisymmetricLoadLineConfig>;
 pub type AxisymmetricCapillaryModalFrame = CapillaryModalFrame<AxisymmetricStep>;
+
+/// Native finite-rate wetting with actual contact-line history and loss.
+pub type ContactLineCapillaryModalSystem<'a> =
+    CapillaryModalSystem<'a, ContactLineBridgeLoadLine<'a>>;
+pub type ContactLineCapillaryModalConfig = CapillaryModalConfig<ContactLineLoadLineConfig>;
+pub type ContactLineCapillaryModalFrame = CapillaryModalFrame<ContactLineStep>;
 
 /// One fixed-direction liquid bridge and the complete unchanged native network.
 pub struct CapillaryModalSystem<'a, L: NativeCapillaryModel<'a> = PlanarBridgeLoadLine<'a>> {
@@ -224,6 +264,30 @@ impl<'a> CapillaryModalSystem<'a, AxisymmetricBridgeLoadLine<'a>> {
         state: AxisymmetricState,
         column: Vec<f64>,
         config: AxisymmetricCapillaryModalConfig,
+        gate: &CancelGate,
+    ) -> Result<Self, CapillaryModalError> {
+        Self::from_source(
+            network,
+            source,
+            substrate_materials,
+            state,
+            column,
+            config,
+            gate,
+        )
+    }
+}
+
+impl<'a> CapillaryModalSystem<'a, ContactLineBridgeLoadLine<'a>> {
+    /// Bind sourced finite-rate contact-line friction/pinning to actual bodies.
+    /// Original connected planar geometry and source bounds remain active.
+    pub fn new_contact_line(
+        network: CoupledModalSystem,
+        source: &'a SourceContactLineBridge,
+        substrate_materials: [&MaterialStateId; 2],
+        state: ContactLineState,
+        column: Vec<f64>,
+        config: ContactLineCapillaryModalConfig,
         gate: &CancelGate,
     ) -> Result<Self, CapillaryModalError> {
         Self::from_source(
@@ -443,7 +507,11 @@ impl<'a, L: NativeCapillaryModel<'a>> CapillaryModalSystem<'a, L> {
         let external_work = dot(external, &self.network.free_delta)?;
         let prescribed_work = finite(-force * prescribed_delta)?;
         let network_loss = finite(frame.total_dissipation_j())?;
-        let total_loss = finite(network_loss + actual_view.topology_release_j)?;
+        let contact_line_loss = finite(actual_view.contact_line_dissipation_j)?;
+        if contact_line_loss < 0.0 {
+            return Err(invalid("capillary contact-line loss must be nonnegative").into());
+        }
+        let total_loss = finite(network_loss + contact_line_loss + actual_view.topology_release_j)?;
         let residual = finite((after - before) + total_loss - external_work - prescribed_work)?;
         let scale = before
             .abs()
@@ -462,6 +530,17 @@ impl<'a, L: NativeCapillaryModel<'a>> CapillaryModalSystem<'a, L> {
             }
             .into());
         }
+        let energy_error = finite(actual_view.estimated_energy_error_j)?;
+        if energy_error < 0.0 {
+            return Err(invalid("capillary energy error estimate must be nonnegative").into());
+        }
+        if finite(residual.abs() + energy_error)? > tolerance {
+            return Err(CapillaryModalError::EnergyAccuracy {
+                residual_j: residual,
+                estimated_error_j: energy_error,
+                tolerance_j: tolerance,
+            });
+        }
         let accepted = CapillaryModalFrame {
             sample: frame.sample,
             observer_pressure_pa: frame.observer_pressure_pa,
@@ -470,9 +549,11 @@ impl<'a, L: NativeCapillaryModel<'a>> CapillaryModalSystem<'a, L> {
             external_work_j: external_work,
             prescribed_work_j: prescribed_work,
             network_dissipation_j: network_loss,
+            contact_line_dissipation_j: contact_line_loss,
             topology_release_j: actual_view.topology_release_j,
             energy_residual_j: residual,
             energy_tolerance_j: tolerance,
+            estimated_constitutive_energy_error_j: energy_error,
             applied_mean_force_n: force,
             bridge: actual,
             compatibility_residual_m: gap_residual,
