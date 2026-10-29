@@ -10,7 +10,8 @@ pub struct MovingPartialSaturationBodiesExchange3<const N: usize> {
     /// Simultaneous cell-law response and stationary walls, each counted once.
     pub coupling: PartialSaturationBodiesExchange3<N>,
     /// Per-body trajectory accounts in stable input order. The nested
-    /// `coupling.walls` fields are zero; use the assembly wall account above.
+    /// `coupling.walls` and `coupling.forcing` fields are zero; use the assembly
+    /// wall and imposed-fluid-force accounts above.
     pub bodies: [MovingPartialSaturationExchange3; N],
 }
 
@@ -232,6 +233,7 @@ impl BoundaryGrid3 {
                         coupling: PartialSaturationBodyExchange3 {
                             hydrodynamic: response.hydrodynamic,
                             walls: super::super::WallMomentumExchange3::default(),
+                            forcing: super::super::PartialSaturationForcing3::default(),
                             velocity_midpoint: response.velocity_midpoint,
                             angular_velocity_midpoint: response.angular_velocity_midpoint,
                             kinetic_energy_change: response.kinetic_energy_change,

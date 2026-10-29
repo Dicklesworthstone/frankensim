@@ -28,6 +28,7 @@ mod partial_saturation;
 pub use partial_saturation::{
     PartialSaturationBodiesExchange3, PartialSaturationBody3, PartialSaturationBodyExchange3,
     PartialSaturationBodyResponse3, PartialSaturationError3, PartialSaturationExchange3,
+    PartialSaturationForcing3,
 };
 mod body_motion;
 pub use body_motion::{

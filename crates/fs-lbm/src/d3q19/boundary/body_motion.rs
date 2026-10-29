@@ -229,7 +229,7 @@ impl BoundaryGrid3 {
     /// repeatedly reconstructed from its angular velocity.
     ///
     /// # Errors
-    /// Inherits the force-free BGK/low-Mach admission of the native coupling.
+    /// Inherits the BGK/held-Guo-force and low-Mach admission of the native coupling.
     /// Both swept enclosing balls must stay in the interior domain halo and
     /// avoid fixed solid voxels; contact and periodic body wrapping are refused.
     /// Native drift, endpoint geometry, receipt and cancellation failures leave
@@ -237,7 +237,7 @@ impl BoundaryGrid3 {
     ///
     /// This is one rigid immersed body with retained interior fluid, not a
     /// displaced-fluid density closure, moving-mask remap, GCL or calibrated drag
-    /// model. No full coupled temporal-order or multi-body claim is made.
+    /// model. No full coupled temporal-order claim is made.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // One atomic split step.
     pub fn step_with_moving_partial_saturation_body(
         &mut self,

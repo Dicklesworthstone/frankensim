@@ -4493,7 +4493,7 @@ blended populations using the existing native link receipt. Thus the immersed
 body's action/reaction is not confused with wall reaction. Global angular
 balance on a periodic domain additionally needs periodic transport flux.
 
-This is a force-free BGK, fixed-geometry/world-inertia velocity substep in
+This is a BGK/Guo, fixed-geometry/world-inertia velocity substep in
 lattice units `dx=dt=1`. The caller owns pose drift and gyroscopic evolution and
 must rotate world inertia when orientation changes. Fluid populations and their
 mass/momentum remain in the immersed volume: body inertia is **additional** to
@@ -4508,7 +4508,7 @@ accurate (Najuch and Sun, *Computers & Fluids* 189, 2019,
 validate that constitutive response.
 
 Admission requires finite positive mass, exactly symmetric numerically SPD
-inertia, fractions in `[0,1]` positive only on fluid cells, zero fluid forcing,
+inertia, fractions in `[0,1]` positive only on fluid cells, finite held fluid forcing,
 periodic or stationary-wall faces, and body center/covered-point speeds squared
 below `0.03` at the initial, midpoint and final velocities. Unsupported models,
 invalid requests, numerical overflow and cancellation return
@@ -4581,7 +4581,7 @@ buffer clearing and swept-support checks poll at most every 64 cells, with at
 most 512 membership queries per cell. Native collision and streaming retain
 their existing tile checkpoints. Scratch allocation itself is not interruptible.
 
-This is one force-free BGK immersed body in lattice `dx=dt=1`, with solid inertia
+This is one BGK/Guo immersed body in lattice `dx=dt=1`, with solid inertia
 additional to all retained interior fluid. It supplies no displaced-fluid
 physical-density closure, moving-mask/fresh-cell remap, discrete GCL, exact
 cell-intersection volume, wall contact, periodic body wrapping, overlapping
@@ -4635,7 +4635,8 @@ separated elongated shapes and is not interval-certified CCD. Existing
 wall/halo support restrictions remain. All final shapes, velocities, work and
 momentum accounts and cancellation checks precede fluid or body publication;
 a late failure in the last body rolls back the entire assembly. Nested
-per-body trajectory wall fields are zero: the assembly owns the wall account.
+per-body trajectory wall and fluid-forcing fields are zero: the assembly owns
+both accounts.
 
 There is one reusable fraction field per body and one shared fluid scratch
 pair, with fixed-size `O(N)` body work and two small native Cholesky allocations
@@ -4676,3 +4677,44 @@ reflection bound or measured-instrument accuracy.
 ## Original phase conductivity through moving-liquid release
 
 The original `MaterialFreeSurfaceEnthalpy3` can retain `LiquidMassFractionConductivity`. Both ordinary and rheological complete-melt release transfer that exact law before publishing the receiving liquid and its clock. One shared helper keeps the pinned raw source, declared phase multiplier and effective conductivity separate. Liquid/liquid, finite-solid contact, gas-film and solved gas/radiation-interface half-cell resistances all consume that same effective coefficient, including thermal CFL admission. Source overflow and cancellation refuse before native publication. Focused regressions independently close each heat balance, preserve identity-law behavior and source claims, and carry the law through real melt/release and viscosity-dependent motion. This owner still admits only pure liquid at fixed caloric density; moving mushy phase, solidification, shrinkage and surface-creation energy remain outside this feature.
+
+### Imposed fluid forces through immersed rigid assemblies
+
+The single, simultaneous and moving partial-saturation owners admit the original
+uniform plus per-cell Guo fluid force, alongside each solid's external impulse.
+This enables body-force-driven flow with moving, rotating full-inertia bodies.
+All non-solid cells retain fluid, including occupied fractions, so the complete
+held fluid force acts once per cell. No saturation factor suppresses it and no
+fluid force is silently attributed to a solid. Additional solid loading remains
+in the original explicit impulse/couple input. Changing an evolved force field
+uses `BoundaryGrid3::rebind_force_field` to retain physical momentum and stress.
+
+Stored Guo populations are `f = g - S(u,F)/2`, with physical velocity
+`rho*u = sum_q(f_q*c_q) + F/2`. The existing native source-frame transform
+recovers `g`. The immersed correction is
+`sum_a B_a (Omega_s,a(g) - Omega_BGK(g))`, added to the unchanged native
+`collide_cell3(f, BGK, F)`. Its first moment remains
+`sum_a B_a*rho*(v_a_mid-u)`; the original six-velocity solve uses this same
+physical velocity. The remaining imposed collision impulse is `F`. This is
+the declared additive-force extension of the retained-fluid PSM law, not a
+new displaced-fluid density closure or a full coupled temporal-order claim.
+Unforced paths retain their numerical arithmetic, and zero occupancy reproduces
+the native forced BGK populations bit for bit.
+
+`PartialSaturationForcing3` reports the sum of the actual configured fluid forces,
+their moment about the requested world origin, and imposed-force work at the
+mean of physical pre/post-collision velocities. This local mechanical work
+account excludes streaming and pressure/internal-energy accounting; it is not
+a complete fluid energy balance. Wall and hydrodynamic reactions remain
+separate. For a moving assembly, only the assembly coupling receipt owns fluid
+forcing and walls; nested per-body versions are zero. The existing atomic
+publication and cancellation boundaries apply, with no new population storage
+or second collision/stream pass.
+
+The six focused cases in `tests/forced_partial_saturation3.rs` check an
+independent Guo source and shared-cell population formula with nonzero stress,
+native zero-occupancy bits, repeated full-tensor force/torque/work balances with
+walls and arbitrary origin, moving geometry with shared cells, singleton
+equality, late force overflow, cancellation and exact retry. Existing unforced
+fluid/body suites remain applicable. No sedimentation calibration, rheology,
+lubrication, contact, remap/GCL or continuum-force accuracy is established.

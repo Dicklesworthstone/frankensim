@@ -526,7 +526,7 @@ fn invalid_requests_and_cancellation_publish_nothing_and_recover() {
 }
 
 #[test]
-fn unsupported_collision_forcing_open_faces_and_voxel_occupancy_refuse() {
+fn unsupported_collision_open_faces_and_voxel_occupancy_refuse() {
     let mut body = body();
     let good = fractions();
     let mut grids = [
@@ -541,7 +541,6 @@ fn unsupported_collision_forcing_open_faces_and_voxel_occupancy_refuse() {
             [0.0; 3],
             BoundarySpec3::periodic(),
         ),
-        BoundaryGrid3::new(N, N, N, 0.83, [1e-5, 0.0, 0.0], BoundarySpec3::periodic()),
         BoundaryGrid3::new(
             N,
             N,

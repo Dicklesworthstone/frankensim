@@ -1,7 +1,8 @@
 //! Spatial rigid-body response for the native partially saturated BGK law.
 //!
 //! With `G(r) v = V + omega cross r`, the solid impulse at one cell is
-//! `B rho (u-Gv)`. Thus `K = sum(B rho G^T G)` is positive semidefinite and
+//! `B rho (u-Gv)`, where `u` includes the native Guo half-force shift.
+//! Thus `K = sum(B rho G^T G)` is positive semidefinite and
 //! one midpoint impulse solve `(M+K/2) delta_v = sum(B rho G^T(u-Gv_n))+J`
 //! couples all six velocities. The inertia and sampled geometry are frozen
 //! in this substep: no Euler/gyroscopic or pose evolution is hidden here.
@@ -13,8 +14,8 @@
 
 use super::{
     BoundaryGrid3, BoundaryLink3, CancelGate, CollisionError3, CollisionModel3, E3, Face3,
-    FaceBoundary3, OPP3, Q3, StreamView, TILE_CELLS, WallMomentumExchange3, collide_cell3,
-    equilibrium3,
+    FaceBoundary3, OPP3, Q3, StreamView, TILE_CELLS, WallMomentumExchange3, cell_force,
+    collide_cell3, equilibrium3,
 };
 
 mod multiple;
@@ -60,6 +61,63 @@ pub struct PartialSaturationExchange3 {
     pub coupling_weight_sum: f64,
 }
 
+/// Imposed fluid body force, separate from immersed-body and wall reactions.
+/// All non-solid cells retain fluid, including occupied fractions; the full
+/// held Guo force therefore acts there exactly once, without a saturation
+/// multiplier. An additional solid load belongs separately to the body's
+/// external impulse; the imposed fluid force is not a hydrodynamic reaction.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PartialSaturationForcing3 {
+    /// Sum of held per-cell force densities for this lattice tick.
+    pub impulse: [f64; 3],
+    /// Moment of those forces about the requested fixed world origin.
+    pub angular_impulse: [f64; 3],
+    /// Imposed impulse dotted with the actual mean of the physical velocities
+    /// before and after local collision. This is a local mechanical work
+    /// account, not a complete fluid energy or streaming/pressure-work balance.
+    pub midpoint_work: f64,
+}
+
+impl PartialSaturationForcing3 {
+    fn add(
+        &mut self,
+        incoming: [f64; Q3],
+        outgoing: [f64; Q3],
+        force: [f64; 3],
+        cell: [usize; 3],
+        origin: [f64; 3],
+    ) -> Result<()> {
+        if force == [0.0; 3] {
+            return Ok(());
+        }
+        let (_, before) = moments(incoming, force, cell)?;
+        let (_, after) = moments(outgoing, force, cell)?;
+        let midpoint = core::array::from_fn(|i| 0.5 * (before[i] + after[i]));
+        let arm = core::array::from_fn(|i| cell[i] as f64 + 0.5 - origin[i]);
+        let angular = cross(arm, force);
+        for i in 0..3 {
+            self.impulse[i] += force[i];
+            self.angular_impulse[i] += angular[i];
+        }
+        self.midpoint_work += dot(force, midpoint);
+        Ok(())
+    }
+
+    fn checked(self) -> Result<Self> {
+        if self
+            .impulse
+            .into_iter()
+            .chain(self.angular_impulse)
+            .chain([self.midpoint_work])
+            .all(f64::is_finite)
+        {
+            Ok(self)
+        } else {
+            Err(invalid("imposed fluid force account overflowed"))
+        }
+    }
+}
+
 /// Accepted body update plus separately accounted stationary-wall exchange.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[must_use]
@@ -70,6 +128,8 @@ pub struct PartialSaturationBodyExchange3 {
     /// from the actual blended populations about the same requested origin.
     /// Periodic transport angular flux is not included in this wall receipt.
     pub walls: WallMomentumExchange3,
+    /// External fluid forcing, counted once over all retained fluid cells.
+    pub forcing: PartialSaturationForcing3,
     /// Translational velocity used by the fluid collision.
     pub velocity_midpoint: [f64; 3],
     /// Angular velocity used by the fluid collision.
@@ -165,7 +225,7 @@ pub(super) fn low_mach(velocity: [f64; 3]) -> bool {
     velocity.into_iter().all(f64::is_finite) && dot(velocity, velocity) < 0.03
 }
 
-fn moments(populations: [f64; Q3], cell: [usize; 3]) -> Result<(f64, [f64; 3])> {
+fn moments(populations: [f64; Q3], force: [f64; 3], cell: [usize; 3]) -> Result<(f64, [f64; 3])> {
     let mut rho = 0.0;
     let mut momentum = [0.0; 3];
     for (q, population) in populations.into_iter().enumerate() {
@@ -174,8 +234,13 @@ fn moments(populations: [f64; Q3], cell: [usize; 3]) -> Result<(f64, [f64; 3])> 
         momentum[1] += f64::from(E3[q].1) * population;
         momentum[2] += f64::from(E3[q].2) * population;
     }
-    let velocity = momentum.map(|p| p / rho);
+    let velocity = if force == [0.0; 3] {
+        momentum.map(|p| p / rho)
+    } else {
+        core::array::from_fn(|i| (momentum[i] + 0.5 * force[i]) / rho)
+    };
     if !populations.into_iter().all(f64::is_finite)
+        || !force.into_iter().all(f64::is_finite)
         || !(rho.is_finite() && rho > 0.0)
         || !velocity.into_iter().all(f64::is_finite)
     {
@@ -185,6 +250,22 @@ fn moments(populations: [f64; Q3], cell: [usize; 3]) -> Result<(f64, [f64; 3])> 
         });
     }
     Ok((rho, velocity))
+}
+
+// Guo stores f = g - S(u,F)/2. Replace the BGK collision on physical g,
+// leaving the source outside that replacement: native_BGK(f,F) +
+// sum_a B_a [Omega_s,a(g) - Omega_BGK(g)]. Each correction then has
+// first moment B_a rho (v_a-u), and the external fluid impulse remains F.
+// Reuse the source-frame owner rather than reproducing its polynomial.
+fn physical_populations(
+    mut populations: [f64; Q3],
+    velocity: [f64; 3],
+    force: [f64; 3],
+) -> [f64; Q3] {
+    if force != [0.0; 3] {
+        crate::thermal::forcing::reframe3(&mut populations, velocity, force, [0.0; 3]);
+    }
+    populations
 }
 
 impl BoundaryGrid3 {
@@ -201,10 +282,13 @@ impl BoundaryGrid3 {
     /// native tile-major collision and pull operators. The existing `post`
     /// and `next` buffers are reused; only first-use streaming scratch and two
     /// fixed-size Cholesky factors allocate. Zero fractions recover the
-    /// ordinary force-free BGK step bit for bit.
+    /// ordinary BGK/Guo step bit for bit. The immersed correction operates on
+    /// physical half-source-shifted populations; body response uses the same
+    /// force-corrected fluid velocity. Uniform and per-cell forcing are added
+    /// by the original grid owner, and reported separately from reactions.
     ///
     /// # Errors
-    /// Requires BGK, zero fluid forcing, periodic or stationary-wall faces,
+    /// Requires BGK, finite held forcing, periodic or stationary-wall faces,
     /// symmetric positive-definite inertia, finite inputs, and body center/
     /// sampled point speeds squared below `0.03` before/midpoint/after.
     /// Invalid inputs, numerical overflow and cancellation leave all fluid
@@ -254,13 +338,12 @@ impl BoundaryGrid3 {
         if solid_fractions.len() != self.nx * self.ny * self.nz {
             return Err(invalid("solid fractions must cover the whole grid"));
         }
-        if self.force != [0.0; 3]
-            || Face3::ALL.into_iter().any(|face| {
+        if Face3::ALL.into_iter().any(|face| {
                 !matches!(self.boundaries.face(face), FaceBoundary3::Periodic)
                     && !matches!(self.boundaries.face(face), FaceBoundary3::Wall { velocity } if velocity == [0.0; 3])
             })
         {
-            return Err(invalid("requires force-free fluid and periodic/stationary-wall faces"));
+            return Err(invalid("requires periodic/stationary-wall faces"));
         }
         if !(body.mass.is_finite() && body.mass > 0.0)
             || !body
@@ -293,16 +376,6 @@ impl BoundaryGrid3 {
             checkpoint(gate)?;
             for lane in 0..TILE_CELLS {
                 let cell = self.coords(tile, lane);
-                if self
-                    .force_field
-                    .as_ref()
-                    .is_some_and(|f| f[tile * TILE_CELLS + lane] != [0.0; 3])
-                {
-                    return Err(PartialSaturationError3::Cell {
-                        cell,
-                        reason: "immersed coupling requires zero fluid forcing",
-                    });
-                }
                 let epsilon = solid_fractions[(cell[2] * self.ny + cell[1]) * self.nx + cell[0]];
                 if !(epsilon.is_finite() && (0.0..=1.0).contains(&epsilon))
                     || (epsilon > 0.0 && self.solid[tile] & (1u64 << lane) != 0)
@@ -323,7 +396,9 @@ impl BoundaryGrid3 {
                         reason: "initial body point exceeds low-Mach envelope",
                     });
                 }
-                let (rho, velocity) = moments(self.f.each_ref().map(|f| f[tile].0[lane]), cell)?;
+                let force = cell_force(self.force, self.force_field.as_deref(), tile, lane);
+                let (rho, velocity) =
+                    moments(self.f.each_ref().map(|f| f[tile].0[lane]), force, cell)?;
                 let weight = epsilon * (tau - 0.5) / (1.0 - epsilon + tau - 0.5) * rho;
                 let slip = core::array::from_fn(|axis| velocity[axis] - solid_velocity[axis]);
                 let torque = cross(r, slip);
@@ -384,6 +459,7 @@ impl BoundaryGrid3 {
 
         let mut exchange = PartialSaturationExchange3::default();
         let mut walls = WallMomentumExchange3::default();
+        let mut forcing = PartialSaturationForcing3::default();
         for tile in 0..self.f[0].len() {
             checkpoint(gate)?;
             for lane in 0..TILE_CELLS {
@@ -392,7 +468,8 @@ impl BoundaryGrid3 {
                 }
                 let cell = self.coords(tile, lane);
                 let f = self.f.each_ref().map(|f| f[tile].0[lane]);
-                let ordinary = collide_cell3(f, self.collision_model, [0.0; 3])
+                let force = cell_force(self.force, self.force_field.as_deref(), tile, lane);
+                let ordinary = collide_cell3(f, self.collision_model, force)
                     .map_err(|source| PartialSaturationError3::Collision { cell, source })?;
                 let mut post = ordinary;
                 let epsilon = solid_fractions[(cell[2] * self.ny + cell[1]) * self.nx + cell[0]];
@@ -407,15 +484,22 @@ impl BoundaryGrid3 {
                             reason: "solved body point exceeds low-Mach envelope",
                         });
                     }
-                    let (rho, velocity) = moments(f, cell)?;
+                    let (rho, velocity) = moments(f, force, cell)?;
+                    let physical = physical_populations(f, velocity, force);
                     let fluid_eq = equilibrium3(rho, velocity);
                     let solid_eq = equilibrium3(rho, solid_velocity);
                     let b = epsilon * (tau - 0.5) / (1.0 - epsilon + tau - 0.5);
                     let mut fluid_impulse = [0.0; 3];
                     for q in 0..Q3 {
-                        let fluid_collision = (fluid_eq[q] - f[q]) / tau;
-                        let solid_collision = f[OPP3[q]] - f[q] + solid_eq[q] - fluid_eq[OPP3[q]];
-                        post[q] = f[q] + (1.0 - b) * fluid_collision + b * solid_collision;
+                        let fluid_collision = (fluid_eq[q] - physical[q]) / tau;
+                        let solid_collision =
+                            physical[OPP3[q]] - physical[q] + solid_eq[q] - fluid_eq[OPP3[q]];
+                        post[q] = if force == [0.0; 3] {
+                            // Preserve the original force-free numerical path.
+                            f[q] + (1.0 - b) * fluid_collision + b * solid_collision
+                        } else {
+                            ordinary[q] + b * (solid_collision - fluid_collision)
+                        };
                         let correction = post[q] - ordinary[q];
                         exchange.fluid_population_mass_change += correction;
                         fluid_impulse[0] += f64::from(E3[q].0) * correction;
@@ -443,6 +527,7 @@ impl BoundaryGrid3 {
                         reason: "blended collision overflowed",
                     });
                 }
+                forcing.add(f, post, force, cell, moment_origin)?;
                 for (field, value) in self.post.iter_mut().zip(post) {
                     field[tile].0[lane] = value;
                 }
@@ -471,6 +556,7 @@ impl BoundaryGrid3 {
         let walls = walls
             .checked()
             .map_err(|_| invalid("wall exchange overflowed"))?;
+        let forcing = forcing.checked()?;
         let dv = core::array::from_fn(|i| after[i] - body.velocity[i]);
         let dw = core::array::from_fn(|i| omega_after[i] - body.angular_velocity[i]);
         let dp = dv.map(|v| body.mass * v);
@@ -559,6 +645,7 @@ impl BoundaryGrid3 {
         let receipt = PartialSaturationBodyExchange3 {
             hydrodynamic: exchange,
             walls,
+            forcing,
             velocity_midpoint: midpoint,
             angular_velocity_midpoint: omega_mid,
             kinetic_energy_change,
