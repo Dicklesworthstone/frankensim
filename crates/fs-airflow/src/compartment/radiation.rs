@@ -26,6 +26,9 @@ use fs_gas::multicomponent::compartment::{Layer, LayerRates, TwoZone, ZoneError}
 use fs_la::prepared_lu::{LuWorkspace, LuWorkspaceError};
 use fs_qty::{Area, Length, Power, Qty, Temperature};
 
+/// Source-explicit Rayleigh soot absorption and its Planck-weighted gray mean.
+pub mod soot;
+
 /// Maximum surface axis for the bounded dense reflection solve.
 pub const MAX_RADIATION_SURFACES: usize = 64;
 /// Maximum authored reciprocal chords per enclosure.

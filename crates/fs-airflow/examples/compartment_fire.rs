@@ -4,18 +4,20 @@
 //!   data/reference/compartment_fire/steckler_1982_cases.csv 10 10 10 0.5 1800 4
 //!
 //! Required: cases CSV, case number, inner h [W/m2/K], outer h, maximum dt [s].
-//! Optional: end time [s] (1800), wall cells (4). Coefficients are explicitly
+//! Optional: end time [s] (1800), wall cells (4), plume (unconfined|neutral).
+//! Coefficients are explicitly
 //! chosen engineering inputs, not fitted material or validation parameters.
 //! The CFAST deck's wall approximation is used without retuning. This prescribed
 //! external heat-source case does not consume fuel/O2 or make products/soot;
-//! species-limited burning is a separate source operator. Gas radiation and
-//! weak-plume penetration remain outside this example. Radiation from the fire
+//! species-limited burning is a separate source operator. Participating-gas
+//! radiation remains outside this example. The optional neutral plume limit
+//! uses actual receiver density and donor enthalpy. Radiation from the fire
 //! is distributed uniformly by enclosure area; no gas emissivity is inferred.
 
 #[path = "compartment_fire/air.rs"]
 mod air;
 
-use fs_airflow::compartment::fire::PrescribedFire;
+use fs_airflow::compartment::fire::{PlumePenetration, PrescribedFire};
 use fs_airflow::compartment::wall::{
     GasContact, HeatTransferCoefficient, SpecificEnthalpy, ThermalConductivity, Wall1d,
     WallBoundary, WallGeometry, WallSolve,
@@ -115,8 +117,8 @@ fn read_case(path: &str, number: &str) -> Result<Case, Box<dyn Error>> {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if !(5..=7).contains(&args.len()) {
-        return Err("usage: compartment_fire <cases.csv> <case-number> <inner-h-W/m2/K> <outer-h-W/m2/K> <max-dt-s> [end-s=1800] [wall-cells=4]".into());
+    if !(5..=8).contains(&args.len()) {
+        return Err("usage: compartment_fire <cases.csv> <case-number> <inner-h-W/m2/K> <outer-h-W/m2/K> <max-dt-s> [end-s=1800] [wall-cells=4] [plume=unconfined|neutral]".into());
     }
     let c = read_case(&args[0], &args[1])?;
     let h_inside = positive(&args[2])?;
@@ -132,6 +134,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|s| s.parse::<usize>())
         .transpose()?
         .unwrap_or(4);
+    let penetration = match args.get(7).map(String::as_str).unwrap_or("unconfined") {
+        "unconfined" => PlumePenetration::Unconfined,
+        "neutral" => PlumePenetration::NeutralBuoyancy,
+        _ => return Err("plume must be unconfined or neutral".into()),
+    };
     if end > 1800.0 || !(1..=32).contains(&cells) {
         return Err("case supports at most 1800 s; wall cells must be 1..=32".into());
     }
@@ -230,6 +237,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut average_interface = 0.0;
     let mut observation_duration = 0.0;
     let mut next_output = 0.0;
+    let mut limited_plume_steps = 0usize;
+    let mut minimum_plume_ratio = 1.0_f64;
     eprintln!(
         "Case={}, original NASA9 N2/O2 200..1000 K, prescribed HRR={} W, convective fraction=0.8",
         c.id, c.heat
@@ -243,6 +252,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     eprintln!(
         "Uniform area-weighted incident fire radiation; no participating-gas radiation, pyrolysis, burning chemistry or fitted coefficient."
     );
+    eprintln!("Plume penetration: {penetration:?}; no parameters fitted to this comparison.");
     println!(
         "time_s,lower_temperature_k,upper_temperature_k,interface_height_m,pressure_pa,wall_inner_cell_temperature_k,ceiling_inner_cell_temperature_k,floor_inner_cell_temperature_k"
     );
@@ -252,12 +262,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         let before_time = network.rooms()[0].gas.time().value();
         let duration = Time::new(maximum_dt.min(end - before_time));
-        let (report, candidates) = network.step_with_sources(
+        let (report, (candidates, plume_ratio, plume_limited)) = network.step_with_sources(
             duration,
             NetworkControl::default(),
             |rooms, dt, rates, cancelled| {
                 let room = &rooms[0].gas;
-                let source = fire.evaluate(room, Acceleration::new(9.81), &mut *cancelled)?;
+                let source = fire.evaluate_with_penetration(
+                    room,
+                    Acceleration::new(9.81),
+                    penetration,
+                    &mut *cancelled,
+                )?;
+                let plume_ratio = source.plume_estimate.map_or(1.0, |estimate| {
+                    let nominal = estimate.value().mass_rate.value();
+                    if nominal > 0.0 {
+                        source.plume_mass_rate.value() / nominal
+                    } else {
+                        1.0
+                    }
+                });
+                let plume_limited = source.penetration_limit.is_some_and(|limit| limit.active);
                 rates[0] = source.rates;
                 let z = room.interface_height().value();
                 let lower_side = perimeter * z - c.door_width * z.min(c.door_height);
@@ -299,11 +323,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                     candidates.push(candidate);
                 }
-                Ok(candidates)
+                Ok((candidates, plume_ratio, plume_limited))
             },
             || false,
         )?;
         expected_energy_change += report.external_physical_energy_j;
+        limited_plume_steps += usize::from(plume_limited);
+        minimum_plume_ratio = minimum_plume_ratio.min(plume_ratio);
         max_mass_residual = max_mass_residual.max(report.mass_residual_kg.abs());
         max_pressure_residual = max_pressure_residual.max(report.maximum_pressure_residual_pa);
         let mut step_residual = report.physical_energy_residual_j;
@@ -345,6 +371,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     eprintln!(
         "steps={steps},whole_step_halvings={total_halvings},max_mass_residual_kg={max_mass_residual:.6e},max_combined_step_energy_residual_j={max_energy_residual:.6e},max_transport_pressure_residual_pa={max_pressure_residual:.6e},combined_energy_residual_j={:.6e}",
         final_energy - initial_energy - expected_energy_change
+    );
+    eprintln!(
+        "limited_plume_steps={limited_plume_steps},minimum_actual_to_nominal_entrainment={minimum_plume_ratio:.9}"
     );
     if end == 1800.0 && observation_duration > 0.0 {
         let predicted_upper = average_upper / observation_duration;

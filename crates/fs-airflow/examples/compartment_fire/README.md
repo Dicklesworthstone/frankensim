@@ -17,8 +17,9 @@ cargo run -p fs-airflow --features compartment-fire --example compartment_fire -
 
 Arguments are the retained CSV, case number, inner convection coefficient
 [W/(m² K)], outer convection coefficient, maximum timestep [s], end time [s],
-and cells through each wall. The last two arguments default to 1800 s and four
-cells. Both convection coefficients must be supplied explicitly. Tests 10, 11,
+cells through each wall, and an optional plume selector `unconfined` or
+`neutral`. These default to 1800 s, four cells, and `unconfined`, preserving the
+retained comparison below. Both convection coefficients must be supplied explicitly. Tests 10, 11,
 12, 13, 14 and 16 are available. CSV output contains transient temperatures,
 interface height and pressure; stderr contains balances and the comparison.
 
@@ -36,7 +37,11 @@ raw experiment and authored CFAST inputs remain separately identified in
   mixture is 0.79 N2 / 0.21 O2 by mole. Caloric extrapolation is refused.
 - Plume: fs-convection Heskestad correlation using the actual lower-layer
   density and mass-specific heat capacity. One donor species/enthalpy vector
-  is transferred with identical opposite signs.
+  is transferred with identical opposite signs. With `neutral`, the original
+  NASA enthalpy integral and the actual upper-layer density limit entrainment
+  to a neutrally buoyant heated plume, generalizing NIST TN 1889v1 §3.3.3.
+  Nominal and accepted entrainment remain distinct; the executable reports
+  the number of accepted steps where the cap operated and the smallest ratio.
 - Door: fs-airflow stratified hydrostatic opening, including simultaneous
   directional slabs, solved through the bounded pressure-coupled network.
 - Walls: three fixed-mass profiles (vertical walls, ceiling, floor), using the
@@ -58,7 +63,9 @@ is first order; it is not a fully temperature-implicit or second-order method.
 
 This executable uses prescribed external heat. It does not consume oxygen or
 fuel, generate combustion products/soot, include participating-gas radiation,
-apply a weak-plume penetration correction, or model pyrolysis. The separate
+or model pyrolysis. The optional weak-plume limit describes neither momentum
+overshoot nor detrainment, and does not imply improved experimental agreement.
+To exercise it, append `neutral` to the complete command above. The separate
 InventoryLimitedReaction::apply_split API can be composed through
 ZoneNetwork::step_with_stages when an explicit conserved reaction is supplied.
 It uses inventories after transport and preserves the physical clock; add its
@@ -105,3 +112,10 @@ prediction changes by less than 3e-8 K.
 retain all six cases and the timestep refinement. Dalmarnock is not used in
 this example or its calibration. The correlation-only rung remains runnable
 as fs-convection's compartment_fire_correlations example.
+
+The new `neutral` option also completes the full Test 10 interval at dt=0.5 s:
+3,601 accepted steps, two whole-step halvings, and a combined gas/wall energy
+residual of −9.842012e-4 J. The penetration cap is inactive throughout this case;
+its mean upper temperature is 459.852005511 K and its interface is
+0.753201788 m, retaining the original discrepancy. The limiting hot-receiver
+cases are exercised separately with actual gas inventories in the plume tests.

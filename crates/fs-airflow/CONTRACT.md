@@ -1019,10 +1019,33 @@ from the original current species/caloric inventory, then reuses Heskestad
 entrainment. One identical donor vector moves from lower to upper; convective
 heat enters the upper layer and radiant power is returned separately. An absent
 upper layer can be created by real entrainment. No fuel/products/soot are
-invented, and this prescribed-HRR owner does not consume oxygen. Existing
-upper-layer weak-plume penetration, pyrolysis, and field-resolved flame behavior
-remain outside this implementation. The separate inventory-limited burning
+invented, and this prescribed-HRR owner does not consume oxygen. Pyrolysis and
+field-resolved flame behavior remain outside this prescribed-HRR
+helper. The separate inventory-limited burning
 adapter consumes actual reactants and accounts for original formation energy.
+
+`PrescribedFire::evaluate_with_penetration` optionally applies
+`PlumePenetration::NeutralBuoyancy`. NIST TN 1889v1 §3.3.3 equations 3.18–3.19
+give the equal-composition constant-Cp limit `Qc/[Cp(Tu-Tl)]`. This extension
+uses the current lower/upper molecular weights to find the donor temperature
+at the upper-layer density, `Tn = Tu R_upper/R_lower`, and integrates the
+original donor-species NASA enthalpy differences to that temperature. Accepted
+entrainment is the smaller of the original Heskestad estimate and `Qc/Δh`.
+An absent upper layer or an already buoyant donor imposes no barrier. A neutral
+state outside the original caloric domain refuses rather than extrapolates.
+The original `evaluate` retains its unconfined choice. A source with zero
+convective power produces no gas heat or entrainment and reports its radiant
+power without invoking the flame correlation.
+
+This is a steady reduced penetration limit, not resolved momentum overshoot,
+detrainment, or a stalled-plume calculation. Supplied convective heat still
+enters the upper layer once. Nominal and accepted entrainment, neutral
+temperature, required enthalpy rise, and whether the cap was active are
+returned separately. Exact species transfer, common-pressure energy closure,
+the published constant-Cp limit, variable-Cp/unequal-composition cases,
+caloric-reference and species-order invariance, and domain/cancellation
+refusals are tested. No improvement in experimental bias is inferred from
+this additional model option.
 
 Focused native verification passes 30 original-source airflow tests: ten
 stratified vents, seven network/source-composition cases, nine thermal-wall
@@ -1085,6 +1108,28 @@ accuracy. Tests include transparent diffuse plates, black gray-medium slabs,
 hemispherical angular refinement against the independent exponential-integral
 solution, ordered two-layer transfer, opaque shielding, exact equilibrium,
 self-view geometry and actual gas-plus-wall storage conservation.
+
+`radiation::soot::RayleighSoot` supplies a constant-index, dilute Rayleigh-particle
+absorption closure for caller-sourced refractive indices, particle density,
+loading and spectral-temperature domain. It converts actual particulate mass
+concentration to volume fraction; soot is never added to ideal-gas species,
+moles or pressure. The spectral law is the pinned RADCAL small-particle law.
+Its analytic Planck mean uses `4 ζ(5)/ζ(4)` and the exact defining SI constants,
+and is independently checked by direct wavelength quadrature. Zero soot or a
+zero absorptive index is exactly transparent. Coefficient evaluations allocate
+nothing; converting a report into `LayerAbsorption` explicitly records its
+particle population, optical source and blackbody weighting temperature.
+
+This weighting temperature is a radiation-spectrum input: the local particle
+temperature gives an emission mean and an illuminating blackbody temperature
+gives that source's incident mean. One gray coefficient does not exactly
+represent both different spectra or spectral filtering along a finite path.
+Small particles, dilution, negligible scattering and constant optical indices
+remain source assumptions. Using the existing one-temperature gas heat account
+also assumes particle/gas thermal equilibrium. No soot yield, transport law,
+molecular gas spectroscopy or universal optical constants are inferred. Tests
+exercise the original enclosure's signed surface/gas exchange at four soot
+loadings as well as the independent spectral integral.
 
 
 ### Runnable two-zone public-case comparison and pressure linearization
