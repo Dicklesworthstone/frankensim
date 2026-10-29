@@ -198,6 +198,34 @@ pub fn resolve_sheet(card: &MaterialCard, point: &QueryPoint,
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SheetMatrix([f64; 9]);
 impl SheetMatrix {
+    /// Admit a dense symmetric positive-definite matrix in engineering-strain
+    /// coordinates. This also represents rotated or multilayer sections whose
+    /// normal/shear couplings cannot be expressed by four orthotropic constants.
+    /// No coefficients are symmetrized, clipped, or supplied implicitly.
+    pub fn from_coefficients(matrix: [f64; 9]) -> Result<Self, SheetError> {
+        if matrix.iter().any(|v| !v.is_finite())
+            || (0..3).any(|i| (0..3).any(|j| matrix[3*i+j] != matrix[3*j+i]))
+            || [matrix[0], matrix[4], matrix[8]].iter().any(|v| *v <= 0.0)
+        {
+            return Err(SheetError::Invalid("sheet matrix must be finite, symmetric and positive definite"));
+        }
+        // A diagonal congruence avoids multiplying coefficients with very
+        // different dimensions or magnitudes before the Cholesky admission.
+        let scale = [matrix[0].sqrt(), matrix[4].sqrt(), matrix[8].sqrt()];
+        let a = matrix[1] / scale[0] / scale[1];
+        let b = matrix[2] / scale[0] / scale[2];
+        let c = matrix[5] / scale[1] / scale[2];
+        let pivot = 1.0 - a*a;
+        if !pivot.is_finite() || pivot <= 0.0 {
+            return Err(SheetError::Invalid("sheet matrix has a nonpositive or unresolved pivot"));
+        }
+        let last = (c-a*b) / pivot.sqrt();
+        if !last.is_finite() || 1.0-b*b-last*last <= 0.0 {
+            return Err(SheetError::Invalid("sheet matrix has a nonpositive or unresolved pivot"));
+        }
+        Ok(Self(matrix))
+    }
+
     /// Independent principal-axis direct, cross and engineering-shear stiffness.
     pub fn orthotropic(a: f64, b: f64, cross: f64, shear: f64) -> Result<Self, SheetError> {
         if [a,b,cross,shear].iter().any(|v| !v.is_finite()) || a <= 0.0 || b <= 0.0 || shear <= 0.0 {

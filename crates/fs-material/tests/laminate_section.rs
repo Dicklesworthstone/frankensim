@@ -32,7 +32,7 @@ fn reduced_q(e1: f64, e2: f64, nu12: f64, g12: f64) -> [f64; 9] {
 
 /// An orthotropic spruce-like lamina (L along axis 1); moduli in Pa.
 fn spruce() -> OrthotropicElastic {
-    // E_L, E_R, E_T; ν_LR, ν_LT, ν_RT; G_LR, G_LT, G_RT (Pa).
+    // E_L, E_R, E_T; ν_LR, ν_LT, ν_RT; G_LR, G_RT, G_TL (Pa).
     OrthotropicElastic::new(
         [11.0e9, 0.9e9, 0.5e9],
         [0.37, 0.42, 0.47],
@@ -209,11 +209,11 @@ fn g0_transverse_shear_from_layers() {
     let kappa = section.shear_factor();
     assert!((kappa[0] - 5.0 / 6.0).abs() <= 1e-14, "κ_x = {}", kappa[0]);
     assert!((kappa[1] - 5.0 / 6.0).abs() <= 1e-14, "κ_y = {}", kappa[1]);
-    // H_xz = κ·G13·h, H_yz = κ·G23·h (3-axis normal: G13 = g[1], G23 = g[2]).
+    // H_xz = κ·G13·h, H_yz = κ·G23·h (3-axis normal: G13 = g[2], G23 = g[1]).
     let hxz = section.shear_pa_m()[0];
     let hyz = section.shear_pa_m()[3];
-    assert!((hxz / (5.0 / 6.0 * e.g[1] * h) - 1.0).abs() <= 1e-13);
-    assert!((hyz / (5.0 / 6.0 * e.g[2] * h) - 1.0).abs() <= 1e-13);
+    assert!((hxz / (5.0 / 6.0 * e.g[2] * h) - 1.0).abs() <= 1e-13);
+    assert!((hyz / (5.0 / 6.0 * e.g[1] * h) - 1.0).abs() <= 1e-13);
     assert_eq!(section.shear_pa_m()[1], 0.0);
     assert_eq!(section.shear_pa_m()[2], 0.0);
 }

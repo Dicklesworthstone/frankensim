@@ -108,6 +108,15 @@ pub enum LayerLaw {
     /// its frequency-dependent plane-stress Schur complement; the transverse
     /// shear uses the equilibrium (`ω = 0`) out-of-plane moduli.
     Prony(TensorProny),
+    /// Independently characterized reduced plane-stress stiffness and transverse
+    /// shear moduli. This does not invent an unmeasured third Young modulus or
+    /// out-of-plane Poisson ratios for an existing shell material source.
+    PlaneStress {
+        /// Symmetric positive-definite engineering-shear matrix [Pa].
+        stiffness_pa: [f64; 9],
+        /// Principal transverse shear moduli G13, G23 [Pa].
+        transverse_shear_pa: [f64; 2],
+    },
 }
 
 /// One lamina: a thickness, an in-plane orientation, its resolved source
@@ -200,13 +209,14 @@ fn rotate_reduced(q: &[f64; 9], angle: f64) -> Option<[f64; 9]> {
 
 /// Rotate the in-plane `[G_xz, G_yz]` diagonal transverse shear by `angle`
 /// about the normal: `diag(G_xz, G_yz)` transforms as a symmetric 2-tensor.
-fn rotate_transverse(g: [f64; 2], angle: f64) -> [f64; 2] {
+fn rotate_transverse(g: [f64; 2], angle: f64) -> [f64; 4] {
     if angle == 0.0 {
-        return g;
+        return [g[0], 0.0, 0.0, g[1]];
     }
     let (s, c) = angle.sin_cos();
     let (cc, ss) = (c * c, s * s);
-    [g[0] * cc + g[1] * ss, g[0] * ss + g[1] * cc]
+    let cross = (g[0] - g[1]) * c * s;
+    [g[0] * cc + g[1] * ss, cross, cross, g[0] * ss + g[1] * cc]
 }
 
 /// The reference (band-low storage) reduced in-plane stiffness and the
@@ -219,6 +229,15 @@ fn principal_stiffness(
     layer: usize,
 ) -> Result<([f64; 9], [f64; 2]), LaminateError> {
     match law {
+        LayerLaw::PlaneStress { stiffness_pa, transverse_shear_pa } => {
+            crate::sheet::SheetMatrix::from_coefficients(*stiffness_pa).map_err(|_| {
+                LaminateError::Invalid { quantity: "reduced layer stiffness must be symmetric positive definite" }
+            })?;
+            if !transverse_shear_pa.iter().all(|v| finite_positive(*v)) {
+                return Err(LaminateError::Invalid { quantity: "reduced layer transverse shear modulus" });
+            }
+            Ok((*stiffness_pa, *transverse_shear_pa))
+        }
         LayerLaw::Elastic(e) => {
             let plane = OrthotropicPlaneElastic {
                 plane: MaterialPlane::Axes12,
@@ -234,7 +253,8 @@ fn principal_stiffness(
                 });
             }
             // G13 (x–z) and G23 (y–z) with the 3-axis normal to the plate.
-            let shear = [e.g[1], e.g[2]];
+            // OrthotropicElastic stores [G12, G23, G31].
+            let shear = [e.g[2], e.g[1]];
             if !shear.iter().all(|v| finite_positive(*v)) {
                 return Err(LaminateError::Invalid {
                     quantity: "transverse shear modulus",
@@ -346,8 +366,7 @@ impl LaminateSection {
             }
             // Uncorrected transverse shear stiffness ∫G dz; the energy-consistent
             // Whitney factor multiplies it below.
-            shear[0] += gs[0] * m0;
-            shear[3] += gs[1] * m0;
+            for k in 0..4 { shear[k] += gs[k] * m0; }
             let rho = layer.density_kg_m3;
             i0 += rho * m0;
             i1 += rho * m1;
@@ -356,7 +375,7 @@ impl LaminateSection {
                 z_bottom_m: z0,
                 z_top_m: z1,
                 q_bar_pa: q,
-                transverse_shear_pa: gs,
+                transverse_shear_pa: [gs[0], gs[3]],
             });
             bottom = top;
         }
@@ -367,6 +386,12 @@ impl LaminateSection {
         let kappa_y = transverse_shear_factor(&integrals, 4, 1, shear[3]);
         shear[0] *= kappa_x;
         shear[3] *= kappa_y;
+        // A positive diagonal congruence retains the complete transverse
+        // tensor and passivity. For off-axis multilayers these directional
+        // Whitney factors are an approximation, not a coupled warping solve.
+        let cross_correction = kappa_x.sqrt() * kappa_y.sqrt();
+        shear[1] *= cross_correction;
+        shear[2] = shear[1];
         let finite_9 = |m: &[f64; 9]| m.iter().all(|v| v.is_finite());
         if !(finite_9(&a) && finite_9(&b) && finite_9(&d))
             || !shear.iter().all(|v| v.is_finite())
@@ -431,13 +456,15 @@ impl LaminateSection {
     pub const fn d_pa_m3(&self) -> &[f64; 9] {
         &self.d_pa_m3
     }
-    /// Transverse shear stiffness `H` [Pa·m], row-major 2×2 (`[H_xz, _, _, H_yz]`).
+    /// Full symmetric transverse shear stiffness `H` [Pa·m], row-major 2×2
+    /// in `[xz,yz]`, including off-axis cross coupling.
     #[must_use]
     pub const fn shear_pa_m(&self) -> &[f64; 4] {
         &self.shear_pa_m
     }
-    /// Energy-consistent Whitney shear correction factor `[κ_x, κ_y]`
-    /// (`5/6` for one homogeneous layer).
+    /// Directional Whitney shear correction factors `[κ_x, κ_y]`
+    /// (`5/6` for one homogeneous layer). Cross shear uses their geometric
+    /// mean; off-axis multilayers do not claim a coupled 3-D warping solution.
     #[must_use]
     pub const fn shear_factor(&self) -> &[f64; 2] {
         &self.shear_factor
@@ -472,7 +499,7 @@ impl LaminateSection {
         let mut d = [C64::ZERO; 9];
         for (i, (layer, integ)) in self.layers.iter().zip(&self.integrals).enumerate() {
             let (q_re, q_im) = match &layer.law {
-                LayerLaw::Elastic(_) => (integ.q_bar_pa, [0.0f64; 9]),
+                LayerLaw::Elastic(_) | LayerLaw::PlaneStress { .. } => (integ.q_bar_pa, [0.0f64; 9]),
                 LayerLaw::Prony(p) => {
                     let (re, im) = p
                         .plane_stress_complex(MaterialPlane::Axes12, omega)
@@ -502,6 +529,34 @@ impl LaminateSection {
             }
         }
         Ok((a, b, d))
+    }
+
+    /// Integrate one principal-frame resultant matrix per retained layer using
+    /// this section's exact geometry and reference surface. For reduced
+    /// viscosities [Pa s], the outputs are membrane, coupling and bending
+    /// viscosities [N s/m, N s, N m s]. This is the same CLT integration as the
+    /// elastic section; no homogeneous h³/12 replacement discards a coating's
+    /// offset. The caller admits the constitutive matrices' passivity.
+    pub fn integrate_layer_matrices(&self, matrices: &[[f64; 9]])
+        -> Result<([f64; 9], [f64; 9], [f64; 9]), LaminateError>
+    {
+        if matrices.len() != self.layers.len() {
+            return Err(LaminateError::Invalid { quantity: "one resultant matrix is required per layer" });
+        }
+        let (mut a, mut b, mut d) = ([0.0; 9], [0.0; 9], [0.0; 9]);
+        for ((matrix, layer), geometry) in matrices.iter().zip(&self.layers).zip(&self.integrals) {
+            let q = rotate_reduced(matrix, layer.orientation_rad).ok_or(
+                LaminateError::Invalid { quantity: "nonfinite layer resultant" })?;
+            let (z0, z1) = (geometry.z_bottom_m, geometry.z_top_m);
+            let m0 = z1 - z0;
+            let m1 = 0.5 * m0 * (z1 + z0);
+            let m2 = m0 * (z0*z0 + z0*z1 + z1*z1) / 3.0;
+            for k in 0..9 { a[k] += q[k]*m0; b[k] += q[k]*m1; d[k] += q[k]*m2; }
+        }
+        if a.iter().chain(&b).chain(&d).any(|v| !v.is_finite()) {
+            return Err(LaminateError::Invalid { quantity: "unrepresentable layer resultants" });
+        }
+        Ok((a,b,d))
     }
 }
 

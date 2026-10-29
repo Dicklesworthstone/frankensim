@@ -67,6 +67,8 @@ pub mod relaxation;
 pub mod section;
 /// Laminate (layered) plate/shell sections (IRP M1.2-W7).
 pub mod laminate;
+/// Source-bound viscoelastic surface films and explicit isotropic tensor lifts.
+pub mod coating;
 /// Temperature refresh of complete source-bound layered mechanical sections.
 pub mod section_temperature;
 /// Source-bound effective sheet mass, membrane and independent bending response.

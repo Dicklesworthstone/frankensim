@@ -160,6 +160,31 @@ impl Kinematics {
         }
         (translation, rotation)
     }
+
+    fn director_inertia_basis(&self, r: f64, s: f64, col: usize)
+        -> ([f64; 3], [f64; 3], f64)
+    {
+        let h = [1.0-r-s, r, s];
+        let bubble = 27.0*r*s*h[0];
+        let mut translation = [0.0; 3];
+        let mut motion = [0.0; 3];
+        let mut drilling = 0.0;
+        if col < 18 {
+            let node = col/6;
+            let component = col%6;
+            if component < 3 {
+                translation[component] = h[node];
+            } else {
+                let mut rotation = [0.0; 3];
+                rotation[component-3] = 1.0;
+                motion = cross(rotation, self.normals[node]).map(|v| (h[node]-bubble/3.0)*v);
+                drilling = h[node]*self.normals[node][component-3];
+            }
+        } else {
+            motion = cross(self.bubble_axes[col-18], self.average).map(|v| bubble*v);
+        }
+        (translation, motion, drilling)
+    }
 }
 
 fn stiffness_rule() -> Vec<([f64; 3], f64)> {
@@ -192,7 +217,7 @@ impl ElementStrainField {
         u_18: &[f64; 18],
     ) -> Result<Self, PlateError> {
         let kin = Kinematics::new(mesh, tri, &g, normals);
-        let k = strain_matrix(&kin, &g, section.matrices(), &mut || false)?;
+        let k = strain_matrix(&kin, &g, section.coupled_matrices(), &mut || false)?;
         let transform = elastic_transform(&k)?;
         let (constant, twisting) = kin.shear_ties(&g);
         let mut q = [0.0; N];
@@ -277,22 +302,37 @@ pub(super) fn matrices(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Condensed, Condensed), PlateError> {
     let kin = Kinematics::new(mesh, tri, g, normals);
-    let mut k = strain_matrix(&kin, g, section.matrices(), cancelled)?;
+    let mut k = strain_matrix(&kin, g, section.coupled_matrices(), cancelled)?;
     let mut m: Matrix = [[0.0; N]; N];
     if mass == ShellMass::Consistent {
         for (lambda, weight) in mass_rule() {
             if cancelled() {
                 return Err(PlateError::Cancelled);
             }
-            let basis: Vec<_> = (0..N)
-                .map(|c| kin.inertia_basis(lambda[1], lambda[2], c))
-                .collect();
-            for i in 0..N {
-                for j in i..N {
-                    m[i][j] += weight
-                        * g.area_m2
-                        * (section.areal_mass_kg_m2 * dot(basis[i].0, basis[j].0)
-                            + section.rotary_inertia_kg * dot(basis[i].1, basis[j].1));
+            if section.director_inertia {
+                let basis: Vec<_> = (0..N)
+                    .map(|c| kin.director_inertia_basis(lambda[1], lambda[2], c)).collect();
+                for i in 0..N { for j in i..N {
+                    // The linear-through-thickness material velocity is
+                    // u_dot + z*director_dot. I1 is its work-conjugate cross
+                    // inertia, not an angular/translation scalar product.
+                    m[i][j] += weight*g.area_m2
+                        * (section.areal_mass_kg_m2*dot(basis[i].0, basis[j].0)
+                            + section.mass_first_moment_kg_m
+                                * (dot(basis[i].0, basis[j].1)+dot(basis[i].1, basis[j].0))
+                            + section.rotary_inertia_kg
+                                * (dot(basis[i].1, basis[j].1)+basis[i].2*basis[j].2));
+                } }
+            } else {
+                let basis: Vec<_> = (0..N)
+                    .map(|c| kin.inertia_basis(lambda[1], lambda[2], c)).collect();
+                for i in 0..N {
+                    for j in i..N {
+                        m[i][j] += weight
+                            * g.area_m2
+                            * (section.areal_mass_kg_m2 * dot(basis[i].0, basis[j].0)
+                                + section.rotary_inertia_kg * dot(basis[i].1, basis[j].1));
+                    }
                 }
             }
         }
@@ -305,6 +345,15 @@ pub(super) fn matrices(
                     section.rotary_inertia_kg
                 };
         }
+        for node in 0..3 { for component in 0..3 {
+            let mut rotation = [0.0; 3];
+            rotation[component] = 1.0;
+            let motion = cross(rotation, normals[node]);
+            for axis in 0..3 {
+                m[6*node+axis][6*node+3+component] =
+                    g.area_m2/3.0*section.mass_first_moment_kg_m*motion[axis];
+            }
+        } }
     }
     for i in 0..N {
         for j in i..N {
@@ -347,7 +396,7 @@ type Transform = [[f64; 18]; N];
 // kinematics and quadrature. Only their physical constitutive matrices differ.
 fn strain_matrix(
     kin: &Kinematics, g: &FacetGeometry,
-    (a, d, ks): ([f64; 9], [f64; 9], [[f64; 2]; 2]),
+    (a, b, d, ks): ([f64; 9], [f64; 9], [f64; 9], [[f64; 2]; 2]),
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Matrix, PlateError> {
     let (constant, twisting) = kin.shear_ties(g);
@@ -385,6 +434,12 @@ fn strain_matrix(
                     db[p][c] += d[3 * p + q] * bb[q][c];
                 }
             }
+        }
+        if b.iter().any(|v| *v != 0.0) {
+            for p in 0..3 { for c in 0..N { for q in 0..3 {
+                am[p][c] += b[3*p+q]*bb[q][c];
+                db[p][c] += b[3*p+q]*bm[q][c];
+            } } }
         }
         for p in 0..2 {
             for c in 0..N {
@@ -444,9 +499,9 @@ pub(super) fn viscosity_matrix(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Condensed, PlateError> {
     let kin = Kinematics::new(mesh, tri, g, normals);
-    let elastic = strain_matrix(&kin, g, section.matrices(), cancelled)?;
+    let elastic = strain_matrix(&kin, g, section.coupled_matrices(), cancelled)?;
     let transform = elastic_transform(&elastic)?;
-    let c = strain_matrix(&kin, g, law.matrices(), cancelled)?;
+    let c = strain_matrix(&kin, g, law.coupled_matrices(), cancelled)?;
     let mut ct = [[0.0; 18]; N];
     for a in 0..N { for j in 0..18 { for b in 0..N {
         ct[a][j] += c[a][b] * transform[b][j];

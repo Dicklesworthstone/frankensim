@@ -12,6 +12,7 @@
 
 use super::{ShellMesh, ShellModel, cross, dot};
 use crate::PlateError;
+use fs_material::laminate::LaminateSection;
 use fs_material::sheet::SheetMatrix;
 use fs_math::det;
 use fs_sparse::{Coo, DirectOrdering, LdltOptions, NdOptions, SymbolicLdlt};
@@ -28,7 +29,8 @@ pub mod connections;
 pub enum ShellMass {
     /// Exact polynomial mass, congruently condensed with the bubble rotations.
     Consistent,
-    /// Nodal translational and rotary inertia, without a bubble inertia field.
+    /// Nodal translational/rotary inertia and first-moment cross inertia,
+    /// without a bubble inertia field.
     Lumped,
 }
 
@@ -127,17 +129,20 @@ impl NodalDirectors {
     }
 }
 
-/// Independent membrane, bending and transverse-shear resultants. There is no
-/// membrane/bending coupling B and no loss or prestress in this linear section.
+/// Membrane, membrane/bending, bending and transverse-shear resultants about
+/// the mesh reference surface. No loss or prestress is inserted implicitly.
 #[derive(Debug, Clone, Copy)]
 pub struct ShearShellSection {
     membrane: SheetMatrix,
+    coupling: [f64; 9],
     bending: SheetMatrix,
     shear_n_m: [f64; 3],
     shear_correction: f64,
     areal_mass_kg_m2: f64,
+    mass_first_moment_kg_m: f64,
     rotary_inertia_kg: f64,
     material_angle_rad: f64,
+    director_inertia: bool,
 }
 
 impl ShearShellSection {
@@ -156,15 +161,72 @@ impl ShearShellSection {
     ) -> Result<Self, PlateError> {
         let out = Self {
             membrane,
+            coupling: [0.0; 9],
             bending,
             shear_n_m,
             shear_correction,
             areal_mass_kg_m2,
+            mass_first_moment_kg_m: 0.0,
             rotary_inertia_kg,
             material_angle_rad,
+            director_inertia: false,
         };
         out.validate()?;
         Ok(out)
+    }
+
+    /// Complete laminate resultants about the declared mesh reference surface.
+    /// `B` has units N, and `I1 = integral rho*z dz` has units kg/m. The full
+    /// `[A B; B D]` block and `[I0 I1; I1 I2]` inertia must be positive definite.
+    ///
+    /// Physical inertia integrates `u + z*(theta cross director)` using the
+    /// same director interpolation as the strain field. A separate director-
+    /// axis drilling inertia keeps the existing numerical gauge invertible;
+    /// it is not an additional physical rotation of material about its normal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_coupled(
+        membrane: SheetMatrix,
+        coupling: [f64; 9],
+        bending: SheetMatrix,
+        shear_n_m: [f64; 3],
+        shear_correction: f64,
+        areal_mass_kg_m2: f64,
+        mass_first_moment_kg_m: f64,
+        rotary_inertia_kg: f64,
+        material_angle_rad: f64,
+    ) -> Result<Self, PlateError> {
+        let out = Self {
+            membrane,
+            coupling,
+            bending,
+            shear_n_m,
+            shear_correction,
+            areal_mass_kg_m2,
+            mass_first_moment_kg_m,
+            rotary_inertia_kg,
+            material_angle_rad,
+            director_inertia: true,
+        };
+        out.validate()?;
+        Ok(out)
+    }
+
+    /// Consume the original material owner's CLT coefficients and inertia
+    /// moments without homogenizing layers or discarding unsymmetric coupling.
+    /// Layer angles are already integrated by `LaminateSection`; `angle` rotates
+    /// that whole section into the facet frame. The mesh must lie at the source
+    /// section's declared reference surface. Prony layers use the source's
+    /// retained reference storage here; broadband memory remains a separate law.
+    pub fn from_laminate(section: &LaminateSection, angle: f64) -> Result<Self, PlateError> {
+        let sheet = |m| SheetMatrix::from_coefficients(m).map_err(|_| PlateError::BadSection {
+            what: "laminate membrane or bending stiffness is not positive definite",
+        });
+        let shear = section.shear_pa_m();
+        Self::new_coupled(
+            sheet(*section.a_pa_m())?, *section.b_pa_m2(), sheet(*section.d_pa_m3())?,
+            [shear[0], shear[1], shear[3]], 1.0,
+            section.i0_kg_m2(), section.i1_kg_m(), section.i2_kg(), angle,
+        )
     }
 
     /// Homogeneous orthotropic solid, SI units. Both transverse shear moduli
@@ -227,6 +289,7 @@ impl ShearShellSection {
             c,
             self.shear_correction,
             self.areal_mass_kg_m2,
+            self.mass_first_moment_kg_m,
             self.rotary_inertia_kg,
             self.material_angle_rad,
         ]
@@ -238,10 +301,17 @@ impl ShearShellSection {
             || self.shear_correction <= 0.0
             || self.areal_mass_kg_m2 <= 0.0
             || self.rotary_inertia_kg <= 0.0
+            || (self.mass_first_moment_kg_m
+                / det::sqrt(self.areal_mass_kg_m2)
+                / det::sqrt(self.rotary_inertia_kg)).abs() >= 1.0
         {
             return Err(PlateError::BadSection {
                 what: "positive-definite shear, explicit positive correction and inertia required",
             });
+        }
+        if self.coupling.iter().any(|v| *v != 0.0) {
+            admit_coupled_block(self.membrane.coefficients(), &self.coupling,
+                self.bending.coefficients(), false)?;
         }
         Ok(())
     }
@@ -260,6 +330,18 @@ impl ShearShellSection {
         self.areal_mass_kg_m2
     }
 
+    /// Principal membrane/bending coupling B [N], about the mesh reference.
+    #[must_use]
+    pub const fn coupling_pa_m2(&self) -> &[f64; 9] { &self.coupling }
+
+    /// First through-thickness mass moment I1 [kg/m], about the mesh reference.
+    #[must_use]
+    pub const fn mass_first_moment_kg_m(&self) -> f64 { self.mass_first_moment_kg_m }
+
+    /// Second through-thickness mass moment I2 [kg].
+    #[must_use]
+    pub const fn rotary_inertia_kg(&self) -> f64 { self.rotary_inertia_kg }
+
     /// Principal A and D, prior to the explicit facet material-angle transform.
     #[must_use]
     pub const fn principal_matrices(&self) -> (&SheetMatrix, &SheetMatrix) {
@@ -267,6 +349,11 @@ impl ShearShellSection {
     }
 
     fn matrices(&self) -> ([f64; 9], [f64; 9], [[f64; 2]; 2]) {
+        let (a, _, d, shear) = self.coupled_matrices();
+        (a, d, shear)
+    }
+
+    fn coupled_matrices(&self) -> ([f64; 9], [f64; 9], [f64; 9], [[f64; 2]; 2]) {
         let s = det::sin(self.material_angle_rad);
         let c = det::cos(self.material_angle_rad);
         let t = [
@@ -303,10 +390,58 @@ impl ShearShellSection {
         }
         (
             rotate(self.membrane.coefficients()),
+            rotate(&self.coupling),
             rotate(self.bending.coefficients()),
             shear,
         )
     }
+}
+
+/// Congruence-scaled Cholesky admission of the physical six-component
+/// membrane/curvature work. In particular, B itself need not be positive:
+/// reversing layer order reverses B without changing section passivity.
+fn admit_coupled_block(a: &[f64; 9], b: &[f64; 9], d: &[f64; 9], semidefinite: bool)
+    -> Result<(), PlateError>
+{
+    let bad = || PlateError::BadSection {
+        what: "coupled membrane/bending resultant is not finite, symmetric and passive",
+    };
+    let mut block = [[0.0; 6]; 6];
+    for i in 0..3 { for j in 0..3 {
+        block[i][j] = a[3*i+j];
+        block[i][j+3] = b[3*i+j];
+        block[i+3][j] = b[3*i+j];
+        block[i+3][j+3] = d[3*i+j];
+    } }
+    if block.iter().flatten().any(|x| !x.is_finite())
+        || (0..6).any(|i| (0..6).any(|j| block[i][j] != block[j][i])) {
+        return Err(bad());
+    }
+    let mut scale = [0.0; 6];
+    for i in 0..6 {
+        if block[i][i] < 0.0 || (!semidefinite && block[i][i] == 0.0)
+            || (block[i][i] == 0.0 && block[i].iter().any(|v| *v != 0.0)) {
+            return Err(bad());
+        }
+        scale[i] = if block[i][i] == 0.0 { 1.0 } else { det::sqrt(block[i][i]) };
+    }
+    let tolerance = if semidefinite { 64.0*f64::EPSILON } else { 0.0 };
+    let mut l = [[0.0; 6]; 6];
+    for i in 0..6 { for j in 0..=i {
+        let mut value = block[i][j] / scale[i] / scale[j];
+        for k in 0..j { value -= l[i][k]*l[j][k]; }
+        if !value.is_finite() { return Err(bad()); }
+        if i == j {
+            if value < -tolerance || (!semidefinite && value <= 0.0) { return Err(bad()); }
+            l[i][j] = if value <= tolerance { 0.0 } else { det::sqrt(value) };
+        } else if l[j][j] == 0.0 {
+            if value.abs() > tolerance { return Err(bad()); }
+        } else {
+            l[i][j] = value/l[j][j];
+            if !l[i][j].is_finite() { return Err(bad()); }
+        }
+    } }
+    Ok(())
 }
 
 const IDENTITY: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
@@ -944,7 +1079,7 @@ pub fn s_norm_error(
             let f_elem_base0 = 2 * ((jc * ratio) * n_ref + (ic * ratio));
             let g_base0 = reference_model.mesh.facet(f_elem_base0)?;
             let sec_c = &reference_model.sections[f_elem_base0];
-            let (a_mat, d_mat, ks_mat) = sec_c.matrices();
+            let (a_mat, b_mat, d_mat, ks_mat) = sec_c.coupled_matrices();
 
             let mut g_c0_frame = g_base0.frame;
             let mut em_c_quad = [0.0; 3];
@@ -1052,7 +1187,8 @@ pub fn s_norm_error(
                         for p in 0..3 {
                             for q in 0..3 {
                                 q_ref += em_f_raw[p] * a_mat[3 * p + q] * em_f_raw[q]
-                                    + eb_f_raw[p] * d_mat[3 * p + q] * eb_f_raw[q];
+                                    + eb_f_raw[p] * d_mat[3 * p + q] * eb_f_raw[q]
+                                    + 2.0*em_f_raw[p]*b_mat[3*p+q]*eb_f_raw[q];
                             }
                         }
                         for p in 0..2 {
@@ -1160,7 +1296,8 @@ pub fn s_norm_error(
                             for p in 0..3 {
                                 for q in 0..3 {
                                     q_var += vm[p] * a_mat[3 * p + q] * vm[q]
-                                        + vb[p] * d_mat[3 * p + q] * vb[q];
+                                        + vb[p] * d_mat[3 * p + q] * vb[q]
+                                        + 2.0*vm[p]*b_mat[3*p+q]*vb[q];
                                 }
                             }
                             for p in 0..2 {
@@ -1189,7 +1326,8 @@ pub fn s_norm_error(
                     for p in 0..3 {
                         for q in 0..3 {
                             q_var += vm[p] * a_mat[3 * p + q] * vm[q]
-                                + vb[p] * d_mat[3 * p + q] * vb[q];
+                                + vb[p] * d_mat[3 * p + q] * vb[q]
+                                + 2.0*vm[p]*b_mat[3*p+q]*vb[q];
                         }
                     }
                     for p in 0..2 {
@@ -1216,7 +1354,8 @@ pub fn s_norm_error(
             for p in 0..3 {
                 for q in 0..3 {
                     q_mean +=
-                        dm[p] * a_mat[3 * p + q] * dm[q] + db[p] * d_mat[3 * p + q] * db[q];
+                        dm[p] * a_mat[3 * p + q] * dm[q] + db[p] * d_mat[3 * p + q] * db[q]
+                        + 2.0*dm[p]*b_mat[3*p+q]*db[q];
                 }
             }
             for p in 0..2 {

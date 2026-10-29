@@ -35,7 +35,36 @@ No director smoothing or material defaults are inferred. `ShearShellSection`
 requires independent positive-definite membrane A, bending D and transverse
 shear, an explicit positive shear correction, areal mass, rotary inertia and
 material angle. Its solid constructor requires BOTH transverse shear moduli.
-There is no material B coupling or loss in the elastic section. New material-frame trigonometry uses
+`new_coupled` and `from_laminate` retain the original material section's full
+membrane/bending coupling B and first mass moment I1 about the declared mesh
+reference surface. The coupled stiffness block and inertia moments must be
+positive definite. Both strain cross terms enter the original MITC quadrature
+and elastic bubble condensation. Consistent laminate inertia integrates the
+same director motion `u + z*(theta cross director)`, including translation/
+rotation cross work; nodal lumping retains the nodal cross terms. Drilling
+inertia remains an explicit numerical gauge in the existing I2 scale. The
+established homogeneous constructor keeps its original angular-mass arithmetic;
+the complete laminate constructor uses the physical director interpolation,
+which agrees with that constructor for a flat homogeneous layer.
+
+The source laminate already includes its transverse shear correction: it is
+not multiplied by 5/6 a second time. Layer order, reference surface, density,
+and orientation remain caller data. Prony layers lower their retained reference
+storage into this fixed elastic pencil; this does not turn a frequency-domain
+reference into a broadband hereditary solver. The coupled Kelvin--Voigt
+viscosity constructor retains viscous B, checks passivity of the complete
+six-component A/B/D block, and projects it through the SAME elastic trial space.
+Neither B nor its viscous counterpart is required to be positive by itself.
+
+`tests/laminate_shell.rs` covers flat homogeneous equivalence, signed B work,
+first-moment kinetic work, reference-surface invariance, varying-director
+kinetic energy, coupled admission and axial-load-induced curvature on three
+meshes against closed-form CLT. Inline
+viscosity tests check full proportional work and semidefinite coupled loss.
+These are G0/G1 numerical checks, not validation of a historical varnish film,
+audible superiority, or a particular instrument specimen.
+
+New material-frame trigonometry uses
 `fs_math::det`; `SheetMatrix::rotated` is not used by this path.
 
 Supports declare a component mask and either global axes or a proper local

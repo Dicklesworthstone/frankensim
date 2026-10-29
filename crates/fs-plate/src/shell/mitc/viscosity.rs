@@ -1,7 +1,8 @@
 //! Kelvin--Voigt resultants on the original shear-deformable elastic space.
 //!
 //! Membrane [N s/m], bending [N m s] and transverse shear [N s/m] are
-//! independent symmetric tensors in each facet frame. No drilling penalty is
+//! symmetric tensors in each facet frame, with the membrane/bending cross
+//! resultant retained for unsymmetric coatings. No drilling penalty is
 //! dissipated. Bubble rotations are eliminated using the ELASTIC transformation;
 //! the complete physical C is then projected by congruence on the supplied modes.
 //! This is a fixed condensed trial space, not a frequency-dependent elimination
@@ -14,6 +15,7 @@ use fs_math::det;
 #[derive(Clone, Copy, Debug)]
 pub struct ShearShellViscosity {
     membrane: [f64; 9],
+    coupling: [f64; 9],
     bending: [f64; 9],
     shear: [f64; 3],
 }
@@ -60,16 +62,34 @@ impl ShearShellViscosity {
                 && (a <= 0.0 || c <= 0.0 || (b/det::sqrt(a)/det::sqrt(c)).abs() >= 1.0)) {
             admit3(&[a,b,0.0,b,c,0.0,0.0,0.0,0.0])?;
         }
-        Ok(Self { membrane, bending, shear })
+        Ok(Self { membrane, coupling: [0.0; 9], bending, shear })
     }
-    /// The three independent physical resultants in the facet frame.
+    /// Complete viscous A/B/D resultants in the same facet coordinates as the
+    /// elastic section. B has units N s. Its sign depends on layer order;
+    /// passivity is checked on the full six-component block, never on B alone.
+    /// Semidefinite loss and an explicit zero layer remain legal.
+    pub fn new_coupled(membrane: [f64; 9], coupling: [f64; 9], bending: [f64; 9],
+        shear: [f64; 3]) -> Result<Self, PlateError>
+    {
+        let mut out = Self::new(membrane, bending, shear)?;
+        super::admit_coupled_block(&membrane, &coupling, &bending, true)?;
+        out.coupling = coupling;
+        Ok(out)
+    }
+    /// A, D and shear resultants in the facet frame. Use `coupled_matrices`
+    /// to retain the membrane/bending cross resultant of a laminate.
     pub const fn matrices(&self) -> ([f64; 9], [f64; 9], [[f64; 2]; 2]) {
         let [a,b,c] = self.shear;
         (self.membrane, self.bending, [[a,b],[b,c]])
     }
+    /// Complete physical A/B/D/shear resultants, including cross-layer loss.
+    pub const fn coupled_matrices(&self) -> ([f64; 9], [f64; 9], [f64; 9], [[f64; 2]; 2]) {
+        let [a,b,c] = self.shear;
+        (self.membrane, self.coupling, self.bending, [[a,b],[b,c]])
+    }
     /// Explicit source zero; no weak damping is inserted to resolve a gauge.
     pub fn is_zero(&self) -> bool {
-        self.membrane.iter().chain(&self.bending).chain(&self.shear).all(|x| *x == 0.0)
+        self.membrane.iter().chain(&self.coupling).chain(&self.bending).chain(&self.shear).all(|x| *x == 0.0)
     }
 }
 
@@ -199,6 +219,40 @@ mod tests {
         let mut v=[0.0;9]; v[0]=1.0; v[4]=1.0; v[8]=1.0; v[1]=2.0; v[3]=2.0;
         assert!(ShearShellViscosity::new(v,[0.0;9],[0.0;3]).is_err());
         assert!(ShearShellViscosity::new([0.0;9],[0.0;9],[1.0,2.0,1.0]).is_err());
+    }
+
+    #[test]
+    fn g1_coupled_loss_uses_the_same_complete_elastic_trial_space() {
+        let mesh=ShellMesh::new(vec![[0.0,0.0,0.0],[0.4,0.03,0.05],
+            [0.07,0.3,0.04]],vec![[0,1,2]]).unwrap();
+        let g=mesh.facet(0).unwrap();
+        let base=section(); let (a,d,s)=base.matrices(); let z=0.001;
+        let section=ShearShellSection::new_coupled(
+            fs_material::sheet::SheetMatrix::from_coefficients(a).unwrap(),a.map(|v|z*v),
+            fs_material::sheet::SheetMatrix::from_coefficients(core::array::from_fn(|k|d[k]+z*z*a[k])).unwrap(),
+            [s[0][0],s[0][1],s[1][1]],1.0,base.areal_mass_kg_m2(),
+            z*base.areal_mass_kg_m2(),base.rotary_inertia_kg()+z*z*base.areal_mass_kg_m2(),0.0).unwrap();
+        let (a,b,d,s)=section.coupled_matrices(); let tau=0.0017;
+        let law=ShearShellViscosity::new_coupled(a.map(|v|tau*v),b.map(|v|tau*v),d.map(|v|tau*v),
+            [s[0][0]*tau,s[0][1]*tau,s[1][1]*tau]).unwrap();
+        let (k,_)=element::matrices(&mesh,&mesh.tris[0],&g,[g.frame[2];3],&section,
+            ShellMass::Consistent,&mut ||false).unwrap();
+        let c=element::viscosity_matrix(&mesh,&mesh.tris[0],&g,[g.frame[2];3],&section,&law,&mut ||false).unwrap();
+        let scale=k.iter().flatten().map(|x|x.abs()).fold(0.0_f64,f64::max)*tau;
+        for i in 0..18 { for j in 0..18 {
+            assert!((c[i][j]-tau*k[i][j]).abs()<2e-11*scale);
+        } }
+    }
+
+    #[test]
+    fn g0_signed_coupled_loss_is_admitted_only_as_a_passive_full_block() {
+        let directional=|v|[v,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+        assert!(ShearShellViscosity::new_coupled(directional(4.0),directional(-2.0),
+            directional(1.0),[0.0;3]).is_ok());
+        assert!(ShearShellViscosity::new_coupled(directional(4.0),directional(2.01),
+            directional(1.0),[0.0;3]).is_err());
+        assert!(ShearShellViscosity::new_coupled([0.0;9],directional(1.0),
+            [0.0;9],[0.0;3]).is_err());
     }
 
     #[test]
