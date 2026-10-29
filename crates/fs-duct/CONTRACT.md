@@ -1686,3 +1686,32 @@ gas implementation and exact production duct geometry source slice; the
 full workspace/DSR verification boundary remains explicit. The plenum is
 an acoustically compact storage assumption and introduces no empirical
 junction-loss or multidimensional-mixing claim.
+## Harmonic molecular and wall propagation
+
+`molecular::MolecularDuct` binds existing cylinder/cone/profile geometry to the
+original `RelaxationState`. It consumes `caloric_response` once per frequency
+and combines molecular heat capacity with the same positive circular thermal
+diffusion spectrum used by the DG owner. Shear diffusion retains `ZkDiffusive`;
+there is no added ISO, bulk-viscosity or Stokes--Kirchhoff loss. Slip/adiabatic
+walls recover the material's exact relaxing wave; empty reservoirs recover
+the existing lossless or finite-spectrum Bessel law. One isothermal compliance
+remains in the low-frequency wall limit.
+
+Distinct radius spectra are prepared once and reused because the admitted
+gas is homogeneous. Existing stable two-port composition solves inlet
+impedance and outlet pressure/flow, including strongly attenuating lines.
+Cone slices retain the local-radius spherical approximation and profiles
+retain their fourth-order Magnus axis. The explicit load owns exterior
+radiation; no exterior medium is inferred. Compact tone-hole branches refuse.
+No mean-flow, evolving-composition, deformable-wall or multidimensional claim
+is added. Wall band admission is the original sampled equilibrium Bessel
+comparison, not a bound for the full coupled molecular response.
+
+`molecular/tests.rs` covers closed-form molecular waves, the original DG
+operator and its power balance, empty-reservoir and isothermal limits,
+pressure/rate changes, split invariance, attenuation and spatial refinement,
+plus budget/band/cancellation refusal. The `molecular_duct` example accepts
+the existing gas and relaxation grammars and reports solved impedance,
+through-flow and input/output power across six frequencies. Its terrestrial-air
+invocation composes existing engineering gas and relaxation models; it does
+not establish experimental calibration.

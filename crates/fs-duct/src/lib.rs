@@ -75,6 +75,8 @@ pub use modal::MouthLoad;
 pub mod compose;
 /// Smooth plane-wave profiles and declared integration/slice axes.
 pub mod profile;
+/// Harmonic molecular dispersion coupled to the original wall-diffusion law.
+pub mod molecular;
 pub use profile::{ConeSlices, RadiusProfile, RiccatiSteps};
 /// Source-owned local wall response shared by constant and varying gas paths.
 pub mod wall;

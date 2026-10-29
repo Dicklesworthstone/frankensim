@@ -357,7 +357,7 @@ fn local_generator(
     ))
 }
 
-fn magnus_step(
+pub(crate) fn magnus_step(
     (a1, b1): (C64, C64),
     (a2, b2): (C64, C64),
     h: f64,
