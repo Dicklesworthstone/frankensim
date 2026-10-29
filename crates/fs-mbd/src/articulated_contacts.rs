@@ -375,6 +375,7 @@ pub fn resolve_articulated_contacts(
 // The normal and frictional laws share one original articulated inverse-mass
 // action and one independent physical endpoint audit. A row can be normal or
 // tangent; no surrogate link mass or separate friction impulse update exists.
+#[derive(Clone)]
 struct EventWorkspace {
     before: Vec<Kinematics>,
     loads: Vec<Vec<Wrench>>,

@@ -10,7 +10,8 @@ use super::super::{ArticulatedTangentialConfig, ArticulatedTangentialDrive, admi
 use super::{ArticulatedPlanarTangentialContact, admit_frame, prepare_axis};
 use crate::articulated::FreeFloatingImpulseResponse;
 use crate::articulated_contacts::{
-    ArticulatedContactError, ArticulatedContactSystem, EventResponse, EventWorkspace, finite, poll,
+    ArticulatedContactError, ArticulatedContactSystem, EventResponse, EventWorkspace, Prepared,
+    finite, poll,
 };
 use fs_ga::Vec3;
 use fs_math::det;
@@ -32,6 +33,16 @@ pub struct ArticulatedTangentialSite<'a, L: TangentialLaw> {
     pub drive: ArticulatedTangentialDrive,
 }
 
+/// A constitutive trial against previously admitted, unchanged native geometry.
+/// The duration must equal the prepared interval; neither bodies nor contact
+/// frames can be replaced while its physical response is reused.
+#[derive(Debug)]
+pub struct PreparedArticulatedTangentialInput<'a, L: TangentialLaw> {
+    pub law: &'a L,
+    pub state: &'a L::State,
+    pub drive: ArticulatedTangentialDrive,
+}
+
 /// Explicit mechanical and collective constitutive work/storage budgets.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ArticulatedMultiTangentialConfig {
@@ -43,16 +54,17 @@ pub struct ArticulatedMultiTangentialConfig {
 
 /// Complete simultaneous body/history candidate in the original contact order.
 #[derive(Clone, Debug)]
-pub struct ArticulatedMultiTangentialResult<S> {
+pub struct ArticulatedMultiTangentialResult<S, M = Vec<f64>> {
     /// Original native articulated updates, in supplied system order.
     pub responses: Vec<FreeFloatingImpulseResponse>,
     /// Every original law candidate; publish all histories and body states together.
     pub contacts: Vec<TangentialStep<S>>,
     /// Actual 2N-by-2N row-major J M^-1 J^T [1/kg]. Rows are contact 0 axes 0/1,
     /// then contact 1 axes 0/1, and so on; no cross block is discarded.
-    pub mobility_kg_inverse: Vec<f64>,
-    /// Original full row-major dt² W / 2 [m/N], moved from the shared owner.
-    pub compliance_m_per_n: Vec<f64>,
+    pub mobility_kg_inverse: M,
+    /// Original full row-major dt² W / 2 [m/N]. Prepared trials borrow both
+    /// matrices; the one-shot call retains its original owned-vector result.
+    pub compliance_m_per_n: M,
     /// Original point-minus-counterpart tangent speeds [m/s] at each interface.
     pub relative_speed_before_m_s: Vec<[f64; 2]>,
     /// Speeds reconstructed from the actual native endpoint bodies [m/s].
@@ -84,6 +96,188 @@ pub struct ArticulatedMultiTangentialResult<S> {
     pub law_evaluations: usize,
 }
 
+impl<S, M> ArticulatedMultiTangentialResult<S, M> {
+    pub(super) fn with_matrices<N>(
+        self,
+        mobility_kg_inverse: N,
+        compliance_m_per_n: N,
+    ) -> ArticulatedMultiTangentialResult<S, N> {
+        ArticulatedMultiTangentialResult {
+            mobility_kg_inverse,
+            compliance_m_per_n,
+            responses: self.responses,
+            contacts: self.contacts,
+            relative_speed_before_m_s: self.relative_speed_before_m_s,
+            relative_speed_after_m_s: self.relative_speed_after_m_s,
+            slip_increment_m: self.slip_increment_m,
+            compatibility_residual_m: self.compatibility_residual_m,
+            contact_energy_before_j: self.contact_energy_before_j,
+            contact_energy_after_j: self.contact_energy_after_j,
+            contact_work_residual_j: self.contact_work_residual_j,
+            dissipated_energy_j: self.dissipated_energy_j,
+            kinetic_energy_change_j: self.kinetic_energy_change_j,
+            support_work_j: self.support_work_j,
+            energy_balance_residual_j: self.energy_balance_residual_j,
+            linear_momentum_residual: self.linear_momentum_residual,
+            angular_momentum_residual: self.angular_momentum_residual,
+            endpoint_velocity_residual_m_s: self.endpoint_velocity_residual_m_s,
+            coupling_sweeps: self.coupling_sweeps,
+            law_evaluations: self.law_evaluations,
+        }
+    }
+}
+
+impl<S> ArticulatedMultiTangentialResult<S, &[f64]> {
+    /// Keep the accepted report after its prepared geometry owner is released.
+    /// Only the two borrowed matrices are copied; bodies and histories move.
+    #[must_use]
+    pub fn into_owned(self) -> ArticulatedMultiTangentialResult<S> {
+        let mobility = self.mobility_kg_inverse.to_vec();
+        let compliance = self.compliance_m_per_n.to_vec();
+        self.with_matrices(mobility, compliance)
+    }
+}
+
+/// Original articulated snapshot and complete contact response prepared once.
+///
+/// Model and joint-coordinate slices retain their original immutable borrows;
+/// base states are copied from the supplied native contexts. Preparation keeps
+/// the exact original rows, endpoint kinematics, full ABA mobility and shared
+/// constitutive factor. Every trial still applies one native combined impulse
+/// and independently checks actual endpoint motion, work and world momentum.
+/// This is a reusable proposal owner, never a time-advancing body/history store.
+pub struct PreparedArticulatedTangentialContacts<'m> {
+    systems: Vec<ArticulatedContactSystem<'m>>,
+    contacts: Vec<ArticulatedPlanarTangentialContact>,
+    dt_s: f64,
+    config: ArticulatedMultiTangentialConfig,
+    workspace: EventWorkspace,
+    rows: Vec<Prepared>,
+    before_speed: Vec<[f64; 2]>,
+    mobility: Vec<f64>,
+    coupling: PreparedTangentialContacts,
+}
+
+impl<'m> PreparedArticulatedTangentialContacts<'m> {
+    pub fn new(
+        systems: &[ArticulatedContactSystem<'m>],
+        contacts: &[ArticulatedPlanarTangentialContact],
+        dt_s: f64,
+        config: ArticulatedMultiTangentialConfig,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, ArticulatedContactError> {
+        poll(&mut cancelled)?;
+        admit_count(contacts.len(), config)?;
+        // Admit the numerical/interval controls before any native allocation.
+        // The actual per-contact load/environment is admitted on every trial.
+        admit(
+            systems.len(),
+            ArticulatedTangentialDrive {
+                dt_s,
+                normal_force_n: 0.0,
+                contact_temperature_k: None,
+                nominal_pressure_pa: None,
+            },
+            config.mechanical,
+        )?;
+        let count = contacts.len();
+        let mut workspace = EventWorkspace::new(systems, &mut cancelled)?;
+        let mut rows = Vec::with_capacity(2 * count);
+        let mut before_speed = Vec::with_capacity(count);
+        for &contact in contacts {
+            poll(&mut cancelled)?;
+            let axes = admit_frame(contact.frame_world)?;
+            let mut speed = [0.0; 2];
+            for i in 0..2 {
+                let row = prepare_axis(
+                    contact,
+                    axes[i],
+                    &workspace,
+                    config.mechanical.geometry_tolerance_m,
+                )?;
+                speed[i] = finite(row.velocity(&workspace.before))?;
+                rows.push(row);
+            }
+            before_speed.push(speed);
+        }
+        let mobility = workspace.delassus(systems, &rows, &mut cancelled)?;
+        let compliance = mobility
+            .iter()
+            .map(|w| finite(0.5 * dt_s * dt_s * w))
+            .collect::<Result<Vec<_>, _>>()?;
+        let coupling =
+            PreparedTangentialContacts::new(count, compliance, config.coupling, &mut cancelled)?;
+        poll(&mut cancelled)?;
+        Ok(Self {
+            systems: systems.to_vec(),
+            contacts: contacts.to_vec(),
+            dt_s,
+            config,
+            workspace,
+            rows,
+            before_speed,
+            mobility,
+            coupling,
+        })
+    }
+
+    #[must_use]
+    pub fn contacts(&self) -> &[ArticulatedPlanarTangentialContact] {
+        &self.contacts
+    }
+    #[must_use]
+    pub const fn duration_s(&self) -> f64 {
+        self.dt_s
+    }
+    #[must_use]
+    pub const fn config(&self) -> ArticulatedMultiTangentialConfig {
+        self.config
+    }
+    #[must_use]
+    pub fn mobility_kg_inverse(&self) -> &[f64] {
+        &self.mobility
+    }
+    #[must_use]
+    pub fn compliance_m_per_n(&self) -> &[f64] {
+        self.coupling.compliance_m_per_n()
+    }
+    #[must_use]
+    pub fn relative_speed_before_m_s(&self) -> &[[f64; 2]] {
+        &self.before_speed
+    }
+    /// Admitted original world point, without repeating forward kinematics.
+    #[must_use]
+    pub fn contact_world_point(&self, index: usize) -> Option<Vec3> {
+        index
+            .checked_mul(2)
+            .and_then(|row| self.rows.get(row))
+            .map(|row| row.world_point)
+    }
+
+    pub(super) fn into_matrices(self) -> (Vec<f64>, Vec<f64>) {
+        (self.mobility, self.coupling.into_compliance_m_per_n())
+    }
+}
+
+pub(super) fn admit_count(
+    count: usize,
+    config: ArticulatedMultiTangentialConfig,
+) -> Result<(), ArticulatedContactError> {
+    config.coupling.validate()?;
+    if count == 0 || count > config.coupling.maximum_contacts {
+        return Err(ArticulatedContactError::Invalid(
+            "simultaneous shear contact count exceeds its explicit domain",
+        ));
+    }
+    // The validated hard cap is at most 128 contacts, so these products fit.
+    if (2 * count) * (2 * count) > config.coupling.maximum_matrix_terms {
+        return Err(ArticulatedContactError::Invalid(
+            "simultaneous shear contact-space matrix exceeds its allocation budget",
+        ));
+    }
+    Ok(())
+}
+
 /// Advance all declared retained-shear contacts through one native body update.
 ///
 /// The site count is 1..=the explicit contact cap. The complete (2N)² matrix
@@ -106,217 +300,232 @@ pub fn advance_articulated_tangential_contacts<L: TangentialLaw>(
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<ArticulatedMultiTangentialResult<L::State>, ArticulatedContactError> {
     poll(&mut cancelled)?;
-    config.coupling.validate()?;
-    let count = sites.len();
-    if count == 0 || count > config.coupling.maximum_contacts {
-        return Err(ArticulatedContactError::Invalid(
-            "simultaneous shear contact count exceeds its explicit domain",
-        ));
-    }
-    // The shared cap is at most 128 contacts. Check before constructing any
-    // square matrix or invoking a native inverse-mass probe.
-    let dimension = 2 * count;
-    if dimension * dimension > config.coupling.maximum_matrix_terms {
-        return Err(ArticulatedContactError::Invalid(
-            "simultaneous shear contact-space matrix exceeds its allocation budget",
-        ));
-    }
-    let mechanical = config.mechanical;
-    let dt = sites[0].drive.dt_s;
-    let mut energies_before = Vec::with_capacity(count);
-    for site in sites {
-        poll(&mut cancelled)?;
-        admit(systems.len(), site.drive, mechanical)?;
-        if site.drive.dt_s != dt {
-            return Err(ArticulatedContactError::Invalid(
-                "simultaneous shear contacts require one physical interval",
-            ));
-        }
-        let energy = finite(site.law.stored_energy_j(site.state))?;
-        if energy < 0.0 {
-            return Err(ArticulatedContactError::Invalid("negative contact storage"));
-        }
-        energies_before.push(energy);
-    }
-    let mut workspace = EventWorkspace::new(systems, &mut cancelled)?;
-    let mut rows = Vec::with_capacity(dimension);
-    let mut before_speed = Vec::with_capacity(count);
-    let mut inputs = Vec::with_capacity(count);
-    for site in sites {
-        poll(&mut cancelled)?;
-        let axes = admit_frame(site.contact.frame_world)?;
-        let mut speed = [0.0; 2];
-        for i in 0..2 {
-            let row = prepare_axis(
-                site.contact,
-                axes[i],
-                &workspace,
-                mechanical.geometry_tolerance_m,
-            )?;
-            speed[i] = finite(row.velocity(&workspace.before))?;
-            rows.push(row);
-        }
-        before_speed.push(speed);
-        inputs.push(TangentialContactInput {
+    admit_count(sites.len(), config)?;
+    let contacts: Vec<_> = sites.iter().map(|site| site.contact).collect();
+    let prepared = PreparedArticulatedTangentialContacts::new(
+        systems,
+        &contacts,
+        sites[0].drive.dt_s,
+        config,
+        &mut cancelled,
+    )?;
+    let inputs: Vec<_> = sites
+        .iter()
+        .map(|site| PreparedArticulatedTangentialInput {
             law: site.law,
             state: site.state,
-            input: TangentialStepInput {
-                normal_n: site.drive.normal_force_n,
-                slip_increment_m: [finite(-dt * speed[0])?, finite(-dt * speed[1])?],
-                dt_s: dt,
-                contact_temperature_k: site.drive.contact_temperature_k,
-                nominal_pressure_pa: site.drive.nominal_pressure_pa,
-                compliance_m_per_n: 0.0,
-                solve: mechanical.solve,
-            },
-        });
-    }
-    let mobility = workspace.delassus(systems, &rows, &mut cancelled)?;
-    let compliance = mobility
-        .iter()
-        .map(|w| finite(0.5 * dt * dt * w))
-        .collect::<Result<Vec<_>, _>>()?;
-    let prepared =
-        PreparedTangentialContacts::new(count, compliance, config.coupling, &mut cancelled)?;
-    let coupled = prepared.advance(&inputs, &mut cancelled)?;
+            drive: site.drive,
+        })
+        .collect();
+    // Detach the borrowed matrices, then move the preparation's originals to
+    // the legacy result. The one-shot API still makes no dense matrix copy.
+    let candidate = prepared
+        .advance(&inputs, &mut cancelled)?
+        .with_matrices((), ());
+    let (mobility, compliance) = prepared.into_matrices();
     poll(&mut cancelled)?;
-    let mut energies_after = Vec::with_capacity(count);
-    let mut impulses = Vec::with_capacity(dimension);
-    let mut stored_change = 0.0;
-    let mut heat = 0.0;
-    for (index, (site, step)) in sites.iter().zip(&coupled.contacts).enumerate() {
+    Ok(candidate.with_matrices(mobility, compliance))
+}
+
+impl PreparedArticulatedTangentialContacts<'_> {
+    /// Solve another law/environment candidate from the same native body state.
+    /// No contact frame, support velocity, pose or interval can change during
+    /// reuse. Original inverse-mass probes and matrix factorization are absent
+    /// from this call; every physical endpoint audit remains mandatory.
+    pub fn advance<L: TangentialLaw>(
+        &self,
+        sites: &[PreparedArticulatedTangentialInput<'_, L>],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ArticulatedMultiTangentialResult<L::State, &[f64]>, ArticulatedContactError> {
         poll(&mut cancelled)?;
-        let energy = finite(site.law.stored_energy_j(&step.state))?;
-        let change = finite(energy - energies_before[index])?;
-        let dissipated = finite(step.dissipated_j)?;
-        if energy < 0.0 || dissipated < 0.0 {
+        let count = self.contacts.len();
+        if sites.len() != count {
             return Err(ArticulatedContactError::Invalid(
-                "negative contact storage or heat",
+                "prepared shear trial requires every original contact in order",
             ));
         }
-        let force = finite(det::hypot(step.traction_n[0], step.traction_n[1]))?;
-        if force > mechanical.solve.maximum_force_n
-            || step.iterations > mechanical.solve.max_iterations
-        {
-            return Err(ArticulatedContactError::Unresolved(
-                "constitutive effort/work cap exceeded",
-            ));
-        }
-        for i in 0..2 {
-            if finite(step.compatibility_residual_m[i])?.abs() > mechanical.displacement_tolerance_m
-            {
-                return Err(ArticulatedContactError::Unresolved(
-                    "collective constitutive compatibility",
+        let dimension = 2 * count;
+        let mechanical = self.config.mechanical;
+        let dt = self.dt_s;
+        let systems = &self.systems;
+        let rows = &self.rows;
+        let before_speed = &self.before_speed;
+        let mobility = &self.mobility;
+        let mut energies_before = Vec::with_capacity(count);
+        for site in sites {
+            poll(&mut cancelled)?;
+            admit(systems.len(), site.drive, mechanical)?;
+            if site.drive.dt_s != dt {
+                return Err(ArticulatedContactError::Invalid(
+                    "simultaneous shear contacts require one physical interval",
                 ));
             }
-            impulses.push(finite(dt * step.traction_n[i])?);
+            let energy = finite(site.law.stored_energy_j(site.state))?;
+            if energy < 0.0 {
+                return Err(ArticulatedContactError::Invalid("negative contact storage"));
+            }
+            energies_before.push(energy);
+        }
+        let mut inputs = Vec::with_capacity(count);
+        for (site, speed) in sites.iter().zip(before_speed) {
+            poll(&mut cancelled)?;
+            inputs.push(TangentialContactInput {
+                law: site.law,
+                state: site.state,
+                input: TangentialStepInput {
+                    normal_n: site.drive.normal_force_n,
+                    slip_increment_m: [finite(-dt * speed[0])?, finite(-dt * speed[1])?],
+                    dt_s: dt,
+                    contact_temperature_k: site.drive.contact_temperature_k,
+                    nominal_pressure_pa: site.drive.nominal_pressure_pa,
+                    compliance_m_per_n: 0.0,
+                    solve: mechanical.solve,
+                },
+            });
+        }
+        let coupled = self.coupling.advance(&inputs, &mut cancelled)?;
+        poll(&mut cancelled)?;
+        let mut energies_after = Vec::with_capacity(count);
+        let mut impulses = Vec::with_capacity(dimension);
+        let mut stored_change = 0.0;
+        let mut heat = 0.0;
+        for (index, (site, step)) in sites.iter().zip(&coupled.contacts).enumerate() {
+            poll(&mut cancelled)?;
+            let energy = finite(site.law.stored_energy_j(&step.state))?;
+            let change = finite(energy - energies_before[index])?;
+            let dissipated = finite(step.dissipated_j)?;
+            if energy < 0.0 || dissipated < 0.0 {
+                return Err(ArticulatedContactError::Invalid(
+                    "negative contact storage or heat",
+                ));
+            }
+            let force = finite(det::hypot(step.traction_n[0], step.traction_n[1]))?;
+            if force > mechanical.solve.maximum_force_n
+                || step.iterations > mechanical.solve.max_iterations
+            {
+                return Err(ArticulatedContactError::Unresolved(
+                    "constitutive effort/work cap exceeded",
+                ));
+            }
+            for i in 0..2 {
+                if finite(step.compatibility_residual_m[i])?.abs()
+                    > mechanical.displacement_tolerance_m
+                {
+                    return Err(ArticulatedContactError::Unresolved(
+                        "collective constitutive compatibility",
+                    ));
+                }
+                impulses.push(finite(dt * step.traction_n[i])?);
+            }
+            for residual in [
+                finite(change - step.stored_change_j)?,
+                finite(step.closure_residual_j)?,
+                finite(coupled.contact_work_residuals_j[index])?,
+            ] {
+                if residual.abs() > mechanical.energy_tolerance_j {
+                    return Err(ArticulatedContactError::Unresolved(
+                        "collective constitutive contact energy",
+                    ));
+                }
+            }
+            stored_change = finite(stored_change + change)?;
+            heat = finite(heat + dissipated)?;
+            energies_after.push(energy);
         }
         for residual in [
-            finite(change - step.stored_change_j)?,
-            finite(step.closure_residual_j)?,
-            finite(coupled.contact_work_residuals_j[index])?,
+            finite(stored_change - coupled.stored_change_j)?,
+            finite(heat - coupled.dissipated_j)?,
+            finite(coupled.body_work_residual_j)?,
         ] {
             if residual.abs() > mechanical.energy_tolerance_j {
                 return Err(ArticulatedContactError::Unresolved(
-                    "collective constitutive contact energy",
+                    "collective constitutive energy total",
                 ));
             }
         }
-        stored_change = finite(stored_change + change)?;
-        heat = finite(heat + dissipated)?;
-        energies_after.push(energy);
-    }
-    for residual in [
-        finite(stored_change - coupled.stored_change_j)?,
-        finite(heat - coupled.dissipated_j)?,
-        finite(coupled.body_work_residual_j)?,
-    ] {
-        if residual.abs() > mechanical.energy_tolerance_j {
-            return Err(ArticulatedContactError::Unresolved(
-                "collective constitutive energy total",
-            ));
-        }
-    }
-    let mut predicted = Vec::with_capacity(dimension);
-    for (row, values) in mobility.chunks_exact(dimension).enumerate() {
-        let mut speed = before_speed[row / 2][row % 2];
-        for (&w, &impulse) in values.iter().zip(&impulses) {
-            speed = finite(speed + w * impulse)?;
-        }
-        predicted.push(speed);
-    }
-    let mechanics = workspace.apply(
-        systems,
-        &rows,
-        EventResponse {
-            impulses: &impulses,
-            predicted_speeds: &predicted,
-            stored_energy_change: stored_change,
-            dissipated_energy: heat,
-            velocity_tolerance: mechanical.velocity_tolerance_m_s,
-            energy_tolerance: mechanical.energy_tolerance_j,
-        },
-        &mut cancelled,
-    )?;
-    let mut after_speed = Vec::with_capacity(count);
-    let mut slips = Vec::with_capacity(count);
-    let mut compatibility = Vec::with_capacity(count);
-    let mut work_residuals = Vec::with_capacity(count);
-    for (index, step) in coupled.contacts.iter().enumerate() {
-        poll(&mut cancelled)?;
-        let after = [
-            mechanics.speeds_after[2 * index],
-            mechanics.speeds_after[2 * index + 1],
-        ];
-        let mut slip = [0.0; 2];
-        let mut residual = [0.0; 2];
-        for i in 0..2 {
-            slip[i] = finite(-dt * (0.5 * before_speed[index][i] + 0.5 * after[i]))?;
-            residual[i] = finite(slip[i] - step.slip_increment_m[i])?;
-            if residual[i].abs() > mechanical.displacement_tolerance_m {
-                return Err(ArticulatedContactError::Unresolved(
-                    "actual coupled shear displacement",
-                ));
+        let mut predicted = Vec::with_capacity(dimension);
+        for (row, values) in mobility.chunks_exact(dimension).enumerate() {
+            let mut speed = before_speed[row / 2][row % 2];
+            for (&w, &impulse) in values.iter().zip(&impulses) {
+                speed = finite(speed + w * impulse)?;
             }
+            predicted.push(speed);
         }
-        let work = finite(
-            energies_after[index] - energies_before[index] + step.dissipated_j
-                - step.traction_n[0] * slip[0]
-                - step.traction_n[1] * slip[1],
+        // apply consumes its native scratch; the accepted preparation remains
+        // pristine even when cancellation occurs halfway through body evaluation.
+        let mechanics = self.workspace.clone().apply(
+            systems,
+            rows,
+            EventResponse {
+                impulses: &impulses,
+                predicted_speeds: &predicted,
+                stored_energy_change: stored_change,
+                dissipated_energy: heat,
+                velocity_tolerance: mechanical.velocity_tolerance_m_s,
+                energy_tolerance: mechanical.energy_tolerance_j,
+            },
+            &mut cancelled,
         )?;
-        if finite(det::hypot(slip[0], slip[1]) / dt)? > mechanical.maximum_slip_speed_m_s
-            || work.abs() > mechanical.energy_tolerance_j
-        {
-            return Err(ArticulatedContactError::Unresolved(
-                "actual coupled shear speed/work",
-            ));
+        let mut after_speed = Vec::with_capacity(count);
+        let mut slips = Vec::with_capacity(count);
+        let mut compatibility = Vec::with_capacity(count);
+        let mut work_residuals = Vec::with_capacity(count);
+        for (index, step) in coupled.contacts.iter().enumerate() {
+            poll(&mut cancelled)?;
+            let after = [
+                mechanics.speeds_after[2 * index],
+                mechanics.speeds_after[2 * index + 1],
+            ];
+            let mut slip = [0.0; 2];
+            let mut residual = [0.0; 2];
+            for i in 0..2 {
+                slip[i] = finite(-dt * (0.5 * before_speed[index][i] + 0.5 * after[i]))?;
+                residual[i] = finite(slip[i] - step.slip_increment_m[i])?;
+                if residual[i].abs() > mechanical.displacement_tolerance_m {
+                    return Err(ArticulatedContactError::Unresolved(
+                        "actual coupled shear displacement",
+                    ));
+                }
+            }
+            let work = finite(
+                energies_after[index] - energies_before[index] + step.dissipated_j
+                    - step.traction_n[0] * slip[0]
+                    - step.traction_n[1] * slip[1],
+            )?;
+            if finite(det::hypot(slip[0], slip[1]) / dt)? > mechanical.maximum_slip_speed_m_s
+                || work.abs() > mechanical.energy_tolerance_j
+            {
+                return Err(ArticulatedContactError::Unresolved(
+                    "actual coupled shear speed/work",
+                ));
+            }
+            after_speed.push(after);
+            slips.push(slip);
+            compatibility.push(residual);
+            work_residuals.push(work);
         }
-        after_speed.push(after);
-        slips.push(slip);
-        compatibility.push(residual);
-        work_residuals.push(work);
+        poll(&mut cancelled)?;
+        Ok(ArticulatedMultiTangentialResult {
+            responses: mechanics.responses,
+            contacts: coupled.contacts,
+            mobility_kg_inverse: mobility.as_slice(),
+            compliance_m_per_n: self.coupling.compliance_m_per_n(),
+            relative_speed_before_m_s: before_speed.clone(),
+            relative_speed_after_m_s: after_speed,
+            slip_increment_m: slips,
+            compatibility_residual_m: compatibility,
+            contact_energy_before_j: energies_before,
+            contact_energy_after_j: energies_after,
+            contact_work_residual_j: work_residuals,
+            dissipated_energy_j: heat,
+            kinetic_energy_change_j: mechanics.kinetic_energy_change,
+            support_work_j: mechanics.plane_work,
+            energy_balance_residual_j: mechanics.energy_balance_residual,
+            linear_momentum_residual: mechanics.linear_momentum_residual,
+            angular_momentum_residual: mechanics.angular_momentum_residual,
+            endpoint_velocity_residual_m_s: mechanics.endpoint_velocity_residual,
+            coupling_sweeps: coupled.sweeps,
+            law_evaluations: coupled.law_evaluations,
+        })
     }
-    poll(&mut cancelled)?;
-    Ok(ArticulatedMultiTangentialResult {
-        responses: mechanics.responses,
-        contacts: coupled.contacts,
-        mobility_kg_inverse: mobility,
-        compliance_m_per_n: prepared.into_compliance_m_per_n(),
-        relative_speed_before_m_s: before_speed,
-        relative_speed_after_m_s: after_speed,
-        slip_increment_m: slips,
-        compatibility_residual_m: compatibility,
-        contact_energy_before_j: energies_before,
-        contact_energy_after_j: energies_after,
-        contact_work_residual_j: work_residuals,
-        dissipated_energy_j: heat,
-        kinetic_energy_change_j: mechanics.kinetic_energy_change,
-        support_work_j: mechanics.plane_work,
-        energy_balance_residual_j: mechanics.energy_balance_residual,
-        linear_momentum_residual: mechanics.linear_momentum_residual,
-        angular_momentum_residual: mechanics.angular_momentum_residual,
-        endpoint_velocity_residual_m_s: mechanics.endpoint_velocity_residual,
-        coupling_sweeps: coupled.sweeps,
-        law_evaluations: coupled.law_evaluations,
-    })
 }

@@ -857,6 +857,37 @@ or late mechanical/cancellation refusal.
 All six and the thirty-three prior contact groups pass in the focused native
 original-source build; this does not establish a full Cargo/DSR workspace gate.
 
+### Reusable articulated response for coupled endpoint trials
+
+`PreparedArticulatedTangentialContacts` retains the original immutable native
+contexts, admitted contact rows, full ABA mobility and shared constitutive
+factor for one frozen interval. Repeated `advance` calls repeat neither the
+inverse-mass probes nor matrix admission/factorization. They still invoke the
+original accumulated native impulse application and all actual endpoint,
+storage/heat/support-work and world momentum checks on private pristine
+scratch. A failed or cancelled trial cannot contaminate the next proposal.
+Frames, support motion, body pose/velocity and duration belong to preparation;
+changing them requires a new owner. Model and joint arrays keep their original
+immutable borrows, while native base contexts are copied snapshots.
+
+`PreparedArticulatedFramedTangentialContacts` additionally transports each
+original accepted history once before repeated environment trials. No trial
+ages history or reapplies common material spin. The original native law must
+accept that checkpoint with unchanged stored energy; parameter work and source
+continuation require their own explicit owner. Original transport residuals
+remain in every candidate's accepted-state energy audit. Prepared results
+borrow both dense contact matrices; `into_owned` copies them only when the
+caller retains a final report. The existing one-shot functions keep their
+owned-vector API and move the prepared matrices into their results.
+
+Three G1/G3/G4 groups in `tests/articulated_contacts/planar/prepared.rs` cover
+independent full elastic recoil, unchanged repeated histories and matrices,
+exactly-once native frame transport, snapshot and final-report ownership, and
+exact retry after late speed, temperature, shape/interval or cancellation
+refusal. This preparation alone neither solves temperature nor advances time.
+All three groups and the forty-four prior groups pass together in the focused
+native original-source target; this is not a full Cargo/DSR workspace gate.
+
 ## Native rigid-body finite-patch tangential impulses
 
 `tangential_friction::apply_rigid_friction` binds supplied positive normal
