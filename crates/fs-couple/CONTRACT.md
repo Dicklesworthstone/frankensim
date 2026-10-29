@@ -11193,3 +11193,42 @@ renderer. Frame and CLI provenance retain the drive kind, original upstream
 duct geometry/material identity and separate source work. The 96 kHz Lab
 starter is an acoustic feedback experiment: the DG interfaces do not advect
 mean mass or enthalpy, and the finite duct is not a qualified anatomical airway.
+
+### Continuous passive piston loading with resolved weak resistance
+
+`thin_plate::BaffledPistonRadiation` uses the original Bessel–Struve circular
+piston impedance in an infinite rigid baffle and the evaluated coherent gas.
+Its port is pressure/volume flow; the host supplies the same signed volume
+shape for flow and reciprocal reaction. The complete shared acoustic modal
+bank retains every fitted q/p pair. This is a source/composition adapter, not
+another time integrator or a conversion of legacy sampled-filter histories.
+
+The opt-in `radiation::fit::fit_resolved_relative` keeps the existing PSD block
+solver, adds frequency-local complex/resistance weights and a logarithmic
+enrichment of the first resolved dictionary interval, and balances dictionary
+columns without changing the objective or cone. Even frequency samples alone
+determine coefficients and convergence. Training and held-out samples must each
+satisfy a 2% pointwise complex and 2% Hermitian-part relative limit, in addition
+to the original global peak/RMS gates. Legacy fit APIs and their objective are
+unchanged. Errors are sampled Frobenius norms, not continuum or directional
+multiport power certificates. Zero local references or unresolved dynamic
+range refuse instead of being hidden under a global peak normalization.
+
+The piston adapter uses an explicit positive frequency band, an odd 33–257
+point quadratic grid, a geometry-resolving dictionary and a complete 1–128 pole
+capacity. Outside-band queries, incoherent gas, unresolved sampling, excess
+history and cancellation refuse. Density/geometry remain physical inputs; no
+coefficient is fitted to sound recordings. Bodies with multiple independent
+faces need separate sources or an actual mutual-impedance producer. There is
+no claim for unbaffled, nonuniform-face, off-band, or full instrument radiation.
+
+Nine focused native tests pass: four new piston physics groups and five
+existing shared-fit regressions. Independent linear/log frequency grids for
+0.01/0.05/0.15 m radii over the tested 40 rad/s–0.4*pi*48000 rad/s band show
+complex errors below 0.7% and resistance errors below 1.4%, including the weak
+low-frequency resistance. Tests compare complete coupled state, work and heat
+with independently assembled physical-velocity RK4 equations under both normal
+signs and zero coupling, check a loaded small-ka pole/decay limit, and exercise
+density scaling, held-out weak-loss corruption, capacities and refusals. These
+use actual numerical/gas/piston/fit owners with narrow source extraction; the
+large BEM fixture and whole-workspace Cargo/DSR qualification were not run.

@@ -322,8 +322,10 @@ impl CompactBody {
 }
 
 mod cavity;
+mod piston;
 mod prepared;
 mod radiation;
+pub use piston::{BaffledPistonRadiation, PistonRadiationFit};
 pub use cavity::{VkCavityInitial, VkCavityLoad, VkCavityObservation};
 pub use prepared::{PreparedVkBody, PreparedVkStep};
 

@@ -26,6 +26,15 @@ pub struct Fit {
     pub resistance_peak_error:f64,
     pub resistance_rms_error:f64,
 }
+
+/// The shared passive fit with frequency-local discrepancy limits. These
+/// are sampled Frobenius-norm errors, not bounds between sampled frequencies
+/// or on every multiport velocity direction.
+pub struct RelativeFit {
+    pub fit:Fit,
+    pub complex_peak_relative_error:f64,
+    pub resistance_peak_relative_error:f64,
+}
 fn dictionary(low:f64,high:f64)->Vec<(f64,f64)> {
     let mut poles=Vec::with_capacity(TERMS);
     for &factor in &[0.35,0.55,0.80] {
@@ -179,7 +188,7 @@ fn admit(omega:&[f64],data:&[Vec<C64>],ports:usize)->Result<(),String> {
 /// convergence stopping, dictionary choice or tolerance selection.
 pub fn fit(omega:&[f64],data:&[Vec<C64>],ports:usize)->Result<Fit,String> {
     admit(omega,data,ports)?;
-    fit_dictionary(omega,data,ports,&dictionary(omega[0],omega[omega.len()-1]),false)
+    fit_dictionary(omega,data,ports,&dictionary(omega[0],omega[omega.len()-1]),false,false)
 }
 
 /// Fit with a dictionary that resolves the load's longest travel time. `spacing`
@@ -188,6 +197,58 @@ pub fn fit(omega:&[f64],data:&[Vec<C64>],ports:usize)->Result<Fit,String> {
 /// training samples (even indices) must be no further apart than `spacing`, or
 /// the fit refuses rather than interpolate detail it never saw.
 pub fn fit_resolved(omega:&[f64],data:&[Vec<C64>],ports:usize,spacing:f64)->Result<Fit,String> {
+    let poles=admitted_resolved_dictionary(omega,data,ports,spacing)?;
+    fit_dictionary(omega,data,ports,&poles,true,false)
+}
+
+/// Resolve weak low-frequency radiation resistance as well as the larger
+/// reactive response. Training remains EVEN samples only. The same PSD block
+/// solver minimizes frequency-local complex and real-part errors; column
+/// scaling changes numerical conditioning, not the objective or residue cone.
+/// Eight logarithmic resonators fill the first linear dictionary interval,
+/// where a travel-time spacing alone may not resolve the small resistance.
+///
+/// Both training and held-out samples must have at most 2% relative complex
+/// and 2% relative Hermitian-part error at EVERY supplied frequency, in addition
+/// to the original global peak/RMS gates. A zero local reference or more than
+/// twelve decades of required weighting refuses. No recorded datum, frequency
+/// band or tolerance is modified to make a fit pass; no new solver is selected.
+pub fn fit_resolved_relative(omega:&[f64],data:&[Vec<C64>],ports:usize,spacing:f64)
+    ->Result<RelativeFit,String>
+{
+    let mut poles=admitted_resolved_dictionary(omega,data,ports,spacing)?;
+    let low=omega[0];let first=low+spacing;
+    let extra=(1..=8).map(|i| (det::exp(det::ln(low)
+        +(det::ln(first)-det::ln(low))*f64::from(i)/9.),0.5));
+    poles.splice(3..3,extra);
+    if poles.len()>MAX_RESOLVED_TERMS {
+        return Err("relative load fit exceeds the resolved dictionary ceiling".into());
+    }
+    let fit=fit_dictionary(omega,data,ports,&poles,true,true)?;
+    let mut complex=0.0_f64;let mut resistance=0.0_f64;
+    for (&w,reference) in omega.iter().zip(data) {
+        let actual=fit.model.impedance(w)?;
+        let error:Vec<_>=actual.iter().zip(reference).map(|(a,b)|*a-*b).collect();
+        let mut h=0.0_f64;let mut dh=0.0_f64;
+        for i in 0..ports {for j in 0..ports {
+            h=h.hypot((reference[i*ports+j]+reference[j*ports+i].conj()).scale(0.5).abs());
+            dh=dh.hypot((error[i*ports+j]+error[j*ports+i].conj()).scale(0.5).abs());
+        }}
+        if h==0. || norm(reference)==0. {
+            return Err("relative load fit needs nonzero complex and resistive references at every frequency".into());
+        }
+        complex=complex.max(norm(&error)/norm(reference));
+        resistance=resistance.max(dh/h);
+    }
+    if !complex.is_finite() || !resistance.is_finite() || complex>0.02 || resistance>0.02 {
+        return Err(format!("relative passive load fit refused: pointwise complex/resistance={complex:.5}/{resistance:.5}; limits .02/.02"));
+    }
+    Ok(RelativeFit {fit,complex_peak_relative_error:complex,resistance_peak_relative_error:resistance})
+}
+
+fn admitted_resolved_dictionary(omega:&[f64],data:&[Vec<C64>],ports:usize,spacing:f64)
+    ->Result<Vec<(f64,f64)>,String>
+{
     admit(omega,data,ports)?;
     // At most the band itself, so the guard terms stay below the 8x off-band storage.
     if !spacing.is_finite() || spacing<=0. || spacing>omega[omega.len()-1]-omega[0] {
@@ -202,10 +263,11 @@ pub fn fit_resolved(omega:&[f64],data:&[Vec<C64>],ports:usize,spacing:f64)->Resu
     if poles.len()>MAX_RESOLVED_TERMS {
         return Err(format!("resolved load fit needs {} terms, above its {MAX_RESOLVED_TERMS}-term ceiling",poles.len()));
     }
-    fit_dictionary(omega,data,ports,&poles,true)
+    Ok(poles)
 }
 
-fn fit_dictionary(omega:&[f64],data:&[Vec<C64>],ports:usize,poles:&[(f64,f64)],householder:bool)
+fn fit_dictionary(omega:&[f64],data:&[Vec<C64>],ports:usize,poles:&[(f64,f64)],householder:bool,
+    relative:bool)
     ->Result<Fit,String> {
     let size=ports*ports;let terms=poles.len();
     let scale=data.iter().step_by(2).map(|r|norm(r)).fold(0.0_f64,f64::max);
@@ -229,19 +291,37 @@ fn fit_dictionary(omega:&[f64],data:&[Vec<C64>],ports:usize,poles:&[(f64,f64)],h
     }
     let mut gram=vec![0.;terms*terms];let mut rhs=vec![vec![0.;size];terms];
     for f in (0..omega.len()).step_by(2) {
+        let (real_weight,imag_weight)=if relative {
+            let real=data[f].iter().fold(0.0_f64,|s,z|s.hypot(z.re));
+            let imaginary=norm(&data[f]);
+            let weights=(scale/real,scale/imaginary);
+            if !weights.0.is_finite() || !weights.1.is_finite()
+                || weights.0>1e12 || weights.1>1e12 {
+                return Err("relative radiation response exceeds the fit's twelve-decade resolution budget".into());
+            }
+            weights
+        } else {(real_weight,1.)};
         let h:Vec<_>=poles.iter().map(|&p|kernel(omega[f],p)).collect();
         for j in 0..terms {
             for k in 0..terms {
-                gram[j*terms+k]+=h[j].re*real_weight*h[k].re*real_weight+h[j].im*h[k].im;
+                gram[j*terms+k]+=h[j].re*real_weight*h[k].re*real_weight
+                    +h[j].im*imag_weight*h[k].im*imag_weight;
             }
             for (a,value) in rhs[j].iter_mut().enumerate() {
                 let y=data[f][a].scale(1./scale);
-                *value+=h[j].re*real_weight*y.re*real_weight+h[j].im*y.im;
+                *value+=h[j].re*real_weight*y.re*real_weight+h[j].im*imag_weight*y.im*imag_weight;
             }
         }
     }
     if gram.iter().any(|x|!x.is_finite()) || (0..terms).any(|j|gram[j*terms+j]<=0.) {
         return Err("unresolved passive fit dictionary".into());
+    }
+    let columns:Vec<_>=(0..terms).map(|j|if relative {det::sqrt(gram[j*terms+j])} else {1.}).collect();
+    if relative {
+        for j in 0..terms {
+            for k in 0..terms {gram[j*terms+k]=gram[j*terms+k]/columns[j]/columns[k];}
+            for b in &mut rhs[j] {*b/=columns[j];}
+        }
     }
     let id=identity(ports);let mut residue=vec![vec![0.;size];terms];
     let mut y=residue.clone();
@@ -275,7 +355,7 @@ fn fit_dictionary(omega:&[f64],data:&[Vec<C64>],ports:usize,poles:&[(f64,f64)],h
         if change<=1e-10*(1.+magnitude) {break;}
     }
     let mut model=Model {ports,poles:Vec::new()};
-    for (matrix,&(o,z)) in residue.iter().zip(poles) {
+    for (index,(matrix,&(o,z))) in residue.iter().zip(poles).enumerate() {
         let pairs=fs_modal::eigh_gen_dense(matrix,&id,ports).map_err(|e|e.to_string())?;
         let tolerance=1e-8*ports as f64*matrix.iter().fold(0.0_f64,|s,x|s.max(x.abs()));
         for p in pairs {
@@ -284,7 +364,7 @@ fn fit_dictionary(omega:&[f64],data:&[Vec<C64>],ports:usize,poles:&[(f64,f64)],h
                 return Err("passive residue factorization failed".into());
             }
             if p.lambda<=0. {continue;}
-            let gain=det::sqrt(p.lambda*scale*normalization((o,z)));
+            let gain=det::sqrt(p.lambda/columns[index]*scale*normalization((o,z)));
             model.poles.push(Pole {omega:o,zeta:z,coupling:p.phi.iter().map(|x|x*gain).collect()});
         }
     }
