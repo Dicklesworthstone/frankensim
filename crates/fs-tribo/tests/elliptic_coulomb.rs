@@ -69,6 +69,7 @@ fn static_ellipse_and_weaker_sliding_have_distinct_directional_thresholds() {
     assert_eq!(sticking.dissipated_j, 0.0);
     let sliding = law.advance(&state, &input([0.081, 0.0], 0.01)).unwrap();
     assert_eq!(sliding.regime, FrictionRegime::Sliding);
+    assert_eq!(sliding.iterations, 0);
     close2(sliding.traction_n, [6.0, 0.0], 1e-11);
     close2(sliding.slip_increment_m, [0.021, 0.0], 1e-13);
     close(sliding.dissipated_j, 0.126, 3e-13);
@@ -188,6 +189,7 @@ fn isotropic_and_frictionless_limits_match_the_original_coulomb_owner() {
                 let a = elliptic.advance(&elliptic.initial_state(), &x).unwrap();
                 let b = original.advance(&original.initial_state(), &x).unwrap();
                 assert_eq!(a.regime, b.regime);
+                assert_eq!(a.iterations, 0);
                 close2(a.traction_n, b.traction_n, 1e-11);
                 close2(a.slip_increment_m, b.slip_increment_m, 3e-13);
                 close(a.dissipated_j, b.dissipated_j, 2e-12);
@@ -207,6 +209,28 @@ fn isotropic_and_frictionless_limits_match_the_original_coulomb_owner() {
         .unwrap();
     close2(step.traction_n, [0.0, 2.0], 1e-11);
     close(step.dissipated_j, 0.06, 1e-12);
+
+    // Free motion on the frictionless axis and a static transverse reaction
+    // have exactly zero constitutive work in every texture orientation. World
+    // dot-product cancellation may have either sign; it is numerical closure
+    // error, not a thermal source or a reason to reject the same physics.
+    for angle in [0.073, 0.292, 0.365, 0.584, 0.803, 0.949] {
+        let texture =
+            EllipticCoulomb::new([0.0, 0.4], [0.0, 0.2], rotate([1.0, 0.0], angle)).unwrap();
+        let step = texture
+            .advance(
+                &texture.initial_state(),
+                &input(rotate([0.123, 0.007], angle), 0.01),
+            )
+            .unwrap();
+        close2(step.traction_n, rotate([0.0, 0.7], angle), 3e-15);
+        close2(step.slip_increment_m, rotate([0.123, 0.0], angle), 1e-16);
+        assert_eq!(step.dissipated_j, 0.0);
+        let actual_work = step.traction_n[0] * step.slip_increment_m[0]
+            + step.traction_n[1] * step.slip_increment_m[1];
+        assert_eq!(step.closure_residual_j, -actual_work);
+        assert!(step.closure_residual_j.abs() < 2e-17);
+    }
 }
 
 #[test]
@@ -341,4 +365,44 @@ fn invalid_coefficients_foreign_history_and_exhausted_budgets_refuse_atomically(
         retry,
         law.advance(&saved, &input([0.15, 0.04], 0.01)).unwrap()
     );
+}
+
+#[test]
+fn explicit_coefficient_continuation_preserves_slip_texture_and_zero_storage() {
+    let law = law();
+    let before = law
+        .advance(&law.initial_state(), &input([0.02, 0.03], 0.0))
+        .unwrap()
+        .state;
+    let (same, unchanged) = law
+        .continue_coefficients(&before, [0.8, 0.4], [0.6, 0.2])
+        .unwrap();
+    assert_eq!(same, law);
+    assert_eq!(unchanged, before);
+    let (updated, history) = law
+        .continue_coefficients(&before, [0.4, 0.8], [0.1, 0.5])
+        .unwrap();
+    assert_eq!(history.slip_m(), before.slip_m());
+    assert_eq!(history.principal_axis(), before.principal_axis());
+    assert_eq!(
+        history.contact_temperature_k(),
+        before.contact_temperature_k()
+    );
+    assert_eq!(updated.stored_energy_j(&history), 0.0);
+    assert!(law.advance(&history, &input([0.1, 0.1], 0.0)).is_err());
+    let next = updated
+        .advance(&history, &input([0.02, 0.03], 0.0))
+        .unwrap();
+    let support = (0.02_f64.powi(2) + (5.0_f64 * 0.03).powi(2)).sqrt();
+    close2(
+        next.traction_n,
+        [0.02 / support, 25.0 * 0.03 / support],
+        1e-14,
+    );
+    close(next.dissipated_j, support, 1e-14);
+    assert!(
+        law.continue_coefficients(&before, [0.1, 0.2], [0.2, 0.1])
+            .is_err()
+    );
+    assert_eq!(before.slip_m(), [0.02, 0.03]);
 }

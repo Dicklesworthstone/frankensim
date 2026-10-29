@@ -104,7 +104,8 @@ independent axis clamps or a scalar coefficient sampled by direction are not
 substitutes. Zero principal coefficients retain frictionless directions.
 
 The scalar body load line reduces to a bounded monotone ellipse projection.
-It uses fixed-size arithmetic with no solver allocations, honors the original
+Circular ellipses and principal-axis motion use an exact noniterative path.
+The remaining projection uses fixed-size arithmetic with no solver allocations, honors the original
 force and iteration budgets, and exports actual `F dot du` as heat with zero
 elastic storage. The existing full-matrix and simultaneous-contact adapters
 consume it directly, including off-diagonal and cross-contact body recoil.
@@ -112,7 +113,15 @@ Objective history transport rotates both the material direction and accumulated
 slip without time advancement, heat, or source replacement. Foreign native
 checkpoints and unresolved roots refuse before publication.
 
-The seven G1/G3 groups in `tests/elliptic_coulomb.rs` compare the response with
+Explicit coefficient continuation validates both new principal pairs while
+preserving accepted slip, texture and the last thermal boundary. Its zero
+elastic storage needs no parameter work; the source owner remains responsible
+for authorizing coefficient changes. Physical dissipation is evaluated in the
+principal frame, where its terms are nonnegative. Rotation roundoff in the
+world-frame work is retained in the closure residual, so a valid zero-work
+frictionless direction is not rejected as negative dissipation.
+
+The eight G1/G3 groups in `tests/elliptic_coulomb.rs` compare the response with
 an independent constrained-energy minimization and an angular maximum-work
 sweep, and exercise directional breakaway, unequal static/kinetic limits,
 isotropic and frictionless limits, full matrix/multicontact consumers, frame

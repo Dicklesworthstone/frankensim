@@ -7,6 +7,9 @@
 //! Its zero elastic potential permits coefficient evolution without silently
 //! changing stored energy. This is not a transfer of an elastic contact history.
 
+/// Directional principal coefficients from the same original ordered interface.
+pub mod elliptic;
+
 use core::fmt;
 
 use fs_blake3::{ContentHash, DomainHasher};
@@ -208,22 +211,13 @@ impl SourceThermalCoulomb {
         self.identity
     }
 
-    /// Prepare one complete candidate with the original material error preserved.
-    ///
-    /// The supplied temperature and pressure are held for this constitutive
-    /// interval. This operation only borrows accepted history; source-domain,
-    /// coefficient-ordering and mechanical-solve failures leave it unchanged.
-    /// The returned native dissipated work is allocated by the thermal consumer.
-    pub fn advance_sourced(
+    // Shared source refresh for isotropic and directional Coulomb owners. This
+    // performs no mechanical step and never reselects an alternative claim.
+    fn source_at_input(
         &self,
-        state: &SourceThermalCoulombState,
+        previous: &ResolvedInterfaceStatePoint,
         input: &TangentialStepInput,
-    ) -> Result<TangentialStep<SourceThermalCoulombState>, SourceThermalCoulombError> {
-        if state.owner != self.identity {
-            return Err(SourceThermalCoulombError::Invalid(
-                "thermal Coulomb checkpoint belongs to another original source",
-            ));
-        }
+    ) -> Result<ResolvedInterfaceStatePoint, SourceThermalCoulombError> {
         let temperature = input
             .contact_temperature_k
             .filter(|t| t.is_finite() && *t > 0.0)
@@ -245,12 +239,32 @@ impl SourceThermalCoulomb {
                 ));
             }
         }
-        let source = if point == state.source.query() {
-            state.source.clone()
+        if point == previous.query() {
+            Ok(previous.clone())
         } else {
-            self.initial_source
-                .at_query_point(self.interface.card(), &point)?
-        };
+            Ok(self
+                .initial_source
+                .at_query_point(self.interface.card(), &point)?)
+        }
+    }
+
+    /// Prepare one complete candidate with the original material error preserved.
+    ///
+    /// The supplied temperature and pressure are held for this constitutive
+    /// interval. This operation only borrows accepted history; source-domain,
+    /// coefficient-ordering and mechanical-solve failures leave it unchanged.
+    /// The returned native dissipated work is allocated by the thermal consumer.
+    pub fn advance_sourced(
+        &self,
+        state: &SourceThermalCoulombState,
+        input: &TangentialStepInput,
+    ) -> Result<TangentialStep<SourceThermalCoulombState>, SourceThermalCoulombError> {
+        if state.owner != self.identity {
+            return Err(SourceThermalCoulombError::Invalid(
+                "thermal Coulomb checkpoint belongs to another original source",
+            ));
+        }
+        let source = self.source_at_input(&state.source, input)?;
         let law = coefficients(&source, &self.static_property, &self.kinetic_property)?;
         let step = law.advance(&state.constitutive, input)?;
         Ok(TangentialStep {

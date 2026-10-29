@@ -18,7 +18,7 @@
 //! Coefficients are explicit caller data, not calibrated material properties.
 //! Their axes are a supplied effective interface texture, not an inferred blend
 //! of two surfaces. This rung excludes adhesion, elastic microslip, wear and
-//! thermal coefficient evolution. The mechanics owner supplies normal load and
+//! a thermal evolution equation. The mechanics owner supplies normal load and
 //! transports the material axes with the existing objective-history protocol.
 
 use fs_math::det;
@@ -102,6 +102,27 @@ impl EllipticCoulomb {
         self.kinetic_mu
     }
 
+    /// Continue explicit coefficient changes without advancing slip or texture.
+    ///
+    /// This zero-storage law has no elastic parameter-work port. The external
+    /// material owner must authorize new coefficients and retain their source
+    /// identity; this method only checks the native ranges and exact old owner.
+    /// Both returned values form one candidate, leaving the old checkpoint intact.
+    pub fn continue_coefficients(
+        &self,
+        state: &EllipticCoulombState,
+        static_mu: [f64; 2],
+        kinetic_mu: [f64; 2],
+    ) -> Result<(Self, EllipticCoulombState), TriboError> {
+        self.check(state)?;
+        let mut law = Self::new(static_mu, kinetic_mu, self.initial_axis)?;
+        // Constructor normalization must not accumulate into source identity.
+        law.initial_axis = self.initial_axis;
+        let mut next = state.clone();
+        next.owner = law;
+        Ok((law, next))
+    }
+
     fn check(&self, state: &EllipticCoulombState) -> Result<(), TriboError> {
         if state.owner != *self {
             return Err(invalid("elliptic_foreign_checkpoint"));
@@ -169,9 +190,18 @@ impl TangentialLaw for EllipticCoulomb {
                 "elliptic_compatibility_residual_m",
             )?;
         }
-        let dissipated_j =
-            traction_n[0] * slip_increment_m[0] + traction_n[1] * slip_increment_m[1];
+        // Constitutive work is nonnegative term by term in the material axes.
+        // Rotating a degenerate ellipse can put two cancelling contributions
+        // in the world-frame dot product, even when physical heat is exactly
+        // zero. Retain that isometry roundoff as a work residual, not heat or
+        // a spurious negative-dissipation refusal.
+        let dissipated_j = force[0] * slip[0] + force[1] * slip[1];
         nonnegative_finite(dissipated_j, "elliptic_dissipated_j")?;
+        let actual_work_j =
+            traction_n[0] * slip_increment_m[0] + traction_n[1] * slip_increment_m[1];
+        finite(actual_work_j, "elliptic_actual_work_j")?;
+        let closure_residual_j = dissipated_j - actual_work_j;
+        finite(closure_residual_j, "elliptic_closure_residual_j")?;
         Ok(TangentialStep {
             traction_n,
             slip_increment_m,
@@ -179,7 +209,7 @@ impl TangentialLaw for EllipticCoulomb {
             regime,
             stored_change_j: 0.0,
             dissipated_j,
-            closure_residual_j: 0.0,
+            closure_residual_j,
             compatibility_residual_m,
             iterations,
         })
@@ -290,6 +320,16 @@ fn resolve(
     }
     if inside(required, static_caps) {
         return Ok((required, [0.0; 2], FrictionRegime::Sticking, 0));
+    }
+    // Circular ellipses and principal-axis motion have an exact radial answer.
+    // Preserve that common fast path rather than iterating an affine load line.
+    if kinetic_caps[0] == kinetic_caps[1] || free[0] == 0.0 || free[1] == 0.0 {
+        let force = support(kinetic_caps, free)?;
+        let slip = std::array::from_fn(|i| free[i] - c * force[i]);
+        for value in slip {
+            finite(value, "elliptic_resolved_slip_m")?;
+        }
+        return Ok((force, slip, FrictionRegime::Sliding, 0));
     }
     // Degenerate ellipses can stick along one direction while slipping freely
     // along the other. The admissible interior reaction then does zero work.

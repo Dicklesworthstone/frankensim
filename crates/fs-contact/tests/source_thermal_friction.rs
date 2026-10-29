@@ -1,5 +1,8 @@
 //! G1/G3: original interface claims drive temperature/pressure friction and heat.
 
+#[path = "source_thermal_friction/elliptic.rs"]
+mod elliptic;
+
 use fs_contact::interface_binding::bind_dry_interface_system_card;
 use fs_contact::interface_binding::thermal_friction::{
     SourceThermalCoulomb, SourceThermalCoulombError, ThermalFrictionAxes,

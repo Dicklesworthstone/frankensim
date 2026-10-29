@@ -157,6 +157,27 @@ different temperature, foreign-source refusal and exact retry. This lets framed
 articulated heat trials reuse their accepted histories without aging or
 re-querying them during orientation transport.
 
+### Source-backed directional temperature-dependent Coulomb friction
+
+`interface_binding::thermal_friction::elliptic::SourceThermalEllipticCoulomb`
+composes two existing `SourceThermalCoulomb` owners, one per material principal
+direction. Both must retain the same ordered interface, fixed original query,
+temperature/pressure axes and authority. Each selected static and kinetic claim
+keeps its original source pin, uncertainty and usage receipt. The effective
+interface texture direction is explicit; opaque surface names do not determine
+it or a blend of differently oriented textures.
+
+Each candidate refreshes both original coefficient pairs at the supplied
+temperature and pressure, then calls the shared associated elliptical law once.
+Coefficient evolution retains accumulated slip and the objectively transported
+material direction, with no invented elastic storage or parameter heat. A
+failure in either principal source rejects the entire candidate. The existing
+matrix/multicontact consumers can use this `TangentialLaw` directly. The four
+groups in `tests/source_thermal_friction/elliptic.rs` cover source-driven force
+and heat, directional static breakaway, frame transport followed by coefficient
+refresh, original pressure surfaces, pinned receipts and atomic domain refusal.
+These are synthetic source-integration checks, not measured friction validation.
+
 ### Source-backed Hertz--Mindlin normal loading and recontact
 
 `interface_binding::mindlin::loading::SourceHertzMindlinContact` reuses an
