@@ -583,6 +583,63 @@ fn shell_assembly_options_refuse_missing_repeated_unknown_and_malformed_records(
     assert!(refused(&text.replacen("options-v1", "options-v2", 1)).contains("not a frankensim-shell-assembly-options-v1"));
 }
 
+/// A finish is an explicit layer on the selected side of an existing region.
+/// Malformed geometry, tensor assumptions and bounds refuse before pack loading.
+#[test]
+fn shell_coatings_require_explicit_regions_sources_and_physical_assumptions() {
+    let row = "coatings 1\ncoating body varnish.fsmatpk positive 0.00002 1000 0.3 0.001 0.35 0.25\n";
+    let text = shell_text().replace("nodes 25\n", &format!("{row}nodes 25\n"));
+    assert!(Profile::parse(text.as_bytes()).is_ok());
+    for (old, new) in [
+        ("coating body", "coating missing"),
+        ("varnish.fsmatpk", "../varnish.fsmatpk"),
+        ("varnish.fsmatpk", "@body"),
+        ("positive 0.00002", "outside 0.00002"),
+        ("positive 0.00002", "positive 0"),
+        ("1000 0.3", "0 0.3"),
+        ("1000 0.3", "1000 0.5"),
+        ("0.001 0.35", "0 0.35"),
+        ("0.35 0.25", "1.1 0.25"),
+        ("0.35 0.25", "0.35 1"),
+        ("0.35 0.25", "0.35 NaN"),
+        ("coatings 1", "coatings 65"),
+    ] {
+        assert!(Profile::parse(text.replace(old, new).as_bytes()).is_err(), "accepted {new}");
+    }
+    assert!(Profile::parse(shell_text().replace("nodes 25\n", "coatings 0\nnodes 25\n").as_bytes()).is_ok());
+}
+
+/// The actual violin table carries 45 exterior components and 60 material
+/// regions. An exterior selection covers them, without coating internal parts.
+#[test]
+fn cannone_varnish_selection_covers_only_declared_exterior_regions() {
+    use super::super::shell::assembly::table::OptionsFile;
+    let text = include_str!("../../cannone-h8-varnished.assembly");
+    let options = OptionsFile::parse(text).unwrap();
+    let coated = options.convert(CANNONE_H8).unwrap();
+    let bare = cannone_options().convert(CANNONE_H8).unwrap();
+    assert!(Profile::parse(coated.profile.as_bytes()).is_ok());
+    assert_eq!(coated.length_m, bare.length_m);
+    assert_eq!(coated.width_m, bare.width_m);
+    assert_eq!(coated.bridge_snaps_m, bare.bridge_snaps_m);
+    assert_eq!(coated.cavity, bare.cavity);
+    assert_eq!(coated.profile.lines().filter(|line| line.starts_with("coatings ")).count(), 45);
+    assert_eq!(coated.profile.lines().filter(|line| line.starts_with("coating ")).count(), 60);
+    for component in ["bass-bar", "soundpost", "bridge"] {
+        let section = coated.profile.split(&format!("component {component}\n")).nth(1).unwrap()
+            .split("end-component").next().unwrap();
+        assert!(!section.contains("coating "), "coated internal component {component}");
+    }
+    let stripped: String = coated.profile.lines().filter(|line| !line.starts_with("coating ")
+        && !line.starts_with("coatings ")).map(|line| format!("{line}\n")).collect();
+    assert_eq!(stripped, bare.profile, "adding a film changed another assembly choice");
+    let unknown = text.replace("coating @exterior", "coating absent-part");
+    assert!(OptionsFile::parse(&unknown).unwrap().convert(CANNONE_H8).is_err());
+    let doubled = text.replace("coating @exterior", "coating rib");
+    let options = OptionsFile::parse(&doubled).unwrap().convert(CANNONE_H8).unwrap();
+    assert_eq!(options.profile.lines().filter(|line| line.starts_with("coating ")).count(), 16);
+}
+
 /// `cannone-dominant-g3.material-strings` is the il Cannone G3 note for the command line: the four Dominant string packs
 /// on the rung's 0.383 m span and 0.328 m speaking length, the G bowed at 1 N and 0.2 m/s one tenth of its speaking length
 /// from the bridge, 2 s at 144 kHz. Its body and cavity records are the ones this body's conversion gives, and it passes

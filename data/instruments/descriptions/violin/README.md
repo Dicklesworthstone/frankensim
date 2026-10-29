@@ -64,6 +64,60 @@ bulk alloy unless its construction assumptions actually apply. Original source
 identities and queries are retained in the native log. The string is **not
 retuned** after substitution, and the sound is not peak-normalized.
 
+## Apply a measured varnish to the existing violin
+
+`cannone-h8-varnished.assembly` adds an explicitly authored 20 µm film to the
+positive, outward faces of all exterior top, back and rib regions. It uses the
+measured modern oil/copal specimen `varnish-oil-copal-lammlein2021-s1`.
+This is a mechanical surrogate on the il Cannone model, not a recovered
+Guarneri or Stradivari recipe. The uncoated assembly remains the comparison.
+
+Compile the ordinary source pack, then select the coated assembly:
+
+```bash
+varnish_dir="$(mktemp -d)"
+varnish=varnish-oil-copal-lammlein2021-s1
+cargo run -p xtask -- matdb-pack \
+  --manifest "data/matdb/seed-v1/$varnish/manifest.tsv" \
+  --out "$varnish_dir/$varnish.fsmatpk"
+NOTES=G3 \
+ASSEMBLY_OPTIONS="$PWD/crates/fs-couple/examples/material_strings/cannone-h8-varnished.assembly" \
+data/instruments/descriptions/violin/render.sh \
+  target/release/material_strings /path/to/new-varnished-violin-run \
+  --pack "$varnish.fsmatpk=$varnish_dir/$varnish.fsmatpk"
+```
+
+Run the ordinary recipe into another new directory for the bare comparison.
+Keep bow input, strings, mesh, mode count, atmosphere and pressure scale equal.
+For another film family/specimen, edit a copy of the assembly options and
+compile its corresponding pack; merely changing a file label does not change
+its retained source identity. Multiple coating rows can represent separate
+ground and outer films. Historical oil penetration is not added as a second
+external thickness.
+
+The film changes the physical laminate stiffness, mass, mass centroid and
+material damping before body modes, bridge reactions, cavity coupling and
+pressure are formed. A one-sided film retains membrane–bending coupling; it
+is not a scalar stiffness multiplier or audio equalizer. The source conditioning
+is 293.15 K and RH 0.35. The declared Poisson ratio 0.30 and small-strain
+envelope 0.001 are modeling assumptions, not source measurements.
+
+The current shell route freezes storage modulus at 1 kHz and refuses a
+retained body mode whose film storage differs by more than the explicitly
+selected 25% relative allowance. This is a limit on the film modulus
+approximation, not a 25% bound on frequency, sound or total prediction error.
+Loss reads the actual source spectrum at each retained mode and preserves
+passive cross-mode damping by geometric-mean congruence. A full hereditary
+shell solve, evolving coating strain checks, moisture/cure/aging effects and
+frequency-dependent Poisson ratio remain outside this option.
+
+The [source-data guide](../../../matdb/seed-v1/VIOLIN_VARNISHES.md) distinguishes
+historical observations from modern DMA fits. The executable
+[section study](../../../../docs/VIOLIN_VARNISH_PHYSICS.md) quantifies directional
+frequency and decay estimates using the same material and laminate owners.
+No coated full-violin audio or mesh/mode/time convergence result is supplied
+by the addition of this configuration.
+
 ## Listen and inspect in the existing Instrument Lab
 
 With the lab's usual NumPy, Pillow and Matplotlib dependencies installed, add

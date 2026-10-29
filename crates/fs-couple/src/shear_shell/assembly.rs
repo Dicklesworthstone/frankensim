@@ -24,7 +24,6 @@ use fs_plate::shell::{
     },
     mitc::{
         ConstraintFrame, MitcBudget, NodalDirectors, ShellConstraint, ShellMass, assemble_mitc3p,
-        viscosity::{project_viscosity, projection_terms},
     },
     modes_shell,
 };
@@ -284,7 +283,7 @@ impl MaterialShellAssembly {
                 )
             })?;
             work = work
-                .and_then(|w| projection_terms(nodes, triangles, n)?.checked_add(w))
+                .and_then(|w| source.loss_projection_terms(n)?.checked_add(w))
                 .and_then(|w| {
                     6usize
                         .checked_mul(nodes)?
@@ -475,7 +474,6 @@ impl MaterialShellAssembly {
                 &tied.project_glue_damping(&basis).map_err(owner)?,
             )?;
         }
-        let spectrum = super::constant_loss::ConstantLossSpectrum::fit();
         let mut interface_columns = Vec::with_capacity(self.components.len());
         let mut exterior_area = 0.0;
         for (i, part) in self.components.iter().enumerate() {
@@ -501,25 +499,9 @@ impl MaterialShellAssembly {
                     .map_err(owner)?,
             )?;
             exterior_area += pressure.exterior.area_m2();
-            // Each material loss law projects on its own elements; an anchored one is then read at every retained
-            // mode's own frequency (constant loss factors). A Kelvin-Voigt component is the single original projection.
-            for (law, viscosity) in source.loss_groups()? {
-                let mut projected = project_viscosity(
-                    &source.mesh,
-                    &part.directors,
-                    &source.sections,
-                    &viscosity,
-                    &physical_modes[i],
-                    part.assembly_budget,
-                    budget.max_projection_terms,
-                    || gate.is_requested(),
-                )
-                .map_err(owner)?;
-                if let Some(reference) = law {
-                    super::constant_loss::rescale(&mut projected, &omega, reference, &spectrum);
-                }
-                add(&mut matrix, &projected)?;
-            }
+            add(&mut matrix, &source.project_material_viscosity(&part.directors,
+                &physical_modes[i], &omega, part.assembly_budget,
+                budget.max_projection_terms, gate)?)?;
             let laws: Vec<_> = source.interfaces.iter().map(|i| i.law().clone()).collect();
             interface_columns.push(
                 models[i]

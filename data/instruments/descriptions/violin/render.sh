@@ -12,6 +12,7 @@ shift 2
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo="$(cd "$here/../../../.." && pwd -P)"
 materials="$repo/crates/fs-couple/examples/material_strings"
+assembly_options="${ASSEMBLY_OPTIONS:-$materials/cannone-h8.assembly}"
 geometry="$repo/data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026"
 for note in ${NOTES:-G3 D4 A4 E5}; do
     case "$note" in
@@ -23,7 +24,7 @@ for note in ${NOTES:-G3 D4 A4 E5}; do
         --performance "$materials/cannone-dominant-g3.material-strings" \
         --pack-root "$materials/packs" \
         --shell-table "$geometry/shell-assembly-h8.tsv" \
-        --assembly-options "$materials/cannone-h8.assembly" \
+        --assembly-options "$assembly_options" \
         --bow-card "$here/arco-open-$note.performance" --string-index "$string" \
         --bow-distance-from-bridge 0.1 --family violin --note "$note" \
         --observer "material shell-volume and cavity pressure at 1 m; compact receiver approximation" \

@@ -18,6 +18,8 @@ use fs_plate::shell::survey::validate_midsurface;
 mod interfaces;
 #[path = "shell/pressure.rs"]
 mod pressure;
+#[path = "shell/coating.rs"]
+mod coating;
 #[path = "shell/assembly.rs"]
 pub(super) mod assembly;
 
@@ -64,6 +66,7 @@ pub(super) struct Spec {
     nodes: Vec<Node>,
     triangles: Vec<[usize; 3]>,
     regions: Vec<RegionInput>,
+    coatings: coating::Inputs,
     supports: Vec<ShellConstraint>,
     interfaces: interfaces::Inputs,
     pressure_surfaces: Option<fs_couple::shear_shell::pressure::ShellPressureSurfaces>,
@@ -136,6 +139,7 @@ impl Spec {
         if assembly_window.is_none() && !regions.iter().any(|x| x.pack == "@body") {
             return Err("shell regions must retain the performance body material pack".into());
         }
+        let coatings = coating::Inputs::parse(r, &regions)?;
         let n = count(r.row("nodes", 1)?[0], 3, MAX_NODES)?;
         let mut nodes = Vec::with_capacity(n);
         for _ in 0..n {
@@ -194,7 +198,7 @@ impl Spec {
             }
             bridges.push(Bridge { node, direction });
         }
-        Ok(Self { nodes, triangles, regions, supports, interfaces, pressure_surfaces, bridges, minimum_facet_dot,
+        Ok(Self { nodes, triangles, regions, coatings, supports, interfaces, pressure_surfaces, bridges, minimum_facet_dot,
             mass, drilling_alpha, window, projection_work })
     }
 
@@ -324,6 +328,7 @@ impl Spec {
             });
         }
         let specimen = compile_material_shear_shell(mesh, regions, assembly_budget, gate)?;
+        let specimen = self.coatings.bind(specimen, spec, catalog, loader, gate)?;
         let specimen = self.interfaces.bind(specimen, gate)?;
         let specimen = if let Some(surfaces) = &self.pressure_surfaces {
             specimen.with_pressure_surfaces(surfaces.clone(), gate)?

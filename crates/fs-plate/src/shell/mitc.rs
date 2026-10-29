@@ -142,7 +142,6 @@ pub struct ShearShellSection {
     mass_first_moment_kg_m: f64,
     rotary_inertia_kg: f64,
     material_angle_rad: f64,
-    director_inertia: bool,
 }
 
 impl ShearShellSection {
@@ -169,7 +168,6 @@ impl ShearShellSection {
             mass_first_moment_kg_m: 0.0,
             rotary_inertia_kg,
             material_angle_rad,
-            director_inertia: false,
         };
         out.validate()?;
         Ok(out)
@@ -205,7 +203,6 @@ impl ShearShellSection {
             mass_first_moment_kg_m,
             rotary_inertia_kg,
             material_angle_rad,
-            director_inertia: true,
         };
         out.validate()?;
         Ok(out)

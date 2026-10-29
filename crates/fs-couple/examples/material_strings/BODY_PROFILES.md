@@ -535,6 +535,80 @@ equilibrium, separately connected ribs, resolved soundpost and bass-bar solids,
 distributed glue mortars or full exterior acoustic back-loading. The fixture's coefficients are synthetic;
 it establishes the data-to-pressure path, not measured whole-instrument fidelity.
 
+### Source-bound varnish and other measured films
+
+V3 shells and every V4 component accept an optional block **after the last
+`region` and before `nodes`**:
+
+```text
+coatings 1
+coating body varnish-oil-copal-lammlein2021-s1.fsmatpk positive 0.000020 1000 0.30 0.001 0.35 0.25
+```
+
+The nine fields after `coating` are `REGION PACK SIDE THICKNESS_M REFERENCE_HZ
+POISSON_RATIO STRAIN_LIMIT CONDITIONING_RH MAX_STORAGE_RELATIVE_DRIFT`.
+`SIDE` is `positive` or `negative` relative to the original shell directors.
+Repeated rows on one region/side stack outward in declaration order, so a
+ground and outer varnish can have distinct sources and thicknesses. An absent
+block or `coatings 0` retains the uncoated path. Each component admits at most
+64 films; the compiler also bounds all retained film/facet records and charges
+each distinct film's loss projection to the original projection budget.
+
+The measured-film schema supplies density and `varnish_e0`, `varnish_einf`,
+`varnish_alpha`, `varnish_beta`, `varnish_tau`. The source query retains the
+performance temperature as typed absolute kelvin, reference frequency as typed
+cyclic Hz, the authored conditioning RH, `source_fitted_response=1`, and
+`source_density_sample_matched=0`. The published group density is not claimed
+to be paired with an individual DMA sample. Historical stratigraphy alone
+cannot satisfy these mechanical requirements. See
+[`VIOLIN_VARNISHES.md`](../../../../data/matdb/seed-v1/VIOLIN_VARNISHES.md).
+
+The isotropic, real, constant Poisson ratio is an explicit closure of the
+measured uniaxial film spectrum. `STRAIN_LIMIT` declares the constitutive
+small-strain envelope; this linear shell route does not yet monitor coating
+strains during a nonlinear render. The example's values are assumptions,
+not measured historical properties.
+
+The shared laminate and MITC owners integrate complete `A/B/D` stiffness,
+`I0/I1/I2` inertia and the film's offset viscous coupling. The reference remains
+the wood midsurface: the original joint attachment coordinates and cavity
+geometry are retained. Film thickness adds physical mass and does not consume
+a fixed-mass substrate allowance. Perfect bonding is assumed. Penetrating oil,
+curing stress, moisture transport, damage and a displaced exterior acoustic
+boundary are not modeled by an added surface layer.
+
+Storage is frozen at `REFERENCE_HZ`. Every retained body mode must satisfy
+`abs(Eprime(reference)-Eprime(mode))/Eprime(mode) <= MAX_STORAGE_RELATIVE_DRIFT`,
+with an authored tolerance in `[0,1)`, and all original material frequency
+bands. The reference itself must be in both film and wood source bands. Each
+film's modal viscosity instead uses its full source spectrum `Edoubleprime(omega)/omega`.
+After physical projection, positive diagonal congruence scales its full matrix:
+diagonal modal losses read the measured law at their own frequencies and
+off-diagonal terms use the geometric mean of those factors. Passivity and
+cross-mode loss survive. Substrate loss keeps its own existing law, so wood's
+constant-loss rescaling cannot accidentally alter varnish loss.
+
+This is a bounded approximation of dispersive stiffness plus source-dependent
+modal loss. It is not the full hereditary, frequency-dependent shell
+eigenproblem. The material owner separately offers passive tensor-Prony
+lowering with independent storage and loss error bounds; that memory is not
+silently substituted into this shell renderer. The reproducible section study
+in [`VIOLIN_VARNISH_PHYSICS.md`](../../../../docs/VIOLIN_VARNISH_PHYSICS.md)
+evaluates the exact source spectrum and quantifies the mass/stiffness/loss
+competition.
+
+For table conversion, the options file accepts
+`coating COMPONENT PACK SIDE THICKNESS_M REFERENCE_HZ POISSON_RATIO STRAIN_LIMIT
+CONDITIONING_RH MAX_STORAGE_RELATIVE_DRIFT`. A literal component name selects
+all its regions; `@exterior` selects only components explicitly marked exterior
+in the source table. A selector matching no component refuses. The committed
+`cannone-h8-varnished.assembly` applies a 20 µm modern oil/copal surrogate to
+the il Cannone top, back and ribs (45 components, 60 regions), excluding the
+bass bar, soundpost and bridge. It does not establish the original Guarneri
+finish or transfer Stradivari observations to that instrument. Compile the
+varnish pack and use the violin recipe's `ASSEMBLY_OPTIONS` selection described
+in [`violin/README.md`](../../../../data/instruments/descriptions/violin/README.md).
+
 ## Separate exterior and cavity pressure surfaces
 
 A v3 profile can declare which original triangles participate in exterior

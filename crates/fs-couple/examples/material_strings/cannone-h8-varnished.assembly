@@ -1,0 +1,24 @@
+frankensim-shell-assembly-options-v1
+# The existing il Cannone h8 body with an authored 20 micrometre exterior film.
+# This is a modern measured oil/copal surrogate, NOT a reconstructed Guarneri
+# or Stradivari recipe. Geometry, strings, bridge joints and pressure scale are
+# unchanged. Source film conditioning: 293.15 K, RH 0.35.
+window-hz 15 2000
+projection-work 549755813888
+reference-thickness-m 0.003
+pack spruce @body
+pack maple violin-maple-sycamore-sonderegger2013-shell.fsmatpk
+# Coat all regions of explicitly exterior parts: top, back and ribs.
+# Positive directors point outward in this table. No film is added to the
+# bass bar, soundpost or bridge. Multiple rows would stack outward in order.
+# Fields: component pack side h[m] reference[Hz] nu strain-limit RH storage-tolerance.
+# nu=0.30 and strain-limit=0.001 are explicit modeling assumptions; they are
+# not measured properties. Each retained body mode must satisfy <=25% relative
+# storage drift from the reference slice. Modal loss uses the actual spectrum.
+coating @exterior varnish-oil-copal-lammlein2021-s1.fsmatpk positive 0.000020 1000 0.30 0.001 0.35 0.25
+bridge-component bridge
+bridge-direction 1 0 0
+bridge -0.01734 -0.05164
+bridge -0.00557 -0.05421
+bridge 0.00629 -0.05329
+bridge 0.01728 -0.04887

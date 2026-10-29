@@ -9,7 +9,7 @@ use crate::plate_viscosity::ModalPlateViscosity;
 use crate::thin_plate::CompactBody;
 use fs_exec::CancelGate;
 use fs_plate::shell::{modes_shell, mitc::{assemble_mitc3p, MitcBudget, NodalDirectors,
-    ShellConstraint, ShellMass, viscosity::{project_viscosity, projection_terms}}};
+    ShellConstraint, ShellMass}};
 
 /// Largest retained mode count one shell body or shell assembly reduction admits. It bounds the
 /// stored mode vectors and the dense modal damping factor; the cold projection work still has to fit
@@ -137,7 +137,7 @@ impl ResolvedShearShell {
         }
         let (exterior_facets,cavity_facets)=self.pressure_surfaces().map_or((elements,elements),
             |surfaces|(surfaces.exterior.len(),surfaces.cavity.len()));
-        let work=projection_terms(nodes,elements,n)
+        let work=self.loss_projection_terms(n)
             .and_then(|w|6usize.checked_mul(nodes)?.checked_mul(n)?.checked_mul(force_ports.len())?.checked_add(w))
             .and_then(|w|w.checked_add(4*n*n*n))
             .and_then(|w|w.checked_add(fs_plate::shell::pressure::projection_terms(nodes,exterior_facets,n)?))
@@ -202,18 +202,8 @@ impl ResolvedShearShell {
             budget.max_projection_terms,||gate.is_requested()).map_err(owner)?;
         let cavity_volume_shapes=pressure.cavity.project_modes(&physical_modes,
             budget.max_projection_terms,||gate.is_requested()).map_err(owner)?;
-        // Each material loss law projects on its own elements; an anchored one is then read at every retained mode's
-        // own frequency (constant loss factors). A Kelvin-Voigt shell is the single original projection.
-        let spectrum=super::constant_loss::ConstantLossSpectrum::fit();
-        let mut matrix:Vec<f64>=Vec::new();
-        for (law,viscosity) in self.loss_groups()? {
-            let mut part=project_viscosity(&self.mesh,directors,&self.sections,&viscosity,&physical_modes,
-                options.assembly_budget,budget.max_projection_terms,||gate.is_requested()).map_err(owner)?;
-            if let Some(reference)=law { super::constant_loss::rescale(&mut part,&omega,reference,&spectrum); }
-            if matrix.is_empty() { matrix=part; } else {
-                for (target,value) in matrix.iter_mut().zip(&part) { *target+=value; }
-            }
-        }
+        let matrix=self.project_material_viscosity(directors,&physical_modes,&omega,
+            options.assembly_budget,budget.max_projection_terms,gate)?;
         let damping=ModalPlateViscosity::factor(matrix,n,budget.reference_resistance_n_s_m,gate)?;
         let radiators=omega.iter().enumerate().map(|(i,&w)|
             CompactBody::from_mass_normalized_projection(w,volume_shapes[i],projected[0][i],pressure.exterior.area_m2()))

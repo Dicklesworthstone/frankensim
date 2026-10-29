@@ -5076,6 +5076,23 @@ single unchanged Kelvin-Voigt projection, bit for bit. This is a per-mode loss
 law: the stiffness dispersion that a causal constant-loss solid implies is not
 applied.
 
+`ResolvedShearShell::with_coatings` adds ordered, source-bound films on either
+side of each substrate region without moving its midsurface or attachment
+skins. The original laminate/MITC owners retain full A/B/D, I0/I1/I2 and each
+film's offset viscous coupling; the regional shear correction remains explicit.
+Storage is frozen at an authored reference, with every retained mode checked
+against both source support and an authored relative storage-drift bound.
+Each film is projected separately and reads its own E''(omega)/omega; positive
+diagonal congruence gives exact modal-diagonal loss for that basis and a passive
+geometric-mean cross-mode approximation. Wood's anchored law never rescales
+film loss. Complete projection budgets count every material-law group.
+Replacing or removing the stack and rebinding wood preserve the original
+substrate mass/thickness policy, interfaces and pressure ownership. Films add
+mass. Source, geometry, budget and cancellation refusals are transactional.
+Perfect bonding and linear small strains are assumptions; this route supplies
+no penetration, cure stress, slip, hereditary shell memory, evolving local
+strain-amplitude gate or displaced acoustic boundary.
+
 `SharedMaterialShellBody` and
 `ReciprocalStringBank::from_material_shear_shell` connect that image to every
 original material string, its own physical bridge map, shared gas and optional

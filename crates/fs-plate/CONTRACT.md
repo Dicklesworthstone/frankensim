@@ -43,9 +43,11 @@ and elastic bubble condensation. Consistent laminate inertia integrates the
 same director motion `u + z*(theta cross director)`, including translation/
 rotation cross work; nodal lumping retains the nodal cross terms. Drilling
 inertia remains an explicit numerical gauge in the existing I2 scale. The
-established homogeneous constructor keeps its original angular-mass arithmetic;
-the complete laminate constructor uses the physical director interpolation,
-which agrees with that constructor for a flat homogeneous layer.
+homogeneous and complete laminate constructors use the SAME physical director
+interpolation. This corrects the former homogeneous angular-vector rotary
+interpolation on varying directors, while preserving flat-layer equivalence.
+Consequently a vanishing coating approaches the bare curved shell continuously;
+a varnish comparison cannot switch its underlying inertia discretization.
 
 The source laminate already includes its transverse shear correction: it is
 not multiplied by 5/6 a second time. Layer order, reference surface, density,

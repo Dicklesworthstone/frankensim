@@ -4,10 +4,12 @@
 //! full Kelvin--Voigt loss travel together into one immutable element assembly.
 //! A source that states `constant_loss_reference_omega` has its loss factors
 //! read at every retained mode's own frequency instead ([`constant_loss`]).
-//! The material law is homogeneous through each thickness, at a frozen source
-//! state. Geometry, support and numerical resolution remain independent inputs.
+//! Substrate materials are homogeneous through their own thickness, at a frozen
+//! source state. Explicit source-backed surface films use the original laminate
+//! and MITC owners, retaining extension/bending and mass coupling. Geometry,
+//! support and numerical resolution remain independent inputs.
 //! No body frequency, damping ratio, carved-instrument preset or fitting to sound
-//! is introduced. Laminates, prestress evolution and finite strain are absent.
+//! is introduced. Prestress evolution and finite strain are absent.
 
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::thin_plate::{PlateMaterialModel, PlateRegionMaterial, PlateThicknessConstraint,
@@ -46,6 +48,9 @@ pub const CONSTANT_LOSS_REFERENCE_OMEGA: &str = "constant_loss_reference_omega";
 pub const CONSTANT_LOSS_REFERENCE_OMEGA_DIMS: fs_qty::Dims = fs_qty::Dims([0, 0, -1, 0, 0, 0]);
 /// The constant-loss-factor (generalized Maxwell) reading of anchored shell viscosities.
 pub mod constant_loss;
+/// Perfectly bonded source-backed films about the substrate reference surface.
+pub mod coating;
+pub use coating::{CoatingSide, ResolvedShellCoating, ShellCoating};
 
 fn invalid(what: &'static str) -> AcousticRealizeError {
     AcousticRealizeError::InvalidDescription { what }
@@ -89,13 +94,15 @@ impl ResolvedShellRegion {
     pub const fn input(&self) -> &ShellRegionMaterial { &self.input }
     /// Actual midsurface area [m²].
     pub const fn area_m2(&self) -> f64 { self.area_m2 }
-    /// Current thickness [m], independent of arching height.
+    /// Substrate thickness [m], independent of arching height and any coating.
+    /// Attachment geometry remains relative to the original substrate skins.
     pub const fn thickness_m(&self) -> f64 { self.thickness_m }
     /// Actual mass [kg], including this region only.
     pub const fn mass_kg(&self) -> f64 { self.mass_kg }
     /// Principal-frame shear-shell elastic section, before geometric rotation.
     pub const fn section(&self) -> &ShearShellSection { &self.section }
-    /// Principal-frame membrane/bending/shear viscosity, before facet rotation.
+    /// Substrate-only principal-frame viscosity, before facet rotation.
+    /// Coating loss remains separately owned and is never wood-law rescaled.
     pub const fn viscosity(&self) -> &ShearShellViscosity { &self.viscosity }
     /// The original six source-owned reduced plane-stress coefficients.
     pub const fn plane_viscosity(&self) -> &PlaneStressViscosity { &self.plane_viscosity }
@@ -113,6 +120,8 @@ pub struct ResolvedShearShell {
     element_regions: Vec<usize>,
     sections: Vec<ShearShellSection>,
     viscosity: Vec<ShearShellViscosity>,
+    coatings: Vec<ResolvedShellCoating>,
+    coating_viscosity: Vec<Vec<ShearShellViscosity>>,
     budget: MitcBudget,
     mass_kg: f64,
     interfaces: Vec<connections::ResolvedShellConnection>,
@@ -132,7 +141,15 @@ impl ResolvedShearShell {
     }
     /// One exact material section per triangle, in original mesh order.
     pub fn sections(&self) -> &[ShearShellSection] { &self.sections }
-    /// The element viscosities grouped by material loss law, each with its anchor ([`CONSTANT_LOSS_REFERENCE_OMEGA`],
+    /// Original substrate viscosities, in facet coordinates. Coating groups
+    /// remain separate because their measured frequency laws differ.
+    pub fn substrate_viscosities(&self) -> &[ShearShellViscosity] { &self.viscosity }
+    /// One film's complete facet viscosities at its declared storage reference.
+    /// Use `project_material_viscosity` to read its loss at actual modal frequencies.
+    pub fn coating_viscosities(&self, coating: usize) -> Option<&[ShearShellViscosity]> {
+        self.coating_viscosity.get(coating).map(Vec::as_slice)
+    }
+    /// The substrate viscosities grouped by material loss law, each with its anchor ([`CONSTANT_LOSS_REFERENCE_OMEGA`],
     /// `None` for Kelvin-Voigt). One law borrows the original viscosities unchanged; otherwise each group zeroes the
     /// elements of the other laws, so the groups' projections sum to the single one.
     pub(crate) fn loss_groups(&self) -> Result<Vec<(Option<f64>, std::borrow::Cow<'_, [ShearShellViscosity]>)>,
@@ -162,6 +179,8 @@ impl ResolvedShearShell {
         let mut inputs: Vec<_> = self.regions.iter().map(|r| r.input.clone()).collect();
         inputs[index].region.material = material.clone();
         let rebuilt = compile_material_shear_shell(self.mesh.clone(), inputs, self.budget, gate)?;
+        let rebuilt = coating::apply_coatings(rebuilt,
+            self.coatings.iter().map(|c| c.input().clone()).collect(), gate)?;
         let mut rebuilt = rebuilt.with_interfaces(self.interfaces.iter().map(|i| i.input().clone()).collect(),
             self.interface_budget, gate)?;
         // Pressure geometry is unchanged by a material rebind. Retain both the
@@ -302,7 +321,8 @@ pub fn compile_material_shear_shell(mesh: ShellMesh, inputs: Vec<ShellRegionMate
     }
     let mass_kg:f64=sections.iter().zip(element_areas).map(|(s,a)|s.areal_mass_kg_m2()*a).sum();
     if !mass_kg.is_finite() || mass_kg<=0.0 { return Err(invalid("total shell mass is unrepresentable")); }
-    Ok(ResolvedShearShell { mesh,regions,element_regions:assigned,sections,viscosity,budget,mass_kg,
+    Ok(ResolvedShearShell { mesh,regions,element_regions:assigned,sections,viscosity,
+        coatings:Vec::new(),coating_viscosity:Vec::new(),budget,mass_kg,
         interfaces:Vec::new(), interface_budget:fs_plate::shell::mitc::connections::ShellConnectionBudget {
             max_connections:0, max_terms:0, max_work:0,
         }, pressure_surfaces:None })

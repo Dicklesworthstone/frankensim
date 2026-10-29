@@ -10,6 +10,7 @@
 //! fractions of the performance body's length and width (the table's own bounding box); z stays in metres. Directors and
 //! region axes are normalized to unit length (the table prints them rounded). Nothing else is changed or fitted.
 use super::*;
+use super::super::coating::{FilmInput, MAX_COATINGS};
 
 /// The choices a shell-assembly table leaves to its user.
 pub(crate) struct TableOptions<'a> {
@@ -34,7 +35,9 @@ pub(crate) struct TableOptions<'a> {
 /// (`material_strings assemble-shell`, BODY_PROFILES.md). One record per line, `#` starts a comment line:
 /// `window-hz LO HI`, `projection-work N`, `reference-thickness-m T`, `bridge-component NAME` and
 /// `bridge-direction X Y Z` once each; `pack TABLE_PACK PROFILE_PACK` per table pack and `bridge X Y` per string, in
-/// string order.
+/// string order. Optional `coating COMPONENT PACK SIDE THICKNESS_M REFERENCE_HZ
+/// NU STRAIN_LIMIT RH STORAGE_TOL` records select every region of a component;
+/// `@exterior` selects only parts explicitly marked exterior in the table.
 pub(crate) struct OptionsFile {
     window_hz: (f64, f64),
     projection_work: usize,
@@ -43,6 +46,12 @@ pub(crate) struct OptionsFile {
     bridge_component: String,
     bridges: Vec<(f64, f64)>,
     bridge_direction: [f64; 3],
+    coatings: Vec<TableCoating>,
+}
+
+struct TableCoating {
+    component: String,
+    film: FilmInput,
 }
 
 impl OptionsFile {
@@ -54,6 +63,7 @@ impl OptionsFile {
         let (mut window_hz, mut projection_work, mut reference_thickness_m) = (None, None, None);
         let (mut bridge_component, mut bridge_direction) = (None, None);
         let (mut packs, mut bridges) = (Vec::new(), Vec::new());
+        let mut coatings = Vec::new();
         for line in lines.filter(|l| !l.starts_with('#')) {
             let f: Vec<&str> = line.split_ascii_whitespace().collect();
             match f.as_slice() {
@@ -66,6 +76,12 @@ impl OptionsFile {
                 ["pack", table, profile] if !packs.iter().any(|(t, _): &(String, String)| t == table) =>
                     packs.push((table.to_string(), profile.to_string())),
                 ["bridge", rest @ ..] => bridges.push(floats::<2>(rest).map(|[x, y]| (x, y))?),
+                ["coating", component, rest @ ..] if coatings.len() < MAX_COATINGS => {
+                    if component.chars().any(char::is_control) || component.starts_with('@') && *component != "@exterior" {
+                        return Err("shell-assembly coating needs a component name or @exterior".into());
+                    }
+                    coatings.push(TableCoating { component: component.to_string(), film: FilmInput::parse(rest)? });
+                }
                 _ => return Err(format!("unknown, repeated or malformed shell-assembly option: {line}").into()),
             }
         }
@@ -85,6 +101,7 @@ impl OptionsFile {
             bridge_component: bridge_component.ok_or_else(|| missing("bridge-component"))?,
             bridges,
             bridge_direction: bridge_direction.ok_or_else(|| missing("bridge-direction"))?,
+            coatings,
         })
     }
 
@@ -97,7 +114,7 @@ impl OptionsFile {
     pub(crate) fn convert(&self, table: &str) -> Result<ConvertedTable> {
         let two_pi = 2.0 * core::f64::consts::PI;
         let packs: Vec<(&str, &str)> = self.packs.iter().map(|(t, p)| (t.as_str(), p.as_str())).collect();
-        convert(table, &TableOptions {
+        convert_with_coatings(table, &TableOptions {
             window: ((two_pi * self.window_hz.0).powi(2), (two_pi * self.window_hz.1).powi(2)),
             projection_work: self.projection_work,
             packs: &packs,
@@ -105,7 +122,7 @@ impl OptionsFile {
             bridge_component: &self.bridge_component,
             bridges: &self.bridges,
             bridge_direction: self.bridge_direction,
-        })
+        }, &self.coatings)
     }
 }
 
@@ -160,6 +177,10 @@ fn floats<const N: usize>(fields: &[&str]) -> Result<[f64; N]> {
 
 /// Read the table and write it as a v4 assembled body profile (see the module documentation).
 pub(crate) fn convert(table: &str, options: &TableOptions<'_>) -> Result<ConvertedTable> {
+    convert_with_coatings(table, options, &[])
+}
+
+fn convert_with_coatings(table: &str, options: &TableOptions<'_>, coatings: &[TableCoating]) -> Result<ConvertedTable> {
     let mut lines = table.lines();
     if lines.next() != Some("frankensim.shell-assembly.v1") {
         return Err("not a frankensim.shell-assembly.v1 table".into());
@@ -216,6 +237,14 @@ pub(crate) fn convert(table: &str, options: &TableOptions<'_>) -> Result<Convert
             _ => return Err(format!("unknown or malformed shell-assembly table record {}", f[0]).into()),
         }
     }
+    let matches = |coating: &TableCoating, part: &Part<'_>| {
+        coating.component == part.name || coating.component == "@exterior" && part.exterior
+    };
+    for coating in coatings {
+        if !parts.iter().any(|part| matches(coating, part)) {
+            return Err(format!("shell-assembly coating selects no component: {}", coating.component).into());
+        }
+    }
     let all = || parts.iter().flat_map(|p| &p.nodes);
     let bounds = |axis: usize| all().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), n| (lo.min(n[axis]), hi.max(n[axis])));
     let ((x0, x1), (y0, y1)) = (bounds(0), bounds(1));
@@ -238,6 +267,15 @@ pub(crate) fn convert(table: &str, options: &TableOptions<'_>) -> Result<Convert
         let (profile_pack, ratio) = (pack(part.pack)?, part.thickness_m / options.reference_thickness_m);
         for (k, a) in part.axes.iter().enumerate() {
             writeln!(out, "region r{k} {profile_pack} orthotropic12 {ratio} 0 {} {} {} {}", 5.0 / 6.0, a[0], a[1], a[2])?;
+        }
+        let selected: Vec<_> = coatings.iter().filter(|coating| matches(coating, part)).collect();
+        let count = selected.len().checked_mul(part.axes.len()).ok_or("shell coating count overflow")?;
+        if count > MAX_COATINGS { return Err("shell-assembly component exceeds its coating count budget".into()); }
+        if count > 0 {
+            writeln!(out, "coatings {count}")?;
+            for coating in selected {
+                for k in 0..part.axes.len() { coating.film.write_row(&format!("r{k}"), &mut out)?; }
+            }
         }
         writeln!(out, "nodes {}", part.nodes.len())?;
         for n in &part.nodes {
