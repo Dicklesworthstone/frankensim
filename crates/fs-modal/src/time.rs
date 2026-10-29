@@ -30,6 +30,10 @@ use std::sync::Arc;
 
 use fs_math::{c64::C64, det};
 
+#[path = "time/heat.rs"]
+mod heat;
+use heat::{DampedTransition, ViscousIntegral};
+
 /// Maximum number of modes admitted by one runtime model.
 pub const MAX_TIME_DOMAIN_ACOUSTIC_MODES: usize = 4_096;
 
@@ -97,12 +101,12 @@ pub struct ModalAcousticFrame {
     pub input_work_j: f64,
     /// Energy removed by viscous damping during this sample [J].
     ///
-    /// Values within `dissipation_roundoff_tolerance_j` of zero may be
-    /// slightly negative because this is computed as `work - delta_energy`.
+    /// Independently integrates `2*zeta*omega*v(t)^2` along the exact held-force
+    /// trajectory. This is nonnegative physical heat, including losses smaller
+    /// than subtraction roundoff in the stored mechanical energy.
     pub viscous_dissipation_j: f64,
-    /// Mode-local work-minus-energy differences for physical loss routing.
-    /// Their sum agrees with the aggregate loss within the reported roundoff
-    /// allowances; an undamped mode's roundoff is not physical heating.
+    /// Independent mode-local viscous integrals for physical loss routing.
+    /// Their sum is the aggregate heat; undamped and free modes report exact zero.
     pub modal_viscous_losses: Vec<ModalViscousLoss>,
     /// Scale-aware roundoff allowance attached to the dissipation value [J].
     pub dissipation_roundoff_tolerance_j: f64,
@@ -111,10 +115,10 @@ pub struct ModalAcousticFrame {
 /// Viscous energy removal for one retained mode, with numerical uncertainty.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ModalViscousLoss {
-    /// Held-force work minus the mode's stored-energy change [J].
-    /// A small negative result within the allowance is roundoff, not cooling.
+    /// Nonnegative integral of the physical viscous power [J].
+    /// No subtraction of stored mechanical energies enters this value.
     pub energy_j: f64,
-    /// Scale-aware allowance for the mode-local subtraction [J].
+    /// Scale-aware floating-point allowance for the integral contraction [J].
     pub roundoff_tolerance_j: f64,
 }
 
@@ -284,8 +288,8 @@ struct ExactZohKernel {
     sample_period_s: f64,
     full_duration_bits: u64,
     half_duration_bits: u64,
-    full: Box<[ExactZohCoefficients]>,
-    half: std::sync::OnceLock<Box<[ExactZohCoefficients]>>,
+    full: Box<[PreparedZohCoefficients]>,
+    half: std::sync::OnceLock<Box<[PreparedZohCoefficients]>>,
 }
 
 impl ExactZohKernel {
@@ -294,7 +298,7 @@ impl ExactZohKernel {
         let full = modes
             .iter()
             .copied()
-            .map(|mode| exact_zoh_coefficients(mode, sample_period_s))
+            .map(|mode| PreparedZohCoefficients::new(mode, sample_period_s))
             .collect::<Vec<_>>()
             .into_boxed_slice();
         Self {
@@ -310,7 +314,7 @@ impl ExactZohKernel {
         &self,
         modes: &[ModalAcousticMode],
         duration_s: f64,
-    ) -> Option<&[ExactZohCoefficients]> {
+    ) -> Option<&[PreparedZohCoefficients]> {
         let duration_bits = duration_s.to_bits();
         if duration_bits == self.full_duration_bits {
             Some(&self.full)
@@ -320,12 +324,26 @@ impl ExactZohKernel {
                 modes
                     .iter()
                     .copied()
-                    .map(|mode| exact_zoh_coefficients(mode, half_period_s))
+                    .map(|mode| PreparedZohCoefficients::new(mode, half_period_s))
                     .collect::<Vec<_>>()
                     .into_boxed_slice()
             }))
         } else {
             None
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PreparedZohCoefficients {
+    transition: ExactZohCoefficients,
+    viscous_integral: ViscousIntegral,
+}
+impl PreparedZohCoefficients {
+    fn new(mode: ModalAcousticMode, dt: f64) -> Self {
+        Self {
+            transition: exact_zoh_coefficients(mode, dt),
+            viscous_integral: ViscousIntegral::new(mode, dt),
         }
     }
 }
@@ -574,7 +592,7 @@ impl ModalAcousticTimeModel {
             self.modes[mode_index],
             state,
             force,
-            self.transition_kernel.full[mode_index],
+            self.transition_kernel.full[mode_index].transition,
         )
     }
 
@@ -932,6 +950,8 @@ impl ModalAcousticTimeModel {
         let mut input_work_j = 0.0;
         let mut energy_before_j = 0.0;
         let mut energy_after_j = 0.0;
+        let mut viscous_dissipation_j = 0.0;
+        let mut dissipation_roundoff_tolerance_j = 0.0;
         let transition_coefficients = self.transition_kernel.for_duration(&self.modes, duration_s);
         for (mode_index, ((mode, state), force)) in self
             .modes
@@ -940,12 +960,11 @@ impl ModalAcousticTimeModel {
             .zip(generalized_force_n_per_sqrt_kg)
             .enumerate()
         {
-            let next = match transition_coefficients {
-                Some(coefficients) => {
-                    advance_exact_zoh_cached(*mode, *state, *force, coefficients[mode_index])
-                }
-                None => advance_exact_zoh(*mode, *state, *force, duration_s),
+            let prepared = match transition_coefficients {
+                Some(coefficients) => coefficients[mode_index],
+                None => PreparedZohCoefficients::new(*mode, duration_s),
             };
+            let next = advance_exact_zoh_cached(*mode, *state, *force, prepared.transition);
             check_limit(
                 "absolute modal displacement",
                 next.displacement_m_sqrt_kg.abs(),
@@ -971,20 +990,31 @@ impl ModalAcousticTimeModel {
             };
             let work = force * displacement_increment;
             input_work_j += work;
-            let loss = work - (after - before);
-            let allowance =
-                256.0 * f64::EPSILON * work.abs().max(before).max(after).max(f64::MIN_POSITIVE);
-            if !loss.is_finite() {
+            let (loss, allowance) = prepared
+                .viscous_integral
+                .evaluate(*mode, *state, *force, duration_s);
+            let balance_loss = work - (after - before);
+            let balance_allowance =
+                256.0 * f64::EPSILON * work.abs().max(before).max(after).max(f64::MIN_POSITIVE)
+                    + allowance;
+            if !loss.is_finite() || !allowance.is_finite() {
                 return Err(ModalAcousticTimeError::InvalidInput {
-                    what: "mode-local viscous energy must be finite",
+                    what: "mode-local viscous integral must be finite",
                 });
             }
-            if loss < -allowance {
+            if balance_loss < -balance_allowance {
                 return Err(ModalAcousticTimeError::NegativeDissipation {
-                    dissipation_j: loss,
-                    tolerance_j: allowance,
+                    dissipation_j: balance_loss,
+                    tolerance_j: balance_allowance,
                 });
             }
+            if (balance_loss - loss).abs() > balance_allowance {
+                return Err(ModalAcousticTimeError::InvalidInput {
+                    what: "independent viscous heat and held-force energy balance disagree",
+                });
+            }
+            viscous_dissipation_j += loss;
+            dissipation_roundoff_tolerance_j += allowance;
             workspace.frame.modal_viscous_losses[mode_index] = ModalViscousLoss {
                 energy_j: loss,
                 roundoff_tolerance_j: allowance,
@@ -1015,17 +1045,21 @@ impl ModalAcousticTimeModel {
                 what: "sample transition produced a non-finite result",
             });
         }
-        let viscous_dissipation_j = input_work_j - (energy_after_j - energy_before_j);
+        let balance_loss = input_work_j - (energy_after_j - energy_before_j);
         let scale = input_work_j
             .abs()
             .max(energy_before_j)
             .max(energy_after_j)
             .max(f64::MIN_POSITIVE);
-        let dissipation_roundoff_tolerance_j = 256.0 * f64::EPSILON * scale;
-        if viscous_dissipation_j < -dissipation_roundoff_tolerance_j {
-            return Err(ModalAcousticTimeError::NegativeDissipation {
-                dissipation_j: viscous_dissipation_j,
-                tolerance_j: dissipation_roundoff_tolerance_j,
+        dissipation_roundoff_tolerance_j +=
+            (16.0 + self.modes.len() as f64) * f64::EPSILON * viscous_dissipation_j;
+        let balance_allowance = 256.0 * f64::EPSILON * scale + dissipation_roundoff_tolerance_j;
+        if !viscous_dissipation_j.is_finite()
+            || !dissipation_roundoff_tolerance_j.is_finite()
+            || (balance_loss - viscous_dissipation_j).abs() > balance_allowance
+        {
+            return Err(ModalAcousticTimeError::InvalidInput {
+                what: "aggregate viscous integral and held-force energy balance disagree",
             });
         }
         self.states.copy_from_slice(&workspace.candidate);
@@ -1088,12 +1122,17 @@ impl ModalAcousticTimeModel {
             let phi = port_shapes[mode_index];
             let (free, unit) = match transition_coefficients {
                 Some(coefficients) => (
-                    advance_exact_zoh_cached(*mode, *state, 0.0, coefficients[mode_index]),
+                    advance_exact_zoh_cached(
+                        *mode,
+                        *state,
+                        0.0,
+                        coefficients[mode_index].transition,
+                    ),
                     advance_exact_zoh_cached(
                         *mode,
                         ModalAcousticState::default(),
                         1.0,
-                        coefficients[mode_index],
+                        coefficients[mode_index].transition,
                     ),
                 ),
                 None => (
@@ -1221,59 +1260,11 @@ fn exact_zoh_coefficients(mode: ModalAcousticMode, dt: f64) -> ExactZohCoefficie
         drag *= 0.5;
         doublings += 1;
     }
-    let stiffness = angle * angle;
-    let mut previous = 0.0;
-    let mut power = 1.0;
-    let mut reciprocal_factorial = 1.0;
-    let mut b = 1.0;
-    let mut g = 0.5;
-    // p_j = -drag p_{j-1} - angle^2 p_{j-2};
-    // B/h = sum p_j/(j+1)!, G/h^2 = sum p_j/(j+2)!.
-    // At |angle|, |drag| <= 1/4 the omitted terms are below f64 rounding.
-    for j in 1..=18 {
-        let next = -drag * power - stiffness * previous;
-        previous = power;
-        power = next;
-        reciprocal_factorial /= f64::from(j + 1);
-        b += power * reciprocal_factorial;
-        g += power * reciprocal_factorial / f64::from(j + 2);
-    }
-    let mut position_decrement = stiffness * g;
-    let mut velocity_decrement = position_decrement + drag * b;
-    let mut position_retention = 1.0 - position_decrement;
-    let mut velocity_retention = 1.0 - velocity_decrement;
+    let mut transition = DampedTransition::small(angle, drag);
     for _ in 0..doublings {
-        let cross = (angle * b) * (angle * b);
-        let next_position = position_retention * position_retention - cross;
-        let next_velocity = velocity_retention * velocity_retention - cross;
-        g = 0.25 * (g * (1.0 + position_retention) + b * b);
-        b *= 0.5 * (position_retention + velocity_retention);
-        angle *= 2.0;
-        drag *= 2.0;
-        position_decrement = (angle * angle) * g;
-        velocity_decrement = position_decrement + drag * b;
-        // Preserve both tiny increments near identity and exponentially small
-        // tails far from identity. Neither 1-E nor E can recover the other by
-        // subtraction at both ends of that range.
-        position_retention = if position_decrement.abs() < 0.5 {
-            1.0 - position_decrement
-        } else {
-            next_position
-        };
-        velocity_retention = if velocity_decrement.abs() < 0.5 {
-            1.0 - velocity_decrement
-        } else {
-            next_velocity
-        };
+        transition.double();
     }
-    ExactZohCoefficients::Damped {
-        position_retention,
-        velocity_retention,
-        velocity_gain: dt * b,
-        displacement_gain: dt * (dt * g),
-        position_decrement,
-        velocity_decrement,
-    }
+    transition.coefficients(dt)
 }
 
 // The exact integral of velocity for a held force on a free coordinate.

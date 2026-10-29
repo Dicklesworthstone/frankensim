@@ -110,12 +110,25 @@ and demonstrates the old pinning error; G3 checks mixed-sign multimode ports
 in all damping regimes and full/half/subsample durations. This enforces only
 endpoint velocity: continuous no-slip motion, exact within-step event times,
 and a passive contact discretization are not claimed.
-Each frame additionally retains mode-local viscous work-minus-energy differences
-and their scale-aware roundoff allowances. Negative loss beyond a mode's allowance
-refuses the entire step, even when another mode could mask it in the aggregate.
-The aggregate work/energy calculation is unchanged; summing the mode-local
-differences can differ by floating-point roundoff. Neither an undamped mode's
-energy drift nor a negative value within its allowance is physical heating.
+Each frame retains independent mode-local integrals of physical viscous power
+`2*zeta*omega*v(t)^2`, with scale-aware contraction roundoff allowances. Their
+sum supplies the aggregate heat. Undamped and free modes report exactly zero;
+high-Q losses are not recovered by subtracting large mechanical energies.
+Per-mode and aggregate force-work/energy balance checks remain separate and
+refuse disagreement beyond their floating-point allowances before state commit.
+
+A positive square-root Gramian is prepared beside each exact full/half-step
+transition. The same scalar transition owner resolves a short interval before
+composing its viscous integral across longer or stiff intervals. QR preserves
+positivity without subtractive determinants or clipping. The eight-point
+quadrature is confined to a dimensionless generator norm at most one half,
+where its remainder is below floating-point rounding. Warm stepping reuses the
+prepared factors without allocations; arbitrary durations prepare the same
+integral in fixed-size local storage. Existing state-transition arithmetic and
+the narrow-band acoustic observer remain unchanged. Six focused regressions
+cover independent heat/work integration, high-Q cancellation, very soft forced
+modes, long/stiff composition, exact zero-loss cases, and cached/subsample
+consistency.
 The default initial state is zero displacement and velocity. A caller whose
 window begins after a load has already settled may explicitly initialize the
 exact static compliance `q = F/omega^2`, `qdot = 0`; using that operation to
