@@ -8654,6 +8654,50 @@ independent paired-blade motion, exact retry after source refusal or final
 cancellation, and rejection of an unowned second inventory. Native execution
 and measured physical validation remain separate gates.
 
+## Live regional gas fields through branches and moving apertures
+
+`DgPortLoad::rebind_regional_gas_fields_controlled` changes the optional main
+field and explicitly identified finite branches in one transaction. Branch
+inputs use their original external port IDs; unknown and duplicate IDs refuse
+before native work. Reports follow original attachment order. The main-only
+entry point delegates to this same owner, and unselected native propagators
+are retained instead of rebuilt.
+
+Each selected duct uses the existing uniform lossless, uniform diffusion or
+spatial diffusion transfer, preserving its original compression, momentum,
+wall and admitted memory coordinates. Junction and computed-exterior pressure
+gates inspect the complete proposed endpoint. Coordinated regional pressure
+changes can therefore be admitted without publishing an inconsistent
+intermediate junction. Finite slit/circular terminal passages follow the
+accepted gas at their actual branch or main outlet and retain cell momentum,
+history and original Mach limits. Branch and terminal elimination are rebuilt
+once from the accepted regional sources; exterior pole states do not reset.
+
+`DgRegionalGasUpdate` identifies the optional main transfer, selected branch
+transfers and every native terminal-channel transfer. One allowance bounds
+their sum of absolute parameter work; the signed sum equals the represented
+storage change within native arithmetic. Subsequent aggregate step ledgers
+include each branch's cumulative parameter work once, separately from pressure
+work, dissipation and rational exterior exchange. Source, state, propagator
+and coupling changes publish only after all checks and final cancellation.
+
+Scalar, independent-pair and material-modal `ApertureDg` sources consume this
+same regional transaction. A branch-only change updates the source's exact
+mean impedance while retaining inlet gas, viscosity and mechanical history.
+The series regional entry point prepares both tracts, checks their common
+complete inlet gas and summed impedance, and applies one absolute-work
+allowance across both. An explicitly unselected side retains its state and
+reports `None`. Existing main-only APIs share these candidate helpers.
+
+This is a prescribed, fixed-geometry regional material intervention. The
+background owner owes its thermal/species account and signed work; it does not
+add a density-changing valve mass-flow law, static pressure force, mean
+transport or exterior-medium update. Six focused synthetic regression groups
+cover independent branch/channel momentum and energy, native diffusion memory,
+coordinated pressure, scalar and paired source response, series coupling and
+transactional refusal/exact retry. Native compilation, execution and measured
+physical validation remain separate gates. This advances MR05/MR06/MR33/MR67.
+
 ## Finite transport networks drive complete acoustic loads
 
 `dg_port::finite_gas::transport` connects the original multi-parcel material

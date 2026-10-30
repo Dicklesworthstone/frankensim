@@ -14,6 +14,8 @@ use fs_vfit::model::PoleTerm;
 #[path = "../../render/schedule/reed/field_input/tests/support.rs"]
 mod gas_support;
 
+mod regional;
+
 const DT: f64 = 1.0 / 96_000.0;
 const INLET: PortId = PortId(7);
 const OUTLET: PortId = PortId(3);

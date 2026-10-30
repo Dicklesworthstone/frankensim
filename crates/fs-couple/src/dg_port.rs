@@ -15,7 +15,9 @@ pub mod radiation;
 pub mod finite_gas;
 
 mod gas;
-pub use gas::{DgGasRefresh, DgPortGasUpdate};
+pub use gas::{
+    DgBranchGasInput, DgBranchGasUpdate, DgGasRefresh, DgPortGasUpdate, DgRegionalGasUpdate,
+};
 pub(crate) use gas::prepare_dg_gas;
 
 mod terminal;

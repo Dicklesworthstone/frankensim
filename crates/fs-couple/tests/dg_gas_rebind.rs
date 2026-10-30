@@ -31,6 +31,9 @@ mod gas_support;
 #[path = "dg_gas_rebind/finite_gas.rs"]
 mod finite_gas;
 
+#[path = "dg_gas_rebind/regional.rs"]
+mod regional;
+
 const DT: f64 = 1.0 / 96_000.0;
 const RADIUS: f64 = 0.001;
 const LENGTH: f64 = 0.05;

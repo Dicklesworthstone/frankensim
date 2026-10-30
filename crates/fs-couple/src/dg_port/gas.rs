@@ -49,6 +49,39 @@ pub struct DgPortGasUpdate {
     pub absolute_parameter_work_j: f64,
 }
 
+/// A source-field change on an existing finite branch. The external port ID
+/// identifies the original branch; slice order never reassigns its gas.
+#[derive(Clone, Copy, Debug)]
+pub struct DgBranchGasInput<'a> {
+    pub port: PortId,
+    pub field: &'a AxialGasField,
+    pub refresh: DgGasRefresh,
+}
+
+/// Native transfer on one explicitly selected branch, in attachment order.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DgBranchGasUpdate {
+    pub port: PortId,
+    pub duct: DgGasMaterialUpdate,
+}
+
+/// One atomic material intervention on selected regions of the original load.
+/// Unselected ducts keep their original propagators and physical histories.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DgRegionalGasUpdate {
+    pub main: Option<DgGasMaterialUpdate>,
+    pub branches: Vec<DgBranchGasUpdate>,
+    /// Every original terminal channel, in attachment order. Its local outlet
+    /// gas selects the native momentum transfer; unchanged sources report zero.
+    pub terminal_channels: Vec<DgTerminalChannelGasUpdate>,
+    pub energy_before_j: f64,
+    pub energy_after_j: f64,
+    /// Signed native main, branch and channel work INTO represented motion [J].
+    pub parameter_work_j: f64,
+    /// Sum of the absolute native contributions, bounded before publication [J].
+    pub absolute_parameter_work_j: f64,
+}
+
 fn duct_error(error: fs_duct::DuctError) -> AcousticRealizeError {
     match error {
         fs_duct::DuctError::Cancelled { .. } => AcousticRealizeError::Cancelled,
@@ -69,6 +102,22 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), AcousticRealizeError
     } else {
         Ok(())
     }
+}
+
+fn charge_work(
+    signed: &mut f64,
+    absolute: &mut f64,
+    work: f64,
+    allowance: f64,
+) -> Result<(), AcousticRealizeError> {
+    *signed += work;
+    *absolute += work.abs();
+    if !signed.is_finite() || !absolute.is_finite() || *absolute > allowance {
+        return Err(invalid(
+            "live regional gas changes exceed the total absolute parameter-work allowance",
+        ));
+    }
+    Ok(())
 }
 
 /// Shared preparation for the source wall and nonlinear port adapters. The
@@ -177,17 +226,144 @@ impl DgPortLoad {
         maximum_absolute_parameter_work_j: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<DgPortGasUpdate, AcousticRealizeError> {
-        let energy_before_j = self.stored_energy_j();
-        let (duct, state, propagator, duct_report) = prepare_dg_gas(
-            &self.duct,
-            &self.state,
-            &self.propagator,
-            field,
-            refresh,
+        let report = self.rebind_regional_gas_fields_controlled(
+            Some((field, refresh)),
+            &[],
             maximum_absolute_parameter_work_j,
             cancelled,
         )?;
-        for branch in &self.branches {
+        Ok(DgPortGasUpdate {
+            duct: report
+                .main
+                .expect("the main source was explicitly selected"),
+            terminal_channels: report.terminal_channels,
+            energy_before_j: report.energy_before_j,
+            energy_after_j: report.energy_after_j,
+            parameter_work_j: report.parameter_work_j,
+            absolute_parameter_work_j: report.absolute_parameter_work_j,
+        })
+    }
+
+    /// Change the main source and/or named finite branches in ONE continuing load.
+    ///
+    /// `main = None` retains the original main operator and propagator. Branch
+    /// inputs identify existing external port IDs, not positions; unknown or
+    /// duplicate IDs refuse before native work. Unlisted branches retain their
+    /// gas and their original propagation. Each changed duct uses its own
+    /// admitted native uniform/spatial diffusion and wall-memory transfer.
+    ///
+    /// Junction and computed-exterior equilibrium pressures are checked on the
+    /// complete proposed endpoint. This admits coordinated pressure changes
+    /// that cannot pass through separately published intermediate regions.
+    /// Every finite terminal passage follows its actual NEW local outlet gas,
+    /// preserving cell momentum and retaining its original Mach admission.
+    /// Branch and terminal elimination are rebuilt once from the final sources.
+    /// Exterior pole histories, clocks and accepted interval frames survive.
+    ///
+    /// The absolute-work allowance covers all changed ducts and channels before
+    /// any owner is published. Signed work remains an obligation of the gas or
+    /// thermal owner; this prescribed fixed-geometry intervention does not
+    /// itself supply heat, transport species or add static pressure traction.
+    pub fn rebind_regional_gas_fields_controlled(
+        &mut self,
+        main: Option<(&AxialGasField, DgGasRefresh)>,
+        branch_inputs: &[DgBranchGasInput<'_>],
+        maximum_absolute_parameter_work_j: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<DgRegionalGasUpdate, AcousticRealizeError> {
+        poll(cancelled)?;
+        if !maximum_absolute_parameter_work_j.is_finite()
+            || maximum_absolute_parameter_work_j < 0.0
+            || (main.is_none() && branch_inputs.is_empty())
+            || branch_inputs.len() > self.branches.len()
+        {
+            return Err(invalid(
+                "regional gas refresh requires selected original sources and a finite nonnegative work allowance",
+            ));
+        }
+        for (index, input) in branch_inputs.iter().enumerate() {
+            poll(cancelled)?;
+            if !self
+                .branches
+                .iter()
+                .any(|branch| branch.port() == input.port)
+                || branch_inputs[..index]
+                    .iter()
+                    .any(|old| old.port == input.port)
+            {
+                return Err(invalid(
+                    "regional gas refresh requires unique existing branch port IDs",
+                ));
+            }
+        }
+        let energy_before_j = self.stored_energy_j();
+        let main_candidate = main
+            .map(|(field, refresh)| {
+                prepare_dg_gas(
+                    &self.duct,
+                    &self.state,
+                    &self.propagator,
+                    field,
+                    refresh,
+                    maximum_absolute_parameter_work_j,
+                    cancelled,
+                )
+            })
+            .transpose()?;
+        let (duct, state, propagator) = main_candidate.as_ref().map_or(
+            (&self.duct, &self.state, &self.propagator),
+            |(duct, state, propagator, _)| (duct, state, propagator),
+        );
+        let main_report = main_candidate.as_ref().map(|(_, _, _, report)| *report);
+        let mut parameter_work_j = 0.0;
+        let mut absolute_parameter_work_j = 0.0;
+        if let Some(report) = main_report {
+            charge_work(
+                &mut parameter_work_j,
+                &mut absolute_parameter_work_j,
+                report.parameter_work_j,
+                maximum_absolute_parameter_work_j,
+            )?;
+        }
+        let mut branch_reports = Vec::with_capacity(branch_inputs.len());
+        // The common main-only path borrows every original branch. A regional
+        // change allocates one candidate set and never rebuilds unselected
+        // native propagators or refits their material histories.
+        let branch_candidates = if branch_inputs.is_empty() {
+            None
+        } else {
+            let mut candidates = Vec::with_capacity(self.branches.len());
+            for branch in &self.branches {
+                poll(cancelled)?;
+                if let Some(input) = branch_inputs
+                    .iter()
+                    .find(|input| input.port == branch.port())
+                {
+                    let (candidate, report) = branch.prepare_gas(
+                        input.field,
+                        input.refresh,
+                        maximum_absolute_parameter_work_j,
+                        cancelled,
+                    )?;
+                    charge_work(
+                        &mut parameter_work_j,
+                        &mut absolute_parameter_work_j,
+                        report.parameter_work_j,
+                        maximum_absolute_parameter_work_j,
+                    )?;
+                    branch_reports.push(DgBranchGasUpdate {
+                        port: branch.port(),
+                        duct: report,
+                    });
+                    candidates.push(candidate);
+                } else {
+                    candidates.push(branch.clone());
+                }
+            }
+            Some(candidates)
+        };
+        let branches = branch_candidates.as_deref().unwrap_or(&self.branches);
+        for branch in branches {
             poll(cancelled)?;
             let source = duct.side_port_source(branch.port()).map_err(field_error)?;
             if source.gas.pressure.to_bits() != branch.duct().inlet_gas().pressure.to_bits() {
@@ -197,7 +373,7 @@ impl DgPortLoad {
             }
         }
         let terminal_gas = |port| -> Result<_, AcousticRealizeError> {
-            if let Some(branch) = self.branches.iter().find(|branch| branch.port() == port) {
+            if let Some(branch) = branches.iter().find(|branch| branch.port() == port) {
                 Ok(*branch.duct().outlet_gas())
             } else if duct.outlet() == DgBoundary::Port(port) {
                 Ok(*duct.outlet_gas())
@@ -223,8 +399,6 @@ impl DgPortLoad {
         }
         let mut terminal_channels = Vec::with_capacity(self.terminal_channels.len());
         let mut channel_reports = Vec::with_capacity(self.terminal_channels.len());
-        let mut parameter_work_j = duct_report.parameter_work_j;
-        let mut absolute_parameter_work_j = parameter_work_j.abs();
         for channel in &self.terminal_channels {
             poll(cancelled)?;
             let gas = terminal_gas(channel.input().port)?;
@@ -233,27 +407,23 @@ impl DgPortLoad {
             let work = report
                 .transfer
                 .map_or(0.0, |transfer| transfer.parameter_work_j);
-            parameter_work_j += work;
-            absolute_parameter_work_j += work.abs();
-            if !parameter_work_j.is_finite()
-                || !absolute_parameter_work_j.is_finite()
-                || absolute_parameter_work_j > maximum_absolute_parameter_work_j
-            {
-                return Err(invalid(
-                    "live bore and terminal gas changes exceed the total absolute parameter-work allowance",
-                ));
-            }
+            charge_work(
+                &mut parameter_work_j,
+                &mut absolute_parameter_work_j,
+                work,
+                maximum_absolute_parameter_work_j,
+            )?;
             terminal_channels.push(candidate);
             channel_reports.push(report);
         }
-        let response = propagator.multiport_response(&state).map_err(duct_error)?;
-        let branch_coupling = if self.branches.is_empty() {
+        let response = propagator.multiport_response(state).map_err(duct_error)?;
+        let branch_coupling = if branches.is_empty() {
             None
         } else {
-            Some(BranchCoupling::new(&response, &self.branches)?)
+            Some(BranchCoupling::new(&response, branches)?)
         };
         let response = match &branch_coupling {
-            Some(coupling) => coupling.response(response, &self.branches)?,
+            Some(coupling) => coupling.response(response, branches)?,
             None => response,
         };
         let terminal_coupling = match (&self.terminal, &self.terminal_coupling) {
@@ -281,7 +451,7 @@ impl DgPortLoad {
             }
             _ => {
                 propagator
-                    .port_response(&state, self.inlet)
+                    .port_response(state, self.inlet)
                     .map_err(duct_error)?
                     .impedance_pa_s_m3
             }
@@ -291,8 +461,7 @@ impl DgPortLoad {
                 "live DG gas update requires strictly positive exact mean-port impedance",
             ));
         }
-        let duct_energy = self
-            .branches
+        let duct_energy = branches
             .iter()
             .fold(state.stored_energy_j(), |sum, branch| {
                 sum + branch.state().stored_energy_j()
@@ -303,8 +472,9 @@ impl DgPortLoad {
         if !energy_before_j.is_finite() || !energy_after_j.is_finite() {
             return Err(invalid("live DG/channel gas storage cannot be represented"));
         }
-        let report = DgPortGasUpdate {
-            duct: duct_report,
+        let report = DgRegionalGasUpdate {
+            main: main_report,
+            branches: branch_reports,
             terminal_channels: channel_reports,
             energy_before_j,
             energy_after_j,
@@ -312,9 +482,14 @@ impl DgPortLoad {
             absolute_parameter_work_j,
         };
         poll(cancelled)?;
-        self.duct = duct;
-        self.state = state;
-        self.propagator = propagator;
+        if let Some((duct, state, propagator, _)) = main_candidate {
+            self.duct = duct;
+            self.state = state;
+            self.propagator = propagator;
+        }
+        if let Some(branches) = branch_candidates {
+            self.branches = branches;
+        }
         self.branch_coupling = branch_coupling;
         self.terminal_coupling = terminal_coupling;
         self.terminal_channels = terminal_channels;

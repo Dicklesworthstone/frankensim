@@ -44,6 +44,23 @@ impl DgBranchLoad {
     #[must_use]
     pub const fn state(&self) -> &DgState { &self.state }
 
+    pub(super) fn prepare_gas(
+        &self,
+        field: &fs_material::gas_field::AxialGasField,
+        refresh: DgGasRefresh,
+        maximum_absolute_parameter_work_j: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Self, fs_duct::dg::DgGasMaterialUpdate), AcousticRealizeError> {
+        let (duct, state, propagator, report) = prepare_dg_gas(
+            &self.duct, &self.state, &self.propagator, field, refresh,
+            maximum_absolute_parameter_work_j, cancelled,
+        )?;
+        Ok((Self {
+            port: self.port, duct, propagator, state,
+            inlet: self.inlet, outlet: self.outlet,
+        }, report))
+    }
+
     pub(super) fn prepare(
         source: DgBranch, dt: f64, tolerance: f64,
     ) -> Result<Self, AcousticRealizeError> {
@@ -248,6 +265,7 @@ impl DgPortLoad {
             output.ledger.port_work_step_j += ledger.port_work_step_j;
             output.ledger.cumulative_port_work_j += ledger.cumulative_port_work_j;
             output.ledger.cumulative_dissipated_j += ledger.cumulative_dissipated_j;
+            output.ledger.cumulative_parameter_work_j += ledger.cumulative_parameter_work_j;
             output.ledger.energy_balance_residual_j += ledger.energy_balance_residual_j;
             output.ledger.balance_checked &= ledger.balance_checked;
             frames.push(DgBranchFrame {
@@ -259,7 +277,8 @@ impl DgPortLoad {
         // Every participant was constructed cold. Retain the signed original
         // residual sum; internal cancellation roundoff is not clipped away.
         output.ledger.relative_energy_drift = output.ledger.energy_balance_residual_j.abs()
-            / output.ledger.cumulative_port_work_j.abs().max(1e-300);
+            / (output.ledger.cumulative_port_work_j.abs()
+                + output.ledger.cumulative_parameter_work_j.abs()).max(1e-300);
         Ok((states, frames, original_pressure_scales))
     }
 }
