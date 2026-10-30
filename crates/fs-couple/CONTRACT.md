@@ -12618,3 +12618,29 @@ Vk-only responses, signed areas and common-clock gate. The native target uses
 the actual exercised physics; unavailable bow/texture and cavity-source setup
 are explicitly outside its tested scope. Full workspace qualification is not
 asserted.
+
+
+## Native circular wetting between unlike surfaces
+
+`contact::capillary::AsymmetricCircularContactLineCapillaryModalSystem` binds
+the original axisymmetric bridge with two independently evolving circular
+footprints to the shared native mechanical transaction. Both ordered source
+identities, surface histories, wetting thresholds and line resistances remain
+with the original liquid owner. The actual body gap drives the joint footprint
+solve; one line may pin while the other moves. Geometry and line perimeter are
+three-dimensional, and each line exposes its own viscous and pinning losses.
+
+Mechanical probes all start from the same accepted liquid state. A reserved
+final replay evaluates both footprints on actual represented body motion,
+with original component, connection, external-force and prescribed-gap work
+checks. Geometric and quadrature uncertainty must fit the native compatibility,
+force and energy gates before bodies, liquid history, diagnostics and clock
+publish together. Refusal and cancellation leave both original footprint
+histories and the native states retryable.
+
+The owner inherits the original connected, quasistatic, acute-angle,
+nonpositive-pressure, interior-neck and low-speed applicability limits. It
+does not add bulk liquid inertia, evaporation, topology change or a full 3-D
+stability claim. G1/G3/G4 native tests cover unlike-source pin/move dynamics,
+individual friction sensitivity, surface exchange, reciprocal force and work,
+original connections, numerical-accuracy refusal and exact retry.

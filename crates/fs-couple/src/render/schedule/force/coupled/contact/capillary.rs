@@ -22,6 +22,10 @@ use fs_contact::capillary_bridge::asymmetric_contact_line::{
     AsymmetricContactLineLoadLine, AsymmetricContactLineState, AsymmetricContactLineStep,
     SourceAsymmetricContactLineBridge,
 };
+use fs_contact::capillary_bridge::axisymmetric::asymmetric_contact_line::{
+    AsymmetricCircularContactLineLoadLine, AsymmetricCircularContactLineState,
+    AsymmetricCircularContactLineStep, SourceAsymmetricCircularContactLineBridge,
+};
 use fs_contact::capillary_bridge::axisymmetric::contact_line::{
     AxisymmetricContactLineLoadLine, AxisymmetricContactLineState, AxisymmetricContactLineStep,
     SourceAxisymmetricContactLineBridge,
@@ -237,6 +241,15 @@ pub type AxisymmetricContactLineCapillaryModalConfig =
 pub type AxisymmetricContactLineCapillaryModalFrame =
     CapillaryModalFrame<AxisymmetricContactLineStep>;
 
+/// Three-dimensional wetting with two independently moving circular footprints.
+/// The ordered original surfaces retain their own pinning and line resistance.
+pub type AsymmetricCircularContactLineCapillaryModalSystem<'a> =
+    CapillaryModalSystem<'a, AsymmetricCircularContactLineLoadLine<'a>>;
+pub type AsymmetricCircularContactLineCapillaryModalConfig =
+    CapillaryModalConfig<ContactLineLoadLineConfig>;
+pub type AsymmetricCircularContactLineCapillaryModalFrame =
+    CapillaryModalFrame<AsymmetricCircularContactLineStep>;
+
 /// One fixed-direction liquid bridge and the complete unchanged native network.
 pub struct CapillaryModalSystem<'a, L: NativeCapillaryModel<'a> = PlanarBridgeLoadLine<'a>> {
     network: CoupledModalSystem,
@@ -363,6 +376,31 @@ impl<'a> CapillaryModalSystem<'a, AxisymmetricContactLineLoadLine<'a>> {
         state: AxisymmetricContactLineState,
         column: Vec<f64>,
         config: AxisymmetricContactLineCapillaryModalConfig,
+        gate: &CancelGate,
+    ) -> Result<Self, CapillaryModalError> {
+        Self::from_source(
+            network,
+            source,
+            substrate_materials,
+            state,
+            column,
+            config,
+            gate,
+        )
+    }
+}
+
+impl<'a> CapillaryModalSystem<'a, AsymmetricCircularContactLineLoadLine<'a>> {
+    /// Bind both original circular contact-line histories to the actual native
+    /// gap. Source replay and the independent body/work checks use the shared
+    /// mechanical transaction, including the original liquid shape uncertainty.
+    pub fn new_asymmetric_circular_contact_line(
+        network: CoupledModalSystem,
+        source: &'a SourceAsymmetricCircularContactLineBridge,
+        substrate_materials: [&MaterialStateId; 2],
+        state: AsymmetricCircularContactLineState,
+        column: Vec<f64>,
+        config: AsymmetricCircularContactLineCapillaryModalConfig,
         gate: &CancelGate,
     ) -> Result<Self, CapillaryModalError> {
         Self::from_source(
