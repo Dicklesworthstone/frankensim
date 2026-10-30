@@ -196,6 +196,34 @@ groups in `tests/source_thermal_friction/query.rs` exercise two-temperature,
 speed/path source response, preserved breakaway capacity, complete-query and
 source-domain refusal, canonical coordinate ownership and atomic retry.
 
+### Source-backed thermal Hertz force and spin
+
+`SourceThermalCoulomb::hertz_at(T, p, N, a)` binds the same pinned coefficient
+claims to the original joint `HertzWrenchContact`. The immutable
+`thermal_friction::hertz::SourceHertzWrench` retains the original owner identity,
+complete resolved query/usage receipts and native law. Scalar Coulomb and Hertz
+share one query-refresh admission; coefficient roles, uncertainty, selection,
+fixed external conditions and authority remain unchanged. No different claim
+may replace the original outside its support.
+This T/p-only entry refuses sources with additional owned evolving coordinates
+(surface temperatures, speed or path); it cannot silently freeze those inputs.
+
+Compressive normal load and positive circular radius remain caller-normal-owner
+inputs. Native admission checks their numeric physical domain; this bridge does
+not derive normal elasticity, prove a Hertz footprint or promote normal geometry
+authority. Nominal pressure is supplied only when mapped to the original source
+coordinate and is never inferred from force and patch area, including at zero
+load. The enclosing owner accepts temperature, mechanics and source receipts
+together. The bridge adds no solver, history, storage, heat partition or reservoir.
+
+Six focused Hertz groups cover temperature-dependent force/spin/heat, thermal
+static breakaway with full response, explicit pressure versus normal geometry,
+typed temperature aliases/fixed conditions, and source/domain/geometry refusal
+with exact retry, including complete-query ownership refusal. All six and the
+seventeen original/concurrent scalar, objective, elliptic and complete-query
+groups pass in the original-source native lane; this is not a full Cargo/DSR
+workspace gate.
+
 ### Source-backed Hertz--Mindlin normal loading and recontact
 
 `interface_binding::mindlin::loading::SourceHertzMindlinContact` reuses an

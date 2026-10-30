@@ -2,6 +2,8 @@
 
 #[path = "source_thermal_friction/elliptic.rs"]
 mod elliptic;
+#[path = "source_thermal_friction/hertz.rs"]
+mod hertz;
 #[path = "source_thermal_friction/query.rs"]
 mod query;
 

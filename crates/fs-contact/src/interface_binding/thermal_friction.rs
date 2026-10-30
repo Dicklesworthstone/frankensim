@@ -11,6 +11,8 @@
 
 /// Directional principal coefficients from the same original ordered interface.
 pub mod elliptic;
+/// Source-preserving joint Hertz sliding/spin friction at actual thermal conditions.
+pub mod hertz;
 mod query;
 pub use query::{FrictionQueryAxis, FrictionQueryAxisKind};
 
@@ -280,22 +282,39 @@ impl SourceThermalCoulomb {
         previous: &ResolvedInterfaceStatePoint,
         input: &TangentialStepInput,
     ) -> Result<ResolvedInterfaceStatePoint, SourceThermalCoulombError> {
-        if !self.query_axes.is_empty() {
-            return Err(SourceThermalCoulombError::Invalid(
-                "owned friction coordinates require the complete physical query",
-            ));
-        }
         let temperature = input
             .contact_temperature_k
             .filter(|t| t.is_finite() && *t > 0.0)
             .ok_or(SourceThermalCoulombError::Invalid(
                 "thermal Coulomb requires a positive absolute contact temperature",
             ))?;
+        self.source_at_thermal_conditions(previous, temperature, input.nominal_pressure_pa)
+    }
+
+    // Shared T/p-only admission for original Coulomb and Hertz consumers.
+    // Additional physical axes require the complete-query owner; they cannot
+    // silently remain at their initial values during a Hertz thermal trial.
+    fn source_at_thermal_conditions(
+        &self,
+        previous: &ResolvedInterfaceStatePoint,
+        temperature: f64,
+        nominal_pressure_pa: Option<f64>,
+    ) -> Result<ResolvedInterfaceStatePoint, SourceThermalCoulombError> {
+        if !self.query_axes.is_empty() {
+            return Err(SourceThermalCoulombError::Invalid(
+                "owned friction coordinates require the complete physical query",
+            ));
+        }
+        if !temperature.is_finite() || temperature <= 0.0 {
+            return Err(SourceThermalCoulombError::Invalid(
+                "thermal Coulomb requires a positive absolute contact temperature",
+            ));
+        }
         let mut point = self
             .initial_source
             .query()
             .with(&self.axes.temperature, temperature)?;
-        match (&self.axes.nominal_pressure, input.nominal_pressure_pa) {
+        match (&self.axes.nominal_pressure, nominal_pressure_pa) {
             (Some(axis), Some(pressure)) if pressure.is_finite() && pressure >= 0.0 => {
                 point = point.with(axis, pressure)?;
             }
