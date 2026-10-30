@@ -4,11 +4,15 @@
 //! solve its thermal endpoint. The original conductor then supplies I_end and
 //! R_end. A bounded residual closes J = dt I_end^2 R_end before publication.
 
+/// Chemical/caloric endpoints inside the same electrical feedback owner.
+pub mod reactive;
+
 use super::{
     FiniteGasElectrothermalStringFrame, FiniteGasStringError, FiniteGasStringHeat,
     FiniteGasStringSolve, ThermalMaterialStringRuntime, ThermalStringError,
 };
 use crate::acoustic_realize::AcousticRealizeError;
+use crate::acoustic_realize::finite_gas::FiniteGasStringFrame;
 use crate::acoustic_realize::finite_gas::exchange::{
     FiniteGasStringExchangeError, FiniteGasStringExchangeFrame,
 };
@@ -97,10 +101,10 @@ pub struct FiniteGasElectricalFeedbackFrame<R> {
 type ConductionFrame = FiniteGasStringExchangeFrame<ResolvedMaterialStatePoint>;
 type ConductionError = FiniteGasStringExchangeError<LayerConductionError>;
 
-struct Candidate {
+struct Candidate<R> {
     runtime: ThermalMaterialStringRuntime,
     gas: IsochoricGasParcel,
-    frame: FiniteGasElectricalFeedbackFrame<ConductionFrame>,
+    frame: FiniteGasElectricalFeedbackFrame<R>,
 }
 
 fn source_error(error: FiniteGasElectricalFeedbackError) -> ConductionError {
@@ -167,11 +171,7 @@ impl ThermalMaterialStringRuntime {
         FiniteGasElectricalFeedbackFrame<FiniteGasStringExchangeFrame<ResolvedMaterialStatePoint>>,
         FiniteGasStringExchangeError<LayerConductionError>,
     > {
-        let Candidate {
-            runtime,
-            gas: next_gas,
-            frame,
-        } = self.propose_implicit_conduction(
+        let candidate = self.propose_implicit_conduction(
             cx,
             expected_epoch,
             forces,
@@ -183,10 +183,7 @@ impl ThermalMaterialStringRuntime {
             layers,
             electrical,
         )?;
-        super::super::check(cx)?;
-        let _old_string = core::mem::replace(self, runtime);
-        let _old_gas = core::mem::replace(gas, next_gas);
-        Ok(frame)
+        self.publish_implicit_thermal(cx, gas, candidate)
     }
 
     /// The same converged electrical/thermal endpoint followed by native
@@ -220,11 +217,7 @@ impl ThermalMaterialStringRuntime {
         >,
         FiniteGasStringExchangeError<LayerConductionError>,
     > {
-        let Candidate {
-            runtime,
-            gas: heated_gas,
-            frame,
-        } = self.propose_implicit_conduction(
+        let candidate = self.propose_implicit_conduction(
             cx,
             expected_epoch,
             forces,
@@ -236,6 +229,67 @@ impl ThermalMaterialStringRuntime {
             layers,
             electrical,
         )?;
+        self.publish_implicit_nozzle(
+            cx,
+            expected_epoch,
+            forces,
+            gas,
+            reservoir,
+            heat,
+            controls,
+            nozzle,
+            flow_controls,
+            electrical,
+            candidate,
+            |thermal| &mut thermal.coupled,
+            |_, _| Ok(()),
+        )
+    }
+
+    fn publish_implicit_thermal<R>(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        gas: &mut IsochoricGasParcel,
+        candidate: Candidate<R>,
+    ) -> Result<FiniteGasElectricalFeedbackFrame<R>, ConductionError> {
+        let Candidate {
+            runtime,
+            gas: next_gas,
+            frame,
+        } = candidate;
+        super::super::check(cx)?;
+        let _old_string = core::mem::replace(self, runtime);
+        let _old_gas = core::mem::replace(gas, next_gas);
+        Ok(frame)
+    }
+
+    // Every endpoint family retains its original report while sharing the
+    // single transfer, complete source-work account and publication boundary.
+    #[allow(clippy::too_many_arguments)]
+    fn publish_implicit_nozzle<R>(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        expected_epoch: u64,
+        forces: &[f64],
+        gas: &mut IsochoricGasParcel,
+        reservoir: &mut ClosedGasParcel,
+        heat: FiniteGasStringHeat,
+        controls: FiniteGasStringSolve,
+        nozzle: GasNozzle,
+        flow_controls: GasNozzleStepSolve,
+        electrical: FiniteGasElectricalFeedbackSolve,
+        candidate: Candidate<R>,
+        account: impl FnOnce(&mut R) -> &mut FiniteGasStringFrame,
+        admit_final: impl FnOnce(
+            &IsochoricGasParcel,
+            &ClosedGasParcel,
+        ) -> Result<(), ConductionError>,
+    ) -> Result<FiniteGasElectricalFeedbackFrame<FiniteGasStringFlowFrame<R>>, ConductionError> {
+        let Candidate {
+            runtime,
+            gas: heated_gas,
+            frame,
+        } = candidate;
         let combined_heat = FiniteGasStringHeat {
             // This exact sum was already admitted by the shared source owner.
             string_heat_j: heat.string_heat_j + frame.electrical.joule_heat_j,
@@ -262,8 +316,8 @@ impl ThermalMaterialStringRuntime {
                     *gas = heated_gas;
                     Ok::<_, ConductionError>(thermal)
                 },
-                |thermal| &mut thermal.coupled,
-                |_, _| Ok(()),
+                account,
+                admit_final,
             )
         })?;
         // The shared flow owner has already admitted and atomically published
@@ -291,7 +345,49 @@ impl ThermalMaterialStringRuntime {
         exchange: HeatExchangeSolve,
         layers: &MaterialConductionLayers<'_>,
         electrical: FiniteGasElectricalFeedbackSolve,
-    ) -> Result<Candidate, ConductionError> {
+    ) -> Result<Candidate<ConductionFrame>, ConductionError> {
+        self.propose_implicit_thermal(
+            cx,
+            expected_epoch,
+            drive,
+            gas,
+            heat,
+            electrical,
+            |candidate, gas, heat| {
+                candidate.step_with_isochoric_gas_conduction(
+                    cx,
+                    expected_epoch,
+                    forces,
+                    gas,
+                    heat,
+                    controls,
+                    exchange,
+                    layers,
+                )
+            },
+            |thermal| &thermal.coupled,
+        )
+    }
+
+    // The source equation is independent of the chosen gas endpoint law.
+    // Every trial restarts from the same accepted owners; the accessor exposes
+    // only the original shared account, without dropping chemistry receipts.
+    #[allow(clippy::too_many_arguments)]
+    fn propose_implicit_thermal<R>(
+        &self,
+        cx: &fs_exec::Cx<'_>,
+        expected_epoch: u64,
+        drive: OhmicDrive,
+        gas: &IsochoricGasParcel,
+        heat: FiniteGasStringHeat,
+        electrical: FiniteGasElectricalFeedbackSolve,
+        mut advance: impl FnMut(
+            &mut Self,
+            &mut IsochoricGasParcel,
+            FiniteGasStringHeat,
+        ) -> Result<R, ConductionError>,
+        account: impl Fn(&R) -> &FiniteGasStringFrame,
+    ) -> Result<Candidate<R>, ConductionError> {
         electrical.validate().map_err(source_error)?;
         let (conductor_before, current_a, _) = self.prepare_drive(cx, expected_epoch, drive)?;
         let dt = self.mechanical.member.model.sample_period_s();
@@ -307,18 +403,7 @@ impl ThermalMaterialStringRuntime {
                     conductor_before.clone(),
                     current_a,
                     joule_heat_j,
-                    |candidate, gas, heat| {
-                        candidate.step_with_isochoric_gas_conduction(
-                            cx,
-                            expected_epoch,
-                            forces,
-                            gas,
-                            heat,
-                            controls,
-                            exchange,
-                            layers,
-                        )
-                    },
+                    &mut advance,
                 )?;
                 let power = report
                     .conductor_after
@@ -326,7 +411,7 @@ impl ThermalMaterialStringRuntime {
                     .map_err(ThermalStringError::Electrical)?;
                 let source_work_j = dt * power;
                 let source_residual_j = joule_heat_j - source_work_j;
-                let coupled = &report.coupled.coupled;
+                let coupled = account(&report.coupled);
                 let energy_balance_residual_j =
                     coupled.energy_balance_residual_j - source_residual_j;
                 let energy_tolerance_j = coupled.energy_tolerance_j

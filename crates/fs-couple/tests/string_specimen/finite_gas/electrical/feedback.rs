@@ -1,5 +1,8 @@
 //! Independent endpoint electrical/thermal balances and continuing gas flow.
 
+#[path = "feedback/reactive.rs"]
+mod reactive;
+
 use super::super::flow::{flow_solve, nozzle};
 use super::*;
 use fs_couple::acoustic_realize::finite_gas::electrical::feedback::{

@@ -6526,6 +6526,21 @@ Focused regressions in `tests/string_specimen/finite_gas/electrical/feedback.rs`
 cover independent affine-resistance current/voltage roots, two-capacity thermal
 exchange, single-transfer composition, zero-flow parity and atomic refusal.
 
+The `electrical::feedback::reactive` entries use the same source solver,
+private candidate and closed/nozzle publication paths. Each Joule trial calls
+the original simultaneous reacting conduction endpoint, so final composition
+and temperature determine gas conductivity while the same final solid state
+determines resistance and current. The original reaction, exchange and source
+work bounds compose explicitly; trials never consume accepted inventory.
+The nozzle runs once after the entire feedback solve and uses the same final
+reaction-catalog admission. Original chemical/thermal reports remain attached
+to the accepted result, including their pre-transfer time-level meaning.
+Three focused groups in `electrical/feedback/reactive.rs` check analytical
+isomer extent, conductive and current/voltage equations, zero-drive parity,
+single native transfer, two-volume energy, refusal and exact retry. These
+regression definitions require native execution; source review alone does
+not establish numerical or experimental qualification.
+
 ## Finite enthalpy heating through a pressure-loaded solid valve
 
 `solid_enthalpy::valve` binds each accepted P1 material/caloric state to the
