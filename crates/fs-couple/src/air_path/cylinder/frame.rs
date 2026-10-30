@@ -242,3 +242,6 @@ pub mod modal;
 
 /// Exact fluid-memory elimination for repeated physical forced-response solves.
 pub mod harmonic;
+
+/// Reciprocal physical loads, observations and coherent multiport response.
+pub mod harmonic_ports;

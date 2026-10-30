@@ -82,3 +82,54 @@ normalized state difference 1.91e-15, scaled full-equation residual 5.41e-17,
 power discrepancy 1.14e-17 W and mean-energy difference 2.85e-16 J. A four-mode,
 two-region reference factors a 4-by-4 rather than 40-by-40 matrix. This is an
 algebraic dimension comparison, not a native performance benchmark.
+
+## Physical force, moment and member-point ports
+
+`harmonic_ports::FrameHarmonicPorts` borrows the original model and projects
+physical nodal force/moment columns once for an entire frequency sweep.
+`harmonic_transverse_ports` derives columns directly from the original member's
+cubic transverse trace at `(element, xi)`. The corresponding nodal moments are
+retained; a point inside a member is not replaced by endpoint-only forcing.
+
+```rust,ignore
+let ports = model.harmonic_transverse_ports(
+    &[(0, 0.3), (1, 0.6)], port_budget, &gate,
+)?;
+for omega in frequencies_rad_s {
+    let prepared = model.prepare_harmonic(omega, harmonic_budget, &gate)?;
+    let mobility = ports.mobility(&prepared, &gate)?;
+    let driven = ports.solve(&prepared, &complex_drive_amplitudes, &gate)?;
+    // driven retains actual nodal displacement/velocity, source losses and
+    // signed work at each drive. No physical clock or accepted history moves.
+}
+```
+
+`FrameHarmonicPortBudget` bounds port count, `ports*modes*nodal_dofs` projection
+work, the complete `ports*ports` matrix, and independent nodal/port power error.
+General columns use original node-major x/y/rotation order. Caller-declared
+units must make each column times its effort a nodal force or moment; the dual
+motion observation preserves that work. No column is normalized or made positive.
+Zero, repeated and dependent columns remain valid; singular port mobility is not
+repaired. Source identity is checked: another same-sized model cannot reuse a
+port map accidentally.
+
+The returned matrix is row-major `velocity_i = sum_j Y_ij effort_j`, with one
+shared factorization for all columns at that frequency. Reciprocity is not
+forced by averaging entries. No time-domain realization, measured accuracy or
+unconditional forward-error bound is implied by a matrix or residual report.
+
+Coherent drive phases are combined BEFORE solving motion and computing heat.
+Adding separate unit-drive heat accounts would incorrectly omit interference.
+Individual drive work can be negative while the complete passive system absorbs
+positive net power. The API retains those signs and independently checks nodal,
+port and modal work. Returned reports and triangular solves allocate; no
+allocation-free solve or native speedup is claimed.
+
+Five additional Rust regressions cover complex mobility/reciprocity, coherent
+cancellation/reinforcement, original point geometry and rotation work, signed
+coordinate scaling, source mismatch and cancellation/retry. They are authored
+but UNEXECUTED under the toolchain limitation above. Independent NumPy/SciPy
+physical force/moment tests at 1, 30 and 100 rad/s passed: reciprocity discrepancy
+below 7.11e-15, nodal work mismatch below 4.34e-19 W, exact cancellation for
+opposing duplicate drives, and fourfold power for reinforcing duplicate drives.
+These are synthetic equation checks, not native Rust or experimental evidence.

@@ -43,7 +43,7 @@ fn frame(two: bool, rho: f64, young: f64, eta: f64) -> Frame2d {
     result.fix(0,[true;3]);
     result.fix(1,[true,false,!two]);
     if two { result.fix(2,[true,false,false]); }
-    for element in 0..if two {2} else {1} {
+    for element in 0..(if two {2} else {1}) {
         result.add_material_viscous_element(element,element+1,3,section(rho,young,eta)).unwrap();
     }
     result
@@ -213,4 +213,119 @@ fn fast_memory_slip_is_not_lost_to_subtraction_and_zero_forcing_stays_zero() {
     assert_eq!(response.supplied_power_w,0.0);
     assert_eq!(response.mean_stored_energy_j,0.0);
     assert_eq!(response.equation_relative_residual,0.0);
+}
+
+use super::super::harmonic_ports::{FrameHarmonicPortBudget,FrameHarmonicPortError};
+fn port_budget() -> FrameHarmonicPortBudget {
+    FrameHarmonicPortBudget {max_ports:8,max_projection_terms:4096,max_mobility_entries:64,
+        power_absolute_tolerance_w:1e-12,power_relative_tolerance:1e-8}
+}
+fn node_columns() -> Vec<Vec<f64>> {
+    [4,5,7,8].into_iter().map(|dof| {let mut c=vec![0.0;9];c[dof]=1.0;c}).collect()
+}
+
+#[test]
+fn physical_force_and_moment_multiports_are_reciprocal_and_keep_coherent_power() {
+    let frame=frame(true,1000.0,2e6,500.0);
+    let model=model(&frame,4,vec![
+        FrameFluidRegion {element:1,span:[0.0,0.37],fluid:fluid(1000.0,0.01)},
+        FrameFluidRegion {element:1,span:[0.37,1.0],fluid:fluid(3.0,0.002)},
+    ]);
+    let gate=CancelGate::new_clock_free();
+    let columns=node_columns();let ports=model.harmonic_ports(&columns,port_budget(),&gate).unwrap();
+    assert!(core::ptr::eq(ports.model(),&model));
+    let efforts=[C64::new(0.01,0.02),C64::new(-0.007,0.002),C64::new(0.008,-0.01),C64::new(-0.009,-0.003)];
+    for omega in [1.0,30.0,100.0] {
+        let prepared=model.prepare_harmonic(omega,budget(),&gate).unwrap();
+        let y=ports.mobility(&prepared,&gate).unwrap();
+        assert_eq!(y.port_count,4);
+        for i in 0..4 {for j in 0..4 {near(y.entries[i*4+j],y.entries[j*4+i],1e-10);}}
+        let response=ports.solve(&prepared,&efforts,&gate).unwrap();
+        for i in 0..4 {
+            let expected=(0..4).fold(C64::ZERO,|s,j|s+y.entries[i*4+j]*efforts[j]);
+            near(response.port_velocity[i],expected,1e-10);
+            near(response.port_displacement[i],response.nodal_displacement[[4,5,7,8][i]],1e-12);
+        }
+        let independent:f64=response.nodal_force.iter().zip(&response.nodal_velocity)
+            .map(|(f,v)|0.5*(*f*v.conj()).re).sum();
+        near(C64::new(independent,0.0),C64::new(response.mechanical.supplied_power_w,0.0),1e-12);
+        assert!(response.mechanical.supplied_power_w>=0.0);
+        assert!(response.mapping_power_residual_w.abs()<1e-11);
+        if omega==30.0 {assert!(response.port_power_w.iter().any(|p|*p<0.0));}
+    }
+}
+
+#[test]
+fn equal_opposite_drives_cancel_before_fluid_and_solid_heat_are_computed() {
+    let frame=frame(false,1000.0,2e6,500.0);
+    let model=model(&frame,1,vec![FrameFluidRegion {element:0,span:[0.0,1.0],fluid:fluid(400.0,0.01)}]);
+    let gate=CancelGate::new_clock_free();
+    let ports=model.harmonic_transverse_ports(&[(0,0.7),(0,0.7)],port_budget(),&gate).unwrap();
+    let prepared=model.prepare_harmonic(30.0,budget(),&gate).unwrap();
+    let u=C64::new(0.01,0.005);
+    let cancelled=ports.solve(&prepared,&[u,u.scale(-1.0)],&gate).unwrap();
+    assert!(cancelled.mechanical.state.iter().all(|x|*x==C64::ZERO));
+    assert_eq!(cancelled.mechanical.supplied_power_w,0.0);
+    assert!(cancelled.mechanical.fluid_region_loss_w.iter().all(|p|*p==0.0));
+    let one=ports.solve(&prepared,&[u,C64::ZERO],&gate).unwrap();
+    let both=ports.solve(&prepared,&[u,u],&gate).unwrap();
+    near(both.port_velocity[0],one.port_velocity[0].scale(2.0),1e-12);
+    near(C64::new(both.mechanical.supplied_power_w,0.0),C64::new(4.0*one.mechanical.supplied_power_w,0.0),1e-12);
+}
+
+#[test]
+fn transverse_point_ports_use_original_geometry_and_preserve_rotation_work() {
+    let frame=frame(true,1000.0,2e6,500.0);
+    let model=model(&frame,4,vec![]);let gate=CancelGate::new_clock_free();
+    let points=[(0,0.3),(1,0.6)];
+    let ports=model.harmonic_transverse_ports(&points,port_budget(),&gate).unwrap();
+    for (column,&(element,xi)) in ports.nodal_columns().iter().zip(&points) {
+        let (indices,weights,_)=frame.reference_transverse_trace(element,xi).unwrap();
+        let mut expected=vec![0.0;9];
+        for (index,weight) in indices.into_iter().zip(weights) {expected[index]+=weight;}
+        assert_eq!(column,&expected);
+        assert!(indices.into_iter().filter(|i|*i%3==2).any(|i|column[i]!=0.0));
+    }
+    let prepared=model.prepare_harmonic(30.0,budget(),&gate).unwrap();
+    let result=ports.solve(&prepared,&[C64::new(0.01,0.0),C64::new(0.0,0.02)],&gate).unwrap();
+    assert!(result.nodal_force.iter().enumerate().filter(|(i,_)|*i%3==2).any(|(_,f)|*f!=C64::ZERO));
+    assert!(result.mapping_power_residual_w.abs()<1e-12);
+}
+
+#[test]
+fn signed_port_scaling_changes_coordinates_not_forces_motion_or_heat() {
+    let frame=frame(true,1000.0,2e6,500.0);
+    let model=model(&frame,4,vec![FrameFluidRegion {element:1,span:[0.0,1.0],fluid:fluid(400.0,0.01)}]);
+    let gate=CancelGate::new_clock_free();let columns=node_columns();
+    let scales=[2.0,-3.0,0.5,-0.25];
+    let scaled:Vec<_>=columns.iter().zip(scales).map(|(c,s)|c.iter().map(|v|v*s).collect::<Vec<_>>()).collect();
+    let a=model.harmonic_ports(&columns,port_budget(),&gate).unwrap();
+    let b=model.harmonic_ports(&scaled,port_budget(),&gate).unwrap();
+    let prepared=model.prepare_harmonic(30.0,budget(),&gate).unwrap();
+    let u=[C64::new(0.01,0.02),C64::new(-0.007,0.002),C64::new(0.008,-0.01),C64::new(-0.009,-0.003)];
+    let v:Vec<_>=u.iter().zip(scales).map(|(u,s)|u.scale(1.0/s)).collect();
+    let ra=a.solve(&prepared,&u,&gate).unwrap();let rb=b.solve(&prepared,&v,&gate).unwrap();
+    for (&a,&b) in ra.mechanical.state.iter().zip(&rb.mechanical.state) {near(a,b,1e-12);}
+    near(C64::new(ra.mechanical.supplied_power_w,0.0),C64::new(rb.mechanical.supplied_power_w,0.0),1e-12);
+    let ya=a.mobility(&prepared,&gate).unwrap();let yb=b.mobility(&prepared,&gate).unwrap();
+    for i in 0..4 {for j in 0..4 {near(yb.entries[i*4+j],ya.entries[i*4+j].scale(scales[i]*scales[j]),1e-10);}}
+}
+
+#[test]
+fn source_mismatch_invalid_ports_and_cancellation_refuse_without_corrupting_factor() {
+    let frame=frame(true,1000.0,2e6,500.0);
+    let a=model(&frame,4,vec![]);let b=model(&frame,4,vec![]);let gate=CancelGate::new_clock_free();
+    let columns=node_columns();let ports=a.harmonic_ports(&columns,port_budget(),&gate).unwrap();
+    let prepared=a.prepare_harmonic(30.0,budget(),&gate).unwrap();
+    let foreign=b.prepare_harmonic(30.0,budget(),&gate).unwrap();
+    assert!(ports.mobility(&foreign,&gate).is_err());
+    assert!(a.harmonic_ports(&[],port_budget(),&gate).is_err());
+    assert!(a.harmonic_ports(&[vec![0.0;8]],port_budget(),&gate).is_err());
+    assert!(a.harmonic_ports(&[vec![f64::NAN;9]],port_budget(),&gate).is_err());
+    assert!(a.harmonic_transverse_ports(&[(0,1.1)],port_budget(),&gate).is_err());
+    assert!(a.harmonic_ports(&columns,FrameHarmonicPortBudget {max_mobility_entries:15,..port_budget()},&gate).is_err());
+    let original=ports.mobility(&prepared,&gate).unwrap();
+    let cancelled=CancelGate::new_clock_free();cancelled.request();
+    assert!(matches!(ports.mobility(&prepared,&cancelled),Err(FrameHarmonicPortError::Cancelled)));
+    assert_eq!(ports.mobility(&prepared,&gate).unwrap().entries,original.entries);
 }
