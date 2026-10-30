@@ -399,3 +399,6 @@ fn invalid_mode_mobility_budgets_and_cancellation_refuse_without_history_change(
     assert_ne!(retry.state, initial);
     close(retry.energy_residual_j, 0.0, 1e-11);
 }
+
+#[path = "driven/segments.rs"]
+mod segments;

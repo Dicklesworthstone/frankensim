@@ -4948,3 +4948,107 @@ rotating or recoiling walls, thermal allocation and complete moving-wall fluid
 displacement remain outside it. The original midpoint damping is not L-stable
 and does not establish temporal resolution of arbitrarily stiff gap dynamics.
 The broad moving-boundary bead remains open.
+
+
+## Surface-reservoir heat through flow and feedback adapters
+
+The native material-flow advection, sourced-liquid, momentum-feedback,
+electrical-feedback, magnetohydrodynamic-feedback and environment-feedback
+observers forward the original inner observer's `reservoir_conductances`
+hook. State-dependent half-cell and film resistance therefore reaches the
+same thermal substep as internal conductance and advective enthalpy. Authored
+reservoir temperature/area and original error mappings remain intact; a
+missing prepared flow epoch refuses through the existing error path.
+
+The original thermal owner installs these coefficients only for actual heat
+and entropy evaluation and restores authored boundaries before publication.
+No added heat source, duplicate bath credit, independent flux approximation
+or new thermal integrator is introduced. Source-only electrical adapters
+continue to compose physical observers through `CoupledObservers`.
+
+A focused native-flow regression uses actual face mass routes, `Advected`,
+the geometric `ConductionObserver` and the original thermal timeline. An
+independent accepted-interval donor recursion verifies state-dependent bath
+conductance, final enthalpy/temperature, bath heat minus outlet enthalpy export,
+actual-bath entropy, fixed mass, authored-boundary restoration and rollback
+after late cancellation. Four original-source tests pass in the bounded
+native composition. The other five forwarding methods retain their existing
+adjacent delegation/error patterns; this is not a full fs-lbm/workspace build.
+
+### Reciprocal tangent and spin lubrication between unequal spheres
+
+`SphereLubrication3::with_tangential_pairs(cutoff_gap, roughness_gap)` opts the
+existing frozen and sampled-moving sphere owners into a leading-logarithmic
+unequal-sphere resistance block. The previous normal-only path is retained when
+this option is absent or inactive. Pair tangent/roughness lengths are independent
+of the normal-film and plane scales. All actual gaps must remain positive;
+roughness regularizes resistance and never grants permission to intersect.
+
+For radii `a,b`, actual center distance `d`, unit normal `n` from A to B, tangent
+`t`, and `s=n cross t`, define `u=(v_a-v_b).t`,
+`z_a=a*(omega_a.s+u/d)`, `z_b=b*(omega_b.s+u/d)`, and
+`k=4*pi*mu*(a*b/(a+b))/5*ln(cutoff/max(gap,roughness))` below cutoff. The
+reciprocal resistance in `(z_a,z_b)` is `k*[[4,1],[1,4]]`. Its modes
+`(z_a+z_b)/sqrt(2)` and `(z_a-z_b)/sqrt(2)` have positive resistances `5k` and
+`3k`. Both orthogonal tangent directions enter the shared solve. Counterrotation
+therefore retains a singular dissipative mode even when the two surface
+velocities coincide. Rotation about the center normal has no divergent leading
+term and receives no fabricated correction.
+
+At contact this block reproduces all leading `YA/YB/YC` force/torque
+coefficients of Jeffrey--Onishi with Townsend's corrected dimensionalization:
+Townsend, *Physics of Fluids* 35, 127126 (2023),
+<https://arxiv.org/abs/1802.08226v4>, equations 19-25 and 33-34a; coefficient
+functions `G2ya`, `G2yb`, `G2yc`, `G4yc` in the author's
+`Pecnut/stokesian-dynamics/find_resistance_scalars/functions_nearfield.py`,
+observed source blob `bab8a0e4d281db4d6fc2e0c7965ec0220e1e7bbe`.
+The normal coefficient remains the separately calibrated existing `1/gap` law.
+
+At positive gap the rotational velocities are measured relative to the actual
+line-of-centers angular velocity. This is an explicitly objective finite-gap
+completion of the leading logarithmic block: replacing the contact distance
+`a+b` by actual `d` in the frame rate changes omitted-order `h*ln(h)` terms.
+Forces and both center torques are the power-conjugate derivatives of those
+same modes. Thus every pair conserves linear and orbital-plus-spin angular
+momentum and has a null common rigid motion, including common rotation at
+finite gap. This is not the complete higher-order two-sphere resistance, a
+far-field drag model, or an accuracy certificate. The tangent cutoff must be
+at most `0.02` times every supplied sphere radius; this is a conservative
+declared small-gap domain, not a proven error bound. Arbitrary positive radius
+ratios are admitted only when their actual geometry and resistance remain
+representable. No contact, friction, cavitation, background-strain stresslet,
+normal-axis finite spin drag, or dense-suspension closure is inferred.
+
+The original 6-velocity response factors are reused once per body. Only bodies
+touched by active tangent modes need their three angular-response columns.
+Unequal pair modes carry distinct angular covectors for both original bodies;
+they join the same simultaneous solve as normal pairs and prescribed-plane
+films. There is no sequential pair kick, extra fluid sweep, substitute inertia,
+or dense global physical mass matrix. The limits remain 64 bodies, 64 planes,
+64 active physical films and an explicitly admitted scalar-mode limit of
+1 through 320 (default 64); an active tangent block adds four modes to any
+normal mode. Dense response storage and factorization remain O(modes^2) and
+O(modes^3). `active_tangential_pairs` reports the active sphere-pair tangent
+blocks independently of `active_pairs` and plane counts.
+
+Both center spin impulses flow through the existing `body_spin_impulses`,
+`body_angular_impulses`, full-tensor moving-body half-drifts, and per-body balance
+receipts. Work uses actual returned midpoint translation and angular velocity;
+mode loss is nonnegative and the actual constitutive/work defects remain
+visible. Midpoint damping is passive but not L-stable; time refinement is still
+required for stiff relaxation. Existing private finalization preserves atomic
+body/fluid publication on invalid geometry, exhausted modes, cancellation or a
+late swept-sphere intersection.
+
+`pair_tangential_lubrication3.rs` supplies six focused groups: independent
+dimensional `YA/YB/YC` probes at equal, 1:3 and 1:10 radii in both endpoint
+orders and convergence to contact coefficients; zero-slip counterrotation with
+second-order time refinement; common-rigid-motion nullspace, scene covariance
+and endpoint exchange; an independent full 18-velocity solve for shared unequal
+pairs and translating-wall films; a 24-tick sampled unequal/full-inertia body
+trajectory beside an actual voxel wall with Guo forcing, independent global
+momentum and midpoint wrench/work reconstruction; and independent cutoffs,
+roughness, normal-only equality, mode/domain refusal, cancellation, exact late
+swept-sphere refusal and deterministic retry. The six new and 44 prior focused
+native fluid cases pass. These are source-selected native tests, not the
+unavailable repository DSR quality verdict.

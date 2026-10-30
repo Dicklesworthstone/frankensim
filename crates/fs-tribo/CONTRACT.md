@@ -3,6 +3,29 @@
 > Status: `frankensim-ext-tribo-dry-baseline-tgbj` baseline. This is not an
 > admitted material-data result or an Euler-disc validation result.
 
+## Accepted force segments for moving-body consumers
+
+`EllipticCoulomb::advance_driven_segments` exposes each accepted held-traction
+interval to a fallible visitor without allocating a trajectory collection.
+Duration, force, initial/final velocity and contact mode, net slip, unsigned
+travel, physical heat and event exactness remain separate. Rejected numerical
+trials never reach the visitor. Static holds are real segments with reaction
+force and zero slip work.
+
+This entry and `advance_driven` share one integration implementation.
+The aggregate entry retains exact zero-drive relaxation. The segmented entry
+uses bounded first-order changing-direction evolution even at zero drive so
+the original pose owner can integrate the actual force history. Constant-
+direction stop/hold/restart intervals retain their analytic timing. Applying
+one averaged phase force would generally change positions and work.
+
+Visitors must mutate private staged owners and publish only after success:
+a later native or visitor refusal cannot undo previous visits. Cancellation
+is checked around visits, including after the final hold. Four focused groups
+check independent segment reconstruction, event boundaries, curved zero-drive
+refinement against a separate continuum reference, aggregate compatibility,
+refusal and deterministic retry.
+
 ## Driven directional friction and retained rest
 
 `EllipticCoulomb::advance_driven` evolves the same associated static/kinetic

@@ -97,6 +97,7 @@ fn reflected_thermal_nee_obeys_calibrated_physical_range() {
 
         let mut calibrated = FixtureLighting {
             sources: &[],
+            areas: area::AreaLighting::empty(),
             options: TransportOptions {
                 max_distance_m: 10.0,
                 ..TransportOptions::default()

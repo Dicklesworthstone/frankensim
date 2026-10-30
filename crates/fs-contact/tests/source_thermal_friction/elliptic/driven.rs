@@ -4,6 +4,9 @@ use fs_tribo::tangential::elliptic::EllipticCoulomb;
 use fs_tribo::tangential::elliptic::driven::*;
 use fs_tribo::tangential::elliptic::relaxation::EllipticRelaxationControls;
 
+#[path = "driven/segments.rs"]
+mod segments;
+
 fn driven_controls() -> EllipticDrivenControls {
     EllipticDrivenControls {
         maximum_step_s: 0.005,

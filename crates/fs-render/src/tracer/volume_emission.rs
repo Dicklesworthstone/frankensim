@@ -386,7 +386,7 @@ mod tests {
         let mut previous_pdf = None;
         for wavelength in [450.0, 550.0, 650.0, 750.0] {
             let um = wavelength * 1.0e-3;
-            let index = 1.4 + 0.012 / (um * um);
+            let index: f64 = 1.4 + 0.012 / (um * um);
             let fresnel = ((index - 1.0) / (index + 1.0)).powi(2);
             // At normal incidence G=1 and the reflection Jacobian is 1/4.
             let (response, pdf) = reflection

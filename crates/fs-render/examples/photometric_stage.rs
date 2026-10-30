@@ -6,15 +6,19 @@
 //! through a borrowed heterogeneous physical medium.
 //! Add `-- --total-csv` for direct plus reflected/scattered surface lux through
 //! that same physical medium, with estimated IID sampling error per grid point.
+//! Append `--workers 4` to either path mode to use the native CPU tile executor;
+//! the accepted spectral samples and output values remain unchanged.
+//! Append `--panels` to include two finite, lumen-calibrated emitting meshes.
 //! These declared fixture profiles and gray haze are examples, not measurements.
 
 use std::error::Error;
 
-use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_exec::{Budget, CancelGate, Cx, ExecMode, RunId, StreamKey};
 use fs_geom::{Point3, Vec3};
 use fs_render::camera::{Aperture, CameraProjection, PhysicalCamera};
 use fs_render::charts::TriMesh;
 use fs_render::instances::RigidTransform;
+use fs_render::photometry::area::{EmissionSidedness, PhotometricAreaEmitter, PhotometricEmitters};
 use fs_render::photometry::image::LuminanceJob;
 use fs_render::photometry::medium::{HomogeneousMedium, PhaseFunction, ScatterSettings};
 use fs_render::photometry::path::{
@@ -24,7 +28,8 @@ use fs_render::photometry::source::{AngularDistribution, PhotometricSource, Sour
 use fs_render::photometry::{CalculationGrid, IlluminanceJob, PhotometricScene, TransportOptions};
 use fs_render::spectral::LiftedSpectrum;
 use fs_render::tracer::{
-    Camera, DirectStrategy, Material, Primitive, Sampler, Scene, Settings, Shape,
+    Camera, DirectStrategy, Material, Primitive, RenderExecutionConfig, Sampler, Scene, Settings,
+    Shape,
 };
 use fs_render::volumes::VolumeGrid;
 use fs_render::volumes::transport::scattering::{
@@ -34,13 +39,33 @@ use fs_render::volumes::transport::{AbsorbingGrid, AbsorbingGridBudget, MassAbso
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (csv, paths, total_csv) = match args.as_slice() {
-        [] => (false, false, false),
-        [flag] if flag == "--csv" => (true, false, false),
-        [flag] if flag == "--paths" => (false, true, false),
-        [flag] if flag == "--total-csv" => (false, false, true),
-        _ => return Err("usage: photometric_stage [--csv | --paths | --total-csv]".into()),
+    const USAGE: &str = "usage: photometric_stage [--csv | --paths | --total-csv] [--panels] [--workers N]; options require a path mode";
+    let mode = args.first().map_or("", String::as_str);
+    let mut workers = None;
+    let mut panels = false;
+    let mut extra = args.get(1..).unwrap_or_default().iter();
+    while let Some(flag) = extra.next() {
+        match flag.as_str() {
+            "--workers" if workers.is_none() => {
+                workers = Some(extra.next().ok_or(USAGE)?.parse::<usize>()?);
+            }
+            "--panels" if !panels => panels = true,
+            _ => return Err(USAGE.into()),
+        }
+    }
+    let (csv, paths, total_csv) = match mode {
+        "" => (false, false, false),
+        "--csv" => (true, false, false),
+        "--paths" => (false, true, false),
+        "--total-csv" => (false, false, true),
+        _ => return Err(USAGE.into()),
     };
+    if (workers.is_some() || panels) && !(paths || total_csv) {
+        return Err(USAGE.into());
+    }
+    let execution = workers
+        .map(|count| RenderExecutionConfig::try_new(32, 32, count, 512 * 1024 * 1024, RunId(1)))
+        .transpose()?;
     let gate = CancelGate::new_clock_free();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     pool.scope(|arena| {
@@ -56,11 +81,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             Budget::INFINITE,
             ExecMode::Deterministic,
         );
-        run(&cx, csv, paths, total_csv)
+        run(&cx, csv, paths, total_csv, panels, execution.as_ref())
     })
 }
 
-fn run(cx: &Cx<'_>, csv: bool, paths: bool, total_csv: bool) -> Result<(), Box<dyn Error>> {
+fn run(
+    cx: &Cx<'_>,
+    csv: bool,
+    paths: bool,
+    total_csv: bool,
+    panels: bool,
+    execution: Option<&RenderExecutionConfig>,
+) -> Result<(), Box<dyn Error>> {
     // Right-handed world, Z up, metres. Local source +Z is its optical axis.
     // This proper rotation turns +Z downward; changing these transforms and
     // constructing a new scene supplies another pan/tilt/fixture snapshot.
@@ -150,7 +182,16 @@ fn run(cx: &Cx<'_>, csv: bool, paths: bool, total_csv: bool) -> Result<(), Box<d
         Aperture::try_circular(0.0)?, // Pinhole; no exposure or tone mapping.
     )?;
     if paths || total_csv {
-        return run_paths(cx, Vec::from(surfaces), &sources, &camera, grid, total_csv);
+        return run_paths(
+            cx,
+            Vec::from(surfaces),
+            &sources,
+            &camera,
+            grid,
+            total_csv,
+            panels,
+            execution,
+        );
     }
     let mut image = LuminanceJob::new(
         &scene,
@@ -202,6 +243,8 @@ fn run_paths(
     camera: &PhysicalCamera,
     grid: CalculationGrid,
     total_csv: bool,
+    panels: bool,
+    execution: Option<&RenderExecutionConfig>,
 ) -> Result<(), Box<dyn Error>> {
     // A back wall receives reflected floor light through the same material law.
     primitives.push(Primitive {
@@ -219,6 +262,43 @@ fn run_paths(
         },
         emission: None,
     });
+    let mut surface_emitters = Vec::new();
+    if panels {
+        for center_x in [-3.0, 3.0] {
+            let index = primitives.len();
+            primitives.push(Primitive {
+                shape: Shape::Mesh(TriMesh::new(
+                    vec![
+                        [center_x - 0.5, -0.5, 4.5],
+                        [center_x + 0.5, -0.5, 4.5],
+                        [center_x + 0.5, 0.5, 4.5],
+                        [center_x - 0.5, 0.5, 4.5],
+                    ],
+                    vec![[0, 2, 1], [0, 3, 2]], // Front emission points down.
+                )),
+                material: Material::Lambertian {
+                    reflectance: LiftedSpectrum { c: [0.0; 3] },
+                },
+                emission: None,
+            });
+            surface_emitters.push(PhotometricAreaEmitter::try_new(
+                index,
+                2400.0,
+                1.0,
+                SourceSpectrum::equal_energy(),
+                EmissionSidedness::Front,
+            )?);
+        }
+        if !total_csv {
+            println!(
+                "2 finite panels, 4,800 emitted lm, 1 m^2 each; native material reflection retained"
+            );
+        }
+    }
+    let emitters = PhotometricEmitters {
+        points: sources,
+        surfaces: &surface_emitters,
+    };
     let scene = Scene {
         primitives,
         lights: Vec::new(),
@@ -252,9 +332,9 @@ fn run_paths(
         GridPhase::henyey_greenstein(0.7)?,
     )?;
     if total_csv {
-        let mut job = PathIlluminanceJob::for_grid(
+        let mut job = PathIlluminanceJob::for_grid_with_emitters(
             &scene,
-            sources,
+            emitters,
             PathMedium::Scattering(&medium),
             grid,
             TransportOptions {
@@ -270,7 +350,11 @@ fn run_paths(
             cx,
         )?;
         while !job.is_complete() {
-            job.advance(cx, 768)?;
+            if let Some(execution) = execution {
+                job.advance_with_execution(cx, 16_384, execution)?;
+            } else {
+                job.advance(cx, 768)?;
+            }
         }
         println!(
             "x_m,y_m,z_m,direct_lux,continuous_lux,total_lux,estimated_standard_error_lux,samples,total_error_bound_lux"
@@ -305,9 +389,9 @@ fn run_paths(
         strategy: DirectStrategy::Mis,
         seed: 0x5052_4556_495a,
     };
-    let mut image = PathLuminanceJob::new(
+    let mut image = PathLuminanceJob::new_with_emitters(
         &scene,
-        sources,
+        emitters,
         PathMedium::Scattering(&medium),
         TransportOptions {
             max_outputs: 4096,
@@ -317,7 +401,11 @@ fn run_paths(
         cx,
     )?;
     while !image.is_complete() {
-        image.advance(cx, 768)?;
+        if let Some(execution) = execution {
+            image.advance_with_execution(cx, 16_384, execution)?;
+        } else {
+            image.advance(cx, 768)?;
+        }
     }
     let peak = image
         .estimates()

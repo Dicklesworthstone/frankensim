@@ -82,6 +82,59 @@ pub struct EllipticDrivenReport {
     pub quadrature_evaluations: usize,
 }
 
+/// One accepted constant-traction interval of the segmented trajectory.
+///
+/// Velocity varies linearly across this interval. A retained resting constraint
+/// uses exact zero native velocity; its original body residual remains the
+/// mechanical owner's responsibility. Rejected numerical trials are not segments.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EllipticDrivenSegment {
+    /// Start time relative to the beginning of this held-input phase.
+    pub elapsed_before_s: f64,
+    pub dt_s: f64,
+    /// Positive traction, whose force on the positive-slip body is opposite.
+    pub traction_n: [f64; 2],
+    pub velocity_before_m_s: [f64; 2],
+    pub velocity_after_m_s: [f64; 2],
+    /// Resting -> Sliding means breakaway at the START of this interval.
+    pub mode_before: EllipticDrivenMode,
+    /// Sliding -> Resting means arrest at the END of this interval.
+    pub mode_after: EllipticDrivenMode,
+    pub slip_increment_m: [f64; 2],
+    pub distance_m: f64,
+    pub dissipated_j: f64,
+    /// Meaningful only for Sliding -> Resting. False denotes a timestep event.
+    pub arrest_time_is_exact: bool,
+}
+
+/// Native refusal or a failure of the caller's privately staged segment owner.
+#[derive(Clone, Debug, PartialEq)]
+pub enum EllipticDrivenSegmentError<E> {
+    Driven(EllipticDrivenError),
+    Visitor(E),
+}
+impl<E> From<EllipticDrivenError> for EllipticDrivenSegmentError<E> {
+    fn from(error: EllipticDrivenError) -> Self {
+        Self::Driven(error)
+    }
+}
+impl<E> From<TriboError> for EllipticDrivenSegmentError<E> {
+    fn from(error: TriboError) -> Self {
+        Self::Driven(error.into())
+    }
+}
+impl<E> From<EllipticRelaxationError> for EllipticDrivenSegmentError<E> {
+    fn from(error: EllipticRelaxationError) -> Self {
+        Self::Driven(error.into())
+    }
+}
+impl<E: core::fmt::Debug> core::fmt::Display for EllipticDrivenSegmentError<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "segmented directional friction: {self:?}")
+    }
+}
+impl<E: core::fmt::Debug> std::error::Error for EllipticDrivenSegmentError<E> {}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum EllipticDrivenError {
     Constitutive(TriboError),
@@ -118,7 +171,6 @@ impl EllipticCoulomb {
     /// returned mode and independently audit actual endpoint momentum/velocity.
     /// General changing-direction motion requires refinement of maximum_step_s;
     /// exact zero-drive relaxation and constant-direction limits are retained.
-    #[allow(clippy::too_many_lines)]
     pub fn advance_driven(
         &self,
         state: &EllipticCoulombState,
@@ -126,6 +178,52 @@ impl EllipticCoulomb {
         controls: EllipticDrivenControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<EllipticDrivenReport, Error> {
+        self.integrate_driven(state, input, controls, cancelled, false, &mut |_| {
+            Ok::<(), core::convert::Infallible>(())
+        })
+        .map_err(|error| match error {
+            EllipticDrivenSegmentError::Driven(error) => error,
+            EllipticDrivenSegmentError::Visitor(never) => match never {},
+        })
+    }
+
+    /// Visit every accepted constant-traction interval without allocating a path.
+    ///
+    /// This uses the same held-traction evolution as `advance_driven`, but its
+    /// curved ZERO-drive motion also uses bounded endpoint-Coulomb substeps.
+    /// That deliberate discretization exposes the force history needed for pose
+    /// and work integration. Constant-direction intervals remain exact; curved
+    /// motion and its endpoint arrests require refinement of maximum_step_s.
+    /// The aggregate-only entry retains its original exact zero-drive kernel.
+    ///
+    /// The visitor sees static holds, breakaway, moving intervals and arrests,
+    /// never rejected projection trials. It must update PRIVATE staged owners:
+    /// a subsequent visitor/native refusal or cancellation cannot undo earlier
+    /// visits. Publish those owners and this borrowed constitutive checkpoint
+    /// jointly only after success and the mechanical owner's independent audits.
+    /// Source-query trials and accepted replay must use this same segmented
+    /// method and held coefficients, rather than the aggregate zero-drive flow.
+    pub fn advance_driven_segments<E>(
+        &self,
+        state: &EllipticCoulombState,
+        input: &EllipticDrivenInput,
+        controls: EllipticDrivenControls,
+        cancelled: &mut impl FnMut() -> bool,
+        visit: &mut impl FnMut(&EllipticDrivenSegment) -> Result<(), E>,
+    ) -> Result<EllipticDrivenReport, EllipticDrivenSegmentError<E>> {
+        self.integrate_driven(state, input, controls, cancelled, true, visit)
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn integrate_driven<E>(
+        &self,
+        state: &EllipticCoulombState,
+        input: &EllipticDrivenInput,
+        controls: EllipticDrivenControls,
+        cancelled: &mut impl FnMut() -> bool,
+        segmented: bool,
+        visit: &mut impl FnMut(&EllipticDrivenSegment) -> Result<(), E>,
+    ) -> Result<EllipticDrivenReport, EllipticDrivenSegmentError<E>> {
         poll(cancelled)?;
         self.check(state)?;
         controls.solve.validate()?;
@@ -162,16 +260,16 @@ impl EllipticCoulomb {
                 .nominal_pressure_pa
                 .is_some_and(|x| !x.is_finite() || x < 0.0)
         {
-            return Err(Error::Invalid(
-                "finite driven phase, tolerances and work bounds required",
-            ));
+            return Err(
+                Error::Invalid("finite driven phase, tolerances and work bounds required").into(),
+            );
         }
         let w = input.mobility_per_kg;
         let matrix = SymmetricTangentialCompliance::new(w)?;
         let (normalized, determinant) = matrix.material([1.0, 0.0])?;
         let scale = w[0][0].max(w[1][1]);
         if determinant <= 0.0 || scale <= 0.0 {
-            return Err(Error::Invalid("driven motion requires SPD body mobility"));
+            return Err(Error::Invalid("driven motion requires SPD body mobility").into());
         }
         let inverse = |v: [f64; 2]| -> Result<[f64; 2], Error> {
             let [a, b, d] = normalized;
@@ -195,15 +293,16 @@ impl EllipticCoulomb {
                 if length(input.velocity_m_s) > controls.rest_velocity_tolerance_m_s {
                     return Err(Error::Invalid(
                         "retained rest exceeds actual velocity residual gate",
-                    ));
+                    )
+                    .into());
                 }
                 [0.0; 2]
             }
             EllipticDrivenMode::Sliding => {
                 if input.velocity_m_s == [0.0; 2] {
-                    return Err(Error::Invalid(
-                        "zero velocity requires explicit resting mode",
-                    ));
+                    return Err(
+                        Error::Invalid("zero velocity requires explicit resting mode").into(),
+                    );
                 }
                 input.velocity_m_s
             }
@@ -227,7 +326,7 @@ impl EllipticCoulomb {
             path_quadrature_error_m: 0.0,
             quadrature_evaluations: 0,
         };
-        if drive == [0.0; 2] {
+        if !segmented && drive == [0.0; 2] {
             let native = self.relax_velocity(
                 state,
                 &EllipticRelaxationInput {
@@ -268,22 +367,40 @@ impl EllipticCoulomb {
             while elapsed < input.dt_s {
                 poll(cancelled)?;
                 if report.substeps >= controls.maximum_substeps {
-                    return Err(Error::SubstepBudget);
+                    return Err(Error::SubstepBudget.into());
                 }
                 let remaining = input.dt_s - elapsed;
                 if mode == EllipticDrivenMode::Resting && can_hold {
                     if length(q) > force_limit {
-                        return Err(Error::Invalid("static reaction exceeds force budget"));
+                        return Err(Error::Invalid("static reaction exceeds force budget").into());
                     }
                     for i in 0..2 {
                         report.traction_impulse_ns[i] =
                             checked(report.traction_impulse_ns[i] + remaining * q[i])?;
                     }
                     report.substeps += 1;
+                    if segmented {
+                        poll(cancelled)?;
+                        visit(&EllipticDrivenSegment {
+                            elapsed_before_s: elapsed,
+                            dt_s: remaining,
+                            traction_n: q,
+                            velocity_before_m_s: velocity,
+                            velocity_after_m_s: velocity,
+                            mode_before: mode,
+                            mode_after: mode,
+                            slip_increment_m: [0.0; 2],
+                            distance_m: 0.0,
+                            dissipated_j: 0.0,
+                            arrest_time_is_exact: true,
+                        })
+                        .map_err(EllipticDrivenSegmentError::Visitor)?;
+                        poll(cancelled)?;
+                    }
                     break;
                 }
                 if caps[0].max(caps[1]) > force_limit {
-                    return Err(Error::Invalid("kinetic capacity exceeds force budget"));
+                    return Err(Error::Invalid("kinetic capacity exceeds force budget").into());
                 }
                 let mut h = remaining;
                 let mut exact = true;
@@ -297,7 +414,7 @@ impl EllipticCoulomb {
                         project(self, state, input, controls, [0.0; 2], h, force_limit)?;
                     report.projection_iterations += iterations;
                     if end == [0.0; 2] {
-                        return Err(Error::Invalid("superstatic drive did not break away"));
+                        return Err(Error::Invalid("superstatic drive did not break away").into());
                     }
                     (force, end, 0.5 * h * length(end), 0.0, 0)
                 } else {
@@ -340,11 +457,11 @@ impl EllipticCoulomb {
                         let (force, end) = loop {
                             poll(cancelled)?;
                             if report.substeps >= controls.maximum_substeps {
-                                return Err(Error::SubstepBudget);
+                                return Err(Error::SubstepBudget.into());
                             }
                             report.substeps += 1;
                             if elapsed + h <= elapsed || h <= 0.0 {
-                                return Err(Error::UnresolvedDirection);
+                                return Err(Error::UnresolvedDirection.into());
                             }
                             let (force, end, iterations) =
                                 project(self, state, input, controls, velocity, h, force_limit)?;
@@ -358,7 +475,7 @@ impl EllipticCoulomb {
                             if dot(force, velocity) < 0.0 || (end == [0.0; 2] && !kinetic_hold) {
                                 h *= 0.5;
                                 if h < controls.minimum_step_s {
-                                    return Err(Error::UnresolvedDirection);
+                                    return Err(Error::UnresolvedDirection.into());
                                 }
                                 continue;
                             }
@@ -373,7 +490,7 @@ impl EllipticCoulomb {
                     }
                 };
                 if elapsed + h <= elapsed || !h.is_finite() {
-                    return Err(Error::UnresolvedDirection);
+                    return Err(Error::UnresolvedDirection.into());
                 }
                 let displacement = vector([
                     0.5 * h * (velocity[0] + after[0]),
@@ -381,9 +498,9 @@ impl EllipticCoulomb {
                 ])?;
                 let loss = checked(dot(force, displacement))?;
                 if loss < 0.0 || !path.is_finite() || path < 0.0 {
-                    return Err(Error::Invalid(
-                        "negative or unrepresentable driven work/path",
-                    ));
+                    return Err(
+                        Error::Invalid("negative or unrepresentable driven work/path").into(),
+                    );
                 }
                 for i in 0..2 {
                     report.traction_impulse_ns[i] =
@@ -399,6 +516,8 @@ impl EllipticCoulomb {
                     .quadrature_evaluations
                     .checked_add(evaluations)
                     .ok_or(Error::Invalid("quadrature count overflow"))?;
+                let elapsed_before = elapsed;
+                let mode_before = mode;
                 elapsed = if h == remaining {
                     input.dt_s
                 } else {
@@ -412,6 +531,24 @@ impl EllipticCoulomb {
                     }
                 } else {
                     mode = EllipticDrivenMode::Sliding;
+                }
+                if segmented {
+                    poll(cancelled)?;
+                    visit(&EllipticDrivenSegment {
+                        elapsed_before_s: elapsed_before,
+                        dt_s: h,
+                        traction_n: force,
+                        velocity_before_m_s: velocity,
+                        velocity_after_m_s: after,
+                        mode_before,
+                        mode_after: mode,
+                        slip_increment_m: displacement,
+                        distance_m: path,
+                        dissipated_j: loss,
+                        arrest_time_is_exact: exact,
+                    })
+                    .map_err(EllipticDrivenSegmentError::Visitor)?;
+                    poll(cancelled)?;
                 }
                 velocity = after;
             }

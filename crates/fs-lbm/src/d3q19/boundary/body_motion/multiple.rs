@@ -70,12 +70,14 @@ impl BoundaryGrid3 {
         .map(|report| report.motion)
     }
 
-    /// Advance actual separated spherical geometries with simultaneous normal
-    /// lubrication, native fluid exchange, and the original rigid half-drifts.
+    /// Advance actual separated spheres with simultaneous missing-film
+    /// resistance, native fluid exchange, and the original rigid half-drifts.
     ///
     /// The supplied radii define the sampled spheres; they are not independent
     /// curvature hints for arbitrary shapes. Resistance uses actual midpoint
-    /// gaps. Original swept nonintersection and wall/halo admission remain.
+    /// gaps. Opt-in unequal-sphere tangent/rotation modes use both original
+    /// full-inertia spin responses. Original swept nonintersection and wall/halo
+    /// admission remain.
     /// Missing-film impulses and viscous work are separate from resolved-fluid
     /// exchange in `coupling.lubrication`; all per-body balance residuals include
     /// both. The model is retained-interior-fluid plus additional solid inertia.

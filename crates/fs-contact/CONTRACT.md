@@ -3,6 +3,28 @@
 > Status: ACTIVE (Stage 1, increment 1 — bead tqag). Capability-routed
 > body-to-body contact over certified motion.
 
+## Source-consistent physical segments for moving contact
+
+`advance_driven_motion_consistent_with_segments` resolves original directional
+material claims against the same segmented native trajectory that will move
+the body. Source-distance trials use a no-op visitor. Once the source root is
+accepted, its held coefficients are replayed from the original pre-phase
+history and the actual visitor receives only that accepted trajectory.
+The complete native replay report must equal the trial report.
+
+Replay performs one additional bounded native integration and no additional
+material query. Source evaluation counts retain their existing meaning.
+Original claims, texture, path history and static/sliding admission stay intact.
+Source and callback errors retain distinct owners. Visitors stage their own
+physical state because a later segment failure or cancellation can follow
+earlier visits; no accepted source history is mutated by this API.
+
+Three focused groups check a sourced analytic breakaway with no speculative
+pose visits, full-matrix zero-drive segment/path/work reconstruction, original
+query receipts, and source/visitor/cancellation refusal with retry. General
+curved segmented motion needs inner timestep refinement; changing source
+conditions need a separate outer phase control.
+
 ## Source-owned driven directional motion
 
 `SourceThermalEllipticCoulomb::advance_driven_motion_consistent` carries the

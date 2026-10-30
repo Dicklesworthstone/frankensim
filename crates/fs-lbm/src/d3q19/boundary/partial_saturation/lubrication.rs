@@ -5,10 +5,11 @@
 
 use super::{multiple::Response, *};
 
+mod pairs;
 pub(in crate::d3q19::boundary) mod planes;
 pub use planes::{LubricatedPlanesExchange3, LubricationPlane3, PlaneLubricationExchange3};
 
-/// Constant Newtonian normal lubrication correction in lattice units.
+/// Constant Newtonian missing-film resistance in lattice units.
 ///
 /// For actual gap `h > 0`, effective radius `R = Ra Rb/(Ra+Rb)` and
 /// `h_eff = max(h, roughness_gap)`, the extra resistance is
@@ -23,9 +24,9 @@ pub use planes::{LubricatedPlanesExchange3, LubricationPlane3, PlaneLubricationE
 /// native six-velocity body responses. Midpoint damping is passive but not
 /// L-stable: an unresolved stiff relaxation can reverse its endpoint slip.
 /// Prescribed planes can join the same solve through the explicit plane entry
-/// points. Planes can also enable reciprocal tangential/parallel-spin terms.
+/// points. Both pairs and planes can opt into reciprocal tangent/spin terms.
 /// This model does not supply contact, temporal accuracy near contact,
-/// tangential sphere-pair lubrication, cavitation, or a dense-suspension closure.
+/// complete finite-gap hydrodynamics, cavitation, or a dense-suspension closure.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SphereLubrication3 {
     dynamic_viscosity: f64,
@@ -33,6 +34,7 @@ pub struct SphereLubrication3 {
     roughness_gap: f64,
     maximum_pairs: usize,
     maximum_modes: usize,
+    tangential_pairs: Option<(f64, f64)>,
 }
 
 impl SphereLubrication3 {
@@ -63,13 +65,51 @@ impl SphereLubrication3 {
             roughness_gap,
             maximum_pairs,
             maximum_modes: 64,
+            tangential_pairs: None,
         })
+    }
+
+    /// Enable unequal-sphere leading-logarithmic tangent/parallel-spin films.
+    ///
+    /// With radii `a,b`, actual center distance `d`, tangent `t` and
+    /// `s = n cross t`, set `u = (v_a-v_b).t`, `z_a=a*(omega_a.s+u/d)`
+    /// and `z_b=b*(omega_b.s+u/d)`. The resistance in these two velocities is
+    /// `k * [[4,1],[1,4]]`, `k=4*pi*mu*(a*b/(a+b))/5*ln(cutoff/h_eff)`.
+    /// Both positive modes are retained: zero surface slip alone does not remove
+    /// the counter-rotation resistance. Rotation about `n` has no divergent
+    /// leading term and receives no extra resistance.
+    ///
+    /// This is the objective finite-gap completion of the Jeffrey--Onishi
+    /// leading logarithmic `YA/YB/YC` block, with corrected normalization from
+    /// Townsend, Phys. Fluids 35, 127126 (2023), equations 19-25 and 33-34a:
+    /// <https://arxiv.org/abs/1802.08226>. Actual `d`, rather than `a+b`, makes
+    /// the frame follow the line of centers. The resulting power-conjugate
+    /// forces/torques conserve orbital-plus-spin momentum and vanish under a
+    /// common rigid motion. This changes only omitted-order `h*ln(h)` terms;
+    /// it does NOT reproduce the complete higher-order resistance functions.
+    ///
+    /// Cutoff/roughness are separate lattice lengths from the normal film. The
+    /// cutoff must be <= 0.02 times every supplied radius, a declared small-gap
+    /// domain, not a certified error bound. Actual gaps must remain positive.
+    /// Four modes per active tangent film join the same native response solve.
+    ///
+    /// # Errors
+    /// Refuses nonfinite/nonpositive scales or roughness above the cutoff.
+    pub fn with_tangential_pairs(mut self, cutoff_gap: f64, roughness_gap: f64) -> Result<Self> {
+        if !(cutoff_gap.is_finite() && cutoff_gap > 0.0)
+            || !(roughness_gap.is_finite() && roughness_gap > 0.0)
+            || roughness_gap > cutoff_gap
+        {
+            return Err(invalid("invalid tangential sphere-pair lubrication scales"));
+        }
+        self.tangential_pairs = Some((cutoff_gap, roughness_gap));
+        Ok(self)
     }
 
     /// Bound the simultaneous scalar resistance solve independently of the
     /// physical-film count. The default is 64; an explicit limit in `1..=320`
     /// admits at most five modes per each of the 64 supported films. A normal
-    /// film uses one mode and an active tangential wall block uses four more.
+    /// film uses one mode and an active tangent pair/wall block uses four more.
     /// Dense storage is O(modes squared), factorization O(modes cubed).
     ///
     /// # Errors
@@ -86,6 +126,13 @@ impl SphereLubrication3 {
         if N == 0 || N > 64 || !radii.into_iter().all(|r| r.is_finite() && r > 0.0) {
             return Err(invalid(
                 "lubrication requires 1 through 64 positive sphere radii",
+            ));
+        }
+        if let Some((cutoff, _)) = self.tangential_pairs
+            && radii.into_iter().any(|r| cutoff > 0.02 * r)
+        {
+            return Err(invalid(
+                "tangential sphere-pair cutoff exceeds 0.02 sphere radius",
             ));
         }
         Ok(())
@@ -120,6 +167,8 @@ pub struct SphereLubricationExchange3<const N: usize> {
     pub constitutive_residual: f64,
     /// Number of positive-resistance sphere pairs in the simultaneous solve.
     pub active_pairs: usize,
+    /// Active sphere pairs with reciprocal tangent/parallel-spin resistance.
+    pub active_tangential_pairs: usize,
     /// Number of positive-resistance sphere-plane films in that SAME solve.
     pub active_plane_pairs: usize,
     /// Number of active plane films with translation/parallel-spin correction.
@@ -142,6 +191,7 @@ impl<const N: usize> Default for SphereLubricationExchange3<N> {
             work_residual: 0.0,
             constitutive_residual: 0.0,
             active_pairs: 0,
+            active_tangential_pairs: 0,
             active_plane_pairs: 0,
             active_tangential_plane_pairs: 0,
             active_resistance_modes: 0,
@@ -150,7 +200,7 @@ impl<const N: usize> Default for SphereLubricationExchange3<N> {
 }
 
 impl BoundaryGrid3 {
-    /// Advance spherical frozen geometries with missing normal film resistance.
+    /// Advance spherical frozen geometries with missing film resistance.
     ///
     /// Fraction fields must describe the disjoint spheres of the supplied radii
     /// about their body centers. The geometry-free caller owns that obligation;
@@ -199,16 +249,57 @@ struct Pair {
 
 #[derive(Clone, Copy)]
 enum Counterpart {
-    Sphere(usize),
-    Plane { index: usize, point: [f64; 3] },
+    // The second body's entire wrench has sign -1. Its angular covector need
+    // not equal the first body's: pair rolling modes require independent spins.
+    Sphere {
+        index: usize,
+        angular: Option<[f64; 3]>,
+    },
+    Plane {
+        index: usize,
+        point: [f64; 3],
+    },
+}
+
+#[derive(Clone, Copy)]
+struct Direction {
+    linear: [f64; 3],
+    angular: Option<[f64; 3]>,
+}
+
+fn tangent_basis(normal: [f64; 3]) -> [[f64; 3]; 2] {
+    // Isotropic tangent planes share a deterministic, well-conditioned gauge.
+    let axis = (0..3)
+        .min_by(|&a, &b| normal[a].abs().total_cmp(&normal[b].abs()))
+        .expect("three axes");
+    let mut hint = [0.0; 3];
+    hint[axis] = 1.0;
+    let tangent = cross(normal, hint);
+    let length = tangent[0].hypot(tangent[1]).hypot(tangent[2]);
+    let tangent = tangent.map(|x| x / length);
+    [tangent, cross(normal, tangent)]
 }
 
 impl Pair {
-    fn bodies(self) -> [Option<(usize, f64)>; 2] {
+    fn bodies(self) -> [Option<(usize, f64, Direction)>; 2] {
         [
-            Some((self.a, 1.0)),
+            Some((
+                self.a,
+                1.0,
+                Direction {
+                    linear: self.normal,
+                    angular: self.angular,
+                },
+            )),
             match self.counterpart {
-                Counterpart::Sphere(b) => Some((b, -1.0)),
+                Counterpart::Sphere { index, angular } => Some((
+                    index,
+                    -1.0,
+                    Direction {
+                        linear: self.normal,
+                        angular,
+                    },
+                )),
                 Counterpart::Plane { .. } => None,
             },
         ]
@@ -225,8 +316,8 @@ struct FreeResponse {
 }
 
 impl FreeResponse {
-    fn action(&self, row: usize, mode: Pair) -> f64 {
-        let linear = dot(self.linear_columns[row], mode.normal);
+    fn action(&self, row: usize, mode: Direction) -> f64 {
+        let linear = dot(self.linear_columns[row], mode.linear);
         match mode.angular {
             Some(angular) => {
                 linear
@@ -239,8 +330,8 @@ impl FreeResponse {
         }
     }
 
-    fn mobility(&self, test: Pair, trial: Pair) -> f64 {
-        let linear = dot(test.normal, core::array::from_fn(|i| self.action(i, trial)));
+    fn mobility(&self, test: Direction, trial: Direction) -> f64 {
+        let linear = dot(test.linear, core::array::from_fn(|i| self.action(i, trial)));
         match test.angular {
             Some(angular) => {
                 linear + dot(angular, core::array::from_fn(|i| self.action(i + 3, trial)))
@@ -264,7 +355,9 @@ pub(super) fn solve<const N: usize>(
     Vec<PlaneLubricationExchange3>,
 )> {
     let mut pairs = Vec::new();
-    let modes_per_film = if planes.iter().any(|plane| plane.tangential.is_some()) {
+    let modes_per_film = if model.tangential_pairs.is_some()
+        || planes.iter().any(|plane| plane.tangential.is_some())
+    {
         5
     } else {
         1
@@ -276,6 +369,9 @@ pub(super) fn solve<const N: usize>(
                 .min(model.maximum_pairs * modes_per_film),
         )
         .map_err(|_| invalid("lubrication pair allocation refused"))?;
+    let mut sphere_pairs = 0;
+    let mut tangential_sphere_pairs = 0;
+    let mut spin_response = [false; N];
     for a in 0..N {
         checkpoint(gate)?;
         for b in a + 1..N {
@@ -288,40 +384,72 @@ pub(super) fn solve<const N: usize>(
                 ));
             }
             let effective_gap = gap.max(model.roughness_gap);
-            if effective_gap >= model.cutoff_gap {
+            let normal_active = effective_gap < model.cutoff_gap;
+            let normal = delta.map(|x| x / distance);
+            let tangential = pairs::tangential_modes(
+                [radii[a], radii[b]],
+                distance,
+                normal,
+                gap,
+                model.tangential_pairs,
+                model.dynamic_viscosity,
+            )?;
+            if !normal_active && tangential.is_none() {
                 continue;
             }
-            if pairs.len() == model.maximum_pairs {
+            if sphere_pairs == model.maximum_pairs {
                 return Err(invalid("lubrication active-pair limit exhausted"));
             }
-            if pairs.len() == model.maximum_modes {
+            let added_modes = usize::from(normal_active) + if tangential.is_some() { 4 } else { 0 };
+            if pairs.len() + added_modes > model.maximum_modes {
                 return Err(invalid("lubrication resistance-mode limit exhausted"));
             }
-            let small = radii[a].min(radii[b]);
-            let large = radii[a].max(radii[b]);
-            let radius = small / (1.0 + small / large);
-            let resistance = 6.0
-                * core::f64::consts::PI
-                * model.dynamic_viscosity
-                * radius
-                * radius
-                * (1.0 / effective_gap - 1.0 / model.cutoff_gap);
-            if !(resistance.is_finite() && resistance > 0.0) {
-                return Err(invalid("lubrication resistance is unrepresentable"));
+            if normal_active {
+                let small = radii[a].min(radii[b]);
+                let large = radii[a].max(radii[b]);
+                let radius = small / (1.0 + small / large);
+                let resistance = 6.0
+                    * core::f64::consts::PI
+                    * model.dynamic_viscosity
+                    * radius
+                    * radius
+                    * (1.0 / effective_gap - 1.0 / model.cutoff_gap);
+                if !(resistance.is_finite() && resistance > 0.0) {
+                    return Err(invalid("lubrication resistance is unrepresentable"));
+                }
+                pairs.push(Pair {
+                    a,
+                    counterpart: Counterpart::Sphere {
+                        index: b,
+                        angular: None,
+                    },
+                    normal,
+                    angular: None,
+                    resistance,
+                });
             }
-            pairs.push(Pair {
-                a,
-                counterpart: Counterpart::Sphere(b),
-                normal: delta.map(|x| x / distance),
-                angular: None,
-                resistance,
-            });
+            if let Some(tangential) = tangential {
+                for mode in tangential {
+                    pairs.push(Pair {
+                        a,
+                        counterpart: Counterpart::Sphere {
+                            index: b,
+                            angular: Some(mode.angular_b.map(|x| -x)),
+                        },
+                        normal: mode.linear,
+                        angular: Some(mode.angular_a),
+                        resistance: mode.resistance,
+                    });
+                }
+                spin_response[a] = true;
+                spin_response[b] = true;
+                tangential_sphere_pairs += 1;
+            }
+            sphere_pairs += 1;
         }
     }
-    let sphere_pairs = pairs.len();
     let mut plane_pairs = 0;
     let mut tangential_plane_pairs = 0;
-    let mut spin_response = [false; N];
     let mut plane_reports = Vec::new();
     plane_reports
         .try_reserve_exact(planes.len())
@@ -434,7 +562,7 @@ pub(super) fn solve<const N: usize>(
     for (i, pair) in pairs.iter().copied().enumerate() {
         checkpoint(gate)?;
         let slip = core::array::from_fn(|axis| match pair.counterpart {
-            Counterpart::Sphere(b) => {
+            Counterpart::Sphere { index: b, .. } => {
                 bodies[pair.a].velocity[axis] - bodies[b].velocity[axis]
                     + 0.5 * (free[pair.a].increment[axis] - free[b].increment[axis])
             }
@@ -450,12 +578,22 @@ pub(super) fn solve<const N: usize>(
             });
             impulse[i] -= dot(angular, omega);
         }
+        if let Counterpart::Sphere {
+            index: b,
+            angular: Some(angular),
+        } = pair.counterpart
+        {
+            let omega = core::array::from_fn(|axis| {
+                bodies[b].angular_velocity[axis] + 0.5 * free[b].increment[axis + 3]
+            });
+            impulse[i] += dot(angular, omega);
+        }
         for (j, other) in pairs[..=i].iter().copied().enumerate() {
             let mut entry = if i == j { 1.0 / pair.resistance } else { 0.0 };
-            for (a, sign_a) in pair.bodies().into_iter().flatten() {
-                for (b, sign_b) in other.bodies().into_iter().flatten() {
+            for (a, sign_a, direction_a) in pair.bodies().into_iter().flatten() {
+                for (b, sign_b, direction_b) in other.bodies().into_iter().flatten() {
                     if a == b {
-                        entry += 0.5 * sign_a * sign_b * free[a].mobility(pair, other);
+                        entry += 0.5 * sign_a * sign_b * free[a].mobility(direction_a, direction_b);
                     }
                 }
             }
@@ -476,6 +614,7 @@ pub(super) fn solve<const N: usize>(
     }
     let mut report = SphereLubricationExchange3 {
         active_pairs: sphere_pairs,
+        active_tangential_pairs: tangential_sphere_pairs,
         active_plane_pairs: plane_pairs,
         active_tangential_plane_pairs: tangential_plane_pairs,
         active_resistance_modes: k,
@@ -486,8 +625,22 @@ pub(super) fn solve<const N: usize>(
             let value = lambda * pair.normal[axis];
             report.body_impulses[pair.a][axis] += value;
             match pair.counterpart {
-                Counterpart::Sphere(b) => report.body_impulses[b][axis] -= value,
+                Counterpart::Sphere { index: b, .. } => report.body_impulses[b][axis] -= value,
                 Counterpart::Plane { index, .. } => plane_reports[index].impulse[axis] -= value,
+            }
+        }
+        if let Some(angular) = pair.angular {
+            for i in 0..3 {
+                report.body_spin_impulses[pair.a][i] += lambda * angular[i];
+            }
+        }
+        if let Counterpart::Sphere {
+            index: b,
+            angular: Some(angular),
+        } = pair.counterpart
+        {
+            for i in 0..3 {
+                report.body_spin_impulses[b][i] -= lambda * angular[i];
             }
         }
         if let Counterpart::Plane { index, point } = pair.counterpart {
@@ -500,7 +653,6 @@ pub(super) fn solve<const N: usize>(
                     reaction,
                 );
                 for i in 0..3 {
-                    report.body_spin_impulses[pair.a][i] += spin[i];
                     // Opposite total body moment, expressed as force at the
                     // real wall point PLUS a free wall couple. Treating this as
                     // contact-point friction alone would lose the pressure moment.
@@ -546,7 +698,7 @@ pub(super) fn solve<const N: usize>(
         let mut slip = dot(
             pair.normal,
             core::array::from_fn(|i| match pair.counterpart {
-                Counterpart::Sphere(b) => {
+                Counterpart::Sphere { index: b, .. } => {
                     0.5 * ((bodies[pair.a].velocity[i] + proposed[pair.a].velocity[i])
                         - (bodies[b].velocity[i] + proposed[b].velocity[i]))
                 }
@@ -562,6 +714,18 @@ pub(super) fn solve<const N: usize>(
                 core::array::from_fn(|i| {
                     0.5 * (bodies[pair.a].angular_velocity[i]
                         + proposed[pair.a].angular_velocity[i])
+                }),
+            );
+        }
+        if let Counterpart::Sphere {
+            index: b,
+            angular: Some(angular),
+        } = pair.counterpart
+        {
+            slip -= dot(
+                angular,
+                core::array::from_fn(|i| {
+                    0.5 * (bodies[b].angular_velocity[i] + proposed[b].angular_velocity[i])
                 }),
             );
         }
