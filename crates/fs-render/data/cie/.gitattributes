@@ -1,0 +1,3 @@
+# Keep the published checksum valid on every checkout.
+*.csv -text
+*.json -text

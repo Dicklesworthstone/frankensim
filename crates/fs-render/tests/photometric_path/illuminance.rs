@@ -7,7 +7,6 @@ use fs_render::photometry::path::{
     IlluminanceSampling, PathIlluminanceEstimate, PathIlluminanceJob,
 };
 use fs_render::photometry::{CalculationGrid, IlluminanceProbe};
-use fs_render::spectral::cie_y;
 
 fn probe(point: [f64; 3], normal: [f64; 3]) -> IlluminanceProbe {
     IlluminanceProbe::try_new(
@@ -37,6 +36,7 @@ fn measured(job: &mut PathIlluminanceJob<'_, '_>, cx: &Cx<'_>) -> PathIlluminanc
         (estimate.direct_lux + estimate.continuous_lux).to_bits()
     );
     assert!(estimate.total_error_bound_lux.is_none());
+    assert_eq!(estimate.numerical.kind, fs_evidence::NumericalKind::NoClaim);
     estimate
 }
 
@@ -315,7 +315,8 @@ fn g1_thermal_volume_emission_reaches_a_source_free_illuminance_probe() {
             let planck = 2.0 * h * c * c
                 / (wavelength.powi(5) * (h * c / (wavelength * k * 2000.0)).exp_m1())
                 * 1.0e-9;
-            blackbody_cd_m2 += 683.0 * cie_y(nm) * planck * dl;
+            blackbody_cd_m2 +=
+                683.0 * super::spectral_reference::cie_reference_xyz(nm)[1] * planck * dl;
         }
         // E = 2*pi*Bv * integral_0^1 mu [1-exp(-tau/mu)] dmu.
         // The finite side faces affect only a grazing angular region whose

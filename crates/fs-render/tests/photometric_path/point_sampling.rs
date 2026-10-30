@@ -6,7 +6,6 @@ use fs_render::photometry::IlluminanceProbe;
 use fs_render::photometry::path::{
     IlluminanceSampling, MAX_POINT_CONNECTIONS_PER_VERTEX, PathIlluminanceJob, PointFixtureSampling,
 };
-use fs_render::spectral::cie_y;
 use fs_render::tracer::RenderExecutionConfig;
 
 fn importance(connections_per_vertex: u32) -> PointFixtureSampling {
@@ -202,7 +201,7 @@ fn spectral_lambertian_reference(
                 } else {
                     1.0
                 };
-                let photopic = shape * cie_y(lambda);
+                let photopic = shape * super::spectral_reference::cie_reference_xyz(lambda)[1];
                 normalization += photopic;
                 reflected += photopic * rho * transmission;
             }

@@ -67,6 +67,9 @@ pub struct PathIlluminanceEstimate {
     /// not change it. This is neither a confidence interval nor an error bound;
     /// a zero value does not certify absent model or unsampled transport error.
     pub estimated_standard_error_lux: Option<f64>,
+    /// No rigorous arithmetic or spectral-quadrature enclosure is supplied.
+    /// Even an estimated sampling standard error of zero leaves this unknown.
+    pub numerical: fs_evidence::NumericalCertificate,
     /// Unknown total error, including finite depth, spectral discretization,
     /// geometry, source calibration and numerical arithmetic.
     pub total_error_bound_lux: Option<f64>,
@@ -423,6 +426,7 @@ impl<'scene, 'field> PathIlluminanceJob<'scene, 'field> {
             continuous_lux,
             samples,
             estimated_standard_error_lux,
+            numerical: fs_evidence::NumericalCertificate::no_claim(),
             total_error_bound_lux: None,
         })
     }

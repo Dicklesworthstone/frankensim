@@ -6,11 +6,12 @@
 //! distribution exactly, apart from floating-point rounding. Tables are plain
 //! Rust data, so file-format conversion remains the caller's responsibility.
 //!
-//! Spectra use the existing renderer's 80-bin, 380--780 nm quadrature and
-//! approximate CIE 1931 observer. The factor 683 has units lm/W. Calibration is
-//! exact for that declared numerical observer, not certified CIE metrology.
-//! Narrower spectral features, measured-source uncertainty, and errors of the
-//! analytic observer are not bounded here. Angular interpolation is a declared
+//! Spectra use 80-bin, 380--780 nm quadrature and the published CIE 1931
+//! 2-degree observer, linearly interpolated at bin midpoints (see [`super::observer`]).
+//! The factor 683 has units lm/W. Normalization is with respect to that declared
+//! quadrature, not certified CIE metrology. Narrower spectral features,
+//! omitted wavelengths and measured-source uncertainty are not bounded here.
+//! Angular interpolation is a declared
 //! source model, not a bound on an unknown manufacturer's intensity function.
 //! Photometric unit reference: <https://www.bipm.org/en/si-base-units/candela>.
 
@@ -22,7 +23,7 @@ use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
 use crate::instances::RigidTransform;
-use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN, QUAD_BINS, cie_y};
+use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN, QUAD_BINS};
 
 /// Spectral bins shared with the existing spectral renderer.
 pub const SPECTRAL_BINS: usize = QUAD_BINS;
@@ -45,7 +46,7 @@ pub fn wavelength_nm(bin: usize) -> f64 {
 /// Multiply by 683 and spectral radiance/irradiance to obtain cd/m²/lux.
 #[must_use]
 pub fn photopic_weight_nm(bin: usize) -> f64 {
-    cie_y(wavelength_nm(bin)) * BIN_WIDTH_NM
+    super::observer::xyz_at_bin(bin)[1] * BIN_WIDTH_NM
 }
 
 /// A finite-input or representability refusal for a calibrated source.
@@ -387,7 +388,7 @@ impl SourceSpectrum {
     }
 
     /// Normalize arbitrary nonnegative relative spectral samples to one lumen
-    /// using the shared renderer's explicit fixed photopic quadrature.
+    /// using the calibrated transport's explicit CIE photopic quadrature.
     pub fn try_from_bins(mut bins: [f64; SPECTRAL_BINS]) -> Result<Self, SourceError> {
         if bins.iter().any(|v| !v.is_finite() || *v < 0.0) {
             return Err(SourceError::InvalidSpectrum);

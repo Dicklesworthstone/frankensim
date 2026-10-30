@@ -445,7 +445,7 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
                 &wavelengths,
                 &state.rng,
             )?;
-            Some(packet_radiance_to_xyz(
+            Some(packet_radiance_to_photometric_xyz(
                 direct,
                 &wavelengths,
                 LUMINOUS_EFFICACY_LM_W,
@@ -486,6 +486,26 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
         cx.checkpoint()?;
         Ok(xyz)
     }
+}
+
+/// Integrate a calibrated spectral packet using the same tabulated observer
+/// as source lumen normalization. This also covers probe-primary area NEE and
+/// recursive dielectric contributions, which must not use the display fit.
+pub(super) fn packet_radiance_to_photometric_xyz(
+    radiance: [f64; PACKET],
+    wavelengths: &[f64],
+    efficacy: f64,
+) -> [f64; 3] {
+    let range = LAMBDA_MAX - LAMBDA_MIN;
+    let mut xyz = [0.0; 3];
+    for (lane, &wavelength) in wavelengths.iter().enumerate() {
+        let weight = radiance[lane] * range / PACKET as f64 * efficacy;
+        let observer = crate::photometry::observer::xyz_at_wavelength(wavelength);
+        for channel in 0..3 {
+            xyz[channel] += weight * observer[channel];
+        }
+    }
+    xyz
 }
 
 /// Shared calibrated packet for incoming paths and probe-primary area NEE.

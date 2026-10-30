@@ -10,8 +10,8 @@
 //! Calibrated finite mesh sources in [`area`] share those same paths and report
 //! their incident illuminance in the sampled continuous component.
 //!
-//! The existing CIE analytic observer and 80-bin spectral discretization are
-//! numerical models. Neither manufacturer calibration nor their model error
+//! The tabulated CIE 1931 observer and 80-bin spectral discretization are
+//! declared numerical models. Neither manufacturer calibration nor model error
 //! has a certified bound here. [`NumericalCertificate::no_claim`] deliberately
 //! distinguishes an analytic binary64 calculation from a rigorous enclosure.
 //! No Monte Carlo sampling error is invented for a deterministic direct sum.
@@ -30,6 +30,7 @@ use std::sync::Arc;
 pub mod area;
 pub mod image;
 pub mod medium;
+pub mod observer;
 pub mod path;
 pub mod source;
 pub mod transport;
@@ -39,7 +40,9 @@ use source::{PhotometricSource, SourceError};
 use transport::{PhotometricMedium, photopic_transmittance};
 
 /// Version of the calibrated transport model and output interpretation.
-pub const PHOTOMETRY_SEMANTICS_VERSION: u32 = 1;
+/// Version 2 uses the published CIE 1931 2-degree observer at the existing
+/// spectral midpoints, replacing the display renderer's analytic fit.
+pub const PHOTOMETRY_SEMANTICS_VERSION: u32 = 2;
 
 /// Explicit geometric and output budgets for an offline calculation.
 #[derive(Debug, Clone, Copy, PartialEq)]

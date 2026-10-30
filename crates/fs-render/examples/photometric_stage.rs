@@ -34,12 +34,16 @@ use fs_render::photometry::area::{
 };
 use fs_render::photometry::image::LuminanceJob;
 use fs_render::photometry::medium::{HomogeneousMedium, PhaseFunction, ScatterSettings};
+use fs_render::photometry::observer::OBSERVER_ID;
 use fs_render::photometry::path::{
-    IlluminanceSampling, MAX_POINT_CONNECTIONS_PER_VERTEX, PathIlluminanceJob, PathLuminanceJob,
-    PathMedium, PointFixtureSampling,
+    IlluminanceSampling, MAX_POINT_CONNECTIONS_PER_VERTEX, PHOTOMETRIC_PATH_SEMANTICS_VERSION,
+    PathIlluminanceJob, PathLuminanceJob, PathMedium, PointFixtureSampling,
 };
 use fs_render::photometry::source::{AngularDistribution, PhotometricSource, SourceSpectrum};
-use fs_render::photometry::{CalculationGrid, IlluminanceJob, PhotometricScene, TransportOptions};
+use fs_render::photometry::{
+    CalculationGrid, IlluminanceJob, PHOTOMETRY_SEMANTICS_VERSION, PhotometricScene,
+    TransportOptions,
+};
 use fs_render::spectral::LiftedSpectrum;
 use fs_render::tracer::{
     Camera, DirectStrategy, Material, Primitive, RenderExecutionConfig, Sampler, Scene, Settings,
@@ -175,6 +179,23 @@ fn run(
     camera_lens: Option<(CameraProjection, Aperture, f64)>,
     execution: Option<&RenderExecutionConfig>,
 ) -> Result<(), Box<dyn Error>> {
+    // Keep machine-readable CSV on stdout and its interpretation on stderr.
+    // The observer identity is source-data provenance, not fixture calibration.
+    eprintln!(
+        "photometry_semantics={PHOTOMETRY_SEMANTICS_VERSION} path_semantics={PHOTOMETRIC_PATH_SEMANTICS_VERSION} observer={OBSERVER_ID}"
+    );
+    eprintln!(
+        "units=m,rad,lm,cd,lx,cd/m^2; numerical=NoClaim; fixture_calibration_error=unknown; spectral_discretization_error=unknown; geometry_material_medium_error=unknown"
+    );
+    if paths || total_csv {
+        eprintln!(
+            "sampling=IID; seed=0x50524556495a; standard_error=sample_estimate_only; confidence_interval=none; max_vertices=6; omitted_transport_error=unknown; total_error=unknown"
+        );
+    } else {
+        eprintln!(
+            "sampling=deterministic; haze_error=refinement_discrepancy_only; omitted_transport_error=unknown; total_error=unknown"
+        );
+    }
     // Right-handed world, Z up, metres. Local source +Z is its optical axis.
     // This proper rotation turns +Z downward; changing these transforms and
     // constructing a new scene supplies another pan/tilt/fixture snapshot.
@@ -237,10 +258,13 @@ fn run(
         illuminance.advance(cx, 32)?; // Completed prefixes are usable immediately.
     }
     if csv {
-        println!("x_m,y_m,z_m,direct_lux");
+        println!("x_m,y_m,z_m,direct_lux,total_error_bound_lux");
         for (index, estimate) in illuminance.results().iter().enumerate() {
             let point = grid.probe(index)?.position_m();
-            println!("{},{},{},{:.9}", point.x, point.y, point.z, estimate.lux);
+            println!(
+                "{},{},{},{:.9},unknown",
+                point.x, point.y, point.z, estimate.lux
+            );
         }
         return Ok(());
     }

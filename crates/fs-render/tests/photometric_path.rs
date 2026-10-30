@@ -27,6 +27,9 @@ mod projector;
 #[path = "photometric_path/point_sampling.rs"]
 mod point_sampling;
 
+#[path = "photometric_path/spectral_reference.rs"]
+mod spectral_reference;
+
 use core::f64::consts::{FRAC_PI_2, PI};
 
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -164,6 +167,7 @@ fn render_pixel(
     );
     assert!(estimate.xyz.iter().all(|value| value.is_finite()));
     assert!(estimate.total_error_bound_cd_m2.is_none());
+    assert_eq!(estimate.numerical.kind, fs_evidence::NumericalKind::NoClaim);
     estimate
 }
 
@@ -438,6 +442,7 @@ fn g4_g5_progressive_paths_publish_whole_samples_and_resume_exactly() {
         let first = job.pixel_estimate(0).unwrap();
         assert_eq!(first.samples, 1);
         assert!(first.estimated_standard_error_cd_m2.is_none());
+        assert_eq!(first.numerical.kind, fs_evidence::NumericalKind::NoClaim);
         assert!(job.pixel_estimate(1).is_none());
         assert_eq!(job.advance(cx, 2).unwrap(), 2);
         assert_eq!(job.completed_path_samples(), 3);

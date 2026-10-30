@@ -1702,12 +1702,24 @@ quadrature discrepancy is an estimate, never an enclosure; discontinuous shadows
 or narrow beams can remain unresolved. Omitted multiple scattering has no finite
 bound. Gray coefficients are an explicit wavelength-independent approximation.
 
-Source spectra use the existing approximate CIE observer and 80 five-nanometre
-bins with the 683 lm/W photopic conversion. Observer error, input calibration,
-geometry uncertainty and omitted transport are not certified. Direct analytic
-values carry `NumericalKind::NoClaim`, not a fictitious zero-width certificate;
-unknown total error is `None`. There is no claim of CIE 171 conformance or
-measured-fixture agreement. G0/G1/G3/G4/G5 tests exercise flux, spectral filtering,
+Source spectra use the published CIE 1931 2-degree observer (CIE dataset
+`10.25039/CIE.DS.xvudnb9b`) linearly interpolated at 80 five-nanometre midpoints
+over 380--780 nm, with the 683 lm/W photopic conversion. Photometry semantics
+version 2 and path semantics version 9 use this observer consistently for
+source normalization, filtering, direct response, all path XYZ and probe area
+NEE. The legacy display renderer retains its analytic fit. The original CIE
+CSV, metadata, published checksum and separately licensed CC BY-SA 4.0 adapted
+table are retained under `data/cie`; `photometry::observer::OBSERVER_ID` names
+the data and interpolation convention. This removes the observer-fit mismatch
+at represented wavelengths, not spectral-bin/truncation or metrological error.
+
+Input calibration, geometry/material/medium uncertainty and omitted transport
+are not certified. Direct and path estimates carry `NumericalKind::NoClaim`,
+not a fictitious zero-width certificate; unknown total error is `None`.
+Sampling standard error and haze quadrature discrepancy are separate estimates,
+neither a confidence interval nor a total error bound. A zero estimate does not
+exclude unobserved paths, depth bias or unresolved beams. There is no claim of
+CIE 171 conformance or measured-fixture agreement. G0/G1/G3/G4/G5 tests exercise flux, spectral filtering,
 inverse square/cosine laws, real mesh visibility, homogeneous reference integrals,
 frame invariance, cancellation and deterministic progressive partitions.
 
@@ -1736,6 +1748,9 @@ primary truncation, singularity refusal and progressive cancellation/replay.
 The `photometric_stage` example accepts ordinary Rust fixture/scene data and
 prints an illuminance summary and luminance diagnostics, or a lux CSV with
 `--csv`; its fixture profiles and haze coefficients are declared examples.
+Both CSV modes name unknown total bounds. Stderr records the observer and
+semantics versions, units, numerical claim, sampling interpretation/seed/depth,
+and separate unknown calibration, discretization and physical-model errors.
 
 ### Borrowed spectral physical media
 
@@ -1769,9 +1784,9 @@ area/environment/material emission refuses at this SI
 boundary. Borrowed physical grids supply spectral attenuation, scattering and
 their already calibrated LTE radiance. Existing constructors retain the pinhole
 `Scene::camera`; `PathLuminanceJob::new_with_camera` instead borrows an explicit
-native `PhysicalCamera` and ignores the unused legacy camera. With fixtures
-present, hero wavelengths use the same 80-bin
-midpoints as source normalization, and XYZ accumulation uses 683 rather than
+native `PhysicalCamera` and ignores the unused legacy camera. Calibrated hero
+wavelengths use the same 80-bin midpoints and tabulated observer as source
+normalization, and XYZ accumulation uses 683 rather than
 the legacy display-white normalization. Y therefore reports cd/m². The old
 entry points pass no fixture context and retain their previous arithmetic.
 

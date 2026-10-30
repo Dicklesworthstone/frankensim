@@ -10,6 +10,7 @@
 use crate::camera::{LensSample, PhysicalCamera};
 use crate::charts::Ray;
 use crate::tracer::photometric_brdf;
+use fs_evidence::NumericalCertificate;
 use fs_exec::Cx;
 
 use super::medium::{
@@ -28,6 +29,9 @@ pub struct LuminanceEstimate {
     pub surface_cd_m2: f64,
     /// Haze contribution, including the declared quadrature estimate.
     pub single_scatter: ScatterEstimate,
+    /// No rigorous arithmetic or quadrature enclosure. The separate haze
+    /// refinement discrepancy must not be promoted into this certificate.
+    pub numerical: NumericalCertificate,
     /// Unknown total error, including calibration, spectral discretization,
     /// geometry, pixel sampling, interreflection and multiple scattering.
     /// The haze refinement estimate must never be substituted for this bound.
@@ -42,6 +46,8 @@ pub struct LuminanceEstimate {
 pub struct SurfaceLuminanceEstimate {
     /// Unscattered directly reflected surface luminance, cd/m².
     pub surface_cd_m2: f64,
+    /// No rigorous arithmetic or spectral-quadrature enclosure is supplied.
+    pub numerical: NumericalCertificate,
     /// Unknown error from source/observer calibration, geometry and spectra.
     pub total_error_bound_cd_m2: Option<f64>,
 }
@@ -82,6 +88,7 @@ impl PhotometricScene<'_> {
             luminance_cd_m2: surface.surface_cd_m2,
             surface_cd_m2: surface.surface_cd_m2,
             single_scatter,
+            numerical: NumericalCertificate::no_claim(),
             total_error_bound_cd_m2: None,
         })
     }
@@ -221,6 +228,7 @@ impl PhotometricScene<'_> {
             luminance_cd_m2,
             surface_cd_m2,
             single_scatter,
+            numerical: NumericalCertificate::no_claim(),
             total_error_bound_cd_m2: None,
         })
     }
@@ -243,6 +251,7 @@ impl PhotometricScene<'_> {
         let Some((primitive_index, hit)) = primary else {
             return Ok(SurfaceLuminanceEstimate {
                 surface_cd_m2: 0.0,
+                numerical: NumericalCertificate::no_claim(),
                 total_error_bound_cd_m2: None,
             });
         };
@@ -324,6 +333,7 @@ impl PhotometricScene<'_> {
         cx.checkpoint()?;
         Ok(SurfaceLuminanceEstimate {
             surface_cd_m2,
+            numerical: NumericalCertificate::no_claim(),
             total_error_bound_cd_m2: None,
         })
     }

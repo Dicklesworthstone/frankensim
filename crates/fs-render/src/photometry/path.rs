@@ -15,6 +15,7 @@
 use crate::camera::PhysicalCamera;
 use crate::tracer::photometric::FixtureTransport;
 use crate::tracer::{AdaptivePixelAccumulator, RenderExecutionConfig, Sampler, Scene, Settings};
+use fs_evidence::NumericalCertificate;
 use fs_exec::Cx;
 
 use super::area::PhotometricEmitters;
@@ -31,10 +32,13 @@ pub use illuminance::{IlluminanceSampling, PathIlluminanceEstimate, PathIllumina
 pub use crate::tracer::photometric::FixtureMedium as PathMedium;
 
 /// Version of fixture-path admission, units and progressive accumulation.
-/// Version 8 adds passive multi-beam projector optics and finite-source filters. The
-/// legacy camera, complete source sum and all existing path streams remain unchanged.
+/// Version 9 uses the published CIE 1931 2-degree observer for source
+/// normalization and all calibrated XYZ contributions. Sample addresses and
+/// the legacy display renderer remain unchanged; calibrated values can change.
+/// The physical camera, multi-beam projector and finite-source filters remain
+/// supported with their existing source and camera models.
 /// Active point fixtures with glass still require missing specular connections.
-pub const PHOTOMETRIC_PATH_SEMANTICS_VERSION: u32 = 8;
+pub const PHOTOMETRIC_PATH_SEMANTICS_VERSION: u32 = 9;
 
 /// Maximum sampled point-fixture connections at one surface or volume vertex.
 /// The bounded proposal storage is local to that path, with no per-vertex heap
@@ -91,6 +95,9 @@ pub struct PathLuminanceEstimate {
     /// samples. It is an estimate, not a confidence interval or error bound.
     /// It is unavailable for Owen–Sobol, whose samples are correlated.
     pub estimated_standard_error_cd_m2: Option<f64>,
+    /// No rigorous arithmetic or spectral-quadrature enclosure is supplied.
+    /// Sampling standard error is separate and cannot strengthen this claim.
+    pub numerical: NumericalCertificate,
     /// Unknown total error, including the finite-depth transport remainder.
     pub total_error_bound_cd_m2: Option<f64>,
 }
@@ -377,6 +384,7 @@ impl<'scene, 'field> PathLuminanceJob<'scene, 'field> {
             luminance_cd_m2: xyz[1],
             samples,
             estimated_standard_error_cd_m2,
+            numerical: NumericalCertificate::no_claim(),
             total_error_bound_cd_m2: None,
         })
     }

@@ -15277,23 +15277,24 @@ fn trace_path_with_regions(
             }
         }
     }
-    // Hero-wavelength estimator → XYZ. Ordinary callers use the normalized
-    // `spectral::xyz_of_spectrum` convention; calibrated fixture callers pass
-    // the photopic efficacy instead, so Y is luminance in cd/m².
-    let range = LAMBDA_MAX - LAMBDA_MIN;
-    let mut xyz = [0.0f64; 3];
-    for (k, &l) in lambdas.iter().enumerate() {
-        let w = radiance[k] * range / PACKET as f64 * kn;
-        xyz[0] += w * cie_x(l);
-        xyz[1] += w * cie_y(l);
-        xyz[2] += w * cie_z(l);
-    }
+    // Calibrated transport uses one published observer for both normalization
+    // and every XYZ contribution. Display callers retain their original fit
+    // and arithmetic. The photopic efficacy alone cannot correct a mismatched
+    // observer after wavelength-dependent filtering/reflection.
+    let to_xyz = |radiance| {
+        #[cfg(feature = "photometry")]
+        if fixtures.is_some() {
+            return photometric::packet_radiance_to_photometric_xyz(radiance, &lambdas, kn);
+        }
+        packet_radiance_to_xyz(radiance, &lambdas, kn)
+    };
+    let mut xyz = to_xyz(radiance);
     add_xyz(&mut xyz, resumed_xyz);
     let contribution_split = contribution_radiance.map(|contributions| {
         let mut split = PathContributionSplit {
-            direct_xyz: packet_radiance_to_xyz(contributions.direct, &lambdas, kn),
-            indirect_xyz: packet_radiance_to_xyz(contributions.indirect, &lambdas, kn),
-            emission_xyz: packet_radiance_to_xyz(contributions.emission, &lambdas, kn),
+            direct_xyz: to_xyz(contributions.direct),
+            indirect_xyz: to_xyz(contributions.indirect),
+            emission_xyz: to_xyz(contributions.emission),
         };
         split
             .add_assign(resumed_contribution_split.expect("captured recursive contribution split"));
