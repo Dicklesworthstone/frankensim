@@ -9,6 +9,9 @@ use fs_material::phase::transport::PhaseTransport;
 use super::*;
 use crate::conjugate::{FvBoundary, Voxel};
 
+/// Bounded source-density convection through exact solid, mushy and liquid states.
+pub mod buoyancy;
+
 /// Transport information consumed by the common material-flow owner.
 ///
 /// The original liquid API uses `FluidTransportState` directly. The phase API
@@ -82,6 +85,11 @@ fn phase_snapshot<F: PhaseTransport>(
     if source.phase_state() != phase {
         return Err(invalid(
             "phase transport source differs from the original caloric state",
+        ));
+    }
+    if source.transport_density_kg_m3().to_bits() != phase.bulk_density_kg_m3().to_bits() {
+        return Err(invalid(
+            "phase source density needs an explicit reference-mass projection or volume-change owner",
         ));
     }
     let conductivity_w_m_k = source.thermal_conductivity_w_m_k()?;

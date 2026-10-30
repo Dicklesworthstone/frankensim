@@ -228,6 +228,62 @@ fn exact_solid_keeps_thermal_and_electrical_sources_without_any_liquid_claim() {
 }
 
 #[test]
+fn explicit_density_departure_retains_raw_source_and_actual_dynamic_viscosity() {
+    let card = card(990.0, true, LiquidViscosityBasis::Kinematic);
+    let curve = curve(&card, 1000.0);
+    let law = MushyPhaseLaw::try_new_with_immobile_solid(&curve, 1000.0, 1000.0, 1e-8).unwrap();
+    let point = point();
+    let query = || PhaseTransportSourceQuery {
+        source: ThermalMaterialPoint {
+            material: &card,
+            context: &point,
+            temperature_axis: "T",
+            liquid_fraction_axis: Some("liquid"),
+        },
+        viscosity_basis: LiquidViscosityBasis::Kinematic,
+        extra_requirements: &[],
+        selection: MaterialPropertySelection::SingleClaimOnly,
+    };
+    for h in [-50.0, 50.0, 150.0] {
+        assert!(resolve_phase_transport_state(&law, h, query()).is_err());
+        let source =
+            resolve_phase_transport_state_with_density_departure(&law, h, query(), 0.02).unwrap();
+        assert_eq!(source.source_density_kg_m3(), 990.0);
+        assert_eq!(source.phase_state().bulk_density_kg_m3(), 1000.0);
+        assert_eq!(
+            source.phase_state(),
+            &curve.state_at_specific_enthalpy(h).unwrap()
+        );
+        assert_eq!(source.material().card_identity(), card.content_hash());
+        if h < 0.0 {
+            assert!(source.mobile_transport().is_none());
+            assert!(
+                source
+                    .material()
+                    .property(SPECIFIC_HEAT_CAPACITY_PROPERTY)
+                    .is_none()
+            );
+            assert!(
+                source
+                    .material()
+                    .property(KINEMATIC_VISCOSITY_PROPERTY)
+                    .is_none()
+            );
+        } else {
+            let actual = source.transport_state().unwrap();
+            assert_eq!(actual.density_kg_m3(), 990.0);
+            assert!((actual.dynamic_viscosity_pa_s() - 990.0 * 2e-5).abs() < 1e-16);
+        }
+        for limit in [0.005, -0.1, 1.0, f64::NAN] {
+            assert!(
+                resolve_phase_transport_state_with_density_departure(&law, h, query(), limit)
+                    .is_err()
+            );
+        }
+    }
+}
+
+#[test]
 fn latent_plateau_uses_one_h_derived_fraction_for_heat_current_and_momentum() {
     let card = card(1000.0, true, LiquidViscosityBasis::Dynamic);
     let curve = curve(&card, 1000.0);

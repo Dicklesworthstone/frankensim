@@ -13,6 +13,9 @@ mod environment;
 #[path = "occupancy/locking.rs"]
 mod locking;
 
+#[path = "occupancy/buoyancy.rs"]
+mod buoyancy;
+
 fn geometry<'a>(
     domain: &VoxelDomain,
     curve: &'a EquilibriumEnthalpyPhaseCurve,

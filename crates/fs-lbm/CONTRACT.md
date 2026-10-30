@@ -5236,3 +5236,35 @@ Three G1/G3/G4 regressions cover independently translating/counter-rotating
 heated cubes with actual continued native flow, isolated-component
 equivalence, equal/opposite numerical-energy errors that cannot cancel,
 unresolved component aliasing, cancellation and retry.
+
+## Source buoyancy through melting and complete native liquid release
+
+`MaterialFlowFeedback::try_new_phase_boussinesq` attaches original source density
+to the SAME native solid/mushy/liquid momentum and enthalpy timeline. The original
+phase chart, reference mass/volume, exact-solid occupancy and sourced Darcy
+resistance remain authoritative. Mobile material receives (rho_source-rho0)*g;
+exact solids retain the opposite stationary support-on-material reaction, zero
+velocity and zero support work. Liquid-only properties are never fabricated for
+exact solids. Source density/Cp departures retain the existing Boussinesq bounds;
+raw dynamic viscosity and conductivity remain physical source values.
+
+The original unsteady momentum owner retains signed buoyancy work, kinetic
+storage, molecular/Darcy heat and backward-Euler numerical loss separately. Only
+physical dissipation heats the material. Every endpoint source or bound refusal
+uses the existing atomic thermal/momentum publication and deterministic retry.
+
+Complete melting can release the original phase source into the native VOF
+Boussinesq owner while retaining the same caloric object, card, query conditions,
+selected claims, reference transport, gravity and approximation bounds. Existing
+mass, enthalpy, momentum, angular momentum, clock and projection-loss admission
+remain in force. Removing stationary support exposes native reference gravity
+plus its density perturbation; force-frame rebind preserves initial velocity.
+Combined shear-rheology/buoyancy release still refuses rather than dropping a law.
+
+This is a bounded Boussinesq stationary-skeleton model, not moving partial-solid
+geometry, shrinkage, elastic-energy release, separate phase velocities or a
+closed gravitational-potential inventory. Three native regressions cover cold
+startup to mushy circulation/remelting, endpoint refusal, and source-preserving
+complete release followed by further heated motion. They are authored but unrun
+here. Independent exact-rational ring force/work arithmetic passed; it does not
+replace native execution, refinement or experimental qualification.

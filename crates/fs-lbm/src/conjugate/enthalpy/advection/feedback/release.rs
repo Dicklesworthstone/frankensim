@@ -6,6 +6,7 @@
 //! stationary mould and its boundary schedule, not moving-wall physics. New
 //! permanent walls and gravity are declared by the receiving domain.
 
+use super::phase::buoyancy::BoussinesqPhaseMaterial;
 use super::*;
 use crate::conjugate::FvBoundary;
 use crate::material::free_surface::{
@@ -20,8 +21,35 @@ use fs_exec::Cx;
 use fs_material::liquid::surface::LiquidCapillarity;
 use fs_material::liquid_temperature::LiquidTemperatureLaw;
 use fs_material::phase::{
-    EquilibriumEnthalpyPhaseCurve, SolidLiquidPhase, transport::ResolvedPhaseTransportState,
+    EquilibriumEnthalpyPhaseCurve, SolidLiquidPhase,
+    transport::{PhaseTransport, ResolvedPhaseTransportState},
 };
+
+/// Original source and optional reference-density projection retained at release.
+/// Implementations expose existing source state; the handoff independently
+/// checks every selected property against the receiving liquid law.
+pub trait PhaseReleaseSource: PhaseTransport + Clone {
+    fn phase_source(&self) -> &ResolvedPhaseTransportState;
+    fn buoyancy_projection(&self) -> Option<(BoussinesqConfig<3>, FluidTransportState)>;
+}
+
+impl PhaseReleaseSource for ResolvedPhaseTransportState {
+    fn phase_source(&self) -> &ResolvedPhaseTransportState {
+        self
+    }
+    fn buoyancy_projection(&self) -> Option<(BoussinesqConfig<3>, FluidTransportState)> {
+        None
+    }
+}
+
+impl PhaseReleaseSource for BoussinesqPhaseMaterial {
+    fn phase_source(&self) -> &ResolvedPhaseTransportState {
+        self.material()
+    }
+    fn buoyancy_projection(&self) -> Option<(BoussinesqConfig<3>, FluidTransportState)> {
+        Some((self.config(), self.reference()))
+    }
+}
 
 /// Explicit same-time removal of stationary support and its old boundary drives.
 /// Source cells must already be liquid; no solid stress or surface energy is erased.
@@ -80,10 +108,9 @@ impl From<FreeSurfaceEnthalpyError> for LiquidReleaseError {
     }
 }
 
-impl<R> MaterialFlowFeedback<'_, ResolvedPhaseTransportState, R, (), PhaseFlowTransport>
+impl<F: PhaseReleaseSource, R> MaterialFlowFeedback<'_, F, R, (), PhaseFlowTransport>
 where
-    R: Clone
-        + FnMut(usize, &DepositedCell, f64) -> Result<ResolvedPhaseTransportState, MaterialError>,
+    R: Clone + FnMut(usize, &DepositedCell, f64) -> Result<F, MaterialError>,
 {
     /// Release an accepted, completely molten fixed-grid body into native VOF.
     ///
@@ -101,8 +128,12 @@ where
     /// constraints are not a moving-solid calculation. Old thermal contacts end
     /// here: use the receiver's original conduction API on current wet faces.
     /// Source rheology uses `release_fully_liquid_with_rheology`; the separate
-    /// phase-conductivity law is retained by the original liquid owner. Buoyancy
-    /// still requires a separate receiving force owner. Surface tension must be explicitly neglected:
+    /// phase-conductivity law is retained by the original liquid owner. A phase
+    /// Boussinesq source retains its original reference transport and bounds in
+    /// the receiver's existing force owner. Gravity must match that binding;
+    /// removal of support exposes the receiver's reference rho0*g free-surface
+    /// load as well as its source-density perturbation, without an initial impulse.
+    /// Surface tension must be explicitly neglected:
     /// no surface-creation energy, residual elastic stress or latent heat is invented.
     ///
     /// MAC-to-cell averaging preserves P and angular P on this shared grid.
@@ -143,8 +174,8 @@ where
     /// viscous stress on the receiving lattice; it does not transfer the MAC
     /// stress tensor. Generalized-Newtonian response has no stored elastic
     /// memory to erase, but the stress startup and time split require refinement.
-    /// Phase-conductivity multipliers, buoyancy and surface energy remain named
-    /// unsupported transitions, rather than disappearing from the material law.
+    /// Phase conductivity remains attached. Combined rheology/Boussinesq release
+    /// and surface-creation energy still require additional receiving ownership.
     #[allow(clippy::too_many_arguments)]
     pub fn release_fully_liquid_with_rheology<'s, 'm>(
         &self,
@@ -225,10 +256,33 @@ where
                 "release needs one complete cubic liquid, stationary walls, original law and explicitly neglected capillarity",
             ));
         }
-        if self.buoyancy.is_some() {
+        let buoyancy = self
+            .endpoint
+            .first()
+            .and_then(|sample| sample.material.buoyancy_projection());
+        if self.buoyancy.is_some() != buoyancy.is_some()
+            || self
+                .endpoint
+                .iter()
+                .any(|sample| sample.material.buoyancy_projection() != buoyancy)
+        {
             return Err(refused(
-                "release must retain buoyancy through an explicit receiving force owner",
+                "release needs one retained original buoyancy projection",
             ));
+        }
+        if let Some((config, reference)) = buoyancy {
+            if rheology.is_some()
+                || config.gravity_m_s2 != domain.gravity_m_s2
+                || law
+                    .reference_state()
+                    .transport_state()
+                    .map_err(FreeSurfaceEnthalpyError::from)?
+                    != reference
+            {
+                return Err(refused(
+                    "buoyant release needs original reference transport/gravity and no unowned combined rheology",
+                ));
+            }
         }
         let rate_axis = match (
             self.endpoint_shear_rate_per_s(),
@@ -289,7 +343,7 @@ where
                 law.at_temperature(fs_qty::Temperature::new(sample.temperature_k))
             }
             .map_err(FreeSurfaceEnthalpyError::from)?;
-            let original = sample.material.material();
+            let original = sample.material.phase_source().material();
             let current = liquid.material();
             if current.card_identity() != original.card_identity()
                 || current.query_point() != original.query_point()
@@ -354,6 +408,11 @@ where
             scaling.free_surface3_from_cells_with_rheology(
                 domain, &initial, law, caloric, transport, solve, initial_h, cx, self.gate,
             )?
+        } else if let Some((config, _)) = buoyancy {
+            scaling
+                .free_surface3_from_cells(domain, &initial, cx)
+                .map_err(FreeSurfaceEnthalpyError::from)?
+                .with_boussinesq_enthalpy(law, caloric, transport, config, initial_h, self.gate)?
         } else {
             scaling
                 .free_surface3_from_cells(domain, &initial, cx)

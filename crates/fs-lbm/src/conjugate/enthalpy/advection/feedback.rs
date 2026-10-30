@@ -125,6 +125,13 @@ pub struct MaterialFlowEpoch<F, T = FluidTransportState> {
     /// With unsteady heating, its signed native-face work is retained as a
     /// subset of total body work in unsteady_mechanical_step.
     pub buoyancy_force_n_m3: Option<Vec<[f64; 3]>>,
+    /// Stationary support force ON exact-solid material, opposing its source-
+    /// density perturbation load [N/m3]; zero on mobile/nonmaterial cells.
+    /// Entries follow native voxel order; the load on the anchor has the opposite sign.
+    /// Multiply by the original cell volume for force. This anchor has exactly
+    /// zero velocity/work; the reference hydrostatic load is already removed.
+    /// None without material buoyancy. It is never fed back as a fluid force.
+    pub buoyancy_support_reaction_n_m3: Option<Vec<[f64; 3]>>,
     /// Explicit externally powered force density at this epoch, separate from
     /// buoyancy. Its signed work is in viscous_power for quasisteady heating;
     /// in unsteady_mechanical_step it is total body work minus the buoyancy
@@ -235,7 +242,14 @@ where
             .into());
         }
         let endpoint = sample(
-            thermal, domain, input, gate, &mut resolve, None, fluid_snapshot::<F>, &mut || Ok(()),
+            thermal,
+            domain,
+            input,
+            gate,
+            &mut resolve,
+            None,
+            fluid_snapshot::<F>,
+            &mut || Ok(()),
         )?;
         let reference = endpoint
             .first()
@@ -338,7 +352,6 @@ where
         }));
         Ok(coupled)
     }
-
 }
 
 impl<'a, F: Clone, R, O: DepositionObserver, T: FlowTransportSnapshot>
@@ -411,7 +424,8 @@ where
                     if phase.temperature_k().to_bits() != sample.temperature_k.to_bits() {
                         return Err(invalid(
                             "solid constraint temperature differs from the original caloric owner",
-                        ).into());
+                        )
+                        .into());
                     }
                     continue;
                 }
@@ -429,11 +443,11 @@ where
                 )
                 .into());
             }
-            let transport = sample.transport.mobile_transport().ok_or(invalid(
-                "mobile mushy state has no material transport",
-            ))?;
-            let value =
-                transport.dynamic_viscosity_pa_s() * state.inverse_permeability_per_m2;
+            let transport = sample
+                .transport
+                .mobile_transport()
+                .ok_or(invalid("mobile mushy state has no material transport"))?;
+            let value = transport.dynamic_viscosity_pa_s() * state.inverse_permeability_per_m2;
             if !value.is_finite() || (state.inverse_permeability_per_m2 > 0.0 && value <= 0.0) {
                 return Err(invalid("mushy Darcy resistance is not representable").into());
             }
@@ -687,13 +701,7 @@ where
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), MaterialFlowError<O::Error>> {
         check_gate(self.gate, check)?;
-        admit_map(
-            thermal,
-            self.domain,
-            self.density_kg_m3,
-            self.input,
-            check,
-        )?;
+        admit_map(thermal, self.domain, self.density_kg_m3, self.input, check)?;
         self.check_fluid_conduction(thermal, check)?;
         Ok(())
     }
@@ -724,8 +732,13 @@ where
     }
 
     fn requires_step_interval(&self) -> bool {
-        self.unsteady.as_ref().is_some_and(MaterialMomentum::has_heating)
-            || self.advected.as_ref().is_some_and(|inner| inner.requires_step_interval())
+        self.unsteady
+            .as_ref()
+            .is_some_and(MaterialMomentum::has_heating)
+            || self
+                .advected
+                .as_ref()
+                .is_some_and(|inner| inner.requires_step_interval())
     }
 
     fn step_sources(
@@ -739,7 +752,9 @@ where
         check_gate(self.gate, check)?;
         // Always forward duration-dependent inner sources, including when
         // this observer has no physical momentum-heating attachment.
-        let mut sources = self.advected.as_mut()
+        let mut sources = self
+            .advected
+            .as_mut()
             .ok_or(invalid("missing material-flow source epoch"))?
             .step_sources(thermal, start_s, dt_s, end_s, check)
             .map_err(MaterialFlowError::Inner)?;
@@ -775,8 +790,11 @@ where
         }
         // No liquid reference is invented at an all-solid epoch. Once mobile,
         // use an actual retained mobile source for scalar parameter admission.
-        let reference = self.reference.or_else(|| samples.iter()
-            .find_map(|sample| sample.transport.mobile_transport()));
+        let reference = self.reference.or_else(|| {
+            samples
+                .iter()
+                .find_map(|sample| sample.transport.mobile_transport())
+        });
         let mut viscosities = Vec::new();
         let fluid = if let Some(reference) = reference {
             viscosities = vec![reference.dynamic_viscosity_pa_s(); self.domain.cell_count()];
@@ -796,13 +814,24 @@ where
         } else {
             None
         };
+        let mut buoyancy_support_reaction_n_m3 = None;
         let buoyancy_force_n_m3 = if let Some((gravity, density)) = self.buoyancy {
             let mut forces = vec![[0.0; 3]; self.domain.cell_count()];
+            let mut support = vec![[0.0; 3]; self.domain.cell_count()];
             for sample in &samples {
                 check_gate(self.gate, check)?;
                 let contrast = density(&sample.material) - self.density_kg_m3;
-                forces[sample.voxel] = gravity.map(|g| contrast * g);
+                let force = gravity.map(|g| contrast * g);
+                if force.iter().any(|value| !value.is_finite()) {
+                    return Err(invalid("material buoyancy force is not representable").into());
+                }
+                if sample.transport.mobile_transport().is_some() {
+                    forces[sample.voxel] = force;
+                } else {
+                    support[sample.voxel] = force.map(|value| -value);
+                }
             }
+            buoyancy_support_reaction_n_m3 = Some(support);
             Some(forces)
         } else {
             None
@@ -818,11 +847,20 @@ where
         } else if !native_solve {
             // All constraints have zero velocity and every admitted drive does
             // zero work. This is an exact empty momentum system, not a solve.
-            (immobile_flow(domain), self.viscous_heating.as_ref().map(|_| {
-                immobile_power(domain, mushy_drag_pa_s_m2.is_some(), self.external_force_n_m3.is_some())
-            }))
+            (
+                immobile_flow(domain),
+                self.viscous_heating.as_ref().map(|_| {
+                    immobile_power(
+                        domain,
+                        mushy_drag_pa_s_m2.is_some(),
+                        self.external_force_n_m3.is_some(),
+                    )
+                }),
+            )
         } else {
-            let fluid = fluid.as_ref().ok_or(invalid("mobile cells lack a transport source"))?;
+            let fluid = fluid
+                .as_ref()
+                .ok_or(invalid("mobile cells lack a transport source"))?;
             if let Some(owner) = &self.viscous_heating {
                 let (flow, power) = if let Some(force) = &self.external_force_n_m3 {
                     creeping_flow_with_body_force_heat(
@@ -895,13 +933,8 @@ where
             }
         };
         check_gate(self.gate, check)?;
-        let (flows, boundaries) = mass_graph(
-            domain,
-            &flow.field,
-            self.density_kg_m3,
-            self.input,
-            check,
-        )?;
+        let (flows, boundaries) =
+            mass_graph(domain, &flow.field, self.density_kg_m3, self.input, check)?;
         let old = self
             .advected
             .take()
@@ -934,6 +967,7 @@ where
             shear_rate_per_s: self.rheology.as_ref().map(|source| source.rates.clone()),
             flow,
             buoyancy_force_n_m3,
+            buoyancy_support_reaction_n_m3,
             external_force_n_m3: self.external_force_n_m3.clone(),
             mushy_drag_pa_s_m2,
             viscous_power,
@@ -984,11 +1018,9 @@ where
             }
             let mut k = [0.0; 2];
             for (i, id) in [cells.0, cells.1].into_iter().enumerate() {
-                let sample = samples
-                    .get(&id)
-                    .ok_or(invalid(
-                        "fluid conduction lacks an applied transport sample",
-                    ))?;
+                let sample = samples.get(&id).ok_or(invalid(
+                    "fluid conduction lacks an applied transport sample",
+                ))?;
                 k[i] = self.effective_conductivity(sample)?;
             }
             let distances = face
@@ -1196,7 +1228,10 @@ where
         let mobility = phase_law
             .map(|law| law.classify_at_specific_enthalpy(cell.specific_h_j_kg))
             .transpose()
-            .map_err(|source| MaterialFlowError::Material { cell: cell.id, source })?;
+            .map_err(|source| MaterialFlowError::Material {
+                cell: cell.id,
+                source,
+            })?;
         let material =
             resolve(voxel, cell, temperature_k).map_err(|source| MaterialFlowError::Material {
                 cell: cell.id,
@@ -1220,12 +1255,16 @@ where
     Ok(samples)
 }
 
-fn admit_density<F, T: FlowTransportSnapshot>(samples: &[FlowMaterialSample<F, T>], rho: f64) -> Result<(), DepositionError> {
-    if samples
-        .iter()
-        .any(|value| value.transport.mobile_transport()
-            .is_some_and(|transport| transport.density_kg_m3().to_bits() != rho.to_bits()))
-    {
+fn admit_density<F, T: FlowTransportSnapshot>(
+    samples: &[FlowMaterialSample<F, T>],
+    rho: f64,
+) -> Result<(), DepositionError> {
+    if samples.iter().any(|value| {
+        value
+            .transport
+            .mobile_transport()
+            .is_some_and(|transport| transport.density_kg_m3().to_bits() != rho.to_bits())
+    }) {
         Err(invalid(
             "live flow density changes require compatible mass/volume and momentum evolution",
         ))

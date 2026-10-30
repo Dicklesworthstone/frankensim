@@ -37,6 +37,10 @@ use super::mushy::{MushyPhaseLaw, PhaseMobility};
 /// never call FluidTransport::transport_state on an immobile solid.
 pub trait PhaseTransport: FluidTransport {
     fn phase_state(&self) -> &EquilibriumPhaseState;
+    /// Density proposed for transported/inertial mass, available in exact solid
+    /// without asking for liquid properties. An explicit bounded projection
+    /// reports its retained reference here and keeps raw source rho separately.
+    fn transport_density_kg_m3(&self) -> f64;
     fn thermal_conductivity_w_m_k(&self) -> Result<f64, MaterialError>;
 }
 
@@ -85,6 +89,15 @@ impl ResolvedPhaseTransportState {
     pub const fn mobile_transport(&self) -> Option<&FluidTransportState> {
         self.mobile_transport.as_ref()
     }
+    /// Unprojected source density, including when no liquid transport exists.
+    /// A fixed-mass approximation must retain the chart density separately.
+    #[must_use]
+    pub fn source_density_kg_m3(&self) -> f64 {
+        self.material
+            .property(DENSITY_PROPERTY)
+            .expect("phase transport always resolves density")
+            .value_si()
+    }
 }
 impl FluidTransport for ResolvedPhaseTransportState {
     fn transport_state(&self) -> Result<FluidTransportState, MaterialError> {
@@ -96,6 +109,9 @@ impl FluidTransport for ResolvedPhaseTransportState {
 impl PhaseTransport for ResolvedPhaseTransportState {
     fn phase_state(&self) -> &EquilibriumPhaseState {
         ResolvedPhaseTransportState::phase_state(self)
+    }
+    fn transport_density_kg_m3(&self) -> f64 {
+        self.source_density_kg_m3()
     }
     fn thermal_conductivity_w_m_k(&self) -> Result<f64, MaterialError> {
         Ok(self.thermal_conductivity_w_m_k)
@@ -120,7 +136,36 @@ pub fn resolve_phase_transport_state(
     specific_enthalpy_j_kg: f64,
     query: PhaseTransportSourceQuery<'_>,
 ) -> Result<ResolvedPhaseTransportState, MaterialError> {
-    resolve_phase_transport_state_inner(law, specific_enthalpy_j_kg, query, None)
+    resolve_phase_transport_state_inner(law, specific_enthalpy_j_kg, query, None, None)
+}
+
+/// Resolve bounded source-density departures for an explicit reference-mass model.
+///
+/// The original chart still owns phase, latent energy and its constant reference
+/// density. The returned source and mobile tuple retain ACTUAL rho(T,phi), mu
+/// and k; this function neither changes mass nor projects momentum/storage.
+/// A consumer must explicitly supply that projection (for example Boussinesq
+/// buoyancy). The ordinary fixed-density phase-flow entry rejects this tuple
+/// when its density differs from the registered caloric mass density, including
+/// exactly solid states; a raw sample cannot silently choose a projection.
+///
+/// The bound must lie in [0,1) and be justified as small for the intended model.
+/// Exactly solid material is bounded too, without requesting liquid Cp or mu.
+/// Unequal constituent/chart densities remain unsupported: this is not a
+/// shrinkage law or a phase-volume source.
+pub fn resolve_phase_transport_state_with_density_departure(
+    law: &MushyPhaseLaw<'_>,
+    specific_enthalpy_j_kg: f64,
+    query: PhaseTransportSourceQuery<'_>,
+    maximum_relative_density_departure: f64,
+) -> Result<ResolvedPhaseTransportState, MaterialError> {
+    resolve_phase_transport_state_inner(
+        law,
+        specific_enthalpy_j_kg,
+        query,
+        None,
+        Some(maximum_relative_density_departure),
+    )
 }
 
 /// Resolve the SAME phase/material bundle at an owned physical shear rate.
@@ -149,6 +194,7 @@ pub fn resolve_phase_transport_state_with_shear_rate(
         specific_enthalpy_j_kg,
         query,
         Some((shear_rate_axis, shear_rate_per_s)),
+        None,
     )
 }
 
@@ -157,10 +203,18 @@ fn resolve_phase_transport_state_inner(
     specific_enthalpy_j_kg: f64,
     query: PhaseTransportSourceQuery<'_>,
     shear: Option<(&str, f64)>,
+    maximum_relative_density_departure: Option<f64>,
 ) -> Result<ResolvedPhaseTransportState, MaterialError> {
     let density = law.fixed_density_kg_m3().ok_or_else(|| {
         invalid("phase transport requires exactly equal constant phase and chart densities")
     })?;
+    if maximum_relative_density_departure
+        .is_some_and(|limit| !limit.is_finite() || !(0.0..1.0).contains(&limit))
+    {
+        return Err(invalid(
+            "phase source density-departure bound must lie in [0,1)",
+        ));
+    }
     // This must precede even the liquid-property requirement list.
     let mobility = law.classify_at_specific_enthalpy(specific_enthalpy_j_kg)?;
     let mut point = query.source.at(mobility.phase()).map_err(source_error)?;
@@ -276,9 +330,13 @@ fn resolve_phase_transport_state_inner(
             .expect("required phase transport property was resolved")
             .value_si()
     };
-    if value(DENSITY_PROPERTY).to_bits() != density.to_bits()
-        || mobility.phase().bulk_density_kg_m3().to_bits() != density.to_bits()
-    {
+    let source_density = value(DENSITY_PROPERTY);
+    let departure = ((source_density - density) / density).abs();
+    let density_admitted = match maximum_relative_density_departure {
+        Some(limit) => departure.is_finite() && departure <= limit,
+        None => source_density.to_bits() == density.to_bits(),
+    };
+    if !density_admitted || mobility.phase().bulk_density_kg_m3().to_bits() != density.to_bits() {
         return Err(invalid(
             "phase transport source density differs from the original fixed thermal mass density",
         ));
@@ -287,10 +345,10 @@ fn resolve_phase_transport_state_inner(
     let mobile_transport = if mobile {
         let viscosity = match query.viscosity_basis {
             LiquidViscosityBasis::Dynamic => value(viscosity_name),
-            LiquidViscosityBasis::Kinematic => density * value(viscosity_name),
+            LiquidViscosityBasis::Kinematic => source_density * value(viscosity_name),
         };
         Some(FluidTransportState::try_new(
-            density,
+            source_density,
             value(SPECIFIC_HEAT_CAPACITY_PROPERTY),
             thermal_conductivity_w_m_k,
             viscosity,

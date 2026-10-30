@@ -5545,3 +5545,25 @@ the native checked transfer inverse. Varying singular factors refuse even
 at zero actual memory; unchanged singular factors retain their original
 free energy with zero thermal entropy. Non-affine stored tensors, thermal
 expansion and finite-strain thermodynamics are outside this admission.
+
+## Source density retained through bounded phase transport
+
+`phase::transport::resolve_phase_transport_state_with_density_departure` keeps
+the original source density even at exactly solid states, while the original
+enthalpy/phase chart retains its constant reference density and latent energy.
+The caller supplies an explicit finite relative departure bound in [0,1).
+Exactly solid classification precedes liquid-only Cp/viscosity queries. Mobile
+kinematic viscosity converts to dynamic viscosity using RAW source density;
+projection never changes that physical viscosity or conductivity.
+
+`PhaseTransport::transport_density_kg_m3` makes the proposed inertial/transport
+density explicit even without a liquid transport tuple. The ordinary phase-flow
+owner refuses a raw density departure; a bounded Boussinesq owner must retain
+reference mass separately. Unequal phase densities, shrinkage and phase-volume
+sources remain unsupported by this fixed-density path. Existing exact source,
+context, phase identity and chart-domain checks remain active.
+
+The new material regression covers raw density, exact-solid property admission,
+kinematic-to-dynamic conversion and strict departure bounds. It is authored but
+unrun in this implementation environment; no source or experimental validation
+is inferred from the synthetic fixture.
