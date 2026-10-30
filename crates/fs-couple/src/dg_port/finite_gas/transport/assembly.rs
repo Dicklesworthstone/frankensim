@@ -4,6 +4,9 @@
 //! caloric feedback, final source gates, compensated accounts and joint
 //! publication remain in the same kernel as every homogeneous entry point.
 
+/// Native finite-rate chemistry coupled to transport and acoustic work.
+pub mod reactive;
+
 pub use super::{FiniteGasDgTransportError, FiniteGasDgTransportInput, FiniteGasDgTransportSolve};
 use crate::bernoulli_aperture::dg::LoadedApertureDg;
 use crate::bernoulli_aperture::dg::finite_gas::FiniteGasApertureDgStep;
@@ -15,7 +18,6 @@ use crate::bernoulli_aperture::wall::material::{
 };
 use crate::dg_port::DgPortLoad;
 use crate::dg_port::finite_gas::{FiniteGasDgBackground, FiniteGasDgError, FiniteGasDgPortStep};
-use fs_material::thermochemical_gas::energy::GasEnergyError;
 use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 use fs_material::thermochemical_gas::energy::parcel::composition::GasCompositionStep;
 use fs_material::thermochemical_gas::energy::parcel::transfer::species::network::transport::GasTransportPaths;
@@ -75,13 +77,13 @@ pub enum FiniteGasAcousticInput {
 
 /// Native per-owner reports without erasing their distinct physical accounts.
 #[derive(Debug)]
-pub enum FiniteGasAcousticStep {
+pub enum FiniteGasAcousticStep<S = GasCompositionStep> {
     /// Source-wall DG and finite gas endpoint.
-    Wall(FiniteGasDgStep<GasCompositionStep>),
+    Wall(FiniteGasDgStep<S>),
     /// Complete passive load and finite gas endpoint.
-    Port(FiniteGasDgPortStep<GasCompositionStep>),
+    Port(FiniteGasDgPortStep<S>),
     /// Original moving mechanics, complete load and finite gas endpoint.
-    Aperture(FiniteGasApertureDgStep<GasCompositionStep>),
+    Aperture(FiniteGasApertureDgStep<S>),
 }
 
 /// One original transport snapshot and one enclosing mass/energy account.
@@ -90,13 +92,13 @@ pub type FiniteGasAcousticTransportStep = FiniteGasDgTransportStep<FiniteGasAcou
 pub type FiniteGasAcousticTransportCandidate =
     FiniteGasDgTransportCandidate<FiniteGasAcousticNode, FiniteGasAcousticStep>;
 
-fn mismatch() -> FiniteGasDgError<GasEnergyError> {
+fn mismatch<E>() -> FiniteGasDgError<E> {
     FiniteGasDgError::Invalid("gas transport input kind must match its original acoustic owner")
 }
 
 impl FiniteGasTransportNode for FiniteGasAcousticNode {
     type Input = FiniteGasAcousticInput;
-    type Step = FiniteGasAcousticStep;
+    type Step<S> = FiniteGasAcousticStep<S>;
 
     fn transport_input(
         input: &Self::Input,
@@ -137,12 +139,12 @@ impl FiniteGasTransportNode for FiniteGasAcousticNode {
         }
     }
 
-    fn admit<C: FnMut() -> bool>(
+    fn admit<E, C: FnMut() -> bool>(
         &self,
         gas: &ClosedGasParcel,
         input: &Self::Input,
         cancelled: &mut C,
-    ) -> Result<(), FiniteGasDgError<GasEnergyError>> {
+    ) -> Result<(), FiniteGasDgError<E>> {
         // The shared kernel runs this exact-kind gate for EVERY node before
         // evaluating any material path. No drive can be silently ignored.
         match (self, input) {
@@ -159,7 +161,7 @@ impl FiniteGasTransportNode for FiniteGasAcousticNode {
         }
     }
 
-    fn advance<C: FnMut() -> bool>(
+    fn advance<S, E, C: FnMut() -> bool>(
         &mut self,
         gas: &mut ClosedGasParcel,
         input: &Self::Input,
@@ -168,9 +170,9 @@ impl FiniteGasTransportNode for FiniteGasAcousticNode {
             f64,
             f64,
             &mut C,
-        ) -> Result<FiniteGasDgBackground<GasCompositionStep>, GasEnergyError>,
+        ) -> Result<FiniteGasDgBackground<S>, E>,
         cancelled: &mut C,
-    ) -> Result<Self::Step, FiniteGasDgError<GasEnergyError>> {
+    ) -> Result<Self::Step<S>, FiniteGasDgError<E>> {
         match (self, input) {
             (Self::Wall(node), FiniteGasAcousticInput::Passive(input)) => node
                 .advance(gas, input, evolve, cancelled)
@@ -185,11 +187,19 @@ impl FiniteGasTransportNode for FiniteGasAcousticNode {
         }
     }
 
-    fn accounts(step: &Self::Step) -> [f64; 3] {
+    fn accounts<S>(step: &Self::Step<S>) -> [f64; 3] {
         match step {
             FiniteGasAcousticStep::Wall(step) => FiniteGasDgNode::accounts(step),
             FiniteGasAcousticStep::Port(step) => DgPortLoad::accounts(step),
             FiniteGasAcousticStep::Aperture(step) => LoadedApertureDg::accounts(step),
+        }
+    }
+
+    fn source<S>(step: &Self::Step<S>) -> &S {
+        match step {
+            FiniteGasAcousticStep::Wall(step) => &step.background,
+            FiniteGasAcousticStep::Port(step) => &step.background,
+            FiniteGasAcousticStep::Aperture(step) => &step.gas.background,
         }
     }
 }

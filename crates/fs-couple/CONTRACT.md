@@ -9355,6 +9355,45 @@ immutable preview, final cancellation, exact retry and continued evolution.
 These are authored synthetic implementation regressions; native execution and
 measured physical validation remain separate gates.
 
+## Reacting finite gas in mixed acoustic assemblies
+
+`dg_port::finite_gas::transport::assembly::reactive` connects the original
+implicit `GasReaction` owner to the same mixed wall-DG, complete-load and
+moving-aperture transport transaction. Sparse parcel-keyed bindings select
+reacting acoustic chambers or finite reservoirs; unlisted parcels retain the
+original caloric calls. The reaction catalog must preserve the exact sources
+of incoming species and initially absent products. Gas inversion controls
+must agree with the original parcel input.
+
+Material transport runs once on the original network snapshot. Every native
+acoustic work trial restarts chemistry from that same transported inventory.
+The original boundary mechanism solves the endpoint at fixed volume with
+`U_end = U_transported + Q_external - W_gas_to_wave`. Species formation
+energy stays in gas storage and is never added again as reaction heat. Heat
+and mechanical work retain their distinct entropy accounts.
+
+Numerical work probes defer the native chemical entropy inequality; the
+actual accepted background report must pass it after acoustic work closes.
+Reacting reservoirs use the original boundary endpoint with zero mechanical
+work. Final transport driving-force gates and the enclosing native energy
+and mass gates still apply. An additional compensated species account checks
+actual network amount changes against the retained stoichiometric reaction
+changes. Candidates retain every endpoint privately, and final publication
+changes all parcels and original physical owners together.
+
+This is first-order snapshot transport followed by coupled endpoint chemistry,
+heat and acoustic parameter work in well-mixed fixed volumes. Arriving species
+may react during the interval; products enter outgoing transport on the next
+interval. It supplies neither resolved flame dynamics nor chemical acoustic
+relaxation, and does not invent pressure excitation or an acoustic junction
+between chambers. Chemical entropy admission is stage-local, not a claim of
+complete assembly entropy production.
+
+Source parsing and a bounded API review passed for this implementation. Native
+compilation and execution remain unverified because the available Cargo build
+cannot load required sibling dependency sources. Experimental validation remains
+a separate gate; no measured combustion or sound-accuracy claim is made.
+
 ## Continuing spatial dielectric charge through thermal phase change
 
 `ConductionThermalNetwork::step_dielectric_candidate` connects the native

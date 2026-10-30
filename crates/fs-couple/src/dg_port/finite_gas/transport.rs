@@ -16,7 +16,6 @@ pub use crate::bernoulli_aperture::wall::material::{
     FiniteGasDgTransportError, FiniteGasDgTransportInput, FiniteGasDgTransportSolve,
 };
 use crate::dg_port::DgPortLoad;
-use fs_material::thermochemical_gas::energy::GasEnergyError;
 use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 use fs_material::thermochemical_gas::energy::parcel::composition::GasCompositionStep;
 use fs_material::thermochemical_gas::energy::parcel::transfer::{
@@ -34,7 +33,7 @@ pub type FiniteGasDgPortTransportCandidate =
     FiniteGasDgTransportCandidate<DgPortLoad, FiniteGasDgPortStep<GasCompositionStep>>;
 
 impl FiniteGasTransportNode for DgPortLoad {
-    type Step = FiniteGasDgPortStep<GasCompositionStep>;
+    type Step<S> = FiniteGasDgPortStep<S>;
     type Input = FiniteGasDgTransportInput;
 
     fn transport_input(
@@ -54,12 +53,12 @@ impl FiniteGasTransportNode for DgPortLoad {
         DgPortLoad::stored_energy_j(self)
     }
 
-    fn admit<C: FnMut() -> bool>(
+    fn admit<E, C: FnMut() -> bool>(
         &self,
         gas: &ClosedGasParcel,
         input: &FiniteGasDgTransportInput,
         cancelled: &mut C,
-    ) -> Result<(), FiniteGasDgError<GasEnergyError>> {
+    ) -> Result<(), FiniteGasDgError<E>> {
         if input.ports.len() != 1
             || input.ports[0].id != self.inlet()
             || !input.ports[0].effort.is_finite()
@@ -76,7 +75,7 @@ impl FiniteGasTransportNode for DgPortLoad {
         )
     }
 
-    fn advance<C: FnMut() -> bool>(
+    fn advance<S, E, C: FnMut() -> bool>(
         &mut self,
         gas: &mut ClosedGasParcel,
         input: &FiniteGasDgTransportInput,
@@ -85,9 +84,9 @@ impl FiniteGasTransportNode for DgPortLoad {
             f64,
             f64,
             &mut C,
-        ) -> Result<FiniteGasDgBackground<GasCompositionStep>, GasEnergyError>,
+        ) -> Result<FiniteGasDgBackground<S>, E>,
         cancelled: &mut C,
-    ) -> Result<Self::Step, FiniteGasDgError<GasEnergyError>> {
+    ) -> Result<Self::Step<S>, FiniteGasDgError<E>> {
         self.step_with_finite_gas_controlled(
             gas,
             input.ports[0].effort,
@@ -97,13 +96,15 @@ impl FiniteGasTransportNode for DgPortLoad {
         )
     }
 
-    fn accounts(step: &Self::Step) -> [f64; 3] {
+    fn accounts<S>(step: &Self::Step<S>) -> [f64; 3] {
         [
             step.acoustic.ledger.port_work_step_j,
             step.acoustic_dissipation_j,
             step.refresh.parameter_work_j,
         ]
     }
+
+    fn source<S>(step: &Self::Step<S>) -> &S { &step.background }
 }
 
 /// Advance native nozzle/diffusion transport and complete acoustic loads together.

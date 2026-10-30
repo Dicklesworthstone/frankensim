@@ -71,24 +71,24 @@ pub struct FiniteGasDgTransportSolve {
 }
 
 #[derive(Debug)]
-pub enum FiniteGasDgTransportError {
+pub enum FiniteGasDgTransportError<E = GasEnergyError> {
     Invalid(&'static str),
     Transport(GasTransportError),
-    Acoustic { parcel: u64, error: FiniteGasDgError<GasEnergyError> },
-    Gas { parcel: u64, error: GasEnergyError },
+    Acoustic { parcel: u64, error: FiniteGasDgError<E> },
+    Gas { parcel: u64, error: E },
     Energy { residual_j: f64, tolerance_j: f64 },
     Cancelled,
 }
-impl core::fmt::Display for FiniteGasDgTransportError {
+impl<E: core::fmt::Debug> core::fmt::Display for FiniteGasDgTransportError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "finite-gas acoustic transport: {self:?}")
     }
 }
-impl std::error::Error for FiniteGasDgTransportError {}
+impl<E: std::error::Error + 'static> std::error::Error for FiniteGasDgTransportError<E> {}
 
 /// Actual original-owner reports and independently measured enclosure storage.
 #[derive(Debug)]
-pub struct FiniteGasDgTransportStep<A = FiniteGasDgStep<GasCompositionStep>> {
+pub struct FiniteGasDgTransportStep<A = FiniteGasDgStep<GasCompositionStep>, R = GasHeatStep> {
     pub duration_s: f64,
     /// The single original-snapshot species/partial-enthalpy transport.
     /// Its entropy account belongs to that stage, not subsequent heat/wave work.
@@ -96,8 +96,8 @@ pub struct FiniteGasDgTransportStep<A = FiniteGasDgStep<GasCompositionStep>> {
     /// Same-clock bound-node endpoints and local gas/work closure, by parcel ID.
     /// Moving-source adapters include their original mechanical reports here.
     pub acoustics: BTreeMap<u64, A>,
-    /// Original heating reports for parcels without an acoustic owner.
-    pub reservoirs: BTreeMap<u64, GasHeatStep>,
+    /// Original endpoint reports for parcels without an acoustic owner.
+    pub reservoirs: BTreeMap<u64, R>,
     pub gas_storage_change_j: f64,
     /// Complete bound-node storage, including moving-source mechanics when present.
     pub acoustic_storage_change_j: f64,
@@ -123,21 +123,22 @@ pub struct FiniteGasDgTransportStep<A = FiniteGasDgStep<GasCompositionStep>> {
 pub struct FiniteGasDgTransportCandidate<
     N = FiniteGasDgNode,
     A = FiniteGasDgStep<GasCompositionStep>,
+    R = GasHeatStep,
 > {
     parcels: BTreeMap<u64, ClosedGasParcel>,
     nodes: BTreeMap<u64, N>,
-    step: FiniteGasDgTransportStep<A>,
+    step: FiniteGasDgTransportStep<A, R>,
 }
-impl<N, A> FiniteGasDgTransportCandidate<N, A> {
+impl<N, A, R> FiniteGasDgTransportCandidate<N, A, R> {
     /// Proposed original gas parcels, keyed by their existing identities.
     pub fn parcels(&self) -> &BTreeMap<u64, ClosedGasParcel> { &self.parcels }
     /// Proposed original source bindings, states and propagators.
     pub fn nodes(&self) -> &BTreeMap<u64, N> { &self.nodes }
     /// Original-owner reports and complete energy/mass account.
-    pub fn step(&self) -> &FiniteGasDgTransportStep<A> { &self.step }
+    pub fn step(&self) -> &FiniteGasDgTransportStep<A, R> { &self.step }
     /// Consume the complete preview without advancing any external owner.
     pub fn into_parts(self) -> (
-        BTreeMap<u64, ClosedGasParcel>, BTreeMap<u64, N>, FiniteGasDgTransportStep<A>,
+        BTreeMap<u64, ClosedGasParcel>, BTreeMap<u64, N>, FiniteGasDgTransportStep<A, R>,
     ) { (self.parcels, self.nodes, self.step) }
 }
 
@@ -146,7 +147,7 @@ impl<N, A> FiniteGasDgTransportCandidate<N, A> {
 /// Native transport, caloric feedback input, endpoint gates, global accounts
 /// and atomic publication stay in the single transaction below.
 pub(crate) trait FiniteGasTransportNode: Clone {
-    type Step;
+    type Step<S>;
     type Input;
 
     /// Admit the node-specific source controls before any transport runs, and
@@ -160,29 +161,32 @@ pub(crate) trait FiniteGasTransportNode: Clone {
     fn step_count(&self) -> u64;
     fn stored_energy_j(&self) -> f64;
 
-    fn admit<C: FnMut() -> bool>(
+    fn admit<E, C: FnMut() -> bool>(
         &self,
         gas: &ClosedGasParcel,
         input: &Self::Input,
         cancelled: &mut C,
-    ) -> Result<(), FiniteGasDgError<GasEnergyError>>;
+    ) -> Result<(), FiniteGasDgError<E>>;
 
-    fn advance<C: FnMut() -> bool>(
+    fn advance<S, E, C: FnMut() -> bool>(
         &mut self,
         gas: &mut ClosedGasParcel,
         input: &Self::Input,
         evolve: impl FnMut(&ClosedGasParcel, f64, f64, &mut C)
-            -> Result<FiniteGasDgBackground<GasCompositionStep>, GasEnergyError>,
+            -> Result<FiniteGasDgBackground<S>, E>,
         cancelled: &mut C,
-    ) -> Result<Self::Step, FiniteGasDgError<GasEnergyError>>;
+    ) -> Result<Self::Step<S>, FiniteGasDgError<E>>;
 
     /// Net port work, exported acoustic loss and internal gas-to-wave work [J].
     /// Net port work already accounts for any represented exterior terminal.
-    fn accounts(step: &Self::Step) -> [f64; 3];
+    fn accounts<S>(step: &Self::Step<S>) -> [f64; 3];
+
+    /// The actual accepted background, never a side effect of a rejected trial.
+    fn source<S>(step: &Self::Step<S>) -> &S;
 }
 
 impl FiniteGasTransportNode for FiniteGasDgNode {
-    type Step = FiniteGasDgStep<GasCompositionStep>;
+    type Step<S> = FiniteGasDgStep<S>;
     type Input = FiniteGasDgTransportInput;
 
     fn transport_input(
@@ -196,12 +200,12 @@ impl FiniteGasTransportNode for FiniteGasDgNode {
     fn step_count(&self) -> u64 { self.state.step_count() }
     fn stored_energy_j(&self) -> f64 { self.state.stored_energy_j() }
 
-    fn admit<C: FnMut() -> bool>(
+    fn admit<E, C: FnMut() -> bool>(
         &self,
         gas: &ClosedGasParcel,
         input: &FiniteGasDgTransportInput,
         cancelled: &mut C,
-    ) -> Result<(), FiniteGasDgError<GasEnergyError>> {
+    ) -> Result<(), FiniteGasDgError<E>> {
         super::check(cancelled)?;
         super::admit_controls(input.acoustic.expect("validated acoustic input"))?;
         let duct = self.binding.duct();
@@ -227,14 +231,14 @@ impl FiniteGasTransportNode for FiniteGasDgNode {
         super::check(cancelled)
     }
 
-    fn advance<C: FnMut() -> bool>(
+    fn advance<S, E, C: FnMut() -> bool>(
         &mut self,
         gas: &mut ClosedGasParcel,
         input: &FiniteGasDgTransportInput,
         evolve: impl FnMut(&ClosedGasParcel, f64, f64, &mut C)
-            -> Result<FiniteGasDgBackground<GasCompositionStep>, GasEnergyError>,
+            -> Result<FiniteGasDgBackground<S>, E>,
         cancelled: &mut C,
-    ) -> Result<Self::Step, FiniteGasDgError<GasEnergyError>> {
+    ) -> Result<Self::Step<S>, FiniteGasDgError<E>> {
         let solve = input.acoustic.expect("validated acoustic input");
         match &mut self.binding {
             FiniteGasDgBinding::Uniform(wall) => wall.step_with_finite_gas_controlled(
@@ -248,32 +252,104 @@ impl FiniteGasTransportNode for FiniteGasDgNode {
         }
     }
 
-    fn accounts(step: &Self::Step) -> [f64; 3] {
+    fn accounts<S>(step: &Self::Step<S>) -> [f64; 3] {
         [step.acoustic.ledger.port_work_step_j, step.acoustic_dissipation_j,
             step.refresh.parameter_work_j]
+    }
+
+    fn source<S>(step: &Self::Step<S>) -> &S { &step.background }
+}
+
+/// Only the post-transport caloric/chemical endpoint varies. The transaction
+/// retains ownership of transport, native work feedback and complete accounts.
+pub(crate) trait FiniteGasTransportEvolution {
+    type Source;
+    type Reservoir;
+    type Error: From<GasEnergyError>;
+
+    fn is_cancelled(error: &Self::Error) -> bool;
+
+    fn admit<C: FnMut() -> bool>(
+        &self, id: u64, gas: &ClosedGasParcel, input: &FiniteGasDgTransportInput,
+        duration_s: f64, cancelled: &mut C,
+    ) -> Result<(), Self::Error>;
+
+    fn node_candidate<C: FnMut() -> bool>(
+        &self, id: u64, gas: &ClosedGasParcel, input: &FiniteGasDgTransportInput,
+        duration_s: f64, work_by_gas_j: f64, cancelled: &mut C,
+    ) -> Result<(ClosedGasParcel, Self::Source), Self::Error>;
+
+    fn reservoir_candidate<C: FnMut() -> bool>(
+        &self, id: u64, gas: &ClosedGasParcel, input: &FiniteGasDgTransportInput,
+        duration_s: f64, cancelled: &mut C,
+    ) -> Result<(ClosedGasParcel, Self::Reservoir), Self::Error>;
+
+    /// Apply physical endpoint gates after the native work residual has closed.
+    fn admit_node_endpoint(&self, id: u64, source: &Self::Source) -> Result<(), Self::Error>;
+}
+
+struct CaloricEvolution;
+impl FiniteGasTransportEvolution for CaloricEvolution {
+    type Source = GasCompositionStep;
+    type Reservoir = GasHeatStep;
+    type Error = GasEnergyError;
+
+    fn is_cancelled(error: &Self::Error) -> bool { *error == GasEnergyError::Cancelled }
+
+    fn admit<C: FnMut() -> bool>(
+        &self, _: u64, _: &ClosedGasParcel, _: &FiniteGasDgTransportInput,
+        _: f64, _: &mut C,
+    ) -> Result<(), Self::Error> { Ok(()) }
+
+    fn node_candidate<C: FnMut() -> bool>(
+        &self, _: u64, gas: &ClosedGasParcel, input: &FiniteGasDgTransportInput,
+        _: f64, work_by_gas_j: f64, cancelled: &mut C,
+    ) -> Result<(ClosedGasParcel, Self::Source), Self::Error> {
+        let mut endpoint = gas.clone();
+        let source = endpoint.replace_model_with_heat_work_volume(
+            gas.model().clone(), gas.volume_m3(), input.supplied_heat_j,
+            work_by_gas_j, input.gas, cancelled,
+        )?;
+        Ok((endpoint, source))
+    }
+
+    fn reservoir_candidate<C: FnMut() -> bool>(
+        &self, _: u64, gas: &ClosedGasParcel, input: &FiniteGasDgTransportInput,
+        _: f64, cancelled: &mut C,
+    ) -> Result<(ClosedGasParcel, Self::Reservoir), Self::Error> {
+        let mut endpoint = gas.clone();
+        let source = endpoint.add_heat(input.supplied_heat_j, input.gas, cancelled)?;
+        Ok((endpoint, source))
+    }
+
+    fn admit_node_endpoint(&self, _: u64, _: &Self::Source) -> Result<(), Self::Error> {
+        Ok(())
     }
 }
 
 use FiniteGasDgTransportError as Error;
-fn check(cancelled: &mut impl FnMut() -> bool) -> Result<(), Error> {
+fn check<E>(cancelled: &mut impl FnMut() -> bool) -> Result<(), Error<E>> {
     if cancelled() { Err(Error::Cancelled) } else { Ok(()) }
 }
-fn transport_error(error: GasTransportError) -> Error {
+fn transport_error<E>(error: GasTransportError) -> Error<E> {
     match error { GasTransportError::Cancelled => Error::Cancelled, error => Error::Transport(error) }
 }
-fn gas_error(parcel: u64, error: GasEnergyError) -> Error {
-    match error { GasEnergyError::Cancelled => Error::Cancelled, error => Error::Gas { parcel, error } }
+fn gas_error<T: FiniteGasTransportEvolution>(parcel: u64, error: T::Error) -> Error<T::Error> {
+    if T::is_cancelled(&error) { Error::Cancelled } else { Error::Gas { parcel, error } }
 }
-fn acoustic_error(parcel: u64, error: FiniteGasDgError<GasEnergyError>) -> Error {
+fn acoustic_error<T: FiniteGasTransportEvolution>(
+    parcel: u64, error: FiniteGasDgError<T::Error>,
+) -> Error<T::Error> {
     match error {
-        FiniteGasDgError::Cancelled | FiniteGasDgError::Background(GasEnergyError::Cancelled) => Error::Cancelled,
+        FiniteGasDgError::Cancelled => Error::Cancelled,
+        FiniteGasDgError::Background(error) if T::is_cancelled(&error) => Error::Cancelled,
         error => Error::Acoustic { parcel, error },
     }
 }
 #[derive(Default)]
 struct Sum { value: f64, correction: f64 }
 impl Sum {
-    fn add(&mut self, value: f64) -> Result<(), Error> {
+    fn add<E>(&mut self, value: f64) -> Result<(), Error<E>> {
         let adjusted = value - self.correction;
         let next = self.value + adjusted;
         if !value.is_finite() || !adjusted.is_finite() || !next.is_finite() {
@@ -352,7 +428,7 @@ pub(crate) fn advance_finite_gas_transport_with_paths<N: FiniteGasTransportNode,
     duration_s: f64,
     controls: FiniteGasDgTransportSolve,
     cancelled: &mut C,
-) -> Result<FiniteGasDgTransportStep<N::Step>, Error> {
+) -> Result<FiniteGasDgTransportStep<N::Step<GasCompositionStep>>, Error> {
     let candidate = finite_gas_transport_candidate_with_paths(
         parcels, nodes, inputs, paths, duration_s, controls, cancelled)?;
     check(cancelled)?;
@@ -394,7 +470,28 @@ pub(crate) fn finite_gas_transport_candidate_with_paths<N: FiniteGasTransportNod
     duration_s: f64,
     controls: FiniteGasDgTransportSolve,
     cancelled: &mut C,
-) -> Result<FiniteGasDgTransportCandidate<N, N::Step>, Error> {
+) -> Result<FiniteGasDgTransportCandidate<N, N::Step<GasCompositionStep>>, Error> {
+    finite_gas_transport_candidate_with_evolution(
+        parcels, nodes, inputs, paths, duration_s, controls, &CaloricEvolution, cancelled,
+    )
+}
+
+/// The single transport/work/accounting transaction with an original physical
+/// endpoint owner. Chemistry changes only this endpoint calculation; native
+/// transport still runs once, and no trial can consume an accepted inventory.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn finite_gas_transport_candidate_with_evolution<
+    N: FiniteGasTransportNode, T: FiniteGasTransportEvolution, C: FnMut() -> bool,
+>(
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    nodes: &BTreeMap<u64, N>,
+    inputs: &BTreeMap<u64, N::Input>,
+    paths: GasTransportPaths<'_>,
+    duration_s: f64,
+    controls: FiniteGasDgTransportSolve,
+    evolution: &T,
+    cancelled: &mut C,
+) -> Result<FiniteGasDgTransportCandidate<N, N::Step<T::Source>, T::Reservoir>, Error<T::Error>> {
     check(cancelled)?;
     if parcels.is_empty() || parcels.len() > MAX_SNAPSHOT_PARCELS || nodes.is_empty()
         || !parcels.keys().eq(inputs.keys()) || nodes.keys().any(|id| !parcels.contains_key(id))
@@ -414,7 +511,9 @@ pub(crate) fn finite_gas_transport_candidate_with_paths<N: FiniteGasTransportNod
         {
             return Err(Error::Invalid("finite heat and exact per-parcel acoustic input binding required"));
         }
-        input.gas.validate().map_err(|error| gas_error(id, error))?;
+        input.gas.validate().map_err(|error| gas_error::<T>(id, error.into()))?;
+        evolution.admit(id, &parcels[&id], input, duration_s, cancelled)
+            .map_err(|error| gas_error::<T>(id, error))?;
         endpoints.insert(id, input.gas);
     }
     for (&id, node) in nodes.iter() {
@@ -423,12 +522,12 @@ pub(crate) fn finite_gas_transport_candidate_with_paths<N: FiniteGasTransportNod
             return Err(Error::Invalid("all acoustic owners require one clock"));
         }
         node.admit(&parcels[&id], &inputs[&id], cancelled)
-            .map_err(|error| acoustic_error(id, error))?;
+            .map_err(|error| acoustic_error::<T>(id, error))?;
     }
     let (transported, transport) = material::step_candidate_with_paths(
         parcels, paths, duration_s, &endpoints, controls.transport, &mut *cancelled,
     ).map_err(transport_error)?.into_parts();
-    let mut next_parcels = transported.clone();
+    let mut next_parcels = BTreeMap::new();
     let mut next_nodes = nodes.clone();
     let mut acoustics = BTreeMap::new();
     let mut reservoirs = BTreeMap::new();
@@ -448,28 +547,29 @@ pub(crate) fn finite_gas_transport_candidate_with_paths<N: FiniteGasTransportNod
             // Its repeatable callback reads the ONE immutable transported inventory.
             let mut gas = parcels[&id].clone();
             let evolve = |_: &ClosedGasParcel, _: f64, work: f64, cancel: &mut C| {
-                let mut endpoint = transported_gas.clone();
-                let source = endpoint.replace_model_with_heat_work_volume(
-                    transported_gas.model().clone(), transported_gas.volume_m3(),
-                    input.supplied_heat_j, work, input.gas, cancel,
+                let (endpoint, source) = evolution.node_candidate(
+                    id, transported_gas, input, duration_s, work, cancel,
                 )?;
-                Ok::<_, GasEnergyError>(FiniteGasDgBackground {
+                Ok::<_, T::Error>(FiniteGasDgBackground {
                     gas: endpoint, supplied_heat_j: input.supplied_heat_j,
                     transported_enthalpy_j: enthalpy, source,
                 })
             };
             let step = node.advance(&mut gas, node_input, evolve, cancelled)
-                .map_err(|error| acoustic_error(id, error))?;
-            let [net_port_work, acoustic_loss, gas_work] = N::accounts(&step);
+                .map_err(|error| acoustic_error::<T>(id, error))?;
+            evolution.admit_node_endpoint(id, N::source::<T::Source>(&step))
+                .map_err(|error| gas_error::<T>(id, error))?;
+            let [net_port_work, acoustic_loss, gas_work] = N::accounts::<T::Source>(&step);
             port_work.add(net_port_work)?;
             losses.add(acoustic_loss)?;
             parameter_work.add(gas_work)?;
             next_parcels.insert(id, gas);
             acoustics.insert(id, step);
         } else {
-            let gas = next_parcels.get_mut(&id).expect("original complete transport map");
-            let step = gas.add_heat(input.supplied_heat_j, input.gas, &mut *cancelled)
-                .map_err(|error| gas_error(id, error))?;
+            let (gas, step) = evolution.reservoir_candidate(
+                id, &transported[&id], input, duration_s, cancelled,
+            ).map_err(|error| gas_error::<T>(id, error))?;
+            next_parcels.insert(id, gas);
             reservoirs.insert(id, step);
         }
     }

@@ -18,7 +18,6 @@ pub use crate::dg_port::finite_gas::transport::{
 };
 use crate::dg_port::finite_gas::{FiniteGasDgBackground, FiniteGasDgError};
 use crate::dg_port::sum_terminal_work;
-use fs_material::thermochemical_gas::energy::GasEnergyError;
 use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 use fs_material::thermochemical_gas::energy::parcel::composition::GasCompositionStep;
 use fs_material::thermochemical_gas::energy::parcel::transfer::{
@@ -60,7 +59,7 @@ pub type FiniteGasApertureTransportCandidate =
     FiniteGasDgTransportCandidate<LoadedApertureDg, FiniteGasApertureDgStep<GasCompositionStep>>;
 
 impl FiniteGasTransportNode for LoadedApertureDg {
-    type Step = FiniteGasApertureDgStep<GasCompositionStep>;
+    type Step<S> = FiniteGasApertureDgStep<S>;
     type Input = FiniteGasApertureTransportInput;
 
     fn transport_input(
@@ -87,12 +86,12 @@ impl FiniteGasTransportNode for LoadedApertureDg {
         LoadedApertureDg::stored_energy_j(self)
     }
 
-    fn admit<C: FnMut() -> bool>(
+    fn admit<E, C: FnMut() -> bool>(
         &self,
         gas: &ClosedGasParcel,
         input: &Self::Input,
         cancelled: &mut C,
-    ) -> Result<(), FiniteGasDgError<GasEnergyError>> {
+    ) -> Result<(), FiniteGasDgError<E>> {
         let source = input.source.ok_or(FiniteGasDgError::Invalid(
             "finite aperture transport is missing its original source drive",
         ))?;
@@ -121,7 +120,7 @@ impl FiniteGasTransportNode for LoadedApertureDg {
         )
     }
 
-    fn advance<C: FnMut() -> bool>(
+    fn advance<S, E, C: FnMut() -> bool>(
         &mut self,
         gas: &mut ClosedGasParcel,
         input: &Self::Input,
@@ -130,9 +129,9 @@ impl FiniteGasTransportNode for LoadedApertureDg {
             f64,
             f64,
             &mut C,
-        ) -> Result<FiniteGasDgBackground<GasCompositionStep>, GasEnergyError>,
+        ) -> Result<FiniteGasDgBackground<S>, E>,
         cancelled: &mut C,
-    ) -> Result<Self::Step, FiniteGasDgError<GasEnergyError>> {
+    ) -> Result<Self::Step<S>, FiniteGasDgError<E>> {
         let source = input.source.expect("admitted moving-source input");
         self.step_with_finite_gas_controlled(
             gas,
@@ -145,7 +144,7 @@ impl FiniteGasTransportNode for LoadedApertureDg {
         )
     }
 
-    fn accounts(step: &Self::Step) -> [f64; 3] {
+    fn accounts<S>(step: &Self::Step<S>) -> [f64; 3] {
         let frame = &step.coupled;
         // The valve/duct pressure-flow work is INTERNAL to this node. Only
         // original prescribed drives and signed exterior exchange cross its
@@ -157,6 +156,8 @@ impl FiniteGasTransportNode for LoadedApertureDg {
             frame.parameter_work_j,
         ]
     }
+
+    fn source<S>(step: &Self::Step<S>) -> &S { &step.gas.background }
 }
 
 /// Advance native nozzle/diffusion transport and complete moving sources together.

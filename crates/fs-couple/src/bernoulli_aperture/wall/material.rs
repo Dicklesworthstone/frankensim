@@ -36,8 +36,8 @@ pub use local::finite_gas::transport::{
     finite_gas_dg_transport_candidate_with_paths, advance_finite_gas_dg_transport_with_paths,
 };
 pub(crate) use local::finite_gas::transport::{
-    FiniteGasTransportNode, advance_finite_gas_transport_with_paths,
-    finite_gas_transport_candidate_with_paths,
+    FiniteGasTransportNode, FiniteGasTransportEvolution, advance_finite_gas_transport_with_paths,
+    finite_gas_transport_candidate_with_paths, finite_gas_transport_candidate_with_evolution,
 };
 
 use fs_vfit::relaxation::RelaxationImpedanceSpec;
