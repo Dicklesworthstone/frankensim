@@ -129,6 +129,10 @@ pub enum ArticulatedContactError {
     ContactLaw(MultiImpactError),
     /// Shared coupled normal/Coulomb law refused.
     FrictionLaw(FrictionalContactError),
+    /// Shared directional normal/tangent Coulomb law refused.
+    EllipticFrictionLaw(
+        fs_contact::frictional_multicontact::elliptic::EllipticFrictionalContactError,
+    ),
     /// Shared stateful tangential constitutive law refused.
     TangentialLaw(TriboError),
     /// Shared two-axis constitutive/body-compliance solve refused.
@@ -162,6 +166,9 @@ impl fmt::Display for ArticulatedContactError {
             Self::Geometry(error) => write!(f, "impact geometry: {error}"),
             Self::ContactLaw(error) => write!(f, "simultaneous contact: {error}"),
             Self::FrictionLaw(error) => write!(f, "simultaneous frictional contact: {error}"),
+            Self::EllipticFrictionLaw(error) => {
+                write!(f, "simultaneous directional contact: {error}")
+            }
             Self::TangentialLaw(error) => write!(f, "stateful tangential contact: {error}"),
             Self::TangentialMatrix(error) => write!(f, "two-axis tangential contact: {error}"),
             Self::TangentialContacts(error) => write!(f, "coupled tangential contacts: {error}"),
@@ -197,6 +204,20 @@ impl From<FrictionalContactError> for ArticulatedContactError {
             Self::Cancelled
         } else {
             Self::FrictionLaw(error)
+        }
+    }
+}
+impl From<fs_contact::frictional_multicontact::elliptic::EllipticFrictionalContactError>
+    for ArticulatedContactError
+{
+    fn from(
+        error: fs_contact::frictional_multicontact::elliptic::EllipticFrictionalContactError,
+    ) -> Self {
+        use fs_contact::frictional_multicontact::elliptic::EllipticFrictionalContactError;
+        if matches!(error, EllipticFrictionalContactError::Cancelled) {
+            Self::Cancelled
+        } else {
+            Self::EllipticFrictionLaw(error)
         }
     }
 }

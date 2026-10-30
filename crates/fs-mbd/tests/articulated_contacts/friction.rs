@@ -425,3 +425,6 @@ fn refusal_and_late_cancellation_publish_no_articulated_state() {
         Err(ArticulatedContactError::Invalid(_))
     ));
 }
+
+#[path = "friction/elliptic.rs"]
+mod elliptic;

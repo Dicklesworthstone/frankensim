@@ -9,6 +9,9 @@
 /// Simultaneous frictional impacts with rigid bilateral distance reactions.
 pub mod constrained;
 
+/// Directional friction with the same native articulated contact mechanics.
+pub mod elliptic;
+
 use super::{
     ArticulatedContactError, ArticulatedContactSystem, ContactCounterpart, EventResponse,
     EventWorkspace, LinkContactPoint, Prepared, finite, magnitude, poll, prepare_point,
@@ -23,7 +26,7 @@ use fs_ga::Vec3;
 
 /// One supplied geometric witness with an explicit ideal Coulomb law.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ArticulatedFrictionalContact {
+pub struct ArticulatedFrictionalContact<F = f64> {
     /// Stable distinct identity used to order assembly and impulse accumulation.
     pub id: u64,
     /// Original link point receiving the positive impulse.
@@ -36,23 +39,24 @@ pub struct ArticulatedFrictionalContact {
     pub tangent_world: Vec3,
     /// Maximum admitted nonnegative normal gap, in metres.
     pub activation_tolerance: f64,
-    /// Common nonnegative static/kinetic Coulomb coefficient. This event law
-    /// does not infer velocity dependence or finite-patch microslip.
-    pub friction_coefficient: f64,
+    /// Constitutive payload of the selected entry point. The default scalar is
+    /// one nonnegative static/kinetic coefficient; the directional entry point
+    /// carries its principal pair and axis. No velocity dependence is inferred.
+    pub friction_coefficient: F,
     /// Explicit normal endpoint law owned by `fs-contact`.
     pub normal_law: NormalVelocityLaw,
 }
 
 /// All native system responses and independently reconstructed balances.
 #[derive(Debug, Clone)]
-pub struct ArticulatedFrictionalContactResult {
+pub struct ArticulatedFrictionalContactResult<R = FrictionalContactResult> {
     /// Canonical contact order for every contact-space vector and matrix below.
     pub contact_ids: Vec<u64>,
     /// Updated states and physical momenta, in original system order.
     pub responses: Vec<FreeFloatingImpulseResponse>,
     /// Original contact owner result, including cone, complementarity and
     /// passivity residuals. A velocity-only witness does not identify local loads.
-    pub contact: FrictionalContactResult,
+    pub contact: R,
     /// Actual returned-state relative velocities, [normal, tangent, n cross t].
     pub relative_velocities_after: Vec<[f64; 3]>,
     /// Full row-major 3N-by-3N J M^-1 J^T, in inverse kilograms.
@@ -68,6 +72,22 @@ pub struct ArticulatedFrictionalContactResult {
     pub angular_momentum_residual: Vec3,
     /// Maximum actual versus predicted point-velocity discrepancy, in m/s.
     pub endpoint_velocity_residual: f64,
+}
+
+/// Actual original material-point kinematics before an articulated impact.
+///
+/// The frame is the exact normalized [normal, tangent, normal cross tangent]
+/// basis used by the native contact assembly. A plane counterpart point is the
+/// body's normal projection onto that plane, not its arbitrary defining anchor.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ArticulatedImpactKinematics {
+    pub original_index: usize,
+    pub contact_id: u64,
+    pub axes_world: [Vec3; 3],
+    pub gap_m: f64,
+    pub relative_velocity_m_s: [f64; 3],
+    pub point_world: Vec3,
+    pub counterpart_point_world: Vec3,
 }
 
 /// Resolve supplied frictional contacts over freely moving articulated trees.
@@ -140,10 +160,10 @@ pub fn resolve_articulated_frictional_contacts(
     })
 }
 
-struct PreparedContactEvent {
+struct PreparedContactEvent<L = FrictionalContact> {
     workspace: EventWorkspace,
     prepared: Vec<Prepared>,
-    laws: Vec<FrictionalContact>,
+    laws: Vec<L>,
     order: Vec<usize>,
 }
 
@@ -153,11 +173,35 @@ fn prepare_event(
     config: FrictionalContactConfig,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<PreparedContactEvent, ArticulatedContactError> {
+    prepare_event_with(systems, contacts, config, cancelled, |query| {
+        let c = contacts[query.original_index];
+        Ok(FrictionalContact {
+            id: c.id,
+            gap: query.gap_m,
+            activation_tolerance: c.activation_tolerance,
+            relative_velocity: query.relative_velocity_m_s,
+            friction_coefficient: c.friction_coefficient,
+            normal_law: c.normal_law,
+        })
+    })
+}
+
+/// Assemble geometry and native point rows once, independent of coefficient
+/// source. The law callback only receives original incoming kinematics; the
+/// complete native response is still admitted by EventWorkspace::apply.
+fn prepare_event_with<F: Copy, L, E: From<ArticulatedContactError>>(
+    systems: &[ArticulatedContactSystem<'_>],
+    contacts: &[ArticulatedFrictionalContact<F>],
+    config: FrictionalContactConfig,
+    cancelled: &mut impl FnMut() -> bool,
+    mut make_law: impl FnMut(&ArticulatedImpactKinematics) -> Result<L, E>,
+) -> Result<PreparedContactEvent<L>, E> {
     poll(cancelled)?;
     if contacts.len() > 21 || contacts.len() > config.maximum_contacts || systems.len() > 128 {
         return Err(ArticulatedContactError::Invalid(
             "articulated frictional event exceeds its size cap",
-        ));
+        )
+        .into());
     }
     let mut order: Vec<_> = (0..contacts.len()).collect();
     order.sort_unstable_by_key(|&index| contacts[index].id);
@@ -165,9 +209,7 @@ fn prepare_event(
         .windows(2)
         .any(|pair| contacts[pair[0]].id == contacts[pair[1]].id)
     {
-        return Err(ArticulatedContactError::Invalid(
-            "duplicate contact identity",
-        ));
+        return Err(ArticulatedContactError::Invalid("duplicate contact identity").into());
     }
     let workspace = EventWorkspace::new(systems, cancelled)?;
     let mut prepared = Vec::with_capacity(3 * contacts.len());
@@ -185,6 +227,8 @@ fn prepare_event(
         let axes = [normal, first_tangent, second_tangent];
         let mut gap = 0.0;
         let mut relative_velocity = [0.0; 3];
+        let mut point_world = Vec3::default();
+        let mut counterpart_point_world = Vec3::default();
         for (axis_index, axis) in axes.into_iter().enumerate() {
             let (first, world_point) = prepare_point(c.point, axis, &workspace.before)?;
             let (second, other_point, plane_speed) = match c.other {
@@ -194,7 +238,8 @@ fn prepare_event(
                     {
                         return Err(ArticulatedContactError::Invalid(
                             "contact requires distinct rigid links",
-                        ));
+                        )
+                        .into());
                     }
                     let (term, position) =
                         prepare_point(point, axis.scale(-1.0), &workspace.before)?;
@@ -212,13 +257,20 @@ fn prepare_event(
             if axis_index == 0 {
                 let separation = world_point - other_point;
                 gap = finite(normal.dot(separation))?;
+                point_world = world_point;
+                counterpart_point_world = if second.is_some() {
+                    other_point
+                } else {
+                    world_point - normal.scale(gap)
+                };
+                vector(counterpart_point_world)?;
                 if second.is_some() {
                     let tangent = separation - normal.scale(gap);
                     let scale = magnitude(world_point)
                         .max(magnitude(other_point))
                         .max(magnitude(separation));
                     if magnitude(tangent) > 256.0 * f64::EPSILON * scale {
-                        return Err(ArticulatedContactError::NonCollinearContact { index });
+                        return Err(ArticulatedContactError::NonCollinearContact { index }.into());
                     }
                 }
             }
@@ -233,14 +285,16 @@ fn prepare_event(
             relative_velocity[axis_index] = finite(row.velocity(&workspace.before))?;
             prepared.push(row);
         }
-        laws.push(FrictionalContact {
-            id: c.id,
-            gap,
-            activation_tolerance: c.activation_tolerance,
-            relative_velocity,
-            friction_coefficient: c.friction_coefficient,
-            normal_law: c.normal_law,
-        });
+        laws.push(make_law(&ArticulatedImpactKinematics {
+            original_index: index,
+            contact_id: c.id,
+            axes_world: axes,
+            gap_m: gap,
+            relative_velocity_m_s: relative_velocity,
+            point_world,
+            counterpart_point_world,
+        })?);
+        poll(cancelled)?;
     }
     Ok(PreparedContactEvent {
         workspace,
@@ -250,9 +304,9 @@ fn prepare_event(
     })
 }
 
-fn admit_support_work(
+fn admit_support_work<F>(
     contact: &FrictionalContactResult,
-    contacts: &[ArticulatedFrictionalContact],
+    contacts: &[ArticulatedFrictionalContact<F>],
     order: &[usize],
 ) -> Result<(), ArticulatedContactError> {
     if matches!(

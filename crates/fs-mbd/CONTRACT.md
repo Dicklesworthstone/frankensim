@@ -1,5 +1,30 @@
 # CONTRACT: fs-mbd
 
+## Directional friction through original articulated contact
+
+`articulated_contacts::friction::elliptic` routes oriented principal
+coefficient pairs through the original point Jacobians, articulated-body
+inverse-mass actions and complete native endpoint/momentum/work audit.
+Normal/tangent, joint/base and shared-contact coupling remain simultaneous.
+No generalized dense mass matrix or second rigid-body integrator is introduced.
+Physical impulses and velocities remain distinct from transformed determinacy
+evidence; velocity-only admission retains the common-support-work restriction.
+
+`resolve_articulated_elliptic_contacts_with` borrows original histories and
+queries each geometrically active contact once, in canonical contact-ID order,
+using actual incoming point velocities, normalized frames and both physical
+witness positions. A plane source point is the normal projection, not its
+arbitrary defining anchor. Inactive histories remain untouched. Mapped source
+candidates return only with the globally admitted mechanical response, without
+requiring a clone of every accepted history.
+
+The surrounding event owner publishes all returned system responses and active
+histories together. Source failure, cancellation, numerical refusal and late
+physical audit failure return no partial candidate. This remains a fixed-pose
+instantaneous impact law: no collision discovery, time advancement, pressure
+from impulse or thermal allocation is inferred. The caller owns normal response
+and source-frame transport. Singly zero ellipses and unproved determinacy refuse.
+
 ## Directional friction through sphere impact events
 
 `sphere_plane::directional::impact` adds native and source-callback entry
