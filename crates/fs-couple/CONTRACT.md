@@ -12039,3 +12039,32 @@ below 2e-10 Pa. Complete restart and changed-clock continuation are reproducible
 late cancellation, inconsistent moving restart and cap22/cap21 refusal preserve
 accepted history. These are focused actual-owner native builds, not full
 workspace Cargo/DSR qualification or a measured material/real-time certificate.
+
+### Prescribed-flow ducts retain the complete vibrating source
+
+`acoustic_realize::realize_blown_ode` now consumes the same complete
+`PlateBankImage` as the coupled string/duct path. Compact, Vk-only and mixed
+banks retain their original storage, full damping and material/cavity/exterior
+histories, including accepted initial motion. Cylindrical-chain dispatch no
+longer excludes a Vk source. A ratio-one transformer joins the bank's signed
+outward-volume port to the second duct inlet. The independent structural-force
+port remains open with exactly zero applied force, and only the surviving
+fluid inlet receives the prescribed flow. Thus a pressure-driven body's
+response depends on its original signed surface areas, independently of an
+unforced point-drive projection. Observed inlet pressure comes from that same
+fluid port, with the complete original plate observer added once.
+
+The quadratic route prepares one shared exact propagator for the full source
+and viscothermal duct and reuses it across samples. Nonlinear storage keeps the
+shared temporal admission and refuses unresolved clocks; there is no inferred
+linearization or new integration owner. Shared dense capacity and existing
+per-step candidate allocation remain. Reed/scattering and Dirac routes are
+unchanged.
+
+Three focused tests execute the actual complete blown renderer with the actual
+coherent gas, transport and Foster duct owners. They check point-drive
+independence with nonzero pressure-driven motion, Vk-only and mixed source
+participation with signed areas and positive-definite, non-diagonally-dominant
+material damping, and audible decay from already accepted Maxwell history
+without a new blow. This exercises general material loss beside the duct's
+singular passive Foster blocks without removing their physical branches.

@@ -1086,6 +1086,8 @@ fn plate_chain_radiation(
 
 #[cfg(test)]
 mod plate_chain_tests;
+#[cfg(test)]
+mod blown_ode_tests;
 
 /// One shared clock: string, plate, and duct exchange force and flow
 /// every sample via the characteristic FIR. Used when the duct is
@@ -5547,54 +5549,33 @@ fn realize_blown_ode(
     n: usize,
     wall: Option<LocallyReactingWall>,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
-    let radius = sections.first().map_or(0.0, |s| s.radius);
-    let area = core::f64::consts::PI * radius * radius;
-    let inlets = if plates.linear.is_empty() { 1 } else { 2 };
+    let inlets = if plates.is_empty() { 1 } else { 2 };
     let line = ode_bore_chain(sections, outlet, inlets, taps, gas, wall)?;
     let dt = 1.0 / f64::from(sample_rate_hz);
-    if plates.linear.is_empty() {
-        let linear = prepare_render_linear(&line)?;
-        let mut x = vec![0.0; line.state_dim()];
-        let mut out = Vec::with_capacity(n);
-        for i in 0..n {
-            let t = i as f64 * dt;
-            let u = if t < blow.duration_s {
-                blow.peak_m3_s * det::sin(core::f64::consts::PI * t / blow.duration_s)
-            } else {
-                0.0
-            };
-            let rec = fs_phs::linear_exact::step_render(&line, &linear, &x, &[u], dt)
-                .map_err(render_phs_error)?;
-            out.push(rec.y[0]);
-            x = rec.x;
-        }
-        return Ok(out);
-    }
-    let plate =
-        plate_modal_ports(plates, false)?.ok_or(AcousticRealizeError::InvalidDescription {
-            what: "ODE duct expected a linear plate bank",
-        })?;
-    let sys = transformer(plate, line, 0, 1, area)
-        .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+    let (sys, mut x, observation) = compose_plate_chain(plates, line, 1, gas, sample_rate_hz)?;
     let linear = prepare_render_linear(&sys)?;
-    let mut x = vec![0.0; sys.state_dim()];
+    let exact = prepare_chain_exact(&sys, &linear, dt)?;
+    // A complete bank retains its independent external force port at slot zero.
+    // Only the remaining duct inlet receives this prescribed volume source;
+    // pressure reaction must never depend on an unrelated point-drive footprint.
+    let source = usize::from(observation.is_some());
+    let mut input = vec![0.0; sys.port_dim()];
     let mut out = Vec::with_capacity(n);
-    let n_plate = 2 * plates.linear.len();
     for i in 0..n {
         let t = i as f64 * dt;
-        let u = if t < blow.duration_s {
+        input[source] = if t < blow.duration_s {
             blow.peak_m3_s * det::sin(core::f64::consts::PI * t / blow.duration_s)
         } else {
             0.0
         };
-        let rec = fs_phs::linear_exact::step_render(&sys, &linear, &x, &[u], dt)
-            .map_err(render_phs_error)?;
-        let mut p = rec.y[0];
-        for (k, body) in plates.linear.iter().enumerate() {
-            let acc = (rec.x[2 * k + 1] - x[2 * k + 1]) / dt;
-            p += body.radiate_mass_normalized(acc, gas.density, listener_m);
+        let rec = step_chain_flow(&sys, &linear, exact.as_ref(), &x, &input, dt)?;
+        let p = rec.y[source]
+            + plate_chain_radiation(observation.as_ref(), &rec.x, &x, gas, listener_m, dt)?;
+        if !p.is_finite() {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "blown ODE pressure left the finite set",
+            });
         }
-        debug_assert!(rec.x.len() >= n_plate);
         out.push(p);
         x = rec.x;
     }
@@ -5801,9 +5782,7 @@ fn realize_blown_duct(
         WaveguideEnd::FlangedOpen => Termination::FlangedOpen,
     };
     refuse_open_nyquist(duct, gas, sample_rate_hz)?;
-    if let Some((sections, taps)) = bore_spec(duct)
-        && plates.vk.is_none()
-    {
+    if let Some((sections, taps)) = bore_spec(duct) {
         return realize_blown_ode(
             &sections,
             duct_outlet(duct.termination),
