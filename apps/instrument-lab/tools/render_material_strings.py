@@ -144,10 +144,37 @@ def assembly_geometry(text: str, report: str) -> str:
     return "\n".join(lines) + "\nschedule\n" + schedule
 
 
+def material_state_bindings(bindings: list[list[str]], manifests: list[str]) -> dict[str, list[str]]:
+    """Explicit original card identities; never infer chemistry or a contact pair.
+
+    The Rust compiler owns material-card admission. Here we only prevent an
+    ignored, ambiguous or malformed CLI binding before staging any sources.
+    """
+    targets = {binding.partition("=")[0] for binding in manifests}
+    states = {}
+    for binding in bindings:
+        if len(binding) != 5:
+            raise ValueError("--pack-material-state needs PACK CHEMISTRY PHASE PROCESS REVISION")
+        name, *identity = binding
+        if name not in targets or name in states:
+            raise ValueError("--pack-material-state must name one distinct --pack-manifest target")
+        if any(not part.strip() or part.startswith("--")
+               or any(ord(char) < 32 or ord(char) == 127 for char in part)
+               for part in identity[:3]):
+            raise ValueError("material chemistry, phase and process must be nonempty identity fields")
+        revision = identity[3]
+        if not re.fullmatch(r"0|[1-9][0-9]*", revision) or int(revision) > 4_294_967_295:
+            raise ValueError("material revision must be a canonical unsigned 32-bit integer")
+        states[name] = identity
+    return states
+
+
 def stage_packs(texts: list[str], root: Path, replacements: list[str], output: Path,
-                manifests: list[str] | None = None, compiler: str | None = None) -> list[str]:
+                manifests: list[str] | None = None, compiler: str | None = None,
+                material_states: list[list[str]] | None = None) -> list[str]:
     # These are the existing binary pack formats, copied byte for byte.
     # Rust remains the material decoder and property/domain authority.
+    states = material_state_bindings(material_states or [], manifests or [])
     suffixes = (".fsmatpk", ".fsintpk", ".fsmodelpk")
     available = {str(p.relative_to(root)): p for suffix in suffixes for p in root.rglob("*" + suffix)}
     tokens = {token for text in texts for line in text.splitlines() if not line.startswith("#") for token in line.split()}
@@ -181,8 +208,9 @@ def stage_packs(texts: list[str], root: Path, replacements: list[str], output: P
             # The existing compiler resolves sibling source tables, source
             # identity, dimensions, uncertainty and validity from the manifest.
             # A failed compilation stops here; never use a stale available pack.
+            state_args = ["--material-state", *states[name]] if name in states else []
             subprocess.run([compiler, "matdb-pack", "--manifest", str(compiled[name]),
-                            "--out", str(destination)], check=True)
+                            "--out", str(destination), *state_args], check=True)
             if not destination.is_file() or destination.stat().st_size == 0:
                 raise ValueError(f"material compiler did not create a nonempty pack: {name}")
         else:
@@ -258,6 +286,9 @@ def main(argv=None) -> int:
     parser.add_argument("--pack-manifest", action="append", default=[], metavar="REFERENCED_PATH=MANIFEST",
                         help="compile this original source manifest into its referenced pack with the existing Rust material compiler")
     parser.add_argument("--pack-compiler", help="path to the existing xtask executable; required with --pack-manifest")
+    parser.add_argument("--pack-material-state", action="append", nargs=5, default=[],
+                        metavar=("PACK", "CHEMISTRY", "PHASE", "PROCESS", "REVISION"),
+                        help="bind an explicit original material-card identity to one --pack-manifest target; omit for the original property/interface/model/species envelope")
     parser.add_argument("--body-profile", type=Path)
     parser.add_argument("--stop-profile", type=Path, help="original finger/fret/bow-surface contact profile")
     parser.add_argument("--contact-thermal", type=Path, help="original finite contact-heat profile; thermal properties come from the same assembly packs")
@@ -294,6 +325,10 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if bool(args.pack_manifest) != bool(args.pack_compiler):
         parser.error("--pack-manifest and --pack-compiler must be supplied together")
+    try:
+        material_state_bindings(args.pack_material_state, args.pack_manifest)
+    except ValueError as error:
+        parser.error(str(error))
     compiler = shutil.which(args.pack_compiler) if args.pack_compiler else None
     if args.pack_compiler and compiler is None:
         parser.error("--pack-compiler must name an available xtask executable")
@@ -384,7 +419,7 @@ def main(argv=None) -> int:
     # independent thermal pack loader or bypass the native card-identity check.
     attachments += stage_packs([text, profile, (stop_profile or b"").decode("utf-8")],
                               args.pack_root or args.performance.parent, args.pack, output,
-                              args.pack_manifest, compiler)
+                              args.pack_manifest, compiler, args.pack_material_state)
     source = output / "performance.material-strings"
     source.write_text(text)
     gas_components = []

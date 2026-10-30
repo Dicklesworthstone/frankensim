@@ -88,6 +88,18 @@ same referenced path. The resulting pack bytes enter both the portable
 experiment and the native render. Use `--renderer PATH --lab-experiment` in
 place of `--prepare-only` to compile, render and save the same experiment.
 
+For a source that must retain a canonical material identity, add
+`--pack-material-state REFERENCED_PATH CHEMISTRY PHASE PROCESS REVISION`
+for that manifest target. The launcher forwards these explicit identity fields
+to the same compiler's `--material-state` option. Its verified material-card
+bytes then reach the native performer and the saved Lab experiment unchanged.
+This matters when an ordered bow/string or finger/string contact names the
+original material identities. It does not infer a contact pair or change any
+material property. Identity fields must describe the actual source state;
+revision is an unsigned 32-bit integer. Without this option the compiler keeps
+its original property, interface, model or species envelope. The compiler
+refuses applying a material-card identity to a non-material source.
+
 Precompiled `--pack` bindings and manifest bindings can be combined, but each
 referenced path has exactly one explicit binding. Compilation failure stops
 the experiment; a previously compiled pack is never substituted for a failed

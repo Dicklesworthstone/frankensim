@@ -144,12 +144,13 @@ class MaterialPreparation(unittest.TestCase):
             calls.append(command)
             if command[0] == str(compiler):
                 self.assertEqual(command, [str(compiler), "matdb-pack", "--manifest",
-                                           str(manifest), "--out", str(output / "strings/whole.source")])
+                                           str(manifest), "--out", str(output / "strings/whole.source"),
+                                           *(["--material-state", *identity] if identity else [])])
                 self.assertEqual(kwargs, {"check": True})
                 self.assertEqual((manifest.read_bytes(), table.read_bytes()), before)
                 # This witness is only an executable boundary. The real Rust
                 # compiler owns manifest decoding and normalized pack semantics.
-                Path(command[-1]).write_bytes(emitted)
+                Path(command[command.index("--out") + 1]).write_bytes(emitted)
             else:
                 self.assertEqual(command, [str(renderer), str(output / "performance.material-strings"),
                                            str(output / "render.wav")])
@@ -161,20 +162,26 @@ class MaterialPreparation(unittest.TestCase):
 
         with mock.patch.object(R.shutil, "which", side_effect=lambda name: name), \
              mock.patch.object(R.subprocess, "run", side_effect=native_call):
-            for name, mode in (("prepared", ["--prepare-only"]),
-                               ("rendered", ["--renderer", str(renderer), "--lab-experiment"])):
+            card_identity = ["declared whole-string", "solid", "source specimen", "4294967295"]
+            for name, mode, identity in (
+                    ("prepared", ["--prepare-only"], []),
+                    ("rendered", ["--renderer", str(renderer), "--lab-experiment"], []),
+                    ("card-prepared", ["--prepare-only"], card_identity),
+                    ("card-rendered", ["--renderer", str(renderer), "--lab-experiment"], card_identity)):
                 output = root / name
                 self.assertEqual(R.main(["--performance", str(source), "--out", str(output),
                     "--pack-compiler", str(compiler),
                     "--pack-manifest", f"strings/whole.source={manifest}",
-                    "--pack", f"body.fsmatpk={body}", *mode]), 0)
+                    "--pack", f"body.fsmatpk={body}",
+                    *(["--pack-material-state", "strings/whole.source", *identity] if identity else []),
+                    *mode]), 0)
                 packet = json.loads((output / "experiment.native.json").read_text())
                 self.assertEqual(base64.b64decode(packet["source"]), original.encode())
                 self.assertEqual({item["path"]: base64.b64decode(item["bytes"])
                                   for item in packet["attachments"]},
                                  {"strings/whole.source": emitted, "body.fsmatpk": body.read_bytes()})
                 self.assertEqual(packet["renderer"], "strings")
-        self.assertEqual(len(calls), 3)  # one compile per experiment, then one native render
+        self.assertEqual(len(calls), 6)  # four compiles and two renders; exact identities and bytes above
         self.assertEqual((manifest.read_bytes(), table.read_bytes()), before)
         self.assertEqual(source.read_text(), original)
         self.assertEqual(stale.read_bytes(), b"stale pack must never win an explicit compilation")
@@ -209,6 +216,36 @@ class MaterialPreparation(unittest.TestCase):
         with mock.patch.object(R.subprocess, "run", return_value=mock.Mock(returncode=0)):
             with self.assertRaisesRegex(ValueError, "did not create a nonempty pack"):
                 R.stage_packs(["string wire.fsmatpk"], root, [], output, [binding], "xtask")
+
+    def test_material_state_bindings_refuse_ignored_or_ambiguous_identities_before_io(self):
+        identity = ["wire.fsmatpk", "Cu", "solid", "annealed", "0"]
+        manifests = ["wire.fsmatpk=source.tsv"]
+        self.assertEqual(R.material_state_bindings([identity], manifests),
+                         {"wire.fsmatpk": identity[1:]})
+        for bindings, sources in [
+            ([identity], []),
+            ([identity, identity], manifests),
+            ([["other.pack", *identity[1:]]], manifests),
+            ([[*identity[:-1], "-1"]], manifests),
+            ([[*identity[:-1], "4294967296"]], manifests),
+            ([[*identity[:-1], "01"]], manifests),
+            ([["wire.fsmatpk", "", "solid", "annealed", "0"]], manifests),
+            ([identity[:-1]], manifests),
+        ]:
+            with self.assertRaises(ValueError):
+                R.material_state_bindings(bindings, sources)
+        for options in (
+                ["--pack-material-state", *identity],
+                ["--pack-compiler", "xtask", "--pack-manifest", manifests[0],
+                 "--pack-material-state", *identity, "--pack-material-state", *identity],
+                ["--pack-compiler", "xtask", "--pack-manifest", manifests[0],
+                 "--pack-material-state", *identity[:-1], "4294967296"]):
+            with mock.patch.object(R.Path, "read_text", side_effect=AssertionError("source I/O before refusal")), \
+                 mock.patch.object(R.Path, "mkdir", side_effect=AssertionError("directory before refusal")), \
+                 mock.patch.object(R.subprocess, "run", side_effect=AssertionError("compiler before refusal")):
+                with self.assertRaises(SystemExit):
+                    R.main(["--prepare-only", "--performance", "unread.material-strings",
+                            "--out", "uncreated", *options])
 
     def test_manifest_compiler_options_refuse_before_source_io(self):
         for options in (["--pack-manifest", "wire.fsmatpk=source.tsv"],
