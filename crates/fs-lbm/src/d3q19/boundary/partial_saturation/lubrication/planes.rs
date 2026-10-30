@@ -154,15 +154,7 @@ impl LubricationPlane3 {
         }
         // Choose a well-conditioned auxiliary axis. The two tangent directions
         // are isotropic: their sum is independent of this coordinate gauge.
-        let axis = (0..3)
-            .min_by(|&a, &b| self.normal[a].abs().total_cmp(&self.normal[b].abs()))
-            .expect("three axes");
-        let mut hint = [0.0; 3];
-        hint[axis] = 1.0;
-        let tangent = cross(self.normal, hint);
-        let length = tangent[0].hypot(tangent[1]).hypot(tangent[2]);
-        let tangent = tangent.map(|x| x / length);
-        let basis = [tangent, cross(self.normal, tangent)];
+        let basis = tangent_basis(self.normal);
         let modes = core::array::from_fn(|i| {
             let tangent = basis[i / 2];
             let spin = cross(self.normal, tangent);
@@ -219,7 +211,7 @@ pub struct LubricatedPlanesExchange3<const N: usize> {
 }
 
 impl BoundaryGrid3 {
-    /// Solve sphere-pair normal and sphere-plane missing resistance together.
+    /// Solve sphere-pair and sphere-plane missing resistance together.
     ///
     /// Body fractions and resolved wall geometry remain caller-owned. Each plane
     /// uses its own positive-gap/roughness/cutoff scales and the model's dynamic
