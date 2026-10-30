@@ -15,6 +15,7 @@ use fs_exec::CancelGate;
 use fs_matdb::MaterialStateId;
 
 mod asymmetric_contact_line;
+mod axisymmetric_contact_line;
 mod contact_line;
 
 mod sealed {

@@ -12218,3 +12218,11 @@ participation with signed areas and positive-definite, non-diagonally-dominant
 material damping, and audible decay from already accepted Maxwell history
 without a new blow. This exercises general material loss beside the duct's
 singular passive Foster blocks without removing their physical branches.
+
+## Native mechanics with dynamic axisymmetric liquid footprints
+
+`capillary::AxisymmetricContactLineCapillaryModalSystem::new_axisymmetric_contact_line` binds the original 3-D circular-footprint source to the shared native mechanical transaction. Original bodies, connections, external forces and prescribed gap velocity determine actual gap motion. Source surface energy, circular-line viscous and pinning losses, numerical uncertainty and both ordered material identities remain attached.
+
+The final source replay starts from the old accepted radius and uses actual represented body travel. Mechanics, circular footprint, angle, gap, clock and observation publish together after the existing force/work/source gates. Connected topology contributes zero release; no rupture or bulk liquid dynamics is inferred.
+
+Six native tests cover reciprocal impulse/momentum and complete work, pinned-radius angle change, source-friction sensitivity, original connection/external/prescribed work, cancellation/source/range refusal with deterministic retry, and a late numerical-energy refusal that preserves both bodies and liquid history. All six prior planar and axisymmetric capillary tests pass. The underlying branch remains explicitly symmetric and quasistatic in the liquid.
