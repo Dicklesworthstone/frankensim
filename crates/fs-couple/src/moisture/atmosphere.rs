@@ -1,25 +1,26 @@
 //! Isothermal moisture exchange with a finite, well-mixed atmosphere.
 //!
-//! One scalar implicit balance couples the ORIGINAL slab diffusion solve to
-//! its atmosphere's actual water inventory. Sorption is a pinned material
+//! One scalar implicit balance couples the ORIGINAL slab diffusion solves to
+//! one atmosphere's actual water inventory. Sorption is a pinned material
 //! property in kg water/kg dry solid as a function of relative humidity; RH,
 //! dry-basis moisture and gas composition are never interchangeable inputs.
 //! The existing gas owner resolves the accepted composition, pressure,
 //! transport and acoustic medium. Carrier species and dry skeleton are fixed.
 //!
-//! Both faces may share this atmosphere or be sealed. Temperature and volume
+//! Arbitrarily many admitted specimens may share this same inventory; every
+//! trial starts from all their accepted fields and uses one common endpoint RH.
+//! Each face may contact this atmosphere or be sealed. Temperature and volume
 //! are prescribed; a thermostat maintains the isothermal condition. As in the
 //! original moisture owner, bound-water caloric storage/sorption heat are NOT
 //! represented, so the gas energy change below is not a total heat balance.
 //! There is no condensation, hysteresis, gas momentum or moving interface.
 
-use super::{
-    MaterialCard, MaterialPropertySelection, MoistureError, MoistureSlab,
-    MoistureStepConfig, MoistureStepReport, QueryPoint, ResolvedMaterialStatePoint,
-    ScalarAdmissibility, ScalarPropertyRequirement, poll, positive, quantity,
-    resolve_material_state_point,
-};
 use super::surface::{DryBasisSurfaceTransfer, ResolvedMoistureFace, admit_environment};
+use super::{
+    MaterialCard, MaterialPropertySelection, MoistureError, MoistureSlab, MoistureStepConfig,
+    MoistureStepReport, QueryPoint, ResolvedMaterialStatePoint, ScalarAdmissibility,
+    ScalarPropertyRequirement, poll, positive, quantity, resolve_material_state_point,
+};
 use fs_exec::Cx;
 use fs_material::thermochemical_gas::{
     ThermochemicalGasModel,
@@ -81,7 +82,10 @@ impl DryBasisSorption {
         transfer: DryBasisSurfaceTransfer,
     ) -> Result<Self, MoistureError> {
         let point = self.source.query();
-        transfer.at(point.axes()["temperature"], point.axes()["relative_humidity"])?;
+        transfer.at(
+            point.axes()["temperature"],
+            point.axes()["relative_humidity"],
+        )?;
         self.surface_transfer = Some(transfer);
         Ok(self)
     }
@@ -232,6 +236,69 @@ impl AtmosphereMoistureCandidate {
         AtmosphereMoistureStep,
     ) {
         (self.atmosphere, self.moisture, self.step)
+    }
+}
+
+/// One physical specimen exposed to a shared atmosphere. Stable, distinct IDs
+/// name separate physical inventories, including geometrically identical ones.
+/// Each specimen retains its own original material, diffusion and surface laws.
+pub struct MoistureParticipant<'a> {
+    pub id: u64,
+    pub slab: &'a MoistureSlab,
+    pub faces: &'a [Option<DryBasisSorption>; 2],
+    pub transport: MoistureStepConfig,
+}
+
+/// One accepted specimen and its native local transfer/source report.
+#[derive(Clone, Debug)]
+pub struct SharedMoistureSolid {
+    pub id: u64,
+    pub moisture: MoistureSlab,
+    pub transport: MoistureStepReport,
+}
+
+/// One common gas inventory debit, with all internal vapor/solid transfers
+/// canceled. The gas energy account excludes sorption heat as in `advance`.
+#[derive(Clone, Debug)]
+pub struct SharedAtmosphereMoistureStep {
+    pub interval_s: [f64; 2],
+    pub relative_humidity: [f64; 2],
+    pub vapor_mass_kg: [f64; 2],
+    pub water_to_solids_kg: f64,
+    pub water_balance_residual_kg: f64,
+    pub total_mass_residual_kg: f64,
+    pub maximum_carrier_mass_residual_kg: f64,
+    /// Gas m*u change at prescribed T; not the thermostat's total heat duty.
+    pub gas_internal_energy_change_j: f64,
+    pub iterations: usize,
+}
+
+/// Original gas and every moisture field accepted together. Solids are in
+/// increasing stable-ID order, independent of caller enumeration order.
+#[derive(Clone, Debug)]
+pub struct SharedAtmosphereMoistureCandidate {
+    atmosphere: FiniteMoistureAtmosphere,
+    solids: Vec<SharedMoistureSolid>,
+    step: SharedAtmosphereMoistureStep,
+}
+impl SharedAtmosphereMoistureCandidate {
+    pub const fn atmosphere(&self) -> &FiniteMoistureAtmosphere {
+        &self.atmosphere
+    }
+    pub fn solids(&self) -> &[SharedMoistureSolid] {
+        &self.solids
+    }
+    pub const fn step(&self) -> &SharedAtmosphereMoistureStep {
+        &self.step
+    }
+    pub fn into_parts(
+        self,
+    ) -> (
+        FiniteMoistureAtmosphere,
+        Vec<SharedMoistureSolid>,
+        SharedAtmosphereMoistureStep,
+    ) {
+        (self.atmosphere, self.solids, self.step)
     }
 }
 
@@ -391,16 +458,91 @@ impl FiniteMoistureAtmosphere {
         controls: AtmosphereMoistureSolve,
         cx: &Cx<'_>,
     ) -> Result<AtmosphereMoistureCandidate, AtmosphereMoistureError> {
+        let participant = MoistureParticipant {
+            id: 0,
+            slab,
+            faces,
+            transport,
+        };
+        let candidate =
+            self.advance_shared(&[participant], dt_s, slab.moisture().len(), controls, cx)?;
+        let (atmosphere, mut solids, shared) = candidate.into_parts();
+        let solid = solids.pop().expect("one admitted participant");
+        let step = AtmosphereMoistureStep {
+            sorption: solid.transport.surface_sorption.clone(),
+            transport: solid.transport,
+            relative_humidity: shared.relative_humidity,
+            vapor_mass_kg: shared.vapor_mass_kg,
+            water_to_solid_kg: shared.water_to_solids_kg,
+            water_balance_residual_kg: shared.water_balance_residual_kg,
+            maximum_carrier_mass_residual_kg: shared.maximum_carrier_mass_residual_kg,
+            gas_internal_energy_change_j: shared.gas_internal_energy_change_j,
+            iterations: shared.iterations,
+        };
+        Ok(AtmosphereMoistureCandidate {
+            atmosphere,
+            moisture: solid.moisture,
+            step,
+        })
+    }
+
+    /// Advance heterogeneous specimens against ONE finite vapor inventory.
+    ///
+    /// Every scalar trial uses the same endpoint RH for all exposed faces and
+    /// restarts each native diffusion owner from its accepted field. Source
+    /// sorption and surface-transfer laws remain specimen-local; the atmosphere
+    /// is debited only once, after all fields and the gas endpoint pass. This
+    /// permits simultaneous adsorption and desorption without ordering bias or
+    /// treating the same vapor as a separate reservoir for every specimen.
+    ///
+    /// Stable IDs must be unique and accepted clocks and temperatures must agree.
+    /// The total cell budget includes sealed specimens, whose internal diffusion
+    /// still advances. Native iteration budgets apply to each scalar trial.
+    /// The existing isothermal, fixed-volume, dilute bound-water assumptions
+    /// remain: this does not add sorption heat, gas flow, or condensation.
+    pub fn advance_shared(
+        &self,
+        participants: &[MoistureParticipant<'_>],
+        dt_s: f64,
+        maximum_total_cells: usize,
+        controls: AtmosphereMoistureSolve,
+        cx: &Cx<'_>,
+    ) -> Result<SharedAtmosphereMoistureCandidate, AtmosphereMoistureError> {
         poll(cx)?;
-        let temperature = self.gas.state().state().temperature;
-        if slab.reference().query().axes()["temperature"].to_bits() != temperature.to_bits() {
+        if participants.is_empty()
+            || maximum_total_cells == 0
+            || maximum_total_cells > super::MAX_MOISTURE_CELLS
+            || participants.len() > maximum_total_cells
+        {
             return Err(invalid(
-                "finite moisture exchange is isothermal across gas and solid",
+                "a nonempty bounded collection of moisture specimens is required",
             ));
+        }
+        let mut ordered: Vec<_> = participants.iter().collect();
+        ordered.sort_unstable_by_key(|body| body.id);
+        if ordered.windows(2).any(|pair| pair[0].id == pair[1].id) {
+            return Err(invalid("shared-atmosphere specimen IDs must be unique"));
+        }
+        let time_s = ordered[0].slab.time_s();
+        let temperature = self.gas.state().state().temperature;
+        let mut cells = 0usize;
+        for body in &ordered {
+            poll(cx)?;
+            cells = cells
+                .checked_add(body.slab.moisture().len())
+                .filter(|count| *count <= maximum_total_cells)
+                .ok_or_else(|| invalid("shared-atmosphere total cell budget exhausted"))?;
+            if body.slab.time_s().to_bits() != time_s.to_bits()
+                || body.slab.reference().query().axes()["temperature"].to_bits()
+                    != temperature.to_bits()
+            {
+                return Err(invalid(
+                    "shared moisture specimens need the same accepted clock and gas temperature",
+                ));
+            }
         }
         let old_inventory = self.inventory()?;
         let initial_rh = old_inventory[self.water] / self.saturation_mass_kg;
-        let total_water = old_inventory[self.water] + slab.water_mass_kg();
         let [mut lower, mut upper] = controls.relative_humidity_bracket;
         if !lower.is_finite()
             || !upper.is_finite()
@@ -409,7 +551,6 @@ impl FiniteMoistureAtmosphere {
             || lower >= upper
             || initial_rh < lower
             || initial_rh > upper
-            || !total_water.is_finite()
             || !positive(controls.mass_tolerance_kg)
             || controls.maximum_iterations == 0
             || controls.maximum_iterations > 256
@@ -421,26 +562,43 @@ impl FiniteMoistureAtmosphere {
 
         let evaluate = |rh| -> Result<_, AtmosphereMoistureError> {
             poll(cx)?;
-            let mut boundary = std::array::from_fn(|_| ResolvedMoistureFace::default());
-            for side in 0..2 {
-                if let Some(law) = &faces[side] {
-                    boundary[side] = law.resolve(temperature, rh)?;
+            let mut solids = Vec::with_capacity(ordered.len());
+            // Balance increments: large pre-existing bound-water inventories
+            // must not provide an artificial tolerance scale for vapor exchange.
+            let mut water_change = 0.0;
+            for body in &ordered {
+                poll(cx)?;
+                let mut boundary = std::array::from_fn(|_| ResolvedMoistureFace::default());
+                for side in 0..2 {
+                    if let Some(law) = &body.faces[side] {
+                        boundary[side] = law.resolve(temperature, rh)?;
+                    }
                 }
+                let (moisture, transport) =
+                    body.slab
+                        .advance_resolved(dt_s, boundary, body.transport, cx)?;
+                water_change += moisture.water_mass_kg() - body.slab.water_mass_kg();
+                solids.push(SharedMoistureSolid {
+                    id: body.id,
+                    moisture,
+                    transport,
+                });
             }
-            let (next, report) = slab.advance_resolved(dt_s, boundary, transport, cx)?;
-            let sources = report.surface_sorption.clone();
-            let residual = self.saturation_mass_kg * rh + next.water_mass_kg() - total_water;
+            let residual = self.saturation_mass_kg * (rh - initial_rh) + water_change;
             if !residual.is_finite() {
                 return Err(invalid("coupled water residual is unrepresentable"));
             }
-            Ok((residual, next, report, sources))
+            Ok((residual, solids, water_change))
         };
         let mut iterations = 0;
         let start = evaluate(initial_rh)?;
         let (rh, accepted) = if start.0.abs() <= controls.mass_tolerance_kg {
             (initial_rh, start)
         } else {
-            if faces.iter().all(Option::is_none) {
+            if ordered
+                .iter()
+                .all(|body| body.faces.iter().all(Option::is_none))
+            {
                 return Err(AtmosphereMoistureError::MassBalance {
                     residual_kg: start.0,
                     tolerance_kg: controls.mass_tolerance_kg,
@@ -484,15 +642,14 @@ impl FiniteMoistureAtmosphere {
                 }
             }
         };
-        let (_, moisture, transport, sorption) = accepted;
+        let (_, solids, water_to_solids_kg) = accepted;
         let atmosphere = if rh.to_bits() == initial_rh.to_bits() {
             self.clone()
         } else {
             self.endpoint(self.saturation_mass_kg * rh, &old_inventory)?
         };
         let new_inventory = atmosphere.inventory()?;
-        let water_to_solid_kg = moisture.water_mass_kg() - slab.water_mass_kg();
-        let residual = new_inventory[self.water] - old_inventory[self.water] + water_to_solid_kg;
+        let residual = new_inventory[self.water] - old_inventory[self.water] + water_to_solids_kg;
         let carrier_residual = new_inventory
             .iter()
             .zip(&old_inventory)
@@ -500,7 +657,7 @@ impl FiniteMoistureAtmosphere {
             .filter(|(i, _)| *i != self.water)
             .map(|(_, (a, b))| (a - b).abs())
             .fold(0.0, f64::max);
-        let mass_residual = atmosphere.gas.mass_kg() - self.gas.mass_kg() + water_to_solid_kg;
+        let mass_residual = atmosphere.gas.mass_kg() - self.gas.mass_kg() + water_to_solids_kg;
         let lost_species = new_inventory
             .iter()
             .zip(&old_inventory)
@@ -523,21 +680,21 @@ impl FiniteMoistureAtmosphere {
         if !gas_internal_energy_change_j.is_finite() {
             return Err(invalid("gas storage change is unrepresentable"));
         }
-        let step = AtmosphereMoistureStep {
-            transport,
-            sorption,
+        let step = SharedAtmosphereMoistureStep {
+            interval_s: [time_s, solids[0].moisture.time_s()],
             relative_humidity: [initial_rh, atmosphere.relative_humidity()?],
             vapor_mass_kg: [old_inventory[self.water], new_inventory[self.water]],
-            water_to_solid_kg,
+            water_to_solids_kg,
             water_balance_residual_kg: residual,
+            total_mass_residual_kg: mass_residual,
             maximum_carrier_mass_residual_kg: carrier_residual,
             gas_internal_energy_change_j,
             iterations,
         };
         poll(cx)?;
-        Ok(AtmosphereMoistureCandidate {
+        Ok(SharedAtmosphereMoistureCandidate {
             atmosphere,
-            moisture,
+            solids,
             step,
         })
     }

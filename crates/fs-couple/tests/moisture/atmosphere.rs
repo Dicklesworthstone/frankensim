@@ -9,6 +9,9 @@ use fs_thermochem::{Composition, CompositionBasis, UNIVERSAL_GAS_CONSTANT_J_PER_
 #[path = "../../src/render/schedule/reed/field_input/tests/support.rs"]
 mod gas_support;
 
+#[path = "atmosphere/shared.rs"]
+mod shared;
+
 const TEMPERATURE: f64 = 293.15;
 const PRESSURE: f64 = 101_325.0;
 const WATER_MOLAR_MASS: f64 = 0.018_015_28;
