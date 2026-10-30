@@ -9,6 +9,8 @@ mod temperature;
 mod ramps;
 mod upstream;
 mod molecular;
+mod mixtures;
+mod observations;
 mod patch;
 mod source_patch;
 mod reservoir;

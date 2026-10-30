@@ -681,6 +681,23 @@ Alternatives use the same original parsers and owners:
   match the selected source area. One source and one coupled declaration may
   appear in either order; duplicate roles refuse, including mixed indexed/SI
   declarations. Neither record changes the original grid.
+- `gas mixture T_K P_PA mole|mass COUNT SPECIES FRACTION ...` and the shared
+  `gas pack NAME` records retain the original named species and complete
+  composition in `NamedMixtureNsfGas`. The original material owner evaluates
+  every evolving cell and thermal face: mixture EOS, molecular viscosity,
+  conductivity, sound speed and `cp/R` for SGS heat remain coupled. Its named
+  near-ambient law has constant source heat capacities, so conserved sensible
+  energy and temperature reconstruction use exactly `(cp - R) T`; no fitted
+  single-species `GasSpec` or NASA9 approximation is substituted. One canonical
+  source state binds the fluid, reference reservoirs, main duct and optional
+  upstream duct. The native record retains the shared reader's canonical mole
+  fractions, including for mass-fraction declarations.
+  The original 273.15–323.15 K, 10–200 kPa and water-saturation limits apply to
+  the reference, declared temperature window and actual evolved/controlled
+  states. A saturated reference cannot authorize colder or supersaturated
+  states. Composition is frozen: this does not add species advection,
+  condensation, chemistry or finite-inventory thermal transport into the DG
+  bore. The NSF bulk/shear viscosity ratio remains an explicit source input.
 - `gas thermochemical T_K P_PA mole|mass COUNT ID FRACTION ...` selects a complete
   source-backed thermochemical model. An `energy_solve ENERGY_J_KG_TOL MAXITER`
   record is then mandatory immediately after `fluid_limits`. Source packs and
@@ -704,8 +721,8 @@ Alternatives use the same original parsers and owners:
   openings. A flush-site closure retains the existing terminal-channel law.
 - `dg_molecular` selects the existing causal molecular-relaxation law for the
   original DG gas region, using exactly the same grammar as native reed/flue
-  sources. Its species composition comes from the original thermochemical
-  source record or axial field. A dry-air scalar snapshot has no species
+  sources. Its species composition comes from the original named-mixture or
+  thermochemical source record, or the axial field. A dry-air scalar snapshot has no species
   association and refuses this law; missing species, unsupported temperatures
   and insufficient memory allowances also refuse. This changes the DG gas
   region's memory; it does not add molecular internal-energy dynamics to the

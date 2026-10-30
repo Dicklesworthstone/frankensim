@@ -3,9 +3,9 @@
 //! Geometry is an explicit Cartesian grid and stationary solid-cell mask,
 //! optionally sampled from bounded SI boxes, clipped wedges, spheres and
 //! capped oriented cylinders. Independent source and bore apertures retain
-//! their own surrounding boundary laws. Gas
-//! evolution retains either the original dry-air law or complete thermochemical
-//! source models; a mixture snapshot is never converted into an invented law.
+//! their own surrounding boundary laws. Gas evolution retains the original
+//! dry-air, named-mixture or complete thermochemical source law. Named species
+//! and composition remain available to the original local material evaluator.
 //! Initial physical states and finite pressure/characteristic controls are data. No jet
 //! card, noise generator, desired pitch or instrument name enters this path.
 //! See `docs/RESOLVED_NSF_DG_COUPLING.md` for the grammar and physical limits.
@@ -23,16 +23,17 @@ use fs_exec::CancelGate;
 use fs_lbm::d3q27::D3q27;
 use fs_lbm::nsf3::{
     NsfBoundaryDrive, NsfCharacteristicAxis, NsfCharacteristicBoundary, NsfCharacteristicPatch,
-    NsfError, NsfGasMedium, NsfGrid3, NsfOpenState, NsfReservoirAperture, NsfSgsConfig, NsfSpec,
+    NamedMixtureNsfGas, NsfError, NsfGasMedium, NsfGrid3, NsfOpenState, NsfReservoirAperture, NsfSgsConfig, NsfSpec,
     ThermochemicalNsfGas, WallThermal, MAX_NSF_RESERVOIR_APERTURES,
 };
 use fs_lbm::sgs3::{SgsConfig, SgsModel, SgsUse};
 use fs_matdb::NormalizedMaterialCardPack;
 use fs_material::gas::{GasSpec, GasState};
 use fs_material::gas_species::input::{
-    GasInputError, GasRecord, ThermochemicalSources, read_frozen_thermochemical_model,
+    GasInputError, GasRecord, ThermochemicalSources, read_frozen_thermochemical_model, read_gas_record,
 };
 use fs_material::thermochemical_gas::energy::GasEnergySolve;
+use fs_qty::semantic::{Composition, CompositionBasis};
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 use std::sync::Arc;
 
@@ -204,14 +205,34 @@ impl ResolvedDgFilePerformance {
         }
 
         let mut row = rows.row("gas")?;
-        let (gas, model, mut gas_records) = match row.fields.clone().next() {
+        let (gas, model, named, mut gas_records) = match row.fields.clone().next() {
             Some("dry-air") => {
                 row.word()?;
                 let temperature = row.scalar()?;
                 let pressure = row.scalar()?;
                 let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), temperature, pressure)
                     .map_err(|e| ResolvedDgInputError::Flow(NsfError::Gas(e.to_string())))?;
-                (gas, None, vec![GasRecord::Legacy(gas)])
+                (gas, None, None, vec![GasRecord::Legacy(gas)])
+            }
+            Some("mixture") | Some("pack") => {
+                let record = read_gas_record(&mut row.fields, None, sources)
+                    .map_err(ResolvedDgInputError::Gas)?;
+                let GasRecord::Mixture(state, parts) = record else {
+                    return Err(bad(row.line, "resolved named gas requires its retained species composition"));
+                };
+                let composition = Composition::new(CompositionBasis::MoleFraction,
+                    parts.iter().map(|(_, fraction)| *fraction).collect())
+                    .map_err(|error| ResolvedDgInputError::Flow(NsfError::Gas(error.to_string())))?;
+                let named = NamedMixtureNsfGas::new(
+                    parts.iter().map(|(species, _)| *species).collect(), composition,
+                    state.temperature, state.pressure,
+                ).map_err(ResolvedDgInputError::Flow)?;
+                // The shared reader retains mole fractions even for mass
+                // input. Resolve that exact frozen source once for every
+                // physical participant; do not mix preconversion roundoff
+                // with the grid's continuing per-temperature material law.
+                let gas = *named.reference_state();
+                (gas, None, Some(named), vec![GasRecord::Mixture(gas, parts)])
             }
             Some("thermochemical") => {
                 let registry = sources.ok_or_else(|| bad(row.line, "resolved mixture needs original thermochemical source packs"))?;
@@ -219,9 +240,9 @@ impl ResolvedDgFilePerformance {
                     .map_err(ResolvedDgInputError::Gas)?;
                 let resolved = model.evaluate(&point).map_err(|e|
                     ResolvedDgInputError::Gas(GasInputError::Material(e)))?;
-                (*resolved.state(), Some((model, point)), vec![GasRecord::Thermochemical(resolved)])
+                (*resolved.state(), Some((model, point)), None, vec![GasRecord::Thermochemical(resolved)])
             }
-            _ => return Err(bad(row.line, "resolved gas requires dry-air T P or a complete thermochemical source; snapshots cannot evolve")),
+            _ => return Err(bad(row.line, "resolved gas requires dry-air T P, a named mixture/pack, or a complete thermochemical source; snapshots cannot evolve")),
         };
         row.end()?;
         let mut row = rows.row("grid")?;
@@ -257,7 +278,8 @@ impl ResolvedDgFilePerformance {
                 maximum_temperature_k: temperature_window_k[1],
                 energy_tolerance_j_kg, maximum_iterations,
             }).map_err(ResolvedDgInputError::Flow)?.into()
-        } else { GasSpec::dry_air_ussa1976().into() };
+        } else if let Some(named) = named { named.into() }
+        else { GasSpec::dry_air_ussa1976().into() };
         let mut row = rows.row("bulk_viscosity")?;
         let bulk_to_shear_ratio = row.scalar()?;
         let bulk_ratio_source = row.word()?.to_string();
