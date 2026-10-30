@@ -15888,3 +15888,39 @@ equivalence, uniform/regional source-to-operator effects, continuing pressure
 and wall motion, shared artifact loading, and malformed/source/cancellation
 refusals. Tests require execution for runtime evidence; synthetic cards do not
 provide experimental material or instrument validation.
+
+## Moving source-bound chambers coupled to shared spatial-wall heat
+
+`cavity_phs::piston::material::solid` connects original material-bound pistons
+to the continuing `SolidEnthalpy` gas network. Original-snapshot nozzle flow
+precedes joint reaction and finite spatial-wall heat, followed by the native
+gas/piston midpoint momentum and pressure-work solve over the SAME thermal
+interval. Source bodies, inertial mass, velocity, support and port history are
+retained. Final volume, species, temperature and pressure drive the next flow
+snapshot. The complete heat-network variant retains original material contacts,
+conduction layers and closed surface radiation.
+
+Native datum-cancelled stage residuals telescope across original-to-final gas,
+finite-wall and kinetic stores, including exterior pressure, applied force and
+support work. Transported enthalpy, chemical formation energy and pressure work
+are never credited twice. Final gas masses are independently remeasured; all
+moving endpoints, wall history and source-resolved structural state return only
+after every stage and enclosing conservation/cancellation check succeeds. The
+native substage port report is replaced by one whole-interval tick. Open species
+streams explicitly require the enclosing assembly balance, not the closed
+piston's two-port audit.
+
+This is first-order flow -> joint reaction/heat -> motion composition, requiring
+time refinement and event splitting. Thermal contact geometry and the structural
+reference mesh stay fixed. The translating piston is a separate rigid source
+body; structural fields retain sequential thermal-loading semantics. Deforming
+wall pressure traction, reciprocal thermoelastic heat, jet thrust, crank/contact/
+friction laws and spatial combustion are not supplied by this composition.
+
+`tests/solid_reactive_gas/moving.rs` defines independent flow, four-store heat and
+midpoint momentum/work references; source conductivity and density changes;
+species/formation continuity; continuing port clocks; full heat-network use;
+and late mechanical refusal/cancellation with deterministic retry. These native
+regressions are authored but unrun in this implementation environment. Separate
+synthetic arithmetic checks and syntax review are not native execution or
+experimental validation.

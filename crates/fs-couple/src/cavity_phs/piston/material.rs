@@ -6,6 +6,8 @@
 
 /// Shared-state multiport flow with the original source-resolved wall inertias.
 pub mod graph;
+/// Continuing pressure work after shared reacting gas and spatial-solid heat.
+pub mod solid;
 
 use super::{ClosedGasParcel, GasPiston, PistonError, PistonInput, PistonSolve, PistonStep};
 use fs_mbd_material::ResolvedBody;

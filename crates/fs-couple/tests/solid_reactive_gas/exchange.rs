@@ -9,6 +9,9 @@ use fs_qty::QuantitySpec;
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_thermochem::{Composition, CompositionBasis};
 
+#[path = "moving.rs"]
+mod moving;
+
 const R: f64 = fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
 const MOLAR_MASS: f64 = 0.028;
 const RS: f64 = R / MOLAR_MASS;
