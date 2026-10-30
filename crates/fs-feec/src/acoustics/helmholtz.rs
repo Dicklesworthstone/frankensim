@@ -39,6 +39,9 @@ pub mod diffusion;
 /// Viscous and thermal boundary layers on the original pressure traces.
 pub mod boundary_layer;
 
+/// Work-conjugate spatial port modes and multiport extraction.
+pub mod multiport;
+
 /// Highest element order accepted; `MAX_ORDER + 1` refuses.
 pub const MAX_ORDER: usize = 4;
 /// Most Neumann modes a window may hold; more refuses (the window is never truncated).
@@ -691,6 +694,21 @@ impl ReducedHelmholtz {
             boundary_layer::BoundaryLayerGeometry,
         )>,
     ) -> Result<Self, AcousticFeError> {
+        Self::build_with_port_loads(fe, modes, ports, static_vectors, wall, None)
+    }
+
+    fn build_with_port_loads(
+        fe: &HelmholtzFe<'_>,
+        modes: &HelmholtzModes,
+        ports: &[&[[u32; 3]]],
+        static_vectors: bool,
+        wall: Option<(
+            &[[u32; 3]],
+            boundary_layer::BoundaryLayerTransport,
+            boundary_layer::BoundaryLayerGeometry,
+        )>,
+        supplied_loads: Option<&[Vec<f64>]>,
+    ) -> Result<Self, AcousticFeError> {
         let mut loads = Vec::with_capacity(ports.len());
         let mut cs = Vec::with_capacity(ports.len());
         let mut area = Vec::with_capacity(ports.len());
@@ -699,6 +717,18 @@ impl ReducedHelmholtz {
             loads.push(b);
             area.push(a);
             cs.push(fe.boundary_mass(faces)?);
+        }
+        if let Some(supplied) = supplied_loads {
+            if supplied.len() != ports.len()
+                || supplied.iter().any(|b| {
+                    b.len() != fe.ndof() || b.iter().any(|value| !value.is_finite())
+                })
+            {
+                return Err(AcousticFeError::InvalidInput {
+                    what: "spatial port load shape or nonfinite value",
+                });
+            }
+            loads.clone_from_slice(supplied);
         }
         let mut basis: Vec<Vec<f64>> = modes.shapes.clone();
         if static_vectors {
@@ -1192,5 +1222,6 @@ mod tests {
         }
     }
 }
+
 
 

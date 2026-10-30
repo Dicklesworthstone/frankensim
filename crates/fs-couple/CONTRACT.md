@@ -14049,3 +14049,35 @@ warm ringing under zero new flow, transmit an added pulse, keep an unexcited
 body silent and preserve all original accepted source history. The existing
 complete-state numerical bounds remain; these checks do not establish
 arbitrary-clock accuracy, empirical calibration or real-time throughput.
+
+### Spatial interior multiports in the original duct composition
+
+`cavity_modal::interior::multiport` binds original FE boundary modes to one
+coherent `GasState`. Lossless, thermoviscous and conductive-wall constructors
+require exact FE density/sound-speed agreement with that gas. Transport and
+the solid thermal sample use the existing source adapters; no independently
+authored air constants or second gas/solid caloric model is introduced.
+
+`duct_scattering` converts the original real-reference FE power scattering
+from `exp(+i omega t)` to the duct owner's `exp(-i omega t)` by entrywise
+conjugation. Port order, positive real references, modal pressure/flow work
+coordinates, and area normalization are unchanged. It exposes the original
+row-major matrix for the existing Redheffer owner; callers retain grouping
+and matching of connected modes and references. Positive real power-reference
+coordinates are not evanescent traveling-wave amplitudes.
+
+`duct_two_port` admits exactly two explicitly retained coordinates and one
+common positive real reference, then returns the original
+`fs_duct::compose::TwoPort`. Existing `compose_chain`/star composition owns the
+network closure, pole/condition handling and terminal load. No retained FE
+mode is silently discarded, no feature schema or surrogate fit is added, and
+source/cancellation errors publish no partial scattering block.
+
+Focused tests compare actual FE-section plus original analytic duct composition
+against one full-length analytic duct, including complex transmission phase,
+input impedance and terminal pressure/flow on P2 meshes 1/2/3; finest scaled
+complex error must be below 1e-4. Source dry/humid gas and conductive/isothermal
+walls change the exported block while the original wall work closes. Typed
+source-medium mismatch, unrequested mode truncation, invalid references and
+cancellation refuse. These are composition checks, not acceptance of an actual
+tone-hole/bend/pad geometry or proof of sufficient evanescent/trace resolution.

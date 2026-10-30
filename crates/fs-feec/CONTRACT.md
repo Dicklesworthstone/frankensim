@@ -1191,3 +1191,53 @@ heating, imperfect interface contact, lateral conduction, multilayer solid,
 mean thermal evolution or time-domain realization is supplied. Existing
 curved-map, narrow-gap, corner-layer and Bessel-cylinder limitations remain;
 M2.4-W1b is not closed by this extension.
+
+
+## Spatial work-conjugate interior ports
+
+`acoustics::helmholtz::multiport::InteriorMultiport` projects real piecewise-linear
+normal-velocity shapes onto the original hierarchical pressure FE. A shape psi
+on physical area A defines inward velocity psi*Q/A and conjugate pressure
+P=integral(psi*p)/A; mean acoustic input work is Re(sum(conj(P)*Q))/2. The
+uniform shape recovers ordinary volume flow and mean pressure. A zero-mean
+shape retains its reactive/transverse response; its Q coordinate is not net
+volume flow. Shapes may share faces and need not be orthogonal. Their ordering,
+normalization and physical interpretation remain explicit caller data.
+
+Original boundary trace quadrature, volume mass/stiffness, modal basis and
+residual-flexibility enrichment are reused; each enrichment uses the actual
+spatial load. `prepare` retains one original cancellable complex LU for repeated
+simultaneous flow excitations. `impedance` extracts every matrix column from
+that factorization without symmetrizing. `scattering` adds the work-conjugate
+Robin load directly before factorization, avoiding an intermediate impedance
+pole. With positive real reference R, a=(P+R*Q)/(2*sqrt(R)) and
+b=(P-R*Q)/(2*sqrt(R)); input work is (norm(a)^2-norm(b)^2)/2.
+The frequency, port and reduced-dimension caps refuse invalid work. Cancellation
+is checked around projection, between modes, and in the original LU/substitution;
+no partially prepared factor or extracted matrix is returned. The existing
+volume assembly/static-enrichment cancellation granularity is unchanged.
+
+`new_with_boundary_layers` and `with_thermal_wall` attach the same viscous and
+gas/solid thermal operators to these spatial ports. Port and wall faces cannot
+overlap. The original `boundary_layer_power` closes their work using the same
+solved pressure coordinates. No new damping law or duplicate heat exchange is
+introduced. Cached projection and one factorization per frequency are algorithmic
+properties, not a measured runtime guarantee.
+
+Four focused native tests cover an independent triangle work moment, parity
+with the original uniform-flow FE, multimode reciprocity and input/wall work,
+power scattering and replay, invalid-input/late-cancellation refusal, and an
+independent straight rectangular guide with a retained below-cutoff cosine mode.
+For P2 meshes with 27/125/343 DOFs, plane-impedance relative errors decrease
+1.755559e-4 -> 1.832614e-5 -> 4.180726e-6, while evanescent errors decrease
+0.2690877 -> 0.03035866 -> 0.005153092. These are fixture-specific FE/trace
+convergence results, not general accuracy bounds.
+
+The original exp(+i omega t) convention is retained. Real-reference power
+coordinates are not propagating/evanescent traveling-wave amplitudes, whose
+normalization and reciprocity metric differ. No evanescent channel is discarded
+or incorrectly assigned a Euclidean traveling-wave passivity test. Analytic
+cross-section eigenfunctions, curved geometry, resolved thin-gap LNS, transverse
+truncation bounds, port de-embedding, qualified tone-hole junctions and complete
+M2.4-W2 acceptance remain outside this extraction capability. Spatial traces,
+volume mesh/order and reduced basis require their own refinement.

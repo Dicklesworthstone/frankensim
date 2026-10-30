@@ -4,6 +4,9 @@
 //! original pressure traces and the frequency solve stay in `fs-feec`. This
 //! adapter only binds their numerical views to the same coherent gas state.
 
+/// Source gas and duct composition for original spatial FE boundary modes.
+pub mod multiport;
+
 use fs_feec::acoustics::helmholtz::boundary_layer::thermal_wall::{
     ConductiveThermalWall, ThermalWall, ThermalWallDepth, WallThermalTransport,
 };
