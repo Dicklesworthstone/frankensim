@@ -15,7 +15,8 @@ use fs_lbm::material::free_surface::enthalpy::{
     FreeSurfaceCellHeat, FreeSurfaceEnthalpyError, MaterialFreeSurfaceEnthalpy3,
     conduction::{
         FreeSurfaceBodyContact, FreeSurfaceBodyInterface, FreeSurfaceConductionControls,
-        FreeSurfaceConductionFace, FreeSurfaceGasFace, FreeSurfaceThermalBody,
+        FreeSurfaceConductionFace, FreeSurfaceGasFace, FreeSurfaceInterfaceFace,
+        FreeSurfaceInterfaceSolve, FreeSurfaceThermalBody,
     },
     viscous::FreeSurfaceViscousConductionReport,
 };
@@ -80,7 +81,7 @@ pub struct ReactiveLiquidGasReport {
     pub liquid_enthalpy_change_j: f64,
     /// Actual sum of finite solid wall enthalpy changes [J].
     pub wall_enthalpy_change_j: f64,
-    /// External authored/electrical heat and physical molecular dissipation [J].
+    /// External authored/electrical/radiant heat and physical molecular dissipation [J].
     /// Gas/liquid and solid/liquid exchange are internal and do not enter this sum.
     pub supplied_thermal_energy_j: f64,
     /// Sum of actual storage changes minus supplied_thermal_energy_j [J].
@@ -164,13 +165,116 @@ impl GasReaction {
         controls: ReactiveLiquidGasSolve,
         gate: &CancelGate,
     ) -> Result<ReactiveLiquidGasCandidate<'s, 'm, 'b>, ReactiveLiquidGasError> {
+        self.liquid_boundary_candidate(
+            liquid,
+            gas,
+            bodies,
+            exposed.len(),
+            controls,
+            gate,
+            |next_liquid, next_gas, next_bodies| {
+                next_liquid.step_with_finite_gas_environment(
+                    faces,
+                    heat,
+                    controls.thermal,
+                    next_bodies,
+                    contacts,
+                    interfaces,
+                    next_gas,
+                    exposed,
+                    controls.reaction.gas,
+                    controls.with_viscous_heating,
+                    gate,
+                )
+            },
+        )
+    }
+
+    /// React the finite atmosphere and solve the SAME liquid/gas/radiation
+    /// interface before advancing its original native flow and enthalpy.
+    ///
+    /// This uses the existing zero-storage surface solve: actual product gas
+    /// conductivity and caloric storage determine the shared surface temperature.
+    /// When the liquid has attached thermocapillarity, its original sigma(Ts)
+    /// supplies capillary pressure and Marangoni stress. Bulk liquid transport
+    /// retains its own enthalpy-derived temperature. Radiation can heat either
+    /// finite participant through this surface and enters the enclosing account
+    /// once; gas/liquid exchange remains internal.
+    ///
+    /// Supply the native owner's complete current surface geometry and solve
+    /// controls. Its geometry/source/refinement limits remain unchanged; no
+    /// surface law, radiative material data or additional chemical heat is
+    /// inferred. The gas remains homogeneous with fixed mass/volume. No gas
+    /// traction, phase conversion, surface-energy or whole mechanical-energy
+    /// theorem is added. This shares the original first-order reaction then
+    /// thermal/flow split and transactional publication with `liquid_candidate`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn liquid_surface_candidate<'s, 'm, 'b>(
+        &self,
+        liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+        gas: &IsochoricGasParcel,
+        bodies: &[FreeSurfaceThermalBody<'b>],
+        faces: &[FreeSurfaceConductionFace],
+        heat: &[FreeSurfaceCellHeat],
+        contacts: &[FreeSurfaceBodyContact],
+        interfaces: &[FreeSurfaceBodyInterface<'_>],
+        surfaces: &[FreeSurfaceInterfaceFace],
+        surface_solve: FreeSurfaceInterfaceSolve,
+        controls: ReactiveLiquidGasSolve,
+        gate: &CancelGate,
+    ) -> Result<ReactiveLiquidGasCandidate<'s, 'm, 'b>, ReactiveLiquidGasError> {
+        self.liquid_boundary_candidate(
+            liquid,
+            gas,
+            bodies,
+            surfaces.len(),
+            controls,
+            gate,
+            |next_liquid, next_gas, next_bodies| {
+                next_liquid.step_with_finite_gas_surface_exchange(
+                    faces,
+                    heat,
+                    controls.thermal,
+                    next_bodies,
+                    contacts,
+                    interfaces,
+                    next_gas,
+                    surfaces,
+                    controls.reaction.gas,
+                    surface_solve,
+                    controls.with_viscous_heating,
+                    gate,
+                )
+            },
+        )
+    }
+
+    // All admitted boundaries share chemical staging, actual whole-interval
+    // storage, source admission and atomic publication. The callback can only
+    // evolve the private original-owner clones, never the accepted inputs.
+    #[allow(clippy::too_many_arguments)]
+    fn liquid_boundary_candidate<'s, 'm, 'b>(
+        &self,
+        liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+        gas: &IsochoricGasParcel,
+        bodies: &[FreeSurfaceThermalBody<'b>],
+        surface_count: usize,
+        controls: ReactiveLiquidGasSolve,
+        gate: &CancelGate,
+        exchange: impl FnOnce(
+            &mut MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+            &mut IsochoricGasParcel,
+            &mut [FreeSurfaceThermalBody<'b>],
+        )
+            -> Result<FreeSurfaceViscousConductionReport, FreeSurfaceEnthalpyError>,
+    ) -> Result<ReactiveLiquidGasCandidate<'s, 'm, 'b>, ReactiveLiquidGasError> {
         poll(gate)?;
         if !controls.maximum_gas_temperature_increment_k.is_finite()
             || controls.maximum_gas_temperature_increment_k <= 0.0
             || !controls.total_energy_tolerance_j.is_finite()
             || controls.total_energy_tolerance_j < 0.0
-            || exposed.is_empty()
-            || exposed.len() > controls.thermal.maximum_faces
+            || surface_count == 0
+            || surface_count > controls.thermal.maximum_faces
         {
             return Err(ReactiveLiquidGasError::Invalid(
                 "bounded exposed patches and finite gas temperature/combined energy limits required",
@@ -197,19 +301,7 @@ impl GasReaction {
         let mut next_gas = reacted.into_isochoric();
         let mut next_liquid = liquid.clone();
         let mut next_bodies = bodies.to_vec();
-        let thermal = next_liquid.step_with_finite_gas_environment(
-            faces,
-            heat,
-            controls.thermal,
-            &mut next_bodies,
-            contacts,
-            interfaces,
-            &mut next_gas,
-            exposed,
-            controls.reaction.gas,
-            controls.with_viscous_heating,
-            gate,
-        )?;
+        let thermal = exchange(&mut next_liquid, &mut next_gas, &mut next_bodies)?;
         let gas_internal_energy_change_j = gas.mass_kg()
             * (next_gas.state().specific_internal_energy_j_kg()
                 - gas.state().specific_internal_energy_j_kg());
@@ -219,17 +311,17 @@ impl GasReaction {
             .map(FreeSurfaceThermalBody::enthalpy_j)
             .sum::<f64>()
             - initial_wall_h;
-        let environment =
-            thermal
-                .conduction
-                .environment
-                .as_ref()
-                .ok_or(ReactiveLiquidGasError::Invalid(
-                    "finite atmosphere lost its native heat account",
-                ))?;
+        let gas_supply_j = match (&thermal.conduction.environment, &thermal.conduction.surface) {
+            (Some(environment), None) => environment.heat_to_liquid_j,
+            (None, Some(surface)) => surface.heat_from_gas_j,
+            _ => {
+                return Err(ReactiveLiquidGasError::Invalid(
+                    "finite atmosphere requires exactly one original boundary heat account",
+                ));
+            }
+        };
         let flow = &thermal.conduction.flow;
-        let supplied_thermal_energy_j =
-            flow.external_heat_j - environment.heat_to_liquid_j + flow.viscous_heat_j;
+        let supplied_thermal_energy_j = flow.external_heat_j - gas_supply_j + flow.viscous_heat_j;
         let combined_energy_residual_j =
             gas_internal_energy_change_j + liquid_enthalpy_change_j + wall_enthalpy_change_j
                 - supplied_thermal_energy_j;

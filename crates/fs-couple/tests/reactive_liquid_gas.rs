@@ -35,6 +35,9 @@ use fs_thermochem::*;
 #[path = "material_exchange/gas.rs"]
 mod gas_data;
 
+#[path = "reactive_liquid_gas/surface.rs"]
+mod surface;
+
 const EXPOSED: [usize; 3] = [3, 3, 3];
 const VOLUME: f64 = 1e-8;
 const DT: f64 = 0.001;
@@ -152,10 +155,7 @@ fn face() -> FreeSurfaceGasFace {
     }
 }
 
-fn with_liquid<R>(
-    moving: bool,
-    run: impl FnOnce(&MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
-) -> R {
+fn liquid_card() -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (name, dims, values) in [
         ("density", Dims([-3, 1, 0, 0, 0, 0]), [1000.0; 2]),
@@ -195,7 +195,7 @@ fn with_liquid<R>(
             })
             .unwrap();
     }
-    let card = MaterialCard::assemble(
+    MaterialCard::assemble(
         MaterialStateId {
             chemistry: "manufactured liquid".into(),
             phase: "liquid".into(),
@@ -205,7 +205,14 @@ fn with_liquid<R>(
         claims,
         vec![],
     )
-    .unwrap();
+    .unwrap()
+}
+
+fn with_liquid<R>(
+    moving: bool,
+    run: impl FnOnce(&MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
+) -> R {
+    let card = liquid_card();
     let point = QueryPoint::new()
         .with("T", 400.0)
         .unwrap()

@@ -82,6 +82,20 @@ independent isomer/finite-capacity balances, G3 data-only changes that reach
 native VOF populations, continuation and G4 rollback checks; synthetic fixtures
 do not constitute empirical combustion or liquid validation.
 
+`GasReaction::liquid_surface_candidate` shares that chemical staging and
+whole-interval audit with the native solved liquid/gas/radiation interface.
+Product composition, NASA-9 energy and transport feed its surface-temperature
+solve; the original liquid `sigma(T_surface)` then drives native capillary
+pressure and Marangoni traction while bulk transport retains its enthalpy
+temperature. Radiation enters the external account once, and gas/liquid
+transfer cancels within the combined finite inventory. The complete-surface
+geometry and source restrictions, fixed gas mass/volume and first-order split
+remain binding; this adds no surface-energy or mechanical-energy theorem.
+`tests/reactive_liquid_gas/surface.rs` supplies independent zero-storage
+radiative and finite-capacity references, data-only kinetics and surface-tension
+changes reaching native populations, continuation and refusal rollback.
+These are manufactured model checks, not experimental validation.
+
 ## Assembled shell adhesive dissipation
 
 `shear_shell::assembly::MaterialShellAssembly::reduce` projects the original
