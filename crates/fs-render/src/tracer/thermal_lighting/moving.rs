@@ -19,7 +19,7 @@ const UNIFORM_BODY_FRACTION: f64 = 1.0 / 16.0;
 struct MovingSource<'scene> {
     primitive_index: usize,
     instance: &'scene AnimatedGeometryInstance,
-    local: AdmittedLighting<'static>,
+    local: AdmittedLighting<'scene>,
     log_power: f64,
 }
 
@@ -43,12 +43,13 @@ impl<'scene> MovingThermalLights<'scene> {
         let mut ordered = BTreeMap::new();
         for (primitive_index, primitive) in scene.primitives.iter().enumerate() {
             cx.checkpoint()?;
-            let (Shape::AnimatedInstance(instance), Material::GrayDiffuseThermal { surface }) =
-                (&primitive.shape, primitive.material)
-            else {
+            let Shape::AnimatedInstance(instance) = &primitive.shape else {
                 continue;
             };
-            if surface.emissivity() == 0.0 {
+            let Some(surface) = primitive.material.thermal_surface() else {
+                continue;
+            };
+            if !surface.is_emitting() {
                 continue;
             }
             let SharedGeometry::Mesh(mesh) = instance.geometry() else {
@@ -77,8 +78,8 @@ impl<'scene> MovingThermalLights<'scene> {
             let local =
                 AdmittedLighting::with_thermal_surface_emission(cx, &[], None, triangles, true)?;
             let Some(log_power) = local.thermal_log_power(cx)? else {
-                // A completely underflowed visible spectrum has no source
-                // proposal, even if its bolometric exitance remains positive.
+                // The gray source's entire visible spectrum can underflow.
+                // No total-spectrum power is inferred from a spectral table.
                 continue;
             };
             if ordered
@@ -167,7 +168,7 @@ impl<'scene> MovingThermalLights<'scene> {
         ray_time: Option<&PathTime>,
         origin: Point3,
         variates: [f64; 3],
-    ) -> Result<Option<ThermalLightSample>, TracerError> {
+    ) -> Result<Option<ThermalLightSample<'scene>>, TracerError> {
         cx.checkpoint()?;
         if self.is_empty() {
             return Ok(None);

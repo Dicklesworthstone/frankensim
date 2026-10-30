@@ -7,36 +7,36 @@ use fs_blake3::{ContentHash, DomainHasher};
 use fs_geom::{Point3, Vec3};
 
 use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN, QUAD_BINS, cie_y};
-use crate::thermal_surface::GrayDiffuseThermalSurface;
+use crate::thermal_surface::DiffuseThermalSurface;
 
 use super::{LightingError, TAU, canonical_f64_bits, cross, triangle_solid_angle};
 
 /// Source-bound triangle from accepted static or rigid-instance geometry.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct ThermalTriangleLight {
+pub(crate) struct ThermalTriangleLight<'a> {
     pub(crate) vertices: [Point3; 3],
     pub(crate) primitive_index: usize,
-    pub(crate) surface: GrayDiffuseThermalSurface,
+    pub(crate) surface: DiffuseThermalSurface<'a>,
 }
 
 /// One physical thermal-source NEE sample, with the complete mixture PDF.
 #[derive(Clone, Copy, Debug)]
-pub struct ThermalLightSample {
-    /// Primitive carrying the same gray/diffuse surface in the traced scene.
+pub struct ThermalLightSample<'a> {
+    /// Primitive carrying the same diffuse thermal surface in the traced scene.
     pub primitive_index: usize,
     /// Sampled world-space triangle point, in metres.
     pub point: Point3,
     /// Triangle unit normal. Physical thermal emission is two-sided.
     pub normal: Vec3,
     /// The original source-bound Planck law, without an RGB approximation.
-    pub surface: GrayDiffuseThermalSurface,
+    pub surface: DiffuseThermalSurface<'a>,
     /// Full light-mixture density at the shading point, in inverse steradians.
     pub pdf_solid_angle: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct AdmittedThermalTriangle {
-    pub(super) source: ThermalTriangleLight,
+pub(super) struct AdmittedThermalTriangle<'a> {
+    pub(super) source: ThermalTriangleLight<'a>,
     pub(super) identity: ContentHash,
     pub(super) normal: Vec3,
     pub(super) luminance: f64,
@@ -46,8 +46,8 @@ pub(super) struct AdmittedThermalTriangle {
     coordinate_scale: f64,
 }
 
-impl AdmittedThermalTriangle {
-    pub(super) fn try_new(mut source: ThermalTriangleLight, luminance: f64) -> Option<Self> {
+impl<'a> AdmittedThermalTriangle<'a> {
+    pub(super) fn try_new(mut source: ThermalTriangleLight<'a>, luminance: f64) -> Option<Self> {
         if source
             .vertices
             .iter()
@@ -233,9 +233,13 @@ impl AdmittedThermalTriangle {
 }
 
 pub(super) fn visible_luminance(
-    surface: GrayDiffuseThermalSurface,
+    surface: DiffuseThermalSurface<'_>,
     checkpoint: &mut impl FnMut() -> Result<(), LightingError>,
 ) -> Result<f64, LightingError> {
+    if let DiffuseThermalSurface::Spectral(surface) = surface {
+        return spectral_visible_luminance(surface, checkpoint);
+    }
+    // Keep the established gray sampling arithmetic and stream unchanged.
     let dl = (LAMBDA_MAX - LAMBDA_MIN) / QUAD_BINS as f64;
     let mut luminance = 0.0;
     let mut normalization = 0.0;
@@ -269,6 +273,49 @@ pub(super) fn visible_luminance(
     Ok(luminance)
 }
 
+/// Split quadrature at every emissivity knot so even a narrow accepted band
+/// receives proposal weight. Smooth Planck/CIE factors retain the established
+/// maximum bin width. This is cached once per source state, never per triangle
+/// or ray, and does not replace the pointwise transported spectrum.
+fn spectral_visible_luminance(
+    surface: &crate::thermal_surface::SpectralDiffuseThermalSurface,
+    checkpoint: &mut impl FnMut() -> Result<(), LightingError>,
+) -> Result<f64, LightingError> {
+    let emissivity = surface.emissivity();
+    let dl = (LAMBDA_MAX - LAMBDA_MIN) / QUAD_BINS as f64;
+    let mut luminance = 0.0;
+    let mut normalization = 0.0;
+    for interval in emissivity.knots().windows(2) {
+        checkpoint()?;
+        let width = interval[1].0 - interval[0].0;
+        let bins = (width / dl).ceil().max(1.0) as usize;
+        let step = width / bins as f64;
+        for bin in 0..bins {
+            if bin % 8 == 0 {
+                checkpoint()?;
+            }
+            let lambda = interval[0].0 + (bin as f64 + 0.5) * step;
+            let observer_weight = cie_y(lambda) * step;
+            let radiance = surface
+                .radiance_w_m2_sr_nm(lambda)
+                .map_err(|_| LightingError::InvalidThermalTriangle { light_index: 0 })?;
+            luminance += radiance * observer_weight;
+            normalization += observer_weight;
+        }
+    }
+    luminance /= normalization;
+    if !luminance.is_finite() || luminance < 0.0 {
+        return Err(LightingError::InvalidThermalTriangle { light_index: 0 });
+    }
+    // Adjacent binary64 knots can round both midpoints away from a positive
+    // peak; extreme Wien-tail products can also underflow. This proposal-only
+    // floor preserves support without asserting a bolometric surface power.
+    if luminance == 0.0 && DiffuseThermalSurface::Spectral(surface).is_emitting() {
+        luminance = f64::MIN_POSITIVE;
+    }
+    Ok(luminance)
+}
+
 fn normalized(vector: Vec3) -> Option<(Vec3, f64)> {
     let scale = vector.x.abs().max(vector.y.abs()).max(vector.z.abs());
     if !(scale > 0.0 && scale.is_finite()) {
@@ -284,8 +331,11 @@ fn normalized(vector: Vec3) -> Option<(Vec3, f64)> {
 mod tests {
     use super::*;
     use crate::lighting::{AdmittedLighting, LightSample};
+    use crate::thermal_surface::{
+        GrayDiffuseThermalSurface, SpectralDiffuseThermalSurface, SpectralEmissivity,
+    };
 
-    fn triangle(x: f64, primitive_index: usize) -> ThermalTriangleLight {
+    fn triangle(x: f64, primitive_index: usize) -> ThermalTriangleLight<'static> {
         ThermalTriangleLight {
             vertices: [
                 Point3::new(x, 1.0, -0.5),
@@ -294,11 +344,12 @@ mod tests {
             ],
             primitive_index,
             surface: GrayDiffuseThermalSurface::try_new(2400.0, 0.7, ContentHash([71; 32]))
-                .unwrap(),
+                .unwrap()
+                .into(),
         }
     }
 
-    fn admit(triangles: Vec<ThermalTriangleLight>) -> AdmittedLighting<'static> {
+    fn admit(triangles: Vec<ThermalTriangleLight<'_>>) -> AdmittedLighting<'_> {
         AdmittedLighting::try_new_controlled(&[], None, triangles, false, || Ok(())).unwrap()
     }
 
@@ -338,7 +389,9 @@ mod tests {
     fn g5_thermal_source_order_and_vertex_numbering_do_not_change_samples() {
         let a = triangle(-2.0, 1);
         let mut b = triangle(1.0, 2);
-        b.surface = GrayDiffuseThermalSurface::try_new(2700.0, 0.9, ContentHash([72; 32])).unwrap();
+        b.surface = GrayDiffuseThermalSurface::try_new(2700.0, 0.9, ContentHash([72; 32]))
+            .unwrap()
+            .into();
         let forward = admit(vec![a, b]);
         let mut a_reversed = a;
         a_reversed.vertices.swap(0, 2);
@@ -407,5 +460,78 @@ mod tests {
             });
         assert!(matches!(result, Err(LightingError::Cancelled)));
         assert_eq!(polls, 5);
+    }
+
+    #[test]
+    fn g0_narrow_spectral_source_retains_proposal_support_and_borrowed_law() {
+        let surface = SpectralDiffuseThermalSurface::try_new(
+            2400.0,
+            SpectralEmissivity::table(&[
+                (LAMBDA_MIN, 0.0),
+                (552.6, 0.0),
+                (553.0, 1.0),
+                (553.4, 0.0),
+                (LAMBDA_MAX, 0.0),
+            ])
+            .unwrap(),
+            ContentHash([74; 32]),
+        )
+        .unwrap();
+        // Every old fixed quadrature location misses this accepted band.
+        let dl = (LAMBDA_MAX - LAMBDA_MIN) / QUAD_BINS as f64;
+        for bin in 0..QUAD_BINS {
+            let wavelength = LAMBDA_MIN + (bin as f64 + 0.5) * dl;
+            assert_eq!(surface.radiance_w_m2_sr_nm(wavelength).unwrap(), 0.0);
+        }
+        let view = DiffuseThermalSurface::Spectral(&surface);
+        let weight = visible_luminance(view, &mut || Ok(())).unwrap();
+        assert!(weight.is_finite() && weight > f64::MIN_POSITIVE);
+        let source = ThermalTriangleLight {
+            surface: view,
+            ..triangle(-0.5, 4)
+        };
+        let lights = admit(vec![source]);
+        let origin = Point3::new(0.0, 0.0, 0.0);
+        for index in 0..32 {
+            let LightSample::ThermalSurface(sample) = lights
+                .sample(origin, (f64::from(index) + 0.5) / 32.0, 0.37)
+                .unwrap()
+            else {
+                panic!("spectral thermal source expected");
+            };
+            let DiffuseThermalSurface::Spectral(borrowed) = sample.surface else {
+                panic!("accepted spectral law must remain borrowed");
+            };
+            assert!(core::ptr::eq(borrowed, &surface));
+            assert_eq!(
+                sample.pdf_solid_angle.to_bits(),
+                lights
+                    .thermal_mixture_pdf(4, origin, sample.point)
+                    .to_bits()
+            );
+            assert!(sample.surface.radiance_w_m2_sr_nm(553.0).unwrap() > 0.0);
+            assert_eq!(sample.surface.radiance_w_m2_sr_nm(560.0).unwrap(), 0.0);
+        }
+    }
+
+    #[test]
+    fn g5_borrowed_surface_view_preserves_gray_proposal_arithmetic() {
+        for (temperature, emissivity) in [(2400.0, 0.7), (5500.0, 0.3), (300.0, 1.0)] {
+            let surface =
+                GrayDiffuseThermalSurface::try_new(temperature, emissivity, ContentHash([75; 32]))
+                    .unwrap();
+            let dl = (LAMBDA_MAX - LAMBDA_MIN) / QUAD_BINS as f64;
+            let mut expected = 0.0;
+            let mut normalization = 0.0;
+            for bin in 0..QUAD_BINS {
+                let lambda = LAMBDA_MIN + (bin as f64 + 0.5) * dl;
+                let weight = cie_y(lambda) * dl;
+                expected += surface.radiance_w_m2_sr_nm(lambda).unwrap() * weight;
+                normalization += weight;
+            }
+            expected /= normalization;
+            let actual = visible_luminance(surface.into(), &mut || Ok(())).unwrap();
+            assert_eq!(actual.to_bits(), expected.to_bits());
+        }
     }
 }

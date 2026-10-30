@@ -1,6 +1,6 @@
-//! Opaque gray/diffuse surfaces in local thermal equilibrium.
+//! Opaque diffuse surfaces in local thermal equilibrium.
 //!
-//! This is an explicit constitutive approximation: one emissivity applies at
+//! The gray law is an explicit constitutive approximation: one emissivity applies at
 //! every wavelength and direction, with diffuse reflectance `1 - emissivity`.
 //! A hemispherical-total measurement alone does not establish that assumption.
 //! The material-state adapter binds this declared approximation to the SAME
@@ -15,9 +15,17 @@
 //! This spectrum is for emission into vacuum (the tracer's exterior air
 //! approximation). A thermal hit within an active dielectric medium refuses;
 //! no refractive-index correction is invented for the original cooling model.
+//!
+//! [`SpectralDiffuseThermalSurface`] additionally accepts a declared visible-band
+//! emissivity curve and uses it for both reciprocal reflection and emission.
+//! That finite-band law makes no claim about bolometric cooling or infrared
+//! continuation; its thermal owner remains responsible for total energy.
 
 #[cfg(feature = "material-state")]
 mod entropy;
+
+mod spectral;
+pub use spectral::{DiffuseThermalSurface, SpectralDiffuseThermalSurface, SpectralEmissivity};
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_math::det;
@@ -157,9 +165,12 @@ pub enum ThermalSurfaceError {
     Temperature,
     /// Emissivity must be finite and in [0,1].
     Emissivity,
+    /// The visible emissivity table must contain 2–16 strictly increasing
+    /// finite wavelength knots, starting at 380 nm and ending at 780 nm exactly.
+    SpectralEmissivity,
     /// The physical-source identity must not be zero.
     SourceIdentity,
-    /// Wavelength must be finite and strictly positive in nm.
+    /// Wavelength must be finite and inside the model's declared domain.
     Wavelength,
     /// The requested physical radiance or power cannot be represented.
     Unrepresentable,
@@ -167,7 +178,12 @@ pub enum ThermalSurfaceError {
 
 impl core::fmt::Display for ThermalSurfaceError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "invalid gray/diffuse thermal surface: {self:?}")
+        match self {
+            Self::SpectralEmissivity => {
+                f.write_str("invalid visible-band spectral emissivity table")
+            }
+            _ => write!(f, "invalid gray/diffuse thermal surface: {self:?}"),
+        }
     }
 }
 impl core::error::Error for ThermalSurfaceError {}

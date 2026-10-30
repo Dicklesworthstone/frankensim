@@ -19,6 +19,8 @@ mod lighting;
 mod moving;
 #[path = "thermal_surface/scene_exposure.rs"]
 mod scene_exposure;
+#[path = "thermal_surface/spectral.rs"]
+mod spectral;
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new_clock_free();

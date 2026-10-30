@@ -632,11 +632,11 @@ pub struct EnvironmentEvaluation {
 
 /// One direct-light sample.
 #[derive(Debug, Clone, Copy)]
-pub enum LightSample {
+pub enum LightSample<'a> {
     /// Finite rectangular source.
     Rectangle(RectLightSample),
-    /// Finite physical gray/diffuse thermal surface.
-    ThermalSurface(ThermalLightSample),
+    /// Finite physical diffuse thermal surface with gray or spectral emissivity.
+    ThermalSurface(ThermalLightSample<'a>),
     /// Infinite environment source.
     Environment(EnvironmentLightSample),
 }
@@ -692,7 +692,7 @@ pub struct AdmittedLighting<'a> {
     // admitted scalar in input order so hot mixture-PDF paths never repeat
     // that quadrature and original rectangle indices remain O(1).
     rectangle_luminances: Vec<f64>,
-    thermal_triangles: Vec<AdmittedThermalTriangle>,
+    thermal_triangles: Vec<AdmittedThermalTriangle<'a>>,
     thermal_tree: Option<ThermalLightTree>,
     nonthermal_candidates: Vec<Candidate>,
     has_positive_thermal: bool,
@@ -733,7 +733,7 @@ impl<'a> AdmittedLighting<'a> {
         cx: &Cx<'_>,
         rectangles: &'a [RectLight],
         environment: Option<&'a EnvironmentMap>,
-        triangles: Vec<ThermalTriangleLight>,
+        triangles: Vec<ThermalTriangleLight<'a>>,
         has_unsampled_surface_emission: bool,
     ) -> Result<Self, LightingError> {
         Self::try_new_controlled(
@@ -748,7 +748,7 @@ impl<'a> AdmittedLighting<'a> {
     fn try_new_controlled(
         rectangles: &'a [RectLight],
         environment: Option<&'a EnvironmentMap>,
-        triangles: Vec<ThermalTriangleLight>,
+        triangles: Vec<ThermalTriangleLight<'a>>,
         has_unsampled_surface_emission: bool,
         mut checkpoint: impl FnMut() -> Result<(), LightingError>,
     ) -> Result<Self, LightingError> {
@@ -934,7 +934,7 @@ impl<'a> AdmittedLighting<'a> {
     /// Sample one candidate with a deterministic residual remap. The exact
     /// single-rectangle/no-environment case passes `u1,u2` straight through.
     #[must_use]
-    pub fn sample(&self, origin: Point3, u1: f64, u2: f64) -> Option<LightSample> {
+    pub fn sample(&self, origin: Point3, u1: f64, u2: f64) -> Option<LightSample<'a>> {
         if !unit_sample(u1) || !unit_sample(u2) {
             return None;
         }
@@ -991,7 +991,7 @@ impl<'a> AdmittedLighting<'a> {
         origin: Point3,
         u1: f64,
         u2: f64,
-    ) -> Option<LightSample> {
+    ) -> Option<LightSample<'a>> {
         let total = self.total_weight(origin);
         if !(total > 0.0 && total.is_finite()) {
             return None;
@@ -1159,7 +1159,7 @@ impl<'a> AdmittedLighting<'a> {
         u2: f64,
         selection_probability: f64,
         total_weight: f64,
-    ) -> Option<LightSample> {
+    ) -> Option<LightSample<'a>> {
         match candidate.kind {
             LightKind::Rectangle(light_index) => {
                 self.sample_rectangle(light_index, origin, u1, u2, selection_probability)
@@ -1182,7 +1182,7 @@ impl<'a> AdmittedLighting<'a> {
         u1: f64,
         u2: f64,
         total_weight: f64,
-    ) -> Option<LightSample> {
+    ) -> Option<LightSample<'a>> {
         let triangle = self.thermal_triangles.get(light_index)?;
         let point = triangle.sample_point(u1, u2);
         let pdf_solid_angle = self.thermal_mixture_pdf_with_total(
@@ -1209,7 +1209,7 @@ impl<'a> AdmittedLighting<'a> {
         u1: f64,
         u2: f64,
         selection_probability: f64,
-    ) -> Option<LightSample> {
+    ) -> Option<LightSample<'a>> {
         let light = self.rectangles.get(light_index)?;
         let (point, conditional_pdf) = sample_rectangle_solid_angle(light, origin, u1, u2)?;
         let direction = point.delta_from(origin);

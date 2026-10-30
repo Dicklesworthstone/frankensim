@@ -6,7 +6,10 @@ use super::*;
 use crate::animated_instances::{RigidTransformTrajectory, TransformKeyframe};
 use crate::charts::TriMesh;
 use crate::motion::{ShotTimeBounds, ShutterConvention, ShutterDistribution};
-use crate::thermal_surface::GrayDiffuseThermalSurface;
+use crate::thermal_surface::{
+    DiffuseThermalSurface, GrayDiffuseThermalSurface, SpectralDiffuseThermalSurface,
+    SpectralEmissivity,
+};
 use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
 
 fn with_cx<R>(operation: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
@@ -295,5 +298,56 @@ fn g4_empty_cold_invalid_time_and_cancel_have_explicit_outcomes() {
             MovingThermalLights::try_new(&hot_scene, cx),
             Err(TracerError::Cancelled)
         ));
+    });
+}
+
+#[test]
+fn g3_moving_narrow_spectral_emitter_borrows_the_accepted_law_and_matches_hit_density() {
+    with_cx(|cx, _| {
+        let end = RigidTransform::try_new([0.0, 0.0, 0.0, 1.0], [2.0, -1.0, 0.5]).unwrap();
+        let mut primitive = source(1, 1.0, end, 2400.0);
+        primitive.material = Material::SpectralDiffuseThermal {
+            surface: SpectralDiffuseThermalSurface::try_new(
+                2400.0,
+                SpectralEmissivity::table(&[
+                    (380.0, 0.0),
+                    (552.6, 0.0),
+                    (553.0, 1.0),
+                    (553.4, 0.0),
+                    (780.0, 0.0),
+                ])
+                .unwrap(),
+                ContentHash([76; 32]),
+            )
+            .unwrap(),
+        };
+        let scene = scene(vec![primitive]);
+        let Material::SpectralDiffuseThermal { surface } = &scene.primitives[0].material else {
+            unreachable!()
+        };
+        let lights = MovingThermalLights::try_new(&scene, cx).unwrap();
+        assert!(!lights.is_empty());
+        for absolute_time in [0.0, 0.37, 1.0] {
+            let time = time(absolute_time);
+            let transform = lights.sources[0].transform(Some(&time)).unwrap();
+            let origin = transform.transform_point(Point3::new(0.15, 0.25, 3.0));
+            let sample = lights
+                .sample(cx, Some(&time), origin, [0.25, 0.36, 0.7])
+                .unwrap()
+                .unwrap();
+            let DiffuseThermalSurface::Spectral(borrowed) = sample.surface else {
+                panic!("spectral law expected");
+            };
+            assert!(core::ptr::eq(borrowed, surface));
+            assert!(sample.surface.radiance_w_m2_sr_nm(553.0).unwrap() > 0.0);
+            assert_eq!(sample.surface.radiance_w_m2_sr_nm(560.0).unwrap(), 0.0);
+            assert_eq!(
+                sample.pdf_solid_angle.to_bits(),
+                lights
+                    .hit_pdf(cx, Some(&time), 0, origin, sample.point)
+                    .unwrap()
+                    .to_bits()
+            );
+        }
     });
 }

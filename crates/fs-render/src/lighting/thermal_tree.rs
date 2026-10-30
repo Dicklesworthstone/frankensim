@@ -26,7 +26,7 @@ struct Bounds {
 }
 
 impl Bounds {
-    fn triangle(triangle: &AdmittedThermalTriangle) -> Self {
+    fn triangle(triangle: &AdmittedThermalTriangle<'_>) -> Self {
         let mut result = Self {
             lo: [f64::INFINITY; 3],
             hi: [f64::NEG_INFINITY; 3],
@@ -114,7 +114,7 @@ struct Node {
 }
 
 impl Node {
-    fn leaf(index: usize, triangle: &AdmittedThermalTriangle) -> Self {
+    fn leaf(index: usize, triangle: &AdmittedThermalTriangle<'_>) -> Self {
         let weight_cap = TAU * triangle.luminance;
         Self {
             kind: Kind::Leaf(index),
@@ -128,7 +128,7 @@ impl Node {
         }
     }
 
-    fn weight(self, triangles: &[AdmittedThermalTriangle], origin: Point3) -> f64 {
+    fn weight(self, triangles: &[AdmittedThermalTriangle<'_>], origin: Point3) -> f64 {
         if let Kind::Leaf(index) = self.kind {
             return triangles[index].weight(origin);
         }
@@ -193,7 +193,7 @@ pub(super) struct ThermalLightTree {
 
 impl ThermalLightTree {
     pub(super) fn try_new(
-        triangles: &[AdmittedThermalTriangle],
+        triangles: &[AdmittedThermalTriangle<'_>],
         checkpoint: &mut impl FnMut() -> Result<(), LightingError>,
     ) -> Result<Option<Self>, LightingError> {
         let mut domain = None;
@@ -258,7 +258,7 @@ impl ThermalLightTree {
     fn build(
         &mut self,
         indices: &[usize],
-        triangles: &[AdmittedThermalTriangle],
+        triangles: &[AdmittedThermalTriangle<'_>],
         checkpoint: &mut impl FnMut() -> Result<(), LightingError>,
     ) -> Result<usize, LightingError> {
         checkpoint()?;
@@ -289,13 +289,13 @@ impl ThermalLightTree {
         Ok(index)
     }
 
-    pub(super) fn weight(&self, triangles: &[AdmittedThermalTriangle], origin: Point3) -> f64 {
+    pub(super) fn weight(&self, triangles: &[AdmittedThermalTriangle<'_>], origin: Point3) -> f64 {
         self.nodes[0].weight(triangles, origin)
     }
 
     fn child_probabilities(
         &self,
-        triangles: &[AdmittedThermalTriangle],
+        triangles: &[AdmittedThermalTriangle<'_>],
         origin: Point3,
         left: usize,
         right: usize,
@@ -323,7 +323,7 @@ impl ThermalLightTree {
     /// One descent and a residual uniform variate for the triangle's area map.
     pub(super) fn sample(
         &self,
-        triangles: &[AdmittedThermalTriangle],
+        triangles: &[AdmittedThermalTriangle<'_>],
         origin: Point3,
         mut u: f64,
     ) -> Option<(usize, f64)> {
@@ -351,7 +351,7 @@ impl ThermalLightTree {
 
     pub(super) fn selection_probability(
         &self,
-        triangles: &[AdmittedThermalTriangle],
+        triangles: &[AdmittedThermalTriangle<'_>],
         origin: Point3,
         triangle: usize,
     ) -> f64 {
@@ -377,7 +377,7 @@ impl ThermalLightTree {
 
     pub(super) fn mixture_pdf(
         &self,
-        triangles: &[AdmittedThermalTriangle],
+        triangles: &[AdmittedThermalTriangle<'_>],
         primitive_index: usize,
         origin: Point3,
         point: Point3,
@@ -396,7 +396,7 @@ impl ThermalLightTree {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn mixture_pdf_with_tolerance(
         &self,
-        triangles: &[AdmittedThermalTriangle],
+        triangles: &[AdmittedThermalTriangle<'_>],
         primitive_index: usize,
         origin: Point3,
         point: Point3,
@@ -418,7 +418,7 @@ impl ThermalLightTree {
     fn point_pdf(
         &self,
         index: usize,
-        triangles: &[AdmittedThermalTriangle],
+        triangles: &[AdmittedThermalTriangle<'_>],
         primitive_index: usize,
         origin: Point3,
         point: Point3,
@@ -488,7 +488,7 @@ mod tests {
     use fs_blake3::ContentHash;
     use fs_geom::Vec3;
 
-    fn source(index: usize) -> ThermalTriangleLight {
+    fn source(index: usize) -> ThermalTriangleLight<'static> {
         let x = (index % 8) as f64 - 4.0;
         let z = (index / 8) as f64 - 4.0;
         ThermalTriangleLight {
@@ -503,11 +503,12 @@ mod tests {
                 0.7,
                 ContentHash([73; 32]),
             )
-            .unwrap(),
+            .unwrap()
+            .into(),
         }
     }
 
-    fn admitted(sources: Vec<ThermalTriangleLight>) -> AdmittedLighting<'static> {
+    fn admitted(sources: Vec<ThermalTriangleLight<'_>>) -> AdmittedLighting<'_> {
         AdmittedLighting::try_new_controlled(&[], None, sources, false, || Ok(())).unwrap()
     }
 

@@ -13,17 +13,17 @@ use crate::lighting::{ThermalLightSample, ThermalTriangleLight};
 mod moving;
 pub(super) use moving::MovingThermalLights;
 
-pub(super) fn triangles(
-    scene: &Scene,
+pub(super) fn triangles<'scene>(
+    scene: &'scene Scene,
     cx: &Cx<'_>,
-) -> Result<Vec<ThermalTriangleLight>, TracerError> {
+) -> Result<Vec<ThermalTriangleLight<'scene>>, TracerError> {
     let mut lights = Vec::new();
     for (primitive_index, primitive) in scene.primitives.iter().enumerate() {
         cx.checkpoint()?;
-        let Material::GrayDiffuseThermal { surface } = primitive.material else {
+        let Some(surface) = primitive.material.thermal_surface() else {
             continue;
         };
-        if surface.emissivity() == 0.0 {
+        if !surface.is_emitting() {
             continue;
         }
         let (mesh, placement) = match &primitive.shape {
@@ -87,7 +87,7 @@ pub(super) fn direct_contribution(
     ray_time: Option<&PathTime>,
     settings: &Settings,
     depth: u32,
-    light: ThermalLightSample,
+    light: ThermalLightSample<'_>,
     material: &Material,
     point: Point3,
     frame: SurfaceFrame,

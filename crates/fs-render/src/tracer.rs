@@ -262,7 +262,7 @@ impl SceneLighting<'_> {
         point: Point3,
         rng: &PathRng,
         depth: u32,
-    ) -> Result<Option<crate::lighting::ThermalLightSample>, TracerError> {
+    ) -> Result<Option<crate::lighting::ThermalLightSample<'_>>, TracerError> {
         let Some(moving) = &self.moving else {
             return Ok(None);
         };
@@ -743,7 +743,7 @@ fn u32_unit(x: u32) -> f64 {
     f64::from(x) / 4_294_967_296.0
 }
 
-fn prepare_direct_light(origin: Point3, sample: LightSample) -> Option<PreparedDirectLight> {
+fn prepare_direct_light(origin: Point3, sample: LightSample<'_>) -> Option<PreparedDirectLight> {
     let prepared = match sample {
         LightSample::Rectangle(sample) => {
             let displacement = sample.point.delta_from(origin);
@@ -863,6 +863,14 @@ pub enum Material {
         /// Accepted temperature, gray emissivity and physical-source identity.
         surface: crate::thermal_surface::GrayDiffuseThermalSurface,
     },
+    /// Opaque diffuse equilibrium surface with explicit visible-band spectral
+    /// emissivity. Each wavelength emits `epsilon * B_lambda(T)` and reflects
+    /// `1-epsilon`; the visible table supplies no broadband cooling model.
+    /// `Primitive::emission` must be absent.
+    SpectralDiffuseThermal {
+        /// Accepted temperature, bounded spectral law and source identity.
+        surface: crate::thermal_surface::SpectralDiffuseThermalSurface,
+    },
     /// GGX microfacet (Smith separable shadowing, Schlick Fresnel with
     /// the spectral reflectance as F0).
     Ggx {
@@ -903,6 +911,23 @@ pub enum Material {
 }
 
 impl Material {
+    /// Borrow a common thermal source view without copying a spectral table
+    /// into every triangle or light sample. Gray source arithmetic is retained.
+    #[must_use]
+    pub const fn thermal_surface(
+        &self,
+    ) -> Option<crate::thermal_surface::DiffuseThermalSurface<'_>> {
+        match self {
+            Self::GrayDiffuseThermal { surface } => Some(
+                crate::thermal_surface::DiffuseThermalSurface::Gray(*surface),
+            ),
+            Self::SpectralDiffuseThermal { surface } => Some(
+                crate::thermal_surface::DiffuseThermalSurface::Spectral(surface),
+            ),
+            _ => None,
+        }
+    }
+
     /// Deterministic content identity of this complete tracer material value.
     ///
     /// This binds the numerical visual model, including declared glass
@@ -919,6 +944,10 @@ impl Material {
             }
             Self::GrayDiffuseThermal { surface } => {
                 hasher.update(&[6]);
+                hasher.update(surface.identity().as_bytes());
+            }
+            Self::SpectralDiffuseThermal { surface } => {
+                hasher.update(&[7]);
                 hasher.update(surface.identity().as_bytes());
             }
             Self::Ggx { reflectance, alpha } => {
@@ -3033,11 +3062,13 @@ impl core::fmt::Display for TracerError {
                 formatter.write_str("bidirectional transport does not support brushed conductors")
             }
             Self::ThermalSurfaceUnsupported => formatter
-                .write_str("bidirectional transport does not support gray/diffuse thermal sources"),
-            Self::ThermalSurfaceMediumUnsupported => formatter
-                .write_str("gray/diffuse thermal emission requires an exterior vacuum/air side"),
-            Self::DuplicateThermalEmission => formatter
-                .write_str("a gray/diffuse thermal surface must own its primitive's emission"),
+                .write_str("bidirectional transport does not support diffuse thermal sources"),
+            Self::ThermalSurfaceMediumUnsupported => {
+                formatter.write_str("diffuse thermal emission requires an exterior vacuum/air side")
+            }
+            Self::DuplicateThermalEmission => {
+                formatter.write_str("a diffuse thermal surface must own its primitive's emission")
+            }
             Self::AnimatedLightUnsupported => {
                 formatter.write_str("animated area-light geometry is unsupported")
             }
@@ -9191,6 +9222,19 @@ impl AovAlbedoCache {
             .ok_or(CinematicAovError::InvalidPrimary)?;
         match *slot.get_or_init(|| match material {
             Material::GrayDiffuseThermal { surface } => Ok(Some([surface.reflectance(); 3])),
+            Material::SpectralDiffuseThermal { surface } => {
+                // This cached display/AOV projection is separate from the
+                // physical spectrum used by every path wavelength.
+                let xyz = crate::spectral::xyz_of_spectrum(|lambda| {
+                    surface.reflectance(lambda).unwrap_or(f64::NAN)
+                });
+                let rgb = xyz_to_linear_srgb(xyz_e_to_d65(xyz));
+                if rgb.iter().any(|value| !value.is_finite()) {
+                    Err(())
+                } else {
+                    Ok(Some(rgb.map(|value| value.clamp(0.0, 1.0))))
+                }
+            }
             Material::Lambertian { reflectance } | Material::Ggx { reflectance, .. } => {
                 let rgb = reflectance.rgb();
                 if rgb.iter().any(|value| !value.is_finite()) {
@@ -10274,6 +10318,7 @@ fn discover_parallel_slab(
         Material::Dielectric { glass, surface } => (glass, surface),
         Material::Lambertian { .. }
         | Material::GrayDiffuseThermal { .. }
+        | Material::SpectralDiffuseThermal { .. }
         | Material::Ggx { .. }
         | Material::Conductor { .. }
         | Material::BrushedConductor { .. } => {
@@ -11090,6 +11135,7 @@ fn discover_planar_manifold_boundary(
         Material::Dielectric { glass, surface } => (glass, surface),
         Material::Lambertian { .. }
         | Material::GrayDiffuseThermal { .. }
+        | Material::SpectralDiffuseThermal { .. }
         | Material::Ggx { .. }
         | Material::Conductor { .. }
         | Material::BrushedConductor { .. } => {
@@ -13705,7 +13751,7 @@ fn trace_path_with_emitters(
             break; // v1: emitters do not reflect
         }
 
-        if let Material::GrayDiffuseThermal { surface } = prim.material {
+        if let Some(surface) = prim.material.thermal_surface() {
             if medium_stack.len() != 0 {
                 return Err(TracerError::ThermalSurfaceMediumUnsupported);
             }
@@ -13755,6 +13801,7 @@ fn trace_path_with_emitters(
             )?),
             Material::Lambertian { .. }
             | Material::GrayDiffuseThermal { .. }
+            | Material::SpectralDiffuseThermal { .. }
             | Material::Ggx { .. }
             | Material::Conductor { .. }
             | Material::BrushedConductor { .. } => None,
@@ -14048,6 +14095,7 @@ fn trace_path_with_emitters(
                 }
                 Material::Lambertian { .. }
                 | Material::GrayDiffuseThermal { .. }
+                | Material::SpectralDiffuseThermal { .. }
                 | Material::Ggx { .. }
                 | Material::Conductor { .. }
                 | Material::BrushedConductor { .. } => {
@@ -14900,6 +14948,7 @@ fn trace_path_with_emitters(
             }
             Material::Lambertian { .. }
             | Material::GrayDiffuseThermal { .. }
+            | Material::SpectralDiffuseThermal { .. }
             | Material::Ggx { .. }
             | Material::Conductor { .. }
             | Material::BrushedConductor { .. } => {
@@ -15642,11 +15691,11 @@ fn validate_scene_with_medium_emission<'scene>(
     let mut thermal_emission = false;
     for primitive in &scene.primitives {
         cx.checkpoint()?;
-        if let Material::GrayDiffuseThermal { surface } = primitive.material {
+        if let Some(surface) = primitive.material.thermal_surface() {
             if primitive.emission.is_some() {
                 return Err(TracerError::DuplicateThermalEmission);
             }
-            thermal_emission |= surface.bolometric_exitance_w_m2() > 0.0;
+            thermal_emission |= surface.is_emitting();
         }
     }
     let lighting = if thermal_emission || has_medium_emission {
@@ -19935,7 +19984,10 @@ fn bsdf_eval(mat: &Material, n: Vec3, wo: Vec3, wi: Vec3, lambda: f64) -> f64 {
             let f = schlick(reflectance.eval(lambda), wo.dot(m).max(0.0));
             d * g * f / (4.0 * cos_o * cos_i)
         }
-        Material::Conductor { .. } | Material::BrushedConductor { .. } => 0.0,
+        // These families use fallible wavelength admission in opaque_bsdf_eval.
+        Material::SpectralDiffuseThermal { .. }
+        | Material::Conductor { .. }
+        | Material::BrushedConductor { .. } => 0.0,
         Material::Dielectric { .. } => 0.0,
     }
 }
@@ -19967,6 +20019,16 @@ fn opaque_bsdf_eval(
     incident_medium: Option<DielectricGlass>,
     brushed: Option<&crate::surface_detail::ShadingFrame>,
 ) -> Result<f64, TracerError> {
+    if let Material::SpectralDiffuseThermal { surface } = mat {
+        let reflectance = surface
+            .reflectance(lambda)
+            .map_err(|_| TracerError::InvalidInput)?;
+        return Ok(if n.dot(wo) > 0.0 && n.dot(wi) > 0.0 {
+            reflectance / PI
+        } else {
+            0.0
+        });
+    }
     if let Material::BrushedConductor { optics, detail } = mat {
         // Anisotropic evaluation in the brushed tangent frame. A pole
         // (no derivable radial tangent) falls back to the isotropic base
@@ -20043,7 +20105,9 @@ fn bsdf_pdf(
         return 0.0;
     }
     match mat {
-        Material::Lambertian { .. } | Material::GrayDiffuseThermal { .. } => cos_i / PI,
+        Material::Lambertian { .. }
+        | Material::GrayDiffuseThermal { .. }
+        | Material::SpectralDiffuseThermal { .. } => cos_i / PI,
         Material::Ggx { alpha, .. } => {
             let hsum = Vec3::new(wo.x + wi.x, wo.y + wi.y, wo.z + wi.z);
             let hn = hsum.norm();
@@ -20096,7 +20160,9 @@ fn bsdf_sample(
     brushed: Option<&crate::surface_detail::ShadingFrame>,
 ) -> Option<(Vec3, f64)> {
     match mat {
-        Material::Lambertian { .. } | Material::GrayDiffuseThermal { .. } => {
+        Material::Lambertian { .. }
+        | Material::GrayDiffuseThermal { .. }
+        | Material::SpectralDiffuseThermal { .. } => {
             let (wi, pdf) = cosine_sample(n, u1, u2);
             (pdf > 0.0).then_some((wi, pdf))
         }

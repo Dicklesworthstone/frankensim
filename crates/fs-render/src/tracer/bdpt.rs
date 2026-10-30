@@ -138,7 +138,7 @@ const BIDIRECTIONAL_SAMPLE_KERNEL: &str = "fs-render/bidirectional-sample-block-
 fn admit_thermal_sources(scene: &Scene, cx: &Cx<'_>) -> Result<(), TracerError> {
     for primitive in &scene.primitives {
         cx.checkpoint()?;
-        if matches!(primitive.material, Material::GrayDiffuseThermal { .. }) {
+        if primitive.material.thermal_surface().is_some() {
             return Err(TracerError::ThermalSurfaceUnsupported);
         }
     }
@@ -241,6 +241,7 @@ impl Vertex {
             }
             Material::Lambertian { .. }
             | Material::GrayDiffuseThermal { .. }
+            | Material::SpectralDiffuseThermal { .. }
             | Material::Ggx { .. }
             | Material::Conductor { .. }
             | Material::BrushedConductor { .. } => {
@@ -274,6 +275,7 @@ impl Vertex {
                     Material::Dielectric { surface, .. } => !surface.is_delta(),
                     Material::Lambertian { .. }
                     | Material::GrayDiffuseThermal { .. }
+                    | Material::SpectralDiffuseThermal { .. }
                     | Material::Ggx { .. }
                     | Material::Conductor { .. }
                     | Material::BrushedConductor { .. } => true,
@@ -494,7 +496,9 @@ fn surface_scattering(
             )
         }
         Material::BrushedConductor { .. } => Err(TracerError::BrushedConductorUnsupported),
-        Material::GrayDiffuseThermal { .. } => Err(TracerError::ThermalSurfaceUnsupported),
+        Material::GrayDiffuseThermal { .. } | Material::SpectralDiffuseThermal { .. } => {
+            Err(TracerError::ThermalSurfaceUnsupported)
+        }
         Material::Dielectric { surface, .. } => {
             let Some(alpha) = surface.roughness_alpha() else {
                 return Ok(0.0);
@@ -553,7 +557,9 @@ fn surface_pdf_solid_angle(
             ))
         }
         Material::BrushedConductor { .. } => Err(TracerError::BrushedConductorUnsupported),
-        Material::GrayDiffuseThermal { .. } => Err(TracerError::ThermalSurfaceUnsupported),
+        Material::GrayDiffuseThermal { .. } | Material::SpectralDiffuseThermal { .. } => {
+            Err(TracerError::ThermalSurfaceUnsupported)
+        }
         Material::Dielectric { surface, .. } => {
             let Some(alpha) = surface.roughness_alpha() else {
                 return Ok(0.0);
@@ -594,7 +600,9 @@ fn sample_surface(
     let normal = oriented_normal(vertex, wo).ok_or(TracerError::MissingNormal)?;
     match material {
         Material::BrushedConductor { .. } => Err(TracerError::BrushedConductorUnsupported),
-        Material::GrayDiffuseThermal { .. } => Err(TracerError::ThermalSurfaceUnsupported),
+        Material::GrayDiffuseThermal { .. } | Material::SpectralDiffuseThermal { .. } => {
+            Err(TracerError::ThermalSurfaceUnsupported)
+        }
         Material::Lambertian { .. } | Material::Ggx { .. } | Material::Conductor { .. } => {
             let Some((wi, pdf_fwd)) = bsdf_sample(material, normal, wo, random[0], random[1], None)
             else {

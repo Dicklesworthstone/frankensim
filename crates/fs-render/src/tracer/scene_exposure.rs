@@ -347,10 +347,10 @@ fn add_budgeted(total: &mut usize, amount: usize, limit: usize) -> Result<(), Tr
 }
 
 fn thermal_triangle_count(primitive: &Primitive) -> usize {
-    let Material::GrayDiffuseThermal { surface } = primitive.material else {
+    let Some(surface) = primitive.material.thermal_surface() else {
         return 0;
     };
-    if surface.emissivity() == 0.0 {
+    if !surface.is_emitting() {
         return 0;
     }
     match &primitive.shape {

@@ -89,7 +89,7 @@ differentiable lift). Pure Rust throughout.
   same-primitive triangle proposals. Thermal hits use the corresponding MIS
   weight and continue through the reciprocal reflection law. The last admitted
   bounce gives NEE full weight because no competing continuation is evaluated.
-  Charts, animated thermal geometry and paths through smooth dielectric
+  Charts and paths through smooth dielectric
   connectors retain camera-path emission without a fictitious NEE competitor.
   Separate `Primitive::emission` is refused for this material. BDPT refuses it
   before film publication until a physical thermal
@@ -100,6 +100,28 @@ differentiable lift). Pure Rust throughout.
   area quadrature under NEE, BSDF, balance MIS and power MIS, and verifies
   occlusion, emissivity scaling and construction-order/progressive replay. These
   are numerical consistency checks, not experimental spectral validation.
+
+- `SpectralDiffuseThermalSurface` extends the same opaque diffuse transport
+  with an explicit visible-band Kirchhoff law. `SpectralEmissivity` admits
+  2–16 strictly increasing linear knots spanning exactly 380–780 nm with
+  emissivity in `[0,1]`; evaluation never extrapolates. Each wavelength emits
+  `epsilon(lambda) * B_lambda(T)` and reflects `1-epsilon(lambda)`. Source
+  identity binds the actual numerical curve, temperature and declared source.
+  A visible table does not supply bolometric exitance, infrared continuation,
+  a cooling debit or authenticated specimen measurements. The original gray
+  model and its all-wavelength source arithmetic remain available unchanged.
+  Camera paths, opaque BSDFs, stationary and moving thermal mesh proposals,
+  physical-medium phase lighting and accepted scene exposures use the same
+  spectral law. AOV albedo caches a separate visible reflectance projection.
+  Prepared triangles and light samples borrow a compact source view; they do
+  not copy a 16-knot table per triangle or path. Visible proposal quadrature
+  splits at the emissivity knots and retains positive narrow-band support
+  even when the old fixed 5 nm nodes miss it. Physical transport still evaluates
+  the original curve at each path wavelength. BDPT and the static photometric
+  scene adapter retain their explicit thermal-source limitations. Numerical
+  tests cover independent SI Planck/Kirchhoff equilibrium, gray limits,
+  narrow-band proposals, source PDFs, direct-estimator energy agreement,
+  moving accepted source states and deterministic execution replay.
 
 - `charts` module (plan §10.2, beads qfx.2 + 8ll9; [S], default-on through
   `chart-backends`): render charts that opt into a typed trace theorem, WITHOUT

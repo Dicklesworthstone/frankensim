@@ -347,7 +347,7 @@ pub(super) fn direct_contribution(
     phase: PhaseFunction,
     point: Point3,
     incoming_travel: Vec3,
-    light: LightSample,
+    light: LightSample<'_>,
     wavelengths: &[f64; PACKET],
 ) -> Result<[f64; PACKET], TracerError> {
     let mut result = [0.0; PACKET];

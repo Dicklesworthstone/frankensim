@@ -375,7 +375,8 @@ impl<'a> PhotometricScene<'a> {
                     Material::BrushedConductor { .. } => {
                         Some("anisotropic tangent-frame shading is not yet supported")
                     }
-                    Material::GrayDiffuseThermal { .. } => {
+                    Material::GrayDiffuseThermal { .. }
+                    | Material::SpectralDiffuseThermal { .. } => {
                         Some("thermal sources require a separate calibrated emission integral")
                     }
                     _ => None,
