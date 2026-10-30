@@ -128,9 +128,11 @@ fn owning_and_borrowed_flows_preserve_complete_work_and_warm_steps_allocate_noth
     let mut supplied = 0.0;
     TRACK.with(|cell| cell.set((true, 0)));
     for _ in 0..1000 {
+        let (free, mobility) = owned.average_relation(&x, &[f64::NAN, -0.23], 0).unwrap();
         let record = owned
             .step_into(&x, &[0.17, -0.23], &mut next, &mut output)
             .unwrap();
+        close(free + mobility * 0.17, output[0]);
         heat += record.dissipated;
         supplied += record.supplied;
         x = next;
@@ -142,7 +144,7 @@ fn owning_and_borrowed_flows_preserve_complete_work_and_warm_steps_allocate_noth
     });
     assert_eq!(
         allocations, 0,
-        "successful warm propagation must reuse every numerical buffer"
+        "successful warm relation and propagation must reuse every numerical buffer"
     );
     assert!(heat > 0.01);
     close(owned.system().hamiltonian(&x) - before + heat, supplied);
@@ -169,6 +171,21 @@ fn cached_full_damping_and_memory_match_direct_exact_flow_and_energy_datum() {
     assert_eq!(end, shifted_end);
     assert_eq!(out, shifted_out);
     assert_eq!(a, b);
+    for port in 0..input.len() {
+        let relation = cached.average_relation(&x, &input, port).unwrap();
+        assert_eq!(
+            relation,
+            shifted.average_relation(&x, &input, port).unwrap()
+        );
+        close(relation.0 + relation.1 * input[port], out[port]);
+        let mut no_memory = x;
+        no_memory[4] = 0.0;
+        let cold = cached.average_relation(&no_memory, &input, port).unwrap();
+        assert!(
+            (relation.0 - cold.0).abs() > 1e-4,
+            "material history must load the current port"
+        );
+    }
     for (actual, truth) in end.iter().zip(&direct.x) {
         close(*actual, *truth);
     }
@@ -229,4 +246,62 @@ fn complete_admission_and_failed_candidates_preserve_both_caller_outputs() {
         (record.delta_h, record.dissipated, record.supplied),
         (0.0, 0.0, 0.0)
     );
+    for port in 0..2 {
+        let (free, mobility) = zero.average_relation(&x, &[0.0, 0.0], port).unwrap();
+        close(free, expected[port]);
+        assert_eq!(mobility, 0.0);
+    }
+    assert!(zero.average_relation(&x, &[0.0, f64::NAN], 0).is_err());
+    assert!(zero.average_relation(&x, &[f64::INFINITY, 0.0], 0).is_ok());
+    assert!(zero.average_relation(&x[..4], &[0.0, 0.0], 0).is_err());
+    assert!(zero.average_relation(&x, &[0.0], 0).is_err());
+    assert!(zero.average_relation(&x, &[0.0, 0.0], 2).is_err());
+}
+
+// G1: the physical scalar equation is dx/dt = -x + 2*u0 - 3*u1,
+// with y0=8*x and y1=-12*x. Its exponential integral is independent of
+// the production energy transform, mean-output map and dense propagator.
+#[test]
+fn mean_port_relation_matches_analytic_decay_and_retains_other_held_sources() {
+    let original = PortHamiltonian::new(
+        1,
+        2,
+        vec![0.0],
+        vec![0.25],
+        vec![2.0, -3.0],
+        Box::new(QuadraticStorage::new(vec![4.0], 1).unwrap()),
+    )
+    .unwrap();
+    let dt = 1.25;
+    let cached = PreparedExactZoh::new_owned(original, dt, budget()).unwrap();
+    let initial = [0.12];
+    let input = [0.17, -0.23];
+    let decay_average = -(-dt).exp_m1() / dt;
+    let response = 1.0 - decay_average;
+    for port in 0..2 {
+        let other = 1 - port;
+        let g = [2.0, -3.0];
+        let output = [8.0, -12.0];
+        let expected_free =
+            output[port] * (initial[0] * decay_average + g[other] * input[other] * response);
+        let expected_mobility = output[port] * g[port] * response;
+        let (free, mobility) = cached.average_relation(&initial, &input, port).unwrap();
+        close(free, expected_free);
+        close(mobility, expected_mobility);
+        assert!(mobility > 0.0);
+        let mut ignored = input;
+        ignored[port] = f64::NAN;
+        assert_eq!(
+            (free, mobility),
+            cached.average_relation(&initial, &ignored, port).unwrap()
+        );
+        let actual = cached.step(&initial, &input).unwrap();
+        close(free + mobility * input[port], actual.y[port]);
+        // The ORIGINAL physical work still equals the held input times its
+        // complete interval mean. Condensing a source creates no loss channel.
+        close(
+            actual.supplied,
+            dt * (input[0] * actual.y[0] + input[1] * actual.y[1]),
+        );
+    }
 }

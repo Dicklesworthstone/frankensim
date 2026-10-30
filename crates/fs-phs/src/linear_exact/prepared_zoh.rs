@@ -48,6 +48,10 @@ pub struct PreparedExactZoh<'a> {
     duration: f64,
     flow: Option<PreparedQuadraticFlow>,
     heat: Option<PositiveHeat>,
+    // Original-coordinate maps for each interval-mean output. These are
+    // extracted from the same cached integral, never from trial trajectories.
+    mean_state: Vec<f64>,
+    mean_input: Vec<f64>,
     scratch: Scratch,
 }
 
@@ -78,21 +82,72 @@ impl<'a> PreparedExactZoh<'a> {
         }
         let (n, m) = (system.n, system.m);
         let scratch = Scratch::new(n, m);
-        if duration == 0.0 { return Ok(Self { system: owner, duration, flow: None, heat: None, scratch }); }
         let q = split.quadratic_matrix();
         let outputs: Vec<Vec<f64>> = (0..m).map(|p| (0..n).map(|j|
             (0..n).map(|k| system.g[k*m+p]*q[k*n+j]).sum()).collect()).collect();
+        if duration == 0.0 {
+            let mean_state: Vec<f64> = outputs.into_iter().flatten().collect();
+            if !finite(&mean_state) {
+                return Err(refuse("prepared ZOH instantaneous output map is nonfinite"));
+            }
+            return Ok(Self { system: owner, duration, flow: None, heat: None,
+                mean_state, mean_input: Vec::new(), scratch });
+        }
         let flow = PreparedQuadraticFlow::new(system, &split, duration, &[], &outputs,
             DenseExponentialBudget { max_dimension: MAX_LINEAR_EXPONENTIAL_BLOCK_DIM,
                 max_dense_bytes: usize::MAX, max_multiply_terms: u64::MAX })?;
+        let mut mean_state = Vec::with_capacity(m*n);
+        let mut mean_input = Vec::with_capacity(m*m);
+        for p in 0..m {
+            let (state, input) = flow.linear_integral_map(p)?;
+            mean_state.extend(state.into_iter().map(|value| value/duration));
+            mean_input.extend(input.into_iter().map(|value| value/duration));
+        }
+        if !finite(&mean_state) || !finite(&mean_input) {
+            return Err(refuse("prepared ZOH mean output map is nonfinite"));
+        }
         let heat = PositiveHeat::new(system, &split, duration, &system.r)?;
-        Ok(Self { system: owner, duration, flow: Some(flow), heat: Some(heat), scratch })
+        Ok(Self { system: owner, duration, flow: Some(flow), heat: Some(heat),
+            mean_state, mean_input, scratch })
     }
 
     /// Original immutable physical owner, including complete material storage.
     pub fn system(&self) -> &PortHamiltonian { self.system.get() }
     /// Prepared held-input duration [s]. It never changes during a warm step.
     pub fn duration(&self) -> f64 { self.duration }
+
+    /// Same-window held-input relation `y_bar[p] = free + beta*input[p]`.
+    ///
+    /// The selected input slot is neither read nor validated; all other held
+    /// inputs and every original initial state coordinate enter `free`.
+    /// This is one allocation-free O(n+m) contraction of the exact cached
+    /// integral, with no trial propagation, exponential or state mutation.
+    /// At zero duration it returns the original instantaneous output and zero
+    /// response. A consumer requiring positive mobility must admit `beta`
+    /// itself; a disconnected port can have an exactly zero response.
+    pub fn average_relation(&self, initial: &[f64], input: &[f64], selected_port: usize)
+        -> Result<(f64, f64), PhsError> {
+        let (n, m) = (self.system().n, self.system().m);
+        if selected_port >= m { return Err(PhsError::BadPortPairing); }
+        if initial.len() != n || input.len() != m || !finite(initial)
+            || input.iter().enumerate().any(|(p, value)| p != selected_port && !value.is_finite())
+        {
+            return Err(refuse("prepared ZOH mean relation requires complete finite state and other inputs"));
+        }
+        let state_row = &self.mean_state[selected_port*n..(selected_port+1)*n];
+        let mut free = state_row.iter().zip(initial).map(|(a, x)| a*x).sum::<f64>();
+        let beta = if self.duration == 0.0 { 0.0 } else {
+            let input_row = &self.mean_input[selected_port*m..(selected_port+1)*m];
+            free += input_row.iter().zip(input).enumerate()
+                .filter(|(p, _)| *p != selected_port)
+                .map(|(_, (a, u))| a*u).sum::<f64>();
+            input_row[selected_port]
+        };
+        if !free.is_finite() {
+            return Err(refuse("prepared ZOH free mean output is nonfinite"));
+        }
+        Ok((free, beta))
+    }
 
     /// Evolve one held input. Heat is the original integral of grad(H)^T R grad(H),
     /// and output is its actual trajectory average, not the final port effort.

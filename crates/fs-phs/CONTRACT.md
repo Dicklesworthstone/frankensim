@@ -1022,3 +1022,25 @@ velocity crosses zero. The existing dimension/EPS coefficient is unchanged.
 This changes no physical state or reaction and adds no projection or drift
 repair. Original incompatible input and atomic-refusal regressions remain; an
 actual 73-state warm-radiation join now completes 128 audio-rate steps.
+
+## Exact held-input mean port response for nonlinear coupling
+
+`PreparedExactZoh::average_relation(initial, input, selected_port)` returns
+`(free, beta)` for the SAME prepared interval's mean output:
+`y_bar[p] = free + beta * input[p]`. Every original state, including material
+memory, and every other held input contributes to the free response. The
+selected input is ignored while predicting its response. Maps come directly
+from the existing cached output integrals, not unit-state probes or new
+exponentials. Warm queries require O(n+m) contractions and no owner allocation.
+
+At zero duration, the relation is the original instantaneous output with zero
+mobility. A disconnected port may also have zero mobility; consumers requiring
+positive impedance must admit it themselves. Existing complete-state, exact
+quadratic, finite-value and dense-work admissions remain. Physical port work
+is still the held input times the integrated original output; this API adds no
+loss, state projection or constitutive approximation.
+
+Focused G1 tests compare a two-port scalar decay with its independent analytical
+integral, retain full cross damping and warm Maxwell history, and preserve the
+energy-datum invariant. The existing 1,000-step allocation check now includes
+mean-port prediction and still observes zero allocations.
