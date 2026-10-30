@@ -19,6 +19,9 @@ mod relaxation;
 #[path = "elliptic_coulomb/driven.rs"]
 mod driven;
 
+#[path = "elliptic_coulomb/impulse.rs"]
+mod impulse;
+
 fn input(free: [f64; 2], compliance: f64) -> TangentialStepInput {
     TangentialStepInput {
         normal_n: 10.0,

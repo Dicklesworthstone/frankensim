@@ -13,15 +13,39 @@ use super::*;
 /// determinant refuses. Rank-deficient static forces need not be unique.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SymmetricTangentialCompliance {
-    matrix: [[f64; 2]; 2],
-    scale: f64,
-    normalized: [f64; 3],
-    determinant: f64,
+    response: SymmetricResponse,
 }
 
 impl SymmetricTangentialCompliance {
     pub fn new(matrix_m_per_n: [[f64; 2]; 2]) -> Result<Self, TriboError> {
-        let m = matrix_m_per_n;
+        Ok(Self {
+            response: SymmetricResponse::new(matrix_m_per_n)?,
+        })
+    }
+
+    #[must_use]
+    pub const fn matrix_m_per_n(self) -> [[f64; 2]; 2] {
+        self.response.matrix
+    }
+
+    pub(super) fn material(self, axis: [f64; 2]) -> Result<([f64; 3], f64), TriboError> {
+        self.response.material(axis)
+    }
+}
+
+// Dimension-neutral symmetric response for the shared projection kernel.
+// Public wrappers attach physical units and require PSD compliance or SPD
+// impulse mobility without inventing a time interval.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct SymmetricResponse {
+    pub(super) matrix: [[f64; 2]; 2],
+    pub(super) scale: f64,
+    pub(super) normalized: [f64; 3],
+    pub(super) determinant: f64,
+}
+
+impl SymmetricResponse {
+    pub(super) fn new(m: [[f64; 2]; 2]) -> Result<Self, TriboError> {
         if m.iter().flatten().any(|v| !v.is_finite())
             || m[0][1] != m[1][0]
             || m[0][0] < 0.0
@@ -59,11 +83,6 @@ impl SymmetricTangentialCompliance {
             normalized,
             determinant,
         })
-    }
-
-    #[must_use]
-    pub const fn matrix_m_per_n(self) -> [[f64; 2]; 2] {
-        self.matrix
     }
 
     pub(super) fn material(self, axis: [f64; 2]) -> Result<([f64; 3], f64), TriboError> {
@@ -110,7 +129,7 @@ impl EllipticCoulomb {
         if input.compliance_m_per_n != 0.0 {
             return Err(invalid("elliptic_competing_compliance"));
         }
-        let m = compliance.matrix;
+        let m = compliance.response.matrix;
         if m[0][1] == 0.0 && m[0][0] == m[1][1] {
             return self.advance(
                 state,
@@ -139,9 +158,11 @@ impl EllipticCoulomb {
             kinetic_caps,
             c,
             determinant,
-            compliance,
+            compliance.response,
             state.axis,
-            input,
+            input.slip_increment_m,
+            input.normal_n > 0.0,
+            ProjectionControls::from(input.solve),
         )?;
         let traction_n = from_principal(state.axis, force)?;
         let slip_increment_m = if force == [0.0; 2] {
@@ -249,17 +270,19 @@ pub(super) fn spectrum(c: [f64; 3], determinant: f64) -> Result<([f64; 2], [f64;
 }
 
 #[allow(clippy::too_many_arguments)]
-fn resolve_matrix(
+pub(super) fn resolve_matrix(
     free: [f64; 2],
     static_caps: [f64; 2],
     caps: [f64; 2],
     c: [f64; 3],
     determinant: f64,
-    matrix: SymmetricTangentialCompliance,
+    matrix: SymmetricResponse,
     material_axis: [f64; 2],
-    input: &TangentialStepInput,
+    free_original: [f64; 2],
+    normal_active: bool,
+    solve: ProjectionControls,
 ) -> Result<Resolution, TriboError> {
-    if input.normal_n == 0.0 || static_caps == [0.0; 2] {
+    if !normal_active || static_caps == [0.0; 2] {
         return Ok(([0.0; 2], free, FrictionRegime::Sliding, 0));
     }
     if free == [0.0; 2] {
@@ -267,7 +290,7 @@ fn resolve_matrix(
     }
     if matrix.determinant > 0.0 {
         let [a, b, d] = matrix.normalized;
-        let g = input.slip_increment_m.map(|v| v / matrix.scale);
+        let g = free_original.map(|v| v / matrix.scale);
         let required = [
             (d * g[0] - b * g[1]) / matrix.determinant,
             (a * g[1] - b * g[0]) / matrix.determinant,
@@ -290,12 +313,10 @@ fn resolve_matrix(
         ];
         let pivot = usize::from(column[1].abs() > column[0].abs());
         if column[pivot] != 0.0 {
-            let required = input.slip_increment_m[pivot] / column[pivot];
+            let required = free_original[pivot] / column[pivot];
             let consistent = (0..2).all(|i| {
-                (input.slip_increment_m[i] - column[i] * required).abs()
-                    <= 64.0
-                        * f64::EPSILON
-                        * (input.slip_increment_m[i].abs() + (column[i] * required).abs())
+                (free_original[i] - column[i] * required).abs()
+                    <= 64.0 * f64::EPSILON * (free_original[i].abs() + (column[i] * required).abs())
             });
             if required.abs() <= static_caps[active] && consistent {
                 let mut force = [0.0; 2];
@@ -307,7 +328,7 @@ fn resolve_matrix(
         let [a, b, d] = matrix.normalized;
         let pivot = usize::from(d > a);
         let other = 1 - pivot;
-        let g = input.slip_increment_m;
+        let g = free_original;
         let null_residual = g[other] - b * g[pivot];
         if null_residual.abs() <= 64.0 * f64::EPSILON * (g[other].abs() + (b * g[pivot]).abs()) {
             let direction = if pivot == 0 { [1.0, b] } else { [b, 1.0] };
@@ -367,7 +388,7 @@ fn resolve_matrix(
     let rhs_eigen = to_principal(axis, rhs)?;
     let mut lower = 0.0;
     let mut upper = det::hypot(rhs[0], rhs[1]);
-    for iteration in 1..=input.solve.max_iterations {
+    for iteration in 1..=solve.maximum_iterations {
         let q = f64::midpoint(lower, upper);
         let mut y = [0.0; 2];
         for i in 0..2 {
@@ -380,7 +401,7 @@ fn resolve_matrix(
         let slip = matrix_slip(free, force, c, matrix.scale)?;
         let expected = support(caps, slip)?;
         let residual = det::hypot(force[0] - expected[0], force[1] - expected[1]);
-        let tolerance = input.solve.tolerance(
+        let tolerance = solve.tolerance(
             det::hypot(force[0], force[1]),
             det::hypot(expected[0], expected[1]),
         )?;

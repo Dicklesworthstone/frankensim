@@ -36,6 +36,9 @@ pub mod relaxation;
 /// Driven static hold, breakaway and bounded directional sliding evolution.
 pub mod driven;
 
+/// Instantaneous directional impulses without advancing physical slip history.
+pub mod impulse;
+
 /// Constant static/kinetic principal coefficients and an initial texture axis.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EllipticCoulomb {
@@ -204,7 +207,14 @@ impl TangentialLaw for EllipticCoulomb {
         let free = to_principal(state.axis, input.slip_increment_m)?;
         let static_caps = capacities(self.static_mu, input.normal_n)?;
         let kinetic_caps = capacities(self.kinetic_mu, input.normal_n)?;
-        let (force, slip, regime, iterations) = resolve(free, static_caps, kinetic_caps, input)?;
+        let (force, slip, regime, iterations) = resolve(
+            free,
+            static_caps,
+            kinetic_caps,
+            input.compliance_m_per_n,
+            input.normal_n > 0.0,
+            ProjectionControls::from(input.solve),
+        )?;
         let traction_n = from_principal(state.axis, force)?;
         let slip_increment_m = if input.compliance_m_per_n == 0.0 {
             // Preserve the exact prescribed kinematic boundary and source path.
@@ -332,14 +342,41 @@ fn support(caps: [f64; 2], slip: [f64; 2]) -> Result<[f64; 2], TriboError> {
 
 type Resolution = ([f64; 2], [f64; 2], FrictionRegime, usize);
 
+// Stateless numerical budgets shared by force/displacement and impulse/velocity
+// projections. Physical wrappers validate their own quantities and units.
+#[derive(Clone, Copy)]
+struct ProjectionControls {
+    maximum_iterations: usize,
+    absolute_tolerance: f64,
+    relative_tolerance: f64,
+}
+impl From<super::TangentialSolveConfig> for ProjectionControls {
+    fn from(solve: super::TangentialSolveConfig) -> Self {
+        Self {
+            maximum_iterations: solve.max_iterations,
+            absolute_tolerance: solve.force_absolute_tolerance_n,
+            relative_tolerance: solve.force_relative_tolerance,
+        }
+    }
+}
+impl ProjectionControls {
+    fn tolerance(self, applied: f64, expected: f64) -> Result<f64, TriboError> {
+        let result =
+            self.absolute_tolerance + self.relative_tolerance * applied.abs().max(expected.abs());
+        finite(result, "elliptic_projection_tolerance")?;
+        Ok(result)
+    }
+}
+
 fn resolve(
     free: [f64; 2],
     static_caps: [f64; 2],
     kinetic_caps: [f64; 2],
-    input: &TangentialStepInput,
+    c: f64,
+    normal_active: bool,
+    solve: ProjectionControls,
 ) -> Result<Resolution, TriboError> {
-    let c = input.compliance_m_per_n;
-    if input.normal_n == 0.0 {
+    if !normal_active {
         return Ok(([0.0; 2], free, FrictionRegime::Sliding, 0));
     }
     if free == [0.0; 2] {
@@ -399,7 +436,7 @@ fn resolve(
     // projection, not a nested vector Newton solve or a sampled direction grid.
     let mut lo = 0.0;
     let mut hi = det::hypot(r[0] * d[0], r[1] * d[1]);
-    for iteration in 1..=input.solve.max_iterations {
+    for iteration in 1..=solve.maximum_iterations {
         let q = f64::midpoint(lo, hi);
         let mut force = [0.0; 2];
         let mut slip = [0.0; 2];
@@ -416,7 +453,7 @@ fn resolve(
         }
         let expected = support(kinetic_caps, slip)?;
         let residual = det::hypot(force[0] - expected[0], force[1] - expected[1]);
-        let tolerance = input.solve.tolerance(
+        let tolerance = solve.tolerance(
             det::hypot(force[0], force[1]),
             det::hypot(expected[0], expected[1]),
         )?;

@@ -3,6 +3,35 @@
 > Status: `frankensim-ext-tribo-dry-baseline-tgbj` baseline. This is not an
 > admitted material-data result or an Euler-disc validation result.
 
+## Directional instantaneous friction impulses
+
+`tangential::elliptic::impulse` resolves a maximum-dissipation tangent
+impulse inside an explicitly declared ellipse at a supplied normal impulse.
+It shares the original scalar/matrix projection with sustained friction through
+dimension-neutral numerical controls and response data. The borrowed original
+law/history supplies coefficient identity and retained texture; impact does
+not advance accumulated physical slip, temperature or texture.
+
+The ellipse requires equal static/kinetic principal coefficients. Full SPD
+tangent mobility and zero friction axes are admitted. This is a conditional
+tangent solve: normal restitution and any normal/tangent coupling remain with
+their mechanical owners. No fictitious timestep or finite-slip heat is used.
+The applied impulse has the actual body sign. Loss is negative midpoint
+impulse work and remains unallocated mechanical loss, including at arrest.
+
+Admission checks actual endpoint velocity, ellipse capacity, associated
+final-slip stationarity and an independent inverse-mobility kinetic-energy
+change. Impulse magnitude, velocity and energy tolerances are explicit.
+The solve allocates no workspace, admits at most 128 root iterations, and
+polls cancellation before/after that bounded projection and after admission.
+Failure leaves the borrowed history unchanged.
+
+Five impulse groups cover analytical isotropic/principal-axis response,
+full-SPD off-axis maximum dissipation, retained-frame and unit covariance,
+degenerate directions and limits, and history/cancellation/budget refusal
+with deterministic retry. Existing finite-slip and driven/relaxation tests
+retain their original physical semantics.
+
 ## Accepted force segments for moving-body consumers
 
 `EllipticCoulomb::advance_driven_segments` exposes each accepted held-traction
