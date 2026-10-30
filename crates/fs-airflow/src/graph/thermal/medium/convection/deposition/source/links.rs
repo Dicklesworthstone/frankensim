@@ -2,6 +2,9 @@
 //! Existing thermal links own area, both energy debits, CFL and integration.
 
 use super::super::{CellConvectionEvaluation, evaluate_convection_state};
+/// Native thermal-timeline integration of finite fluid convection.
+pub mod observer;
+
 use super::*;
 
 /// An existing thermal contact whose total conductance comes from convection.

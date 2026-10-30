@@ -103,31 +103,9 @@ where
         thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<ResolvedCellConvectionSources<F>, SourceCellConvectionError<E>> {
-        checkpoint()?;
-        // The evaluator takes a Boolean cancellation callback. Keep the original
-        // timeline error (including budgets) instead of reducing it to Cancelled.
-        let mut interrupted = None;
-        let evaluated = evaluate_source_cell_convection(
-            thermal,
-            self.bindings,
-            self.maximum_cells,
-            &mut self.resolve,
-            || {
-                if interrupted.is_some() {
-                    return true;
-                }
-                if let Err(error) = checkpoint() {
-                    interrupted = Some(error);
-                    return true;
-                }
-                false
-            },
-        );
-        if let Some(error) = interrupted {
-            return Err(error.into());
-        }
-        checkpoint()?;
-        evaluated
+        with_checkpoint(checkpoint, |cancelled| evaluate_source_cell_convection(
+            thermal, self.bindings, self.maximum_cells, &mut self.resolve, cancelled))
+
     }
 }
 
@@ -194,4 +172,26 @@ where
         self.source_epoch = None;
         Ok(())
     }
+}
+
+// Preserve native budget/domain errors through both source evaluators' Boolean
+// cancellation seam. No source query or candidate state escapes an interruption.
+pub(super) fn with_checkpoint<T, E>(
+    checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    evaluate: impl FnOnce(&mut dyn FnMut() -> bool)
+        -> Result<T, SourceCellConvectionError<E>>,
+) -> Result<T, SourceCellConvectionError<E>> {
+    checkpoint()?;
+    let mut interrupted = None;
+    let result = evaluate(&mut || {
+        if interrupted.is_some() { return true; }
+        if let Err(error) = checkpoint() {
+            interrupted = Some(error);
+            return true;
+        }
+        false
+    });
+    if let Some(error) = interrupted { return Err(error.into()); }
+    checkpoint()?;
+    result
 }

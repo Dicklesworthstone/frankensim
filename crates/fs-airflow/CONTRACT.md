@@ -147,6 +147,21 @@ one material card, independently solve a closed wall/liquid backward-Euler
 balance, change viscosity data, reverse link orientation, and check zero external
 heat plus transactional source/ownership refusals.
 
+`source::links::observer::SourceLinkConvectionObserver` installs these
+conductances on the original explicit thermal timeline. Both the native pair
+exchange and its combined conductive CFL consume the same values. Reports retain
+the actual starting-state material evaluations used by the accepted substep and
+fresh endpoint evaluations separately. Source-support failure at that endpoint
+or cancellation discards both finite-cell histories and the candidate observer.
+Competing conductance owners refuse through the existing observer composition.
+
+The adapter preserves explicit integration and coefficient-freezing refinement
+requirements. Focused tests change only liquid Cp source data, rebuilding its
+original caloric law from the same card, and compare both finite temperatures
+against the analytic constant-property solution across three timestep sizes.
+They also check native CFL budget enforcement, zero external heat, distinct
+applied/endpoint sources, late support failure and cancellation.
+
 ### Shared thermochemical medium in hydraulic and heat paths
 
 `FrozenFlowMedium::bind_fan_bank` connects the same original reference/inlet

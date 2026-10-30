@@ -1,5 +1,8 @@
 //! One liquid source drives transport and caloric storage in a closed pair.
 use super::*;
+
+#[path = "links/observer.rs"]
+mod observer;
 use fs_airflow::graph::thermal::medium::convection::deposition::source::links::*;
 use fs_matdb::SelectionPolicy;
 use fs_material::phase::{HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, SolidLiquidPhase};
@@ -64,6 +67,13 @@ fn pair<'a>(
     reversed: bool,
     authored_g: f64,
 ) -> DepositionSimulation<'a> {
+    // This fixture has constant Cp. Read its enthalpy from the actual source
+    // chart so changing Cp data preserves the same initial 290 K fluid.
+    let knots = fluid.curve().knots();
+    let (lower, upper) = (&knots[0], &knots[knots.len() - 1]);
+    let fluid_h = lower.specific_enthalpy_j_kg
+        + (290.0 - lower.temperature_k) / (upper.temperature_k - lower.temperature_k)
+            * (upper.specific_enthalpy_j_kg - lower.specific_enthalpy_j_kg);
     let mut events = IDS
         .into_iter()
         .enumerate()
@@ -75,7 +85,7 @@ fn pair<'a>(
                 segment_id: i as u64,
                 material_id: MaterialId(i as u64),
                 mass_kg: MASS,
-                specific_h_j_kg: if i == 0 { 10.0 * CP } else { -10.0 * FLUID_CP },
+                specific_h_j_kg: if i == 0 { 10.0 * CP } else { fluid_h },
                 geometry: CellGeometry {
                     start_m: [0.0, i as f64, 0.0],
                     end_m: [0.1, i as f64, 0.0],
