@@ -33,6 +33,41 @@ def row(lines: list[str], key: str) -> tuple[int, list[str]]:
     return matches[0]
 
 
+def gas_records(text: str, exterior: str | None, cavity: str | None) -> str:
+    """Replace only explicitly selected native media, without evaluating either.
+
+    An absent cavity record inherits the exterior in the native solver. An
+    existing one remains independent, including when only the exterior changes.
+    The launcher supplies canonical LF text required by the native schedule.
+    Keep the original material state, molecular law and mechanics.
+    """
+    for option, value in (("--gas-record", exterior), ("--cavity-gas-record", cavity)):
+        if value is not None and (not value.strip() or "\n" in value or "\r" in value):
+            raise ValueError(f"{option} must be one nonempty record")
+    if exterior is None and cavity is None:
+        return text
+    header, schedule = text.split("\nschedule\n", 1)
+    lines = header.splitlines()
+    keys = [line.split()[0] if line.split() else "" for line in lines]
+    gas_rows = [i for i, key in enumerate(keys) if key == "gas"]
+    cavity_rows = [i for i, key in enumerate(keys) if key == "cavity_gas"]
+    if len(gas_rows) != 1:
+        raise ValueError("expected exactly one gas record")
+    gas_row = gas_rows[0]
+    if len(cavity_rows) > 1 or (cavity_rows and cavity_rows[0] != gas_row + 1):
+        raise ValueError("cavity_gas must be a single record immediately after gas")
+
+    if exterior is not None:
+        lines[gas_row] = "gas " + exterior
+    if cavity is not None:
+        if cavity_rows:
+            index = cavity_rows[0]
+            lines[index] = "cavity_gas " + cavity
+        else:
+            lines.insert(gas_row + 1, "cavity_gas " + cavity)
+    return "\n".join(lines) + "\nschedule\n" + schedule
+
+
 def rust_e(value: float) -> str:
     """Canonical gesture f64 exponent spelling, as used by the existing note generator."""
     if not math.isfinite(value):
@@ -201,7 +236,8 @@ def main(argv=None) -> int:
     parser.add_argument("--contact-thermal", type=Path, help="original finite contact-heat profile; thermal properties come from the same assembly packs")
     parser.add_argument("--shell-table", type=Path)
     parser.add_argument("--assembly-options", type=Path)
-    parser.add_argument("--gas-record", help="exact shared gas record after 'gas', e.g. 'mixture 293.15 101325 mole 2 N2 0.8 O2 0.2'")
+    parser.add_argument("--gas-record", help="exact exterior/string gas record after 'gas'; the cavity inherits it only when no cavity_gas is declared")
+    parser.add_argument("--cavity-gas-record", help="exact independent interior gas record after 'cavity_gas'; requires a native cavity and the same static pressure as the exterior")
     parser.add_argument("--gas-component", action="append", nargs=3, default=[], metavar=("SPECIES", "NASA9", "TRANSPORT"))
     parser.add_argument("--gas-water")
     parser.add_argument("--gas-phase", choices=("frozen", "liquid-water"))
@@ -270,12 +306,12 @@ def main(argv=None) -> int:
     text = args.performance.read_text()
     if args.bow_card:
         text = bow_schedule(text, args.bow_card.read_text(), args.string_index, args.bow_distance_from_bridge)
+    try:
+        text = gas_records(text, args.gas_record, args.cavity_gas_record)
+    except ValueError as error:
+        parser.error(str(error))
     header, schedule = text.split("\nschedule\n", 1)
     lines = header.splitlines()
-    if args.gas_record is not None:
-        if not args.gas_record.strip() or "\n" in args.gas_record or "\r" in args.gas_record:
-            parser.error("--gas-record must be one nonempty record")
-        lines[row(lines, "gas")[0]] = "gas " + args.gas_record
     if args.full_scale_pa is not None:
         if not math.isfinite(args.full_scale_pa) or args.full_scale_pa <= 0:
             parser.error("--full-scale-pa must be finite positive pascals")
@@ -364,12 +400,15 @@ def main(argv=None) -> int:
         subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True)
     print(response if response_arguments else wav)
     if args.analysis:
-        _, audio = row(text.split("\nschedule\n", 1)[0].splitlines(), "audio")
-        gas = " ".join(row(text.split("\nschedule\n", 1)[0].splitlines(), "gas")[1][1:])
+        lines = text.split("\nschedule\n", 1)[0].splitlines()
+        _, audio = row(lines, "audio")
+        gas = " ".join(row(lines, "gas")[1][1:])
+        cavity = [line for line in lines if line.split()[:1] == ["cavity_gas"]]
+        atmosphere = "; gas " + gas + ("; " + cavity[0] if cavity else "; cavity_gas inherited")
         subprocess.run([sys.executable, str(HERE / "instrgrade" / "decompose.py"), "listen",
                         "--render", str(wav), "--family", args.family, "--note", args.note,
                         "--slot", args.note + "-" + args.variant, "--git-sha", args.git_sha,
-                        "--observer", args.observer + "; gas " + gas, "--recipe", args.recipe,
+                        "--observer", args.observer + atmosphere, "--recipe", args.recipe,
                         "--reason", "This material/atmosphere configuration has no co-characterized reference recording; this is an ungraded physics render.",
                         "--full-scale-pa", audio[3], "--out", str(args.analysis)], check=True)
     return 0

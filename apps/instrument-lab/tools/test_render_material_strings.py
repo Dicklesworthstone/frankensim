@@ -46,6 +46,59 @@ class MaterialPreparation(unittest.TestCase):
         with self.assertRaises(KeyError):
             R.assembly_geometry(original, "body-length-m 0.4\n")
 
+    def test_independent_cavity_gas_preserves_mechanics_and_original_record_order(self):
+        original = (EXAMPLES / "pluck.material-strings").read_text()
+        exterior = "mixture 301 101325 mass 3 N2 0.6 O2 0.3 CO2 0.1"
+        cavity = "thermochemical 290 101325 mole 2 helium-source 0.8 oxygen-source 0.2"
+        gas_line = next(line for line in original.splitlines(keepends=True) if line.startswith("gas "))
+        inherited = R.gas_records(original, exterior, None)
+        self.assertNotIn("cavity_gas", inherited)
+        inserted = R.gas_records(original, None, cavity)
+        self.assertEqual(inserted, original.replace(gas_line, gas_line + "cavity_gas " + cavity + "\n", 1))
+        independent = R.gas_records(inserted, exterior, None)
+        self.assertIn("cavity_gas " + cavity + "\n", independent)
+        self.assertEqual(R.gas_records(inserted, None, None), inserted)
+        replacement = "mixture 288 101325 mole 1 He 1"
+        replaced = R.gas_records(independent, None, replacement)
+        self.assertEqual(replaced.count("cavity_gas "), 1)
+        self.assertIn("gas " + exterior + "\ncavity_gas " + replacement + "\n", replaced)
+        self.assertEqual([line for line in replaced.splitlines() if line.split()[0] not in ("gas", "cavity_gas")],
+                         [line for line in original.splitlines() if line.split()[0] != "gas"])
+        # The original molecular declaration follows the inserted medium;
+        # its law and budgets must never be recalculated or replaced here.
+        law = "cavity_molecular 32 1024 original-law-data\n"
+        molecular = original.replace(gas_line, gas_line + law, 1)
+        self.assertIn(gas_line + "cavity_gas " + cavity + "\n" + law,
+                      R.gas_records(molecular, None, cavity))
+
+    def test_gas_record_overrides_refuse_multiple_or_ambiguous_records(self):
+        original = (EXAMPLES / "pluck.material-strings").read_text()
+        for record in ("", "   ", "mixture\nstate 1 1", "mixture\rstate 1 1"):
+            for exterior, cavity in ((record, None), (None, record)):
+                with self.assertRaisesRegex(ValueError, "one nonempty record"):
+                    R.gas_records(original, exterior, cavity)
+        valid = R.gas_records(original, None, "mixture 293.15 101325 mole 1 He 1")
+        for source in (valid.replace("body body.fsmatpk", "cavity_gas mixture 293.15 101325 mole 1 He 1\nbody body.fsmatpk"),
+                       original.replace("strings 1", "cavity_gas mixture 293.15 101325 mole 1 He 1\nstrings 1")):
+            with self.assertRaisesRegex(ValueError, "single record immediately after gas"):
+                R.gas_records(source, None, "mixture 293.15 101325 mole 1 N2 1")
+
+    def test_prepare_only_normalizes_crlf_to_the_native_canonical_schedule(self):
+        root = Path(tempfile.mkdtemp())
+        source = root / "source.material-strings"
+        original = (EXAMPLES / "pluck.material-strings").read_bytes().replace(b"\n", b"\r\n")
+        source.write_bytes(original)
+        for name in ("wire.fsmatpk", "body.fsmatpk"):
+            (root / name).write_bytes(b"original material source")
+        output = root / "prepared"
+        self.assertEqual(R.main(["--prepare-only", "--performance", str(source), "--out", str(output)]), 0)
+        canonical = original.replace(b"\r\n", b"\n")
+        self.assertEqual((output / "performance.material-strings").read_bytes(), canonical)
+        packet = json.loads((output / "experiment.native.json").read_text())
+        self.assertEqual(base64.b64decode(packet["source"]), canonical)
+        self.assertIn(b"\nschedule\n", canonical)
+        self.assertEqual(source.read_bytes(), original)
+
     def test_pack_replacement_is_bytes_only_and_refuses_unconsumed_or_duplicate_names(self):
         root = Path(tempfile.mkdtemp())
         packs = root / "packs"
@@ -121,24 +174,28 @@ class MaterialPreparation(unittest.TestCase):
         other = root / "other.fsmatpk"
         other.write_bytes(b"different-density-and-stiffness")
         gas = "mixture 293.15 50662.5 mole 3 N2 0.7 O2 0.2 He 0.1"
+        cavity = "mixture 300 50662.5 mole 3 N2 0.6 O2 0.2 CO2 0.2"
         thermal = root / "source.contact-thermal"
         thermal.write_bytes(b"frankensim-contact-thermal-v1\r\nboundary adiabatic\r\n")
         body = root / "source.body"
         body.write_bytes(b"original coated shell profile\r\n")
         args = ["--renderer", str(executable), "--performance", str(source), "--out", str(root / "run"),
-                "--gas-record", gas, "--pack", f"wire.fsmatpk={other}", "--full-scale-pa", "5",
+                "--gas-record", gas, "--cavity-gas-record", cavity,
+                "--pack", f"wire.fsmatpk={other}", "--full-scale-pa", "5",
                 "--contact-thermal", str(thermal), "--body-profile", str(body),
                 "--coating-strain-guard", "536870912", "1000000000000"]
         self.assertEqual(R.main(args), 0)
         witness = json.loads((root / "run/render.log").read_text())
         self.assertIn("gas " + gas, witness["performance"])
+        self.assertIn("gas " + gas + "\ncavity_gas " + cavity + "\n", witness["performance"])
         self.assertEqual(witness["wire"], "different-density-and-stiffness")
         self.assertEqual(witness["thermal"], thermal.read_bytes().hex())
         self.assertEqual((root / "run/contact-thermal.profile").read_bytes(), thermal.read_bytes())
         self.assertEqual(witness["args"], ["--body-profile", str(root / "run/body.profile"),
             "--contact-thermal", str(root / "run/contact-thermal.profile"),
             "--coating-strain-guard", "536870912", "1000000000000"])
-        self.assertEqual(R.row(witness["performance"].splitlines(), "string"), R.row(original.splitlines(), "string"))
+        self.assertEqual(R.row(witness["performance"].splitlines(), "string")[1], R.row(original.splitlines(), "string")[1])
+        self.assertEqual(R.row(witness["performance"].splitlines(), "state")[1], R.row(original.splitlines(), "state")[1])
         self.assertEqual(source.read_text(), original)
         with self.assertRaises(FileExistsError):
             R.main(args)
@@ -174,10 +231,12 @@ class MaterialPreparation(unittest.TestCase):
             path.write_bytes(bytes([0, 255, i, 13, 10]))
             gas_files.append(path)
         gas = "thermochemical 307 82000 mole 2 oxygen-source 0.3 inert-source 0.7"
+        cavity = "thermochemical 290 82000 mole 2 oxygen-source 0.8 inert-source 0.2"
         output = root / "prepared"
         args = ["--prepare-only", "--performance", str(source), "--out", str(output),
                 "--body-profile", str(body), "--stop-profile", str(stop), "--contact-thermal", str(thermal),
-                "--gas-record", gas, "--gas-component", *map(str, gas_files[:3]),
+                "--gas-record", gas, "--cavity-gas-record", cavity,
+                "--gas-component", *map(str, gas_files[:3]),
                 "--gas-component", *map(str, gas_files[3:]), "--gas-water", "none", "--gas-phase", "frozen"]
         with mock.patch.object(R.subprocess, "run", side_effect=AssertionError("preparation must not render audio")):
             self.assertEqual(R.main(args), 0)
@@ -188,7 +247,8 @@ class MaterialPreparation(unittest.TestCase):
         prepared = base64.b64decode(packet["source"])
         self.assertEqual(prepared, (output / "performance.material-strings").read_bytes())
         self.assertIn("gas " + gas, prepared.decode())
-        self.assertEqual(R.row(prepared.decode().splitlines(), "string"), R.row(original.splitlines(), "string"))
+        self.assertIn("gas " + gas + "\ncavity_gas " + cavity + "\n", prepared.decode())
+        self.assertEqual(R.row(prepared.decode().splitlines(), "string")[1], R.row(original.splitlines(), "string")[1])
         files = {file["path"]: base64.b64decode(file["bytes"]) for file in packet["attachments"]}
         self.assertEqual(packet["stringProfiles"], {"bodyPath": "body.profile", "stopPath": "stops.profile",
                                                   "contactThermalPath": "contact-thermal.profile"})

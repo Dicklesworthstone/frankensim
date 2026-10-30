@@ -41,11 +41,42 @@ NOTES=G3 data/instruments/descriptions/violin/render.sh \
   --gas-record 'mixture 293.15 101325 mole 3 N2 0.7 O2 0.2 He 0.1'
 ```
 
-The one material-gas state reaches the existing string air loading/loss,
-cavity and pressure-observation owners. Solid temperature remains the separate
-`state` record. Thermochemical gas records can supply the native
+The `gas` state reaches the existing string air loading/loss and exterior
+pressure-observation owners. The cavity inherits this state when the performance
+has no `cavity_gas` declaration. An existing independent cavity atmosphere stays
+unchanged when only `--gas-record` is supplied.
+
+Use `--cavity-gas-record` to replace or add the interior medium of a description
+whose native cavity supports separate media. The default violin's compact
+`physical-neck` declaration uses one medium for both ends and therefore keeps
+the same gas inside and outside. A differing medium requires a supplied spatial
+cavity or an exterior-owned mouth, rather than a change to that default alone.
+
+For example, the existing manufactured spatial-cavity fixture supports helium
+inside and air outside. First compile its `wire.fsmatpk` and `closed-shell.fsmatpk`
+sources as described in the material-string example README, then run:
+
+```bash
+python3 apps/instrument-lab/tools/render_material_strings.py \
+  --renderer target/release/material_strings \
+  --performance crates/fs-couple/examples/material_strings/regional-cavity.material-strings \
+  --body-profile crates/fs-couple/examples/material_strings/closed-shell-cavity.body \
+  --pack-root /path/to/compiled-example-packs \
+  --out /path/to/new-cavity-gas-run \
+  --gas-record 'mixture 293.15 101325 mole 2 N2 0.8 O2 0.2' \
+  --cavity-gas-record 'mixture 293.15 101325 mole 1 He 1'
+```
+
+These are independently declared acoustic media at the same static pressure;
+the native model does not add mixing or thermal equilibration through the
+openings. A differing static pressure or a cavity declaration without a modeled
+cavity refuses natively. Molecular-law data remain unchanged and must admit
+the selected medium. Solid temperature remains the separate `state` record.
+Both atmosphere records are retained in a prepared Instrument Lab experiment.
+Thermochemical gas records can supply the native
 `--gas-component SPECIES NASA9 TRANSPORT`, `--gas-water` and `--gas-phase`
-options; no new gas-property calculator is introduced here.
+options for the species in either region; the same native source registry
+resolves both media.
 
 Use `--pack REFERENCED_PATH=SOURCE_PACK` to substitute an explicitly compiled
 material pack, including a body wood, core/section or interface. For example:
