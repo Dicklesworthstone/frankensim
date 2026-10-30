@@ -1,5 +1,6 @@
 //! G1/G3/G4: physical tensor memory and finite self-heating close together.
 mod affine;
+mod expansion;
 use super::*;
 use fs_couple::tensor_material::solid::source::SolidMaterialSource;
 use fs_couple::tensor_material::solid::thermal::relaxation::{

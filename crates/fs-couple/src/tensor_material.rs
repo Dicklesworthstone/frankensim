@@ -157,6 +157,19 @@ impl TensorMaterialBody {
                 // projected Kelvin matrix dissipates v^T C_kv v, once only.
                 r[(n+i)*states+n+k]+=point.viscosity_matrix()[i*n+k];
             }}
+            if point.free_strain_mandel().iter().any(|x| *x != 0.0) {
+                // The unit coordinate is a stationary Casimir, not a force
+                // port. Its PSD quadratic storage is .5 V (S*u-e_th):C:(S*u-e_th).
+                // Native PHS therefore owns both thermal stress and its energy.
+                let unit = states-1;
+                let (load, constant) = point.equilibrium_eigenstrain_terms()
+                    .map_err(TensorMaterialError::Material)?;
+                for i in 0..n {
+                    q[i*states+unit] -= load[i];
+                    q[unit*states+i] -= load[i];
+                }
+                q[unit*states+unit] += 2.0*constant;
+            }
             for branch in point.branches() {
                 let rate=branch.relaxation_time_s().recip();
                 if !rate.is_finite() || rate<=0.0 {return Err(bad("material relaxation rate is unrepresentable"));}
@@ -193,8 +206,19 @@ impl TensorMaterialBody {
     /// consuming graph then owns state, clocks and material-domain admission.
     pub fn into_port_system(self)->PortHamiltonian {self.system}
 
+    fn has_eigenstrain(&self)->bool {
+        self.points.iter().any(|p|p.free_strain_mandel().iter().any(|x|*x!=0.0))
+    }
+
     fn admit_state(&self,x:&[f64])->Result<()> {
         if x.len()!=self.state_dimension() || !finite(x) {return Err(bad("nonfinite or incomplete tensor-memory state"));}
+        // The existing exact flow changes to/from an energy-scaled eigenbasis;
+        // admit only roundoff in this stationary coordinate, never renormalize
+        // the native endpoint or its independently integrated work/loss.
+        if self.has_eigenstrain() && x.last().is_none_or(|v|
+            (v-1.0).abs()>64.0*f64::EPSILON*self.state_dimension() as f64) {
+            return Err(bad("affine material storage stationary coordinate drift exceeds roundoff"));
+        }
         for point in &self.points {
             point.strain(&x[..self.coordinates()]).map_err(TensorMaterialError::Material)?;
         }
@@ -218,12 +242,16 @@ impl TensorMaterialBody {
         }
         let mut state=vec![0.0;self.state_dimension()];state[..n].copy_from_slice(displacement_m);
         state[n..2*n].copy_from_slice(&self.inertia.momentum(velocity_m_s));
+        if self.has_eigenstrain() {let last=state.len()-1;state[last]=1.0;}
         if memory==InitialMemory::Instantaneous {
             let mut at=2*n;
-            for point in &self.points {for branch in point.branches() {
+            for point in &self.points {
+                let free=point.eigenstrain_factor_coordinates().map_err(TensorMaterialError::Material)?;
+                let start=at;
+                for branch in point.branches() {
                 poll(gate)?;
                 for row in branch.rows() {
-                    state[at]=row.iter().zip(displacement_m).fold(0.0,|s,(a,u)|s+a*u);at+=1;
+                    state[at]=row.iter().zip(displacement_m).fold(0.0,|s,(a,u)|s+a*u)-free[at-start];at+=1;
                 }
             }}
         }
@@ -254,7 +282,8 @@ fn full_3d_extent(n:usize,points:&[ProjectedTensorProny],budget:TensorMaterialBu
     }
     let branches=points.iter().try_fold(0_usize,|sum,p|sum.checked_add(p.branches().len()))
         .ok_or_else(||bad("material branch count overflow"))?;
-    let states=branches.checked_mul(6).and_then(|v|v.checked_add(2*n))
+    let affine=usize::from(points.iter().any(|p|p.free_strain_mandel().iter().any(|x|*x!=0.0)));
+    let states=branches.checked_mul(6).and_then(|v|v.checked_add(2*n+affine))
         .ok_or_else(||bad("material state extent overflow"))?;
     let block=states.checked_add(n+1).and_then(|v|v.checked_mul(2))
         .ok_or_else(||bad("material exponential extent overflow"))?;
@@ -284,6 +313,8 @@ impl TensorMaterialHistory<'_> {
     /// points use spring z; plane-stress points use viscous a coordinates, then
     /// zero to three retained normal tensor strains per point where Kelvin
     /// viscosity acts; exactly undamped local directions remain algebraic.
+    /// A full-3D body with nonzero eigenstrain appends one stationary unit
+    /// coordinate for its affine equilibrium storage after all branch memory.
     pub fn state(&self)->&[f64] {&self.state}
     /// Accepted physical displacements [m].
     pub fn displacement_m(&self)->&[f64] {&self.state[..self.body.coordinates()]}

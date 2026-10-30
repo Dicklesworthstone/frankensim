@@ -34,11 +34,13 @@ pub(super) fn states<E>(
     history: &TensorSolidHistory<'_, '_>,
     derivatives: &[TensorTemperatureDerivative],
     temperatures: &[f64],
+    expansion_per_k: Option<&[[f64; 6]]>,
     tolerance: f64,
     gate: &CancelGate,
 ) -> Result<Vec<TensorThermalState>, Error<E>> {
     if derivatives.len() != history.solid.projection.element_count()
         || temperatures.len() != derivatives.len()
+        || expansion_per_k.is_some_and(|a| a.len() != derivatives.len())
     {
         return Err(invalid(
             "complete thermal derivative and temperature per original element required",
@@ -56,11 +58,12 @@ pub(super) fn states<E>(
         check(gate)?;
         let count = 6 * point.branches().len();
         let state = point
-            .thermal_state(
+            .thermal_state_with_expansion(
                 &derivatives[element],
                 history.inner.displacement_m(),
                 &history.inner.state[at..at + count],
                 temperatures[element],
+                expansion_per_k.map_or([0.0; 6], |a| a[element]),
                 tolerance,
                 || gate.is_requested(),
             )

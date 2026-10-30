@@ -12,6 +12,9 @@
 /// Source-backed affine stiffness, entropy and internal caloric exchange.
 pub mod affine;
 pub use affine::{AffineThermalBudget, TensorThermalExchange};
+/// Source-integrated free strain in the original full-memory trajectory.
+pub mod expansion;
+pub use expansion::ThermalExpansionCell;
 
 use super::super::{SolidError, SolidStep, TensorSolidBody, TensorSolidHistory};
 use crate::circuit_enthalpy::{
@@ -87,6 +90,7 @@ pub enum RelaxationThermalError<E> {
     Solid(SolidError),
     Phase(PhaseStateError),
     Material(ThermalMaterialError),
+    Expansion(fs_solid::linear3::source::SolidMaterialError),
     HeatSource(E),
 }
 impl<E: core::fmt::Debug> core::fmt::Display for RelaxationThermalError<E> {
@@ -284,7 +288,7 @@ impl<'s> TensorSolidHistory<'_, 's> {
         gate: &CancelGate,
     ) -> Result<RelaxationThermalCandidate<'s, 't, S>, Error<E>> {
         self.advance_thermal_model(
-            thermal, target_s, force_n, cells, controls, guess_j, resolve, None, gate,
+            thermal, target_s, force_n, cells, controls, guess_j, resolve, None, None, gate,
         )
     }
 
@@ -327,6 +331,52 @@ impl<'s> TensorSolidHistory<'_, 's> {
             guess_j,
             resolve,
             Some(budget),
+            None,
+            gate,
+        )
+    }
+
+    /// Solve actual thermal expansion, inertia, Maxwell memory and reciprocal
+    /// caloric heat on the SAME implicit residual. Expansion comes from the
+    /// existing isotropic/orthotropic source integrals in fixed mesh frames.
+    /// Every interval preserves viscous strain when free strain changes; it
+    /// never reinitializes branch history or replaces motion by equilibrium.
+    ///
+    /// The admitted model has constant stored tensors and constant alpha over
+    /// the complete source interval, with source-dependent tau(T) allowed.
+    /// The native PHS carries .5*(e-e_th):C:(e-e_th) as affine quadratic storage;
+    /// S=V*alpha:sigma includes every branch and U=psi+T*S closes caloric energy.
+    /// The actual caloric chart must keep mass*dh/dT-T*V*alpha:C_inst:alpha > 0.
+    /// Thermal force is internal, never counted as external port work.
+    ///
+    /// This is the existing first-order endpoint split on fixed reference
+    /// geometry and mass, with small total/elastic/free strains. Varying alpha,
+    /// varying stored tensors with expansion, Kelvin thermal strain-rate work,
+    /// finite deformation and phase transitions require another admitted model.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_expanding_thermal_candidate<'t, S, E>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        force_n: &[[f64; 3]],
+        cells: &[RelaxationThermalCell<'_>],
+        expansion: &[ThermalExpansionCell<'_>],
+        controls: RelaxationThermalSolve,
+        budget: AffineThermalBudget,
+        guess_j: &[f64],
+        resolve: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
+        gate: &CancelGate,
+    ) -> Result<RelaxationThermalCandidate<'s, 't, S>, Error<E>> {
+        self.advance_thermal_model(
+            thermal,
+            target_s,
+            force_n,
+            cells,
+            controls,
+            guess_j,
+            resolve,
+            Some(budget),
+            Some(expansion),
             gate,
         )
     }
@@ -342,9 +392,18 @@ impl<'s> TensorSolidHistory<'_, 's> {
         guess_j: &[f64],
         resolve: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
         affine: Option<AffineThermalBudget>,
+        expansion: Option<&[ThermalExpansionCell<'_>]>,
         gate: &CancelGate,
     ) -> Result<RelaxationThermalCandidate<'s, 't, S>, Error<E>> {
         check(gate)?;
+        if expansion.is_none()
+            && (self.solid.thermal_expansion_identity.is_some()
+                || self.solid.body.has_eigenstrain())
+        {
+            return Err(invalid(
+                "an expanding tensor history must retain its original reciprocal expansion model",
+            ));
+        }
         if affine.is_some_and(|b| {
             !b.max_absolute_coefficient_work_j.is_finite()
                 || b.max_absolute_coefficient_work_j < 0.0
@@ -497,6 +556,9 @@ impl<'s> TensorSolidHistory<'_, 's> {
                 ));
             }
         }
+        let expansion_model = expansion
+            .map(|bindings| expansion::prepare(self, thermal, cells, bindings, gate))
+            .transpose()?;
         let cards: Vec<_> = cells.iter().map(|b| b.point.material).collect();
         let before_states = affine
             .map(|budget| {
@@ -504,6 +566,7 @@ impl<'s> TensorSolidHistory<'_, 's> {
                     self,
                     &derivatives,
                     &temperatures_before,
+                    expansion_model.as_ref().map(|m| m.alpha_mandel.as_slice()),
                     budget.relative_memory_tolerance,
                     gate,
                 )
@@ -543,16 +606,23 @@ impl<'s> TensorSolidHistory<'_, 's> {
                     })?);
                     temperatures_after.push(phase.temperature_k());
                 }
-                let body = self
+                let strains = expansion
+                    .map(|bindings| expansion::strains(self, cells, bindings, &points, gate))
+                    .transpose()?;
+                let mut body = self
                     .solid
-                    .at_query_points(
+                    .at_query_points_with_thermal_strains(
                         &cards,
                         &points,
+                        strains.as_deref(),
                         controls.projection,
                         controls.dynamics,
                         gate,
                     )
                     .map_err(solid)?;
+                if let Some(model) = &expansion_model {
+                    body.thermal_expansion_identity = Some(model.identities.clone());
+                }
                 let rebound = self
                     .rebind_materials(
                         &body,
@@ -573,6 +643,7 @@ impl<'s> TensorSolidHistory<'_, 's> {
                             &history,
                             &derivatives,
                             &temperatures_after,
+                            expansion_model.as_ref().map(|m| m.alpha_mandel.as_slice()),
                             budget.relative_memory_tolerance,
                             gate,
                         )
@@ -598,6 +669,7 @@ impl<'s> TensorSolidHistory<'_, 's> {
                             &history,
                             &derivatives,
                             &temperatures_after,
+                            expansion_model.as_ref().map(|m| m.alpha_mandel.as_slice()),
                             budget.relative_memory_tolerance,
                             gate,
                         )

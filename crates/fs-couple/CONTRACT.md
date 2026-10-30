@@ -15964,3 +15964,38 @@ Focused authored/manual attachment, unequal-temperature exchange, source
 refresh, block partition, budget/refusal and cancellation cases live in
 performance/file/wall/tests/thermal.rs. Their runtime assertions require actual
 execution; syntax parsing alone is not numerical or experimental validation.
+
+## Reciprocal source expansion through native tensor mechanics and finite heat
+
+`TensorSolidHistory::advance_expanding_thermal_candidate` binds the existing
+source-integrated isotropic or oriented-orthotropic expansion model to original
+tensor-Prony quadrature and the finite enthalpy residual. Nonzero eigenstrain
+adds one stationary unit coordinate to native quadratic PHS storage, supplying
+thermal stress through the original exact motion/work/loss owner. It is not an
+external force port. Native Maxwell rebind preserves viscous strain through
+thermal strain increments, including unchanged singular factor directions.
+
+The original source card, selected expansion claims, stress-free reference and
+material/mesh frames remain attached across continuation; generic refresh or
+older thermal entry points refuse to drop an accepted expansion binding. Exact
+zero expansion keeps the original state extent and trajectory. A stationary
+coordinate may drift only within the declared floating-point roundoff budget;
+its endpoint is never renormalized or its work/loss recomputed to hide error.
+
+Entropy includes equilibrium and Maxwell V*alpha:sigma terms; the shared finite
+heat driver receives native dashpot loss plus signed reversible exchange and
+checks physical K+U, where U=psi+T*S. Actual caloric receiver mass and the complete
+instantaneous tensor enter C_eff=m*dh/dT-T*sum[V*alpha:C_inst:alpha], which must
+remain positive over each chart segment. Constant source alpha and stored
+tensors are required over the full admitted interval; supported source-dependent
+relaxation times remain active. Combined varying stiffness/expansion, Kelvin
+thermal strain rates, finite deformation and phase mechanics remain outside
+this bounded reciprocal model.
+
+Five native regressions cover two continuing heated Maxwell intervals, rotated
+orthotropic expansion, zero-alpha compatibility, source/capacity/reference/
+cancellation refusals, and singular-factor memory. They are authored but unrun.
+Pinned syntax/whitespace checks and an independent physical-coordinate RK4 plus
+scalar enthalpy reference passed. Actual stationary-coordinate propagation and
+its runtime tolerance still require native execution; no experimental authority
+is inferred from the synthetic reference.

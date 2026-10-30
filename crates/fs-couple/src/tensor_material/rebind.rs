@@ -54,6 +54,7 @@ impl TensorMaterialHistory<'_> {
             state.extend(memory);
             offset += count;
         }
+        if body.has_eigenstrain() { state.push(1.0); }
         body.admit_state(&state)?;
         let change = body.system.hamiltonian(&state) - self.stored_energy_j();
         let parameter_work = self.parameter_work + change;

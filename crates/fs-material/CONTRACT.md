@@ -5567,3 +5567,26 @@ The new material regression covers raw density, exact-solid property admission,
 kinematic-to-dynamic conversion and strict departure bounds. It is authored but
 unrun in this implementation environment; no source or experimental validation
 is inferred from the synthetic fixture.
+
+## Affine eigenstrain in source tensor memory and thermodynamics
+
+`ProjectedTensorProny` retains explicitly admitted stress-free Mandel strain in
+the original quadrature frame. Equilibrium affine load/constant terms represent
+one physical elastic potential; original branch Gram factors lower free strain
+to the same native memory coordinates. Temperature continuation subtracts
+sqrt(V)*B_new*delta(e_th) after original factor transfer, preserving viscous
+strain instead of resetting spring memory. Unchanged singular factors remain
+supported without inversion. Kelvin eigenstrain-rate coupling is not inferred.
+
+For constant stored tensors and expansion derivative alpha, native thermal
+state evaluation includes equilibrium V*alpha:sigma and the corresponding
+volume-scaled branch-factor entropy. Internal energy remains U=psi+T*S. The
+complete equilibrium plus Maxwell tensor capacity coefficient includes even
+constrained directions absent from a reduced displacement basis. Source-driven
+coupling admits positive total fixed-strain caloric capacity on every supported
+chart segment; material uncertainty and source coverage remain separate.
+
+Focused coupling regressions retain nonzero and singular Maxwell memory,
+rotated expansion, zero-alpha compatibility and source/domain refusals. They
+are authored but unrun here; syntax review and independent physical-coordinate
+arithmetic do not establish native runtime or experimental validation.

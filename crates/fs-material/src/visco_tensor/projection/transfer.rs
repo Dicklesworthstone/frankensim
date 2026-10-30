@@ -76,7 +76,10 @@ impl ProjectedTensorProny {
     /// endpoints: old hidden strain cannot be reconstructed, and a new nullspace
     /// would erase strain required by later continuation. Exactly unchanged
     /// factors need no inversion, including rank-deficient branches.
-    /// No relaxation, strain increment, heat or clock advancement occurs here.
+    /// If free strain changes, subtract B_new*(free_new-free_old) from each
+    /// new factor coordinate. Thus the original VISCOUS strain survives the
+    /// thermal strain change; keeping spring strain fixed would erase thermal
+    /// stress. No relaxation, dissipative heat or clock advancement occurs here.
     pub fn transfer_factor_memory(
         &self,
         next: &Self,
@@ -99,6 +102,8 @@ impl ProjectedTensorProny {
             ));
         }
         let root = det::sqrt(self.volume_m3);
+        let free_change =
+            core::array::from_fn(|i| next.free_strain_mandel[i] - self.free_strain_mandel[i]);
         let mut output = Vec::with_capacity(memory.len());
         for (index, (old, new)) in self
             .model
@@ -111,13 +116,23 @@ impl ProjectedTensorProny {
             let old_rows = old.resolved_gram_rows(&self.model.factors[index]);
             let new_rows = new.resolved_gram_rows(&next.model.factors[index]);
             let z = &memory[6 * index..6 * index + 6];
+            let shift = apply(&new_rows, &free_change).map(|x| root * x);
             if old_rows == new_rows {
-                output.extend_from_slice(z);
+                if free_change.iter().all(|x| *x == 0.0) {
+                    output.extend_from_slice(z);
+                } else {
+                    let transformed: Vec<_> = z.iter().zip(shift).map(|(x, d)| x - d).collect();
+                    if transformed.iter().any(|v| !v.is_finite()) {
+                        return Err(invalid("thermal memory transfer overflow"));
+                    }
+                    output.extend(transformed);
+                }
                 continue;
             }
             let strain = recover_strain(&old.c_pa, &old_rows, z, root, relative_tolerance)?;
             recoverable_factor(&new.c_pa, &new_rows, relative_tolerance)?;
-            let transformed = apply(&new_rows, &strain).map(|x| root * x);
+            let transformed =
+                core::array::from_fn::<_, 6, _>(|i| root * dot(&new_rows[i], &strain) - shift[i]);
             if !finite(&transformed) {
                 return Err(invalid("transferred Maxwell factor coordinates overflow"));
             }
@@ -143,6 +158,33 @@ impl ProjectedTensorProny {
         memory: &[f64],
         temperature_k: f64,
         relative_memory_tolerance: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<TensorThermalState> {
+        self.thermal_state_with_expansion(
+            derivative,
+            displacement,
+            memory,
+            temperature_k,
+            [0.0; 6],
+            relative_memory_tolerance,
+            cancelled,
+        )
+    }
+
+    /// The same complete potential, with a source-admitted free-strain
+    /// derivative in this point's Mandel frame. At fixed total/viscous strains,
+    /// S includes V*alpha:sigma for equilibrium AND every Maxwell spring.
+    /// Constant singular branches need no inverse: B*alpha dotted with their
+    /// original factor memory retains all energetic directions exactly.
+    #[allow(clippy::too_many_arguments)]
+    pub fn thermal_state_with_expansion(
+        &self,
+        derivative: &source::thermal::TensorTemperatureDerivative,
+        displacement: &[f64],
+        memory: &[f64],
+        temperature_k: f64,
+        alpha_mandel: Voigt,
+        relative_memory_tolerance: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<TensorThermalState> {
         poll(&mut cancelled)?;
@@ -153,12 +195,14 @@ impl ProjectedTensorProny {
             || !relative_memory_tolerance.is_finite()
             || relative_memory_tolerance <= 0.0
             || relative_memory_tolerance > 1e-8
+            || !finite(&alpha_mandel)
         {
             return Err(invalid(
                 "thermal tensor state needs complete memory, bounded temperature and reconstruction tolerance",
             ));
         }
-        let strain = mandel(&self.strain(displacement)?);
+        let total = mandel(&self.strain(displacement)?);
+        let strain = core::array::from_fn(|i| total[i] - self.free_strain_mandel[i]);
         let n = self.coordinates();
         let mut free_energy_j = 0.0;
         for i in 0..n {
@@ -167,8 +211,14 @@ impl ProjectedTensorProny {
                     0.5 * displacement[i] * self.equilibrium[i * n + j] * displacement[j];
             }
         }
+        if self.free_strain_mandel.iter().any(|x| *x != 0.0) {
+            // Evaluate physical elastic strain directly; subtracting nearly
+            // equal affine terms would lose free-expansion energy accuracy.
+            free_energy_j = 0.5 * self.volume_m3 * dot(&strain, &apply(&self.model.c_eq, &strain));
+        }
         let mut entropy_j_k =
             -0.5 * self.volume_m3 * dot(&strain, &apply(&derivative.equilibrium_pa_k, &strain));
+        entropy_j_k += self.volume_m3 * dot(&alpha_mandel, &apply(&self.model.c_eq, &strain));
         let root = det::sqrt(self.volume_m3);
         for (index, (branch, slope)) in self
             .model
@@ -180,6 +230,11 @@ impl ProjectedTensorProny {
             poll(&mut cancelled)?;
             let z = &memory[6 * index..6 * index + 6];
             free_energy_j += 0.5 * z.iter().map(|v| v * v).sum::<f64>();
+            if alpha_mandel.iter().any(|v| *v != 0.0) {
+                let rows = branch.resolved_gram_rows(&self.model.factors[index]);
+                let rate = apply(&rows, &alpha_mandel);
+                entropy_j_k += root * rate.iter().zip(z).map(|(a, b)| a * b).sum::<f64>();
+            }
             if slope.iter().flatten().any(|v| *v != 0.0) {
                 let rows = branch.resolved_gram_rows(&self.model.factors[index]);
                 let q = recover_strain(&branch.c_pa, &rows, z, root, relative_memory_tolerance)?;

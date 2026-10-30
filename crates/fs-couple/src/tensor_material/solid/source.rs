@@ -91,7 +91,29 @@ impl<'s> TensorSolidBody<'s> {
         dynamics_budget: TensorMaterialBudget,
         gate: &CancelGate,
     ) -> SolidResult<Self> {
+        self.at_query_points_with_thermal_strains(
+            cards,
+            points,
+            None,
+            projection_budget,
+            dynamics_budget,
+            gate,
+        )
+    }
+
+    pub(crate) fn at_query_points_with_thermal_strains(
+        &self,
+        cards: &[&MaterialCard],
+        points: &[QueryPoint],
+        strains: Option<&[fs_solid::linear3::TetThermalStrainState]>,
+        projection_budget: SolidProjectionBudget,
+        dynamics_budget: TensorMaterialBudget,
+        gate: &CancelGate,
+    ) -> SolidResult<Self> {
         poll(gate)?;
+        if self.thermal_expansion_identity.is_some() && strains.is_none() {
+            return Err(bad("source-bound expansion must be refreshed by its original thermal owner").into());
+        }
         let current = self
             .sources
             .as_ref()
@@ -115,11 +137,25 @@ impl<'s> TensorSolidBody<'s> {
                 material_to_mesh: source.material_to_mesh,
             });
         }
-        let projection = self
+        let mut projection = self
             .projection
             .with_element_laws(&laws, projection_budget, gate)?;
+        if let Some(strains) = strains {
+            if strains.len() != sources.len()
+                || strains.iter().zip(&sources).any(|(strain, source)| {
+                    strain.elastic_material_state_identity() != source.material.state().identity().0
+                })
+            {
+                return Err(bad(
+                    "thermal eigenstrain must retain the exact rebuilt material identity",
+                )
+                .into());
+            }
+            projection = projection.with_element_thermal_strains(strains, gate)?;
+        }
         let mut body = Self::new(projection, dynamics_budget, gate)?;
         body.sources = Some(sources);
+        body.thermal_expansion_identity = self.thermal_expansion_identity.clone();
         poll(gate)?;
         Ok(body)
     }
@@ -156,6 +192,8 @@ impl<'s> TensorSolidHistory<'_, 's> {
             || self.solid.projection.basis() != next.projection.basis()
             || self.solid.projection.point_elements() != next.projection.point_elements()
             || previous.len() != sources.len()
+            || self.solid.thermal_expansion_identity.is_some()
+                && self.solid.thermal_expansion_identity != next.thermal_expansion_identity
         {
             return Err(bad(
                 "material continuation cannot change original geometry, supports or basis",

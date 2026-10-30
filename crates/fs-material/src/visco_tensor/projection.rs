@@ -5,6 +5,7 @@ use super::*;
 
 mod transfer;
 pub use transfer::TensorThermalState;
+mod eigenstrain;
 
 /// Cold projection limits; all columns and all six rows of every branch survive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,6 +43,7 @@ pub struct ProjectedTensorProny {
     equilibrium: Vec<f64>,
     viscosity: Vec<f64>,
     branches: Vec<ProjectedPronyBranch>,
+    free_strain_mandel: Voigt,
 }
 impl TensorProny {
     /// Project a full 3D material through fixed tensor-shear strain columns.
@@ -111,7 +113,7 @@ impl TensorProny {
         }
         poll(&mut cancelled)?;
         Ok(ProjectedTensorProny { model:self.clone(), columns:columns.to_vec(), volume_m3,
-            equilibrium, viscosity, branches })
+            equilibrium, viscosity, branches, free_strain_mandel: [0.0; 6] })
     }
 }
 impl ProjectedTensorProny {
@@ -143,6 +145,11 @@ impl ProjectedTensorProny {
         }
         self.model.validate_mandel_strain(&mandel(&out))
             .map_err(|_| invalid("projected strain exceeds original small-strain domain"))?;
+        if self.free_strain_mandel.iter().any(|x| *x != 0.0) {
+            let elastic = core::array::from_fn(|i| WEIGHTS[i]*out[i] - self.free_strain_mandel[i]);
+            self.model.validate_mandel_strain(&elastic)
+                .map_err(|_| invalid("projected elastic strain exceeds original small-strain domain"))?;
+        }
         Ok(out)
     }
 

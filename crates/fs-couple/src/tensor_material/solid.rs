@@ -46,6 +46,7 @@ pub struct TensorSolidBody<'s> {
     projection: ProjectedViscoSolid<'s>,
     body: TensorMaterialBody,
     sources: Option<Vec<source::SolidMaterialSource>>,
+    thermal_expansion_identity: Option<Vec<fs_blake3::ContentHash>>,
 }
 impl<'s> TensorSolidBody<'s> {
     pub fn new(
@@ -58,7 +59,7 @@ impl<'s> TensorSolidBody<'s> {
             projection.coordinates(), projection.mass_matrix_kg().to_vec(),
             projection.material_points().to_vec(), budget, gate,
         )?;
-        Ok(Self { projection, body, sources:None })
+        Ok(Self { projection, body, sources:None, thermal_expansion_identity:None })
     }
     pub fn projection(&self) -> &ProjectedViscoSolid<'s> { &self.projection }
     pub fn body(&self) -> &TensorMaterialBody { &self.body }

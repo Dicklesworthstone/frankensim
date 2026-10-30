@@ -2360,3 +2360,16 @@ interface state; no thermal transport, fracture-heat partition or
 temperature-dependent cohesive-history transfer is inferred. New modules pass
 formatting and whitespace checks. Native tests remain unexecuted: a single-threaded
 metadata-only check was SIGKILLed in unchanged asupersync in the authoring worker.
+
+## Original thermal eigenstrain in tensor-Prony projection
+
+The existing tetrahedral tensor-Prony projector carries each explicitly supplied
+thermal free strain into its original material quadrature instead of discarding
+it or inventing an external force. Original geometry, physical strain columns,
+consistent inertia, material frame and supports remain unchanged. Eigenstrain
+admission uses the existing small-strain material domain. Its constitutive
+energy and continuing Maxwell memory belong to the original projected material
+and native coupled PHS owners; projection adds no heat or independent solver.
+Source-integrated isotropic/oriented-orthotropic expansion and reciprocal heat
+are exercised by the tensor coupling regressions, currently authored but unrun
+in this environment.

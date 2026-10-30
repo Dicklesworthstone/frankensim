@@ -76,13 +76,35 @@ impl<'s> ProjectedViscoSolid<'s> {
                     max_scalar_terms: material_work(n, &laws[element])?,
                 },
                 || gate.is_requested(),
-            ).map_err(ViscoElementError::Projection)?);
+            ).and_then(|point| point.with_eigenstrain_mandel(*old.free_strain_mandel()))
+                .map_err(ViscoElementError::Projection)?);
         }
         poll_map(gate)?;
         Ok(ProjectedViscoSolid {
             source: self.source, basis: self.basis.clone(), mass_kg: self.mass_kg.clone(),
             points, point_elements: self.point_elements.clone(),
         })
+    }
+
+    /// Apply the original solid owner's admitted per-element thermal strains
+    /// to the SAME quadrature, basis and reference mass. The source coupling
+    /// owner must bind material/frame identities before this lowering.
+    pub fn with_element_thermal_strains(
+        &self, strains: &[crate::linear3::TetThermalStrainState], gate: &CancelGate,
+    ) -> Result<Self, ViscoElementError> {
+        poll_map(gate)?;
+        if strains.len() != self.element_count() {
+            return Err(invalid("one admitted thermal strain per original element required"));
+        }
+        let mut points = Vec::with_capacity(self.points.len());
+        for (point, &element) in self.points.iter().zip(&self.point_elements) {
+            poll_map(gate)?;
+            points.push(point.with_eigenstrain_mandel(strains[element].free_strain_mandel())
+                .map_err(ViscoElementError::Projection)?);
+        }
+        poll_map(gate)?;
+        Ok(Self { source: self.source, basis: self.basis.clone(), mass_kg: self.mass_kg.clone(),
+            points, point_elements: self.point_elements.clone() })
     }
 
     /// Apply the SAME basis transpose to a full node-major force field.
