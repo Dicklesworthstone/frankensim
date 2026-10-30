@@ -555,7 +555,24 @@ differentiable lift). Pure Rust throughout.
   The exposure model holds each accepted state over its declared interval,
   including explicit grid/model changes. It does not interpolate temperatures,
   average optical depth before rendering, or extrapolate missing simulation
-  state. One selected state must remain fixed for the complete optical path.
+  state. One selected state remains fixed for the complete optical path.
+  `MediumExposure` admits that history together with a shutter and optional
+  thin-lens/keyframed camera. `render_medium_exposure` selects the snapshot at
+  the same absolute shutter time used by the camera and animated geometry;
+  camera, shadow, scattering and dielectric continuation rays retain it.
+  This integrates radiance over held simulation states rather than rendering
+  averaged density or temperature. Vacuum snapshots retain ordinary motion and
+  cinematic rendering, and zero-scattering states retain deterministic
+  absorption. `MediumExposureFilm` binds the exact history, shutter/sample
+  policy, settings and numeric cinematic-camera content, including changes
+  made under the same shot identifier. Scene geometry/materials/lights and the
+  legacy scene camera remain the caller's fixed owners between appends.
+  Fresh and progressive execution entries reuse the existing bounded tile
+  pool and transactional publication. Focused tests cover duration-weighted
+  extinction/emission, per-sample mixed-state shadow transport, motion/camera
+  coherence, exact split-range/tile replay and refusal rollback. This remains
+  quasi-static exposure integration: no finite-light-travel-time effects,
+  interpolation across missing simulation states, or thermal-energy debit.
 
 ## Invariants
 

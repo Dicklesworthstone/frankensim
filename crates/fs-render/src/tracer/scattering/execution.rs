@@ -134,7 +134,7 @@ fn render_medium_with_execution(
         CameraPath::Legacy,
         execution,
         &pool,
-        medium,
+        medium.map(MediumInput::Static),
         has_emission,
     )?;
     let publication_started = Instant::now();
@@ -178,7 +178,7 @@ fn render_medium_range_with_execution(
         CameraPath::Legacy,
         execution,
         &pool,
-        medium,
+        medium.map(MediumInput::Static),
         has_emission,
     )?;
     let mut report = result.report;

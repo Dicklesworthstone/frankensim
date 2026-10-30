@@ -129,6 +129,15 @@ mod absorbing;
 mod scattering;
 #[cfg(feature = "volumes")]
 use scattering::PathMedium;
+#[cfg(feature = "volumes")]
+mod medium_exposure;
+#[cfg(feature = "volumes")]
+use medium_exposure::MediumInput;
+#[cfg(feature = "volumes")]
+pub use medium_exposure::{
+    MediumExposure, MediumExposureFilm, render_medium_exposure, render_medium_exposure_range,
+    render_medium_exposure_range_with_execution, render_medium_exposure_with_execution,
+};
 mod thermal_lighting;
 #[cfg(feature = "volumes")]
 pub use absorbing::{AbsorbingFilm, render_absorbing, render_absorbing_range};
@@ -2847,6 +2856,9 @@ pub enum TracerError {
     /// Borrowed density/temperature transport refused a ray, field or budget.
     #[cfg(feature = "volumes")]
     Volume(crate::volumes::transport::VolumeTransportError),
+    /// Accepted physical history does not cover an exposure or is malformed.
+    #[cfg(feature = "volumes")]
+    MediumTimeline(crate::volumes::transport::timeline::TimelineError),
     /// Participating-cell transport cannot yet follow the curved
     /// multi-interface paths used by the dielectric NEE connectors.
     #[cfg(feature = "volumes")]
@@ -2950,6 +2962,8 @@ impl core::fmt::Display for TracerError {
             Self::Lighting(error) => write!(formatter, "scene lighting refused: {error}"),
             #[cfg(feature = "volumes")]
             Self::Volume(error) => write!(formatter, "scene medium refused: {error}"),
+            #[cfg(feature = "volumes")]
+            Self::MediumTimeline(error) => write!(formatter, "medium exposure refused: {error}"),
             #[cfg(feature = "volumes")]
             Self::VolumeDielectricUnsupported => formatter
                 .write_str("physical scene media do not yet support dielectric boundary transport"),
@@ -3791,8 +3805,45 @@ fn render_range_impl(
     shutter: Option<ShutterInterval>,
     camera_path: CameraPath<'_>,
 ) -> Result<(), TracerError> {
-    let (lighting, requested_mode) =
-        preflight_render(scene, cx, s, Some(film), from, to, shutter, camera_path)?;
+    render_range_with_medium_impl(
+        scene,
+        cx,
+        s,
+        film,
+        from,
+        to,
+        shutter,
+        camera_path,
+        #[cfg(feature = "volumes")]
+        None,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_range_with_medium_impl(
+    scene: &Scene,
+    cx: &Cx<'_>,
+    s: &Settings,
+    film: &mut Film,
+    from: u32,
+    to: u32,
+    shutter: Option<ShutterInterval>,
+    camera_path: CameraPath<'_>,
+    #[cfg(feature = "volumes")] medium: Option<MediumInput<'_, '_>>,
+    has_medium_emission: bool,
+) -> Result<(), TracerError> {
+    let (lighting, requested_mode) = preflight_render_with_medium_emission(
+        scene,
+        cx,
+        s,
+        Some(film),
+        from,
+        to,
+        shutter,
+        camera_path,
+        has_medium_emission,
+    )?;
     if to == from {
         return Ok(());
     }
@@ -3818,7 +3869,7 @@ fn render_range_impl(
             let slot = &mut staged_xyz[pixel as usize];
             for sample in from..to {
                 cx.checkpoint()?;
-                let xyz = trace_pixel_sample(
+                let xyz = trace_pixel_sample_with_primary_and_medium(
                     scene,
                     &lighting,
                     cx,
@@ -3831,10 +3882,17 @@ fn render_range_impl(
                     sample,
                     shutter,
                     camera_path,
-                )?;
+                    false,
+                    #[cfg(feature = "volumes")]
+                    medium,
+                )?
+                .xyz;
                 slot[0] += xyz[0];
                 slot[1] += xyz[1];
                 slot[2] += xyz[2];
+                if slot.iter().any(|channel| !channel.is_finite()) {
+                    return Err(TracerError::InvalidInput);
+                }
             }
         }
     }
@@ -3869,7 +3927,7 @@ struct ParallelRenderKernel<'run, 'assets> {
     shutter: Option<ShutterInterval>,
     camera_path: CameraPath<'assets>,
     #[cfg(feature = "volumes")]
-    medium: Option<PathMedium<'run, 'assets>>,
+    medium: Option<MediumInput<'run, 'assets>>,
     sobol: Option<&'run Sobol>,
     path_sobol: Option<&'run Sobol>,
     compute_ns: &'run AtomicU64,
@@ -5594,7 +5652,7 @@ fn render_range_parallel_with_medium_impl<R: RenderPoolRunner>(
     camera_path: CameraPath<'_>,
     execution: &RenderExecutionConfig,
     runner: &R,
-    #[cfg(feature = "volumes")] medium: Option<PathMedium<'_, '_>>,
+    #[cfg(feature = "volumes")] medium: Option<MediumInput<'_, '_>>,
     has_medium_emission: bool,
 ) -> Result<ParallelRenderResult, RenderExecutionError> {
     let setup_started = Instant::now();
@@ -9498,7 +9556,7 @@ fn trace_pixel_sample_with_primary_and_medium(
     shutter: Option<ShutterInterval>,
     camera_path: CameraPath<'_>,
     capture_primary: bool,
-    #[cfg(feature = "volumes")] medium: Option<PathMedium<'_, '_>>,
+    #[cfg(feature = "volumes")] medium: Option<MediumInput<'_, '_>>,
 ) -> Result<PathTraceSample, TracerError> {
     // Pool seeds control scheduling/placement only. Bind downstream chart,
     // camera, and intersection work to the public render seed while retaining
@@ -9532,6 +9590,17 @@ fn trace_pixel_sample_with_primary_and_medium(
         }
         None => None,
     };
+    #[cfg(feature = "volumes")]
+    let medium = medium
+        .map(|source| {
+            source.at_time(
+                ray_time
+                    .as_ref()
+                    .map(|time| time.interval.time_at(time.normalized)),
+            )
+        })
+        .transpose()?
+        .flatten();
     trace_path_with_medium(
         scene,
         lighting,

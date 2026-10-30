@@ -19,6 +19,8 @@ use fs_render::volumes::transport::{
 
 #[path = "absorbing_transport/dielectric.rs"]
 mod dielectric;
+#[path = "absorbing_transport/exposure.rs"]
+mod exposure;
 #[path = "absorbing_transport/scattering.rs"]
 mod scattering;
 
