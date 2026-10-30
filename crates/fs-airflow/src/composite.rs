@@ -85,7 +85,7 @@ pub fn compose_series(banks: &[FanBank]) -> Result<FanBank, AirflowError> {
         ));
     }
     let curve = synthetic_curve("series", banks, points, domain_lo)?;
-    FanBank::new(curve, 1, FanArrangement::Series, 1.0)
+    composite_bank(curve, banks)
 }
 
 /// Compose member banks in PARALLEL: every bank sees one shared pressure
@@ -155,7 +155,30 @@ pub fn compose_parallel(banks: &[FanBank]) -> Result<FanBank, AirflowError> {
     }
     let admissible_min = points.first().expect("nonempty").flow.value();
     let curve = synthetic_curve("parallel", banks, points, admissible_min)?;
-    FanBank::new(curve, 1, FanArrangement::Series, 1.0)
+    composite_bank(curve, banks)
+}
+
+fn composite_bank(curve: FanCurve, banks: &[FanBank]) -> Result<FanBank, AirflowError> {
+    let mut bank = FanBank::new(curve, 1, FanArrangement::Series, 1.0)?;
+    if let Some(inlet) = banks.iter().find_map(FanBank::inlet_gas) {
+        if banks.iter().any(|member| member.inlet_gas() != Some(inlet)) {
+            return Err(AirflowError::MaterialFanComposition {
+                reason: "material fan members must all retain the same coherent inlet gas; unbound or different media cannot share a volume-flow composition",
+            });
+        }
+        let limit = banks.iter().filter_map(FanBank::material_pressure_limit).fold(0.1_f64, f64::min);
+        let peak = bank.curve().points()[0].pressure.value()
+            * (1.0 + bank.curve().pressure_tolerance_rel());
+        if !peak.is_finite() || peak / inlet.pressure > limit {
+            return Err(AirflowError::MaterialFanComposition {
+                reason: "combined static pressure exceeds the common low-pressure applicability",
+            });
+        }
+        bank.gas_scaling = crate::graph::thermal::medium::fan::FanGasScaling::Composed {
+            inlet: Box::new(*inlet), maximum_pressure_fraction: limit,
+        };
+    }
+    Ok(bank)
 }
 
 /// One member bank's effective curve: the declared base curve with the
@@ -249,6 +272,9 @@ fn synthetic_curve(
             FanArrangement::Parallel => 1,
         }]);
         hasher.update(&bank.speed_ratio().to_le_bytes());
+        if let Some(gas) = bank.gas_density_binding() {
+            hasher.update(&gas.identity_bytes());
+        }
     }
     let identity = hasher.finalize();
     let source = SourceProvenance::new(
@@ -305,4 +331,6 @@ fn compare_banks(left: &FanBank, right: &FanBank) -> core::cmp::Ordering {
             (FanArrangement::Parallel, FanArrangement::Series) => core::cmp::Ordering::Greater,
         })
         .then(left.speed_ratio().total_cmp(&right.speed_ratio()))
+        .then_with(|| left.gas_density_binding().map(|gas| gas.identity_bytes())
+            .cmp(&right.gas_density_binding().map(|gas| gas.identity_bytes())))
 }

@@ -116,7 +116,9 @@ pub fn operating_flow_speed_gradient(
         poll(cx)?;
         let bank = &banks[i];
         let speed_bounds = bank.curve().model_card().validity.bounds()["speed_ratio"];
-        if bank.speed_ratio() <= speed_bounds.0 || bank.speed_ratio() >= speed_bounds.1 {
+        if bank.speed_ratio() <= speed_bounds.0 || bank.speed_ratio() >= speed_bounds.1
+            || !bank.material_controls_are_interior()
+        {
             return Err(SpeedDerivativeError::NonSmooth { bank: i });
         }
         let curve = effective_curve(bank);

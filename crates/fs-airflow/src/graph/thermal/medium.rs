@@ -4,10 +4,12 @@
 //! law: replacing the medium rebuilds the loss and channel coefficients. The
 //! existing flow, correlation, Robin and exponential channel owners still own
 //! their equations and admission. In particular, a material swap cannot turn
-//! an out-of-domain correlation into a supported one. Nothing here silently
-//! rescales a measured fan/pump curve or assumes a liquid cannot boil.
+//! an out-of-domain correlation into a supported one. Fan density similarity
+//! requires an explicit reference medium and applicability through [`fan`];
+//! no pump correction or liquid phase validity is inferred.
 
 pub mod convection;
+pub mod fan;
 pub mod series;
 pub mod steady_gas;
 pub use series::{FlowHeatSection, MaterialFlowPath, MaterialHeatExchange, MAX_MATERIAL_FLOW_SECTIONS};

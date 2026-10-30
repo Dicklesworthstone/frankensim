@@ -22,6 +22,7 @@
 
 use super::{Endpoint, Layer, NetworkError, Room, ZoneNetwork, poll, positive, vent_layer};
 use crate::{AirflowError, FanArrangement, FanBank, LossNetwork, SourceProvenance};
+use crate::graph::thermal::medium::fan::density_affinity_ratio;
 use fs_qty::{Area, Density, Length, MassFlowRate, Power, Pressure, VolumetricFlowRate};
 
 /// Bound on original fan samples admitted by this low-order connection.
@@ -210,6 +211,11 @@ impl FanModel {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, FanError> {
         check(&mut cancelled)?;
+        if bank.has_material_density() {
+            return Err(FanError::Invalid(
+                "evolving compartment fan requires the original reference bank, not a frozen material binding",
+            ));
+        }
         let [rho_lo, rho_hi] = domain.density_ratio;
         if bank.curve().points().len() > MAX_FAN_POINTS
             || !source_present(bank.curve().source())
@@ -339,10 +345,9 @@ impl FanModel {
         {
             return Err(FanError::Invalid("fan endpoint or numerical controls"));
         }
-        let ratio = finite(donor_density.value() / self.reference_density.value())?;
-        if !(self.domain.density_ratio[0]..=self.domain.density_ratio[1]).contains(&ratio) {
-            return Err(FanError::Invalid("fan density-affinity domain"));
-        }
+        let ratio = density_affinity_ratio(self.reference_density.value(),
+            donor_density.value(), self.domain.density_ratio)
+            .map_err(|_| FanError::Invalid("fan density-affinity domain"))?;
         let head = finite(receiver_pressure.value() - donor_pressure.value())?;
         let min_pressure = donor_pressure.value().min(receiver_pressure.value());
         if head.abs() / min_pressure > self.domain.maximum_pressure_fraction {

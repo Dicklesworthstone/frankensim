@@ -331,6 +331,7 @@ pub struct FanBank {
     count: usize,
     arrangement: FanArrangement,
     speed_ratio: f64,
+    gas_scaling: graph::thermal::medium::fan::FanGasScaling,
 }
 
 impl FanBank {
@@ -361,6 +362,7 @@ impl FanBank {
             count,
             arrangement,
             speed_ratio,
+            gas_scaling: graph::thermal::medium::fan::FanGasScaling::Unbound,
         })
     }
 
@@ -388,6 +390,44 @@ impl FanBank {
         self.speed_ratio
     }
 
+    /// Coherent gas snapshots and similarity domain when this bank is bound
+    /// through `FrozenFlowMedium::bind_fan_bank`. Source owners remain beside
+    /// the bank on `MaterialFanBank`. Composites retain their member identities
+    /// in the synthetic curve source instead; see `has_material_density`.
+    #[must_use]
+    pub fn gas_density_binding(&self) -> Option<&graph::thermal::medium::fan::FanGasBinding> {
+        match &self.gas_scaling {
+            graph::thermal::medium::fan::FanGasScaling::Medium(binding) => Some(binding),
+            _ => None,
+        }
+    }
+
+    /// Whether density similarity was already applied directly or through a
+    /// composition. Such a bank cannot be rebound as original reference data.
+    #[must_use]
+    pub fn has_material_density(&self) -> bool {
+        !matches!(self.gas_scaling, graph::thermal::medium::fan::FanGasScaling::Unbound)
+    }
+
+    /// Common numerical inlet state retained through direct and nested
+    /// material fan compositions. Original source owners remain on adapters.
+    #[must_use]
+    pub fn inlet_gas(&self) -> Option<&fs_material::gas::GasState> {
+        match &self.gas_scaling {
+            graph::thermal::medium::fan::FanGasScaling::Unbound => None,
+            graph::thermal::medium::fan::FanGasScaling::Medium(binding) => Some(binding.inlet()),
+            graph::thermal::medium::fan::FanGasScaling::Composed { inlet, .. } => Some(inlet),
+        }
+    }
+
+    pub(crate) fn material_pressure_limit(&self) -> Option<f64> {
+        match &self.gas_scaling {
+            graph::thermal::medium::fan::FanGasScaling::Unbound => None,
+            graph::thermal::medium::fan::FanGasScaling::Medium(binding) => Some(binding.domain().maximum_pressure_fraction),
+            graph::thermal::medium::fan::FanGasScaling::Composed { maximum_pressure_fraction, .. } => Some(*maximum_pressure_fraction),
+        }
+    }
+
     pub(crate) fn flow_factor(&self) -> f64 {
         match self.arrangement {
             FanArrangement::Series => self.speed_ratio,
@@ -397,10 +437,11 @@ impl FanBank {
 
     pub(crate) fn pressure_factor(&self) -> f64 {
         let speed_squared = self.speed_ratio * self.speed_ratio;
-        match self.arrangement {
+        let factor = match self.arrangement {
             FanArrangement::Series => speed_squared * self.count as f64,
             FanArrangement::Parallel => speed_squared,
-        }
+        };
+        self.gas_density_binding().map_or(factor, |gas| factor * gas.density_ratio())
     }
 
     fn domain(&self) -> Interval {
@@ -1077,6 +1118,12 @@ fn operating_model_evidence(
         fan_law_source.citation,
         fan_law_source.identifier
     )];
+    if let Some(gas) = fan.gas_density_binding() {
+        assumptions.push(format!(
+            "explicit frozen gas density similarity: rho/rho_ref={}, rotor Re/Re_ref={}; incompressible static-pressure model, material uncertainty not propagated",
+            gas.density_ratio(), gas.reynolds_ratio(),
+        ));
+    }
     let mut network_rel = 0.0;
     network
         .full
@@ -1296,6 +1343,9 @@ fn operating_provenance(fan: &FanBank, network: &EnclosureNetwork) -> Provenance
         FanArrangement::Parallel => 1,
     });
     bytes.extend_from_slice(&fan.speed_ratio.to_bits().to_le_bytes());
+    if let Some(gas) = fan.gas_density_binding() {
+        bytes.extend_from_slice(&gas.identity_bytes());
+    }
     push_network_identity(&mut bytes, &network.full);
     push_string_identity(&mut bytes, &network.leakage_name);
     ProvenanceHash::of_bytes(&bytes)
@@ -1423,6 +1473,12 @@ pub enum AirflowError {
     EmptyFanComposition {
         /// The topology that was attempted.
         topology: &'static str,
+    },
+    /// Material-bound fan members do not share one admitted gas state or
+    /// their composed pressure exceeds the common low-pressure domain.
+    MaterialFanComposition {
+        /// Physical assumption that prevents this composition.
+        reason: &'static str,
     },
     /// Series members share no common flow domain above every member's
     /// stall boundary.
@@ -1720,6 +1776,7 @@ impl fmt::Display for AirflowError {
                 formatter,
                 "a {topology} fan-system composition needs at least two member banks"
             ),
+            Self::MaterialFanComposition { reason } => write!(formatter, "material fan composition: {reason}"),
             Self::NoCommonSeriesDomain {
                 low_bits,
                 high_bits,

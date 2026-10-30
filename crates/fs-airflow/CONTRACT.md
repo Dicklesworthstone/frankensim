@@ -89,6 +89,32 @@ mixed-law ownership and thermal-energy balance.
 
 ### Shared thermochemical medium in hydraulic and heat paths
 
+`FrozenFlowMedium::bind_fan_bank` connects the same original reference/inlet
+gas owners to the existing `FanBank`. Static pressure and its slope gain the
+explicit density-affinity factor; volume-flow coordinates, source samples,
+speed law and stall limits remain unchanged. The shared pressure factor is
+used by the certified enclosure root, arbitrary graph operating point,
+series/parallel composition, and their local speed/curve derivatives. Retained
+material snapshots participate in operating/composite identities, and the
+adapter keeps the original material/source-pack owners. A detached `FanBank`
+retains numerical state and applicability, not new material-source authority.
+
+The caller declares positive density and rotor-Reynolds ratio bounds and a
+static-pressure fraction in `(0, 0.1]`. Admission checks coherent gas states and
+the full tolerance-inclusive pressure envelope; liquids, repeated binding and
+unsupported similarity refuse. Local derivatives also require interior
+Reynolds and pressure support. Material fan composition requires the same
+admitted inlet state on every member, preserves it through nested composition,
+and checks the combined pressure against the strictest common limit. It cannot
+mix unbound inputs or apply density twice. The evolving compartment fan reuses density
+admission and rejects a frozen binding to avoid scaling twice. This is a
+frozen, incompressible static-pressure similarity model: it supplies neither
+total-pressure conversion, fan efficiency, material uncertainty propagation,
+Mach/stall/chemical-compatibility validation nor measured exotic-gas accuracy.
+`tests/material_fan.rs` checks source-backed pressure/composition/temperature
+substitution through fan, hydraulic and heat calculations, analytic graph
+roots and derivatives, composition, and refusals.
+
 `graph::thermal::medium::FrozenFlowMedium::ThermochemicalGas` retains the
 original `ResolvedThermochemicalGasState`, including species, caloric, EOS and
 transport sources. Its single transport snapshot supplies hydraulic density,

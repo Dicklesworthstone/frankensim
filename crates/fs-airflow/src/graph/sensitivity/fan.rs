@@ -265,6 +265,9 @@ fn admit_segment(
     if !(fan.speed_ratio() > low_speed && fan.speed_ratio() < high_speed) {
         return Err(GraphFanSensitivityError::NonDifferentiableFan("speed lies on a retained-domain boundary"));
     }
+    if !fan.material_controls_are_interior() {
+        return Err(GraphFanSensitivityError::NonDifferentiableFan("fan material similarity lies on a retained-domain boundary"));
+    }
     let factor = fan.flow_factor();
     let margin = config.absolute_flow_tolerance.value().max(8.0 * f64::EPSILON * flow.abs());
     let minimum = finite(fan.curve().admissible_min_flow().value() * factor, "fan derivative domain")?;
