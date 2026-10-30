@@ -1106,3 +1106,50 @@ work, thermal storage or contact event detection. Seven G1/G3 groups in
 refined time integrals, weak/strong decay, signed reversal, split continuation,
 zero loss and original source/cancellation refusals. A reversal with zero net
 impulse retains its positive original bulk heat.
+
+## Full tensor retained shear layers
+
+`layer_contact::ThirdBodyLayerContact::new_tensor` shares the original retained
+layer state, mechanical ports, midpoint integration and native consumers. Its
+equilibrium and each Maxwell spring have independent symmetric two-axis
+stiffnesses; their principal directions need not coincide. Positive-semidefinite
+memory is retained through at most six original Gram rows per arm, including
+rank-deficient tensors. The equilibrium tensor is strictly positive definite.
+The original isotropic constructor and its closed-form return remain intact.
+Scalar stiffness/arm getters return `None` for the tensor material; callers must
+use the complete tensor getters instead of silently discarding cross terms.
+
+Storage is `e^T K e/2 + sum(r_j^T K_j r_j/2)`. Maxwell heat is independently
+`sum(dt r_mid^T K_j r_mid/tau_j)`. Plastic flow remains the explicitly declared
+isotropic Bingham branch. Its tensor return solves one bounded scalar plastic
+compliance against the full stiffness, preserving the original force/work/slip
+sign convention and `dt <= 2*tau_j` admission. No energy residual becomes heat.
+Coefficient continuation retains every strain and branch in original order;
+changing stored tensors requires explicit coefficient work. The scalar thermal
+derivative API refuses tensor materials because it cannot express their entropy.
+
+The fixed-law objective transport capability refuses a nonidentity tensor
+rotation. `transport_tensor_state` instead rotates each Gram factor and every
+retained strain together, returning the transformed law/state and an explicit
+zero-work storage residual. Rotating history alone is not an objective transfer.
+
+The production `fs-couple::friction_heat::third_body::rigid::tensor` source
+adapter projects the existing `ResolvedTensorMaterial` through physical
+`sym(t_i tensor n)/h` strain columns and volume `A*h`. It retains original
+material orientation, source receipts, Maxwell order and Gram rows. Existing
+separated face forces/couples drive actual rigid momenta, and independently
+computed plastic/Maxwell loss enters the existing finite layer caloric cell in
+the original joint nonlinear solve. Geometry, material mass, caloric identity,
+temperature and clock must agree. This fixed-geometry rung admits constant
+stored tensors with source-defined temperature-dependent relaxation and plastic
+kinetics. It refuses tensor thermal softening, Kelvin viscosity, phase changes,
+normal/bending/torsional response and unowned geometric changes.
+
+`tests/tensor_layer.rs` covers independent cross-term equilibrium, the isotropic
+limit, noncommuting and rank-deficient memory, second-order held-strain
+relaxation, independent plastic power, rotation covariance and transactional
+refusals. The production fixture is
+`fs-couple/tests/rigid_layer_contact/tensor.rs`; its manufactured orthotropic
+card and finite heat inventory are numerical verification, not measured rosin,
+wood or other specimen validation.
+

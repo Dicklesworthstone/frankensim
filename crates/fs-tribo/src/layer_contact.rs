@@ -22,6 +22,10 @@ use crate::{FrictionRegime, TangentialLaw, TangentialStep, TangentialStepInput, 
     checked_add, checked_mul, finite, nonnegative_finite, positive_finite};
 use fs_math::det;
 
+/// Complete material-frame shear tensors on the same retained layer owner.
+pub mod tensor;
+use tensor::TensorLayerPotential;
+
 /// Explicit storage bound on material shear histories per physical contact.
 pub const MAX_LAYER_RELAXATION_ARMS: usize = 64;
 
@@ -51,6 +55,7 @@ pub struct ThirdBodyLayerContact {
     temperature_kelvin: f64,
     maximum_elastic_slip_m: f64,
     relaxation: Vec<ThirdBodyLayerRelaxationArm>,
+    tensor: Option<TensorLayerPotential>,
 }
 
 /// Accepted elastic and plastic slip in the checkpoint's current tangent frame.
@@ -99,14 +104,14 @@ impl ThirdBodyLayerContact {
         positive_finite(temperature_kelvin, "layer_temperature_kelvin")?;
         positive_finite(maximum_elastic_slip_m, "layer_maximum_elastic_slip_m")?;
         Ok(Self { stiffness_n_m, yield_force_n, plastic_resistance_n_s_m,
-            temperature_kelvin, maximum_elastic_slip_m, relaxation: Vec::new() })
+            temperature_kelvin, maximum_elastic_slip_m, relaxation: Vec::new(), tensor: None })
     }
     /// Bind source-derived linear shear memory before creating its state. The
     /// original `stiffness_n_m` is the EQUILIBRIUM stiffness, not the sum of arms.
     /// Midpoint integration requires dt <= 2*tau for every arm, avoiding an
     /// unresolved alternating relaxation response. Refine dt independently.
     pub fn with_relaxation(mut self, arms: Vec<ThirdBodyLayerRelaxationArm>) -> Result<Self, TriboError> {
-        if arms.len() > MAX_LAYER_RELAXATION_ARMS || !self.relaxation.is_empty() {
+        if arms.len() > MAX_LAYER_RELAXATION_ARMS || !self.relaxation.is_empty() || self.tensor.is_some() {
             return Err(TriboError::InvalidInput { field: "layer_relaxation_count_or_rebinding" });
         }
         let mut total = self.stiffness_n_m;
@@ -118,9 +123,16 @@ impl ThirdBodyLayerContact {
         self.relaxation = arms;
         Ok(self)
     }
-    pub fn relaxation(&self) -> &[ThirdBodyLayerRelaxationArm] { &self.relaxation }
+    /// Isotropic arms only. Tensor materials must use `tensor_relaxation`;
+    /// returning no scalar law prevents silently dropping their cross terms.
+    pub fn relaxation(&self) -> Option<&[ThirdBodyLayerRelaxationArm]> {
+        self.tensor.is_none().then_some(&self.relaxation)
+    }
     #[must_use]
-    pub const fn stiffness_n_m(&self) -> f64 { self.stiffness_n_m }
+    /// Isotropic equilibrium stiffness, absent for a tensor-valued material.
+    pub const fn stiffness_n_m(&self) -> Option<f64> {
+        if self.tensor.is_none() { Some(self.stiffness_n_m) } else { None }
+    }
     #[must_use]
     pub const fn yield_force_n(&self) -> f64 { self.yield_force_n }
     #[must_use]
@@ -140,6 +152,9 @@ impl ThirdBodyLayerContact {
     /// elastic slip is reset, including on a failed continuation.
     pub fn continue_state(&self, previous: &ThirdBodyLayerState)
         -> Result<ThirdBodyLayerState, TriboError> {
+        if self.tensor.is_some() || previous.owner.tensor.is_some() {
+            return self.continue_tensor_state(previous, false).map(|value| value.state);
+        }
         if self.stiffness_n_m.to_bits() != previous.owner.stiffness_n_m.to_bits()
             || self.relaxation.len() != previous.owner.relaxation.len()
             || self.relaxation.iter().zip(&previous.owner.relaxation)
@@ -160,6 +175,9 @@ impl ThirdBodyLayerContact {
     /// changes remain outside this operation; the strain limit is unchanged.
     pub fn continue_state_with_work(&self, previous: &ThirdBodyLayerState)
         -> Result<ThirdBodyLayerContinuation, TriboError> {
+        if self.tensor.is_some() || previous.owner.tensor.is_some() {
+            return self.continue_tensor_state(previous, true);
+        }
         if self.relaxation.len() != previous.owner.relaxation.len()
             || previous.relaxation_slip_m.len() != self.relaxation.len()
             || self.maximum_elastic_slip_m.to_bits()
@@ -218,6 +236,11 @@ impl ThirdBodyLayerContact {
     pub fn thermodynamics_with_relaxation(&self, state: &ThirdBodyLayerState,
         stiffness_slope_n_m_k: f64, relaxation_slopes_n_m_k: &[f64])
         -> Result<ThirdBodyLayerThermodynamics, TriboError> {
+        if self.tensor.is_some() {
+            return Err(TriboError::InvalidInput {
+                field: "tensor_layer_requires_complete_tensor_thermal_derivatives",
+            });
+        }
         if state.owner != *self {
             return Err(TriboError::InvalidInput { field: "layer_checkpoint_owner" });
         }
@@ -266,6 +289,7 @@ impl ThirdBodyLayerContact {
     /// continuation happens before this mechanical interval.
     pub fn step_dissipation(&self, old: &ThirdBodyLayerState, new: &ThirdBodyLayerState,
         dt_s: f64) -> Result<ThirdBodyLayerDissipation, TriboError> {
+        if self.tensor.is_some() { return self.tensor_dissipation(old, new, dt_s); }
         positive_finite(dt_s, "layer_dissipation_dt_s")?;
         if old.owner != *self || new.owner != *self
             || old.relaxation_slip_m.len() != self.relaxation.len()
@@ -299,6 +323,11 @@ impl crate::tangential::transport::ObjectiveTangentialLaw for ThirdBodyLayerCont
     fn transport_state(&self, state: &Self::State,
         rotation: crate::tangential::transport::TangentialHistoryRotation)
         -> Result<Self::State, TriboError> {
+        // A material-frame tensor must rotate along with its history. The
+        // fixed-law transport capability cannot change constitutive parameters.
+        if self.tensor.is_some() && rotation.cosine_sine() != [1.0, 0.0] {
+            return Err(TriboError::InvalidInput { field: "tensor_layer_requires_joint_frame_transfer" });
+        }
         if state.owner != *self {
             return Err(TriboError::InvalidInput { field: "layer_checkpoint_owner" });
         }
@@ -316,15 +345,18 @@ impl crate::tangential::transport::ObjectiveTangentialLaw for ThirdBodyLayerCont
 impl TangentialLaw for ThirdBodyLayerContact {
     type State = ThirdBodyLayerState;
     fn model_id(&self) -> &str {
+        if self.tensor.is_some() { return "retained-tensor-viscoelastic-viscoplastic-shear-layer-v1"; }
         if self.relaxation.is_empty() { "retained-isothermal-elastic-viscoplastic-shear-layer-v1" }
         else { "retained-isothermal-viscoelastic-viscoplastic-shear-layer-v1" }
     }
     fn initial_state(&self) -> Self::State {
         ThirdBodyLayerState { elastic_slip_m: [0.0; 2], plastic_slip_m: [0.0; 2],
-            relaxation_slip_m: vec![[0.0; 2]; self.relaxation.len()],
+            relaxation_slip_m: vec![[0.0; 2]; self.tensor.as_ref()
+                .map_or(self.relaxation.len(), |potential| potential.arms.len())],
             owner: self.clone() }
     }
     fn stored_energy_j(&self, state: &Self::State) -> f64 {
+        if self.tensor.is_some() { return self.tensor_energy(state); }
         // States are constructed only by this law. A foreign checkpoint is not
         // a physical material transfer and must not produce a finite ledger.
         if state.owner != *self { return f64::NAN; }
@@ -338,6 +370,7 @@ impl TangentialLaw for ThirdBodyLayerContact {
     }
     fn advance(&self, state: &Self::State, input: &TangentialStepInput)
         -> Result<TangentialStep<Self::State>, TriboError> {
+        if self.tensor.is_some() { return self.advance_tensor(state, input); }
         input.solve.validate()?;
         if state.owner != *self {
             return Err(TriboError::InvalidInput { field: "layer_checkpoint_owner" });

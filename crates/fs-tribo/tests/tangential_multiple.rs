@@ -142,7 +142,7 @@ fn simultaneous_elastic_preloads_match_an_independent_complete_equilibrium_solve
     let mut a = c.clone();
     let mut b = free.to_vec();
     for i in 0..4 {
-        a[4 * i + i] += 2.0 / laws[i / 2].stiffness_n_m();
+        a[4 * i + i] += 2.0 / laws[i / 2].stiffness_n_m().unwrap();
         b[i] += 2.0 * elastic[i];
     }
     let expected = solve(a.clone(), b.clone());
@@ -163,7 +163,7 @@ fn simultaneous_elastic_preloads_match_an_independent_complete_equilibrium_solve
             );
         }
         expected_change += 0.5
-            * laws[i].stiffness_n_m()
+            * laws[i].stiffness_n_m().unwrap()
             * (e[0] * e[0] + e[1] * e[1] - elastic[2 * i].powi(2) - elastic[2 * i + 1].powi(2));
     }
     close(result.stored_change_j, expected_change);
@@ -245,7 +245,7 @@ fn nonlinear_reference(
     let mut a = c.to_vec();
     let b: Vec<_> = free.iter().zip(elastic).map(|(u, e)| u + 2.0 * e).collect();
     for i in 0..n {
-        a[n * i + i] += 2.0 / laws[i / 2].stiffness_n_m();
+        a[n * i + i] += 2.0 / laws[i / 2].stiffness_n_m().unwrap();
     }
     let mut force = vec![0.0; n];
     for _ in 0..64 {

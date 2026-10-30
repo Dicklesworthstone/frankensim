@@ -39,6 +39,9 @@ use std::cell::{Cell, RefCell};
 /// Source-pinned thermoelastic layer feedback on the original rigid/heat solve.
 pub mod thermal;
 
+/// Full source tensor shear with original rigid momenta and finite caloric cells.
+pub mod tensor;
+
 /// The actual opposing face centres and unchanged material tangent frame.
 /// The normal points from face A to face B. Arms are COM-relative in each
 /// original body's principal frame. Area and thickness are physical dimensions.

@@ -229,7 +229,7 @@ fn opposing_contacts_share_full_body_response_and_match_a_dense_elastic_oracle()
             result.contacts[i].traction_n,
             [expected[2 * i], expected[2 * i + 1]],
         );
-        let k = laws[i].stiffness_n_m();
+        let k = laws[i].stiffness_n_m().unwrap();
         let ignored = (k * old_elastic[i][0] + 0.5 * k * free[2 * i])
             / (1.0 + 0.25 * k * dt * dt * w[(2 * i) * 4 + 2 * i]);
         assert!((ignored - result.contacts[i].traction_n[0]).abs() > 1e-3);
@@ -457,7 +457,7 @@ fn nonproportional_plastic_histories_advance_together_without_reset() {
                 close(new_e[j], old_e[j] + result.slip_increment_m[i][j] - plastic);
                 close(
                     step.traction_n[j],
-                    0.5 * laws[i].stiffness_n_m() * (old_e[j] + new_e[j]),
+                    0.5 * laws[i].stiffness_n_m().unwrap() * (old_e[j] + new_e[j]),
                 );
             }
             close(

@@ -3,6 +3,8 @@
 //! none is a calibrated layer specimen or a complete bending/inertial solid.
 #[path = "rigid_layer_contact/thermal.rs"]
 mod thermoelastic;
+#[path = "rigid_layer_contact/tensor.rs"]
+mod tensor_material;
 
 use fs_couple::friction_heat::third_body::rigid::*;
 use fs_couple::friction_heat::third_body::{ThirdBodyHeatRoute, ThirdBodyHeatTolerances};
@@ -791,3 +793,4 @@ fn g4_late_failures_preserve_original_bodies_history_and_caloric_state() {
         assert_eq!(a.specific_h_j_kg.to_bits(), b.specific_h_j_kg.to_bits());
     }
 }
+

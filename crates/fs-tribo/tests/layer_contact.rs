@@ -315,7 +315,7 @@ fn g1_subyield_shear_relaxes_to_equilibrium_with_second_order_material_memory() 
         // The independent continuous held-strain Maxwell solution is one
         // exponential per SOURCE arm. No force/spectrum fitting is involved.
         let mut error = 0.0_f64;
-        for ((arm, initial), final_slip) in model.relaxation().iter()
+        for ((arm, initial), final_slip) in model.relaxation().unwrap().iter()
             .zip(loaded.state.relaxation_slip_m()).zip(state.relaxation_slip_m()) {
             for axis in 0..2 {
                 let exact = initial[axis]*(-0.02/arm.relaxation_time_s).exp();
@@ -343,7 +343,7 @@ fn g1_maxwell_and_plastic_losses_close_the_same_two_axis_contact_return() {
         assert!(channels.plastic_j >= 0.0 && channels.relaxation_j >= 0.0);
         let actual = model.advance(&state, &input(step.slip_increment_m, drive.dt_s, 0.0)).unwrap();
         for axis in 0..2 { close(actual.traction_n[axis], step.traction_n[axis], 1.0); }
-        for ((arm, old), new) in model.relaxation().iter()
+        for ((arm, old), new) in model.relaxation().unwrap().iter()
             .zip(state.relaxation_slip_m()).zip(step.state.relaxation_slip_m()) {
             for axis in 0..2 {
                 let de = step.state.elastic_slip_m()[axis]-state.elastic_slip_m()[axis];
@@ -366,7 +366,7 @@ fn g0_material_memory_continues_thermal_history_and_refuses_unresolved_or_replac
     let cold = hereditary(100.0);
     let loaded = cold.advance(&cold.initial_state(), &input([0.002, 0.001], 0.001, 0.0)).unwrap();
     let warm = ThirdBodyLayerContact::new(1000.0, 100.0, 2.0, 310.0, 0.02).unwrap()
-        .with_relaxation(cold.relaxation().iter().map(|arm| ThirdBodyLayerRelaxationArm {
+        .with_relaxation(cold.relaxation().unwrap().iter().map(|arm| ThirdBodyLayerRelaxationArm {
             stiffness_n_m: arm.stiffness_n_m, relaxation_time_s: 0.5*arm.relaxation_time_s,
         }).collect()).unwrap();
     let continued = warm.continue_state(&loaded.state).unwrap();
@@ -384,5 +384,5 @@ fn g0_material_memory_continues_thermal_history_and_refuses_unresolved_or_replac
         ThirdBodyLayerRelaxationArm { stiffness_n_m: 0.0, relaxation_time_s: 0.01 },
         ThirdBodyLayerRelaxationArm { stiffness_n_m: 1.0, relaxation_time_s: f64::NAN },
     ] { assert!(law(1.0).with_relaxation(vec![arm]).is_err()); }
-    assert!(law(1.0).with_relaxation(vec![cold.relaxation()[0]; 65]).is_err());
+    assert!(law(1.0).with_relaxation(vec![cold.relaxation().unwrap()[0]; 65]).is_err());
 }
