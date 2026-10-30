@@ -1259,26 +1259,10 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 flow.balance_defect_j + report.gas_balance_defect_j;
         }
         let accepted_finite_atmosphere = observer.finite_atmosphere.take();
-        // Flow has passed every endpoint/advection gate; accepting the already
-        // admitted solid candidate is now infallible. No partial thermal commit.
-        for ((body, h), material) in bodies.iter_mut().zip(body_enthalpies).zip(body_sources) {
-            body.accept(h, material);
-        }
-        if let (Some(target), Some(accepted)) = (finite_atmosphere, accepted_finite_atmosphere) {
-            *target = accepted;
-        }
-        let body_report = (!bodies.is_empty()).then_some(FreeSurfaceBodyExchange {
-            enthalpy_before_j: body_before,
-            enthalpy_after_j: body_after,
-            heat_to_liquid_j: body_heat,
-            heat_from_gas_j: observer.body_atmosphere.heat_j,
-            heat_from_radiation_j: observer.body_radiation.heat_j,
-            combined_balance_defect_j: flow.balance_defect_j,
-            last_applied: body_last,
-            thermal_endpoint: body_endpoint,
-            solid_last_applied,
-            solid_thermal_endpoint,
-        });
+        // The observer borrows `bodies`; read its gas and radiation accounts
+        // before the accept loop takes them mutably.
+        let body_heat_from_gas_j = observer.body_atmosphere.heat_j;
+        let body_heat_from_radiation_j = observer.body_radiation.heat_j;
         let body_environment = (!observer.body_atmosphere.faces.is_empty()).then_some(
             FreeSurfaceBodyGasExchange {
                 heat_to_solids_j: observer.body_atmosphere.heat_j,
@@ -1293,6 +1277,26 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 thermal_endpoint: observer.body_radiation.endpoint,
             },
         );
+        // Flow has passed every endpoint/advection gate; accepting the already
+        // admitted solid candidate is now infallible. No partial thermal commit.
+        for ((body, h), material) in bodies.iter_mut().zip(body_enthalpies).zip(body_sources) {
+            body.accept(h, material);
+        }
+        if let (Some(target), Some(accepted)) = (finite_atmosphere, accepted_finite_atmosphere) {
+            *target = accepted;
+        }
+        let body_report = (!bodies.is_empty()).then_some(FreeSurfaceBodyExchange {
+            enthalpy_before_j: body_before,
+            enthalpy_after_j: body_after,
+            heat_to_liquid_j: body_heat,
+            heat_from_gas_j: body_heat_from_gas_j,
+            heat_from_radiation_j: body_heat_from_radiation_j,
+            combined_balance_defect_j: flow.balance_defect_j,
+            last_applied: body_last,
+            thermal_endpoint: body_endpoint,
+            solid_last_applied,
+            solid_thermal_endpoint,
+        });
         Ok(FreeSurfaceConductionReport {
             body_environment,
             body_radiation,
