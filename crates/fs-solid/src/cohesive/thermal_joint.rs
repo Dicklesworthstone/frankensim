@@ -13,6 +13,9 @@
 //! Thermal transport and contact updates belong to the caller. No fracture heat,
 //! healing, fitted adhesion, dynamic snap-back or equilibrium uniqueness is claimed.
 
+/// Original bulk and ordered interface sources on the same joint history.
+pub mod source;
+
 use std::collections::BTreeMap;
 use fs_exec::Cx;
 use fs_material::cohesive::{BilinearCohesive, CohesiveEnergy, CohesivePoint};
@@ -272,3 +275,7 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(),Error> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "thermal_joint/source_tests.rs"]
+mod source_tests;

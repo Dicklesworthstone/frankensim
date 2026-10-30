@@ -2340,3 +2340,23 @@ their original ownership independently of a consumer's contact-face selection.
 `RodMaterialSource::thermoelastic_laws` lowers each original concentric segment/layer through the same pinned mechanical and thermal-expansion data into the complete material thermoelastic law. `PreparedRodMotion::segment_strain_states` returns the actual-pose axial, bending, shear and torsional strains and section energy through the existing native kinematic and energy owners. Neither path introduces a replacement rod model, effective material, or extra trajectory.
 
 The reciprocal finite-enthalpy consumer in `fs-couple::rod_motion::enthalpy` uses these views to evaluate thermal exchange and refresh the original source-derived stiffness and integrated expansion while retaining reference mass/inertia, pose, momentum, supports, attached links, loads and clock. Existing source and small-strain refusals remain authoritative. Independent native-energy, nonuniform conduction and torsional-reaction regressions were added under `fs-couple/tests/rod_motion/enthalpy.rs`; native execution remains pending the unchanged dependency/environment build blocker.
+
+## Original bulk and interface sources on thermal joints
+
+`cohesive::thermal_joint::source::SourceJoint` binds the existing restrained-member
+and cohesive solver to original `ResolvedThermoMaxwell` bulk sources and one ordered
+`ResolvedBilinearCohesive` interface. Receiving member identities must match both
+interface sides. Source temperature, strain and rate domains remain enforced by
+the native material law; member memory, cohesive damage, force/extension
+compatibility and work/storage checks remain owned by the existing joint.
+
+Every advance explicitly admits the unchanged interface query, including quantity
+conventions, so evolving bulk temperature cannot silently freeze an unsupported
+cohesive-state change. Three source integration tests cover independent series and
+thermal-work references, data-only substitutions with relaxation and fracture
+continuation, and source/domain/cancellation refusal. This remains a quasistatic
+fixed-geometry series model with prescribed bulk temperatures and fixed external
+interface state; no thermal transport, fracture-heat partition or
+temperature-dependent cohesive-history transfer is inferred. New modules pass
+formatting and whitespace checks. Native tests remain unexecuted: a single-threaded
+metadata-only check was SIGKILLed in unchanged asupersync in the authoring worker.
