@@ -6,7 +6,7 @@ use crate::material::free_surface::enthalpy::FreeSurfaceEnthalpyError;
 use crate::material::free_surface::enthalpy::rheology::RheologySolve;
 use fs_qty::Frequency;
 
-fn source_card(rate_slope: f64, maximum_rate: f64) -> MaterialCard {
+pub(super) fn source_card(rate_slope: f64, maximum_rate: f64) -> MaterialCard {
     let original = thermal_card(1000.0, 2e-5);
     let mut claims = ClaimSet::new();
     for (_, claim) in original.claims().claims_ordered() {

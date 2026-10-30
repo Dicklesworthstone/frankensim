@@ -3638,6 +3638,36 @@ The original exact overlap, per-fragment mass, linear/angular momentum and entha
 
 Two synthetic regressions specify data-only rheology changes in actual native motion/dissipation, independent mass/enthalpy and both-momentum checks, source-versus-receiver rates, rigid-rotation objectivity, out-of-domain source shear, bounded admission, late receiver refusal and cancellation. Constant reference density, fully liquid source, absent stored elastic/plastic history and neglected capillary surface energy remain required. MR28, MR29 and MR69 remain open for their broader phase, stress-history and moving-geometry obligations.
 
+### Source-density buoyancy across conservative tetrahedral liquid transfer
+
+`free_surface3_from_tetrahedra_with_boussinesq_enthalpy` carries original
+source-density feedback into the existing thermal VOF trajectory. Tetrahedral
+mass, geometric volume, inertia and the caloric chart retain the original
+reference density rho0. Every nodal/caloric-knot/property-line sample uses the
+shared `BoussinesqMaterial` admission for source density and heat-capacity
+departures, including interior source breakpoints. Actual source rho(T) and
+its receipts remain available; no material-name expansion coefficient is
+introduced. Optional original rheology controls compose through the same
+thermal attachment and constitutive samples.
+
+The native receiving owner retains its reference gravity load and adds the
+bounded source-density departure. Its Guo-frame rebind preserves physical
+velocity and stress without adding an impulse, time or heat. Transfer rereads
+actual receiving mass and both momenta after attachment, using the original
+per-fragment projection and shared absolute error budgets. Mechanical
+projection differences remain separate from thermodynamic storage. Later
+heating, advection and molecular dissipation refresh that same material/force
+trajectory; local dynamic viscosity is divided by rho0 for collision.
+
+Three synthetic regressions specify independently moving fragments, analytic
+gravity impulses before/after heating, zero-departure parity, simultaneous
+source shear and buoyancy, reference-inertia invariance, interior density
+bounds and late gravity/cancellation refusal. This bounded Boussinesq
+feedback does not add volume expansion, phase-density change, pressure work or a new
+gravitational-energy store. Fully liquid material, absent stored elastic/plastic
+history and neglected capillary surface energy remain required. The broader
+MR28/MR29/MR69 deliveries remain open.
+
 ### Constant sourced capillarity in the original heated free surface
 
 `MaterialFreeSurfaceEnthalpy3` now retains sourced capillarity when sigma

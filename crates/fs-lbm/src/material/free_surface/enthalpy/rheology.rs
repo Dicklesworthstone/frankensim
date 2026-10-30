@@ -198,7 +198,7 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
         let binding = RheologyBinding::try_new(self.material(), law, solve)?;
         let flow = self.free_surface3_from_cells_inner(domain, initial, cx)?;
         let liquid =
-            flow.with_bound_rheological_enthalpy(law, caloric, controls, initial_h, binding, gate)?;
+            flow.with_bound_thermal_transport(law, caloric, controls, initial_h, None, Some(binding), gate)?;
         cx.checkpoint().map_err(|_| FreeSurfaceError3::Cancelled)?;
         Ok(liquid)
     }
@@ -206,18 +206,19 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
 
 impl<'s> MaterialFreeSurface3<'s> {
     // A conservative transfer initializes native populations through the same
-    // owner before attaching this already-admitted constitutive binding.
+    // owner before attaching its original buoyancy and rheology models.
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::material::free_surface) fn with_bound_rheological_enthalpy<'m>(
+    pub(in crate::material::free_surface) fn with_bound_thermal_transport<'m>(
         self,
         law: &'m LiquidTemperatureLaw<'m>,
         caloric: &'m EquilibriumEnthalpyPhaseCurve,
         controls: FreeSurfaceEnthalpyControls,
         initial_h: impl Fn([usize; 3]) -> f64,
-        binding: RheologyBinding,
+        buoyancy: Option<crate::material::transport::boussinesq::BoussinesqConfig<3>>,
+        binding: Option<RheologyBinding>,
         gate: &CancelGate,
     ) -> Result<MaterialFreeSurfaceEnthalpy3<'s, 'm>, Error> {
-        self.with_enthalpy_model(law, caloric, controls, initial_h, None, Some(binding), None, gate)
+        self.with_enthalpy_model(law, caloric, controls, initial_h, buoyancy, binding, None, gate)
     }
 }
 

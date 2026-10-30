@@ -10,6 +10,7 @@
 //! convert phases, introduce pressure work or supply capillary surface energy.
 
 use std::collections::BTreeSet;
+mod buoyancy;
 mod rheology;
 
 use fs_exec::{CancelGate, Cx};
@@ -18,6 +19,7 @@ use fs_material::state_point::MaterialStatePointError;
 use fs_material::liquid_temperature::LiquidTemperatureLaw;
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, SolidLiquidPhase};
 use fs_qty::Temperature;
+use crate::material::transport::boussinesq::BoussinesqConfig;
 
 use super::{
     MaterialFreeSurfaceDomain3, MaterialFreeSurfaceScaling, TetLiquidTransferError,
@@ -142,7 +144,7 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
         gate: &CancelGate,
     ) -> Result<(MaterialFreeSurfaceEnthalpy3<'s, 'm>, TetEnthalpyTransferReport), TetEnthalpyTransferError> {
         self.transfer_tetrahedra_enthalpy(
-            domain, grid_origin_m, source, law, caloric, limits, controls, None, cx, gate,
+            domain, grid_origin_m, source, law, caloric, limits, controls, None, None, cx, gate,
         )
     }
 
@@ -184,7 +186,53 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
         gate: &CancelGate,
     ) -> Result<(MaterialFreeSurfaceEnthalpy3<'s, 'm>, TetEnthalpyTransferReport), TetEnthalpyTransferError> {
         self.transfer_tetrahedra_enthalpy(
-            domain, grid_origin_m, source, law, caloric, limits, controls, Some(solve), cx, gate,
+            domain, grid_origin_m, source, law, caloric, limits, controls, Some(solve), None, cx, gate,
+        )
+    }
+
+    /// Preserve source-density buoyancy through conservative liquid transfer.
+    ///
+    /// Source geometry, mass, inertia and the original h chart keep rho0, the
+    /// density at the original liquid law's reference point. The SAME source
+    /// rho(T) and Cp(T) are admitted over every source temperature interval by
+    /// the shared Boussinesq owner and its explicit relative-departure bounds.
+    /// Source density is never substituted into reference-volume mass storage.
+    ///
+    /// The original VOF owner keeps its rho0*g reference load and adds the
+    /// source-density departure to gravity. Its Guo-frame attachment preserves
+    /// transferred physical velocity and stress; the actual initialized native
+    /// moments are then checked again with the original per-fragment gates.
+    /// No impulse, elapsed time or heat is supplied by attaching buoyancy.
+    /// Later heating/advection refreshes the original source and native force.
+    ///
+    /// The optional rheology controls retain the SAME T/shear law when the
+    /// source has an explicit evolving shear axis. Both effects then use one
+    /// material sample: molecular viscosity is divided by rho0 for collision,
+    /// and unprojected source density supplies buoyancy. Omitting the required
+    /// shear owner still refuses, as in ordinary thermal transfer.
+    ///
+    /// This bounded Boussinesq approximation does not expand the liquid volume,
+    /// change phase density, perform pressure work, or add gravitational energy
+    /// storage. Gravity must match the receiving domain. The original pure
+    /// liquid, neglected capillarity and mechanical-projection limits remain.
+    #[allow(clippy::too_many_arguments)]
+    pub fn free_surface3_from_tetrahedra_with_boussinesq_enthalpy<'m>(
+        self,
+        domain: MaterialFreeSurfaceDomain3<'_>,
+        grid_origin_m: [f64; 3],
+        source: TetrahedralLiquidEnthalpyState<'_>,
+        law: &'m LiquidTemperatureLaw<'m>,
+        caloric: &'m EquilibriumEnthalpyPhaseCurve,
+        limits: TetEnthalpyTransferLimits,
+        controls: FreeSurfaceEnthalpyControls,
+        buoyancy: BoussinesqConfig<3>,
+        rheology: Option<RheologySolve>,
+        cx: &Cx<'_>,
+        gate: &CancelGate,
+    ) -> Result<(MaterialFreeSurfaceEnthalpy3<'s, 'm>, TetEnthalpyTransferReport), TetEnthalpyTransferError> {
+        self.transfer_tetrahedra_enthalpy(
+            domain, grid_origin_m, source, law, caloric, limits, controls, rheology,
+            Some(buoyancy), cx, gate,
         )
     }
 
@@ -199,6 +247,7 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
         limits: TetEnthalpyTransferLimits,
         controls: FreeSurfaceEnthalpyControls,
         solve: Option<RheologySolve>,
+        buoyancy: Option<BoussinesqConfig<3>>,
         cx: &Cx<'_>,
         gate: &CancelGate,
     ) -> Result<(MaterialFreeSurfaceEnthalpy3<'s, 'm>, TetEnthalpyTransferReport), TetEnthalpyTransferError> {
@@ -231,15 +280,15 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
             let (_, rate_axis) = self.material().rheology_axes()
                 .expect("original source admitted by native rheology binding");
             rheology::admit_source(
-                source, density, law, caloric, rate_axis, limits, &mut source_queries, cx, gate,
+                source, density, law, caloric, rate_axis, limits, &mut source_queries, buoyancy, cx, gate,
             )?
         } else {
-            let (minimum_h, maximum_h) = admit_frozen_source(
-                source, density, law, caloric, limits, &mut source_queries, cx,
+            let (minimum_h, maximum_h) = admit_temperature_source(
+                source, density, law, caloric, limits, &mut source_queries, buoyancy, cx,
             )?;
             (minimum_h, maximum_h, Vec::new())
         };
-        let (flow, mechanical, transferred) = self.transfer_tetrahedra(
+        let (flow, mut mechanical, transferred) = self.transfer_tetrahedra(
             domain, grid_origin_m, source.motion, Some(source.specific_enthalpy_j_kg),
             binding.as_ref(), limits.mechanical, cx,
         )?;
@@ -251,12 +300,15 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
             }
         }
         let initial_h = |coordinates| transferred.by_cell.get(&coordinates).copied().unwrap_or(f64::NAN);
-        let thermal = match binding {
-            Some(binding) => flow.with_bound_rheological_enthalpy(
-                law, caloric, controls, initial_h, binding, gate,
-            )?,
-            None => flow.with_enthalpy(law, caloric, controls, initial_h, gate)?,
-        };
+        let thermal = flow.with_bound_thermal_transport(
+            law, caloric, controls, initial_h, buoyancy, binding, gate,
+        )?;
+        if buoyancy.is_some() {
+            buoyancy::admit_receiver_moments(
+                thermal.flow(), &mut mechanical, self.cell_size_m(),
+                domain.gravity_m_s2, limits.mechanical, cx,
+            )?;
+        }
         let target_enthalpy_j = thermal.total_enthalpy_j()?;
         let enthalpy_defect_j = target_enthalpy_j - transferred.source_j;
         if !enthalpy_defect_j.is_finite()
@@ -307,13 +359,14 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn admit_frozen_source(
+fn admit_temperature_source(
     source: TetrahedralLiquidEnthalpyState<'_>,
     density: f64,
     law: &LiquidTemperatureLaw<'_>,
     caloric: &EquilibriumEnthalpyPhaseCurve,
     limits: TetEnthalpyTransferLimits,
     source_queries: &mut usize,
+    buoyancy: Option<BoussinesqConfig<3>>,
     cx: &Cx<'_>,
 ) -> Result<(f64, f64), TetEnthalpyTransferError> {
     let mut queried = BTreeSet::new();
@@ -325,7 +378,7 @@ fn admit_frozen_source(
             let h = *source.specific_enthalpy_j_kg.get(index as usize)
                 .ok_or_else(|| invalid("tetrahedron index lies outside the enthalpy field"))?;
             if queried.insert(index) {
-                admit_source_sample(h, density, law, caloric, limits, source_queries, None)?;
+                admit_source_sample(h, density, law, caloric, limits, source_queries, None, buoyancy)?;
                 minimum_h = minimum_h.min(h);
                 maximum_h = maximum_h.max(h);
             }
@@ -338,13 +391,13 @@ fn admit_frozen_source(
         {
             admit_source_sample(
                 knot.specific_enthalpy_j_kg, density, law, caloric,
-                limits, source_queries, None,
+                limits, source_queries, None, buoyancy,
             )?;
         }
     }
     admit_source_lines(
         minimum_h, maximum_h, density, law, caloric, limits,
-        source_queries, None, cx,
+        source_queries, None, buoyancy, cx,
     )?;
     Ok((minimum_h, maximum_h))
 }
@@ -358,6 +411,7 @@ fn admit_source_sample(
     limits: TetEnthalpyTransferLimits,
     queries: &mut usize,
     rate: Option<(&str, f64)>,
+    buoyancy: Option<BoussinesqConfig<3>>,
 ) -> Result<(), TetEnthalpyTransferError> {
     *queries = queries.checked_add(1)
         .filter(|count| *count <= limits.max_source_queries)
@@ -369,7 +423,7 @@ fn admit_source_sample(
     {
         return Err(invalid("source thermal field must remain liquid at the original density").into());
     }
-    admit_transport_temperature(phase.temperature_k(), density, law, rate)
+    admit_transport_temperature(phase.temperature_k(), density, law, rate, buoyancy)
 }
 
 fn admit_transport_temperature(
@@ -377,6 +431,7 @@ fn admit_transport_temperature(
     density: f64,
     law: &LiquidTemperatureLaw<'_>,
     rate: Option<(&str, f64)>,
+    buoyancy: Option<BoussinesqConfig<3>>,
 ) -> Result<(), TetEnthalpyTransferError> {
     let material = match rate {
         Some((axis, rate)) => {
@@ -388,7 +443,9 @@ fn admit_transport_temperature(
         }
         None => law.at_temperature(Temperature::new(temperature_k)),
     }.map_err(FreeSurfaceEnthalpyError::from)?;
-    if material.density_kg_m3().to_bits() != density.to_bits() {
+    if let Some(config) = buoyancy {
+        buoyancy::admit_source_transport(material, density, law, config)?;
+    } else if material.density_kg_m3().to_bits() != density.to_bits() {
         return Err(invalid("source thermal field requires a density/volume-change owner").into());
     }
     Ok(())
@@ -404,6 +461,7 @@ fn admit_source_lines(
     limits: TetEnthalpyTransferLimits,
     queries: &mut usize,
     rate: Option<(&str, f64)>,
+    buoyancy: Option<BoussinesqConfig<3>>,
     cx: &Cx<'_>,
 ) -> Result<(), TetEnthalpyTransferError> {
     let point_at = |h| -> Result<fs_matdb::QueryPoint, TetEnthalpyTransferError> {
@@ -443,7 +501,7 @@ fn admit_source_lines(
             *queries = queries.checked_add(1)
                 .filter(|count| *count <= limits.max_source_queries)
                 .ok_or_else(|| invalid("tetrahedral thermal source-query budget exhausted"))?;
-            admit_transport_temperature(temperature, density, law, rate)?;
+            admit_transport_temperature(temperature, density, law, rate, buoyancy)?;
         }
     }
     Ok(())
