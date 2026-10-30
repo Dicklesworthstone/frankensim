@@ -343,6 +343,61 @@ impl LongitudinalString {
         Ok(self.geometric_mean(slopes))
     }
 
+    /// Material strain rate of the SAME retained moderate-slope strain.
+    ///
+    /// Returns the mean rate and writes the retained cosine coefficients of
+    /// `u_xt + y_x*y_xt + z_x*z_xt`. `axial_velocity` is in the original solid
+    /// mass basis; slope velocities include any explicitly supplied chord.
+    /// Because each geometric coefficient is quadratic, evaluating this at
+    /// midpoint slopes with coordinate difference / dt gives the EXACT finite
+    /// strain increment / dt, including both transverse polarizations.
+    /// This is kinematics only: no viscosity, loss or time step is inferred.
+    ///
+    /// # Errors
+    /// Refuses incomplete/nonfinite inputs, wrong output extent or overflow.
+    /// Output contents are unspecified after an error. Allocates nothing.
+    pub fn strain_rate(
+        &self,
+        slopes: &[f64],
+        slope_velocity: &[f64],
+        axial_velocity: &[f64],
+        harmonics: &mut [f64],
+    ) -> Result<f64, NlModalError> {
+        self.validate_state(slopes, axial_velocity)?;
+        if slope_velocity.len() != self.slope_count()
+            || harmonics.len() != self.axial_modes.len()
+            || slope_velocity.iter().any(|v| !v.is_finite())
+        {
+            return Err(invalid("complete finite longitudinal string strain rates"));
+        }
+        let n = self.transverse_modes;
+        let mut mean = 0.0;
+        for (a, v) in slopes.chunks_exact(n + 1).zip(slope_velocity.chunks_exact(n + 1)) {
+            mean += a[0] * v[0] + 0.5 * dot4(&a[1..], &v[1..]);
+        }
+        for (j, (&mode, out)) in self.axial_modes.iter().zip(harmonics.iter_mut()).enumerate() {
+            let mut rate = self.axial_slope_scales[j] * axial_velocity[j];
+            for (a, v) in slopes.chunks_exact(n + 1).zip(slope_velocity.chunks_exact(n + 1)) {
+                if mode <= n {
+                    rate += a[0] * v[mode] + v[0] * a[mode];
+                    for k in 1..=n - mode {
+                        rate += 0.5 * (a[k] * v[k + mode] + v[k] * a[k + mode]);
+                    }
+                }
+                let low = mode.saturating_sub(n).max(1);
+                let high = (mode - 1).min(n);
+                for k in low..=high {
+                    rate += 0.25 * (a[k] * v[mode - k] + v[k] * a[mode - k]);
+                }
+            }
+            *out = rate;
+        }
+        if !mean.is_finite() || harmonics.iter().any(|v| !v.is_finite()) {
+            return Err(invalid("longitudinal string strain-rate overflow"));
+        }
+        Ok(mean)
+    }
+
     /// Storage and nonuniform strain bound from [`Self::geometric_strain`]'s
     /// output and the axial coordinates; writes each retained mode's total
     /// strain coefficient `d_j u_j + s_j` to `strain`. Same arithmetic as

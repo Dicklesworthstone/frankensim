@@ -1,4 +1,4 @@
-//! Select linear axial loss without borrowing transverse or fluid damping.
+//! Select source-bound axial constitutive loss without borrowing fluid damping.
 use super::{ImpactError, MaterialStringSource, invalid};
 use fs_material::section::{ConcentricElasticSection, ConcentricMaterialLayer};
 use fs_material::section::axial::ConcentricAxialViscosity;
@@ -14,12 +14,28 @@ pub enum LongitudinalMaterialLoss {
         /// Explicit uniaxial property; every layer must supply it in its bundle.
         viscosity_property: String,
     },
+    /// The same source viscosity applied to the complete retained strain rate
+    /// `u_xt + y_x*y_xt + z_x*z_xt`. The original joint nonlinear/contact solve
+    /// owns the resulting force and loss; linear modal axial damping is absent.
+    /// This remains the declared moderate-slope strain reduction, not a fully
+    /// geometrically exact material law or a thermal evolution model.
+    FiniteStrainKelvinVoigt {
+        /// Explicit uniaxial viscosity [Pa s] from every original solid layer.
+        viscosity_property: String,
+    },
 }
 impl LongitudinalMaterialLoss {
+    pub(super) fn finite_strain(&self) -> bool {
+        matches!(self, Self::FiniteStrainKelvinVoigt { .. })
+    }
     pub(in crate::bowed_string::runtime::reciprocal::bank::nonlinear) fn bind(&self, source: &MaterialStringSource)
         -> Result<Option<ConcentricAxialViscosity>, ImpactError>
     {
-        let Self::KelvinVoigt { viscosity_property } = self else { return Ok(None); };
+        let viscosity_property = match self {
+            Self::Elastic => return Ok(None),
+            Self::KelvinVoigt { viscosity_property }
+            | Self::FiniteStrainKelvinVoigt { viscosity_property } => viscosity_property,
+        };
         let section = match source {
             MaterialStringSource::WithPolarizations(p) => return self.bind(p.source()),
             MaterialStringSource::WithTorsion(t) => return self.bind(t.bending()),

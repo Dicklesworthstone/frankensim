@@ -113,3 +113,52 @@ fn source_selection_is_explicit_and_cannot_be_ignored_without_axial_coordinates(
         assert_eq!(calls,0,"refuse ignored source physics before pack I/O");
     });
 }
+
+#[test]
+fn finite_strain_selection_changes_material_reaction_and_shared_pressure_without_double_loss() {
+    use fs_couple::render::schedule::force::coupled::contact::friction::nonlinear::ModalPotential;
+    scoped(|cx,gate| {
+        let input = selected_text().replace("longitudinal-loss kelvin-voigt",
+            "longitudinal-loss finite-strain-kelvin-voigt");
+        let mut a = build(cx,gate,&input,1e5,200_000.0).unwrap();
+        let mut b = build(cx,gate,&input,4e5,200_000.0).unwrap();
+        let law = b.performance.bank().source().bank().longitudinal_waves().unwrap().strings()[0].clone();
+        assert!(law.has_finite_strain_viscosity());
+        assert!(b.performance.bank().system().components()[law.axial_component()].modes()
+            .iter().all(|mode|mode.damping_ratio==0.0));
+        // Pure transverse instantaneous motion stretches material even with
+        // every axial velocity zero. Linear u_xt loss would be exactly zero.
+        let mut q = vec![0.0;law.coordinate_count()];
+        let mut v = q.clone();
+        let mut reaction = q.clone();
+        q[0]=1e-6;v[0]=0.01;
+        law.dissipative_reaction(&q,&v,&mut reaction).unwrap();
+        assert!(reaction[0]<0.0);
+        assert!(-reaction.iter().zip(&v).map(|(f,v)|f*v).sum::<f64>()>0.0);
+        assert_eq!(a.spec.bytes,b.spec.bytes);
+        let first=pressure(&mut a,37);
+        let changed=pressure(&mut b,128);
+        assert!(first.iter().zip(&changed).any(|(x,y)|(x-y).abs()>1e-18));
+        assert_eq!(changed,pressure(&mut build(cx,gate,&input,4e5,200_000.0).unwrap(),1));
+        let frame=b.performance.bank().system().last_frame().unwrap();
+        assert!(frame.nonlinear.unwrap().nonlinear_dissipation_j>=0.0);
+        assert!(frame.energy_residual_j.abs()<=frame.energy_tolerance_j);
+        assert!(build(cx,gate,&input,4e5,50_000.0).is_err());
+        assert!(build(cx,gate,&input,-1.0,200_000.0).is_err());
+        assert!(input::Spec::parse(input.as_bytes()).unwrap().compile(cx,gate,|name|
+            Ok(pack(name,7800.0,200_000.0,None))).is_err());
+    });
+}
+
+#[test]
+fn zero_finite_strain_viscosity_preserves_the_existing_elastic_run() {
+    scoped(|cx,gate| {
+        let input = selected_text().replace("longitudinal-loss kelvin-voigt",
+            "longitudinal-loss finite-strain-kelvin-voigt");
+        let source = |name:&str| Ok(if name=="body.fsmatpk" { pack(name,7800.0,200_000.0,None) }
+            else { source_pack(name,0.0,200_000.0) });
+        let mut loss = input::Spec::parse(input.as_bytes()).unwrap().compile(cx,gate,source).unwrap();
+        let mut elastic = input::Spec::parse(text().as_bytes()).unwrap().compile(cx,gate,source).unwrap();
+        assert_eq!(pressure(&mut loss,37),pressure(&mut elastic,128));
+    });
+}

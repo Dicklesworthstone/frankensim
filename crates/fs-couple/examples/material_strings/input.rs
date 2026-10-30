@@ -543,7 +543,10 @@ impl Spec {
                 "kelvin-voigt" => LongitudinalMaterialLoss::KelvinVoigt {
                     viscosity_property: fs_material::section::axial::YOUNG_VISCOSITY_PROPERTY.into(),
                 },
-                _ => return Err("longitudinal-loss must be elastic or kelvin-voigt".into()),
+                "finite-strain-kelvin-voigt" => LongitudinalMaterialLoss::FiniteStrainKelvinVoigt {
+                    viscosity_property: fs_material::section::axial::YOUNG_VISCOSITY_PROPERTY.into(),
+                },
+                _ => return Err("longitudinal-loss must be elastic, kelvin-voigt or finite-strain-kelvin-voigt".into()),
             };
             row.end()?;
             loss

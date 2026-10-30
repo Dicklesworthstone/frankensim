@@ -27,6 +27,78 @@ fn spatial_slope(plane: &[f64], fraction: f64) -> f64 {
 }
 
 #[test]
+fn g1_material_strain_rate_matches_independent_continuum_projection() {
+    let p = parameters();
+    let n = 3;
+    let modes: Vec<_> = (1..=2*n).collect();
+    let law = LongitudinalString::new(p, n, 2, &modes).unwrap();
+    let q = [0.004, -0.02, 0.014, 0.007, -0.003, 0.006, -0.013, 0.009];
+    let v = [0.8, -1.2, 0.7, 0.4, -0.3, 0.1, 1.4, -0.6];
+    let axial_v = [1e-4, -2e-4, 4e-4, 3e-4, -1e-4, 2e-4];
+    let mut rates = [0.0; 6];
+    let mean = law.strain_rate(&q, &v, &axial_v, &mut rates).unwrap();
+    let samples = 1024;
+    let normalization = (2.0 / (p.lin_density*p.length)).sqrt();
+    let continuum: Vec<_> = (0..samples).map(|i| {
+        let x = (i as f64 + 0.5) / samples as f64;
+        let transverse: f64 = q.chunks_exact(n+1).zip(v.chunks_exact(n+1))
+            .map(|(q,v)| spatial_slope(q,x)*spatial_slope(v,x)).sum();
+        transverse + axial_v.iter().enumerate().map(|(j,v)| {
+            let k = (j+1) as f64*core::f64::consts::PI/p.length;
+            normalization*k*v*det::cos(k*p.length*x)
+        }).sum::<f64>()
+    }).collect();
+    relative(mean, continuum.iter().sum::<f64>() / samples as f64, 5e-13);
+    for (j, rate) in rates.iter().enumerate() {
+        let projected = 2.0 * continuum.iter().enumerate().map(|(i,r)|
+            r*det::cos((j+1) as f64*core::f64::consts::PI*(i as f64+0.5)/samples as f64))
+            .sum::<f64>() / samples as f64;
+        relative(*rate, projected, 5e-13);
+    }
+    let physical_loss = continuum.iter().map(|r|r*r).sum::<f64>()/samples as f64;
+    relative(mean*mean+0.5*rates.iter().map(|r|r*r).sum::<f64>(),physical_loss,5e-13);
+    assert!(law.strain_rate(&q, &v[..7], &axial_v, &mut rates).is_err());
+    assert!(law.strain_rate(&q, &v, &[f64::NAN;6], &mut rates).is_err());
+}
+
+#[test]
+fn g1_midpoint_material_rate_has_exact_finite_step_viscous_work() {
+    let p = parameters();
+    let law = LongitudinalString::new(p, 3, 2, &[1,2,4,6]).unwrap();
+    let a = [0.004, -0.02, 0.014, 0.007, -0.003, 0.006, -0.013, 0.009];
+    let b = [-0.002, -0.013, 0.019, -0.004, 0.007, -0.008, -0.011, 0.003];
+    let u = [2e-7, -4e-7, 1e-7, -2e-7];
+    let w = [-5e-7, 2e-7, 3e-7, 1e-7];
+    let dt = 1e-4;
+    let midpoint: Vec<_> = a.iter().zip(b).map(|(&a,b)|f64::midpoint(a,b)).collect();
+    let rate: Vec<_> = a.iter().zip(b).map(|(&a,b)|(b-a)/dt).collect();
+    let axial_rate: Vec<_> = u.iter().zip(w).map(|(&a,b)|(b-a)/dt).collect();
+    let mut strain_rates = [0.0;4];
+    let mean = law.strain_rate(&midpoint,&rate,&axial_rate,&mut strain_rates).unwrap();
+    // Independently integrate actual endpoint strain increments. No force,
+    // damping-ratio or per-mode loss formula supplies this continuum reference.
+    let ca = 0.37; // Manufactured sum(eta_i A_i) [N s], not measured material data.
+    let mut integral = 0.0;
+    for i in 0..1024 {
+        let x = (i as f64+0.5)/1024.0;
+        let actual = (law.strain_at(&b,&w,x).unwrap()-law.strain_at(&a,&u,x).unwrap())/dt;
+        let projected = mean+strain_rates.iter().zip(law.axial_modes()).map(|(r,n)|
+            r*det::cos(*n as f64*core::f64::consts::PI*x)).sum::<f64>();
+        assert!((actual-projected).abs()<5e-13);
+        integral += ca*p.length*dt*actual*actual/1024.0;
+    }
+    let c = ca*p.length;
+    let weights: Vec<_> = strain_rates.iter().map(|r|0.5*c*r).collect();
+    let mut gradient = [0.0;8];
+    law.geometric_strain_gradient(&midpoint,c*mean,&weights,&mut gradient).unwrap();
+    let work = gradient.iter().zip(a.iter().zip(b)).map(|(g,(&a,b))|g*(b-a)).sum::<f64>()
+        + weights.iter().zip(law.axial_slope_scales()).zip(u.iter().zip(w))
+            .map(|((g,d),(&a,b))|g*d*(b-a)).sum::<f64>();
+    assert!(integral>0.0);
+    relative(work,integral,1e-12);
+}
+
+#[test]
 fn energy_matches_independent_span_integral_with_explicit_static_condensation() {
     let p = parameters();
     let slopes = [

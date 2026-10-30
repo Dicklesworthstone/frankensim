@@ -1767,6 +1767,41 @@ body. Axial strain reaches the receiver through its reciprocal effect on
 transverse motion and the original bridge connections. This is not a claim of
 measured violin/cello/bass equivalence.
 
+### Complete material strain-rate loss
+
+Immediately after `longitudinal-waves`, the existing axial viscosity property
+can supply the complete retained moderate-slope constitutive loss:
+
+```text
+longitudinal-loss finite-strain-kelvin-voigt
+```
+
+Every original solid layer must supply `kelvin_voigt_young_viscosity` [Pa s].
+The actual annular areas give `C_a = sum(eta_i A_i)` [N s]. The selected law acts
+on `u_xt + y_x*y_xt + z_x*z_xt`, so transverse motion can dissipate energy even
+when the axial coordinates have zero instantaneous velocity. Both transverse
+polarizations, the mean strain and all retained axial harmonics participate.
+Material substitution changes that same loss without a new damping ratio.
+
+The original nonlinear/friction solve evaluates the strain derivative at
+midpoint coordinates and uses the accepted displacement increment / dt.
+For this quadratic strain, that is exactly the finite strain increment / dt.
+The work-conjugate reaction dissipates
+`C_a L dt (edot_0^2 + sum(edot_j^2)/2)` and acts reciprocally on axial and
+transverse motion. Axial diagonal damping is zero for this selection, preventing
+double counting. The loss is included in the existing network energy balance
+and `nonlinear_dissipation_j`; endpoint acceleration pressure uses the actual
+endpoint strain and velocity. No extra time step or output filter is added.
+
+`longitudinal-loss kelvin-voigt` retains the explicitly linear `u_xt` option;
+`elastic` (or omission) retains no axial viscosity. Missing, negative,
+frequency-dependent or out-of-band data refuses. The complete small-signal
+coupled frequency bound is checked again when later material histories are
+attached; it does not certify every nonlinear harmonic. The separate moving-end
+support adapter explicitly refuses this option. This does not add temperature
+evolution, self-heating, finite-slope hereditary stress, winding slip or a fully
+geometrically exact string law, and does not establish measured audio fidelity.
+
 ### Source-derived longitudinal material memory
 
 After `longitudinal-waves` and the optional `longitudinal-loss` record, an

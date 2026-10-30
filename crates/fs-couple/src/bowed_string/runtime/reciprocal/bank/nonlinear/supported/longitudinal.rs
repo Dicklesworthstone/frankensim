@@ -78,6 +78,9 @@ impl SupportedMaterialStrings {
         -> Result<Self,ImpactError>
     {
         poll(gate)?;
+        if matches!(&loss, LongitudinalMaterialLoss::FiniteStrainKelvinVoigt { .. }) {
+            return Err(invalid("finite-strain axial viscosity requires the fixed-end joint nonlinear owner"));
+        }
         if sources.is_empty() || sources.len()>32 || attachments.len()!=sources.len() {
             return Err(invalid("material axial support requires 1..=32 complete source attachments"));
         }

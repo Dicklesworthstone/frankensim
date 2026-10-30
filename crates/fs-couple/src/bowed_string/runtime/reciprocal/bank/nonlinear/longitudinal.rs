@@ -79,6 +79,7 @@ pub struct MaterialLongitudinalString {
     axial_component: usize,
     elastic_frequency_band_rad_s: Option<(f64, f64)>,
     axial_material_loss: Option<ConcentricAxialViscosity>,
+    finite_strain_viscosity: bool,
 }
 impl MaterialLongitudinalString {
     /// Existing finite-strain owner, including the material axial frequencies.
@@ -106,9 +107,14 @@ impl MaterialLongitudinalString {
         self.elastic_frequency_band_rad_s
     }
     /// Original per-layer axial loss, absent only for an explicit elastic selection.
-    /// The retained law supplies linear u_xt loss, not finite-slope strain-rate loss.
+    /// The selected law's kinematics are identified by `has_finite_strain_viscosity`.
     pub const fn axial_material_loss(&self) -> Option<&ConcentricAxialViscosity> {
         self.axial_material_loss.as_ref()
+    }
+    /// Whether the original layer viscosities act on the complete retained
+    /// strain rate, including both transverse geometric contributions.
+    pub const fn has_finite_strain_viscosity(&self) -> bool {
+        self.finite_strain_viscosity
     }
     /// Declared modal selection and finite-motion envelope.
     pub const fn resolution(&self) -> &LongitudinalStringResolution {
@@ -259,6 +265,62 @@ impl ModalPotential for MaterialLongitudinalString {
         }
         Ok(())
     }
+    fn has_constitutive_loss(&self) -> bool {
+        self.finite_strain_viscosity && self.axial_material_loss.as_ref()
+            .is_some_and(|law| law.viscous_rigidity_n_s() > 0.0)
+    }
+    fn dissipative_reaction(
+        &self, q: &[f64], velocity: &[f64], out: &mut [f64],
+    ) -> Result<(), ModalCouplingError> {
+        out.fill(0.0);
+        if !self.finite_strain_viscosity { return Ok(()); }
+        self.validate_coordinates(q)?;
+        if velocity.len() != self.coordinate_count() || out.len() != q.len()
+            || velocity.iter().any(|x| !x.is_finite()) {
+            return Err(ModalCouplingError::Invalid {
+                what: "finite-strain axial loss needs its complete original velocities",
+            });
+        }
+        let law = self.axial_material_loss.as_ref().ok_or(ModalCouplingError::Invalid {
+            what: "finite-strain axial loss lost its original source viscosity",
+        })?;
+        let ca = law.viscous_rigidity_n_s();
+        if ca == 0.0 { return Ok(()); }
+        // C_a = sum(eta_i A_i), c = C_a L. The physical Rayleigh potential is
+        // c/2 [edot_0^2 + 1/2 sum edot_j^2]. Its negative velocity gradient
+        // acts on BOTH axial and transverse coordinates through the same strain.
+        let c = 2.0 * self.model.strain_energy_coefficient() * (ca / self.axial_rigidity_n);
+        if !c.is_finite() || c <= 0.0 {
+            return Err(ModalCouplingError::Invalid {
+                what: "finite-strain axial viscous rigidity is unrepresentable",
+            });
+        }
+        let slopes = self.slopes(q);
+        let slope_velocity = self.slopes(velocity);
+        let mut weights = vec![0.0; self.model.axial_modes().len()];
+        let mean_rate = self.model.strain_rate(&slopes, &slope_velocity,
+            &velocity[self.transverse_count()..], &mut weights).map_err(owner)?;
+        for weight in &mut weights { *weight *= 0.5 * c; }
+        let mut gradient = vec![0.0; slopes.len()];
+        self.model.geometric_strain_gradient(&slopes, c * mean_rate, &weights,
+            &mut gradient).map_err(owner)?;
+        for plane in 0..self.planes {
+            for mode in 0..self.transverse_modes {
+                out[plane * self.transverse_modes + mode] = -self.slope_scales[mode]
+                    * gradient[plane * (self.transverse_modes + 1) + mode + 1];
+            }
+        }
+        for (out, (&weight, &scale)) in out[self.transverse_count()..].iter_mut()
+            .zip(weights.iter().zip(self.model.axial_slope_scales())) {
+            *out = -weight * scale;
+        }
+        if out.iter().any(|x| !x.is_finite()) {
+            return Err(ModalCouplingError::Invalid {
+                what: "finite-strain axial viscous force overflow",
+            });
+        }
+        Ok(())
+    }
 }
 
 fn elastic_source(
@@ -337,14 +399,17 @@ impl ReciprocalStringBank {
 
     /// Retain the same nonlinear axial/transverse coupling with explicit axial loss.
     /// Every solid layer supplies its own uniaxial viscosity; missing data refuses.
-    /// The original exact linear owner integrates the derived modal damping and
+    /// The selected law joins the original exact linear or nonlinear owner and
     /// includes its dissipation in the same friction/body/fluid energy account.
     /// No output filtering, second damping step or extra state is introduced.
     ///
-    /// Kelvin--Voigt here is the small-strain linear u_xt operator. The nonlinear
-    /// elastic strain law is unchanged, but finite-slope viscous y_x*y_xt terms,
-    /// creep, heat evolution and interlayer slip are not modeled. Source bands
-    /// screen retained linear axial frequencies, not all nonlinear harmonics.
+    /// `KelvinVoigt` selects the linear u_xt operator. The explicit
+    /// `FiniteStrainKelvinVoigt` selection instead retains y_x*y_xt and z_x*z_xt
+    /// in the same joint constitutive iteration and removes diagonal axial
+    /// damping, so the same viscosity is never counted twice. Its positive loss
+    /// uses actual strain increments and reaches the original pressure observer.
+    /// Creep, heat evolution and interlayer slip are not supplied. Source bands
+    /// screen the small-signal coupled spectrum, not all nonlinear harmonics.
     pub fn with_longitudinal_waves_and_loss(
         self,
         resolutions: Vec<LongitudinalStringResolution>,
@@ -444,6 +509,7 @@ impl ReciprocalStringBank {
                             .map_err(|e| ImpactError::Owner(e.to_string()))?,
                         None => 0.0, // Explicit Elastic selection; never missing data.
                     };
+                    let damping_ratio = if loss.finite_strain() { 0.0 } else { damping_ratio };
                     Ok(ModalAcousticMode {
                         angular_frequency_rad_s: omega,
                         damping_ratio,
@@ -479,6 +545,7 @@ impl ReciprocalStringBank {
                 axial_component: self.system.components().len() + index,
                 elastic_frequency_band_rad_s: band,
                 axial_material_loss,
+                finite_strain_viscosity: loss.finite_strain(),
             };
             let transverse = law.transverse_count();
             if self.system.components()[index].modes().len() != member.source.modes()
@@ -515,6 +582,17 @@ impl ReciprocalStringBank {
             .and_then(|system| system.with_mapped_nonlinear_potentials(bindings, config, gate))
             .map_err(|e| ImpactError::Owner(e.to_string()))?;
         bearings::validate_bands(&self.source, &strings, &bearings, &self.system, gate)?;
+        if loss.finite_strain() {
+            let high = self.system.linear_frequency_upper_bound_rad_s();
+            for string in &strings {
+                let law = string.axial_material_loss.as_ref()
+                    .ok_or_else(|| invalid("finite-strain loss requires its original material law"))?;
+                let (lo, hi) = law.omega_band_rad_s();
+                if lo != 0.0 || hi < high {
+                    return Err(invalid("finite-strain viscosity requires DC through the complete coupled linear band"));
+                }
+            }
+        }
         self.source.validate_body_memory_frequencies(&self.system, gate)
             .map_err(|e| ImpactError::Owner(e.to_string()))?;
         if !bearings.is_empty() {

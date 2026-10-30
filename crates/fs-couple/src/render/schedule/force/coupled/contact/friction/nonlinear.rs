@@ -1,6 +1,7 @@
 //! Nonlinear storage coupled to the SAME exact linear and friction owners.
 //!
-//! Each trial supplies a held reaction -DG(V,q0,q1) to the original complete
+//! Each trial supplies a held reaction -DG(V,q0,q1), plus any explicitly bound
+//! passive constitutive strain-rate force, to the original complete
 //! linear network. The original scalar or simultaneous bow solve includes that
 //! reaction. The fixed point is accepted only when the reaction law AND the combined energy
 //! balance close. fs-phs owns DG; this adapter changes neither the exponential
@@ -23,6 +24,23 @@ pub trait ModalPotential: Storage + Send + Sync {
     fn coordinate_count(&self) -> usize;
     /// Reject nonfinite coordinates or motion outside the constitutive domain.
     fn validate_coordinates(&self, q: &[f64]) -> Result<(), ModalCouplingError>;
+    /// Whether the constitutive reaction below can be nonzero. Elastic laws
+    /// keep the original solve path without additional per-trial loss work.
+    fn has_constitutive_loss(&self) -> bool { false }
+    /// Optional memoryless constitutive reaction in this SAME coordinate basis.
+    /// It must be passive: `reaction dot velocity <= 0`. The default is elastic.
+    ///
+    /// The coupled solve evaluates this at midpoint coordinates and actual
+    /// displacement increment / dt. Its held-force work is included once in
+    /// network dissipation. Endpoint acceleration observation instead supplies
+    /// endpoint coordinates/velocities. A law must not repeat modal or joint
+    /// damping already owned by the linear network. No state may be advanced.
+    fn dissipative_reaction(
+        &self, _q: &[f64], _velocity: &[f64], reaction: &mut [f64],
+    ) -> Result<(), ModalCouplingError> {
+        reaction.fill(0.0);
+        Ok(())
+    }
 }
 
 /// A contiguous, nonoverlapping part of one original component.
@@ -99,6 +117,8 @@ pub struct NonlinearFrictionFrame {
     /// Conservative correction [J], already counted in friction energy. May be
     /// signed when full strain storage replaces selected linear stiffness.
     pub nonlinear_energy_j: f64,
+    /// Constitutive strain-rate loss [J], already in network dissipation.
+    pub nonlinear_dissipation_j: f64,
     /// Complete linear/friction trials required by this accepted sample.
     pub nonlinear_iterations: usize,
     /// Maximum constitutive force mismatch [N/sqrt(kg)].
@@ -113,6 +133,8 @@ pub struct NonlinearFrictionFrame {
 pub struct NonlinearFrictionDiagnostics {
     /// Conservative correction [J]; may be signed for linear replacements.
     pub nonlinear_energy_j: f64,
+    /// Constitutive strain-rate loss [J], already in network dissipation.
+    pub nonlinear_dissipation_j: f64,
     /// Complete network/friction trials required by this accepted sample.
     pub nonlinear_iterations: usize,
     /// Maximum constitutive force mismatch [N/sqrt(kg)].
@@ -124,6 +146,7 @@ impl NonlinearFrictionFrame {
     pub(super) fn diagnostics(self) -> NonlinearFrictionDiagnostics {
         NonlinearFrictionDiagnostics {
             nonlinear_energy_j: self.nonlinear_energy_j,
+            nonlinear_dissipation_j: self.nonlinear_dissipation_j,
             nonlinear_iterations: self.nonlinear_iterations,
             reaction_residual: self.reaction_residual,
             reaction_tolerance: self.reaction_tolerance,
@@ -170,6 +193,7 @@ pub(super) struct NonlinearContactWork {
 pub(super) struct NonlinearCorrection {
     pub observer_pressure_pa: f64,
     pub network_energy_j: f64,
+    pub network_dissipation_j: f64,
     pub external_work_j: f64,
     pub energy_residual_j: f64,
     pub energy_tolerance_j: f64,
@@ -485,12 +509,14 @@ impl NonlinearFrictionState {
         let mut frame = trial.frame.ok_or_else(|| invalid("nonlinear solve accepted no mechanical trial"))?;
         frame.observer_pressure_pa = correction.observer_pressure_pa;
         frame.network_energy_j = correction.network_energy_j;
+        frame.network_dissipation_j = correction.network_dissipation_j;
         frame.external_work_j = correction.external_work_j;
         frame.energy_residual_j = correction.energy_residual_j;
         frame.energy_tolerance_j = correction.energy_tolerance_j;
         Ok(NonlinearFrictionFrame {
             friction: frame,
             nonlinear_energy_j: correction.diagnostics.nonlinear_energy_j,
+            nonlinear_dissipation_j: correction.diagnostics.nonlinear_dissipation_j,
             nonlinear_iterations: correction.diagnostics.nonlinear_iterations,
             reaction_residual: correction.diagnostics.reaction_residual,
             reaction_tolerance: correction.diagnostics.reaction_tolerance,
@@ -510,10 +536,17 @@ impl NonlinearFrictionState {
             );
         }
         let before_q = coordinates(inner.components());
+        let dt = inner.sample_period_s();
+        let has_loss = self.potentials.iter().any(|p| p.potential.has_constitutive_loss());
         let before_potential = self.potential_energy(&before_q)?;
         let before = finite(inner.network.total_energy_j()? + before_potential)?;
         let mut reaction = vec![0.0; inner.mode_count()];
         self.reactions(&before_q, &before_q, &mut reaction, gate)?;
+        let mut loss_reaction = if has_loss { vec![0.0; inner.mode_count()] } else { Vec::new() };
+        if has_loss {
+            self.loss_reactions(&before_q, &velocities(inner.components()), &mut loss_reaction, gate)?;
+            self.add_loss_reaction(&mut reaction, &loss_reaction)?;
+        }
         let mut next_reaction = reaction.clone();
         let mut forces = external.to_vec();
         let mut last_ratio = f64::INFINITY;
@@ -532,6 +565,21 @@ impl NonlinearFrictionState {
             let after_q = coordinates(&inner.network.candidates);
             let after_potential = self.potential_energy(&after_q)?;
             self.reactions(&before_q, &after_q, &mut next_reaction, gate)?;
+            let nonlinear_dissipation = if has_loss {
+                let midpoint: Vec<_> = before_q.iter().zip(&after_q)
+                    .map(|(&a, &b)| f64::midpoint(a, b)).collect();
+                let increment: Vec<_> = before_q.iter().zip(&after_q).map(|(&a, &b)| b - a).collect();
+                let velocity: Vec<_> = increment.iter().map(|&delta| delta / dt).collect();
+                self.loss_reactions(&midpoint, &velocity, &mut loss_reaction, gate)?;
+                self.add_loss_reaction(&mut next_reaction, &loss_reaction)?;
+                // Work conjugacy uses actual held-force displacement, never a
+                // separately integrated endpoint velocity or guessed decay ratio.
+                finite(-dot(&loss_reaction, &increment)?)?
+            } else { 0.0 };
+            if nonlinear_dissipation < 0.0 {
+                return Err(invalid("nonlinear constitutive reaction is not passive").into());
+            }
+            let network_dissipation = finite(frame.network_dissipation_j + nonlinear_dissipation)?;
             let residual = reaction
                 .iter()
                 .zip(&next_reaction)
@@ -562,17 +610,17 @@ impl NonlinearFrictionState {
                 None => (stored_before, stored_after),
             };
             let balance = if let Some(contact) = frame.contacts {
-                finite(total_after - total_before + frame.network_dissipation_j
+                finite(total_after - total_before + network_dissipation
                     + frame.friction_dissipation_j + contact.dissipation_j
                     - external_work - frame.drive_work_j - contact.work_j)?
             } else { finite(
-                total_after - total_before + frame.network_dissipation_j + frame.friction_dissipation_j
+                total_after - total_before + network_dissipation + frame.friction_dissipation_j
                     - external_work
                     - frame.drive_work_j,
             )? };
             let mut energy_scale = total_before
                 .max(total_after)
-                .max(frame.network_dissipation_j)
+                .max(network_dissipation)
                 .max(frame.friction_dissipation_j)
                 .max(external_work.abs())
                 .max(frame.absolute_drive_work_j);
@@ -590,10 +638,16 @@ impl NonlinearFrictionState {
                     total_after,
                     inner.network.config.maximum_total_energy_j,
                 )?;
-                // Actual endpoint pressure uses -grad V(q1), not held DG.
+                // Actual endpoint pressure uses constitutive force at (q1,v1),
+                // not the held discrete-gradient/midpoint reaction.
                 let mut observer_pressure_pa = frame.observer_pressure_pa;
                 if let Some(weights) = inner.acceleration_pressure_weights() {
                     self.reactions(&after_q, &after_q, &mut next_reaction, gate)?;
+                    if has_loss {
+                        self.loss_reactions(&after_q, &velocities(&inner.network.candidates),
+                            &mut loss_reaction, gate)?;
+                        self.add_loss_reaction(&mut next_reaction, &loss_reaction)?;
+                    }
                     for ((weight, endpoint), held) in
                         weights.iter().zip(&next_reaction).zip(&reaction)
                     {
@@ -609,11 +663,13 @@ impl NonlinearFrictionState {
                 let accepted = NonlinearCorrection {
                     observer_pressure_pa,
                     network_energy_j: after,
+                    network_dissipation_j: network_dissipation,
                     external_work_j: external_work,
                     energy_residual_j: balance,
                     energy_tolerance_j: energy_tolerance,
                     diagnostics: NonlinearFrictionDiagnostics {
                         nonlinear_energy_j: after_potential,
+                        nonlinear_dissipation_j: nonlinear_dissipation,
                         nonlinear_iterations: iteration,
                         reaction_residual: residual,
                         reaction_tolerance: tolerance,
@@ -639,6 +695,39 @@ impl NonlinearFrictionState {
     }
     pub(super) fn publish(&mut self, frame: NonlinearFrictionFrame) {
         self.last = Some(frame);
+    }
+    fn add_loss_reaction(&self, reaction: &mut [f64], loss: &[f64]) -> Result<(), ModalFrictionError> {
+        for (reaction, &loss) in reaction.iter_mut().zip(loss) {
+            // Preserve the original elastic arithmetic when no loss is selected.
+            if loss != 0.0 { *reaction = finite(*reaction + loss)?; }
+            limit("complete nonlinear generalized reaction", reaction.abs(),
+                self.config.maximum_generalized_force)?;
+        }
+        Ok(())
+    }
+    fn loss_reactions(
+        &self, q: &[f64], velocity: &[f64], out: &mut [f64], gate: Option<&CancelGate>,
+    ) -> Result<(), ModalFrictionError> {
+        out.fill(0.0);
+        if q.len() != velocity.len() || q.len() != out.len()
+            || q.iter().chain(velocity).any(|x| !x.is_finite()) {
+            return Err(invalid("nonlinear loss requires complete finite coordinates and velocities").into());
+        }
+        for binding in &self.potentials {
+            poll(gate)?;
+            if !binding.potential.has_constitutive_loss() { continue; }
+            let selected_q = binding.select(q);
+            let selected_v = binding.select(velocity);
+            let mut reaction = vec![0.0; binding.coordinates.len()];
+            binding.potential.dissipative_reaction(&selected_q, &selected_v, &mut reaction)?;
+            if finite(dot(&reaction, &selected_v)?)? > 0.0 {
+                return Err(invalid("nonlinear constitutive reaction supplies energy").into());
+            }
+            for (&index, value) in binding.coordinates.iter().zip(reaction) {
+                out[index] = finite(value)?;
+            }
+        }
+        Ok(())
     }
     fn reactions(
         &self,
@@ -680,4 +769,8 @@ fn coordinates(models: &[ModalAcousticTimeModel]) -> Vec<f64> {
                 .map(|state| state.displacement_m_sqrt_kg)
         })
         .collect()
+}
+fn velocities(models: &[ModalAcousticTimeModel]) -> Vec<f64> {
+    models.iter().flat_map(|model| model.states().iter()
+        .map(|state| state.velocity_m_sqrt_kg_per_s)).collect()
 }

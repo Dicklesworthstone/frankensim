@@ -24,6 +24,18 @@ impl MaterialStringBankSource {
     ) -> Result<(), ReciprocalStringError> {
         poll(gate)?;
         self.validate_source_memory_frequencies(system, gate)?;
+        if let Some(axial) = &self.longitudinal_waves {
+            let high = system.linear_frequency_upper_bound_rad_s();
+            for string in axial.strings().iter().filter(|string| string.has_finite_strain_viscosity()) {
+                poll(gate)?;
+                let law = string.axial_material_loss()
+                    .ok_or_else(|| invalid("finite-strain loss lost its original material law"))?;
+                let (lo, hi) = law.omega_band_rad_s();
+                if lo != 0.0 || hi < high {
+                    return Err(invalid("complete coupled band exceeds finite-strain viscosity source support"));
+                }
+            }
+        }
         if let Some(image) = &self.material_chart_relaxation {
             // A coupled body receives forcing and relaxation below its bare
             // resonances as well as at the instantaneous coupled frequencies.

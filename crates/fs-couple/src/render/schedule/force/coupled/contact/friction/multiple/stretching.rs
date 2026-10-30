@@ -80,6 +80,7 @@ impl MultiFrictionModalSystem {
                 .ok_or_else(|| invalid("nonlinear solve accepted no simultaneous mechanical trial"))?;
             frame.observer_pressure_pa = correction.observer_pressure_pa;
             frame.network_energy_j = correction.network_energy_j;
+            frame.network_dissipation_j = correction.network_dissipation_j;
             frame.external_work_j = correction.external_work_j;
             frame.energy_residual_j = correction.energy_residual_j;
             frame.energy_tolerance_j = correction.energy_tolerance_j;

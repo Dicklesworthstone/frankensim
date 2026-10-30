@@ -157,7 +157,8 @@ fn resolve(name:&str, catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result
             requirements.push(Requirement::try_new(TORSION_REFERENCE,TORSION_REFERENCE_DIMS,Admit::StrictlyPositive)?);
         }
     }
-    if !body && let LongitudinalMaterialLoss::KelvinVoigt { viscosity_property } = &spec.longitudinal_loss {
+    if !body && let (LongitudinalMaterialLoss::KelvinVoigt { viscosity_property }
+        | LongitudinalMaterialLoss::FiniteStrainKelvinVoigt { viscosity_property }) = &spec.longitudinal_loss {
         requirements.push(Requirement::try_new(viscosity_property.as_str(),DynViscosity::DIMS,Admit::Finite)?);
     }
     if !body && let Some(memory) = &spec.longitudinal_memory {
