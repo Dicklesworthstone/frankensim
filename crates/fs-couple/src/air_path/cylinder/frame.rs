@@ -239,3 +239,6 @@ pub mod viscosity;
 
 /// Exact loaded-inertia coordinates and original fluid memory for shared assemblies.
 pub mod modal;
+
+/// Exact fluid-memory elimination for repeated physical forced-response solves.
+pub mod harmonic;
