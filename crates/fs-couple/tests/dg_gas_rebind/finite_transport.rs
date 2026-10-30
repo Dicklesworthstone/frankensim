@@ -2,6 +2,8 @@
 //! Synthetic source laws independently check implementation, not measured instruments.
 #[path = "finite_transport/assembly.rs"]
 mod assembly;
+#[path = "finite_transport/reactive.rs"]
+mod reactive;
 
 use super::finite_gas::{channel_load, controls, energy_solve, gas};
 use super::*;
