@@ -1,4 +1,6 @@
 use super::*;
+
+mod compatible_reconstruction;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, Provenance};
 use fs_qty::{Length, MolarMass, Pressure, Temperature, Time};

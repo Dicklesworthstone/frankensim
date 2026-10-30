@@ -41,6 +41,7 @@ pub(super) fn neighbour(
 }
 
 /// One source-admitted contraction for all components on all six traces.
+/// A source may limit a coupled leading block before scalar velocity/pressure.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn slopes<E: Failure>(
     grid: &CartesianGrid,
@@ -49,6 +50,7 @@ pub(super) fn slopes<E: Failure>(
     velocity_components: [usize; 3],
     reconstruction: Reconstruction,
     value: impl Fn(usize, usize) -> f64,
+    mut coupled: impl FnMut(usize, usize, usize, &mut [f64]) -> Result<usize, E>,
     output: &mut [f64],
     mut admits: impl FnMut(usize, usize, f64, &[f64]) -> bool,
     cancelled: &mut impl FnMut() -> bool,
@@ -65,7 +67,8 @@ pub(super) fn slopes<E: Failure>(
             let (lo, reflect_lo) = neighbour(grid, boundaries, cell, axis, false);
             let (hi, reflect_hi) = neighbour(grid, boundaries, cell, axis, true);
             let offset = start + axis * width;
-            for d in 0..width {
+            let leading = coupled(cell, lo, hi, &mut output[offset..offset + width])?;
+            for d in leading..width {
                 let lower = value(lo, d)
                     * if reflect_lo && d == velocity_components[axis] {
                         -1.0

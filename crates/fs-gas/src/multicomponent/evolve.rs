@@ -182,7 +182,8 @@ impl MixtureEuler1d {
         totals(&states, mesh.volumes(), m - 2, cancelled)?;
         let work = Workspace {
             primitive,
-            slopes: allocated(count * m, 0.0)?,
+            // Primitive reconstruction carries rho separately from every Yi.
+            slopes: allocated(count * (m + 1), 0.0)?,
             faces: allocated((count + 1) * m, 0.0)?,
             face_data: allocated(count + 1, Face::default())?,
             stage: allocated(count * m, 0.0)?,
@@ -535,9 +536,10 @@ fn check_cfl(observed: f64, maximum: f64) -> Result<(), Error> {
     }
 }
 
-// Primitive reconstruction uses every partial density together with velocity
-// and pressure. Thus density and mixture gas constant cannot drift from the
-// species, and no normalization modifies a reconstructed conserved inventory.
+// Reconstruct Yi, rho, velocity and pressure, with one common composition
+// limiter. The stored cell averages remain the original conserved species.
+// A uniform inert or linear elemental fraction must stay uniform through a
+// density wave; separately limiting partial densities does not preserve that.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn operator(
     gas: &MixtureGas,
@@ -554,6 +556,7 @@ pub(super) fn operator(
 ) -> Result<Stage, Error> {
     let n = gas.species_count();
     let m = n + 2;
+    let primitive_width = n + 3;
     let count = mesh.cell_count();
     for (i, q) in states.chunks_exact(m).enumerate() {
         primitive[i] = gas.decode(q, Some(primitive[i].temperature), cancelled)?;
@@ -561,8 +564,10 @@ pub(super) fn operator(
     slopes.fill(0.0);
     let value = |i: usize, k: usize| {
         if k < n {
-            states[i * m + k]
+            states[i * m + k] / primitive[i].density
         } else if k == n {
+            primitive[i].density
+        } else if k == n + 1 {
             primitive[i].velocity
         } else {
             primitive[i].pressure
@@ -571,7 +576,8 @@ pub(super) fn operator(
     let center =
         |i: usize| mesh.positions()[i] + 0.5 * (mesh.positions()[i + 1] - mesh.positions()[i]);
     let mut limited = 0;
-    let mut trial = [0.0; MAX_COMPONENTS];
+    let mut trial = [0.0; MAX_COMPONENTS + 1];
+    let mut densities = [0.0; MAX_SPECIES];
     let mut out = [0.0; MAX_COMPONENTS];
     for i in 0..count {
         poll(cancelled)?;
@@ -590,9 +596,17 @@ pub(super) fn operator(
         let xl = center(prev) - if i == 0 { length } else { 0.0 };
         let xr = center(next) + if i + 1 == count { length } else { 0.0 };
         let width = mesh.positions()[i + 1] - mesh.positions()[i];
-        for k in 0..m {
+        let row = &mut slopes[i * primitive_width..(i + 1) * primitive_width];
+        super::reconstruction::slopes_with_geometry(
+            &states[prev * m..prev * m + n],
+            &states[i * m..i * m + n],
+            &states[next * m..next * m + n],
+            [width / (x - xl), width / (xr - xl), width / (xr - x)],
+            &mut row[..n],
+        )?;
+        for k in n..primitive_width {
             let (a, b, c) = (value(prev, k), value(i, k), value(next, k));
-            slopes[i * m + k] = minmod(
+            row[k] = minmod(
                 2.0 * (b - a) / (x - xl),
                 (c - a) / (xr - xl),
                 2.0 * (c - b) / (xr - x),
@@ -603,12 +617,16 @@ pub(super) fn operator(
         for reduction in 0..=12 {
             valid = true;
             for sign in [-0.5, 0.5] {
-                for k in 0..m {
-                    trial[k] = value(i, k) + sign * scale * slopes[i * m + k];
+                for k in 0..primitive_width {
+                    trial[k] = value(i, k) + sign * scale * row[k];
                 }
-                if gas
-                    .state_at(&trial[..n], trial[n], trial[n + 1], &mut out[..m])
-                    .is_err()
+                for k in 0..n {
+                    densities[k] = trial[n] * trial[k];
+                }
+                if !positive(trial[n])
+                    || gas
+                        .state_at(&densities[..n], trial[n + 1], trial[n + 2], &mut out[..m])
+                        .is_err()
                 {
                     valid = false;
                     break;
@@ -622,27 +640,28 @@ pub(super) fn operator(
             }
             scale *= 0.5;
         }
-        for k in 0..m {
-            slopes[i * m + k] = if valid {
-                scale * slopes[i * m + k]
-            } else {
-                0.0
-            };
+        for value in row {
+            *value = if valid { scale * *value } else { 0.0 };
         }
     }
     let reconstruct = |i: usize, sign: f64, target: &mut [f64]| -> Result<Primitive, Error> {
-        if slopes[i * m..(i + 1) * m].iter().all(|x| *x == 0.0) {
+        let row = &slopes[i * primitive_width..(i + 1) * primitive_width];
+        if row.iter().all(|x| *x == 0.0) {
             target.copy_from_slice(&states[i * m..(i + 1) * m]);
             return Ok(primitive[i]);
         }
         let mut densities = [0.0; MAX_SPECIES];
+        let density = value(i, n) + sign * row[n];
+        if !positive(density) {
+            return Err(Error::Invalid("reconstructed mixture density"));
+        }
         for k in 0..n {
-            densities[k] = value(i, k) + sign * slopes[i * m + k];
+            densities[k] = density * (value(i, k) + sign * row[k]);
         }
         gas.state_at(
             &densities[..n],
-            value(i, n) + sign * slopes[i * m + n],
-            value(i, n + 1) + sign * slopes[i * m + n + 1],
+            value(i, n + 1) + sign * row[n + 1],
+            value(i, n + 2) + sign * row[n + 2],
             target,
         )
     };

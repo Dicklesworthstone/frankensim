@@ -1433,3 +1433,48 @@ exact-zero species, source/axis refusal and final cancellation/replay. Original
 axial/network regressions remain authoritative for their geometry and balances.
 This face owner supplies no Soret/Dufour closure, no-slip or molecular reservoir
 boundary, nonideal transport, spatial accuracy or combustion validation.
+
+### Three-momentum chemistry on the same prepared cell source
+
+`CellChemistry::advance_spatial` extends the same prepared axial/planar owner
+to canonical species, px/py/pz and referenced total energy. All three momentum
+components remain fixed, and all three kinetic terms enter the original-source
+internal-energy target and independent endpoint reconstruction. The original
+formation-reference change is applied once, with no extra heat-release source
+on chemical total energy. Dimension-specific public entry points share one
+const-generic conversion and acceptance kernel.
+
+The existing atomic cell/report publication, exact source identity, caloric
+interval and bounded-work requirements remain unchanged. Actual prepared
+reactor capacities are available to the enclosing spatial memory budget.
+Focused dimension-reduction/rotation and late-cancellation/replay checks cover
+complete chemical energy, all momenta and reusable prepared storage. This is
+the local fixed-volume chemical source; it does not itself establish a spatial
+entropy theorem, resolved flame structure or experimental combustion validity.
+
+### Compatible composition through density and compression waves
+
+`multicomponent::reconstruction::mass_fraction_slopes` supplies the same
+bounded, allocation-free composition limiter to axial and Cartesian mixture
+consumers. Traces reconstruct density and every canonical mass fraction
+separately, then recover partial densities as their product. Conservative
+cell averages and their original species equations are unchanged. A single
+MC factor scales the entire centered fraction-slope vector; constant inert
+fractions and other linear composition constraints survive density variation
+to floating-point roundoff. No dependent remainder species, normalization,
+trace seed or independent species correction is introduced.
+
+The relative-only 32-epsilon roundoff guard prevents division noise in an
+otherwise constant fraction from flattening all composition slopes, while
+retaining resolved gradients even for a 1e-200 trace constituent and preserving
+exact absent species. The axial owner uses actual nonuniform cell-centre
+distances. Its source-domain contraction scales density, every fraction,
+velocity and pressure together before the original thermodynamic admission.
+The additional density reconstruction scalar is prepared once per cell and
+does not add a second conserved density equation or per-step allocation.
+
+Focused compression-wave tests on uniform and nonuniform 80-cell meshes
+retain a uniform inert fraction to 2.23e-16 and an independent weighted
+composition constraint to 4.45e-16 while closing every species and energy
+balance. These verify compatible reconstruction; they do not establish a
+fully discrete composition-maximum principle or entropy theorem.

@@ -624,6 +624,7 @@ fn spatial(
         [1, 2],
         reconstruction,
         |k, d| primitive[k].array()[d],
+        |_, _, _, _| Ok(0),
         slopes,
         |k, _, sign, slope| {
             let center = primitive[k].array();

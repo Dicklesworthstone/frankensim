@@ -212,6 +212,97 @@ fn g1_oblique_species_contact_refines_and_updates_original_local_calorics() {
 }
 
 #[test]
+fn g0_planar_compatible_species_transport_preserves_uniform_inert_fraction() {
+    // Equal gamma admits exact constant-p,u material-contact advection even
+    // though distinct molar masses change T with the local composition.
+    // Uniform Y_C must remain uniform when rho and Y_A have different slopes.
+    let gas = gas(vec![
+        source("A", R, 3.5, 0.0, 30.0),
+        source("B", 2.0 * R, 3.5, 0.0, -60.0),
+        source("C", 0.5 * R, 3.5, 0.0, 7.0),
+    ]);
+    let spacing = [1.0 / 8.0, 1.0 / 10.0];
+    let grid = CartesianGrid::new(8, 10, spacing[0], spacing[1], 0.4).unwrap();
+    let velocity = [0.4, -0.25];
+    let mode = |x: [f64; 2], time: f64, wave: [f64; 2]| {
+        let phase = 2.0
+            * std::f64::consts::PI
+            * (0..2)
+                .map(|axis| wave[axis] * (x[axis] - velocity[axis] * time))
+                .sum::<f64>();
+        let average = (0..2)
+            .map(|axis| {
+                let z = std::f64::consts::PI * wave[axis] * spacing[axis];
+                if z == 0.0 { 1.0 } else { z.sin() / z }
+            })
+            .product::<f64>();
+        (average * phase.sin(), average * phase.cos())
+    };
+    let exact = |x: [f64; 2], time: f64| {
+        let density = 1.0 + 0.3 * mode(x, time, [1.0, 1.0]).0;
+        // Exact conservative cell average of rho*(0.4+0.2*cos(x-y)), using
+        // sin(a)*cos(b)=(sin(a+b)+sin(a-b))/2 before averaging each mode.
+        let a = 0.4 * density
+            + 0.2 * mode(x, time, [1.0, -1.0]).1
+            + 0.03 * (mode(x, time, [2.0, 0.0]).0 + mode(x, time, [0.0, 2.0]).0);
+        let c = 0.2 * density;
+        [a, density - a - c, c]
+    };
+    let mut flow = field(gas, grid, PERIODIC, |x| (exact(x, 0.0), velocity, 1.0));
+    let before = flow.totals();
+    let initial = flow.states().to_vec();
+    for _ in 0..5 {
+        balance(
+            flow.step(Time::new(0.003), StepControl::default(), || false)
+                .unwrap(),
+        );
+    }
+    assert_ne!(flow.states(), initial);
+    let mut maximum_inert_error: f64 = 0.0;
+    let mut species_error = 0.0;
+    for i in 0..grid.len() {
+        let q = flow.cell(i).unwrap();
+        let p = q.primitive(flow.gas(), || false).unwrap();
+        maximum_inert_error =
+            maximum_inert_error.max((q.partial_densities[2] / p.density - 0.2).abs());
+        let expected = exact(grid.cell_center(i).unwrap(), flow.time().value());
+        for k in 0..3 {
+            species_error += (q.partial_densities[k] - expected[k]).abs();
+        }
+        for axis in 0..2 {
+            close(p.velocity[axis], velocity[axis], 3e-11);
+        }
+        close(p.pressure, 1.0, 3e-11);
+        close(
+            p.temperature,
+            1.0 / (q.partial_densities[0]
+                + 0.5 * q.partial_densities[1]
+                + 2.0 * q.partial_densities[2]),
+            3e-11,
+        );
+        close(p.sound_speed.powi(2), 1.4 / p.density, 3e-11);
+    }
+    let after = flow.totals();
+    for k in 0..3 {
+        close(after.species_masses[k], before.species_masses[k], 3e-12);
+    }
+    close(
+        after.absolute_energy(flow.gas()).unwrap(),
+        before.absolute_energy(flow.gas()).unwrap(),
+        3e-12,
+    );
+    let species_error = species_error / grid.len() as f64;
+    eprintln!(
+        "compatible planar species transport: maximum inert-Y error={maximum_inert_error:e}, total-species L1={species_error:e}"
+    );
+    assert!(species_error < 0.01);
+    assert!(
+        maximum_inert_error < 5e-13,
+        "uniform inert mass fraction drifted by {maximum_inert_error:e}"
+    );
+}
+
+#[test]
 fn g2_planar_species_shock_matches_original_axial_owner_and_rotation() {
     let n = 28;
     let dx = 1.0 / n as f64;

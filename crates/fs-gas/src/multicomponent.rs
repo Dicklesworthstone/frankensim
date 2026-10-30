@@ -31,6 +31,9 @@ pub mod dissipation;
 /// Atomic finite-rate chemistry coupled to conservative species transport.
 pub mod reactive;
 
+/// Compatible species reconstruction shared by axial and spatial solvers.
+pub mod reconstruction;
+
 /// Stationary wall drag and conservative heat exchange with finite wall storage.
 pub mod wall_exchange;
 

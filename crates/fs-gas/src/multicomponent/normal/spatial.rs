@@ -226,7 +226,10 @@ impl MixtureGas {
             .is_ok_and(|q| self.admissible_cell(q))
     }
 
-    fn spatial_reduction<'a>(&self, cell: SpatialCell<'a>) -> Result<Cell<'a>, Error> {
+    pub(in crate::multicomponent) fn spatial_reduction<'a>(
+        &self,
+        cell: SpatialCell<'a>,
+    ) -> Result<Cell<'a>, Error> {
         let (rho, _) = self.admit_densities(cell.partial_densities)?;
         if ![cell.normal_momentum, cell.energy]
             .iter()

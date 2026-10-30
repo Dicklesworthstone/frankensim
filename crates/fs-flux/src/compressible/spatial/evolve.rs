@@ -104,6 +104,7 @@ fn spatial(
         [1, 2, 3],
         reconstruction,
         |k, d| primitive[k].array()[d],
+        |_, _, _, _| Ok(0),
         slopes.as_flattened_mut().as_flattened_mut(),
         |k, _, sign, slope| {
             let center = primitive[k].array();

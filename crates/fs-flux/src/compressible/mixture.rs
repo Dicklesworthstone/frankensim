@@ -224,7 +224,8 @@ impl MixtureEuler2d {
                 .checked_mul(5)?
                 .checked_add(faces)?
                 .checked_add(boundary.checked_mul(2)?)?
-                .checked_mul(width)?;
+                .checked_mul(width)?
+                .checked_add(grid.len().checked_mul(2)?)?;
             scalars
                 .checked_mul(size_of::<f64>())?
                 .checked_add(grid.len().checked_mul(size_of::<Primitive>())?)?
@@ -280,7 +281,9 @@ impl MixtureEuler2d {
             boundary_impulses: allocated(2 * (nx + ny) * width, 0.0)?,
             work: Workspace {
                 primitive,
-                slopes: allocated(2 * count, 0.0)?,
+                // Density plus every mass fraction adds one reconstruction
+                // scalar per direction without another conserved equation.
+                slopes: allocated(2 * (count + grid.len()), 0.0)?,
                 x_flux: allocated((nx + 1) * ny * width, 0.0)?,
                 y_flux: allocated(nx * (ny + 1) * width, 0.0)?,
                 x_metadata: allocated((nx + 1) * ny, FaceFlux::default())?,
@@ -530,16 +533,28 @@ fn spatial(
 ) -> Result<StageStats, Error> {
     let n = gas.species_count();
     let width = n + 3;
+    let slope_width = width + 1;
     for (q, p) in states.chunks_exact(width).zip(primitive.iter_mut()) {
         *p = cell(q, n).primitive(gas, &mut *cancelled)?;
     }
     let value = |k: usize, d: usize| {
-        if d < n {
-            states[k * width + d]
-        } else if d < n + 2 {
-            primitive[k].velocity[d - n]
+        if d == 0 {
+            primitive[k].density
+        } else if d <= n {
+            states[k * width + d - 1] / primitive[k].density
+        } else if d < n + 3 {
+            primitive[k].velocity[d - n - 1]
         } else {
             primitive[k].pressure
+        }
+    };
+    let reconstruct = |k: usize, sign: f64, slope: &[f64], out: &mut [f64]| {
+        let density = value(k, 0) + sign * slope[0];
+        for d in 0..n {
+            out[d] = density * (value(k, d + 1) + sign * slope[d + 1]);
+        }
+        for d in n..width {
+            out[d] = value(k, d + 1) + sign * slope[d + 1];
         }
     };
     let mut trace = [0.0; WIDTH_LIMIT];
@@ -547,15 +562,23 @@ fn spatial(
     let limited = cartesian::slopes::<Error>(
         grid,
         boundaries,
-        width,
-        [n, n + 1],
+        slope_width,
+        [n + 1, n + 2],
         reconstruction,
         value,
+        |k, lo, hi, slope| {
+            slope[0] = cartesian::mc(value(k, 0) - value(lo, 0), value(hi, 0) - value(k, 0));
+            fs_gas::multicomponent::reconstruction::mass_fraction_slopes(
+                &states[lo * width..lo * width + n],
+                &states[k * width..k * width + n],
+                &states[hi * width..hi * width + n],
+                &mut slope[1..=n],
+            )?;
+            Ok(n + 1)
+        },
         slopes,
         |k, axis, sign, slope| {
-            for d in 0..width {
-                trace[d] = value(k, d) + sign * slope[d];
-            }
+            reconstruct(k, sign, slope, &mut trace[..width]);
             gas.normal_conserved_into(
                 normal_primitive(&trace[..width], n, axis),
                 &mut check[..width],
@@ -585,10 +608,9 @@ fn spatial(
             metadata[face.index] = metadata[first];
             return Ok(());
         }
-        let reconstruct = |k: usize, sign: f64, out: &mut [f64]| {
-            for d in 0..width {
-                out[d] = value(k, d) + sign * slopes[(2 * k + axis) * width + d];
-            }
+        let face_trace = |k: usize, sign: f64, out: &mut [f64]| {
+            let offset = (2 * k + axis) * slope_width;
+            reconstruct(k, sign, &slopes[offset..offset + slope_width], out);
         };
         let q = |k: usize| cell(&states[k * width..(k + 1) * width], n).normal(axis);
         let first_order = reconstruction == Reconstruction::FirstOrder;
@@ -597,8 +619,8 @@ fn spatial(
                 if first_order {
                     gas.hllc_normal_flux(q(l), q(r), &mut result[..width], &mut *cancelled)?
                 } else {
-                    reconstruct(l, 0.5, &mut left[..width]);
-                    reconstruct(r, -0.5, &mut right[..width]);
+                    face_trace(l, 0.5, &mut left[..width]);
+                    face_trace(r, -0.5, &mut right[..width]);
                     gas.hllc_normal_flux_from_primitive(
                         normal_primitive(&left[..width], n, axis),
                         normal_primitive(&right[..width], n, axis),
@@ -622,7 +644,7 @@ fn spatial(
                     gas.hllc_normal_flux(q(k), q(k), &mut result[..width], &mut *cancelled)?
                 }
                 (false, BoundaryCondition::Reflecting) => {
-                    reconstruct(k, 0.5 * sign, &mut left[..width]);
+                    face_trace(k, 0.5 * sign, &mut left[..width]);
                     gas.stationary_wall_normal_flux_from_primitive(
                         normal_primitive(&left[..width], n, axis),
                         sign,
@@ -631,7 +653,7 @@ fn spatial(
                     )?
                 }
                 (false, BoundaryCondition::Transmissive) => {
-                    reconstruct(k, 0.5 * sign, &mut left[..width]);
+                    face_trace(k, 0.5 * sign, &mut left[..width]);
                     let p = normal_primitive(&left[..width], n, axis);
                     gas.hllc_normal_flux_from_primitive(
                         p,

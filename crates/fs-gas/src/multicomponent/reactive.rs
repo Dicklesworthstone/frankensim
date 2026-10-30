@@ -550,8 +550,8 @@ pub(super) fn react_cell(
     report: &mut ChemistryReport,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), ReactiveError> {
-    cell::react_components(
-        gas, q, volume, i, reactor, amounts, duration, report, false, cancelled,
+    cell::react_components::<1>(
+        gas, q, volume, i, reactor, amounts, duration, report, cancelled,
     )
 }
 

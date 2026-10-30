@@ -1,9 +1,10 @@
 use super::*;
 use crate::compressible::mixture as planar;
-use crate::compressible::mixture::tests::{close, standard};
+use crate::compressible::mixture::tests::{close, gas, source, standard};
 use crate::compressible::{AxisBoundaries, Boundaries2d, CartesianGrid as Grid2d};
 use fs_gas::multicomponent::{Boundaries, Boundary, MixtureEuler1d};
 use fs_qty::Length;
+use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
 const PERIODIC: Boundaries3d = Boundaries3d {
     x: AxisBoundaries::Periodic,
@@ -121,6 +122,94 @@ fn g1_three_axis_species_contact_refines_with_original_local_calorics() {
     eprintln!("3D species contact L1 on 12^3/24^3: {errors:?}; order={order}");
     assert!(order > 1.5, "{errors:?}");
     assert!(errors[1] < 1.5e-3);
+}
+
+#[test]
+fn g0_compatible_species_transport_preserves_uniform_inert_fraction() {
+    // All three sources have gamma=1.4; the distinct molecular masses still
+    // change the exact original temperature with composition. Constant p,u and
+    // independently advected rho,Y are therefore an exact material-contact
+    // solution. An inert constant mass fraction must remain constant even when
+    // density and the other fractions have different spatial gradients.
+    let gas = gas(vec![
+        source("A", R, 3.5, 0.0, 30.0),
+        source("B", 2.0 * R, 3.5, 0.0, -60.0),
+        source("C", 0.5 * R, 3.5, 0.0, 7.0),
+    ]);
+    let n = 8;
+    let dx = 1.0 / n as f64;
+    let velocity = [0.4, -0.25, 0.15];
+    let sinc = |wave: f64| {
+        let x = std::f64::consts::PI * wave * dx;
+        if x == 0.0 { 1.0 } else { x.sin() / x }
+    };
+    let mode = |x: [f64; 3], time: f64, wave: [f64; 3]| {
+        let phase = 2.0
+            * std::f64::consts::PI
+            * (0..3)
+                .map(|a| wave[a] * (x[a] - velocity[a] * time))
+                .sum::<f64>();
+        let average = wave.into_iter().map(sinc).product::<f64>();
+        (average * phase.sin(), average * phase.cos())
+    };
+    let exact = |x: [f64; 3], time: f64| {
+        let density = 1.0 + 0.3 * mode(x, time, [1.0, 1.0, 1.0]).0;
+        // Average rho*Y_A, not the product of separate rho and Y averages.
+        let a = 0.4 * density
+            + 0.2 * mode(x, time, [1.0, -1.0, 1.0]).1
+            + 0.03 * (mode(x, time, [2.0, 0.0, 2.0]).0 + mode(x, time, [0.0, 2.0, 0.0]).0);
+        let c = 0.2 * density;
+        [a, density - a - c, c]
+    };
+    let grid = CartesianGrid::new(n, n, n, dx, dx, dx).unwrap();
+    let mut flow = field(gas, grid, PERIODIC, |x| (exact(x, 0.0), velocity, 1.0));
+    let before = flow.totals();
+    for _ in 0..5 {
+        balance(
+            flow.step(Time::new(0.003), StepControl::default(), || false)
+                .unwrap(),
+        );
+    }
+    let mut maximum_inert_error: f64 = 0.0;
+    let mut species_error = 0.0;
+    for i in 0..flow.cell_count() {
+        let q = flow.cell(i).unwrap();
+        let p = q.primitive(flow.gas(), || false).unwrap();
+        maximum_inert_error =
+            maximum_inert_error.max((q.partial_densities[2] / p.density - 0.2).abs());
+        let expected = exact(grid.cell_center(i).unwrap(), flow.time().value());
+        for k in 0..3 {
+            species_error += (q.partial_densities[k] - expected[k]).abs();
+            close(p.velocity[k], velocity[k], 3e-11);
+        }
+        close(p.pressure, 1.0, 3e-11);
+        close(
+            p.temperature,
+            1.0 / (q.partial_densities[0]
+                + 0.5 * q.partial_densities[1]
+                + 2.0 * q.partial_densities[2]),
+            3e-11,
+        );
+        close(p.sound_speed.powi(2), 1.4 / p.density, 3e-11);
+    }
+    let after = flow.totals();
+    for k in 0..3 {
+        close(after.species_masses[k], before.species_masses[k], 3e-12);
+    }
+    close(
+        after.absolute_energy(flow.gas()).unwrap(),
+        before.absolute_energy(flow.gas()).unwrap(),
+        3e-12,
+    );
+    let species_error = species_error / flow.cell_count() as f64;
+    eprintln!(
+        "compatible 3-D species transport: maximum inert-Y error={maximum_inert_error:e}, total-species L1={species_error:e}"
+    );
+    assert!(species_error < 0.01);
+    assert!(
+        maximum_inert_error < 5e-13,
+        "uniform inert mass fraction drifted by {maximum_inert_error:e}"
+    );
 }
 
 #[test]

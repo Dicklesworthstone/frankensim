@@ -1070,6 +1070,12 @@ passive-scalar wave solver, trace seed or species normalization is introduced.
 Frozen and evolving-species consumers share the private Cartesian MC/common-
 theta reconstruction, face topology, combined CFL, SSP RK2, retry, conservative
 divergence and boundary-integration core. Concrete views are monomorphized.
+Mixture traces reconstruct density, every original mass fraction, velocities
+and pressure. The source-owned common composition limiter preserves uniform
+inert fractions and linear composition constraints through density waves;
+independent partial-density limiting is not used. One source-admission
+contraction scales the complete trace. The additional density slope on each
+axis is included in the declared numerical workspace.
 Flat buffers are prepared once under a checked total byte budget, including
 caller state-vector excess capacity, and a 1 GiB hard ceiling. Successful steps
 allocate no per-cell or per-step vectors. Original source storage and bounded
@@ -1221,6 +1227,14 @@ All axes use physical face areas and cell volumes; periodic endpoints reuse
 the exact stored flux. Source refusal contracts traces or retries the whole
 step, without clipping cell averages or renormalizing species.
 
+Density and all mass fractions use the same original compatible composition
+reconstruction as the 1-D and 2-D owners. One common MC factor scales the
+centered fraction vector, retaining linear composition constraints rather
+than independently limiting species or assigning a remainder species. A
+relative-only roundoff guard keeps constant-fraction division noise from
+flattening resolved trace-species gradients. The common source-admission
+contraction includes density, every fraction, all velocities and pressure.
+
 Flat accepted, stage, slope, face, primitive and boundary arrays are prepared
 once under an explicit checked byte budget and the shared 1 GiB ceiling.
 Excess capacity in the supplied state vector is included. Source-model storage
@@ -1231,7 +1245,7 @@ energy and original per-face transfers; the physical-energy residual applies
 the source reference transform to differences rather than subtracting two
 large absolute formation-energy totals.
 
-Six focused G0/G1/G2/G3/G4 tests cover original 1-D shock equivalence on each
+Seven focused G0/G1/G2/G3/G4 tests cover original 1-D shock equivalence on each
 axis, full two-dimensional extrusion, oblique species contact refinement,
 closed-wall species/energy/support impulse, complete workspace and last-poll
 cancellation/replay, and combined two-shear source refusal. The smooth contact
@@ -1239,11 +1253,92 @@ L1 errors at 12³ and 24³ are 2.48975629e-3 and 5.64993110e-4 (observed order
 2.140). All twelve pre-existing volumetric Euler and molecular tests retain
 their results, including the previously reported contact and heat errors.
 
+An exact periodic advection case varies density and two species while holding
+a third mass fraction uniform. Independent partial-density limiting previously
+produced a 1.30e-3 local inert-fraction error after five steps on 8³ cells,
+despite global conservation. Compatible reconstruction reduces that error to
+5.56e-17; the corresponding 2-D case gives 1.12e-16. The checks also retain
+pressure, velocity, original calorics and global species/physical energy.
+
 The `mixture_shock_box_3d` example uses the original pinned nitrogen and oxygen
 NASA9 sources, a hot nitrogen-rich pocket in an oxygen-rich surrounding gas,
 and six reflecting walls. It writes all three velocities, temperature,
 pressure and both species fractions, and reports actual support impulse and
-species/physical-energy balances. This stationary inviscid species owner does
+species/physical-energy balances. A 12³ run completed 169 accepted steps over
+1.713309878178e-3 s, maximum combined CFL 0.222233 and 1,078,272 numerical
+workspace bytes. Both species masses and physical energy had zero printed
+residual; fluid/support momentum residuals were at most 3.89e-16 kg m/s.
+The exported nitrogen fraction remains within its original 0.25--0.95 range;
+this observation is not a fully discrete maximum-principle certificate.
+This stationary inviscid species owner does
 not itself integrate chemistry or molecular species diffusion, preserve
 pressure exactly at moving unequal-caloric contacts, move the geometry, or
 establish an entropy/invariant-domain or experimental combustion claim.
+
+### Finite-rate reactions coupled to three-dimensional compressive waves
+
+`spatial::mixture::reactive::ReactingEuler3d` composes the original volumetric
+species field with `fs-gas::multicomponent::reactive::CellChemistry`. The
+source-owned fixed-volume reactor retains every species, original mechanism,
+NASA caloric law and formation reference. All three momenta remain fixed in
+each local chemical update. Changes in chemical reference energy enter the
+stored sensible gauge exactly once; temperature, pressure and sound speed then
+feed the next original conservative wave solve.
+
+Every accepted interval is chemistry(dt/2), unsplit waves(dt), chemistry(dt/2).
+If heating increases wave speed enough to shorten the middle step, the whole
+trial restarts from the original accepted field at that duration. Source or
+work refusal likewise retries only within explicit bounds. A final poll
+precedes the single field/report publication; cancellation leaves original
+cells, clock, both reports and per-face loads intact. Chemistry has no face
+flux, so the original accepted wave impulses represent the complete outer
+boundary exchange. Endpoint pressure times duration is not substituted.
+
+Two prepared complete field workspaces and one original prepared reactor are
+reused. The total admitted numerical byte budget includes both fields, excess
+input-vector capacity and actual kinetics/Newton/chemistry buffer capacities,
+under the shared 1 GiB ceiling. Immutable source data, prepared caloric
+coefficients, fixed-size owners and bounded stack scratch are excluded.
+`with_chemistry` consumes an already prepared source without rebuilding it.
+Accepted source reductions are compensated in fixed cell/species order.
+The complete report retains original transport and chemical diagnostics,
+per-species reaction changes, three-axis momentum, mass, referenced energy and
+physical chemical-plus-kinetic energy residuals formed from differences.
+
+Four focused numerical tests compare a moving reacting field to the original
+homogeneous reactor, force heat-release-induced acoustic restarts, refine a
+three-axis reaction/advection solution against analytic reversible decay,
+launch compressive waves from an exothermic pocket while closing chemical
+energy and wall support, and exercise complete workspace/source/work refusal
+with last-publication cancellation and replay. Manufactured mechanisms test
+the conservative numerical composition and do not calibrate real combustion.
+The analytic reaction/advection L1 errors at 12³/24³ are 1.14633243e-3 and
+2.79239902e-4, giving observed order 2.037; the test requires order above 1.8
+in this resolved range. The earlier 6³ sample is outside that refinement claim.
+
+The `reacting_shock_box_3d` example retains the original pinned ten-species,
+29-channel hydrogen/oxygen mechanism and nitrogen diluent, starting with
+exactly absent radicals. An initially hot region reacts and drives the same
+3-D gas field. Explicit resolution, chemistry, time, step and memory budgets
+bound the run. Its CSV includes every species and all solved thermodynamic
+and velocity fields; reported balances independently reconstruct original
+element inventories, physical energy and fluid/support momentum.
+
+The default 4³/100 µs run completed 33 accepted intervals and 4,224 cell solves
+with maximum combined CFL 0.339843 and 221,800 total numerical workspace bytes.
+All 64 accepted cells were finite and species nonnegative; final temperatures
+were 1200.633–2438.868 K, pressures 167869–294049 Pa and maximum speed
+137.135 m/s. Printed mass, physical-energy and all fluid/support momentum
+residuals were zero; the largest elemental residual was 5.21e-18 mol.
+The example explicitly reports local inert-nitrogen preservation: maximum
+fraction drift fell from 6.90e-4 before compatible reconstruction to 4.45e-16
+afterward. All 89 focused flux-library tests pass after integrating the current
+planar molecular/reacting owners. These are coarse numerical source/solver results,
+not experimentally validated flame or detonation predictions.
+
+The selected backward Euler or SDIRK2 source method remains explicit.
+Symmetric ordering alone is not a coupled temporal-order or entropy proof;
+shock limiting and first-order retries may reduce observed order. This
+stationary inviscid reacting rung does not supply molecular species diffusion,
+moving-domain GCL/remap, wall heat transfer, physical flame/detonation thickness,
+turbulence, reciprocal FSI or experimental ignition/detonation validation.

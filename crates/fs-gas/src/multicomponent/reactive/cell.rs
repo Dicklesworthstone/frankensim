@@ -1,14 +1,16 @@
-//! One original-source chemistry update for axial and planar conserved cells.
+//! One original-source chemistry update for axial, planar and spatial cells.
 
 use super::*;
-use crate::multicomponent::{Cell, MAX_NORMAL_COMPONENTS, MixtureGas, NormalCell, Primitive};
+use crate::multicomponent::{
+    Cell, MAX_SPATIAL_COMPONENTS, MixtureGas, NormalCell, Primitive, SpatialCell,
+};
 use fs_qty::{Energy, Temperature, Volume};
 
 /// Prepared chemical source for repeated conservative control-volume updates.
 ///
 /// The immutable gas and mechanism must have the identical original species
 /// bank. The same conversion, caloric reconstruction and energy-reference
-/// accounting serve axial flows, networks and planar fields. Every momentum
+/// accounting serve axial flows, networks and planar/volumetric fields. Every momentum
 /// component and physical total energy are held fixed during chemistry.
 /// Successful advances allocate no heap storage. A refused cell leaves both
 /// its conserved row and the caller's accumulated report unchanged.
@@ -85,7 +87,7 @@ impl CellChemistry {
         report: &mut ChemistryReport,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(), ReactiveError> {
-        react_components(
+        react_components::<1>(
             &self.gas,
             q,
             volume.value(),
@@ -94,7 +96,6 @@ impl CellChemistry {
             &mut self.amounts,
             duration.value(),
             report,
-            false,
             &mut cancelled,
         )
     }
@@ -111,7 +112,7 @@ impl CellChemistry {
         report: &mut ChemistryReport,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(), ReactiveError> {
-        react_components(
+        react_components::<2>(
             &self.gas,
             q,
             volume.value(),
@@ -120,7 +121,33 @@ impl CellChemistry {
             &mut self.amounts,
             duration.value(),
             report,
-            true,
+            &mut cancelled,
+        )
+    }
+
+    /// Advance `[rho_i..., px, py, pz, E_ref]` at fixed physical volume and all
+    /// three momenta. The source target subtracts all three kinetic components;
+    /// endpoint admission independently checks sensible energy and formation
+    /// references before publishing the cell and caller's report together.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_spatial(
+        &mut self,
+        q: &mut [f64],
+        volume: Volume,
+        duration: Time,
+        cell: usize,
+        report: &mut ChemistryReport,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), ReactiveError> {
+        react_components::<3>(
+            &self.gas,
+            q,
+            volume.value(),
+            cell,
+            &mut self.reactor,
+            &mut self.amounts,
+            duration.value(),
+            report,
             &mut cancelled,
         )
     }
@@ -128,27 +155,32 @@ impl CellChemistry {
 
 /// Reduce only transverse kinetic energy, then reuse the exact original
 /// caloric inversion (including its endpoint temperature hint).
-fn caloric(
+fn caloric<const D: usize>(
     gas: &MixtureGas,
     q: &[f64],
-    planar: bool,
     hint: Option<f64>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Primitive, f64), FlowError> {
     let n = gas.species_count();
-    let reduced = if planar {
-        gas.normal_reduction(NormalCell {
+    let reduced = match D {
+        1 => Cell {
+            partial_densities: &q[..n],
+            momentum: q[n],
+            energy: q[n + 1],
+        },
+        2 => gas.normal_reduction(NormalCell {
             partial_densities: &q[..n],
             normal_momentum: q[n],
             transverse_momentum: q[n + 1],
             energy: q[n + 2],
-        })?
-    } else {
-        Cell {
+        })?,
+        3 => gas.spatial_reduction(SpatialCell {
             partial_densities: &q[..n],
-            momentum: q[n],
-            energy: q[n + 1],
-        }
+            normal_momentum: q[n],
+            transverse_momentum: [q[n + 1], q[n + 2]],
+            energy: q[n + 3],
+        })?,
+        _ => return Err(FlowError::Invalid("cell chemistry momentum dimension")),
     };
     let primitive = gas.decode_cell(reduced, hint, cancelled)?;
     let thermal = reduced.energy - 0.5 * reduced.momentum * primitive.velocity;
@@ -156,7 +188,7 @@ fn caloric(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn react_components(
+pub(super) fn react_components<const D: usize>(
     gas: &MixtureGas,
     q: &mut [f64],
     volume: f64,
@@ -165,12 +197,11 @@ pub(super) fn react_components(
     amounts: &mut [Amount],
     duration: f64,
     report: &mut ChemistryReport,
-    planar: bool,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), ReactiveError> {
     poll(cancelled)?;
     let n = gas.species_count();
-    let energy_index = n + 1 + usize::from(planar);
+    let energy_index = n + D;
     let width = energy_index + 1;
     if q.len() != width
         || amounts.len() != n
@@ -184,7 +215,7 @@ pub(super) fn react_components(
     }
     let controls = reactor.controls();
     let domain = gas.domain();
-    let (primitive, thermal) = caloric(gas, q, planar, None, cancelled)?;
+    let (primitive, thermal) = caloric::<D>(gas, q, None, cancelled)?;
     if !(controls.minimum_temperature_k..=controls.maximum_temperature_k)
         .contains(&primitive.temperature)
     {
@@ -222,7 +253,7 @@ pub(super) fn react_components(
             &mut *cancelled,
         )
         .map_err(|source| chemistry_error(cell, source))?;
-    let mut next = [0.0; MAX_NORMAL_COMPONENTS];
+    let mut next = [0.0; MAX_SPATIAL_COMPONENTS];
     for k in 0..n {
         next[k] =
             endpoint.amounts()[k].value() * gas.source().models()[k].molar_mass().value() / volume;
@@ -231,10 +262,9 @@ pub(super) fn react_components(
     // This linear conservative gauge includes heat release exactly once.
     let reference_change = sum((0..n).map(|k| (next[k] - q[k]) * gas.energy_references()[k]));
     next[energy_index] = q[energy_index] - reference_change;
-    let (_, next_thermal) = caloric(
+    let (_, next_thermal) = caloric::<D>(
         gas,
         &next[..width],
-        planar,
         Some(endpoint.temperature().value()),
         cancelled,
     )?;
@@ -264,7 +294,7 @@ pub(super) fn react_components(
             tolerance_j: reconstruction_tolerance,
         });
     }
-    // Small mass error can change BOTH kinetic terms at fixed momenta. Admit
+    // Small mass error can change every kinetic term at fixed momenta. Admit
     // the actual physical discrepancy under the same declared energy budget.
     let physical_residual = ((next_thermal - thermal) + reference_change) * volume;
     if !physical_residual.is_finite() || physical_residual.abs() > tolerance {
