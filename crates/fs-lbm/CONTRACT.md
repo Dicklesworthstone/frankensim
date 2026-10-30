@@ -14,6 +14,27 @@ dimension checks, `fs-exec` for cancel gates and pooled sweeps, and
 `fs-sparse` (COO/CSR assembly and ILU(0)) for the conjugate energy and
 projection solves. Pure, deterministic (fixed tile/cell/link order).
 
+### Material-owned thermal buoyancy in two and three dimensions
+
+`MaterialScaling::thermal_slab_from_material` and `thermal_slab3_from_material`
+consume `ThermalFluidTransport` from the original material owner. One coherent
+state supplies momentum/heat diffusivity, isobaric volumetric expansion and the
+actual reference temperature used by the body force. A separate expansion
+constant or a wall-midpoint temperature cannot silently replace that source.
+The caller's `MaterialBuoyancyBoundary` bounds the linearized fractional density
+departure at both walls. Unknown expansion refuses; explicit zero and negative
+expansion retain their physical meaning.
+
+The corresponding `rebind_thermal_slab_from_material` methods also check every
+current cell before the existing conservative rebind. Both relaxation fields,
+buoyancy and reference temperature update together, preserving momentum and
+temperature populations exactly. Density/Cp or lattice-unit changes still
+require conservative remapping and refuse. Failed admission changes no field.
+These remain frozen-property Boussinesq solvers: the density-departure check
+does not establish phase/EOS support or bound future external heating. Focused
+`material_buoyancy` tests exercise real 2-D/3-D evolution, pressure/composition
+substitution, signed forces, off-center source temperature and atomic refresh.
+
 ### Shared solid/fluid material feedback in natural convection
 
 `MaterialChtFluid::solve_natural_convection_with_material_solids` resolves both

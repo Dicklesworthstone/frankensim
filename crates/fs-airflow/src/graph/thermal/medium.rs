@@ -15,17 +15,20 @@ pub mod steady_gas;
 pub use series::{FlowHeatSection, MaterialFlowPath, MaterialHeatExchange, MAX_MATERIAL_FLOW_SECTIONS};
 
 use fs_convection::{
-    CorrelationError, CorrelationId, CorrelationRobinBoundary,
-    HeatTransferCoefficient, NusseltEvaluation, ThermalConductivity, ThermalDirection,
+    CorrelationError, CorrelationId, CorrelationRobinBoundary, HeatTransferCoefficient,
+    NusseltEvaluation, ThermalConductivity, ThermalDirection,
 };
 use fs_evidence::Evidence;
 use fs_material::MaterialError;
-use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
+use fs_material::fluid_transport::{
+    FluidTransport, FluidTransportState, ThermalFluidTransport, ThermalFluidTransportState,
+};
 use fs_material::gas::{GasState, ResolvedGasState};
 use fs_material::gas_mixture::ResolvedGasMixtureState;
 use fs_material::liquid::ResolvedLiquidState;
 use fs_material::moist_air::ResolvedMoistAirState;
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
+use fs_material::thermochemical_gas::nonideal::ResolvedThermochemicalRealGasState;
 use fs_qty::{Area, Density, Length, Temperature, VolumetricFlowRate};
 
 use crate::conjugate::{AirPath, AirSegment};
@@ -54,6 +57,11 @@ pub enum FrozenFlowMedium<'a> {
     /// The original species, caloric, EOS and transport receipts remain bound
     /// to the hydraulic and thermal consumers; no gas-spec reconstruction.
     ThermochemicalGas(&'a ResolvedThermochemicalGasState),
+    /// A selected stable nonideal EOS branch with its original NASA caloric
+    /// reference and transport materials. The frozen-property network consumes
+    /// the same PR density/Cp as convection; it adds no phase-change or
+    /// compressible-flow capability to the native channel approximation.
+    ThermochemicalRealGas(&'a ResolvedThermochemicalRealGasState),
     /// Explicitly authored gas coefficients; not promoted to sourced data.
     DeclaredGas(&'a GasState),
 }
@@ -66,7 +74,22 @@ impl FluidTransport for FrozenFlowMedium<'_> {
             Self::GasMixture(value) => value.transport_state(),
             Self::MoistAir(value) => value.transport_state(),
             Self::ThermochemicalGas(value) => value.transport_state(),
+            Self::ThermochemicalRealGas(value) => value.transport_state(),
             Self::DeclaredGas(value) => value.transport_state(),
+        }
+    }
+}
+
+impl ThermalFluidTransport for FrozenFlowMedium<'_> {
+    fn thermal_transport_state(&self) -> Result<ThermalFluidTransportState, MaterialError> {
+        match self {
+            Self::Liquid(value) => value.thermal_transport_state(),
+            Self::Gas(value) => value.thermal_transport_state(),
+            Self::GasMixture(value) => value.thermal_transport_state(),
+            Self::MoistAir(value) => value.thermal_transport_state(),
+            Self::ThermochemicalGas(value) => value.thermal_transport_state(),
+            Self::ThermochemicalRealGas(value) => value.thermal_transport_state(),
+            Self::DeclaredGas(value) => value.thermal_transport_state(),
         }
     }
 }

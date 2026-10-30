@@ -12,6 +12,8 @@ use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 
 mod forcing;
+mod buoyancy;
+pub use buoyancy::MaterialBuoyancyBoundary;
 pub mod free_surface;
 pub use forcing::{electrothermal, transport};
 mod runtime_rebind;

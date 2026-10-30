@@ -246,3 +246,170 @@ fn thermochemical_channel_retains_correlation_refusal_without_replacing_the_medi
     assert_eq!(channel.medium(), medium);
     assert_eq!(state, saved);
 }
+
+#[test]
+fn real_gas_source_changes_reach_native_flow_heat_and_natural_convection_together() {
+    use fs_airflow::graph::thermal::medium::convection::evaluate_vertical_plate_from_thermal_material;
+    use fs_airflow::graph::thermal::medium::fan::{FanGasDomain, MaterialFanError};
+    use fs_airflow::{
+        FanArrangement, FanBank, FanCurve, FanPoint, SourceProvenance, ToleranceBasis,
+    };
+    use fs_material::fluid_transport::{FluidTransport, ThermalFluidTransport};
+    use fs_material::thermochemical_gas::nonideal::{
+        PengRobinsonSpeciesBinding, ThermochemicalPengRobinsonModel,
+    };
+    use fs_qty::{Pressure, chemistry::SpeciesId};
+    use fs_thermochem::eos::peng_robinson::PengRobinsonPhaseV1;
+
+    // Manufactured source packs and critical-property choices, not an accuracy
+    // claim for a named real gas. Only source composition/pressure change.
+    let patch = FlowHeatGeometry {
+        flow_area: Area::new(1e-4),
+        characteristic_length: Length::new(0.01),
+        heated_length: Length::new(0.01),
+        wetted_area: Area::new(1e-4),
+        aspect_ratio: None,
+    };
+    let fan = FanBank::new(
+        FanCurve::new(
+            "manufactured fan",
+            vec![
+                FanPoint::new(VolumetricFlowRate::new(0.0), Pressure::new(1.0)),
+                FanPoint::new(VolumetricFlowRate::new(0.05), Pressure::new(0.0)),
+            ],
+            SourceProvenance::new("manufactured fan fixture", "nonideal-refusal-v1"),
+            0.0,
+            ToleranceBasis::Analytic,
+            VolumetricFlowRate::new(0.0),
+            (1.0, 1.0),
+        )
+        .unwrap(),
+        1,
+        FanArrangement::Series,
+        1.0,
+    )
+    .unwrap();
+    let fan_domain = FanGasDomain {
+        density_ratio: [0.1, 1000.0],
+        reynolds_ratio: [0.1, 1000.0],
+        maximum_pressure_fraction: 0.05,
+    };
+    let run = |fraction, pressure| {
+        let original = gas_source::model(fraction);
+        let model = ThermochemicalPengRobinsonModel::new(
+            original.clone(),
+            vec![
+                PengRobinsonSpeciesBinding {
+                    species: SpeciesId::new("A").unwrap(),
+                    critical_temperature: Temperature::new(190.564),
+                    critical_pressure: Pressure::new(4.5992e6),
+                    acentric_factor: 0.01142,
+                },
+                PengRobinsonSpeciesBinding {
+                    species: SpeciesId::new("B").unwrap(),
+                    critical_temperature: Temperature::new(150.687),
+                    critical_pressure: Pressure::new(4.863e6),
+                    acentric_factor: -0.00219,
+                },
+            ],
+            vec![],
+        )
+        .unwrap();
+        let state = model
+            .evaluate_real_gas(
+                &gas_source::point(400.0, pressure),
+                PengRobinsonPhaseV1::Stable,
+            )
+            .unwrap();
+        let medium = FrozenFlowMedium::ThermochemicalRealGas(&state);
+        // The fan owner still stores ideal GasState snapshots. Neither an
+        // inlet nor a reference may silently replace the real medium with its
+        // retained ideal-reference source to satisfy that owner's contract.
+        let ideal_reference = FrozenFlowMedium::ThermochemicalGas(state.source());
+        for (inlet, reference) in [(medium, ideal_reference), (ideal_reference, medium)] {
+            assert!(matches!(
+                inlet.bind_fan_bank(&fan, reference, fan_domain),
+                Err(MaterialFanError::Invalid(
+                    "gas fan similarity does not admit nonideal EOS states"
+                ))
+            ));
+        }
+        let transport = state.transport_state().unwrap();
+        assert_eq!(medium.transport_state().unwrap(), transport);
+        assert_eq!(
+            medium.thermal_transport_state().unwrap().transport(),
+            transport
+        );
+        assert_eq!(state.source().source_packs(), original.source_packs());
+        let loss = medium.orifice_loss("opening", Area::new(1e-4)).unwrap();
+        let resistance = LossNetwork::Element(loss.element().clone())
+            .equivalent_resistance()
+            .value();
+        let q = 1e-5;
+        let channel = medium
+            .channel(
+                "wall",
+                VolumetricFlowRate::new(q),
+                Temperature::new(400.0),
+                patch,
+                CorrelationId::FlatPlateLaminarAverage,
+                ThermalDirection::HeatingFluid,
+            )
+            .unwrap();
+        let capacity = state.density_kg_m3() * q * state.specific_heat_cp_j_kg_k();
+        near(channel.path().capacity_rate_w_per_k(), capacity);
+        let result = channel.path().march(&[420.0]).unwrap();
+        let expected_outlet = 420.0
+            + (400.0 - 420.0)
+                * (-channel.coefficient().value.value() * patch.wetted_area.value() / capacity)
+                    .exp();
+        near(result.outlet_temperature_k, expected_outlet);
+        near(
+            result.total_heat_rate_w,
+            capacity * (expected_outlet - 400.0),
+        );
+        assert!(
+            matches!(channel.medium(), FrozenFlowMedium::ThermochemicalRealGas(source)
+            if core::ptr::eq(source, &state))
+        );
+
+        let natural = evaluate_vertical_plate_from_thermal_material(
+            &medium,
+            9.81,
+            Temperature::new(420.0),
+            Length::new(0.01),
+        )
+        .unwrap();
+        let expected_ra = 9.81
+            * state.volumetric_expansion_per_k()
+            * 20.0
+            * 0.01_f64.powi(3)
+            * state.density_kg_m3().powi(2)
+            * state.specific_heat_cp_j_kg_k()
+            / (transport.dynamic_viscosity_pa_s() * transport.thermal_conductivity_w_m_k());
+        near(natural.nusselt().groups()["Ra"], expected_ra);
+        assert_eq!(*natural.transport(), transport);
+        let robin = natural.robin_boundary(Temperature::new(400.0)).unwrap();
+        near(
+            robin.coefficient().value.value(),
+            natural.coefficient().value.value(),
+        );
+        (
+            resistance,
+            capacity,
+            result.total_heat_rate_w,
+            natural.coefficient().value.value(),
+            state.volumetric_expansion_per_k(),
+        )
+    };
+    let reference = run(0.75, 1e5);
+    let dense = run(0.75, 5e6);
+    let substituted = run(0.25, 5e6);
+    assert!(dense.0 > reference.0 && dense.1 > reference.1);
+    for changed in [dense, substituted] {
+        assert_ne!(changed.2, reference.2);
+        assert_ne!(changed.3, reference.3);
+        assert_ne!(changed.4, reference.4);
+    }
+    assert_ne!(dense, substituted);
+}

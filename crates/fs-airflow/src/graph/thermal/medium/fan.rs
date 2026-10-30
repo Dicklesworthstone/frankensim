@@ -36,7 +36,7 @@ pub struct FanGasDomain {
 /// Source-material, similarity or numerical refusal. No input is modified.
 #[derive(Clone, Debug, PartialEq)]
 pub enum MaterialFanError {
-    /// Invalid applicability, non-gas input, repeated binding or arithmetic.
+    /// Invalid applicability, unsupported medium, repeated binding or arithmetic.
     Invalid(&'static str),
     /// The original material owner refused a stale or incoherent snapshot.
     Material(MaterialError),
@@ -104,6 +104,11 @@ fn gas(medium: FrozenFlowMedium<'_>) -> Result<GasState, MaterialFanError> {
         FrozenFlowMedium::MoistAir(value) => value.state(),
         FrozenFlowMedium::ThermochemicalGas(value) => value.state(),
         FrozenFlowMedium::DeclaredGas(value) => value,
+        FrozenFlowMedium::ThermochemicalRealGas(_) => {
+            return Err(MaterialFanError::Invalid(
+                "gas fan similarity does not admit nonideal EOS states",
+            ));
+        }
         FrozenFlowMedium::Liquid(_) => {
             return Err(MaterialFanError::Invalid(
                 "gas fan similarity cannot reclassify a liquid as an admitted fan medium",
@@ -237,9 +242,9 @@ impl<'a> FrozenFlowMedium<'a> {
     ///
     /// The whole retained static-pressure envelope must remain in the declared
     /// low-pressure range. Reference and inlet must be coherent gas snapshots;
-    /// liquid substitutions, already-bound banks, unsupported Reynolds/density
-    /// similarity and unrepresentable factors refuse without fallback. This
-    /// does not supply fan total pressure, efficiency or new measurement data.
+    /// liquid or nonideal substitutions, already-bound banks, unsupported
+    /// Reynolds/density similarity and unrepresentable factors refuse without
+    /// fallback. This does not supply fan total pressure, efficiency or new measurement data.
     pub fn bind_fan_bank(
         self,
         reference_bank: &FanBank,

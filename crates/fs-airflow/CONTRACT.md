@@ -126,6 +126,23 @@ not advance chemistry, gas energy or phase, and they retain correlation-domain
 refusals. `tests/material_medium.rs` checks solved pressure-driven flow, serial
 heat balance, data-only pressure/composition changes and source-object retention.
 
+`FrozenFlowMedium::ThermochemicalRealGas` retains the original nonideal source
+and uses its PR density and complete Cp through the same hydraulic losses,
+channel heat-capacity rate and convection owners. Every frozen-medium variant
+also delegates the common `ThermalFluidTransport` view.
+`evaluate_vertical_plate_from_thermal_material` obtains reservoir temperature
+and isobaric expansion from that same source, checks thermal/momentum tuple
+agreement, and executes the existing Churchill-Chu correlation and Robin seam.
+Unknown expansion and zero/out-of-range buoyancy refuse instead of acquiring
+an air value. Coefficients stay frozen at the reservoir state; no film-state
+reconstruction, phase evolution or compressible channel law is supplied.
+The separate fan-similarity owner still requires ideal `GasState` snapshots:
+nonideal inlet and reference bindings both refuse instead of substituting the
+retained ideal-reference source for the actual real-gas medium.
+Focused tests cover source-pack pressure/composition changes through native
+channel heat marching and natural convection, the ideal-gas explicit-path
+limit, inconsistent snapshots and unknown-versus-zero expansion.
+
 `medium::steady_gas::solve_material_gas_transport` closes the native
 `SteadyAxialGas` stationary-species/NASA9 enthalpy solve against convection
 evaluated from each retained local source state. The same downstream mixed-cell

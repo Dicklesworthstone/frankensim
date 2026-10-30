@@ -13,7 +13,7 @@ use fs_convection::{
 };
 use fs_evidence::Evidence;
 use fs_material::MaterialError;
-use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
+use fs_material::fluid_transport::{FluidTransport, FluidTransportState, ThermalFluidTransport};
 use fs_qty::{Length, Temperature};
 
 /// Geometry and heat-flow direction required by the selected forced correlation.
@@ -145,6 +145,85 @@ pub fn evaluate_vertical_plate_from_material<F: FluidTransport + ?Sized>(
     reference_temperature: Temperature,
     characteristic_length: Length,
 ) -> Result<MaterialConvection<'_, F>, MaterialConvectionError> {
+    let transport = fluid.transport_state()?;
+    let inputs = vertical_plate_inputs(
+        transport,
+        gravity_m_s2,
+        expansion_per_k,
+        wall_temperature,
+        reference_temperature,
+        characteristic_length,
+    )?;
+    finish(
+        CorrelationId::ChurchillChuVerticalPlate,
+        fluid,
+        transport,
+        characteristic_length,
+        inputs,
+    )
+}
+
+/// Natural convection from the original thermal reservoir's complete material
+/// state, with no separately authored expansion or ambient temperature.
+///
+/// The source's temperature is the reservoir temperature; its density, Cp,
+/// conductivity, viscosity and volumetric expansion supply the same frozen
+/// evaluation. Nonideal gases use their admitted EOS derivative. Liquid
+/// expansion remains unknown unless the source owner explicitly supplies it.
+/// The original material owner stays attached to the result and all existing
+/// Churchill-Chu regime, geometry and model-evidence limits remain unchanged.
+/// This does not re-evaluate properties at a film temperature, establish a
+/// finite-temperature validity interval or model a finite-capacity reservoir.
+///
+/// # Errors
+/// Refuses unknown expansion, inconsistent thermal/momentum snapshots, invalid
+/// temperatures and the same correlation/domain failures as the explicit path.
+pub fn evaluate_vertical_plate_from_thermal_material<F: ThermalFluidTransport + ?Sized>(
+    fluid: &F,
+    gravity_m_s2: f64,
+    wall_temperature: Temperature,
+    characteristic_length: Length,
+) -> Result<MaterialConvection<'_, F>, MaterialConvectionError> {
+    let thermal = fluid.thermal_transport_state()?;
+    let transport = fluid.transport_state()?;
+    if thermal.transport() != transport {
+        return Err(MaterialError::Parameters {
+            what: "thermal and momentum views must describe the same material state".into(),
+        }
+        .into());
+    }
+    let expansion =
+        thermal
+            .volumetric_expansion_per_k()
+            .ok_or_else(|| MaterialError::Parameters {
+                what: "natural convection requires the material source's volumetric expansion"
+                    .into(),
+            })?;
+    let inputs = vertical_plate_inputs(
+        transport,
+        gravity_m_s2,
+        expansion,
+        wall_temperature,
+        Temperature::new(thermal.temperature_k()),
+        characteristic_length,
+    )?;
+    finish(
+        CorrelationId::ChurchillChuVerticalPlate,
+        fluid,
+        transport,
+        characteristic_length,
+        inputs,
+    )
+}
+
+fn vertical_plate_inputs(
+    transport: FluidTransportState,
+    gravity_m_s2: f64,
+    expansion_per_k: f64,
+    wall_temperature: Temperature,
+    reference_temperature: Temperature,
+    characteristic_length: Length,
+) -> Result<CorrelationInputs, MaterialConvectionError> {
     if [wall_temperature.value(), reference_temperature.value()]
         .into_iter().any(|value| !value.is_finite() || value <= 0.0)
     {
@@ -152,16 +231,12 @@ pub fn evaluate_vertical_plate_from_material<F: FluidTransport + ?Sized>(
             what: "natural convection needs positive finite absolute temperatures".into(),
         }.into());
     }
-    let transport = fluid.transport_state()?;
     let rayleigh = transport.rayleigh(
         gravity_m_s2, expansion_per_k,
         wall_temperature.value() - reference_temperature.value(),
         characteristic_length.value(),
     )?.abs();
-    finish(
-        CorrelationId::ChurchillChuVerticalPlate, fluid, transport,
-        characteristic_length, CorrelationInputs::natural(rayleigh, transport.prandtl()),
-    )
+    Ok(CorrelationInputs::natural(rayleigh, transport.prandtl()))
 }
 
 fn finish<F: FluidTransport + ?Sized>(
@@ -238,6 +313,98 @@ mod tests {
         assert!(h * (280.0 - 300.0) < 0.0);
         assert!(h * (320.0 - 300.0) > 0.0);
         assert_eq!(hot.nusselt().groups()["Ra"], fluid.rayleigh(9.81, 1.0 / 300.0, 20.0, 0.1).unwrap());
+    }
+
+    #[test]
+    fn thermal_material_owns_natural_buoyancy_and_ambient_temperature() {
+        let source = GasState::try_new(&GasSpec::dry_air_ussa1976(), 300.0, 150000.0).unwrap();
+        for wall in [280.0, 320.0] {
+            let material = evaluate_vertical_plate_from_thermal_material(
+                &source,
+                9.81,
+                Temperature::new(wall),
+                Length::new(0.1),
+            )
+            .unwrap();
+            let explicit = evaluate_vertical_plate_from_material(
+                &source,
+                9.81,
+                1.0 / 300.0,
+                Temperature::new(wall),
+                Temperature::new(300.0),
+                Length::new(0.1),
+            )
+            .unwrap();
+            assert_eq!(material.nusselt().groups(), explicit.nusselt().groups());
+            assert_eq!(material.coefficient().value, explicit.coefficient().value);
+            assert!(core::ptr::eq(material.fluid(), &source));
+        }
+        let mut stale = source;
+        stale.density *= 2.0;
+        assert!(
+            evaluate_vertical_plate_from_thermal_material(
+                &stale,
+                9.81,
+                Temperature::new(320.0),
+                Length::new(0.1)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn thermal_material_does_not_invent_expansion_or_bypass_zero_driving_refusal() {
+        use fs_material::fluid_transport::ThermalFluidTransportState;
+        let transport = FluidTransportState::try_new(1000.0, 4000.0, 0.5, 0.001).unwrap();
+        let unknown = ThermalFluidTransportState::try_new(transport, 300.0, None).unwrap();
+        assert!(matches!(
+            evaluate_vertical_plate_from_thermal_material(
+                &unknown,
+                9.81,
+                Temperature::new(320.0),
+                Length::new(0.1)
+            ),
+            Err(MaterialConvectionError::Material(_))
+        ));
+        let zero = ThermalFluidTransportState::try_new(transport, 300.0, Some(0.0)).unwrap();
+        assert!(matches!(
+            evaluate_vertical_plate_from_thermal_material(
+                &zero,
+                9.81,
+                Temperature::new(320.0),
+                Length::new(0.1)
+            ),
+            Err(MaterialConvectionError::Correlation(_))
+        ));
+    }
+
+    #[test]
+    fn thermal_material_refuses_disagreeing_fluid_views() {
+        use fs_material::fluid_transport::ThermalFluidTransportState;
+        struct Disagreeing;
+        impl FluidTransport for Disagreeing {
+            fn transport_state(&self) -> Result<FluidTransportState, MaterialError> {
+                FluidTransportState::try_new(1.0, 1000.0, 0.02, 2e-5)
+            }
+        }
+        impl ThermalFluidTransport for Disagreeing {
+            fn thermal_transport_state(&self) -> Result<ThermalFluidTransportState, MaterialError> {
+                ThermalFluidTransportState::try_new(
+                    FluidTransportState::try_new(2.0, 1000.0, 0.02, 2e-5)?,
+                    300.0,
+                    Some(1.0 / 300.0),
+                )
+            }
+        }
+        assert!(matches!(
+            evaluate_vertical_plate_from_thermal_material(
+                &Disagreeing,
+                9.81,
+                Temperature::new(320.0),
+                Length::new(0.1)
+            ),
+            Err(MaterialConvectionError::Material(_))
+        ));
     }
 
     #[test]

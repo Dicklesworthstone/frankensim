@@ -44,6 +44,8 @@ fs-sparse = { path = "../fs-sparse" }
 
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }
+# Exercise the original nonideal EOS branch through material-bound flow and heat.
+fs-thermochem = { path = "../fs-thermochem" }
 # Reuse the native graph's cell identities and signed mass-flow connections.
 fs-thermal = { path = "../fs-thermal" }
 # Exercise convection on the original coupled electrical/thermal/gas network.
