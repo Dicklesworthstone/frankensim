@@ -5,7 +5,7 @@ use fs_solver::NewtonKrylovConfig;
 
 const R: f64 = fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
 
-fn implicit(law: GasReaction) -> GasReaction {
+pub(super) fn implicit(law: GasReaction) -> GasReaction {
     let policy = ImplicitMechanismSolve {
         extent_brackets_mol: law
             .channels()
@@ -47,7 +47,13 @@ fn capacity() -> f64 {
 // Exact scalar BE species elimination for these authored equal-mass isomers:
 // k=k0*T/300, activity_i=(n_i/n)*T/300, K=exp(release/(RT)).
 // No production rate, equilibrium, caloric inversion or nonlinear solver is used.
-fn extent(temperature: f64, initial_product: f64, rate: f64, release: f64, dt: f64) -> f64 {
+pub(super) fn extent(
+    temperature: f64,
+    initial_product: f64,
+    rate: f64,
+    release: f64,
+    dt: f64,
+) -> f64 {
     let a = dt * VOLUME * rate * (temperature / 300.0).powi(2);
     let reverse = (-release / (R * temperature)).exp();
     a * (1.0 - (1.0 + reverse) * initial_product / amount())

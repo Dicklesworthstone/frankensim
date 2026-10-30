@@ -15552,3 +15552,32 @@ cannot conceal excessive deposition into a main-wall body. Continuous
 trajectories require their own matching source integral and refuse this held
 input route. A native heat integral is a physical source report, not permission
 to credit a thermal body without a complete energy transaction.
+
+### Multiple finite gas compartments sharing one spatial material wall
+
+`solid_enthalpy::gas::network` generalizes the original cell/gas
+backward-Euler residual to independently identified finite compartments.
+All existing single-gas entry points delegate to this same residual owner.
+Each compartment retains its original material catalog, mass, fixed volume,
+composition and optional original implicit reaction mechanism. Stable
+compartment IDs define the gas unknown order; globally unique patch IDs and
+aggregate exposed-area admission prevent duplicated wall coverage.
+
+Every trial evaluates all gas endpoints, local solid material sources,
+source-bound gas/solid layers and the optional prepared material or complete
+heat network at the same physical endpoint. Gas patch heat is debited from
+the shared wall once, with separate signed transfers and energy residuals
+for each compartment. Chemical formation energy remains inside native gas
+storage; no independent chemical heat source is added. Original stable
+caloric increments are retained instead of subtracting large absolute
+formation-energy references. Every gas and wall publishes in one detached
+candidate after local and total energy admission.
+
+This is homogeneous, closed, fixed-volume gas chemistry and fixed thermal
+geometry. Compartments exchange heat through the solid, not species or
+momentum. Returned structural fields retain the existing sequential
+thermoelastic interpretation; pressure traction, moving boundaries,
+reciprocal thermoelastic heat, flame fronts and a whole-system entropy
+theorem are not claimed. Numerical refinement remains necessary for
+backward-Euler time accuracy. Source, geometry, work, numerical and
+cancellation refusals publish no partial state.

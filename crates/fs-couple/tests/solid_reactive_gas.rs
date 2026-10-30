@@ -28,6 +28,9 @@ use fixture::*;
 #[path = "solid_reactive_gas/coupled.rs"]
 mod coupled;
 
+#[path = "solid_reactive_gas/network.rs"]
+mod network;
+
 #[test]
 fn kinetic_caloric_and_transport_data_drive_spatial_heat_deformation_and_stress() {
     with_cx(|cx, _| {

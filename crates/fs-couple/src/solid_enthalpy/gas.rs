@@ -1,4 +1,4 @@
-//! One finite, fixed-volume source gas exchanges heat with spatial solid cells.
+//! Finite, fixed-volume source gases exchange heat with shared spatial solid cells.
 //!
 //! The existing thermal backward-Euler owner supplies every local storage/rate
 //! residual. The existing gas owner supplies NASA9 internal energy and EOS; the
@@ -6,7 +6,8 @@
 //! Newton--Krylov solve closes all cell and gas joule balances at the same
 //! endpoint. No thermal body is collapsed into a mean temperature.
 //!
-//! The gas is well mixed and its volume/composition stay fixed. Thermal geometry
+//! Each gas is well mixed and its volume stays fixed. Composition is frozen or
+//! advanced by the original implicit chemistry owner. Thermal geometry
 //! stays fixed. Internal links may retain authored conductances or resolve the
 //! original prepared material or complete heat network at every proposed endpoint.
 //! The returned solid field is a sequential quasistatic thermal load: reciprocal
@@ -29,6 +30,8 @@ use std::cell::Cell;
 
 mod transport;
 use transport::{GasHeatTransport, GasTransportSample};
+/// Separate finite gases sharing the same spatial material wall and heat solve.
+pub mod network;
 /// Declared chemistry, finite gas heat and the same spatial solid state.
 pub mod reactive;
 use crate::circuit_enthalpy::contacts::heat::{
@@ -36,6 +39,10 @@ use crate::circuit_enthalpy::contacts::heat::{
 };
 use crate::circuit_enthalpy::material::{
     MaterialNetworkError, MaterialNetworkSample, PreparedMaterialNetwork,
+};
+use network::{
+    GasEndpointInput, SolidGasCompartmentReport, SolidGasEndpoint, SolidGasNetworkCandidate,
+    SolidGasNetworkReport,
 };
 
 /// A distinct exposed patch on an existing structural cell. Several disjoint
@@ -454,18 +461,96 @@ impl<'m> SolidEnthalpy<'m> {
         )
             -> Result<(IsochoricGasParcel, GasHeatStep, P), SolidGasError>,
     ) -> Result<(SolidGasCandidate<'m, 't, T::Sample>, P), SolidGasError> {
+        let inputs = [GasEndpointInput {
+            id: 0,
+            gas,
+            external_heat_j: external_gas_heat_j,
+            contacts,
+        }];
+        let shared = self.step_gases_with_endpoint(
+            thermal,
+            &inputs,
+            target_s,
+            transport,
+            controls,
+            initial_energy_increments_j,
+            cx,
+            |_, heat| resolve_gas_endpoint(heat),
+        )?;
+        let (thermal, mut gases, state, mut report) = shared.into_parts();
+        let gas = gases
+            .pop()
+            .ok_or(SolidGasError::Invalid("missing gas endpoint"))?
+            .gas;
+        let single = report
+            .gases
+            .pop()
+            .ok_or(SolidGasError::Invalid("missing gas account"))?;
+        Ok((
+            SolidGasCandidate {
+                thermal,
+                gas,
+                state,
+                report: SolidGasReport {
+                    thermal: report.thermal,
+                    gas: single.gas,
+                    contacts: single.contacts,
+                    transport: report.transport,
+                    closed_radiation_net_j: report.closed_radiation_net_j,
+                    external_thermal_heat_j: report.external_thermal_heat_j,
+                    external_gas_heat_j: single.external_heat_j,
+                    solid_to_gas_heat_j: single.solid_to_gas_heat_j,
+                    gas_energy_residual_j: single.energy_residual_j,
+                    combined_energy_residual_j: report.combined_energy_residual_j,
+                    maximum_cell_residual_j: report.maximum_cell_residual_j,
+                    nonlinear: report.nonlinear,
+                    trials: report.trials,
+                },
+            },
+            single.endpoint,
+        ))
+    }
+
+    // One residual owner for one or many finite gas inventories. The canonical
+    // input order is validated here, so every caller shares the same balance
+    // reduction, work budget, source admission and publication boundary.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn step_gases_with_endpoint<'t, P, T: GasHeatTransport>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        gases: &[GasEndpointInput<'_>],
+        target_s: f64,
+        transport: T,
+        controls: SolidGasSolve,
+        initial_energy_increments_j: &[f64],
+        cx: &Cx<'_>,
+        resolve_gas_endpoint: impl Fn(
+            usize,
+            f64,
+        )
+            -> Result<(IsochoricGasParcel, GasHeatStep, P), SolidGasError>,
+    ) -> Result<SolidGasNetworkCandidate<'m, 't, T::Sample, P>, SolidGasError> {
         let checkpoint = || cx.checkpoint().map_err(|_| DepositionError::Cancelled);
         checkpoint()?;
         controls.newton.validate()?;
         controls.gas.validate()?;
+        let patch_count = gases.iter().try_fold(0usize, |count, gas| {
+            count
+                .checked_add(gas.contacts.len())
+                .ok_or(SolidGasError::Invalid("gas patch count overflows"))
+        })?;
         if controls.maximum_cells == 0
             || thermal.cells().len() > controls.maximum_cells
-            || contacts.is_empty()
-            || contacts.len() > controls.maximum_contacts
-            || initial_energy_increments_j.len() != thermal.cells().len().saturating_add(1)
+            || gases.is_empty()
+            || gases
+                .iter()
+                .any(|gas| gas.contacts.is_empty() || !gas.external_heat_j.is_finite())
+            || gases.windows(2).any(|pair| pair[0].id >= pair[1].id)
+            || patch_count > controls.maximum_contacts
+            || initial_energy_increments_j.len()
+                != thermal.cells().len().saturating_add(gases.len())
             || controls.maximum_trials == 0
             || controls.maximum_newton_iterations == 0
-            || !external_gas_heat_j.is_finite()
             || !controls.maximum_gas_temperature_increment_k.is_finite()
             || controls.maximum_gas_temperature_increment_k <= 0.0
             || [
@@ -483,14 +568,17 @@ impl<'m> SolidEnthalpy<'m> {
         }
         let initial = self.resolve(thermal, cx)?;
         let initial_transport = transport.resolve(self, thermal, cx)?;
-        let initial_gas_temperature_k = gas.state().state().temperature;
-        let mut ordered: Vec<_> = contacts.iter().collect();
-        ordered.sort_by_key(|contact| contact.id);
+        let mut ordered: Vec<_> = gases
+            .iter()
+            .enumerate()
+            .flat_map(|(gas, entry)| entry.contacts.iter().map(move |contact| (gas, contact)))
+            .collect();
+        ordered.sort_by_key(|(_, contact)| contact.id);
         let mut areas = BTreeMap::<CellId, f64>::new();
-        let mut prepared: Vec<PreparedContact<'_>> = Vec::with_capacity(contacts.len());
-        for (index, contact) in ordered.into_iter().enumerate() {
+        let mut prepared: Vec<(usize, PreparedContact<'_>)> = Vec::with_capacity(patch_count);
+        for (index, (gas_index, contact)) in ordered.into_iter().enumerate() {
             checkpoint()?;
-            if index > 0 && prepared[index - 1].contact.id == contact.id {
+            if index > 0 && prepared[index - 1].1.contact.id == contact.id {
                 return Err(SolidGasError::Invalid("unique gas patch IDs required"));
             }
             let element = self
@@ -518,6 +606,7 @@ impl<'m> SolidEnthalpy<'m> {
                 selection: contact.selection.clone(),
             };
             let bound = &self.cells[element];
+            let gas = gases[gas_index].gas;
             let reference_phase = bound
                 .source
                 .curve
@@ -550,7 +639,7 @@ impl<'m> SolidEnthalpy<'m> {
                     .as_ref()
                     .map(GasTransportSample::material),
             )?;
-            prepared.push(entry);
+            prepared.push((gas_index, entry));
         }
         let step = BackwardEulerStep::new(thermal, target_s, checkpoint)?;
         let dt = step.duration_s();
@@ -558,7 +647,7 @@ impl<'m> SolidEnthalpy<'m> {
         let trials = Cell::new(0usize);
         let evaluate = |x: &[f64]| {
             checkpoint()?;
-            if x.len() != n + 1 {
+            if x.len() != n + gases.len() {
                 return Err(SolidGasError::Invalid(
                     "complete cell/gas energy vector required",
                 ));
@@ -567,7 +656,29 @@ impl<'m> SolidEnthalpy<'m> {
                 return Err(SolidGasError::TrialBudget);
             }
             trials.set(trials.get() + 1);
-            let (next_gas, gas_step, gas_payload) = resolve_gas_endpoint(x[n])?;
+            let mut endpoints = Vec::with_capacity(gases.len());
+            let mut gas_reports = Vec::with_capacity(gases.len());
+            for (index, input) in gases.iter().enumerate() {
+                checkpoint()?;
+                let (gas, report, payload) = resolve_gas_endpoint(index, x[n + index])?;
+                if gas.mass_kg().to_bits() != input.gas.mass_kg().to_bits()
+                    || gas.volume_m3().to_bits() != input.gas.volume_m3().to_bits()
+                {
+                    return Err(SolidGasError::Invalid(
+                        "closed compartment mass and volume must remain unchanged",
+                    ));
+                }
+                endpoints.push(SolidGasEndpoint { id: input.id, gas });
+                gas_reports.push(SolidGasCompartmentReport {
+                    id: input.id,
+                    gas: report,
+                    contacts: Vec::with_capacity(input.contacts.len()),
+                    external_heat_j: input.external_heat_j,
+                    solid_to_gas_heat_j: 0.0,
+                    energy_residual_j: 0.0,
+                    endpoint: payload,
+                });
+            }
             step.evaluate(
                 &x[..n],
                 |endpoint| {
@@ -587,10 +698,10 @@ impl<'m> SolidEnthalpy<'m> {
                             - closed_radiation_net_j,
                     )?;
                     let mut heats = BTreeMap::<CellId, f64>::new();
-                    let mut samples = Vec::with_capacity(prepared.len());
                     let mut net = 0.0;
-                    for entry in &prepared {
+                    for (gas_index, entry) in &prepared {
                         checkpoint()?;
+                        let next_gas = &endpoints[*gas_index].gas;
                         let phase = state.samples()[entry.element].phase;
                         let sample = entry.resolve(
                             &self.cells[entry.element].source,
@@ -608,7 +719,10 @@ impl<'m> SolidEnthalpy<'m> {
                         net = finite(net + heat)?;
                         let cell_heat = heats.entry(entry.contact.cell).or_insert(0.0);
                         *cell_heat = finite(*cell_heat + heat)?;
-                        samples.push(SolidGasContactSample {
+                        let gas_report = &mut gas_reports[*gas_index];
+                        gas_report.solid_to_gas_heat_j =
+                            finite(gas_report.solid_to_gas_heat_j + heat)?;
+                        gas_report.contacts.push(SolidGasContactSample {
                             id: entry.contact.id,
                             cell: entry.contact.cell,
                             solid_temperature_k: phase.temperature_k(),
@@ -645,21 +759,23 @@ impl<'m> SolidEnthalpy<'m> {
                             "surface heat differs from applied cell transfer",
                         ));
                     }
-                    let gas_residual =
-                        finite(gas_step.stored_energy_change_j - external_gas_heat_j - net)?;
+                    for report in &mut gas_reports {
+                        report.energy_residual_j = finite(
+                            report.gas.stored_energy_change_j
+                                - report.external_heat_j
+                                - report.solid_to_gas_heat_j,
+                        )?;
+                    }
                     Ok::<_, SolidGasError>(StepCoefficients {
                         sources_w: sources,
                         conductances_w_k: conductances,
                         payload: (
-                            next_gas,
-                            gas_step,
+                            endpoints,
+                            gas_reports,
                             state,
-                            samples,
                             net,
                             external,
-                            gas_residual,
                             transport_sample,
-                            gas_payload,
                             closed_radiation_net_j,
                         ),
                     })
@@ -667,14 +783,17 @@ impl<'m> SolidEnthalpy<'m> {
                 checkpoint,
             )
         };
-        let problem =
-            FallibleFiniteDifference::new(n + 1, controls.difference_step_j, |x: &[f64]| {
+        let problem = FallibleFiniteDifference::new(
+            n + gases.len(),
+            controls.difference_step_j,
+            |x: &[f64]| {
                 let trial = evaluate(x)?;
                 let mut residual = trial.residual_j().to_vec();
-                residual.push(trial.payload().6);
+                residual.extend(trial.payload().1.iter().map(|gas| gas.energy_residual_j));
                 Ok::<_, SolidGasError>(residual)
-            })
-            .map_err(numerical)?;
+            },
+        )
+        .map_err(numerical)?;
         let construction = NewtonKrylovState::new(
             &problem,
             initial_energy_increments_j.to_vec(),
@@ -702,63 +821,57 @@ impl<'m> SolidEnthalpy<'m> {
         let maximum_cell_residual_j = trial.maximum_cell_residual_j();
         let (
             thermal,
-            (
-                gas,
-                gas_step,
-                state,
-                contacts,
-                net,
-                external,
-                gas_energy_residual_j,
-                transport,
-                gas_payload,
-                closed_radiation_net_j,
-            ),
+            (endpoints, gas_reports, state, net, external, transport, closed_radiation_net_j),
             audit,
         ) = trial.accept(
             controls.cell_energy_tolerance_j,
             controls.thermal_energy_tolerance_j,
             checkpoint,
         )?;
-        let total = finite(
-            audit.stored_energy_change_j + gas_step.stored_energy_change_j
-                - external
-                - external_gas_heat_j,
-        )?;
-        if gas_energy_residual_j.abs() > controls.gas_energy_tolerance_j
-            || total.abs() > controls.total_energy_tolerance_j
+        let mut gas_change = 0.0;
+        let mut gas_supply = 0.0;
+        for ((input, endpoint), report) in gases.iter().zip(&endpoints).zip(&gas_reports) {
+            checkpoint()?;
+            if report.energy_residual_j.abs() > controls.gas_energy_tolerance_j
+                || (endpoint.gas.state().state().temperature
+                    - input.gas.state().state().temperature)
+                    .abs()
+                    > controls.maximum_gas_temperature_increment_k
+            {
+                return Err(SolidGasError::Invalid(
+                    "compartment energy or temperature exceeds its allowance",
+                ));
+            }
+            // The original caloric owner cancels common formation references
+            // before subtraction; absolute u(end)-u(start) loses this property.
+            gas_change = finite(gas_change + report.gas.stored_energy_change_j)?;
+            gas_supply = finite(gas_supply + report.external_heat_j)?;
+        }
+        let total = finite(audit.stored_energy_change_j + gas_change - external - gas_supply)?;
+        if total.abs() > controls.total_energy_tolerance_j
             || (audit.external_heat_j + net - external - closed_radiation_net_j).abs()
                 > controls.total_energy_tolerance_j
-            || (gas.state().state().temperature - initial_gas_temperature_k).abs()
-                > controls.maximum_gas_temperature_increment_k
         {
             return Err(SolidGasError::Invalid(
                 "local gas, thermal transfer or combined caloric energy exceeds its allowance",
             ));
         }
         checkpoint()?;
-        Ok((
-            SolidGasCandidate {
-                thermal,
-                gas,
-                state,
-                report: SolidGasReport {
-                    thermal: audit,
-                    gas: gas_step,
-                    contacts,
-                    transport,
-                    closed_radiation_net_j,
-                    external_thermal_heat_j: external,
-                    external_gas_heat_j,
-                    solid_to_gas_heat_j: net,
-                    gas_energy_residual_j,
-                    combined_energy_residual_j: total,
-                    maximum_cell_residual_j,
-                    nonlinear: result.report,
-                    trials: trials.get(),
-                },
+        Ok(SolidGasNetworkCandidate {
+            thermal,
+            gases: endpoints,
+            state,
+            report: SolidGasNetworkReport {
+                thermal: audit,
+                gases: gas_reports,
+                transport,
+                closed_radiation_net_j,
+                external_thermal_heat_j: external,
+                combined_energy_residual_j: total,
+                maximum_cell_residual_j,
+                nonlinear: result.report,
+                trials: trials.get(),
             },
-            gas_payload,
-        ))
+        })
     }
 }
