@@ -840,6 +840,15 @@ impl ResolvedMaterialStatePoint {
         &self.query_point
     }
 
+    /// Look up one state coordinate by exact axis name.
+    #[must_use]
+    pub fn state_coordinate(&self, axis: &str) -> Option<f64> {
+        self.query_point
+            .binary_search_by(|(name, _)| name.as_str().cmp(axis))
+            .ok()
+            .map(|index| self.query_point[index].1)
+    }
+
     /// Exact coordinate conventions, shared by all member receipts.
     #[must_use]
     pub fn axis_quantities(&self) -> &std::collections::BTreeMap<String, QuantitySpec> {

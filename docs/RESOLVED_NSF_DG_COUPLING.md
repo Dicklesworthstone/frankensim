@@ -140,7 +140,7 @@ at aperture/wall edges, characteristic feedback and conservative energy flux.
 All these admission rules remain active in the native reader.
 
 `NsfDgFrame::reservoir_mass_out_kg` reports the original streamed mass leaving
-this opening, separately from both characteristic faces. The complete fluid
+all transverse openings, separately from both characteristic faces. The complete fluid
 mass balance uses the two face fluxes **plus** this reservoir flux. Signed
 reservoir energy entering the fluid remains `flow.open_energy_j`; it must be
 included with `flow.open_boundary_energy_j`, wall heat and source work when
@@ -167,6 +167,52 @@ tests in `nsf_dg/performance/file/tests/aperture.rs` check original fluid/duct
 replay, retained thermochemical sources and finite-upstream feedback together
 with the opening. Numerical/interface regressions do not qualify a physical
 mouth or its acoustic transparency.
+
+### Independent breath and escape openings
+
+The resolved grid accepts up to 16 independently indexed transverse openings
+through `with_reservoir_apertures`. Native data declares their count before the
+existing cell-list or SI-rectangle blocks:
+
+```text
+reservoir_apertures 2
+reservoir_aperture 1 low reference 1
+reservoir_cell 5 0 1
+reservoir_aperture 1 high reference 1
+reservoir_cell 5 2 1
+```
+
+Indices are zero-based in authored order. Every opening retains the original
+geometry/halo checks, ghost state, streamed mass, conservative FV total energy
+and acoustic pressure work. Duplicate tiles refuse; diagonal links crossing an
+ownership seam remain walls. Combined tile storage is bounded by the original
+grid cell budget. The legacy single-aperture block retains its original meaning.
+
+`boundary aperture 0 COUNT` drives the selected breath opening with the same
+absolute-pressure/temperature hold records as `boundary reservoir`. It can
+coexist with both the bore and a finite upstream/cork-side DG load, with zero
+added axial series effort. Warm breath uses the original gas energy and transport
+laws; the separate escape opening can remain bound to the exterior reference.
+
+`reservoir_observation aperture 1 baffled OX OY ANGLE_RAD` selects only escape
+tiles for the microphone. A following `reservoir_feedback` row selects that same
+opening for the live exterior reaction. The source and passive escape indices
+must differ. All held breath and trial escape states enter the same original
+NSF transaction with both acoustic loads. No participant publishes before the
+existing pressure/work gates pass.
+
+Typed callers use `step_with_reservoir_aperture`,
+`with_reservoir_radiation_at` and `with_reservoir_observation_at`. Singular
+selection methods require exactly one declared opening. Accepted
+`NsfDgFrame::reservoir_exchanges` retains each owner's original interval account;
+`mass_out_kg` and `total_energy_out_j` are positive outward. Their sums recover
+the aggregate streamed mass and the negative of `flow.open_energy_j`.
+The reaction uses the selected escape's account, never the sum with breath.
+
+`examples/resolved-dg-separate-openings.performance` exercises these declarations
+with a warm transverse source, distinct radiating escape, downstream bore,
+finite closed upstream duct and common material microphone. It is a numerical
+integration fixture, not measured flute geometry or a sound-quality claim.
 
 ### Explicit subgrid transport through open boundaries
 
@@ -517,7 +563,9 @@ bulk_viscosity BULK_TO_SHEAR_RATIO SOURCE_TOKEN
 wall adiabatic
 [optional sgs exploration MODEL COEFFICIENT FILTER_WIDTH_LU MAX_EDDY_TO_MOLECULAR TURBULENT_PRANDTL]
 characteristic AXIS low|high MAX_RELATIVE_PERTURBATION
-[optional coupled_patch OR source_patch START0 END0 START1 END1 pressure REMAINDER_OFFSET_PA]
+[optional coupled_patch START0 END0 START1 END1 pressure REMAINDER_OFFSET_PA]
+[optional source_patch START0 END0 START1 END1 pressure REMAINDER_OFFSET_PA]
+[optional reservoir_apertures APERTURE_COUNT; repeat the following aperture block APERTURE_COUNT times]
 [optional reservoir_aperture AXIS low|high reference COUNT]
 [or explicit reservoir_aperture AXIS low|high DENSITY_KG_M3 VX_M_S VY_M_S VZ_M_S TEMPERATURE_K COUNT]
 [exactly COUNT reservoir_cell X Y Z records when an aperture is declared]
@@ -620,8 +668,11 @@ Alternatives use the same original parsers and owners:
 - `boundary reservoir COUNT` selects the existing transverse aperture instead
   of an axial actuator. Each record is `hold END_OBSERVATION_SAMPLE P_ABSOLUTE_PA
   TEMPERATURE_K`, with positive pressure and temperature in the original gas
-  domain. It requires `reservoir_aperture` and may coexist with `upstream_dg`;
+  domain. It requires exactly one aperture and may coexist with `upstream_dg`;
   neither axial face then receives an added series-pressure source.
+- `boundary aperture INDEX COUNT` uses the same held absolute pressure and
+  temperature on one explicitly indexed opening. Unknown indices refuse; a
+  selected passive reaction opening cannot also be the prescribed breath source.
 - `upstream_dg dg_tube ...` or `upstream_dg dg_bore ...` attaches the second
   original load. Its subsidiary geometry, regional gas, chimney and radiation
   records use the same shared parser as the main load. `upstream_molecular` and
@@ -676,8 +727,18 @@ the outward normal. Grid edge zero maps to `[OX, OY]`, then the supplied angle
 rotates the actual tiles in the plane. Tile areas and spacing remain `dx²` and
 `dx`; neither aperture size nor surface flow is independently authored. The
 same microphone observes both surfaces with their separate travel times and
-signs. Overlapping openings, underresolved tile phase, more than 128 tile
-inputs, nonquiescent or mismatched reservoir/exterior reference gases refuse.
+signs. Overlapping openings, underresolved tile phase, and nonquiescent or
+mismatched observed-opening/exterior reference gases refuse. A distinct breath
+opening may have its own prescribed temperature.
+
+The shared `BaffledTilePressure` adapter partitions larger surfaces into original
+receivers with at most 128 inputs each, retaining every tile's signed flow, area,
+position and physical delay. It never averages tiles into one piston. The
+explicit reference allowance admits at most 120,000 tiles, with aggregate
+retained history and kernel limits of 256 MiB each; material preparation budgets
+also apply across the whole surface. Reaching a budget refuses construction.
+Larger banks reuse the original linear pressure differentiator per piece.
+All pieces preview before any observer history accepts a sample.
 
 The shared differentiating Rayleigh kernel observes every tile after the same
 conservative physical-to-output clock projection as the bore. A selected
@@ -715,7 +776,9 @@ pressure/temperature control, or the finite upstream duct's pressure rise.
 `boundary reservoir` cannot prescribe the same transverse opening that the
 passive exterior must solve; this conflicting pair refuses before construction.
 The typed `step_with_reservoir` likewise refuses without advancing any owner.
-Separate breath and escape openings require separate physical boundaries.
+For separately declared boundaries, `boundary aperture INDEX COUNT` and
+`step_with_reservoir_aperture` can prescribe breath while the distinct observed
+escape receives this reaction, including with a finite upstream duct attached.
 
 The typed equivalent is `NsfDg::with_reservoir_radiation` with an explicit
 `NsfDgReservoirRadiation`. The original joint radiation model receives two

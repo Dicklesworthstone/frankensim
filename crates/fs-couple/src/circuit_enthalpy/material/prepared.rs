@@ -40,6 +40,25 @@ impl PreparedMaterialNetwork<'_, '_> {
             cancelled,
         )
     }
+
+    /// Resolve this original material assembly with additional physical links.
+    ///
+    /// The supplied map and the authored Fourier bindings must partition all
+    /// native links exactly. Added links require zero authored conductance and
+    /// finite nonnegative G; omission, overlap and inactive IDs refuse. The
+    /// caller retains the original source samples producing these conductances.
+    /// Native link geometry, reciprocal heat transfer and integration remain
+    /// authoritative. No additional source heat is generated.
+    pub fn resolve_with_link_conductances(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        additional_links: &BTreeMap<u64, f64>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<CircuitThermalCoefficients<MaterialNetworkSample>, MaterialNetworkError> {
+        self.network.resolve_bound_with_links(
+            thermal, &self.bases, Some(&self.pins), None, Some(additional_links), cancelled,
+        )
+    }
 }
 
 impl<'a> MaterialNetwork<'a> {
@@ -72,6 +91,23 @@ impl<'a> MaterialNetwork<'a> {
         self.prepare_bound(thermal, bases, None, cancelled)
     }
 
+    /// Select original material claims while another physical owner supplies
+    /// the remaining native links. Their coefficients must be re-resolved and
+    /// supplied to `resolve_with_link_conductances` at every trial. Ordinary
+    /// `resolve` still refuses incomplete Fourier coverage; it never silently
+    /// turns these links into insulation or caches their preparation values.
+    pub fn prepare_with_link_conductances<'n>(
+        &'n self,
+        thermal: &DepositionSimulation<'_>,
+        electrical_bases: &[(usize, ElectricalPropertyBasis)],
+        additional_links: &BTreeMap<u64, f64>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedMaterialNetwork<'n, 'a>, MaterialNetworkError> {
+        if cancelled() { return Err(DepositionError::Cancelled.into()); }
+        let bases = self.basis_plan(electrical_bases)?;
+        self.prepare_bound_with_links(thermal, bases, None, Some(additional_links), cancelled)
+    }
+
     // Share the original pin-selection owner with explicitly coupled electrical
     // axes. Ordinary preparation/resolution still passes no additional axes.
     pub(super) fn prepare_bound<'n>(
@@ -79,9 +115,22 @@ impl<'a> MaterialNetwork<'a> {
         thermal: &DepositionSimulation<'_>,
         bases: BTreeMap<usize, ElectricalPropertyBasis>,
         electrical_axes: Option<&ElectricalAxes>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedMaterialNetwork<'n, 'a>, MaterialNetworkError> {
+        self.prepare_bound_with_links(thermal, bases, electrical_axes, None, cancelled)
+    }
+
+    fn prepare_bound_with_links<'n>(
+        &'n self,
+        thermal: &DepositionSimulation<'_>,
+        bases: BTreeMap<usize, ElectricalPropertyBasis>,
+        electrical_axes: Option<&ElectricalAxes>,
+        additional_links: Option<&BTreeMap<u64, f64>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PreparedMaterialNetwork<'n, 'a>, MaterialNetworkError> {
-        let initial = self.resolve_bound(thermal, &bases, None, electrical_axes, &mut cancelled)?;
+        let initial = self.resolve_bound_with_links(
+            thermal, &bases, None, electrical_axes, additional_links, &mut cancelled,
+        )?;
         let selection = |material: &ResolvedMaterialStatePoint| {
             MaterialPropertySelection::PinnedByProperty(material.properties().iter()
                 .map(|p| (p.requirement().name().to_owned(), p.answer().receipt.selected)).collect())

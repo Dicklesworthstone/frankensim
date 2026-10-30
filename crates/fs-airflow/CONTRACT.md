@@ -159,6 +159,35 @@ reservoir inventory, flow, mass exchange, pressure work or moving geometry.
 independent temperature-dependent RC/film-cooling reference, fluid source
 substitution, current/storage/energy checks and transactional refusals.
 
+### Finite coolant in the complete material heat network
+
+`SourceConvectionHeatNetwork::resolve_with_links` and
+`step_candidate_with_links` compose finite-fluid convection with prescribed
+reservoir convection and the same complete heat/circuit assembly. Initial
+link conductances enter `MaterialHeatNetwork::prepare_with_link_conductances`;
+each subsequent residual resolves them afresh from both actual endpoint
+temperatures. The original cells retain their own caloric laws and fixed
+inventories. Finite convection stays in reciprocal link conductances, never
+in the external source-power account.
+
+Fourier bindings and additional convection bindings must partition every
+native link exactly. Missing, duplicate, inactive, nonfinite or competing
+ownership refuses; ordinary preparation/resolution remains strict.
+Integrated conduction may replace only its original Fourier links, and a
+finite convective link cannot also carry a separate thermal-contact law.
+The report retains the complete heat assembly, prescribed-reservoir sources
+and finite-fluid source evaluations together.
+
+The focused `heat_network/finite_links.rs` regression uses one liquid card
+for its caloric storage and film transport. Viscosity and heat-capacity data
+substitutions alter both finite temperatures and the original RC charge/current
+solution, compared with an independent scalar balance. Internal exchange
+cancels and capacitor loss supplies total thermal gain. The fixture also
+checks source pins, link orientation, missing/conflicting owners and refused
+source trials. Uniform cells, fixed geometry/mass, prescribed relative flow
+and native first-order endpoint coupling remain the model limits; advection,
+fluid momentum, pressure work and moving phase fronts need their own owners.
+
 ### Reciprocal material convection on finite thermal links
 
 `source::links::evaluate_source_link_convection` resolves the original fluid

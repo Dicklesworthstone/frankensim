@@ -16,6 +16,7 @@ use fs_conduction::transient::deposition::radiation::{
 use fs_exec::Cx;
 use fs_matdb::ClaimSelection;
 use fs_material::state_point::MaterialPropertySelection;
+use std::collections::BTreeMap;
 
 mod extension;
 mod observer;
@@ -146,6 +147,27 @@ impl<'a> MaterialHeatNetwork<'a> {
             self.radiation.map_or(&[], |radiation| radiation.cells))
     }
 
+    /// Prepare the same complete heat assembly with additional physical link
+    /// laws, such as material-resolved convection to finite fluid cells.
+    ///
+    /// These conductances and the ordinary Fourier bindings must partition the
+    /// native links exactly. Added links need zero authored G and cannot also
+    /// carry a material thermal contact. No value is cached: every trial must
+    /// call `resolve_with_link_conductances` with freshly evaluated source data.
+    /// Ordinary `resolve`/stepping refuses missing Fourier bindings, so omitting
+    /// the additional owner cannot silently turn a heat path into insulation.
+    pub fn prepare_with_link_conductances<'n>(
+        &'n self, cx: &Cx<'_>, thermal: &DepositionSimulation<'_>,
+        additional_links: &BTreeMap<u64, f64>,
+    ) -> Result<PreparedHeatNetwork<'n, 'a>, HeatNetworkError> {
+        check(cx)?;
+        let electrical = self.electrical.prepare_with_link_conductances(
+            thermal, additional_links, || cx.checkpoint().is_err(),
+        )?;
+        self.prepare_bound_with_links(cx, thermal, electrical, self.thermal_contacts,
+            self.radiation.map_or(&[], |radiation| radiation.cells), Some(additional_links))
+    }
+
     // Fresh preparation and topology continuation share the original evaluators.
     // Supplied bindings may already contain retained pins; never select over them.
     fn prepare_bound<'n>(&'n self, cx: &Cx<'_>, thermal: &DepositionSimulation<'_>,
@@ -153,8 +175,23 @@ impl<'a> MaterialHeatNetwork<'a> {
         contact_bindings: &[MaterialContactLink<'a>], surface_bindings: &[RadiatingCell<'a>])
         -> Result<PreparedHeatNetwork<'n, 'a>, HeatNetworkError>
     {
+        self.prepare_bound_with_links(cx, thermal, electrical, contact_bindings, surface_bindings, None)
+    }
+
+    fn prepare_bound_with_links<'n>(
+        &'n self, cx: &Cx<'_>, thermal: &DepositionSimulation<'_>,
+        electrical: PreparedElectricalContactNetwork<'n, 'a>,
+        contact_bindings: &[MaterialContactLink<'a>], surface_bindings: &[RadiatingCell<'a>],
+        additional_links: Option<&BTreeMap<u64, f64>>,
+    ) -> Result<PreparedHeatNetwork<'n, 'a>, HeatNetworkError> {
         check(cx)?;
-        let mut initial = electrical.resolve(thermal, || cx.checkpoint().is_err())?;
+        admit_additional_contact_links(contact_bindings, additional_links)?;
+        let mut initial = match additional_links {
+            Some(links) => electrical.resolve_with_link_conductances(
+                thermal, links, || cx.checkpoint().is_err(),
+            ),
+            None => electrical.resolve(thermal, || cx.checkpoint().is_err()),
+        }?;
         let contacts = apply_material_contacts(thermal, contact_bindings,
             &mut initial.bulk.conductances_w_k, || cx.checkpoint().is_err())?;
         let mut thermal_contacts = Vec::with_capacity(contacts.len());
@@ -298,8 +335,33 @@ impl PreparedHeatNetwork<'_, '_> {
     pub fn resolve(&self, cx: &Cx<'_>, thermal: &DepositionSimulation<'_>)
         -> Result<ContactThermalCoefficients<HeatNetworkSample>, HeatNetworkError>
     {
+        self.resolve_with_optional_links(cx, thermal, None)
+    }
+
+    /// Resolve additional physical link laws alongside the same bulk/contact,
+    /// integrated layer, electrical and enclosure-radiation sources.
+    /// The native links perform reciprocal heat exchange; do not also inject
+    /// their powers into the external source map. Complete, disjoint coverage
+    /// and source validity are checked before any coefficients are returned.
+    pub fn resolve_with_link_conductances(
+        &self, cx: &Cx<'_>, thermal: &DepositionSimulation<'_>,
+        additional_links: &BTreeMap<u64, f64>,
+    ) -> Result<ContactThermalCoefficients<HeatNetworkSample>, HeatNetworkError> {
+        self.resolve_with_optional_links(cx, thermal, Some(additional_links))
+    }
+
+    fn resolve_with_optional_links(
+        &self, cx: &Cx<'_>, thermal: &DepositionSimulation<'_>,
+        additional_links: Option<&BTreeMap<u64, f64>>,
+    ) -> Result<ContactThermalCoefficients<HeatNetworkSample>, HeatNetworkError> {
         check(cx)?;
-        let mut coefficients = self.electrical.resolve(thermal, || cx.checkpoint().is_err())?;
+        admit_additional_contact_links(&self.thermal_contacts, additional_links)?;
+        let mut coefficients = match additional_links {
+            Some(links) => self.electrical.resolve_with_link_conductances(
+                thermal, links, || cx.checkpoint().is_err(),
+            ),
+            None => self.electrical.resolve(thermal, || cx.checkpoint().is_err()),
+        }?;
         let integrated_conduction = self.resolve_integrated_conduction(cx, thermal,
             &mut coefficients.bulk.conductances_w_k, &mut coefficients.bulk.source)?;
         let thermal_contacts = apply_material_contacts(thermal, &self.thermal_contacts,
@@ -352,6 +414,17 @@ impl PreparedHeatNetwork<'_, '_> {
         check(cx).map_err(as_circuit_error)?;
         Ok(proposal)
     }
+}
+
+fn admit_additional_contact_links(
+    contacts: &[MaterialContactLink<'_>], additional_links: Option<&BTreeMap<u64, f64>>,
+) -> Result<(), HeatNetworkError> {
+    if additional_links.is_some_and(|links| contacts.iter().any(|contact| links.contains_key(&contact.link))) {
+        return Err(HeatNetworkError::Invalid(
+            "additional thermal links cannot share a material thermal-contact owner",
+        ));
+    }
+    Ok(())
 }
 
 fn as_circuit_error(e: HeatNetworkError) -> CircuitEnthalpyError<HeatNetworkError> {

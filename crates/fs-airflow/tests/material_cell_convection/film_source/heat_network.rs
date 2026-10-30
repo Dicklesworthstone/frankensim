@@ -1,5 +1,8 @@
 //! A source-only coolant substitution changes finite current and stored heat.
 use super::*;
+
+#[path = "heat_network/finite_links.rs"]
+mod finite_links;
 use fs_airflow::graph::thermal::medium::convection::deposition::source::heat::{
     ConvectionHeatError, SourceConvectionHeatNetwork,
 };

@@ -360,6 +360,32 @@ hyperelastic material-card consumer and a closed two-variable electrothermal
 reference exercise this API. Convergence of arbitrary caller balances does
 not confer conservation, passivity, calibration or a time-discretization law.
 
+## Additional physical links in the shared material heat assembly
+
+The material, electrical-contact and complete-heat prepared owners expose
+`prepare_with_link_conductances` / `resolve_with_link_conductances` paths for
+another physical law to supply native thermal links. Ordinary Fourier bindings
+and the supplied conductance map must partition all active links exactly at
+every trial. Additional links require zero authored conductance and finite
+nonnegative resolved G; overlap, missing links and inactive IDs refuse.
+Default methods retain complete Fourier coverage and cannot silently omit an
+additional owner. Preparation retains source pins without caching extra G.
+
+The same original contact work, cell caloric state and thermal residual apply.
+Additional link heat is reciprocal internal exchange, never duplicate source
+power. The caller retains the source payload and resolves its law at each
+proposed state. `with_integrated_conduction_and_link_conductances` preserves
+the existing layer-law correspondence checks; integrated layers can replace
+only original Fourier links. A material thermal contact cannot also own an
+additional link.
+
+The `fs-airflow` finite-fluid convection consumer composes this path with
+prescribed reservoirs and the original circuit/enthalpy solve. Its material
+viscosity/Cp substitutions change both finite temperatures and native current
+and charge while closing the same energy account. These interfaces add no
+mass, momentum, pressure-work or time-integration law; those remain with the
+participating physical owners.
+
 ## Source-integrated conductivity in composed heat transfer
 
 `PreparedHeatNetwork::with_integrated_conduction` routes the existing material

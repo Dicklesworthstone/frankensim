@@ -24,7 +24,7 @@ use fs_lbm::d3q27::D3q27;
 use fs_lbm::nsf3::{
     NsfBoundaryDrive, NsfCharacteristicAxis, NsfCharacteristicBoundary, NsfCharacteristicPatch,
     NsfError, NsfGasMedium, NsfGrid3, NsfOpenState, NsfReservoirAperture, NsfSgsConfig, NsfSpec,
-    ThermochemicalNsfGas, WallThermal,
+    ThermochemicalNsfGas, WallThermal, MAX_NSF_RESERVOIR_APERTURES,
 };
 use fs_lbm::sgs3::{SgsConfig, SgsModel, SgsUse};
 use fs_matdb::NormalizedMaterialCardPack;
@@ -334,8 +334,21 @@ impl ResolvedDgFilePerformance {
             characteristic_patches[usize::from(patch_high)] =
                 Some((NsfCharacteristicPatch { start, end }, background));
         }
-        let physical_reservoir = rows.next_is("reservoir_aperture_m");
-        let reservoir_aperture = if physical_reservoir || rows.next_is("reservoir_aperture") {
+        let aperture_count = if rows.next_is("reservoir_apertures") {
+            let mut row = rows.row("reservoir_apertures")?;
+            let count: usize = row.number()?;
+            row.end()?;
+            if !(1..=MAX_NSF_RESERVOIR_APERTURES).contains(&count) {
+                return Err(bad(rows.line, "reservoir aperture count exceeds the original owner budget"));
+            }
+            count
+        } else {
+            usize::from(rows.next_is("reservoir_aperture_m") || rows.next_is("reservoir_aperture"))
+        };
+        let mut reservoir_apertures = Vec::with_capacity(aperture_count);
+        let mut reservoir_tiles = 0usize;
+        for _ in 0..aperture_count {
+            let physical_reservoir = rows.next_is("reservoir_aperture_m");
             let mut row = rows.row(if physical_reservoir { "reservoir_aperture_m" } else { "reservoir_aperture" })?;
             let axis: usize = row.number()?;
             let high = match row.word()? {
@@ -378,8 +391,11 @@ impl ResolvedDgFilePerformance {
                 }
                 selected
             };
-            Some(NsfReservoirAperture { axis, high, cells: selected, state })
-        } else { None };
+            reservoir_tiles = reservoir_tiles.checked_add(selected.len())
+                .filter(|&n| n <= cells).ok_or_else(|| bad(rows.line,
+                    "combined reservoir tiles exceed the original cell budget"))?;
+            reservoir_apertures.push(NsfReservoirAperture { axis, high, cells: selected, state });
+        }
         let mut row = rows.row("initial")?;
         let initial = match row.word()? {
             "rest" => [gas.density, 0.0, 0.0, 0.0, gas.temperature],
@@ -440,16 +456,26 @@ impl ResolvedDgFilePerformance {
         row.end()?;
         let reservoir_observation = if rows.next_is("reservoir_observation") {
             let mut row = rows.row("reservoir_observation")?;
-            if row.word()? != "baffled" {
-                return Err(bad(row.line, "reservoir_observation requires baffled OX OY ANGLE_RAD"));
+            let kind = row.word()?;
+            let (aperture, kind) = if kind == "aperture" {
+                (row.number::<usize>()?, row.word()?)
+            } else {
+                if reservoir_apertures.len() != 1 {
+                    return Err(bad(row.line, "singular reservoir observation requires exactly one aperture"));
+                }
+                (0, kind)
+            };
+            if kind != "baffled" || aperture >= reservoir_apertures.len() {
+                return Err(bad(row.line,
+                    "reservoir_observation requires a declared aperture and baffled OX OY ANGLE_RAD"));
             }
             let input = ReservoirObservation { origin_m: [row.scalar()?, row.scalar()?], angle_rad: row.scalar()? };
             row.end()?;
-            Some(input)
+            Some((aperture, input))
         } else { None };
         let reservoir_feedback = if rows.next_is("reservoir_feedback") {
             let mut row = rows.row("reservoir_feedback")?;
-            let placement = reservoir_observation.ok_or_else(|| bad(row.line,
+            let (aperture, placement) = reservoir_observation.ok_or_else(|| bad(row.line,
                 "reservoir_feedback requires the explicit reservoir_observation placement"))?;
             let ApertureObservation::TubeBaffled(receiver) = observation else {
                 return Err(bad(row.line, "reservoir_feedback requires the common baffled exterior"));
@@ -465,7 +491,7 @@ impl ResolvedDgFilePerformance {
                 terminal_angular_points: receiver.angular_points,
             };
             row.end()?;
-            Some(input)
+            Some((aperture, input))
         } else { None };
         let observer_gas = if rows.next_is("observer_gas") {
             let mut row = rows.row("observer_gas")?;
@@ -483,18 +509,34 @@ impl ResolvedDgFilePerformance {
             Some("pressure") => { row.word()?; 1 }
             Some("upstream-pressure") => { row.word()?; 2 }
             Some("reservoir") => { row.word()?; 3 }
+            Some("aperture") => { row.word()?; 5 }
             Some("pressure-temperature") => { row.word()?; 4 }
             Some("characteristic") => { row.word()?; 0 }
             _ => 0,
         };
-        if boundary_kind == 3 && reservoir_feedback.is_some() {
+        let driven_aperture = match boundary_kind {
+            3 => {
+                if reservoir_apertures.len() != 1 {
+                    return Err(bad(row.line, "singular reservoir controls require exactly one aperture"));
+                }
+                Some(0)
+            }
+            5 => {
+                let aperture: usize = row.number()?;
+                if aperture >= reservoir_apertures.len() {
+                    return Err(bad(row.line, "reservoir controls require a declared aperture index"));
+                }
+                Some(aperture)
+            }
+            _ => None,
+        };
+        if driven_aperture.is_some_and(|source|
+            reservoir_feedback.is_some_and(|(escape, _)| escape == source))
+        {
             return Err(bad(row.line,
-                "reservoir_feedback requires axial breath control; the same opening cannot prescribe reservoir pressure and passive radiation pressure"));
+                "the same opening cannot prescribe breath pressure and passive radiation pressure"));
         }
-        if boundary_kind == 3 && reservoir_aperture.is_none() {
-            return Err(bad(row.line, "reservoir controls require the declared transverse aperture"));
-        }
-        if boundary_kind != 3 && upstream.is_some() != (boundary_kind == 2) {
+        if driven_aperture.is_none() && upstream.is_some() != (boundary_kind == 2) {
             return Err(bad(row.line, "upstream-pressure requires its declared upstream DG load; face controls require an unloaded source face"));
         }
         let boundary_segments: usize = row.number()?;
@@ -519,12 +561,20 @@ impl ResolvedDgFilePerformance {
                         pressure_offset_pa: value, inflow_temperature_k: temperature,
                     })
                 },
-                3 => {
+                3 | 5 => {
                     let temperature_k = row.scalar()?;
-                    if value <= 0.0 || temperature_k <= 0.0 {
-                        return Err(bad(row.line, "reservoir controls require positive absolute pressure and temperature"));
+                    if value <= 0.0 || !(temperature_window_k[0]..=temperature_window_k[1]).contains(&temperature_k) {
+                        return Err(bad(row.line,
+                            "reservoir controls require positive absolute pressure and temperature inside the fluid window"));
                     }
-                    NsfDgDrive::Reservoir { pressure_pa: value, temperature_k }
+                    if boundary_kind == 3 {
+                        NsfDgDrive::Reservoir { pressure_pa: value, temperature_k }
+                    } else {
+                        NsfDgDrive::ReservoirAperture {
+                            aperture: driven_aperture.expect("validated reservoir index"),
+                            pressure_pa: value, temperature_k,
+                        }
+                    }
                 },
                 2 => NsfDgDrive::UpstreamPressureRise(value),
                 1 => NsfDgDrive::Boundary(NsfBoundaryDrive::PressureOffset(value)),
@@ -591,8 +641,8 @@ impl ResolvedDgFilePerformance {
                     NsfBoundaryDrive::IncomingCharacteristic(0.0)).map_err(ResolvedDgInputError::Flow)?;
             }
         }
-        if let Some(aperture) = reservoir_aperture {
-            zone = zone.with_reservoir_aperture(aperture).map_err(ResolvedDgInputError::Flow)?;
+        if !reservoir_apertures.is_empty() {
+            zone = zone.with_reservoir_apertures(reservoir_apertures).map_err(ResolvedDgInputError::Flow)?;
         }
         if let Some(config) = sgs {
             zone = zone.with_sgs(config).map_err(ResolvedDgInputError::Flow)?;
@@ -612,13 +662,15 @@ impl ResolvedDgFilePerformance {
             system = system.with_upstream_load(load, &gate).map_err(ResolvedDgInputError::Coupling)?;
             Some(wall)
         } else { None };
-        if let Some(input) = reservoir_feedback {
-            system = system.with_reservoir_radiation(input, &gate).map_err(ResolvedDgInputError::Coupling)?;
+        if let Some((aperture, input)) = reservoir_feedback {
+            system = system.with_reservoir_radiation_at(aperture, input, &gate)
+                .map_err(ResolvedDgInputError::Coupling)?;
         }
         let mut renderer = NsfDgPerformance::new_resampled_with_drives(system, observation, sample_rate_hz,
             boundary, samples as u64, maximum_block, Arc::clone(&gate)).map_err(ResolvedDgInputError::Render)?;
-        if let Some(input) = reservoir_observation {
-            renderer = renderer.with_reservoir_observation(input).map_err(ResolvedDgInputError::Render)?;
+        if let Some((aperture, input)) = reservoir_observation {
+            renderer = renderer.with_reservoir_observation_at(aperture, input)
+                .map_err(ResolvedDgInputError::Render)?;
         }
         if let Some(propagation) = observer_gas {
             renderer = renderer.with_observer_gas(&propagation).map_err(ResolvedDgInputError::Render)?;

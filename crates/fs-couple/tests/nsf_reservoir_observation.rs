@@ -16,8 +16,8 @@ fn source(gas: bool) -> String {
         .replace("hold 256 -20", "hold 128 -20")
         .replace("hold 2048 0", "hold 256 0")
         .replace(
-            "300 1\nreservoir_cell 5 2 1",
-            "300 3\nreservoir_cell 5 2 1\nreservoir_cell 3 2 1\nreservoir_cell 4 2 1",
+            "reference 1\nreservoir_cell 5 2 1",
+            "reference 3\nreservoir_cell 5 2 1\nreservoir_cell 3 2 1\nreservoir_cell 4 2 1",
         );
     if !gas {
         text = text.replace("observer_gas stokes-kirchhoff 4096 1000000 50000000\n", "");
@@ -366,7 +366,7 @@ fn feedback_geometry_domains_and_cancelled_or_unbracketed_solves_preserve_owners
         text.replace(ROW, "reservoir_observation baffled -0.08 0 0.2\n"),
         // The original aperture remains a valid pair of fluid tiles, but its
         // missing middle tile cannot silently become a filled rectangular port.
-        text.replace("300 3\nreservoir_cell", "300 2\nreservoir_cell")
+        text.replace("reference 3\nreservoir_cell", "reference 2\nreservoir_cell")
             .replace("reservoir_cell 4 2 1\n", ""),
         text.replace(ROW, ""),
         text.replace("boundary pressure 3", "boundary reservoir 3")
@@ -427,4 +427,171 @@ fn feedback_geometry_domains_and_cancelled_or_unbracketed_solves_preserve_owners
             refused.system().load().state().clone()
         )
     );
+}
+
+
+fn separate_opening_source(gas: bool, upstream: bool) -> String {
+    let mut text = feedback_source(gas)
+        .replace("reservoir_aperture 1 high reference 3",
+            "reservoir_apertures 2\nreservoir_aperture 1 low reference 1\nreservoir_cell 5 0 1\nreservoir_aperture 1 high reference 3")
+        .replace(ROW, "reservoir_observation aperture 1 baffled -0.08 0 0\n")
+        .replace("boundary pressure 3", "boundary aperture 0 3")
+        .replace("hold 16 2", "hold 16 100002 300.2")
+        .replace("hold 32 -2", "hold 32 99998 300.1")
+        .replace("hold 64 0", "hold 64 100000 300");
+    if upstream {
+        text = text.replace("observation baffled 0 0 0.2 8 32 2000",
+            "upstream_dg dg_tube 0.03 0.00896143253443043 closed 1 2 32 50 2000 0.01 1e-11 512\nobservation baffled 0 0 0.2 8 32 2000");
+    }
+    text
+}
+
+#[test]
+fn separate_breath_and_escape_retain_conservative_accounts_and_selected_sound() {
+    let text = separate_opening_source(false, false);
+    let mut renderer = read(&text, 1).into_renderer();
+    assert_eq!(renderer.system().zone().reservoir_aperture_count(), 2);
+    assert_eq!(renderer.system().reservoir_radiation_aperture(), Some(1));
+    assert_eq!(renderer.reservoir_observation_aperture(), Some(1));
+    let mut bore = renderer.baffled_receiver().unwrap().clone();
+    let mut escape = renderer.reservoir_receiver().unwrap().clone();
+    let mut reacted = false;
+    let mut independent_mass = false;
+    for index in 0..64 {
+        let mass = renderer.system().zone().total_mass_kg();
+        let energy = renderer.system().zone().total_energy_j();
+        let mut pressure = [0.0];
+        renderer.block(&mut pressure).unwrap();
+        let frame = renderer.last_frame().unwrap();
+        let mouth = frame.reservoir_radiation.as_ref().unwrap();
+        let accounts = &frame.reservoir_exchanges;
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts[0].aperture, 0);
+        assert_eq!(accounts[1].aperture, 1);
+        assert_eq!(mouth.resolved_exchange, accounts[1]);
+        assert!(matches!(frame.drive,
+            fs_couple::nsf_dg::NsfDgDrive::ReservoirAperture { aperture: 0, .. }));
+        let tiles: Vec<_> = frame.reservoir_flows.iter().filter(|tile| tile.aperture == 1)
+            .map(|tile| tile.outward_volume_flow_m3_s).collect();
+        assert_eq!(tiles.len(), 3);
+        assert_eq!(frame.reservoir_flows.iter().filter(|tile| tile.aperture == 0).count(), 1);
+        let terminals: Vec<_> = frame.terminals.iter().map(|port| port.outward_flow_m3_s).collect();
+        assert_eq!(pressure[0], bore.step_trace(&terminals).unwrap() + escape.step_trace(&tiles).unwrap());
+        let dt = renderer.system().load().propagator().dt();
+        assert_eq!(mouth.mass_projection_difference_kg,
+            accounts[1].mass_out_kg - renderer.system().reference_gas().density
+                * (accounts[1].normal_volume_flow_m3_s * dt));
+        assert_eq!(mouth.acoustic_work_residual_j,
+            accounts[1].acoustic_pressure_work_out_j - mouth.radiation_work_j);
+        let reservoir_mass: f64 = accounts.iter().map(|owner| owner.mass_out_kg).sum();
+        let reservoir_energy: f64 = accounts.iter().map(|owner| owner.total_energy_out_j).sum();
+        assert!((reservoir_mass - frame.reservoir_mass_out_kg).abs() < 1e-13 * mass);
+        assert!((reservoir_energy + frame.flow.open_energy_j).abs() < 1e-13 * energy.abs());
+        let mass_residual = frame.flow_mass_change_kg + reservoir_mass
+            + frame.faces.iter().map(|face| face.mass_out_kg).sum::<f64>();
+        assert!(mass_residual.abs() < 5e-12 * mass);
+        let supplied = frame.flow.open_energy_j + frame.flow.open_boundary_energy_j
+            + frame.flow.wall_heat_j + frame.flow.source_energy_j;
+        assert!((frame.flow_energy_change_j - supplied).abs() < 5e-11 * energy.abs());
+        assert!(frame.pressure_residual_pa.abs() < 1e-5);
+        assert!(mouth.pressure_residual_pa.abs() < 1e-5);
+        let expected_temperature = if index < 16 { 300.2 } else if index < 32 { 300.1 } else { 300.0 };
+        assert_eq!(renderer.system().zone().reservoir_aperture_at(0).unwrap().state.temperature_k,
+            expected_temperature);
+        assert_eq!(renderer.system().zone().reservoir_aperture_at(1).unwrap().state.temperature_k, 300.0);
+        reacted |= mouth.radiation_pressure_pa.abs() > 1e-9;
+        independent_mass |= accounts[0].mass_out_kg != accounts[1].mass_out_kg;
+    }
+    assert!(reacted);
+    assert!(independent_mass);
+}
+
+#[test]
+fn separate_breath_escape_and_cork_duct_replay_and_cancel_as_one_system() {
+    let text = separate_opening_source(true, true);
+    let run = |block| {
+        let mut renderer = read(&text, block).into_renderer();
+        let mut output = vec![0.0; 64];
+        for chunk in output.chunks_mut(block) { renderer.block(chunk).unwrap(); }
+        (output, renderer)
+    };
+    let (whole, a) = run(16);
+    let (parts, b) = run(3);
+    assert_eq!(whole, parts);
+    assert!(whole.iter().any(|value| value.abs() > 1e-12));
+    assert_eq!(a.system().zone().state_hash(), b.system().zone().state_hash());
+    assert_eq!(a.system().load().state(), b.system().load().state());
+    assert_eq!(a.system().upstream_load().unwrap().state(), b.system().upstream_load().unwrap().state());
+    assert_eq!(a.last_frame().unwrap().reservoir_exchanges, b.last_frame().unwrap().reservoir_exchanges);
+    let frame = a.last_frame().unwrap();
+    assert!(frame.upstream.as_ref().unwrap().pressure_residual_pa.abs() < 1e-5);
+    assert_eq!(frame.upstream.as_ref().unwrap().source_work_j, 0.0);
+    assert_eq!(a.observer_gas().unwrap().additional_latency_samples,
+        a.reservoir_observer_gas().unwrap().additional_latency_samples);
+
+    let gate = Arc::new(CancelGate::new_clock_free());
+    let mut renderer = ResolvedDgFilePerformance::from_bytes(
+        text.as_bytes(), 1, Arc::clone(&gate)).unwrap().into_renderer();
+    renderer.block(&mut [0.0]).unwrap();
+    let before = (renderer.system().zone().state_hash(),
+        renderer.system().zone().last_reservoir_exchanges().to_vec(),
+        renderer.system().load().state().clone(),
+        renderer.system().upstream_load().unwrap().state().clone());
+    gate.request();
+    assert!(renderer.block(&mut [0.0]).is_err());
+    assert_eq!(before, (renderer.system().zone().state_hash(),
+        renderer.system().zone().last_reservoir_exchanges().to_vec(),
+        renderer.system().load().state().clone(),
+        renderer.system().upstream_load().unwrap().state().clone()));
+}
+
+#[test]
+fn unbracketed_escape_never_publishes_its_separate_breath_control() {
+    let text = separate_opening_source(false, true)
+        .replace(FEEDBACK, "reservoir_feedback 500 600 16 16\n");
+    let mut renderer = read(&text, 1).into_renderer();
+    let before = (renderer.system().zone().state_hash(),
+        renderer.system().zone().reservoir_aperture_at(0).unwrap().state,
+        renderer.system().zone().reservoir_aperture_at(1).unwrap().state,
+        renderer.system().load().state().clone(),
+        renderer.system().upstream_load().unwrap().state().clone());
+    assert!(renderer.block(&mut [0.0]).is_err());
+    assert_eq!(renderer.system().accepted_steps(), 0);
+    assert_eq!(before, (renderer.system().zone().state_hash(),
+        renderer.system().zone().reservoir_aperture_at(0).unwrap().state,
+        renderer.system().zone().reservoir_aperture_at(1).unwrap().state,
+        renderer.system().load().state().clone(),
+        renderer.system().upstream_load().unwrap().state().clone()));
+}
+
+
+#[test]
+fn both_characteristic_patches_keep_separate_breath_and_escape_in_the_same_trial() {
+    let text = separate_opening_source(false, true).replace("reservoir_apertures 2",
+        "coupled_patch 0 3 0 3 pressure 0\nsource_patch 0 3 0 3 pressure 0\nreservoir_apertures 2");
+    let mut renderer = read(&text, 1).into_renderer();
+    assert!(renderer.system().coupled_patch().is_some());
+    assert!(renderer.system().source_patch().is_some());
+    for _ in 0..8 {
+        let mass = renderer.system().zone().total_mass_kg();
+        renderer.block(&mut [0.0]).unwrap();
+        let frame = renderer.last_frame().unwrap();
+        let main = frame.coupled_patch.as_ref().unwrap();
+        let source = frame.source_patch.as_ref().unwrap();
+        let upstream = frame.upstream.as_ref().unwrap();
+        let escape = frame.reservoir_radiation.as_ref().unwrap();
+        assert_eq!(main.normal_volume_flow_m3_s, frame.inlet_flow_m3_s);
+        assert_eq!(source.normal_volume_flow_m3_s, upstream.inlet_flow_m3_s);
+        assert_eq!(frame.reservoir_exchanges.len(), 2);
+        assert_eq!(escape.resolved_exchange, frame.reservoir_exchanges[1]);
+        assert_eq!(upstream.source_work_j, 0.0);
+        assert!(frame.pressure_residual_pa.abs() < 1e-5);
+        assert!(upstream.pressure_residual_pa.abs() < 1e-5);
+        assert!(escape.pressure_residual_pa.abs() < 1e-5);
+        // Selected patch accounts are part of the full axial faces, not extra
+        // transport to add a second time to the two transverse openings.
+        let mass_residual = frame.flow_mass_change_kg + frame.reservoir_mass_out_kg
+            + frame.faces.iter().map(|face| face.mass_out_kg).sum::<f64>();
+        assert!(mass_residual.abs() < 5e-12 * mass);
+    }
 }

@@ -12,7 +12,7 @@ duct_section 0 1 0.0020000 0.0075299 1e-10
 duct_section 1 2 0.2855515 0.0075299 1e-10
 duct_section 1 3 0.0020000 0.0001000 1e-10
 radiation compact-baffled
-flue 0.01506 0.00143 0.00714 0.0003571 0 0.02
+flue 0.01506 0.00143 0.007635 0.0003571 0 0.02
 windway none
 jet_card json {"schema":"fs-aeroac.jet-card/v1","claim_kind":"edge-tone-tonal","claim":{"stage":1,"locked_strouhal":0.05,"ladder_band_lo":0.7,"ladder_band_hi":1.4,"multi_stable_strouhal":[0.05],"hysteresis_recorded":true,"saturated_force_rms":null},"authority":"X-Est","profile":{"u_centerline":0.08,"slot_half":1,"momentum_thickness":1.75},"band_db":null,"residual":null,"validity":{"reynolds_lo":1000,"reynolds_hi":2500,"h_over_delta":10,"requires_receptivity_edge":true,"seeded_amplitude_claims_only":true},"provenance":{"rig_fingerprint":0,"receipts":["de la Cuadra et al. 2008 Acta Acustica 94(5) Sec. 7: maximum amplification at Str_h 0.025; Re 1000 to 2500 (Eq. 5); convection ratio 0.4 (Auvray 2012, Terrien 2014)"],"classification":"published-parameter estimate for a lip jet, not a measured jet card"},"scope":"fs-aeroac outputs are relative spectral shapes and scaling laws from a 2D incompressible base flow via Curle's analogy; they are NOT absolute SPL predictions. 2D line-source (cylindrical-spreading) results additionally need a 2D-to-3D span correction before any comparison to measured levels."}
 jet 90 1e-6 3 0
@@ -32,5 +32,5 @@ tracks	1
 track	blow	blowing-pressure
 initial	pressure-pa	0e0
 events	2
-event	0e0	5e-2	pressure-pa	5.947e2
+event	0e0	5e-2	pressure-pa	2.3493e2
 event	2.2e0	1.05e-2	pressure-pa	0e0
