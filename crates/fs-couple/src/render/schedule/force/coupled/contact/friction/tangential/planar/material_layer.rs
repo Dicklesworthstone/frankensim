@@ -1,6 +1,6 @@
 //! Source-bound two-axis layer shear and its original finite thermal cell.
 //!
-//! The original material owner admits affine G(T), constant reference density,
+//! The original material owner admits affine equilibrium/Maxwell moduli, constant reference density,
 //! unchanged area/thickness and solid caloric state. The original modal owner
 //! retains both shear directions and their complete response. Each endpoint
 //! trial starts from accepted elastic/plastic history; no trial changes clocks.
@@ -130,6 +130,7 @@ pub struct PlanarMaterialLayerSystem<'a> {
     source: ResolvedShearLayer,
     binding: PlanarLayerThermalBinding<'a>,
     stiffness_slope_n_m_k: f64,
+    relaxation_slopes_n_m_k: Vec<f64>,
 }
 
 /// Accepted held-effort mechanics and complete physical thermal accounting.
@@ -152,7 +153,7 @@ pub struct PlanarLayerThermalFrame<P> {
     pub reversible_heat_j: f64,
     /// psi(T_new,e_old) - psi(T_old,e_old).
     pub coefficient_free_energy_change_j: f64,
-    /// T_new*s_new - T_old*s_old, with s = -k' |e|^2 / 2.
+    /// T_new*s_new - T_old*s_old, including every Maxwell arm's entropy.
     pub mechanical_entropy_energy_change_j: f64,
     /// Actual accepted change of psi + T*s in both tangent directions.
     pub layer_internal_energy_change_j: f64,
@@ -230,7 +231,7 @@ impl<'a> PlanarMaterialLayerSystem<'a> {
                 .expect("admitted original caloric chart")
                 .temperature_k,
         );
-        let stiffness_slope_n_m_k = source.thermal_stiffness_slope_n_m_k(
+        let slopes = source.thermal_stiffness_slopes_n_m_k(
             binding.material,
             binding.temperature_axis,
             span,
@@ -248,7 +249,8 @@ impl<'a> PlanarMaterialLayerSystem<'a> {
             mechanics,
             source,
             binding,
-            stiffness_slope_n_m_k,
+            stiffness_slope_n_m_k: slopes.equilibrium_n_m_k,
+            relaxation_slopes_n_m_k: slopes.relaxation_n_m_k,
         })
     }
 
@@ -263,6 +265,12 @@ impl<'a> PlanarMaterialLayerSystem<'a> {
     #[must_use]
     pub const fn stiffness_slope_n_m_k(&self) -> f64 {
         self.stiffness_slope_n_m_k
+    }
+
+    /// Source-derived affine Maxwell stiffness derivatives, in history order.
+    #[must_use]
+    pub fn relaxation_stiffness_slopes_n_m_k(&self) -> &[f64] {
+        &self.relaxation_slopes_n_m_k
     }
 
     /// Advance the same retained film and original finite thermal network.
@@ -348,10 +356,11 @@ impl<'a> PlanarMaterialLayerSystem<'a> {
             ));
         }
         let slope = self.stiffness_slope_n_m_k;
+        let relaxation_slopes = &self.relaxation_slopes_n_m_k;
         let initial = self
             .mechanics
             .law()
-            .thermodynamics(&original_state, slope)?;
+            .thermodynamics_with_relaxation(&original_state, slope, relaxation_slopes)?;
         let network_before_j = self
             .mechanics
             .network()
@@ -388,8 +397,10 @@ impl<'a> PlanarMaterialLayerSystem<'a> {
                         Some(gate),
                         Some((&layer.law, &layer.state)),
                     )?;
-                    let current = layer.law.thermodynamics(&mechanical.state, slope)?;
-                    let entropy_energy_change_j = if slope == 0.0 {
+                    let current = layer.law.thermodynamics_with_relaxation(
+                        &mechanical.state, slope, relaxation_slopes)?;
+                    let entropy_energy_change_j = if current.entropy_j_k == 0.0
+                        && initial.entropy_j_k == 0.0 {
                         0.0
                     } else {
                         number(

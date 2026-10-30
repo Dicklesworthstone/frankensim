@@ -8,9 +8,10 @@
 //! evaluated at that cell's temperature, and the original simultaneous contact
 //! solve starts from accepted elastic/plastic history. No trial advances time.
 //!
-//! This bounded continuation admits affine G(T), fixed reference density,
+//! This bounded continuation admits affine equilibrium/Maxwell moduli, fixed reference density,
 //! unchanged film geometry, retained compression and solid caloric state. Mechanical
-//! free energy is psi=k(T)e^2/2, entropy s=-k'e^2/2 and internal energy psi+T*s.
+//! free energy is psi=k(T)e^2/2+sum(k_j(T)r_j^2/2), entropy s=-d(psi)/dT
+//! at retained strains, and internal energy psi+T*s.
 //! Source knots are checked across the complete caloric interval; a kink in G
 //! refuses because its entropy jump is absent from this thermal model. The grid
 //! retains reference mass/volume: the stress-free caloric enthalpy changes are
@@ -633,11 +634,12 @@ impl MultiFrictionModalSystem {
             let knots = binding.caloric.knots();
             let span = (knots.first().expect("admitted caloric chart").temperature_k,
                 knots.last().expect("admitted caloric chart").temperature_k);
-            let slope = original.source.thermal_stiffness_slope_n_m_k(
+            let slopes = original.source.thermal_stiffness_slopes_n_m_k(
                 binding.material, binding.temperature_axis, span)?;
-            let initial = original.law.thermodynamics(&original.state, slope)
+            let initial = original.law.thermodynamics_with_relaxation(&original.state,
+                slopes.equilibrium_n_m_k, &slopes.relaxation_n_m_k)
                 .map_err(ModalFrictionError::from)?;
-            thermodynamics.push((slope, initial));
+            thermodynamics.push((slopes, initial));
         }
         self.prepare_step(drives, obstacle_offsets, obstacle_geometry, contact_patch_motion, Some(gate))?;
         let step = BackwardEulerStep::new(thermal, target_s, checkpoint)?;
@@ -684,16 +686,18 @@ impl MultiFrictionModalSystem {
                     let mut physical_heat = Vec::with_capacity(bindings.len());
                     let (mut coefficient_work_j, mut entropy_energy_j,
                         mut internal_change_j, mut reversible_heat_j) = (0.0, 0.0, 0.0, 0.0);
-                    for ((binding, &(slope, initial)), coefficient_work) in bindings.iter()
+                    for ((binding, (slopes, initial)), coefficient_work) in bindings.iter()
                         .zip(&thermodynamics).zip(coefficient_changes) {
                         checkpoint()?;
                         let layer = candidate_layers[binding.port].as_ref().expect("admitted");
                         let staged = layer.staged.as_ref().expect("staged material layer");
-                        let current = layer.law.thermodynamics(&staged.state, slope)
+                        let current = layer.law.thermodynamics_with_relaxation(&staged.state,
+                            slopes.equilibrium_n_m_k, &slopes.relaxation_n_m_k)
                             .map_err(ModalFrictionError::from)?;
                         let old_temperature = original_layers[binding.port].as_ref()
                             .expect("admitted").source.temperature_kelvin();
-                        let entropy_energy_change = if slope == 0.0 { 0.0 } else {
+                        let entropy_energy_change = if current.entropy_j_k == 0.0
+                            && initial.entropy_j_k == 0.0 { 0.0 } else {
                             number(layer.source.temperature_kelvin() * current.entropy_j_k
                                 - old_temperature * initial.entropy_j_k)?
                         };

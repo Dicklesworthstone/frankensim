@@ -18,6 +18,14 @@ pub const PLASTIC_SHEAR_VISCOSITY_PROPERTY: &str = "plastic_shear_viscosity";
 /// Bounded source histories per retained material layer, independent of mesh.
 pub const MAX_SHEAR_RELAXATION_ARMS: usize = 64;
 
+/// Source-derived affine temperature derivatives of the complete retained
+/// free energy. Memory entries keep the original constitutive-history order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShearLayerThermalSlopes {
+    pub equilibrium_n_m_k: f64,
+    pub relaxation_n_m_k: Vec<f64>,
+}
+
 fn invalid(quantity: &'static str) -> MaterialStatePointError {
     MaterialStatePointError::InvalidDerived { quantity }
 }
@@ -248,6 +256,26 @@ impl ResolvedShearLayer {
         temperature_axis: &str,
         temperature_span_k: (f64, f64),
     ) -> Result<f64, MaterialStatePointError> {
+        let slopes = self.thermal_stiffness_slopes_n_m_k(card, temperature_axis, temperature_span_k)?;
+        if slopes.relaxation_n_m_k.iter().any(|slope| *slope != 0.0) {
+            return Err(invalid("a scalar thermal derivative cannot omit shear-memory entropy"));
+        }
+        Ok(slopes.equilibrium_n_m_k)
+    }
+
+    /// Admit the COMPLETE affine shear potential on the caloric interval.
+    /// Each original equilibrium/Maxwell modulus is positive and differentiable
+    /// throughout that interval. A thermal consumer must include every branch's
+    /// `-k_j' |r_j|^2/2` entropy and its coefficient work; changing a relaxation
+    /// time affects dissipation but stores no additional energy. Affine moduli
+    /// contribute zero fixed-strain heat capacity. Kinks/nonlinear temperature
+    /// laws, phase change and geometry evolution still require richer physics.
+    pub fn thermal_stiffness_slopes_n_m_k(
+        &self,
+        card: &MaterialCard,
+        temperature_axis: &str,
+        temperature_span_k: (f64, f64),
+    ) -> Result<ShearLayerThermalSlopes, MaterialStatePointError> {
         let (lo, hi) = temperature_span_k;
         let absolute = QuantitySpec::semantic(SemanticType::new(
             QuantityKind::AbsoluteTemperature, ValueForm::Static));
@@ -262,40 +290,32 @@ impl ResolvedShearLayer {
                 != Some(self.temperature_kelvin) {
             return Err(invalid("shear thermal path needs the original card, temperature axis and complete positive interval"));
         }
-        let property = self.resolved.property(SHEAR_LAYER_MODULUS_PROPERTY)
-            .expect("the immutable layer retains its modulus");
-        let claim = card.claims().claim(property.answer().receipt.selected)
-            .ok_or_else(|| invalid("shear thermal modulus claim is absent"))?;
         let lower = self.resolved.query().with(temperature_axis, lo)
             .map_err(|_| invalid("shear thermal path start violates its original schema"))?;
         let upper = self.resolved.query().with(temperature_axis, hi)
             .map_err(|_| invalid("shear thermal path end violates its original schema"))?;
-        // The shared film thermal owner accounts affine equilibrium entropy.
-        // Maxwell arms store their own strain; an unaccounted d(DeltaG)/dT
-        // would omit their entropy. Permit temperature-dependent tau, whose
-        // change alters dissipation without changing the elastic potential.
-        for (name, _) in &self.relaxation_properties {
-            let arm = self.resolved.property(name).expect("bound shear memory property");
-            let claim = card.claims().claim(arm.answer().receipt.selected)
-                .ok_or_else(|| invalid("shear memory thermal source claim is absent"))?;
-            let values = pinned_temperature_line(card, &claim.key, temperature_axis,
-                &lower, &upper, arm.answer().receipt.selected)?;
-            if values.iter().any(|(_, value)| *value != arm.value_si()) {
-                return Err(invalid("thermal shear memory requires temperature-independent arm moduli"));
+        let slope = |name: &str| -> Result<f64, MaterialStatePointError> {
+            let property = self.resolved.property(name).expect("immutable retained shear modulus");
+            let claim = card.claims().claim(property.answer().receipt.selected)
+                .ok_or_else(|| invalid("shear thermal modulus claim is absent"))?;
+            let knots = pinned_temperature_line(card, &claim.key, temperature_axis, &lower,
+                &upper, property.answer().receipt.selected)?;
+            if knots.iter().any(|(_, g)| !g.is_finite() || *g <= 0.0) {
+                return Err(invalid("shear thermal modulus must be positive over the complete source path"));
             }
-        }
-        let knots = pinned_temperature_line(card, &claim.key, temperature_axis, &lower,
-            &upper, property.answer().receipt.selected)?;
-        if knots.iter().any(|(_, g)| !g.is_finite() || *g <= 0.0) {
-            return Err(invalid("shear thermal modulus must be positive over the complete source path"));
-        }
-        let slope = affine_temperature_slope(&knots, self.temperature_kelvin,
-            property.value_si()).map_err(invalid)?;
-        let stiffness_slope = (self.area_m2 / self.thickness_m) * slope;
-        if !stiffness_slope.is_finite() || slope != 0.0 && stiffness_slope == 0.0 {
-            return Err(invalid("shear thermal stiffness derivative is unrepresentable"));
-        }
-        Ok(stiffness_slope)
+            let derivative = affine_temperature_slope(&knots, self.temperature_kelvin,
+                property.value_si()).map_err(invalid)?;
+            let stiffness_slope = (self.area_m2 / self.thickness_m) * derivative;
+            if !stiffness_slope.is_finite() || derivative != 0.0 && stiffness_slope == 0.0 {
+                return Err(invalid("shear thermal stiffness derivative is unrepresentable"));
+            }
+            Ok(stiffness_slope)
+        };
+        Ok(ShearLayerThermalSlopes {
+            equilibrium_n_m_k: slope(SHEAR_LAYER_MODULUS_PROPERTY)?,
+            relaxation_n_m_k: self.relaxation_properties.iter().map(|(name, _)| slope(name))
+                .collect::<Result<_, _>>()?,
+        })
     }
     #[must_use]
     pub const fn omega_band_rad_s(&self) -> (f64, f64) { self.omega_band_rad_s }
@@ -416,6 +436,11 @@ mod tests {
 
     fn thermal_layer(knots: Vec<(f64, f64)>, axis: &str)
         -> (MaterialCard, ResolvedShearLayer) {
+        thermal_layer_with_memory(knots.clone(), knots, axis)
+    }
+
+    fn thermal_layer_with_memory(knots: Vec<(f64, f64)>, memory_knots: Vec<(f64, f64)>, axis: &str)
+        -> (MaterialCard, ResolvedShearLayer) {
         let temperature = QuantitySpec::semantic(SemanticType::new(
             QuantityKind::AbsoluteTemperature, ValueForm::Static));
         let mut claims = ClaimSet::new();
@@ -433,7 +458,8 @@ mod tests {
                 key: PropertyKey::new(name, dims),
                 value: if modulus { PropertyValue::Curve {
                     abscissa: axis.into(), abscissa_dims: Temperature::DIMS,
-                    knots: knots.clone(), dims,
+                    knots: if name == "thermal_memory_modulus" { memory_knots.clone() }
+                        else { knots.clone() }, dims,
                 } } else { PropertyValue::Scalar { value, dims } },
                 validity: ValidityDomain::unconstrained()
                     .with_quantity(axis, temperature, 280.0, 320.0)
@@ -520,5 +546,39 @@ mod tests {
             vec![(280.0, 1.2e6), (300.0, 1.1e6), (320.0, 0.8e6)], "T");
         assert!(layer.thermal_stiffness_slope_n_m_k(&card, "T",
             (280.0, 320.0)).is_err());
+    }
+
+    #[test]
+    fn g1_thermal_memory_derivatives_retain_source_order_and_admit_only_complete_affine_paths() {
+        let constant = vec![(280.0, 1e6), (320.0, 1e6)];
+        let names = vec![("memory_modulus".into(), "memory_time".into()),
+            ("thermal_memory_modulus".into(), "memory_time".into())];
+        let (card, layer) = thermal_layer_with_memory(constant.clone(),
+            vec![(280.0, 1.2e6), (300.0, 1e6), (320.0, 0.8e6)], "film_temperature");
+        let layer = layer.with_relaxation(names.clone()).unwrap();
+        let slopes = layer.thermal_stiffness_slopes_n_m_k(&card, "film_temperature",
+            (280.0, 320.0)).unwrap();
+        assert_eq!(slopes.equilibrium_n_m_k, 0.0);
+        assert_eq!(slopes.relaxation_n_m_k.len(), 2);
+        assert_eq!(slopes.relaxation_n_m_k[0], 0.0);
+        assert!((slopes.relaxation_n_m_k[1]+2000.0).abs() < 1e-12);
+        let warm = layer.at_query_point(&card,
+            &layer.resolved().query().with("film_temperature", 310.0).unwrap()).unwrap();
+        assert_eq!(warm.relaxation_properties(), names);
+        assert_eq!(warm.relaxation()[0], layer.relaxation()[0]);
+        assert!((warm.relaxation()[1].0-layer.relaxation()[1].0+20_000.0).abs() < 1e-10);
+        assert!(layer.thermal_stiffness_slope_n_m_k(&card, "film_temperature",
+            (280.0, 320.0)).is_err(), "scalar derivative must not drop branch entropy");
+        assert!(layer.thermal_stiffness_slopes_n_m_k(&card, "film_temperature",
+            (279.0, 320.0)).is_err());
+        for branch in [
+            vec![(280.0, 1.2e6), (300.0, 1.1e6), (320.0, 0.8e6)],
+            vec![(280.0, 0.0), (300.0, 1e6), (320.0, 2e6)],
+        ] {
+            let (card, layer) = thermal_layer_with_memory(constant.clone(), branch, "T");
+            let layer = layer.with_relaxation(names.clone()).unwrap();
+            assert!(layer.thermal_stiffness_slopes_n_m_k(&card, "T", (280.0, 320.0)).is_err(),
+                "a kink or nonpositive arm anywhere on the full path cannot be frozen");
+        }
     }
 }

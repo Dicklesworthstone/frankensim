@@ -51,6 +51,15 @@ fn coating(
     yield_pa: f64,
     variable_loss: bool,
 ) -> (MaterialCard, ResolvedHeatCapacityCurve) {
+    coating_with_memory(modulus, yield_pa, variable_loss, None)
+}
+
+fn coating_with_memory(
+    modulus: Option<Vec<(f64, f64)>>,
+    yield_pa: f64,
+    variable_loss: bool,
+    memory: Option<(Vec<(f64, f64)>, f64)>,
+) -> (MaterialCard, ResolvedHeatCapacityCurve) {
     let mut claims = ClaimSet::new();
     for (name, dims, cold, hot, varies) in [
         ("density", Density::DIMS, RHO, RHO, false),
@@ -119,6 +128,22 @@ fn coating(
             })
             .unwrap();
     }
+    if let Some((knots, tau)) = memory {
+        for (name, dims, value, interpolation) in [
+            ("memory_modulus", Pressure::DIMS, PropertyValue::Curve {
+                abscissa: "T".into(), abscissa_dims: Temperature::DIMS, knots,
+                dims: Pressure::DIMS }, InterpolationPolicy::LinearInside),
+            ("memory_time", fs_qty::Time::DIMS, PropertyValue::Scalar {
+                value: tau, dims: fs_qty::Time::DIMS }, InterpolationPolicy::ConstantWithinValidity),
+        ] {
+            claims.insert_claim(PropertyClaim { key: PropertyKey::new(name, dims), value,
+                validity: ValidityDomain::unconstrained().with("T", 280.0, 340.0)
+                    .with("omega", 0.0, 1e6), uncertainty: UncertaintyModel::Unstated,
+                interpolation, observations: vec![], provenance: Provenance {
+                    source: "manufactured affine shear memory".into(), license: "CC0-1.0".into(),
+                    artifact: None } }).unwrap();
+        }
+    }
     let card = MaterialCard::assemble(
         MaterialStateId {
             chemistry: "manufactured-film".into(),
@@ -149,7 +174,11 @@ fn coating(
 }
 
 fn source(card: &MaterialCard) -> ResolvedShearLayer {
-    let requirements: Vec<_> = [
+    source_with_memory(card, false)
+}
+
+fn source_with_memory(card: &MaterialCard, memory: bool) -> ResolvedShearLayer {
+    let mut requirements: Vec<_> = [
         ("density", Density::DIMS),
         ("shear_modulus", Pressure::DIMS),
         ("shear_yield_stress", Pressure::DIMS),
@@ -162,6 +191,12 @@ fn source(card: &MaterialCard) -> ResolvedShearLayer {
             .unwrap()
     })
     .collect();
+    if memory {
+        for (name, dims) in [("memory_modulus", Pressure::DIMS), ("memory_time", fs_qty::Time::DIMS)] {
+            requirements.push(ScalarPropertyRequirement::try_new(name, dims,
+                ScalarAdmissibility::StrictlyPositive).unwrap());
+        }
+    }
     let resolved = resolve_material_state_point(
         card,
         &point(300.0),
@@ -169,7 +204,9 @@ fn source(card: &MaterialCard) -> ResolvedShearLayer {
         MaterialPropertySelection::SingleClaimOnly,
     )
     .unwrap();
-    ResolvedShearLayer::new(resolved, AREA, THICKNESS, 0.05).unwrap()
+    let layer = ResolvedShearLayer::new(resolved, AREA, THICKNESS, 0.05).unwrap();
+    if memory { layer.with_relaxation(vec![("memory_modulus".into(), "memory_time".into())]).unwrap() }
+        else { layer }
 }
 
 fn thermal(curve: &EquilibriumEnthalpyPhaseCurve) -> DepositionSimulation<'_> {
@@ -339,6 +376,93 @@ fn elastic(c: [[f64; 2]; 2], free: [f64; 2], old: [f64; 2], t: f64) -> ([f64; 2]
     ];
     let e = std::array::from_fn(|i| old[i] + free[i] - c[i][0] * f[0] - c[i][1] * f[1]);
     (f, e)
+}
+
+#[test]
+fn temperature_dependent_memory_closes_full_two_axis_thermal_root_and_preserves_refused_history() {
+    const K: f64 = 16e6;
+    const MEMORY_INTERCEPT: f64 = 14.4e6;
+    const MEMORY_SLOPE: f64 = -2e4;
+    const TAU: f64 = 0.0005;
+    let (card, caloric) = coating_with_memory(None, 1e8, false,
+        Some((vec![(280.0, 4.4e6), (340.0, 3.8e6)], TAU)));
+    let mut heat = thermal(caloric.curve());
+    let gate = CancelGate::new();
+    let mut owner = PlanarMaterialLayerSystem::new(network(false), attachments(0, IDENTITY),
+        Some(attachments(1, IDENTITY)), source_with_memory(&card, true),
+        binding(&card, caloric.curve()), &heat, config(), matrix_config(), &gate).unwrap();
+    assert_eq!(owner.stiffness_slope_n_m_k(), 0.0,
+        "thermal memory must remain active even when equilibrium stiffness is constant");
+    close(owner.relaxation_stiffness_slopes_n_m_k()[0], MEMORY_SLOPE, 1e-10);
+    for speed in [[0.0012, -0.0007], [0.0, 0.0], [-0.0010, 0.0006]] {
+        let old = owner.mechanics().state().elastic_slip_m();
+        let old_r = owner.mechanics().state().relaxation_slip_m()[0];
+        let old_t = heat.temperature_k(FILM).unwrap();
+        let old_h = heat_energy(&heat);
+        let old_body = owner.mechanics().network().total_energy_j().unwrap();
+        let (c, free) = free_response(&owner, speed);
+        // Independent two-axis midpoint Maxwell equations, followed by a
+        // scalar caloric root; no production source/return-map calls below.
+        let candidate = |t: f64| {
+            let memory = MEMORY_INTERCEPT + MEMORY_SLOPE*t;
+            let w = 1.0/(1.0+DT/(2.0*TAU));
+            let half = 0.5*(K+memory*w);
+            let a = [[1.0+half*c[0][0], half*c[0][1]],
+                [half*c[1][0], 1.0+half*c[1][1]]];
+            let b: [f64; 2] = std::array::from_fn(|i| K*old[i]+memory*w*old_r[i]+half*free[i]);
+            let det = a[0][0]*a[1][1]-a[0][1]*a[1][0];
+            let force = [(a[1][1]*b[0]-a[0][1]*b[1])/det,
+                (a[0][0]*b[1]-a[1][0]*b[0])/det];
+            let de: [f64; 2] = std::array::from_fn(|i| free[i]-c[i][0]*force[0]-c[i][1]*force[1]);
+            let e: [f64; 2] = std::array::from_fn(|i| old[i]+de[i]);
+            let r: [f64; 2] = std::array::from_fn(|i| 2.0*w*(old_r[i]+0.5*de[i])-old_r[i]);
+            let mean: [f64; 2] = std::array::from_fn(|i| 0.5*(r[i]+old_r[i]));
+            let loss = DT*memory/TAU*norm2(mean);
+            let coefficient = 0.5*MEMORY_SLOPE*(t-old_t)*norm2(old_r);
+            let entropy_energy = -0.5*MEMORY_SLOPE*(t*norm2(r)-old_t*norm2(old_r));
+            let residual = RHO*AREA*THICKNESS*CP*(t-old_t)-loss+coefficient+entropy_energy;
+            (force, e, r, loss, coefficient, entropy_energy, residual)
+        };
+        let (mut lo, mut hi) = (280.0, 340.0);
+        assert!(candidate(lo).6 < 0.0 && candidate(hi).6 > 0.0);
+        for _ in 0..64 {
+            let mid = 0.5*(lo+hi);
+            if candidate(mid).6 < 0.0 { lo=mid; } else { hi=mid; }
+        }
+        let expected_t = 0.5*(lo+hi);
+        let (force, e, r, loss, coefficient, entropy_energy, _) = candidate(expected_t);
+        let frame = owner.step_with_layer_heat(&mut heat, &[0.0; 4], input(speed),
+            controls(), &[0.0], other, &gate).unwrap();
+        close(heat.temperature_k(FILM).unwrap(), expected_t, 2e-7);
+        for axis in 0..2 {
+            close(frame.mechanical.traction_n[axis], force[axis], 2e-10);
+            close(owner.mechanics().state().elastic_slip_m()[axis], e[axis], 2e-14);
+            close(owner.mechanics().state().relaxation_slip_m()[0][axis], r[axis], 2e-14);
+        }
+        close(frame.relaxation_heat_j, loss, 2e-16);
+        close(frame.coefficient_free_energy_change_j, coefficient, 2e-16);
+        close(frame.mechanical_entropy_energy_change_j, entropy_energy, 2e-16);
+        close(frame.reversible_heat_j, -coefficient-entropy_energy, 2e-16);
+        close(frame.layer_internal_energy_change_j,
+            0.5*K*(norm2(e)-norm2(old))+0.5*MEMORY_INTERCEPT*(norm2(r)-norm2(old_r)), 2e-16);
+        assert_eq!(frame.plastic_heat_j, 0.0);
+        assert!(frame.relaxation_heat_j > 0.0);
+        close(heat_energy(&heat)-old_h, frame.relaxation_heat_j+frame.reversible_heat_j, 1e-13);
+        close(frame.mechanical.network_energy_j-old_body+frame.layer_internal_energy_change_j
+            +heat_energy(&heat)-old_h, frame.mechanical.drive_work_j, 2e-12);
+        assert!(frame.total_energy_residual_j.abs() <= controls().total_energy_tolerance_j);
+    }
+    let state = owner.mechanics().state().clone();
+    let source = owner.source().clone();
+    let cells = heat.cells().clone();
+    let sample = owner.mechanics().network().samples_rendered();
+    assert!(owner.step_with_layer_heat(&mut heat, &[0.0; 4], input([0.0002, 0.0001]),
+        controls(), &[0.0], |_| Err::<StepCoefficients<()>, _>("manufactured late source refusal"),
+        &gate).is_err());
+    assert_eq!(owner.mechanics().state(), &state);
+    assert_eq!(owner.source(), &source);
+    assert_eq!(heat.cells(), &cells);
+    assert_eq!(owner.mechanics().network().samples_rendered(), sample);
 }
 
 #[test]

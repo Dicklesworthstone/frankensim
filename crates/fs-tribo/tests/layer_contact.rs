@@ -240,6 +240,54 @@ fn hereditary(yield_force: f64) -> ThirdBodyLayerContact {
 }
 
 #[test]
+fn g1_affine_maxwell_moduli_preserve_full_entropy_internal_energy_and_heat_work_identity() {
+    // Independent complete free energy: k_inf=1600-2T,
+    // k_0=2300-T, k_1=1300-2T. Internal-energy coefficients are their
+    // intercepts, so a temperature change at fixed strains leaves U unchanged.
+    let cold = hereditary(100.0);
+    let loaded = cold.advance(&cold.initial_state(), &input([0.002, 0.001], 0.001, 0.0)).unwrap();
+    let warm = ThirdBodyLayerContact::new(960.0, 100.0, 2.0, 320.0, 0.02).unwrap()
+        .with_relaxation(vec![
+            ThirdBodyLayerRelaxationArm { stiffness_n_m: 1980.0, relaxation_time_s: 0.01 },
+            ThirdBodyLayerRelaxationArm { stiffness_n_m: 660.0, relaxation_time_s: 0.04 },
+        ]).unwrap();
+    let transfer = warm.continue_state_with_work(&loaded.state).unwrap();
+    assert_eq!(transfer.state.relaxation_slip_m(), loaded.state.relaxation_slip_m());
+    assert_eq!(transfer.state.elastic_slip_m(), loaded.state.elastic_slip_m());
+    assert_eq!(transfer.state.plastic_slip_m(), loaded.state.plastic_slip_m());
+    let norm2 = |x: [f64; 2]| x[0]*x[0] + x[1]*x[1];
+    let e2 = norm2(loaded.state.elastic_slip_m());
+    let r0 = norm2(loaded.state.relaxation_slip_m()[0]);
+    let r1 = norm2(loaded.state.relaxation_slip_m()[1]);
+    let entropy = 0.5*(2.0*e2+r0+2.0*r1);
+    let internal = 0.5*(1600.0*e2+2300.0*r0+1300.0*r1);
+    let before = cold.thermodynamics_with_relaxation(&loaded.state, -2.0, &[-1.0, -2.0]).unwrap();
+    let continued = warm.thermodynamics_with_relaxation(&transfer.state, -2.0, &[-1.0, -2.0]).unwrap();
+    close(before.entropy_j_k, entropy, entropy);
+    close(before.internal_energy_j, internal, internal);
+    close(continued.internal_energy_j, internal, internal);
+    close(transfer.coefficient_free_energy_change_j, -20.0*entropy, 20.0*entropy);
+    close(continued.free_energy_j-before.free_energy_j,
+        transfer.coefficient_free_energy_change_j, internal);
+    let step = warm.advance(&transfer.state, &TangentialStepInput {
+        contact_temperature_k: Some(320.0), ..input([0.0002, -0.0001], 0.001, 0.0)
+    }).unwrap();
+    let after = warm.thermodynamics_with_relaxation(&step.state, -2.0, &[-1.0, -2.0]).unwrap();
+    let heat = step.dissipated_j - transfer.coefficient_free_energy_change_j
+        - (320.0*after.entropy_j_k - 300.0*before.entropy_j_k);
+    let work = step.traction_n[0]*step.slip_increment_m[0]
+        + step.traction_n[1]*step.slip_increment_m[1];
+    close(after.internal_energy_j-before.internal_energy_j+heat, work, internal);
+    assert!(step.dissipated_j > 0.0);
+    assert_eq!(step.state.plastic_slip_m(), [0.0; 2]);
+    assert!(cold.thermodynamics_with_relaxation(&loaded.state, -2.0, &[-1.0]).is_err());
+    assert!(cold.thermodynamics_with_relaxation(&loaded.state, -2.0, &[-1.0, f64::NAN]).is_err());
+    assert!(warm.thermodynamics_with_relaxation(&loaded.state, -2.0, &[-1.0, -2.0]).is_err());
+    assert_eq!(cold.thermodynamics(&loaded.state, -2.0).unwrap(),
+        cold.thermodynamics_with_relaxation(&loaded.state, -2.0, &[0.0, 0.0]).unwrap());
+}
+
+#[test]
 fn g1_subyield_shear_relaxes_to_equilibrium_with_second_order_material_memory() {
     let model = hereditary(100.0);
     let loaded = model.advance(&model.initial_state(),

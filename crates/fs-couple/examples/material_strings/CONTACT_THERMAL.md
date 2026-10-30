@@ -51,10 +51,26 @@ separate film cell for **each physical contact port**, using that port's
 distributed area.
 
 Density is constant over the admitted interval. The existing thermal film
-owner admits constant or affine shear modulus; it rejects nonlinear modulus
-paths and derivative jumps because their additional thermodynamics are not
-part of this model. Constitutive source applicability is checked on every
-accepted endpoint; leaving the caloric/material domain stops the render.
+owner admits constant or affine equilibrium shear modulus and Maxwell-arm
+moduli. The ordinary `shear-memory` declaration selects each arm's modulus and
+relaxation-time claims; no separate thermal-memory input is needed. At each
+trial temperature the same retained sources determine the arm stiffnesses and
+relaxation times. The arm's internal slip remains with its original mechanical
+history when those properties change.
+
+All retained elastic strains contribute to the film's mechanical entropy:
+`s = -0.5 * k_inf'(T) * e² - sum(0.5 * k_j'(T) * r_j²)` [J/K], where `e`
+is the equilibrium elastic slip and `r_j` is the relative slip stored in arm
+`j`. Mechanical internal energy is `U = psi + T*s`. The finite heat solve
+includes coefficient work and changes of `T*s`, together with the original
+plastic and relaxation dissipation. Changing a branch stiffness therefore
+cannot silently create or remove stored energy.
+
+Nonlinear modulus paths and derivative jumps remain unsupported because their
+additional thermodynamics are not part of this model. Constitutive source
+applicability is checked on every accepted endpoint; leaving the
+caloric/material domain stops the render. These are constitutive capabilities,
+not a claim that an available material pack identifies measured rosin behavior.
 
 ## Profile format
 

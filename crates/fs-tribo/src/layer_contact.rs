@@ -205,18 +205,45 @@ impl ThirdBodyLayerContact {
     /// must enforce this requirement, rather than omit branch entropy.
     pub fn thermodynamics(&self, state: &ThirdBodyLayerState,
         stiffness_slope_n_m_k: f64) -> Result<ThirdBodyLayerThermodynamics, TriboError> {
+        self.thermodynamics_with_relaxation(state, stiffness_slope_n_m_k,
+            &[0.0; MAX_LAYER_RELAXATION_ARMS][..self.relaxation.len()])
+    }
+
+    /// Complete mechanical entropy/internal energy for affine equilibrium AND
+    /// Maxwell stiffnesses: s=-k'|e|^2/2-sum(k_j'|r_j|^2/2), U=psi+T*s.
+    /// Derivatives must cover every retained arm in source order. The caller
+    /// admits their original material laws over the full thermal interval and
+    /// includes coefficient work plus delta(T*s) in the finite caloric balance.
+    /// No strain is reset and no relaxation loss is relabelled as reversible heat.
+    pub fn thermodynamics_with_relaxation(&self, state: &ThirdBodyLayerState,
+        stiffness_slope_n_m_k: f64, relaxation_slopes_n_m_k: &[f64])
+        -> Result<ThirdBodyLayerThermodynamics, TriboError> {
         if state.owner != *self {
             return Err(TriboError::InvalidInput { field: "layer_checkpoint_owner" });
+        }
+        if relaxation_slopes_n_m_k.len() != self.relaxation.len()
+            || state.relaxation_slip_m.len() != self.relaxation.len() {
+            return Err(TriboError::InvalidInput { field: "layer_thermal_memory_derivative_count" });
         }
         finite(stiffness_slope_n_m_k, "layer_stiffness_temperature_derivative")?;
         self.admit_elastic_slip(state.elastic_slip_m)?;
         let e = det::hypot(state.elastic_slip_m[0], state.elastic_slip_m[1]);
         let free_energy_j = self.stored_energy_j(state);
         nonnegative_finite(free_energy_j, "layer_free_energy_j")?;
-        let entropy_j_k = if stiffness_slope_n_m_k == 0.0 { 0.0 } else {
+        let mut entropy_j_k = if stiffness_slope_n_m_k == 0.0 { 0.0 } else {
             checked_mul(checked_mul(-0.5 * stiffness_slope_n_m_k, e,
                 "layer_mechanical_entropy_j_k")?, e, "layer_mechanical_entropy_j_k")?
         };
+        for (&slope, slip) in relaxation_slopes_n_m_k.iter().zip(&state.relaxation_slip_m) {
+            finite(slope, "layer_memory_temperature_derivative")?;
+            self.admit_elastic_slip(*slip)?;
+            if slope != 0.0 {
+                let r = det::hypot(slip[0], slip[1]);
+                let entropy = checked_mul(checked_mul(-0.5*slope, r,
+                    "layer_memory_entropy_j_k")?, r, "layer_memory_entropy_j_k")?;
+                entropy_j_k = checked_add(entropy_j_k, entropy, "layer_mechanical_entropy_j_k")?;
+            }
+        }
         let internal_energy_j = checked_add(free_energy_j,
             checked_mul(self.temperature_kelvin, entropy_j_k,
                 "layer_entropy_energy_j")?, "layer_internal_energy_j")?;

@@ -321,3 +321,88 @@ fn source_shear_memory_heat_and_temperature_dependent_relaxation_survive_cli_the
         assert_eq!(wav.into_inner().len(), 44+512*2);
     });
 }
+
+fn thermal_memory_pack(modulus_slope_pa_k: f64) -> NormalizedPack {
+    let source = thermal_pack(10.0, None, 200_000.0);
+    let mut claims = source.claims().clone();
+    let artifact = fs_blake3::ContentHash([20; 32]);
+    let provenance = Provenance {
+        source: "MANUFACTURED affine Maxwell modulus fixture".into(),
+        license: "CC0-1.0".into(), artifact: Some(artifact),
+    };
+    let observation = claims.register_observation(ObservationDataset {
+        specimen: "manufactured-thermal-layer".into(),
+        method: "analytic thermal memory intervention, not measured rosin".into(),
+        artifact, caveats: "only the branch modulus temperature slope changes".into(),
+        provenance: provenance.clone(),
+    }).unwrap();
+    claims.insert_claim(PropertyClaim {
+        key: PropertyKey::new("shear_memory_thermal_modulus", Pressure::DIMS),
+        value: PropertyValue::Curve {
+            abscissa: "T".into(), abscissa_dims: Temperature::DIMS,
+            knots: [280.0, 320.0].into_iter()
+                .map(|t| (t, 200_000.0 + modulus_slope_pa_k * (t - 293.15))).collect(),
+            dims: Pressure::DIMS,
+        },
+        validity: ValidityDomain::unconstrained()
+            .with("T", 280.0, 320.0).with("omega", 0.0, 200_000.0),
+        uncertainty: UncertaintyModel::Unstated,
+        interpolation: InterpolationPolicy::LinearInside,
+        observations: vec![observation], provenance,
+    }).unwrap();
+    NormalizedPack::new("manufactured-shear-layer", "manufactured-thermal-memory-v1",
+        artifact, "manufactured CC0 integration fixture", claims, vec![], vec![]).unwrap()
+}
+
+#[test]
+fn affine_maxwell_source_softening_reaches_native_heat_pressure_and_pcm_replay() {
+    scoped(|cx, gate| {
+        let profile = Profile::parse(PROFILE.as_bytes()).unwrap();
+        let text = String::from_utf8(thermal_spec().bytes).unwrap()
+            .replace("forces retain", "shear-memory 1 shear_memory_thermal_modulus shear_memory_thermal_time\nforces retain");
+        let build = |slope, block| {
+            let bytes = text.replace("48000 512 0.01 128", &format!("48000 512 0.01 {block}"));
+            let mut spec = input::Spec::parse(bytes.as_bytes()).unwrap();
+            spec.contact_thermal = true;
+            spec.compile(cx, gate, |name| Ok(if name == "manufactured-shear-layer.fsmatpk" {
+                thermal_memory_pack(slope)
+            } else { pack(name, 7800.0, 200_000.0, None) })).unwrap()
+        };
+        let mut softening = build(-5000.0, 37);
+        let mut fixed = build(0.0, 37);
+        let mut replay = build(-5000.0, 128);
+        assert_eq!(softening.spec.bytes, fixed.spec.bytes);
+        let original = softening.performance.bank().bow_shear_layer(0).unwrap().clone();
+        let fixed_initial = fixed.performance.bank().bow_shear_layer(0).unwrap().clone();
+        assert!((original.relaxation()[0].0 / fixed_initial.relaxation()[0].0 - 1.0).abs() < 1e-13);
+        let a = profile.prepare(&softening, gate).unwrap();
+        let b = profile.prepare(&fixed, gate).unwrap();
+        let c = profile.prepare(&replay, gate).unwrap();
+        let mut trace = Vec::new();
+        let (wav, _) = a.write(&mut softening, Cursor::new(Vec::new()), Some(&mut trace), gate).unwrap();
+        b.write(&mut fixed, Cursor::new(Vec::new()), None, gate).unwrap();
+        let (replayed_wav, _) = c.write(&mut replay, Cursor::new(Vec::new()), None, gate).unwrap();
+        assert_eq!(wav.into_inner(), replayed_wav.into_inner());
+        assert_eq!(String::from_utf8(trace).unwrap().lines().count(), 513);
+        assert_eq!(softening.performance.bank().system().last_frame(),
+            replay.performance.bank().system().last_frame());
+        assert_eq!(softening.performance.bank().system().material_shear_state(0),
+            replay.performance.bank().system().material_shear_state(0));
+        let current = softening.performance.bank().bow_shear_layer(0).unwrap();
+        let fixed_current = fixed.performance.bank().bow_shear_layer(0).unwrap();
+        assert!(current.temperature_kelvin() > original.temperature_kelvin());
+        let expected = (200_000.0 - 5000.0 * (current.temperature_kelvin() - 293.15))
+            * current.area_m2() / current.thickness_m();
+        assert!((current.relaxation()[0].0 / expected - 1.0).abs() < 1e-12);
+        assert!(current.relaxation()[0].0 < original.relaxation()[0].0);
+        assert_eq!(fixed_current.relaxation()[0].0, fixed_initial.relaxation()[0].0);
+        assert_eq!(current.resolved().card_identity(), original.resolved().card_identity());
+        for (now, before) in current.resolved().properties().iter().zip(original.resolved().properties()) {
+            assert_eq!(now.answer().receipt.selected, before.answer().receipt.selected);
+        }
+        let frame = softening.performance.bank().system().last_frame().unwrap();
+        assert!(frame.ports[0].shear_layer.as_ref().unwrap().relaxation_dissipated_j > 0.0);
+        assert_ne!(frame.observer_pressure_pa,
+            fixed.performance.bank().system().last_frame().unwrap().observer_pressure_pa);
+    });
+}
