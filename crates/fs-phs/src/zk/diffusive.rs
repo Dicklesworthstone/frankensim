@@ -51,6 +51,67 @@ pub struct ZkDiffusive {
     max_real_loss_error: f64,
 }
 
+/// Reusable dimensionless circular diffusion spectra at one pole resolution.
+///
+/// Radius and gas properties scale the SAME two Jacobi spectral measures.
+/// A field or radius sweep can therefore prepare these eigensolves once and
+/// [`bind`](Self::bind) each local physical state without repeating them.
+/// Every binding still performs the original 129-frequency complex/loss
+/// accuracy check; a successful state never admits a different state or band.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ZkDiffusiveBasis {
+    series: Vec<(f64, f64)>,
+    thermal: Vec<(f64, f64)>,
+}
+
+impl ZkDiffusiveBasis {
+    /// Prepare the original positive spectral measures, with no physical gas
+    /// or frequency band implied. The original pole cap and residual checks
+    /// apply. This performs exactly two bounded real symmetric eigensolves.
+    pub fn new(poles: usize) -> Result<Self, PhsError> {
+        if !(1..=MAX_ZK_DIFFUSIVE_POLES).contains(&poles) {
+            return Err(invalid("ZK diffusive physical data, pole count or band"));
+        }
+        Ok(Self {
+            series: measure(6.0, poles)?,
+            thermal: measure(2.0, poles)?,
+        })
+    }
+
+    /// Number of positive viscous and thermal poles in each spectrum.
+    #[must_use]
+    pub fn poles_per_field(&self) -> usize {
+        self.series.len()
+    }
+
+    /// Scale and admit one local radius/gas/band through the original owner.
+    /// Returns the same coefficients, response and sampled errors as
+    /// [`ZkDiffusive::new`] with this pole count, including gamma=1 behavior.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bind(
+        &self,
+        radius_m: f64,
+        density_kg_m3: f64,
+        viscosity_pa_s: f64,
+        gamma: f64,
+        prandtl: f64,
+        band_rad_s: [f64; 2],
+        maximum_relative_error: f64,
+    ) -> Result<ZkDiffusive, PhsError> {
+        ZkDiffusive::build(
+            radius_m,
+            density_kg_m3,
+            viscosity_pa_s,
+            gamma,
+            prandtl,
+            self.series.len(),
+            band_rad_s,
+            maximum_relative_error,
+            Some(self),
+        )
+    }
+}
+
 fn invalid(what: &'static str) -> PhsError {
     PhsError::NotPsd { what }
 }
@@ -138,6 +199,31 @@ impl ZkDiffusive {
         band_rad_s: [f64; 2],
         maximum_relative_error: f64,
     ) -> Result<Self, PhsError> {
+        Self::build(
+            radius_m,
+            density_kg_m3,
+            viscosity_pa_s,
+            gamma,
+            prandtl,
+            poles,
+            band_rad_s,
+            maximum_relative_error,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        radius_m: f64,
+        density_kg_m3: f64,
+        viscosity_pa_s: f64,
+        gamma: f64,
+        prandtl: f64,
+        poles: usize,
+        band_rad_s: [f64; 2],
+        maximum_relative_error: f64,
+        basis: Option<&ZkDiffusiveBasis>,
+    ) -> Result<Self, PhsError> {
         if !(1..=MAX_ZK_DIFFUSIVE_POLES).contains(&poles)
             || ![
                 radius_m,
@@ -173,9 +259,16 @@ impl ZkDiffusive {
                 "ZK diffusive physical scales are not representable",
             ));
         }
-        let series = measure(6.0, poles)?
-            .into_iter()
-            .map(|(pole, weight)| ZkDiffusiveTerm {
+        let direct_series;
+        let series_measure = if let Some(basis) = basis {
+            &basis.series
+        } else {
+            direct_series = measure(6.0, poles)?;
+            &direct_series
+        };
+        let series = series_measure
+            .iter()
+            .map(|&(pole, weight)| ZkDiffusiveTerm {
                 gain_per_s: weight * pole / (3.0 * tau_s),
                 rate_per_s: pole / tau_s,
             })
@@ -183,9 +276,16 @@ impl ZkDiffusive {
         let shunt = if gamma == 1.0 {
             Vec::new()
         } else {
-            measure(2.0, poles)?
-                .into_iter()
-                .map(|(pole, weight)| ZkDiffusiveTerm {
+            let direct_thermal;
+            let thermal_measure = if let Some(basis) = basis {
+                &basis.thermal
+            } else {
+                direct_thermal = measure(2.0, poles)?;
+                &direct_thermal
+            };
+            thermal_measure
+                .iter()
+                .map(|&(pole, weight)| ZkDiffusiveTerm {
                     gain_per_s: (gamma - 1.0) * weight * pole / thermal_tau,
                     rate_per_s: pole / thermal_tau,
                 })
@@ -297,3 +397,7 @@ impl ZkDiffusive {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "diffusive/basis_tests.rs"]
+mod basis_tests;

@@ -17,9 +17,10 @@
 //! Preparation caches each distinct local radius's diffusion eigensolve;
 //! frequency sweeps only evaluate the retained rational coefficients.
 //!
-//! This is frozen, homogeneous, linear plane-wave acoustics with rigid walls.
-//! Cones use the existing local-radius spherical-slice approximation; profiles
-//! use Webster/Magnus. Molecular data, diffusion poles, cone slices and profile
+//! This is frozen, linear plane-wave acoustics with rigid walls. The homogeneous
+//! constructor uses the existing local-radius spherical-cone approximation;
+//! profiles and prescribed gas fields use the original Webster/Magnus owner.
+//! Molecular data, diffusion poles, cone slices and profile/field integration
 //! steps are independent resolution/model choices. The diffusion admission is
 //! against equilibrium Bessel response, not an error bound for the joint
 //! molecular law. Compact tone-hole chimneys consume the same reservoirs and
@@ -38,6 +39,7 @@ use std::collections::BTreeMap;
 
 mod holes;
 pub use holes::{MolecularHoleFlow, MolecularHoleSite, MolecularResponse};
+mod field;
 
 /// Original constitutive or propagation refusal, without a fallback gas law.
 #[derive(Debug)]
@@ -88,6 +90,9 @@ struct MaterialPoint {
     radius: f64,
     x_m: f64,
     wall: Option<ZkDiffusive>,
+    /// Absent on the original homogeneous path; otherwise the exact source
+    /// state at this geometry/material quadrature point.
+    state: Option<usize>,
 }
 #[derive(Debug, Clone)]
 enum Piece {
@@ -100,6 +105,7 @@ enum Piece {
 #[derive(Debug, Clone)]
 pub struct MolecularDuct {
     state: RelaxationState,
+    field_binding: Option<field::FieldBinding>,
     points: Vec<MaterialPoint>,
     pieces: Vec<Piece>,
     reference_impedance: f64,
@@ -190,6 +196,7 @@ impl MolecularDuct {
         }
         let mut result = Self {
             state,
+            field_binding: None,
             points: Vec::new(),
             pieces: Vec::with_capacity(count),
             reference_impedance: reference,
@@ -311,12 +318,14 @@ impl MolecularDuct {
             radius,
             x_m: x,
             wall,
+            state: None,
         });
         cache.insert(radius.to_bits(), index);
         Ok(index)
     }
 
-    /// Original evaluated material, never replaced by an effective sound speed.
+    /// Original evaluated inlet material, never an averaged/effective state.
+    /// A field binding retains its local states at each material point.
     pub fn state(&self) -> &RelaxationState {
         &self.state
     }
@@ -330,9 +339,16 @@ impl MolecularDuct {
             })
             .sum()
     }
-    /// Distinct radii whose wall spectra were prepared once and reused.
+    /// Distinct radius/material pairs prepared once and reused.
     pub fn material_points(&self) -> usize {
         self.points.len()
+    }
+
+    fn state_at_point(&self, index: usize) -> &RelaxationState {
+        match self.points[index].state {
+            Some(state) => &self.field_binding.as_ref().expect("field material point").states[state],
+            None => &self.state,
+        }
     }
 
     fn wave(
@@ -343,10 +359,11 @@ impl MolecularDuct {
         relaxing_k: C64,
     ) -> Result<SegmentWave, MolecularDuctError> {
         let point = &self.points[index];
-        let gas = self.state.gas();
+        let state = self.state_at_point(index);
+        let gas = state.gas();
         let area = core::f64::consts::PI * point.radius * point.radius;
         if point.wall.is_none() {
-            if self.state.processes().is_empty() {
+            if state.processes().is_empty() {
                 return Ok(crate::segment_wave(
                     gas,
                     point.radius,
@@ -373,7 +390,7 @@ impl MolecularDuct {
                     x_m: point.x_m,
                 })?;
         let z_plus = series.scale(gas.density / area);
-        let y_plus = if self.state.processes().is_empty() {
+        let y_plus = if state.processes().is_empty() {
             equilibrium_shunt.scale(area / (gas.density * gas.sound_speed * gas.sound_speed))
         } else {
             let mut temperature = C64::ZERO;
@@ -440,25 +457,7 @@ impl MolecularDuct {
         {
             return Err(bad("molecular chimney loads must be finite and passive").into());
         }
-        let caloric = self.state.caloric_response(omega)?;
-        let cp = caloric.cp_j_kg_k;
-        let relaxing_k = caloric
-            .bulk_modulus_pa
-            .scale(1.0 / self.state.gas().density)
-            .sqrt()
-            .recip()
-            .scale(omega);
-        if !finite(relaxing_k) || relaxing_k.re <= 0.0 || relaxing_k.im < 0.0 {
-            return Err(bad("molecular duct material wavenumber is unrepresentable").into());
-        }
-        let mut waves = Vec::with_capacity(self.points.len());
-        let mut min_shear = f64::INFINITY;
-        for i in 0..self.points.len() {
-            poll(cancelled, 0)?;
-            let wave = self.wave(i, omega, cp, relaxing_k)?;
-            min_shear = min_shear.min(wave.shear_number);
-            waves.push(wave);
-        }
+        let (waves, min_shear) = self.waves_controlled(omega, cancelled)?;
         let reference = self.reference_impedance;
         let mut blocks = Vec::with_capacity(self.blocks());
         let mut observations = Vec::new();
@@ -474,7 +473,7 @@ impl MolecularDuct {
                     };
                     let (local, observation) = hole.prepare(
                         &waves[hole.point],
-                        self.state.gas().density,
+                        self.state_at_point(hole.point).gas().density,
                         omega,
                         load,
                         reference,
@@ -485,28 +484,7 @@ impl MolecularDuct {
                     observations.push(observation);
                     continue;
                 }
-                Piece::Wave { geometry, point } => {
-                    TwoPort::from_wave(geometry, &waves[*point], reference)?
-                }
-                Piece::Magnus { h, points } => {
-                    let generator = |point: usize| {
-                        let wave = waves[point];
-                        let ik = C64::new(0.0, 1.0) * wave.wavenumber;
-                        (
-                            ik * wave.characteristic_impedance.scale(1.0 / reference),
-                            ik * wave.characteristic_impedance.recip().scale(reference),
-                        )
-                    };
-                    let mut matrix = crate::profile::magnus_step(
-                        generator(points[0]),
-                        generator(points[1]),
-                        *h,
-                        det::sqrt(3.0),
-                    )?;
-                    matrix[1] = matrix[1].scale(reference);
-                    matrix[2] = matrix[2].scale(1.0 / reference);
-                    TwoPort::from_abcd(matrix, reference)?
-                }
+                _ => self.piece_wave_block(piece, &waves)?,
             };
             blocks.push(block);
         }
@@ -518,6 +496,80 @@ impl MolecularDuct {
             },
             observations,
         ))
+    }
+
+    fn waves_controlled(
+        &self,
+        omega: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Vec<SegmentWave>, f64), MolecularDuctError> {
+        poll(cancelled, 0)?;
+        if !positive(omega) {
+            return Err(bad("molecular duct frequency must be positive and finite").into());
+        }
+        let caloric = |state: &RelaxationState| -> Result<(C64, C64), MolecularDuctError> {
+            let response = state.caloric_response(omega)?;
+            let k = response.bulk_modulus_pa.scale(1.0 / state.gas().density)
+                .sqrt().recip().scale(omega);
+            if !finite(k) || k.re <= 0.0 || k.im < 0.0 {
+                return Err(bad("molecular duct material wavenumber is unrepresentable").into());
+            }
+            Ok((response.cp_j_kg_k, k))
+        };
+        // Preserve one evaluation and the original operation order for a
+        // homogeneous duct. Varying fields evaluate each cached local state.
+        let uniform = caloric(&self.state)?;
+        let mut local = Vec::new();
+        if let Some(binding) = &self.field_binding {
+            local.reserve(binding.states.len());
+            for (index, state) in binding.states.iter().enumerate() {
+                poll(cancelled, 0)?;
+                local.push(if index == 0 { uniform } else { caloric(state)? });
+            }
+        }
+        let mut waves = Vec::with_capacity(self.points.len());
+        let mut min_shear = f64::INFINITY;
+        for (index, point) in self.points.iter().enumerate() {
+            poll(cancelled, 0)?;
+            let (cp, k) = match point.state {
+                Some(state) => local[state],
+                None => uniform,
+            };
+            let wave = self.wave(index, omega, cp, k)?;
+            min_shear = min_shear.min(wave.shear_number);
+            waves.push(wave);
+        }
+        Ok((waves, min_shear))
+    }
+
+    fn piece_wave_block(
+        &self,
+        piece: &Piece,
+        waves: &[SegmentWave],
+    ) -> Result<TwoPort, MolecularDuctError> {
+        let reference = self.reference_impedance;
+        Ok(match piece {
+            Piece::Wave { geometry, point } => {
+                TwoPort::from_wave(geometry, &waves[*point], reference)?
+            }
+            Piece::Magnus { h, points } => {
+                let generator = |point: usize| {
+                    let wave = waves[point];
+                    let ik = C64::new(0.0, 1.0) * wave.wavenumber;
+                    (
+                        ik * wave.characteristic_impedance.scale(1.0 / reference),
+                        ik * wave.characteristic_impedance.recip().scale(reference),
+                    )
+                };
+                let mut matrix = crate::profile::magnus_step(
+                    generator(points[0]), generator(points[1]), *h, det::sqrt(3.0),
+                )?;
+                matrix[1] = matrix[1].scale(reference);
+                matrix[2] = matrix[2].scale(1.0 / reference);
+                TwoPort::from_abcd(matrix, reference)?
+            }
+            Piece::ToneHole(_) => return Err(bad("tone holes require their branch preparation").into()),
+        })
     }
 
     /// Actual terminated pressure/volume-flow response; `None` is a rigid cap,

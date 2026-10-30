@@ -59,6 +59,8 @@ struct QuadratureStep {
     /// Negative because the physical ABCD map propagates outlet to inlet.
     h: f64,
     radii: [f64; 2],
+    /// Absolute positions of the original material/geometry quadrature.
+    positions_m: [f64; 2],
     /// Physical wall area per axial area at the same two geometry samples.
     slants: [f64; 2],
     gases: [GasState; 2],
@@ -69,9 +71,17 @@ struct ToneHoleStep {
     /// Keep the zero-length junction at its exact authored axial station.
     before_step: usize,
     segment: usize,
+    axial_position_m: f64,
     gas: GasState,
     extra_series_m: f64,
     bore_one_way_time_s: f64,
+}
+
+/// Read-only geometry/material sample shared with the molecular constitutive
+/// binding. The original field owner alone chooses knots and quadrature.
+pub(crate) enum MolecularFieldStep<'a> {
+    Magnus { h: f64, radii: [f64; 2], positions_m: [f64; 2] },
+    Hole { geometry: &'a Segment, axial_position_m: f64 },
 }
 
 /// Physical open chimney and its travel time through the original material
@@ -236,6 +246,7 @@ impl GasFieldDuct {
                 result.holes.push(ToneHoleStep {
                     before_step: result.quadrature.len(),
                     segment: segment_index,
+                    axial_position_m: offset,
                     gas: *field.state_at(offset)?.state(),
                     extra_series_m,
                     bore_one_way_time_s: travel,
@@ -327,7 +338,10 @@ impl GasFieldDuct {
                     let radii = [radius(positions[0])?, radius(positions[1])?];
                     let slants = [slant(positions[0])?, slant(positions[1])?];
                     travel += -0.5 * h * (1.0 / gases[0].sound_speed + 1.0 / gases[1].sound_speed);
-                    result.quadrature.push(QuadratureStep { h, radii, slants, gases });
+                    result.quadrature.push(QuadratureStep {
+                        h, radii, slants, gases,
+                        positions_m: [offset + positions[0], offset + positions[1]],
+                    });
                 }
             }
             offset = end;
@@ -394,6 +408,27 @@ impl GasFieldDuct {
     /// junctions; zero for the original uniform path.
     pub fn steps_used(&self) -> usize {
         self.quadrature.len() + self.holes.len()
+    }
+
+    /// Traverse original quadrature and exact authored junctions without
+    /// copying or inventing a second field-integration mesh.
+    pub(crate) fn molecular_steps(&self) -> impl Iterator<Item = MolecularFieldStep<'_>> {
+        let mut axial = 0;
+        let mut hole = 0;
+        std::iter::from_fn(move || {
+            if let Some(junction) = self.holes.get(hole).filter(|h| h.before_step == axial) {
+                hole += 1;
+                return Some(MolecularFieldStep::Hole {
+                    geometry: &self.duct.segments[junction.segment],
+                    axial_position_m: junction.axial_position_m,
+                });
+            }
+            let step = self.quadrature.get(axial)?;
+            axial += 1;
+            Some(MolecularFieldStep::Magnus {
+                h: step.h, radii: step.radii, positions_m: step.positions_m,
+            })
+        })
     }
     /// Exact inlet rho*c/area, with no independently supplied medium knob.
     pub fn inlet_impedance(&self) -> f64 {

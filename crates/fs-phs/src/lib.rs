@@ -70,7 +70,7 @@ pub use newton::{
 mod zk;
 pub use zk::{
     MAX_ZK_DIFFUSIVE_POLES, ZK_MAX_SHEAR, ZK_MIN_SHEAR, ZK_SERIES_SWITCH, ZkDiffusive,
-    ZkDiffusiveTerm, zk_one_minus_f, zwikker_kosten_f,
+    ZkDiffusiveBasis, ZkDiffusiveTerm, zk_one_minus_f, zwikker_kosten_f,
 };
 
 /// Energy storage: the Hamiltonian and its exact gradient.

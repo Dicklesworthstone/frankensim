@@ -897,3 +897,17 @@ a non-diagonally-dominant material block alongside a compressed passive graph
 and separate 1e-200 loss, and refusal of a represented tiny-indefinite matrix
 whose negative ground is hidden by ordinary summation. These are native
 physical-equation checks, not interval or full-workspace qualification.
+
+### Reusable circular diffusion spectra
+
+`ZkDiffusiveBasis` prepares the original positive dimensionless viscous and
+thermal Jacobi measures once at an explicit pole count. `bind` scales them for
+one radius, density, viscosity, gamma and Prandtl number and returns the same
+`ZkDiffusive` coefficients and sampled errors as direct construction. Each bind
+retains the original 129-frequency complex and dissipative Bessel admission;
+a successful material state or band never admits another by implication. The
+basis adds no time integrator, fitted law or changed storage. The existing
+constructor retains its arithmetic, including the gamma=1 thermal limit.
+Focused tests check bitwise direct/basis equality across material scales, exact
+diffusion-time scaling and refusal of an unresolved band after an admitted
+binding. Nonuniform molecular ducts reuse this basis across local samples.

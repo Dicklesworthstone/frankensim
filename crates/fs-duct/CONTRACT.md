@@ -1745,3 +1745,31 @@ and independent scalar exterior mouths. Partial venting retains the existing
 admittance-mixture model; resolved pad motion and exterior mutual radiation
 matrices are not inferred. Original diffusion accuracy and geometry limits
 remain separate from molecular-rate data quality.
+
+### Molecular propagation through primitive gas fields
+
+`MolecularDuct::from_gas_field` binds the original `AxialGasField` and declared
+`RelaxationAbsorption` to the existing geometry/field Magnus quadrature. Local
+temperature and composition are resolved through the thermochemical material
+owner at each original sample and exact tone-hole station. Density, transport,
+heat capacities and rates are not independently interpolated. The field covers
+the exact duct length at common static pressure; geometry boundaries, source
+stations and profile knots remain integration boundaries. Uniform fields
+delegate the original homogeneous constructor and preserve its arithmetic.
+`state()` is the exact inlet state; `outlet_state`, `gas_field` and
+`field_relaxation_law` expose the retained binding.
+
+Frequency preparation evaluates each distinct caloric state once. Exact state
+and gas/radius caches use ordered maps. One `ZkDiffusiveBasis` supplies the
+dimensionless radial spectra for the nonuniform field; each local binding keeps
+the original complex/loss Bessel band admission. Wall poles and axial steps are
+separate refinement axes. Chimneys use their local gas, including density in
+the compact series correction. A varying primitive field between multiple open
+holes still refuses: the existing internal mutual-junction law is homogeneous.
+
+Focused tests compare with independent mass/momentum integration and a
+modified-Bessel radial heat/momentum oracle, exercise three-rung axial and wall
+ladders, and check source sensitivity, uniform identity, local chimney work,
+cache reuse, coverage, caps and cancellation. Scope is frozen, no-mean-flow,
+rigid-wall plane-wave acoustics; no gas transport, condensation, evolving
+reservoir transfer, resolved pads or three-dimensional qualification is added.
