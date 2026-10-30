@@ -25,9 +25,10 @@
 //! equivalently `Im k = alpha = (1/(r c)) sqrt(nu omega / 2)
 //! (1 + (gamma - 1)/sqrt(Pr))` — the classic Kirchhoff wall-loss
 //! attenuation. Validity is a NAMED refusal, not degradation: below
-//! [`MIN_SHEAR_NUMBER`] the wide-tube expansion is invalid (narrow
-//! tubes use [`LossModel::Bessel`],
-//! which store Helmholtz `k` (`e^{ikx}`), not telegraph `γ`).
+//! [`MIN_SHEAR_NUMBER`] in either active diffusion layer the wide-tube
+//! expansion is invalid. Large coupled thermal corrections also refuse.
+//! Narrow tubes use [`LossModel::Bessel`],
+//! which stores Helmholtz `k` (`e^{ikx}`), not telegraph `γ`.
 //! A locally reacting wall is an optional
 //! [`fs_phs::WallPin`] on [`input_impedance_wall`].
 //!
@@ -73,8 +74,8 @@ pub mod modal;
 pub use modal::MouthLoad;
 /// Stable wave/reflection and Redheffer composition with explicit conditioning.
 pub mod compose;
-/// Material-driven, lossless bulk acoustics for gases and liquids, with the
-/// same geometry, wall response and stable pressure/volume-flow composition.
+/// Material-driven pressure waves and viscothermal losses for gases and liquids,
+/// with shared geometry, wall response and stable pressure/volume-flow composition.
 pub mod fluid;
 /// Smooth plane-wave profiles and declared integration/slice axes.
 pub mod profile;
@@ -503,8 +504,8 @@ pub struct OpenHoleFlow {
 /// entirely from the first-principles [`GasState`].
 ///
 /// # Errors
-/// [`DuctError`] on bad inputs or a shear number below
-/// [`MIN_SHEAR_NUMBER`] (narrow-tube regime, refused by name).
+/// [`DuctError`] on bad inputs, viscous or active thermal shear below
+/// [`MIN_SHEAR_NUMBER`], or thermal coupling outside the wide-tube envelope.
 pub fn segment_wave(
     state: &GasState,
     radius: f64,
@@ -685,8 +686,27 @@ fn wide_tube_wave_from_inputs(
     refuse_narrow: bool,
 ) -> Result<SegmentWave, DuctError> {
     let rv = radius * (state.density * omega / state.dynamic_viscosity).sqrt();
+    if !(rv.is_finite() && rv > 0.0) {
+        return Err(DuctError::BadParameter { what: "wide-tube shear number must be finite and positive" });
+    }
     if refuse_narrow && rv < MIN_SHEAR_NUMBER {
         return Err(DuctError::TooNarrow { shear_number: rv });
+    }
+    // A low-Pr fluid can have a thin viscous layer but a thick thermal layer.
+    // Both original gas and generic fluid callers enforce the SAME physical
+    // envelope here. Cp=Cv removes the thermal channel exactly.
+    if refuse_narrow && state.gamma > 1.0 {
+        let thermal_shear = rv * state.prandtl.sqrt();
+        if !thermal_shear.is_finite() || thermal_shear < MIN_SHEAR_NUMBER {
+            return Err(DuctError::BadParameter {
+                what: "wide-tube thermal shear must reach MIN_SHEAR_NUMBER; use Bessel for a thick thermal layer",
+            });
+        }
+        if (state.gamma - 1.0) / thermal_shear > 1.0 / MIN_SHEAR_NUMBER {
+            return Err(DuctError::BadParameter {
+                what: "wide-tube coupled thermal correction exceeds the first-order envelope; use Bessel",
+            });
+        }
     }
     let thermal = (state.gamma - 1.0) / state.prandtl.sqrt();
     let scale = 1.0 / (core::f64::consts::SQRT_2 * rv);

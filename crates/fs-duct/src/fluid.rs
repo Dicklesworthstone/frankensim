@@ -153,33 +153,14 @@ fn thermoviscous_wave_from_state(
         prandtl: transport.prandtl(),
     };
     let wave = match loss {
-        LossModel::WideTube => {
-            let wave = crate::wide_tube_wave_from_inputs(
-                &inputs,
-                radius,
-                omega,
-                base.wavenumber.re,
-                base.characteristic_impedance.re,
-                true,
-            )?;
-            if !positive(wave.shear_number) {
-                return Err(bad("wide-tube viscous shear number must be representable"));
-            }
-            if inputs.gamma > 1.0 {
-                let thermal_shear = wave.shear_number * inputs.prandtl.sqrt();
-                if !positive(thermal_shear) || thermal_shear < crate::MIN_SHEAR_NUMBER {
-                    return Err(bad(
-                        "wide-tube thermal shear must reach MIN_SHEAR_NUMBER; use Bessel for a thick thermal layer",
-                    ));
-                }
-                if (inputs.gamma - 1.0) / thermal_shear > 1.0 / crate::MIN_SHEAR_NUMBER {
-                    return Err(bad(
-                        "wide-tube coupled thermal correction exceeds the first-order envelope; use Bessel",
-                    ));
-                }
-            }
-            wave
-        }
+        LossModel::WideTube => crate::wide_tube_wave_from_inputs(
+            &inputs,
+            radius,
+            omega,
+            base.wavenumber.re,
+            base.characteristic_impedance.re,
+            true,
+        )?,
         LossModel::Bessel => crate::bessel_wave_from_inputs(&inputs, radius, omega)?,
         LossModel::Lossless => unreachable!("lossless response returned above"),
     };

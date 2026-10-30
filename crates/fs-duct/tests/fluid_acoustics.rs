@@ -18,6 +18,9 @@ use fs_qty::{Pressure, Temperature};
 use fs_thermochem::water::if97::{If97Region, If97State};
 use std::sync::Arc;
 
+#[path = "fluid_acoustics/thermoviscous.rs"]
+mod thermoviscous;
+
 fn options() -> ComposeOptions {
     ComposeOptions {
         preserve_well_conditioned_bits: false,

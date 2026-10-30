@@ -58,7 +58,9 @@ adds the actual material's viscosity, conductivity and caloric ratio through
 `fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid`. A single
 coherent snapshot drives all local samples. Existing gas and generic fluid
 routes share the same Bessel/wide-tube numerical kernels; legacy gas callers
-retain their original checked gamma/Pr arithmetic and admission. The generic
+retain their original checked gamma/Pr arithmetic and gas-coherence admission.
+The same numerical owner enforces the physical diffusion-layer validity for
+both routes. The generic
 route never constructs a GasState from liquid coefficients or substitutes a
 gas EOS for the actual adiabatic modulus and Cp/Cv.
 
@@ -71,7 +73,7 @@ Cp==Cv omits the uncoupled thermal evaluation exactly. No-slip, isothermal
 thermal boundaries, Newtonian fluid and the plane-wave approximation remain
 the model assumptions. Bulk viscosity and molecular absorption are not added.
 
-Generic `WideTube` requires viscous shear >=10 and, when Cp/Cv>1, thermal
+Every `WideTube` entry point requires viscous shear >=10 and, when Cp/Cv>1, thermal
 shear >=10 and `(Cp/Cv-1)/thermal_shear <=0.1`. This is an explicit conservative
 first-order approximation envelope, not a certified error bound. Low-Pr or
 strong caloric coupling can therefore require full `Bessel` even when the
@@ -87,6 +89,13 @@ loaded-line attenuation and power balance, viscosity/Cv substitutions,
 mixed geometry and existing gas/mixture responses, plus physical refusals for
 unsupported thermal approximations. Manufactured liquid inputs are numerical
 fixtures, not measured attenuation data or experimental qualification.
+`tests/fluid_acoustics/thermoviscous.rs` additionally refreshes the original
+six-claim liquid bundle and verifies actual transmitted pressure/flow and heat
+loss against an independent Kirchhoff line solution, preserving claim identity
+and refusal beyond the source domain. The source-backed liquid and gas share
+independent Poiseuille/inertance/compliance limits. A gas with viscous shear
+above ten but thermal shear below ten must now refuse consistently through
+both public entry points; full Bessel remains available at that same state.
 
 ### Independent exterior gas
 
