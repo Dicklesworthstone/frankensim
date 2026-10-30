@@ -17,7 +17,7 @@
 //!
 //! The slab back is insulated. Gas state and supplied optical paths/opacity are
 //! frozen over each interval. Geometry recession does not imply a change of gas
-//! volume or pressure work. Original noncharring/source domains and first-order
+//! volume or pressure work. Original condensed/source domains and first-order
 //! time integration remain; this is not a flame, soot-production or gas-moving-
 //! boundary model. Candidates publish only alongside network acceptance.
 
@@ -68,7 +68,7 @@ pub enum ThermalSurface<'a, 'm> {
         /// Original wall boundary inputs.
         boundary: WallBoundary,
     },
-    /// Original homogeneous noncharring slab with an insulated back.
+    /// Original homogeneous-material slab with optional char and an insulated back.
     Slab {
         /// Accepted original receding solid.
         slab: &'a RecedingSlab<'m>,

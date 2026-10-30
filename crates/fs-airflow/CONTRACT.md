@@ -1383,7 +1383,9 @@ focused tests cover published coefficients, pressure scaling, amount/mass
 conversion, the retained CO fit seam, domains, source identity and cancellation.
 
 `radiation::reactive` extends the SAME existing wall/radiation feedback
-iteration to original finite `Wall1d` and noncharring `RecedingSlab` owners.
+iteration to original finite `Wall1d` and `RecedingSlab` owners, including
+explicitly declared char density/conductivity and the existing conservative
+virgin/char remap.
 A slab trial advances its original implicit reaction/conduction and conservative
 remap. The current remapped half-cell resistance recovers the moving-face
 temperature, which closes against radiation, convection and separately
@@ -1408,3 +1410,61 @@ does not infer gas-volume change or pressure work. This is first-order split
 coupling, not a guaranteed second-order or fully implicit gas integrator,
 a coupled entropy theorem, flame structure, soot production or experimental
 compartment-fire validation.
+
+## Coupled full-methane chemistry and moving retained char
+
+The existing `coupled_compartment_fire` example now selects `hydrogen`,
+`methane` or `charring-methane` through one fuel/source adapter. The latter
+two use the complete pinned 53-species, 325-channel GRI-Mech 3.0 mechanism,
+including its original irreversible channels. Canonical species indices,
+molar masses and element inventories come from the admitted source, and all
+species stay in the original gas/network owners. Selected CO, CO2 and NO are
+reported without removing other intermediates or inferring soot yields.
+
+Methane starts in explicitly hot 1500 K oxygen/nitrogen gas with no radical
+seed. The gas admits 300--3000 K; the existing molecular Planck closure still
+enforces its narrower 300--2500 K range. CH4, CO, CO2 and H2O contribute their
+actual partial pressures; the unrepresented species remain explicitly
+transparent. Optical state is frozen per outer interval as before.
+
+The manufactured charring fuel is defined by mass as 0.8 CH4 plus 0.2 condensed
+carbon. Its independent char enthalpy, 300 kg/m3 char density, 0.08 W/(m K)
+char conductivity and parallel volume-fraction conductivity mixing feed the
+same conservative `RecedingSlab::with_char` owner and implicit radiating-face
+solve. The initial virgin enthalpy is the yield-weighted original volatile/char
+enthalpy at 300 K minus the authored 1 MJ/kg decomposition energy. Actual
+time-integrated volatile mass and enthalpy enter `VolatileMixture` exactly
+once; source chemical formation energy is never added as separate combustion
+heat. Independent audits include gas, remaining virgin, retained char, finite
+wall storage and external vent streams.
+
+The new modes share the original pressure-source callbacks, prepared
+`ZoneKinetics`, nonlinear surface coupling and accepted-payload publication.
+No thermal, chemistry or transport clock advances twice. The summary includes
+accepted chemical work and checked direct-Newton fallback counts. Counts from
+discarded pressure-root trials are outside that accepted-payload summary.
+
+The existing hydrogen SDIRK2 consumer and both frozen charring controls were
+executed through 0.1 s with 0.001 s maximum step and 12 solid cells. Hydrogen
+reproduces its prior 1331.048718306 K, 137365.531842355 Pa endpoint. Frozen
+closed and vented controls each complete 100 outer intervals and conservative
+remaps, with no network halving or gas reaction products. Their maximum combined
+residuals are below 6.43e-17 kg mass, 3.26e-7 J energy and 1.41e-14 mol elements.
+Both closed reacting methane variants also complete 0.1 s in 100 outer
+intervals with no network halving. Their final temperatures are 1683.198402902 K
+without char and 1646.380168650 K with char; the latter retains
+3.691197223245e-6 kg of condensed carbon. The largest combined residual across
+these closed reacting cases is 7.16e-17 kg mass, 3.26e-7 J energy and
+1.20e-14 mol elements. A separately completed 20 ms reacting vent case uses
+20 outer intervals with no halving, reaching 1522.866245311 K at
+102199.510551066 Pa; its maximum pressure residual is below 8.51e-6 Pa.
+
+Commands, source inputs and actual endpoint tables are retained in
+`examples/coupled_compartment_fire/README.md`.
+
+This is a manufactured source-composition exercise. It is not a measured wood,
+PMMA, hydride, char-oxidation or pyrolysate mechanism. Recession changes only
+the solid geometry and supplies no inferred vessel-volume displacement or
+pressure work. The existing first-order overall source/pressure/thermal
+composition, approximate gray radiation, finite chemistry domains and absence
+of an experimental fire/soot/emission validation remain explicit.
