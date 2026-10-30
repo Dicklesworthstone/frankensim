@@ -11,6 +11,7 @@ mod molecular;
 mod patch;
 mod source_patch;
 mod reservoir;
+mod reservoirs;
 mod flue_geometry;
 mod geometry;
 mod aperture;

@@ -387,3 +387,106 @@ fn native_separate_opening_fixture_selects_breath_escape_reaction_and_microphone
     assert!(matches!(ResolvedDgFilePerformance::from_bytes(conflicting.as_bytes(), 4,
         Arc::new(CancelGate::new_clock_free())), Err(ResolvedDgInputError::Input { .. })));
 }
+
+// Two independently declared physical openings: a warm two-tile breath source
+// and a one-tile ambient escape. Only the latter belongs to this microphone.
+fn paired_reservoir_observer_source(rate: u32, samples: u64) -> NsfDgPerformance<D3q27> {
+    let gas = reference(100000.0);
+    let text = fixture(gas, "dry-air 300 100000")
+        .replace("output 32 20", "output 96 20")
+        .replace("hold 32 -0.1", "hold 96 -0.1")
+        .replace("matched 1 2", "baffled 1 2")
+        .replace("observation inlet-pressure", "dg_radiation computed-baffled 20 65 4 8 12 20 0.1 67108864 2 100 1e-8 64 1048576 257\ndg_exterior 300 100000 0\nobservation baffled 0 0 0.02 8 32 2000");
+    let original = read(&text, 8).into_renderer();
+    let observation = original.observation();
+    let NsfDg { zone, load, high, limits, .. } = original.system;
+    let gate = Arc::new(CancelGate::new_clock_free());
+    let warm = GasState::try_new(&GasSpec::dry_air_ussa1976(), 303.0, gas.pressure).unwrap();
+    let zone = zone.with_reservoir_apertures(vec![
+        NsfReservoirAperture {
+            axis: 1, high: false, cells: vec![[5, 0, 1], [6, 0, 1]],
+            state: NsfOpenState { density_kg_m3: warm.density, velocity_m_s: [0.0; 3], temperature_k: warm.temperature },
+        },
+        NsfReservoirAperture {
+            axis: 1, high: true, cells: vec![[7, 2, 1]],
+            state: NsfOpenState { density_kg_m3: gas.density, velocity_m_s: [0.0; 3], temperature_k: gas.temperature },
+        },
+    ]).unwrap();
+    let system = NsfDg::new(zone, load, high, limits, &gate).unwrap();
+    let intervals = source_intervals_for(system.load().propagator().dt(), rate, samples).unwrap();
+    let drives = vec![NsfDgDrive::ReservoirAperture { aperture: 0, pressure_pa: 100020.0, temperature_k: 303.0 }; intervals];
+    NsfDgPerformance::new_resampled_with_drives(system, observation, rate, drives, samples, 8, gate).unwrap()
+}
+
+fn escape_placement() -> ReservoirObservation {
+    ReservoirObservation { origin_m: [-0.05, 0.0], angle_rad: 0.0 }
+}
+
+#[test]
+fn selected_escape_observer_replays_original_rayleigh_without_mixing_breath_tiles() {
+    use crate::pcm_wav::baffled::{BaffledPressure, SurfaceSample};
+    let mut observed = paired_reservoir_observer_source(RATE, 64)
+        .with_reservoir_observation_at(1, escape_placement()).unwrap();
+    let mut bore = paired_reservoir_observer_source(RATE, 64);
+    let dx = observed.system().zone().law().dx_m;
+    // Explicit high-y escape cell [7,2,1] in the original cyclic z,x frame.
+    let surface = [SurfaceSample {
+        position_m: [-0.05 + 1.5 * dx, 7.5 * dx, 0.0],
+        area_m2: dx * dx, mode_shape: vec![1.0 / (dx * dx)],
+    }];
+    let gas = reference(100000.0);
+    let mut rayleigh = BaffledPressure::new_differentiating(&surface, 1, RATE,
+        [0.0, 0.0, 0.02], (&gas).into()).unwrap();
+    let mut largest_escape = 0.0_f64;
+    for _ in 0..64 {
+        let mut pressure = [0.0]; let mut bore_pressure = [0.0];
+        observed.block(&mut pressure).unwrap();
+        bore.block(&mut bore_pressure).unwrap();
+        let frame = bore.last_frame().unwrap();
+        assert_eq!(frame.reservoir_flows.iter().filter(|flow| flow.aperture == 0).count(), 2);
+        assert_eq!(frame.reservoir_flows.iter().filter(|flow| flow.aperture == 1).count(), 1);
+        let selected = frame.reservoir_flows.iter().find(|flow| flow.aperture == 1).unwrap();
+        assert_eq!(selected.aperture, 1);
+        assert_eq!(selected.cell, [7, 2, 1]);
+        let escape = rayleigh.step_trace(&[selected.outward_volume_flow_m3_s]).unwrap();
+        largest_escape = largest_escape.max(escape.abs());
+        assert_eq!(pressure[0], bore_pressure[0] + escape);
+        assert_eq!(observed.system().zone().state_hash(), bore.system().zone().state_hash());
+        assert_eq!(observed.system().load().state(), bore.system().load().state());
+    }
+    assert!(largest_escape > 1e-9, "selected physical escape must reach its retarded microphone");
+    assert_eq!(observed.reservoir_observation_aperture(), Some(1));
+    let mut wrong_owner = [*observed.last_frame().unwrap().reservoir_flows.iter()
+        .find(|flow| flow.aperture == 1).unwrap()];
+    wrong_owner[0].aperture = 0;
+    let observer = observed.reservoir.as_mut().unwrap();
+    let before = observer.flows.clone();
+    assert!(observer.accumulate(&wrong_owner, 1.0).is_err());
+    assert_eq!(observer.flows, before);
+}
+
+#[test]
+fn selected_escape_observer_preserves_projected_clock_callback_identity_and_refuses_ambiguity() {
+    let render = |block: usize| {
+        let mut renderer = paired_reservoir_observer_source(72000, 48)
+            .with_reservoir_observation_at(1, escape_placement()).unwrap();
+        let mut pressure = vec![0.0; 48];
+        for chunk in pressure.chunks_mut(block) { renderer.block(chunk).unwrap(); }
+        (pressure, renderer)
+    };
+    let (a, whole) = render(8);
+    let (b, split) = render(3);
+    assert_eq!(a, b);
+    assert!(a.iter().any(|value| value.abs() > 1e-9));
+    assert_eq!(whole.system().accepted_steps(), whole.drive_history().len() as u64);
+    assert_eq!(whole.system().zone().state_hash(), split.system().zone().state_hash());
+    assert_eq!(whole.system().load().state(), split.system().load().state());
+    assert_eq!(whole.reservoir_observation_aperture(), Some(1));
+    assert!(paired_reservoir_observer_source(RATE, 64)
+        .with_reservoir_observation(escape_placement()).is_err());
+    assert!(paired_reservoir_observer_source(RATE, 64)
+        .with_reservoir_observation_at(2, escape_placement()).is_err());
+    // The warm source cannot be reinterpreted as a quiescent ambient escape.
+    assert!(paired_reservoir_observer_source(RATE, 64)
+        .with_reservoir_observation_at(0, escape_placement()).is_err());
+}

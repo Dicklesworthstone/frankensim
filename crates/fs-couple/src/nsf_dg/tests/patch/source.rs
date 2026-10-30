@@ -367,3 +367,105 @@ fn dual_apertures_require_explicit_roles_and_each_loads_actual_area() {
         assert!(matches!(model.with_upstream_load(source, &gate), Err(NsfDgError::Input(_))));
     }
 }
+
+fn reservoir_pair(high: bool, substeps: usize, upstream: bool) -> NsfDg<D3q27> {
+    let gas = reference();
+    let state = NsfOpenState { density_kg_m3: gas.density,
+        velocity_m_s: [0.0; 3], temperature_k: gas.temperature };
+    let zone = dual_zone(high, substeps).with_reservoir_apertures(vec![
+        fs_lbm::nsf3::NsfReservoirAperture { axis: 1, high: false,
+            cells: vec![[3, 0, 1], [4, 0, 1]], state },
+        fs_lbm::nsf3::NsfReservoirAperture { axis: 1, high: true,
+            cells: vec![[4, 3, 2]], state },
+    ]).unwrap();
+    let main = load(&zone, gas, PATCH_CELLS as f64, 1.0, DgBoundary::Matched);
+    let gate = CancelGate::new_clock_free();
+    let owner = NsfDg::new_on_patches(zone, main, high, budget(substeps), &gate).unwrap();
+    if upstream {
+        let source = load(owner.zone(), gas, SOURCE_CELLS as f64, 1.0, DgBoundary::Matched);
+        owner.with_upstream_load(source, &gate).unwrap()
+    } else { owner }
+}
+
+#[test]
+fn indexed_breath_replays_original_controls_and_preserves_independent_escape_accounts() {
+    let gate = CancelGate::new_clock_free();
+    for high in [false, true] {
+        for upstream in [false, true] {
+            for substeps in [1, 3] {
+                let mut owner = reservoir_pair(high, substeps, upstream);
+                let original = reservoir_pair(high, substeps, upstream);
+                let mut fluid = original.zone;
+                let mut main = original.load;
+                let mut source = original.upstream;
+                let mut control_values = [fluid.reservoir_aperture_at(0).unwrap().state,
+                    fluid.reservoir_aperture_at(1).unwrap().state];
+                for (index, pressure, temperature) in [(0, 100002.0, 300.01), (1, 99999.0, 300.0), (0, 100000.0, 300.0)] {
+                    let frame = owner.step_with_reservoir_aperture(index, pressure, temperature, &gate).unwrap();
+                    assert_eq!(frame.drive, NsfDgDrive::ReservoirAperture { aperture: index,
+                        pressure_pa: pressure, temperature_k: temperature });
+                    control_values[index] = fluid.reservoir_aperture_state_for(index, pressure, temperature).unwrap();
+                    let mut incoming = [NsfBoundaryDrive::IncomingCharacteristic(frame.incoming_characteristic_m_s); 2];
+                    incoming[usize::from(!high)] = NsfBoundaryDrive::IncomingCharacteristic(
+                        frame.upstream.as_ref().map_or(0.0, |source| source.incoming_characteristic_m_s));
+                    let backgrounds = fluid.boundary_drives().unwrap();
+                    let trial = fluid.preview_boundary_interval_with_patches_and_reservoirs(
+                        backgrounds, incoming.map(Some), &[(index, control_values[index])],
+                        substeps, GRID_CELLS * substeps, || false).unwrap();
+                    assert_eq!(trial.boundary_exchange(), &frame.faces);
+                    assert_eq!(trial.reservoir_flows(), frame.reservoir_flows);
+                    assert_eq!(trial.reservoir_exchanges(), frame.reservoir_exchanges);
+                    assert_eq!(trial.reservoir_mass_out_kg(), frame.reservoir_mass_out_kg);
+                    let balance = frame.flow_mass_change_kg + frame.reservoir_mass_out_kg
+                        + frame.faces.iter().map(|face| face.mass_out_kg).sum::<f64>();
+                    assert!(balance.abs() <= 3e-12 * trial.previous_mass_kg());
+                    for opening in 0..2 {
+                        assert_eq!(trial.grid().reservoir_aperture_at(opening).unwrap().state, control_values[opening]);
+                        assert_eq!(frame.reservoir_flows.iter().filter(|tile| tile.aperture == opening).count(),
+                            if opening == 0 { 2 } else { 1 });
+                        assert_eq!(frame.reservoir_exchanges[opening].aperture, opening);
+                    }
+                    assert!(!frame.reservoir_flows.iter().any(|tile| tile.aperture == 2));
+                    assert!(frame.reservoir_exchanges.get(2).is_none());
+                    trial.accept();
+                    main.preview_step(frame.inlet_flow_m3_s).unwrap().accept();
+                    if let Some(source) = &mut source {
+                        let upstream = frame.upstream.as_ref().unwrap();
+                        assert_eq!(upstream.source_work_j, 0.0);
+                        source.load.preview_step(upstream.inlet_flow_m3_s).unwrap().accept();
+                        assert_eq!(owner.upstream_load().unwrap().state(), source.load.state());
+                    }
+                    assert_eq!(owner.zone().state_hash(), fluid.state_hash());
+                    assert_eq!(owner.load().state(), main.state());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn indexed_breath_refusals_preserve_every_opening_and_both_loads() {
+    let gate = CancelGate::new_clock_free();
+    let mut owner = reservoir_pair(true, 1, true);
+    owner.step_with_reservoir_aperture(0, 100002.0, 300.01, &gate).unwrap();
+    let snapshot = |owner: &NsfDg<D3q27>| (
+        owner.zone().state_hash(), owner.zone().cumulative_ledger(),
+        owner.zone().last_reservoir_exchanges().to_vec(), owner.zone().last_reservoir_flows().to_vec(),
+        [owner.zone().reservoir_aperture_at(0).unwrap().state, owner.zone().reservoir_aperture_at(1).unwrap().state],
+        owner.load().state().clone(), owner.upstream_load().unwrap().state().clone(), owner.accepted_steps(),
+    );
+    let before = snapshot(&owner);
+    assert!(owner.step_with_reservoir(100002.0, 300.01, &gate).is_err());
+    for (index, pressure, temperature) in [(2, 100002.0, 300.01), (0, f64::NAN, 300.0), (1, 100000.0, 1000.0)] {
+        assert!(owner.step_with_reservoir_aperture(index, pressure, temperature, &gate).is_err());
+        assert_eq!(snapshot(&owner), before);
+    }
+    let cancelled = CancelGate::new_clock_free(); cancelled.request();
+    assert!(matches!(owner.step_with_reservoir_aperture(1, 100000.0, 300.0, &cancelled), Err(NsfDgError::Cancelled)));
+    assert_eq!(snapshot(&owner), before);
+    let mut replay = reservoir_pair(true, 1, true);
+    replay.step_with_reservoir_aperture(0, 100002.0, 300.01, &gate).unwrap();
+    owner.step_with_reservoir_aperture(1, 99999.0, 300.0, &gate).unwrap();
+    replay.step_with_reservoir_aperture(1, 99999.0, 300.0, &gate).unwrap();
+    assert_eq!(snapshot(&owner), snapshot(&replay));
+}
