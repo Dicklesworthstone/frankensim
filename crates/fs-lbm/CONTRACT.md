@@ -3236,8 +3236,10 @@ closed-grid "no open boundary" limitation only within this narrow domain.
 
 Each face prescribes one incoming outward-normal acoustic characteristic
 `J- = delta u_n - delta p/(rho_ref*c_ref)`; the outgoing `J+` comes from the
-adjacent live cell. Entropy and tangential velocity use the inflow reference or
-the actual outflow donor. The reference density, impedance and caloric tangent
+adjacent live cell. For incoming-wave and pressure-only controls, entropy and
+tangential velocity follow the reference normal speed: inward uses the reference,
+outward or stationary uses the adjacent cell. Acoustic flow reversal therefore
+does not reset those convected modes. The reference density, impedance and caloric tangent
 come from the SAME retained `NsfGasMedium`. Reconstructed pressure and temperature
 query its actual NASA9 caloric energy and local transport, or the original
 GasSpec path; no independent reservoir gamma, density, sound speed, viscosity
@@ -3247,6 +3249,16 @@ Mach, temperature-window and viscosity refusals still active. Composition stays
 frozen. The entropy/acoustic boundary reconstruction is explicitly linearized
 about the authored reference; NASA9 energy inversion inside the grid remains
 nonlinear and source-owned.
+
+This fixed-reference donor is the local linear characteristic approximation:
+entropy and shear travel at the reference flow speed while the acoustic modes
+travel at that speed plus/minus sound speed. The explicit `PressureTemperature`
+source instead retains its declared temperature and reference tangential velocity
+on actual inflow, and the adjacent entropy/tangential state on outflow or at rest.
+That material-source switch can remain discontinuous at reversal; it is not an
+acoustic-only control or a finite exterior material history. No donor smoothing
+or nonlinear entropy/enthalpy transport through an attached acoustic duct is
+implied. Both paths retain the same original face material and conservative flux.
 
 The same reconstructed face supplies incoming populations (adjacent
 post-collision non-equilibrium extrapolation), the conservative thermal-pressure

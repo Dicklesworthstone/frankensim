@@ -2,8 +2,10 @@
 //!
 //! For the outward normal, J+ = du_n + dp/(rho_ref c_ref) leaves the
 //! domain and J- = du_n - dp/(rho_ref c_ref) enters it. Only J- is
-//! prescribed. The entropy and tangential characteristics use their upwind
-//! donor. This is the local linear, plane-normal rung of characteristic
+//! prescribed. For acoustic controls, entropy and tangential characteristics
+//! travel at the reference normal speed; stationary modes retain the interior.
+//! An explicit pressure/temperature source retains its actual inflow donor.
+//! This is the local linear, plane-normal rung of characteristic
 //! boundaries (Poinsot & Lele, JCP 101 (1992), 104-129,
 //! doi:10.1016/0021-9991(92)90046-2), not the full nonlinear NSCBC scheme.
 //!
@@ -262,10 +264,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     ///
     /// A pressure drive fixes each reconstructed quadrature pressure throughout
     /// the original predictor/corrector. It does not freeze the incoming wave:
-    /// the live outgoing wave determines its value and the normal flow. Inflow
-    /// tangential data retain the original material reference. Incoming entropy
-    /// retains that reference unless an explicit inflow temperature is supplied;
-    /// outflow retains the adjacent cell. Pressure, temperature, Mach and source-domain
+    /// the live outgoing wave determines its value and the normal flow. Acoustic
+    /// entropy/shear donors follow the reference normal speed, with stationary
+    /// modes retaining the adjacent cell. An explicit inflow temperature instead
+    /// selects the declared thermal source on actual inflow and the adjacent
+    /// cell on outflow. Pressure, temperature, Mach and source-domain
     /// refusals apply before any physical state or control is published.
     /// Each attached aperture retains its own drive; these controls apply to
     /// the complementary cells of each face.
@@ -574,7 +577,17 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                             + 0.5 * impedance * (outgoing - incoming),
                     ),
                 };
-                let entropy_temperature = if normal >= 0.0 {
+                // The linearized entropy/shear modes travel at u_ref, not at
+                // the acoustic perturbation. Switching them at acoustic flow
+                // reversal inserts a finite material jump at zero transport.
+                // An explicit thermal source declares incoming material and
+                // deliberately retains its actual-flow boundary condition.
+                let outward_convected = if inflow_temperature.is_some() {
+                    normal >= 0.0
+                } else {
+                    normal_reference >= 0.0
+                };
+                let entropy_temperature = if outward_convected {
                     ti - reference.temperature - alpha * (pi - reference.pressure)
                 } else {
                     0.0
@@ -585,7 +598,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                         + alpha * (pressure - reference.pressure)
                         + entropy_temperature,
                 };
-                let mut velocity = if normal >= 0.0 {
+                let mut velocity = if outward_convected {
                     ui
                 } else {
                     boundary.reference_velocity_m_s

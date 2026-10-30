@@ -86,21 +86,32 @@ accepted incoming wave and use the bracket midpoint. Every trial consumes the
 original shared budget and must meet the original pressure tolerance. Existing
 complete-face and downstream-aperture owners retain their cold-start sequence.
 
-Continuing playback through every reflected-flow reversal remains unsupported.
-The original characteristic boundary switches its entropy and tangential
-velocity donor with flow direction; the pressure residual can jump over zero.
-`NsfDgError::Resolution` reports the actual adjacent incoming bracket and
-opposite nonzero residuals. The refused interval changes neither physical
-owner nor its boundary history; playback keeps its accepted prefix and becomes
-poisoned.
+The local linear characteristic boundary uses the declared reference normal
+velocity to select the entropy and tangential-velocity donors for pressure and
+incoming-wave controls. Linearization of the convected equations gives
+`ds'/dt + U_reference ds'/dn = 0` and the same convective speed for tangential
+velocity. At the zero reference velocity required by `NsfDg`, those modes are
+stationary and retain the adjacent fluid state. An acoustic velocity reversal
+therefore does not abruptly replace the temperature and shear data supplied to
+the original populations, pressure force and Fourier heat flux. The acoustic
+pressure/velocity reconstruction, material law, conservative update and root
+tolerances are unchanged.
 
-The unchanged 32-sample closed-upstream regression encounters this limit after
-17 accepted intervals and verifies rollback, poisoned retry, and identical
-accepted output across callback sizes. A longer signed `+20/-20/0 Pa`
-downstream-radiation run also refused after 383 accepted intervals. That longer
-history remains a known limitation; complete 2,048-sample playback is not
-claimed. No donor smoothing, tolerance relaxation or substitute boundary law
-is introduced.
+The closed-upstream regression retains its original 32-sample, 2 Pa history,
+geometry and numerical budgets, and requires complete playback with identical
+accepted states across callback sizes. The earlier instantaneous-donor rule
+had refused after 17 intervals. The longer signed `+20/-20/0 Pa` radiation
+history has not been rerun with this correction; complete 2,048-sample playback
+and a general backflow guarantee remain unclaimed.
+
+Explicit `PressureTemperature` controls still use the actual flow direction
+to impose the declared incoming temperature and tangential reservoir data.
+Such thermal-source reversal can retain a discontinuity; this correction does
+not add material transport into the acoustic DG duct. Any unresolved pressure
+gap still reports `NsfDgError::Resolution` with the actual adjacent incoming
+bracket and opposite nonzero residuals. A refused interval changes neither
+physical owner nor its boundary history; playback retains its accepted prefix
+and becomes poisoned.
 
 This enables a split boundary topology, not a complete flute mouth. It does not
 create a labium wall at the patch edge, resolve an unmeshed jet, or remove the
@@ -995,6 +1006,6 @@ patch's flow and pressure-work enter only its own acoustic projection. Full-face
 mass and total-energy accounts already include both patches and their separate
 remainders; do not add selected-patch accounts to those totals again. All owners
 and controls publish together after the original pressure, work and cancellation
-checks. The unchanged characteristic-collar, projection, flow-reversal and
+checks. The characteristic-collar, projection, explicit thermal-backflow and
 frozen-composition limits still apply. Two apertures do not establish resolved
 lip anatomy, full bore heat/species transport or qualified flute sound.
