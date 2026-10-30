@@ -163,3 +163,189 @@ fn a_warm_material_source_remains_audible_without_a_new_blow() {
         "accepted vibration must not be zeroed by ODE routing"
     );
 }
+
+fn nonlinear_warm_bank(coefficient: f64, force: f64) -> PlateBank {
+    let body = VkBody::from_modal_storage_with_damping(
+        SosModalStorage {
+            omegas: vec![600.0, 900.0],
+            channels: vec![fs_nlmodal::StressChannel {
+                coefficient,
+                coupling: vec![1.0, 0.3, 0.3, 0.5],
+            }],
+        },
+        &[60.0, -70.0, -70.0, 90.0],
+        &[0.7, -0.4],
+        vec![0.015, -0.02],
+    )
+    .unwrap()
+    .with_relaxation_branches(
+        vec![fs_phs::RelaxationBranch {
+            projection: vec![0.7, 0.0, -0.4, 0.0],
+            stiffness: 1600.0,
+            relaxation_time_s: 2e-5,
+        }],
+        1,
+    )
+    .unwrap();
+    let mut bank = compact(0.7, 0.003);
+    bank.vk = Some(body);
+    // The original bank owner admits this short preparation clock. Every
+    // renderer below receives exactly this accepted history, independent of
+    // its own later sample rate. No test writes a physical state directly.
+    for _ in 0..256 {
+        bank.advance_controlled(force, 5e-7, gas().density, 1.0, || false)
+            .unwrap();
+    }
+    bank
+}
+
+#[test]
+fn nonlinear_prescribed_flow_retains_warm_memory_and_amplitude_dependent_motion() {
+    let mut strong = nonlinear_warm_bank(1e17, 200.0);
+    let initial = strong
+        .physical_image(&gas(), RATE, &fs_exec::CancelGate::default())
+        .unwrap()
+        .unwrap()
+        .state()
+        .to_vec();
+    assert_eq!(initial.len(), 7);
+    assert!(
+        initial[6].abs() > 1e-8,
+        "rapid material memory must already be populated"
+    );
+    let strain =
+        initial[2] * initial[2] + 0.6 * initial[2] * initial[4] + 0.5 * initial[4] * initial[4];
+    let nonlinear_energy = 0.25 * 1e17 * strain * strain;
+    let linear_strain_energy =
+        0.5 * (600.0_f64.powi(2) * initial[2].powi(2) + 900.0_f64.powi(2) * initial[4].powi(2));
+    assert!(nonlinear_energy > 0.01 * linear_strain_energy);
+    let ringing = render(&mut strong, 0.0);
+    let driven = render(&mut strong, 1e-5);
+    let weak = render(&mut nonlinear_warm_bank(1e17, 100.0), 0.0);
+    let doubled_weak: Vec<_> = weak.iter().map(|p| 2.0 * p).collect();
+    let quadratic = render(&mut nonlinear_warm_bank(0.0, 200.0), 0.0);
+    assert!(ringing.iter().all(|p| p.is_finite()));
+    assert!(ringing.iter().any(|p| p.abs() > 1e-5));
+    assert!(
+        relative_difference(&ringing, &driven) > 1e-4,
+        "new physical flow must reach the retained nonlinear body"
+    );
+    assert!(
+        relative_difference(&ringing, &quadratic) > 1e-3,
+        "the original quartic force must remain active"
+    );
+    assert!(
+        relative_difference(&ringing, &doubled_weak) > 1e-3,
+        "nonlinear motion must depend on physical amplitude"
+    );
+    let preserved = strong
+        .physical_image(&gas(), RATE, &fs_exec::CancelGate::default())
+        .unwrap()
+        .unwrap();
+    assert_eq!(preserved.state(), initial);
+    assert!(
+        render(&mut nonlinear_warm_bank(1e17, 0.0), 0.0)
+            .iter()
+            .all(|p| *p == 0.0)
+    );
+}
+
+#[test]
+fn zero_flow_nonlinear_body_refines_against_independent_complete_equations() {
+    let gas = gas();
+    let mut bank = nonlinear_warm_bank(1e17, 200.0);
+    let line = ode_bore_chain(
+        &sections(),
+        ChainOutlet::PressureRelease,
+        2,
+        &[],
+        &gas,
+        None,
+    )
+    .unwrap();
+    let (system, initial, _) = compose_plate_chain(&mut bank, line, 1, &gas, RATE).unwrap();
+    let n = system.state_dim();
+    let ports = system.port_dim();
+    let (j, r, g) = system.structure();
+    let rhs = |state: &[f64]| {
+        let effort = system.effort(&state[..n]);
+        let mut result = vec![0.0; n + 1];
+        for row in 0..n {
+            result[row] = (0..n)
+                .map(|column| (j[row * n + column] - r[row * n + column]) * effort[column])
+                .sum();
+        }
+        result[n] = (0..n).map(|row| g[row * ports + 1] * effort[row]).sum();
+        result
+    };
+    // Independent original pressure observation: the compact mode is mass
+    // normalized, while the supplied Vk surface areas are already modal.
+    let surface_flow = |x: &[f64]| 0.003 / 0.02_f64.sqrt() * x[1] + 0.015 * x[3] - 0.02 * x[5];
+    let duration = 1.0 / f64::from(RATE);
+    let windows = 24;
+    let subdivisions = 256;
+    let h = duration / f64::from(subdivisions);
+    let mut x = vec![0.0; n + 1];
+    x[..n].copy_from_slice(&initial);
+    let mut reference = Vec::with_capacity(windows);
+    for _ in 0..windows {
+        let before_flow = surface_flow(&x);
+        x[n] = 0.0;
+        for _ in 0..subdivisions {
+            let a = rhs(&x);
+            let b = rhs(&x
+                .iter()
+                .zip(&a)
+                .map(|(v, d)| v + 0.5 * h * d)
+                .collect::<Vec<_>>());
+            let c = rhs(&x
+                .iter()
+                .zip(&b)
+                .map(|(v, d)| v + 0.5 * h * d)
+                .collect::<Vec<_>>());
+            let d = rhs(&x.iter().zip(&c).map(|(v, d)| v + h * d).collect::<Vec<_>>());
+            for i in 0..x.len() {
+                x[i] += h * (a[i] + 2.0 * b[i] + 2.0 * c[i] + d[i]) / 6.0;
+            }
+        }
+        reference.push(
+            x[n] / duration
+                + gas.density * (surface_flow(&x) - before_flow)
+                    / (core::f64::consts::TAU * duration),
+        );
+    }
+    let mut errors = Vec::new();
+    for refinement in [1, 2, 4] {
+        let response = realize_blown_ode(
+            &sections(),
+            ChainOutlet::PressureRelease,
+            &[],
+            VolumeVelocityPulse {
+                peak_m3_s: 0.0,
+                duration_s: 0.001,
+            },
+            &mut bank,
+            &gas,
+            1.0,
+            RATE * refinement as u32,
+            windows * refinement,
+            None,
+        )
+        .unwrap();
+        let averaged: Vec<f64> = response
+            .chunks_exact(refinement)
+            .map(|window| window.iter().sum::<f64>() / refinement as f64)
+            .collect();
+        errors.push(relative_difference(&averaged, &reference));
+    }
+    assert!(
+        errors[2] < 2e-3,
+        "complete nonlinear pressure errors: {errors:?}"
+    );
+    for pair in errors.windows(2) {
+        assert!(
+            pair[0] > 2.5 * pair[1],
+            "nonlinear physical clock refinement: {errors:?}"
+        );
+    }
+}

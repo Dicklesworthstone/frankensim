@@ -5291,12 +5291,35 @@ fn realize_blown_ode(
     let dt = 1.0 / f64::from(sample_rate_hz);
     let (sys, mut x, observation) = compose_plate_chain(plates, line, 1, gas, sample_rate_hz)?;
     let linear = prepare_render_linear(&sys)?;
-    let exact = prepare_chain_exact(&sys, &linear, dt)?;
     // A complete bank retains its independent external force port at slot zero.
     // Only the remaining duct inlet receives this prescribed volume source;
     // pressure reaction must never depend on an unrelated point-drive footprint.
     let source = usize::from(observation.is_some());
     let mut input = vec![0.0; sys.port_dim()];
+    let mut average_output = vec![0.0; input.len()];
+    let mut next = vec![0.0; x.len()];
+    let budget = fs_phs::linear_exact::LinearSplitBudget {
+        max_modes: sys.state_dim(),
+        max_omega_dt: core::f64::consts::PI,
+    };
+    // Both owners retain the complete physical storage and all material states.
+    // The nonlinear path solves its original potential implicitly while the
+    // stiff acoustic/material quadratic block evolves through the shared cache.
+    enum Flow {
+        Quadratic(fs_phs::linear_exact::PreparedExactZoh<'static>),
+        Nonlinear(fs_phs::linear_exact::PreparedNonlinearZoh),
+    }
+    let mut flow = if linear.is_exact_quadratic() {
+        Flow::Quadratic(
+            fs_phs::linear_exact::PreparedExactZoh::new_owned(sys, dt, budget)
+                .map_err(render_phs_error)?,
+        )
+    } else {
+        Flow::Nonlinear(
+            fs_phs::linear_exact::PreparedNonlinearZoh::new_owned(sys, dt, budget)
+                .map_err(render_phs_error)?,
+        )
+    };
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
         let t = i as f64 * dt;
@@ -5305,16 +5328,20 @@ fn realize_blown_ode(
         } else {
             0.0
         };
-        let rec = step_chain_flow(&sys, &linear, exact.as_ref(), &x, &input, dt)?;
-        let p = rec.y[source]
-            + plate_chain_radiation(observation.as_ref(), &rec.x, &x, gas, listener_m, dt)?;
+        match &mut flow {
+            Flow::Quadratic(owner) => owner.step_into(&x, &input, &mut next, &mut average_output),
+            Flow::Nonlinear(owner) => owner.step_into(&x, &input, &mut next, &mut average_output),
+        }
+        .map_err(render_phs_error)?;
+        let p = average_output[source]
+            + plate_chain_radiation(observation.as_ref(), &next, &x, gas, listener_m, dt)?;
         if !p.is_finite() {
             return Err(AcousticRealizeError::InvalidDescription {
                 what: "blown ODE pressure left the finite set",
             });
         }
         out.push(p);
-        x = rec.x;
+        core::mem::swap(&mut x, &mut next);
     }
     Ok(out)
 }

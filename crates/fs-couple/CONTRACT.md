@@ -13000,11 +13000,11 @@ unforced point-drive projection. Observed inlet pressure comes from that same
 fluid port, with the complete original plate observer added once.
 
 The quadratic route prepares one shared exact propagator for the full source
-and viscothermal duct and reuses it across samples. Nonlinear storage keeps the
-shared temporal admission and refuses unresolved clocks; there is no inferred
-linearization or new integration owner. Shared dense capacity and existing
-per-step candidate allocation remain. Reed/scattering and Dirac routes are
-unchanged.
+and viscothermal duct and reuses it across samples. Nonlinear storage uses the
+shared `PreparedNonlinearZoh` exponential discrete-gradient owner described
+below. Both routes reuse candidate-state and mean-output buffers at the render
+clock. The shared complete-state capacity remains; the separate Dirac route
+retains its original nonlinear temporal admission.
 
 Three focused tests execute the actual complete blown renderer with the actual
 coherent gas, transport and Foster duct owners. They check point-drive
@@ -13975,3 +13975,31 @@ check zero-strain parity and continuing native boundary events, propagate
 face-partition-only changes through cooling/current/magnetic motion, and
 exercise source/coverage refusals plus late cancellation/replay. Runtime
 execution remains separate from test-target compilation and source review.
+
+## Prescribed flow with nonlinear complete-body vibration
+
+`acoustic_realize::realize_blown_ode` prepares either `PreparedExactZoh` for
+exactly quadratic original storage or `PreparedNonlinearZoh` for an original
+nonlinear remainder. Both own the complete body and viscothermal duct, reuse
+all sample buffers, and apply the prescribed flow only at its original inlet.
+The nonlinear route retains quartic modal interactions, full cross-mode
+resistance, every accepted Maxwell coordinate and the signed surface map.
+The quadratic model is not inferred from effort probes, and no nonlinear
+stiffness or material branch is removed to meet a render clock.
+
+The common nonlinear owner closes an endpoint discrete gradient around exact
+quadratic propagation. Its original-resistance loss is integrated on the
+method's discrete effort, and original storage and external work close that
+discrete account. This is not exact continuous nonlinear motion or heat; body
+and input-band temporal accuracy remain separate from energy acceptance.
+
+Five focused renderer checks include two nonlinear regressions. A warm mixed
+body with a 20-microsecond Maxwell branch renders at 48/96/192 kHz. Independent
+full-equation RK4 with a separately written physical pressure observer gives
+symmetric normalized L2 differences of 2.023823e-5, 5.535631e-6 and 1.495980e-6
+on identical physical windows, over 3.6-fold reduction per refinement. Tests
+also distinguish the original quartic force and amplitude dependence, retain
+warm ringing under zero new flow, transmit an added pulse, keep an unexcited
+body silent and preserve all original accepted source history. The existing
+complete-state numerical bounds remain; these checks do not establish
+arbitrary-clock accuracy, empirical calibration or real-time throughput.
