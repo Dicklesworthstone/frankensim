@@ -29,6 +29,7 @@ use fs_solid::frame2d::Frame2d;
 
 mod mechanics;
 mod regions;
+mod plane;
 pub use regions::FrameFluidRegion;
 
 /// Original member index and original exterior material source; never a radius,

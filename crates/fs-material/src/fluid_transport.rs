@@ -151,6 +151,22 @@ pub trait FluidTransport {
     fn transport_state(&self) -> Result<FluidTransportState, MaterialError>;
 }
 
+/// Borrow the original owner rather than copying its coefficients into another
+/// material. Supports concrete sources and heterogeneous `&dyn FluidTransport`
+/// inputs; the selected source's complete admission and errors are unchanged.
+impl<T: FluidTransport + ?Sized> FluidTransport for &T {
+    fn transport_state(&self) -> Result<FluidTransportState, MaterialError> {
+        T::transport_state(*self)
+    }
+}
+/// The borrowed thermal view delegates to the SAME source, including unknown
+/// expansion and refusal of incoherent temperature or transport state.
+impl<T: ThermalFluidTransport + ?Sized> ThermalFluidTransport for &T {
+    fn thermal_transport_state(&self) -> Result<ThermalFluidTransportState, MaterialError> {
+        T::thermal_transport_state(*self)
+    }
+}
+
 impl FluidTransport for FluidTransportState {
     fn transport_state(&self) -> Result<FluidTransportState, MaterialError> { Ok(*self) }
 }
