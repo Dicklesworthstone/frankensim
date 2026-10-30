@@ -14335,3 +14335,42 @@ temperature refusal. This is uniform frozen-mean harmonic physics: thermal
 mesh/pressure-basis convergence, original thin viscous wall admission and
 solid normal-profile limits remain explicit. No mean thermal/species evolution,
 nonlinear excitation closure or time-domain realization is inferred.
+
+### Source-owned resolved thermoviscous features in duct networks
+
+`cavity_modal::interior::thermoviscous::source_medium` maps a coherent original
+`GasState` to the mixed velocity/pressure/temperature FE coefficients. The
+independent bulk viscosity is required explicitly; it must not duplicate a
+molecular reservoir supplied by the source. `ThermoviscousInterior` retains
+the immutable gas and optional original `RelaxationState`, validates bitwise
+agreement with the FE density, pressure, temperature, cp, viscosity and
+conductivity, and admits only its declared positive frequency band.
+
+At each frequency, the source heat capacity is evaluated once and conjugated
+from the material exp(-i omega t) convention into the FE exp(+i omega t)
+temperature equation. Molecular relaxation and heat conduction then use the
+same resolved field. No bulk-loss overlay, plane-wave attenuation substitute,
+or independent wall resistance is introduced. Responses expose the original
+pressure, velocity, temperature and separate physical work terms. Material,
+mixed-FE and duct errors preserve their original typed causes.
+
+`admittance` retains the FE convention and one factorization for all columns.
+`duct_scattering` conjugates the full direct loaded power-scattering matrix
+into the original duct convention, without changing inward flow or coordinate
+normalization. `duct_two_port` requires exactly two retained coordinates and
+one positive real reference, returning the existing `TwoPort` for
+`compose_chain`/Redheffer composition. P is total normal traction; Q is its
+work-conjugate inward flow. Nonuniform traction shapes require a matching dual
+trace mapping and are not automatically conventional evanescent traveling
+waves. No additional port or mode is silently discarded.
+
+Three native integration tests exercise original dry-air and molecular
+sources, empty-reservoir parity, changed-rate liveness, source/band/cancellation
+refusal, and positive shear/conduction/caloric work with input closure. An
+actual resolved feature joins an original analytic duct and complex load at
+80/300/1100 Hz; input impedance and terminal pressure/flow match an independent
+closure through the FE admittance within 1e-9 of their declared scales. This
+is a composition/algebra check, not a continuum or instrument accuracy bound.
+The mixed solver's mesh, geometry, equilibrium, thermal-boundary and harmonic
+scope limits remain in force. No automatic Helmholtz/LNS mesh interface,
+moving mean inventory or nonlinear time-domain excitation loop is inferred.

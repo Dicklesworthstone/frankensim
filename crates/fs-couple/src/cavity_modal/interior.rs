@@ -10,6 +10,9 @@ pub mod multiport;
 /// Joint molecular calorics and resolved temperature in the spatial pressure FE.
 pub mod molecular;
 
+/// Source-owned mixed velocity/pressure/temperature fields and duct composition.
+pub mod thermoviscous;
+
 use fs_feec::acoustics::helmholtz::boundary_layer::thermal_wall::{
     ConductiveThermalWall, ThermalWall, ThermalWallDepth, WallThermalTransport,
 };
