@@ -66,7 +66,7 @@ impl SymmetricTangentialCompliance {
         self.matrix
     }
 
-    fn material(self, axis: [f64; 2]) -> Result<([f64; 3], f64), TriboError> {
+    pub(super) fn material(self, axis: [f64; 2]) -> Result<([f64; 3], f64), TriboError> {
         // Pivot on the unit normalized diagonal. Rotating this Gram factor
         // avoids subtracting nearly equal terms in a rank-one diagonal entry.
         let [a, b, d] = self.normalized;
@@ -225,7 +225,7 @@ fn matrix_slip(
 
 // Positive eigenvalues and a unit maximum-eigenvalue axis. The determinant is
 // retained from the original Gram factor, avoiding cancellation of a*d-b*b.
-fn spectrum(c: [f64; 3], determinant: f64) -> Result<([f64; 2], [f64; 2]), TriboError> {
+pub(super) fn spectrum(c: [f64; 3], determinant: f64) -> Result<([f64; 2], [f64; 2]), TriboError> {
     let [a, b, d] = c;
     if b == 0.0 {
         return Ok(if a >= d {

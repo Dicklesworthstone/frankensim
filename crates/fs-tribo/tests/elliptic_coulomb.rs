@@ -13,6 +13,9 @@ use fs_tribo::{
 #[path = "elliptic_coulomb/compliance.rs"]
 mod compliance;
 
+#[path = "elliptic_coulomb/relaxation.rs"]
+mod relaxation;
+
 fn input(free: [f64; 2], compliance: f64) -> TangentialStepInput {
     TangentialStepInput {
         normal_n: 10.0,

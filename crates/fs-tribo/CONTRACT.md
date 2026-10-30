@@ -167,6 +167,36 @@ localization.
 associated solutions, scalar equivalence, rotated frames, degenerate axes,
 singular response and refusal boundaries.
 
+### Continuous directional sliding and finite arrest
+
+`EllipticCoulomb::relax_velocity` in `elliptic::relaxation` evolves the
+original associated kinetic law with constant normal load, coefficients,
+temperature, geometry and positive-definite two-axis body mobility. It retains
+the original static coefficients, texture and slip checkpoint.
+
+Writing the principal capacities as `a*d`, `max(d)=1`, the transformed
+velocity `u=d*v` satisfies `du/dtau=-(d W d)u` and
+`dt/dtau=norm(u)/a`. The existing normalized Gram rotation and symmetric
+eigensystem provide closed velocity, integrated impulse and physical-work
+expressions. Bounded deterministic quadrature resolves physical time, net
+displacement and unsigned travel on a finite interval whose endpoint is
+complete arrest. These are distinct accounts: mean force times net displacement
+does not represent the work of a curved friction trajectory.
+
+Isotropic/eigen-direction motion has an analytic branch. A zero kinetic axis
+retains free motion, including cross-axis recoil after active-axis arrest.
+A separate short-time chart, conservative clock bracket and `expm1` retain
+small impulses/work without integrating the entire stopping history.
+
+Time/travel tolerances, evaluation and root budgets are explicit. Quadrature
+errors are adaptive estimates, not interval certificates; a target inside the
+unresolved stopping-time uncertainty refuses. Cancellation, invalid mobility,
+foreign history and numerical/work-limit failures publish no checkpoint.
+The owner supplies no external tangential drive, pose/normal evolution,
+material-source refresh or thermal store. Six new G1/G3/G4 groups cover exact
+and curved references, split continuation, frame covariance, free-axis motion,
+stiff short steps and atomic refusals.
+
 ### Full two-axis tangential body compliance
 
 `tangential::matrix::advance_with_matrix_compliance` couples the original

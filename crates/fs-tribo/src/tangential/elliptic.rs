@@ -30,6 +30,9 @@ use crate::{FrictionRegime, TriboError, finite, nonnegative_finite, positive_fin
 mod compliance;
 pub use compliance::SymmetricTangentialCompliance;
 
+/// Continuous held-load relaxation with finite slip-arrest events.
+pub mod relaxation;
+
 /// Constant static/kinetic principal coefficients and an initial texture axis.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EllipticCoulomb {

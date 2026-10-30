@@ -7,6 +7,9 @@
 //! into a mirror velocity refuses; the trajectory owner must refine or locate
 //! arrest. Exact stopping is accepted when the held phase resolves it.
 
+/// Continuous held-load directional motion through resolved finite arrest.
+pub mod trajectory;
+
 use super::{RigidContactBinding, components, magnitude, vector};
 use crate::{DynamicsError, MassProperties, PointKinematics, RigidBodyState, Vec3};
 use fs_contact::interface_binding::thermal_friction::elliptic::EllipticFrictionMode;

@@ -1472,6 +1472,31 @@ independent unit-impulse columns, equivalent body-frame parameterizations,
 work/heat balance, exact stopping under large common translation, overstep
 refusal and atomic callback/cancellation/geometry failures.
 
+## Continuous directional friction trajectories on finite rigid bodies
+
+`tangential_friction::directional::trajectory::apply_rigid_directional_trajectory`
+composes the original native elliptical relaxation with the actual two-body
+mobility. Original masses, full tensors, frozen poses and contact arms determine
+the response. Integrated opposing impulses update exactly the selected pair;
+the native curve supplies net slip, unsigned travel, physical heat and any
+finite arrest time.
+
+Per-body and total linear/angular momentum, actual endpoint velocity and
+kinetic work are reconstructed independently. With constant symmetric
+mobility, integrated impulse paired with mean endpoint velocity equals kinetic
+change even when force turns; this identity is independent of the trajectory's
+net displacement. Momentum-increment energy evaluation preserves small losses
+under large common translation. Normal recoil is exposed to its original owner.
+
+Both bodies and the original native history publish together after every
+physical gate and the final cancellation poll. Other bodies and all poses are
+unchanged. The phase holds normal load, geometry and law coefficients fixed,
+with no external tangential drive, normal constraint, material query or thermal
+store. The native quadrature's estimated-error and unresolved-time limits remain
+visible. Three new G1/G3/G4 groups cover full-tensor arrest against independent
+impulse-response columns, body-frame covariance, split continuation and atomic
+budget/cancellation/geometry refusals.
+
 ## Joint Hertz sliding and spin on two finite bodies
 
 `tangential_friction::hertz::apply_rigid_hertz` consumes the original

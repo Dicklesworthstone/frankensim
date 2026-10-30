@@ -8,6 +8,9 @@ use fs_tribo::partial_slip::TangentFrame;
 use fs_tribo::tangential::elliptic::EllipticCoulomb;
 use fs_tribo::{TangentialLaw, TangentialSolveConfig, TangentialStep};
 
+#[path = "rigid_directional/trajectory.rs"]
+mod trajectory;
+
 fn close(a: f64, b: f64) {
     assert!(
         (a - b).abs() < 3e-9 * a.abs().max(b.abs()).max(1.0),
