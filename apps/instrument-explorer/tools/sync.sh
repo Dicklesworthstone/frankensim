@@ -18,9 +18,10 @@ TS1="${IE_TS1:-ts1}"
 SSH="ssh -o ConnectTimeout=15"
 
 # Work-in-progress renders by lanes that have not committed or graded them yet. Edit when the lanes move them.
-KIT="/data/tmp/mb-phrases/kit14/"  # on TRJ: source.json (render commits), renders/, grade/ (kitgrade.py: data/kit.json, data/decays.json, audio/*.wav, img/*.webp)
+KIT="/data/tmp/mb-phrases/kit15/"  # on TRJ: source.json (render commits), renders/, grade/ (kitgrade.py: data/kit.json, data/decays.json, audio/*.wav, img/*.webp)
 VIOLIN_ASSEMBLED="/home/ubuntu/irp-verify/out-ProudBison/violin-g3-rung-v2/violin-g3-rung-2s.wav"  # on TS1
 FLUTE_EXTERIOR="/data/tmp/wa-inst/renders/flute-exterior/25a5514944ea/"             # on TRJ
+TIMPANI="/home/ubuntu/irp-verify/mb-timpani-land/render/timpani-2b.wav"  # on TS1: timpani/render.sh at a95d54fa4 (pexfp.376)
 PLAYABLE="/data/tmp/mb-phrases/scales18/"   # on TRJ: every note each family can play today, per family dir with its own source.json (the commit it was rendered at), and pitch.json (measured f0). scales18 = scales17 with the three notes that changed at 30fa619b4816 (trumpet pramp-t1.25e0, voice a-A3, viola open G3)
 # On TRJ: regradings made outside the shared tree with the committed grader. Each <family>/<note>/ here replaces that note
 # of the grading tree (its superseded/ carries the earlier gradings forward). Every graded pair the site shows was regraded
@@ -35,7 +36,7 @@ GRADE_OVERRIDES="/data/tmp/mb-phrases/grade-overrides-ig4g/"
 
 PREV="$(ls -d "$ROOT"/mirror-* 2>/dev/null | tail -1)"
 M="$ROOT/mirror-$(date -u +%Y%m%dT%H%MZ)"
-mkdir -p "$M/analysis" "$M/piano-pairs" "$M/u4" "$M/kit" "$M/renders/flute-exterior/25a5514944ea" "$M/renders/violin-assembled" "$M/renders/playable"
+mkdir -p "$M/analysis" "$M/piano-pairs" "$M/u4" "$M/kit" "$M/renders/flute-exterior/25a5514944ea" "$M/renders/violin-assembled" "$M/renders/timpani/a95d54fa4" "$M/renders/playable"
 FAILED=0
 step() { echo "== $(date -u +%H:%M:%SZ) $*"; }
 done_step() { local rc=$1; echo "   exit $rc"; [ "$rc" -eq 0 ] || FAILED=$((FAILED + 1)); }
@@ -109,6 +110,10 @@ done_step $?
 
 step "flute renders with the exterior body (ungraded)"
 rsync -a -e "$SSH" --include='*.wav' --include='*.provenance.json' --exclude='*' "$TRJ:$FLUTE_EXTERIOR" "$M/renders/flute-exterior/25a5514944ea/"
+done_step $?
+
+step "timpani render at its landing commit (not graded)"
+rsync -a -e "$SSH" "$TS1:$TIMPANI" "$M/renders/timpani/a95d54fa4/"
 done_step $?
 
 step "playable notes per family (listening renders, not graded)"
