@@ -59,10 +59,10 @@ impl SupportedMaterialStrings {
     /// The same complete source-bound support image with explicit axial loss.
     /// Every homogeneous/bonded solid layer supplies its own uniaxial viscosity.
     /// The original fixed-end bank and this moving termination share the same
-    /// material binding, solid axial inertia and small-strain constitutive law.
+    /// material binding and solid axial inertia.
     ///
-    /// Both relative axial motion and the moving endpoint's uniform extension
-    /// dissipate through the original reciprocal resistance matrix. Nonzero
+    /// With `KelvinVoigt`, relative axial motion and the moving endpoint's uniform
+    /// extension dissipate through the original reciprocal resistance matrix. Nonzero
     /// transverse/axial/torsion states, stationary-gas channels and the support
     /// input survive. There is no second damping step or copied audio engine.
     ///
@@ -70,17 +70,17 @@ impl SupportedMaterialStrings {
     /// source band must therefore cover DC through the existing conservative
     /// bound on the coupled support/string SMALL-SIGNAL spectrum, not just axial
     /// poles. This does not certify every finite-amplitude generated harmonic.
-    /// Finite-slope strain-rate loss, evolving heat and axial fluid loss remain
-    /// absent. Missing, frequency-dependent or out-of-band source data refuses.
+    /// `FiniteStrainKelvinVoigt` instead applies the complete retained strain
+    /// rate, including both transverse planes and affine endpoint motion, in the
+    /// SAME nonlinear solve. Evolving heat and axial fluid loss remain absent.
+    /// Missing, frequency-dependent or out-of-band source data refuses.
     pub fn in_stationary_gas_with_longitudinal_waves_and_loss(sources:Vec<NonlinearMaterialString>,
         support:TranslatingSupport, attachments:Vec<MaterialLongitudinalSupport>,
         loss:LongitudinalMaterialLoss, remainder_frequency_hz:f64, gate:&CancelGate)
         -> Result<Self,ImpactError>
     {
         poll(gate)?;
-        if matches!(&loss, LongitudinalMaterialLoss::FiniteStrainKelvinVoigt { .. }) {
-            return Err(invalid("finite-strain axial viscosity requires the fixed-end joint nonlinear owner"));
-        }
+        let finite_strain=matches!(&loss,LongitudinalMaterialLoss::FiniteStrainKelvinVoigt {..});
         if sources.is_empty() || sources.len()>32 || attachments.len()!=sources.len() {
             return Err(invalid("material axial support requires 1..=32 complete source attachments"));
         }
@@ -104,7 +104,9 @@ impl SupportedMaterialStrings {
             }
             rigidities.push(law.viscous_rigidity_n_s());laws.push(law);
         }
-        image.supported=image.supported.with_axial_viscosity(rigidities)?;
+        image.supported=if finite_strain {
+            image.supported.with_finite_strain_axial_viscosity(rigidities)?
+        } else {image.supported.with_axial_viscosity(rigidities)?};
         image.bodies[0].potential=BodyPotential::SupportedStrings(image.supported.clone());
         image.axial_material_loss=Some(laws);
         poll(gate)?;

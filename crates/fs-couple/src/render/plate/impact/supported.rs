@@ -151,6 +151,7 @@ struct Data {
     translation: Vec<f64>,
     damping: Vec<f64>,
     axial_viscosity_n_s: Option<Vec<f64>>,
+    finite_strain_axial_viscosity: bool,
     axial_endpoint_damping_n_s_m: f64,
     end_motion: Vec<StringEndMotion>,
     remainder_mass: Vec<f64>,
@@ -384,7 +385,7 @@ impl SupportedStrings {
         bound=bound.max(support_row);
         if !bound.is_finite() {return Err(invalid("moving support linear clock bound overflow"));}
         let result=Self(Rc::new(Data {support,wires:wires.to_vec(),potentials,ranges,storage_ranges,axial_ranges,translation,damping,
-            axial_viscosity_n_s:None,axial_endpoint_damping_n_s_m:0.0,
+            axial_viscosity_n_s:None,finite_strain_axial_viscosity:false,axial_endpoint_damping_n_s_m:0.0,
             end_motion,remainder_mass,absolute_drag:None,transverse:transverse_motion,weight,
             total_mass_kg:total_mass,clock_bounds:vec![det::sqrt(bound);count+1]}));
         // Check initial energy/motion representation before returning an adapter.

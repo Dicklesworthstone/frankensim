@@ -168,3 +168,62 @@ fn g0_missing_layer_wrong_loss_or_uncovered_support_frequency_refuses_before_pla
             source,support(),attachments(),selected(),300.0,&stop).is_err());
     });
 }
+
+#[test]
+fn g3_full_material_strain_loss_drives_the_same_support_and_closes_mechanical_work() {
+    with_cx(|cx,gate| {
+        let full=||LongitudinalMaterialLoss::FiniteStrainKelvinVoigt {
+            viscosity_property:YOUNG_VISCOSITY_PROPERTY.into(),
+        };
+        let mut trajectories=Vec::new();
+        for eta in [1e5,2e6] {
+            let image=build(cx,gate,Some(eta),(0.0,200_000.0),full()).unwrap();
+            assert!(image.supported().has_finite_strain_axial_viscosity());
+            let small=build(cx,gate,Some(eta),(0.0,200_000.0),selected()).unwrap();
+            assert_eq!(image.bodies()[0].initial,small.bodies()[0].initial);
+            assert_eq!(image.supported().absolute_drag(),small.supported().absolute_drag());
+            assert_eq!(image.torsion_ranges(),small.torsion_ranges());
+            let index=image.supported().support_coordinate();
+            let row=image.support_shape();
+            let mut run=image.prepare(config_at(RATE),gate).unwrap();
+            let initial=run.system().stored_energy_j();
+            let (mut loss,mut work)=(0.0,0.0);
+            for tick in 0..128 {
+                let force=if tick<16 {0.01} else {0.0};
+                let before=run.system().state().to_vec();
+                let frame=run.step(&row.iter().map(|b|force*b).collect::<Vec<_>>(),gate).unwrap();
+                let state=run.system().state();
+                let actual_work=force*row.iter().enumerate().map(|(i,b)|b*(state[2*i]-before[2*i])).sum::<f64>();
+                assert!((frame.supplied_work_j-actual_work).abs()<1e-12);
+                assert!(frame.dissipated_energy_j>=0.0);
+                loss+=frame.dissipated_energy_j;work+=frame.supplied_work_j;
+                assert!((frame.stored_energy_j+loss-initial-work).abs()<1e-9);
+            }
+            assert!(loss>0.0);
+            trajectories.push(run.system().state().to_vec());
+            assert_ne!(trajectories.last().unwrap()[2*index],0.0);
+            // A failed/cancelled tick must leave the original mechanical clock
+            // and every coupled state untouched, including torsion and support.
+            let before=run.system().state().to_vec();let samples=run.system().samples();
+            let stop=CancelGate::new_clock_free();stop.request();
+            assert!(run.step(&vec![0.0;row.len()],&stop).is_err());
+            assert_eq!(before,run.system().state());assert_eq!(samples,run.system().samples());
+        }
+        assert_ne!(trajectories[0],trajectories[1],"only the source viscosity changed");
+        let image=build(cx,gate,Some(0.0),(0.0,200_000.0),full()).unwrap();
+        assert!(image.axial_material_loss().is_some());
+        assert!(!image.supported().has_finite_strain_axial_viscosity());
+        let mut zero=image.prepare(config_at(RATE),gate).unwrap();
+        let mut elastic=build(cx,gate,Some(0.0),(0.0,200_000.0),LongitudinalMaterialLoss::Elastic)
+            .unwrap().prepare(config_at(RATE),gate).unwrap();
+        for _ in 0..16 {
+            let a=zero.step(&[0.0;10],gate).unwrap();let b=elastic.step(&[0.0;10],gate).unwrap();
+            assert_eq!(a.dissipated_energy_j,b.dissipated_energy_j);
+            assert_eq!(zero.system().state(),elastic.system().state());
+        }
+        for (eta,band) in [(None,(0.0,200_000.0)),(Some(1e5),(1.0,200_000.0)),
+            (Some(1e5),(0.0,10_000.0))] {
+            assert!(build(cx,gate,eta,band,full()).is_err());
+        }
+    });
+}

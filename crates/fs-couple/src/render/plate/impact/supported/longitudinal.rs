@@ -5,6 +5,7 @@
 //! static prestress reactions are not applied a second time here.
 use super::*;
 use fs_nlmodal::{KcStringParams, longitudinal::LongitudinalString};
+mod viscosity;
 
 /// A physical span and the direction of the common translating termination.
 /// The first transverse axis fixes the source's existing two-plane frame; the
@@ -98,7 +99,29 @@ impl SupportedStrings {
     /// endpoint bank. Geometric y_x*y_xt loss, heat and axial gas drag are not
     /// supplied. Zero is explicit lossless data; a missing string is an error.
     /// No state, mass, elastic force, transverse or torsional loss is replaced.
-    pub fn with_axial_viscosity(mut self, viscous_rigidity_n_s: Vec<f64>)
+    pub fn with_axial_viscosity(self, viscous_rigidity_n_s: Vec<f64>)
+        -> Result<Self, ImpactError>
+    {
+        self.bind_axial_viscosity(viscous_rigidity_n_s,false)
+    }
+
+    /// Bind Kelvin--Voigt loss to the SAME retained moderate-slope strain as
+    /// storage: epsilon=u_x+(y_x^2+z_x^2)/2. Its rate includes both transverse
+    /// planes, longitudinal waves and actual affine endpoint motion. The
+    /// reciprocal force and analytic tangent enter the existing joint solve;
+    /// their positive work enters its existing dissipation ledger.
+    ///
+    /// This replaces the linear axial approximation, never adds it twice.
+    /// It preserves the original bending, torsional, gas and support losses.
+    /// Source bands must cover the whole coupled image. No thermal feedback,
+    /// slip, hereditary axial law or geometrically exact large strain is implied.
+    pub fn with_finite_strain_axial_viscosity(self, viscous_rigidity_n_s: Vec<f64>)
+        -> Result<Self, ImpactError>
+    {
+        self.bind_axial_viscosity(viscous_rigidity_n_s,true)
+    }
+
+    fn bind_axial_viscosity(mut self, viscous_rigidity_n_s: Vec<f64>, finite_strain: bool)
         -> Result<Self, ImpactError>
     {
         if self.0.axial_viscosity_n_s.is_some()
@@ -119,7 +142,7 @@ impl SupportedStrings {
                 if !rate.is_finite() || (rigidity>0.0 && rate==0.0) {
                     return Err(invalid("supported axial viscous rate is unrepresentable"));
                 }
-                damping[index]=rate;
+                if !finite_strain {damping[index]=rate;}
             }
             let chord=potential.chord[2];
             let resistance=rigidity*self.0.wires[index].length_m()*chord*chord;
@@ -134,8 +157,9 @@ impl SupportedStrings {
         }
         let data=Rc::make_mut(&mut self.0);
         data.damping=damping;
-        data.axial_endpoint_damping_n_s_m=endpoint_damping;
+        data.axial_endpoint_damping_n_s_m=if finite_strain {0.0} else {endpoint_damping};
         data.axial_viscosity_n_s=Some(viscous_rigidity_n_s);
+        data.finite_strain_axial_viscosity=finite_strain;
         Ok(self)
     }
 

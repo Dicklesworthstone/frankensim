@@ -180,3 +180,99 @@ fn g1_axial_viscous_power_is_the_spatial_strain_rate_integral_with_endpoint_work
     let transverse=SupportedStrings::new(&[wire(1)],law(),rail()).unwrap();
     assert!(transverse.with_axial_viscosity(vec![1.0]).is_err());
 }
+
+#[test]
+fn g1_finite_strain_viscosity_matches_spatial_power_and_the_full_support_tangent() {
+    for ends in [StringEndMotion::First,StringEndMotion::Second,StringEndMotion::Both] {
+        let w=wire(2);let l=w.length_m();let rigidity=0.06;
+        let support=TranslatingSupport {initial_position_m:2e-4,initial_velocity_m_s:0.03,..rail()};
+        let base=SupportedStrings::with_longitudinal_motion(&[w.clone()],&[law()],&[ends],
+            &[geometry([0.6,0.48,0.64])],&[axial(vec![1,2,3,4])],support).unwrap();
+        let loaded=base.clone().with_finite_strain_axial_viscosity(vec![rigidity]).unwrap();
+        let n=loaded.mode_count();let dim=2*n;
+        let (mut before,mut after)=(vec![0.0;dim*dim],vec![0.0;dim*dim]);
+        base.add_resistance(0,dim,&mut before).unwrap();
+        loaded.add_resistance(0,dim,&mut after).unwrap();
+        assert_eq!(before,after,"finite-strain viscosity must not also be a linear resistance");
+        let relative:Vec<_>=(0..8).map(|i|ModalAcousticState {
+            displacement_m_sqrt_kg:if i<4 {2e-6*(i as f64-1.2)} else {1e-8*(i as f64-4.7)},
+            velocity_m_sqrt_kg_per_s:if i<4 {0.001*(i as f64-2.3)} else {1e-6*(i as f64-6.2)},
+        }).collect();
+        let body=loaded.body_with_relative_states(&relative).unwrap();
+        let z:Vec<_>=body.initial.iter().map(|s|s.displacement_m_sqrt_kg).collect();
+        let v:Vec<_>=body.initial.iter().map(|s|s.velocity_m_sqrt_kg_per_s).collect();
+        let mut force=vec![0.0;n];assert!(loaded.viscous_reaction(&z,&v,&mut force));
+        let power=-force.iter().zip(&v).map(|(f,v)|f*v).sum::<f64>();
+        let sign=match ends {StringEndMotion::First=>-1.0,StringEndMotion::Second=>1.0,StringEndMotion::Both=>0.0};
+        let transverse=(2.0/(w.linear_density_kg_m*l)).sqrt();let solid=(2.0/(0.01*l)).sqrt();
+        let cells=512;let mut spatial=0.0;
+        for cell in 0..cells {
+            let x=l*(cell as f64+0.5)/cells as f64;
+            let mut rate=sign*0.6*support.initial_velocity_m_s/l;
+            for mode in 0..4 {
+                let k=(mode+1) as f64*core::f64::consts::PI/l;
+                rate+=solid*k*relative[4+mode].velocity_m_sqrt_kg_per_s*(k*x).cos();
+            }
+            for (plane,projection) in [0.48,0.64].into_iter().enumerate() {
+                let mut slope=sign*projection*support.initial_position_m/l;
+                let mut slope_rate=sign*projection*support.initial_velocity_m_s/l;
+                for mode in 0..2 {
+                    let k=(mode+1) as f64*core::f64::consts::PI/l;let state=relative[2*plane+mode];
+                    slope+=transverse*k*state.displacement_m_sqrt_kg*(k*x).cos();
+                    slope_rate+=transverse*k*state.velocity_m_sqrt_kg_per_s*(k*x).cos();
+                }
+                rate+=slope*slope_rate;
+            }
+            spatial+=rigidity*rate*rate*l/cells as f64;
+        }
+        assert!(power>0.0);near(power,spatial,2e-12);
+        // Both product-rule terms and the kinetic pullback depend on the
+        // support component. Probe the complete normalized coordinate direction.
+        let dz:Vec<_>=(0..n).map(|i|0.0001*(i as f64-3.1)).collect();
+        let dv:Vec<_>=(0..n).map(|i|0.02*(i as f64+1.7)).collect();
+        let mut tangent=vec![0.0;n];assert!(loaded.viscous_reaction_tangent(&z,&v,&dz,&dv,&mut tangent));
+        let h=1e-7;
+        let plus:Vec<_>=z.iter().zip(&dz).map(|(z,d)|z+h*d).collect();
+        let minus:Vec<_>=z.iter().zip(&dz).map(|(z,d)|z-h*d).collect();
+        let vplus:Vec<_>=v.iter().zip(&dv).map(|(v,d)|v+h*d).collect();
+        let vminus:Vec<_>=v.iter().zip(&dv).map(|(v,d)|v-h*d).collect();
+        let (mut fp,mut fm)=(vec![0.0;n],vec![0.0;n]);
+        assert!(loaded.viscous_reaction(&plus,&vplus,&mut fp));
+        assert!(loaded.viscous_reaction(&minus,&vminus,&mut fm));
+        for i in 0..n {near(tangent[i],(fp[i]-fm[i])/(2.0*h),2e-6);}
+        let zero=base.clone().with_finite_strain_axial_viscosity(vec![0.0]).unwrap();
+        assert!(!zero.has_finite_strain_axial_viscosity());
+        assert!(zero.viscous_reaction(&z,&v,&mut force));assert_eq!(force,vec![0.0;n]);
+        if ends==StringEndMotion::Both {
+            let mut translation=vec![0.0;n];translation[n-1]=1.0;
+            for (value,c) in translation.iter_mut().zip(&base.0.translation) {*value=c*base.force_weight();}
+            assert!(loaded.viscous_reaction(&z,&translation,&mut force));
+            assert_eq!(force,vec![0.0;n],"rigid endpoint/string translation has no axial strain rate");
+        }
+        assert!(loaded.clone().with_axial_viscosity(vec![rigidity]).is_err());
+        assert!(loaded.with_finite_strain_axial_viscosity(vec![rigidity]).is_err());
+    }
+}
+
+#[test]
+fn g1_transverse_motion_dissipates_axially_at_finite_slope_with_no_axial_velocity() {
+    let base=SupportedStrings::with_longitudinal_motion(&[wire(1)],&[law()],&[StringEndMotion::Second],
+        &[geometry([0.6,0.8,0.0])],&[axial(vec![1,2])],rail()).unwrap();
+    let loaded=base.clone().with_finite_strain_axial_viscosity(vec![0.06]).unwrap();
+    let relative=vec![ModalAcousticState {displacement_m_sqrt_kg:1e-5,
+        velocity_m_sqrt_kg_per_s:0.001},ModalAcousticState::default(),
+        ModalAcousticState::default(),ModalAcousticState::default()];
+    let body=loaded.body_with_relative_states(&relative).unwrap();
+    let z:Vec<_>=body.initial.iter().map(|s|s.displacement_m_sqrt_kg).collect();
+    let v:Vec<_>=body.initial.iter().map(|s|s.velocity_m_sqrt_kg_per_s).collect();
+    let mut force=vec![0.0;loaded.mode_count()];assert!(loaded.viscous_reaction(&z,&v,&mut force));
+    assert!(force[0]*v[0]<0.0,"geometric strain rate must reach the transverse motion");
+    assert!(force[3].abs()>0.0,"the same viscous stress reacts on the second axial harmonic");
+    let w=wire(1);let scale=(2.0/(w.linear_density_kg_m*w.length_m())).sqrt()
+        *core::f64::consts::PI/w.length_m();
+    let a=scale*relative[0].displacement_m_sqrt_kg;
+    let b=scale*relative[0].velocity_m_sqrt_kg_per_s;
+    // epsilon_dot=a*b*cos^2(pi*x/L), integral cos^4 = 3L/8.
+    near(-force.iter().zip(&v).map(|(f,v)|f*v).sum::<f64>(),
+        0.06*wire(1).length_m()*3.0/8.0*(a*b).powi(2),1e-13);
+}
