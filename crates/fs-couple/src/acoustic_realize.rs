@@ -1964,6 +1964,11 @@ fn realize_dirac_join(
     n: usize,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
     validate_string(string, pluck, bow)?;
+    if duct.is_none() && (reed.is_some() || blow.is_some()) {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "a Dirac fluid exciter requires an independent duct source port",
+        });
+    }
     let n_s = string.n_modes.max(1);
     let zetas: Vec<f64> = (0..n_s)
         .map(|k| {
@@ -2089,6 +2094,20 @@ fn realize_dirac_join(
         }
     };
     let dt = 1.0 / f64::from(sample_rate_hz);
+    let (sys, mut descriptor_exact) = match sys {
+        Some(system) if system.storage().quadratic_part().is_some_and(|part| part.exact) => {
+            let budget = fs_phs::linear_exact::LinearSplitBudget {
+                max_modes: system.state_dim(),
+                max_omega_dt: core::f64::consts::PI,
+            };
+            let prepared = fs_phs::linear_exact::PreparedCommonFlowZoh::new_owned(
+                system, dt, budget,
+            )
+            .map_err(render_phs_error)?;
+            (None, Some(prepared))
+        }
+        original => (original, None),
+    };
     let descriptor_rate = sys
         .as_ref()
         .map(fs_phs::linear_exact::descriptor_pole_rate_bound)
@@ -2105,11 +2124,31 @@ fn realize_dirac_join(
     };
     let mut texture = TextureDrive::try_new(texture)?;
     let mut out = Vec::with_capacity(n);
+    let mut rec_x = vec![0.0; x.len()];
+    let mut average_output = vec![0.0; descriptor_exact.as_ref().map_or(0, |s| s.port_dim())];
     let phi0 = det::sqrt(2.0 / (string.lin_density_kg_m * string.length_m));
     let pi = core::f64::consts::PI;
     for i in 0..n {
         let t = i as f64 * dt;
-        let rec_x = if let Some(s) = &sys {
+        if let Some(prepared) = descriptor_exact.as_mut() {
+            let u = leftover_u(
+                prepared.system(),
+                &x,
+                n_s,
+                string,
+                bow,
+                obstacles,
+                reed,
+                blow,
+                gas,
+                t,
+                dt,
+                &mut texture,
+                fluid_port,
+            )?;
+            prepared.step_into(&x, &u, &mut rec_x, &mut average_output)
+                .map_err(render_phs_error)?;
+        } else if let Some(s) = &sys {
             let u = leftover_u(
                 s,
                 &x,
@@ -2125,9 +2164,9 @@ fn realize_dirac_join(
                 &mut texture,
                 fluid_port,
             )?;
-            step_descriptor(s, &x, &u, dt)
+            rec_x = step_descriptor(s, &x, &u, dt)
                 .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?
-                .x
+                .x;
         } else {
             let wg = waveguide.as_ref().expect("waveguide-only clock");
             let u = leftover_u_ode(
@@ -2146,7 +2185,7 @@ fn realize_dirac_join(
                 ode_start,
                 fluid_port,
             )?;
-            step_chain_flow(
+            rec_x = step_chain_flow(
                 wg,
                 waveguide_linear.as_ref().expect("prepared waveguide clock"),
                 waveguide_exact.as_ref(),
@@ -2154,8 +2193,8 @@ fn realize_dirac_join(
                 &u,
                 dt,
             )?
-            .x
-        };
+            .x;
+        }
         let mut p = 0.0;
         for k in 0..n_s {
             let acc = (rec_x[2 * k + 1] - x[2 * k + 1]) / dt;
@@ -2177,7 +2216,7 @@ fn realize_dirac_join(
                 what: "Dirac observer pressure left the finite set",
             });
         }
-        x = rec_x;
+        core::mem::swap(&mut x, &mut rec_x);
         out.push(p);
     }
     Ok(out)
@@ -5735,7 +5774,7 @@ mod string_observer_tests {
     }
 
     #[test]
-    fn actual_dirac_renderer_refuses_an_unresolved_common_clock() {
+    fn actual_dirac_renderer_refuses_an_unresolved_nonlinear_common_clock() {
         let gas = gas_state(AmbientGas::sea_level()).unwrap();
         for rate in [48_000, 96_000, 192_000] {
             let mut plates = PlateBank::default();
@@ -5752,7 +5791,7 @@ mod string_observer_tests {
                 length_m: 0.5,
                 tension_n: (2.0 * frequency).powi(2),
                 lin_density_kg_m: 1.0,
-                axial_stiffness_n: 0.0,
+                axial_stiffness_n: 1.0,
                 width_m: 0.001,
                 n_modes: 1,
                 damping_ratio: 0.0,

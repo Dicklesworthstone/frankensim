@@ -299,6 +299,39 @@ fn attached_radiation_history_stays_in_the_descriptor_before_its_multiplier() {
         fs_phs::linear_exact::admit_midpoint_band(rate, 1.0 / 48_000.0).is_err(),
         "retained stiff acoustic history must not bypass original temporal admission"
     );
+    let mut exact = fs_phs::linear_exact::PreparedCommonFlowZoh::new_owned(
+        joined.system,
+        1.0 / 48_000.0,
+        fs_phs::linear_exact::LinearSplitBudget {
+            max_modes: joined.state.len(),
+            max_omega_dt: core::f64::consts::PI,
+        },
+    )
+    .unwrap();
+    let mut state = joined.state;
+    let mut next = vec![0.0; state.len()];
+    let input = vec![0.0; exact.port_dim()];
+    let mut output = vec![0.0; input.len()];
+    let mut heat = 0.0;
+    for _ in 0..128 {
+        let record = exact
+            .step_into(&state, &input, &mut next, &mut output)
+            .unwrap();
+        heat += record.dissipated;
+        core::mem::swap(&mut state, &mut next);
+    }
+    assert_eq!(state.len(), 3 + accepted.len());
+    assert!(state.iter().all(|value| value.is_finite()));
+    assert!(heat > 0.0);
+    assert!(exact.hamiltonian(&state) < energy);
+    assert!((exact.hamiltonian(&state) - energy + heat).abs() < 2e-10 * energy);
+    assert_eq!(
+        bank.physical_image(&gas, 48_000, &fs_exec::CancelGate::default())
+            .unwrap()
+            .unwrap()
+            .state(),
+        accepted,
+    );
 }
 
 fn string(frequency_hz: f64) -> fs_scenario::PrestressedString {
@@ -380,15 +413,77 @@ fn actual_dirac_renderer_uses_mixed_and_vk_only_banks_with_signed_surface_maps()
         ),
         "an incompatible moving source cannot be silently reset by renderer dispatch"
     );
+    assert!(matches!(
+        super::super::realize_dirac_join(
+            &string,
+            None,
+            None,
+            &[],
+            None,
+            &mut cold_bank(false),
+            None,
+            None,
+            None,
+            Some(fs_scenario::VolumeVelocityPulse {
+                peak_m3_s: 1e-4,
+                duration_s: 0.01,
+            }),
+            &gas(),
+            1.0,
+            48_000,
+            1,
+        ),
+        Err(AcousticRealizeError::InvalidDescription { .. })
+    ));
 }
 
 #[test]
-fn actual_dirac_renderer_keeps_the_original_common_clock_refusal() {
+fn actual_dirac_renderer_resolves_quadratic_clocks_and_keeps_nonlinear_admission() {
     for rate in [48_000, 96_000, 192_000] {
         assert!(render(&mut cold_bank(false), &string(1.0), rate, 1).is_ok());
+        let high = render(&mut cold_bank(false), &string(10_000.0), rate, 8).unwrap();
+        assert!(high.iter().all(|sample| sample.is_finite()));
+        assert!(high.iter().any(|sample| sample.abs() > 1e-6));
         assert!(matches!(
-            render(&mut cold_bank(false), &string(10_000.0), rate, 1),
+            render(&mut cold_bank(true), &string(10_000.0), rate, 1),
             Err(AcousticRealizeError::TimeResolution(_))
         ));
     }
+}
+
+#[test]
+fn actual_dirac_renderer_retains_declared_radiation_at_the_audio_clock() {
+    let mut bank = PlateBank::default();
+    bank.linear.push(
+        CompactBody::from_radiator(fs_scenario::RadiatingPlate {
+            area_m2: core::f64::consts::PI * 0.01_f64.powi(2),
+            mass_kg: 2e-5,
+            frequency_hz: 600.0 / core::f64::consts::TAU,
+            damping_ratio: 0.01,
+        })
+        .unwrap(),
+    );
+    bank.declare_radiation_loads(&gas(), 48_000).unwrap();
+    let before = bank
+        .physical_image(&gas(), 48_000, &fs_exec::CancelGate::default())
+        .unwrap()
+        .unwrap()
+        .state()
+        .to_vec();
+    assert!(
+        before.len() > 2,
+        "the physical exterior has internal memory"
+    );
+    let long = render(&mut bank, &string(110.0), 48_000, 96).unwrap();
+    let short = render(&mut bank, &string(110.0), 48_000, 8).unwrap();
+    assert_eq!(&long[..short.len()], short);
+    assert!(long.iter().all(|sample| sample.is_finite()));
+    assert!(long.iter().any(|sample| sample.abs() > 1e-8));
+    assert_eq!(
+        bank.physical_image(&gas(), 48_000, &fs_exec::CancelGate::default())
+            .unwrap()
+            .unwrap()
+            .state(),
+        before,
+    );
 }

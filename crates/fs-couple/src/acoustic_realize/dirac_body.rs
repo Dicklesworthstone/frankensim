@@ -108,7 +108,8 @@ pub(super) fn join_complete_body(
     let system = join_port(waveguide, body, 0, 0)
         .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
     // The multiplier carries no energy. Zero is an initial representative;
-    // the existing descriptor step solves its interval-average reaction.
+    // the selected integrator supplies its reaction (instantaneous endpoint
+    // for exact quadratic flow, interval average for the descriptor step).
     initial.push(0.0);
     if initial.len() != system.state_dim() {
         return Err(invalid(

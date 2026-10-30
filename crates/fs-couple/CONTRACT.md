@@ -12784,29 +12784,38 @@ port participates in the original common-velocity `join_port`; its independent
 signed outward-volume port couples through the existing ratio-one transformer.
 The surviving fluid source port is mapped explicitly after the original string
 force ports. An unloaded body's pressure port stays open with zero applied
-pressure and is not mistaken for a volume-flow source.
+pressure and is not mistaken for a volume-flow source. A reed or volume source
+without an independent duct inlet refuses instead of being silently ignored.
 
 Joining accepted histories requires compatible initial attachment velocities.
 Admission uses the original efforts and force columns with a relative
 roundoff scale from their absolute products. Incompatible moving histories
 refuse; no velocity projection, hidden impact, state reset or material-memory
 reconstruction occurs. The multiplier has no storage and starts as a zero
-representative; the original descriptor integrator determines its interval
-reaction. The original complete quadratic pole bound and midpoint band remain
-in force, including stiff retained acoustic poles. Nonlinear storage keeps the
-existing Gonzalez update and its limits. This increment does not claim an
-exact descriptor propagator or automatic audio-clock admission for stiff loads.
+representative. Exactly declared quadratic joins prepare the shared
+`PreparedCommonFlowZoh` once, retain every physical coordinate, and return the
+instantaneous endpoint reaction. Original material heat and source work are
+integrated independently by that owner. Its complete-state and dense limits
+remain; the renderer reuses candidate-state and mean-output buffers.
+
+Nonlinear storage keeps the original descriptor/Gonzalez update and the
+original complete pole-rate bound and midpoint admission, including retained
+acoustic poles. Exact held-input evolution does not make state-dependent
+exciters monolithic or supply a source-bandwidth/anti-aliasing guarantee.
+The existing held-input, contact and observer conventions remain explicit.
 
 The original bank observer reads its complete physical prefix at the declared
 string offset, so compact and Vk modes cannot overlap or double count in the
-pressure calculation. Five focused native tests cover independently written
+pressure calculation. Focused native tests cover independently written
 mechanical/fluid DAE evolution with 20/40/80-step refinement, work/heat and
-constraint closure, nonlinear histories, malformed/incompatible joins, retained
-warm radiation state and temporal refusal, plus the actual renderer's mixed and
-Vk-only responses, signed areas and common-clock gate. The native target uses
-the actual exercised physics; unavailable bow/texture and cavity-source setup
-are explicitly outside its tested scope. Full workspace qualification is not
-asserted.
+constraint closure, nonlinear histories, malformed/incompatible joins, and
+128 exact steps of accepted warm radiation memory at 48 kHz. Actual renderer
+checks cover mixed and Vk-only bodies, signed areas, declared radiation at
+48 kHz, render-length prefix identity, an exact quadratic 10 kHz common mode,
+and retention of the nonlinear clock refusal. The native target uses the
+actual exercised physics; unavailable bow/texture and cavity-source setup
+are explicitly outside its tested scope. Full workspace and measured
+real-time qualification are not asserted.
 A dependent two-body/two-patch fixture also couples a shared native support
 to two distinct original finite thermal pads carrying that same body's identity;
 its independently derived full mechanical response and finite-cell root check
