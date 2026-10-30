@@ -205,7 +205,10 @@ pub struct CoupledModalFrame {
     pub material_dissipation_j: f64,
     /// Independently integrated exterior-load resistance [J].
     pub radiation_dissipation_j: f64,
-    /// Combined storage change + dissipation - external work [J].
+    /// Explicit time-discretization loss [J], separate from every physical
+    /// dissipation channel. Exact propagation records zero. This is not heat.
+    pub numerical_dissipation_j: f64,
+    /// Combined storage change + physical and numerical loss - external work [J].
     pub energy_residual_j: f64,
     /// Actual absolute + relative energy tolerance used by the gate [J].
     pub energy_tolerance_j: f64,
@@ -443,6 +446,7 @@ impl CoupledModalSystem {
             material_energy_j: 0.0, radiation_energy_j: 0.0,
             external_work_j: 0.0, component_dissipation_j: 0.0, connection_dissipation_j: 0.0,
             material_dissipation_j: 0.0, radiation_dissipation_j: 0.0,
+            numerical_dissipation_j: 0.0,
             energy_residual_j: 0.0, energy_tolerance_j: 0.0, solve_relative_residual: 0.0,
             connection_forces_n: vec![0.0; links],
         };

@@ -87,6 +87,9 @@ impl From<NativeLinearEventError> for AdhesiveNetworkEventModalError {
 /// Simultaneous sourced junctions sharing the same original native mechanics.
 pub mod multiple;
 
+/// Joint two-dimensional Coulomb disks with explicit time-discretization loss.
+pub mod vector;
+
 /// Complete accepted motion, with source capacities and distinct loss channels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AdhesiveNetworkEventModalFrame {

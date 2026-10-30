@@ -9,7 +9,7 @@ use super::super::super::{
     CoupledModalSystem, ModalCouplingError, dot, finite, invalid, limit, poll,
 };
 use super::super::linear_network::LinearNetworkLink;
-use super::{EventNativeAccount, projected_velocity, stage_account};
+use super::{EventNativeAccount, projected_velocity, stage_account_with_numerical_loss};
 use crate::modal_acoustic_time::ModalAcousticState;
 use crate::port_adoption::PortTransfer;
 use fs_exec::CancelGate;
@@ -159,7 +159,38 @@ impl NativeLinearNetworkWorkspace {
         path: NativeLinearEventTrajectory<'_>,
         gate: &CancelGate,
     ) -> Result<NativeLinearEventFrame, NativeLinearEventError> {
+        self.stage_with_numerical_loss(network, external, surface_energy_j, path, 0.0, None, gate)
+    }
+
+    /// Original mechanics and work ports for a dissipative time discretization.
+    /// The numerical loss is independently derived by that integrator, never a
+    /// residual correction, and is retained separately from physical losses.
+    #[allow(clippy::too_many_arguments)]
+    pub fn stage_with_numerical_loss(
+        &mut self,
+        network: &mut CoupledModalSystem,
+        external: &[f64],
+        surface_energy_j: f64,
+        path: NativeLinearEventTrajectory<'_>,
+        numerical_loss_j: f64,
+        connection_numerical_loss_j: Option<&[f64]>,
+        gate: &CancelGate,
+    ) -> Result<NativeLinearEventFrame, NativeLinearEventError> {
         poll(Some(gate))?;
+        if !numerical_loss_j.is_finite() || numerical_loss_j < 0.0 {
+            return Err(invalid("nonnegative finite numerical dissipation required").into());
+        }
+        if let Some(losses) = connection_numerical_loss_j {
+            if losses.len() != network.connections.len()
+                || losses.iter().any(|loss| !loss.is_finite() || *loss < 0.0)
+            {
+                return Err(invalid("each original connection requires a nonnegative discrete spring loss").into());
+            }
+            let sum = losses.iter().try_fold(0.0, |sum, loss| finite(sum + loss))?;
+            if sum > numerical_loss_j * (1.0 + 64.0 * f64::EPSILON) {
+                return Err(invalid("connection numerical loss exceeds the original total").into());
+            }
+        }
         let n = network.mode_count();
         if external.len() != n
             || external.iter().any(|f| !f.is_finite())
@@ -232,7 +263,9 @@ impl NativeLinearNetworkWorkspace {
                 return Err(invalid("negative original connection loss").into());
             }
             let change = finite(0.5 * link.stiffness_n_m * (z1 - z0) * (z1 + z0))?;
-            self.connection_work[i] = PortTransfer::work(finite(-change - loss)?, false);
+            let numerical_spring_loss = connection_numerical_loss_j.map_or(0.0, |losses| losses[i]);
+            self.connection_work[i] =
+                PortTransfer::work(finite(-change - loss - numerical_spring_loss)?, false);
             connection_loss = finite(connection_loss + loss)?;
             spring_energy = finite(spring_energy + 0.5 * link.stiffness_n_m * z1 * z1)?;
             network.reactions[i] = finite(-link.stiffness_n_m * z1 - link.damping_n_s_m * speed)?;
@@ -272,12 +305,13 @@ impl NativeLinearNetworkWorkspace {
             finite(after + surface_energy_j)?.abs(),
             network.config.maximum_total_energy_j,
         )?;
-        let residual = finite(after - before + loss - external_work)?;
+        let residual = finite(after - before + loss + numerical_loss_j - external_work)?;
         let scale = before
             .abs()
             .max(after.abs())
             .max(external_work.abs())
             .max(loss)
+            .max(numerical_loss_j)
             .max(surface_energy_j.abs());
         let tolerance = finite(
             network.config.energy_absolute_tolerance_j
@@ -299,7 +333,7 @@ impl NativeLinearNetworkWorkspace {
                 });
             }
         }
-        stage_account(
+        stage_account_with_numerical_loss(
             network,
             EventNativeAccount {
                 sample,
@@ -313,6 +347,7 @@ impl NativeLinearNetworkWorkspace {
                 residual_j: residual,
                 tolerance_j: tolerance,
             },
+            numerical_loss_j,
             self.connection_work.iter().copied(),
         );
         Ok(NativeLinearEventFrame {

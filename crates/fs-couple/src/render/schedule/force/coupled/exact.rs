@@ -954,6 +954,7 @@ fn stage_candidate(network: &mut CoupledModalSystem, external: &[f64], candidate
         connection_dissipation_j: connection_loss,
         material_dissipation_j: material_loss,
         radiation_dissipation_j: radiation_loss,
+        numerical_dissipation_j: 0.0,
         energy_residual_j: residual,
         energy_tolerance_j: tolerance,
         solve_relative_residual: 0.0,

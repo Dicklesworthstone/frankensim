@@ -13513,3 +13513,36 @@ disk-versus-box behavior, joint momentum/sticking, independent full-network RK4
 and first-order convergence of state and numerical loss, basis/contact-order
 covariance, internal elastic motion, partitioned impulses and moments, and
 strict physical/numerical/cancellation refusal with bit-identical retry.
+
+
+## Original native mechanics with sourced vector adhesive friction
+
+`adhesive_network_events::vector::VectorAdhesiveNetworkModalSystem` binds every
+two-tangent disk to its original ordered DMT/shear sources. Real contact area
+and the original junction strength determine capacity. This owner explicitly
+requires equal static and kinetic source strengths; it does not flatten a
+velocity-weakening law into a monotone one. All native modes, modal damping,
+Kelvin-Voigt links, rest extensions, pressure observations and physical limits
+remain active. Each contact must supply both complete independent work columns.
+
+The vector kernel and scalar event owners share original native state staging.
+Actual component restoration, independent storage/work checks, each original
+connection's force/work, source/speed/slip limits and propagated numerical work
+uncertainty precede joint publication. The vector owner's backward-Euler loss
+has its own `numerical_dissipation_j` field in both native and adhesive frames,
+and a separately named numerical-loss entry in the native window audit. Physical
+modal damping, link damping, friction, external work and numerical loss remain
+distinct; `CoupledModalFrame::total_dissipation_j` contains physical losses only.
+Each connection's discrete spring loss also enters its actual work transfer.
+No numerical loss is assigned to heat, and no residual is erased as a loss.
+
+Eight G1/G3/G4 tests cover diagonal loading outside the disk, joint sticking
+with continuing internal elastic motion, tangent-chart rotation and contact
+permutation, individual source causality, first-order refinement toward the
+original complete prepared network, separate numerical/work-accuracy limits,
+source and rank admission, cancellation and late original-body refusal with
+bit-identical retry. The 26 existing scalar native event tests also pass.
+This lane retains fixed normal indentation, fixed tangent geometry and source
+conditions, with bounded internal timesteps. It does not add rotating frames,
+normal impacts, velocity weakening, nonlinear constitutive memory, dependent
+reaction selection or exact continuous event times.

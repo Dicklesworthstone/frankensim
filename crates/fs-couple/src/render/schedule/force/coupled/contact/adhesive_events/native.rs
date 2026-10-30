@@ -136,6 +136,17 @@ pub(crate) fn stage_account(
     account: EventNativeAccount,
     connection_transfers: impl IntoIterator<Item = PortTransfer>,
 ) {
+    stage_account_with_numerical_loss(network, account, 0.0, connection_transfers);
+}
+
+/// A time-discrete contact owner supplies its independently computed numerical
+/// loss without relabeling it as friction, damping, heat or external work.
+pub(crate) fn stage_account_with_numerical_loss(
+    network: &mut CoupledModalSystem,
+    account: EventNativeAccount,
+    numerical_loss_j: f64,
+    connection_transfers: impl IntoIterator<Item = PortTransfer>,
+) {
     let frame = &mut network.staged_frame;
     frame.sample = account.sample;
     frame.observer_pressure_pa = account.observer_pressure_pa;
@@ -148,13 +159,14 @@ pub(crate) fn stage_account(
     frame.connection_dissipation_j = account.connection_dissipation_j;
     frame.material_dissipation_j = 0.0;
     frame.radiation_dissipation_j = 0.0;
+    frame.numerical_dissipation_j = numerical_loss_j;
     frame.energy_residual_j = account.residual_j;
     frame.energy_tolerance_j = account.tolerance_j;
     frame.solve_relative_residual = 0.0;
     frame
         .connection_forces_n
         .copy_from_slice(&network.reactions);
-    network.staged_ports.accept(
+    network.staged_ports.accept_with_numerical_loss(
         StepAccount {
             tick: account.sample,
             duration_s: network.dt,
@@ -167,6 +179,7 @@ pub(crate) fn stage_account(
             tolerance_j: Some(account.tolerance_j),
             unavailable: None,
         },
+        numerical_loss_j,
         connection_transfers,
     );
 }

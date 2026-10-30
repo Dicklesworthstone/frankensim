@@ -58,6 +58,8 @@ pub(crate) struct ModulePorts {
     pub(crate) charts: Vec<PortCoordinateChart>,
     pub(crate) junctions: Vec<JunctionSchema>,
     last: Option<StepAccount>,
+    /// Accepted discretization loss, never physical heat or material damping.
+    numerical_loss_j: f64,
     raw: Vec<PortTransfer>,
     /// When set, `raw` is empty and the last window's transfers come from this evaluator, run once on first request.
     deferred: Option<Deferred>,
@@ -133,6 +135,7 @@ impl ModulePorts {
             charts,
             junctions: Vec::new(),
             last: None,
+            numerical_loss_j: 0.0,
             raw,
             deferred: None,
             evaluated: OnceLock::new(),
@@ -169,11 +172,23 @@ impl ModulePorts {
         account: StepAccount,
         ports: impl IntoIterator<Item = PortTransfer>,
     ) {
+        self.accept_with_numerical_loss(account, 0.0, ports);
+    }
+    /// Keep a discretization loss separate in the physical window audit. The
+    /// owner admits its finiteness, sign and accuracy budget before publication;
+    /// `account.loss_j` continues to contain only physical dissipation.
+    pub(crate) fn accept_with_numerical_loss(
+        &mut self,
+        account: StepAccount,
+        numerical_loss_j: f64,
+        ports: impl IntoIterator<Item = PortTransfer>,
+    ) {
         self.raw.clear();
         self.raw.extend(ports);
         self.deferred = None;
         self.evaluated = OnceLock::new();
         self.last = Some(account);
+        self.numerical_loss_j = numerical_loss_j;
         self.integrated = OnceLock::new();
     }
     /// An independent observation may refuse after the physical owner accepts.
@@ -294,8 +309,12 @@ impl ModulePorts {
         // Named external sinks and prescribed work remain measured owner values.
         for (key, energy) in [
             ("dissipation", -loss),
+            ("numerical-dissipation", -self.numerical_loss_j),
             ("prescribed-work", last.included_work_j),
         ] {
+            if key == "numerical-dissipation" && energy == 0.0 {
+                continue;
+            }
             let base = schema(&self.owner, key, PortKind::MechanicalForceVelocity);
             let port = PortSchema::try_new(
                 base.id().clone(),
