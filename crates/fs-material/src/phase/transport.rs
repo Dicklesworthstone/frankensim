@@ -198,6 +198,35 @@ pub fn resolve_phase_transport_state_with_shear_rate(
     )
 }
 
+/// Resolve original phase, physical shear and bounded source-density response together.
+///
+/// This composes the existing shear and density-departure admissions on ONE
+/// source query. The h chart still owns phase and reference mass; actual source
+/// rho(T,phi) is retained for an explicit reference-mass momentum projection.
+/// Native `sqrt(2 D:D)` controls the same sourced viscosity and conductivity
+/// used by flow and molecular heat. Density and Cp may not depend on shear,
+/// including when the current numerical value lies inside the departure bound.
+///
+/// Exact solids receive zero rate and never request liquid-only properties.
+/// This does not provide shrinkage, a moving solid skeleton or a second
+/// thermodynamic storage law.
+pub fn resolve_phase_transport_state_with_shear_rate_and_density_departure(
+    law: &MushyPhaseLaw<'_>,
+    specific_enthalpy_j_kg: f64,
+    query: PhaseTransportSourceQuery<'_>,
+    shear_rate_axis: &str,
+    shear_rate_per_s: f64,
+    maximum_relative_density_departure: f64,
+) -> Result<ResolvedPhaseTransportState, MaterialError> {
+    resolve_phase_transport_state_inner(
+        law,
+        specific_enthalpy_j_kg,
+        query,
+        Some((shear_rate_axis, shear_rate_per_s)),
+        Some(maximum_relative_density_departure),
+    )
+}
+
 fn resolve_phase_transport_state_inner(
     law: &MushyPhaseLaw<'_>,
     specific_enthalpy_j_kg: f64,

@@ -4640,8 +4640,9 @@ The shared transfer still checks mass, enthalpy, linear and angular momentum,
 and separately bounds the kinetic projection deficit. Equilibrium population
 initialization rebuilds receiving viscous stress; it does not transfer the MAC
 stress tensor. This memoryless generalized-Newtonian rung needs startup and time
-refinement and does not claim elastic memory, capillary energy, phase-conductivity
-multiplier or buoyancy transfer. Unsupported owners refuse explicitly.
+refinement and does not claim elastic memory, capillary energy, shrinkage or
+moving-solid geometry. The original phase-conductivity multiplier and bounded
+buoyancy projection can accompany the same native rheology owner.
 
 The integrated regression melts the specimen, drives native circulation,
 releases it and advances native free-surface motion with data-only rheology
@@ -5385,7 +5386,23 @@ selected claims, reference transport, gravity and approximation bounds. Existing
 mass, enthalpy, momentum, angular momentum, clock and projection-loss admission
 remain in force. Removing stationary support exposes native reference gravity
 plus its density perturbation; force-frame rebind preserves initial velocity.
-Combined shear-rheology/buoyancy release still refuses rather than dropping a law.
+The joint phase resolver admits original h/T/fraction, native physical shear
+and bounded source density in one query. Shear-dependent density or Cp still
+refuses. `BoussinesqPhaseMaterial::at_source` refreshes that source while retaining
+the original reference, bounds, material, caloric chart and mobility law; exact
+solids continue to omit liquid-only properties. Native viscosity drives the same
+momentum, Darcy resistance and molecular heat, while the original k drives heat.
+
+`release_fully_liquid_with_rheology` now carries this combined source into
+`free_surface3_from_cells_with_boussinesq_rheology`, which uses the existing VOF
+force and constitutive owners together. Source MAC rates admit the original
+source; receiving rates are solved from its own force-corrected stress. Mass and
+inertia retain rho0, departing source rho drives buoyancy, and force-frame
+rebinding precedes all receiving momentum/kinetic checks. Projection loss is
+still reported separately from heat. The joint regression heats exact solid
+through the latent plateau, drives native shear, releases complete liquid and
+checks data-only motion changes, original transfer budgets and independently
+summed mu*gamma_dot^2*volume*dt heating on the evolving VOF owner.
 
 This is a bounded Boussinesq stationary-skeleton model, not moving partial-solid
 geometry, shrinkage, elastic-energy release, separate phase velocities or a

@@ -194,11 +194,62 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
         cx: &Cx<'_>,
         gate: &CancelGate,
     ) -> Result<MaterialFreeSurfaceEnthalpy3<'s, 'm>, Error> {
+        self.free_surface3_from_cells_with_rheology_model(
+            domain, initial, law, caloric, controls, solve, None, initial_h, cx, gate,
+        )
+    }
+
+    /// Initialize one moving-liquid owner with original buoyancy AND rheology.
+    ///
+    /// The same pinned T/rate bundle supplies raw rho, Cp, mu and k. The existing
+    /// Boussinesq owner bounds rho/Cp against the original reference while rho0
+    /// owns transported mass, caloric storage and collision inertia. The native
+    /// constitutive solve uses force-corrected stress and the original viscosity;
+    /// attaching gravity does not freeze the rate or introduce another law.
+    ///
+    /// Initial force rebinding preserves physical momentum. Later heat, VOF
+    /// transport, conduction and molecular heating all continue through the
+    /// existing combined owner. Caloric states must remain pure liquid; no
+    /// phase-volume change or solid-skeleton dynamics is introduced.
+    #[allow(clippy::too_many_arguments)]
+    pub fn free_surface3_from_cells_with_boussinesq_rheology<'m>(
+        self,
+        domain: MaterialFreeSurfaceDomain3<'_>,
+        initial: &[MaterialFreeSurfaceInitialCell3],
+        law: &'m LiquidTemperatureLaw<'m>,
+        caloric: &'m EquilibriumEnthalpyPhaseCurve,
+        controls: FreeSurfaceEnthalpyControls,
+        solve: RheologySolve,
+        buoyancy: crate::material::transport::boussinesq::BoussinesqConfig<3>,
+        initial_h: impl Fn([usize; 3]) -> f64,
+        cx: &Cx<'_>,
+        gate: &CancelGate,
+    ) -> Result<MaterialFreeSurfaceEnthalpy3<'s, 'm>, Error> {
+        self.free_surface3_from_cells_with_rheology_model(
+            domain, initial, law, caloric, controls, solve, Some(buoyancy), initial_h, cx, gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn free_surface3_from_cells_with_rheology_model<'m>(
+        self,
+        domain: MaterialFreeSurfaceDomain3<'_>,
+        initial: &[MaterialFreeSurfaceInitialCell3],
+        law: &'m LiquidTemperatureLaw<'m>,
+        caloric: &'m EquilibriumEnthalpyPhaseCurve,
+        controls: FreeSurfaceEnthalpyControls,
+        solve: RheologySolve,
+        buoyancy: Option<crate::material::transport::boussinesq::BoussinesqConfig<3>>,
+        initial_h: impl Fn([usize; 3]) -> f64,
+        cx: &Cx<'_>,
+        gate: &CancelGate,
+    ) -> Result<MaterialFreeSurfaceEnthalpy3<'s, 'm>, Error> {
         poll(gate)?;
         let binding = RheologyBinding::try_new(self.material(), law, solve)?;
         let flow = self.free_surface3_from_cells_inner(domain, initial, cx)?;
-        let liquid =
-            flow.with_bound_thermal_transport(law, caloric, controls, initial_h, None, Some(binding), gate)?;
+        let liquid = flow.with_bound_thermal_transport(
+            law, caloric, controls, initial_h, buoyancy, Some(binding), gate,
+        )?;
         cx.checkpoint().map_err(|_| FreeSurfaceError3::Cancelled)?;
         Ok(liquid)
     }

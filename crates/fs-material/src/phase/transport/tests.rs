@@ -1,4 +1,6 @@
 //! Manufactured constitutive/source checks, not measured metal properties.
+mod joint_response;
+
 use super::*;
 use crate::conductor::ElectricalPropertyBasis;
 use crate::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, SolidLiquidPhase};

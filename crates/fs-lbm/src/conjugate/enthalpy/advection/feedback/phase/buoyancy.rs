@@ -34,6 +34,38 @@ impl BoussinesqPhaseMaterial {
         self.config
     }
 
+    /// Refresh an original phase source while retaining this exact projection.
+    ///
+    /// Native rheology callbacks can resolve h/T/shear/source density on the
+    /// original material, then call this method on the initial phase sample.
+    /// Reference transport and bounds remain fixed; they cannot be accidentally
+    /// replaced by the current source density or a reference shear value.
+    /// The phase curve, mobility law and material identity must also survive.
+    ///
+    /// Claim selection and fixed nonthermal query context remain the original
+    /// resolver's responsibility. Retain its ThermalMaterialPoint and selection;
+    /// this projection does not infer which source coordinates may evolve.
+    ///
+    /// Exact solids still require no liquid Cp or viscosity. The shared
+    /// Boussinesq owner bounds mobile rho/Cp while retaining actual mu and k;
+    /// caloric mass and latent storage remain owned by the original h chart.
+    pub fn at_source(
+        &self,
+        material: ResolvedPhaseTransportState,
+    ) -> Result<Self, MaterialError> {
+        if material.material().card_identity() != self.material.material().card_identity()
+            || material.phase_state().phase_curve_identity()
+                != self.material.phase_state().phase_curve_identity()
+            || material.mobility().law_identity() != self.material.mobility().law_identity()
+        {
+            return Err(MaterialError::State {
+                what: "phase buoyancy refresh must retain the original material, chart and mobility law"
+                    .into(),
+            });
+        }
+        Self::try_new(material, self.reference, self.config)
+    }
+
     fn try_new(
         material: ResolvedPhaseTransportState,
         reference: FluidTransportState,

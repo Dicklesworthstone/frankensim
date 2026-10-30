@@ -21,6 +21,9 @@ mod rheology;
 #[path = "release/buoyancy.rs"]
 mod buoyancy;
 
+#[path = "release/buoyancy_rheology.rs"]
+mod buoyancy_rheology;
+
 fn domain() -> VoxelDomain {
     VoxelDomain::from_fn(4, 4, 4, 1.0, |[x, y, z]| {
         if (1.0..3.0).contains(&x) && (1.0..3.0).contains(&y) && z < 2.0 {

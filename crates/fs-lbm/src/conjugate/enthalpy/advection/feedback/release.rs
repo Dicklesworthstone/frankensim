@@ -174,8 +174,10 @@ where
     /// viscous stress on the receiving lattice; it does not transfer the MAC
     /// stress tensor. Generalized-Newtonian response has no stored elastic
     /// memory to erase, but the stress startup and time split require refinement.
-    /// Phase conductivity remains attached. Combined rheology/Boussinesq release
-    /// and surface-creation energy still require additional receiving ownership.
+    /// Phase conductivity and the original bounded buoyancy projection remain
+    /// attached to that same T/shear source. Source MAC rates are used only for
+    /// admission; receiving rates come from its own force-corrected stress.
+    /// Surface-creation energy remains unsupported.
     #[allow(clippy::too_many_arguments)]
     pub fn release_fully_liquid_with_rheology<'s, 'm>(
         &self,
@@ -271,8 +273,7 @@ where
             ));
         }
         if let Some((config, reference)) = buoyancy {
-            if rheology.is_some()
-                || config.gravity_m_s2 != domain.gravity_m_s2
+            if config.gravity_m_s2 != domain.gravity_m_s2
                 || law
                     .reference_state()
                     .transport_state()
@@ -280,7 +281,7 @@ where
                     != reference
             {
                 return Err(refused(
-                    "buoyant release needs original reference transport/gravity and no unowned combined rheology",
+                    "buoyant release needs original reference transport and gravity",
                 ));
             }
         }
@@ -404,20 +405,24 @@ where
         // remains authoritative; the independently summed faces checked it above.
         source.kinetic_energy_j = native.final_kinetic_energy_j;
         let initial_h = |at| enthalpy.get(&at).copied().unwrap_or(f64::NAN);
-        let liquid = if let Some(solve) = rheology {
-            scaling.free_surface3_from_cells_with_rheology(
+        let liquid = match (rheology, buoyancy) {
+            (Some(solve), Some((config, _))) => {
+                scaling.free_surface3_from_cells_with_boussinesq_rheology(
+                    domain, &initial, law, caloric, transport, solve, config, initial_h, cx,
+                    self.gate,
+                )?
+            }
+            (Some(solve), None) => scaling.free_surface3_from_cells_with_rheology(
                 domain, &initial, law, caloric, transport, solve, initial_h, cx, self.gate,
-            )?
-        } else if let Some((config, _)) = buoyancy {
-            scaling
+            )?,
+            (None, Some((config, _))) => scaling
                 .free_surface3_from_cells(domain, &initial, cx)
                 .map_err(FreeSurfaceEnthalpyError::from)?
-                .with_boussinesq_enthalpy(law, caloric, transport, config, initial_h, self.gate)?
-        } else {
-            scaling
+                .with_boussinesq_enthalpy(law, caloric, transport, config, initial_h, self.gate)?,
+            (None, None) => scaling
                 .free_surface3_from_cells(domain, &initial, cx)
                 .map_err(FreeSurfaceEnthalpyError::from)?
-                .with_enthalpy(law, caloric, transport, initial_h, self.gate)?
+                .with_enthalpy(law, caloric, transport, initial_h, self.gate)?,
         };
         let liquid = match self.phase_conductivity_law() {
             Some(law) => liquid.with_phase_conductivity(law, self.gate)?,
