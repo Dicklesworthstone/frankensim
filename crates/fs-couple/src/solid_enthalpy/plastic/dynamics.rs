@@ -14,7 +14,7 @@
 //!
 //! This inherits the original source/phase/small-strain admission. The model
 //! uses rate-independent J2 by default; explicit material viscosity selects the
-//! same source-bound linear-overstress law as the quasistatic thermal owner.
+//! same source-bound overstress law as the quasistatic thermal owner.
 //! Both constitutive kinetics and inertia use the actual physical interval.
 //! Loads and support displacements are endpoint values; resolve pulses and
 //! refine physical intervals to assess first-order time accuracy. The thermal
@@ -29,6 +29,8 @@ pub use fs_solid::plastic3::dynamics::InertialEnergy;
 pub mod contact;
 /// Circuit heating and pressure-dependent interfaces with retained inertia.
 pub mod electrical;
+/// Finite-gas heat exchange and complete thermal assemblies with native inertia.
+pub mod gas;
 
 pub(super) struct Motion {
     pub velocity_mps: Vec<[f64; 3]>,

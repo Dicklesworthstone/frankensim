@@ -7,9 +7,10 @@
 //! neither Newton probes nor thermal proposals advance the constitutive clock.
 //!
 //! Gas mass, volume and composition and solid reference geometry remain fixed.
-//! This is quasistatic small-strain mechanics over the original fully solid
-//! source domain. Gas pressure traction, moving gas boundaries and chemistry
-//! are not inferred from this thermal connection.
+//! The same small-strain proposal serves quasistatic mechanics and the native
+//! inertial trajectory in [`super::dynamics::ThermoplasticDynamics`], over the
+//! original fully solid source domain. Gas pressure traction, moving gas
+//! boundaries and chemistry are not inferred from this thermal connection.
 
 use super::*;
 use crate::circuit_enthalpy::contacts::heat::{HeatNetworkSample, PreparedHeatNetwork};
@@ -117,8 +118,10 @@ impl<'m> ThermoplasticSolid<'m> {
             yield_tolerance_pa,
             controls,
             initial_energy_increments_j,
+            None,
             cx,
         )
+        .map(|(candidate, _)| candidate)
     }
 
     /// The same coupled endpoint with the complete prepared heat assembly.
@@ -160,12 +163,14 @@ impl<'m> ThermoplasticSolid<'m> {
             yield_tolerance_pa,
             controls,
             initial_energy_increments_j,
+            None,
             cx,
         )
+        .map(|(candidate, _)| candidate)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn advance_gas_transport<'t, T: GasHeatTransport>(
+    pub(super) fn advance_gas_transport<'t, T: GasHeatTransport>(
         &self,
         thermal: &DepositionSimulation<'t>,
         gas: &IsochoricGasParcel,
@@ -179,8 +184,15 @@ impl<'m> ThermoplasticSolid<'m> {
         yield_tolerance_pa: f64,
         controls: SolidGasSolve,
         initial_energy_increments_j: &[f64],
+        motion: Option<&[[f64; 3]]>,
         cx: &Cx<'_>,
-    ) -> Result<ThermoplasticGasCandidate<'m, 't, T::Sample>, SolidGasError> {
+    ) -> Result<
+        (
+            ThermoplasticGasCandidate<'m, 't, T::Sample>,
+            Option<dynamics::Motion>,
+        ),
+        SolidGasError,
+    > {
         poll::<Infallible>(cx)?;
         let duration_s = target_s - self.time_s;
         if thermal.time_s() != self.time_s
@@ -256,14 +268,20 @@ impl<'m> ThermoplasticSolid<'m> {
                     settings,
                     mechanical_controls,
                     duration_s,
-                    None,
+                    motion,
                     cx,
                 )?;
+                // The native consistent-mass account belongs to the same
+                // enclosing gas/solid balance. Kinetic and constitutive
+                // numerical losses remain separate from physical cell heat.
+                let inertia = mechanical.motion.as_ref().map(|motion| motion.energy);
                 let exchange = StructuralExchange {
                     heat_j: mechanical.heat_j.clone(),
                     stored_change_j: mechanical.stored_change_j
-                        + mechanical.thermoelastic_storage_change_j,
-                    numerical_loss_j: mechanical.numerical_loss_j,
+                        + mechanical.thermoelastic_storage_change_j
+                        + inertia.map_or(0.0, |energy| energy.kinetic_change_j),
+                    numerical_loss_j: mechanical.numerical_loss_j
+                        + inertia.map_or(0.0, |energy| energy.numerical_loss_j),
                     external_work_j: mechanical.external_work_j,
                 };
                 Ok(StructuralEndpoint {
@@ -317,11 +335,14 @@ impl<'m> ThermoplasticSolid<'m> {
             mechanical_residual_j: mechanical.mechanical_residual_j,
         };
         poll::<Infallible>(cx)?;
-        Ok(ThermoplasticGasCandidate {
-            thermal,
-            gas,
-            solid,
-            report,
-        })
+        Ok((
+            ThermoplasticGasCandidate {
+                thermal,
+                gas,
+                solid,
+                report,
+            },
+            mechanical.motion,
+        ))
     }
 }
