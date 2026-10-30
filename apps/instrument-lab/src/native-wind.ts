@@ -12,6 +12,7 @@ import radiatingMouthResolvedDgSource from "../../../crates/fs-couple/examples/r
 import separateOpeningsResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-separate-openings.performance?raw";
 import multipleEscapesResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-multiple-escapes.performance?raw";
 import finiteReservoirResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-finite-reservoir.performance?raw";
+import actuatedReservoirResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-actuated-reservoir.performance?raw";
 import slitEdgeResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-slit-edge.performance?raw";
 import siSlitEdgeResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-si-slit-edge.performance?raw";
 import upstreamResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-upstream.performance?raw";
@@ -153,6 +154,15 @@ const EXAMPLES = [
     decimate: true,
     intro: "Starter: the same resolved gas field feeds a bore and two atmospheric openings. The microphone combines each original signed tile flow with its declared placement, delay and exterior gas propagation.",
     help: "Repeat reservoir_observation aperture with each original aperture index. Changing the selected gas updates all exterior paths while retaining the original grid. Multiple observers require an explicit aperture index when selecting the existing single reservoir_feedback reaction. This numerical fixture does not establish measured flute geometry or a multi-reservoir radiation reaction.",
+  },
+  {
+    name: "resolved-dg-actuated-reservoir.performance",
+    label: "Resolved flow — chamber work and heat",
+    renderer: "resolved",
+    source: actuatedReservoirResolvedDgSource,
+    decimate: false,
+    intro: "Starter: compress and expand a finite nitrogen chamber while adding heat. Its original gas law converts the work and heat into pressure and temperature changes that drive the resolved opening, bore, cork duct and separate radiating escape.",
+    help: "Attach the same nitrogen species, NASA9 and transport packs as the finite-chamber starter. boundary finite-reservoir-actuation holds or ramps volume rate in m³/s and heat power in watts; positive rate expands and positive power heats. The native solver integrates those controls on its physical clock and checks the gas, work and exchange budgets before accepting each interval. This 8 ms numerical fixture uses a well-mixed source; it does not supply player anatomy or measured flute validation.",
   },
   {
     name: "resolved-dg-slit-edge.performance",

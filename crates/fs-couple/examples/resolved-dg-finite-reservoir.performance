@@ -1,6 +1,6 @@
 frankensim-resolved-dg-performance-v1
-clock 8000 12
-output 64 20
+clock 48000 12
+output 384 20
 gas thermochemical 300 95000 mole 1 N2 1
 grid 16 3 3 0.0052945752017603985 0 0 0
 fluid_limits 144 280 340 0.2 1 17 1
@@ -31,5 +31,5 @@ reservoir_observation aperture 1 baffled -0.08 0 0
 reservoir_feedback -20 20 16 16
 observer_gas stokes-kirchhoff 4096 1000000 50000000
 boundary finite-reservoir 0 1
-hold 64
+hold 384
 end

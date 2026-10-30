@@ -1106,7 +1106,8 @@ lip anatomy, full bore heat/species transport or qualified flute sound.
 ## Finite thermochemical source chamber
 
 A selected transverse opening can now exchange mass and complete total energy
-with a finite rigid chamber. Attach it with
+with a finite well-mixed chamber. Its volume is fixed unless an explicit
+thermochemical actuation drive supplies volume rate and heat power. Attach it with
 `NsfDg::with_finite_reservoir(aperture, volume_m3, limits, gate)`, then advance
 with `NsfDgDrive::FiniteReservoir { aperture }`. The initial inventory comes
 from that opening's original density and temperature and the **same frozen
@@ -1152,10 +1153,12 @@ end
 ```
 
 The endpoint is on the existing observation clock. No pressure or temperature
-values follow it. Prescribed source controls, a different selected opening,
-or an authored ramp conflict with this finite inventory and refuse. Existing
-pressure/temperature/characteristic holds and ramps retain their original
-grammar for sources without a finite chamber.
+values follow this passive hold. Prescribed source controls, a different
+selected opening, or a ramp of passive ownership conflict with this declaration
+and refuse. The separate actuation history below supplies physical volume rate
+and heat power for a thermochemical chamber. Existing pressure/temperature/
+characteristic holds and ramps retain their original grammar for sources
+without a finite chamber.
 
 A separate opening can retain `reservoir_feedback` and its material microphone.
 The source also composes with the original downstream duct, optional finite
@@ -1230,8 +1233,9 @@ This is an **explicit first-order source partition**: pressure and temperature
 are held over each coupled physical interval, then updated. Refine that interval
 and the grid for source-feedback accuracy. The acoustic DG ducts still omit
 mean mass/enthalpy advection; the chamber does not fill that separate gap.
-There is no mechanical breathing effort, source refill, moving chamber wall,
-composition evolution or experimental flute qualification in this attachment.
+The optional actuation below supplies imposed volume work and heat. It does
+not solve player anatomy, moving-wall inertia, source refill, composition
+evolution or experimental flute qualification.
 The focused integration and native-input regressions are authored numerical
 checks; the direct GitHub implementation session did not execute native builds,
 runtime tests, convergence campaigns or listening comparisons.
@@ -1243,8 +1247,10 @@ a 10 mL nitrogen chamber to opening 0, a separate radiating escape to opening 1,
 the original downstream bore, a finite closed cork-side duct, and the existing
 material microphone. It retains the previous separate-opening fixture's physical
 mesh while the original nitrogen properties determine its physical timestep.
-The 64 samples at 8 kHz are an 8 ms numerical integration window, not a playable
-phrase or a measured flute model.
+The 384 samples at 48 kHz are an 8 ms numerical integration window, not a
+playable phrase or a measured flute model. The 48 kHz observation clock is
+accepted by the native PCM command without `--decimate`; it does not change
+the original physical interval or the twelve NSF substeps per coupled interval.
 
 The resolved gas starts at 300 K and 95000 Pa. The quiescent chamber starts at
 300.15 K with density `1.0664144914103022 kg/m3`, corresponding to approximately
@@ -1282,3 +1288,105 @@ source aperture's density or temperature changes its original initial state.
 Neither edit supplies a desired pitch, artificial turbulence or calibrated
 audio. The example and new native regressions require an actual native run
 before stability, numerical accuracy or audibility claims.
+
+### Physical chamber motion and heat
+
+`NsfDgDrive::FiniteReservoirActuation` adds an explicit volume rate in
+`m3/s`, heat power in `W`, and a maximum relative volume change per
+physical interval. Positive volume rate expands the chamber; negative rate
+compresses it. Positive heat power supplies energy to the gas. These commands
+are physical boundary inputs: the original gas law determines pressure and
+temperature, and the original resolved opening determines mass flow.
+
+This attachment requires the retained NASA9 thermochemical parcel. Passive
+finite sources retain both the named-mixture and thermochemical paths. The
+named source is not converted to an invented NASA model to enable motion.
+
+The native boundary header and rows are:
+
+```text
+boundary finite-reservoir-actuation APERTURE MAX_REL_VOLUME SEGMENTS
+hold END_SAMPLE VOLUME_RATE_M3_S HEAT_POWER_W
+ramp END_SAMPLE START_VOLUME_RATE START_HEAT_POWER END_VOLUME_RATE END_HEAT_POWER
+```
+
+`MAX_REL_VOLUME` must be strictly between zero and one. Holds and ramps use
+the existing observation-clock endpoints. The current rate and power are sampled
+at each original physical interval's start; the original physical interval
+duration supplies the volume increment and heat:
+
+```text
+delta_volume = volume_rate * physical_dt
+supplied_heat = heat_power * physical_dt
+```
+
+Callback size, observation resampling and PCM decimation do not retime those
+physical increments. A ramp's endpoint remains an exclusive control endpoint,
+as in the other native drive histories. Its within-interval hold approximation
+needs physical-timestep refinement.
+
+The source transaction first reconstructs the original fluid exchange at fixed
+volume. Before publication, the resulting parcel calls its existing
+`ClosedGasParcel::midpoint_heat_volume` with the requested final volume and
+whole-interval heat. That owner solves the coupled heat/volume update in
+conservative coordinates, retains the original caloric and transport sources,
+and supplies one common midpoint pressure for the work:
+
+```text
+work_by_gas = midpoint_pressure * delta_volume
+source_energy_change = original_NSF_energy_out + supplied_heat - work_by_gas
+```
+
+The chamber update checks this complete balance using original-law energy
+increments and the actual final mass. The original NSF total energy already
+contains the opening's pressure and viscous work; those terms are not added
+again. Volume work belongs to the chamber motion and remains a separate
+original receipt.
+
+The physical volume increment must fit its declared relative bound and retain
+a positive, representable final volume. The existing source energy-movement
+bound now includes the sum of absolute original fluid substep energy transfers,
+absolute supplied heat and absolute chamber work. Opposing heat, work and flow
+cannot hide excessive movement through cancellation. Material-domain, original
+caloric solve, source-ghost, mass/energy and cancellation checks all precede the
+same publication of fluid, ducts and source.
+
+`NsfFiniteReservoirFrame::volume_m3` remains the starting volume;
+`final_volume_m3` is the accepted final volume. Its optional `actuation`
+contains the original midpoint pressure and `GasHeatVolumeStep`, including
+supplied heat, work, storage residual, caloric iterations and entropy change.
+That entropy change is a diagnostic, not an entropy-production or exact
+isentrope certificate.
+
+Midpoint integration applies to the closed heat/volume stage only. The complete
+flow-then-actuation composition remains first order, and the accepted pressure
+and temperature affect the next resolved interval. This is imposed motion of a
+well-mixed source, without a solved piston, diaphragm, respiratory tissue or
+resolved internal chamber field. The acoustic ducts' separate mean-flow
+transport limitation remains unchanged.
+
+### Actuated chamber starter
+
+`crates/fs-couple/examples/resolved-dg-actuated-reservoir.performance` retains
+the supplied-source chamber example's geometry, source packs, separate escape,
+both ducts and material microphone. It adds the following 8 ms program:
+
+```text
+boundary finite-reservoir-actuation 0 0.01 4
+ramp 96 0 0 -1e-7 0.0005
+hold 192 -1e-7 0.0005
+ramp 288 -1e-7 0.0005 1e-7 0
+hold 384 1e-7 0
+```
+
+The source compresses while heat power rises to 0.5 mW, holds those rates,
+transitions to expansion as heat falls, then expands without supplied heat.
+Use the same three nitrogen packs and native render command above, replacing
+the input filename and choosing a fresh output path. Instrument Lab imports
+the canonical file as **Resolved flow — chamber work and heat**.
+
+The small imposed motion is an authored numerical exercise. It is not measured
+lung motion, a playable phrase, or evidence of flute sound quality. Regression
+sources compare the original material candidate, complete energy balance,
+feedback, rollback and native control timing; native execution and physical
+refinement remain required before stronger claims.
