@@ -111,6 +111,62 @@ source-pinned; arbitrary two-coordinate magnetic laws are not inferred.
 Backward-Euler magnetic convexity loss remains a numerical export and is
 never deposited as material heat.
 
+## Complete heat assemblies and material field storage
+
+`contacts::heat::HeatAssembly` is the common interface for the prepared heat
+network plus additional physical heat laws. It exposes the exact original
+`PreparedHeatNetwork`, resolves one complete candidate state, and retains an
+associated source sample that refers to its original `HeatNetworkSample`.
+The ordinary prepared network implements this interface directly. Source
+failures remain typed; cancellation and native solver/work refusals retain
+their original error classes.
+
+The airflow `SourceConvectionHeatNetwork` implements it for prescribed
+reservoirs. Its `with_links` view adds source-resolved finite coolant using the
+existing reciprocal native links. Prepare the underlying heat network with the
+original initial additional-link conductances, then keep the same provider and
+source laws across physical steps. The original complete/disjoint link and
+exposed-area admission remains mandatory.
+
+```rust,ignore
+use fs_couple::circuit_enthalpy::field_storage::heat::field_storage_candidate;
+
+let provider = convection.with_links(
+    &finite_links, maximum_links,
+    |binding, thermal_trial, property_temperature| {
+        resolve_original_fluid(binding, thermal_trial, property_temperature)
+    },
+);
+let proposal = field_storage_candidate(
+    &provider, &cx, &thermal, target_s, &circuit, &ports,
+    &field_bindings, controls, &energy_guess_j,
+)?;
+let (next_thermal, next_circuit, report) = proposal.into_parts();
+let accepted_heat_and_fluid = &report.coupled.source.network;
+```
+
+This entry uses the original material field-storage driver. At each nonlinear
+trial, the same finite-cell temperatures determine source-bound resistance,
+C(T)/L(T), contact/layer conduction, radiation and fluid transport. The original
+driver retains charge/flux, accounts for field-parameter work and field entropy,
+and supplies reversible caloric heat separately from Joule loss. Changing only
+fluid caloric or transport data can therefore change actual current, stored
+field energy and subsequent temperature history.
+
+Finite coolant exchange stays internal native conduction. Prescribed convection
+is external heat. The original physical field-plus-caloric energy gate excludes
+the retained closed-enclosure numerical net from external supply. No second
+thermal solve, field-history advance or heat deposition is introduced.
+`PreparedHeatNetwork::field_storage_candidate` delegates to this same entry,
+so the existing complete-network path keeps its behavior and result defaults.
+
+The field law still needs its original fully solid, fixed-volume material and
+positive combined caloric/field capacity over its declared coordinate envelope.
+Finite coolant cells keep their own caloric charts; they are not forced to use
+the solid field cell's law. Pressure, composition and flow retain their declared
+provider ownership. This does not add fluid momentum, advection, pressure work,
+or new electrical/magnetic constitutive laws. Time refinement remains necessary.
+
 ## Energy and scope
 
 The standard circuit/enthalpy report preserves the actual source arithmetic,
@@ -124,8 +180,9 @@ heat is clipped or redistributed to manufacture an exactly zero total.
 This is fixed-geometry, fixed-topology Ohmic transport with uniform thermal
 cells, supplied contact areas/heat splits, and a closed opaque gray-diffuse
 radiation enclosure. Thermal and electrical contact resistances are independent
-properties, not inferred from one another. View factors and capacitance/
-inductance remain fixed. Radiation may coexist with conduction or convection
+properties, not inferred from one another. View factors stay fixed. The ordinary
+circuit entry holds capacitance/inductance fixed; the field-storage entry uses
+their explicitly admitted source laws. Radiation may coexist with conduction or convection
 on an exposed surface because these are distinct mechanisms. No participating
 gas radiation, contact mechanics, spreading-temperature law, arc or flowing
 melt is implied. Overall time accuracy remains that of the existing coupled

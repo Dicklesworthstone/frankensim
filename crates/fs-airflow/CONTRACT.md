@@ -188,6 +188,32 @@ source trials. Uniform cells, fixed geometry/mass, prescribed relative flow
 and native first-order endpoint coupling remain the model limits; advection,
 fluid momentum, pressure work and moving phase fronts need their own owners.
 
+### Shared heat assemblies with material field storage
+
+The `source::heat::assembly` module implements the fs-couple `HeatAssembly`
+interface for prescribed fluid reservoirs and the borrowed `with_links` view
+of finite-fluid convection. Both delegate to the existing complete source
+resolver. The exact prepared heat owner, all fluid evaluations and original
+heat-network sample remain accessible; no fluid type or material name selects
+a physical driver.
+
+`fs_couple::circuit_enthalpy::field_storage::heat::field_storage_candidate`
+consumes that same assembly in the original C(T)/L(T), current and enthalpy
+residual. Original field-parameter work, entropy and reversible heat remain
+separate from Joule loss. Finite coolant exchanges reciprocal internal heat;
+prescribed reservoirs supply external heat. Closed radiation's numerical net
+is excluded by the original physical energy gate. Source errors remain typed
+and native cancellation/work failures keep their original classifications.
+
+The finite-links field-storage regression compares both capacitor and inductor
+histories against independent midpoint and total-internal-energy equations.
+Source-only viscosity, coolant Cp and field-temperature-slope substitutions
+change accepted charge/flux and temperatures. It covers continued steps,
+source identity, missing finite-link ownership and candidate refusal/retry.
+Original whole-volume field capacity admission, uniform thermal cells, fixed
+geometry and timestep-refinement requirements remain unchanged. Pressure,
+composition and relative flow retain their original provider ownership.
+
 ### Complete material heat on the native explicit timeline
 
 `SourceConvectionHeatNetwork::observe_with_links` composes the complete prepared

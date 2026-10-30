@@ -18,6 +18,8 @@ use fs_matdb::ClaimSelection;
 use fs_material::state_point::MaterialPropertySelection;
 use std::collections::BTreeMap;
 
+mod assembly;
+pub use assembly::HeatAssembly;
 mod extension;
 mod observer;
 mod layers;

@@ -134,6 +134,23 @@ pub enum CircuitEnthalpyError<E> {
     /// Cancellation before joint publication.
     Cancelled,
 }
+impl<E> CircuitEnthalpyError<E> {
+    /// Change only the typed source payload while retaining native failure
+    /// classes, cancellation, numerical reports and work-budget refusals.
+    pub fn map_source<F>(self, map: impl FnOnce(E) -> F) -> CircuitEnthalpyError<F> {
+        match self {
+            Self::Invalid(message) => CircuitEnthalpyError::Invalid(message),
+            Self::Source(error) => CircuitEnthalpyError::Source(map(error)),
+            Self::Circuit(error) => CircuitEnthalpyError::Circuit(error),
+            Self::Thermal(error) => CircuitEnthalpyError::Thermal(error),
+            Self::Newton(error) => CircuitEnthalpyError::Newton(error),
+            Self::NotConverged(report) => CircuitEnthalpyError::NotConverged(report),
+            Self::Interrupted(progress) => CircuitEnthalpyError::Interrupted(progress),
+            Self::CircuitBudget => CircuitEnthalpyError::CircuitBudget,
+            Self::Cancelled => CircuitEnthalpyError::Cancelled,
+        }
+    }
+}
 impl<E> From<DepositionError> for CircuitEnthalpyError<E> {
     fn from(e: DepositionError) -> Self {
         if e == DepositionError::Cancelled { Self::Cancelled } else { Self::Thermal(e) }
