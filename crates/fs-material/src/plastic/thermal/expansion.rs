@@ -2,10 +2,10 @@
 //!
 //! Let f(T) = integral(alpha(theta) dtheta), a(T) = alpha(T) I and
 //! e = eps - eps_p - f(T) I. The Helmholtz contribution is
-//! psi = e:C(T):e/2 + H(T) p^2/2 + H_k dev(eps_p):dev(eps_p)/3.
-//! The optional Prager modulus H_k is fixed over the admitted thermal chart
-//! and contributes storage but no temperature derivative. With fixed nu and affine E/H its entropy is
-//! s = a(T):sigma - (E'/E) psi_elastic - H' p^2/2; internal energy is psi + T s.
+//! psi = e:C(T):e/2 + H_iso(T) p^2/2 + H_k(T) dev(eps_p):dev(eps_p)/3.
+//! With fixed nu and affine moduli its mechanical entropy is
+//! s = a(T):sigma - (E'/E) psi_elastic - H_iso' p^2/2
+//!     - H_k' dev(eps_p):dev(eps_p)/3; internal energy is psi + T s.
 //! The native backward-Euler return map freezes coefficients at T_1. Retain its
 //! original physical/numerical losses and add the frozen-history coefficient
 //! change Dpsi_c = psi(T_1,e_0,p_0)-psi(T_0,e_0,p_0) to its stored-energy change.
@@ -79,7 +79,7 @@ pub struct ThermoplasticIncrement {
     /// Native mechanical strain eps-integral(alpha dT) and endpoint-modulus
     /// J2 work/storage. Both native energy endpoints use the NEW moduli.
     pub mechanical: EnergyIncrement,
-    /// Frozen old strain/history free-energy change from sourced E(T)/H(T).
+    /// Frozen old strain/history free-energy change from sourced E(T)/H_iso(T)/H_k(T).
     /// Adding this to the native stored change gives the actual two-temperature
     /// free-energy change [J/m3]. This is neither plastic nor numerical loss.
     pub coefficient_storage_change_j_m3: f64,
@@ -258,7 +258,8 @@ impl ThermoplasticSource<'_> {
         }.map_err(FeedbackError::Mechanical)?;
         let old_elastic = core::array::from_fn(|i| old_mechanical[i] - old_state.plastic_strain[i]);
         let variable_moduli = self.youngs_temperature_slope_pa_k != 0.0
-            || self.hardening_temperature_slope_pa_k != 0.0;
+            || self.hardening_temperature_slope_pa_k != 0.0
+            || self.kinematic_hardening_temperature_slope_pa_k != 0.0;
         let old_source = if variable_moduli || !self.expansion_knots.is_empty() {
             Some(self.resolve_temperature(old_temperature_k)?)
         } else {
@@ -305,7 +306,7 @@ impl ThermoplasticSource<'_> {
             )?;
             // Use actual pinned endpoint coefficients. The correction changes
             // native frozen-coefficient delta(psi) into true endpoint delta(psi).
-            finite(
+            let mut coefficient = finite(
                 product(
                     (youngs - old_law.law().elastic.youngs) / youngs,
                     mechanical.energy.initial.elastic_j_m3,
@@ -313,7 +314,31 @@ impl ThermoplasticSource<'_> {
                     0.5 * (source.law().hardening - old_law.law().hardening),
                     old_p_squared,
                 )?,
-            )?
+            )?;
+            if self.kinematic_hardening_temperature_slope_pa_k != 0.0 {
+                // Differentiate the original energetic Prager storage in its
+                // native tensor convention. Use plastic strain directly:
+                // dividing storage/backstress by H_k would be singular when a
+                // physically admitted source reaches zero hardening.
+                let old_plastic = crate::tensor::deviator(&old_state.plastic_strain);
+                let new_plastic = crate::tensor::deviator(&mechanical.state.plastic_strain);
+                let old_shape = finite(contract(&old_plastic, &old_plastic) / 3.0)?;
+                let new_shape = finite(contract(&new_plastic, &new_plastic) / 3.0)?;
+                old_entropy = finite(
+                    old_entropy - product(self.kinematic_hardening_temperature_slope_pa_k, old_shape)?,
+                )?;
+                new_entropy = finite(
+                    new_entropy - product(self.kinematic_hardening_temperature_slope_pa_k, new_shape)?,
+                )?;
+                coefficient = finite(
+                    coefficient
+                        + product(
+                            source.law().kinematic_hardening - old_law.law().kinematic_hardening,
+                            old_shape,
+                        )?,
+                )?;
+            }
+            coefficient
         } else {
             0.0
         };
@@ -470,7 +495,8 @@ impl ThermoplasticSource<'_> {
         // At fixed total strain and plastic history:
         // c_eff = rho c_caloric + T [alpha' tr(sigma)
         //          + 2 alpha tr(C' e) - 9 K alpha^2].
-        // E/H are globally affine with fixed nu, so C''=0 and H''=0;
+        // E/H_iso/H_k are globally affine with fixed nu, so all second
+        // temperature derivatives of the frozen-history moduli vanish;
         // no unbounded hardening-history term is hidden in this capacity gate.
         // Native energy::admit_energy_history bounds the ACTUAL elastic tensor
         // e by ||e|| <= strain_limit under tensor::contract: diagonal squares

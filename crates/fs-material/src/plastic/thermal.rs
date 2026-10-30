@@ -1,10 +1,11 @@
 //! Source-bound uniform thermoplastic heat feedback using native J2 and transport.
 //!
 //! The declared reduction has energetic linear isotropic hardening and optional
-//! fixed-modulus Prager kinematic hardening, fixed
+//! Prager kinematic hardening, fixed
 //! reference geometry/density and Poisson ratio, globally affine E(T) and native
-//! energetic H(T), optional sourced isotropic expansion, and a strictly increasing
-//! single-solid caloric chart. Yield stress, Cp and expansion may be piecewise linear.
+//! energetic H_iso(T)/H_k(T), optional sourced isotropic expansion, and a strictly
+//! increasing single-solid caloric chart. Yield stress, Cp and expansion may be
+//! piecewise linear.
 //! Under these fixed-reference-density assumptions, stress-free caloric enthalpy
 //! is the caloric internal-energy chart. Coefficient work and temperature derivatives
 //! of elastic/hardening free energy enter the same reversible heat/storage account.
@@ -162,6 +163,7 @@ pub struct ThermoplasticSource<'a> {
     minimum_source_heat_capacity_j_kg_k: f64,
     youngs_temperature_slope_pa_k: f64,
     hardening_temperature_slope_pa_k: f64,
+    kinematic_hardening_temperature_slope_pa_k: f64,
     maximum_youngs_modulus_pa: f64,
     reference_temperature_k: f64,
     linear_overstress: bool,
@@ -203,7 +205,7 @@ pub struct FeedbackStep<'a, R> {
     pub physical_heat_j: f64,
     /// Signed reversible thermoelastic exchange into the caloric chart [J].
     pub reversible_heat_j: f64,
-    /// Frozen-history free-energy change caused by sourced E(T)/H(T) [J].
+    /// Frozen-history free-energy change caused by sourced E(T)/H_iso(T)/H_k(T) [J].
     /// Add this to mechanical.energy.stored_change_j_m3() times reference volume.
     pub coefficient_storage_change_j: f64,
     /// Change in T times mechanical entropy, separate from free energy [J].
@@ -225,8 +227,9 @@ impl<'a> ThermoplasticSource<'a> {
     /// Bind one source at its initial enthalpy, without creating a material point.
     /// Mechanical/caloric source roles and optional expansion share one card, context and temperature. Every
     /// selected claim must continuously cover the complete caloric chart.
-    /// E and native H may vary affinely over the complete temperature span;
-    /// nu, density and any Prager H_k remain fixed. A nonzero uniaxial Et reduction remains
+    /// E and both native energetic hardening moduli may vary affinely over the
+    /// complete temperature span; nu and reference density remain fixed.
+    /// A nonzero uniaxial Et reduction remains
     /// constant: its generally rational H(T) conversion is not an affine law.
     /// Expansion is integrated along its complete pinned path. Every crossed
     /// source knot/surface edge is checked; equal endpoints alone do not suffice.
@@ -407,6 +410,7 @@ impl<'a> ThermoplasticSource<'a> {
         let mut expansion_knots = Vec::new();
         let mut youngs_knots = Vec::new();
         let mut hardening_knots = Vec::new();
+        let mut kinematic_hardening_knots = Vec::new();
         let mut minimum_source_heat_capacity_j_kg_k = f64::INFINITY;
         for property in bundle.properties() {
             let receipt = &property.answer().receipt;
@@ -423,8 +427,8 @@ impl<'a> ThermoplasticSource<'a> {
                 name == crate::state_point::LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY;
             let youngs = name == YOUNG_MODULUS_PROPERTY;
             let hardening = name == query.hardening_basis.property_name();
-            let fixed = name == POISSON_RATIO_PROPERTY || name == density_name
-                || name == KINEMATIC_HARDENING_MODULUS_PROPERTY;
+            let kinematic = name == KINEMATIC_HARDENING_MODULUS_PROPERTY;
+            let fixed = name == POISSON_RATIO_PROPERTY || name == density_name;
             // Mechanics, caloric data and linked transport use the same
             // admission of instantaneous coefficients at fixed external context.
             admit_rate_independent_property(property, &query.temperature_axis)?;
@@ -455,13 +459,17 @@ impl<'a> ThermoplasticSource<'a> {
                 if youngs {
                     youngs_knots.push((temperature, value));
                 }
-                if hardening {
+                if hardening || kinematic {
                     if !value.is_finite() || value < 0.0 {
                         return Err(FeedbackError::Invalid(
                             "hardening must be finite and nonnegative over the complete source path",
                         ));
                     }
-                    hardening_knots.push((temperature, value));
+                    if hardening {
+                        hardening_knots.push((temperature, value));
+                    } else {
+                        kinematic_hardening_knots.push((temperature, value));
+                    }
                 }
                 if name == receipts[0].property {
                     minimum_source_heat_capacity_j_kg_k =
@@ -469,10 +477,10 @@ impl<'a> ThermoplasticSource<'a> {
                 }
                 if fixed && value != property.value_si() {
                     return Err(FeedbackError::Invalid(
-                        "Poisson ratio, reference density and Prager modulus must be constant on every source-line segment",
+                        "Poisson ratio and reference density must be constant on every source-line segment",
                     ));
                 }
-                if !fixed && !expansion && !hardening && !positive(value) {
+                if !fixed && !expansion && !hardening && !kinematic && !positive(value) {
                     return Err(FeedbackError::Invalid(
                         "Young's modulus, yield and Cp must be positive at every source-line breakpoint",
                     ));
@@ -513,6 +521,17 @@ impl<'a> ThermoplasticSource<'a> {
             .iter()
             .map(|(_, value)| *value)
             .fold(0.0_f64, f64::max);
+        let kinematic_hardening_temperature_slope_pa_k =
+            if query.hardening_basis == HardeningPropertyBasis::MixedPlasticStrainModuli {
+                affine_temperature_slope(
+                    &kinematic_hardening_knots,
+                    state.temperature_k(),
+                    source.law().kinematic_hardening,
+                )
+                .map_err(FeedbackError::Invalid)?
+            } else {
+                0.0
+            };
         let expansion_per_k = source
             .material()
             .property(crate::state_point::LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY)
@@ -537,6 +556,7 @@ impl<'a> ThermoplasticSource<'a> {
             minimum_source_heat_capacity_j_kg_k,
             youngs_temperature_slope_pa_k,
             hardening_temperature_slope_pa_k,
+            kinematic_hardening_temperature_slope_pa_k,
             maximum_youngs_modulus_pa,
             reference_temperature_k: state.temperature_k(),
             linear_overstress: false,
@@ -702,7 +722,8 @@ impl<'a> ThermoplasticSource<'a> {
         )
         .map_err(FeedbackError::Source)?;
         if source.law().elastic.poisson != self.source.law().elastic.poisson
-            || source.law().kinematic_hardening != self.source.law().kinematic_hardening
+            || self.kinematic_hardening_temperature_slope_pa_k == 0.0
+                && source.law().kinematic_hardening != self.source.law().kinematic_hardening
             || self.youngs_temperature_slope_pa_k == 0.0
                 && source.law().elastic.youngs != self.source.law().elastic.youngs
             || self.hardening_temperature_slope_pa_k == 0.0

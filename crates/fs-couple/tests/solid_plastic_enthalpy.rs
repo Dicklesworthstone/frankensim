@@ -6,6 +6,8 @@ mod contact;
 mod expansion_curve;
 #[path = "solid_plastic_enthalpy/modulus_curve.rs"]
 mod modulus_curve;
+#[path = "solid_plastic_enthalpy/kinematic.rs"]
+mod kinematic;
 #[path = "solid_plastic_enthalpy/dynamics.rs"]
 mod dynamics;
 #[path = "solid_plastic_enthalpy/overstress.rs"]
