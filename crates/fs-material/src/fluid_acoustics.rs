@@ -7,6 +7,9 @@
 //! Source-card wrappers retain every query and usage receipt. The numerical
 //! snapshot itself does not confer source or experimental authority.
 
+/// Shared acoustic, caloric and transport state for viscous/thermal sound loss.
+pub mod thermoviscous;
+
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::{Density, Dims, Pressure, QuantitySpec, Velocity};
