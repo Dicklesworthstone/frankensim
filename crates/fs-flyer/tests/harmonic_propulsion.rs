@@ -5,7 +5,7 @@ use fs_flyer::aircraft::wright_openloop_v1;
 use fs_flyer::spine::SixDofState;
 use fs_flyer::spine::rotors::geared::{GearedAssembly, GearedRotor, GearedState};
 use fs_flyer::spine::rotors::propulsion::dynamic::first_harmonic::{
-    HarmonicPropulsion, HarmonicState,
+    ContinuedHarmonicState, HarmonicEvaluation, HarmonicPropulsion, HarmonicState,
 };
 use fs_flyer::spine::rotors::propulsion::dynamic::{DynamicPropulsion, DynamicState};
 use fs_flyer::spine::rotors::propulsion::{
@@ -345,6 +345,333 @@ fn shaft_axis_conventions_and_late_refusal_preserve_complete_state() {
     assert_eq!(sa, initial(&aa));
     let run = || {
         ma.step(&sa, 0.0, 0.004, ZERO, |t, _| Ok(inputs(t)), |_, _| Ok(ZERO))
+            .unwrap()
+    };
+    assert_eq!(run(), run());
+}
+
+fn continuation_controls() -> fs_wing::nonlinear::continuation::ContinuationControls {
+    fs_wing::nonlinear::continuation::ContinuationControls {
+        maximum_incidence_rad: 0.6,
+        maximum_incidence_change_rad: 0.08,
+        maximum_row_condition: 16.0,
+        minimum_trailing_clearance_chords: 0.02,
+        maximum_newton_iterations: 32,
+        maximum_residual_evaluations: 600,
+        maximum_jacobian_products: 4096,
+        section_difference_rad: 1e-6,
+    }
+}
+
+fn admitted_turn(t: f64, p: [f64; 3]) -> [f64; 3] {
+    let mut wind = turning_wind(t, p);
+    wind[1] = -wind[1];
+    wind
+}
+
+fn independent_wing_residual(
+    state: &HarmonicState,
+    time: f64,
+    evaluation: &HarmonicEvaluation<2>,
+) -> f64 {
+    let design = wright_openloop_v1();
+    let (panels, strips) = design.layout(inputs(time).canard_rad).unwrap();
+    let q = state.motion.rigid.quat;
+    let rotation = So3::try_from_quat(Quat {
+        w: q[0],
+        x: q[1],
+        y: q[2],
+        z: q[3],
+    })
+    .unwrap();
+    let relative = rotation
+        .inverse()
+        .rotate(v(state.motion.rigid.vel_mps) - v(admitted_turn(time, state.motion.rigid.pos_m)))
+        .unwrap();
+    let stream = a(relative.scale(1.0 / relative.norm()));
+    let gamma = &evaluation.aerodynamics.gamma;
+    let mut worst = 0.0_f64;
+    for (s, strip) in strips.iter().enumerate() {
+        let panel = &panels[strip.panel_indices[0]];
+        let point = core::array::from_fn(|i| 0.5 * (panel.a[i] + panel.b[i]));
+        let mut w = fs_wing::induced_velocity_free(point, &panels, gamma, stream)[2];
+        // Remove the complete finite bound field independently; the solver's
+        // private cached trailing coefficients are not used by this oracle.
+        for (panel, &g) in panels.iter().zip(gamma) {
+            let r1 = v(point) - v(panel.a);
+            let r2 = v(point) - v(panel.b);
+            let cross = r1.cross(r2);
+            let c2 = cross.dot(cross);
+            let n1 = r1.norm();
+            let n2 = r2.norm();
+            if c2 >= 1e-8 && n1 >= 1e-8 && n2 >= 1e-8 {
+                let segment = v(panel.b) - v(panel.a);
+                w -= g * cross.z * (segment.dot(r1) / n1 - segment.dot(r2) / n2)
+                    / (4.0 * core::f64::consts::PI * c2);
+            }
+        }
+        let flow = evaluation.aerodynamics.strip_velocity_mps[s];
+        let speed = flow[0].hypot(flow[2]);
+        let alpha = fs_math::det::atan2(flow[2], flow[0]) + strip.twist_rad + w / speed;
+        assert!(
+            alpha.abs() < 0.30,
+            "this full trajectory is on the admitted attached branch"
+        );
+        let cl = core::f64::consts::TAU * (alpha + 2.0 * design.camber_ratio);
+        let target = -0.5 * speed * strip.chord_m * cl;
+        let actual: f64 = strip.panel_indices.iter().map(|&j| gamma[j]).sum();
+        worst = worst.max((target - actual).abs() / (actual.abs() + 1e-9));
+        let stored = evaluation.aerodynamics.wing_continuation.as_ref().unwrap();
+        assert!((stored.effective_incidence_rad()[s] - alpha).abs() < 2e-13);
+        assert_eq!(stored.gamma(), gamma);
+    }
+    worst
+}
+
+fn integrate_continued(
+    model: &HarmonicPropulsion<'_, '_, 2>,
+    assembly: &GearedAssembly<2>,
+    n: usize,
+) -> (ContinuedHarmonicState, f64) {
+    let domain = continuation_controls();
+    let mut state = model
+        .initialize_continuation(
+            initial(assembly),
+            inputs(0.0),
+            &|p| Ok(admitted_turn(0.0, p)),
+            domain,
+        )
+        .unwrap();
+    let origin = [-5.0, 3.0, 2.0];
+    let p0 = v(state.state.motion.rigid.vel_mps).scale(assembly.mass_kg());
+    let l0 = angular_momentum(assembly, &state.state.motion, origin);
+    let mut dp = Vec3::default();
+    let mut dl = Vec3::default();
+    let mut work = 0.0;
+    let mut max_wing = 0.0_f64;
+    let mut max_modal = 0.0_f64;
+    let mut max_energy = 0.0_f64;
+    let mut maximum_newton = 0;
+    let mut maximum_products = 0;
+    let dt = 0.096 / n as f64;
+    for tick in 0..n {
+        let mut stages = Vec::new();
+        let result = model
+            .step_continued(
+                &state,
+                domain,
+                tick as f64 * dt,
+                dt,
+                origin,
+                |t, s| {
+                    stages.push((t, *s));
+                    Ok(inputs(t))
+                },
+                |t, p| Ok(admitted_turn(t, p)),
+            )
+            .unwrap();
+        assert_eq!(stages.len(), 2);
+        let step = &result.step;
+        for ((time, stage), evaluation) in stages.iter().zip([&step.initial, &step.midpoint]) {
+            max_wing = max_wing.max(independent_wing_residual(stage, *time, evaluation));
+            maximum_newton = maximum_newton.max(evaluation.aerodynamics.wing_iterations);
+            let anchor = evaluation.aerodynamics.wing_continuation.as_ref().unwrap();
+            maximum_products = maximum_products.max(anchor.jacobian_products());
+            assert!(anchor.maximum_row_condition() <= domain.maximum_row_condition);
+            assert!(
+                anchor.minimum_trailing_clearance_chords()
+                    >= domain.minimum_trailing_clearance_chords
+            );
+            assert!(anchor.maximum_incidence_change_rad() <= domain.maximum_incidence_change_rad);
+        }
+        dp = dp + v(step.motion.external_linear_impulse_world);
+        dl = dl + v(step.motion.external_angular_impulse_world);
+        for wake in step.inflow {
+            max_modal = max_modal.max(v(wake.momentum_residual_ns).norm());
+            max_energy = max_energy.max(wake.energy_residual_j.abs());
+        }
+        work += step
+            .coupling_work_residual_j
+            .into_iter()
+            .map(f64::abs)
+            .sum::<f64>();
+        assert_eq!(result.state.state, step.state);
+        state = result.state;
+    }
+    let p = (v(state.state.motion.rigid.vel_mps).scale(assembly.mass_kg()) - p0 - dp).norm();
+    let l = (angular_momentum(assembly, &state.state.motion, origin) - l0 - dl).norm();
+    println!(
+        "continued {n} ticks / 96ms: P={p:e}, L={l:e}, independent wing={max_wing:e}, modal={max_modal:e}, wake energy={max_energy:e}, Newton={maximum_newton}, Jv={maximum_products}"
+    );
+    assert!(p < 2e-9 && l < 2e-8);
+    assert!(max_wing < fs_wing::nonlinear::GAMMA_TOL);
+    assert!(max_modal < 2e-9 && max_energy < 2e-9);
+    assert!(maximum_newton < 12);
+    (state, work)
+}
+
+#[test]
+fn full_96ms_continued_turn_refines_with_physical_momentum_and_section_work() {
+    let design = wright_openloop_v1();
+    let aa = assembly(design.gross_mass_kg, false);
+    let ab = assembly(design.gross_mass_kg, true);
+    let ba = GearedPropulsion::new_spatial(&design, &aa, mounts(false)).unwrap();
+    let bb = GearedPropulsion::new_spatial(&design, &ab, mounts(true)).unwrap();
+    let ma = HarmonicPropulsion::new_skewed(&ba, RHO, 32, SkewInflowControls::default()).unwrap();
+    let mb = HarmonicPropulsion::new_skewed(&bb, RHO, 32, SkewInflowControls::default()).unwrap();
+    let reference = integrate_continued(&ma, &aa, 384).0;
+    let runs = [
+        integrate_continued(&ma, &aa, 24),
+        integrate_continued(&ma, &aa, 48),
+        integrate_continued(&ma, &aa, 96),
+    ];
+    assert_eq!(runs[0], integrate_continued(&mb, &ab, 24));
+    let errors = runs
+        .each_ref()
+        .map(|r| distance(&r.0.state, &reference.state));
+    let work = runs.each_ref().map(|r| r.1);
+    println!("full96ms continued errors={errors:?}; coupling work={work:?}");
+    for values in [errors, work] {
+        for pair in values.windows(2) {
+            assert!((3.4..4.7).contains(&(pair[0] / pair[1])));
+        }
+    }
+}
+
+#[test]
+fn continuation_crosses_the_old_picard_failure_then_refuses_unresolved_row_cancellation() {
+    let design = wright_openloop_v1();
+    let aa = assembly(design.gross_mass_kg, false);
+    let ba = GearedPropulsion::new_spatial(&design, &aa, mounts(false)).unwrap();
+    let model =
+        HarmonicPropulsion::new_skewed(&ba, RHO, 32, SkewInflowControls::default()).unwrap();
+    let domain = continuation_controls();
+    let mut state = model
+        .initialize_continuation(
+            initial(&aa),
+            inputs(0.0),
+            &|p| Ok(turning_wind(0.0, p)),
+            domain,
+        )
+        .unwrap();
+    let mut cold = initial(&aa);
+    let mut cold_failure = None;
+    let mut domain_failure = None;
+    for tick in 0..24 {
+        if cold_failure.is_none() {
+            match model.step(
+                &cold,
+                tick as f64 * 0.004,
+                0.004,
+                ZERO,
+                |t, _| Ok(inputs(t)),
+                |t, p| Ok(turning_wind(t, p)),
+            ) {
+                Ok(step) => cold = step.state,
+                Err(error) => {
+                    assert_eq!(error.code, "nonlinear-did-not-converge");
+                    cold_failure = Some(tick);
+                }
+            }
+        }
+        let saved = state.clone();
+        match model.step_continued(
+            &state,
+            domain,
+            tick as f64 * 0.004,
+            0.004,
+            ZERO,
+            |t, _| Ok(inputs(t)),
+            |t, p| Ok(turning_wind(t, p)),
+        ) {
+            Ok(step) => state = step.state,
+            Err(error) => {
+                assert_eq!(error.code, "nonlinear-row-split-ill-conditioned");
+                assert_eq!(state, saved);
+                domain_failure = Some(tick);
+                break;
+            }
+        }
+    }
+    assert_eq!(cold_failure, Some(2));
+    assert!(domain_failure.unwrap() > 10);
+}
+
+#[test]
+fn hostile_separated_initial_flow_and_late_continuation_failures_are_atomic() {
+    let design = wright_openloop_v1();
+    let aa = assembly(design.gross_mass_kg, false);
+    let ba = GearedPropulsion::new_spatial(&design, &aa, mounts(false)).unwrap();
+    let model =
+        HarmonicPropulsion::new_skewed(&ba, RHO, 32, SkewInflowControls::default()).unwrap();
+    let domain = continuation_controls();
+    let error = model
+        .initialize_continuation(
+            skew_initial(&aa),
+            inputs(0.0),
+            &|p| Ok(turning_wind(0.0, p)),
+            domain,
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "nonlinear-filament-proximity");
+    let state = model
+        .initialize_continuation(
+            initial(&aa),
+            inputs(0.0),
+            &|p| Ok(admitted_turn(0.0, p)),
+            domain,
+        )
+        .unwrap();
+    let saved = state.clone();
+    let mut calls = 0;
+    let error = model
+        .step_continued(
+            &state,
+            domain,
+            0.0,
+            0.004,
+            ZERO,
+            |t, _| {
+                calls += 1;
+                let mut i = inputs(t);
+                if calls == 2 {
+                    i.density_kg_m3 = 1.0;
+                }
+                Ok(i)
+            },
+            |t, p| Ok(admitted_turn(t, p)),
+        )
+        .unwrap_err();
+    assert_eq!(calls, 2);
+    assert_eq!(error.code, "harmonic-propulsion-invalid");
+    let one = fs_wing::nonlinear::continuation::ContinuationControls {
+        maximum_newton_iterations: 1,
+        ..domain
+    };
+    let error = model
+        .step_continued(
+            &state,
+            one,
+            0.0,
+            0.004,
+            ZERO,
+            |t, _| Ok(inputs(t)),
+            |t, p| Ok(admitted_turn(t, p)),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "nonlinear-continuation-unresolved");
+    assert_eq!(state, saved);
+    let run = || {
+        model
+            .step_continued(
+                &state,
+                domain,
+                0.0,
+                0.004,
+                ZERO,
+                |t, _| Ok(inputs(t)),
+                |t, p| Ok(admitted_turn(t, p)),
+            )
             .unwrap()
     };
     assert_eq!(run(), run());

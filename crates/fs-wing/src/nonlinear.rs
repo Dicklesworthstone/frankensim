@@ -25,6 +25,9 @@ use crate::{MAX_PANELS, Panel, Refusal, SolveReport, solve_weissinger_linear};
 use fs_blake3::hash_domain;
 use fs_math::det;
 
+/// Explicit bounded continuation of an accepted section solution.
+pub mod continuation;
+
 /// Iteration cap (refusals at cap AND cap+1 by the safeguard test).
 // 600, not 200: the full wing+canard multisurface system converges
 // linearly at ~0.94/iteration through the cross-coupling (measured in
@@ -37,6 +40,9 @@ pub const GAMMA_TOL: f64 = 1.0e-10;
 pub const OMEGA_START: f64 = 0.7;
 /// Relaxation floor before refusing.
 pub const OMEGA_MIN: f64 = 0.02;
+// The original row-share fallback floor. Explicit continuation refuses a
+// multirow split at this floor instead of treating equal shares as resolved.
+const ROW_SUM_FLOOR: f64 = 1e-14;
 
 fn refuse(code: &'static str, message: String, repair: &str) -> Refusal {
     Refusal {
@@ -167,6 +173,7 @@ pub fn solve_nonlinear(
         None,
         strip_du_axial,
         warm_start,
+        None,
     )
 }
 
@@ -203,6 +210,7 @@ pub fn solve_nonlinear_with_incident(
         Some(strip_incident_mps),
         strip_du_axial,
         warm_start,
+        None,
     )
 }
 
@@ -217,6 +225,7 @@ fn solve_nonlinear_impl(
     strip_incident_mps: Option<&[[f64; 3]]>,
     strip_du_axial: Option<&[f64]>,
     warm_start: Option<&[f64]>,
+    mut continuation: Option<&mut continuation::Guard<'_>>,
 ) -> Result<NonlinearReport, Refusal> {
     if geometry_hash(panels, freestream) != op.geometry_hash {
         return Err(refuse(
@@ -228,6 +237,15 @@ fn solve_nonlinear_impl(
     let n = panels.len();
     if n > MAX_PANELS {
         return Err(refuse("panel-count-invalid", format!("{n}"), "cap"));
+    }
+    if warm_start
+        .is_some_and(|values| values.len() != n || !values.iter().all(|value| value.is_finite()))
+    {
+        return Err(refuse(
+            "strips-invalid",
+            "warm circulation must have one finite value per panel".into(),
+            "supply a complete accepted circulation on the same panel ownership",
+        ));
     }
     let mut owned = vec![false; n];
     for s in strips {
@@ -339,7 +357,7 @@ fn solve_nonlinear_impl(
     let mut strip_gamma: Vec<f64> = Vec::with_capacity(strips.len());
     for s in strips {
         let total: f64 = s.panel_indices.iter().map(|&i| lin[i]).sum();
-        let r: Vec<f64> = if total.abs() > 1e-14 {
+        let r: Vec<f64> = if total.abs() > ROW_SUM_FLOOR {
             s.panel_indices.iter().map(|&i| lin[i] / total).collect()
         } else {
             vec![1.0 / s.panel_indices.len() as f64; s.panel_indices.len()]
@@ -350,6 +368,9 @@ fn solve_nonlinear_impl(
             None => total,
         });
     }
+    if let Some(guard) = &mut continuation {
+        guard.prepare(panels, strips, freestream, lin)?;
+    }
     let mut gamma = vec![0.0f64; n];
     let scatter = |strip_gamma: &[f64], gamma: &mut Vec<f64>| {
         for (s, spec) in strips.iter().enumerate() {
@@ -359,156 +380,175 @@ fn solve_nonlinear_impl(
         }
     };
     scatter(&strip_gamma, &mut gamma);
-    let mut omega = OMEGA_START;
-    let mut growth_streak = 0u32;
     let mut residual = f64::INFINITY;
     let mut regimes = vec![StripRegime::Attached; strips.len()];
     let mut iterations = 0u32;
-    let mut next = vec![0.0; strips.len()];
-    let mut previous_mismatch = vec![0.0f64; strips.len()];
-    let mut oscillation_streak = 0u32;
-    while iterations < MAX_ITERATIONS {
-        iterations += 1;
-        let mut worst = 0.0f64;
-        // Common scaling keeps the residual angle/norm comparison finite
-        // without changing the convergence metric or the circulation update.
-        let mut comparison_scale = 0.0f64;
-        let mut previous_norm_sq = 0.0f64;
-        let mut current_norm_sq = 0.0f64;
-        let mut direction_dot = 0.0f64;
-        for (s, spec) in strips.iter().enumerate() {
-            let mut w = 0.0;
-            for (j, coefficient) in downwash[s].iter().enumerate() {
-                let term = gamma[j] * coefficient;
-                w += term;
+    if let Some(guard) = &mut continuation {
+        let solved = guard.solve(
+            &strip_gamma,
+            strips,
+            &ratios,
+            &downwash,
+            &section_flow,
+            closure,
+            n,
+        )?;
+        strip_gamma = solved.gamma;
+        scatter(&strip_gamma, &mut gamma);
+        residual = solved.residual;
+        regimes = solved.regimes;
+        iterations = solved.iterations;
+    } else {
+        let mut omega = OMEGA_START;
+        let mut growth_streak = 0u32;
+        let mut next = vec![0.0; strips.len()];
+        let mut previous_mismatch = vec![0.0f64; strips.len()];
+        let mut oscillation_streak = 0u32;
+        while iterations < MAX_ITERATIONS {
+            iterations += 1;
+            let mut worst = 0.0f64;
+            // Common scaling keeps the residual angle/norm comparison finite
+            // without changing the convergence metric or the circulation update.
+            let mut comparison_scale = 0.0f64;
+            let mut previous_norm_sq = 0.0f64;
+            let mut current_norm_sq = 0.0f64;
+            let mut direction_dot = 0.0f64;
+            for (s, spec) in strips.iter().enumerate() {
+                let mut w = 0.0;
+                for (j, coefficient) in downwash[s].iter().enumerate() {
+                    let term = gamma[j] * coefficient;
+                    w += term;
+                }
+                // Sign chain (settled EMPIRICALLY by the battery's physical
+                // fixtures): in this basis the lift-up circulation sign is
+                // negative and the trailing kernel returns w < 0 for the
+                // lift-up system, so the downwash correction enters with a
+                // PLUS — the attached fixture (tracks the exact linear
+                // solve) and the weight-class camber fixture jointly pin the
+                // composite sign; a wrong sign fails both.
+                let (alpha_incident, speed_induction, speed_circulation) = section_flow[s];
+                let alpha_eff = alpha_incident + spec.twist_rad + (w / speed_induction);
+                let (cl, regime) = closure(s, alpha_eff);
+                if !cl.is_finite() {
+                    return Err(refuse(
+                        "nonlinear-did-not-converge",
+                        format!(
+                            "closure returned non-finite cl at strip {s} (alpha_eff {alpha_eff})"
+                        ),
+                        "the closure must be finite over the reachable alpha range; NEVER fall back silently to the linear answer",
+                    ));
+                }
+                regimes[s] = regime;
+                // Prop slipstream: the washed strip sees a higher local speed
+                // (axial increment du) — the REAL prop->wing coupling arm.
+                let v_local = speed_circulation;
+                // The solver's Γ sign convention (BC with −z normals, a→b
+                // along +y) is NEGATIVE for lift-up — the first battery run
+                // converged to −5420 N because the closure assumed the
+                // opposite sign. Match the solver, not the textbook.
+                let target = -0.5 * v_local * spec.chord_m * cl;
+                let mismatch = target - strip_gamma[s];
+                if !mismatch.is_finite() {
+                    return Err(refuse(
+                        "nonlinear-did-not-converge",
+                        format!("non-finite circulation mismatch at strip {s}"),
+                        "the closure and circulation must remain finite; NEVER fall back silently to the linear answer",
+                    ));
+                }
+                let prior = previous_mismatch[s];
+                let component_scale = prior.abs().max(mismatch.abs());
+                if component_scale > comparison_scale {
+                    let ratio = comparison_scale / component_scale;
+                    let squared = ratio * ratio;
+                    previous_norm_sq *= squared;
+                    current_norm_sq *= squared;
+                    direction_dot *= squared;
+                    comparison_scale = component_scale;
+                }
+                if comparison_scale > 0.0 {
+                    let old_scaled = prior / comparison_scale;
+                    let new_scaled = mismatch / comparison_scale;
+                    previous_norm_sq += old_scaled * old_scaled;
+                    current_norm_sq += new_scaled * new_scaled;
+                    direction_dot += old_scaled * new_scaled;
+                }
+                previous_mismatch[s] = mismatch;
+                // Residual = the OMEGA-INDEPENDENT fixed-point mismatch (the
+                // step-size metric shrank with every safeguard halving and
+                // faked progress — a measured lesson).
+                worst = worst.max((target - strip_gamma[s]).abs() / (strip_gamma[s].abs() + 1e-9));
+                // Statement-split (guzez.7.2.1): a + omega*(t-a) is a
+                // fusable mul-add; bind the update first.
+                let upd = omega * (target - strip_gamma[s]);
+                next[s] = strip_gamma[s] + upd;
             }
-            // Sign chain (settled EMPIRICALLY by the battery's physical
-            // fixtures): in this basis the lift-up circulation sign is
-            // negative and the trailing kernel returns w < 0 for the
-            // lift-up system, so the downwash correction enters with a
-            // PLUS — the attached fixture (tracks the exact linear
-            // solve) and the weight-class camber fixture jointly pin the
-            // composite sign; a wrong sign fails both.
-            let (alpha_incident, speed_induction, speed_circulation) = section_flow[s];
-            let alpha_eff = alpha_incident + spec.twist_rad + (w / speed_induction);
-            let (cl, regime) = closure(s, alpha_eff);
-            if !cl.is_finite() {
-                return Err(refuse(
-                    "nonlinear-did-not-converge",
-                    format!("closure returned non-finite cl at strip {s} (alpha_eff {alpha_eff})"),
-                    "the closure must be finite over the reachable alpha range; NEVER fall back silently to the linear answer",
-                ));
+            // The scalar relative residual can alternate as a strip passes near
+            // zero, and an unstable mode may grow less than 25% each time. Both
+            // evade the legacy two-growth guard indefinitely. Two successive
+            // residual reversals (angle >120 degrees) with no norm contraction
+            // identify that oscillatory mode independently of the denominator.
+            // The epsilon allowance recognizes a roundoff-level two-cycle; it
+            // does not relax GAMMA_TOL or accept any circulation as converged.
+            let opposing = direction_dot < 0.0
+                && 4.0 * direction_dot * direction_dot > previous_norm_sq * current_norm_sq;
+            let noncontracting = previous_norm_sq > 0.0
+                && current_norm_sq >= previous_norm_sq * (1.0 - 64.0 * f64::EPSILON);
+            if worst >= GAMMA_TOL && opposing && noncontracting {
+                oscillation_streak += 1;
+            } else {
+                oscillation_streak = 0;
             }
-            regimes[s] = regime;
-            // Prop slipstream: the washed strip sees a higher local speed
-            // (axial increment du) — the REAL prop->wing coupling arm.
-            let v_local = speed_circulation;
-            // The solver's Γ sign convention (BC with −z normals, a→b
-            // along +y) is NEGATIVE for lift-up — the first battery run
-            // converged to −5420 N because the closure assumed the
-            // opposite sign. Match the solver, not the textbook.
-            let target = -0.5 * v_local * spec.chord_m * cl;
-            let mismatch = target - strip_gamma[s];
-            if !mismatch.is_finite() {
-                return Err(refuse(
-                    "nonlinear-did-not-converge",
-                    format!("non-finite circulation mismatch at strip {s}"),
-                    "the closure and circulation must remain finite; NEVER fall back silently to the linear answer",
-                ));
-            }
-            let prior = previous_mismatch[s];
-            let component_scale = prior.abs().max(mismatch.abs());
-            if component_scale > comparison_scale {
-                let ratio = comparison_scale / component_scale;
-                let squared = ratio * ratio;
-                previous_norm_sq *= squared;
-                current_norm_sq *= squared;
-                direction_dot *= squared;
-                comparison_scale = component_scale;
-            }
-            if comparison_scale > 0.0 {
-                let old_scaled = prior / comparison_scale;
-                let new_scaled = mismatch / comparison_scale;
-                previous_norm_sq += old_scaled * old_scaled;
-                current_norm_sq += new_scaled * new_scaled;
-                direction_dot += old_scaled * new_scaled;
-            }
-            previous_mismatch[s] = mismatch;
-            // Residual = the OMEGA-INDEPENDENT fixed-point mismatch (the
-            // step-size metric shrank with every safeguard halving and
-            // faked progress — a measured lesson).
-            worst = worst.max((target - strip_gamma[s]).abs() / (strip_gamma[s].abs() + 1e-9));
-            // Statement-split (guzez.7.2.1): a + omega*(t-a) is a
-            // fusable mul-add; bind the update first.
-            let upd = omega * (target - strip_gamma[s]);
-            next[s] = strip_gamma[s] + upd;
-        }
-        // The scalar relative residual can alternate as a strip passes near
-        // zero, and an unstable mode may grow less than 25% each time. Both
-        // evade the legacy two-growth guard indefinitely. Two successive
-        // residual reversals (angle >120 degrees) with no norm contraction
-        // identify that oscillatory mode independently of the denominator.
-        // The epsilon allowance recognizes a roundoff-level two-cycle; it
-        // does not relax GAMMA_TOL or accept any circulation as converged.
-        let opposing = direction_dot < 0.0
-            && 4.0 * direction_dot * direction_dot > previous_norm_sq * current_norm_sq;
-        let noncontracting = previous_norm_sq > 0.0
-            && current_norm_sq >= previous_norm_sq * (1.0 - 64.0 * f64::EPSILON);
-        if worst >= GAMMA_TOL && opposing && noncontracting {
-            oscillation_streak += 1;
-        } else {
-            oscillation_streak = 0;
-        }
-        if oscillation_streak >= 2 {
-            omega *= 0.5;
-            oscillation_streak = 0;
-            growth_streak = 0;
-            if omega < OMEGA_MIN {
-                return Err(refuse(
-                    "nonlinear-did-not-converge",
-                    format!(
-                        "oscillation relaxation floor: residual {worst:e} at iteration {iterations}"
-                    ),
-                    "the current branch did not contract within the admitted relaxation range; NEVER fall back silently to the linear answer",
-                ));
-            }
-            // Reevaluate the same current state with the smaller relaxation;
-            // no extrapolation, cold restart, or search for another branch.
-            continue;
-        }
-        if worst > residual * 1.25 {
-            growth_streak += 1;
-            if growth_streak >= 2 {
-                // Two CONSECUTIVE growths: halve the relaxation and RETRY
-                // from the current state (safeguard; never accept a
-                // persistently growing step). A SINGLE growth is accepted:
-                // in a multisurface system a settling surface legitimately
-                // forces a one-iteration residual spike on the surfaces it
-                // washes (canard -> wing, measured in E4.6a-ii), and
-                // halving on first growth floors omega during a convergent
-                // joint transient. A truly divergent closure grows every
-                // iteration and still hits the floor refusal.
+            if oscillation_streak >= 2 {
                 omega *= 0.5;
+                oscillation_streak = 0;
                 growth_streak = 0;
                 if omega < OMEGA_MIN {
                     return Err(refuse(
                         "nonlinear-did-not-converge",
                         format!(
-                            "relaxation floor: residual {residual:e} at iteration {iterations}"
+                            "oscillation relaxation floor: residual {worst:e} at iteration {iterations}"
                         ),
-                        "the closure/geometry pair is outside the admitted domain; NEVER fall back silently to the linear answer",
+                        "the current branch did not contract within the admitted relaxation range; NEVER fall back silently to the linear answer",
                     ));
                 }
+                // Reevaluate the same current state with the smaller relaxation;
+                // no extrapolation, cold restart, or search for another branch.
                 continue;
             }
-        } else {
-            growth_streak = 0;
-        }
-        core::mem::swap(&mut strip_gamma, &mut next);
-        scatter(&strip_gamma, &mut gamma);
-        residual = worst;
-        if residual < GAMMA_TOL {
-            break;
+            if worst > residual * 1.25 {
+                growth_streak += 1;
+                if growth_streak >= 2 {
+                    // Two CONSECUTIVE growths: halve the relaxation and RETRY
+                    // from the current state (safeguard; never accept a
+                    // persistently growing step). A SINGLE growth is accepted:
+                    // in a multisurface system a settling surface legitimately
+                    // forces a one-iteration residual spike on the surfaces it
+                    // washes (canard -> wing, measured in E4.6a-ii), and
+                    // halving on first growth floors omega during a convergent
+                    // joint transient. A truly divergent closure grows every
+                    // iteration and still hits the floor refusal.
+                    omega *= 0.5;
+                    growth_streak = 0;
+                    if omega < OMEGA_MIN {
+                        return Err(refuse(
+                            "nonlinear-did-not-converge",
+                            format!(
+                                "relaxation floor: residual {residual:e} at iteration {iterations}"
+                            ),
+                            "the closure/geometry pair is outside the admitted domain; NEVER fall back silently to the linear answer",
+                        ));
+                    }
+                    continue;
+                }
+            } else {
+                growth_streak = 0;
+            }
+            core::mem::swap(&mut strip_gamma, &mut next);
+            scatter(&strip_gamma, &mut gamma);
+            residual = worst;
+            if residual < GAMMA_TOL {
+                break;
+            }
         }
     }
     if residual >= GAMMA_TOL {

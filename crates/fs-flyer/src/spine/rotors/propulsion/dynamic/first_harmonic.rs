@@ -19,6 +19,7 @@ use fs_airscrew::dynamic_inflow::first_harmonic::{
     FirstHarmonicInflow, HarmonicInduction, HarmonicInflowRate, HarmonicInflowStep,
 };
 use fs_airscrew::oblique::{DiskFrame, ObliqueLoads};
+use fs_wing::nonlinear::continuation::{ContinuationControls, WingContinuation};
 
 /// Full mechanical state plus each disk's three physical induction velocities.
 /// First modes use the fixed carrier disk frames returned by `disk_frames`.
@@ -26,6 +27,15 @@ use fs_airscrew::oblique::{DiskFrame, ObliqueLoads};
 pub struct HarmonicState {
     pub motion: GearedState,
     pub induction: [HarmonicInduction; 2],
+}
+
+/// Complete replay state for explicitly continued wing/propeller flight.
+/// The wing anchor selects the local algebraic solution; it is not added
+/// aerodynamic inertia or a lagged force. Both real stages re-solve the wing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContinuedHarmonicState {
+    pub state: HarmonicState,
+    pub wing: WingContinuation,
 }
 
 /// The actual blade/wing field and conjugate wake loads at one force stage.
@@ -47,6 +57,9 @@ pub struct HarmonicAerodynamics {
     pub strip_velocity_mps: Vec<[f64; 3]>,
     pub wing_lift_n: f64,
     pub wing_residual: f64,
+    pub wing_iterations: u32,
+    /// Actual accepted stage anchor when continuation is selected.
+    pub wing_continuation: Option<WingContinuation>,
 }
 
 impl AerodynamicSolution for HarmonicAerodynamics {
@@ -82,6 +95,13 @@ pub struct HarmonicStep<const N: usize> {
     /// Implicit wake input work minus actual predicted-midpoint blade
     /// induced work. This partitioned quadrature defect is NOT dissipation.
     pub coupling_work_residual_j: [f64; 2],
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContinuedHarmonicStep<const N: usize> {
+    pub state: ContinuedHarmonicState,
+    /// The same accepted physical update and momentum/work accounting.
+    pub step: HarmonicStep<N>,
 }
 
 /// Explicit first-harmonic transport choice. Constant-density modal
@@ -145,10 +165,14 @@ impl<'p, 'a, const N: usize> HarmonicPropulsion<'p, 'a, N> {
         &self,
         stage: AerodynamicStage<'_>,
         induction: [HarmonicInduction; 2],
+        continuation: Option<(ContinuationControls, Option<&WingContinuation>)>,
     ) -> Result<HarmonicAerodynamics, Refusal> {
-        let wing = self
-            .base
-            .solve_wing(&stage, induction.map(|u| u.mean_mps), Some(&induction))?;
+        let wing = self.base.solve_wing(
+            &stage,
+            induction.map(|u| u.mean_mps),
+            Some(&induction),
+            continuation,
+        )?;
         let (rule, frames) = self
             .base
             .oblique
@@ -228,6 +252,8 @@ impl<'p, 'a, const N: usize> HarmonicPropulsion<'p, 'a, N> {
             strip_velocity_mps: wing.strip_velocity_mps,
             wing_lift_n: wing.lift_n,
             wing_residual: wing.residual,
+            wing_iterations: wing.iterations,
+            wing_continuation: wing.continuation,
         })
     }
 
@@ -238,6 +264,51 @@ impl<'p, 'a, const N: usize> HarmonicPropulsion<'p, 'a, N> {
         state: &HarmonicState,
         inputs: PropulsionInputs,
         wind_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+    ) -> Result<HarmonicEvaluation<N>, Refusal> {
+        self.evaluate_with_continuation(state, inputs, wind_world, None)
+    }
+
+    /// Establish an admitted initial wing anchor. No physical state is
+    /// advanced; an algebraic root outside the declared domain refuses.
+    pub fn initialize_continuation(
+        &self,
+        state: HarmonicState,
+        inputs: PropulsionInputs,
+        wind_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+        domain: ContinuationControls,
+    ) -> Result<ContinuedHarmonicState, Refusal> {
+        let solved =
+            self.evaluate_with_continuation(&state, inputs, wind_world, Some((domain, None)))?;
+        let wing = solved.aerodynamics.wing_continuation.ok_or_else(|| {
+            reject(
+                "harmonic-continuation-invalid",
+                "missing initial wing anchor",
+            )
+        })?;
+        Ok(ContinuedHarmonicState { state, wing })
+    }
+
+    pub fn evaluate_continued(
+        &self,
+        state: &ContinuedHarmonicState,
+        inputs: PropulsionInputs,
+        wind_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+        domain: ContinuationControls,
+    ) -> Result<HarmonicEvaluation<N>, Refusal> {
+        self.evaluate_with_continuation(
+            &state.state,
+            inputs,
+            wind_world,
+            Some((domain, Some(&state.wing))),
+        )
+    }
+
+    fn evaluate_with_continuation(
+        &self,
+        state: &HarmonicState,
+        inputs: PropulsionInputs,
+        wind_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+        continuation: Option<(ContinuationControls, Option<&WingContinuation>)>,
     ) -> Result<HarmonicEvaluation<N>, Refusal> {
         if inputs.density_kg_m3 != self.inflow.density_kg_m3()
             || !state
@@ -255,7 +326,7 @@ impl<'p, 'a, const N: usize> HarmonicPropulsion<'p, 'a, N> {
             self.base
                 .propulsion
                 .evaluate_with(&state.motion, inputs, wind_world, |stage| {
-                    self.solve(stage, state.induction)
+                    self.solve(stage, state.induction, continuation)
                 })?;
         Ok(HarmonicEvaluation {
             loads: result.loads,
@@ -315,8 +386,83 @@ impl<'p, 'a, const N: usize> HarmonicPropulsion<'p, 'a, N> {
         t_s: f64,
         dt_s: f64,
         angular_origin_world: [f64; 3],
+        inputs: C,
+        wind_world: W,
+    ) -> Result<HarmonicStep<N>, Refusal>
+    where
+        C: FnMut(f64, &HarmonicState) -> Result<PropulsionInputs, Refusal>,
+        W: Fn(f64, [f64; 3]) -> Result<[f64; 3], Refusal>,
+    {
+        self.step_impl(
+            state,
+            t_s,
+            dt_s,
+            angular_origin_world,
+            inputs,
+            wind_world,
+            None,
+        )
+    }
+
+    /// Continue from the caller's accepted circulation through both actual
+    /// force stages. The returned anchor is the accepted mechanical midpoint
+    /// stage, then used as a guess for the next initial force solve. It never
+    /// substitutes a previous force for a current force. A refusal publishes
+    /// neither the physical update nor a changed caller-owned wing anchor.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_continued<C, W>(
+        &self,
+        state: &ContinuedHarmonicState,
+        domain: ContinuationControls,
+        t_s: f64,
+        dt_s: f64,
+        angular_origin_world: [f64; 3],
+        inputs: C,
+        wind_world: W,
+    ) -> Result<ContinuedHarmonicStep<N>, Refusal>
+    where
+        C: FnMut(f64, &HarmonicState) -> Result<PropulsionInputs, Refusal>,
+        W: Fn(f64, [f64; 3]) -> Result<[f64; 3], Refusal>,
+    {
+        let step = self.step_impl(
+            &state.state,
+            t_s,
+            dt_s,
+            angular_origin_world,
+            inputs,
+            wind_world,
+            Some((domain, &state.wing)),
+        )?;
+        let wing = step
+            .midpoint
+            .aerodynamics
+            .wing_continuation
+            .clone()
+            .ok_or_else(|| {
+                reject(
+                    "harmonic-continuation-invalid",
+                    "missing accepted midpoint wing anchor",
+                )
+            })?;
+        Ok(ContinuedHarmonicStep {
+            state: ContinuedHarmonicState {
+                state: step.state,
+                wing,
+            },
+            step,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_impl<C, W>(
+        &self,
+        state: &HarmonicState,
+        t_s: f64,
+        dt_s: f64,
+        angular_origin_world: [f64; 3],
         mut inputs: C,
         wind_world: W,
+        continuation: Option<(ContinuationControls, &WingContinuation)>,
     ) -> Result<HarmonicStep<N>, Refusal>
     where
         C: FnMut(f64, &HarmonicState) -> Result<PropulsionInputs, Refusal>,
@@ -325,6 +471,7 @@ impl<'p, 'a, const N: usize> HarmonicPropulsion<'p, 'a, N> {
         let mut initial = None;
         let mut midpoint = None;
         let mut stage_induction = state.induction;
+        let mut stage_wing = continuation.map(|(_, anchor)| anchor.clone());
         let motion = geared::step(
             self.base.propulsion.assembly,
             &state.motion,
@@ -336,9 +483,13 @@ impl<'p, 'a, const N: usize> HarmonicPropulsion<'p, 'a, N> {
                     motion: *mechanical,
                     induction: stage_induction,
                 };
-                let evaluation = self.evaluate(&stage, inputs(time, &stage)?, &|point| {
-                    wind_world(time, point)
-                })?;
+                let evaluation = self.evaluate_with_continuation(
+                    &stage,
+                    inputs(time, &stage)?,
+                    &|point| wind_world(time, point),
+                    continuation.map(|(domain, _)| (domain, stage_wing.as_ref())),
+                )?;
+                stage_wing = evaluation.aerodynamics.wing_continuation.clone();
                 let loads = evaluation.loads;
                 if initial.is_none() {
                     stage_induction = self

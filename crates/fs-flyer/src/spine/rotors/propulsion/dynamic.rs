@@ -24,6 +24,7 @@ use fs_airscrew::dynamic_inflow::first_harmonic::HarmonicInduction;
 use fs_airscrew::dynamic_inflow::{InflowStep, RotorEvaluation, UniformAxialInflow};
 use fs_airscrew::oblique::{AzimuthQuadrature, DiskFrame, ObliqueLoads, SpinDirection};
 use fs_wing::induced_velocity_free;
+use fs_wing::nonlinear::continuation::{self, ContinuationControls, WingContinuation};
 use fs_wing::nonlinear::solve_nonlinear_with_incident;
 
 /// Mean and first harmonic wakes coupled to the original aircraft/shaft motion.
@@ -38,6 +39,8 @@ struct WingAtInduction {
     strip_velocity_mps: Vec<[f64; 3]>,
     lift_n: f64,
     residual: f64,
+    iterations: u32,
+    continuation: Option<WingContinuation>,
 }
 
 /// All physical memory of the dynamic propulsion step.
@@ -199,6 +202,7 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
         stage: &AerodynamicStage<'_>,
         induced_mps: [f64; 2],
         harmonics: Option<&[HarmonicInduction; 2]>,
+        continuation: Option<(ContinuationControls, Option<&WingContinuation>)>,
     ) -> Result<WingAtInduction, Refusal> {
         let wash = self.axes.wash_map(
             stage.strips,
@@ -242,18 +246,38 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
                 Ok(self.axes.velocity(incident, factors, local))
             })
             .collect::<Result<_, Refusal>>()?;
-        let wing = solve_nonlinear_with_incident(
-            stage.op,
-            stage.panels,
-            stage.strips,
-            stage.freestream,
-            stage.rho,
-            stage.closure,
-            &strip_velocity_mps,
-            None,
-            None,
-        )
-        .map_err(wing_error)?;
+        let (wing, continuation) = if let Some((domain, previous)) = continuation {
+            let solved = continuation::solve_with_incident(
+                stage.op,
+                stage.panels,
+                stage.strips,
+                stage.freestream,
+                stage.rho,
+                stage.closure,
+                &strip_velocity_mps,
+                None,
+                previous,
+                domain,
+            )
+            .map_err(wing_error)?;
+            (solved.solution, Some(solved.continuation))
+        } else {
+            (
+                solve_nonlinear_with_incident(
+                    stage.op,
+                    stage.panels,
+                    stage.strips,
+                    stage.freestream,
+                    stage.rho,
+                    stage.closure,
+                    &strip_velocity_mps,
+                    None,
+                    None,
+                )
+                .map_err(wing_error)?,
+                None,
+            )
+        };
         let mut disk_velocity_mps = [[0.0; 3]; 2];
         let disk_axial_mps = core::array::from_fn(|k| {
             let induced = induced_velocity_free(
@@ -274,6 +298,8 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
             strip_velocity_mps,
             lift_n: wing.total_lift_n,
             residual: wing.residual,
+            iterations: wing.iterations,
+            continuation,
         })
     }
 
@@ -282,7 +308,7 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
         stage: AerodynamicStage<'_>,
         induced_mps: [f64; 2],
     ) -> Result<DynamicAerodynamics, Refusal> {
-        let wing = self.solve_wing(&stage, induced_mps, None)?;
+        let wing = self.solve_wing(&stage, induced_mps, None, None)?;
         let disk_axial_mps = wing.disk_axial_mps;
         let oblique = if let Some((rule, frames)) = &self.oblique {
             let loads = |k: usize| {

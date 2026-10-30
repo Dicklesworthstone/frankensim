@@ -14,6 +14,7 @@ layer = "L3"
 fs-airfoil = { path = "../fs-airfoil" }
 fs-blake3 = { path = "../fs-blake3" }
 fs-math = { path = "../fs-math" }
+fs-solver = { path = "../fs-solver" }
 
 [lints]
 workspace = true

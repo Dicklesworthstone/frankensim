@@ -3121,6 +3121,7 @@ dependencies = [
  "fs-airfoil",
  "fs-blake3",
  "fs-math",
+ "fs-solver",
 ]
 
 [[package]]

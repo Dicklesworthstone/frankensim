@@ -688,3 +688,69 @@ The extension supplies the skew transport matrix; it does not supply a
 transported/skewed far-wake geometry, direct inter-disk wake coupling,
 intradisk ambient wind gradients, reverse-flow regimes, higher modes,
 swirl, flapping/cyclic pitch, or a complete fluid/body energy/momentum model.
+
+## Actual stage-by-stage wing continuation in skewed flight
+
+`first_harmonic::ContinuedHarmonicState` pairs the existing complete physical
+`HarmonicState` with an explicit `fs-wing::nonlinear::continuation::WingContinuation`.
+`initialize_continuation`, `evaluate_continued` and `step_continued` select the new
+wing continuation lane. The original entry points retain their original cold
+wing solve. The actual initial force stage continues from the caller's anchor;
+its accepted circulation seeds the actual midpoint force stage. The returned
+physical endpoint carries the accepted midpoint circulation as the next initial
+guess. Both stages resolve current section equations and apply current loads;
+neither force is lagged. The original aircraft/shaft mechanics, blade section
+quadrature, skew-inflow owner, force/moment arms and impulse/work accounts remain
+the only physical owners. The anchor adds no aerodynamic momentum state.
+
+The exposed long-flight failure had two distinct causes. On the original
+`vel_z=0.8 m/s` positive-gust trajectory, the old Picard iteration refuses at
+8 ms after its 600-attempt cap even while the section solution is attached and
+the row split is well conditioned. Caller-owned warm starts alone did not cure
+it. The new native Newton--Krylov continuation crosses that failure at the same
+`1e-10` actual componentwise section gate. Continuing the same positive-gust
+trajectory later approaches cancellation of a signed linear chord-row total;
+the declared row-condition bound correctly refuses. The original
+`vel_z=1.5 m/s` fixture also has near-filament and very large effective-incidence
+roots; the admitted continuation API explicitly refuses it. A low algebraic
+residual on that legacy fixture is not evidence of realistic long-trajectory
+accuracy.
+
+The full coupled refinement regression uses the original attached
+`vel_z=0.8 m/s` initial state and the opposite smooth crosswind turn,
+`wind(t,p)=[0.02*p_y, -0.5*sin(20*t), 0.1*cos(20*t)] m/s`. It completes the actual
+96 ms interval at 24, 48, 96 and 384 physical steps with canted counterrotating
+disks, moving attitude, local wing velocities, first-harmonic skew transport and
+state-dependent aircraft/shaft loads. The section equations at every real
+initial and midpoint stage are independently reconstructed from the public full
+horseshoe field minus an independent finite-bound field. Their maximum measured
+normalized residual is `3.069e-11`; all effective incidences remain attached.
+The run does not weaken the force residual or shorten the physical interval.
+
+Against the 384-step reference, the existing full-state distance errors at
+24/48/96 steps are `3.4904523143e-4`, `8.6389460900e-5`, `2.0587886173e-5`.
+The accumulated absolute induced-work coupling defects are `1.4235880765e-3`,
+`3.5729731447e-4`, `8.9494495170e-5 J`. Both refine at the expected second order.
+Across those runs and the reference, independent solid-body/rotor world linear
+momentum defects stay below `7.48e-12 N s`, angular momentum defects below
+`9.03e-11 N m s`, reduced-wake impulse defects below `6.92e-11 N s`, and wake
+energy-balance defects below `3.59e-11 J`. No stage uses more than six Newton
+attempts or 44 Jacobian products. Reversing equivalent shaft-axis/ratio/blade
+handedness conventions gives exactly the same complete continued run and work
+account. Late source and exhausted-Newton refusals leave both physical state and
+wing anchor unchanged; exact replay is tested.
+
+These measured bounds concern this admitted 96 ms convergence fixture. They do
+not certify arbitrary maneuver duration, separated-wing roots, a moving far
+wake, unsteady section hysteresis or full fluid/body momentum closure. The
+previous explicit induced-work partition defect remains a quadrature defect,
+not dissipation or a passivity guarantee. Row-cancellation, incidence and
+filament domains remain explicit physical/numerical admission limits rather
+than hidden regularization.
+
+The focused final sweep passes 107 cases: 30 wing/continuation cases and 77
+airscrew/propulsion cases, including the ten-case harmonic flight battery.
+The native harness compiles current wing and propulsion sources and the actual
+Newton/FGMRES/Armijo numerics; it omits the solver's two `fs_exec::Cx` convenience
+wrappers and unrelated aircraft surfaces. This does not substitute for a full
+workspace Cargo/clippy/CI gate, which was not run in this environment.
