@@ -2063,3 +2063,26 @@ Focused authored cases exercise independent physical-power integration,
 source isolation, regional loss, zero loss and refusal. Parser/formatter and
 source checks do not establish native execution or measured validation;
 native compilation and runtime tests remain unverified.
+
+## Shared-fluid porous termination
+
+`fluid::input_impedance_boundary` connects the existing `NetworkLoad`
+description to the native shared-fluid chain and stable composer. It evaluates
+the original `ThermoviscousFluid` exactly once, then uses that same admitted
+snapshot for duct propagation and the rigid-frame porous load. The original
+JCA(L) material owner supplies inertia, permeability-based drag, the actual
+adiabatic fluid stiffness and Cp/Cv thermal relaxation. Gas network and generic
+fluid consumers share the same surface-to-volume-flow and phasor conversion.
+
+Closed, pressure-release, explicit and tabulated boundaries retain their
+existing semantics. Gas-specific radiation variants require an explicitly
+resolved impedance in this generic path. The porous skeleton is rigid and
+fully saturated by one uniform fluid; partial saturation, frame motion and
+transient deposition of absorbed acoustic heat are outside this entry point.
+
+Focused G1/G3 regressions use original liquid source curves, an independent
+permeability/diffusivity JCA(L) expression and an analytic loaded tube. They
+check actual pressure/flow, material and pore substitutions, acoustic power,
+separate wall diffusion, single-snapshot evaluation, source support and
+cancellation. These regressions are authored; native Cargo execution remains
+unverified in the resource-exhausted authoring environment.

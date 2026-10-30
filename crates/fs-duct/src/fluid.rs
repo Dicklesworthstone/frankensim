@@ -23,6 +23,7 @@
 //! The caller retains the source material and its original query receipts.
 
 use crate::compose::{self, ChainResult, ComposeOptions, PreparedChain, TwoPort};
+use crate::network::NetworkLoad;
 use crate::{ConeSlices, Duct, DuctError, LossModel, Segment, SegmentWave, WallModel};
 use fs_material::MaterialError;
 use fs_material::fluid_acoustics::thermoviscous::{ThermoviscousFluid, ThermoviscousFluidState};
@@ -449,4 +450,73 @@ fn admit_load(load: Option<C64>) -> Result<(), DuctError> {
         ));
     }
     Ok(())
+}
+
+/// Resolve a material boundary and the whole duct from ONE original fluid
+/// snapshot. The existing [`NetworkLoad`] description is shared with gas
+/// networks; no separate liquid load schema or porous constitutive law exists.
+///
+/// A rigid-backed porous layer uses the fluid's actual adiabatic bulk modulus,
+/// Cp/Cv and transport response, and the skeleton's original permeability.
+/// Its surface impedance is converted to the same exp(-i omega t), pressure /
+/// volume-flow port as the native chain. Porous absorption, duct wall diffusion
+/// and mechanical wall loss remain separate physical contributions.
+///
+/// Closed, pressure-release, explicit and tabulated loads also use their
+/// existing owners. Gas-only radiation models refuse; a separately admitted
+/// radiation impedance can be supplied as [`NetworkLoad::Impedance`]. The fluid
+/// is uniform and the pore skeleton remains rigid and fully saturated in that
+/// same fluid. This adds no frame waves, partial saturation, mean flow, or
+/// phase-change model. The caller retains the original fluid source receipts.
+#[allow(clippy::too_many_arguments)]
+pub fn input_impedance_boundary<M: ThermoviscousFluid + ?Sized>(
+    duct: &Duct,
+    material: &M,
+    omega: f64,
+    loss: LossModel,
+    load: &NetworkLoad,
+    wall: WallModel<'_>,
+    cone_slices: ConeSlices,
+    options: ComposeOptions,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<ChainResult, FluidDuctError> {
+    admit_geometry(duct, options, &mut cancelled)?;
+    let state = material.thermoviscous_state()?;
+    let impedance = match load {
+        NetworkLoad::Closed => None,
+        NetworkLoad::PressureRelease => Some(C64::ZERO),
+        NetworkLoad::Impedance(z) => Some(*z),
+        NetworkLoad::Tabulated(table) => Some(table.z_at(omega)?),
+        NetworkLoad::PorousRigid {
+            material,
+            thickness_m,
+            area_m2,
+        } => {
+            if !positive(*area_m2) {
+                return Err(bad("porous boundary area must be positive and finite").into());
+            }
+            let surface = material.surface_impedance_rigid_fluid(&state, omega, *thickness_m)?;
+            Some(crate::network::porous_volume_impedance(surface, *area_m2)?)
+        }
+        NetworkLoad::Radiation { .. } => {
+            return Err(bad(
+                "shared fluid boundaries need an explicitly resolved radiation impedance",
+            )
+            .into());
+        }
+    };
+    poll(&mut cancelled, 0)?;
+    // This immutable admitted snapshot implements the shared trait directly:
+    // the caller's original material is evaluated exactly once for both owners.
+    input_impedance_load_with_loss(
+        duct,
+        &state,
+        omega,
+        loss,
+        impedance,
+        wall,
+        cone_slices,
+        options,
+        cancelled,
+    )
 }

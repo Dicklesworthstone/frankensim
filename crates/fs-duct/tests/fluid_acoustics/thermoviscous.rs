@@ -443,3 +443,6 @@ fn lossy_material_admission_cancellation_and_work_refusals_publish_no_partial_ch
     assert_eq!(first.u_out_over_u_in, second.u_out_over_u_in);
     assert_eq!(liquid, original);
 }
+
+#[path = "thermoviscous/porous.rs"]
+mod porous;

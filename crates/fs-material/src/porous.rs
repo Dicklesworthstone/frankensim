@@ -51,8 +51,9 @@ use fs_math::det;
 
 use crate::MaterialError;
 
-/// Resolve the existing rigid-frame law in a shared, changing gas state.
+/// Resolve the existing rigid-frame law in a shared, changing fluid state.
 pub mod gas;
+pub use gas::{PorousFluidLaw, PorousFluidResponse};
 /// Typed intrinsic permeability and conservative, compressible Darcy barriers.
 pub mod permeability;
 /// Explicit saturation-dependent gas mobility and pore diffusivity.
@@ -237,6 +238,17 @@ impl PorousCard {
         ambient: PorousAmbient,
         omega: f64,
     ) -> Result<C64, MaterialError> {
+        self.effective_density_from(ambient.rho0, ambient.eta, omega)
+    }
+
+    // One viscous kernel for the original gas adapter and the shared-fluid
+    // owner. Static resistivity has already been resolved from mu/k0.
+    fn effective_density_from(
+        &self,
+        density: f64,
+        viscosity: f64,
+        omega: f64,
+    ) -> Result<C64, MaterialError> {
         self.validate()?;
         if !(omega.is_finite() && omega > 0.0) {
             return Err(MaterialError::State {
@@ -247,11 +259,11 @@ impl PorousCard {
         let lam = self.viscous_length_m;
         let j = C64::new(0.0, 1.0);
         let g = (C64::new(1.0, 0.0)
-            + j.scale(4.0 * a_inf * a_inf * ambient.eta * ambient.rho0 * omega)
+            + j.scale(4.0 * a_inf * a_inf * viscosity * density * omega)
                 / C64::new(sigma * sigma * lam * lam * phi * phi, 0.0))
         .sqrt();
-        let visc = C64::new(sigma * phi, 0.0) / (j.scale(omega * ambient.rho0 * a_inf)) * g;
-        Ok((C64::new(1.0, 0.0) + visc).scale(a_inf * ambient.rho0 / phi))
+        let visc = C64::new(sigma * phi, 0.0) / (j.scale(omega * density * a_inf)) * g;
+        Ok((C64::new(1.0, 0.0) + visc).scale(a_inf * density / phi))
     }
 
     /// Effective dynamic bulk modulus K_eff(ω): Lafarge when `k0'` is
@@ -260,6 +272,29 @@ impl PorousCard {
     /// # Errors
     /// Card validation; non-positive frequency.
     pub fn effective_bulk(&self, ambient: PorousAmbient, omega: f64) -> Result<C64, MaterialError> {
+        // Preserve the original ideal-gas adapter's pressure convention and
+        // arithmetic. General fluids supply their actual adiabatic modulus.
+        self.effective_bulk_from(
+            ambient.rho0,
+            ambient.eta,
+            ambient.prandtl,
+            ambient.gamma,
+            ambient.gamma * ambient.p0,
+            omega,
+        )
+    }
+
+    // K_eff = (K_s/phi) / [gamma - (gamma-1)/D(omega)]. Only the ideal-gas
+    // adapter has K_s=gamma*p; a liquid or nonideal gas keeps its own EOS.
+    fn effective_bulk_from(
+        &self,
+        density: f64,
+        viscosity: f64,
+        prandtl: f64,
+        heat_capacity_ratio: f64,
+        adiabatic_bulk_modulus: f64,
+        omega: f64,
+    ) -> Result<C64, MaterialError> {
         self.validate()?;
         if !(omega.is_finite() && omega > 0.0) {
             return Err(MaterialError::State {
@@ -267,6 +302,11 @@ impl PorousCard {
             });
         }
         let phi = self.porosity;
+        // Cp=Cv removes pressure/temperature coupling exactly. Do not evaluate
+        // an inactive thermal diffusion expression and then multiply NaN by 0.
+        if heat_capacity_ratio == 1.0 {
+            return Ok(C64::new(adiabatic_bulk_modulus / phi, 0.0));
+        }
         let lam_t = self.thermal_length_m;
         let j = C64::new(0.0, 1.0);
         // Champoux–Allard's thermal function is the Lafarge form with
@@ -275,15 +315,14 @@ impl PorousCard {
             .thermal_permeability_m2
             .unwrap_or(phi * lam_t * lam_t / 8.0);
         let gp = (C64::new(1.0, 0.0)
-            + j.scale(4.0 * k0p * k0p * ambient.prandtl * ambient.rho0 * omega)
-                / C64::new(ambient.eta * lam_t * lam_t * phi * phi, 0.0))
+            + j.scale(4.0 * k0p * k0p * prandtl * density * omega)
+                / C64::new(viscosity * lam_t * lam_t * phi * phi, 0.0))
         .sqrt();
         let denom = C64::new(1.0, 0.0)
-            + C64::new(ambient.eta * phi, 0.0)
-                / (j.scale(omega * ambient.rho0 * ambient.prandtl * k0p))
-                * gp;
-        let inner = C64::new(ambient.gamma, 0.0) - C64::new(ambient.gamma - 1.0, 0.0) / denom;
-        Ok(C64::new(ambient.gamma * ambient.p0 / phi, 0.0) / inner)
+            + C64::new(viscosity * phi, 0.0) / (j.scale(omega * density * prandtl * k0p)) * gp;
+        let inner =
+            C64::new(heat_capacity_ratio, 0.0) - C64::new(heat_capacity_ratio - 1.0, 0.0) / denom;
+        Ok(C64::new(adiabatic_bulk_modulus / phi, 0.0) / inner)
     }
 
     /// Characteristic impedance Zc and complex wavenumber k.
@@ -297,7 +336,7 @@ impl PorousCard {
     ) -> Result<(C64, C64), MaterialError> {
         let rho = self.effective_density(ambient, omega)?;
         let k_mod = self.effective_bulk(ambient, omega)?;
-        Ok(((rho * k_mod).sqrt(), (rho / k_mod).sqrt().scale(omega)))
+        Ok(characteristic_from_response(rho, k_mod, omega))
     }
 
     /// Surface impedance of a thickness-`d` layer on a RIGID backing:
@@ -311,14 +350,8 @@ impl PorousCard {
         omega: f64,
         thickness_m: f64,
     ) -> Result<C64, MaterialError> {
-        if !(thickness_m.is_finite() && thickness_m > 0.0) {
-            return Err(MaterialError::Parameters {
-                what: "layer thickness must be positive".to_string(),
-            });
-        }
         let (zc, k) = self.characteristic(ambient, omega)?;
-        let gamma_d = C64::new(0.0, 1.0) * k.scale(thickness_m);
-        Ok(zc * coth_c(gamma_d))
+        rigid_surface_from_characteristic(zc, k, thickness_m)
     }
 
     /// Normal-incidence absorption coefficient of the rigid-backed
@@ -347,6 +380,27 @@ impl PorousCard {
         let r = (zs - z0) / (zs + z0);
         Ok(1.0 - r.norm_sq())
     }
+}
+
+fn characteristic_from_response(density: C64, bulk: C64, omega: f64) -> (C64, C64) {
+    (
+        (density * bulk).sqrt(),
+        (density / bulk).sqrt().scale(omega),
+    )
+}
+
+fn rigid_surface_from_characteristic(
+    impedance: C64,
+    wavenumber: C64,
+    thickness_m: f64,
+) -> Result<C64, MaterialError> {
+    if !(thickness_m.is_finite() && thickness_m > 0.0) {
+        return Err(MaterialError::Parameters {
+            what: "layer thickness must be positive".to_string(),
+        });
+    }
+    let gamma_d = C64::new(0.0, 1.0) * wavenumber.scale(thickness_m);
+    Ok(impedance * coth_c(gamma_d))
 }
 
 /// Complex hyperbolic cotangent via `tanh(a+jb) =

@@ -1161,19 +1161,34 @@ None.
   spectra (machine-readable CC-BY data; no figure digitization) —
   the model reproduces measured absorption to worst 0.041 / mean
   0.018 (Basotect 60 mm) and 0.029 / 0.006 (Pinta 50 mm) inside
-  authored 0.06/0.03 bands. `porous::gas::PorousGasLaw` retains the
+  authored 0.06/0.03 bands. `porous::PorousFluidLaw` (also available through
+  the existing `porous::gas::PorousGasLaw` spelling) retains the
   original card, provenance, frequency support and explicitly supplied
-  characterization-gas viscosity. Intrinsic permeability
-  `k0 = mu_ref / sigma_ref` stays fixed; current `GasState` viscosity
-  supplies `sigma = mu / k0`. Density, sound speed, viscosity, gamma,
-  pressure and Prandtl number come from that same coherent gas snapshot,
-  then the original JCA(L) evaluator. `fs-duct::network::NetworkLoad::PorousRigid`
+  characterization-fluid viscosity. Intrinsic permeability
+  `k0 = mu_ref / sigma_ref` stays fixed; current viscosity supplies
+  `sigma = mu / k0`. `effective_fluid` and `surface_impedance_rigid_fluid`
+  consume one original `ThermoviscousFluid` state: density, adiabatic bulk
+  modulus, viscosity, Cp/Cv and thermal diffusion remain coherent. The shared
+  JCA(L) kernel uses the fluid's actual `K_s`, including `rho*c²` for a sourced
+  liquid or nonideal gas; liquid pressure is never substituted for stiffness.
+  The existing gas entry preserves its `gamma*p` arithmetic in that same
+  kernel. `Cp=Cv` gives exactly `K_s/porosity` without evaluating inactive
+  thermal relaxation; viscous drag remains. Missing transport or Cv refuses
+  through the original material owner. `PorousFluidResponse` retains the
+  numerical state, dynamic density/modulus, characteristic response and
+  rigid-backed surface response; original sources retain their authority.
+  `fs-duct::network::NetworkLoad::PorousRigid`
   consumes the rigid-backed response as a normal-incidence boundary,
   with the exact phasor and exposed-area conversion. Source/geometry
   refusals remain explicit. No porous constitutive model is duplicated.
-  The skeleton remains rigid and gas-filled; gas substitution does not
-  establish liquid saturation, condensation, swelling, moving-frame waves,
+  The skeleton remains rigid with pores completely filled by one fluid;
+  model transfer does not experimentally qualify an air-characterized
+  specimen in a liquid. Original frequency support is still enforced.
+  Substitution does not establish partial saturation, condensation, swelling, moving-frame waves,
   distributed lining or transient deposition of absorbed acoustic heat.
+  General-fluid G0/G1 regressions cover gas parity, Darcy and high-frequency
+  inertia, isothermal/adiabatic liquid stiffness, thin-layer compliance,
+  exact zero thermal coupling, material-only changes and original refusals.
   Focused gas-source and duct-cylinder tests exercise data-only changes of
   temperature, pressure, gas mixture and pore permeability, including
   independent acoustic power balance through both network load paths.

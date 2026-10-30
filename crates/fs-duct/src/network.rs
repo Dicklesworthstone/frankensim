@@ -66,12 +66,14 @@ pub enum NetworkLoad {
     },
     /// A measured/baked load; its own support and passivity admission apply.
     Tabulated(TabulatedLoad),
-    /// Gas-filled rigid-frame absorber over a uniform-pressure boundary.
-    /// The solve's actual gas refreshes drag, inertia and thermal relaxation.
+    /// Fluid-filled rigid-frame absorber over a uniform-pressure boundary.
+    /// The solve's actual fluid refreshes drag, inertia and thermal relaxation.
+    /// Gas networks use their exterior gas; the shared-fluid chain uses its
+    /// identical admitted fluid for both propagation and this boundary.
     /// This is a normal-incidence load, not a distributed duct-wall model.
     PorousRigid {
-        /// Original porous skeleton and characterization-gas viscosity.
-        material: fs_material::porous::gas::PorousGasLaw,
+        /// Original porous skeleton and characterization-fluid viscosity.
+        material: fs_material::porous::PorousFluidLaw,
         /// Porous layer thickness against its rigid backing [m].
         thickness_m: f64,
         /// Exposed area carrying the boundary's volume flow [m2].
@@ -435,15 +437,23 @@ fn load_impedance(
             let surface = material
                 .surface_impedance_rigid(exterior, omega, *thickness_m)
                 .map_err(|_| bad("porous boundary gas, geometry or material support refused"))?;
-            // The material owner uses exp(+i wt); the network uses exp(-i wt).
-            // U = A v, so the pressure/volume-flow load is conj(Z_surface)/A.
-            let load = C64::new(surface.re / *area_m2, -surface.im / *area_m2);
-            if (surface.re != 0.0 && load.re == 0.0) || (surface.im != 0.0 && load.im == 0.0) {
-                return Err(bad("porous boundary impedance conversion underflows"));
-            }
-            Ok(Some(finite_impedance(load)?))
+            Ok(Some(porous_volume_impedance(surface, *area_m2)?))
         }
     }
+}
+
+/// The material owner uses exp(+i wt); all duct consumers use exp(-i wt).
+/// U = A v, so the pressure/volume-flow load is conj(Z_surface)/A.
+/// Gas graphs and generic-fluid chains share this one conversion/admission.
+pub(crate) fn porous_volume_impedance(surface: C64, area_m2: f64) -> Result<C64, DuctError> {
+    if !area_m2.is_finite() || area_m2 <= 0.0 {
+        return Err(bad("porous boundary area must be positive and finite"));
+    }
+    let load = C64::new(surface.re / area_m2, -surface.im / area_m2);
+    if (surface.re != 0.0 && load.re == 0.0) || (surface.im != 0.0 && load.im == 0.0) {
+        return Err(bad("porous boundary impedance conversion underflows"));
+    }
+    finite_impedance(load)
 }
 
 fn norm_inf(a: &[C64], n: usize) -> f64 {
