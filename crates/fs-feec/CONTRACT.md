@@ -1293,3 +1293,63 @@ independent refinement. No curved isoparametric geometry, corner-layer
 acceptance, mean flow/heating, evolving composition, lateral solid conduction,
 time-domain realization, real-instrument validation or runtime performance
 benchmark follows from this frequency-domain extension.
+
+### Resolved three-dimensional thermoviscous acoustics
+
+`acoustics::thermoviscous::ThermoviscousFe` supplies the mixed harmonic
+linearized Navier–Stokes owner for a uniform stationary ideal gas on straight
+tetrahedra. Velocity uses three original P2 H1 components, pressure uses P1,
+and temperature uses P2. The element pair is fixed; an unstabilized equal-order
+pair is not offered. Axial diffusion and full deviatoric/dilatational stresses
+remain in the volume equations. No thin gas-layer approximation is imposed.
+
+Using exp(+i omega t) and theta=T'/T0, the system has the form
+`R + G + i omega H`, with exactly antisymmetric pressure/divergence coupling,
+consistent inertial/caloric mass, and physical viscous/thermal dissipation.
+Source-evaluated complex cp enters the temperature equation itself; Im(cp)<=0
+adds molecular dissipation. Independent bulk viscosity remains explicit and
+must not duplicate the same molecular reservoir loss.
+
+Every boundary face belongs to a stationary no-slip wall or a pressure port.
+An explicit wall subset is isothermal; other walls and all pressure ports have
+zero conductive heat flux. Existing piecewise-linear `BoundaryMode` traces
+define total traction `-P psi n` and inward flow `Q=-integral(psi v.n)`.
+Port work is `Re(sum(conj(P) Q))/2`. P includes viscous normal stress and is
+not a point sample of thermodynamic pressure. Uniform traces have net-volume
+flow semantics; nonuniform traction modes require a matching dual map before
+connection to a prescribed-velocity modal basis.
+
+Static assembly is reused across frequencies. One original cancellable complex
+LU serves repeated drives and every admittance column. Direct real-reference
+power scattering adds `sum R_m B_m B_m^T` before factorization and avoids
+inverting an intermediate impedance/admittance. At most two correction solves
+reuse that LU, with the original `fs_math::Dd` owner evaluating residuals of
+the unscaled physical equations. This corrects loss of small flow/work digits
+near the static limit without another dense matrix. Final componentwise
+backward error above 5e-13 refuses; this is a numerical solve criterion, not
+a physical accuracy bound. Cancellation is polled during element assembly,
+scaling, residual evaluation, original factor/substitution, and field work.
+
+Limits include explicit element and tetrahedron-aspect bounds, a default
+1024/hard 1536 mixed-unknown cap, and `48*ndof^2` bytes for peak dense arrays
+(geometry and vectors are extra). The aspect proxy is longest edge divided
+by smallest altitude; admission does not prove mesh robustness or convergence.
+The response retains original-coordinate pressure, velocity and temperature,
+all port flows, and independently integrated shear, bulk, conduction and
+caloric work. Losses and work residuals are not clipped.
+
+Four focused native tests cover traction-work closure and all live loss
+channels, reciprocity, simultaneous drives, direct power scattering, replay,
+boundary/material/budget/cancellation refusals, and independent continuum
+checks. Low-frequency compliance relative errors are 3.33714e-6 isothermal,
+1.87563e-7 adiabatic and 1.80514e-7 relaxing, within the unchanged 2e-5 gate.
+A long finite rectangular duct on 126/332/638 mixed unknowns has Poiseuille
+conductance errors 0.0584342 -> 0.0161579 -> 0.00611767. Finite-end effects
+remain separate from the fully developed reference. The finest fixture error
+is about 0.612%, not the M2.4-W1c infinite-slit/tube 1e-4 qualification.
+
+M2.4-W1c remains open: dynamic slit propagation and characteristic impedance,
+circular-tube Bessel and asymptotic overlap acceptance, automatic conforming
+Helmholtz/LNS interface assembly, curved geometry, finite conductive solid walls
+in this owner, moving walls, mean flow, nonlinear acoustics, a sequential LNS
+variant, time stepping and large-domain iterative solves are not supplied.
