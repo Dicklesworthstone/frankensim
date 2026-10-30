@@ -168,9 +168,9 @@ pub(super) fn resolve_viscosity(material: &ResolvedMaterialStatePoint)
         let coefficient = material
             .property(key)
             .ok_or_else(|| refuse("material plate loss needs density, E, nu and viscosity"))?;
-        if !coefficient.is_constant_at_fixed_temperature() {
+        if !coefficient.is_constant_at_fixed_environment() {
             return Err(refuse(
-                "Kelvin-Voigt plate coefficients must be validity-wide scalar constants or temperature-only curves at fixed positive absolute T",
+                "Kelvin-Voigt plate coefficients must be constant at the held typed environment, with no frequency-valued or unowned response law",
             ));
         }
         if let Some((lo, hi)) = coefficient.angular_frequency_band_rad_s().map_err(|_| {

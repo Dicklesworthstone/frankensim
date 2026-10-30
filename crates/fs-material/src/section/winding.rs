@@ -129,8 +129,8 @@ impl CloseWoundSection {
             let property = material.property(name)
                 .ok_or_else(|| invalid("winding needs unambiguous density and shear modulus"))?;
             if property.requirement().quantity() != QuantitySpec::dimensional(dims)
-                || !property.is_constant_at_fixed_temperature() {
-                return Err(invalid("winding coefficients require constant or fixed-temperature dimensioned laws"));
+                || !property.is_constant_at_fixed_environment() {
+                return Err(invalid("winding coefficients require dimensioned laws at a held typed environment"));
             }
             coefficients[i] = positive(property.value_si(), "positive winding coefficient")?;
             if let Some((lower, upper)) = property.angular_frequency_band_rad_s()? {

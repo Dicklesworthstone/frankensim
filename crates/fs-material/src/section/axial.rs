@@ -30,7 +30,7 @@ pub struct ConcentricAxialViscosity {
 impl ConcentricElasticSection {
     /// Bind explicit uniaxial viscosity [Pa s] from every original layer.
     ///
-    /// Density, E and viscosity must be constant at the selected temperature.
+    /// Density, E and viscosity must be constant at the held typed environment.
     /// Every viscosity supplies a frequency band; all coefficient bands are
     /// intersected. Explicit zero is lossless, but absent loss data is an error.
     /// The section is perfectly bonded: no averaging of material identities.
@@ -58,7 +58,7 @@ impl ConcentricElasticSection {
             for key in [DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY, property_name] {
                 let coefficient = layer.material.property(key)
                     .ok_or_else(|| invalid("axial loss lost an original section coefficient"))?;
-                if !coefficient.is_constant_at_fixed_temperature() {
+                if !coefficient.is_constant_at_fixed_environment() {
                     return Err(invalid("axial loss requires fixed-state constant density, modulus and viscosity"));
                 }
                 if let Some((lo, hi)) = coefficient.angular_frequency_band_rad_s()? {

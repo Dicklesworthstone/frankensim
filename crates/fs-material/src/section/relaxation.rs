@@ -70,7 +70,7 @@ impl ConcentricElasticSection {
     /// Resolve every layer's independent generalized-Maxwell bending spectrum.
     ///
     /// Density, Young's modulus, equilibrium modulus and all branch coefficients
-    /// must be constants or T-only curves at fixed positive absolute T. Each
+    /// must be constants at the held, explicitly typed environment. Each
     /// relaxation time declares a frequency band, intersected with every other
     /// coefficient's band. For an empty layer spectrum its equilibrium modulus
     /// declares the band instead. All original receipts and selectors survive.
@@ -119,9 +119,9 @@ impl SectionPronySpectrum {
                 let property = layer.material.property(key)
                     .ok_or_else(|| invalid("section relaxation is missing an unambiguous source coefficient"))?;
                 if property.requirement().quantity() != quantity
-                    || !property.is_constant_at_fixed_temperature()
+                    || !property.is_constant_at_fixed_environment()
                 {
-                    return Err(invalid("section relaxation needs fixed-temperature coefficients with the declared SI quantity"));
+                    return Err(invalid("section relaxation needs held-environment coefficients with the declared SI quantity"));
                 }
                 match property.angular_frequency_band_rad_s()? {
                     Some((lo, hi)) => band = (band.0.max(lo), band.1.min(hi)),

@@ -504,6 +504,24 @@ impl ResolvedScalarProperty {
         self.has_only_fixed_external_conditions(None, false)
     }
 
+    /// Whether this is a constant mechanical coefficient at a held environment.
+    ///
+    /// Uses the same explicit fixed-external policy as
+    /// `is_static_at_fixed_external_conditions`, allowing a frequency coordinate
+    /// only as applicability. A source value depending on frequency, strain,
+    /// stress, rate or field still refuses. Typed temperature, pressure,
+    /// composition, moisture and concentration can describe curves or surfaces;
+    /// every coordinate remains fixed at the original resolved state.
+    ///
+    /// The consumer must intersect `angular_frequency_band_rad_s` for all
+    /// selected coefficients and admit its actual frequencies. This predicate
+    /// neither turns a sampled spectrum into a broadband law nor updates a
+    /// coefficient during evolution. Source models and receipts are unchanged.
+    #[must_use]
+    pub fn is_constant_at_fixed_environment(&self) -> bool {
+        self.has_only_fixed_external_conditions(None, true)
+    }
+
     /// Admit one explicitly evolved coordinate and otherwise fixed external context.
     ///
     /// The owned coordinate must be present with the EXACT declared quantity and

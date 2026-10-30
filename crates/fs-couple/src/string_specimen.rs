@@ -173,8 +173,8 @@ impl ResolvedStringSpecimen {
     ///
     /// Requires a nonnegative dimension-only `kelvin_voigt_bending_viscosity`
     /// [Pa s] and an explicit frequency validity interval in its retained
-    /// material claim. Density, E and viscosity must all be validity-wide scalar
-    /// constants or temperature-only curves evaluated at fixed positive absolute T.
+    /// material claim. Density, E and viscosity must all be constant at the
+    /// held, explicitly typed environment (including temperature and moisture).
     /// A frequency-sampled curve cannot silently become a broadband law.
     /// Their frequency domains intersect. Other coordinates (T, moisture, etc.)
     /// stay at the already admitted state point; no thermal evolution is implied.
@@ -227,9 +227,9 @@ impl ResolvedStringSpecimen {
             let coefficient = self.material.property(key).ok_or_else(|| {
                 refuse("material bending loss needs density, modulus and viscosity")
             })?;
-            if !coefficient.is_constant_at_fixed_temperature() {
+            if !coefficient.is_constant_at_fixed_environment() {
                 return Err(refuse(
-                    "Kelvin-Voigt string coefficients must be validity-wide scalar constants or temperature-only curves at fixed positive absolute T",
+                    "Kelvin-Voigt string coefficients must be constant at the held typed environment, with no frequency-valued or unowned response law",
                 ));
             }
             if let Some((lo, hi)) = coefficient.angular_frequency_band_rad_s().map_err(|_| {
@@ -262,8 +262,8 @@ impl ResolvedStringSpecimen {
     /// `relaxing_bending_modulus` [Pa] and `bending_relaxation_time` [s].
     /// Equilibrium E must equal the original `young_modulus` claim: a measured
     /// storage modulus at an arbitrary frequency cannot silently become E_inf.
-    /// All coefficients and density must be validity-wide constants or
-    /// temperature-only curves evaluated at fixed positive absolute T. The
+    /// All coefficients and density must be constant at the held typed
+    /// environment, retaining every source coordinate and receipt. The
     /// relaxation-time claim supplies an explicit frequency band, intersected with
     /// every coefficient's band. Source receipts and uncertainty are retained.
     ///
@@ -283,8 +283,8 @@ impl ResolvedStringSpecimen {
 
     /// Bind a generalized Maxwell bending spectrum from explicitly selected
     /// scalar modulus/time properties. Each time constant declares a frequency
-    /// band; every participating coefficient must be constant at the fixed
-    /// temperature, using scalars or temperature-only curves.
+    /// band; every participating coefficient must be constant at the held
+    /// typed environment, without frequency-valued or unowned response laws.
     /// An empty spectrum requires the equilibrium modulus to declare the band.
     /// Source pairs stay attached for later geometry/material rebinding.
     /// One typed frequency axis admits Hz or rad/s; legacy `omega` is rad/s.
@@ -357,9 +357,9 @@ impl ResolvedStringSpecimen {
             let coefficient = self.material.property(key).ok_or_else(|| {
                 refuse("relaxation bending needs every selected material coefficient")
             })?;
-            if !coefficient.is_constant_at_fixed_temperature() {
+            if !coefficient.is_constant_at_fixed_environment() {
                 return Err(refuse(
-                    "relaxation bending coefficients must be validity-wide scalar constants or temperature-only curves at fixed positive absolute T",
+                    "relaxation bending coefficients must be constant at the held typed environment, with no frequency-valued or unowned response law",
                 ));
             }
             if let Some((lo, hi)) = coefficient.angular_frequency_band_rad_s().map_err(|_| {

@@ -29,9 +29,9 @@ impl ConcentricShearSection {
     ///
     /// Every layer must supply the named nonnegative shear viscosity [Pa s],
     /// with an explicit angular-frequency validity interval. Density, selected
-    /// shear modulus and viscosity must be constants (or T-only curves at a
-    /// fixed positive absolute T); frequency samples cannot become a broadband
-    /// law. Their applicability intervals are intersected, not extrapolated.
+    /// shear modulus and viscosity must be constants at the held typed
+    /// environment; frequency samples cannot become a broadband law.
+    /// Their applicability intervals are intersected, not extrapolated.
     /// Explicit zero viscosity is supported, missing loss data is not zero.
     /// The shear correction affects transverse shear only, never circular GJ.
     ///
@@ -61,7 +61,7 @@ impl ConcentricShearSection {
             for key in [crate::state_point::DENSITY_PROPERTY, self.shear_property(), property_name] {
                 let property = layer.material.property(key)
                     .ok_or_else(|| invalid("torsion lost an original coefficient"))?;
-                if !property.is_constant_at_fixed_temperature() {
+                if !property.is_constant_at_fixed_environment() {
                     return Err(invalid("torsion requires fixed-state constant density, shear modulus and viscosity"));
                 }
                 if let Some((lo, hi)) = property.angular_frequency_band_rad_s()

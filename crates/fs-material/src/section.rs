@@ -234,8 +234,8 @@ impl ConcentricElasticSection {
     /// assigning one layer's decay to its neighbors. Explicit zero eta is allowed;
     /// a missing datum is NOT treated as a lossless layer.
     ///
-    /// Density, E and eta must be constants or T-only curves at fixed positive
-    /// absolute T. Each eta declares a frequency band; all coefficient bands
+    /// Density, E and eta must be constants at the held typed environment.
+    /// Each eta declares a frequency band; all coefficient bands
     /// intersect. The consumer must admit every actual mode against this band.
     /// This is frozen-state linear bending loss, not axial creep or thermal history.
     ///
@@ -265,8 +265,8 @@ impl ConcentricElasticSection {
             for key in [DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY, viscosity_property] {
                 let coefficient = layer.material.property(key)
                     .ok_or_else(|| invalid("layer bending law needs density, modulus and viscosity"))?;
-                if !coefficient.is_constant_at_fixed_temperature() {
-                    return Err(invalid("layer bending coefficients must be constants or T-only curves at fixed positive absolute T"));
+                if !coefficient.is_constant_at_fixed_environment() {
+                    return Err(invalid("layer bending coefficients need a held, explicitly typed environment and no unowned response dependence"));
                 }
                 if let Some((lo, hi)) = coefficient.angular_frequency_band_rad_s()
                     .map_err(|_| invalid("invalid layer coefficient frequency semantics"))?
@@ -398,6 +398,97 @@ mod constitutive_tests {
         ]).unwrap()
     }
     fn near(a: f64, b: f64) { assert!((a-b).abs() < 2e-13 * a.abs().max(b.abs()), "{a} != {b}"); }
+
+    fn moisture_source(at: f64, typed: bool, extra_strain: bool) -> ResolvedMaterialStatePoint {
+        use fs_qty::semantic::{MoistureBasis, QuantityKind, SemanticType, ValueForm};
+        let moisture = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::Moisture(MoistureBasis::DryMass), ValueForm::Static));
+        let mut claims = ClaimSet::new();
+        let mut required = Vec::new();
+        for (name, dims, low, high) in [
+            (DENSITY_PROPERTY, Density::DIMS, 8000.0, 9000.0),
+            (YOUNG_MODULUS_PROPERTY, Pressure::DIMS, 2e11, 1e11),
+            ("shear_modulus", Pressure::DIMS, 8e10, 4e10),
+            ("bending_eta", DynViscosity::DIMS, 1e7, 2e7),
+            ("delta_e", Pressure::DIMS, 1e9, 2e9),
+            ("tau", fs_qty::Time::DIMS, 0.001, 0.002),
+        ] {
+            let mut validity = ValidityDomain::unconstrained().with("omega", 1.0, 20000.0);
+            validity = if typed { validity.with_quantity("moisture_content", moisture, 0.0, 0.2) }
+                else { validity.with("moisture_content", 0.0, 0.2) };
+            if extra_strain { validity = validity.with("strain", 0.0, 0.1); }
+            claims.insert_claim(PropertyClaim {
+                key: PropertyKey::new(name, dims),
+                value: PropertyValue::Curve { abscissa: "moisture_content".into(),
+                    abscissa_dims: fs_qty::Dims::NONE, knots: vec![(0.0, low), (0.2, high)], dims },
+                validity, uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::LinearInside, observations: vec![],
+                provenance: Provenance { source: "manufactured held-moisture section".into(),
+                    license: "test-only".into(), artifact: None },
+            }).unwrap();
+            required.push(ScalarPropertyRequirement::try_new(name, dims,
+                ScalarAdmissibility::StrictlyPositive).unwrap());
+        }
+        let card = MaterialCard::assemble(MaterialStateId { chemistry: "manufactured".into(),
+            phase: "solid".into(), process: "held environment".into(), revision: 0 }, claims, vec![]).unwrap();
+        let point = QueryPoint::new().with("omega", 1000.0).unwrap();
+        let mut point = if typed { point.with_quantity("moisture_content", moisture, at).unwrap() }
+            else { point.with("moisture_content", at).unwrap() };
+        if extra_strain { point = point.with("strain", 0.01).unwrap(); }
+        resolve_material_state_point(&card, &point, &required,
+            MaterialPropertySelection::SingleClaimOnly).unwrap()
+    }
+
+    #[test]
+    fn held_moisture_reaches_section_mass_elasticity_and_all_retained_loss_channels() {
+        let dry = moisture_source(0.0, true, false);
+        let wet = moisture_source(0.2, true, false);
+        assert_eq!(dry.card_identity(), wet.card_identity());
+        assert_ne!(dry.identity(), wet.identity());
+        let make = |material| ConcentricElasticSection::try_new(0.0,
+            vec![ConcentricMaterialLayer { outer_radius_m: 0.001, material }]).unwrap();
+        let a = make(dry.clone());
+        let b = make(wet.clone());
+        near(b.line_density_kg_m() / a.line_density_kg_m(), 9.0 / 8.0);
+        near(b.axial_stiffness_n() / a.axial_stiffness_n(), 0.5);
+        near(b.bending_stiffness_n_m2() / a.bending_stiffness_n_m2(), 0.5);
+        let loss_a = a.clone().with_kelvin_voigt_bending("bending_eta").unwrap();
+        let loss_b = b.clone().with_kelvin_voigt_bending("bending_eta").unwrap();
+        near(loss_b.viscous_stiffness_n_m2_s() / loss_a.viscous_stiffness_n_m2_s(), 2.0);
+        assert_eq!(loss_b.omega_band_rad_s(), (1.0, 20000.0));
+        assert_eq!(loss_b.elastic().layers()[0].material, wet);
+        let axial_a = a.clone().with_axial_viscosity("bending_eta").unwrap();
+        let axial_b = b.clone().with_axial_viscosity("bending_eta").unwrap();
+        near(axial_b.viscous_rigidity_n_s() / axial_a.viscous_rigidity_n_s(), 2.0);
+        let torsion_a = a.clone().with_shear_modulus("shear_modulus", 1.0).unwrap()
+            .with_torsional_viscosity("bending_eta").unwrap();
+        let torsion_b = b.clone().with_shear_modulus("shear_modulus", 1.0).unwrap()
+            .with_torsional_viscosity("bending_eta").unwrap();
+        near(torsion_b.stiffness_n_m2() / torsion_a.stiffness_n_m2(), 0.5);
+        near(torsion_b.rotary_inertia_kg_m() / torsion_a.rotary_inertia_kg_m(), 9.0 / 8.0);
+        let spectrum = [relaxation::LayerRelaxationProperties {
+            equilibrium_modulus: YOUNG_MODULUS_PROPERTY.into(),
+            branches: vec![("delta_e".into(), "tau".into())],
+        }];
+        let prony = b.with_prony_bending(&spectrum).unwrap();
+        assert_eq!(prony.branches()[0].relaxation_time_s, 0.002);
+        near(prony.branches()[0].relaxing_stiffness_n_m2,
+            2e9 * prony.elastic().second_moment_m4());
+        let property = wet.property(YOUNG_MODULUS_PROPERTY).unwrap();
+        assert!(property.is_constant_at_fixed_environment());
+        assert!(!property.is_static_at_fixed_external_conditions(), "frequency applicability stays explicit");
+        assert!(!property.is_constant_at_fixed_temperature(), "the old predicate is unchanged");
+        assert!(matches!(property.answer().receipt.decision, fs_matdb::EvaluationDecision::ExactTabulated { .. }));
+    }
+
+    #[test]
+    fn held_environment_never_freezes_untyped_moisture_unowned_strain_or_frequency_response() {
+        for material in [moisture_source(0.1, false, false), moisture_source(0.1, true, true),
+            source(1e7, 8e10, (1.0, 20000.0), true)] {
+            assert!(!material.property("bending_eta").unwrap().is_constant_at_fixed_environment());
+            assert!(section(material.clone(), material).with_kelvin_voigt_bending("bending_eta").is_err());
+        }
+    }
 
     #[test]
     fn layer_integrals_drive_shear_torsion_and_bending_loss_without_averaging() {
