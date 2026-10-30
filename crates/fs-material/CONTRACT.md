@@ -5106,3 +5106,36 @@ work limits and cancellation without altering accepted state.
 ## Native thermoelectric constitutive graph
 
 `thermoelectric::graph::MaterialSeebeckNode` binds the original absolute thermopower source to the public constitutive graph through three temperature-change inputs and signed current. Every value is supplied by `ResolvedSeebeckSpan`, retaining both terminal Peltier transfers, the original bulk Thomson exchange, and electrical supply. The selected claim, query quantities, fixed external context, and continuously supported temperature slice remain pinned. Its consistent tangent integrates piecewise source derivatives, including reversed edges and the isothermal limit, without differencing nearly equal thermopowers. The node declares reversible transfer with no local storage and explicitly zero dissipation; graph execution and equation-compiler execution retain that declaration, and the compiler codec preserves it. Resistance, Joule heat, Fourier conduction, caloric storage, physical time, and acceptance of complete coupled balances remain with their existing owners. No phase evolution, magnetic transport, relative-to-reference thermopower substitution, or measured authority beyond the original source is inferred.
+
+## Radial material conduction and finite thermal feedback
+
+`thermal::conduction::LayerGeometry` admits planar, concentric cylindrical and
+spherical source-free conduction. It lowers the exact metric
+`A_contact * integral(ds/A(s))` to equivalent planar distances, retaining
+physical radii and contact area. The original `TwoLayerConduction` integrates
+each source k(T), solves contact temperatures and supplies endpoint derivatives.
+The contact jump uses the actual area; thin-radius differences use stable
+logarithm/difference forms. No source value is inferred from a material name.
+
+`PreparedLayerConduction::new_geometric` binds those metrics to the original
+active contact, source-qualified pure-phase caloric objects and per-side
+coverage. `LayerConductionObserver` supplies their integrated conductances to
+the existing explicit enthalpy/heat-rate/CFL owner; `resolve` supplies the same
+implicit endpoint residual. One signed internal transfer changes both finite
+stores, with no external heat or duplicate storage. Source/domain/event and
+cancellation refusal discard the full proposed advance. Source selection and
+geometric metrics are prepared once; flux evaluation performs no database query.
+
+The six `radial_conduction` regressions cover independent cylindrical/spherical
+resistance, nonlinear conductivity integrals/tangents, thin shells and the
+exterior limit, data-only rho/Cp/k changes between finite solid/liquid cells,
+native time refinement/energy/entropy, implicit endpoint parity and refusal
+with replay. Their integration target and the existing `layer_conduction` and
+`layer_conduction_network` targets compile in the scoped Cargo check; runtime
+execution is not established by that check.
+
+This is stationary radial conduction at fixed mass/reference geometry with
+quiescent liquid and explicit symmetry assumptions. The legs have no independent
+thermal storage; transient spatial resolution and coefficient-freezing error
+require refinement. No convection, fluid pressure/motion, confinement correction,
+phase-transition propagation or experimental accuracy is claimed.
