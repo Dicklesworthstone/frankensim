@@ -69,7 +69,7 @@ impl PortHamiltonian {
                 resistance_witness:self.resistance_witness.clone() };
         }
         let original = core::mem::replace(&mut self.storage,
-            Box::new(crate::QuadraticStorage { n: 0, q: Vec::new() }));
+            Box::new(crate::QuadraticStorage::admitted(Vec::new(), 0)));
         let shared: std::rc::Rc<dyn Storage> = std::rc::Rc::from(original);
         self.storage = Box::new(SharedStorage(shared.clone()));
         Self { n:self.n, m:self.m, j, r, g, storage:Box::new(SharedStorage(shared)),

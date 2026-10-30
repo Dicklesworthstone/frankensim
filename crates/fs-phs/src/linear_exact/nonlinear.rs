@@ -171,7 +171,7 @@ impl PreparedNonlinearZoh {
             j: system.j.clone(),
             r: system.r.clone(),
             g,
-            storage: Box::new(QuadraticStorage { n, q: q.clone() }),
+            storage: Box::new(QuadraticStorage::admitted(q.clone(), n)),
             resistance_witness: system.resistance_witness.clone(),
         };
         let shadow_split = split_quadratic(&shadow, budget)?;

@@ -118,10 +118,19 @@ pub trait Storage {
 
 /// Quadratic storage `H = x^T Q x / 2` with `Q` symmetric PSD
 /// (row-major, verified at construction).
+///
+/// The evaluations visit only the columns where `Q` or `Q^T` is non-zero, in
+/// ascending order. A skipped term is a signed zero for a finite state, and
+/// the sums start at `+0.0`, which no exact cancellation can turn negative,
+/// so every result is bit-identical to the dense row sums. They differ only
+/// for a non-finite state entry in a column `Q` stores nothing in.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QuadraticStorage {
     n: usize,
     q: Vec<f64>,
+    // Row `i`'s non-zero columns are `cols[starts[i]..starts[i + 1]]`.
+    starts: Vec<usize>,
+    cols: Vec<usize>,
 }
 
 impl QuadraticStorage {
@@ -132,7 +141,25 @@ impl QuadraticStorage {
     pub fn new(q: Vec<f64>, n: usize) -> Result<Self, PhsError> {
         require_symmetric(&q, n, "Q")?;
         require_psd(&q, n, "Q")?;
-        Ok(QuadraticStorage { n, q })
+        Ok(QuadraticStorage::admitted(q, n))
+    }
+
+    // An already admitted `Q` with its pattern: the union of the patterns of
+    // `Q` and `Q^T`, since the remainder reads both and admission tolerates a
+    // tiny asymmetry.
+    pub(crate) fn admitted(q: Vec<f64>, n: usize) -> Self {
+        let mut starts = Vec::with_capacity(n + 1);
+        let mut cols = Vec::new();
+        starts.push(0);
+        for i in 0..n {
+            cols.extend((0..n).filter(|&j| q[i * n + j] != 0.0 || q[j * n + i] != 0.0));
+            starts.push(cols.len());
+        }
+        QuadraticStorage { n, q, starts, cols }
+    }
+
+    fn row_cols(&self, i: usize) -> &[usize] {
+        &self.cols[self.starts[i]..self.starts[i + 1]]
     }
 
     /// The stiffness/compliance matrix (row-major).
@@ -144,7 +171,21 @@ impl QuadraticStorage {
 
 impl Storage for QuadraticStorage {
     fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
-        Some(quadratic_midpoint_remainder(&self.q, a, b, mid))
+        // `quadratic_midpoint_remainder` over the stored columns.
+        let n = self.n;
+        let mut remainder = 0.0;
+        for i in 0..n {
+            let mut row = 0.0;
+            for &j in self.row_cols(i) {
+                let qij = self.q[i * n + j];
+                let qji = self.q[j * n + i];
+                let offset = (a[j] - mid[j]) + (b[j] - mid[j]);
+                row += (0.25 * qij + 0.25 * qji) * offset
+                    + (0.5 * qji - 0.5 * qij) * mid[j];
+            }
+            remainder += (b[i] - a[i]) * row;
+        }
+        Some(remainder)
     }
 
     fn exact_quadratic_matrix(&self) -> Option<&[f64]> {
@@ -159,7 +200,7 @@ impl Storage for QuadraticStorage {
         let mut acc = 0.0;
         for i in 0..self.n {
             let mut row = 0.0;
-            for j in 0..self.n {
+            for &j in self.row_cols(i) {
                 row += self.q[i * self.n + j] * x[j];
             }
             acc += x[i] * row;
@@ -170,7 +211,7 @@ impl Storage for QuadraticStorage {
     fn gradient(&self, x: &[f64], out: &mut [f64]) {
         for i in 0..self.n {
             let mut row = 0.0;
-            for j in 0..self.n {
+            for &j in self.row_cols(i) {
                 row += self.q[i * self.n + j] * x[j];
             }
             out[i] = row;
@@ -4998,5 +5039,128 @@ mod valve_ports {
         assert_eq!(quasistatic_aperture_opening(4.0e-4, 1_000.0, 1_000.0), 0.0);
         assert!((quasistatic_aperture_opening(4.0e-4, 1_000.0, 0.0) - 4.0e-4).abs() < 1.0e-16);
         assert!((quasistatic_aperture_opening(4.0e-4, 1_000.0, 400.0) - 2.4e-4).abs() < 1.0e-16);
+    }
+}
+
+#[cfg(test)]
+mod quadratic_storage_pattern {
+    use super::{modal_bank_ports, quadratic_midpoint_remainder, QuadraticStorage, Storage};
+
+    // splitmix64
+    struct Draws(u64);
+
+    impl Draws {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+
+        fn unit(&mut self) -> f64 {
+            (self.next() >> 11) as f64 / (1u64 << 53) as f64
+        }
+
+        // Finite entries over twelve decades and both signs, with exact and
+        // negative zeros and subnormals among them.
+        fn state(&mut self, n: usize) -> Vec<f64> {
+            (0..n)
+                .map(|_| match self.next() % 20 {
+                    0 => 0.0,
+                    1 => -0.0,
+                    2 => {
+                        let tiny = f64::from_bits(self.next() % (1 << 52));
+                        if self.next() % 2 == 0 { tiny } else { -tiny }
+                    }
+                    _ => (2.0 * self.unit() - 1.0) * 10f64.powf(12.0 * self.unit() - 6.0),
+                })
+                .collect()
+        }
+    }
+
+    // The dense row sums the storage evaluated before it kept its pattern.
+    fn dense_rows(q: &[f64], x: &[f64]) -> Vec<f64> {
+        let n = x.len();
+        (0..n)
+            .map(|i| {
+                let mut row = 0.0;
+                for j in 0..n {
+                    row += q[i * n + j] * x[j];
+                }
+                row
+            })
+            .collect()
+    }
+
+    fn dense_hamiltonian(q: &[f64], x: &[f64]) -> f64 {
+        let mut acc = 0.0;
+        for (i, row) in dense_rows(q, x).into_iter().enumerate() {
+            acc += x[i] * row;
+        }
+        0.5 * acc
+    }
+
+    fn assert_bitwise(storage: &dyn Storage, n: usize, draws: &mut Draws, states: usize) {
+        let q = storage.exact_quadratic_matrix().unwrap().to_vec();
+        let mut gradient = vec![0.0; n];
+        for s in 0..states {
+            let (a, b, x) = (draws.state(n), draws.state(n), draws.state(n));
+            assert_eq!(storage.hamiltonian(&x).to_bits(), dense_hamiltonian(&q, &x).to_bits(), "H, state {s}");
+            storage.gradient(&x, &mut gradient);
+            for (i, (sparse, dense)) in gradient.iter().zip(dense_rows(&q, &x)).enumerate() {
+                assert_eq!(sparse.to_bits(), dense.to_bits(), "gradient {i}, state {s}");
+            }
+            // the represented midpoint, and an arbitrary one
+            let mid: Vec<f64> = a.iter().zip(&b).map(|(&l, &r)| f64::midpoint(l, r)).collect();
+            for mid in [mid, x] {
+                assert_eq!(
+                    storage.midpoint_energy_remainder(&a, &b, &mid).unwrap().to_bits(),
+                    quadratic_midpoint_remainder(&q, &a, &b, &mid).to_bits(),
+                    "remainder, state {s}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_544_state_modal_bank_evaluates_bit_identically_to_the_dense_sums() {
+        // the timpani's pole bank size: 272 oscillators from 60 Hz to 13 kHz
+        let mut draws = Draws(0x0376_2001);
+        let omegas: Vec<f64> = (0..272).map(|k| 2.0 * std::f64::consts::PI * 60.0 * 1.02f64.powi(k)).collect();
+        let zetas: Vec<f64> = (0..272).map(|_| 1e-3 * draws.unit()).collect();
+        let drive: Vec<f64> = (0..272).map(|_| draws.unit() - 0.5).collect();
+        let bank = modal_bank_ports(&omegas, &zetas, &[&drive]).unwrap();
+        let q = bank.storage.exact_quadratic_matrix().unwrap().to_vec();
+        // diagonal: one stored column per row
+        assert_eq!(QuadraticStorage::new(q, 544).unwrap().cols.len(), 544);
+        assert_bitwise(bank.storage.as_ref(), 544, &mut draws, 64);
+    }
+
+    #[test]
+    fn a_coupled_bank_with_an_admitted_asymmetry_evaluates_bit_identically() {
+        // 20 oscillators whose displacements couple to their neighbours and the
+        // first to the last (diagonally dominant, so PSD), and one coupling
+        // stored on one side only, inside admission's relative symmetry tolerance
+        let (modes, n) = (20, 40);
+        let mut q = vec![0.0; n * n];
+        for k in 0..modes {
+            let (d, p) = (2 * k, 2 * k + 1);
+            q[d * n + d] = (1.0 + k as f64) * 1e4;
+            q[p * n + p] = 1.0 + 0.1 * k as f64;
+            if k + 1 < modes {
+                let c = if k % 2 == 0 { 0.3e4 } else { -0.3e4 };
+                q[d * n + d + 2] = c;
+                q[(d + 2) * n + d] = c;
+            }
+        }
+        q[38] = 100.0;
+        q[38 * n] = 100.0;
+        q[3 * n + 1] = 1e-12 * 2e5;
+        let storage = QuadraticStorage::new(q, n).unwrap();
+        assert!(storage.row_cols(1).contains(&3) && storage.row_cols(3).contains(&1));
+        assert!(storage.cols.len() > n && storage.cols.len() < n * n / 4, "{}", storage.cols.len());
+        let mut draws = Draws(0x0376_2002);
+        assert_bitwise(&storage, n, &mut draws, 400);
     }
 }
