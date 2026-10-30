@@ -227,7 +227,7 @@ impl PreparedHeatNetwork<'_, '_> {
         Ok(electrical.bulk)
     }
 
-    // Nonlinear spatial electrical consumers solve local E/J, but neither a
+    // Spatial electrical/magnetic consumers solve local E/J/B/H, but neither a
     // uniform radiating cell nor a thermal-contact law owns an interface field.
     // Do not retain an initially valid zero-field slice after that field moves.
     // This admission is opt-in for those consumers; existing prescribed-context
@@ -238,16 +238,18 @@ impl PreparedHeatNetwork<'_, '_> {
     ) -> Result<(), HeatNetworkError> {
         use fs_material::conductor::response::ConductorMagnitude;
         let invalid = HeatNetworkError::Invalid;
-        let electrical = |dims| [ConductorMagnitude::ElectricField.quantity().dims(),
-            ConductorMagnitude::CurrentDensity.quantity().dims()].contains(&dims);
+        let field_dimension = |dims| [ConductorMagnitude::ElectricField.quantity().dims(),
+            ConductorMagnitude::CurrentDensity.quantity().dims(),
+            fs_material::field_storage::permanent::FLUX_DENSITY_DIMS,
+            fs_material::field_storage::permanent::FIELD_STRENGTH_DIMS].contains(&dims);
         let admit = |claim: &fs_matdb::PropertyClaim, context: &fs_matdb::QueryPoint,
             cells: &[fs_thermal::enthalpy::CellId]| {
             let owned = |axis: &str| field_axes.iter()
                 .any(|(cell, name)| cells.contains(cell) && *name == axis);
-            if claim.value.axes().any(|(axis, dims)| owned(axis) || electrical(dims))
+            if claim.value.axes().any(|(axis, dims)| owned(axis) || field_dimension(dims))
                 || claim.validity.bounds().keys().any(|axis| owned(axis)
                     || [claim.validity.axis_quantities().get(axis), context.axis_quantities().get(axis)]
-                        .into_iter().flatten().any(|q| electrical(q.dims()))) {
+                        .into_iter().flatten().any(|q| field_dimension(q.dims()))) {
                 return Err(invalid("thermal contacts and emissivity require field-independent response and applicability"));
             }
             Ok(())

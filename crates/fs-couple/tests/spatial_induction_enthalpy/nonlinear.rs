@@ -1,5 +1,8 @@
 //! G1/G3/G4: source-only saturation and temperature changes reach the actual
 //! retained 3D field, native Joule heat and finite caloric cells together.
+#[path = "nonlinear/heat.rs"]
+mod heat;
+
 use super::*;
 use fs_em::spatial::{
     nonlinear::SpatialNonlinearMaterial,

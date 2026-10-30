@@ -6,11 +6,11 @@
 //! the material; backward-Euler magnetic loss stays a numerical energy export.
 
 use super::{
-    CircuitEnthalpyError, CircuitEnthalpySolve, DrivenCoefficients, DriverAccount, Error,
-    MagneticThermalNetwork, MaterialNetwork, RefCell, SpatialInductionThermalReport,
-    SpatialInductionThermalSource, SpatialMagneticMaterialSample, SpatialMagneticThermalNetwork,
-    ThermalDriver, cell_driver_candidate, check, deposit_cell_heat, finite, invalid, material,
-    same_material,
+    CircuitEnthalpyError, CircuitEnthalpySolve, CircuitThermalCoefficients, DrivenCoefficients,
+    DriverAccount, Error, MagneticThermalNetwork, MaterialNetwork, MaterialNetworkSample, RefCell,
+    SpatialInductionThermalReport, SpatialInductionThermalSource, SpatialMagneticMaterialSample,
+    SpatialMagneticThermalNetwork, ThermalDriver, cell_driver_candidate, check, deposit_cell_heat,
+    finite, invalid, material, same_material,
 };
 use fs_em::spatial::{
     SpatialMagneticError,
@@ -30,19 +30,19 @@ use fs_thermal::enthalpy::DepositionSimulation;
 use std::collections::BTreeMap;
 
 /// One jointly accepted magnetic/conducting state and its finite heat history.
-pub struct SpatialNonlinearInductionThermalCandidate<'t, 'm> {
+pub struct SpatialNonlinearInductionThermalCandidate<'t, 'm, S = MaterialNetworkSample> {
     thermal: DepositionSimulation<'t>,
     field: SpatialNonlinearInduction<'m>,
-    report: SpatialInductionThermalReport<SpatialNonlinearInductionStep>,
+    pub(super) report: SpatialInductionThermalReport<SpatialNonlinearInductionStep, S>,
 }
-impl<'t, 'm> SpatialNonlinearInductionThermalCandidate<'t, 'm> {
+impl<'t, 'm, S> SpatialNonlinearInductionThermalCandidate<'t, 'm, S> {
     pub fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
     pub fn field(&self) -> &SpatialNonlinearInduction<'m> {
         &self.field
     }
-    pub fn report(&self) -> &SpatialInductionThermalReport<SpatialNonlinearInductionStep> {
+    pub fn report(&self) -> &SpatialInductionThermalReport<SpatialNonlinearInductionStep, S> {
         &self.report
     }
     /// Publish both histories together. Reported Joule heat is already paid;
@@ -52,7 +52,7 @@ impl<'t, 'm> SpatialNonlinearInductionThermalCandidate<'t, 'm> {
     ) -> (
         DepositionSimulation<'t>,
         SpatialNonlinearInduction<'m>,
-        SpatialInductionThermalReport<SpatialNonlinearInductionStep>,
+        SpatialInductionThermalReport<SpatialNonlinearInductionStep, S>,
     ) {
         (self.thermal, self.field, self.report)
     }
@@ -131,6 +131,53 @@ impl SpatialMagneticThermalNetwork<'_> {
     ) -> Result<SpatialNonlinearInductionThermalCandidate<'t, 'm>, Error> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
+        let material_network = MaterialNetwork {
+            cells: self.cells,
+            resistors: &[],
+            links: self.links,
+        };
+        let prepared = material_network
+            .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
+            .map_err(material)?;
+        self.step_nonlinear_resolved_candidate(
+            thermal,
+            target_s,
+            field,
+            endpoint_current_a_m2,
+            velocity_m_s,
+            controls,
+            field_controls,
+            initial_energy_increments_j,
+            |trial| {
+                prepared
+                    .resolve(trial, || (*cancel.borrow_mut())())
+                    .map_err(material)
+            },
+            |sample| sample,
+            &cancel,
+        )
+    }
+
+    // Full sourced heat assemblies keep these original field and enthalpy
+    // equations and carry their complete interface/radiation source payload.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn step_nonlinear_resolved_candidate<'t, 'm, S>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        field: &SpatialNonlinearInduction<'m>,
+        endpoint_current_a_m2: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        controls: CircuitEnthalpySolve,
+        field_controls: SpatialNonlinearInductionControls,
+        initial_energy_increments_j: &[f64],
+        resolve_sources: impl Fn(
+            &DepositionSimulation<'_>,
+        ) -> Result<CircuitThermalCoefficients<S>, Error>,
+        sample: impl Fn(&S) -> &MaterialNetworkSample,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<SpatialNonlinearInductionThermalCandidate<'t, 'm, S>, Error> {
+        check(cancel)?;
         crate::circuit_enthalpy::admit_driver_unknowns(
             thermal,
             controls,
@@ -150,14 +197,6 @@ impl SpatialMagneticThermalNetwork<'_> {
             magnetic_regions: &regions,
             volume_tolerance_m3: self.volume_tolerance_m3,
         };
-        let material_network = MaterialNetwork {
-            cells: self.cells,
-            resistors: &[],
-            links: self.links,
-        };
-        let prepared = material_network
-            .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
-            .map_err(material)?;
         let problem = field.problem();
         let originals = problem
             .materials()
@@ -184,7 +223,7 @@ impl SpatialMagneticThermalNetwork<'_> {
             &conductors.keys().copied().collect::<Vec<_>>(),
             &cancel,
         )?;
-        let resolve = |state: &DepositionSimulation<'_>, sample: &super::MaterialNetworkSample| {
+        let resolve = |state: &DepositionSimulation<'_>, sample: &MaterialNetworkSample| {
             network.materials_at_using(
                 state,
                 &originals,
@@ -229,10 +268,8 @@ impl SpatialMagneticThermalNetwork<'_> {
                 },
             )
         };
-        let initial = prepared
-            .resolve(thermal, || (*cancel.borrow_mut())())
-            .map_err(material)?;
-        let (accepted, _) = resolve(thermal, &initial.source)?;
+        let initial = resolve_sources(thermal)?;
+        let (accepted, _) = resolve(thermal, sample(&initial.source))?;
         if accepted.len() != conductors.len()
             || accepted.iter().any(|(cell, source)| {
                 conductors.get(cell).is_none_or(|old| {
@@ -254,10 +291,8 @@ impl SpatialMagneticThermalNetwork<'_> {
             initial_energy_increments_j,
             |trial, _| {
                 check(&cancel)?;
-                let coefficients = prepared
-                    .resolve(trial, || (*cancel.borrow_mut())())
-                    .map_err(material)?;
-                let (sources, magnetic) = resolve(trial, &coefficients.source)?;
+                let coefficients = resolve_sources(trial)?;
+                let (sources, magnetic) = resolve(trial, sample(&coefficients.source))?;
                 let mut refreshed = vec![None; originals.len()];
                 for (cell, source) in sources {
                     refreshed[cell] = Some(source);

@@ -15020,3 +15020,23 @@ The source hybrid preparation now calls the retained `RelaxationState::caloric_r
 The preceding calorically perfect path remains available. Source molecular preparation requires a pressure region without the old H boundary-layer overlay; finite conductive solids remain available in the full resolved region. No mean gas evolution, extra gas loss, loss fitting, time-domain material realization, or full conforming interface is inferred.
 
 The new molecular source case and both retained source-hybrid cases pass on the final implementation. Final focused total across both crates: 25 distinct selected cases, 14 new and 11 retained, all PASS. The coupled final run reused coherent previously verified original dependency rmeta/rlib artifacts with the same Rust 1.100.0-nightly compiler after a redundant material rebuild hit a memory limit. It compiled the current FE and coupled source implementations directly; no production source, dependency or numerical kernel was replaced. Full workspace, pinned-toolchain, DSR/RCH and instrument-render gates remain unexecuted.
+
+## Shared heat network on retained spatial induction histories
+
+`PreparedHeatNetwork::step_spatial_induction_candidate` and
+`step_spatial_nonlinear_induction_candidate` place both retained 3D A–phi histories
+inside the original complete material heat assembly. Every endpoint trial resolves
+thermal-contact resistance, optional integrated layer conduction and enclosure
+emissivity/radiosity alongside conductivity and magnetic calorics. Original field
+and enthalpy equations, whole-volume receivers and source pins remain the owners;
+reports retain the full thermal/interface/radiation samples. Both native/free-energy
+and physical internal-energy accounts exclude closed-enclosure numerical net from
+external supply. Physical Joule heat and reversible magnetic exchange remain
+separate from numerical magnetic dissipation. Graph electrical bindings and
+E/J/B/H-dependent thermal boundary laws refuse without their work/state owners.
+Fixed geometry, fully solid magnetic receivers and original magnetic source limits
+remain. Three new integration groups compare independent two-temperature linear
+and saturating references, contact/emissivity substitutions and continuation, then
+check field applicability, source-domain exits and cancellation rollback. New
+modules pass formatting and whitespace checks; native execution remains unverified
+after the unchanged runtime dependency exceeded the authoring worker's memory limit.
