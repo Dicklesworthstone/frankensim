@@ -157,6 +157,14 @@ impl BaffledPressure {
     ) -> Result<(), String> {
         let extra = latency.checked_sub(report.additional_latency_samples)
             .ok_or("material receiver alignment cannot remove causal padding")?;
+        self.add_gas_padding(extra)?;
+        report.additional_latency_samples = latency;
+        Ok(())
+    }
+
+    // Shared cold shift for a single aperture or an exact per-tile bank.
+    // Only numerical padding changes; original physical paths remain intact.
+    pub(super) fn add_gas_padding(&mut self, extra: usize) -> Result<(), String> {
         if extra == 0 { return Ok(()); }
         let last = self.delay_samples.1.checked_add(extra)
             .filter(|&last| last < MAX_HISTORY)
@@ -168,7 +176,6 @@ impl BaffledPressure {
         for (delay, _) in &mut self.kernels { *delay += extra; }
         self.delay_samples = (self.delay_samples.0 + extra, last);
         self.material_path_delay += extra;
-        report.additional_latency_samples = latency;
         self.prepare_taps();
         Ok(())
     }

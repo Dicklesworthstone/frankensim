@@ -38,6 +38,10 @@ pub mod gas;
 #[path = "baffled_pressure_openings.rs"]
 pub mod openings;
 
+/// Independently resolved physical tiles through bounded original receivers.
+#[path = "baffled_pressure_tiles.rs"]
+pub mod tiles;
+
 /// Largest retained input basis (the established observer/decimator limit).
 pub const MAX_RAYLEIGH_INPUTS: usize = 128;
 
@@ -428,20 +432,29 @@ impl BaffledPressure {
     /// spatial propagation at audio rate and retain explicit causal delay.
     /// All candidate values are checked before either delay line is committed.
     pub fn step_trace(&mut self, velocity: &[f64])->Result<f64,String> {
+        let pressure = self.preview_trace(velocity)?;
+        self.accept_trace(velocity);
+        Ok(pressure)
+    }
+
+    // A distributed surface may need several original bounded input bases.
+    // Preview changes only pending filter buffers; all histories wait until
+    // every piece and their physical pressure sum have been admitted.
+    fn preview_trace(&mut self, velocity: &[f64])->Result<f64,String> {
         if velocity.len()!=self.acceleration.len() || velocity.iter().any(|v|!v.is_finite()) {
             return Err("microphone needs the complete finite substep velocity trace".into());
         }
         let ratio=self.decimator.input_frames();
-        let filtered = if self.differentiate_velocity {
-            self.decimator.preview(velocity)?
+        if self.differentiate_velocity {
+            self.decimator.preview(velocity)?;
         } else {
             let mechanics_rate=self.rate*ratio as f64;
             for s in 0..ratio { for i in 0..self.modes {
                 let previous=if s==0 {self.previous_velocity[i]} else {velocity[(s-1)*self.modes+i]};
                 self.acceleration[s*self.modes+i]=(velocity[s*self.modes+i]-previous)*mechanics_rate;
             }}
-            self.decimator.preview(&self.acceleration)?
-        };
+            self.decimator.preview(&self.acceleration)?;
+        }
         let mut pressure=0.0;
         let transposed=self.tap_history==self.history.as_ptr() as usize;
         if !transposed {
@@ -465,6 +478,13 @@ impl BaffledPressure {
             Some(derivative)=>derivative.preview(&[pressure])?[0],
             None=>pressure,
         };
+        Ok(pressure)
+    }
+
+    fn accept_trace(&mut self, velocity: &[f64]) {
+        let ratio = self.decimator.input_frames();
+        let filtered = self.decimator.pending_output();
+        let transposed = self.tap_history == self.history.as_ptr() as usize;
         let offset=self.head*self.modes;
         self.history[offset..offset+self.modes].copy_from_slice(filtered);
         if transposed {
@@ -478,7 +498,6 @@ impl BaffledPressure {
         self.decimator.commit();
         if let Some(derivative)=&mut self.pressure_derivative {derivative.commit();}
         self.head+=1;if self.head==self.history_frames{self.head=0;}
-        Ok(pressure)
     }
 }
 

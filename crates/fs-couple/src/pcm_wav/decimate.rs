@@ -237,6 +237,16 @@ impl Decimator {
         self.pending = true;
         Ok(self.buffers.last().expect("input buffer always present"))
     }
+    /// The successful, uncommitted candidate for a shared receiver transaction.
+    pub(crate) fn pending_output(&self) -> &[f64] {
+        assert!(self.pending, "pending output requires a successful preview");
+        self.buffers.last().expect("input buffer always present")
+    }
+    /// Retained floating-point filter/history values, excluding object metadata.
+    pub(crate) fn retained_values(&self) -> usize {
+        self.buffers.iter().map(Vec::len).sum::<usize>()
+            + self.stages.iter().map(|stage| stage.history.len() + stage.pairs.len()).sum::<usize>()
+    }
     pub fn commit(&mut self) {
         assert!(self.pending, "commit requires a successful preview");
         for (stage, input) in self.stages.iter_mut().zip(&self.buffers) { stage.commit(input); }
