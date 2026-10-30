@@ -9,6 +9,8 @@
 /// Source-bound viscous interfaces with reciprocal finite-body heat feedback.
 #[cfg(feature = "dissipative-coupling")]
 pub mod damping;
+/// Expanded displacement geometry and buoyancy on the same thermal clock.
+pub mod hydrostatic;
 /// Material-coordinate external impulse events on the same accepted trajectory.
 pub mod loads;
 
@@ -39,6 +41,7 @@ pub enum HeatedMotionError {
     Heating(HeatingError),
     Principal(PrincipalFrameError),
     Dynamics(DynamicsError),
+    Hydrostatic(crate::hydrostatic::HydrostaticStepError),
     Invalid(&'static str),
     Budget(&'static str),
 }
@@ -66,6 +69,16 @@ impl From<PrincipalFrameError> for HeatedMotionError {
 impl From<DynamicsError> for HeatedMotionError {
     fn from(e: DynamicsError) -> Self {
         Self::Dynamics(e)
+    }
+}
+impl From<crate::hydrostatic::HydrostaticError> for HeatedMotionError {
+    fn from(e: crate::hydrostatic::HydrostaticError) -> Self {
+        Self::Hydrostatic(e.into())
+    }
+}
+impl From<crate::hydrostatic::HydrostaticStepError> for HeatedMotionError {
+    fn from(e: crate::hydrostatic::HydrostaticStepError) -> Self {
+        Self::Hydrostatic(e)
     }
 }
 
@@ -296,6 +309,31 @@ impl DepositionObserver for RigidExpansion<'_> {
             self.integrator
                 .step(self.state, self.principal.properties(), Wrench::ZERO, dt_s)?;
         let numerical_j = mechanical_change(step.diagnostics_before, step.diagnostics_after)?;
+        self.finish_step(
+            start_s,
+            dt_s,
+            old,
+            thermal,
+            step.state_after,
+            numerical_j,
+            checkpoint,
+        )
+    }
+}
+
+impl RigidExpansion<'_> {
+    /// Accept the existing mechanics owner's candidate and refresh the SAME
+    /// thermal configuration and momentum map for every supported load model.
+    fn finish_step(
+        &mut self,
+        start_s: f64,
+        dt_s: f64,
+        old: &BTreeMap<CellId, f64>,
+        thermal: &DepositionSimulation<'_>,
+        state_after: RigidBodyState,
+        numerical_j: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), HeatedMotionError> {
         self.expansion
             .step(start_s, dt_s, old, thermal, checkpoint)?;
         let principal = PrincipalFrame::from_inertia(
@@ -305,7 +343,7 @@ impl DepositionObserver for RigidExpansion<'_> {
         )?;
         let transfer = principal.transfer_state_from(
             &self.principal,
-            step.state_after,
+            state_after,
             self.controls.transfer,
             || false,
         )?;

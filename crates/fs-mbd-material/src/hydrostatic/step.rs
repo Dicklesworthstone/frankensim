@@ -1,7 +1,7 @@
 //! Re-evaluated hydrostatic loading around the existing rigid-body time step.
 use fs_material::fluid_transport::FluidTransport;
 use fs_mbd::{RigidBodyIntegrator, RigidBodyState, StepReceipt};
-use crate::principal::PrincipalBody;
+use crate::principal::{PrincipalBody, PrincipalFrame};
 use super::{DisplacementMesh, HydrostaticError, HydrostaticLoad, HydrostaticMedium, finite, poll};
 
 /// One explicit physical timestep and an absolute numerical-energy allowance.
@@ -77,17 +77,23 @@ impl<F: FluidTransport + ?Sized> HydrostaticMedium<'_, F> {
     pub fn step(&self, mesh: &DisplacementMesh, body: &PrincipalBody<'_>,
         state: RigidBodyState, controls: HydrostaticStepControls,
         mut cancelled: impl FnMut() -> bool) -> Result<HydrostaticStep, HydrostaticStepError> {
+        self.step_frame(mesh, body.frame(), state, controls, &mut cancelled)
+    }
+
+    pub(crate) fn step_frame(&self, mesh: &DisplacementMesh, body: &PrincipalFrame,
+        state: RigidBodyState, controls: HydrostaticStepControls,
+        mut cancelled: impl FnMut() -> bool) -> Result<HydrostaticStep, HydrostaticStepError> {
         poll(&mut cancelled)?;
         if !controls.duration_s.is_finite() || controls.duration_s <= 0.0
             || !controls.maximum_energy_defect_j.is_finite() || controls.maximum_energy_defect_j <= 0.0 {
             return Err(HydrostaticError::Invalid("positive finite timestep and absolute energy allowance required").into());
         }
-        let load_before = self.load(mesh, body, state, &mut cancelled)?;
+        let load_before = self.load_frame(mesh, body, state, &mut cancelled)?;
         poll(&mut cancelled)?;
         let dynamics = RigidBodyIntegrator::new(self.gravity())
             .step_kick_drift(state, body.properties(), load_before.wrench(), controls.duration_s)
             .map_err(HydrostaticError::Dynamics)?;
-        let load_after = self.load(mesh, body, dynamics.state_after, &mut cancelled)?;
+        let load_after = self.load_frame(mesh, body, dynamics.state_after, &mut cancelled)?;
         let before = dynamics.diagnostics_before;
         let after = dynamics.diagnostics_after;
         let total_energy_before_j = finite(before.mechanical_energy + load_before.pressure_potential_j())?;

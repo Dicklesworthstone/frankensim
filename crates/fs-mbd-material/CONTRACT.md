@@ -531,3 +531,33 @@ demonstrate source-only body/fluid substitution, check second-order time
 refinement, separate maintained-flow work from heat, and exercise geometry,
 regime and transactional refusals. This is a bounded MR57 capability; it does
 not close the broader exterior/gap-flow bead or claim empirical validation.
+
+## Continuing hydrostatics during material-resolved thermal expansion
+
+`HeatedRigidBody::advance_hydrostatic` composes the original heat scheduler,
+clipped-volume hydrostatics, native kick-drift mechanics and momentum-preserving
+thermal configuration transfer. Named `ThermalDisplacementRegion` envelopes
+follow their own original integrated free strain and fixed point. Each rebuild
+starts from reference vertices; closed-body mass remains unchanged. Fluid
+density is the exact `FluidTransport` snapshot, and reservoir gravity must
+match the original mechanical integrator.
+
+`HeatedHydrostaticAudit` includes pressure-potential storage and separately
+reports its change caused by expansion as external configuration work, never
+caloric heat. Absolute parameter-work sums count inertia and displacement
+contributions before cancellation. The numerical budget bounds the native
+kinetic-plus-gravity-plus-pressure-potential defect. Failed bindings, sources,
+work limits and late cancellation publish neither proposed trajectory.
+
+The fluid reservoir has frozen homogeneous density and a prescribed surface;
+the coupling uses a first-order split. It adds no waves, drag, added mass,
+flooding, expansion-induced fluid kinetic energy, constrained deformation or
+reciprocal thermoelastic heat. The caller owns envelope coverage, nonoverlap
+and compatibility of free regional expansions. Replacing the reservoir or
+envelope between calls changes the model; no exchange work is inferred.
+
+G1/G3/G4 definitions in `tests/heated_hydrostatic_motion.rs` check material-alpha
+changes reaching flotation, independent regional center of buoyancy and torque,
+source-density acceleration, reference rebuilding and restart, and late
+cancellation/work-budget rollback. Synthetic coefficients test the implementation;
+they do not establish measured material or hydrodynamic validity.

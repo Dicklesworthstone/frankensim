@@ -26,7 +26,7 @@ use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_mbd::{DynamicsError, Gravity, RigidBodyState, Wrench};
 use crate::MaterialInertiaError;
-use crate::principal::{PrincipalBody, PrincipalFrameError};
+use crate::principal::{PrincipalBody, PrincipalFrame, PrincipalFrameError};
 
 /// A failed evaluation returns no partial load, state or displaced volume.
 #[derive(Clone, Debug, PartialEq)]
@@ -113,6 +113,13 @@ impl<'a, F: FluidTransport + ?Sized> HydrostaticMedium<'a, F> {
     /// buoyancy wrench. It enables an independent mechanical energy audit.
     pub fn load(&self, mesh: &DisplacementMesh, body: &PrincipalBody<'_>, state: RigidBodyState,
         mut cancelled: impl FnMut() -> bool) -> Result<HydrostaticLoad, HydrostaticError> {
+        self.load_frame(mesh, body.frame(), state, &mut cancelled)
+    }
+
+    /// Shared load assembly for the already admitted original or expanded frame.
+    pub(crate) fn load_frame(&self, mesh: &DisplacementMesh, body: &PrincipalFrame,
+        state: RigidBodyState, mut cancelled: impl FnMut() -> bool)
+        -> Result<HydrostaticLoad, HydrostaticError> {
         poll(&mut cancelled)?;
         let displaced = self.displacement(mesh, body.world_from_body(state)?, &mut cancelled)?;
         let mass = finite(self.transport.density_kg_m3()*displaced.volume_m3())?;
