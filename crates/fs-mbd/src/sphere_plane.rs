@@ -25,7 +25,9 @@ use core::fmt;
 use fs_contact::ballistic::{
     BallisticContactError, BallisticContactInput, first_ballistic_contact,
 };
-use fs_contact::impact::{NormalImpactError, NormalImpactInput, solve_normal_impact};
+use fs_contact::impact::{
+    NormalImpactError, NormalImpactInput, NormalImpactResult, solve_normal_impact,
+};
 use fs_contact::tangential::impact::{
     CoulombImpulseError, CoulombImpulseInput, CoulombImpulseResult, FrictionLaw,
     solve_isotropic_coulomb_impulse,
@@ -267,6 +269,12 @@ struct Ledger {
     impulse_scale: f64,
     angular_scale: f64,
 }
+/// A constitutive impact candidate; the original body/normal owner applies it.
+struct TangentialImpactAdvance {
+    impulse: [f64; 2],
+    velocity_after: [f64; 2],
+    dissipated: f64,
+}
 struct Engine {
     scene: SpherePlane,
     config: SpherePlaneConfig,
@@ -458,11 +466,22 @@ impl Engine {
         });
         Ok(())
     }
-    fn impact(
+    fn impact<C: FnMut() -> bool>(
         &mut self,
         body: RigidBodyState,
         time: f64,
+        cancelled: &mut C,
+        resolve: &mut impl FnMut(
+            &Engine,
+            RigidBodyState,
+            f64,
+            f64,
+            &NormalImpactResult,
+            [f64; 2],
+            &mut C,
+        ) -> Result<Option<TangentialImpactAdvance>, SpherePlaneError>,
     ) -> Result<(RigidBodyState, bool), SpherePlaneError> {
+        poll(cancelled)?;
         let (normal_speed, slip) = self.kinematics(body)?;
         let normal = solve_normal_impact(NormalImpactInput {
             gap: 0.0,
@@ -471,9 +490,32 @@ impl Engine {
             inverse_effective_mass: self.mass.recip(),
             restitution: self.scene.restitution,
         })?;
-        let friction =
-            self.friction(slip, normal.normal_impulse, self.scene.friction_coefficient)?;
-        let tangent = self.tangent_vector(friction.tangent_impulse);
+        let friction = match resolve(self, body, time, normal_speed, &normal, slip, cancelled)? {
+            Some(friction) => friction,
+            None => {
+                let response =
+                    self.friction(slip, normal.normal_impulse, self.scene.friction_coefficient)?;
+                TangentialImpactAdvance {
+                    impulse: response.tangent_impulse,
+                    velocity_after: response.relative_tangent_velocity_after,
+                    dissipated: response.dissipated_energy,
+                }
+            }
+        };
+        poll(cancelled)?;
+        if friction
+            .impulse
+            .iter()
+            .chain(&friction.velocity_after)
+            .any(|x| !x.is_finite())
+            || !friction.dissipated.is_finite()
+            || friction.dissipated < 0.0
+        {
+            return Err(SpherePlaneError::Invalid(
+                "invalid tangential impact response",
+            ));
+        }
+        let tangent = self.tangent_vector(friction.impulse);
         let impulse = self.n.scale(normal.normal_impulse).add(tangent);
         let arm_body = body.pose().orientation().rotate_world_to_body(self.arm);
         let result = body.apply_impulse_at_body_point(self.scene.properties, arm_body, impulse)?;
@@ -483,17 +525,16 @@ impl Engine {
         self.ledger.plane_work =
             finite(self.ledger.plane_work + impulse.dot(self.scene.velocity_world))?;
         self.ledger.loss =
-            finite(self.ledger.loss + normal.dissipated_energy + friction.dissipated_energy)?;
-        self.ledger.impact_loss = finite(
-            self.ledger.impact_loss + normal.dissipated_energy + friction.dissipated_energy,
-        )?;
+            finite(self.ledger.loss + normal.dissipated_energy + friction.dissipated)?;
+        self.ledger.impact_loss =
+            finite(self.ledger.impact_loss + normal.dissipated_energy + friction.dissipated)?;
         self.ledger.impulse_scale = finite(self.ledger.impulse_scale + norm(impulse)?)?;
         self.ledger.angular_scale = finite(self.ledger.angular_scale + norm(angular)?)?;
         let (actual_normal, actual_slip) = self.kinematics(result.state_after)?;
         let allowance = 4096.0 * f64::EPSILON * self.velocity_scale;
         if (actual_normal - normal.relative_normal_speed_after).abs() > allowance
-            || (actual_slip[0] - friction.relative_tangent_velocity_after[0]).abs() > allowance
-            || (actual_slip[1] - friction.relative_tangent_velocity_after[1]).abs() > allowance
+            || (actual_slip[0] - friction.velocity_after[0]).abs() > allowance
+            || (actual_slip[1] - friction.velocity_after[1]).abs() > allowance
         {
             return Err(SpherePlaneError::Unresolved("impact endpoint velocity"));
         }
@@ -779,7 +820,7 @@ pub fn advance_sphere_plane_with_support_friction(
     config: SpherePlaneConfig,
     cancelled: impl FnMut() -> bool,
 ) -> Result<SpherePlaneAdvance, SpherePlaneError> {
-    advance_with_support(
+    advance_with_contact(
         scene,
         state,
         support_friction,
@@ -788,12 +829,13 @@ pub fn advance_sphere_plane_with_support_friction(
         None,
         cancelled,
         |_, _, _, _, _, _, _| Ok(None),
+        |_, _, _, _, _, _, _| Ok(None),
     )
     .map(|(motion, _)| motion)
 }
 
-/// Private support substitution; all flight, impact, geometry and global
-/// physical admission below remain owned by the original trajectory engine.
+/// Private support substitution; geometry and global physical admission remain
+/// owned by the original trajectory engine.
 struct SupportAdvance {
     body: RigidBodyState,
     mode: SpherePlaneMode,
@@ -801,7 +843,7 @@ struct SupportAdvance {
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn advance_with_support<C: FnMut() -> bool>(
+fn advance_with_contact<C: FnMut() -> bool>(
     scene: &SpherePlane,
     state: SpherePlaneState,
     support_friction: &FrictionLaw,
@@ -818,6 +860,15 @@ fn advance_with_support<C: FnMut() -> bool>(
         SpherePlaneMode,
         &mut C,
     ) -> Result<Option<SupportAdvance>, SpherePlaneError>,
+    mut impact: impl FnMut(
+        &Engine,
+        RigidBodyState,
+        f64,
+        f64,
+        &NormalImpactResult,
+        [f64; 2],
+        &mut C,
+    ) -> Result<Option<TangentialImpactAdvance>, SpherePlaneError>,
 ) -> Result<(SpherePlaneAdvance, f64), SpherePlaneError> {
     poll(&mut cancelled)?;
     if !(duration_s.is_finite() && duration_s > 0.0) {
@@ -871,7 +922,7 @@ fn advance_with_support<C: FnMut() -> bool>(
         };
         let slip_speed = finite(slip[0].hypot(slip[1]))?;
         if touching && normal_speed < 0.0 {
-            (body, zero_normal) = engine.impact(body, time)?;
+            (body, zero_normal) = engine.impact(body, time, &mut cancelled, &mut impact)?;
             mode = SpherePlaneMode::Flight;
             if zero_normal && engine.acceleration_normal <= 0.0 {
                 let (_, after_slip) = engine.kinematics(body)?;
@@ -1121,7 +1172,12 @@ fn advance_with_support<C: FnMut() -> bool>(
         touching = true;
         zero_normal = event.relative_normal_speed == 0.0;
         if event.relative_normal_speed < 0.0 {
-            (body, zero_normal) = engine.impact(body, finite(state.time_s + elapsed)?)?;
+            (body, zero_normal) = engine.impact(
+                body,
+                finite(state.time_s + elapsed)?,
+                &mut cancelled,
+                &mut impact,
+            )?;
             if zero_normal && engine.acceleration_normal <= 0.0 {
                 let (_, after_slip) = engine.kinematics(body)?;
                 mode = if after_slip[0].hypot(after_slip[1])

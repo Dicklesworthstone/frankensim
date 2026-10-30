@@ -1,5 +1,35 @@
 # CONTRACT: fs-mbd
 
+## Directional friction through sphere impact events
+
+`sphere_plane::directional::impact` adds native and source-callback entry
+points with an explicit instantaneous impulse ellipse. It reuses the original
+normal restitution solve, contact detection, body impulse application,
+prescribed-plane work and complete trajectory momentum/energy admission.
+The existing sustained-only entry points retain their original impact law.
+
+The native entry point takes separate sustained and impact laws/histories.
+The impact law requires equal static/kinetic principal coefficients and
+borrows its retained texture history without advancing slip or temperature.
+The generic entry point exposes actual preimpact body state, event time,
+normal velocities, admitted normal impulse and tangent mobility. The source
+owner explicitly chooses instantaneous sampling; no duration, contact
+pressure or finite travel is manufactured for a collision.
+
+Support and impact callbacks share one private candidate history. A later
+source refusal, bad impulse work or cancellation cannot publish preceding
+private impacts or supported motion. Actual point velocity and midpoint
+impulse loss are independently checked before the original body application
+and whole-trajectory audit. Sustained heat and directly accumulated impact
+loss remain separate outputs.
+
+Four integration groups cover analytic impulse/spin/pose/loss and isotropic
+recovery, detected impact followed by sustained arrest without invented
+travel, rotated texture/moving-plane work, and late failure/cancellation/
+forged-work refusal with deterministic retry. The single-sphere prescribed-
+plane geometry admits decoupled normal and tangent mobility; this entry point
+does not extend the contact law to general coupled rigid-body impacts.
+
 ## Directional friction on moving sphere/plane trajectories
 
 `sphere_plane::directional` advances the original sphere's position,

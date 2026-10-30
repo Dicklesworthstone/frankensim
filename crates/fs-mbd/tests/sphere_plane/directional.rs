@@ -8,6 +8,9 @@ use fs_tribo::tangential::elliptic::relaxation::EllipticRelaxationControls;
 use fs_tribo::tangential::elliptic::{EllipticCoulomb, EllipticCoulombState};
 use fs_tribo::{FrictionLaw, TangentialLaw, TangentialSolveConfig};
 
+#[path = "directional/impact.rs"]
+mod impact;
+
 fn frame() -> TangentFrame {
     TangentFrame::new([0.0, 1.0, 0.0], [1.0, 0.0, 0.0]).unwrap()
 }

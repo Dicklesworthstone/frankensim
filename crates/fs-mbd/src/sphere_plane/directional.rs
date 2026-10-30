@@ -16,8 +16,13 @@ use fs_tribo::tangential::elliptic::driven::{
     EllipticDrivenControls, EllipticDrivenInput, EllipticDrivenMode, EllipticDrivenReport,
     EllipticDrivenSegment, EllipticDrivenSegmentError,
 };
+use fs_tribo::tangential::elliptic::impulse::{EllipticImpulseInput, EllipticImpulseReport};
 use fs_tribo::tangential::elliptic::{EllipticCoulomb, EllipticCoulombState};
 use std::cell::RefCell;
+
+/// Explicit instantaneous directional friction through the same contact events.
+pub mod impact;
+use impact::SpherePlaneDirectionalImpactPhase;
 
 #[derive(Clone, Copy, Debug)]
 pub struct SpherePlaneDirectionalControls {
@@ -133,12 +138,46 @@ pub fn advance_sphere_plane_directional_with<S: Clone, E>(
     frame: TangentFrame,
     duration_s: f64,
     controls: SpherePlaneDirectionalControls,
+    resolve: impl FnMut(
+        &S,
+        &SpherePlaneDirectionalPhase,
+        &mut dyn FnMut(&EllipticDrivenSegment) -> Result<(), SpherePlaneError>,
+        &mut dyn FnMut() -> bool,
+    ) -> Result<(EllipticDrivenReport, S), E>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<SpherePlaneDirectionalAdvance, SpherePlaneDirectionalError<E>> {
+    advance_directional_contact(
+        scene,
+        state,
+        history,
+        frame,
+        duration_s,
+        controls,
+        resolve,
+        |_, _, _| Ok(None),
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn advance_directional_contact<S: Clone, E>(
+    scene: &SpherePlane,
+    state: SpherePlaneState,
+    history: &mut S,
+    frame: TangentFrame,
+    duration_s: f64,
+    controls: SpherePlaneDirectionalControls,
     mut resolve: impl FnMut(
         &S,
         &SpherePlaneDirectionalPhase,
         &mut dyn FnMut(&EllipticDrivenSegment) -> Result<(), SpherePlaneError>,
         &mut dyn FnMut() -> bool,
     ) -> Result<(EllipticDrivenReport, S), E>,
+    mut resolve_impact: impl FnMut(
+        &S,
+        &SpherePlaneDirectionalImpactPhase,
+        &mut dyn FnMut() -> bool,
+    ) -> Result<Option<(EllipticImpulseReport, S)>, E>,
     cancelled: impl FnMut() -> bool,
 ) -> Result<SpherePlaneDirectionalAdvance, SpherePlaneDirectionalError<E>> {
     if !controls.maximum_support_phase_s.is_finite()
@@ -153,18 +192,18 @@ pub fn advance_sphere_plane_directional_with<S: Clone, E>(
             "positive finite support phase limits and physical tolerances required",
         ));
     }
-    let mut accepted_history = history.clone();
-    let mut source_error = None;
+    let accepted_history = RefCell::new(history.clone());
+    let source_error = RefCell::new(None);
     let mut support_phases = 0usize;
     let mut segments = 0usize;
     let mut support_distance_m = 0.0;
     let mut support_slip_m = [0.0; 2];
     let mut sustained_friction_heat_j = 0.0;
-    let result = advance_with_support(
+    let result = advance_with_contact(
         scene,
         state,
-        // Unused by this support hook; the original impact coefficient remains
-        // scene-owned and no second support law participates in its physics.
+        // Unused by this support hook. Instantaneous tangent response comes
+        // from the impact callback or the original scene-owned fallback.
         &FrictionLaw::Coulomb {
             static_mu: 0.0,
             kinetic_mu: 0.0,
@@ -215,7 +254,7 @@ pub fn advance_sphere_plane_directional_with<S: Clone, E>(
             let mut arrest = None;
             let cancel = RefCell::new(cancelled);
             let callback_result = resolve(
-                &accepted_history,
+                &accepted_history.borrow(),
                 &phase,
                 &mut |segment| {
                     poll(&mut || (*cancel.borrow_mut())())?;
@@ -332,7 +371,7 @@ pub fn advance_sphere_plane_directional_with<S: Clone, E>(
             let (native, next_history) = match callback_result {
                 Ok(result) => result,
                 Err(error) => {
-                    source_error = Some(error);
+                    *source_error.borrow_mut() = Some(error);
                     return Err(SpherePlaneError::Unresolved("directional source refused"));
                 }
             };
@@ -410,7 +449,7 @@ pub fn advance_sphere_plane_directional_with<S: Clone, E>(
             for i in 0..2 {
                 support_slip_m[i] = finite(support_slip_m[i] + slip[i])?;
             }
-            accepted_history = next_history;
+            *accepted_history.borrow_mut() = next_history;
             Ok(Some(SupportAdvance {
                 body: next,
                 mode: match current_mode {
@@ -420,13 +459,43 @@ pub fn advance_sphere_plane_directional_with<S: Clone, E>(
                 duration_s: dt,
             }))
         },
+        |engine, body, time, normal_before, normal, velocity, cancelled| {
+            let w = engine.inverse_tangent_mass;
+            let phase = SpherePlaneDirectionalImpactPhase {
+                input: EllipticImpulseInput {
+                    normal_impulse_ns: normal.normal_impulse,
+                    velocity_before_m_s: velocity,
+                    mobility_per_kg: [[w, 0.0], [0.0, w]],
+                },
+                time_s: time,
+                body,
+                frame,
+                normal_velocity_before_m_s: normal_before,
+                normal_velocity_after_m_s: normal.relative_normal_speed_after,
+            };
+            let response = resolve_impact(&accepted_history.borrow(), &phase, &mut || cancelled());
+            let (native, next_history) = match response {
+                Ok(Some(response)) => response,
+                Ok(None) => return Ok(None),
+                Err(error) => {
+                    *source_error.borrow_mut() = Some(error);
+                    return Err(SpherePlaneError::Unresolved(
+                        "directional impact source refused",
+                    ));
+                }
+            };
+            poll(cancelled)?;
+            let accepted = impact::admit_impact(&phase, &native, controls)?;
+            *accepted_history.borrow_mut() = next_history;
+            Ok(Some(accepted))
+        },
     );
-    if let Some(error) = source_error {
+    if let Some(error) = source_error.into_inner() {
         return Err(SpherePlaneDirectionalError::Source(error));
     }
     let (motion, impact_loss_j) = result?;
     // No fallible work or callback follows the original global admission.
-    *history = accepted_history;
+    *history = accepted_history.into_inner();
     Ok(SpherePlaneDirectionalAdvance {
         motion,
         sustained_friction_heat_j,
