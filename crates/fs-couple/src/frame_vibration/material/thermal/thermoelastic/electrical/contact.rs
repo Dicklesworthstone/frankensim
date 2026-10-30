@@ -36,6 +36,7 @@ impl<'n, 'a> FrameThermoelasticSystem<'n, 'a> {
         thermal: &DepositionSimulation<'_>,
         source: &MaterialNetwork<'_>,
         circuit: &MaterialCircuit,
+        fields: &[FieldThermalBinding],
         gate: &CancelGate,
     ) -> Result<()> {
         check(gate)?;
@@ -43,10 +44,11 @@ impl<'n, 'a> FrameThermoelasticSystem<'n, 'a> {
             || thermal.time_s().to_bits() != self.origin_s.to_bits()
             || !core::ptr::eq(self.source.cells, source.cells)
             || !core::ptr::eq(self.source.links, source.links)
-            || source.resistors.is_empty() || !circuit.storage().is_empty()
+            || source.resistors.is_empty()
+            || (fields.is_empty() && !circuit.storage().is_empty())
         {
             return Err(invalid(
-                "frame circuit requires one cold binding, original cell/link slices, bulk resistors and fixed authored C/L",
+                "frame circuit requires one cold binding, original cell/link slices, bulk resistors and explicit field thermal ownership",
             ));
         }
         for (member, state) in self.members.iter().zip(&self.states) {
@@ -56,6 +58,9 @@ impl<'n, 'a> FrameThermoelasticSystem<'n, 'a> {
             {
                 return Err(invalid("frame circuit starts from the jointly accepted material temperatures"));
             }
+        }
+        if !fields.is_empty() {
+            super::field::admit(self, source, thermal, circuit, fields, gate)?;
         }
         Ok(())
     }
@@ -77,13 +82,24 @@ impl<'n, 'a> FrameThermoelasticSystem<'n, 'a> {
     /// Mechanical motion and material temperature retain the documented first-
     /// order split. This adds no thermal integrator or contact-resistance law.
     pub fn with_material_contact_circuit(
-        mut self,
+        self,
         thermal: &DepositionSimulation<'_>,
         source: &'n ElectricalContactNetwork<'a>,
         circuit: MaterialCircuit,
         gate: &CancelGate,
     ) -> Result<Self> {
-        self.admit_electrical_binding(thermal, source.bulk, &circuit, gate)?;
+        self.bind_material_contact_circuit(thermal, source, circuit, Vec::new(), gate)
+    }
+
+    pub(super) fn bind_material_contact_circuit(
+        mut self,
+        thermal: &DepositionSimulation<'_>,
+        source: &'n ElectricalContactNetwork<'a>,
+        circuit: MaterialCircuit,
+        fields: Vec<FieldThermalBinding>,
+        gate: &CancelGate,
+    ) -> Result<Self> {
+        self.admit_electrical_binding(thermal, source.bulk, &circuit, &fields, gate)?;
         if source.contacts.is_empty() {
             return Err(invalid("contact frame binding requires explicit original interfaces"));
         }
@@ -116,7 +132,7 @@ impl<'n, 'a> FrameThermoelasticSystem<'n, 'a> {
             .map(|route| (route.branch, route.cell)).collect();
         check(gate)?;
         self.electrical = Some(super::Binding {
-            circuit, destinations, contacts: Some(Binding { prepared, routes }),
+            circuit, destinations, contacts: Some(Binding { prepared, routes }), fields,
         });
         Ok(self)
     }

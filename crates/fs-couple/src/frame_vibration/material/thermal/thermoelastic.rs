@@ -38,7 +38,7 @@ mod connection_heat;
 mod electrical;
 pub use assembly::{FrameThermoelasticBinding, FrameThermoelasticFrame};
 pub use connection_heat::{FrameConnectionHeat, FrameConnectionHeatDestination};
-pub use electrical::FrameElectricalInput;
+pub use electrical::{FrameElectricalInput, FrameFieldStorageReport};
 
 use super::*;
 use crate::modal_acoustic_time::{ModalAcousticMode, ModalAcousticState, ModalAcousticTimeModel};
@@ -58,6 +58,8 @@ struct Member<'a> {
     component: usize,
     damping_start: usize,
     linear_strain_limit: f64,
+    /// Conservative caloric + elastic capacity floor per original layer.
+    capacity_floor_j_k: Vec<f64>,
     axial_property: String,
     bending_property: String,
 }
@@ -104,6 +106,10 @@ pub struct FrameThermoelasticLayerExchange {
 pub struct FrameThermoelasticEntropy {
     pub thermal_storage_change_j_k: f64,
     pub mechanical_storage_change_j_k: f64,
+    pub field_storage_change_j_k: f64,
+    pub field_reversible_transfer_entropy_j_k: f64,
+    /// Signed field/circuit temperature-splitting defect, not dissipation.
+    pub field_temporal_defect_j_k: f64,
     pub reservoir_entropy_input_j_k: f64,
     pub conduction_generation_j_k: f64,
     /// All deposited material/connector loss and, when bound, Joule loss over
@@ -125,6 +131,8 @@ pub struct FrameThermoelasticReport {
     pub mechanical: CoupledModalFrame,
     /// Original electrical work, finite storage and branch heat, when bound.
     pub electrical: Option<crate::material_circuit::MaterialCircuitStep>,
+    /// Physical field U and S at actual endpoints; native circuit storage is psi.
+    pub field_storage: Option<FrameFieldStorageReport>,
     pub thermal: EnergyAudit,
     pub source: MaterialNetworkSample,
     pub members: Vec<FrameThermoelasticMemberState>,
@@ -306,7 +314,8 @@ fn admit_capacity(
     state: &FrameThermoelasticMemberState,
     source: &MaterialNetwork<'_>,
     strain_limit: f64,
-) -> Result<()> {
+) -> Result<Vec<f64>> {
+    let mut floors = Vec::with_capacity(member.region.receivers.len());
     for (receiver, layer) in member.region.receivers.iter().zip(&state.source.layers) {
         let caloric = source
             .cells
@@ -341,9 +350,9 @@ fn admit_capacity(
                         * (layer.young_modulus_derivative_pa_k * layer.alpha_per_k).abs()
                         * strain_limit),
         )?;
-        positive(finite(capacity - hi * curvature)?)?;
+        floors.push(positive(finite(capacity - hi * curvature)?)?);
     }
-    Ok(())
+    Ok(floors)
 }
 
 impl FrameVibrationComponent {
@@ -487,13 +496,14 @@ impl FrameVibrationComponent {
         let mut projected = vec![0.0; count * count];
         for (index, (region, (_, eta))) in regions.into_iter().zip(viscosity).enumerate() {
             check(gate)?;
-            let member = Member {
+            let mut member = Member {
                 law: ConcentricThermoelasticLaw::try_new(region.law.clone()).map_err(material)?,
                 columns: core::array::from_fn(|k| connections[3 * index + k].left.shapes.clone()),
                 spring_start: connections.len(),
                 component,
                 damping_start: connection_start + 3 * index,
                 linear_strain_limit,
+                capacity_floor_j_k: Vec::new(),
                 axial_property: eta.axial().viscosity_property().into(),
                 bending_property: eta.bending().viscosity_property().into(),
                 region,
@@ -504,7 +514,7 @@ impl FrameVibrationComponent {
                 model.states(),
                 dt,
             )?;
-            admit_capacity(&member, &state, source, linear_strain_limit)?;
+            member.capacity_floor_j_k = admit_capacity(&member, &state, source, linear_strain_limit)?;
             for layer in 0..state.layers.len() {
                 for (k, (stiffness, rest)) in layer_springs(&state, layer, member.region.length_m)?
                     .into_iter()
@@ -669,6 +679,7 @@ impl FrameThermoelasticSystem<'_, '_> {
         let states = &self.states;
         let prepared = &self.prepared;
         let electrical = &self.electrical;
+        let field_prepared = electrical::prepare_fields(electrical.as_ref(), self.source, thermal, gate)?;
         let owned_connections = &self.owned_connections;
         let connection_heat_destinations = &self.connection_heat_destinations;
         for (member, state) in members.iter().zip(states) {
@@ -748,8 +759,11 @@ impl FrameThermoelasticSystem<'_, '_> {
                     thermal, target, controls.driver(), energy_guess_j,
                     |trial, _remaining| {
                         check(gate)?;
-                        let (mut network_source, circuit) = electrical::resolve(
-                            electrical.as_ref(), electrical_input, prepared, trial, dt_heat, gate,
+                        let electrical::ResolvedElectrical {
+                            bulk: mut network_source, circuit, field_storage, reversible_sources,
+                        } = electrical::resolve(
+                            electrical.as_ref(), electrical_input, prepared, field_prepared.as_ref(),
+                            trial, dt_heat, controls.total_energy_tolerance_j, gate,
                         )?;
                         // Capture independent sources before adding signed reversible exchange.
                         let mut independent_entropy = 0.0;
@@ -759,6 +773,13 @@ impl FrameThermoelasticSystem<'_, '_> {
                                 if power != 0.0 { has_independent = true; }
                                 independent_entropy = finite(independent_entropy+dt_heat*power/trial.temperature_k(id)?)?;
                             }
+                        }
+                        // Field exchange has already been derived by the original field
+                        // owner. Add it only after classifying independent heat inputs.
+                        for (cell, power) in reversible_sources {
+                            check(gate)?;
+                            let source = network_source.sources_w.entry(cell).or_insert(0.0);
+                            *source = finite(*source + power)?;
                         }
                         let mut next_states = Vec::with_capacity(members.len());
                         let mut exchanges = Vec::with_capacity(works.len());
@@ -793,7 +814,7 @@ impl FrameThermoelasticSystem<'_, '_> {
                             circuit: electrical::Driver::new(MechanicalCandidate { frame: frame.clone(), stored_before_j: before,
                                 material_heat_j, outside_loss_j: outside }, circuit)?,
                             sources_w: network_source.sources_w, conductances_w_k: network_source.conductances_w_k,
-                            source: (network_source.source, next_states, exchanges, independent_entropy, has_independent),
+                            source: (network_source.source, next_states, exchanges, independent_entropy, has_independent, field_storage),
                             circuit_trials: 1,
                         })
                     },
@@ -813,11 +834,21 @@ impl FrameThermoelasticSystem<'_, '_> {
                     return Err(invalid("complete frame electrical candidate is missing"));
                 }
                 let (mechanical_report, electrical_report) = audit.electrical;
-                let electrical_storage_change = electrical_report.as_ref().map_or(0.0,
-                    |step| step.stored_after_j-step.stored_before_j);
+
                 let electrical_work = electrical_report.as_ref().map_or(0.0, |step| step.native.supplied);
                 let electrical_heat = electrical_report.as_ref().map_or(0.0, |step| step.heat_j);
-                let (source, next_states, layers, independent_entropy, has_independent) = audit.source;
+                let (source, next_states, layers, independent_entropy, has_independent, field_storage) = audit.source;
+                let electrical_storage_change = match &field_storage {
+                    Some(field) => finite(field.internal_energy_j[1] - field.internal_energy_j[0])?,
+                    None => electrical_report.as_ref().map_or(0.0,
+                        |step| step.stored_after_j-step.stored_before_j),
+                };
+                let field_heat = field_storage.as_ref().map_or(0.0, |field| field.reversible_heat_j);
+                let (field_entropy, field_reversible_entropy) = match &field_storage {
+                    Some(field) => field.entropy_changes()?,
+                    None => (0.0, 0.0),
+                };
+                let field_split = finite(field_entropy + field_reversible_entropy)?;
                 let mut updates = Vec::with_capacity(transfers.len());
                 for (member, state) in members.iter().zip(&next_states) {
                     let l = member.region.length_m;
@@ -886,7 +917,7 @@ impl FrameThermoelasticSystem<'_, '_> {
                     return Err(invalid("native endpoint stiffness work and original thermoelastic potential disagree"));
                 }
                 let reversible_heat_j = sum(layers.iter().map(|l| l.reversible_heat_j))?;
-                let external_heat = finite(audit.non_electrical_heat_j-reversible_heat_j)?;
+                let external_heat = finite(audit.non_electrical_heat_j-reversible_heat_j-field_heat)?;
                 let internal_after = finite(frame.total_energy_j()+parameter_work_j
                     +sum(next_states.iter().flat_map(|s| s.layers.iter().map(|l| l.temperature_k*l.entropy_j_k)))?)?;
                 let residual = finite(internal_after-internal_before+audit.thermal.stored_energy_change_j
@@ -902,6 +933,9 @@ impl FrameThermoelasticSystem<'_, '_> {
                 let entropy = FrameThermoelasticEntropy {
                     thermal_storage_change_j_k: e.thermal_storage_change_j_k,
                     mechanical_storage_change_j_k: mechanical_entropy,
+                    field_storage_change_j_k: field_entropy,
+                    field_reversible_transfer_entropy_j_k: field_reversible_entropy,
+                    field_temporal_defect_j_k: field_split,
                     reservoir_entropy_input_j_k: e.reservoir_entropy_input_j_k,
                     conduction_generation_j_k: e.conduction_generation_j_k,
                     material_loss_generation_j_k: e.electrical_loss_generation_j_k,
@@ -910,13 +944,13 @@ impl FrameThermoelasticSystem<'_, '_> {
                     thermal_temporal_defect_j_k: e.temporal_defect_j_k,
                     thermoelastic_temporal_defect_j_k: split,
                     algebraic_residual_j_k: e.algebraic_residual_j_k,
-                    accounting_residual_j_k: sum([e.thermal_storage_change_j_k, mechanical_entropy,
+                    accounting_residual_j_k: sum([e.thermal_storage_change_j_k, mechanical_entropy, field_entropy,
                         -e.reservoir_entropy_input_j_k, -e.conduction_generation_j_k,
                         -e.electrical_loss_generation_j_k, -independent_entropy, -e.temporal_defect_j_k,
-                        -split, -e.algebraic_residual_j_k])?,
+                        -split, -field_split, -e.algebraic_residual_j_k])?,
                 };
                 let report = FrameThermoelasticReport {
-                    mechanical: mechanical_report, electrical: electrical_report,
+                    mechanical: mechanical_report, electrical: electrical_report, field_storage,
                     thermal: audit.thermal, source, members: next_states.clone(),
                     layers, connection_heat: loss_account.receivers, entropy, parameter_work_j, reversible_heat_j,
                     deposited_material_heat_j: material_heat_j, deposited_joule_heat_j: electrical_heat,
@@ -929,6 +963,9 @@ impl FrameThermoelasticSystem<'_, '_> {
                 Ok((candidate, report, update, next_states, next_circuit))
             },
         )?;
+        // Accepted source snapshots are no longer needed; end their borrow
+        // before installing the complete electrical/mechanical endpoint.
+        drop(field_prepared);
         // Native admission checked cancellation immediately before publication.
         self.mechanical.install_connection_coefficients(update);
         self.states = next_states;

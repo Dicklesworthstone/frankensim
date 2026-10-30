@@ -1,5 +1,9 @@
 //! Kirchhoff storage and frame materials on the original shared heat residual.
 mod contact;
+mod field;
+pub use field::FrameFieldStorageReport;
+pub(super) use field::prepare_fields;
+use crate::circuit_enthalpy::field_storage::{FieldThermalBinding, PreparedFieldThermal};
 
 use super::*;
 use crate::material_circuit::{
@@ -19,6 +23,7 @@ pub(super) struct Binding<'n, 'a> {
     contacts: Option<contact::Binding<'n, 'a>>,
     pub(super) circuit: MaterialCircuit,
     destinations: BTreeMap<usize, CellId>,
+    fields: Vec<FieldThermalBinding>,
 }
 
 impl<'n, 'a> FrameThermoelasticSystem<'n, 'a> {
@@ -36,21 +41,34 @@ impl<'n, 'a> FrameThermoelasticSystem<'n, 'a> {
     /// The original charges and fluxes are retained. This is cold binding only:
     /// the frame sample clock must still be zero, and thermal cells must match
     /// the accepted frame state. Electrical contacts use
-    /// [`Self::with_material_contact_circuit`]; material-derived C/L currently
-    /// require their reciprocal thermal laws and refuse here. Explicitly
+    /// [`Self::with_material_contact_circuit`]; material-derived C/L use
+    /// [`Self::with_material_field_circuit`] and their reciprocal thermal laws. Explicitly
     /// authored fixed C/L retain their native storage accounting.
     /// Fixed geometry means no motional EMF, magnetic force, or changing wire
     /// length is implied. The mechanical/thermal split remains first order.
     #[allow(clippy::too_many_arguments)]
     pub fn with_material_circuit(
-        mut self,
+        self,
         thermal: &DepositionSimulation<'_>,
         source: &'n MaterialNetwork<'a>,
         circuit: MaterialCircuit,
         electrical_bases: &[(usize, ElectricalPropertyBasis)],
         gate: &CancelGate,
     ) -> Result<Self> {
-        self.admit_electrical_binding(thermal, source, &circuit, gate)?;
+        self.bind_material_circuit(thermal, source, circuit, electrical_bases, Vec::new(), gate)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bind_material_circuit(
+        mut self,
+        thermal: &DepositionSimulation<'_>,
+        source: &'n MaterialNetwork<'a>,
+        circuit: MaterialCircuit,
+        electrical_bases: &[(usize, ElectricalPropertyBasis)],
+        fields: Vec<FieldThermalBinding>,
+        gate: &CancelGate,
+    ) -> Result<Self> {
+        self.admit_electrical_binding(thermal, source, &circuit, &fields, gate)?;
         if !circuit.contacts().is_empty() {
             return Err(invalid("contact-bound frames require their original electrical contact network"));
         }
@@ -65,7 +83,7 @@ impl<'n, 'a> FrameThermoelasticSystem<'n, 'a> {
             (r.destination.branch, r.destination.cell)).collect();
         check(gate)?;
         self.prepared = prepared;
-        self.electrical = Some(Binding { circuit, destinations, contacts: None });
+        self.electrical = Some(Binding { circuit, destinations, contacts: None, fields });
         Ok(self)
     }
 
@@ -174,24 +192,31 @@ impl ThermalDriver for Driver {
     }
 }
 
-// One constitutive/source-resolution seam for both bulk-only and contact-bearing
-// circuits. Resolve the entire material network once per trial, then use the
-// existing native source-continuity and circuit step. No nested thermal solve.
+// Original material resolution and native circuit work, with optional field
+// thermodynamics. A separate reversible-source map keeps physical exchange out
+// of authored-source entropy; the caller inserts it into the SAME residual.
+pub(super) struct ResolvedElectrical {
+    pub bulk: crate::circuit_enthalpy::CircuitThermalCoefficients<MaterialNetworkSample>,
+    pub circuit: Option<MaterialCircuitCandidate>,
+    pub field_storage: Option<FrameFieldStorageReport>,
+    pub reversible_sources: BTreeMap<CellId, f64>,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn resolve(
     binding: Option<&Binding<'_, '_>>,
     input: Option<FrameElectricalInput<'_>>,
     prepared: &PreparedMaterialNetwork<'_, '_>,
+    fields: Option<&PreparedFieldThermal<'_>>,
     trial: &DepositionSimulation<'_>,
     dt: f64,
+    tolerance_j: f64,
     gate: &CancelGate,
-) -> Result<(
-    crate::circuit_enthalpy::CircuitThermalCoefficients<MaterialNetworkSample>,
-    Option<MaterialCircuitCandidate>,
-)> {
+) -> Result<ResolvedElectrical> {
     check(gate)?;
     match (binding, input) {
         (Some(binding), Some(input)) => {
-            let (mut bulk, contacts) = match &binding.contacts {
+            let (bulk, contacts) = match &binding.contacts {
                 Some(source) => {
                     let value = source.prepared.resolve(trial, || gate.is_requested())
                         .map_err(contact::source_error)?;
@@ -199,18 +224,15 @@ pub(super) fn resolve(
                 }
                 None => (prepared.resolve(trial, || gate.is_requested()).map_err(network)?, Vec::new()),
             };
-            let candidate = crate::circuit_enthalpy::contacts::advance_circuit(
-                &binding.circuit, core::mem::take(&mut bulk.resistors), contacts,
-                input.ports, dt, input.solve, || gate.is_requested(),
-            )?;
-            Ok((bulk, Some(candidate)))
+            field::advance(binding, input, fields, bulk, contacts, trial, dt, tolerance_j, gate)
         }
         (None, None) => {
             let bulk = prepared.resolve(trial, || gate.is_requested()).map_err(network)?;
-            if !bulk.resistors.is_empty() {
+            if !bulk.resistors.is_empty() || fields.is_some() {
                 return Err(invalid("frame electrical sources lack their original coupled owner"));
             }
-            Ok((bulk, None))
+            Ok(ResolvedElectrical { bulk, circuit: None, field_storage: None,
+                reversible_sources: BTreeMap::new() })
         }
         _ => Err(invalid("frame electrical sources and held inputs disagree")),
     }

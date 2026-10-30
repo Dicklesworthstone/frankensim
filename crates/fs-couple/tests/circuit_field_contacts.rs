@@ -22,7 +22,7 @@ use fs_material::{
     thermal::{source::ThermalMaterialPoint, interface::ThermalInterfacePoint},
 };
 use fs_phs::circuit::{Branch, CircuitGraph};
-use fs_qty::{Density, QuantitySpec, Temperature};
+use fs_qty::{Density, QuantitySpec, Temperature, semantic::{QuantityKind, SemanticType, ValueForm}};
 use fs_solver::NewtonKrylovConfig;
 use fs_thermal::enthalpy::*;
 
@@ -32,7 +32,7 @@ const CP: [f64; 2] = [2.0, 3.0];
 const BETA: f64 = 0.002;
 const DT: f64 = 0.2;
 fn point(t: f64) -> QueryPoint {
-    QueryPoint::new().with_quantity("T", QuantitySpec::dimensional(Temperature::DIMS), t).unwrap()
+    QueryPoint::new().with_quantity("T", QuantitySpec::semantic(SemanticType::new(QuantityKind::AbsoluteTemperature, ValueForm::Static)), t).unwrap()
 }
 fn card(i: usize, magnetic: bool, alpha: f64, g: f64) -> MaterialCard {
     let (name, dims) = if magnetic { (MAGNETIC_PERMEABILITY_PROPERTY, MAGNETIC_PERMEABILITY_DIMS) }
@@ -50,7 +50,7 @@ fn card(i: usize, magnetic: bool, alpha: f64, g: f64) -> MaterialCard {
             value: PropertyValue::Curve { abscissa: "T".into(), abscissa_dims: Temperature::DIMS,
                 knots: vec![(250.0, low), (500.0, high)], dims },
             validity: ValidityDomain::unconstrained().with_quantity(
-                "T", QuantitySpec::dimensional(Temperature::DIMS), 250.0, 500.0),
+                "T", QuantitySpec::semantic(SemanticType::new(QuantityKind::AbsoluteTemperature, ValueForm::Static)), 250.0, 500.0),
             uncertainty: UncertaintyModel::Unstated, interpolation: InterpolationPolicy::LinearInside,
             observations: vec![], provenance: Provenance {
                 source: "manufactured two-body field/contact equations".into(), license: "test-only".into(), artifact: None,

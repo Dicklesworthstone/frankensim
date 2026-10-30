@@ -213,7 +213,7 @@ fn volume(value: &ThermalFieldElement) -> f64 {
 }
 // Borrow the original native storage; this view owns no electrical history or
 // stepping law. Lumped and spatial circuits use the same field thermodynamics.
-pub(super) struct FieldCircuitView<'a> {
+pub(crate) struct FieldCircuitView<'a> {
     pub graph: &'a CircuitGraph,
     pub storage: &'a [MaterialStorage],
     pub charges_c: &'a [f64],
@@ -401,7 +401,7 @@ fn admit(
 
 /// Shared source admission and reversible transfer for original circuit owners.
 /// All trials refer to these SAME accepted field coordinates and caloric cells.
-pub(super) struct PreparedFieldThermal<'a> {
+pub(crate) struct PreparedFieldThermal<'a> {
     bindings: &'a [FieldThermalBinding],
     initial: Vec<InitialField>,
 }
