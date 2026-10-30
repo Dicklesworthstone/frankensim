@@ -24,7 +24,15 @@ impl<'m, 'f, F> FrameFluidCoordinates<'m, 'f, F> {
     /// b_native=L^-1 b_original. The SAME transform applies to an observation
     /// column and its conjugate generalized force. It does not alter units.
     pub fn project_column(&self, original: &[f64]) -> Result<Vec<f64>> {
-        lower_solve(&self.factor, original, self.source.basis.modes().len())
+        let mut result = vec![0.0; self.source.basis.modes().len()];
+        self.project_column_into(original, &mut result)?;
+        Ok(result)
+    }
+
+    /// Allocation-free force/column projection into caller scratch. Refusal may
+    /// overwrite scratch but never changes a physical state or source object.
+    pub fn project_column_into(&self, original: &[f64], output: &mut [f64]) -> Result<()> {
+        lower_solve_into(&self.factor, original, output, self.source.basis.modes().len())
     }
 
     /// r=L^T q and rdot=L^T qdot, including a nonzero initial history.
@@ -94,6 +102,9 @@ impl<'f, F> MaterialFluidFrame<'f, F> {
             .and_then(|n| n.checked_add(reserved_connections))
             .ok_or_else(|| invalid("complete modal fluid connection count overflow"))?;
         if total > config.max_modes || links > config.max_connections
+            || links.checked_add(1).and_then(|n| n.checked_mul(n))
+                .and_then(|n| n.checked_mul(total))
+                .is_none_or(|n| n > config.max_setup_terms)
             || total.checked_mul(total).and_then(|n| n.checked_mul(links))
                 .is_none_or(|n| n > config.max_setup_terms) {
             return Err(invalid("all fluid gauges, material ports and modal setup must fit the native budget"));
@@ -149,17 +160,23 @@ impl<'f, F> MaterialFluidFrame<'f, F> {
     }
 }
 
+#[cfg(test)]
 fn lower_solve(l: &Cholesky, input: &[f64], n: usize) -> Result<Vec<f64>> {
-    if input.len() != n || input.iter().any(|x| !x.is_finite()) {
+    let mut out = vec![0.0; n];
+    lower_solve_into(l, input, &mut out, n)?;
+    Ok(out)
+}
+fn lower_solve_into(l: &Cholesky, input: &[f64], out: &mut [f64], n: usize) -> Result<()> {
+    if input.len() != n || out.len() != n || input.iter().any(|x| !x.is_finite()) {
         return Err(invalid("complete finite inertia-coordinate column required"));
     }
-    let mut out = input.to_vec();
+    out.copy_from_slice(input);
     for i in 0..n {
         let mut value = out[i];
         for j in 0..i { value = (-l.l(i,j)).mul_add(out[j], value); }
         out[i] = finite(value/l.l(i,i))?;
     }
-    Ok(out)
+    Ok(())
 }
 fn map_states(l: &Cholesky, input: &[ModalAcousticState], n: usize, inverse: bool)
     -> Result<Vec<ModalAcousticState>> {

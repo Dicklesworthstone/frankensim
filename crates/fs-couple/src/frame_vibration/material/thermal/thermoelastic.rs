@@ -939,3 +939,6 @@ impl FrameThermoelasticSystem<'_, '_> {
         Ok(report)
     }
 }
+
+/// Complete exterior-fluid memory on this same thermoelastic/electrical timeline.
+pub mod fluid;
