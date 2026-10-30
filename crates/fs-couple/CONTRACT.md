@@ -9657,7 +9657,7 @@ applied and must not be deposited again.
 
 These are distinct uniform thermal stores with fixed effective layer geometry
 and negligible solid pV work. They do not automatically change an aperture's
-mechanics, wall stiffness, dimensions, or acoustic-loss heat partition. A body
+mechanics, wall stiffness, dimensions, or general acoustic-loss partition. A body
 shared by several gas volumes uses the separate `thermal::shared` owner below;
 duplicate entries in this independent-body map remain unsupported. Phase follows the original chart without claiming melt
 motion or structural recoupling. Uniform-body validity and material/density/
@@ -9711,11 +9711,56 @@ reported contact heat has already been applied.
 This remains a uniform-body, fixed-geometry, negligible-solid-pV-work model
 with effective conduction layers and the existing first-order transport split.
 It does not supply spatial solid gradients, thermal deformation, automatic wall
-stiffness or aperture updates, or acoustic-loss heating. The authored G1/G4
+stiffness or aperture updates, or general acoustic-loss partition. Selected
+molecular source heating uses the original gas owner described below. The G1/G4
 regressions cover opposite nonzero contacts with zero net heat against an
 independent constant-capacity solution, reacting transport with continuing warm
 passive and paired-aperture owners, and atomic refusal/cancellation/retry. They
 are formatter/source checked; native execution remains unverified.
+
+## Molecular acoustic heat in reacting thermal gas assemblies
+
+`FiniteGasAcousticInput::MolecularWall` opts an original wall-DG gas volume
+into native molecular relaxation heating within the existing heterogeneous
+transport, chemistry and finite-body APIs. Uniform and regional material wall
+owners retain their original histories. The selection requires the existing
+`UniformMolecularDiffusion` refresh and an explicit native dense-exponential
+budget. Binding it to a complete passive load, moving aperture or unbound gas
+reservoir refuses, including when the expected heat would be zero.
+
+The prepared transaction integrates the original molecular slip-square source
+once from each selected accepted duct/state and its actual held ports, after
+all owner admission and before material transport. Every subsequent body,
+contact-heat and acoustic-work trial reuses this same source integral M. The
+common caloric/chemical/thermal endpoint receives actual gas heat
+`Q_external + M + Q_body`. Native gas-to-wave parameter work remains separate.
+An internal callback seam carries M to its original native energy account;
+there is no public override accepting an arbitrary deposited molecular heat.
+
+Reports retain total native decrement D, internal molecular heat M and the
+exported remainder D-M as distinct quantities. The gas/acoustic boundary heat
+contains only external heat and body contact heat. Its balance therefore uses
+`delta U_gas + delta E_acoustic + (D-M) - Q_boundary - W_external`.
+The enclosing finite-body account adds body storage once and cancels each
+body contact. Other wall, boundary, viscous and numerical losses keep their
+existing exported meaning; an aggregate energy deficit is never converted
+into molecular heat or clipped to a nonnegative remainder.
+
+Ordinary inputs preserve their previous zero-transfer arithmetic. Missing
+sources, unsupported owners, exhausted source budgets, invalid native refresh,
+failed energy/species gates and cancellation publish no partial gas, acoustic
+or body state. Molecular source observations are not repeated by nested roots.
+
+The original molecular refresh still preserves species fractions and reservoir
+support. Same-composition transport and changing thermodynamic conditions are
+supported; a composition-changing reaction or inflow in the molecular source
+duct refuses. Other owners in the same network may react, and the shared body
+can transfer molecularly generated heat to them. This remains the original
+fixed-geometry, frozen-medium sample with a first-order background split,
+not a model for acoustic species perturbations or arbitrary loss partition.
+Focused regressions exercise the native source/heat receipt, complete energy
+enclosure, coupled body/chemical feedback and atomic refusal/retry. They are
+authored and source/parser checked; native execution remains unverified.
 
 ## Continuing spatial dielectric charge through thermal phase change
 

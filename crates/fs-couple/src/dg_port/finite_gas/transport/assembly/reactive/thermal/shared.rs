@@ -64,7 +64,8 @@ pub struct SharedFiniteGasAcousticThermalStep {
 pub struct SharedFiniteGasAcousticThermalSource {
     pub native: FiniteGasAcousticReactionSource,
     pub port: Option<SharedFiniteGasAcousticThermalStep>,
-    /// Actual external gas heat plus this contact's Q; work stays separate.
+    /// Actual gas heat: external input, selected native molecular heat and this
+    /// contact's Q. Mechanical work remains separate.
     pub supplied_heat_j: f64,
 }
 
@@ -78,7 +79,8 @@ pub struct SharedFiniteGasAcousticThermalReservoir {
 /// One material body and all original native reports at the same endpoint.
 #[derive(Debug)]
 pub struct SharedThermalReactiveFiniteGasAcousticTransportStep {
-    /// Gas/acoustic boundary only: supplied heat includes every internal Q_i.
+    /// Gas/acoustic boundary: supplied heat includes each body contact's Q_i;
+    /// original molecular heat cancels against acoustic loss inside this boundary.
     pub transport: FiniteGasDgTransportStep<
         FiniteGasAcousticStep<SharedFiniteGasAcousticThermalSource>,
         SharedFiniteGasAcousticThermalReservoir,
@@ -516,8 +518,10 @@ impl FiniteGasTransportEvolution for SharedEvolution<'_, '_, '_> {
 /// effective conduction layers. The caller asserts nonoverlapping patches and
 /// the validity of lumping/density/geometry. It is not spatial solid conduction,
 /// automatic duct-wall stiffness or aperture updates, expansion, resolved gas
-/// motion or acoustic-loss heating. The original first-order transport/acoustic
-/// split, source domains and local chemical entropy gate remain; convergence is
+/// motion or general acoustic-loss partition. An explicitly selected molecular
+/// wall input deposits only its original source integral in gas; other losses
+/// remain exported. The original first-order transport/acoustic split, source
+/// domains and local chemical entropy gate remain; convergence is
 /// not time accuracy, uniqueness or a whole-system entropy theorem.
 #[allow(clippy::too_many_arguments)]
 pub fn finite_gas_shared_thermal_reacting_acoustic_transport_candidate_with_paths<
@@ -666,7 +670,7 @@ pub fn finite_gas_shared_thermal_reacting_acoustic_transport_candidate_with_path
     for term in [
         step.transport.gas_storage_change_j,
         step.transport.acoustic_storage_change_j,
-        step.transport.acoustic_dissipation_j,
+        step.transport.exported_acoustic_dissipation_j,
         step.body_storage_change_j,
         -step.external_gas_heat_j,
         -step.external_body_heat_j,

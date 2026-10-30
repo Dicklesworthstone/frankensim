@@ -181,6 +181,7 @@ fn mixed() -> (Parcels, MixedNodes, MixedInputs, Vec<SnapshotNozzleLink>) {
 fn thermal(input: &FiniteGasAcousticInput) -> &FiniteGasDgTransportInput {
     match input {
         FiniteGasAcousticInput::Passive(input) => input,
+        FiniteGasAcousticInput::MolecularWall { thermal, .. } => thermal,
         FiniteGasAcousticInput::Aperture(input) => &input.thermal,
     }
 }

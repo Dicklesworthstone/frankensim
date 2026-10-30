@@ -79,6 +79,7 @@ impl FiniteGasTransportNode for DgPortLoad {
         &mut self,
         gas: &mut ClosedGasParcel,
         input: &FiniteGasDgTransportInput,
+        molecular_heat_j: f64,
         evolve: impl FnMut(
             &ClosedGasParcel,
             f64,
@@ -87,6 +88,11 @@ impl FiniteGasTransportNode for DgPortLoad {
         ) -> Result<FiniteGasDgBackground<S>, E>,
         cancelled: &mut C,
     ) -> Result<Self::Step<S>, FiniteGasDgError<E>> {
+        if molecular_heat_j != 0.0 {
+            return Err(FiniteGasDgError::Invalid(
+                "complete passive loads do not own the source-wall molecular heat integral",
+            ));
+        }
         self.step_with_finite_gas_controlled(
             gas,
             input.ports[0].effort,
@@ -96,11 +102,12 @@ impl FiniteGasTransportNode for DgPortLoad {
         )
     }
 
-    fn accounts<S>(step: &Self::Step<S>) -> [f64; 3] {
+    fn accounts<S>(step: &Self::Step<S>) -> [f64; 4] {
         [
             step.acoustic.ledger.port_work_step_j,
             step.acoustic_dissipation_j,
             step.refresh.parameter_work_j,
+            0.0,
         ]
     }
 

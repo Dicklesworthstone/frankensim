@@ -67,8 +67,9 @@ pub struct FiniteGasAcousticThermalStep {
 pub struct FiniteGasAcousticThermalSource {
     pub native: FiniteGasAcousticReactionSource,
     pub thermal: Option<FiniteGasAcousticThermalStep>,
-    /// Heat across the gas boundary: external gas heat plus body transfer.
-    /// This excludes mechanical work and formation energy.
+    /// Actual gas heat: external input, selected native molecular heat and body
+    /// transfer. The enclosing transport account cancels molecular heat against
+    /// acoustic loss; mechanical work and formation energy remain separate.
     pub supplied_heat_j: f64,
 }
 
@@ -645,8 +646,8 @@ impl Sum {
 /// from their exact accepted states, and every Q/work probe restarts the same
 /// transported gas. Conduction uses the original material-layer resistance law
 /// at the final gas/body temperatures, with its initial source claim pinned.
-/// Chemistry receives actual heat Q_external + Q_body and separate mechanical
-/// work. Formation energy is already included in gas internal energy.
+/// Chemistry receives actual heat Q_external + Q_molecular + Q_body and separate
+/// mechanical work. Formation energy is already included in gas internal energy.
 ///
 /// Body storage uses the original negligible-pV-work enthalpy model at fixed
 /// geometry. Uniform-body validity, material/density/geometry consistency and
@@ -755,7 +756,7 @@ pub fn finite_gas_thermal_reacting_acoustic_transport_candidate_with_paths<C: Fn
     for term in [
         step.transport.gas_storage_change_j,
         step.transport.acoustic_storage_change_j,
-        step.transport.acoustic_dissipation_j,
+        step.transport.exported_acoustic_dissipation_j,
         body_storage.value,
         -gas_heat.value,
         -body_heat.value,

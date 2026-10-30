@@ -21,6 +21,7 @@ use crate::dg_port::finite_gas::{FiniteGasDgBackground, FiniteGasDgError, Finite
 use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 use fs_material::thermochemical_gas::energy::parcel::composition::GasCompositionStep;
 use fs_material::thermochemical_gas::energy::parcel::transfer::species::network::transport::GasTransportPaths;
+use fs_phs::linear_exact::DenseExponentialBudget;
 use std::collections::BTreeMap;
 
 /// An original accepted physical owner, keyed by its finite gas parcel identity.
@@ -71,6 +72,16 @@ pub enum FiniteGasAcousticInput {
     /// A wall's held native ports, a complete load's one original inlet, or an
     /// unbound reservoir's caloric controls with no acoustic controls or ports.
     Passive(FiniteGasDgTransportInput),
+    /// A source-wall DG volume returns its native molecular relaxation heat to
+    /// its own finite gas. The original slip-square integral is prepared once
+    /// from accepted history and held ports, then reused by every coupled trial.
+    /// Other native losses stay exported. Requires the original molecular law,
+    /// unchanged species fractions and reservoir support; complete port loads,
+    /// moving apertures and unbound reservoirs cannot use this input variant.
+    MolecularWall {
+        thermal: FiniteGasDgTransportInput,
+        heat_budget: DenseExponentialBudget,
+    },
     /// Held drives of an actual moving source, with no prescribed acoustic flow.
     Aperture(FiniteGasApertureTransportInput),
 }
@@ -106,10 +117,12 @@ impl FiniteGasTransportNode for FiniteGasAcousticNode {
     ) -> Result<&FiniteGasDgTransportInput, &'static str> {
         match input {
             FiniteGasAcousticInput::Passive(input) => Ok(input),
+            FiniteGasAcousticInput::MolecularWall { thermal, .. } if bound => Ok(thermal),
             FiniteGasAcousticInput::Aperture(input) if bound => {
                 LoadedApertureDg::transport_input(input, bound)
             }
-            FiniteGasAcousticInput::Aperture(_) => {
+            FiniteGasAcousticInput::Aperture(_)
+            | FiniteGasAcousticInput::MolecularWall { .. } => {
                 Err("unbound gas reservoirs require plain caloric controls")
             }
         }
@@ -148,7 +161,8 @@ impl FiniteGasTransportNode for FiniteGasAcousticNode {
         // The shared kernel runs this exact-kind gate for EVERY node before
         // evaluating any material path. No drive can be silently ignored.
         match (self, input) {
-            (Self::Wall(node), FiniteGasAcousticInput::Passive(input)) => {
+            (Self::Wall(node), FiniteGasAcousticInput::Passive(input))
+            | (Self::Wall(node), FiniteGasAcousticInput::MolecularWall { thermal: input, .. }) => {
                 node.admit(gas, input, cancelled)
             }
             (Self::Port(node), FiniteGasAcousticInput::Passive(input)) => {
@@ -161,10 +175,25 @@ impl FiniteGasTransportNode for FiniteGasAcousticNode {
         }
     }
 
+    fn prepare_internal_heat<E, C: FnMut() -> bool>(
+        &self,
+        input: &Self::Input,
+        cancelled: &mut C,
+    ) -> Result<f64, FiniteGasDgError<E>> {
+        match (self, input) {
+            (Self::Wall(node), FiniteGasAcousticInput::MolecularWall { thermal, heat_budget }) => {
+                node.prepare_molecular_heat(thermal, *heat_budget, cancelled)
+            }
+            (_, FiniteGasAcousticInput::MolecularWall { .. }) => Err(mismatch()),
+            _ => Ok(0.0),
+        }
+    }
+
     fn advance<S, E, C: FnMut() -> bool>(
         &mut self,
         gas: &mut ClosedGasParcel,
         input: &Self::Input,
+        molecular_heat_j: f64,
         evolve: impl FnMut(
             &ClosedGasParcel,
             f64,
@@ -174,20 +203,21 @@ impl FiniteGasTransportNode for FiniteGasAcousticNode {
         cancelled: &mut C,
     ) -> Result<Self::Step<S>, FiniteGasDgError<E>> {
         match (self, input) {
-            (Self::Wall(node), FiniteGasAcousticInput::Passive(input)) => node
-                .advance(gas, input, evolve, cancelled)
+            (Self::Wall(node), FiniteGasAcousticInput::Passive(input))
+            | (Self::Wall(node), FiniteGasAcousticInput::MolecularWall { thermal: input, .. }) => node
+                .advance(gas, input, molecular_heat_j, evolve, cancelled)
                 .map(FiniteGasAcousticStep::Wall),
             (Self::Port(node), FiniteGasAcousticInput::Passive(input)) => node
-                .advance(gas, input, evolve, cancelled)
+                .advance(gas, input, molecular_heat_j, evolve, cancelled)
                 .map(FiniteGasAcousticStep::Port),
             (Self::Aperture(node), FiniteGasAcousticInput::Aperture(input)) => node
-                .advance(gas, input, evolve, cancelled)
+                .advance(gas, input, molecular_heat_j, evolve, cancelled)
                 .map(FiniteGasAcousticStep::Aperture),
             _ => Err(mismatch()),
         }
     }
 
-    fn accounts<S>(step: &Self::Step<S>) -> [f64; 3] {
+    fn accounts<S>(step: &Self::Step<S>) -> [f64; 4] {
         match step {
             FiniteGasAcousticStep::Wall(step) => FiniteGasDgNode::accounts(step),
             FiniteGasAcousticStep::Port(step) => DgPortLoad::accounts(step),

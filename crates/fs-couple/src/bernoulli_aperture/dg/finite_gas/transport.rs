@@ -124,6 +124,7 @@ impl FiniteGasTransportNode for LoadedApertureDg {
         &mut self,
         gas: &mut ClosedGasParcel,
         input: &Self::Input,
+        molecular_heat_j: f64,
         evolve: impl FnMut(
             &ClosedGasParcel,
             f64,
@@ -132,6 +133,11 @@ impl FiniteGasTransportNode for LoadedApertureDg {
         ) -> Result<FiniteGasDgBackground<S>, E>,
         cancelled: &mut C,
     ) -> Result<Self::Step<S>, FiniteGasDgError<E>> {
+        if molecular_heat_j != 0.0 {
+            return Err(FiniteGasDgError::Invalid(
+                "moving apertures do not own the source-wall molecular heat integral",
+            ));
+        }
         let source = input.source.expect("admitted moving-source input");
         self.step_with_finite_gas_controlled(
             gas,
@@ -144,7 +150,7 @@ impl FiniteGasTransportNode for LoadedApertureDg {
         )
     }
 
-    fn accounts<S>(step: &Self::Step<S>) -> [f64; 3] {
+    fn accounts<S>(step: &Self::Step<S>) -> [f64; 4] {
         let frame = &step.coupled;
         // The valve/duct pressure-flow work is INTERNAL to this node. Only
         // original prescribed drives and signed exterior exchange cross its
@@ -154,6 +160,7 @@ impl FiniteGasTransportNode for LoadedApertureDg {
                 - sum_terminal_work(&frame.terminals),
             frame.inferred_total_dissipation_j,
             frame.parameter_work_j,
+            0.0,
         ]
     }
 
