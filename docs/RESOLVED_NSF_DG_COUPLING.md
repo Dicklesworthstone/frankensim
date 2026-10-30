@@ -717,8 +717,19 @@ equation to this same transaction. Every numerical candidate starts from the
 accepted physical state; cancellation, unbracketed roots, exhausted total work
 budgets and excessive pressure/work errors publish none of the participants.
 The accepted frame exposes the reservoir pressure, independent flow, radiation
-work and signed projection discrepancy. Original streamed mass and conservative
-total-energy flux remain separate.
+work and signed projection discrepancy. Its `resolved_exchange` retains the
+complete original fluid interval, including every NSF substep. Pressure matching
+and acoustic work admission both use the cached FV predictor quadrature that
+updates conservative total energy. This work is the spatial average of
+`p_cell * u_cell` and `p_ghost * u_ghost`, integrated with the original predictor
+time trapezoid. It is not a product of independently averaged pressure and flow,
+nor a reconstruction from the corrected endpoint state.
+
+The per-tile endpoint pressure/work traces remain available for observation
+diagnostics. They cannot replace the conservative exchange in the reaction
+equation. Original streamed mass and conservative total-energy flux remain
+separate; the acoustic projection does not absorb enthalpy, conduction or
+viscous work.
 
 The microphone still observes each original reservoir tile and each circular
 bore outlet once, at their actual positions, with the selected shared gas law.
@@ -733,6 +744,28 @@ Physical interface, geometry, quadrature and clock refinement remain required.
 selects the joint feedback and material observation paths. It retains twelve
 original NSF steps per 8 kHz acoustic interval and is a numerical example,
 not a measured instrument or a realism preset.
+
+The existing `resolved-dg-slit-edge.performance` Instrument Lab source now also
+selects this reaction and the original per-tile microphone. Its 27 escape cells
+form a 1.5 mm by 4.5 mm rectangle centered at `[-0.05, 0]` m in the shared baffle.
+The explicit observation origin is `[-0.05125, -0.00725]` m and the native
+`reservoir_feedback -5 5 16 32` row supplies the ghost-pressure search domain
+and independent radiation quadrature. The unchanged physical clock requires
+the joint radiation source to resolve a band extending to approximately 127 kHz.
+The circular surfaces therefore use 48 radial rings and 96 angular points,
+with a 128 MiB cold-fitting memory allowance, so they satisfy the original
+phase-resolution and pair-distance-storage admissions. These numerical
+resources do not relax the fit, passivity or coupling error tolerances.
+The original voxel slit/edge, gas, pressure history and physical clock remain
+the source of the calculation. The circular receiver observes the bore outlets once;
+the tile receiver observes the mouth once. This coarse manufactured fixture
+still requires geometry, boundary, clock and acoustic refinement before any
+edge-tone, self-oscillation or instrument-fidelity claim.
+
+The shared radiation admission includes all 32 allowed DG side ports, the
+axial outlet and one independent mouth (34 coordinates). Every self and mutual
+term remains present, with the existing fitting-memory and runtime-state
+bounds.
 
 ## Scope and refinement
 

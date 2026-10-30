@@ -34,10 +34,11 @@ use fs_vfit::mimo::{
     repair_mimo_passivity_with_budget, shared_pole_relocation_scratch_bytes,
 };
 
-/// A complete bounded DG side-port set plus its axial outlet. Every opening
-/// retains all mutual terms; the shared fitter eliminates local numerators
-/// before solving its common denominator for larger arrays.
-pub const MAX_BAFFLED_MIMO_PORTS: usize = fs_duct::dg::MAX_DG_SIDE_PORTS + 1;
+/// A complete bounded DG side-port set, its axial outlet and an independently
+/// driven resolved mouth. Every opening retains all mutual terms; the shared
+/// fitter eliminates local numerators before solving its common denominator
+/// for larger arrays. Existing fit-memory and runtime-state limits still apply.
+pub const MAX_BAFFLED_MIMO_PORTS: usize = fs_duct::dg::MAX_DG_SIDE_PORTS + 2;
 /// Maximum rows in each fitting, causality or withheld frequency sweep.
 pub const MAX_BAFFLED_MIMO_FREQUENCIES: usize = 513;
 /// Maximum admitted allowance for the dense fitting and certification scratch.

@@ -224,6 +224,7 @@ fn resolved_mouth_reaction_changes_original_flow_and_audits_both_acoustic_ports(
     let mut independent_flow = false;
     let mut changed_flow = false;
     let mut reacted = false;
+    let mut distinct_fv_work = false;
     for _ in 0..64 {
         let mass = coupled.system().zone().total_mass_kg();
         let energy = coupled.system().zone().total_energy_j();
@@ -232,17 +233,30 @@ fn resolved_mouth_reaction_changes_original_flow_and_audits_both_acoustic_ports(
         let frame = coupled.last_frame().unwrap();
         let mouth = frame.reservoir_radiation.as_ref().unwrap();
         let dt = coupled.system().load().propagator().dt();
-        let q: f64 = frame
-            .reservoir_flows
-            .iter()
-            .map(|tile| tile.outward_volume_flow_m3_s)
-            .sum();
-        let resolved_work: f64 = frame
-            .reservoir_flows
-            .iter()
-            .map(|tile| tile.acoustic_pressure_work_out_j)
-            .sum();
+        let resolved = &mouth.resolved_exchange;
+        let tile_q: f64 = frame.reservoir_flows.iter()
+            .map(|tile| tile.outward_volume_flow_m3_s).sum();
+        let tile_q_abs: f64 = frame.reservoir_flows.iter()
+            .map(|tile| tile.outward_volume_flow_m3_s.abs()).sum();
+        let q = resolved.normal_volume_flow_m3_s;
+        let resolved_work = resolved.acoustic_pressure_work_out_j;
+        let trace_work: f64 = frame.reservoir_flows.iter()
+            .map(|tile| tile.acoustic_pressure_work_out_j).sum();
+        let trace_absolute_work: f64 = frame.reservoir_flows.iter()
+            .map(|tile| tile.pressure_work_out_j.abs()).sum();
+        let flow_scale = tile_q_abs + q.abs()
+            + coupled.system().reference_gas().sound_speed * resolved.area_m2;
+        assert!((tile_q - q).abs() <= 64.0 * f64::EPSILON * flow_scale);
         assert_eq!(mouth.outward_flow_m3_s, q);
+        assert_eq!(mouth.mean_acoustic_pressure_pa, resolved.mean_acoustic_pressure_pa);
+        assert_eq!(resolved.reference_pressure_pa,
+            coupled.system().reference_gas().pressure);
+        // Absolute-pressure scale includes centering and cancellation roundoff;
+        // the witness must distinguish physical quadratures beyond those errors.
+        let work_scale = resolved.pressure_work_out_j.abs() + trace_absolute_work
+            + resolved.reference_pressure_pa * (flow_scale * dt);
+        distinct_fv_work |= (resolved_work - trace_work).abs()
+            > 256.0 * f64::EPSILON * work_scale;
         assert!(frame.pressure_residual_pa.abs() < 1e-5);
         assert!(mouth.pressure_residual_pa.abs() < 1e-5);
         assert_eq!(
@@ -274,6 +288,8 @@ fn resolved_mouth_reaction_changes_original_flow_and_audits_both_acoustic_ports(
         changed_flow |= frame.inlet_flow_m3_s != baseline.last_frame().unwrap().inlet_flow_m3_s;
         reacted |= mouth.radiation_pressure_pa.abs() > 1e-9;
     }
+    assert!(distinct_fv_work,
+        "the fixture must distinguish original FV work from endpoint trace products");
     assert!(
         independent_flow,
         "resolved storage must not impose Q_mouth = -Q_bore"
@@ -376,6 +392,7 @@ fn feedback_geometry_domains_and_cancelled_or_unbracketed_solves_preserve_owners
         renderer.system().zone().state_hash(),
         renderer.system().zone().cumulative_ledger(),
         renderer.system().zone().last_reservoir_flows().to_vec(),
+        renderer.system().zone().last_reservoir_exchange().copied(),
         renderer.system().load().state().clone(),
         renderer.system().accepted_steps(),
     );
@@ -387,6 +404,7 @@ fn feedback_geometry_domains_and_cancelled_or_unbracketed_solves_preserve_owners
             renderer.system().zone().state_hash(),
             renderer.system().zone().cumulative_ledger(),
             renderer.system().zone().last_reservoir_flows().to_vec(),
+            renderer.system().zone().last_reservoir_exchange().copied(),
             renderer.system().load().state().clone(),
             renderer.system().accepted_steps()
         )
@@ -396,6 +414,7 @@ fn feedback_geometry_domains_and_cancelled_or_unbracketed_solves_preserve_owners
     let mut refused = read(&unreachable, 1).into_renderer();
     let before = (
         refused.system().zone().state_hash(),
+        refused.system().zone().last_reservoir_exchange().copied(),
         refused.system().load().state().clone(),
     );
     assert!(refused.block(&mut [0.0]).is_err());
@@ -404,6 +423,7 @@ fn feedback_geometry_domains_and_cancelled_or_unbracketed_solves_preserve_owners
         before,
         (
             refused.system().zone().state_hash(),
+            refused.system().zone().last_reservoir_exchange().copied(),
             refused.system().load().state().clone()
         )
     );

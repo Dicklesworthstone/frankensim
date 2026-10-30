@@ -473,7 +473,7 @@ pub(super) fn resolved_provenance(
             system.reservoir_radiation().is_some())
     });
     let reservoir_feedback = system.reservoir_radiation().map_or_else(String::new, |input| {
-        format!(",\"reservoir_feedback\":{{\"kind\":\"same-interval-original-joint-DG-mouth-radiation\",\"origin_m\":[{:e},{:e}],\"mouth_quadrature\":[{},{}],\"ghost_pressure_bracket_pa\":[{:e},{:e}],\"flow_coordinates\":[\"into bore\",\"outward through resolved reservoir\"],\"scope\":\"independent original flows; full computed self and mutual exterior response; pressure and acoustic work checked before fluid, bore and radiation publish; uniform pressure projection on the original reservoir ghost boundary; no transparent-boundary or free-field qualification\"}}",
+        format!(",\"reservoir_feedback\":{{\"kind\":\"same-interval-original-joint-DG-mouth-radiation\",\"origin_m\":[{:e},{:e}],\"mouth_quadrature\":[{},{}],\"ghost_pressure_bracket_pa\":[{:e},{:e}],\"flow_coordinates\":[\"into bore\",\"outward through resolved reservoir\"],\"scope\":\"independent original flows; full computed self and mutual exterior response; pressure and acoustic work use the original cached conservative FV predictors over the complete physical interval; endpoint tile traces remain observation-only; pressure and work checked before fluid, bore and radiation publish; uniform pressure projection on the original reservoir ghost boundary; no transparent-boundary or free-field qualification\"}}",
             input.origin_m[0], input.origin_m[1], input.cells[0], input.cells[1],
             input.pressure_bracket_pa[0], input.pressure_bracket_pa[1])
     });

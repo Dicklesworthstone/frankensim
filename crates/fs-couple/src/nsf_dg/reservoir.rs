@@ -31,6 +31,9 @@ pub(super) struct ReservoirRadiation {
 /// Accepted acoustic exchange at the actual resolved transverse opening.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NsfDgReservoirFrame {
+    /// Complete accepted fluid interval, including all original NSF substeps.
+    /// Work uses the cached conservative FV predictor flux, not endpoint traces.
+    pub resolved_exchange: fs_lbm::nsf3::NsfReservoirExchange,
     pub ghost_pressure_offset_pa: f64,
     pub mean_acoustic_pressure_pa: f64,
     pub outward_flow_m3_s: f64,
@@ -242,6 +245,8 @@ impl<L: Lattice3<27>> NsfDg<L> {
         let bore = coupled_exchange(&fluid, side)?;
         let source_face = coupled_exchange(&fluid, other)?;
         let mouth = exchange(&fluid)?;
+        let resolved_exchange = *fluid.reservoir_exchange().ok_or(NsfDgError::Input(
+            "joint exterior lost its conservative reservoir exchange"))?;
         let dt = self.load.propagator().dt();
         let inlet = self.load.inlet();
         let acoustic = self.load.preview_step_with_mouth_flow(
@@ -302,6 +307,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
             step: self.steps, evaluations, incoming_characteristic_m_s: downstream, drive,
             upstream, faces, coupled_patch, source_patch, reservoir_mass_out_kg, reservoir_flows,
             reservoir_radiation: Some(NsfDgReservoirFrame {
+                resolved_exchange,
                 ghost_pressure_offset_pa: pressure_offset,
                 mean_acoustic_pressure_pa: mouth.mean_acoustic_pressure_pa,
                 outward_flow_m3_s: mouth.normal_volume_flow_m3_s,
@@ -335,18 +341,20 @@ fn preview<'a, L: Lattice3<27>>(
 fn exchange<L: Lattice3<27>>(
     trial: &NsfCharacteristicTrial<'_, L>,
 ) -> Result<NsfBoundaryExchange, NsfDgError> {
-    let tiles = trial.reservoir_flows();
-    if tiles.is_empty() { return Err(NsfDgError::Input("resolved exterior has no original reservoir quadrature")); }
-    let mut face = NsfBoundaryExchange::default();
-    for tile in tiles {
-        face.normal_volume_flow_m3_s += tile.outward_volume_flow_m3_s;
-        face.mean_pressure_pa += tile.mean_pressure_pa;
-        face.mean_acoustic_pressure_pa += tile.mean_acoustic_pressure_pa;
-        face.pressure_work_out_j += tile.pressure_work_out_j;
-        face.acoustic_pressure_work_out_j += tile.acoustic_pressure_work_out_j;
-    }
-    face.mean_pressure_pa /= tiles.len() as f64;
-    face.mean_acoustic_pressure_pa /= tiles.len() as f64;
-    face.mass_out_kg = trial.reservoir_mass_out_kg();
-    Ok(face)
+    let source = trial.reservoir_exchange().ok_or(NsfDgError::Input(
+        "resolved exterior has no original conservative reservoir work quadrature"))?;
+    // Match pressure and audit work from the SAME cached FV predictors that
+    // update total energy. Endpoint midpoint-pressure times midpoint-velocity
+    // is a separate observation quadrature and cannot replace this transfer.
+    // Streamed mass remains independent; no enthalpy, conduction or viscous
+    // work is folded into the acoustic projection.
+    Ok(NsfBoundaryExchange {
+        mass_out_kg: trial.reservoir_mass_out_kg(),
+        mean_pressure_pa: source.mean_pressure_pa,
+        normal_volume_flow_m3_s: source.normal_volume_flow_m3_s,
+        pressure_work_out_j: source.pressure_work_out_j,
+        mean_acoustic_pressure_pa: source.mean_acoustic_pressure_pa,
+        acoustic_pressure_work_out_j: source.acoustic_pressure_work_out_j,
+        ..NsfBoundaryExchange::default()
+    })
 }

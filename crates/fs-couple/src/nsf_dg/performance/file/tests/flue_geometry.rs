@@ -4,12 +4,18 @@
 use super::*;
 
 const SOURCE: &str = include_str!("../../../../../examples/resolved-dg-slit-edge.performance");
+const ESCAPE_OBSERVER: &str = "reservoir_observation baffled -0.05125 -0.00725 0\n";
+const ESCAPE_FEEDBACK: &str = "reservoir_feedback -5 5 16 32\n";
 
 fn diagnostic_prefix() -> String {
+    // The geometry diagnostics retain their original inlet-pressure observation.
+    // The canonical file test below exercises the shared exterior and its reaction.
     SOURCE
+        .replace(ESCAPE_OBSERVER, "")
+        .replace(ESCAPE_FEEDBACK, "")
         .replace("output 2048 20", "output 32 20")
         .replace(
-            "observation baffled 0 0 0.2 8 32 2000",
+            "observation baffled 0 0 0.2 48 96 2000",
             "observation inlet-pressure",
         )
         .replace("observer_gas stokes-kirchhoff 4096 1000000 50000000\n", "")
@@ -42,6 +48,18 @@ fn slit_edge_source_binds_the_actual_solid_geometry_and_both_openings() {
         })
     );
     assert_eq!(zone.reservoir_aperture().unwrap().cells.len(), 27);
+    let reaction = system.reservoir_radiation().unwrap();
+    assert_eq!(reaction.origin_m, [-0.05125, -0.00725]);
+    assert_eq!(reaction.cells, [16, 32]);
+    assert_eq!(reaction.terminal_radial_rings, 48);
+    assert_eq!(reaction.terminal_angular_points, 96);
+    assert_eq!(reaction.pressure_bracket_pa, [-5.0, 5.0]);
+    assert!(system.load().independent_mouth_response().is_ok());
+    assert!(file.renderer().reservoir_receiver().is_some());
+    assert_eq!(
+        file.renderer().reservoir_observer_gas().unwrap().filters.len(),
+        27
+    );
     // Source-owned material queries distinguish the actual interior solids
     // from fluid cells. The windway is not a prescribed velocity or jet card.
     for cell in [[2, 4, 2], [7, 7, 2], [14, 6, 2], [21, 8, 2]] {
@@ -60,6 +78,13 @@ fn slit_edge_source_binds_the_actual_solid_geometry_and_both_openings() {
     renderer.block(&mut pressure).unwrap();
     assert!(pressure[0].is_finite());
     assert!(renderer.system().accepted_steps() > 1);
+    let mouth = renderer.last_frame().unwrap().reservoir_radiation.as_ref().unwrap();
+    assert_eq!(
+        mouth.outward_flow_m3_s,
+        mouth.resolved_exchange.normal_volume_flow_m3_s
+    );
+    assert!(mouth.pressure_residual_pa.abs() < 1e-5);
+    assert!((mouth.resolved_exchange.area_m2 - 27.0 * 0.0005_f64.powi(2)).abs() < 1e-20);
     assert_eq!(
         renderer.last_frame().unwrap().inlet_flow_m3_s,
         renderer
