@@ -13819,11 +13819,12 @@ invalid boundaries, nonlinear refusal or cancellation return no partial state.
 
 This lane admits quasistatic, stress-free, wholly solid expansion at fixed
 delivered mass. Reference thermal geometry and caloric charts remain intact;
-changing density never changes mass. Expanded cells refuse occupied thermal
-contacts, Robin exchange and reservoirs because those evolving areas and layer
-distances require their own geometric heat-transfer closure. Independent
-applied watts remain allowed. Constrained thermoelastic work, evolving thermal
-surfaces, phase changes, skin effects and changing magnetic storage geometry
+changing density never changes mass. Expanded cells refuse occupied interbody
+thermal contacts because those evolving interface areas and layer distances
+require their own heat-transfer closure. Robin/reservoir exchange is admitted
+only through the explicit source surface partitions below. Independent applied
+watts remain allowed. Constrained thermoelastic work, arbitrary curved or
+shearing surfaces, phase changes, skin effects and changing magnetic storage geometry
 are outside this admission. Coupled temporal order remains the original first
 order; no performance benchmark or unconditional passivity claim is made.
 
@@ -13908,6 +13909,7 @@ Two focused adapter regressions use original source cards/prepared transport
 and source gases, checking material-only conductivity/capacity substitutions,
 full FE work closure, and mismatched-temperature/incoherent-gas refusal.
 
+
 ## Nonlinear complete-body reed feedback
 
 `acoustic_realize::reed_ode` uses `PreparedNonlinearZoh` for a body with original
@@ -13941,3 +13943,35 @@ changes pressure at the same initial state. A late-observer-refusal regression
 preserves every warm source coordinate. The direct Gonzalez owner retains its
 original clock refusal; this extension does not weaken that gate or claim
 root uniqueness, measured-instrument accuracy or real-time throughput.
+
+## Expanding-surface feedback in native electrothermal networks
+
+`with_free_expansion_and_boundaries` binds disjoint principal-normal ambient
+and reservoir face areas to that SAME expansion source, reference query and
+frame. The original thermal surface and reservoir coverage must match their
+reference partition. `PreparedExpansionSurface` supplies each current area;
+electrical length/section never imply an exposed surface. Ambient total
+conductance is `h*A_exposed(T)`. A reservoir binding explicitly declares a
+uniform areal law, so its native reference `G_ref` becomes
+`G_ref*A_reservoir(T)/A_reservoir,ref`. Original boundary events may change h,
+reference G and reservoir temperatures; changing coverage requires a new
+explicit partition. This does not infer changing bulk conduction lengths,
+mechanical support, pressure work or a contact constitutive law.
+
+`resolve_with_boundary_conductances` retains actual area, source identity,
+total G and signed heat samples in `ExpandingNetworkSample`. The scalar-only
+resolver refuses attached surfaces, preventing a caller from dropping their
+thermal feedback. Native circuit, reciprocal field-motion and final-only
+entropy paths pass total-G replacements through the original thermal rate and
+entropy owners. These are replacements, never additional boundary watts.
+Authored reference geometry, reservoir inputs, event cursor and mass survive
+acceptance unchanged. The private driver hook moves bounded coefficient maps
+once; ordinary drivers use empty maps and the same original numerical path.
+
+Four additional focused G1/G3/G4 groups in
+`tests/circuit_material_network/expansion/boundary.rs` compare mixed hot/cold
+reservoir and Joule feedback with independent endpoint equations and entropy,
+check zero-strain parity and continuing native boundary events, propagate
+face-partition-only changes through cooling/current/magnetic motion, and
+exercise source/coverage refusals plus late cancellation/replay. Runtime
+execution remains separate from test-target compilation and source review.

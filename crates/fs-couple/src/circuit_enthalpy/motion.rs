@@ -105,6 +105,35 @@ pub fn step_candidate<'m, S, E>(
     }, cancelled)
 }
 
+/// Original reciprocal field motion and finite heating with endpoint total
+/// ambient/reservoir conductances. The thermal owner receives replacements,
+/// not a second heat source; all original electrical and mechanical work enters
+/// the same joint acceptance. Contact-bound circuits need their contact owner.
+#[allow(clippy::too_many_arguments)]
+pub fn step_candidate_with_boundary_conductances<'m, S, E>(
+    thermal: &DepositionSimulation<'m>, target_s: f64,
+    input: FieldMotionEnthalpyInput<'_>, controls: CircuitEnthalpySolve, guess_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'m>) -> Result<BoundaryCircuitThermalCoefficients<S>, E>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<FieldMotionEnthalpyCandidate<'m, S>, CircuitEnthalpyError<E>> {
+    let cancel = RefCell::new(cancelled);
+    let original = input.motion.circuit();
+    let circuit_input = CircuitEnthalpyInput { circuit: original, ports: input.ports, destinations: input.destinations };
+    let (thermal, motion, report) = coupled_driver_candidate(thermal, target_s, circuit_input,
+        &[], controls, guess_j, |state, _| {
+            let coefficients = resolve(state).map_err(CircuitEnthalpyError::Source)?;
+            let bulk = coefficients.bulk;
+            contacts::admit_sources(original, &[], || (*cancel.borrow_mut())())?;
+            let circuit = input.motion.step_with_contacts_candidate(bulk.resistors, Vec::new(),
+                FieldMotionInput { electrical_ports: input.ports, external_force_n: input.external_force_n,
+                    duration_s: target_s-thermal.time_s() }, controls.circuit, || (*cancel.borrow_mut())())?;
+            Ok(DrivenCoefficients { circuit: BoundaryDriver { inner: circuit, boundaries: coefficients.boundaries },
+                sources_w: bulk.sources_w, conductances_w_k: bulk.conductances_w_k,
+                source: bulk.source, circuit_trials: 1 })
+        }, || (*cancel.borrow_mut())())?;
+    Ok(FieldMotionEnthalpyCandidate { thermal, motion, report })
+}
+
 /// The same interval with refreshed material electrical contacts and explicitly
 /// declared A/B heat destinations. Source identity and selected contact claims
 /// use the SAME continuity check as the stationary electrothermal circuit.

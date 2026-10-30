@@ -4,7 +4,10 @@ use super::*;
 
 mod extension;
 mod expansion;
-pub use expansion::{ConductorFreeExpansion, ExpandingMaterialNetwork};
+pub use expansion::{
+    ConductorFreeExpansion, ExpandingBoundary, ExpandingBoundarySample,
+    ExpandingMaterialNetwork, ExpandingNetworkSample,
+};
 
 /// Immutable transport-source choices tied to one borrowed material network.
 ///

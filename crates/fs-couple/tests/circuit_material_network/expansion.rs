@@ -1,6 +1,9 @@
 //! Sourced expansion drives native Kirchhoff storage, Joule heat and field motion.
 //! Synthetic material tables establish numerical causality, not material fidelity.
 
+#[path = "expansion/boundary.rs"]
+mod boundary;
+
 use super::*;
 use fs_couple::circuit_enthalpy::CircuitEnthalpyError;
 use fs_couple::material_circuit::MaterialCircuit;

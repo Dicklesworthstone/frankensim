@@ -96,6 +96,23 @@ pub fn step_candidate<'m, S, E>(
     Ok((CircuitEnthalpyCandidate { thermal: next, circuit, report }, entropy))
 }
 
+/// The same native entropy account with total ambient/reservoir conductances
+/// supplied by the physical boundary owner. Actual reservoir temperatures and
+/// accepted endpoint heat supply entropy directly; no geometry correction is
+/// misclassified as applied work or counted alongside the original boundary.
+#[allow(clippy::too_many_arguments)]
+pub fn step_candidate_with_boundary_conductances<'m, S, E>(
+    thermal: &DepositionSimulation<'m>, target_s: f64,
+    input: CircuitEnthalpyInput<'_>, controls: CircuitEnthalpySolve,
+    initial_energy_increments_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'m>) -> Result<super::BoundaryCircuitThermalCoefficients<S>, E>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<(CircuitEnthalpyCandidate<'m, S>, CircuitEntropyAudit), CircuitEnthalpyError<E>> {
+    let (candidate, entropy) = super::boundary_candidate(thermal, target_s, input, controls,
+        initial_energy_increments_j, resolve, true, cancelled)?;
+    Ok((candidate, entropy.ok_or(CircuitEnthalpyError::Invalid("missing requested circuit entropy"))?))
+}
+
 #[derive(Default)]
 pub(super) struct Sum { value: f64, correction: f64 }
 impl Sum {

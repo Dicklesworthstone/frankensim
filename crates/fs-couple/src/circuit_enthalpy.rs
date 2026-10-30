@@ -40,7 +40,9 @@ use std::collections::BTreeMap;
 use crate::material_circuit::{MaterialCircuit, MaterialCircuitCandidate, MaterialCircuitError,
     MaterialCircuitSolve, MaterialCircuitStep, MaterialResistor};
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation, EnergyAudit};
-use fs_thermal::enthalpy::backward_euler::{BackwardEulerStep, StepCoefficients};
+use fs_thermal::enthalpy::backward_euler::{
+    BackwardEulerStep, BoundaryConductances, BoundaryStepCoefficients, StepCoefficients,
+};
 use fs_solver::{NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport, SolverRunProgress};
 use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
 
@@ -76,6 +78,15 @@ pub struct CircuitThermalCoefficients<S> {
     pub conductances_w_k: BTreeMap<u64, f64>,
     /// Original material/thermal-interface results, retained without type erasure.
     pub source: S,
+}
+
+/// Original electrical/thermal coefficients with explicit total boundary
+/// conductances. The native thermal owner retains reservoir temperatures,
+/// coverage, signed heat, entropy and authored inputs. No boundary heat is
+/// repeated in `bulk.sources_w`.
+pub struct BoundaryCircuitThermalCoefficients<S> {
+    pub bulk: CircuitThermalCoefficients<S>,
+    pub boundaries: BoundaryConductances,
 }
 
 /// Independent nonlinear, circuit and physical energy/work admission.
@@ -230,6 +241,44 @@ pub fn step_candidate<'m, S, E>(
     }, || (*cancel.borrow_mut())())
 }
 
+/// The same native circuit/enthalpy residual with endpoint boundary geometry or
+/// transfer coefficients supplied by an explicit physical owner. Replacements
+/// are total W/K, not additional watts, and retain the native reservoir heat
+/// account. Every trial restarts the original electrical and thermal histories.
+#[allow(clippy::too_many_arguments)]
+pub fn step_candidate_with_boundary_conductances<'m, S, E>(
+    thermal: &DepositionSimulation<'m>, target_s: f64,
+    input: CircuitEnthalpyInput<'_>, controls: CircuitEnthalpySolve,
+    initial_energy_increments_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'m>) -> Result<BoundaryCircuitThermalCoefficients<S>, E>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<CircuitEnthalpyCandidate<'m, S>, CircuitEnthalpyError<E>> {
+    boundary_candidate(thermal, target_s, input, controls, initial_energy_increments_j,
+        resolve, false, cancelled).map(|(candidate, _)| candidate)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn boundary_candidate<'m, S, E>(
+    thermal: &DepositionSimulation<'m>, target_s: f64,
+    input: CircuitEnthalpyInput<'_>, controls: CircuitEnthalpySolve,
+    initial_energy_increments_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'m>) -> Result<BoundaryCircuitThermalCoefficients<S>, E>,
+    with_entropy: bool, cancelled: impl FnMut() -> bool,
+) -> Result<(CircuitEnthalpyCandidate<'m, S>, Option<entropy::CircuitEntropyAudit>), CircuitEnthalpyError<E>> {
+    let cancel = RefCell::new(cancelled);
+    let (thermal, circuit, report, entropy) = coupled_driver_candidate_entropy_option(thermal, target_s, input, &[],
+        controls, initial_energy_increments_j, |state, _| {
+            let coefficients = resolve(state).map_err(CircuitEnthalpyError::Source)?;
+            let bulk = coefficients.bulk;
+            let circuit = input.circuit.step_candidate(bulk.resistors, input.ports,
+                target_s-thermal.time_s(), controls.circuit, || (*cancel.borrow_mut())())?;
+            Ok(DrivenCoefficients { circuit: BoundaryDriver { inner: circuit, boundaries: coefficients.boundaries },
+                sources_w: bulk.sources_w, conductances_w_k: bulk.conductances_w_k,
+                source: bulk.source, circuit_trials: 1 })
+        }, with_entropy, || (*cancel.borrow_mut())())?;
+    Ok((CircuitEnthalpyCandidate { thermal, circuit, report }, entropy))
+}
+
 // A coupled driver may determine circuit ports from another physical owner.
 // Keep branch heat deposition, cell residuals and the Newton/acceptance path
 // identical to the ordinary circuit path. This is crate-private: callers cannot
@@ -259,6 +308,26 @@ pub(crate) trait ThermalDriver {
     type Step;
     fn account(&self) -> DriverAccount<'_>;
     fn into_parts(self) -> (Self::Model, Self::Step);
+    // A complete endpoint may own replacements of the native boundary G.
+    // Moving the maps exactly once avoids per-trial copies. Ordinary drivers
+    // return an empty set and retain their original thermal arithmetic.
+    fn take_boundary_conductances(&mut self) -> BoundaryConductances {
+        BoundaryConductances::default()
+    }
+}
+
+pub(crate) struct BoundaryDriver<D> {
+    pub(crate) inner: D,
+    pub(crate) boundaries: BoundaryConductances,
+}
+impl<D: ThermalDriver> ThermalDriver for BoundaryDriver<D> {
+    type Model = D::Model;
+    type Step = D::Step;
+    fn account(&self) -> DriverAccount<'_> { self.inner.account() }
+    fn into_parts(self) -> (Self::Model, Self::Step) { self.inner.into_parts() }
+    fn take_boundary_conductances(&mut self) -> BoundaryConductances {
+        std::mem::take(&mut self.boundaries)
+    }
 }
 impl ThermalDriver for MaterialCircuitCandidate {
     type Model = MaterialCircuit;
@@ -454,7 +523,8 @@ pub(crate) fn cell_driver_candidate_entropy_option<'m, S, E, D: ThermalDriver>(
             return Err(CircuitEnthalpyError::CircuitBudget);
         }
         trials.set(trials.get()+coefficients.circuit_trials);
-        let circuit = coefficients.circuit;
+        let mut circuit = coefficients.circuit;
+        let boundaries = circuit.take_boundary_conductances();
         let account = circuit.account();
         if !account.numerical_dissipation_j.is_finite() || account.numerical_dissipation_j < 0.0 {
             return Err(CircuitEnthalpyError::Invalid("driver numerical dissipation must be finite and nonnegative"));
@@ -477,14 +547,14 @@ pub(crate) fn cell_driver_candidate_entropy_option<'m, S, E, D: ThermalDriver>(
             let sum = powers.entry(cell).or_insert(0.0);
             *sum = finite(*sum + power)?;
         }
-        Ok::<_, CircuitEnthalpyError<E>>(StepCoefficients { sources_w: powers,
+        Ok::<_, CircuitEnthalpyError<E>>(BoundaryStepCoefficients { bulk: StepCoefficients { sources_w: powers,
             conductances_w_k: coefficients.conductances_w_k,
-            payload: (circuit, coefficients.source, deposited, entropy) })
+            payload: (circuit, coefficients.source, deposited, entropy) }, boundaries })
         };
         if entropy_requested {
-            step.evaluate_with_entropy(x, coefficients, checkpoint)
+            step.evaluate_with_boundary_conductances_and_entropy(x, coefficients, checkpoint)
         } else {
-            step.evaluate(x, coefficients, checkpoint)
+            step.evaluate_with_boundary_conductances(x, coefficients, checkpoint)
         }
     };
     let problem = FallibleFiniteDifference::new(step.cell_ids().len(), controls.difference_step_j,

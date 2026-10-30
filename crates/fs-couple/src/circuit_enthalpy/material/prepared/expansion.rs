@@ -1,7 +1,8 @@
 //! Source-defined free geometry on the original finite circuit/enthalpy solve.
 //!
-//! Only resistor geometry is lowered here. Material queries, caloric history,
-//! Kirchhoff evolution, field motion and Joule deposition keep their owners.
+//! Resistor and explicitly bound surface geometry are lowered here. Material
+//! queries, caloric history, Kirchhoff evolution, field motion, Joule deposition
+//! and boundary heat keep their owners.
 //! The thermal cells retain their reference geometry and delivered mass.
 
 use super::*;
@@ -10,6 +11,9 @@ use crate::material_circuit::motion::MaterialFieldMotion;
 use fs_material::conductor::{ResolvedConductorState, graph::MaterialOhmicNode};
 use fs_material::thermal::transport::expansion::PreparedFreeExpansion;
 use fs_thermal::enthalpy::CellGeometry;
+
+mod boundary;
+pub use boundary::{ExpandingBoundary, ExpandingBoundarySample, ExpandingNetworkSample};
 
 /// One original resistor's measured engineering-strain path and current axis.
 /// The fixed principal frame belongs to `source`; no geometry is inferred from
@@ -26,6 +30,7 @@ struct ExpandingBranch {
     mass_kg: f64,
     geometry: CellGeometry,
     law: MaterialOhmicNode,
+    boundary: Option<ExpandingBoundary>,
 }
 
 /// Prepared transport with sourced, unconstrained solid resistor expansion.
@@ -37,12 +42,12 @@ struct ExpandingBranch {
 /// its complete bundle then moves through the common geometry law.
 ///
 /// This is fixed-mass, quasistatic, stress-free expansion, without phase change
-/// or mechanical loading. Expanded cells must have no occupied thermal contact
-/// or Robin/reservoir boundary: their changing areas and layer distances need a
+/// or mechanical loading. Robin/reservoir exchange requires explicit source-
+/// bound surface partitions; occupied interbody contacts still need their own
 /// geometric heat-transfer owner. Independent cell watts remain admissible.
 /// Other cells retain the network's original heat-transfer laws. No mechanical
-/// work, thermal surface evolution, density-based mass update or geometry change
-/// to an inductor/capacitor is inferred.
+/// work, density-based mass update or geometry change to an inductor/capacitor
+/// is inferred.
 pub struct ExpandingMaterialNetwork<'n, 'a> {
     prepared: PreparedMaterialNetwork<'n, 'a>,
     branches: BTreeMap<usize, ExpandingBranch>,
@@ -58,6 +63,23 @@ impl<'n, 'a> PreparedMaterialNetwork<'n, 'a> {
         self,
         thermal: &DepositionSimulation<'_>,
         expansions: &[ConductorFreeExpansion],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ExpandingMaterialNetwork<'n, 'a>, MaterialNetworkError> {
+        self.with_free_expansion_and_boundaries(thermal, expansions, &[], cancelled)
+    }
+
+    /// The same original free expansion with explicit disjoint ambient and
+    /// reservoir surface patches. Their principal directions and strain path
+    /// must match the electrical geometry; their reference areas must cover the
+    /// actual original thermal surface exactly. Robin h remains per current
+    /// area. Reservoir G is explicitly interpreted as a uniform areal law at
+    /// its declared reference coverage; native boundary events may change h,
+    /// G and reservoir temperatures while preserving this geometric partition.
+    pub fn with_free_expansion_and_boundaries(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        expansions: &[ConductorFreeExpansion],
+        boundaries: &[ExpandingBoundary],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ExpandingMaterialNetwork<'n, 'a>, MaterialNetworkError> {
         let invalid = MaterialNetworkError::Invalid;
@@ -67,6 +89,20 @@ impl<'n, 'a> PreparedMaterialNetwork<'n, 'a> {
         if expansions.is_empty() || expansions.len() > self.network.resistors.len() {
             return Err(invalid(
                 "bounded nonempty original resistor expansion bindings required",
+            ));
+        }
+        if boundaries.len() > expansions.len()
+            || boundaries.iter().enumerate().any(|(i, boundary)| {
+                !expansions
+                    .iter()
+                    .any(|expansion| expansion.branch == boundary.branch)
+                    || boundaries[..i]
+                        .iter()
+                        .any(|other| other.branch == boundary.branch)
+            })
+        {
+            return Err(invalid(
+                "boundary surfaces need unique expanded resistor branches",
             ));
         }
         let original = self.resolve(thermal, &mut cancelled)?;
@@ -149,6 +185,10 @@ impl<'n, 'a> PreparedMaterialNetwork<'n, 'a> {
                 mass_kg: cell.mass_kg,
                 geometry: cell.geometry,
                 law,
+                boundary: boundaries
+                    .iter()
+                    .find(|b| b.branch == expansion.branch)
+                    .cloned(),
             };
             entry.admit(thermal)?;
             if branches.insert(expansion.branch, entry).is_some() {
@@ -177,15 +217,26 @@ impl ExpandingBranch {
                 "free resistor expansion must retain delivered mass and reference thermal geometry",
             ));
         }
-        if cell.boundary.htc_w_m2_k != 0.0
-            || cell.boundary.reservoir.is_some()
-            || thermal
-                .links()
-                .values()
-                .any(|link| (link.a == self.cell || link.b == self.cell) && link.area_m2 != 0.0)
-        {
+        if thermal.links().values().any(|link| {
+            if link.a != self.cell && link.b != self.cell {
+                return false;
+            }
+            let side = usize::from(link.b == self.cell);
+            thermal
+                .contact_patch(link.id)
+                .is_some_and(|patch| patch.covered_area_m2[side] != 0.0)
+                || link.area_m2 != 0.0
+                || link.conductance_w_k != 0.0
+        }) {
             return Err(invalid(
-                "expanding resistor boundary/contact geometry needs its own heat-transfer owner",
+                "expanding resistor contact geometry needs its own heat-transfer owner",
+            ));
+        }
+        if let Some(boundary) = &self.boundary {
+            boundary.admit(self, thermal)?;
+        } else if cell.boundary.htc_w_m2_k != 0.0 || cell.boundary.reservoir.is_some() {
+            return Err(invalid(
+                "expanding resistor boundary needs its explicit source surface partition",
             ));
         }
         Ok(())
@@ -206,6 +257,19 @@ impl ExpandingMaterialNetwork<'_, '_> {
     /// Resolve original transport ONCE and lower its exact endpoint bundle
     /// through prepared source geometry. No alternate R(T) or heat law exists.
     pub fn resolve(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<CircuitThermalCoefficients<MaterialNetworkSample>, MaterialNetworkError> {
+        if self.branches.values().any(|entry| entry.boundary.is_some()) {
+            return Err(MaterialNetworkError::Invalid(
+                "surface-bound expansion requires the complete boundary-aware resolver",
+            ));
+        }
+        self.resolve_bulk(thermal, cancelled)
+    }
+
+    fn resolve_bulk(
         &self,
         thermal: &DepositionSimulation<'_>,
         mut cancelled: impl FnMut() -> bool,
@@ -241,7 +305,9 @@ impl ExpandingMaterialNetwork<'_, '_> {
         circuit: &MaterialCircuit,
         cancelled: impl FnMut() -> bool,
     ) -> Result<(), MaterialNetworkError> {
-        let current = self.resolve(thermal, cancelled)?;
+        let current = self
+            .resolve_with_boundary_conductances(thermal, cancelled)?
+            .bulk;
         if current.resistors.len() != circuit.resistors().len()
             || current.resistors.iter().any(|source| {
                 !circuit
@@ -272,26 +338,28 @@ impl ExpandingMaterialNetwork<'_, '_> {
         guess_j: &[f64],
         cancelled: impl FnMut() -> bool,
     ) -> Result<
-        CircuitEnthalpyCandidate<'m, MaterialNetworkSample>,
+        CircuitEnthalpyCandidate<'m, ExpandingNetworkSample>,
         CircuitEnthalpyError<MaterialNetworkError>,
     > {
         let cancel = RefCell::new(cancelled);
         self.admit_circuit(thermal, circuit, || (*cancel.borrow_mut())())
             .map_err(coupled_error)?;
         let destinations = self.resistor_destinations();
-        map_cancel(crate::circuit_enthalpy::step_candidate(
-            thermal,
-            target_s,
-            CircuitEnthalpyInput {
-                circuit,
-                ports,
-                destinations: &destinations,
-            },
-            controls,
-            guess_j,
-            |state| self.resolve(state, || (*cancel.borrow_mut())()),
-            || (*cancel.borrow_mut())(),
-        ))
+        map_cancel(
+            crate::circuit_enthalpy::step_candidate_with_boundary_conductances(
+                thermal,
+                target_s,
+                CircuitEnthalpyInput {
+                    circuit,
+                    ports,
+                    destinations: &destinations,
+                },
+                controls,
+                guess_j,
+                |state| self.resolve_with_boundary_conductances(state, || (*cancel.borrow_mut())()),
+                || (*cancel.borrow_mut())(),
+            ),
+        )
     }
 
     /// The same prepared resistor geometry drives the existing reciprocal
@@ -309,27 +377,29 @@ impl ExpandingMaterialNetwork<'_, '_> {
         guess_j: &[f64],
         cancelled: impl FnMut() -> bool,
     ) -> Result<
-        FieldMotionEnthalpyCandidate<'m, MaterialNetworkSample>,
+        FieldMotionEnthalpyCandidate<'m, ExpandingNetworkSample>,
         CircuitEnthalpyError<MaterialNetworkError>,
     > {
         let cancel = RefCell::new(cancelled);
         self.admit_circuit(thermal, motion.circuit(), || (*cancel.borrow_mut())())
             .map_err(coupled_error)?;
         let destinations = self.resistor_destinations();
-        map_cancel(crate::circuit_enthalpy::motion::step_candidate(
-            thermal,
-            target_s,
-            FieldMotionEnthalpyInput {
-                motion,
-                ports,
-                external_force_n,
-                destinations: &destinations,
-            },
-            controls,
-            guess_j,
-            |state| self.resolve(state, || (*cancel.borrow_mut())()),
-            || (*cancel.borrow_mut())(),
-        ))
+        map_cancel(
+            crate::circuit_enthalpy::motion::step_candidate_with_boundary_conductances(
+                thermal,
+                target_s,
+                FieldMotionEnthalpyInput {
+                    motion,
+                    ports,
+                    external_force_n,
+                    destinations: &destinations,
+                },
+                controls,
+                guess_j,
+                |state| self.resolve_with_boundary_conductances(state, || (*cancel.borrow_mut())()),
+                || (*cancel.borrow_mut())(),
+            ),
+        )
     }
 }
 

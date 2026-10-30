@@ -7,7 +7,8 @@ mod prepared;
 pub mod conductivity;
 pub use conductivity::CellConductionResponse;
 pub use prepared::{
-    ConductorFreeExpansion, ExpandingMaterialNetwork, MaterialTransportObserver,
+    ConductorFreeExpansion, ExpandingBoundary, ExpandingBoundarySample,
+    ExpandingMaterialNetwork, ExpandingNetworkSample, MaterialTransportObserver,
     PreparedMaterialNetwork,
 };
 use conductivity::ElectricalAxes;
@@ -79,6 +80,8 @@ pub enum MaterialNetworkError {
     Material(ThermalMaterialError),
     /// Original Ohmic geometry/source refusal.
     Conductor(JouleHeatingError),
+    /// Original prepared expansion/surface geometry refusal.
+    Expansion(fs_material::thermal::transport::ThermalTransportError),
     /// Original thermal state or cancellation refusal.
     Thermal(DepositionError),
 }
