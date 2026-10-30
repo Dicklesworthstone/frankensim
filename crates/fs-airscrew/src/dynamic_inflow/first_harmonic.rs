@@ -12,10 +12,14 @@
 //! the disk normal adds the coordinate term `m_1 omega_n J h`, with
 //! `J[h_x,h_y]=[-h_y,h_x]`. This term does no work; rotor shaft speed is NOT
 //! the basis rate. Tangent transport follows the current disk plane, not a
-//! resolved three-dimensional wake. Crossflow/skew transport, wake distortion,
-//! ground effect and higher spatial harmonics are outside this model.
+//! resolved three-dimensional wake. `skew` separately selects the full skew
+//! transport. Wake distortion, ground effect and higher spatial harmonics
+//! remain outside both choices.
 
 use super::{Refusal, UniformAxialInflow, invalid};
+
+/// Full first-harmonic skew transport in fixed disk coordinates.
+pub mod skew;
 
 /// Dimensional mean and tip-amplitude spatial modes, all in m/s.
 /// The ordered modes are mean, cosine along the disk radial reference, and
@@ -57,8 +61,8 @@ pub struct HarmonicInflowRate {
     pub frame_force_n: [f64; 3],
 }
 
-/// Implicit-midpoint modal step under held blade loads, incident axial
-/// speed, and disk-basis axial rate. These are reduced modal balances,
+/// Implicit-midpoint modal step under held blade loads, incident velocity
+/// and disk-basis axial rate. These are reduced modal balances,
 /// not the world momentum or total kinetic energy of a resolved wake.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HarmonicInflowStep {
@@ -73,6 +77,7 @@ pub struct HarmonicInflowStep {
     pub kinetic_after_j: f64,
     /// Generalized blade force dotted with midpoint modal velocity.
     pub induced_work_j: f64,
+    /// Actual transport work; skew mean/harmonic coupling has a signed part.
     pub transport_work_j: f64,
     /// Zero in real arithmetic, retained to expose floating-point transport.
     pub frame_work_j: f64,
@@ -217,6 +222,19 @@ impl FirstHarmonicInflow {
         };
         self.admit(induction, axial_mps)?;
         let rate = self.rate(midpoint, axial_mps, force_n, frame_rate_rad_s)?;
+        self.account_step(before, induction, midpoint, force_n, rate, dt_s)
+    }
+
+    // Both physical transport choices use this same original storage/impulse owner.
+    fn account_step(
+        self,
+        before: HarmonicInduction,
+        induction: HarmonicInduction,
+        midpoint: HarmonicInduction,
+        force_n: [f64; 3],
+        rate: HarmonicInflowRate,
+        dt_s: f64,
+    ) -> Result<HarmonicInflowStep, Refusal> {
         let driving_impulse_ns = force_n.map(|f| dt_s * f);
         let transport_impulse_ns = rate.transport_force_n.map(|f| dt_s * f);
         let frame_impulse_ns = rate.frame_force_n.map(|f| dt_s * f);

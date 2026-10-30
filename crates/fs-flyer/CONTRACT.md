@@ -627,3 +627,64 @@ The state error is a numerical fixture norm, not a common physical unit or
 trajectory certificate. All ten new and 55 original propulsion/airscrew
 cases pass in the focused actual-source native build. This is not a full
 Cargo/DSR, cross-platform, browser, real-time or physical validation gate.
+
+## Skew-flow harmonic wakes in actual turning aircraft motion
+
+`HarmonicPropulsion::new_skewed` selects the full Pitt--Peters first harmonic
+transport from the `fs-airscrew` source owner. `new` retains its original
+normal-transport choice. The dimensional source gain, moment signs and
+normal-throughflow limits are specified in the airscrew contract and Chen,
+NASA TM-102219, equations (13b), (14), (17), (18):
+<https://ntrs.nasa.gov/api/citations/19900006622/downloads/19900006622.pdf>.
+This extends the earlier explicitly zero-skew transport assumption; it does
+not replace the shared section, wing or geared mechanical owners.
+
+Each actual aerodynamic stage projects the same wing/ambient incident
+velocity into its fixed physical disk frame. The current transverse
+direction changes only the source operator; stored wake modes retain their
+body-fixed meaning. `disk_incident_mps` and optional `skew_transport` expose
+these actual stage inputs and coefficients. Mean and both harmonics reach
+the original radial/azimuth blade points and existing wing-strip wash
+window. Their actual thrust and transverse hub moments drive the modal
+ports. Rotor body/shaft forces, torque, carrier reaction, lever arms and
+motor work still use the original mechanical update exactly once.
+
+The optional `skew_inflow` entries contain the same accepted modal steps
+also exposed in `inflow`; they are additional accounting detail, not extra
+updates. Source cross work is signed and does not become invented heat.
+The original `coupling_work_residual_j` still measures implicit wake input
+work minus actual predicted-midpoint blade induced work. A late wake,
+blade, wing or input refusal returns no changed borrowed state; callbacks
+remain caller-owned. Source iteration caps and tolerances are explicit.
+
+Three additional actual-source aircraft cases exercise a time-varying
+crosswind and turning disk velocity; exact shaft-axis/ratio sign parity;
+unchanged aerodynamic loads at identical induction but changed derivatives;
+independent physical world momentum reconstruction; signed source work;
+full-state and partitioned-work refinement; exhausted iteration budgets;
+and late refusal/retry. A 24-tick, 96 ms canted-rotor trajectory measures
+`2.67193e-13 N s` linear and `1.84520e-11 N m s` angular impulse defects,
+with largest modal defect `4.76659e-11 N s`, within-wake energy defect
+`1.89884e-11 J`, and at most four coefficient iterations. Its accumulated
+signed cross transport work is `-2.21195e-3 J`.
+
+The complete coupled refinement check uses the initial smooth 6 ms interval
+of that fixture: 8/16/32 steps versus a 256-step reference give state-norm
+errors `1.79455e-4`, `4.49075e-5`, `1.10028e-5` and accumulated absolute
+coupling-work defects `5.12082e-5`, `1.22387e-5`, `2.97900e-6 J`. This norm
+mixes native coordinates and is a numerical convergence measure, not a
+common physical unit. Longer refined versions encounter nonuniform
+convergence or the existing quasi-steady wing solver's 600-iteration
+refusal; no wing tolerance, cap or closure was relaxed. The 96 ms momentum
+ledger is therefore not a convergence certificate for that entire flight.
+Independent source-level nonlinear refinement remains separately tested.
+
+All nine new and 65 prior airscrew/propulsion cases pass in the focused
+pinned native build (74 cases across twelve suites). This does not claim
+full Cargo/DSR, cross-platform, real-time or physical validation. Existing
+positive section throughflow/angle domains, disk-center incident sampling,
+straight finite-window wash geometry and constant air density still apply.
+The extension supplies the skew transport matrix; it does not supply a
+transported/skewed far-wake geometry, direct inter-disk wake coupling,
+intradisk ambient wind gradients, reverse-flow regimes, higher modes,
+swirl, flapping/cyclic pitch, or a complete fluid/body energy/momentum model.

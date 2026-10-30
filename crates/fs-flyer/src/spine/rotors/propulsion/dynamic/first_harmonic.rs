@@ -3,14 +3,17 @@
 //! The same finite modal field reaches every native blade quadrature point and
 //! every wing strip inside the existing straight-wash window. Blade thrust and
 //! transverse moments drive mean and first-harmonic air inertia. Axial shaft
-//! torque remains owned once by the original geared mechanics. The wake uses
-//! an explicitly selected zero-skew NORMAL transport approximation even when
-//! the section law resolves incident crossflow. It is not a full skew wake.
+//! torque remains owned once by the original geared mechanics. `new` retains
+//! the explicit normal-transport model; `new_skewed` selects the full source
+//! first-harmonic skew gain. Neither supplies transported far-wake geometry.
 
 use super::{
     AerodynamicFields, AerodynamicSolution, AerodynamicStage, DynamicPropulsion, GearedLoads,
     GearedPropulsion, GearedState, GearedStep, PropulsionInputs, Refusal, air_error, geared,
     reject,
+};
+use fs_airscrew::dynamic_inflow::first_harmonic::skew::{
+    SkewInflowControls, SkewInflowStep, SkewTransport,
 };
 use fs_airscrew::dynamic_inflow::first_harmonic::{
     FirstHarmonicInflow, HarmonicInduction, HarmonicInflowRate, HarmonicInflowStep,
@@ -30,11 +33,16 @@ pub struct HarmonicState {
 pub struct HarmonicAerodynamics {
     pub induction: [HarmonicInduction; 2],
     pub disk_axial_mps: [f64; 2],
+    /// Material-relative incident velocity in each fixed disk's
+    /// `[normal, radial-reference, azimuth-reference]` coordinates, m/s.
+    pub disk_incident_mps: [[f64; 3]; 2],
     /// Carrier rate about each disk normal; never physical blade speed.
     pub frame_rate_rad_s: [f64; 2],
     pub propellers: [ObliqueLoads; 2],
     pub wake_force_n: [[f64; 3]; 2],
     pub wake_rate: [HarmonicInflowRate; 2],
+    /// Actual source operator at this state when skew transport is selected.
+    pub skew_transport: Option<[SkewTransport; 2]>,
     pub gamma: Vec<f64>,
     pub strip_velocity_mps: Vec<[f64; 3]>,
     pub wing_lift_n: f64,
@@ -66,6 +74,9 @@ pub struct HarmonicStep<const N: usize> {
     pub state: HarmonicState,
     pub motion: GearedStep<N>,
     pub inflow: [HarmonicInflowStep; 2],
+    /// Nonlinear solve and signed transport-work detail. Its `modal` entries
+    /// are the SAME accepted entries in `inflow`, not additional wake steps.
+    pub skew_inflow: Option<[SkewInflowStep; 2]>,
     pub initial: HarmonicEvaluation<N>,
     pub midpoint: HarmonicEvaluation<N>,
     /// Implicit wake input work minus actual predicted-midpoint blade
@@ -73,12 +84,13 @@ pub struct HarmonicStep<const N: usize> {
     pub coupling_work_residual_j: [f64; 2],
 }
 
-/// Explicit normal-transport first-harmonic choice. Constant-density modal
+/// Explicit first-harmonic transport choice. Constant-density modal
 /// masses and all quadrature trigonometry are prepared once. The original
 /// physical aircraft, rotor inertias, section law and wing solver are reused.
 pub struct HarmonicPropulsion<'p, 'a, const N: usize> {
     base: DynamicPropulsion<'p, 'a, N>,
     inflow: FirstHarmonicInflow,
+    skew: Option<SkewInflowControls>,
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -95,7 +107,24 @@ impl<'p, 'a, const N: usize> HarmonicPropulsion<'p, 'a, N> {
             base: DynamicPropulsion::new_oblique(propulsion, density_kg_m3, azimuth_points)?,
             inflow: FirstHarmonicInflow::new(propulsion.design.rotor.radius_m, density_kg_m3)
                 .map_err(air_error)?,
+            skew: None,
         })
+    }
+
+    /// Select the complete Pitt--Peters first-harmonic skew transport.
+    /// Wind direction changes the operator in the fixed disk frame; stored
+    /// modes never rotate into a newly chosen wind frame. Positive section
+    /// throughflow and the existing moderate-braking domain remain required.
+    pub fn new_skewed(
+        propulsion: &'p GearedPropulsion<'a, N>,
+        density_kg_m3: f64,
+        azimuth_points: usize,
+        controls: SkewInflowControls,
+    ) -> Result<Self, Refusal> {
+        controls.admit().map_err(air_error)?;
+        let mut result = Self::new(propulsion, density_kg_m3, azimuth_points)?;
+        result.skew = Some(controls);
+        Ok(result)
     }
 
     #[must_use]
@@ -150,7 +179,26 @@ impl<'p, 'a, const N: usize> HarmonicPropulsion<'p, 'a, N> {
                 stage.carrier_angular_velocity_body_rad_s,
             )
         });
+        let disk_incident_mps = core::array::from_fn(|k| {
+            [
+                wing.disk_axial_mps[k],
+                dot(wing.disk_velocity_mps[k], frames[k].radial_reference()),
+                dot(wing.disk_velocity_mps[k], frames[k].azimuth_reference()),
+            ]
+        });
         let rate = |k: usize| {
+            if self.skew.is_some() {
+                let value = self
+                    .inflow
+                    .rate_skewed(
+                        induction[k],
+                        disk_incident_mps[k],
+                        wake_force_n[k],
+                        frame_rate_rad_s[k],
+                    )
+                    .map_err(air_error)?;
+                return Ok((value.modal, Some(value.transport)));
+            }
             self.inflow
                 .rate(
                     induction[k],
@@ -158,15 +206,24 @@ impl<'p, 'a, const N: usize> HarmonicPropulsion<'p, 'a, N> {
                     wake_force_n[k],
                     frame_rate_rad_s[k],
                 )
+                .map(|value| (value, None))
                 .map_err(air_error)
+        };
+        let (left, left_transport) = rate(0)?;
+        let (right, right_transport) = rate(1)?;
+        let skew_transport = match (left_transport, right_transport) {
+            (Some(left), Some(right)) => Some([left, right]),
+            _ => None,
         };
         Ok(HarmonicAerodynamics {
             induction,
             disk_axial_mps: wing.disk_axial_mps,
+            disk_incident_mps,
             frame_rate_rad_s,
             propellers,
             wake_force_n,
-            wake_rate: [rate(0)?, rate(1)?],
+            wake_rate: [left, right],
+            skew_transport,
             gamma: wing.gamma,
             strip_velocity_mps: wing.strip_velocity_mps,
             wing_lift_n: wing.lift_n,
@@ -213,7 +270,23 @@ impl<'p, 'a, const N: usize> HarmonicPropulsion<'p, 'a, N> {
         before: [HarmonicInduction; 2],
         stage: &HarmonicAerodynamics,
         dt_s: f64,
-    ) -> Result<[HarmonicInflowStep; 2], Refusal> {
+    ) -> Result<([HarmonicInflowStep; 2], Option<[SkewInflowStep; 2]>), Refusal> {
+        if let Some(controls) = self.skew {
+            let step = |k: usize| {
+                self.inflow
+                    .step_skewed_held(
+                        before[k],
+                        stage.disk_incident_mps[k],
+                        stage.wake_force_n[k],
+                        stage.frame_rate_rad_s[k],
+                        dt_s,
+                        controls,
+                    )
+                    .map_err(air_error)
+            };
+            let skew = [step(0)?, step(1)?];
+            return Ok((skew.map(|value| value.modal), Some(skew)));
+        }
         let step = |k: usize| {
             self.inflow
                 .step_held(
@@ -225,7 +298,7 @@ impl<'p, 'a, const N: usize> HarmonicPropulsion<'p, 'a, N> {
                 )
                 .map_err(air_error)
         };
-        Ok([step(0)?, step(1)?])
+        Ok(([step(0)?, step(1)?], None))
     }
 
     /// Two real force evaluations predict and advance all original mechanical
@@ -270,6 +343,7 @@ impl<'p, 'a, const N: usize> HarmonicPropulsion<'p, 'a, N> {
                 if initial.is_none() {
                     stage_induction = self
                         .advance_wakes(state.induction, &evaluation.aerodynamics, 0.5 * dt_s)?
+                        .0
                         .map(|wake| wake.induction);
                     initial = Some(evaluation);
                 } else {
@@ -282,7 +356,8 @@ impl<'p, 'a, const N: usize> HarmonicPropulsion<'p, 'a, N> {
             .ok_or_else(|| reject("harmonic-propulsion-invalid", "missing initial stage"))?;
         let midpoint = midpoint
             .ok_or_else(|| reject("harmonic-propulsion-invalid", "missing midpoint stage"))?;
-        let inflow = self.advance_wakes(state.induction, &midpoint.aerodynamics, dt_s)?;
+        let (inflow, skew_inflow) =
+            self.advance_wakes(state.induction, &midpoint.aerodynamics, dt_s)?;
         let coupling_work_residual_j = core::array::from_fn(|k| {
             inflow[k].induced_work_j - dt_s * midpoint.aerodynamics.propellers[k].induced_work_w
         });
@@ -299,6 +374,7 @@ impl<'p, 'a, const N: usize> HarmonicPropulsion<'p, 'a, N> {
             },
             motion,
             inflow,
+            skew_inflow,
             initial,
             midpoint,
             coupling_work_residual_j,
