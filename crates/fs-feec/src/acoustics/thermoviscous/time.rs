@@ -7,16 +7,16 @@
 //! Hamiltonian. Its inverse is computed by fs-la and checked against EVERY
 //! original entry before the admitted fs-phs exact held-input owner is called.
 //!
-//! Fluid viscosity (shear plus bulk), fluid conduction and original structural
-//! damping are independently integrated along that SAME trajectory. Pressure
-//! and structural-force work use their actual interval-integrated dual flows.
+//! Fluid viscosity (shear plus bulk), fluid conduction, molecular heat exchange
+//! and original structural damping are integrated along that SAME trajectory.
+//! Pressure and structural-force work use their actual interval-integrated dual flows.
 //! No response curve, fitted decay or endpoint-loss approximation is involved.
 //!
-//! This bounded dense path admits only real, frequency-independent calorics
-//! with insulated/isothermal thermal boundaries. A finite conductive wall's
-//! frequency impedance is not a causal state and is refused. Source adapters
-//! must also refuse molecular reservoirs until their actual memory coordinates
-//! are included. Geometry and equilibrium remain fixed; no mean flow, ALE,
+//! Original caloric reservoirs contribute their full P2 temperature fields,
+//! frozen heat capacity and positive translational/molecular heat exchange. Insulated
+//! and isothermal thermal boundaries constrain only the translational field.
+//! A finite conductive wall's frequency impedance is not a causal state and is
+//! refused. Geometry and equilibrium remain fixed; no mean flow, ALE,
 //! phase change, nonlinear mechanics or acoustic-resolution claim is inferred.
 
 use super::*;
@@ -26,6 +26,10 @@ use fs_phs::linear_exact::{
     prepared::PreparedQuadraticFlow, split_quadratic,
 };
 use fs_phs::{PhsError, PortHamiltonian, PreparedStepError, QuadraticStorage};
+
+mod caloric;
+pub use caloric::ThermoviscousCaloricReservoir;
+const HEAT_CHANNELS: usize = 4;
 
 /// Original-owner refusals; no state is published on failure or cancellation.
 #[derive(Debug)]
@@ -70,7 +74,8 @@ fn invalid(what: &'static str) -> ThermoviscousTimeError {
 /// Explicit small-domain cold preparation and physical accounting admission.
 #[derive(Clone, Copy, Debug)]
 pub struct ThermoviscousTimeLimits {
-    /// Complete mixed states plus every structural displacement, without truncation.
+    /// Complete mixed and molecular fields plus every structural displacement.
+    /// Exceeding the cap is a refusal; no original field is truncated.
     pub max_states: usize,
     /// Existing pHS flow-integral byte/work limits. Coordinate maps additionally
     /// use O(max_states^2) storage; no per-step exponential is computed.
@@ -102,6 +107,10 @@ pub struct ThermoviscousTimeState {
     pub velocity_m_s: Vec<[f64; 3]>,
     /// Original hierarchical P2 temperature PERTURBATION coefficients [K].
     pub temperature_k: Vec<f64>,
+    /// Original full P2 molecular-temperature perturbations [K], in the
+    /// supplied reservoir order. A zero-capacity reservoir has an empty vector.
+    /// Molecular fields have no independent isothermal boundary constraint.
+    pub molecular_temperature_k: Vec<Vec<f64>>,
     /// Original mass-normalized structural displacements [m sqrt(kg)].
     pub wall_displacement_m_sqrt_kg: Vec<f64>,
     /// Original mass-normalized structural velocities [m sqrt(kg)/s].
@@ -120,10 +129,16 @@ pub struct ThermoviscousTimeWork {
     pub fluid_viscous_heat_j: f64,
     pub fluid_conductive_heat_j: f64,
     pub structural_damping_heat_j: f64,
+    /// Heat exchange between the translational and molecular temperatures.
+    /// This is independent of viscosity and of spatial thermal conduction.
+    pub molecular_relaxation_heat_j: f64,
 }
 impl ThermoviscousTimeWork {
     pub fn dissipated_j(self) -> f64 {
-        self.fluid_viscous_heat_j + self.fluid_conductive_heat_j + self.structural_damping_heat_j
+        self.fluid_viscous_heat_j
+            + self.fluid_conductive_heat_j
+            + self.structural_damping_heat_j
+            + self.molecular_relaxation_heat_j
     }
     pub fn supplied_j(self) -> f64 {
         self.pressure_work_j + self.structural_work_j
@@ -151,6 +166,9 @@ pub struct PreparedThermoviscousTime<'a, 'c> {
     duration_s: f64,
     scale: Vec<f64>,
     wall_scale: Vec<f64>,
+    frozen_cp_j_kg_k: f64,
+    reservoirs: Vec<ThermoviscousCaloricReservoir>,
+    reservoir_offsets: Vec<Option<usize>>,
     system: PortHamiltonian,
     flow: PreparedQuadraticFlow,
     maximum_relative_energy_residual: f64,
@@ -165,7 +183,39 @@ impl<'c> ThermoviscousFe<'c> {
         limits: ThermoviscousTimeLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedThermoviscousTime<'a, 'c>, ThermoviscousTimeError> {
-        PreparedThermoviscousTime::new(self, duration_s, limits, cancelled)
+        self.prepare_time_with_caloric_reservoirs(
+            duration_s,
+            self.medium.cp_j_kg_k,
+            &[],
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Evolve the original positive caloric reservoirs on the SAME complete
+    /// velocity/pressure/temperature and structural trajectory. Each positive
+    /// capacity retains all P2 molecular coefficients, including those at an
+    /// isothermal translational wall. No fitted pole or bulk-loss overlay enters.
+    ///
+    /// The original equilibrium Cp must equal frozen Cp plus the supplied
+    /// capacities to roundoff. Source adapters retain species/process identity;
+    /// this material-independent owner preserves their order and coefficients.
+    pub fn prepare_time_with_caloric_reservoirs<'a>(
+        &'a self,
+        duration_s: f64,
+        frozen_cp_j_kg_k: f64,
+        reservoirs: &[ThermoviscousCaloricReservoir],
+        limits: ThermoviscousTimeLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedThermoviscousTime<'a, 'c>, ThermoviscousTimeError> {
+        PreparedThermoviscousTime::new(
+            self,
+            duration_s,
+            frozen_cp_j_kg_k,
+            reservoirs,
+            limits,
+            cancelled,
+        )
     }
 }
 
@@ -173,6 +223,8 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
     fn new(
         model: &'a ThermoviscousFe<'c>,
         duration_s: f64,
+        frozen_cp_j_kg_k: f64,
+        reservoirs: &[ThermoviscousCaloricReservoir],
         limits: ThermoviscousTimeLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, ThermoviscousTimeError> {
@@ -182,7 +234,7 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
                 "causal finite conductive walls require their actual thermal memory states",
             ));
         }
-        let base = model.n;
+        let (base, reservoir_offsets) = caloric::layout(model, frozen_cp_j_kg_k, reservoirs)?;
         let walls = model.pressure_start - 3 * model.velocity_count;
         let n = base + walls;
         let ports = model.loads.len() + walls;
@@ -198,7 +250,14 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
                 "complete transient state/port capacity, positive clock and bounded energy tolerance required",
             ));
         }
-        let mut mass = model.mass.clone();
+        let (mut mass, molecular_exchange) = caloric::assemble(
+            model,
+            frozen_cp_j_kg_k,
+            reservoirs,
+            &reservoir_offsets,
+            base,
+            cancelled,
+        )?;
         let mut wall_scale = Vec::with_capacity(walls);
         for i in 0..walls {
             let row = 3 * model.velocity_count + i;
@@ -268,12 +327,12 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
             }
         }
         let mut physical_j = vec![0.0; n * n];
-        let mut heat = [vec![0.0; n * n], vec![0.0; n * n], vec![0.0; n * n]];
+        let mut heat: [Vec<f64>; HEAT_CHANNELS] = std::array::from_fn(|_| vec![0.0; n * n]);
         let mut input = vec![0.0; n * ports];
-        for i in 0..base {
+        for i in 0..model.n {
             poll(cancelled)?;
-            for j in 0..base {
-                let value = model.constant[i * base + j] / (scale[i] * scale[j]);
+            for j in 0..model.n {
+                let value = model.constant[i * model.n + j] / (scale[i] * scale[j]);
                 if i < model.pressure_start && j < model.pressure_start {
                     heat[0][i * n + j] = value;
                 } else if i >= model.temperature_start && j >= model.temperature_start {
@@ -284,6 +343,12 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
             }
             for (p, load) in model.loads.iter().enumerate() {
                 input[i * ports + p] = load[i] / scale[i];
+            }
+        }
+        for i in 0..base {
+            poll(cancelled)?;
+            for j in 0..base {
+                heat[3][i * n + j] = molecular_exchange[i * base + j] / (scale[i] * scale[j]);
             }
         }
         for i in 0..walls {
@@ -310,7 +375,7 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
         }
         let j = congruence(&physical_j, &inverse, n, cancelled)?;
         let total: Vec<_> = (0..n * n)
-            .map(|i| heat[0][i] + heat[1][i] + heat[2][i])
+            .map(|i| heat.iter().map(|channel| channel[i]).sum())
             .collect();
         let r = congruence(&total, &inverse, n, cancelled)?;
         let mut g = vec![0.0; n * ports];
@@ -350,6 +415,9 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
             duration_s,
             scale,
             wall_scale,
+            frozen_cp_j_kg_k,
+            reservoirs: reservoirs.to_vec(),
+            reservoir_offsets,
             system,
             flow,
             maximum_relative_energy_residual: limits.maximum_relative_energy_residual,
@@ -365,6 +433,16 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
     }
     pub const fn duration_s(&self) -> f64 {
         self.duration_s
+    }
+
+    pub const fn frozen_cp_j_kg_k(&self) -> f64 {
+        self.frozen_cp_j_kg_k
+    }
+
+    /// Unchanged capacities and relaxation times in the original source order,
+    /// including zero-capacity entries (which own no dynamic coordinates).
+    pub fn caloric_reservoirs(&self) -> &[ThermoviscousCaloricReservoir] {
+        &self.reservoirs
     }
 
     /// Explicit all-rest initial condition, including structural coordinates.
@@ -387,6 +465,7 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
         if state.pressure_pa.len() != model.temperature_start - model.pressure_start
             || state.velocity_m_s.len() != model.space.ndof
             || state.temperature_k.len() != model.space.ndof
+            || state.molecular_temperature_k.len() != self.reservoir_offsets.len()
             || state.wall_displacement_m_sqrt_kg.len() != walls
             || state.wall_velocity_m_sqrt_kg_per_s.len() != walls
             || state
@@ -396,6 +475,7 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
                 .chain(&state.wall_displacement_m_sqrt_kg)
                 .chain(&state.wall_velocity_m_sqrt_kg_per_s)
                 .chain(state.velocity_m_s.iter().flatten())
+                .chain(state.molecular_temperature_k.iter().flatten())
                 .any(|v| !v.is_finite())
         {
             return Err(invalid(
@@ -442,7 +522,26 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
         }
         for i in 0..walls {
             x[3 * model.velocity_count + i] = state.wall_velocity_m_sqrt_kg_per_s[i];
-            x[model.n + i] = state.wall_displacement_m_sqrt_kg[i] * self.wall_scale[i];
+            x[self.scale.len() + i] = state.wall_displacement_m_sqrt_kg[i] * self.wall_scale[i];
+        }
+        for (field, offset) in state
+            .molecular_temperature_k
+            .iter()
+            .zip(&self.reservoir_offsets)
+        {
+            match offset {
+                Some(start) if field.len() == model.space.ndof => {
+                    for (i, temperature) in field.iter().enumerate() {
+                        x[start + i] = temperature / model.medium.temperature_k;
+                    }
+                }
+                None if field.is_empty() => {}
+                _ => {
+                    return Err(invalid(
+                        "complete unconstrained molecular temperature fields required",
+                    ));
+                }
+            }
         }
         for (value, scale) in x.iter_mut().zip(&self.scale) {
             *value *= scale;
@@ -486,11 +585,23 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
                     })
                 })
                 .collect(),
+            molecular_temperature_k: self
+                .reservoir_offsets
+                .iter()
+                .map(|offset| {
+                    offset.map_or_else(Vec::new, |start| {
+                        mixed[start..start + model.space.ndof]
+                            .iter()
+                            .map(|theta| theta * model.medium.temperature_k)
+                            .collect()
+                    })
+                })
+                .collect(),
             wall_displacement_m_sqrt_kg: self
                 .wall_scale
                 .iter()
                 .enumerate()
-                .map(|(i, s)| state[model.n + i] / s)
+                .map(|(i, s)| state[self.scale.len() + i] / s)
                 .collect(),
             wall_velocity_m_sqrt_kg_per_s: wall_velocity,
         }
@@ -549,12 +660,12 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
         let pressure_work_j = traction_pa
             .iter()
             .enumerate()
-            .map(|(p, u)| u * candidate.integrals[3 + p])
+            .map(|(p, u)| u * candidate.integrals[HEAT_CHANNELS + p])
             .sum();
         let structural_work_j = wall_forces_n_per_sqrt_kg
             .iter()
             .enumerate()
-            .map(|(p, u)| u * candidate.integrals[3 + self.model.loads.len() + p])
+            .map(|(p, u)| u * candidate.integrals[HEAT_CHANNELS + self.model.loads.len() + p])
             .sum();
         let work = ThermoviscousTimeWork {
             initial_energy_j,
@@ -565,6 +676,7 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
             fluid_viscous_heat_j: candidate.integrals[0],
             fluid_conductive_heat_j: candidate.integrals[1],
             structural_damping_heat_j: candidate.integrals[2],
+            molecular_relaxation_heat_j: candidate.integrals[3],
         };
         let scale = initial_energy_j
             .abs()
@@ -582,14 +694,16 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
         .iter()
         .any(|v| !v.is_finite())
             || candidate.integrals.iter().any(|v| !v.is_finite())
-            || candidate.integrals[..3].iter().any(|v| *v < -tolerance)
+            || candidate.integrals[..HEAT_CHANNELS]
+                .iter()
+                .any(|v| *v < -tolerance)
             || work.balance_residual_j().abs() > tolerance
         {
             return Err(invalid(
                 "original transient field/structure energy balance refused",
             ));
         }
-        let means: Vec<_> = candidate.integrals[3..]
+        let means: Vec<_> = candidate.integrals[HEAT_CHANNELS..]
             .iter()
             .map(|v| v / self.duration_s)
             .collect();

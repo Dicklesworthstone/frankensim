@@ -5,6 +5,8 @@ use crate::acoustics::thermoviscous::time::{
 };
 use fs_modal::time::{ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel};
 
+mod molecular;
+
 fn translating<'c>(
     mesh: &'c TetComplex,
     pos: &[[f64; 3]],
@@ -182,6 +184,7 @@ fn phasor_state(field: &ThermoviscousField, angular_frequency: f64) -> Thermovis
         pressure_pa: field.pressure_pa.iter().map(|p| p.re).collect(),
         velocity_m_s: field.velocity_m_s.iter().map(|v| v.map(|z| z.re)).collect(),
         temperature_k: field.temperature_k.iter().map(|v| v.re).collect(),
+        molecular_temperature_k: vec![],
         wall_displacement_m_sqrt_kg: field
             .moving_wall
             .modal_velocity_m_sqrt_kg_per_s

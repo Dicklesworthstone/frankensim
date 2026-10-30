@@ -16,7 +16,8 @@
 
 use fs_duct::{DuctError, compose::TwoPort};
 use fs_feec::acoustics::thermoviscous::time::{
-    PreparedThermoviscousTime, ThermoviscousTimeError, ThermoviscousTimeLimits,
+    PreparedThermoviscousTime, ThermoviscousCaloricReservoir, ThermoviscousTimeError,
+    ThermoviscousTimeLimits,
 };
 use fs_feec::acoustics::thermoviscous::{
     ThermoviscousError, ThermoviscousFe, ThermoviscousField, ThermoviscousMedium,
@@ -294,8 +295,9 @@ impl<'c, S> ThermoviscousInterior<'c, S> {
 
     /// Causal full-field motion and work with this SAME immutable fluid source.
     /// The borrow retains the source, FE and structural model for every step.
-    /// Molecular calorics and finite-wall impedances require their actual time
-    /// states; they are refused, never replaced by their equilibrium values.
+    /// Original molecular capacities and rates own full P2 internal-temperature
+    /// fields in the same solve. Finite-wall impedances still require their
+    /// actual time states and are refused.
     /// The clock must sample the declared source band; no frequency truncation
     /// or proof of spatial/input-waveform resolution follows from that check.
     pub fn prepare_time<'a>(
@@ -307,17 +309,31 @@ impl<'c, S> ThermoviscousInterior<'c, S> {
         if cancelled() {
             return Err(ThermoviscousError::Cancelled.into());
         }
-        if self.relaxation.is_some() {
-            return Err(invalid(
-                "causal resolved molecular calorics require their original memory states",
-            ));
-        }
         if duration_s * self.band_hz[1] > 0.5 {
             return Err(invalid(
                 "resolved transient clock does not sample the declared source band",
             ));
         }
-        Ok(self.fe.prepare_time(duration_s, limits, cancelled)?)
+        match &self.relaxation {
+            Some(source) => {
+                let reservoirs: Vec<_> = source
+                    .processes()
+                    .iter()
+                    .map(|process| ThermoviscousCaloricReservoir {
+                        heat_capacity_j_kg_k: process.heat_capacity_j_kg_k,
+                        relaxation_time_s: process.relaxation_time_s,
+                    })
+                    .collect();
+                Ok(self.fe.prepare_time_with_caloric_reservoirs(
+                    duration_s,
+                    source.frozen_cv_j_kg_k() + source.gas().specific_gas_constant,
+                    &reservoirs,
+                    limits,
+                    cancelled,
+                )?)
+            }
+            None => Ok(self.fe.prepare_time(duration_s, limits, cancelled)?),
+        }
     }
 
     fn heat_capacity(
