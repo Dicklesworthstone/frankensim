@@ -16,6 +16,9 @@ use fs_solid::rod::material_field::motion::{PreparedRodMotion,RodRootBoundary};
 use fs_solid::rod::material_field::supports::RodSupport;
 use fs_solid::rod::material_field::tension::{MaterialTensionLink,TensionLinkAttachment};
 
+#[path = "rod_motion/environment.rs"]
+mod environment;
+
 fn section(scale:f64)->ConcentricShearSection {
     let mut claims=ClaimSet::new();let mut requirements=Vec::new();
     for (name,value,dims) in [("density",1000.0,Density::DIMS),

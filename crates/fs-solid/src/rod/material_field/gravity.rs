@@ -153,7 +153,7 @@ impl SpatialMaterialRod {
     pub fn gravity_potential_j(&self) -> Result<f64, SpatialRodError> {
         self.gravity_potential_for(&self.rod)
     }
-    fn gravity_potential_for(&self, rod: &Rod) -> Result<f64, SpatialRodError> {
+    pub(super) fn gravity_potential_for(&self, rod: &Rod) -> Result<f64, SpatialRodError> {
         let Some(load) = &self.gravity else { return Ok(0.0); };
         let mut potential = 0.0;
         for (node, (position, force)) in rod.positions.iter().zip(&load.force_n).enumerate() {

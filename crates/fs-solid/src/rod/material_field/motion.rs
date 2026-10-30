@@ -15,6 +15,10 @@ use fs_material::state_point::{DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY};
 use crate::rod::{Rod, derivatives::RodEnergy};
 use super::{SpatialMaterialRod, SpatialRodError, checkpoint};
 
+/// Conservative ambient body loads and fluid-state refresh on the same model.
+pub mod environment;
+pub use environment::RodBodyLoads;
+
 pub mod spatial {
 //! Reference centroid and full rotary tensor for eccentric rod attachments.
 //!
@@ -180,7 +184,7 @@ impl RodNodalInertia {
 /// Complete native force, including fixed nodes, for impulse/reaction accounting.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RodMotionResponse {
-    /// Elastic/link storage PLUS the original gravitational potential [J].
+    /// Elastic/link storage plus the original gravity and hydrostatic potentials [J].
     pub potential_energy_j: f64,
     /// Force ON each material node, world frame [N].
     pub force_n: Vec<[f64; 3]>,
@@ -316,6 +320,21 @@ impl<I> PreparedRodMotion<I> {
     /// shared by both inertia views; cancellation retains no candidate state.
     pub fn evaluate(&self, pose: &RodMotionPose, gate: &CancelGate)
         -> Result<RodMotionResponse, SpatialRodError> {
+        let rod = self.rod_at_pose(pose, gate)?;
+        let energy = super::derivatives::SpatialEnergy::new(&self.source);
+        let potential_energy_j = energy.value(&rod)?;
+        let response = energy.linearize(&rod, &[], false, &|| checkpoint(gate))?
+            .ok_or(SpatialRodError::Invalid("native dynamic rod requires analytical forces"))?;
+        let force_n = response.gradient.iter().map(|g| [-g[0], -g[1], -g[2]]).collect();
+        let torque_body_nm = response.gradient.iter().map(|g| [-g[3], -g[4], -g[5]]).collect();
+        checkpoint(gate)?;
+        Ok(RodMotionResponse { potential_energy_j, force_n, torque_body_nm })
+    }
+
+    // All material/body-load observations use the same current pose and support
+    // admission. A source's retained static pose must not substitute for motion.
+    fn rod_at_pose(&self, pose: &RodMotionPose, gate: &CancelGate)
+        -> Result<Rod, SpatialRodError> {
         checkpoint(gate)?;
         let count = self.inertia.len();
         if pose.positions_m.len() != count || pose.frames.len() != count
@@ -334,16 +353,9 @@ impl<I> PreparedRodMotion<I> {
                 return Err(SpatialRodError::Invalid("dynamic rod moved a stationary frame support"));
             }
         }
-        let rod = Rod { positions: pose.positions_m.clone(), frames: pose.frames.clone(),
-            l0: self.source.rod.l0, section: self.source.rod.section };
-        let energy = super::derivatives::SpatialEnergy::new(&self.source);
-        let potential_energy_j = energy.value(&rod)?;
-        let response = energy.linearize(&rod, &[], false, &|| checkpoint(gate))?
-            .ok_or(SpatialRodError::Invalid("native dynamic rod requires analytical forces"))?;
-        let force_n = response.gradient.iter().map(|g| [-g[0], -g[1], -g[2]]).collect();
-        let torque_body_nm = response.gradient.iter().map(|g| [-g[3], -g[4], -g[5]]).collect();
         checkpoint(gate)?;
-        Ok(RodMotionResponse { potential_energy_j, force_n, torque_body_nm })
+        Ok(Rod { positions: pose.positions_m.clone(), frames: pose.frames.clone(),
+            l0: self.source.rod.l0, section: self.source.rod.section })
     }
 }
 

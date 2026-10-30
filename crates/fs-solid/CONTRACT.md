@@ -2296,3 +2296,7 @@ Tet10 images deliberately carry no P1 exterior surface: a consumer requiring
 that trace must refuse rather than invent midside geometry or interpolate an
 unqualified contact surface. Mechanical pressure and swept-volume maps retain
 their original ownership independently of a consumer's contact-face selection.
+
+## Continuing material-fluid rod loads
+
+`PreparedRodMotion::body_loads` exposes the external conservative wrench at an admitted dynamic pose using the same gravity, hydrostatic displacement, attached-strand forces, and reference potential as the native force assembly. Nodal forces are expressed in world axes; pure attachment couples are expressed in the current body axes. Rotating attachment arms retain their actual mass and displaced-volume distributions, including cases where their centroids differ. `rebind_submerged_fluid` replaces an existing uniform fluid snapshot through `FluidTransport` while retaining the original solid reference inventory, inertial data, displaced-volume policy, reference geometry, and stationary supports. This model-level operation neither advances time nor accounts for environmental work; the continuing time owner must account for the potential change at its actual pose. These operations retain the existing full-immersion, nonoverlapping-volume, fixed-reference-volume approximation and infer no drag, added mass, partial immersion, free surface, solid compression, or reservoir dynamics.

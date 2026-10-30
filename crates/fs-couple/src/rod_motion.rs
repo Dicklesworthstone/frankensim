@@ -12,7 +12,9 @@
 //! Free nodes and stationary frame clamps are supported. An eccentric free rotor
 //! with constrained centerline translation needs a coupled constraint integrator
 //! and refuses. No distributed cable inertia, moving supports, contact, material
-//! damping, damage or live source replacement is inferred.
+//! damping, damage or live solid-source replacement is inferred. Prescribed
+//! hydrostatic fluid refresh retains this same trajectory and accounts for the
+//! environmental parameter work at the original potential reference.
 
 use std::sync::Arc;
 use fs_exec::CancelGate;
@@ -348,6 +350,10 @@ fn g4_rejection_cancellation_and_cloned_continuation_preserve_the_complete_motio
 pub use inertia::RodMotionInertia;
 use inertia::KineticFrame;
 
+/// Continuing material-fluid snapshots on the same native trajectory.
+pub mod environment;
+pub use environment::RodFluidRefresh;
+
 /// A force AT the material node and a pure couple held in the WORLD frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RodNodalWrench {
@@ -400,7 +406,7 @@ impl From<LieStepError> for RodMotionError { fn from(e:LieStepError)->Self {Self
 #[derive(Clone, Debug, PartialEq)]
 pub struct RodMotionObservables {
     pub kinetic_energy_j: f64,
-    /// Native elastic/link storage plus gravitational potential.
+    /// Native elastic/link storage plus gravity and hydrostatic potentials.
     pub potential_energy_j: f64,
     pub linear_momentum_kg_m_s: [f64; 3],
     /// Centroid orbital momentum about the requested origin PLUS central spin.
@@ -418,10 +424,10 @@ pub struct RodMotionStep {
     pub before: RodMotionObservables,
     pub after: RodMotionObservables,
     /// Symmetric kick quadrature of applied material-node wrench power.
-    /// Gravity remains in potential energy, not counted twice as applied work.
+    /// Gravity and buoyancy remain in potential energy, not counted twice as work.
     pub source_work_quadrature_j: f64,
     pub integration_defect_j: f64,
-    /// Applied loads, gravity force/offset couple and stationary-support impulses.
+    /// Applied loads, gravity/buoyancy wrenches and stationary-support impulses.
     pub external_linear_impulse_n_s: [f64; 3],
     pub external_angular_impulse_nm_s: [f64; 3],
     pub linear_balance_residual_n_s: [f64; 3],
@@ -619,6 +625,7 @@ impl<I:RodMotionInertia> RodMotion<I> {
     }
     fn kick(&mut self,h:f64,loads:&[RodNodalWrench],origin:[f64;3],accounts:&mut KickAccounts,
         gate:&CancelGate)->Result<(),RodMotionError> {
+        let body_loads=self.model.body_loads(&self.pose,gate)?;
         for (node,load) in loads.iter().enumerate() {
             checkpoint(gate)?;
             let frame=self.pose.frames[node];let k=self.kinetics[node];
@@ -648,14 +655,13 @@ impl<I:RodMotionInertia> RodMotion<I> {
                 accounts.work+=h*applied_central[c]*(0.5*old_omega[c]+0.5*omega[c]);
             }
             let support_t=rotate(frame,support_t)?;
-            let gravity=self.model.source().gravity_nodal_forces_n().map_or([0.0;3],|f|f[node]);
-            let gravity_couple=if k.eccentric() {cross(rotate(frame,k.center)?,gravity)} else {[0.0;3]};
-            let impulse=std::array::from_fn(|c|h*(load.force_n[c]+gravity[c])+support_f[c]);
+            let body_force=body_loads.force_n[node];
+            let body_couple=rotate(frame,body_loads.torque_body_nm[node])?;
+            let impulse=std::array::from_fn(|c|h*(load.force_n[c]+body_force[c])+support_f[c]);
             let orbital=cross(sub(self.pose.positions_m[node],origin),impulse);
             for c in 0..3 {
                 accounts.linear[c]+=impulse[c];
-                accounts.angular[c]+=orbital[c]+h*load.torque_nm[c]+support_t[c];
-                if k.eccentric() {accounts.angular[c]+=h*gravity_couple[c];}
+                accounts.angular[c]+=orbital[c]+h*(load.torque_nm[c]+body_couple[c])+support_t[c];
                 accounts.supports[node].linear_n_s[c]+=support_f[c];
                 accounts.supports[node].angular_nm_s[c]+=support_t[c];
             }
