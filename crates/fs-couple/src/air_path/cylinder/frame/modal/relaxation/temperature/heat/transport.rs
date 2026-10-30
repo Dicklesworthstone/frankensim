@@ -46,7 +46,9 @@ impl<F> FrameRelaxationThermalSystem<'_, '_, '_, '_, F> {
     /// material Q/T transfer is separate from unclassified authored sources.
     /// This is not a photon-entropy model or a new time-integration scheme.
     ///
-    /// Geometry, view factors, storage moduli/density and C/L remain fixed.
+    /// Geometry, view factors and mechanical storage moduli/density stay fixed.
+    /// Source C(T)/L(T) requires the original field/thermal binding; otherwise
+    /// authored electrical storage remains fixed rather than being inferred.
     /// Thermal paths do not infer deformation, opening contacts or melting.
     /// Source/solver/budget failures and either cancellation authority return
     /// before the existing joint publication. Explicitly choosing a different
@@ -138,7 +140,7 @@ pub(super) fn resolve(
     }, independent_entropy_j_k, has_independent_sources })))
 }
 
-fn source_entropy(power: f64, dt: f64, temperature: f64) -> Result<f64> {
+pub(super) fn source_entropy(power: f64, dt: f64, temperature: f64) -> Result<f64> {
     let heat = finite(dt * power)?;
     let entropy = finite(heat / temperature)?;
     if power != 0.0 && (heat == 0.0 || entropy == 0.0) {

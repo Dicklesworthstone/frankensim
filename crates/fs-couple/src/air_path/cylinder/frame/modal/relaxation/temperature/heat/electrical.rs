@@ -6,6 +6,9 @@
 //! no RC integrator, material evaluator or second temperature is introduced.
 
 mod contact;
+/// Original material C(T)/L(T), reversible field heat and conserved coordinates.
+pub mod field;
+use crate::circuit_enthalpy::field_storage::FieldThermalBinding;
 use super::*;
 use crate::circuit_enthalpy::contacts::ContactThermalCoefficients;
 use crate::material_circuit::contacts::SeriesElectricalContact;
@@ -23,6 +26,7 @@ pub(super) struct Binding<'n, 'a> {
     pub(super) circuit: MaterialCircuit,
     destinations: BTreeMap<usize, CellId>,
     contacts: Option<contact::Binding<'n, 'a>>,
+    fields: Vec<FieldThermalBinding>,
 }
 
 impl<'m, 'f, 'n, 'a, F> FrameRelaxationThermalSystem<'m, 'f, 'n, 'a, F> {
@@ -52,7 +56,20 @@ impl<'m, 'f, 'n, 'a, F> FrameRelaxationThermalSystem<'m, 'f, 'n, 'a, F> {
         electrical_bases: &[(usize, ElectricalPropertyBasis)],
         gate: &CancelGate,
     ) -> Result<()> {
-        self.admit_electrical_binding(thermal, source, &circuit, gate)?;
+        self.bind_bulk_circuit(thermal, source, circuit, electrical_bases, Vec::new(), gate)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bind_bulk_circuit(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        source: &'n MaterialNetwork<'a>,
+        circuit: MaterialCircuit,
+        electrical_bases: &[(usize, ElectricalPropertyBasis)],
+        fields: Vec<FieldThermalBinding>,
+        gate: &CancelGate,
+    ) -> Result<()> {
+        self.admit_electrical_binding(thermal, source, &circuit, &fields, gate)?;
         if !circuit.contacts().is_empty() {
             return Err(invalid("electrical contact heat requires explicit original two-sided receivers"));
         }
@@ -71,7 +88,7 @@ impl<'m, 'f, 'n, 'a, F> FrameRelaxationThermalSystem<'m, 'f, 'n, 'a, F> {
         // is shared, not rebuilt by a second network or exposed mutable circuit.
         self.prepared = prepared;
         self.source = source;
-        self.electrical = Some(Binding { circuit, destinations, contacts: None });
+        self.electrical = Some(Binding { circuit, destinations, contacts: None, fields });
         Ok(())
     }
 

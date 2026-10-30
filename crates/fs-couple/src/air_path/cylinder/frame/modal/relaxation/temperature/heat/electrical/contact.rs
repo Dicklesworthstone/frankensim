@@ -27,6 +27,7 @@ impl<'m, 'f, 'n, 'a, F> FrameRelaxationThermalSystem<'m, 'f, 'n, 'a, F> {
         thermal: &DepositionSimulation<'_>,
         source: &MaterialNetwork<'_>,
         circuit: &MaterialCircuit,
+        fields: &[FieldThermalBinding],
         gate: &CancelGate,
     ) -> Result<()> {
         check(gate)?;
@@ -37,9 +38,10 @@ impl<'m, 'f, 'n, 'a, F> FrameRelaxationThermalSystem<'m, 'f, 'n, 'a, F> {
         {
             return Err(invalid("electrical relaxation binding requires its original cold clock and same cell/link owners"));
         }
-        if !circuit.storage().is_empty() {
+        if fields.is_empty() && !circuit.storage().is_empty() {
             return Err(invalid("source-bound electrical storage requires its original field/thermal work owner"));
         }
+        if !fields.is_empty() { field::admit(source, thermal, circuit, fields, gate)?; }
         self.admit_temperatures(thermal, gate)?;
         propose_shared(&self.materials, &self.mechanical, self.source, &self.receivers,
             &self.layer_ranges, thermal, gate)?;
@@ -67,7 +69,18 @@ impl<'m, 'f, 'n, 'a, F> FrameRelaxationThermalSystem<'m, 'f, 'n, 'a, F> {
         circuit: MaterialCircuit,
         gate: &CancelGate,
     ) -> Result<()> {
-        self.admit_electrical_binding(thermal, source.bulk, &circuit, gate)?;
+        self.bind_contact_circuit(thermal, source, circuit, Vec::new(), gate)
+    }
+
+    pub(super) fn bind_contact_circuit(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        source: &'n ElectricalContactNetwork<'a>,
+        circuit: MaterialCircuit,
+        fields: Vec<FieldThermalBinding>,
+        gate: &CancelGate,
+    ) -> Result<()> {
+        self.admit_electrical_binding(thermal, source.bulk, &circuit, &fields, gate)?;
         if source.contacts.is_empty() {
             return Err(invalid("contact relaxation binding needs explicit original interfaces"));
         }
@@ -101,7 +114,7 @@ impl<'m, 'f, 'n, 'a, F> FrameRelaxationThermalSystem<'m, 'f, 'n, 'a, F> {
         // Original thermal-only source/preparation stays intact. The contact
         // network owns the added bulk/interface source queries for every trial.
         self.electrical = Some(super::Binding {
-            circuit, destinations, contacts: Some(Binding { prepared, routes }),
+            circuit, destinations, contacts: Some(Binding { prepared, routes }), fields,
         });
         Ok(())
     }

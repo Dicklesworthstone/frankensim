@@ -84,8 +84,8 @@ separately from structural/fluid spectral resolution and thermal lumping.
 
 Reference density, geometry, equilibrium and incremental moduli remain fixed.
 Selected relaxation layers must retain wholly solid caloric charts and their
-original source-domain validity. C/L are explicitly authored fixed storage;
-material-bound field storage refuses without its reciprocal thermal-work owner.
+original source-domain validity. The bulk-only circuit binding holds authored
+C/L fixed; material-dependent storage requires the field binding described below.
 The bulk-only entry point refuses electrical contacts without their two-sided
 source/heat binding; the interface path below provides that binding. There
 is no moving wire geometry, motional EMF, magnetic force, nonlinear E/J response,
@@ -113,6 +113,65 @@ only core resistivity changed the synthetic continuing displacement by 2.46e-8 m
 The fully relaxed stationary control heated electrically without moving. These
 are manufactured reference equations, not execution of Rust, material measurements,
 or proof of full-workspace or real-time performance.
+
+## Material-dependent electric and magnetic storage
+
+`bind_material_field_circuit` and `bind_material_contact_field_circuit` bind
+the existing `FieldThermalBinding` objects to this same relaxation/heat owner.
+Every capacitor and inductor must retain its original material law, physical
+volume, finite caloric cell and charge/flux envelope, including constant laws.
+Use `step_electrical` or `step_heat_network` normally after binding. The bulk-
+only binding without fields still refuses unaccounted material field storage.
+
+```rust,ignore
+owner.bind_material_field_circuit(
+    &thermal, &electrical_network, source_bound_circuit, &bases,
+    field_thermal_bindings, &gate,
+)?;
+// Each FieldThermalBinding identifies branch, cell, original source law and
+// maximum_abs_coordinate. There is no independent heat-capacity override.
+```
+
+The existing field owner evaluates C(T)/L(T) and its thermodynamic potential.
+It retains charge or flux during a proposed coefficient replacement, then the
+existing native circuit advances from those SAME accepted coordinates. The
+field's internal energy is U = Psi + T*S, not just the isothermal circuit
+Hamiltonian. Its signed reversible heat reaches the original field cell next
+to, but separately from, Joule and material-relaxation loss. A negative source
+slope can cool that cell while electrical resistance dissipates positive heat.
+No energy residual is used as a physical heat source.
+
+`report.field_storage` retains the original field source samples, actual
+endpoint coordinates, internal energies, parameter work and reversible heat.
+`report.field_entropy` records entropy storage, signed reversible Q/T and the
+first-order splitting defect. Include its reversible transfer term along with
+radiation and the existing caloric entropy terms; its signed temporal defect
+is not irreversible entropy production. `external_thermal_heat_j` excludes
+both field exchange and closed radiation. The combined energy gate uses
+actual field U and original mechanical/caloric storage at both endpoints.
+
+Field admission is prepared once per physical interval, not per nonlinear
+stencil. Several independent fields may occupy one whole material cell: their
+capacity contributions add while its caloric capacity is counted once. Missing
+fields, foreign receivers, invalid source domains, exceeded coordinate limits
+and nonpositive combined capacity refuse before publication. Late solver or
+cancellation failure leaves all electrical, mechanical, material, fluid and
+thermal histories available for retry.
+
+Geometry, density and mechanical storage moduli remain fixed. Source field
+laws obey the existing globally affine, solid-state model. This is not a
+Maxwell-force, motional-EMF, hysteresis, thermal-expansion or phase-change model;
+the native first-order thermal split and its refinement requirement remain.
+
+Three native regression groups cover independently calculated RC/RL motion,
+U/S and reversible heat, source-only coefficient changes, whole-cell/capacity
+admission, and late rollback/retry. They are authored but UNEXECUTED: this
+executor has no Rust/Cargo/rustfmt/RCH/DSR, and toolchain-host DNS is unavailable.
+Independent NumPy/SciPy calculations passed nine wet/dry, capacitive/inductive
+and complete-heat cases at four time resolutions, with maximum combined-energy
+discrepancy 4.07e-18 J. Refinement reduced error against continuous DOP853.
+These synthetic equations are not native execution, experimental validation or
+a performance measurement.
 
 
 ## Original electrical interfaces and two-sided heat
