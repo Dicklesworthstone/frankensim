@@ -13446,10 +13446,10 @@ solver. The original linear reed mechanics evolve exactly under the interval's
 held pressure/contact force; the aperture uses the midpoint gap. The body's
 actual accepted mean pressure and work must agree with the condensed junction
 before both candidate states are published. No previous-sample pressure drives
-this quadratic path. Nonlinear bodies retain the original held-force Gonzalez
-path and temporal admission; they are not inferred quadratic from probes.
-Existing dense-state limits remain. Source histories seed a private one-shot
-render snapshot.
+this quadratic path. Nonlinear bodies use the complete exponential
+discrete-gradient path specified below; they are not inferred quadratic from
+probes. Existing dense-state limits remain. Source histories seed a private
+one-shot render snapshot.
 
 The loaded reed retains original contact potential, exact integrated viscous
 heat, nonadhesive contact loss, and Bernoulli jet loss as separate quantities.
@@ -13475,8 +13475,9 @@ viscothermal Foster, modal material, contact and numerical owners. They check bo
 reed selections with mixed modes and non-diagonally-dominant damping, independent
 drive/surface maps, zero-blow silence and warm-memory response, render-length prefix
 identity, same-window aperture pressure/flow against independent physical RK4,
-and preservation of the nonlinear clock refusal. These are numerical/structural
-checks, not measured-instrument, complete workspace or real-time qualification.
+and preservation of the original direct Gonzalez clock refusal. These are
+numerical/structural checks, not measured-instrument, complete workspace or
+real-time qualification.
 
 ## Simultaneous Hertz surface and material rolling bulk heat islands — v0
 
@@ -13906,3 +13907,37 @@ This is not finite mean-body heating or a second application of gas-wall heat.
 Two focused adapter regressions use original source cards/prepared transport
 and source gases, checking material-only conductivity/capacity substitutions,
 full FE work closure, and mismatched-temperature/incoherent-gas refusal.
+
+## Nonlinear complete-body reed feedback
+
+`acoustic_realize::reed_ode` uses `PreparedNonlinearZoh` for a body with original
+nonquadratic storage. The complete quadratic mechanical, material-memory,
+cavity, radiation and Foster-duct block evolves through the existing exact
+linear owner. The original nonlinear remainder supplies a discrete gradient
+closed implicitly against the accepted body endpoint; no mode or memory state
+is dropped to admit the audio clock.
+
+Each endpoint trial supplies its own same-window affine mean pressure to the
+original moving-reed/contact or quasistatic aperture owner. Reed history stays
+provisional throughout the body Newton solve. At the accepted endpoint the
+original reed work must match actual body work and mean pressure, after which
+the private source/body snapshot advances together. A failed observation or
+numerical/source refusal publishes no source history. The original effective
+reed face and reduced lay calibration are unchanged.
+
+Body loss independently integrates the original resistance on the method's
+held discrete effort. The energy account is for this exponential
+discrete-gradient scheme, not an assertion of exact continuous nonlinear heat
+or motion. Preparation and warm buffers are reused. The shared complete-state
+capacity, bounded root work and positive mean impedance requirements remain;
+contact and nonlinear temporal accuracy require refinement separately.
+
+Both massless and massive public renderers pass at 48/96/192 kHz for a warm
+mixed body with quartic cross-mode stress, full damping, Maxwell memory and a
+complete Foster duct. Independent original-equation RK4 references show more
+than 2.5-fold reduction in pressure error per clock doubling, with the finest
+symmetric normalized L2 error below 0.002. Removing the original quartic force
+changes pressure at the same initial state. A late-observer-refusal regression
+preserves every warm source coordinate. The direct Gonzalez owner retains its
+original clock refusal; this extension does not weaken that gate or claim
+root uniqueness, measured-instrument accuracy or real-time throughput.

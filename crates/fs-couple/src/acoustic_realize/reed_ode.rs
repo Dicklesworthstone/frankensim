@@ -1,9 +1,13 @@
 //! Complete vibrating surfaces on the existing reed and duct owners.
 //!
-//! Quasistatic and massive reeds close against the complete quadratic body's
-//! mean pressure under held volume flow. The moving aperture, swept flow and
-//! contact share one work interval with all original body and material states.
+//! Quasistatic and massive reeds close against the complete body's interval
+//! pressure under held volume flow. Quadratic bodies use exact propagation;
+//! nonlinear bodies retain their original storage through an implicit discrete
+//! gradient while the complete stiff linear part evolves exponentially.
 use super::*;
+
+mod nonlinear;
+use nonlinear::realize_nonlinear;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn realize_reed_ode(
@@ -25,7 +29,7 @@ pub(super) fn realize_reed_ode(
     }
     let inlets = if plates.is_empty() { 1 } else { 2 };
     let line = ode_bore_chain(sections, outlet, inlets, taps, gas, wall)?;
-    let (bore, mut state, observation) = compose_plate_chain(plates, line, 1, gas, sample_rate_hz)?;
+    let (bore, state, observation) = compose_plate_chain(plates, line, 1, gas, sample_rate_hz)?;
     // A bank keeps its independent point-force port at zero. Only the fluid
     // inlet supplies volume flow; surface reaction uses the original area map.
     let source = usize::from(observation.is_some());
@@ -57,75 +61,33 @@ pub(super) fn realize_reed_ode(
             n,
         );
     }
-    let exact = prepare_chain_exact(&bore, &linear, dt)?;
-    let massive = if reed.mass_kg > 0.0 {
-        let (stiffness, damping) = reed_structural(reed);
-        let system =
-            mass_spring_damper(reed.mass_kg, stiffness, damping).map_err(render_phs_error)?;
-        let face = reed_pressure_face(reed);
-        let k_lay = 1.0e7 * reed.width_m;
-        let chi = damping / (k_lay * reed.rest_opening_m * reed.rest_opening_m).max(1.0e-18);
-        let lay = slit_lay(k_lay, 2.0)
-            .and_then(|obstacle| obstacle.with_internal_loss(chi))
-            .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?;
-        let linear = prepare_render_linear(&system)?;
-        Some((system, linear, face, lay))
-    } else {
-        None
-    };
-    let reed_exact = massive
-        .as_ref()
-        .map(|(system, linear, _, _)| prepare_chain_exact(system, linear, dt))
-        .transpose()?
-        .flatten();
-    let mut reed_state = vec![0.0; 2];
-    let mut input = vec![0.0; bore.port_dim()];
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let mouth = blowing_envelope(reed, i as f64 * dt);
-        let pressure = bore.output(&state)[source];
-        let drop = mouth - pressure;
-        input[source] = if let Some((system, linear, face, lay)) = &massive {
-            let opening = reed.rest_opening_m + reed_state[0];
-            let velocity = system.output(&reed_state)[0];
-            let jet = bernoulli_volume_flow(reed.width_m, opening.max(0.0), drop, gas.density);
-            let swept = reed_swept_flow(*face, velocity);
-            let contact = slit_contact_force(lay, opening)
-                .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?;
-            let loss = lay
-                .dissipative_modal_forces(1, &[opening, velocity], &[velocity])
-                .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?[0];
-            let force = -face * drop + contact + loss;
-            let next = step_chain_flow(
-                system,
-                linear,
-                reed_exact.as_ref(),
-                &reed_state,
-                &[force],
-                dt,
-            )?;
-            reed_state = next.x;
-            jet + swept
-        } else {
-            // A nonlinear structural body retains its complete Gonzalez flow
-            // and original clock admission. It is never probed into a linear
-            // scattering model. This branch keeps the held-flow approximation.
-            let opening =
-                quasistatic_aperture_opening(reed.rest_opening_m, reed.closing_pressure_pa, drop);
-            bernoulli_volume_flow(reed.width_m, opening, drop, gas.density)
-        };
-        let next = step_chain_flow(&bore, &linear, exact.as_ref(), &state, &input, dt)?;
-        let pressure = next.y[source]
-            + plate_chain_radiation(observation.as_ref(), &next.x, &state, gas, listener_m, dt)?;
-        if !pressure.is_finite() {
-            return Err(AcousticRealizeError::Reed {
-                what: "ODE reed pressure left the finite set",
-            });
-        }
-        state = next.x;
-        out.push(pressure);
-    }
-    Ok(out)
+    realize_nonlinear(
+        bore,
+        state,
+        observation,
+        source,
+        reed,
+        gas,
+        listener_m,
+        dt,
+        n,
+    )
+}
+
+fn prepare_reed_load(
+    reed: BeatingReed,
+    density: f64,
+    dt: f64,
+) -> Result<crate::reed_bore::loaded::PreparedReedLoad, AcousticRealizeError> {
+    let (_, damping) = reed_structural(reed);
+    // Retain the existing reduced lay and its loss calibration for both body
+    // propagators. These coefficients do not become measured specimen data.
+    let stiffness = 1.0e7 * reed.width_m;
+    let chi = damping / (stiffness * reed.rest_opening_m * reed.rest_opening_m).max(1.0e-18);
+    let lay = slit_lay(stiffness, 2.0)
+        .and_then(|obstacle| obstacle.with_internal_loss(chi))
+        .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?;
+    crate::reed_bore::loaded::PreparedReedLoad::new(reed, density, dt, lay)
 }
 
 /// The exact body remains a held-flow owner: its port work is exactly
@@ -151,15 +113,7 @@ fn realize_massive(
     };
     let mut propagator = fs_phs::linear_exact::PreparedExactZoh::new_owned(system, dt, budget)
         .map_err(render_phs_error)?;
-    let (_, damping) = reed_structural(reed);
-    // Retain the already declared reduced lay and its loss calibration. This
-    // coupling change does not turn those coefficients into specimen data.
-    let stiffness = 1.0e7 * reed.width_m;
-    let chi = damping / (stiffness * reed.rest_opening_m * reed.rest_opening_m).max(1.0e-18);
-    let lay = slit_lay(stiffness, 2.0)
-        .and_then(|obstacle| obstacle.with_internal_loss(chi))
-        .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?;
-    let load = crate::reed_bore::loaded::PreparedReedLoad::new(reed, gas.density, dt, lay)?;
+    let load = prepare_reed_load(reed, gas.density, dt)?;
     let mut input = vec![0.0; propagator.system().port_dim()];
     let mut next_state = vec![0.0; state.len()];
     let mut average_output = vec![0.0; input.len()];

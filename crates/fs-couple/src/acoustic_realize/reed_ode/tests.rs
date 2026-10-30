@@ -313,7 +313,7 @@ fn quasistatic_warm_complete_body_closes_mouth_jet_and_original_loss_work() {
 }
 
 #[test]
-fn nonlinear_body_keeps_the_original_clock_refusal_instead_of_becoming_quadratic() {
+fn nonlinear_body_uses_the_exponential_owner_without_weakening_midpoint_admission() {
     let mut bank = PlateBank::default();
     bank.vk = Some(
         VkBody::from_modal_storage_with_damping(
@@ -330,22 +330,48 @@ fn nonlinear_body_keeps_the_original_clock_refusal_instead_of_becoming_quadratic
         )
         .unwrap(),
     );
-    let result = realize_reed_ode(
+    let gas = gas();
+    let line = ode_bore_chain(
         &sections(),
         ChainOutlet::PressureRelease,
+        2,
         &[],
-        reed(0.0, 100.0),
-        &mut bank,
-        &gas(),
-        1.0,
-        RATE,
-        8,
+        &gas,
         None,
-    );
+    )
+    .unwrap();
+    let (original, initial, _) = compose_plate_chain(&mut bank, line, 1, &gas, RATE).unwrap();
+    let split = prepare_render_linear(&original).unwrap();
+    assert!(!split.is_exact_quadratic());
     assert!(matches!(
-        result,
-        Err(AcousticRealizeError::TimeResolution(_))
+        fs_phs::linear_exact::step_render(
+            &original,
+            &split,
+            &initial,
+            &[0.0, 0.0],
+            1.0 / f64::from(RATE)
+        ),
+        Err(fs_phs::PhsError::TimeResolution(_))
     ));
+    for rate in [48_000, 96_000, 192_000] {
+        for mass in [0.0, 1e-4] {
+            let pressure = realize_reed_ode(
+                &sections(),
+                ChainOutlet::PressureRelease,
+                &[],
+                reed(mass, 100.0),
+                &mut bank,
+                &gas,
+                1.0,
+                rate,
+                8,
+                None,
+            )
+            .unwrap();
+            assert!(pressure.iter().all(|p| p.is_finite()));
+            assert!(pressure.iter().any(|p| p.abs() > 1e-4));
+        }
+    }
     assert!(
         bank.vk
             .as_ref()
@@ -376,39 +402,82 @@ fn continuous_massive_reference(
         None,
     )
     .unwrap();
+    continuous_complete_reference(
+        &bore,
+        &vec![0.0; bore.state_dim()],
+        None,
+        0,
+        reed,
+        rate,
+        windows,
+        subdivisions,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn continuous_complete_reference(
+    bore: &fs_phs::PortHamiltonian,
+    initial: &[f64],
+    observation: Option<&PlateBankObservation>,
+    source: usize,
+    reed: BeatingReed,
+    rate: u32,
+    windows: usize,
+    subdivisions: usize,
+) -> Vec<f64> {
+    let gas = gas();
     let n = bore.state_dim();
+    let m = bore.port_dim();
     let (j, r, g) = bore.structure();
     let face = reed.stiffness_n_m * reed.rest_opening_m / reed.closing_pressure_pa;
     let damping = 2.0 * reed.damping_ratio * (reed.stiffness_n_m * reed.mass_kg).sqrt();
     let rhs = |state: &[f64]| {
         let effort = bore.effort(&state[..n]);
-        let pressure: f64 = g.iter().zip(&effort).map(|(g, e)| g * e).sum();
+        let pressure: f64 = (0..n).map(|row| g[row * m + source] * effort[row]).sum();
         let drop = reed.blowing_pressure_pa - pressure;
-        let opening = reed.rest_opening_m + state[n];
-        assert!(
-            opening > 0.5 * reed.rest_opening_m,
-            "smooth reference entered contact"
-        );
-        let jet = reed.width_m * opening * drop.signum() * (2.0 * drop.abs() / gas.density).sqrt();
-        let flow = jet - face * state[n + 1];
+        let opening = if reed.mass_kg > 0.0 {
+            let opening = reed.rest_opening_m + state[n];
+            assert!(
+                opening > 0.25 * reed.rest_opening_m,
+                "smooth reference entered contact"
+            );
+            opening
+        } else {
+            reed.rest_opening_m * (1.0 - drop / reed.closing_pressure_pa).clamp(0.0, 1.0)
+        };
+        let jet = if reed.mass_kg == 0.0 && drop.abs() < 1e-12 {
+            0.0
+        } else {
+            reed.width_m * opening * drop.signum() * (2.0 * drop.abs() / gas.density).sqrt()
+        };
+        let flow = jet
+            - if reed.mass_kg > 0.0 {
+                face * state[n + 1]
+            } else {
+                0.0
+            };
         let mut result = vec![0.0; n + 3];
         for row in 0..n {
             result[row] = (0..n)
                 .map(|column| (j[row * n + column] - r[row * n + column]) * effort[column])
                 .sum::<f64>()
-                + g[row] * flow;
+                + g[row * m + source] * flow;
         }
-        result[n] = state[n + 1];
-        result[n + 1] =
-            (-reed.stiffness_n_m * state[n] - damping * state[n + 1] - face * drop) / reed.mass_kg;
+        if reed.mass_kg > 0.0 {
+            result[n] = state[n + 1];
+            result[n + 1] = (-reed.stiffness_n_m * state[n] - damping * state[n + 1] - face * drop)
+                / reed.mass_kg;
+        }
         result[n + 2] = pressure;
         result
     };
     let duration = 1.0 / f64::from(rate);
     let h = duration / subdivisions as f64;
     let mut state = vec![0.0; n + 3];
+    state[..n].copy_from_slice(initial);
     let mut pressure = Vec::with_capacity(windows);
     for _ in 0..windows {
+        let before_volume = observation.map_or(0.0, |o| o.volume_velocity(&state[..n]).unwrap());
         state[n + 2] = 0.0;
         for _ in 0..subdivisions {
             let a = rhs(&state);
@@ -432,7 +501,12 @@ fn continuous_massive_reference(
             }
         }
         assert!(state.iter().all(|x| x.is_finite()));
-        pressure.push(state[n + 2] / duration);
+        let after_volume = observation.map_or(0.0, |o| o.volume_velocity(&state[..n]).unwrap());
+        pressure.push(
+            state[n + 2] / duration
+                + gas.density * (after_volume - before_volume)
+                    / (core::f64::consts::TAU * duration),
+        );
     }
     pressure
 }
@@ -513,4 +587,206 @@ fn equal_static_compliance_with_distinct_reed_mass_changes_actual_bore_motion() 
         difference > 1e-3,
         "mass affected only an unobserved reed: {difference}"
     );
+}
+
+fn nonlinear_bank(coefficient: f64) -> PlateBank {
+    let body = VkBody::from_modal_storage_with_damping(
+        SosModalStorage {
+            omegas: vec![600.0, 900.0],
+            channels: vec![fs_nlmodal::StressChannel {
+                coefficient,
+                coupling: vec![1.0, 0.3, 0.3, 0.5],
+            }],
+        },
+        &[60.0, -70.0, -70.0, 90.0],
+        &[0.7, -0.4],
+        vec![0.015, -0.02],
+    )
+    .unwrap()
+    .with_relaxation_branches(
+        vec![fs_phs::RelaxationBranch {
+            projection: vec![0.7, 0.0, -0.4, 0.0],
+            stiffness: 1600.0,
+            relaxation_time_s: 0.0008,
+        }],
+        1,
+    )
+    .unwrap();
+    let mut bank = PlateBank::default();
+    bank.linear.push(compact(0.7, 0.003));
+    bank.vk = Some(body);
+    bank
+}
+
+fn nonlinear_image(
+    coefficient: f64,
+    rate: u32,
+) -> (
+    fs_phs::PortHamiltonian,
+    Vec<f64>,
+    Option<PlateBankObservation>,
+) {
+    let gas = gas();
+    let line = ode_bore_chain(
+        &sections(),
+        ChainOutlet::PressureRelease,
+        2,
+        &[],
+        &gas,
+        None,
+    )
+    .unwrap();
+    let (system, mut state, observation) =
+        compose_plate_chain(&mut nonlinear_bank(coefficient), line, 1, &gas, rate).unwrap();
+    assert_eq!(observation.as_ref().unwrap().state_dim(), 7);
+    // Original order: compact q/p, two Vk q/p pairs, then Maxwell memory.
+    // Both coefficient selections start with exactly the same physical state.
+    state[..7].copy_from_slice(&[2e-6, 1e-5, 5e-6, 0.01, -3e-6, -0.006, 8e-5]);
+    (system, state, observation)
+}
+
+#[test]
+fn nonlinear_complete_reed_body_retains_finite_amplitude_stress_and_refines() {
+    let coefficient = 1e17;
+    let windows = 8;
+    let (system, initial, observation) = nonlinear_image(coefficient, RATE);
+    let split = prepare_render_linear(&system).unwrap();
+    assert!(!split.is_exact_quadratic());
+    let n = system.state_dim();
+    let q = split.quadratic_matrix();
+    let quadratic: f64 = (0..n)
+        .map(|i| {
+            (0..n)
+                .map(|j| 0.5 * initial[i] * q[i * n + j] * initial[j])
+                .sum::<f64>()
+        })
+        .sum();
+    assert!(
+        system.hamiltonian(&initial) > 1.05 * quadratic,
+        "fixture must carry material nonlinear storage, not an infinitesimal channel"
+    );
+    for mass in [0.0, 1e-5] {
+        let reed = resonant_reed(mass);
+        let reference = continuous_complete_reference(
+            &system,
+            &initial,
+            observation.as_ref(),
+            1,
+            reed,
+            RATE,
+            windows,
+            1024,
+        );
+        let mut errors = Vec::new();
+        let mut finest = Vec::new();
+        for refinement in [1, 2, 4] {
+            let rate = RATE * refinement as u32;
+            let (system, state, observer) = nonlinear_image(coefficient, rate);
+            let pressure = nonlinear::realize_nonlinear(
+                system,
+                state,
+                observer,
+                1,
+                reed,
+                &gas(),
+                1.0,
+                1.0 / f64::from(rate),
+                windows * refinement,
+            )
+            .unwrap();
+            let average: Vec<f64> = pressure
+                .chunks_exact(refinement)
+                .map(|chunk| chunk.iter().sum::<f64>() / refinement as f64)
+                .collect();
+            errors.push(relative_difference(&average, &reference));
+            finest = average;
+        }
+        assert!(
+            errors[2] < 2e-3,
+            "mass={mass}: finite-amplitude errors {errors:?}"
+        );
+        for pair in errors.windows(2) {
+            assert!(
+                pair[0] > 2.5 * pair[1],
+                "mass={mass}: original nonlinear flow did not refine {errors:?}"
+            );
+        }
+        let (linear, same_state, observer) = nonlinear_image(0.0, 4 * RATE);
+        assert_eq!(same_state, initial);
+        let linear_pressure = if mass == 0.0 {
+            realize_quasistatic(
+                linear,
+                same_state,
+                observer,
+                1,
+                reed,
+                &gas(),
+                1.0,
+                1.0 / f64::from(4 * RATE),
+                4 * windows,
+            )
+            .unwrap()
+        } else {
+            realize_massive(
+                linear,
+                same_state,
+                observer,
+                1,
+                reed,
+                &gas(),
+                1.0,
+                1.0 / f64::from(4 * RATE),
+                4 * windows,
+            )
+            .unwrap()
+        };
+        let linear_average: Vec<f64> = linear_pressure
+            .chunks_exact(4)
+            .map(|chunk| chunk.iter().sum::<f64>() / 4.0)
+            .collect();
+        assert!(
+            relative_difference(&finest, &linear_average) > 1e-3,
+            "quartic material stress must change the actual coupled pressure"
+        );
+    }
+}
+
+#[test]
+fn refused_nonlinear_observation_preserves_every_original_bank_history() {
+    let gas = gas();
+    let mut bank = nonlinear_bank(1e17);
+    for _ in 0..24 {
+        bank.advance_controlled(0.7, 1.0 / f64::from(RATE), gas.density, 1.0, || false)
+            .unwrap();
+    }
+    let initial = bank
+        .physical_image(&gas, RATE, &fs_exec::CancelGate::default())
+        .unwrap()
+        .unwrap()
+        .state()
+        .to_vec();
+    assert!(initial.last().unwrap().abs() > 0.0);
+    for mass in [0.0, 1e-5] {
+        let result = realize_reed_ode(
+            &sections(),
+            ChainOutlet::PressureRelease,
+            &[],
+            resonant_reed(mass),
+            &mut bank,
+            &gas,
+            0.0,
+            RATE,
+            8,
+            None,
+        );
+        assert!(matches!(
+            result,
+            Err(AcousticRealizeError::InvalidDescription { .. })
+        ));
+        let retained = bank
+            .physical_image(&gas, RATE, &fs_exec::CancelGate::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.state(), initial);
+    }
 }
