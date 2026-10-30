@@ -12992,3 +12992,35 @@ coupling/FIR tests.
 ## Finite source-material cavity walls
 
 `SharedCavity::new_with_cylindrical_material_wall` couples an explicit cylindrical gas region to a finite solid wall using the original `PreparedThermalTransport` source, evaluated at the reference gas temperature. Radial finite-volume capacities and Fourier conductances include gas, wall, and any original local molecular reservoirs in one caloric operator before pressure elimination. Its positive compression realization joins the existing exact mechanical runtime and harmonic response, with one accepted state, pressure, availability, dissipation, and rollback account. Gas and wall cell counts are independent spatial refinement axes; the cold realization is limited to 128 total thermal coordinates and rejects unresolved or unrepresentable spectra. The exterior wall is held at the reference temperature and endcaps are insulated. The scope is small perturbations, uniform acoustic pressure, fixed geometry, and frozen reference coefficients; this path does not infer mean heating, phase evolution, thermal expansion, interface resistance, exterior convection, or spatial accuracy from the declared frequency band.
+
+### Complete vibrating bodies on the reed-driven ODE duct
+
+The reed ODE renderer consumes the original `PlateBankImage`, retaining compact
+and Vk modes together, full material damping and every accepted internal state.
+The signed surface-volume port supplies reciprocal pressure reaction independently
+of the external point-force port, which remains unforced. The complete original
+plate observer uses the same state prefix. The existing inlet-pressure plus plate
+observation convention remains; this change does not supply a new exterior outlet
+microphone model.
+
+For an exactly quadratic body/duct, a quasistatic reed uses the shared selected-port
+`PreparedScatteringZoh`. Its existing aperture root closes against the SAME held
+window's affine mean-pressure response, with no delayed outgoing-wave surrogate,
+hidden 5 Pa primer, extra initialization step or render-length-dependent model
+selection. Complete state/output buffers are reused. The reference-wave boundary
+account remains distinct from physical material heat in the shared owner.
+
+A massive reed retains its existing held-pressure/contact and swept-flow scheme;
+its original two-state exact propagator and the complete quadratic body propagator
+are prepared once. This is not a monolithic reed/contact/bore energy solve. A
+nonlinear body retains the original Gonzalez update and temporal refusal rather
+than being inferred quadratic from unit-state probes. Existing dense-state limits
+remain. Source histories seed a private one-shot render snapshot.
+
+Four focused native tests execute the complete renderer with original gas,
+viscothermal Foster, modal material, contact and numerical owners. They check both
+reed selections with mixed modes and non-diagonally-dominant damping, independent
+drive/surface maps, zero-blow silence and warm-memory response, render-length prefix
+identity, same-window aperture pressure/flow against independent physical RK4,
+and preservation of the nonlinear clock refusal. These are numerical/structural
+checks, not measured-instrument, complete workspace or real-time qualification.

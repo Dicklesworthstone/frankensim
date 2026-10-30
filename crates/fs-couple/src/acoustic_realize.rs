@@ -13,6 +13,9 @@ pub mod thermoelastic;
 pub mod concentric;
 mod thermal_step;
 mod dirac_body;
+mod reed_ode;
+
+use reed_ode::realize_reed_ode;
 
 use crate::modal_acoustic_time::{
     MAX_TIME_DOMAIN_ACOUSTIC_MODES, ModalAcousticFrame, ModalAcousticMode, ModalAcousticState,
@@ -48,7 +51,7 @@ use fs_nlmodal::{
 };
 use fs_phs::{
     AcousticSection, AcousticTap, ChainOutlet, MouthFlange, ViscothermalPin, WallPin,
-    acoustic_chain_outlet_wall, bernoulli_volume_flow, mass_spring_damper, modal_bank,
+    acoustic_chain_outlet_wall, bernoulli_volume_flow, mass_spring_damper,
     modal_bank_ports, quasistatic_aperture_opening, step, step_descriptor, transformer,
 };
 use fs_scenario::{
@@ -2415,34 +2418,6 @@ fn free_fixed_pluck_modal(pluck: Pluck, string: &PrestressedString, k_zero: usiz
         acc += w * det::cos(kappa * x);
     }
     mu * phi0 * acc * (l / nq as f64)
-}
-
-fn plate_modal_ports(
-    plates: &PlateBank,
-    with_area_port: bool,
-) -> Result<Option<fs_phs::PortHamiltonian>, AcousticRealizeError> {
-    if plates.linear.is_empty() {
-        return Ok(None);
-    }
-    let omegas: Vec<f64> = plates.linear.iter().map(|b| b.omega).collect();
-    let zetas: Vec<f64> = plates.linear.iter().map(|b| b.zeta).collect();
-    let drives: Vec<f64> = plates
-        .linear
-        .iter()
-        .map(|b| b.drive_participation / b.mass_kg.sqrt())
-        .collect();
-    let sys = if with_area_port {
-        let areas: Vec<f64> = plates
-            .linear
-            .iter()
-            .map(|b| b.area_m2 / b.mass_kg.sqrt())
-            .collect();
-        modal_bank_ports(&omegas, &zetas, &[&drives, &areas])
-    } else {
-        modal_bank(&omegas, &zetas, &drives)
-    }
-    .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-    Ok(Some(sys))
 }
 
 fn helmholtz_flow_cavity(
@@ -5259,288 +5234,6 @@ fn bore_spec_inner(
     Some((sections, taps))
 }
 
-struct PreparedLinearZoh {
-    n: usize,
-    m: usize,
-    phi_x: Vec<f64>,
-    gamma_x: Vec<f64>,
-    phi_y: Vec<f64>,
-    gamma_y: Vec<f64>,
-}
-
-impl PreparedLinearZoh {
-    fn from_phs_scattering(
-        sys: &fs_phs::PortHamiltonian,
-        zc: f64,
-        dt: f64,
-    ) -> Result<Self, AcousticRealizeError> {
-        let n = sys.state_dim();
-        let m = sys.port_dim();
-        let (j, r, g) = sys.structure();
-        let mut q = vec![0.0; n * n];
-        let mut unit = vec![0.0; n];
-        for col in 0..n {
-            unit[col] = 1.0;
-            let e = sys.effort(&unit);
-            unit[col] = 0.0;
-            for row in 0..n {
-                q[row * n + col] = e[row];
-            }
-        }
-        let inv_zc = if zc > 0.0 && zc.is_finite() {
-            1.0 / zc
-        } else {
-            0.0
-        };
-        // Scattering state matrix A_scat = (J - R - (1/Zc) g_0 g_0^T) * Q
-        // and output matrix C = G^T * Q.
-        let mut a = vec![0.0; n * n];
-        for row in 0..n {
-            let g_row0 = if m > 0 { g[row * m] } else { 0.0 };
-            for k in 0..n {
-                let g_k0 = if m > 0 { g[k * m] } else { 0.0 };
-                let r_scat = r[row * n + k] + inv_zc * g_row0 * g_k0;
-                let jrk = j[row * n + k] - r_scat;
-                if jrk == 0.0 {
-                    continue;
-                }
-                for col in 0..n {
-                    a[row * n + col] += jrk * q[k * n + col];
-                }
-            }
-        }
-        let mut c = vec![0.0; m * n];
-        for p in 0..m {
-            for k in 0..n {
-                let gkp = g[k * m + p];
-                if gkp == 0.0 {
-                    continue;
-                }
-                for col in 0..n {
-                    c[p * n + col] += gkp * q[k * n + col];
-                }
-            }
-        }
-        let mut d = vec![1.0; n];
-        let mut inv_d = vec![1.0; n];
-        for i in 0..n {
-            let qii = q[i * n + i];
-            if qii > 0.0 && qii.is_finite() {
-                let s = qii.sqrt();
-                d[i] = s;
-                inv_d[i] = 1.0 / s;
-            }
-        }
-        let mut a_bal = vec![0.0; n * n];
-        for row in 0..n {
-            let d_row = d[row];
-            for col in 0..n {
-                a_bal[row * n + col] = d_row * a[row * n + col] * inv_d[col] * dt;
-            }
-        }
-        let (phi_bal, f1_bal, f2_bal) = dense_phi_f1_f2(&a_bal, n)?;
-        let mut phi_x = vec![0.0; n * n];
-        let mut f1 = vec![0.0; n * n];
-        let mut f2 = vec![0.0; n * n];
-        for row in 0..n {
-            let inv_d_row = inv_d[row];
-            for col in 0..n {
-                let scale = inv_d_row * d[col];
-                let idx = row * n + col;
-                phi_x[idx] = phi_bal[idx] * scale;
-                f1[idx] = f1_bal[idx] * scale;
-                f2[idx] = f2_bal[idx] * scale;
-            }
-        }
-        let mut gamma_x = vec![0.0; n * m];
-        let mut f2_g_dt = vec![0.0; n * m];
-        for row in 0..n {
-            for k in 0..n {
-                let f1_rk = f1[row * n + k] * dt;
-                let f2_rk = f2[row * n + k] * dt;
-                for p in 0..m {
-                    let g_scale = if p == 0 && inv_zc > 0.0 {
-                        2.0 * inv_zc
-                    } else {
-                        1.0
-                    };
-                    let g_kp = g[k * m + p] * g_scale;
-                    if g_kp != 0.0 {
-                        gamma_x[row * m + p] += f1_rk * g_kp;
-                        f2_g_dt[row * m + p] += f2_rk * g_kp;
-                    }
-                }
-            }
-        }
-        let mut phi_y = vec![0.0; m * n];
-        let mut gamma_y = vec![0.0; m * m];
-        for p in 0..m {
-            for k in 0..n {
-                let c_pk = c[p * n + k];
-                if c_pk == 0.0 {
-                    continue;
-                }
-                for col in 0..n {
-                    phi_y[p * n + col] += c_pk * f1[k * n + col];
-                }
-                for col_p in 0..m {
-                    gamma_y[p * m + col_p] += c_pk * f2_g_dt[k * m + col_p];
-                }
-            }
-        }
-        Ok(Self {
-            n,
-            m,
-            phi_x,
-            gamma_x,
-            phi_y,
-            gamma_y,
-        })
-    }
-
-    fn step(&self, x: &[f64], u: &[f64]) -> (Vec<f64>, Vec<f64>) {
-        let mut x_next = vec![0.0; self.n];
-        for row in 0..self.n {
-            let base = row * self.n;
-            let mut sum = 0.0;
-            for col in 0..self.n {
-                sum += self.phi_x[base + col] * x[col];
-            }
-            for p in 0..self.m {
-                sum += self.gamma_x[row * self.m + p] * u[p];
-            }
-            x_next[row] = sum;
-        }
-        let mut y = vec![0.0; self.m];
-        for p in 0..self.m {
-            let base = p * self.n;
-            let mut sum = 0.0;
-            for col in 0..self.n {
-                sum += self.phi_y[base + col] * x[col];
-            }
-            for col_p in 0..self.m {
-                sum += self.gamma_y[p * self.m + col_p] * u[col_p];
-            }
-            y[p] = sum;
-        }
-        (x_next, y)
-    }
-}
-
-#[allow(clippy::type_complexity)]
-fn dense_phi_f1_f2(
-    a: &[f64],
-    dim: usize,
-) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), AcousticRealizeError> {
-    let mut norm1 = 0.0_f64;
-    for col in 0..dim {
-        let mut col_sum = 0.0;
-        for row in 0..dim {
-            col_sum += a[row * dim + col].abs();
-        }
-        if !col_sum.is_finite() {
-            return Err(AcousticRealizeError::Nonlinear(
-                "non-finite linear ZOH generator".to_string(),
-            ));
-        }
-        norm1 = norm1.max(col_sum);
-    }
-    let mut s = 0u32;
-    let mut scaled_norm = norm1;
-    while scaled_norm > 0.5 && s < 30 {
-        scaled_norm *= 0.5;
-        s += 1;
-    }
-    let scale = 0.5_f64.powi(s as i32);
-    let mut a_s = vec![0.0; dim * dim];
-    for (dst, &src) in a_s.iter_mut().zip(a.iter()) {
-        *dst = src * scale;
-    }
-    let mut phi = vec![0.0; dim * dim];
-    let mut f1 = vec![0.0; dim * dim];
-    let mut f2 = vec![0.0; dim * dim];
-    let mut term = vec![0.0; dim * dim];
-    for i in 0..dim {
-        let diag = i * dim + i;
-        phi[diag] = 1.0;
-        f1[diag] = 1.0;
-        f2[diag] = 0.5;
-        term[diag] = 1.0;
-    }
-    let mut next_term = vec![0.0; dim * dim];
-    for k in 1..=24 {
-        let inv_k = 1.0 / f64::from(k);
-        next_term.fill(0.0);
-        for i in 0..dim {
-            let row_i = i * dim;
-            for p in 0..dim {
-                let t_ip = term[row_i + p];
-                if t_ip == 0.0 {
-                    continue;
-                }
-                let scaled = t_ip * inv_k;
-                let row_p = p * dim;
-                for j in 0..dim {
-                    next_term[row_i + j] += scaled * a_s[row_p + j];
-                }
-            }
-        }
-        term.copy_from_slice(&next_term);
-        let c1 = 1.0 / f64::from(k + 1);
-        let c2 = 1.0 / (f64::from(k + 1) * f64::from(k + 2));
-        let mut max_delta = 0.0_f64;
-        for idx in 0..(dim * dim) {
-            let t = term[idx];
-            phi[idx] += t;
-            f1[idx] += t * c1;
-            f2[idx] += t * c2;
-            max_delta = max_delta.max(t.abs());
-        }
-        if max_delta <= 1.0e-16 {
-            break;
-        }
-    }
-    let mut one_plus_phi = vec![0.0; dim * dim];
-    let mut prod = vec![0.0; dim * dim];
-    for _ in 0..s {
-        one_plus_phi.copy_from_slice(&phi);
-        for i in 0..dim {
-            one_plus_phi[i * dim + i] += 1.0;
-        }
-        // f2_next = 0.25 * ((I + phi) * f2 + f1)
-        dense_matmul(&one_plus_phi, &f2, &mut prod, dim);
-        for idx in 0..(dim * dim) {
-            f2[idx] = 0.25 * (prod[idx] + f1[idx]);
-        }
-        // f1_next = 0.5 * (I + phi) * f1
-        dense_matmul(&one_plus_phi, &f1, &mut prod, dim);
-        for idx in 0..(dim * dim) {
-            f1[idx] = 0.5 * prod[idx];
-        }
-        // phi_next = phi * phi
-        dense_matmul(&phi, &phi, &mut prod, dim);
-        phi.copy_from_slice(&prod);
-    }
-    Ok((phi, f1, f2))
-}
-
-fn dense_matmul(a: &[f64], b: &[f64], out: &mut [f64], dim: usize) {
-    out.fill(0.0);
-    for i in 0..dim {
-        let row_i = i * dim;
-        for p in 0..dim {
-            let a_ip = a[row_i + p];
-            if a_ip == 0.0 {
-                continue;
-            }
-            let row_p = p * dim;
-            for j in 0..dim {
-                out[row_i + j] += a_ip * b[row_p + j];
-            }
-        }
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn realize_blown_ode(
     sections: &[AcousticSection],
@@ -5583,185 +5276,6 @@ fn realize_blown_ode(
         }
         out.push(p);
         x = rec.x;
-    }
-    Ok(out)
-}
-
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_lines)] // one coherent realization
-fn realize_reed_ode(
-    sections: &[AcousticSection],
-    outlet: ChainOutlet,
-    taps: &[AcousticTap],
-    reed: BeatingReed,
-    plates: &mut PlateBank,
-    gas: &GasState,
-    listener_m: f64,
-    sample_rate_hz: u32,
-    n: usize,
-    wall: Option<LocallyReactingWall>,
-) -> Result<Vec<f64>, AcousticRealizeError> {
-    // Parity with ReedBoreVoice::new (render.rs): the ODE path must
-    // reject non-finite/nonphysical attack ramps and reed stiffnesses
-    // up front, or NaN slips past typed refusals into generic per-step
-    // Nonlinear noise mid-integration (bead frankensim-dtb76).
-    if !crate::reed_bore::reed_parameters_valid(reed) {
-        return Err(AcousticRealizeError::InvalidDescription {
-            what: "reed parameters must be physical and finite",
-        });
-    }
-    let radius = sections.first().map_or(0.0, |s| s.radius);
-    let area = core::f64::consts::PI * radius * radius;
-    let zc = gas.density * gas.sound_speed / area;
-    let inlets = if plates.linear.is_empty() { 1 } else { 2 };
-    let line = ode_bore_chain(sections, outlet, inlets, taps, gas, wall)?;
-    let bore_sys = if plates.linear.is_empty() {
-        line
-    } else {
-        let plate =
-            plate_modal_ports(plates, false)?.ok_or(AcousticRealizeError::InvalidDescription {
-                what: "ODE reed expected a linear plate bank",
-            })?;
-        transformer(plate, line, 0, 1, area)
-            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?
-    };
-    let massive = if reed.mass_kg > 0.0 {
-        let (k, r_damp) = reed_structural(reed);
-        let phs = mass_spring_damper(reed.mass_kg, k, r_damp)
-            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-        let face = reed_pressure_face(reed);
-        let k_lay = 1.0e7 * reed.width_m;
-        let chi = r_damp / (k_lay * reed.rest_opening_m * reed.rest_opening_m).max(1.0e-18);
-        let lay = slit_lay(k_lay, 2.0)
-            .and_then(|o| o.with_internal_loss(chi))
-            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-        let linear = prepare_render_linear(&phs)?;
-        Some((phs, linear, face, lay))
-    } else {
-        None
-    };
-    let dt = 1.0 / f64::from(sample_rate_hz);
-    let block_fits_phs =
-        2 * (bore_sys.state_dim() + bore_sys.port_dim() + 1)
-            <= fs_phs::linear_exact::MAX_LINEAR_EXPONENTIAL_BLOCK_DIM;
-    let bore_linear = if block_fits_phs && n <= 4 {
-        Some(prepare_render_linear(&bore_sys)?)
-    } else {
-        None
-    };
-    let zoh = if bore_linear.is_none() {
-        let zc_scat = if massive.is_none() { zc } else { 0.0 };
-        Some(PreparedLinearZoh::from_phs_scattering(&bore_sys, zc_scat, dt)?)
-    } else {
-        None
-    };
-    let mut x = vec![0.0; bore_sys.state_dim()];
-    let mut x_reed = vec![0.0; 2];
-    let mut p_plus_prev = 5.0;
-    let mut p_minus_prev = 0.0;
-    if massive.is_none()
-        && let Some(z) = &zoh
-    {
-        let (nx, ny) = z.step(&x, &[p_plus_prev]);
-        p_minus_prev = ny[0] - p_plus_prev;
-        x = nx;
-    }
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let t = i as f64 * dt;
-        let p_m = blowing_envelope(reed, t);
-        let p_bore = bore_sys.output(&x).first().copied().unwrap_or(0.0);
-        if let Some((reed_phs, reed_linear, face, lay)) = &massive {
-            let q = x_reed[0];
-            let opening = (reed.rest_opening_m + q).max(0.0);
-            let v = reed_phs.output(&x_reed).first().copied().unwrap_or(0.0);
-            let dp = p_m - p_bore;
-            let u_jet = bernoulli_volume_flow(reed.width_m, opening, dp, gas.density);
-            let u_swept = reed_swept_flow(*face, v);
-            let y = reed.rest_opening_m + q;
-            let mut f = -face * dp;
-            let contact = slit_contact_force(lay, y)
-                .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-            f += contact;
-            f += lay
-                .dissipative_modal_forces(1, &[y, v], &[v])
-                .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?[0];
-            let rec_r = fs_phs::linear_exact::step_render(reed_phs, reed_linear, &x_reed, &[f], dt)
-                .map_err(render_phs_error)?;
-            if !rec_r.x.iter().all(|xi| xi.is_finite()) {
-                return Err(AcousticRealizeError::Reed {
-                    what: "massive reed left the finite set",
-                });
-            }
-            x_reed = rec_r.x;
-            let u = u_jet + u_swept;
-            let (next_x, y0) = if let Some(linear) = &bore_linear {
-                let rec = fs_phs::linear_exact::step_render(&bore_sys, linear, &x, &[u], dt)
-                    .map_err(render_phs_error)?;
-                (rec.x, rec.y[0])
-            } else {
-                let (nx, ny) = zoh.as_ref().expect("precomputed ZOH").step(&x, &[u]);
-                (nx, ny[0])
-            };
-            let mut p = y0;
-            if !plates.linear.is_empty() {
-                for (k, body) in plates.linear.iter().enumerate() {
-                    let acc = (next_x[2 * k + 1] - x[2 * k + 1]) / dt;
-                    p += body.radiate_mass_normalized(acc, gas.density, listener_m);
-                }
-            }
-            if !p.is_finite() {
-                return Err(AcousticRealizeError::Reed {
-                    what: "ODE reed pressure left the finite set",
-                });
-            }
-            x = next_x;
-            out.push(p);
-            continue;
-        }
-        let (next_x, y0) = if let Some(linear) = &bore_linear {
-            let h = quasistatic_aperture_opening(
-                reed.rest_opening_m,
-                reed.closing_pressure_pa,
-                p_m - p_bore,
-            );
-            let u = bernoulli_volume_flow(reed.width_m, h, p_m - p_bore, gas.density);
-            let rec = fs_phs::linear_exact::step_render(&bore_sys, linear, &x, &[u], dt)
-                .map_err(render_phs_error)?;
-            (rec.x, rec.y[0])
-        } else {
-            let z = zoh.as_ref().expect("precomputed ZOH");
-            let p_minus = p_minus_prev;
-            let p_plus = crate::reed_bore::solve_reed_wave(
-                reed,
-                gas.density,
-                zc,
-                0.0,
-                p_minus,
-                p_m,
-                p_plus_prev,
-                0.0,
-            )?;
-            p_plus_prev = p_plus;
-            let (nx, ny) = z.step(&x, &[p_plus]);
-            let p_minus_now = ny[0] - p_plus;
-            p_minus_prev = p_minus_now;
-            (nx, p_plus + p_minus_now)
-        };
-        let mut p = y0;
-        if !plates.linear.is_empty() {
-            for (k, body) in plates.linear.iter().enumerate() {
-                let acc = (next_x[2 * k + 1] - x[2 * k + 1]) / dt;
-                p += body.radiate_mass_normalized(acc, gas.density, listener_m);
-            }
-        }
-        if !p.is_finite() {
-            return Err(AcousticRealizeError::Reed {
-                what: "ODE reed pressure left the finite set",
-            });
-        }
-        x = next_x;
-        out.push(p);
     }
     Ok(out)
 }
@@ -6163,7 +5677,7 @@ mod string_observer_tests {
     }
 
     #[test]
-    fn reed_ode_observes_exact_held_flow_for_both_valve_selections() {
+    fn massive_reed_ode_observes_exact_held_flow() {
         let gas = gas_state(AmbientGas::sea_level()).unwrap();
         let sections = [AcousticSection {
             length: 0.5,
@@ -6172,56 +5686,51 @@ mod string_observer_tests {
             cells: 2,
         }];
         for rate in [48_000, 96_000, 192_000] {
-            for mass in [0.0, 1e-4] {
-                let dt = 1.0 / f64::from(rate);
-                let reed = BeatingReed {
-                    rest_opening_m: 1e-3,
-                    width_m: 0.01,
-                    closing_pressure_pa: 1e6,
-                    blowing_pressure_pa: 100.0,
-                    attack_s: 2.0 * dt,
-                    mass_kg: mass,
-                    stiffness_n_m: 100.0,
-                    damping_ratio: 0.01,
-                };
-                let out = realize_reed_ode(
-                    &sections,
-                    ChainOutlet::PressureRelease,
-                    &[],
-                    reed,
-                    &mut PlateBank::default(),
-                    &gas,
-                    1.0,
-                    rate,
-                    2,
-                    None,
-                )
-                .unwrap();
-                let pressure = blowing_envelope(reed, dt);
-                let opening = if mass == 0.0 {
-                    quasistatic_aperture_opening(
-                        reed.rest_opening_m,
-                        reed.closing_pressure_pa,
-                        pressure,
-                    )
-                } else {
-                    reed.rest_opening_m
-                };
-                let flow = bernoulli_volume_flow(reed.width_m, opening, pressure, gas.density);
-                let line = ode_bore_chain(&sections, ChainOutlet::PressureRelease, 1, &[], &gas, None).unwrap();
-                let split = prepare_render_linear(&line).unwrap();
-                let expected = fs_phs::linear_exact::step_split(
-                    &line,
-                    &split,
-                    fs_phs::linear_exact::LinearPropagator::ExactZoh,
-                    &vec![0.0; line.state_dim()],
-                    &[flow],
-                    dt,
-                )
-                .unwrap();
-                assert_eq!(out[0], 0.0);
-                assert!((out[1] - expected.y[0]).abs() <= 1e-12 * expected.y[0].abs());
-            }
+            let dt = 1.0 / f64::from(rate);
+            let reed = BeatingReed {
+                rest_opening_m: 1e-3,
+                width_m: 0.01,
+                closing_pressure_pa: 1e6,
+                blowing_pressure_pa: 100.0,
+                attack_s: 2.0 * dt,
+                mass_kg: 1e-4,
+                stiffness_n_m: 100.0,
+                damping_ratio: 0.01,
+            };
+            let out = realize_reed_ode(
+                &sections,
+                ChainOutlet::PressureRelease,
+                &[],
+                reed,
+                &mut PlateBank::default(),
+                &gas,
+                1.0,
+                rate,
+                2,
+                None,
+            )
+            .unwrap();
+            let pressure = blowing_envelope(reed, dt);
+            let flow = bernoulli_volume_flow(
+                reed.width_m,
+                reed.rest_opening_m,
+                pressure,
+                gas.density,
+            );
+            let line =
+                ode_bore_chain(&sections, ChainOutlet::PressureRelease, 1, &[], &gas, None).unwrap();
+            let split = prepare_render_linear(&line).unwrap();
+            let expected = fs_phs::linear_exact::step_split(
+                &line,
+                &split,
+                fs_phs::linear_exact::LinearPropagator::ExactZoh,
+                &vec![0.0; line.state_dim()],
+                &[flow],
+                dt,
+            )
+            .unwrap();
+            assert_eq!(out[0], 0.0);
+            assert!((out[1] - expected.y[0]).abs() <= 1e-12 * expected.y[0].abs());
         }
     }
 
