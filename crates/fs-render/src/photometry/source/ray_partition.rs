@@ -1,4 +1,4 @@
-//! Angular-cell crossings of a scaled fixture-local line segment.
+//! Source and scattering angular-cell crossings of scaled line segments.
 //!
 //! These floating-point roots guide quadrature; they are not certified
 //! intersections or numerical error enclosures. The opposite cone nappe and
@@ -73,6 +73,41 @@ pub(crate) fn cone_crossings(origin: [f64; 3], delta: [f64; 3], mu: f64) -> [Opt
             if mu < 0.0 { z <= 0.0 } else { z >= 0.0 }
         })
     })
+}
+
+/// Camera-segment crossing of a point source's propagation phase cosine.
+/// `camera_to_source` and `distance` share one length scale; the caller scales
+/// them before forming these products. The view direction is finite and near
+/// unit length. Its actual norm is retained to match the incident-field dot
+/// product, including the ray admission's permitted unit-vector roundoff.
+pub(crate) fn phase_crossing(
+    camera_to_source: [f64; 3],
+    direction: [f64; 3],
+    distance: f64,
+    cosine: f64,
+) -> Option<f64> {
+    let norm = dot(direction, direction).sqrt();
+    let mu = cosine / norm;
+    if !(mu > -1.0 && mu < 1.0) {
+        return None;
+    }
+    let axis = direction.map(|component| component / norm);
+    let projection = dot(camera_to_source, axis);
+    let perpendicular = [
+        difference_of_products(camera_to_source[1], axis[2], camera_to_source[2], axis[1]),
+        difference_of_products(camera_to_source[2], axis[0], camera_to_source[0], axis[2]),
+        difference_of_products(camera_to_source[0], axis[1], camera_to_source[1], axis[0]),
+    ];
+    let impact = dot(perpendicular, perpendicular).sqrt();
+    if impact == 0.0 {
+        // A collinear source outside the admitted segment has constant phase.
+        // Sources on the segment are rejected by scene singularity admission.
+        return None;
+    }
+    // In the camera-axis frame mu=z/sqrt(b²+z²), z=c-|direction|*t.
+    // Its inverse is monotone, with one root and no opposite cone nappe.
+    let sine = ((1.0 - mu.abs()) * (1.0 + mu.abs())).sqrt();
+    interior((-impact).mul_add(mu / sine, projection) / (norm * distance))
 }
 
 /// Crossings of one azimuth ray, excluding the opposite half of its plane.
@@ -155,6 +190,91 @@ mod tests {
         let mut roots: Vec<_> = roots.into_iter().flatten().collect();
         roots.sort_by(f64::total_cmp);
         roots
+    }
+
+    #[test]
+    fn g1_phase_crossings_match_forward_and_backward_right_triangles() {
+        let q = [0.5, 0.25, 0.0];
+        let direction = [1.0, 0.0, 0.0];
+        let diagonal_cosine = core::f64::consts::FRAC_1_SQRT_2;
+        for (cosine, expected) in [
+            (diagonal_cosine, 0.25),
+            (0.0, 0.5),
+            (-diagonal_cosine, 0.75),
+        ] {
+            let actual = phase_crossing(q, direction, 1.0, cosine).unwrap();
+            assert!((actual - expected).abs() < 2.0e-16);
+        }
+        let norm = 1.0 + 4.0 * f64::EPSILON;
+        let actual = phase_crossing(q, [norm, 0.0, 0.0], 1.0, norm * diagonal_cosine).unwrap();
+        assert!((actual - 0.25 / norm).abs() < 2.0e-16);
+    }
+
+    #[test]
+    fn g1_narrow_phase_cells_keep_distinct_boundaries_between_quadrature_nodes() {
+        let q = [0.5, 0.3, 0.0];
+        for center in [0.2_f64, -0.2] {
+            let mut knots = Vec::new();
+            for cosine in [center - 1.0e-5, center, center + 1.0e-5] {
+                let actual = phase_crossing(q, [1.0, 0.0, 0.0], 1.0, cosine).unwrap();
+                let expected = 0.5 - 0.3 / cosine.acos().tan();
+                assert!((actual - expected).abs() < 3.0e-16);
+                insert_knot(&mut knots, actual, 3).unwrap();
+            }
+            assert_eq!(knots.len(), 3);
+            assert!(knots[0] < knots[1] && knots[1] < knots[2]);
+            // The unpartitioned two- and four-panel midpoint evaluations
+            // never encounter either of these nonzero phase lobes.
+            for node in [0.125, 0.25, 0.375, 0.625, 0.75, 0.875] {
+                assert!(node < knots[0] || node > knots[2]);
+            }
+        }
+    }
+
+    #[test]
+    fn g3_phase_crossings_preserve_rigid_rotation_and_common_length_scale() {
+        let rotate = |v: [f64; 3]| {
+            [
+                (v[0] + 2.0 * v[1] - 2.0 * v[2]) / 3.0,
+                (2.0 * v[0] + v[1] + 2.0 * v[2]) / 3.0,
+                (2.0 * v[0] - 2.0 * v[1] - v[2]) / 3.0,
+            ]
+        };
+        let q = [0.55, 0.25, -0.125];
+        for cosine in [-0.6, 0.0, 0.6] {
+            let baseline = phase_crossing(q, [1.0, 0.0, 0.0], 1.0, cosine).unwrap();
+            for scale in [1.0e-100, 0.125, 128.0, 1.0e100] {
+                let actual = phase_crossing(
+                    rotate(q.map(|component| component * scale)),
+                    rotate([1.0, 0.0, 0.0]),
+                    scale,
+                    cosine,
+                )
+                .unwrap();
+                assert!((actual - baseline).abs() < 8.0e-16);
+            }
+        }
+    }
+
+    #[test]
+    fn g0_constant_phase_and_endpoint_crossings_add_no_interior_partition() {
+        for q in [[-1.0, 0.0, 0.0], [2.0, 0.0, 0.0]] {
+            for cosine in [-0.95, 0.0, 0.95] {
+                assert_eq!(phase_crossing(q, [1.0, 0.0, 0.0], 1.0, cosine), None);
+            }
+        }
+        for cosine in [-1.0, 1.0, f64::NAN] {
+            assert_eq!(
+                phase_crossing([0.5, 0.3, 0.0], [1.0, 0.0, 0.0], 1.0, cosine),
+                None
+            );
+        }
+        for projection in [0.0, 1.0] {
+            assert_eq!(
+                phase_crossing([projection, 0.3, 0.0], [1.0, 0.0, 0.0], 1.0, 0.0),
+                None
+            );
+        }
     }
 
     #[test]

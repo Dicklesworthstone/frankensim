@@ -1706,12 +1706,22 @@ The single-scattering integrator analytically integrates camera-path extinction
 within midpoint panels and refines under an explicit panel budget. Its returned
 quadrature discrepancy is an estimate, never an enclosure. The scene image
 entry point partitions a camera segment at fixture cone/cosine cutoffs and
-tabulated polar/azimuth boundaries, including the azimuth seam. Intersections
-use the original rigid fixture frames and represented angular laws. Opposite
+tabulated polar/azimuth boundaries, including the azimuth seam. Since photometry
+semantics version 6, it also splits at every interior tabulated phase-law cosine
+knot for each active point fixture. Those phase crossings use photon propagation
+toward the camera, independent of the fixture's optical frame, and retain the
+admitted camera direction's actual norm. Isotropic and full-sphere fixtures
+still contribute phase crossings. Collinear sources outside the admitted
+segment have constant phase and need no phase cuts; sources on the segment
+remain subject to the existing singularity refusal.
+
+Beam intersections use the original rigid fixture frames and represented angular
+laws. Opposite
 cone nappes and azimuth half-planes are excluded by their geometric signs,
-retaining ambiguous zeros; distinct roots are never epsilon-merged. Each
-angular interval then receives its own midpoint refinements,
-so a narrow known beam cannot evade all sampling merely by lying between the
+retaining ambiguous zeros; distinct roots are never epsilon-merged. Source and
+phase boundaries share one exactly deduplicated partition. Each angular
+interval then receives its own midpoint refinements, so a narrow represented
+beam or phase lobe cannot evade all sampling merely by lying between the
 original uniform grid's nodes.
 
 The intervals share `ScatterSettings::max_panels`, with at least one panel per
@@ -1725,8 +1735,9 @@ Unpartitioned scenes retain the original integration arithmetic. Photometry
 semantics version 3 records this change.
 
 This partition is not a certified intersection or integration enclosure.
-Unresolved shadow boundaries, phase peaks, smooth within-cell variation and
-floating-point geometry can still defeat a refinement estimate. The public
+Unresolved shadow boundaries, untabulated analytic phase peaks, smooth
+within-cell variation and floating-point geometry can still defeat a
+refinement estimate. The public
 callback-only integrator has no fixture-profile metadata and retains its stated
 aliasing limitation. Omitted multiple scattering has no finite bound. Gray
 coefficients are an explicit wavelength-independent approximation.
@@ -1818,6 +1829,15 @@ progressive replay tests remain in the photometry batteries.
   error and its inverse-square-root sample-count scaling. Single-sample and
   Owen–Sobol results retain no IID error claim. These fixed regression
   tolerances are neither confidence certificates nor total-error bounds.
+
+- `photometric_image::phase_reference` independently integrates narrow forward
+  and backward tabulated phase lobes in angle space. For a declared 100 cd
+  fixture, 0.05 m⁻¹ absorption and 0.1 m⁻¹ scattering, the two references are
+  approximately 2.04655970 and 2.04655733 cd/m². Both lobes lie entirely between
+  the original two/four-panel midpoint nodes, which otherwise yield zero and
+  apparent convergence. The regressions also check rigid placement, SI scaling,
+  shared multi-fixture partition budgets, and unknown discrepancy when no
+  actual refinement comparison fits the budget.
 
 These original analytic scenes are not reproductions of CIE 171 test cases.
 The public CIE 171:2006 description does not supply the complete reference case

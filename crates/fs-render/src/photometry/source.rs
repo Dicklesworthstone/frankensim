@@ -544,7 +544,7 @@ impl PhotometricSource {
         Ok(self.emitted_flux_lm * self.distribution.intensity_per_steradian(local)?)
     }
 
-    /// Split a camera segment at represented angular-profile boundaries.
+    /// Split a camera segment at represented source-profile and phase boundaries.
     /// Knots are sorted, exactly deduplicated fractions in `(0,1)`, shared
     /// across fixtures. They guide quadrature but do not certify geometry,
     /// resolve shadow boundaries, or bound phase/smooth-profile variation.
@@ -552,18 +552,22 @@ impl PhotometricSource {
         &self,
         ray: &crate::charts::Ray,
         distance_m: f64,
+        phase: &super::medium::PhaseFunction,
         max_panels: u32,
         knots: &mut Vec<f64>,
         cx: &fs_exec::Cx<'_>,
     ) -> Result<(), super::PhotometryError> {
-        use super::PhotometryError;
-        use ray_partition::{KnotError, azimuth_crossing, cone_crossings, insert_knot};
+        use super::{PhotometryError, medium::PhaseFunction};
+        use ray_partition::{
+            KnotError, azimuth_crossing, cone_crossings, insert_knot, phase_crossing,
+        };
 
         cx.checkpoint()?;
         if self.emitted_flux_lm == 0.0
             || distance_m == 0.0
-            || matches!(&self.distribution.law, AngularLaw::Isotropic)
-            || matches!(&self.distribution.law, AngularLaw::Cone { cosine_cutoff } if *cosine_cutoff == -1.0)
+            || (!matches!(phase, PhaseFunction::Tabulated(_))
+                && (matches!(&self.distribution.law, AngularLaw::Isotropic)
+                    || matches!(&self.distribution.law, AngularLaw::Cone { cosine_cutoff } if *cosine_cutoff == -1.0)))
         {
             return Ok(());
         }
@@ -609,6 +613,7 @@ impl PhotometricSource {
         };
         match &self.distribution.law {
             AngularLaw::Isotropic => {}
+            AngularLaw::Cone { cosine_cutoff } if *cosine_cutoff == -1.0 => {}
             AngularLaw::Cone { cosine_cutoff } | AngularLaw::CosinePower { cosine_cutoff, .. } => {
                 for root in cone_crossings(origin, delta, *cosine_cutoff)
                     .into_iter()
@@ -634,6 +639,21 @@ impl PhotometricSource {
                             insert(root)?;
                         }
                     }
+                }
+            }
+        }
+        if let PhaseFunction::Tabulated(table) = phase {
+            // The phase angle belongs to the source-camera geometry, not the
+            // fixture's optical frame. Scale before forming dot/cross products.
+            let camera_to_source = [-offset.x / scale, -offset.y / scale, -offset.z / scale];
+            let direction = [ray.dir.x, ray.dir.y, ray.dir.z];
+            let phase_knots = table.knots_per_sr();
+            for &(cosine, _) in &phase_knots[1..phase_knots.len() - 1] {
+                cx.checkpoint()?;
+                if let Some(root) =
+                    phase_crossing(camera_to_source, direction, distance_m / scale, cosine)
+                {
+                    insert(root)?;
                 }
             }
         }

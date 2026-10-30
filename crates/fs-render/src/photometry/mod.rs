@@ -40,10 +40,12 @@ use source::{PhotometricSource, SourceError};
 use transport::{PhotometricMedium, photopic_transmittance};
 
 /// Version of the calibrated transport model and output interpretation.
-/// Version 5 admits passive tabulated diffuse reflectance. Version 4's
+/// Version 6 resolves represented tabulated phase-law cells in homogeneous
+/// single-scattered images. Version 5 admits passive tabulated diffuse
+/// reflectance. Version 4's
 /// shared tabulated haze phase laws, version 3's fixture
 /// angular partitions and version 2's published CIE observer remain in use.
-pub const PHOTOMETRY_SEMANTICS_VERSION: u32 = 5;
+pub const PHOTOMETRY_SEMANTICS_VERSION: u32 = 6;
 
 /// Explicit geometric and output budgets for an offline calculation.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -85,7 +87,7 @@ pub enum PhotometryError {
     InvalidCameraRay,
     /// Single-scattering quadrature settings are invalid.
     InvalidScatterSettings,
-    /// The declared fixture angular intervals need more panels than the
+    /// The declared fixture/phase angular intervals need more panels than the
     /// caller permits. No unresolved interval is silently discarded.
     ScatteringPartitionBudgetExceeded {
         /// Increase this total panel cap to admit the known angular intervals.

@@ -143,6 +143,7 @@ impl PhotometricScene<'_> {
                 source.append_scattering_breakpoints(
                     ray,
                     limit,
+                    medium.phase_ref(),
                     scatter.max_panels,
                     &mut scattering_knots,
                     cx,
