@@ -313,6 +313,7 @@ impl MaterialStringSource {
             Self::Concentric { section, .. } => section.elastic().clone(),
             Self::ConcentricProny { section, .. } => section.elastic().clone(),
             Self::Wound(_) => return Err(invalid("close-coiled winding torsion requires a resolved core/wrap model")),
+            Self::Measured(_) => return Err(invalid("whole-string bending measurements do not determine torsional stiffness or polar inertia")),
             Self::WithTorsion(_) => return Err(invalid("nested torsion is not a new physical section")),
             Self::WithPolarizations(_) => return Err(invalid("polarized torsion must retain its original source")),
         };
@@ -351,7 +352,7 @@ impl MaterialStringSource {
                 twist.relaxation = Some(twist.section.clone().with_prony_torsion(properties)?);
                 Ok(Self::WithTorsion(twist))
             }
-            Self::Homogeneous(_) | Self::Wound(_) | Self::Concentric { .. } | Self::ConcentricProny { .. } =>
+            Self::Homogeneous(_) | Self::Measured(_) | Self::Wound(_) | Self::Concentric { .. } | Self::ConcentricProny { .. } =>
                 Err(MaterialStatePointError::InvalidDerived {
                     quantity: "shear relaxation requires the original torsional source",
                 }),

@@ -183,6 +183,7 @@ fn section(source: &MaterialStringSource) -> Result<ConcentricElasticSection, Re
         MaterialStringSource::Concentric { section, .. } => Ok(section.elastic().clone()),
         MaterialStringSource::ConcentricProny { section, .. } => Ok(section.elastic().clone()),
         MaterialStringSource::Wound(s) => Ok(s.section().core().elastic().clone()),
+        MaterialStringSource::Measured(_) => Err(invalid("whole-string bending measurements do not resolve material layers or their relaxation spectra")),
     }
 }
 // Raising instantaneous core stiffness must not escape the wrapping material's

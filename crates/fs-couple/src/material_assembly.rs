@@ -9,6 +9,8 @@
 pub mod concentric;
 /// Source-bound close-coiled winding on the same generic string/body solver.
 pub mod wound;
+/// Direct measured whole-string properties without invented core/winding laws.
+pub mod measured_string;
 /// Material-reduced reeds composed with the existing solid/gas assembly.
 pub mod valve;
 

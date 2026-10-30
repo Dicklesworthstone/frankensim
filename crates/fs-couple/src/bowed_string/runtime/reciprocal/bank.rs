@@ -46,6 +46,9 @@ pub enum MaterialStringSource {
     WithTorsion(Box<torsion::TorsionalStringSource>),
     /// Homogeneous circular specimen, with its complete material/loss receipts.
     Homogeneous(ResolvedStringSpecimen),
+    /// Direct measured whole-string mass, EI, diameter, length and tension.
+    /// No intrinsic loss or hidden core, axial, shear or surface law is inferred.
+    Measured(crate::material_assembly::measured_string::ResolvedMeasuredStringSpecimen),
     /// Sliding close-coiled winding: actual wire mass/spring stiffness and core flexure.
     Wound(crate::material_assembly::wound::ResolvedWoundStringSpecimen),
     /// Perfectly bonded annuli with per-layer elasticity, density and viscosity.
@@ -77,6 +80,7 @@ impl MaterialStringSource {
             Self::WithPolarizations(p) => p.source().resolved_transverse_string(),
             Self::WithTorsion(t) => t.bending().resolved_transverse_string(),
             Self::Homogeneous(s) => Ok(s.string()),
+            Self::Measured(s) => Ok(s.string()),
             Self::Wound(s) => Ok(s.string()),
             Self::Concentric { template, section, prestress } =>
                 crate::material_assembly::concentric::with_concentric_kelvin_voigt_section(
@@ -92,6 +96,7 @@ impl MaterialStringSource {
         match self { Self::WithPolarizations(p) => p.total_modes(),
             Self::WithTorsion(t) => t.total_modes(),
             Self::Homogeneous(s) => s.string().n_modes,
+            Self::Measured(s) => s.string().n_modes,
             Self::Wound(s) => s.string().n_modes,
             Self::Concentric { template, .. } | Self::ConcentricProny { template, .. } => template.n_modes }
     }
@@ -105,6 +110,7 @@ impl MaterialStringSource {
             Self::WithPolarizations(p) => return p.source().lower(cx, gas, rate),
             Self::WithTorsion(t) => return t.bending().lower(cx, gas, rate),
             Self::Homogeneous(s) => BowedStringCard::from_material_specimen_with_gas(cx, s, gas, rate),
+            Self::Measured(s) => BowedStringCard::from_measured_string_specimen(cx, s, gas, rate),
             Self::Wound(s) => BowedStringCard::from_wound_material_specimen(cx, s, gas, rate),
             Self::Concentric { template, section, prestress } =>
                 BowedStringCard::from_concentric_material_section(cx, template.clone(), section, *prestress, gas, rate),

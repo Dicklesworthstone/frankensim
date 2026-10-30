@@ -204,6 +204,11 @@ fn geometry_and_band(source: &MaterialStringSource)
         MaterialStringSource::WithPolarizations(p) => geometry_and_band(p.source()),
         MaterialStringSource::WithTorsion(t) => geometry_and_band(t.bending()),
         MaterialStringSource::Wound(s) => Ok((s.section().outer_radius_m(), s.section().omega_band_rad_s())),
+        // No loss-property band is manufactured for a measured elastic section.
+        // The finite sentinel is numerical admission only; source metadata keeps
+        // an unstated frequency range as None throughout the bank/performance.
+        MaterialStringSource::Measured(s) =>
+            Ok((s.radius_m(), s.omega_band_rad_s().unwrap_or((0.0, f64::MAX)))),
         MaterialStringSource::Homogeneous(s) => {
             let string = s.string();
             let band = string.kelvin_voigt_bending.map(|law| law.omega_band_rad_s)

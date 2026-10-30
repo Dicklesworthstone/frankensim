@@ -319,6 +319,7 @@ pub(super) fn outer_material(
         MaterialStringSource::WithPolarizations(p) => outer_material(p.source()),
         MaterialStringSource::WithTorsion(t) => outer_material(t.bending()),
         MaterialStringSource::Homogeneous(s) => Ok(s.material()),
+        MaterialStringSource::Measured(_) => Err(invalid("whole-string mass and bending measurements do not identify a contact surface material")),
         MaterialStringSource::Wound(s) => Ok(s.section().winding_material()),
         MaterialStringSource::Concentric { section, .. } => section
             .elastic()

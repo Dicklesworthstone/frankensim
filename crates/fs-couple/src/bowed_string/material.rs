@@ -30,6 +30,29 @@ fn invalid(what: &'static str) -> AcousticRealizeError {
 }
 
 impl BowedStringCard {
+    /// Lower direct whole-string measurements through the original transverse
+    /// dispersion, cylinder resistance and time-domain admission. Intrinsic
+    /// material loss remains absent, explicitly unmeasured; no Q is converted
+    /// into a viscosity, torsional law or invented homogeneous solid.
+    pub fn from_measured_string_specimen(
+        cx: &Cx<'_>,
+        specimen: &crate::material_assembly::measured_string::ResolvedMeasuredStringSpecimen,
+        gas: &GasState,
+        sample_rate_hz: u32,
+    ) -> Result<Self, AcousticRealizeError> {
+        poll(cx)?;
+        let string = specimen.string();
+        validate_incremental_string(&string)?;
+        for mode in 1..=string.n_modes {
+            poll(cx)?;
+            specimen.admit_angular_frequency(fs_nlmodal::prestressed_beam_omega(
+                string.length_m, string.tension_n, string.lin_density_kg_m,
+                string.bending_stiffness_n_m2, mode,
+            ))?;
+        }
+        lower_backbone(cx, &string, gas, sample_rate_hz, 0.0)
+    }
+
     /// Compile the admitted close-coiled material winding through the same
     /// string dispersion, gas drag, bridge shear and source-band checks.
     pub fn from_wound_material_specimen(

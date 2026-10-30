@@ -20,6 +20,7 @@ pub(super) fn split_loss(source: &NonlinearMaterialString, remainder_hz: f64,
     };
     let radius=match bending {
         MaterialStringSource::Homogeneous(s) => 0.5*s.string().width_m,
+        MaterialStringSource::Measured(s) => s.radius_m(),
         MaterialStringSource::Wound(s) => s.section().outer_radius_m(),
         MaterialStringSource::Concentric { section, .. } => section.elastic().outer_radius_m(),
         MaterialStringSource::ConcentricProny { section, .. } => section.elastic().outer_radius_m(),

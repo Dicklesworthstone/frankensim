@@ -101,6 +101,7 @@ fn string_band(
             }
         }
         MaterialStringSource::Homogeneous(s) => material_band(s.material(), band)?,
+        MaterialStringSource::Measured(s) => material_band(s.measurements(), band)?,
         MaterialStringSource::Wound(s) => intersect(band, s.section().omega_band_rad_s())?,
         MaterialStringSource::Concentric { section, .. } => {
             intersect(band, section.omega_band_rad_s())?;

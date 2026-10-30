@@ -168,6 +168,7 @@ fn elastic_section(source: &MaterialStringSource) -> Result<ConcentricElasticSec
         MaterialStringSource::Concentric { section, .. } => Ok(section.elastic().clone()),
         MaterialStringSource::ConcentricProny { section, .. } => Ok(section.elastic().clone()),
         MaterialStringSource::Wound(_) => Err(invalid("quasistatic winding spring has no resolved axial material history")),
+        MaterialStringSource::Measured(_) => Err(invalid("whole-string bending measurements do not determine an axial material history")),
     }
 }
 
