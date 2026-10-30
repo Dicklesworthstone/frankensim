@@ -13,6 +13,7 @@ use crate::liquid::ResolvedLiquidState;
 use crate::moist_air::ResolvedMoistAirState;
 
 mod thermal;
+mod water;
 pub use thermal::{ThermalFluidTransport, ThermalFluidTransportState};
 
 /// Immutable transport coefficients for one evaluated material state point.

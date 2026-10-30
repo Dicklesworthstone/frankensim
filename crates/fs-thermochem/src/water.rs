@@ -22,6 +22,8 @@ pub mod if97;
 pub mod ice;
 /// Explicit near-ambient liquid and empirical freshwater-ice transport sources.
 pub mod conductivity;
+/// Industrial viscosity and conductivity from the original admitted IF97 state.
+pub mod transport;
 use core::fmt;
 use fs_math::det;
 use fs_qty::{Density, Pressure, Qty, Temperature};
