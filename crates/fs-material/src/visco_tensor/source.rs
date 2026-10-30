@@ -8,13 +8,14 @@
 
 use super::{TensorProny, TensorPronyBranch};
 use crate::state_point::{
-    MaterialStatePointError, ORTHOTROPIC_POISSON_RATIO_PROPERTIES,
+    MaterialPropertySelection, MaterialStatePointError, ORTHOTROPIC_POISSON_RATIO_PROPERTIES,
     ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES, ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES,
     ResolvedMaterialStatePoint, ScalarAdmissibility as Admit,
-    ScalarPropertyRequirement as Requirement,
+    ScalarPropertyRequirement as Requirement, resolve_material_state_point,
 };
 use crate::{IsotropicElastic, OrthotropicElastic};
-use fs_qty::{Dims, Pressure};
+use fs_matdb::{MaterialCard, QueryPoint};
+use fs_qty::{Density, Dims, Pressure, QuantitySpec};
 
 /// Canonical equilibrium elastic data, before any spatial rotation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,6 +70,97 @@ impl From<MaterialStatePointError> for TensorSourceError {
 }
 
 type Result<T> = core::result::Result<T, TensorSourceError>;
+
+/// Reference inertia and the complete hereditary law from one immutable card.
+///
+/// Geometry and material orientation belong to the consuming specimen. Density,
+/// equilibrium elasticity, every Maxwell tensor and every relaxation time share
+/// one physical query and source selection. No equivalent isotropic material,
+/// fitted modal damping or density-derived modulus is introduced.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedTensorMaterial {
+    state: ResolvedMaterialStatePoint,
+    properties: TensorPronyProperties,
+    law: TensorProny,
+    density_kg_m3: f64,
+}
+
+impl ResolvedTensorMaterial {
+    /// Atomically resolve the source law and reference density. Frequency
+    /// applicability of density also restricts the law's original source band;
+    /// a sampled frequency-dependent density cannot become constant inertia.
+    /// Temperature and geometry stay fixed for the resulting dynamics. This
+    /// binding does not implement thermal expansion or a material transition.
+    pub fn resolve(
+        card: &MaterialCard,
+        point: &QueryPoint,
+        properties: TensorPronyProperties,
+        selection: MaterialPropertySelection,
+    ) -> Result<Self> {
+        let mut requirements = properties.requirements()?;
+        if requirements.iter().any(|r| r.name() == "density") {
+            return Err(TensorSourceError::Invalid(
+                "density cannot also name an elastic, strain or relaxation property".into(),
+            ));
+        }
+        requirements.push(Requirement::try_new(
+            "density",
+            Density::DIMS,
+            Admit::StrictlyPositive,
+        )?);
+        let state = resolve_material_state_point(card, point, &requirements, selection)?;
+        let density = state.property("density").expect("resolved source density");
+        if density.requirement().quantity() != QuantitySpec::dimensional(Density::DIMS)
+            || !density.is_constant_at_fixed_temperature()
+            || !density.value_si().is_finite()
+            || density.value_si() <= 0.0
+        {
+            return Err(TensorSourceError::Invalid(
+                "reference density must be a positive SI coefficient constant at the declared external state".into(),
+            ));
+        }
+        let mut law = properties.bind(&state)?;
+        if let Some((low, high)) = density.angular_frequency_band_rad_s()? {
+            let band = law.band_rad_s();
+            law = law
+                .with_band((band.0.max(low), band.1.min(high)))
+                .map_err(|e| TensorSourceError::Invalid(e.to_string()))?;
+        }
+        let density_kg_m3 = density.value_si();
+        Ok(Self {
+            state,
+            properties,
+            law,
+            density_kg_m3,
+        })
+    }
+
+    /// Original same-card query, property selections and receipts.
+    pub const fn state(&self) -> &ResolvedMaterialStatePoint {
+        &self.state
+    }
+    /// Original equilibrium family and explicit Maxwell property selectors.
+    pub const fn properties(&self) -> &TensorPronyProperties {
+        &self.properties
+    }
+    /// Complete law in its original material frame, including its source band.
+    pub const fn law(&self) -> &TensorProny {
+        &self.law
+    }
+    /// Fixed density in the reference geometry [kg/m³].
+    pub const fn density_kg_m3(&self) -> f64 {
+        self.density_kg_m3
+    }
+
+    /// Express every original tensor in another frame with the SAME proper
+    /// material-to-target rotation. No material direction is inferred from
+    /// element ordering. Branch rates, strain limits and source band survive.
+    pub fn rotated_law(&self, material_to_target: [[f64; 3]; 3]) -> Result<TensorProny> {
+        self.law
+            .rotated(material_to_target)
+            .map_err(|e| TensorSourceError::Invalid(e.to_string()))
+    }
+}
 
 impl TensorPronyProperties {
     /// Requirements to add to the original card query. Repeated names resolve

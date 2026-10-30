@@ -5340,3 +5340,19 @@ limits of the original slab remain independent requirements.
 `ConcentricRodThermoelasticLaw` extends the original axial thermoelastic material law with the native annular bending, shear and torsional potential. It exposes the same potential, entropy and mechanical heat-capacity derivatives for all six small-strain coordinates. The derivatives come from the pinned material sources, with integrated thermal expansion and the original section moments; there is no independent coefficient table or material-name dispatch.
 
 The admitted chart has fixed reference geometry, scalar reference density and expansion, and scalar or globally affine Young and shear moduli. Source domains, finite results and the original strain envelope are checked. More general temperature laws and phase-dependent geometry are not inferred. The `fs-couple` rod enthalpy regressions compare all components against independent formulas and temperature differentiation, including parity with the native rod energy. These new native tests await execution after the unchanged runtime dependency exceeded the authoring environment's resources.
+
+## Shared tensor dynamics material binding
+
+`visco_tensor::ResolvedTensorMaterial` resolves density, equilibrium elasticity,
+every selected Maxwell tensor/time and strain limit from one material card/query.
+It retains the source and intersects density and constitutive frequency domains;
+dispersive density refuses. `fs-solid::TetViscoMaterial::from_source`, sourced
+`fs-couple::TensorMembrane` facets and the production 3D valve parser share this
+binding. Membranes rotate the complete hereditary law from declared material axes
+into each original facet before the existing plane-stress elimination. Consistent
+and lumped inertia, constitutive memory and physical heat retain their native
+owners. Three `fs-couple/tests/tensor_material_source.rs` tests cover analytic
+inertia/frequency, source-only heat changes, rotation/reindexing invariance and
+source/domain/cancellation refusal; native execution remains unverified in the
+memory-limited authoring worker. This is frozen-state, fixed-geometry, small-strain
+dynamics; no thermal evolution, prestress, bending or acoustic radiation is inferred.

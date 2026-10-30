@@ -21,14 +21,13 @@ use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_matdb::QueryPoint;
 use fs_material::gas::GasState;
 use fs_material::state_point::{
-    MaterialPropertySelection, ResolvedMaterialStatePoint, ScalarAdmissibility,
-    ScalarPropertyRequirement, resolve_material_state_point,
+    MaterialPropertySelection, ResolvedMaterialStatePoint,
 };
 use fs_material::visco_tensor::source::{
-    TensorBranchProperties, TensorElasticity, TensorPronyProperties,
+    ResolvedTensorMaterial, TensorBranchProperties, TensorElasticity, TensorPronyProperties,
+    TensorSourceError,
 };
 use fs_modal::ModalDampingBudget;
-use fs_qty::Density;
 use fs_solid::linear3::{
     TetAssemblyBudget,
     visco::{SolidProjectionBudget, TetViscoField, TetViscoMaterial, ViscoStateBudget},
@@ -50,7 +49,7 @@ pub struct SolidValveMaterialRecord {
     section: usize,
     path: String,
     pack: Arc<NormalizedMaterialCardPack>,
-    resolved: ResolvedMaterialStatePoint,
+    source: ResolvedTensorMaterial,
     axes: [[f64; 3]; 3],
 }
 impl SolidValveMaterialRecord {
@@ -64,7 +63,11 @@ impl SolidValveMaterialRecord {
         &self.pack
     }
     pub const fn resolved(&self) -> &ResolvedMaterialStatePoint {
-        &self.resolved
+        self.source.state()
+    }
+    /// Same source binding used by ordinary solid and membrane dynamics.
+    pub const fn source(&self) -> &ResolvedTensorMaterial {
+        &self.source
     }
     /// Material-to-mesh rotation, admitted by the original tensor law.
     pub const fn material_axes(&self) -> &[[f64; 3]; 3] {
@@ -359,67 +362,28 @@ pub(super) fn read(
             strain_limit,
             branches,
         };
-        let mut requirements = properties
-            .requirements()
-            .map_err(|e| failure(line, e, gate))?;
-        // Density is a physical constitutive claim on the same state and band,
-        // never a separate tuning number or a sampled frequency-dependent mass.
-        if requirements.iter().any(|r| r.name() == "density") {
-            return Err(bad(
-                line,
-                "density cannot also name a tensor or strain property",
-            ));
-        }
-        requirements.push(
-            ScalarPropertyRequirement::try_new(
-                "density",
-                Density::DIMS,
-                ScalarAdmissibility::StrictlyPositive,
-            )
-            .map_err(|e| failure(line, e, gate))?,
-        );
         let pack = cache.load(&path, line, loader, gate)?;
         let query = QueryPoint::new()
             .with("T", temperature)
             .and_then(|p| p.with("omega", omega))
             .map_err(|e| failure(line, e, gate))?;
-        let resolved = resolve_material_state_point(
+        let source = ResolvedTensorMaterial::resolve(
             pack.card(),
             &query,
-            &requirements,
+            properties,
             MaterialPropertySelection::SingleClaimOnly,
         )
-        .map_err(|source| PlateValveInputError::Material { line, source })?;
-        let density = resolved.property("density").expect("resolved density");
-        if !density.is_constant_at_fixed_temperature() {
-            return Err(bad(
-                line,
-                "solid density must be constant at the declared external state",
-            ));
-        }
-        let mut law = properties
-            .bind(&resolved)
-            .map_err(|e| failure(line, e, gate))?;
-        if let Some((low, high)) = density
-            .angular_frequency_band_rad_s()
-            .map_err(|e| failure(line, e, gate))?
-        {
-            let band = law.band_rad_s();
-            law = law
-                .with_band((band.0.max(low), band.1.min(high)))
-                .map_err(|e| failure(line, e, gate))?;
-        }
-        let law = law.rotated(axes).map_err(|e| failure(line, e, gate))?;
-        materials.push(TetViscoMaterial {
-            law,
-            density_kg_m3: density.value_si(),
-            material_state_identity: resolved.identity().0,
-        });
+        .map_err(|e| match e {
+            TensorSourceError::StatePoint(source) => PlateValveInputError::Material { line, source },
+            e => failure(line, e, gate),
+        })?;
+        materials.push(TetViscoMaterial::from_source(&source, axes)
+            .map_err(|e| failure(line, e, gate))?);
         records.push(SolidValveMaterialRecord {
             section,
             path,
             pack,
-            resolved,
+            source,
             axes,
         });
     }

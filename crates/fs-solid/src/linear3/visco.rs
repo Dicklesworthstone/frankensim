@@ -60,6 +60,23 @@ pub struct TetViscoMaterial {
     pub material_state_identity: [u8; 32],
 }
 
+impl TetViscoMaterial {
+    /// Lower one same-card constitutive/inertial source into the original
+    /// tetrahedral owner. Every tensor uses the explicit material-to-mesh
+    /// rotation; density, branch rates and applicability are unchanged. Retain
+    /// `source` alongside the specimen when its full receipts are needed.
+    pub fn from_source(
+        source: &fs_material::visco_tensor::source::ResolvedTensorMaterial,
+        material_to_mesh: [[f64; 3]; 3],
+    ) -> Result<Self, fs_material::visco_tensor::source::TensorSourceError> {
+        Ok(Self {
+            law: source.rotated_law(material_to_mesh)?,
+            density_kg_m3: source.density_kg_m3(),
+            material_state_identity: source.state().identity().0,
+        })
+    }
+}
+
 /// Uniform or explicitly per-element constitutive data.
 #[derive(Clone, Copy)]
 pub enum TetViscoField<'a> {

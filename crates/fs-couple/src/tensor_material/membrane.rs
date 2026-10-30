@@ -20,6 +20,8 @@ use std::collections::BTreeSet;
 
 mod loading;
 pub use loading::MembraneEdgeTraction;
+/// Same-card hereditary material and inertia in explicit physical frames.
+pub mod source;
 
 /// Explicit homogeneous-through-thickness material on ONE original triangle.
 #[derive(Clone, Debug)]
@@ -42,6 +44,8 @@ pub enum MembraneError {
     Geometry(fs_plate::PlateError),
     /// Original material, exact propagation, or cancellation refusal.
     Dynamics(TensorMaterialError),
+    /// Original same-card material or explicit material-frame admission.
+    MaterialSource(fs_material::visco_tensor::source::TensorSourceError),
 }
 impl core::fmt::Display for MembraneError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -49,6 +53,7 @@ impl core::fmt::Display for MembraneError {
             Self::Invalid(what) => write!(f, "tensor membrane: {what}"),
             Self::Geometry(e) => write!(f, "tensor membrane geometry: {e}"),
             Self::Dynamics(e) => write!(f, "tensor membrane dynamics: {e}"),
+            Self::MaterialSource(e) => write!(f, "tensor membrane material: {e}"),
         }
     }
 }
@@ -68,6 +73,7 @@ pub struct TensorMembrane {
     dof_map: Vec<Option<usize>>,
     nodal_mass: Vec<f64>,
     body: TensorMaterialBody,
+    material_sources: Option<Vec<source::MembraneMaterialSource>>,
 }
 impl TensorMembrane {
     /// Assemble row-sum lumped inertia on existing triangle connectivity.
@@ -203,7 +209,7 @@ impl TensorMembrane {
             TensorMaterialBody::from_plane_stress(masses,points,dynamics,gate)
         }.map_err(MembraneError::Dynamics)?;
         poll(gate)?;
-        Ok(Self { mesh, materials, facets, dof_map, nodal_mass, body })
+        Ok(Self { mesh, materials, facets, dof_map, nodal_mass, body, material_sources: None })
     }
     /// Original mesh; it cannot change after the strain maps have been prepared.
     pub fn mesh(&self) -> &ShellMesh { &self.mesh }
