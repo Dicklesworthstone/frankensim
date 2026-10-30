@@ -8720,6 +8720,43 @@ independent paired-blade motion, exact retry after source refusal or final
 cancellation, and rejection of an unowned second inventory. Native execution
 and measured physical validation remain separate gates.
 
+## Moving metering valves between independent finite gases
+
+`cavity_phs::piston::double_acting::valve` connects the original two finite
+gas inventories through a rectangular metering window on their existing shared
+wall coordinate. `RectangularMeteringValve` derives edge displacement from
+the primary volume and its original face area; the exposed area is the exact
+window overlap. It creates no second position state and does not clamp motion.
+
+`DoubleActingGasPiston::valve_candidate` and `step_with_valve` select the
+donor from actual initial pressures, call the original compressible nozzle and
+species/total-enthalpy transfer once, then call the original two-gas midpoint
+pressure-work and single-wall momentum solve. Different gas compositions,
+source caloric laws, temperatures and densities retain their original owners.
+Native throat/choking, source-domain, gross donor-fraction and transfer
+conservation gates remain active. Final pressure ordering is checked again
+after the actual heat and motion.
+
+The endpoint audit independently re-evaluates post-transfer caloric increments,
+actual wall kinetic change and force work. The original transfer's conserved
+species datums cancel before accumulation, preserving small thermal signals.
+Transferred enthalpy is internal to the pair; jet kinetic energy and pressure
+flow work are not deposited again. A late source, geometry, pressure, balance
+or cancellation refusal leaves both gases and the shared wall unchanged.
+
+This remains a first-order frozen-opening, transfer-then-motion partition.
+It supplies no jet recoil, resolved valve-fluid inertia, metering-edge friction
+or heterogeneous acoustic junction law. Actual mechanical/heat port observations
+are retained; for positive mass transfer, the full typed stream/mixing-entropy
+audit is explicitly unavailable because the native pair report does not supply
+that entropy account. Closed flow preserves the original native port accounts.
+
+Four focused regression groups cover independent species/caloric balances,
+both donor directions, geometry-driven opening/closure, analytical constant-
+caloric choking, changed shared-wall response, and late refusal/cancellation
+with exact retry. These tests are authored but not natively executed here;
+formatting/parser checks are separate from numerical or physical validation.
+
 ## Finite gas feedback retains spatial and molecular histories
 
 `FiniteGasDgLoss::SpatialViscothermal` and

@@ -7,6 +7,8 @@
 
 /// Reciprocal circuit force/back-emf on the original shared mechanical state.
 pub mod electrical;
+/// Geometry-driven internal gas exchange on the same two-sided motion.
+pub mod valve;
 
 use super::{
     ClosedGasParcel, GasEnergySolve, GasHeatVolumeCandidate, GasHeatVolumeStep,
@@ -216,8 +218,10 @@ impl DoubleActingGasPiston {
     /// Both geometric endpoint volumes must be positive BEFORE querying sources.
     /// At most 2*(maximum_iterations+3) gas proposals are made. Sources, geometry,
     /// balances, exhausted work and cancellation cannot publish either side alone.
-    /// There are no valves, mass/species exchange, contact stops, crank linkages,
-    /// combustion, wall heat capacity or acoustic propagation in this component.
+    /// This closed step has no mass/species exchange; [`Self::valve_candidate`]
+    /// adds the original compressible transport through a moving metering edge.
+    /// Contact stops, crank linkages, combustion, wall heat capacity and acoustic
+    /// propagation remain separate owners.
     pub fn step(
         &mut self,
         input: DoublePistonInput,
