@@ -175,7 +175,7 @@ impl<F, I, R> Clone for InterfaceSource<'_, F, I, R> {
 
 // Establish bounded, safe ordered indexing before any constitutive callback.
 // Conducting/electrode admissibility still belongs to the original solver.
-fn admit_interfaces(input: JouleEnthalpyInput<'_>, gate: &CancelGate) -> Result<(), JouleEnthalpyError> {
+pub(in crate::conjugate::enthalpy) fn admit_interfaces(input: JouleEnthalpyInput<'_>, gate: &CancelGate) -> Result<(), JouleEnthalpyError> {
     checkpoint(gate)?;
     let n = input.domain.cell_count();
     if input.contacts.len() > n.saturating_mul(3) {

@@ -5,7 +5,11 @@
 //! at the same endpoint velocity as native backward-Euler mechanical work.
 //! Neither transfer defects nor backward-Euler numerical loss become heat.
 
+/// Source-owned electrical interfaces on the same material/current/flow epoch.
+pub mod interfaces;
+
 use super::*;
+use interfaces::{FixedInterfaces, MhdInterfaces};
 use crate::conjugate::enthalpy::{
     JouleEnthalpyError, JouleEnthalpyInput, StepConfig, admit_map as admit_electrical_map,
     checkpoint, electrode_power, finite,
@@ -154,8 +158,9 @@ type ElectricalResponse<'a, F, T> =
     dyn Fn(&FlowMaterialSample<F, T>) -> Result<Option<f64>, ChtError> + 'a;
 
 #[derive(Clone)]
-struct Pending {
+struct Pending<I> {
     state: MhdCurrentState,
+    interfaces: I,
     start_s: f64,
     dt_s: f64,
     end_s: f64,
@@ -184,15 +189,16 @@ struct Work {
 }
 
 #[derive(Clone)]
-struct MhdFlow<'a, 'f, F, R, O, T> {
+struct MhdFlow<'a, 'f, F, R, O, T, C: MhdInterfaces<F, T>> {
     flow: MaterialFlowFeedback<'f, F, R, O, T>,
     input: JouleEnthalpyInput<'a>,
     motion: MhdEnthalpyInput<'a>,
     response: &'a ElectricalResponse<'a, F, T>,
+    interfaces: C,
     current_solves: usize,
     momentum_trials: usize,
-    pending: Option<Pending>,
-    last: Option<Pending>,
+    pending: Option<Pending<C::Epoch>>,
+    last: Option<Pending<C::Epoch>>,
     work: Work,
 }
 
@@ -201,7 +207,7 @@ fn invalid(reason: &'static str) -> JouleEnthalpyError {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn evaluate<F, T: FlowTransportSnapshot>(
+fn evaluate<F, T: FlowTransportSnapshot, C: MhdInterfaces<F, T>>(
     input: JouleEnthalpyInput<'_>,
     motion: MhdEnthalpyInput<'_>,
     gate: &CancelGate,
@@ -210,7 +216,8 @@ fn evaluate<F, T: FlowTransportSnapshot>(
     samples: &[FlowMaterialSample<F, T>],
     velocity: &[[f64; 3]],
     response: &ElectricalResponse<'_, F, T>,
-) -> Result<MhdCurrentState, JouleEnthalpyError> {
+    interfaces: &C,
+) -> Result<(MhdCurrentState, C::Epoch), JouleEnthalpyError> {
     admit_electrical_map(thermal, input, gate)?;
     if *solves >= input.max_current_solves {
         return Err(JouleEnthalpyError::CurrentBudget);
@@ -235,6 +242,7 @@ fn evaluate<F, T: FlowTransportSnapshot>(
         temperature_k.push(sample.temperature_k);
         specific_enthalpy_j_kg.push(sample.specific_enthalpy_j_kg);
     }
+    let contacts = interfaces.evaluate(input, thermal.time_s(), samples, gate)?;
     let mut resistivity_ohm_m = vec![None; samples.len()];
     let resolve = |c: usize, _, _| {
         let value = response(&samples[c])?;
@@ -249,20 +257,22 @@ fn evaluate<F, T: FlowTransportSnapshot>(
     };
     *solves += 1;
     let solution = match motion.current_boundary {
-        MhdCurrentBoundary::Electrodes => input.setup.solve_with_cell_motion(
+        MhdCurrentBoundary::Electrodes => input.setup.solve_with_cell_motion_topology(
             input.domain,
             &temperature_k,
-            input.contacts,
+            &contacts.applied,
+            &contacts.open,
             native,
             resolve,
             gate,
         )?,
         MhdCurrentBoundary::Isolated {
             current_tolerance_a,
-        } => input.setup.solve_isolated_cell_motion(
+        } => input.setup.solve_isolated_cell_motion_topology(
             input.domain,
             &temperature_k,
-            input.contacts,
+            &contacts.applied,
+            &contacts.open,
             native,
             current_tolerance_a,
             resolve,
@@ -289,7 +299,7 @@ fn evaluate<F, T: FlowTransportSnapshot>(
             }
         }
     }
-    Ok(MhdCurrentState {
+    Ok((MhdCurrentState {
         time_s: thermal.time_s(),
         temperature_k,
         specific_enthalpy_j_kg,
@@ -297,7 +307,7 @@ fn evaluate<F, T: FlowTransportSnapshot>(
         velocity_m_s: velocity.to_vec(),
         frozen_lorentz_reaction_n,
         solution,
-    })
+    }, contacts.epoch))
 }
 
 // This is the transpose of the existing MAC cell-to-face force lift: each cell
@@ -322,8 +332,8 @@ fn cell_work(
     Ok(power)
 }
 
-impl<F: Clone, R, O: DepositionObserver, T: FlowTransportSnapshot> DepositionObserver
-    for MhdFlow<'_, '_, F, R, O, T>
+impl<F: Clone, R, O: DepositionObserver, T: FlowTransportSnapshot, C: MhdInterfaces<F, T>> DepositionObserver
+    for MhdFlow<'_, '_, F, R, O, T, C>
 where
     R: Clone + FnMut(usize, &DepositedCell, f64) -> Result<F, MaterialError>,
 {
@@ -405,7 +415,7 @@ where
             if native_solve && self.momentum_trials >= self.flow.max_solves {
                 return Err(DepositionError::Budget("live material MHD momentum trials").into());
             }
-            let current = evaluate(
+            let (current, interfaces) = evaluate(
                 self.input,
                 self.motion,
                 self.flow.gate,
@@ -414,6 +424,7 @@ where
                 &epoch.samples,
                 &velocity,
                 self.response,
+                &self.interfaces,
             )?;
             // Every trial starts from the SAME accepted face momentum and inner
             // history. Rejected Picard iterates cannot age either owner.
@@ -538,6 +549,7 @@ where
                 }
                 self.pending = Some(Pending {
                     state: current,
+                    interfaces,
                     start_s,
                     dt_s,
                     end_s,
@@ -744,8 +756,9 @@ where
     O: DepositionObserver,
 {
     advance_mhd_enthalpy_impl(
-        thermal, target_s, config, input, motion, flow, false, resistivity,
+        thermal, target_s, config, input, motion, flow, false, resistivity, FixedInterfaces,
     )
+    .map(|(next, accepted, report, _, ())| (next, accepted, report))
 }
 
 /// Continue conducting solid, mushy and liquid material with stationary anchors.
@@ -794,12 +807,13 @@ where
     O: DepositionObserver,
 {
     advance_mhd_enthalpy_impl(
-        thermal, target_s, config, input, motion, flow, true, resistivity,
+        thermal, target_s, config, input, motion, flow, true, resistivity, FixedInterfaces,
     )
+    .map(|(next, accepted, report, _, ())| (next, accepted, report))
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-fn advance_mhd_enthalpy_impl<'t, 'f, F, R, O, T>(
+fn advance_mhd_enthalpy_impl<'t, 'f, F, R, O, T, C>(
     thermal: &DepositionSimulation<'t>,
     target_s: f64,
     config: StepConfig,
@@ -808,17 +822,21 @@ fn advance_mhd_enthalpy_impl<'t, 'f, F, R, O, T>(
     flow: &MaterialFlowFeedback<'f, F, R, O, T>,
     anchored_skeleton: bool,
     resistivity: impl Fn(&FlowMaterialSample<F, T>) -> Result<Option<f64>, ChtError>,
+    interfaces: C,
 ) -> Result<
     (
         DepositionSimulation<'t>,
         MaterialFlowFeedback<'f, F, R, O, T>,
         MhdEnthalpyReport,
+        Option<C::Epoch>,
+        C::Epoch,
     ),
     MaterialFlowMhdError<O::Error>,
 >
 where
     F: Clone,
     T: FlowTransportSnapshot,
+    C: MhdInterfaces<F, T>,
     R: Clone + FnMut(usize, &DepositedCell, f64) -> Result<F, MaterialError>,
     O: DepositionObserver,
 {
@@ -877,6 +895,7 @@ where
         input,
         motion,
         response: &resistivity,
+        interfaces,
         current_solves: 0,
         momentum_trials: 0,
         pending: None,
@@ -888,7 +907,7 @@ where
     };
     let (next, mut accepted, thermal_audit) =
         thermal.advance_observed(&source, target_s, config, || checkpoint(gate))?;
-    let endpoint = evaluate(
+    let (endpoint, endpoint_interfaces) = evaluate(
         input,
         motion,
         gate,
@@ -901,6 +920,7 @@ where
             .expect("admitted momentum")
             .velocity_m_s,
         accepted.response,
+        &accepted.interfaces,
     )?;
     let mechanical = accepted
         .flow
@@ -950,5 +970,6 @@ where
         endpoint,
     };
     checkpoint(gate)?;
-    Ok((next, accepted.flow, report))
+    let last_interfaces = accepted.last.as_ref().map(|last| last.interfaces.clone());
+    Ok((next, accepted.flow, report, last_interfaces, endpoint_interfaces))
 }

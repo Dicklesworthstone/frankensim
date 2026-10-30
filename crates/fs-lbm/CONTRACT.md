@@ -3479,6 +3479,44 @@ current trials, and late support-solve/nonconvergence rollback. This closes the
 bounded MR43 moving-current/fluid/thermal connection; general phase transition,
 induction and moving solid/fluid mechanical coupling remain broader work.
 
+### Source-owned electrical interfaces on live MHD
+
+`conjugate::enthalpy::advection::feedback::mhd::interfaces` adds
+`advance_mhd_enthalpy_with_material_interfaces` and
+`advance_mhd_enthalpy_with_anchored_interfaces`. Both reuse the original MHD
+current/momentum/enthalpy driver. Ordered interface callbacks receive the exact
+retained adjacent bulk/phase samples used by the same current trial. The shared
+interface response owns finite resistance and explicit heat partition, or an
+explicit supported opening; no interface temperature, pressure, surface law or
+missing-data fallback is inferred. Original source payloads need not be Clone.
+The existing source binder checks actual material/process/texture surface roles.
+
+Resolved contacts and openings enter the native moving-current topology solve
+before electrical reachability and assembly. That ONE solution supplies bulk
+and contact heat, reciprocal Lorentz force and its work. An opening removes the
+face from current, motional voltage, contact heat and Lorentz transfer, while
+independent material, thermal and fluid owners retain their state. Zero
+resistance remains perfect contact. Authored coefficients are not added to a
+resolved source resistance; unlisted faces keep perfect-contact semantics.
+Wired components still require their native voltage references; the isolated
+owner retains its per-cell current-continuity admission.
+
+Accepted interface epochs accompany the actual accepted MHD intervals; rejected
+Picard trials cannot publish contact or observer history. Fresh endpoint source
+support uses returned h/T and velocity without depositing another heat increment.
+Source, topology, current/momentum budget, convergence and cancellation failures
+preserve the original state. Existing combined energy gates, fixed-field
+low-induction and fixed-geometry assumptions remain unchanged. Interfaces own no
+separate momentum or energy storage. Source changes are sampled at actual thermal
+interval starts; discontinuities need explicit advance endpoints and refinement.
+
+Synthetic tests in `liquid_flow_enthalpy/mhd/interfaces.rs` compare native motion,
+current, ordered contact heat and total energy against an independent MAC/circuit
+reduction. They exercise original interface-card substitution and temperature
+feedback, actual surface order, non-Clone receipts, opening with retained viscous
+coasting, reclosing, and late source-support refusal. These are numerical
+regressions, not measured material or contact validation.
+
 ## Isothermal source rheology with native capillarity
 
 `material::free_surface::rheology::IsothermalRheologyLaw` binds one immutable

@@ -617,3 +617,5 @@ fn late_current_budget_and_nonconvergent_transfer_publish_no_history() {
     assert_eq!(old.time_s(), 0.0);
     assert_eq!(old.energy_j(), 0.0);
 }
+
+mod interfaces;
