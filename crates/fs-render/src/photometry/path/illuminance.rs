@@ -11,7 +11,7 @@ use crate::tracer::{
 };
 use fs_exec::Cx;
 
-use super::{PathMedium, PointFixtureSampling};
+use super::{PathCalculationContext, PathMedium, PointFixtureSampling, SamplingUncertainty};
 
 /// Fixed sampling policy for surface probes, independent of image dimensions.
 #[derive(Debug, Clone, Copy)]
@@ -429,6 +429,31 @@ impl<'scene, 'field> PathIlluminanceJob<'scene, 'field> {
             numerical: fs_evidence::NumericalCertificate::no_claim(),
             total_error_bound_lux: None,
         })
+    }
+
+    /// Interpret this probe's sampling uncertainty in lux, using exactly the
+    /// standard error exposed by [`Self::probe_estimate`]. The deterministic
+    /// direct term adds no sampling variance. Uncomputed or out-of-range
+    /// probes return `None`; one IID sample and correlated samples are distinct.
+    #[must_use]
+    pub fn sampling_uncertainty_lux(&self, index: usize) -> Option<SamplingUncertainty> {
+        let estimate = self.probe_estimate(index)?;
+        Some(SamplingUncertainty::from_estimate(
+            self.sampling.sampler,
+            estimate.samples,
+            estimate.estimated_standard_error_lux,
+        ))
+    }
+
+    /// Declared observer, model versions and actual retained sampling settings.
+    /// This context is not a calibration or a complete scene identity.
+    #[must_use]
+    pub const fn calculation_context(&self) -> PathCalculationContext {
+        PathCalculationContext::new(
+            self.sampling.sampler,
+            self.sampling.seed,
+            self.sampling.max_depth,
+        )
     }
 
     /// Probe-order estimates without another result allocation.

@@ -2030,8 +2030,35 @@ in lux after two paths. The exact direct term contributes no sampling variance.
 Owen–Sobol results carry no IID standard-error claim. Total error remains
 unknown, including the finite-depth remainder and physical-model uncertainty.
 `photometric_stage --total-csv` writes positions, direct/continuous/total lux,
-estimated IID standard error, sample count and explicit unknown total bounds
-for a stage grid using heterogeneous spectral haze and reflected light.
+estimated IID standard error, sample count, explicit unknown total bounds and
+a named sampling-uncertainty state for a stage grid using heterogeneous
+spectral haze and reflected light.
+
+### Interpreting path sampling uncertainty
+
+Both path jobs expose `calculation_context()`, returning the actual admitted
+sampler, seed and maximum surface/volume vertex depth, together with the
+published observer identifier and photometry/path semantics versions.
+`PathCalculationContext` records declared settings for result interpretation;
+it is neither a complete scene/replay identity nor an accuracy certificate.
+Geometry, fixture, material and medium inputs remain the caller's retained
+scene data. A named observer does not establish fixture calibration.
+
+`sampling_uncertainty_cd_m2(pixel)` and `sampling_uncertainty_lux(probe)` return
+`SamplingUncertainty`: `InsufficientIidSamples`, `EstimatedIidStandardError`,
+or `CorrelatedSamples`, with the accepted whole-path count. The standard-error
+value has the method's named SI unit. Uncomputed and out-of-range outputs
+return outer `None`. The typed estimate retains the existing Welford value
+bit-for-bit; legacy optional standard-error fields remain available. This
+distinguishes a one-path IID result from an Owen–Sobol result without inventing
+an IID estimate for correlated samples. Zero estimated sampling error still
+leaves numerical `NoClaim`, the finite-depth remainder, calibration,
+discretization and total error unchanged and unknown.
+
+The headless example derives path metadata from these job accessors. Its total
+lux CSV appends `sampling_uncertainty` to identify the reason for a missing
+standard-error value; path-image summaries report an unavailable estimate
+when no IID values exist instead of substituting zero.
 
 ### Native CPU execution of calibrated paths
 

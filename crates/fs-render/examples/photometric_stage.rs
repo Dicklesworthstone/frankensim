@@ -44,8 +44,8 @@ use fs_render::photometry::image::LuminanceJob;
 use fs_render::photometry::medium::{HomogeneousMedium, PhaseFunction, ScatterSettings};
 use fs_render::photometry::observer::OBSERVER_ID;
 use fs_render::photometry::path::{
-    IlluminanceSampling, MAX_POINT_CONNECTIONS_PER_VERTEX, PHOTOMETRIC_PATH_SEMANTICS_VERSION,
-    PathIlluminanceJob, PathLuminanceJob, PathMedium, PointFixtureSampling,
+    IlluminanceSampling, MAX_POINT_CONNECTIONS_PER_VERTEX, PathCalculationContext,
+    PathIlluminanceJob, PathLuminanceJob, PathMedium, PointFixtureSampling, SamplingUncertainty,
 };
 use fs_render::photometry::source::{AngularDistribution, PhotometricSource, SourceSpectrum};
 use fs_render::photometry::{
@@ -60,6 +60,21 @@ use fs_render::tracer::{
 use fs_render::volumes::VolumeGrid;
 use fs_render::volumes::transport::scattering::{MassScatteringSpectrum, ScatteringGrid};
 use fs_render::volumes::transport::{AbsorbingGrid, AbsorbingGridBudget, MassAbsorptionSpectrum};
+
+fn report_path_context(context: PathCalculationContext) {
+    eprintln!(
+        "photometry_semantics={} path_semantics={} observer={}",
+        context.photometry_semantics_version, context.path_semantics_version, context.observer_id,
+    );
+    let interpretation = match context.sampler {
+        Sampler::Iid => "sample_estimate_after_two_paths",
+        Sampler::OwenSobol | Sampler::OwenSobolFullPath => "unavailable_for_correlated_samples",
+    };
+    eprintln!(
+        "sampling={:?}; seed={:#x}; standard_error={interpretation}; confidence_interval=none; max_vertices={}; omitted_transport_error=unknown; total_error=unknown",
+        context.sampler, context.seed, context.max_depth,
+    );
+}
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -237,9 +252,9 @@ fn run(
 ) -> Result<(), Box<dyn Error>> {
     // Keep machine-readable CSV on stdout and its interpretation on stderr.
     // The observer identity is source-data provenance, not fixture calibration.
-    eprintln!(
-        "photometry_semantics={PHOTOMETRY_SEMANTICS_VERSION} path_semantics={PHOTOMETRIC_PATH_SEMANTICS_VERSION} observer={OBSERVER_ID}"
-    );
+    if !(paths || total_csv) {
+        eprintln!("photometry_semantics={PHOTOMETRY_SEMANTICS_VERSION} observer={OBSERVER_ID}");
+    }
     eprintln!(
         "units=m,rad,lm,cd,lx,cd/m^2; numerical=NoClaim; fixture_calibration_error=unknown; spectral_discretization_error=unknown; geometry_material_medium_error=unknown"
     );
@@ -248,11 +263,7 @@ fn run(
             "haze_phase=tabulated; axis=propagation_cosine; interpolation=linear_cosine; angular_measurement_and_interpolation_error=unknown"
         );
     }
-    if paths || total_csv {
-        eprintln!(
-            "sampling=IID; seed=0x50524556495a; standard_error=sample_estimate_only; confidence_interval=none; max_vertices=6; omitted_transport_error=unknown; total_error=unknown"
-        );
-    } else {
+    if !(paths || total_csv) {
         eprintln!(
             "sampling=deterministic; haze_error=refinement_discrepancy_only; omitted_transport_error=unknown; total_error=unknown"
         );
@@ -623,6 +634,7 @@ fn run_paths(
             cx,
         )?;
         job.set_point_sampling(point_sampling)?;
+        report_path_context(job.calculation_context());
         while !job.is_complete() {
             if let Some(execution) = execution {
                 job.advance_with_execution(cx, 16_384, execution)?;
@@ -631,17 +643,28 @@ fn run_paths(
             }
         }
         println!(
-            "x_m,y_m,z_m,direct_lux,continuous_lux,total_lux,estimated_standard_error_lux,samples,total_error_bound_lux"
+            "x_m,y_m,z_m,direct_lux,continuous_lux,total_lux,estimated_standard_error_lux,samples,total_error_bound_lux,sampling_uncertainty"
         );
         for (index, estimate) in job.estimates().enumerate() {
             let estimate = estimate.ok_or("completed probe has no estimate")?;
             let point = grid.probe(index)?.position_m();
-            let stderr = estimate
-                .estimated_standard_error_lux
-                .map(|value| format!("{value:.9}"))
-                .unwrap_or_default();
+            let (sampling_uncertainty, stderr) = match job
+                .sampling_uncertainty_lux(index)
+                .ok_or("completed probe has no sampling interpretation")?
+            {
+                SamplingUncertainty::EstimatedIidStandardError { standard_error, .. } => (
+                    "estimated_iid_standard_error",
+                    format!("{standard_error:.9}"),
+                ),
+                SamplingUncertainty::InsufficientIidSamples { .. } => {
+                    ("insufficient_iid_samples", String::new())
+                }
+                SamplingUncertainty::CorrelatedSamples { .. } => {
+                    ("correlated_samples", String::new())
+                }
+            };
             println!(
-                "{},{},{},{:.9},{:.9},{:.9},{},{},unknown",
+                "{},{},{},{:.9},{:.9},{:.9},{},{},unknown,{}",
                 point.x,
                 point.y,
                 point.z,
@@ -650,6 +673,7 @@ fn run_paths(
                 estimate.illuminance_lux,
                 stderr,
                 estimate.samples,
+                sampling_uncertainty,
             );
         }
         return Ok(());
@@ -676,6 +700,8 @@ fn run_paths(
         cx,
     )?;
     image.set_point_sampling(point_sampling)?;
+    let context = image.calculation_context();
+    report_path_context(context);
     while !image.is_complete() {
         if let Some(execution) = execution {
             image.advance_with_execution(cx, 16_384, execution)?;
@@ -692,8 +718,11 @@ fn run_paths(
         .estimates()
         .flatten()
         .filter_map(|p| p.estimated_standard_error_cd_m2)
-        .fold(0.0, f64::max);
-    println!("16 x 12 spectral path image, 128 samples/pixel, maximum 6 surface/volume vertices");
+        .reduce(f64::max);
+    println!(
+        "{} x {} spectral path image, {} samples/pixel, maximum {} surface/volume vertices",
+        settings.width, settings.height, settings.spp, context.max_depth,
+    );
     if let Some(focal_m) = camera.projection().focal_length_m() {
         println!(
             "Physical camera: {:.1} mm focal length, {:.1} mm sensor height, f/{:.2}, axial focus {:.3} m",
@@ -704,9 +733,12 @@ fn run_paths(
         );
     }
     println!("Reflections and multiple scattering: peak {peak:.6} cd/m^2");
-    println!(
-        "Largest estimated IID sampling standard error: {stderr:.6} cd/m^2 (not an error bound)"
-    );
+    match stderr {
+        Some(value) => println!(
+            "Largest estimated IID sampling standard error: {value:.6} cd/m^2 (not an error bound)"
+        ),
+        None => println!("Estimated IID sampling standard error unavailable for these samples"),
+    }
     println!(
         "Total error unknown: calibration, observer/discretization, and finite-depth remainder."
     );

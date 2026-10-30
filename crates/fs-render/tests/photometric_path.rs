@@ -36,6 +36,9 @@ mod measured_reflectance;
 #[path = "photometric_path/uncertainty_reference.rs"]
 mod uncertainty_reference;
 
+#[path = "photometric_path/reporting.rs"]
+mod reporting;
+
 #[path = "photometric_path/tabulated_phase.rs"]
 mod tabulated_phase;
 

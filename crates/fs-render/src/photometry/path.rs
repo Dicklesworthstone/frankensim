@@ -26,7 +26,9 @@ use super::{PhotometryError, TransportOptions};
 mod camera_tests;
 mod execution;
 mod illuminance;
+mod report;
 pub use illuminance::{IlluminanceSampling, PathIlluminanceEstimate, PathIlluminanceJob};
+pub use report::{PathCalculationContext, SamplingUncertainty};
 
 /// Borrowed native physical media for spectral fixture paths.
 pub use crate::tracer::photometric::FixtureMedium as PathMedium;
@@ -115,6 +117,8 @@ pub struct PathLuminanceJob<'scene, 'field> {
     height: u32,
     samples_per_pixel: u32,
     sampler: Sampler,
+    seed: u64,
+    max_depth: u32,
     moments: Vec<AdaptivePixelAccumulator>,
     completed: u64,
     target: u64,
@@ -245,6 +249,8 @@ impl<'scene, 'field> PathLuminanceJob<'scene, 'field> {
             height: settings.height,
             samples_per_pixel: settings.spp,
             sampler: settings.sampler,
+            seed: settings.seed,
+            max_depth: settings.max_depth,
             moments,
             completed: 0,
             target,
@@ -387,6 +393,27 @@ impl<'scene, 'field> PathLuminanceJob<'scene, 'field> {
             numerical: NumericalCertificate::no_claim(),
             total_error_bound_cd_m2: None,
         })
+    }
+
+    /// Interpret this pixel's sampling uncertainty in cd/m², using exactly
+    /// the standard error exposed by [`Self::pixel_estimate`]. Uncomputed or
+    /// out-of-range pixels return `None`; insufficient IID samples and
+    /// correlated sampling remain distinct from an estimated zero.
+    #[must_use]
+    pub fn sampling_uncertainty_cd_m2(&self, index: usize) -> Option<SamplingUncertainty> {
+        let estimate = self.pixel_estimate(index)?;
+        Some(SamplingUncertainty::from_estimate(
+            self.sampler,
+            estimate.samples,
+            estimate.estimated_standard_error_cd_m2,
+        ))
+    }
+
+    /// Declared observer, model versions and actual retained sampling settings.
+    /// This context is not a calibration or a complete scene identity.
+    #[must_use]
+    pub const fn calculation_context(&self) -> PathCalculationContext {
+        PathCalculationContext::new(self.sampler, self.seed, self.max_depth)
     }
 
     /// Row-major estimates without an additional image allocation.
