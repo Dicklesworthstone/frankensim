@@ -10162,6 +10162,55 @@ moving footprints and pose integration remain separate owners. Finite cells,
 a common patch temperature and backward-Euler heat require spatial/time
 refinement; nonlinear convergence alone does not prove root uniqueness.
 
+### Finite-body rolling with original whole-sphere caloric storage
+
+`friction_heat::rolling::propose_rigid_rolling_heat` stages the original native
+two-body rolling response, retained rolling history, and finite enthalpy endpoint
+as one complete candidate. The original deforming sphere's viscoelastic moment
+work enters its own bulk caloric cell exactly once. It is not routed to a
+zero-capacity contact interface or divided by an authored heat fraction.
+Ordinary network links, boundaries and signed other heat remain active.
+
+The explicit binding matches the native deforming A/B body to an existing
+thermal body/material ID and a cell whose mass equals the whole sphere mass.
+A second active cell with that thermal body ID refuses, so this one-cell model
+cannot duplicate the sphere's caloric inventory. Unborn scheduled cells have no
+accepted energy; original event-boundary and activation rules remain in charge.
+The caller declares correspondence of the rolling card's material because native
+`MassProperties` contains no material ID to compare independently.
+
+The original rolling card has constant coefficients within its authored
+temperature/frequency domain. One cached native solve supplies actual work while
+every thermal trial admits its actual sphere temperature through that same card.
+Final mechanics and history are restaged at the converged endpoint temperature;
+exact physical agreement with the cached state, work and impulse is required.
+Final source-use receipts are retained. Initial card temperature must equal the
+accepted sphere temperature. Both owners share the actual representable clock
+interval. No temperature-dependent viscosity or material refresh is invented.
+
+The inner thermal audit includes injected rolling work; a separate outer account
+retains only authored/caller outside heat. Actual caloric change minus outside
+heat minus native rolling dissipation, and actual contacted-pair kinetic change
+plus caloric change minus outside heat, have independent joule gates. Other
+bodies are neither copied nor included in pair energy. Accepted states remain
+borrowed through source failures, nonlinear budget exhaustion and cancellation.
+
+Seven native groups in `tests/rolling_friction_heat.rs` pass against the current
+original-source full-inertia body implementation. They cover independently
+derived two-axis recoil and finite-cell conduction, latent enthalpy, signed
+other heat and endpoint conductance, zero-speed/viscosity/load conduction,
+deforming surface B and remapped body indices with an energetic spectator,
+whole-sphere/source/temperature admission including duplicate active inventory,
+and loaded-history late failure/cancellation/budget with exact retry. Synthetic
+fixtures establish analytical behavior, not measured-material validation or a
+full Cargo/DSR workspace gate.
+
+This is uniform whole-sphere bulk temperature with the original held normal
+patch and no-slip rolling law. Spatial loss density, flash heating, sliding or
+spin loss, thermoelastic storage and temperature-dependent rheology remain
+separate physics. Endpoint heat transport is first order and needs time/spatial
+refinement independently of nonlinear convergence.
+
 ## Finite-gas rocket propulsion and translation
 
 `rocket_blowdown::GasRocketState` binds an immutable source-bearing finite
