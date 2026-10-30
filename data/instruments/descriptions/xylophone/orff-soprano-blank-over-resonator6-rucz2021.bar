@@ -1,0 +1,40 @@
+frankensim.bar-card.v1
+# The same uniform 270 x 31 x 16 mm Orff-soprano rosewood blank as orff-soprano-blank-rucz2021.bar (read its header for the wood:
+# Rucz's measured density, a Wood Handbook stand-in for the stiffness), now over a Helmholtz box resonator.
+# This is a ROUTE DEMONSTRATION, not an instrument: the blank is not a musical note and no bar of the real xylophone sits on this
+# resonator. Resonator 6 is used because its measured resonance (1007.5 Hz) is the nearest of the six to the blank's measured
+# fundamental (1040 Hz). Compared with the card without a resonator, only the resonator rows differ.
+name	orff-soprano-blank-over-resonator6-rucz2021
+source	Geometry, density and resonator: Rucz P., Ulveczki M. A., Angster J., Miklos A. (2021), J. Acoust. Soc. Am. 149(5) 3200-3212, doi 10.1121/10.0004216 (author copy real.mtak.hu/129618): Sec. III.A p.3204 (blank 270 x 31 x 16 mm, density 1116 kg/m3 SD 20), Table III p.3206 (resonator 6: V 259.9 cm3, S 46.32 cm2, l_eff 55.9 mm, measured f_res 1007.5 Hz) and Sec. III.C ("a very short neck of 3 mm length"). Stiffness and ratios: USDA Wood Handbook FPL-GTR-282 through the packs named in the wood rows.
+note	NOT in the source: where the bar lies over the opening. The paper prints the opening's area and says it is rectangular with rounded corners at the centre of the top plate, covered by two bars, but gives neither its dimensions nor the bars' overlap. resonator_wet_x_m is therefore a declared stand-in (the middle 70 mm of the blank across its full width, 21.7 cm2 of the 46.32 cm2 opening) and is an UNKNOWN, not a measurement. The model also omits the box walls and the neighbouring bars (the paper's measured detuning by the bars, 6-15 percent, is not reproduced), and the lumped element's pitch misses the measured resonance by 11 percent for this resonator (897 Hz against 1007.5 Hz).
+length_m	0.270
+width_m	0.031
+thickness_m	0.016
+profile	uniform
+wood_density	data/matdb/seed-v1/rosewood-orff-xylophone-bars-rucz-jasa2021/properties.tsv
+wood_youngs_longitudinal	data/matdb/seed-v1/rosewood-indian-fpl-gtr282/properties.tsv
+wood_ratios	data/matdb/seed-v1/mahogany-honduras-fpl-gtr282/properties.tsv
+mesh_counts	32	4	2
+mesh_rungs	1	2
+band_hz	10000
+windows	4
+strike_fraction	0.25
+receiver_m	0.081	0.2	1.0
+bem_stride	1
+gas	crates/fs-couple/examples/dry-air-20c.gas
+loss	data/instruments/descriptions/bars/rosewood-loss-chaigne-doutaut1997.tsv
+mallet_contact_pack	contact-boxwood-mallet-on-rosewood-bar-doutaut-chaigne1994
+mallet_contact	data/matdb/seed-v1/contact-boxwood-mallet-on-rosewood-bar-doutaut-chaigne1994/contact.tsv
+mallet_properties	data/matdb/seed-v1/mallet-boxwood-rosewood-bar-doutaut-chaigne-jp4-1994/properties.tsv
+mallet_speed_m_s	2.1
+duration_s	4.0
+substeps	32
+rate_hz	48000
+full_scale_pa	0.5
+reference_vertical_hz	1040	2728	4976	7320
+resonator	helmholtz
+resonator_volume_m3	2.599e-4
+resonator_opening_area_m2	4.632e-3
+resonator_neck_length_m	0.003
+resonator_wet_x_m	0.1	0.17
+resonator_measured_hz	1007.5

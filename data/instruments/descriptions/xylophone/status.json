@@ -3,16 +3,21 @@
   "family": "xylophone",
   "title": "Xylophone",
   "reference_instrument": "Iowa MIS xylophone (model NA; bar material not stated; hard-rubber and rosewood mallets, the graded file uses the rosewood mallets)",
-  "summary": "Bar-S1 slice: one three-dimensional rosewood bar with a designed undercut (tuned from its own modes so the second mode is three times the first, scaled to the Db5 fundamental, never from a recording), struck by a Hertz silicone sphere and heard at a modal Burton-Miller receiver one metre away. The first render is lossless and only a diagnostic; a second render damps the five elastic modes with a rosewood decay law measured on another bar. There is no resonator, no cord suspension, and no marimba or vibraphone.",
+  "summary": "Bar-S1 slice: one three-dimensional rosewood bar with a designed undercut (tuned from its own modes so the second mode is three times the first, scaled to the Db5 fundamental, never from a recording), struck by a Hertz silicone sphere and heard at a modal Burton-Miller receiver one metre away. The first render is lossless and only a diagnostic; a second render damps the five elastic modes with a rosewood decay law measured on another bar. That slice has no resonator, no cord suspension, and no marimba or vibraphone. A second route, the bar_strike example of fs-couple, strikes an uncut rosewood-stock blank described by a data card for the Orff soprano xylophone of Rucz et al. (2021), alone or over a Helmholtz box resonator, with many certified modes instead of five. It is a route demonstration, not a note of any instrument: the blank is not tuned to a pitch, its stiffness is a declared Wood Handbook stand-in (the source prints none), and no specimen match is claimed. The undercut is not rendered because the check that would admit it failed.",
   "physics_present": [
     "Quadratic tetrahedral elasticity of the bar with an orthotropic wood scenario, modal analysis of the free-free body and six rigid modes",
     "Burton-Miller boundary-element radiation transfer of the five retained elastic modes to a receiver at one metre",
     "Material Hertz mallet contact with a silicone head, time-stepped with a measured substep ladder",
-    "Mode damping from the decay law measured on a rosewood xylophone bar (Chaigne and Doutaut 1997), used as a declared scenario"
+    "Mode damping from the decay law measured on a rosewood xylophone bar (Chaigne and Doutaut 1997), used as a declared scenario",
+    "bar_strike route: a bar card with the printed blank dimensions, density from the measured blank of Rucz et al. (2021) and stiffness from cited Wood Handbook packs; quadratic tetrahedral modes in the 10 kHz band by certified windows, a Burton-Miller receiver transfer per mode, a Hertz boxwood mallet contact from the Doutaut and Chaigne 1994 pack, and a modal render with cited rosewood loss",
+    "The same route over a Helmholtz box resonator (volume, opening area and neck from Rucz et al. Table III), wired as a lumped cavity with a compact flanged-monopole neck radiation"
   ],
   "physics_missing": [
     "Wood loss measured on this bar: the decay law belongs to another rosewood bar, and the first render has no loss at all",
-    "Transverse rosewood constants and density are scenario values, not measurements of a rosewood bar",
+    "Transverse rosewood constants and density of the Bar-S1 slice are scenario values, not measurements of a rosewood bar",
+    "bar_strike: the undercut. The three-dimensional mode check (check B) against the printed modes of the real A5 bar failed at every printed mid-bar thickness, so only the uncut blank is rendered and no cut bar is claimed",
+    "bar_strike: the wood. Rucz et al. do not state the species or print a stiffness; the cards combine their measured density with Wood Handbook species means (Indian rosewood longitudinal modulus, Honduras mahogany ratios) as a declared choice, and the stand-in blank's vertical modes fall 27 to 32 percent below the modes Rucz et al. measured on their blanks. The gap is reported as measured: no modulus was fitted to a frequency and no card value was changed to close it",
+    "bar_strike resonator: where the bar covers the opening is an unknown that the card declares; the lumped element misses the six measured resonances by up to roughly a tenth, reported and not trimmed; box walls, neighbouring bars and bar supports are omitted",
     "Mallet head loss, mallet shaft and the real mallet of the recording",
     "The cord suspension and the bar supports",
     "A tubular resonator below the bar, which a marimba needs and which also changes a xylophone",

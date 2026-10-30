@@ -11,7 +11,7 @@
     "Glued end blocks: that builder's lowest bars (C2 to D#3) carry extra wood under their ends, which a bar-only model does not include",
     "The Iowa marimba's model and bar material are not stated (model NA), and the only instrument found with a full table of bar dimensions is a home-built padouk marimba, so a rendered padouk marimba could not be claimed to be the Iowa marimba"
   ],
-  "blocked": "A pre-registered check failed: a 1-D Timoshenko model of the builder's bars with a parabolic arch gives f2/f1 = 5.28, 4.60 and 4.33 for C2, C3 and C4 where the builder states 4, so the assumed curve is wrong. Three things would unblock it: (1) a source for the arch curve of one real marimba bar; (2) a measured f1:f2:f3 of one real bar, to check a candidate curve; (3) a published bar with its undercut curve and its resonator dimensions.",
+  "blocked": "A pre-registered check failed: a 1-D Timoshenko model of the builder's bars with a parabolic arch gives f2/f1 = 5.28, 4.60 and 4.33 for C2, C3 and C4 where the builder states 4, so the assumed curve is wrong. A second check on a different bar failed the same way: the Orff soprano xylophone bar of Rucz et al. (2021) prints a grindstone-cut radius and a thickness range, yet a three-dimensional mode check against its printed modes failed at every printed thickness, so a printed cut radius alone has not closed the curve. Three things would unblock it: (1) a source for the arch curve of one real marimba bar; (2) a measured f1:f2:f3 of one real bar, to check a candidate curve; (3) a published bar with its undercut curve and its resonator dimensions.",
   "beads": [
     "pexfp.270"
   ]

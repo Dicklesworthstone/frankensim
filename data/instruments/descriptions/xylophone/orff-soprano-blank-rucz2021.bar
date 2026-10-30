@@ -1,0 +1,36 @@
+frankensim.bar-card.v1
+# One untuned rosewood blank of the Sonor Orff primary-series soprano xylophone, as described by Rucz et al. 2021 (Sec. III.A):
+# a UNIFORM 270 x 31 x 16 mm block, not a musical note.
+# GEOMETRY and DENSITY are Rucz's (density measured on eight blanks: 1116 kg/m3, SD 20). The WOOD STIFFNESS is a Wood Handbook
+# STAND-IN, declared and not matched to this specimen: Rucz does not state the rosewood species, and the tree holds no rosewood
+# set of orthotropic ratios. So E_L is Indian rosewood (Dalbergia latifolia, FPL-GTR-282, pack rosewood-indian-fpl-gtr282) and
+# the ratios and Poisson ratios are Honduras mahogany's (Swietenia macrophylla, FPL-GTR-282, pack mahogany-honduras-fpl-gtr282),
+# the same composition the bar_s1 test uses. Species means, not this wood: the blank's frequencies below are REPORTED against
+# Rucz's measured 1040/2728/4976 Hz (Table I), never tuned to them, and no E_L is back-fitted from any frequency.
+name	orff-soprano-blank-rucz2021
+source	Geometry and density: Rucz P., Ulveczki M. A., Angster J., Miklos A. (2021), J. Acoust. Soc. Am. 149(5) 3200-3212, doi 10.1121/10.0004216 (author copy real.mtak.hu/129618), Sec. III.A p.3204. Stiffness and ratios: USDA Wood Handbook FPL-GTR-282 chapter 5 (ledger source fpl-gtr282-tonewoods) through the two packs named in the wood rows.
+length_m	0.270
+width_m	0.031
+thickness_m	0.016
+profile	uniform
+wood_density	data/matdb/seed-v1/rosewood-orff-xylophone-bars-rucz-jasa2021/properties.tsv
+wood_youngs_longitudinal	data/matdb/seed-v1/rosewood-indian-fpl-gtr282/properties.tsv
+wood_ratios	data/matdb/seed-v1/mahogany-honduras-fpl-gtr282/properties.tsv
+mesh_counts	32	4	2
+mesh_rungs	1	2
+band_hz	10000
+windows	4
+strike_fraction	0.25
+receiver_m	0.081	0.2	1.0
+bem_stride	1
+gas	crates/fs-couple/examples/dry-air-20c.gas
+loss	data/instruments/descriptions/bars/rosewood-loss-chaigne-doutaut1997.tsv
+mallet_contact_pack	contact-boxwood-mallet-on-rosewood-bar-doutaut-chaigne1994
+mallet_contact	data/matdb/seed-v1/contact-boxwood-mallet-on-rosewood-bar-doutaut-chaigne1994/contact.tsv
+mallet_properties	data/matdb/seed-v1/mallet-boxwood-rosewood-bar-doutaut-chaigne-jp4-1994/properties.tsv
+mallet_speed_m_s	2.1
+duration_s	4.0
+substeps	32
+rate_hz	48000
+full_scale_pa	0.5
+reference_vertical_hz	1040	2728	4976	7320
