@@ -374,10 +374,12 @@ export function createNativeWindPanel(): HTMLElement {
   const replacementFile = el("input", {type:"file", "aria-label":"Replace an attached source without changing its path"});
   replacementFile.hidden = true;
   let editingAttachment: Attached | null = null;
-  let attachmentEditorInitialValue = "";
+  let loadedAttachmentSource = "", loadedAttachmentEditorValue = "";
   const attachmentEditorTitle = el("label", {for:"native-attachment-source"});
   const attachmentSource = el("textarea", {id:"native-attachment-source", class:"nw-source", rows:"12",
     spellcheck:"false", autocapitalize:"off", autocomplete:"off", wrap:"off"});
+  const currentAttachmentSource = (): string => attachmentSource.value === loadedAttachmentEditorValue
+    ? loadedAttachmentSource : attachmentSource.value;
   const applyAttachment = el("button", {type:"button", class:"btn primary"}, "Apply source edit");
   const cancelAttachment = el("button", {type:"button", class:"btn"}, "Cancel edit");
   const attachmentEditor = el("section", {"aria-label":"Edit attached physical source"},
@@ -393,6 +395,16 @@ export function createNativeWindPanel(): HTMLElement {
     source.value = next; loadedSource = next; loadedEditorValue = source.value;
     edited();
   }, () => controls());
+  // Reuse the same record editor for original attached gas files. Applying the
+  // gas draft changes this editor; Apply source edit publishes bytes and identity
+  // together through replaceAttachedSource, preserving every source association.
+  const attachmentAtmosphere = createNativeAtmosphereControls(currentAttachmentSource, next => {
+    attachmentSource.value = next;
+    loadedAttachmentSource = next; loadedAttachmentEditorValue = attachmentSource.value;
+    attachmentAtmosphere.refresh(next);
+    controls();
+  }, () => controls());
+  attachmentEditor.insertBefore(attachmentAtmosphere.element, attachmentSource);
   const file = el("input", { type: "file", accept: ".performance,.material-strings,.string,.txt,text/plain",
     "aria-label": "Open a native physical performance" });
   file.hidden = true;
@@ -451,8 +463,9 @@ export function createNativeWindPanel(): HTMLElement {
       .forEach(control => { control.disabled = locked; });
     source.readOnly = locked;
     source.setAttribute("aria-busy", String(active));
-    attachmentSource.readOnly = active || loadingFile;
-    applyAttachment.disabled = active || loadingFile;
+    attachmentAtmosphere.setDisabled(active || loadingFile || editingAttachment === null);
+    attachmentSource.readOnly = active || loadingFile || attachmentAtmosphere.hasDraft();
+    applyAttachment.disabled = active || loadingFile || attachmentAtmosphere.hasDraft();
     cancelAttachment.disabled = active || loadingFile;
     render.textContent = active ? "Rendering…" : "Render WAV";
   };
@@ -676,7 +689,9 @@ export function createNativeWindPanel(): HTMLElement {
         try {
           const text = editableAttachmentText(attached.bytes);
           attachmentSource.value = text;
-          attachmentEditorInitialValue = attachmentSource.value;
+          loadedAttachmentSource = text; loadedAttachmentEditorValue = attachmentSource.value;
+          attachmentAtmosphere.refresh(text);
+          attachmentAtmosphere.element.hidden = !attachmentAtmosphere.hasRegions();
           editingAttachment = attached;
           attachmentEditorTitle.textContent = `Editing ${attached.path}`;
           attachmentEditor.hidden = false;
@@ -716,11 +731,17 @@ export function createNativeWindPanel(): HTMLElement {
   };
   const closeAttachmentEditor = (): void => {
     editingAttachment = null;
-    attachmentEditorInitialValue = "";
+    loadedAttachmentSource = ""; loadedAttachmentEditorValue = "";
     attachmentSource.value = "";
+    attachmentAtmosphere.refresh("");
     attachmentEditor.hidden = true;
     controls();
   };
+  attachmentSource.addEventListener("input", () => {
+    attachmentAtmosphere.refresh(currentAttachmentSource());
+    attachmentAtmosphere.element.hidden = !attachmentAtmosphere.hasRegions();
+    controls();
+  });
   cancelAttachment.addEventListener("click", () => {
     if (rendering || loadingFile) return;
     closeAttachmentEditor();
@@ -728,11 +749,10 @@ export function createNativeWindPanel(): HTMLElement {
   });
   applyAttachment.addEventListener("click", () => {
     const target = editingAttachment;
-    if (!target || rendering || loadingFile) return;
+    if (!target || rendering || loadingFile || attachmentAtmosphere.hasDraft()) return;
     let bytes: Uint8Array;
     try {
-      bytes = attachmentSource.value === attachmentEditorInitialValue ? target.bytes
-        : editedAttachmentBytes(target.bytes, attachmentSource.value);
+      bytes = editedAttachmentBytes(target.bytes, currentAttachmentSource());
     }
     catch (error) { showResult(message(error), true); return; }
     if (bytes === target.bytes) {

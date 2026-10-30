@@ -3,9 +3,83 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {nativeGasRegions, editNativeGasRegion} from '../src/native-gas-records.mjs';
-import {serializeNativeExperiment, validateInput} from '../src/native-experiment.mjs';
+import {editableAttachmentText, editedAttachmentBytes, serializeNativeExperiment, validateInput} from '../src/native-experiment.mjs';
 
 const fixture = name => readFile(new URL(`../../../crates/fs-couple/examples/${name}`, import.meta.url), 'utf8');
+
+
+test('attached finite gas records expose their original state without inventing a performance owner', async () => {
+  const source = await fixture('finite_gas_string/nitrogen-reservoir.gas');
+  const [region] = nativeGasRegions(source);
+  assert.equal(nativeGasRegions(source).length, 1);
+  assert.deepEqual(region.supportedKinds, ['thermochemical']);
+  assert.equal(region.values.temperature, '300');
+  assert.equal(region.values.pressure, '95000');
+  assert.deepEqual(region.values.components, [{species:'N2', fraction:'1'}]);
+  assert.equal(editNativeGasRegion(source, region, region.values), source);
+  assert.equal(editNativeGasRegion(source, region, {...region.values,
+    temperature:'310', pressure:'90000',
+    components:[{species:'N2', fraction:'0.8'}, {species:'CO2', fraction:'0.2'}]}),
+    'thermochemical 310 90000 mole 2 N2 0.8 CO2 0.2\n');
+});
+
+test('bare gas edits retain comments, BOM, line endings and the explicitly selected fraction basis', () => {
+  const source = '\ufeff# original reservoir, not a new material card\r\n\tthermochemical\t300 95000 mass 1 N2 1\r\n# original source IDs\r\n';
+  const [region] = nativeGasRegions(source);
+  assert.equal(region.line, 2);
+  assert.equal(region.values.basis, 'mass');
+  assert.equal(editNativeGasRegion(source, region, region.values), source);
+  assert.equal(editNativeGasRegion(source, region, {...region.values, pressure:'88000'}),
+    '\ufeff# original reservoir, not a new material card\r\n\tthermochemical 300 88000 mass 1 N2 1\r\n# original source IDs\r\n');
+  const withBom = '\ufeffthermochemical 300 95000 mole 1 N2 1\r\n';
+  const [first] = nativeGasRegions(withBom);
+  assert.equal(editNativeGasRegion(withBom, first, {...first.values, temperature:'305'}),
+    '\ufeffthermochemical 305 95000 mole 1 N2 1\r\n');
+});
+
+test('finite gas sources keep their native thermochemical law and reject ambiguous complete records', () => {
+  const source = 'thermochemical 300 95000 mole 1 N2 1\n';
+  const [region] = nativeGasRegions(source);
+  assert.throws(() => editNativeGasRegion(source, region, {...region.values, kind:'mixture'}), /supports thermochemical/);
+  assert.throws(() => editNativeGasRegion(source, region, {...region.values, kind:'dry-air'}), /supports thermochemical/);
+  assert.throws(() => editNativeGasRegion(source, region, {...region.values, pressure:'0'}), /Absolute pressure/);
+  for (const invalid of [
+    source + source, source + 'unclaimed row\n', source.trim() + ' trailing\n',
+    'thermochemical 300 95000 mole 2 N2 1\n',
+    'mixture 300 95000 mole 1 N2 1\n',
+  ]) assert.deepEqual(nativeGasRegions(invalid), []);
+  assert.throws(() => editNativeGasRegion(source + '# changed\n', region, region.values), /changed/);
+});
+
+
+test('edited finite atmosphere reaches the saved native experiment with independent reservoir bytes and source bindings', async () => {
+  const encode = text => new TextEncoder().encode(text);
+  const source = await fixture('finite_gas_string/browser-feedback-flow.string');
+  const initial = encode('thermochemical 300 101325 mole 1 N2 1\r\n');
+  const reservoir = encode(await fixture('finite_gas_string/nitrogen-reservoir.gas'));
+  const original = editableAttachmentText(initial);
+  const [region] = nativeGasRegions(original);
+  const changed = editNativeGasRegion(original, region, {...region.values, temperature:'315', pressure:'88000'});
+  const edited = editedAttachmentBytes(initial, changed);
+  const components = [{speciesPath:'species.pack', nasa9Path:'nasa9.pack', transportPath:'transport.pack'}];
+  const files = [
+    {path:'string.pack', bytes:new Uint8Array([0, 1, 128, 255])},
+    {path:'nitrogen.gas', bytes:edited},
+    {path:'nitrogen-reservoir.gas', bytes:reservoir},
+    ...Object.values(components[0]).map(path => ({path, bytes:new Uint8Array([255, 0, 127])})),
+  ];
+  const options = {renderer:'finite-gas-string', finiteGasString:{solidPath:'string.pack', gasRecordPath:'nitrogen.gas'},
+    gasSources:{components, phase:'frozen', waterSpecies:null}};
+  const packet = validateInput(encode(serializeNativeExperiment(source, files, options)), true);
+  assert.deepEqual(packet.source, encode(source));
+  assert.deepEqual(packet.finiteGasString, options.finiteGasString);
+  assert.deepEqual(packet.gasSources, options.gasSources);
+  assert.deepEqual(packet.attachments, files);
+  assert.equal(editableAttachmentText(packet.attachments[1].bytes),
+    'thermochemical 315 88000 mole 1 N2 1\r\n');
+  assert.deepEqual(packet.attachments[2].bytes, reservoir);
+  assert.equal(editedAttachmentBytes(initial, original.replace(/\r\n/g, '\n')), initial);
+});
 
 const fieldBore = [
   'dg_bore 2 open 2 2 8 50 2000 0.01 1e-11 1024 4 gas_field 3 mole 2 Z-N2 A-CO2',
