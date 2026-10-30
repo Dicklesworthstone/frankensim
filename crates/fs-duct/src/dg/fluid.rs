@@ -9,7 +9,9 @@ use crate::fluid::FluidDuctError;
 use fs_material::fluid_acoustics::thermoviscous::{ThermoviscousFluid, ThermoviscousFluidState};
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 
+mod regional;
 mod update;
+pub use regional::{DgFluidRegion, DgRegionalFluid};
 
 mod sealed {
     pub trait Medium {}
@@ -17,9 +19,11 @@ mod sealed {
 
 /// Read-only coefficients of an original admitted DG medium.
 ///
-/// Implementations are the existing gas state and the source-preserving fluid
-/// wrapper produced by [`DgDuct::from_material`]. This bound keeps arbitrary
-/// mutable coefficient providers outside the assembled physical owner.
+/// Implementations retain the existing gas state, admitted acoustic or
+/// thermoviscous snapshots, or the original uniform and regional fluid sources
+/// produced by [`DgDuct::from_material`] and [`DgDuct::from_material_regions`].
+/// This bound keeps arbitrary mutable coefficient providers outside the
+/// assembled physical owner.
 pub trait DgMedium: sealed::Medium + Clone {
     /// Equilibrium density [kg/m³].
     fn density_kg_m3(&self) -> f64;
@@ -28,6 +32,11 @@ pub trait DgMedium: sealed::Medium + Clone {
     /// Original admission, before constructing any physical operator.
     #[doc(hidden)]
     fn admit(&self) -> Result<(), DuctError>;
+    /// Whether acoustic storage varies along the retained original source.
+    #[doc(hidden)]
+    fn has_spatial_acoustics(&self) -> bool {
+        false
+    }
 }
 
 impl sealed::Medium for GasState {}
@@ -84,6 +93,19 @@ impl DgMedium for FluidAcousticState {
     }
     fn sound_speed_m_s(&self) -> f64 {
         (*self).sound_speed_m_s()
+    }
+    fn admit(&self) -> Result<(), DuctError> {
+        Ok(())
+    }
+}
+
+impl sealed::Medium for ThermoviscousFluidState {}
+impl DgMedium for ThermoviscousFluidState {
+    fn density_kg_m3(&self) -> f64 {
+        self.acoustic().density_kg_m3()
+    }
+    fn sound_speed_m_s(&self) -> f64 {
+        self.acoustic().sound_speed_m_s()
     }
     fn admit(&self) -> Result<(), DuctError> {
         Ok(())
@@ -147,6 +169,33 @@ impl<M: Clone> DgDuct<DgFluidMaterial<M>> {
 }
 
 impl<M: ThermoviscousFluid + Clone> DgDuct<DgFluidMaterial<M>> {
+    /// Attach the native spatial Bessel wall owner to this original fluid.
+    ///
+    /// The original radius is sampled at each positive Gauss point, allowing
+    /// cones and profiles as well as cylinders. Viscous and thermal memories
+    /// share the acoustic exponential and physical energy. This is the local
+    /// cylindrical, rigid isothermal wall approximation; it does not infer
+    /// mean flow, finite wall temperature or a background heat evolution.
+    /// Cp == Cv retains only the viscous channels.
+    pub fn with_spatial_viscothermal(
+        mut self,
+        resolution: DgWallResolution,
+    ) -> Result<Self, FluidDuctError> {
+        let state = self.material().thermoviscous_state()?;
+        if state.acoustic() != self.gas.acoustic {
+            return Err(DuctError::BadParameter {
+                what: "DG thermoviscous and acoustic views must be the same original material state",
+            }.into());
+        }
+        let geometry = self.geometry.clone();
+        self.attach_spatial_viscothermal::<FluidDuctError, _>(&geometry, resolution, &mut |_| {
+            Ok(state)
+        })?;
+        self.gas.thermoviscous = Some(state);
+        self.outlet_gas.thermoviscous = Some(state);
+        Ok(self)
+    }
+
     /// Attach the existing positive Bessel-derived wall diffusion realization
     /// using this SAME original fluid's viscosity, conductivity, Cp and Cp/Cv.
     ///

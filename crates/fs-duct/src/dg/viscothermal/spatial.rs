@@ -12,14 +12,47 @@
 //! JASA 150 (2021), DOI 10.1121/10.0005537.
 
 use super::*;
+use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluidState;
 use fs_phs::{MAX_ZK_DIFFUSIVE_POLES, ZkDiffusive, ZkDiffusiveTerm};
 
 mod update;
 
+// Read-only admitted wall responses. Gas keeps its original arithmetic and
+// fields; fluids carry their actual transport/caloric response, never a gas EOS.
+pub(in crate::dg) trait SpatialWallMedium: DgMedium {
+    fn dynamic_viscosity_pa_s(&self) -> f64;
+    fn heat_capacity_ratio(&self) -> f64;
+    fn prandtl(&self) -> f64;
+}
+
+impl SpatialWallMedium for GasState {
+    fn dynamic_viscosity_pa_s(&self) -> f64 {
+        self.dynamic_viscosity
+    }
+    fn heat_capacity_ratio(&self) -> f64 {
+        self.gamma
+    }
+    fn prandtl(&self) -> f64 {
+        self.prandtl
+    }
+}
+
+impl SpatialWallMedium for ThermoviscousFluidState {
+    fn dynamic_viscosity_pa_s(&self) -> f64 {
+        self.transport().dynamic_viscosity_pa_s()
+    }
+    fn heat_capacity_ratio(&self) -> f64 {
+        ThermoviscousFluidState::heat_capacity_ratio(self)
+    }
+    fn prandtl(&self) -> f64 {
+        self.transport().prandtl()
+    }
+}
+
 /// Independent wall diffusion and spatial-integration resolution axes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DgWallResolution {
-    /// Positive continued-fraction arms for EACH of viscosity and heat.
+    /// Positive continued-fraction arms for viscosity and, when Cp > Cv, heat.
     pub poles_per_field: usize,
     /// Gauss points per axial element, from order+1 through 64.
     /// Refine this separately for variable geometry or material fields.
@@ -151,16 +184,10 @@ impl DgDuct {
         mut self,
         resolution: DgWallResolution,
     ) -> Result<Self, GasFieldDuctError> {
-        if self.compliant_wall.is_some() || self.molecular.is_some() {
-            return Err(invalid("attach DG viscothermal memory before compliant wall mechanics").into());
-        }
-        if self.viscothermal.is_some() {
-            return Err(invalid("DG viscothermal memory is already attached").into());
-        }
         let geometry = self.geometry.clone();
         let field = self.gas_field.clone();
         let uniform = self.gas;
-        self.attach_spatial_viscothermal::<GasFieldDuctError>(&geometry, resolution, &mut |x| {
+        self.attach_spatial_viscothermal::<GasFieldDuctError, _>(&geometry, resolution, &mut |x| {
             match &field {
                 Some(field) => Ok(*field.state_at(x)?.state()),
                 None => Ok(uniform),
@@ -169,29 +196,28 @@ impl DgDuct {
         Ok(self)
     }
 
-    fn attach_spatial_viscothermal<E: From<DuctError>>(
+}
+
+impl<M: DgMedium> DgDuct<M> {
+    pub(in crate::dg) fn attach_spatial_viscothermal<E: From<DuctError>, A: SpatialWallMedium>(
         &mut self,
         duct: &Duct,
         resolution: DgWallResolution,
-        gas_at: &mut impl FnMut(f64) -> Result<GasState, E>,
+        gas_at: &mut impl FnMut(f64) -> Result<A, E>,
     ) -> Result<(), E> {
+        if self.compliant_wall.is_some() || self.molecular.is_some() {
+            return Err(invalid("attach DG viscothermal memory before compliant wall mechanics").into());
+        }
+        if self.viscothermal.is_some() {
+            return Err(invalid("DG viscothermal memory is already attached").into());
+        }
         let local = self.mesh.order + 1;
         if !(1..=MAX_ZK_DIFFUSIVE_POLES).contains(&resolution.poles_per_field)
             || !(local..=64).contains(&resolution.quadrature_points)
         {
             return Err(invalid("DG wall pole or quadrature count is outside its domain").into());
         }
-        // GasState has gamma>1, so both physical fields have exactly this
-        // many arms. Check the full state before any dense allocation.
-        let memory_dofs =
-            2 * self.mesh.elements * resolution.quadrature_points * resolution.poles_per_field;
         let acoustic_dofs = 2 * self.field_dofs;
-        let n = acoustic_dofs + memory_dofs;
-        if n > MAX_DG_PROPAGATOR_DOFS {
-            return Err(
-                invalid("DG acoustic plus wall-memory DOFs exceed MAX_DG_PROPAGATOR_DOFS").into(),
-            );
-        }
         let mut spans = Vec::with_capacity(duct.segments.len());
         let mut x_start = 0.0;
         for segment in &duct.segments {
@@ -208,7 +234,7 @@ impl DgDuct {
         let mut cursor = acoustic_dofs;
         let mut admission = DgWallAdmission {
             resolution,
-            memory_dofs,
+            memory_dofs: 0,
             max_complex_error: 0.0,
             max_real_loss_error: 0.0,
         };
@@ -223,13 +249,13 @@ impl DgDuct {
                 let radius = span.radius_at_local(x - span.x_start)?;
                 let area = core::f64::consts::PI * radius * radius;
                 let gas = gas_at(x)?;
-                crate::validate_gas(&gas)?;
+                gas.admit()?;
                 let law = ZkDiffusive::new(
                     radius,
-                    gas.density,
-                    gas.dynamic_viscosity,
-                    gas.gamma,
-                    gas.prandtl,
+                    gas.density_kg_m3(),
+                    gas.dynamic_viscosity_pa_s(),
+                    gas.heat_capacity_ratio(),
+                    gas.prandtl(),
                     resolution.poles_per_field,
                     resolution.band_rad_s,
                     resolution.maximum_relative_error,
@@ -244,8 +270,9 @@ impl DgDuct {
                 admission.max_real_loss_error =
                     admission.max_real_loss_error.max(law.max_real_loss_error());
                 let phi = self.lgl.eval_basis(xi);
-                let compliance = area / (gas.density * gas.sound_speed * gas.sound_speed);
-                let inertance = gas.density / area;
+                let compliance = area
+                    / (gas.density_kg_m3() * gas.sound_speed_m_s() * gas.sound_speed_m_s());
+                let inertance = gas.density_kg_m3() / area;
                 for (is_pressure, coefficient, drag, terms) in [
                     (true, compliance, 0.0, law.shunt_terms()),
                     (
@@ -255,6 +282,16 @@ impl DgDuct {
                         law.series_terms(),
                     ),
                 ] {
+                    // Cp == Cv has no thermal storage. Do not fabricate zero
+                    // roots or count nonexistent arms against the native cap.
+                    if terms.is_empty() && drag == 0.0 {
+                        continue;
+                    }
+                    let next_cursor = cursor.checked_add(terms.len())
+                        .filter(|n| *n <= MAX_DG_PROPAGATOR_DOFS)
+                        .ok_or_else(|| invalid(
+                            "DG acoustic plus wall-memory DOFs exceed MAX_DG_PROPAGATOR_DOFS",
+                        ))?;
                     let mass = jac * weight * coefficient;
                     if !mass.is_finite() || mass <= 0.0 {
                         return Err(
@@ -262,7 +299,7 @@ impl DgDuct {
                         );
                     }
                     let storage_root = det::sqrt(mass)
-                        * if is_pressure { det::sqrt(gas.gamma - 1.0) } else { 1.0 };
+                        * if is_pressure { det::sqrt(gas.heat_capacity_ratio() - 1.0) } else { 1.0 };
                     if !storage_root.is_finite() || storage_root <= 0.0 {
                         return Err(invalid("DG wall physical arm storage is unrepresentable").into());
                     }
@@ -292,13 +329,15 @@ impl DgDuct {
                         terms: terms.to_vec(),
                         memory_start: cursor,
                     });
-                    cursor += terms.len();
+                    cursor = next_cursor;
                 }
             }
         }
-        if cursor != n {
-            return Err(invalid("DG wall memory size disagrees with admitted material").into());
-        }
+        // Count actual admitted support before allocating the dense operator.
+        // Gas retains both fields and exactly the original channel order.
+        let n = cursor;
+        let memory_dofs = n - acoustic_dofs;
+        admission.memory_dofs = memory_dofs;
         let mut operator = vec![0.0; n * n];
         for i in 0..acoustic_dofs {
             for j in 0..acoustic_dofs {

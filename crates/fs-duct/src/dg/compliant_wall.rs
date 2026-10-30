@@ -198,7 +198,7 @@ impl<M: DgMedium> DgDuct<M> {
         let radius = self
             .uniform_radius_m
             .ok_or_else(|| invalid("DG compliant wall requires identical circular cylinders"))?;
-        let spatial_gas = self
+        let spatial_material = self.gas.has_spatial_acoustics() || self
             .gas_field
             .as_ref()
             .is_some_and(|field| field.uniform_state().is_none());
@@ -207,7 +207,7 @@ impl<M: DgMedium> DgDuct<M> {
         })?;
         let omega = det::sqrt(pin.stiffness_per_area / pin.surface_density);
         let decay = pin.resistance / pin.surface_density;
-        let (coupling, displacement_scale, velocity_scale) = if spatial_gas {
+        let (coupling, displacement_scale, velocity_scale) = if spatial_material {
             // The map itself includes 1/sqrt(P*sigma); displacement uses the
             // same geometric Gram root with its independent equilibrium spring.
             (
@@ -258,7 +258,7 @@ impl<M: DgMedium> DgDuct<M> {
             operator[i * total..i * total + original]
                 .copy_from_slice(&self.l_tilde[i * original..(i + 1) * original]);
         }
-        let physical_velocity_maps = if spatial_gas {
+        let physical_velocity_maps = if spatial_material {
             let local = self.mesh.order + 1;
             // Products of degree-p basis functions have degree 2p: p+1
             // Gauss nodes integrate the geometric Gram matrix exactly.

@@ -83,7 +83,7 @@ use fs_la::eigen::{admit_jacobi_eigh, householder_eigh, jacobi_eigh};
 use fs_material::gas::GasState;
 
 mod fluid;
-pub use fluid::{DgFluidMaterial, DgMedium};
+pub use fluid::{DgFluidMaterial, DgFluidRegion, DgMedium, DgRegionalFluid};
 use fs_material::gas_field::AxialGasField;
 use fs_math::det;
 
@@ -690,6 +690,33 @@ impl<M: DgMedium> DgDuct<M> {
         field: Option<&AxialGasField>,
         gas_at: &mut impl FnMut(f64) -> Result<A, E>,
     ) -> Result<Self, E> {
+        let mut result = Self::assemble_at_stations(
+            duct,
+            gas,
+            outlet_material,
+            mesh,
+            inlet,
+            outlet,
+            field.map(AxialGasField::stations_m).unwrap_or(&[]),
+            gas_at,
+        )?;
+        result.gas_field = field.cloned();
+        Ok(result)
+    }
+
+    // One acoustic owner for both primitive gas fields and original regional
+    // fluid sources. All source interfaces are exact DG element boundaries.
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_at_stations<E: From<DuctError>, A: DgMedium>(
+        duct: &Duct,
+        gas: &M,
+        outlet_material: &M,
+        mesh: DgMesh,
+        inlet: DgBoundary,
+        outlet: DgBoundary,
+        stations_m: &[f64],
+        gas_at: &mut impl FnMut(f64) -> Result<A, E>,
+    ) -> Result<Self, E> {
         if duct.segments.is_empty() {
             return Err(DuctError::EmptyDuct.into());
         }
@@ -786,13 +813,12 @@ impl<M: DgMedium> DgDuct<M> {
             }
             .into());
         }
-        if let Some(field) = field {
+        if !stations_m.is_empty() {
             let mut split_spans = Vec::new();
             for span in spans {
                 let end = span.x_start + span.length;
                 let mut left = span.x_start;
-                for right in field
-                    .stations_m()
+                for right in stations_m
                     .iter()
                     .copied()
                     .filter(|x| *x > span.x_start && *x < end)
@@ -1041,7 +1067,7 @@ impl<M: DgMedium> DgDuct<M> {
             mesh,
             gas: gas.clone(),
             outlet_gas: outlet_material.clone(),
-            gas_field: field.cloned(),
+            gas_field: None,
             geometry: duct.clone(),
             uniform_radius_m: viscothermal::uniform_radius(duct),
             viscothermal: None,
