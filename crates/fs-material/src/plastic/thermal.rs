@@ -10,7 +10,7 @@
 //! is the caloric internal-energy chart. Coefficient work and temperature derivatives
 //! of elastic/hardening free energy enter the same reversible heat/storage account.
 //! Kinked moduli require strain/history-dependent entropy jumps and are refused.
-//! Optional linear J2 overstress uses positive sourced eta(T) and the actual
+//! Optional linear or power-law J2 overstress uses sourced kinetics and the actual
 //! physical interval in the same radial return, tangent and work account.
 //! Without that explicit source selection the original rate-independent law
 //! is unchanged. A duration-free response refuses when overstress is selected.
@@ -166,8 +166,11 @@ pub struct ThermoplasticSource<'a> {
     kinematic_hardening_temperature_slope_pa_k: f64,
     maximum_youngs_modulus_pa: f64,
     reference_temperature_k: f64,
-    linear_overstress: bool,
+    overstress: Option<OverstressSelection>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OverstressSelection { Linear, PowerLaw }
 
 /// One initially uniform specimen with immutable accepted native history.
 /// Transport owns the lumped/Biot admission; uniform internal heating and fixed
@@ -559,7 +562,7 @@ impl<'a> ThermoplasticSource<'a> {
             kinematic_hardening_temperature_slope_pa_k,
             maximum_youngs_modulus_pa,
             reference_temperature_k: state.temperature_k(),
-            linear_overstress: false,
+            overstress: None,
         };
         // Affine extrema occur at the span ends; the native owner checks the
         // elastic tensor, hardening conversion and return-map denominator there.
@@ -574,51 +577,86 @@ impl<'a> ThermoplasticSource<'a> {
     /// interval with positive finite values. Temperature may change viscosity;
     /// additional rate/stress/history source axes are not silently frozen.
     /// The actual physical duration is supplied by each later step.
-    pub fn with_linear_overstress(mut self, selection: MaterialPropertySelection)
+    pub fn with_linear_overstress(self, selection: MaterialPropertySelection)
         -> Result<Self, FeedbackError> {
-        use super::rate::{OVERSTRESS_VISCOSITY_DIMS, OVERSTRESS_VISCOSITY_PROPERTY};
-        if self.linear_overstress {
-            return Err(FeedbackError::Invalid("linear overstress is already selected"));
+        self.with_overstress(selection, OverstressSelection::Linear)
+    }
+
+    /// Select the associative power law alpha_dot=(s0/eta)*max(f/s0,0)^n.
+    /// Viscosity [Pa s], stress scale [Pa] and exponent n>=1 are selected
+    /// together from this card, pinned over its complete caloric interval, and
+    /// refreshed at every trial temperature. No rate axis is silently frozen.
+    pub fn with_power_law_overstress(self, selection: MaterialPropertySelection)
+        -> Result<Self, FeedbackError> {
+        self.with_overstress(selection, OverstressSelection::PowerLaw)
+    }
+
+    fn with_overstress(mut self, selection: MaterialPropertySelection, model: OverstressSelection)
+        -> Result<Self, FeedbackError> {
+        use super::rate::{OVERSTRESS_VISCOSITY_DIMS, OVERSTRESS_VISCOSITY_PROPERTY,
+            OVERSTRESS_STRESS_SCALE_PROPERTY, OVERSTRESS_EXPONENT_PROPERTY};
+        if self.overstress.is_some() {
+            return Err(FeedbackError::Invalid("an overstress law is already selected"));
         }
-        let requirement = ScalarPropertyRequirement::try_new(OVERSTRESS_VISCOSITY_PROPERTY,
-            OVERSTRESS_VISCOSITY_DIMS, ScalarAdmissibility::StrictlyPositive)
-            .map_err(|e| FeedbackError::Source(e.into()))?;
+        let mut roles = vec![(OVERSTRESS_VISCOSITY_PROPERTY, OVERSTRESS_VISCOSITY_DIMS)];
+        if model == OverstressSelection::PowerLaw {
+            roles.push((OVERSTRESS_STRESS_SCALE_PROPERTY, Dims([-1, 1, -2, 0, 0, 0])));
+            roles.push((OVERSTRESS_EXPONENT_PROPERTY, Dims([0; 6])));
+        }
+        let requirements = roles.iter().map(|(name, dims)|
+            ScalarPropertyRequirement::try_new(*name, *dims, ScalarAdmissibility::StrictlyPositive))
+            .collect::<Result<Vec<_>, _>>().map_err(|e| FeedbackError::Source(e.into()))?;
         let resolved = resolve_material_state_point(self.card, &self.context,
-            std::slice::from_ref(&requirement), selection)
-            .map_err(|e| FeedbackError::Source(e.into()))?;
-        let property = &resolved.properties()[0];
-        admit_rate_independent_property(property, &self.temperature_axis)?;
-        let selected = property.answer().receipt.selected;
-        let claim = self.card.claims().claim(selected)
-            .ok_or(FeedbackError::Invalid("overstress claim left its original card"))?;
+            &requirements, selection).map_err(|e| FeedbackError::Source(e.into()))?;
         let knots = self.caloric.curve().knots();
         let lower = point_at(&self.context, &self.temperature_axis, knots[0].temperature_k)?;
         let upper = point_at(&self.context, &self.temperature_axis, knots[knots.len()-1].temperature_k)?;
-        let support = self.card.claims().query_line_typed(&claim.key, &self.temperature_axis,
-            &lower, &upper, ClaimSelection::Pinned(selected))
-            .map_err(|e| FeedbackError::Support { property: OVERSTRESS_VISCOSITY_PROPERTY.into(), reason: e.to_string() })?;
-        if support.knots.iter().any(|(_, sample)| !positive(sample.evidence.value.value)) {
-            return Err(FeedbackError::Invalid("overstress viscosity must be positive throughout its source interval"));
+        let mut additional_pins = Vec::with_capacity(roles.len());
+        for property in resolved.properties() {
+            admit_rate_independent_property(property, &self.temperature_axis)?;
+            let name = property.requirement().name();
+            let selected = property.answer().receipt.selected;
+            let claim = self.card.claims().claim(selected)
+                .ok_or(FeedbackError::Invalid("overstress claim left its original card"))?;
+            let support = self.card.claims().query_line_typed(&claim.key, &self.temperature_axis,
+                &lower, &upper, ClaimSelection::Pinned(selected))
+                .map_err(|e| FeedbackError::Support { property: name.into(), reason: e.to_string() })?;
+            if support.knots.iter().any(|(_, sample)| {
+                let value = sample.evidence.value.value;
+                !positive(value) || name == OVERSTRESS_EXPONENT_PROPERTY && value < 1.0
+            }) {
+                return Err(FeedbackError::Invalid(
+                    "overstress coefficients must stay positive and the power exponent >= 1 throughout the source interval"));
+            }
+            additional_pins.push((name.to_owned(), selected));
         }
         let MaterialPropertySelection::PinnedByProperty(pins) = &mut self.selection else {
             return Err(FeedbackError::Invalid("thermoplastic coefficients lost original claim pins"));
         };
-        pins.push((OVERSTRESS_VISCOSITY_PROPERTY.into(), selected));
-        self.requirements.push(requirement);
-        self.linear_overstress = true;
+        pins.extend(additional_pins);
+        self.requirements.extend(requirements);
+        self.overstress = Some(model);
         self.source = self.resolve_temperature(self.reference_temperature_k)?;
         Ok(self)
     }
 
-    /// Whether physical step duration is required for this constitutive model.
-    pub const fn has_linear_overstress(&self) -> bool { self.linear_overstress }
+    /// Whether the original n=1 rate law was explicitly selected.
+    pub const fn has_linear_overstress(&self) -> bool {
+        matches!(self.overstress, Some(OverstressSelection::Linear))
+    }
+    /// Whether the source-selected power law was explicitly selected.
+    pub const fn has_power_law_overstress(&self) -> bool {
+        matches!(self.overstress, Some(OverstressSelection::PowerLaw))
+    }
+    /// Whether constitutive updates require the actual physical interval.
+    pub const fn has_overstress(&self) -> bool { self.overstress.is_some() }
 
     /// Admit accepted strain/history using the selected kinetic interpretation.
     /// Viscous material may carry real positive overstress into the next step.
     pub fn validate_committed_history(&self, source: &ResolvedJ2Plasticity,
         mechanical_strain: &Voigt, history: &J2State, tolerance_pa: f64)
         -> Result<(), EnergyError> {
-        if self.linear_overstress {
+        if self.overstress.is_some() {
             source.law().validate_overstress_history(mechanical_strain, history)
         } else {
             source.law().validate_committed_history(mechanical_strain, history, tolerance_pa)
@@ -778,6 +816,18 @@ impl<'a> CaloricPoint<'a> {
             return Err(FeedbackError::Invalid("select the overstress law before advancing the specimen"));
         }
         self.binding = self.binding.with_linear_overstress(selection)?;
+        self.source = self.binding.resolve_temperature(self.state.temperature_k())?;
+        Ok(self)
+    }
+
+    /// Attach nonlinear power-law flow before loading. The existing uniform
+    /// caloric/transport owner supplies its actual dt and receives physical heat.
+    pub fn with_power_law_overstress(mut self, selection: MaterialPropertySelection)
+        -> Result<Self, FeedbackError> {
+        if self.time_s != 0.0 || self.strain != [0.0; 6] || self.history.alpha != 0.0 {
+            return Err(FeedbackError::Invalid("select the overstress law before advancing the specimen"));
+        }
+        self.binding = self.binding.with_power_law_overstress(selection)?;
         self.source = self.binding.resolve_temperature(self.state.temperature_k())?;
         Ok(self)
     }

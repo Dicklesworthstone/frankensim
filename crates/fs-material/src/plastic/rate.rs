@@ -1,4 +1,4 @@
-//! Linear associative J2 overstress on the original radial-return owner.
+//! Associative J2 overstress on the original radial-return owner.
 //!
 //! With `f = q(stress-backstress) - sigma_y - H_iso alpha`, the declared Perzyna n=1 law is
 //! `alpha_dot = max(f, 0)/eta`, eta in Pa s. Backward Euler gives
@@ -16,6 +16,47 @@ use super::{J2Plasticity, J2State};
 use crate::{MaterialAdmissibility, MaterialError, SmallStrainLaw, Tangent6, Voigt};
 use fs_evidence::{Ambition, ModelCard, ValidityDomain};
 use fs_qty::Dims;
+
+mod power;
+pub use power::{PowerLawOverstressJ2, OVERSTRESS_EXPONENT_PROPERTY, OVERSTRESS_STRESS_SCALE_PROPERTY};
+
+/// The selected kinetic law; both variants retain the native J2 history and
+/// energetic hardening. Kept internal to the shared thermal dispatch.
+#[derive(Clone, Debug)]
+pub(crate) enum OverstressJ2 {
+    Linear(LinearOverstressJ2),
+    PowerLaw(PowerLawOverstressJ2),
+}
+impl OverstressJ2 {
+    pub(crate) fn advance_with_energy(&self, old_strain: &Voigt, old_state: &J2State,
+        strain: &Voigt, tolerances: EnergyTolerances) -> Result<EnergyIncrement, EnergyError> {
+        match self {
+            Self::Linear(law) => law.advance_with_energy(old_strain, old_state, strain, tolerances),
+            Self::PowerLaw(law) => law.advance_with_energy(old_strain, old_state, strain, tolerances),
+        }
+    }
+}
+impl SmallStrainLaw for OverstressJ2 {
+    type State = J2State;
+    fn initial_state(&self) -> J2State {
+        match self { Self::Linear(law) => law.initial_state(), Self::PowerLaw(law) => law.initial_state() }
+    }
+    fn stress(&self, strain: &Voigt, state: &J2State) -> Voigt {
+        match self { Self::Linear(law) => law.stress(strain, state), Self::PowerLaw(law) => law.stress(strain, state) }
+    }
+    fn tangent(&self, strain: &Voigt, state: &J2State) -> Tangent6 {
+        match self { Self::Linear(law) => law.tangent(strain, state), Self::PowerLaw(law) => law.tangent(strain, state) }
+    }
+    fn update_state(&self, strain: &Voigt, state: &J2State) -> J2State {
+        match self { Self::Linear(law) => law.update_state(strain, state), Self::PowerLaw(law) => law.update_state(strain, state) }
+    }
+    fn admissibility(&self) -> MaterialAdmissibility {
+        match self { Self::Linear(law) => law.admissibility(), Self::PowerLaw(law) => law.admissibility() }
+    }
+    fn card(&self) -> ModelCard {
+        match self { Self::Linear(law) => law.card(), Self::PowerLaw(law) => law.card() }
+    }
+}
 
 /// Positive linear-overstress viscosity in coherent Pa s, from material data.
 pub const OVERSTRESS_VISCOSITY_PROPERTY: &str = "plastic_overstress_viscosity";

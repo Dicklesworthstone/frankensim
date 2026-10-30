@@ -221,9 +221,26 @@ impl<'a> ThermoplasticSolid<'a> {
     /// Each selected viscosity is pinned on the SAME mechanical/caloric card.
     /// All existing static, inertial, contact and electrical candidates use the
     /// actual common physical interval in the original return map and heat audit.
-    pub fn with_linear_overstress(mut self,
+    pub fn with_linear_overstress(self,
         selections: &[Option<fs_material::state_point::MaterialPropertySelection>],
         cx: &Cx<'_>) -> Result<Self, ThermoplasticError> {
+        self.with_overstress(selections, false, cx)
+    }
+
+    /// Select material-defined nonlinear power-law flow per tetrahedron before
+    /// loading. Viscosity, stress scale and exponent are pinned and refreshed at
+    /// each actual temperature. Existing equilibrium, inertial, contact and
+    /// electrical candidates receive its consistent tangent, retained plastic
+    /// history and physical heat on their original shared clock.
+    pub fn with_power_law_overstress(self,
+        selections: &[Option<fs_material::state_point::MaterialPropertySelection>],
+        cx: &Cx<'_>) -> Result<Self, ThermoplasticError> {
+        self.with_overstress(selections, true, cx)
+    }
+
+    fn with_overstress(mut self,
+        selections: &[Option<fs_material::state_point::MaterialPropertySelection>],
+        power_law: bool, cx: &Cx<'_>) -> Result<Self, ThermoplasticError> {
         poll(cx)?;
         if selections.len() != self.cells.len() || !self.solution.increments.is_empty()
             || self.solution.element_states.iter().any(|s| s.alpha != 0.0 || s.plastic_strain != [0.0; 6])
@@ -234,8 +251,11 @@ impl<'a> ThermoplasticSolid<'a> {
         for (i, (cell, selection)) in self.cells.iter_mut().zip(selections).enumerate() {
             poll(cx)?;
             if let Some(selection) = selection {
-                cell.source = cell.source.clone().with_linear_overstress(selection.clone())
-                    .map_err(ThermoplasticError::Material)?;
+                cell.source = if power_law {
+                    cell.source.clone().with_power_law_overstress(selection.clone())
+                } else {
+                    cell.source.clone().with_linear_overstress(selection.clone())
+                }.map_err(ThermoplasticError::Material)?;
                 self.materials[i] = cell.source.resolve_enthalpy(cell.accepted.specific_h_j_kg)
                     .map_err(ThermoplasticError::Material)?.1;
             }

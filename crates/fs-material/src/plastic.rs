@@ -9,7 +9,7 @@ pub mod source;
 pub mod energy;
 /// Fixed-energy native thermoplastic heat feedback through shared transport.
 pub mod thermal;
-/// Linear overstress with the same radial return, history and consistent tangent.
+/// Linear and power-law overstress on the same return map and physical history.
 pub mod rate;
 
 use crate::elastic::IsotropicElastic;
@@ -248,6 +248,12 @@ impl SmallStrainLaw for J2Plasticity {
 impl J2Plasticity {
     fn tangent_with_overstress(&self, strain: &Voigt, state: &J2State, overstress_modulus: f64) -> Tangent6 {
         let up = self.radial_return(strain, state, overstress_modulus);
+        self.tangent_from_return(&up, overstress_modulus)
+    }
+
+    // Nonlinear kinetics uses its endpoint derivative here, while the actual
+    // radial correction still comes from the original return-map owner.
+    fn tangent_from_return(&self, up: &Update, overstress_derivative: f64) -> Tangent6 {
         if !up.plastic {
             return self.elastic.stiffness();
         }
@@ -256,7 +262,7 @@ impl J2Plasticity {
         // Simo–Hughes algorithmic moduli:
         //   C = κ I⊗I + 2μθ I_dev − 2μ θ̄ n̂⊗n̂
         let theta = 1.0 - 3.0 * mu * up.dgamma / up.q_trial;
-        let theta_bar = 3.0 * mu / (3.0 * mu + self.combined_hardening() + overstress_modulus) - (1.0 - theta);
+        let theta_bar = 3.0 * mu / (3.0 * mu + self.combined_hardening() + overstress_derivative) - (1.0 - theta);
         let mut c = [[0.0f64; 6]; 6];
         // n̂ : dε picks up the shear-doubling of the tensor contraction.
         let weight = |j: usize| if j < 3 { 1.0 } else { 2.0 };

@@ -13,8 +13,9 @@
 //! Fixed moduli/constant alpha retain -T_0 alpha delta(tr(sigma)) exactly.
 //! This endpoint rule closes the discrete first law; time refinement is required.
 //! Numerical loss remains separate and is never deposited as physical heat.
-//! Selected linear overstress uses eta(T_1)/dt in the original return map and
-//! physical dissipation. Eta stores no free energy and adds no entropy term.
+//! Selected linear or power-law overstress uses endpoint-temperature kinetics
+//! and actual dt in the original return map and physical heat. Its coefficients
+//! store no free energy and add no entropy term.
 
 use super::*;
 use crate::tensor::{contract, trace};
@@ -27,7 +28,7 @@ use fs_evidence::ModelCard;
 pub struct ThermalJ2 {
     source: ResolvedJ2Plasticity,
     expansion_strain: f64,
-    rate: Option<super::super::rate::LinearOverstressJ2>,
+    rate: Option<super::super::rate::OverstressJ2>,
 }
 impl ThermalJ2 {
     /// Complete original property bundle at this law's temperature.
@@ -388,15 +389,24 @@ impl ThermoplasticSource<'_> {
     }
 
     fn overstress_law<E>(&self, source: &ResolvedJ2Plasticity, duration_s: Option<f64>)
-        -> Result<Option<super::super::rate::LinearOverstressJ2>, FeedbackError<E>> {
-        use super::super::rate::{LinearOverstressJ2, OVERSTRESS_VISCOSITY_PROPERTY};
-        if !self.linear_overstress { return Ok(None); }
+        -> Result<Option<super::super::rate::OverstressJ2>, FeedbackError<E>> {
+        use super::super::rate::{LinearOverstressJ2, PowerLawOverstressJ2, OverstressJ2,
+            OVERSTRESS_VISCOSITY_PROPERTY, OVERSTRESS_STRESS_SCALE_PROPERTY, OVERSTRESS_EXPONENT_PROPERTY};
+        let Some(model) = self.overstress else { return Ok(None); };
         let duration_s = duration_s.ok_or(FeedbackError::Invalid(
             "source-defined overstress requires the physical step duration"))?;
-        let viscosity = source.material().property(OVERSTRESS_VISCOSITY_PROPERTY)
-            .ok_or(FeedbackError::Invalid("resolved source omitted overstress viscosity"))?.value_si();
-        let law = LinearOverstressJ2::new(source.law().clone(), viscosity, duration_s)
-            .map_err(|e| FeedbackError::Source(e.into()))?;
+        let value = |name| source.material().property(name).map(|p| p.value_si())
+            .ok_or(FeedbackError::Invalid("resolved source omitted an overstress coefficient"));
+        let viscosity = value(OVERSTRESS_VISCOSITY_PROPERTY)?;
+        let law = match model {
+            OverstressSelection::Linear => OverstressJ2::Linear(
+                LinearOverstressJ2::new(source.law().clone(), viscosity, duration_s)
+                    .map_err(|e| FeedbackError::Source(e.into()))?),
+            OverstressSelection::PowerLaw => OverstressJ2::PowerLaw(
+                PowerLawOverstressJ2::new(source.law().clone(), viscosity,
+                    value(OVERSTRESS_STRESS_SCALE_PROPERTY)?, value(OVERSTRESS_EXPONENT_PROPERTY)?, duration_s)
+                    .map_err(|e| FeedbackError::Source(e.into()))?),
+        };
         Ok(Some(law))
     }
 

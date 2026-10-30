@@ -7,6 +7,9 @@ use fs_material::plastic::rate::{OVERSTRESS_VISCOSITY_DIMS, OVERSTRESS_VISCOSITY
 use fs_material::plastic::thermal::ThermoplasticSource;
 
 fn fixture(cp: f64, eta: f64, temperature_slope: f64) -> Fixture {
+    fixture_with_power(cp, eta, temperature_slope, None)
+}
+fn fixture_with_power(cp: f64, eta: f64, temperature_slope: f64, power: Option<(f64, f64)>) -> Fixture {
     let original = Fixture::new(cp);
     let mut claims = ClaimSet::new();
     for (_, claim) in original.card.claims().claims_ordered() {
@@ -29,6 +32,11 @@ fn fixture(cp: f64, eta: f64, temperature_slope: f64) -> Fixture {
     viscosity.interpolation = InterpolationPolicy::LinearInside;
     viscosity.validity = ValidityDomain::unconstrained().with("T", 280.0, 320.0);
     claims.insert_claim(viscosity).unwrap();
+    if let Some((scale, exponent)) = power {
+        use fs_material::plastic::rate::{OVERSTRESS_STRESS_SCALE_PROPERTY, OVERSTRESS_EXPONENT_PROPERTY};
+        claims.insert_claim(scalar(OVERSTRESS_STRESS_SCALE_PROPERTY, Pressure::DIMS, scale)).unwrap();
+        claims.insert_claim(scalar(OVERSTRESS_EXPONENT_PROPERTY, Dims([0; 6]), exponent)).unwrap();
+    }
     let card = MaterialCard::assemble(original.card.id().clone(), claims, vec![]).unwrap();
     let lower = QueryPoint::new().with("T", 280.0).unwrap();
     let upper = QueryPoint::new().with("T", 320.0).unwrap();
@@ -379,5 +387,120 @@ fn g4_duration_free_api_and_late_thermal_failure_do_not_advance_rate_history() {
             .unwrap();
         assert_eq!(retry.solid().solution(), accepted.solid().solution());
         assert_eq!(retry.thermal().cells(), accepted.thermal().cells());
+    });
+}
+
+
+// Independent stress-controlled power-law endpoint. This oracle uses uniaxial
+// compatibility and caloric balance only; it calls no production radial return.
+fn power_reference(alpha0: f64, t0: f64, stress: f64, eta: f64, slope: f64,
+    cp: f64, dt: f64, scale: f64, exponent: f64) -> (f64, f64) {
+    let mut lower = 0.0;
+    let mut upper = 0.03-alpha0;
+    for _ in 0..100 {
+        let delta = 0.5*(lower+upper);
+        let temperature = t0+(stress-H*(alpha0+delta))*delta/(RHO*cp);
+        let viscosity = eta*(1.0-slope*(temperature-300.0));
+        let f = stress-(YIELD-SOFTENING*(temperature-300.0))-H*(alpha0+delta);
+        let residual = delta-dt*scale/viscosity*(f.max(0.0)/scale).powf(exponent);
+        if residual > 0.0 { upper=delta; } else { lower=delta; }
+    }
+    let delta=0.5*(lower+upper);
+    (alpha0+delta,t0+(stress-H*(alpha0+delta))*delta/(RHO*cp))
+}
+
+#[test]
+fn g1_power_law_material_changes_loaded_tet_shape_with_same_step_heat_feedback() {
+    context(|cx| {
+        let (cp, dt, stress, slope, scale) = (20.0,0.1,5e6,0.02,2e6);
+        let mut final_alpha = Vec::new();
+        for exponent in [1.5, 3.0] {
+            for eta in [1e8,2e8] {
+                let fixture=fixture_with_power(cp,eta,slope,Some((scale,exponent)));
+                let mut thermal=initial(&[&fixture],&[],&[0.0]);
+                let mut solid=bind(&thermal,&[&fixture],&NODES,&TETS,cx)
+                    .with_power_law_overstress(&[Some(MaterialPropertySelection::SingleClaimOnly)],cx).unwrap();
+                let initial_mass=thermal.cells()[&CellId(100)].mass_kg;
+                let (mut alpha,mut temperature)=(0.0,300.0);
+                for step in 1..=4 {
+                    let expected=power_reference(alpha,temperature,stress,eta,slope,cp,dt,scale,exponent);
+                    let candidate=solid.advance(&thermal,&(),step as f64*dt,&ROLLERS,
+                        &[(3,stress*V/L)],IncrementSettings::default(),heat_steps(dt/4.0),config(),cx).unwrap();
+                    let solution=candidate.solid().solution();
+                    close(solution.element_states[0].alpha,expected.0,2e-10);
+                    close(solution.element_stress[0][0],stress,1e-2);
+                    close(solution.element_strain[0][0],stress/E+expected.0,2e-10);
+                    close(solution.displacement_m[1][0],L*(stress/E+expected.0),L*2e-10);
+                    close(candidate.thermal().temperature_k(CellId(100)).unwrap(),expected.1,3e-7);
+                    let report=candidate.report();
+                    close(report.physical_heat_j,RHO*V*cp*(expected.1-temperature),2e-9);
+                    close(report.thermal_audit.stored_energy_change_j,report.physical_heat_j,2e-9);
+                    close(report.combined_residual_j,0.0,config().energy_tolerance_j);
+                    assert!(report.physical_heat_j>0.0);
+                    assert!(report.numerical_loss_j>=0.0);
+                    assert_eq!(candidate.thermal().cells()[&CellId(100)].mass_kg,initial_mass);
+                    let snapshot=candidate.solid().materials()[0].material();
+                    close(snapshot.property(OVERSTRESS_VISCOSITY_PROPERTY).unwrap().value_si(),
+                        eta*(1.0-slope*(expected.1-300.0)),3.0);
+                    for property in snapshot.properties() {
+                        let actual=property.answer().receipt.query_point.iter().find(|(axis,_)|axis=="T").unwrap().1;
+                        close(actual,expected.1,3e-7);
+                    }
+                    alpha=expected.0; temperature=expected.1;
+                    let (next_thermal,next_solid,_,_)=candidate.into_parts();
+                    thermal=next_thermal; solid=next_solid;
+                }
+                final_alpha.push(alpha);
+            }
+        }
+        assert!(final_alpha[0]>final_alpha[1]);
+        assert!(final_alpha[2]>final_alpha[3]);
+        assert!((final_alpha[0]-final_alpha[2]).abs()>1e-5);
+    });
+}
+
+#[test]
+fn g4_power_law_requires_all_sources_valid_exponent_and_physical_time() {
+    for fixture in [fixture(20.0,1e8,0.02),
+        fixture_with_power(20.0,1e8,0.02,Some((2e6,0.5)))] {
+        assert!(ThermoplasticSource::try_new(fixture.query(),0.0).unwrap()
+            .with_power_law_overstress(MaterialPropertySelection::SingleClaimOnly).is_err());
+    }
+    let fixture=fixture_with_power(20.0,1e8,0.02,Some((2e6,2.5)));
+    let source=ThermoplasticSource::try_new(fixture.query(),0.0).unwrap()
+        .with_power_law_overstress(MaterialPropertySelection::SingleClaimOnly).unwrap();
+    assert!(source.has_overstress());
+    assert!(source.has_power_law_overstress());
+    assert!(!source.has_linear_overstress());
+    assert!(source.resolve_expanded_enthalpy(0.0).is_err());
+    assert!(source.resolve_expanded_enthalpy_for_step(0.0,0.0).is_err());
+    let (_,law)=source.resolve_expanded_enthalpy_for_step(0.0,0.1).unwrap();
+    assert!(source.clone().with_linear_overstress(MaterialPropertySelection::SingleClaimOnly).is_err());
+    let point=fs_material::plastic::thermal::CaloricPoint::try_new(fixture.query(),0.0,V,1e-3)
+        .unwrap().with_power_law_overstress(MaterialPropertySelection::SingleClaimOnly).unwrap();
+    assert_eq!(point.history(),&law.initial_state());
+    assert_eq!(point.time_s(),0.0);
+}
+
+#[test]
+fn g4_power_law_thermal_refusal_preserves_original_solid_and_retry() {
+    context(|cx| {
+        let fixture=fixture_with_power(20.0,1e8,0.02,Some((2e6,2.5)));
+        let thermal=initial(&[&fixture],&[],&[0.0]);
+        let solid=bind(&thermal,&[&fixture],&NODES,&TETS,cx)
+            .with_power_law_overstress(&[Some(MaterialPropertySelection::SingleClaimOnly)],cx).unwrap();
+        let original=solid.solution().clone();
+        let mut short=config(); short.maximum_iterations=1;
+        assert!(solid.advance(&thermal,&(),0.1,&ROLLERS,&[(3,5e6*V/L)],
+            IncrementSettings::default(),heat_steps(0.1),short,cx).is_err());
+        assert_eq!(solid.solution(),&original);
+        assert_eq!(solid.time_s(),0.0);
+        assert_eq!(thermal.time_s(),0.0);
+        let first=solid.advance(&thermal,&(),0.1,&ROLLERS,&[(3,5e6*V/L)],
+            IncrementSettings::default(),heat_steps(0.1),config(),cx).unwrap();
+        let retry=solid.advance(&thermal,&(),0.1,&ROLLERS,&[(3,5e6*V/L)],
+            IncrementSettings::default(),heat_steps(0.1),config(),cx).unwrap();
+        assert_eq!(first.solid().solution(),retry.solid().solution());
+        assert_eq!(first.thermal().cells(),retry.thermal().cells());
     });
 }
