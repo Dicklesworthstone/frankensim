@@ -129,6 +129,9 @@ impl Profile {
         if spec.cavity_gas_record.is_some() && spec.cavity.is_none() && self.interior.is_none() {
             return Err("cavity_gas requires an actual lumped or spatial body cavity".into());
         }
+        if spec.cavity_molecular.is_some() && !self.has_thermal_cavity() {
+            return Err("cavity_molecular requires the original interior FE with an air-thermal law".into());
+        }
         match &self.model {
             BodyModel::Plate(_) if spec.body.modes > input::MAX_PLATE_BODY_MODES => Err(format!(
                 "flat plate body profiles admit 1..={} retained body modes", input::MAX_PLATE_BODY_MODES).into()),
@@ -253,6 +256,16 @@ impl Profile {
             BodyModel::Assembly(assembly) => assembly.material_memory_states(),
         };
         solid + self.interior.as_ref().map_or(0, cavity::Spec::thermal_memory_states)
+    }
+    /// Joint caloric histories replace the heat-only allowance in the same
+    /// native memory bank; do not reserve a second parallel thermal owner.
+    pub fn material_memory_states_for(&self, spec: &input::Spec) -> usize {
+        let original = self.material_memory_states();
+        match (&self.interior, &spec.cavity_molecular) {
+            (Some(air), Some(molecular)) => original - air.thermal_memory_states()
+                + molecular.options.maximum_memory_states,
+            _ => original,
+        }
     }
     /// All solid/gas/axial coordinates are now fixed; memory enters the SAME
     /// coupled mechanical owner before conversion to multiple bows and PCM.

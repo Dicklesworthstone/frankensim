@@ -8,6 +8,8 @@ mod openings;
 mod thermal;
 #[path = "spatial_cavity/regional.rs"]
 mod regional;
+#[path = "spatial_cavity/molecular.rs"]
+mod molecular;
 
 const BODY: &str = include_str!("../closed-shell-cavity.body");
 const PERFORMANCE: &str = include_str!("../closed-shell-cavity.material-strings");

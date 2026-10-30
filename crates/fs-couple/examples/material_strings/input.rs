@@ -2,6 +2,8 @@
 use super::*;
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 use fs_material::gas_species::input::{GasRecord, ThermochemicalSources, read_gas_record};
+use fs_material::relaxation::RelaxationState;
+use fs_couple::bowed_string::runtime::reciprocal::bank::cavity::ShellCavityMolecularOptions;
 use fs_scenario::gesture::GestureValue;
 use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::{TransverseDirection, TransverseDirections};
 use fs_scenario::acoustic::BendingRelaxationProperties;
@@ -175,6 +177,13 @@ impl BodyRadiation {
         }
     }
 }
+/// Explicit local caloric reservoirs of the original cavity atmosphere.
+#[derive(Clone, Debug)]
+pub struct CavityMolecular {
+    pub relaxation: RelaxationState,
+    pub options: ShellCavityMolecularOptions,
+}
+
 #[derive(Clone, Debug)]
 pub struct Spec {
     pub bytes: Vec<u8>, pub rate: u32, pub samples: u64, pub full_scale: f64, pub block: usize,
@@ -184,6 +193,8 @@ pub struct Spec {
     /// Optional independent interior atmosphere. Omission inherits gas_record;
     /// an explicit record must be consumed by a lumped or spatial body cavity.
     pub cavity_gas_record: Option<GasRecord>,
+    /// Interior molecular data are independent of exterior observer absorption.
+    pub cavity_molecular: Option<CavityMolecular>,
     pub bridge_interfaces: bridge_interfaces::Inputs,
     pub rotational_bridges: Vec<RotationalBridge>,
     pub translational_bridges: Vec<TranslationalBridge>,
@@ -257,6 +268,19 @@ impl Spec {
             Some(record)
         } else { None };
         let cavity_gas = *cavity_gas_record.as_ref().unwrap_or(&gas_record).state();
+        let cavity_molecular = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("cavity_molecular") {
+            let mut row = r.row("cavity_molecular")?;
+            let options = ShellCavityMolecularOptions {
+                maximum_caloric_coordinates: row.count(128)?,
+                maximum_memory_states: row.count(4096)?,
+            };
+            let law = fs_material::relaxation::input::read_relaxation(&mut row.words)?;
+            row.end()?;
+            let medium = fs_material::relaxation::input::medium_from_record(
+                cavity_gas_record.as_ref().unwrap_or(&gas_record))?;
+            Some(CavityMolecular { relaxation: law.evaluate(&medium)?, options })
+        } else { None };
         let mut row = r.row("body")?;
         let body = Body { pack: row.path()?, length: row.positive()?, width: row.positive()?,
             thickness: row.positive()?, modes: row.count(MAX_BODY_MODES)?, listener: row.positive()? };
@@ -982,12 +1006,13 @@ impl Spec {
         }
         friction.validate_tracks(&schedule)?;
         let spec = Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
-            gas, gas_record, cavity_gas_record, body, strings, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
+            gas, gas_record, cavity_gas_record, cavity_molecular, body, strings, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
             rotational_bridges, translational_bridges, cylinder_gas_loading, prepared_linear, residual_flexibility, geometric_stretching,
             longitudinal_waves, longitudinal_loss, axial_bearings, bending_memory, body_radiation, shell_bem_angular_refinement,
             plate_observer, shell_observer, shell_receiver_quadrature, one_way_observer, cavity, friction, contact_thermal: false, bow_ribbon, bow_fibers,
             bow_station_motion, forces, schedule };
         spec.bow_station_program(&CancelGate::new_clock_free())?;
+        spec.validate_cavity_gas()?;
         spec.validate_shell_observer()?;
         if let Some(layers) = spec.friction.shear_layers() { layers.preflight(&spec)?; }
         spec.network_dimensions(false)?;
@@ -1005,6 +1030,19 @@ impl Spec {
 
     pub fn validate_cavity_gas(&self) -> Result<()> {
         fs_couple::cavity_modal::validate_cavity_media(self.cavity_gas(), &self.gas)?;
+        if let Some(molecular) = &self.cavity_molecular {
+            let width = 1 + molecular.relaxation.processes().iter()
+                .filter(|process| process.heat_capacity_j_kg_k > 0.0).count();
+            if molecular.relaxation.gas() != self.cavity_gas()
+                || !(1..=128).contains(&molecular.options.maximum_caloric_coordinates)
+                || !(1..=4096).contains(&molecular.options.maximum_memory_states)
+                || width > molecular.options.maximum_caloric_coordinates {
+                return Err("cavity_molecular requires its original interior gas and complete positive caloric/memory allowances".into());
+            }
+            if self.cavity.is_some() || self.prepared_linear.is_some() {
+                return Err("cavity_molecular requires an exact spatial thermal cavity, without a separate lumped cavity or prepared-linear owner".into());
+            }
+        }
         if let Some(cavity) = &self.cavity {
             if cavity.cavity.gas() != self.cavity_gas() {
                 return Err("body cavity must retain its original interior gas source record".into());

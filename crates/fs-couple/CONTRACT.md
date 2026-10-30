@@ -14216,3 +14216,7 @@ No new gas/source solver, interpolation or inferred geometry correspondence
 is introduced. This remains a one-way load transfer from stationary gas walls;
 reciprocal moving-wall work, fluid/structure feedback, fracture and material
 shock validation require their own admitted physics.
+
+## Authored interior molecular sources in material-string performances
+
+`material_strings` admits `cavity_molecular MAX_CALORIC_COORDINATES MAX_MEMORY_STATES LAW` after the original regional gas records. The existing inline molecular source grammar evaluates only against the selected cavity `GasRecord`, including attached species, NASA-9 and transport sources. The original FE/air-thermal binder selects the joint native caloric owner before preload; exterior observer absorption never supplies the interior source. Complete joint histories replace the heat-only allowance in the existing setup and state budgets. Missing thermal geometry, stale source state, a separate lumped cavity, prepared propagation and incomplete species data refuse before material I/O. Both mean atmospheres remain frozen; these acoustic histories do not evolve mean heat or species inventories. The authored integration checks cover independent interior/exterior gases, original thermochemical source identity, changed native pressure response, and refusals before material reads.

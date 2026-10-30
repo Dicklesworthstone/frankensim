@@ -182,6 +182,9 @@ impl Spec {
         if spec.cavity.is_some() {
             return Err("interior FE and a separate lumped cavity would duplicate gas storage".into());
         }
+        if spec.cavity_molecular.is_some() && self.thermal.is_none() {
+            return Err("cavity_molecular requires the original air-thermal boundary and heat eigenwindow".into());
+        }
         if let Some(thermal) = self.thermal {
             thermal.validate()?;
             if spec.prepared_linear.is_some() {
@@ -234,9 +237,17 @@ impl Spec {
         // the reciprocal ports before subsequent nonlinear attachments. The
         // authored source cannot return until its mandatory BEM stage binds
         // the complete body/opening exterior load.
-        Ok(bank.with_material_shell_cavity_in_gas(
-            &fe, gas, self.options, self.openings.clone(), self.thermal, gate,
-        )?)
+        if let Some(molecular) = &spec.cavity_molecular {
+            let thermal = self.thermal.ok_or("cavity_molecular lost its original air-thermal source")?;
+            Ok(bank.with_material_shell_cavity_thermal_molecular(
+                &fe, gas, self.options, self.openings.clone(), thermal,
+                molecular.relaxation.clone(), molecular.options, gate,
+            )?)
+        } else {
+            Ok(bank.with_material_shell_cavity_in_gas(
+                &fe, gas, self.options, self.openings.clone(), self.thermal, gate,
+            )?)
+        }
     }
 }
 

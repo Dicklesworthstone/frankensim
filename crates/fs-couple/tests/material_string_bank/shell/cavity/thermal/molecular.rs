@@ -224,7 +224,10 @@ fn zero_reservoir_source_recovers_original_fe_thermal_trajectory_bitwise() {
 #[test]
 fn source_reservoirs_change_native_pressure_sound_and_share_one_energy_history() {
     with_cx(|cx, gate| {
-        with_volume(2, gas(101325.0), |fe| {
+        // The refined frequency-domain test above resolves the complete spatial
+        // law. One interior heat coordinate suffices here to exercise actual
+        // sound, pressure, every loss channel and continuing molecular history.
+        with_volume(1, gas(101325.0), |fe| {
             let gas = gas(101325.0);
             let mut first = molecular_bank(cx, gate, fe, gas, source(gas, Some(0.025)));
             let mut second = molecular_bank(cx, gate, fe, gas, source(gas, Some(0.0025)));

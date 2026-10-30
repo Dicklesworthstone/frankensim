@@ -847,6 +847,54 @@ Build the body pack from `closed-shell-manifest.tsv` with the existing
 performance. This closed-shell specimen and compact body pressure remain
 integration examples, not measured violin/cello/bass or free-field validation.
 
+### Molecular caloric response inside the material body
+
+An optional `cavity_molecular` row after `gas` and optional `cavity_gas`, before
+`body`, binds molecular reservoirs to the existing spatial thermal cavity:
+
+```text
+cavity_molecular MAX_CALORIC_COORDINATES MAX_MEMORY_STATES LAW
+```
+
+The body profile must declare its original `interior-fe-v1` geometry and
+`air-thermal isothermal-walls ...` heat eigenwindow, as in
+`closed-shell-thermal.body`. `LAW` uses the shared material relaxation grammar:
+`iso9613-terrestrial-air`, subject to its composition/domain restrictions, or
+`declared N` followed by explicit species, reservoirs and collision rates.
+The law is evaluated against `cavity_gas`; omission of that record inherits the
+original `gas` record. Thermochemical interiors use the same attached species,
+NASA-9 and transport registry. Exterior observer absorption is a separate
+physical source and never supplies the cavity's molecular data.
+
+For example, these **synthetic integration coefficients** give nitrogen one
+rotational reservoir with a 25 ms reference time at 101325 Pa and explicitly
+declare oxygen non-relaxing:
+
+```text
+gas mixture 293.15 101325 mole 1 He 1
+cavity_gas mixture 293.15 101325 mole 2 N2 0.8 O2 0.2
+cavity_molecular 2 96 declared 2 N2 1 rotation 2 power 2533.125 293.15 0 280 320 O2 0
+```
+
+Changing the interior composition, pressure, temperature or authored collision
+coefficients changes the joint thermal/molecular bulk response, reciprocal
+body/string force and pressure through the original simulation owner. Every
+present species needs an explicit law entry; zero reservoirs must be declared,
+and legacy air records without species identities refuse. `rotation DOF` and
+`vibration MODES THETA_K DEGENERACY ...` use the existing reservoir laws;
+`power P_TAU_REF T_REF EXPONENT T_MIN T_MAX` and
+`partners N ID LOG_P_TAU SLOPE T_MIN T_MAX ...` use their existing rate laws.
+
+`MAX_CALORIC_COORDINATES` reserves gas temperature plus active reservoirs per
+heat mode (1–128). `MAX_MEMORY_STATES` reserves the complete joint heat and
+unresolved molecular histories (1–4096, also subject to the frontend's existing
+complete-state and setup-work ceilings). This replaces the heat-only memory
+allowance, so thermal energy is not counted twice. The original thermal FE,
+projection, cancellation and native propagation limits remain binding.
+Missing thermal geometry, a separate lumped cavity and `prepared-linear`
+propagation refuse. Both mean gases remain frozen during the performance;
+these linear acoustic histories do not evolve mean heat or species inventories.
+
 For a cavity whose neck loss follows the actual atmosphere, use:
 
 ```text

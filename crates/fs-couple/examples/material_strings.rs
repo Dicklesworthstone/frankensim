@@ -247,6 +247,10 @@ impl input::Spec {
             && !profile.as_ref().is_some_and(body::Profile::has_spatial_cavity) {
             return Err("cavity_gas requires an actual lumped or spatial body cavity".into());
         }
+        if self.cavity_molecular.is_some()
+            && !profile.as_ref().is_some_and(body::Profile::has_thermal_cavity) {
+            return Err("cavity_molecular requires a body profile with an original interior FE and air-thermal law".into());
+        }
         self.validate_shell_observer()?;
         let bow_station_program = self.bow_station_program(gate)?;
         if let Some(layers)=self.friction.shear_layers() { layers.preflight(&self)?; }
@@ -303,7 +307,7 @@ impl input::Spec {
             additional_body_modes)?;
         let memory = self.string_memory_states()?
             .checked_add(self.bending_memory.as_ref().map_or(0,bending_memory::Input::max_memory_states))
-            .and_then(|n| n.checked_add(profile.as_ref().map_or(0,body::Profile::material_memory_states)))
+            .and_then(|n| n.checked_add(profile.as_ref().map_or(0, |body| body.material_memory_states_for(&self))))
             .ok_or("complete material memory extent overflow")?;
         // A prepared owner keeps the skin load's poles as its air bank beside the transition, charged to the prepared
         // byte and work budget (the library's own split); only the exact owner holds them in its state.
