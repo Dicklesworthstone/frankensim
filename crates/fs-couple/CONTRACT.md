@@ -5854,6 +5854,26 @@ approximation, not resolved transient jet turning, moving lips, coverage,
 time-varying mouth area/cut-up, or a material-state evolution law. The
 separation closure does not resolve vortex memory or turbulence.
 
+The opt-in card-centreline law uses the same pressure-aware speed admission at
+construction, schedule preflight and live pressure controls. The bulk speed
+still carries volume flow; the actual card speed must also fit the declared
+Mach limit. A fully developed slit additionally retains its Poiseuille-centre
+inviscid bound at every pressure, including the currently accepted input when
+attaching a different held-pressure receipt. The developing core uses the
+proposed pressure before mutation. Refusal preserves both the accepted inputs
+and future source trajectory; no speed or pressure is clipped.
+
+`FlueOutletPerformance::with_observer_gas` and the optional file record after
+`receiver` bind the shared gas propagation owner to every terminal and mouth
+quadrature path. `DuctPressure` retains its original admitted opening geometry,
+signed port order, complete mechanics packets and exterior state. Molecular
+laws resolve against the original exterior composition. The separately prepared
+mouth and terminal receivers share only the additional numerical causal padding;
+their physical distances and dispersion remain distinct. Binding is cold,
+bounded and cancellable, and leaves the jet, bore and radiation reaction
+unchanged. Omitting the record preserves the original observer arithmetic.
+These changes neither qualify the estimated jet nor establish flute realism.
+
 ### Retained material inertia in contact and electrical feedback
 
 `solid_enthalpy::plastic::dynamics::ThermoplasticDynamics` now composes with the

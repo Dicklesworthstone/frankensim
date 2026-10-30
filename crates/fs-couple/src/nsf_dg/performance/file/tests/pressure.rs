@@ -205,3 +205,49 @@ fn canonical_pressure_source_keeps_the_original_exterior_observer() {
     assert_eq!(history[128], NsfDgDrive::Boundary(NsfBoundaryDrive::PressureOffset(-20.0)));
     assert_eq!(history[256], NsfDgDrive::Boundary(NsfBoundaryDrive::PressureOffset(0.0)));
 }
+
+const OBSERVER_LAW: &str = "declared 2 N2 0 CO2 1 vibration 1 1000 1 power 10 300 0 250 600";
+
+fn molecular_observer_input() -> String {
+    // The fluid zone remains dry air. Only the independent exterior contains
+    // this deliberately synthetic molecular process; it is not a measured
+    // carbon-dioxide relaxation law or a flute validation fixture.
+    include_str!("../../../../../examples/resolved-dg-pressure.performance")
+        .replace("output 2048 20", "output 32 20")
+        .replace("hold 128 20", "hold 8 20")
+        .replace("hold 256 -20", "hold 16 -20")
+        .replace("hold 2048 0", "hold 32 0")
+        .replace(
+            "dg_exterior 300 100000 0",
+            "dg_exterior mixture 300 100000 mole 2 N2 0.9 CO2 0.1",
+        )
+        .replace(
+            "observer_gas stokes-kirchhoff 4096 1000000 50000000",
+            &format!("observer_gas molecular 4096 1000000 50000000 {OBSERVER_LAW}"),
+        )
+}
+
+#[test]
+fn resolved_molecular_observer_keeps_downstream_species_with_a_distinct_upstream_exterior() {
+    let text = molecular_observer_input()
+        .replace("coupling 64 9216", "coupling 128 18432")
+        .replace("boundary pressure", "boundary upstream-pressure")
+        .replace("observation baffled", concat!(
+            "upstream_dg dg_tube 0.03 0.00896143253443043 baffled 1 2 32 50 2000 0.01 1e-11 256\n",
+            "dg_radiation computed-baffled 20 65 4 8 12 20 0.1 67108864 2 100 1e-8 64 1048576 257\n",
+            "dg_exterior mixture 300 100000 mole 2 N2 0.8 O2 0.2\n",
+            "observation baffled"));
+    let file = read(&text, 8);
+    let system = file.renderer().system();
+    let downstream = system.load().radiation_record().unwrap().gas_record();
+    let upstream = system
+        .upstream_load()
+        .unwrap()
+        .radiation_record()
+        .unwrap()
+        .gas_record();
+    let report = file.renderer().observer_gas().unwrap();
+    assert_eq!(&report.gas, downstream.state());
+    assert_ne!(&report.gas, upstream.state());
+    assert_eq!(file.gas_records().last().unwrap().state(), upstream.state());
+}

@@ -134,7 +134,10 @@ fn zero_pressure_silence_and_failures_do_not_become_fake_audio() {
 mod embouchure;
 
 fn material_observer_input(selection: &str) -> String {
-    include_str!("../../../../examples/flue-network.performance")
+    let source = include_str!("../../../../examples/flue-network.performance")
+        .split_once("\ngesture\n")
+        .unwrap()
+        .0
         .replace("output 24000", "output 1024")
         .replace("exterior same", "exterior 310 101325 0.4")
         .replace(
@@ -144,7 +147,10 @@ fn material_observer_input(selection: &str) -> String {
         .replace(
             "controls 4096",
             "mouth_aperture rectangle 0.012 0.008\nmouth_radiation -0.3 0 4 2\ncontrols 4096",
-        )
+        );
+    format!(
+        "{source}\ngesture\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t1000\ntracks\t1\ntrack\tblow\tblowing-pressure\ninitial\tpressure-pa\t3e2\nevents\t0\n"
+    )
 }
 
 #[test]

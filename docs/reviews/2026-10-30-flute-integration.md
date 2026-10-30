@@ -4,7 +4,7 @@
 
 The audit covers **1,304 individual commits** on the reviewed main history, using the approximately 72-hour window 2026-10-27 17:05:00 UTC through 2026-10-30 17:05:33 UTC and fixed head `90245fbea53699d5de59ff4ead78a016ec08e5d3`. [The per-commit inventory](2026-10-30-instrument-integration.tsv) contains one row per commit, its title, instrument relevance, integration assessment, changed-path evidence and review depth. Coverage was checked against the original commit manifest: no missing SHAs, duplicate SHAs or mismatched titles.
 
-Every commit received metadata and changed-path assessment. **73 selected rows additionally received relevant patch, interface, current-callsite or current-family trace review; the other 1,231 are scope assessments, not claims of full implementation validation.** The TSV preserves the more precise depth for every row. This is a complete inventory and targeted integration audit, not a proof that every changed line or every unrelated simulation is fully integrated. The comprehensive simulation plan, instrument realism plan, open realism beads and current instrument status informed prioritization.
+In the initial inventory pass, every commit received metadata and changed-path assessment. **73 selected rows additionally received relevant patch, interface, current-callsite or current-family trace review; the other 1,231 are scope assessments, not claims of full implementation validation.** The TSV preserves that pass's review depth. Its appended `followup_*` columns retain the separate review's per-commit relevance and integration assessments; they do not upgrade unrelated-domain screening into numerical qualification. The comprehensive simulation plan, instrument realism plan, open realism beads and current instrument status informed prioritization.
 
 ## Principal finding
 
@@ -14,7 +14,7 @@ The repository already records a concrete source failure. At the current authore
 
 Evidence: `data/instruments/descriptions/flute/status.json`, `flute-d4.performance`, `flute-g4.performance`, `flute-a5.performance`; diagnosis commit `46666de1d8`; `crates/fs-aeroac/src/forced_jet.rs`; `crates/fs-couple/src/flue_loop/forced_jet.rs`.
 
-## Most consequential integration gaps
+## Most consequential integration gaps at the audit baseline
 
 | Area | Existing integrated capability | Remaining flute gap |
 | --- | --- | --- |
@@ -28,11 +28,32 @@ Evidence: `data/instruments/descriptions/flute/status.json`, `flute-d4.performan
 
 The relevant native owners are `crates/fs-couple/src/nsf_dg.rs`, `crates/fs-lbm/src/nsf3.rs` and its boundary modules, `crates/fs-couple/src/dg_port/input.rs`, `crates/fs-couple/src/flue_loop/network/performance/file/excitation.rs`, and the native resolved-performance input/render paths. The per-commit TSV gives the changed evidence paths for each cited commit.
 
+The tone-hole limit is deeper than the parser. Although the underlying DG owner
+supports 32 side ports, native preparation builds radiation for every opening
+before attaching terminal closures. Closed chimneys retain exterior matrix rows
+and histories; finite branches require both original flow ports; the observer
+requires matching terminal/aperture dimensions. Admitting a full flute requires
+separating sealed internal branches from radiating exterior-port indices while
+preserving chimney storage and bore coupling. Raising the input count or
+filtering closed holes alone would break those existing ownership invariants.
+
 ## Session implementation selected from the audit
 
 The highest-value bounded extension is a **localized prescribed-reservoir aperture on a stationary transverse NSF wall**, coexisting with the original characteristic source/bore axis. It reuses the original source material, physical ghost state, population reconstruction, thermal-pressure force and conservative total-energy flux. Geometry must avoid characteristic collars, domain corners, moving walls and solids. Native file input and NSF-to-DG construction need to expose that same owner, rather than introducing a second jet equation.
 
-This enables a separately ventilated resolved source domain. It does not establish an acoustically transparent mouth, a finite atmospheric reservoir, a calibrated flue, a realistic flute recording, or SGS compatibility. Reservoir exchange must remain distinct from characteristic/DG exchange in the ledgers. Tests must demonstrate simultaneous exchange and conservative ownership, not only a parser accepting a new token. This paragraph describes the selected work; final implementation and test outcomes belong in the session report.
+This enables a separately ventilated resolved source domain. It does not establish an acoustically transparent mouth, a finite atmospheric reservoir, a calibrated flue, a realistic flute recording, or SGS compatibility. Reservoir exchange must remain distinct from characteristic/DG exchange in the ledgers. Tests must demonstrate simultaneous exchange and conservative ownership, not only a parser accepting a new token.
+
+**Concurrent implementation after the audit window:** commit
+[`2fdf53b2b`](https://github.com/Dicklesworthstone/frankensim/commit/2fdf53b2b0ee8a77dc23d86d05c701496eaa490b),
+with its boundary-owner prerequisite, now exposes selected characteristic bore
+patches and transverse reservoir apertures through the original NSF/DG owners,
+native inputs, two example performances and Instrument Lab. It retains separate
+complete-face, selected-patch and reservoir accounts. This advances the topology
+gap identified above. Its commit records passing native-client checks and
+explicitly blocked executable numerical qualification. The manufactured examples
+remain distinct from a resolved, validated flute mouth; escaping mouth flow
+still has no separate exterior radiation observer. The native results in this
+supplement predate those late boundary changes and do not qualify them.
 
 ## Prioritized continuation
 
@@ -42,3 +63,91 @@ This enables a separately ventilated resolved source domain. It does not establi
 4. Integrate transported warm breath and the relevant material state after the source topology and full acoustic graph are supported. Complete same-specimen passive impedance, register, harmonic and listening tests through the existing realism beads.
 
 These priorities map to the instrument realism plan’s M3.2–M3.4 resolved source/coupling ladder and flute section 6.8, and the open `.133`–`.141`, `.19`, `.207`, `.319`–`.323` realism beads. Generic high-temperature chemistry, phase conversion, optical radiation and contact mechanics were assessed for scope but are not appropriate additions merely because they are recent. Bowed/plucked strings, reeds, percussion and transducers have real separate consumers documented in the per-commit inventory; this flute-focused audit does not claim those families are comprehensively qualified.
+
+## Supplement: source-to-consumer repairs from the parallel review
+
+A separate review used the exact UTC interval **2026-10-27T17:04:57Z through 2026-10-30T17:04:57Z**, at the same fixed baseline `90245fbea53699d5de59ff4ead78a016ec08e5d3`. It resolves to the **same 1,304-commit set**. Its assessments supplement the existing inventory rather than creating additional reviewed commits. Current-callsite tracing identified three bounded defects in existing wind consumers, alongside the larger source-topology work selected above.
+
+### Canonical flute observation now consumes the exterior gas law
+
+The baseline has shared physical gas propagation in DG wind and other pressure observers, but the characteristic-network `FlueFilePerformance` route lacks the complete attachment. The patch connects `GasPropagation` through `DuctPressure`, `FlueOutletPerformance`, native source parsing, and `music_render` receipts.
+
+Each terminal opening and the mouth retains its own distance, phase, and absorption. Common numerical padding aligns the separately prepared mouth and terminal pressure histories before summation. The explicit gas law therefore reaches the actual listener-pressure calculation rather than remaining a parsed record or applying one filter after unrelated paths have been mixed.
+
+The optional record leaves source pressure, jet dynamics, and bore state under their existing owners. Descriptions that omit it retain their original observation behavior. Relevant changes and regressions are in `baffled_pressure_duct.rs`, `flue_loop/network/performance.rs`, its `file.rs` and tests, and `tests/duct_pressure_packets.rs` under `crates/fs-couple`.
+
+Concurrent commit
+[`da45542bd`](https://github.com/Dicklesworthstone/frankensim/commit/da45542bd3b3bba88acd0d21ca6036db435765d1)
+then selected `observer_gas stokes-kirchhoff 4096 1000000 50000000` in the
+published D4, G4 and A5 descriptions. That activation and its extra direct-owner
+tests are preserved. The integration is therefore selected by those presets;
+the estimated source, authored gain and outstanding register/realism problems
+remain separate.
+
+### Resolved observation now parses molecular propagation against its gas source
+
+The resolved source reader already has an observation attachment, but called `GasPropagation::read_record` without the exterior gas context. `nsf_dg/performance/file.rs` now calls `read_record_for_gas`. Molecular propagation can consequently use the original exterior gas record and its source-defined relaxation law, with the same admission rules as other native consumers.
+
+Concurrent commit `1cede3a1b` delivered the same parser repair during this review; that implementation and its molecular-pressure tests are retained. The follow-up adds a distinct-upstream-exterior regression in `nsf_dg/performance/file/tests/pressure.rs`, so selecting the last parsed gas record cannot accidentally bind the listener to the upstream atmosphere. This closes a source-record-to-observer gap. It does not change the resolved flow’s composition transport, add a lip boundary, or qualify an atmospheric interface.
+
+### Jet-card centre speed now participates in pressure admission
+
+Commit `84bcc88c0` connects exit centre speed to card convection, growth, Reynolds number, and onset seeding, while bulk speed continues to carry volume flux. The associated pressure controls and schedule admission still checked only bulk speed. The fully developed slit’s Poiseuille centre was also checked against its inviscid bound only at initial attachment’s supplied reference pressure.
+
+`card_speed_at` now receives the proposed pressure explicitly, and shared `validated_jet_speed` checks the corresponding centre speed before accepting a control. The declared Mach limit and `sqrt(2P/rho)` bound apply consistently. Cold attachment validates both its reference pressure and any already accepted input; bulk flow retains its original physical law.
+
+New `flue_windway` regressions exercise a legal bulk speed with an illegal centre speed, pressures on both sides of a limit derived from the slit law, and a developing core proposed from a zero-pressure state. A refusal test compares subsequent output with an untouched equivalent voice, covering retained pressure and source history as well as immediate state. This matters directly to shared flue/recorder source semantics; the shipped free flute jet has `windway none`, so this correction alone should not be credited with improving its timbre.
+
+### Recent interface changes also left callers behind
+
+The native build exposed additional integration breakages. The staged double-acting acoustic `StagedPort` had not followed `FiniteGasTransportNode`’s new molecular-heat preparation, advance argument, and fourth accounting term. It now delegates preparation to the complete-load owner, forwards the accounting shape, and explicitly refuses a nonzero molecular heat integral that this passive-load wrapper does not own. A focused regression checks refusal before caloric trials; silently discarding the new heat term would conceal a physical accounting error.
+
+Other repairs restore the actual ownership/visibility of the articulated-contact `Term` import, circuit unknown admission, and thermoelastic conductor-geometry refresh/restore helpers. New wet-frame tests now call the existing gate-aware `step_under_gate` interface, and reed contact tests import their solver types. These changes repair concrete trait/caller seams encountered while building the wind changes; they add no new flute excitation model.
+
+### Validation and remaining physical boundary
+
+Validation used the repository-pinned `nightly-2026-07-06` toolchain and locked,
+offline Cargo dependencies. DSR and RCH were unavailable in this environment.
+
+- `cargo test --locked --offline -p fs-couple --test flue_windway --test duct_pressure_packets`
+  passed **18 tests**: all five duct pressure tests and all thirteen windway
+  tests, including the new source-speed and material-path regressions. This
+  compiled the production coupling crate and native renderer through
+  `ddf9f2100`. Later concurrent topology/ensemble changes are not covered by
+  that completed build.
+- Eight direct `music_render wind` cases passed their expected outcomes:
+  legacy observation, classical propagation at callback sizes 37 and 257,
+  explicit molecular exterior gas, three invalid-input refusals, and a resolved
+  source with distinct upstream/downstream atmospheres. The two callback sizes
+  produced identical PCM; classical propagation produced PCM different from
+  the legacy case. Receipts retained 32 terminal surface paths, eight mouth
+  paths, one exterior gas, and common additional numerical latency.
+- Missing molecular species, a zero preparation budget, and unexpected trailing
+  fields refused before WAV or sidecar creation. The resolved case used the
+  explicitly requested 96-to-48 kHz decimation and accepted the downstream
+  N2/CO2 relaxation law despite the separate upstream N2/O2 exterior.
+- The full `fs-couple --lib` test-binary build was stopped while contending at
+  the shared 8 GiB memory ceiling. Its in-module tests are **not reported as
+  passing**. The narrower native suites and renderer cases above completed.
+  The shortened observer fixture was corrected to use an in-window held
+  pressure after the native renderer correctly refused its old, longer gesture.
+- Additional short-onset checks using the full published D4/G4/A5 geometries
+  were started after their observer activation. The shared filesystem reached
+  zero available bytes during the first case; that extra render was stopped.
+  No full-preset pass, full-note render or audible-realism result is claimed.
+- Changed-range formatting and `git diff --check` passed. The constellation
+  checkout preflight was not fully clean (NumPy legacy-file raw bytes and
+  NetworkX/Pandas checkout-index materialization); this is not a claim that the
+  repository-wide CI/DSR gates passed.
+
+Published implementation checkpoints are
+[`4aa8d7522`](https://github.com/Dicklesworthstone/frankensim/commit/4aa8d7522291688edc394e6a7d8e091788e1d4c5)
+(source-speed admission),
+[`68cf23ca9`](https://github.com/Dicklesworthstone/frankensim/commit/68cf23ca94bc32741b00ac529ec40476f74b1e5f)
+(complete canonical-flue gas observation), and
+[`ddf9f2100`](https://github.com/Dicklesworthstone/frankensim/commit/ddf9f2100539cc60d7597ba5639b8c07a7c2a08c)
+(cross-module heat/force API repairs). The concurrent resolved-observer repair
+`1cede3a1b` is retained and covered by the distinct-atmosphere check. This work
+contains no fresh graded listening result or recording comparison.
+
+The late concurrent boundary commits implement the separate aperture topology described earlier; these three consumer repairs and their completed native checks do not establish its numerical qualification. The dominant source limitations remain those documented above and in realism beads `.135`, `.138`, `.188`, `.207`, and `.320`–`.323`: playing-Re excitation, complete embouchure/bore geometry, correct closed-loop regimes, and measured listener output. Plan M3.2–M3.4 and §6.8 require that physical composition. Existing forced-Bickley register failures and the Nolle/Price whistle failures recorded in `.320` comments 7303/7325 still preclude treating a default-model switch as the completed repair.
