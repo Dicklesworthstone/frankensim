@@ -1,4 +1,6 @@
 //! Independent two-body caloric/field equations, not a measured material fit.
+#[path = "circuit_field_contacts/heat.rs"]
+mod heat;
 #[path = "electrical_contacts/source.rs"]
 mod contact_source;
 use fs_couple::circuit_enthalpy::{
@@ -34,12 +36,13 @@ const DT: f64 = 0.2;
 fn point(t: f64) -> QueryPoint {
     QueryPoint::new().with_quantity("T", QuantitySpec::semantic(SemanticType::new(QuantityKind::AbsoluteTemperature, ValueForm::Static)), t).unwrap()
 }
-fn card(i: usize, magnetic: bool, alpha: f64, g: f64) -> MaterialCard {
+fn card(i: usize, magnetic: bool, alpha: f64, g: f64, emissivity: f64) -> MaterialCard {
     let (name, dims) = if magnetic { (MAGNETIC_PERMEABILITY_PROPERTY, MAGNETIC_PERMEABILITY_DIMS) }
         else { (ELECTRIC_PERMITTIVITY_PROPERTY, ELECTRIC_PERMITTIVITY_DIMS) };
     let mut claims = ClaimSet::new();
     for (name, dims, low, high) in [
         (name, dims, 1.0 - 50.0 * alpha, 1.0 + 200.0 * alpha),
+        (fs_conduction::SURFACE_EMISSIVITY_PROPERTY, fs_conduction::EMISSIVITY_DIMS, emissivity, emissivity),
         ("density", Density::DIMS, 1.0, 1.0),
         ("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS, CP[i], CP[i]),
         ("electrical_resistivity", ELECTRICAL_RESISTIVITY_DIMS, 1.0, 1.0),
@@ -81,7 +84,15 @@ fn fixture<R>(magnetic: bool, alpha: f64, rc: Option<f64>, fraction: f64, g: f64
     run: impl FnOnce(&PreparedElectricalContactNetwork<'_, '_>, &MaterialNetwork<'_>,
         DepositionSimulation<'_>, MaterialCircuit, FieldThermalBinding) -> R,
 ) -> R {
-    let cards = [card(0, magnetic, alpha, g), card(1, magnetic, 0.0, g)];
+    fixture_with_emissivity(magnetic, alpha, rc, fraction, g, 0.3,
+        |prepared, material, thermal, circuit, field, _| run(prepared, material, thermal, circuit, field))
+}
+fn fixture_with_emissivity<R>(magnetic: bool, alpha: f64, rc: Option<f64>, fraction: f64, g: f64,
+    emissivity: f64,
+    run: impl FnOnce(&PreparedElectricalContactNetwork<'_, '_>, &MaterialNetwork<'_>,
+        DepositionSimulation<'_>, MaterialCircuit, FieldThermalBinding, &ElectricalContactNetwork<'_>) -> R,
+) -> R {
+    let cards = [card(0, magnetic, alpha, g, emissivity), card(1, magnetic, 0.0, g, 0.6)];
     let curves = cards.each_ref().map(caloric);
     let context = point(300.0);
     let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
@@ -140,7 +151,7 @@ fn fixture<R>(magnetic: bool, alpha: f64, rc: Option<f64>, fraction: f64, g: f64
         .rebind_contacts_candidate(initial.contacts, &[]).unwrap();
     run(&prepared, &material, thermal, circuit, FieldThermalBinding {
         branch: 0, cell: A, law, maximum_abs_coordinate: 10.0,
-    })
+    }, &network)
 }
 fn near(a: f64, b: f64) { assert!((a-b).abs() < 4e-7, "{a:.16e} != {b:.16e}"); }
 fn coordinate(c: &MaterialCircuit, magnetic: bool) -> f64 {

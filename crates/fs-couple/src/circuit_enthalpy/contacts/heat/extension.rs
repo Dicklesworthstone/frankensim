@@ -5,6 +5,14 @@ use fs_conduction::transient::deposition::contact::MAX_MATERIAL_NETWORK_CONTACTS
 use fs_matdb::QueryPoint;
 
 impl PreparedHeatNetwork<'_, '_> {
+    // This consumer owns both original electrical contact work and two-sided
+    // heat. Unlike field_material_network(), it must not discard those ports.
+    pub(crate) fn field_storage_material_network(
+        &self,
+    ) -> &crate::circuit_enthalpy::material::MaterialNetwork<'_> {
+        self.network.electrical.bulk
+    }
+
     /// Retain bulk, electrical-interface, thermal-interface and emissivity sources
     /// while binding a complete successor heat network around the SAME circuit.
     ///

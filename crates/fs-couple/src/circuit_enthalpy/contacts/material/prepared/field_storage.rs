@@ -1,8 +1,7 @@
 //! Source-dependent electrical storage and two-sided contact heat, one residual.
 use super::*;
 use crate::circuit_enthalpy::field_storage::{
-    FieldThermalBinding, FieldThermalCandidate, FieldThermalError, PreparedFieldThermal,
-    close_report,
+    FieldThermalBinding, FieldThermalCandidate, FieldThermalError, driven_candidate,
 };
 
 type Error = CircuitEnthalpyError<FieldThermalError>;
@@ -65,68 +64,14 @@ impl PreparedElectricalContactNetwork<'_, '_> {
         } else { Ok(()) };
         checkpoint()?;
         crate::circuit_enthalpy::admit_driver_unknowns(thermal, controls, guess_j)?;
-        let mut initial = self.resolve(thermal, || (*cancel.borrow_mut())())
-            .map_err(contact_error)?;
-        initial.bulk.resistors.sort_unstable_by_key(|r| r.branch);
-        if initial.bulk.resistors.as_slice() != circuit.resistors() {
-            return Err(CircuitEnthalpyError::Invalid(
-                "field/contact circuit must retain its original bulk sources and geometry",
-            ));
-        }
-        crate::circuit_enthalpy::contacts::admit_sources(
-            circuit, &initial.contacts, || (*cancel.borrow_mut())(),
-        )?;
-        initial.contacts.sort_unstable_by_key(|c| c.id());
-        for (actual, expected) in circuit.contacts().iter().zip(&initial.contacts) {
-            checkpoint()?;
-            // Pinning changes the policy receipt, not the physical source/query.
-            if actual.id() != expected.id() || actual.branch() != expected.branch()
-                || actual.area_m2().to_bits() != expected.area_m2().to_bits()
-                || actual.resistance_ohm().to_bits() != expected.resistance_ohm().to_bits()
-                || actual.source().resolved().query() != expected.source().resolved().query()
-            {
-                return Err(CircuitEnthalpyError::Invalid(
-                    "field/contact circuit and original interface state or geometry disagree",
-                ));
-            }
-        }
-        let fields = PreparedFieldThermal::new(
-            self.network.bulk, thermal, circuit.into(), bindings, &cancel,
-        )?;
         let routes = self.heat_destinations(thermal).map_err(contact_error)?;
         let destinations = self.resistor_destinations();
-        let dt = target_s - thermal.time_s();
-        let (next, electrical, coupled) = crate::circuit_enthalpy::coupled_driver_candidate(
-            thermal, target_s,
-            CircuitEnthalpyInput { circuit, ports, destinations: &destinations },
-            &routes, controls, guess_j,
-            |trial, _remaining| {
-                checkpoint()?;
-                let coefficients = self.resolve(trial, || (*cancel.borrow_mut())())
-                    .map_err(contact_error)?;
-                let mut bulk = coefficients.bulk;
-                let (storage, samples) = fields.refresh(trial, &cancel)?;
-                let rebound = circuit.rebind_storage_candidate(
-                    storage, ports, || (*cancel.borrow_mut())(),
-                )?;
-                let candidate = crate::circuit_enthalpy::contacts::advance_circuit(
-                    rebound.circuit(), bulk.resistors, coefficients.contacts, ports, dt,
-                    controls.circuit, || (*cancel.borrow_mut())(),
-                )?;
-                let source = fields.account(
-                    samples, candidate.circuit().into(), rebound.parameter_work_j(), dt,
-                    bulk.source, &mut bulk.sources_w, controls.total_energy_tolerance_j, &cancel,
-                )?;
-                Ok(DrivenCoefficients {
-                    circuit: candidate, sources_w: bulk.sources_w,
-                    conductances_w_k: bulk.conductances_w_k, source, circuit_trials: 1,
-                })
-            },
+        driven_candidate(
+            self.network.bulk, thermal, target_s, circuit, ports, bindings,
+            &destinations, &routes, controls, guess_j,
+            |trial| self.resolve(trial, || (*cancel.borrow_mut())()).map_err(contact_error),
+            |_| 0.0,
             || (*cancel.borrow_mut())(),
-        )?;
-        let work = coupled.electrical.native.supplied;
-        let report = close_report(coupled, work, controls.total_energy_tolerance_j)?;
-        checkpoint()?;
-        Ok(FieldThermalCandidate::new(next, electrical, report))
+        )
     }
 }

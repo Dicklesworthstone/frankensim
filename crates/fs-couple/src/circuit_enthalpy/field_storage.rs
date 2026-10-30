@@ -12,13 +12,16 @@
 //! It does not model hysteresis, dielectric relaxation, changing field geometry,
 //! phase transitions or spatially resolved magnetic-field reassembly.
 
+/// Complete thermal-contact and radiative transport on the same field/circuit step.
+pub mod heat;
+
 use super::{
     CircuitEnthalpyError, CircuitEnthalpyInput, CircuitEnthalpyReport, CircuitEnthalpySolve,
     DrivenCoefficients, coupled_driver_candidate, finite,
     material::{MaterialNetwork, MaterialNetworkError, MaterialNetworkSample},
 };
 use crate::material_circuit::storage::{MaterialStorage, MaterialStorageElement};
-use crate::material_circuit::{MaterialCircuit, MaterialCircuitCandidate, MaterialCircuitStep};
+use crate::material_circuit::{MaterialCircuit, MaterialCircuitStep};
 use fs_material::{
     conductor::ElectricalPropertyBasis,
     field_storage::{
@@ -81,19 +84,19 @@ pub struct FieldThermalSample {
 
 /// Actual endpoint material data and the total physical field-energy account.
 #[derive(Clone, Debug, PartialEq)]
-pub struct FieldThermalSource {
-    pub network: MaterialNetworkSample,
+pub struct FieldThermalSource<S = MaterialNetworkSample> {
+    pub network: S,
     pub fields: Vec<FieldThermalSample>,
     pub field_internal_energy_j: [f64; 2],
     pub reversible_heat_j: f64,
 }
 
 /// Independent physical account, using U rather than the isothermal psi alone.
-pub struct FieldThermalReport<D = MaterialCircuitStep> {
+pub struct FieldThermalReport<D = MaterialCircuitStep, S = MaterialNetworkSample> {
     /// Original native circuit and thermal reports. The native circuit's
     /// stored_before_j is psi at the proposed endpoint temperature and the
     /// INITIAL charge/flux. non_electrical_heat_j includes reversible heat.
-    pub coupled: CircuitEnthalpyReport<FieldThermalSource, D>,
+    pub coupled: CircuitEnthalpyReport<FieldThermalSource<S>, D>,
     /// Authored thermal boundaries/sources, excluding Joule AND reversible heat.
     pub external_heat_j: f64,
     /// delta(U_field) + delta(U_caloric) - electrical work - external heat [J].
@@ -101,16 +104,16 @@ pub struct FieldThermalReport<D = MaterialCircuitStep> {
 }
 
 /// One publishable electrical/thermal endpoint; trials mutate no accepted state.
-pub struct FieldThermalCandidate<'m, C = MaterialCircuit, D = MaterialCircuitStep> {
+pub struct FieldThermalCandidate<'m, C = MaterialCircuit, D = MaterialCircuitStep, S = MaterialNetworkSample> {
     thermal: DepositionSimulation<'m>,
     circuit: C,
-    report: FieldThermalReport<D>,
+    report: FieldThermalReport<D, S>,
 }
-impl<'m, C, D> FieldThermalCandidate<'m, C, D> {
+impl<'m, C, D, S> FieldThermalCandidate<'m, C, D, S> {
     pub(super) fn new(
         thermal: DepositionSimulation<'m>,
         circuit: C,
-        report: FieldThermalReport<D>,
+        report: FieldThermalReport<D, S>,
     ) -> Self {
         Self {
             thermal,
@@ -124,10 +127,10 @@ impl<'m, C, D> FieldThermalCandidate<'m, C, D> {
     pub const fn circuit(&self) -> &C {
         &self.circuit
     }
-    pub const fn report(&self) -> &FieldThermalReport<D> {
+    pub const fn report(&self) -> &FieldThermalReport<D, S> {
         &self.report
     }
-    pub fn into_parts(self) -> (DepositionSimulation<'m>, C, FieldThermalReport<D>) {
+    pub fn into_parts(self) -> (DepositionSimulation<'m>, C, FieldThermalReport<D, S>) {
         (self.thermal, self.circuit, self.report)
     }
 }
@@ -442,17 +445,17 @@ impl<'a> PreparedFieldThermal<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn account(
+    pub fn account<S>(
         &self,
         samples: Vec<ResolvedThermalFieldStorage>,
         endpoint: FieldCircuitView<'_>,
         native_parameter_work_j: f64,
         dt: f64,
-        network: MaterialNetworkSample,
+        network: S,
         sources_w: &mut BTreeMap<CellId, f64>,
         tolerance_j: f64,
         cancel: &RefCell<impl FnMut() -> bool>,
-    ) -> Result<FieldThermalSource, Error> {
+    ) -> Result<FieldThermalSource<S>, Error> {
         if samples.len() != self.bindings.len() || !dt.is_finite() || dt <= 0.0 {
             return Err(invalid(
                 "complete field endpoint and positive interval required",
@@ -518,12 +521,25 @@ impl<'a> PreparedFieldThermal<'a> {
     }
 }
 
-pub(super) fn close_report<D>(
-    coupled: CircuitEnthalpyReport<FieldThermalSource, D>,
+pub(super) fn close_report<D, S>(
+    coupled: CircuitEnthalpyReport<FieldThermalSource<S>, D>,
     electrical_work_j: f64,
     tolerance_j: f64,
-) -> Result<FieldThermalReport<D>, Error> {
-    let external_heat_j = finite(coupled.non_electrical_heat_j - coupled.source.reversible_heat_j)?;
+) -> Result<FieldThermalReport<D, S>, Error> {
+    close_report_with_internal_heat(coupled, electrical_work_j, 0.0, tolerance_j)
+}
+
+// Internal exchanges may have a small nonzero numerical net. Never relabel it
+// as supplied heat or redistribute it into the cells to force a zero residual.
+fn close_report_with_internal_heat<D, S>(
+    coupled: CircuitEnthalpyReport<FieldThermalSource<S>, D>,
+    electrical_work_j: f64,
+    internal_heat_j: f64,
+    tolerance_j: f64,
+) -> Result<FieldThermalReport<D, S>, Error> {
+    let external_heat_j = finite(
+        coupled.non_electrical_heat_j - coupled.source.reversible_heat_j - internal_heat_j,
+    )?;
     // Reconstruct physical U at both actual endpoints; the native electrical
     // report instead measures isothermal psi after the coefficient update.
     let total_energy_residual_j = finite(
@@ -579,65 +595,127 @@ pub fn step_candidate<'m>(
         .prepare_with_bases(thermal, electrical_bases, || (*cancel.borrow_mut())())
         .map_err(network)?;
     if !circuit.contacts().is_empty() {
-        return Err(invalid(
-            "field thermal circuit requires bulk-only resistors",
+        return Err(invalid("field thermal circuit requires bulk-only resistors"));
+    }
+    let destinations = prepared.resistor_destinations();
+    driven_candidate(
+        material, thermal, target_s, circuit, ports, bindings, &destinations, &[],
+        controls, initial_energy_increments_j,
+        |trial| {
+            Ok(super::contacts::ContactThermalCoefficients {
+                bulk: prepared.resolve(trial, || (*cancel.borrow_mut())()).map_err(network)?,
+                contacts: Vec::new(),
+            })
+        },
+        |_| 0.0,
+        || (*cancel.borrow_mut())(),
+    )
+}
+
+// Share native field admission, conserved-coordinate rebinding and circuit
+// advancement across bulk, electrical-contact and complete heat networks.
+// Only the source payload/evaluator and declared internal heat net vary.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn driven_candidate<'m, S, E: From<FieldThermalError>>(
+    material: &MaterialNetwork<'_>,
+    thermal: &DepositionSimulation<'m>,
+    target_s: f64,
+    circuit: &MaterialCircuit,
+    ports: &[f64],
+    bindings: &[FieldThermalBinding],
+    destinations: &[super::ResistorCell],
+    routes: &[super::contacts::ContactHeatCells],
+    controls: CircuitEnthalpySolve,
+    guess_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'m>) -> Result<
+        super::contacts::ContactThermalCoefficients<S>, CircuitEnthalpyError<E>>,
+    internal_power_w: impl Fn(&S) -> f64,
+    cancelled: impl FnMut() -> bool,
+) -> Result<FieldThermalCandidate<'m, MaterialCircuit, MaterialCircuitStep, S>, CircuitEnthalpyError<E>> {
+    let cancel = RefCell::new(cancelled);
+    check(&cancel).map_err(map_field_error)?;
+    super::admit_driver_unknowns(thermal, controls, guess_j)?;
+    let mut initial = resolve(thermal)?;
+    initial.bulk.resistors.sort_unstable_by_key(|r| r.branch);
+    // Source pinning changes policy receipts, not physical material state.
+    // Keep the original exact source, complete key, basis and geometry checks.
+    if initial.bulk.resistors.len() != circuit.resistors().len()
+        || initial.bulk.resistors.iter().zip(circuit.resistors()).any(|(a, b)| {
+            let x = &a.conductor;
+            let y = &b.conductor;
+            a.branch != b.branch || x.source_basis() != y.source_basis()
+                || x.source_key() != y.source_key()
+                || x.length_m().to_bits() != y.length_m().to_bits()
+                || x.area_m2().to_bits() != y.area_m2().to_bits()
+                || x.resistance_ohm().to_bits() != y.resistance_ohm().to_bits()
+                || !same_material(x.material(), y.material())
+        }) {
+        return Err(CircuitEnthalpyError::Invalid(
+            "field circuit must retain its original bulk sources and geometry",
         ));
     }
-    let fields = PreparedFieldThermal::new(material, thermal, circuit.into(), bindings, &cancel)?;
-    let destinations = material
-        .resistors
-        .iter()
-        .map(|r| r.destination)
-        .collect::<Vec<_>>();
+    super::contacts::admit_sources(circuit, &initial.contacts, || (*cancel.borrow_mut())())?;
+    initial.contacts.sort_unstable_by_key(|contact| contact.id());
+    for (actual, expected) in circuit.contacts().iter().zip(&initial.contacts) {
+        check(&cancel).map_err(map_field_error)?;
+        if actual.id() != expected.id() || actual.branch() != expected.branch()
+            || actual.area_m2().to_bits() != expected.area_m2().to_bits()
+            || actual.resistance_ohm().to_bits() != expected.resistance_ohm().to_bits()
+            || actual.source().resolved().query() != expected.source().resolved().query()
+        {
+            return Err(CircuitEnthalpyError::Invalid(
+                "field circuit and original interface state or geometry disagree",
+            ));
+        }
+    }
+    let fields = PreparedFieldThermal::new(material, thermal, circuit.into(), bindings, &cancel)
+        .map_err(map_field_error)?;
     let dt = target_s - thermal.time_s();
     let (next, electrical, coupled) = coupled_driver_candidate(
-        thermal,
-        target_s,
-        CircuitEnthalpyInput {
-            circuit,
-            ports,
-            destinations: &destinations,
-        },
-        &[],
-        controls,
-        initial_energy_increments_j,
+        thermal, target_s, CircuitEnthalpyInput { circuit, ports, destinations },
+        routes, controls, guess_j,
         |trial, _remaining| {
-            check(&cancel)?;
-            let mut coefficients = prepared
-                .resolve(trial, || (*cancel.borrow_mut())())
-                .map_err(network)?;
-            let (sources, samples) = fields.refresh(trial, &cancel)?;
-            let rebound =
-                circuit.rebind_storage_candidate(sources, ports, || (*cancel.borrow_mut())())?;
-            let candidate: MaterialCircuitCandidate = rebound.circuit().step_candidate(
-                coefficients.resistors,
-                ports,
-                dt,
-                controls.circuit,
-                || (*cancel.borrow_mut())(),
+            check(&cancel).map_err(map_field_error)?;
+            let coefficients = resolve(trial)?;
+            let mut bulk = coefficients.bulk;
+            let (storage, samples) = fields.refresh(trial, &cancel).map_err(map_field_error)?;
+            let rebound = circuit.rebind_storage_candidate(
+                storage, ports, || (*cancel.borrow_mut())(),
+            )?;
+            let candidate = super::contacts::advance_circuit(
+                rebound.circuit(), bulk.resistors, coefficients.contacts, ports, dt,
+                controls.circuit, || (*cancel.borrow_mut())(),
             )?;
             let source = fields.account(
-                samples,
-                candidate.circuit().into(),
-                rebound.parameter_work_j(),
-                dt,
-                coefficients.source,
-                &mut coefficients.sources_w,
-                controls.total_energy_tolerance_j,
-                &cancel,
-            )?;
+                samples, candidate.circuit().into(), rebound.parameter_work_j(), dt,
+                bulk.source, &mut bulk.sources_w, controls.total_energy_tolerance_j, &cancel,
+            ).map_err(map_field_error)?;
             Ok(DrivenCoefficients {
-                circuit: candidate,
-                sources_w: coefficients.sources_w,
-                conductances_w_k: coefficients.conductances_w_k,
-                circuit_trials: 1,
-                source,
+                circuit: candidate, sources_w: bulk.sources_w,
+                conductances_w_k: bulk.conductances_w_k, source, circuit_trials: 1,
             })
         },
         || (*cancel.borrow_mut())(),
     )?;
-    let supplied_j = coupled.electrical.native.supplied;
-    let report = close_report(coupled, supplied_j, controls.total_energy_tolerance_j)?;
-    check(&cancel)?;
+    let supplied = coupled.electrical.native.supplied;
+    let internal_heat = finite(dt * internal_power_w(&coupled.source.network))?;
+    let report = close_report_with_internal_heat(
+        coupled, supplied, internal_heat, controls.total_energy_tolerance_j,
+    ).map_err(map_field_error)?;
+    check(&cancel).map_err(map_field_error)?;
     Ok(FieldThermalCandidate::new(next, electrical, report))
+}
+
+fn map_field_error<E: From<FieldThermalError>>(error: Error) -> CircuitEnthalpyError<E> {
+    match error {
+        CircuitEnthalpyError::Source(error) => CircuitEnthalpyError::Source(error.into()),
+        CircuitEnthalpyError::Invalid(message) => CircuitEnthalpyError::Invalid(message),
+        CircuitEnthalpyError::Circuit(error) => CircuitEnthalpyError::Circuit(error),
+        CircuitEnthalpyError::Thermal(error) => error.into(),
+        CircuitEnthalpyError::Newton(error) => CircuitEnthalpyError::Newton(error),
+        CircuitEnthalpyError::NotConverged(report) => CircuitEnthalpyError::NotConverged(report),
+        CircuitEnthalpyError::Interrupted(progress) => CircuitEnthalpyError::Interrupted(progress),
+        CircuitEnthalpyError::CircuitBudget => CircuitEnthalpyError::CircuitBudget,
+        CircuitEnthalpyError::Cancelled => CircuitEnthalpyError::Cancelled,
+    }
 }
