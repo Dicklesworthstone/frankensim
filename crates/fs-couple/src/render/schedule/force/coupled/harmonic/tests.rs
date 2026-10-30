@@ -104,6 +104,65 @@ fn harmonic_bare_lossless_air_pole_is_a_finite_joint_antiresonance() {
 }
 
 #[test]
+fn harmonic_material_channels_retain_source_order_and_independent_physical_heat() {
+    // G1/G3: three distinct constitutive reservoirs on signed two-mode forms.
+    // Their heat is obtained independently from each ODE, including a genuine
+    // uncoupled branch. A common forcing phase changes no mean energy or heat.
+    let gate = CancelGate::new_clock_free();
+    let arms = vec![
+        fs_phs::RelaxationBranch {
+            projection: vec![1.0, 0.0, -0.4, 0.0],
+            stiffness: 30_000.0,
+            relaxation_time_s: 0.002,
+        },
+        fs_phs::RelaxationBranch {
+            projection: vec![-0.3, 0.0, 0.8, 0.0],
+            stiffness: 50_000.0,
+            relaxation_time_s: 0.0003,
+        },
+        fs_phs::RelaxationBranch {
+            projection: vec![0.0; 4],
+            stiffness: 20_000.0,
+            relaxation_time_s: 0.01,
+        },
+    ];
+    let system = CoupledModalSystem::new(
+        vec![mode(500.0, 0.02), mode(900.0, 0.03)],
+        vec![], config(), &gate,
+    ).unwrap().with_material_relaxation(
+        arms.clone(), Some(vec![0.001, -0.002, 0.003]), &gate,
+    ).unwrap();
+    let omega = 650.0;
+    let force = [C64::new(0.2, 0.03), C64::new(-0.1, 0.04)];
+    let response = system.harmonic_response(omega, &force, 1000, &gate).unwrap();
+    let rotated = system.harmonic_response(
+        omega, &force.map(|f| C64::new(-f.im, f.re)), 1000, &gate,
+    ).unwrap();
+    assert_eq!(response.material_branch_dissipation_w.len(), arms.len());
+    assert_eq!(response.material_branch_mean_storage_j.len(), arms.len());
+    for (index, arm) in arms.iter().enumerate() {
+        let strain = response.displacement_m_sqrt_kg.iter().enumerate()
+            .fold(C64::ZERO, |sum, (mode, q)| sum + q.scale(
+                arm.stiffness.sqrt() * arm.projection[2 * mode]));
+        let st = C64::new(0.0, -omega * arm.relaxation_time_s);
+        let mismatch = st * strain / (C64::ONE + st);
+        let stored = 0.25 * mismatch.norm_sq();
+        let heat = 0.5 * mismatch.norm_sq() / arm.relaxation_time_s;
+        close(C64::from_re(response.material_branch_mean_storage_j[index]), C64::from_re(stored));
+        close(C64::from_re(response.material_branch_dissipation_w[index]), C64::from_re(heat));
+        close(C64::from_re(rotated.material_branch_dissipation_w[index]), C64::from_re(heat));
+        close(C64::from_re(rotated.material_branch_mean_storage_j[index]), C64::from_re(stored));
+        assert!(response.material_branch_dissipation_w[index] >= 0.0);
+    }
+    assert_eq!(response.material_branch_dissipation_w[2], 0.0);
+    assert_eq!(response.material_branch_mean_storage_j[2], 0.0);
+    assert_eq!(response.material_branch_dissipation_w.iter().sum::<f64>(), response.material_dissipation_w);
+    power_closes(&response);
+    assert_eq!(system.material_memory(), &[0.001, -0.002, 0.003]);
+    assert_eq!(system.samples_rendered(), 0);
+}
+
+#[test]
 fn harmonic_maxwell_response_is_the_refined_limit_of_the_original_time_owner() {
     // G1: start on the continuous periodic solution, then use the actual exact
     // held-force owner. Midpoint samples of a sinusoid converge at second order;

@@ -561,6 +561,9 @@ impl FrictionModalSystem {
 // Optional physical acceleration readout; it does not replace mechanical evolution.
 mod observation;
 
+/// Released-contact response of the original linear mechanical/acoustic owner.
+pub mod harmonic;
+
 mod scalar;
 
 #[cfg(test)]

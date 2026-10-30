@@ -40,6 +40,13 @@ pub struct ModalHarmonicResponse {
     pub component_dissipation_w: f64,
     pub connection_dissipation_w: f64,
     pub material_dissipation_w: f64,
+    /// Mean heat rate of each original Maxwell branch [W], in the same order
+    /// as `material_memory`. Source adapters may sum their retained ranges;
+    /// a factor that combines several source films is not an individual film.
+    pub material_branch_dissipation_w: Vec<f64>,
+    /// Mean stored strain energy of each original Maxwell branch [J].
+    /// For peak mismatch r these are |r|²/4 and heat is |r|²/(2 tau).
+    pub material_branch_mean_storage_j: Vec<f64>,
     pub radiation_dissipation_w: f64,
     /// Total physical mean loss minus external mean power [W].
     pub power_residual_w: f64,
@@ -211,6 +218,11 @@ impl CoupledModalSystem {
         gate: &CancelGate,
     ) -> Result<HarmonicOperator, ModalCouplingError> {
         poll(Some(gate))?;
+        if !self.plane_stress_material_points.is_empty() {
+            return Err(invalid(
+                "harmonic response does not support bound local plane-stress strain checks",
+            ));
+        }
         let n = self.mode_count();
         let poles = self.radiation.as_ref().map_or(0, |r| r.model.poles.len());
         let original_dimension = n
@@ -366,6 +378,8 @@ impl CoupledModalSystem {
             component_dissipation_w: 0.0,
             connection_dissipation_w: 0.0,
             material_dissipation_w: 0.0,
+            material_branch_dissipation_w: Vec::with_capacity(self.relaxation_branches.len()),
+            material_branch_mean_storage_j: Vec::with_capacity(self.relaxation_branches.len()),
             radiation_dissipation_w: 0.0,
             power_residual_w: 0.0,
             solve_relative_residual: relative,
@@ -417,8 +431,12 @@ impl CoupledModalSystem {
             let memory = (C64::from_re(rate) / denominator) * strain;
             let mismatch = (s / denominator) * strain;
             result.material_memory.push(memory);
-            result.mean_stored_energy_j += 0.25 * mismatch.norm_sq();
-            result.material_dissipation_w += 0.5 * rate * mismatch.norm_sq();
+            let stored = 0.25 * mismatch.norm_sq();
+            let heat = 0.5 * rate * mismatch.norm_sq();
+            result.mean_stored_energy_j += stored;
+            result.material_dissipation_w += heat;
+            result.material_branch_mean_storage_j.push(stored);
+            result.material_branch_dissipation_w.push(heat);
         }
         if let Some(air) = &self.radiation {
             for (j, pole) in air.model.poles.iter().enumerate() {

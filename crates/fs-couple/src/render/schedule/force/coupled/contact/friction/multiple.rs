@@ -202,6 +202,26 @@ impl FrictionModalSystem {
     }
 }
 impl MultiFrictionModalSystem {
+    /// Same original linear network with all dry bows released. Bound normal
+    /// contacts, material shear layers and compliant-drive storage refuse;
+    /// this read-only AC solve does not invent their operating-point tangent.
+    pub fn released_harmonic_response(
+        &self, omega_rad_s: f64, force: &[fs_math::c64::C64],
+        maximum_work: usize, gate: &CancelGate,
+    ) -> Result<super::harmonic::ReleasedHarmonicResponse, ModalFrictionError> {
+        poll(Some(gate))?;
+        if self.obstacles.is_some()
+            || self.contact_loads.iter().any(Option::is_some)
+            || self.series_drives.iter().any(Option::is_some)
+            || self.shear_layers.iter().any(Option::is_some)
+        {
+            return Err(invalid(
+                "released harmonic response requires no bound normal contact, shear layer or compliant drive",
+            ).into());
+        }
+        self.core.released_harmonic_response(omega_rad_s, force, maximum_work, gate)
+    }
+
     fn from_single(core: FrictionModalSystem, additional: Vec<(ModalFrictionPort, ModalFrictionConfig)>,
         config: MultiFrictionConfig, gate: &CancelGate) -> Result<Self, ModalFrictionError>
     {

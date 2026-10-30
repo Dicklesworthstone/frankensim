@@ -695,6 +695,9 @@ pub mod plate;
 pub mod chart;
 /// Curved shear-deformable material body in the shared reciprocal mechanics.
 pub mod shell;
+
+/// Released bridge response of the complete original string/body/air performer.
+pub mod harmonic;
 /// The shared material body's exterior impedance in the original joint solve.
 pub mod radiation;
 /// Distributed volume-air modes on the exact retained material-shell basis.

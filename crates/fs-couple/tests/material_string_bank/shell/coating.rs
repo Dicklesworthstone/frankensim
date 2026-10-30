@@ -123,6 +123,76 @@ fn prepared(cx: &Cx<'_>, gate: &CancelGate, coated: bool) -> ReciprocalStringBan
 }
 
 #[test]
+fn g0_loaded_coating_bridge_response_retains_strings_pressure_and_branch_heat() {
+    with_cx(|cx, gate| {
+        let bank = prepared(cx, gate, true);
+        let before: Vec<_> = bank.system().components().iter()
+            .map(|component| component.states().to_vec()).collect();
+        let history = bank.system().material_memory().to_vec();
+        let omega = core::f64::consts::TAU * 1000.0;
+        let peak = fs_math::c64::C64::from_re(1e-3);
+        let response = bank.material_shell_bridge_harmonic_response(
+            omega, 0, peak, 100_000_000, gate,
+        ).unwrap();
+        let dynamics = &response.released.dynamics;
+        assert_eq!(response.bridge_velocity_m_s.len(), 2);
+        assert!(response.coating_dissipation_w > 0.0);
+        assert!(response.coating_mean_stored_energy_j > 0.0);
+        assert!((response.coating_dissipation_w + response.other_material_dissipation_w
+            - dynamics.material_dissipation_w).abs()
+            < 1e-12 * dynamics.material_dissipation_w.max(1e-20));
+        assert!(dynamics.power_residual_w.abs() < 1e-8 * dynamics.external_power_w.abs().max(1e-20));
+        let string_modes: usize = bank.system().components()[..2].iter()
+            .map(|component| component.modes().len()).sum();
+        assert!(dynamics.velocity_m_sqrt_kg_per_s[..string_modes].iter().any(|v| v.abs() > 1e-15),
+            "bridge forcing lost sympathetic string backreaction");
+        let expected_pressure = bank.system().acceleration_pressure_weights().unwrap().iter()
+            .zip(&dynamics.displacement_m_sqrt_kg)
+            .fold(fs_math::c64::C64::ZERO, |sum, (&weight, &q)| sum + q.scale(-omega * omega * weight));
+        assert!((response.released.observer_pressure_pa - expected_pressure).abs()
+            < 1e-12 * expected_pressure.abs().max(1e-20));
+        assert_eq!(bank.system().material_memory(), history);
+        assert_eq!(bank.system().samples_rendered(), 0);
+        for (component, states) in bank.system().components().iter().zip(&before) {
+            assert_eq!(component.states(), states);
+        }
+
+        let multi = bank.with_additional_bows(vec![],
+            fs_couple::render::schedule::force::coupled::contact::friction::multiple::MultiFrictionConfig {
+                max_ports: 4, max_sweeps: 32, max_setup_terms: 1_000_000,
+            }, gate).unwrap();
+        let replay = multi.material_shell_bridge_harmonic_response(
+            omega, 0, peak, 100_000_000, gate,
+        ).unwrap();
+        assert_eq!(response, replay, "multiple-bow ownership changed the released loaded response");
+    });
+}
+
+#[test]
+fn g0_loaded_coating_response_refuses_outside_sources_or_missing_bridges() {
+    with_cx(|cx, gate| {
+        let bank = prepared(cx, gate, true);
+        let history = bank.system().material_memory().to_vec();
+        let force = fs_math::c64::C64::from_re(1e-3);
+        assert!(bank.material_shell_bridge_harmonic_response(
+            10.0 * core::f64::consts::TAU, 0, force, 100_000_000, gate,
+        ).is_err());
+        assert!(bank.material_shell_bridge_harmonic_response(
+            1000.0 * core::f64::consts::TAU, 2, force, 100_000_000, gate,
+        ).is_err());
+        assert!(bank.material_shell_bridge_harmonic_response(
+            1000.0 * core::f64::consts::TAU, 0, force, 1, gate,
+        ).is_err());
+        assert_eq!(bank.system().material_memory(), history);
+        assert_eq!(bank.system().samples_rendered(), 0);
+        let residual = bank.with_residual_flexibility(gate).unwrap();
+        assert!(residual.material_shell_bridge_harmonic_response(
+            1000.0 * core::f64::consts::TAU, 0, force, 100_000_000, gate,
+        ).is_err(), "retained-only bridge force silently omitted residual flexibility");
+    });
+}
+
+#[test]
 fn g1_coating_memory_survives_cold_rebuild_and_changes_reciprocal_pressure() {
     with_cx(|cx, gate| {
         let bank = prepared(cx, gate, true);

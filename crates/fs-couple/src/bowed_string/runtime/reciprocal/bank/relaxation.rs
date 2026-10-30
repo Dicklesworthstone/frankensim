@@ -64,6 +64,8 @@ impl StringBankBendingRelaxation {
     #[must_use] pub fn sections(&self) -> &[ConcentricElasticSection] { &self.sections }
     /// One original spectrum per layer, nested in selection order.
     #[must_use] pub fn spectra(&self) -> &[Vec<GeneralizedMaxwell>] { &self.spectra }
+    /// Original source-support intersections, in selection order [rad/s].
+    #[must_use] pub fn omega_bands_rad_s(&self) -> &[(f64, f64)] { &self.bands }
     /// Order: selection, layer, positive arm, transverse plane, sine mode.
     #[must_use] pub fn channels(&self) -> &[StringBendingMemoryChannel] { &self.channels }
     #[must_use] pub const fn max_memory_states(&self) -> usize { self.max_memory_states }
