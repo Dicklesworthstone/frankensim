@@ -125,6 +125,112 @@ fn pressure_controls_and_schedule_admission_use_the_actual_viscous_speed() {
 }
 
 #[test]
+fn centreline_pressure_admission_uses_the_card_mach_limit_without_changing_bulk_flow() {
+    let g = gas(1.0);
+    let length = 0.06;
+    let mach = 0.025;
+    let limit = mach * g.sound_speed;
+    let build = || voice(g, mach).with_viscous_windway(length).unwrap();
+
+    // At 100 Pa the bulk flow is admissible, while its physical Poiseuille centre
+    // exceeds the declared Mach limit (and still lies below the inviscid bound).
+    let mut bulk = build();
+    bulk.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+    assert!(bulk.jet_speed_m_s() < limit);
+    assert!(1.5 * bulk.jet_speed_m_s() > limit);
+    assert!(1.5 * bulk.jet_speed_m_s() < (2.0 * 100.0 / g.density).sqrt());
+    assert!(build().with_card_centreline_speed(100.0).is_err());
+    assert!(bulk.with_card_centreline_speed(40.0).is_err(),
+        "a valid receipt must not admit an invalid already-held pressure");
+
+    let centred = || build().with_card_centreline_speed(40.0).unwrap();
+    assert!(FlueOutletPerformance::new(centred(), schedule(40.0), config()).is_ok());
+    assert!(FlueOutletPerformance::new(centred(), schedule(100.0), config()).is_err());
+    let mut v = centred();
+    v.apply(FlueControl::SetBlowingPressure(40.0)).unwrap();
+    let mut bulk = build();
+    bulk.apply(FlueControl::SetBlowingPressure(40.0)).unwrap();
+    assert_eq!(v.jet_speed_m_s(), bulk.jet_speed_m_s());
+    assert_eq!(v.card_speed_m_s(), 1.5 * v.jet_speed_m_s());
+
+    // Invert the physical slit law at the declared centre-speed boundary. Nearby
+    // pressures straddle that boundary without clipping either speed or the flux.
+    let bulk_at_limit = limit / 1.5;
+    let pressure_at_limit = 12.0 * g.dynamic_viscosity * length * bulk_at_limit
+        / HEIGHT.powi(2) + 0.5 * g.density * bulk_at_limit.powi(2);
+    let below = pressure_at_limit * (1.0 - 1e-6);
+    let above = pressure_at_limit * (1.0 + 1e-6);
+    v.apply(FlueControl::SetBlowingPressure(below)).unwrap();
+    assert!(v.card_speed_m_s() < limit);
+    let accepted = (v.jet_speed_m_s(), v.card_speed_m_s());
+    assert!(v.validate_blowing_pressure(above).is_err());
+    assert!(v.apply(FlueControl::SetBlowingPressure(above)).is_err());
+    assert_eq!((v.jet_speed_m_s(), v.card_speed_m_s()), accepted);
+    bulk.apply(FlueControl::SetBlowingPressure(above)).unwrap();
+    assert!(bulk.jet_speed_m_s() < limit);
+    assert!(1.5 * bulk.jet_speed_m_s() > limit);
+}
+
+#[test]
+fn centreline_controls_preserve_the_inviscid_bound_and_refuse_atomically() {
+    let g = gas(1.0);
+    let build = || voice(g, 0.3).with_viscous_windway(0.06).unwrap();
+    let mut bulk = build();
+    bulk.apply(FlueControl::SetBlowingPressure(1000.0)).unwrap();
+    assert!(bulk.jet_speed_m_s() < 0.3 * g.sound_speed);
+    assert!(1.5 * bulk.jet_speed_m_s() < 0.3 * g.sound_speed);
+    assert!(1.5 * bulk.jet_speed_m_s() > (2.0 * 1000.0 / g.density).sqrt());
+    assert!(build().with_card_centreline_speed(1000.0).is_err());
+    assert!(bulk.with_card_centreline_speed(100.0).is_err());
+
+    let centred = || build().with_card_centreline_speed(100.0).unwrap();
+    assert!(FlueOutletPerformance::new(centred(), schedule(1000.0), config()).is_err());
+    let mut v = centred();
+    let mut unchanged = centred();
+    for source in [&mut v, &mut unchanged] {
+        source.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+        source.step_block(&mut [0.0; 32]).unwrap();
+    }
+    let before = (v.jet_speed_m_s(), v.card_speed_m_s(), v.samples_rendered(),
+        v.mouth_flow_m3_s(), v.network().unwrap().stored_energy_j());
+    assert!(v.validate_blowing_pressure(1000.0).is_err());
+    assert!(v.apply(FlueControl::SetBlowingPressure(1000.0)).is_err());
+    assert_eq!((v.jet_speed_m_s(), v.card_speed_m_s(), v.samples_rendered(),
+        v.mouth_flow_m3_s(), v.network().unwrap().stored_energy_j()), before);
+    let (mut actual, mut expected) = ([0.0; 64], [0.0; 64]);
+    v.step_block(&mut actual).unwrap();
+    unchanged.step_block(&mut expected).unwrap();
+    assert_eq!(actual, expected, "refusal must also preserve the accepted pressure and source history");
+    v.apply(FlueControl::SetBlowingPressure(0.0)).unwrap();
+    assert_eq!(v.jet_speed_m_s(), 0.0);
+    assert_eq!(v.card_speed_m_s(), 0.0);
+}
+
+#[test]
+fn developing_card_preflight_uses_the_proposed_pressure_for_its_inviscid_core() {
+    let g = gas(1.0);
+    let build = || voice(g, 0.05).with_developing_windway(LENGTH, 100.0).unwrap();
+    let mut bulk = build();
+    bulk.apply(FlueControl::SetBlowingPressure(200.0)).unwrap();
+    let core = (2.0 * 200.0 / g.density).sqrt();
+    assert!(bulk.jet_speed_m_s() < 0.05 * g.sound_speed);
+    assert!(1.5 * bulk.jet_speed_m_s() > core);
+    assert!(core > 0.05 * g.sound_speed);
+
+    // The accepted pressure is initially zero. Reading it during preflight
+    // would report a zero core speed and incorrectly admit the 200 Pa input.
+    let mut v = build().with_card_centreline_speed(100.0).unwrap();
+    assert_eq!(v.card_speed_m_s(), 0.0);
+    assert!(v.validate_blowing_pressure(200.0).is_err());
+    assert!(v.apply(FlueControl::SetBlowingPressure(200.0)).is_err());
+    assert_eq!(v.card_speed_m_s(), 0.0);
+    assert!(FlueOutletPerformance::new(
+        build().with_card_centreline_speed(100.0).unwrap(), schedule(200.0), config()).is_err());
+    v.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+    assert_eq!(v.card_speed_m_s(), (2.0 * 100.0 / g.density).sqrt());
+}
+
+#[test]
 fn windway_and_mouth_losses_share_the_same_partition_independent_receiver() {
     let build = || voice(gas(1.0), 0.3).with_viscous_windway(LENGTH).unwrap()
         .with_mouth_contraction(ContractionSpec { area_ratio: 0.6,

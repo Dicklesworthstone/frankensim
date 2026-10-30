@@ -580,6 +580,18 @@ impl FlueVoice {
         }
         let speed = self.speed_at_pressure(pressure_pa)?;
         self.line.validate_jet_speed(speed)?;
+        if self.card_centreline.is_some() {
+            // Flux retains the windway's bulk speed, but convection, growth and Reynolds
+            // validity use its centre speed. Preflight must use the proposed pressure,
+            // including the developing exit's inviscid core, before any input is changed.
+            let card_speed = self.card_speed_at(pressure_pa, speed);
+            if self.viscous_windway.is_some()
+                && card_speed > (2.0 * pressure_pa / self.rho).sqrt()
+            {
+                return Err(invalid("slit windway's Poiseuille centre speed exceeds the inviscid bound sqrt(2P/rho)"));
+            }
+            self.line.validate_jet_speed(card_speed)?;
+        }
         Ok(speed)
     }
 }

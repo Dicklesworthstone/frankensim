@@ -869,13 +869,13 @@ impl FlueVoice {
     /// speed alone sets the jet's flux.
     #[must_use]
     pub fn card_speed_m_s(&self) -> f64 {
-        self.card_speed_at(self.jet_speed_m_s)
+        self.card_speed_at(self.blow_pa, self.jet_speed_m_s)
     }
 
     // A uniform exit's bulk speed is its centre speed. A slit's Poiseuille profile has its centre
     // at 1.5 times the bulk speed. A developing slit keeps the inviscid core `sqrt(2P/rho)` until
     // the layers meet, and the Poiseuille centre after that.
-    fn card_speed_at(&self, bulk_m_s: f64) -> f64 {
+    fn card_speed_at(&self, pressure_pa: f64, bulk_m_s: f64) -> f64 {
         if self.card_centreline.is_none() {
             return bulk_m_s;
         }
@@ -883,7 +883,7 @@ impl FlueVoice {
         if self.viscous_windway.is_some() {
             centre
         } else if self.developing_windway.is_some() {
-            (2.0 * self.blow_pa / self.rho).sqrt().min(centre)
+            (2.0 * pressure_pa / self.rho).sqrt().min(centre)
         } else {
             bulk_m_s
         }
@@ -895,12 +895,14 @@ impl FlueVoice {
     /// voice feeds them the windway's bulk speed. With this, the card reads the exit's centre speed
     /// (see [`FlueVoice::card_speed_m_s`]) and the bulk speed still carries the flux, so the held
     /// flow is unchanged. A slit held as fully developed is refused where its Poiseuille centre
-    /// would exceed the inviscid bound `sqrt(2P/rho)` at the held pressure. The jet transfers,
-    /// which own their exit speed, and the unsteady channel are refused.
+    /// would exceed the inviscid bound `sqrt(2P/rho)`. Both this bound and the declared
+    /// low-Mach limit apply to the card's speed at attachment and every pressure control.
+    /// The jet transfers, which own their exit speed, and the unsteady channel are refused.
     ///
     /// # Errors
     /// Repeated or late attachment, a poisoned voice, a jet transfer, an unsteady windway, a
-    /// non-positive held pressure, or a slit centre speed above the inviscid bound.
+    /// non-positive held pressure, or a centre speed above the inviscid or low-Mach bound
+    /// at the supplied held pressure or the currently accepted pressure.
     pub fn with_card_centreline_speed(mut self, held_pressure_pa: f64) -> Result<Self, FlueError> {
         if self.poisoned || self.samples != 0 || self.card_centreline.is_some() {
             return Err(FlueError::Invalid { what: "card centreline speed requires one cold attachment" });
@@ -918,9 +920,6 @@ impl FlueVoice {
         let inviscid = (2.0 * held_pressure_pa / self.rho).sqrt();
         let centre = forced_jet::POISEUILLE_CENTRE_OVER_BULK * bulk;
         let (card, law) = if self.viscous_windway.is_some() {
-            if centre > inviscid {
-                return Err(FlueError::Invalid { what: "slit windway's Poiseuille centre speed exceeds the inviscid bound sqrt(2P/rho) at the held pressure" });
-            }
             (centre, "fully developed slit: Poiseuille centre 1.5 x bulk")
         } else if self.developing_windway.is_some() {
             if inviscid < centre {
@@ -933,6 +932,10 @@ impl FlueVoice {
         };
         self.card_centreline = Some(CardCentrelineSpeed { held_pressure_pa,
             held_bulk_speed_m_s: bulk, held_card_speed_m_s: card, law });
+        // The receipt's held pressure can differ from the already accepted input. Neither
+        // may bypass the same source-speed admission used by schedules and live controls.
+        self.validated_jet_speed(held_pressure_pa)?;
+        self.validated_jet_speed(self.blow_pa)?;
         Ok(self)
     }
 
@@ -1612,7 +1615,7 @@ impl FlueVoice {
             } else { self.jet_speed_m_s() };
             // The bulk speed carries the flux; the card's own speed (the bulk speed unless the
             // card centreline speed is attached) sets its convection, band, seed and Reynolds number.
-            let card_u = self.card_speed_at(u);
+            let card_u = self.card_speed_at(self.blow_pa, u);
             let q_max = u * self.geometry.flue_height_m * self.geometry.flue_width_m;
             let transit = if u == 0.0 { f64::INFINITY } else if windway_trial.is_some() {
                 self.geometry.cut_up_m / (self.island.convection_ratio * u)

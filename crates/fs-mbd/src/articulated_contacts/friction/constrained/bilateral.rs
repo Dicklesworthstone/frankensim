@@ -9,7 +9,7 @@
 use super::super::{
     ArticulatedContactError, ArticulatedContactSystem, ArticulatedFrictionalContact,
     ArticulatedFrictionalContactResult, EventResponse, FrictionalContactConfig, LinkContactPoint,
-    Prepared, PreparedContactEvent, Term, admit_support_work, finite, poll, prepare_event,
+    Prepared, PreparedContactEvent, admit_support_work, finite, poll, prepare_event,
     prepare_point, solve_frictional_contacts, unit_normal,
 };
 use super::{
@@ -17,6 +17,7 @@ use super::{
     resolve_constrained_articulated_frictional_contacts,
 };
 use crate::articulated::{motion::MAX_FREE_FLOATING_STEP_LINKS, solve_floating_base_system};
+use crate::articulated_contacts::Term;
 use fs_ga::{Vec3, Wrench};
 use fs_la::factor::cholesky;
 
