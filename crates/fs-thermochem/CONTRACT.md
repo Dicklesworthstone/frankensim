@@ -1284,3 +1284,50 @@ An independent development-only Cantera 3.2.0 calculation agrees with all
 This establishes source conformance, not experimental validation.
 The loader supplies the hydrogen/oxygen submechanism, not full GRI methane
 chemistry, a time integrator, transport, soot, real-gas phases or a fire model.
+
+## Original ice Ih thermodynamics and melting
+
+`water::ice` evaluates the original IAPWS R10-06(2009) Gibbs equation using
+the released IAPWS-95-compatible caloric reference. It retains the original
+complex poles and pressure-polynomial coefficients. A small native complex
+helper and analytic Gibbs derivatives supply h, u, s, g, Helmholtz energy,
+volume, density, Cp, Cv, expansion, pressure coefficient and compressibility.
+No enthalpy or entropy datum is shifted to force agreement with another EOS.
+
+The numerical chart is deliberately limited to 50..=273.16 K and
+0..=210 MPa, explicitly assuming hexagonal ice Ih. This source evaluator does
+not select the globally stable phase against fluid water or other ice
+polymorphs. Consumers must admit their phase path and retain the release's
+experimental limitations separately from arithmetic residuals.
+
+The independent original R14-08(2011) Ih melting correlation supplies p(T),
+its analytic derivative, and a bounded safeguarded T(p) inverse over
+251.165..=273.16 K. Residual and temperature-width budgets must both pass.
+Exact forward anchors at 251.165 K, 273.15 K and 273.16 K are retained, including
+the lower-temperature overlap needed by the original IF97 liquid equation.
+Reported temperature brackets concern evaluated floating-point correlation
+values; they are not real-arithmetic root enclosures. Expm1/log1p expressions
+retain the small pressure changes near the triple point.
+
+Stable isobaric differences evaluate changes in h, u, s and v without
+subtracting large reference quantities. The analytic increments preserve
+small temperature steps, exact zero, reversal and subdivision, and maintain
+Delta h=Delta u+p*Delta v.
+
+`water::ice::bounds` prepares a whole-temperature-interval positive Cp
+enclosure and a conservative dT/dh bound. It reduces the Gibbs second
+temperature derivative to real rational expressions and rounds every
+interval operation outward, including pressure-dependent source coefficients.
+Adaptive subdivision uses explicit work/depth limits and fixed stack storage.
+Samples never certify the bound; unresolved work or cancellation returns no
+partial result. These are bounds on the retained source equation, not
+experimental uncertainty or a global ice phase-stability certificate.
+
+All 188 native thermochemistry tests pass: the 182 previous tests, four ice
+source tests, and two whole-interval Cp-bound tests. Verification covers all
+16 rows and three columns of the release's Table 6, independent thermodynamic
+derivative identities, stable tiny/reversed/subdivided increments, the released
+melting value, pressure/temperature boundaries and inverse budgets, and Cp
+enclosures across the admitted assumed-Ih chart. Original source attribution:
+https://iapws.org/technical-guidance/release/Ice-2009.download and
+https://iapws.org/technical-guidance/release/MeltSub.download.

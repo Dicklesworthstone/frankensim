@@ -18,6 +18,8 @@ use crate::{MassSpecificEnergyQuantityV1, MassSpecificThermalQuantityV1};
 
 /// Independent original IF97 liquid/steam Gibbs and saturation formulations.
 pub mod if97;
+/// Original ice Ih Gibbs source and pressure-dependent melting correlation.
+pub mod ice;
 use core::fmt;
 use fs_math::det;
 use fs_qty::{Density, Pressure, Qty, Temperature};
