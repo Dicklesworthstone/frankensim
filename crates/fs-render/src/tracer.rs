@@ -1829,6 +1829,29 @@ impl ParkedRenderScope<'_> {
         Ok(())
     }
 
+    /// Calibrated jobs reuse the native parked crew while retaining their own
+    /// bounded, atomic wave publication and typed physics-failure channel.
+    #[cfg(feature = "photometry")]
+    pub(crate) fn run_photometric_kernel<K: TileKernel<Out = ()>>(
+        &self,
+        cx: &Cx<'_>,
+        kernel: &K,
+        execution: &RenderExecutionConfig,
+        lease: &OperationMemoryLease,
+    ) -> Result<RunReport, RenderExecutionError> {
+        self.validate_job(cx, execution)?;
+        let (outcome, report) =
+            self.pool
+                .run_declared_leased_with_cx(cx, kernel, execution.run_id, lease);
+        match outcome {
+            Ok(()) => Ok(report),
+            Err(RunError::Cancelled { .. }) => {
+                Err(RenderExecutionError::Tracer(TracerError::Cancelled))
+            }
+            Err(error) => Err(RenderExecutionError::Executor(error)),
+        }
+    }
+
     /// Render a progressive static range on the parked crew.
     #[allow(clippy::too_many_arguments)]
     pub fn render_range(
@@ -13209,17 +13232,14 @@ fn trace_path_with_emitters(
     // Hero wavelengths: one stratified draw covers the packet.
     let hero = LAMBDA_MIN + ul * (LAMBDA_MAX - LAMBDA_MIN);
     #[cfg(feature = "photometry")]
-    let hero = if fixtures.is_some() {
+    let lambdas = if fixtures.is_some() {
         // The calibrated sources use the declared 80-bin midpoint observer.
-        // Packet spacing is 20 bins, so this preserves their exact represented
-        // photopic normalization while retaining the shared spectral estimator.
-        crate::photometry::source::wavelength_nm(
-            ((ul * crate::photometry::source::SPECTRAL_BINS as f64) as usize)
-                .min(crate::photometry::source::SPECTRAL_BINS - 1),
-        )
+        // Probe NEE and incoming paths must use the same spectral packet.
+        photometric::wavelength_packet(ul)
     } else {
-        hero
+        hero_wavelength_packet::<PACKET>(hero, LAMBDA_MIN, LAMBDA_MAX)
     };
+    #[cfg(not(feature = "photometry"))]
     let lambdas = hero_wavelength_packet::<PACKET>(hero, LAMBDA_MIN, LAMBDA_MAX);
     let state = if let Some(state) = resume {
         state
@@ -13395,6 +13415,34 @@ fn trace_path_with_emitters(
                                 lane,
                                 contribution,
                             );
+                        }
+                    }
+                    if fixtures.areas.has_emission() {
+                        let direct = fixtures.areas.direct_contribution(
+                            scene,
+                            fixtures,
+                            cx,
+                            s,
+                            depth,
+                            Some(medium),
+                            event.position,
+                            photometric::area::Receiver::Phase {
+                                phase,
+                                incoming_travel: direction,
+                            },
+                            &lambdas,
+                            &rng,
+                        )?;
+                        for lane in 0..PACKET {
+                            let contribution = throughput[lane] * direct[lane];
+                            radiance[lane] += contribution;
+                            if let Some(contributions) = &mut contribution_radiance {
+                                contributions.record(
+                                    direct_contribution_class(depth),
+                                    lane,
+                                    contribution,
+                                );
+                            }
                         }
                     }
                 }
@@ -13644,6 +13692,31 @@ fn trace_path_with_emitters(
         let n = frame.oriented;
         let brushed_frame =
             brushed_shading_frame(scene, prim_idx, instance_hit.as_ref(), &hit, n, ray_time)?;
+        #[cfg(feature = "photometry")]
+        if let Some(fixtures) = fixtures
+            && fixtures.areas.has_emission()
+        {
+            let emitted = fixtures.areas.hit_radiance(
+                cx,
+                s.strategy,
+                prim_idx,
+                prev_origin,
+                hit.point,
+                frame.geometric,
+                ray.dir.scale(-1.0),
+                previous_bsdf,
+                &lambdas,
+            )?;
+            for lane in 0..PACKET {
+                let contribution = throughput[lane] * emitted[lane];
+                radiance[lane] += contribution;
+                if let Some(contributions) = &mut contribution_radiance {
+                    contributions.record(emissive_contribution_class(depth), lane, contribution);
+                }
+            }
+            // Emission does not replace this primitive's reflected material
+            // response. Its original BSDF continues below like any surface.
+        }
         if let Some((spec, scale)) = &prim.emission {
             // MIS weight against NEE for this light, seen from the
             // previous vertex.
@@ -13825,6 +13898,33 @@ fn trace_path_with_emitters(
                 radiance[lane] += contribution;
                 if let Some(contributions) = &mut contribution_radiance {
                     contributions.record(direct_contribution_class(depth), lane, contribution);
+                }
+            }
+            if fixtures.areas.has_emission() {
+                let direct = fixtures.areas.direct_contribution(
+                    scene,
+                    fixtures,
+                    cx,
+                    s,
+                    depth,
+                    medium,
+                    hit.point,
+                    photometric::area::Receiver::Surface {
+                        material: &prim.material,
+                        normal: n,
+                        outgoing: ray.dir.scale(-1.0),
+                        intersection: &intersection,
+                        incoming_ray: &ray,
+                    },
+                    &lambdas,
+                    &rng,
+                )?;
+                for lane in 0..PACKET {
+                    let contribution = throughput[lane] * direct[lane];
+                    radiance[lane] += contribution;
+                    if let Some(contributions) = &mut contribution_radiance {
+                        contributions.record(direct_contribution_class(depth), lane, contribution);
+                    }
                 }
             }
         }

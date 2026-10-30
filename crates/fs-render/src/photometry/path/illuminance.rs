@@ -1,11 +1,14 @@
 //! Incident illuminance from the same calibrated surface/volume paths as images.
 
+use crate::photometry::area::PhotometricEmitters;
 use crate::photometry::source::PhotometricSource;
 use crate::photometry::{
     CalculationGrid, IlluminanceProbe, PhotometryError, Receivers, TransportOptions,
 };
 use crate::tracer::photometric::FixtureTransport;
-use crate::tracer::{AdaptivePixelAccumulator, DirectStrategy, Sampler, Scene, Settings};
+use crate::tracer::{
+    AdaptivePixelAccumulator, DirectStrategy, RenderExecutionConfig, Sampler, Scene, Settings,
+};
 use fs_exec::Cx;
 
 use super::PathMedium;
@@ -52,9 +55,10 @@ pub struct PathIlluminanceEstimate {
     /// the existing spectral direct transport and geometric visibility.
     pub direct_lux: f64,
     /// Incoming light integrated over continuous directions, in lux. Includes
-    /// fixture light reflected or scattered before arrival and physical LTE
-    /// volume emission. Point-fixture delta directions are excluded here and
-    /// supplied by `direct_lux`, without double counting.
+    /// directly observed finite-area emission, fixture light reflected or
+    /// scattered before arrival, and physical LTE volume emission. Point-fixture
+    /// delta directions are excluded here and supplied by `direct_lux`, without
+    /// double counting. Area NEE and incoming paths form one combined sample.
     pub continuous_lux: f64,
     /// Number of accepted whole incoming paths in this estimate.
     pub samples: u32,
@@ -116,9 +120,33 @@ impl<'scene, 'field> PathIlluminanceJob<'scene, 'field> {
         sampling: IlluminanceSampling,
         cx: &Cx<'_>,
     ) -> Result<Self, PhotometryError> {
+        Self::new_with_emitters(
+            scene,
+            PhotometricEmitters::points_only(sources),
+            medium,
+            probes,
+            options,
+            sampling,
+            cx,
+        )
+    }
+
+    /// Admit probes with calibrated point fixtures and finite mesh emitters.
+    /// Finite-source illumination is sampled together with the incoming path;
+    /// the deterministic `direct_lux` component remains the point-fixture sum.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_emitters(
+        scene: &'scene Scene,
+        emitters: PhotometricEmitters<'scene>,
+        medium: PathMedium<'scene, 'field>,
+        probes: &'scene [IlluminanceProbe],
+        options: TransportOptions,
+        sampling: IlluminanceSampling,
+        cx: &Cx<'_>,
+    ) -> Result<Self, PhotometryError> {
         Self::begin(
             scene,
-            sources,
+            emitters,
             medium,
             Receivers::Probes(probes),
             probes.len(),
@@ -140,9 +168,32 @@ impl<'scene, 'field> PathIlluminanceJob<'scene, 'field> {
         sampling: IlluminanceSampling,
         cx: &Cx<'_>,
     ) -> Result<Self, PhotometryError> {
+        Self::for_grid_with_emitters(
+            scene,
+            PhotometricEmitters::points_only(sources),
+            medium,
+            grid,
+            options,
+            sampling,
+            cx,
+        )
+    }
+
+    /// Admit a calculation plane with calibrated point and finite mesh sources.
+    /// As with [`Self::for_grid`], grid values are infinitesimal point samples.
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_grid_with_emitters(
+        scene: &'scene Scene,
+        emitters: PhotometricEmitters<'scene>,
+        medium: PathMedium<'scene, 'field>,
+        grid: CalculationGrid,
+        options: TransportOptions,
+        sampling: IlluminanceSampling,
+        cx: &Cx<'_>,
+    ) -> Result<Self, PhotometryError> {
         Self::begin(
             scene,
-            sources,
+            emitters,
             medium,
             Receivers::Grid(grid),
             grid.len(),
@@ -155,7 +206,7 @@ impl<'scene, 'field> PathIlluminanceJob<'scene, 'field> {
     #[allow(clippy::too_many_arguments)]
     fn begin(
         scene: &'scene Scene,
-        sources: &'scene [PhotometricSource],
+        emitters: PhotometricEmitters<'scene>,
         medium: PathMedium<'scene, 'field>,
         receivers: Receivers<'scene>,
         count: usize,
@@ -184,9 +235,9 @@ impl<'scene, 'field> PathIlluminanceJob<'scene, 'field> {
             strategy: DirectStrategy::Mis,
             seed: sampling.seed,
         };
-        let transport = FixtureTransport::try_for_probes(
+        let transport = FixtureTransport::try_for_probes_with_emitters(
             scene,
-            sources,
+            emitters,
             medium,
             options,
             settings,
@@ -253,6 +304,64 @@ impl<'scene, 'field> PathIlluminanceJob<'scene, 'field> {
             self.completed += 1;
         }
         Ok((self.completed - start) as usize)
+    }
+
+    /// Advance using the native parked worker crew and bounded private waves.
+    ///
+    /// Wave sizing, memory accounting and atomic publication match
+    /// [`super::PathLuminanceJob::advance_with_execution`]. The exact direct
+    /// fixture term is evaluated only at a probe's first absolute sample and
+    /// committed with that wave. Incoming samples accumulate in logical order,
+    /// so worker count, tile shape and mixed serial/parallel calls preserve lux
+    /// and IID standard-error bits. A failed wave leaves the prior prefix intact.
+    pub fn advance_with_execution(
+        &mut self,
+        cx: &Cx<'_>,
+        max_path_samples: usize,
+        execution: &RenderExecutionConfig,
+    ) -> Result<usize, PhotometryError> {
+        let transport = &self.transport;
+        let receivers = &self.receivers;
+        let retained_capacity = self.moments.capacity();
+        super::execution::advance(
+            cx,
+            max_path_samples,
+            execution,
+            &mut self.moments,
+            retained_capacity,
+            &mut self.completed,
+            self.target,
+            |cx, index, sample, moment| {
+                let probe = match receivers {
+                    Receivers::Probes(probes) => probes[index as usize],
+                    Receivers::Grid(grid) => grid.probe(index as usize)?,
+                };
+                let direct_lux = if sample == 0 && moment.direct_lux.is_none() {
+                    Some(transport.direct_illuminance(cx, &probe)?.lux)
+                } else {
+                    None
+                };
+                Ok(super::execution::PathSample {
+                    xyz: transport.sample_probe(cx, &probe, index, sample)?,
+                    direct_lux,
+                })
+            },
+            |moment, sample| {
+                let direct_lux = moment
+                    .direct_lux
+                    .or(sample.direct_lux)
+                    .ok_or(PhotometryError::NonFiniteResult)?;
+                moment
+                    .continuous
+                    .push(sample.xyz)
+                    .map_err(|_| PhotometryError::NonFiniteResult)?;
+                if !(direct_lux + moment.continuous.mean_xyz()[1]).is_finite() {
+                    return Err(PhotometryError::NonFiniteResult);
+                }
+                moment.direct_lux = Some(direct_lux);
+                Ok(())
+            },
+        )
     }
 
     /// Read an accepted probe estimate. Uncomputed and out-of-range probes

@@ -9,6 +9,12 @@ mod probe_throughput;
 #[path = "photometric_path/illuminance.rs"]
 mod illuminance;
 
+#[path = "photometric_path/parallel.rs"]
+mod parallel;
+
+#[path = "photometric_path/area.rs"]
+mod area;
+
 use core::f64::consts::{FRAC_PI_2, PI};
 
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};

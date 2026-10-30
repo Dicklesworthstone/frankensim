@@ -7,6 +7,8 @@
 //! It is the unscattered, unreflected component, not total room illuminance.
 //! [`path::PathIlluminanceJob`] adds sampled reflected and volume transport to
 //! that direct calculation using the existing spectral path integrator.
+//! Calibrated finite mesh sources in [`area`] share those same paths and report
+//! their incident illuminance in the sampled continuous component.
 //!
 //! The existing CIE analytic observer and 80-bin spectral discretization are
 //! numerical models. Neither manufacturer calibration nor their model error
@@ -23,6 +25,7 @@ use fs_evidence::NumericalCertificate;
 use fs_exec::{Cancelled, Cx};
 use fs_geom::{Point3, Vec3};
 
+pub mod area;
 pub mod image;
 pub mod medium;
 pub mod path;
@@ -116,6 +119,8 @@ pub enum PhotometryError {
     Geometry(TracerError),
     /// The existing physical camera refused ray generation.
     Camera(crate::camera::CameraError),
+    /// Bounded parallel execution refused memory, configuration or scheduling.
+    Execution(crate::tracer::RenderExecutionError),
 }
 
 impl core::fmt::Display for PhotometryError {
@@ -167,6 +172,18 @@ impl From<crate::camera::CameraError> for PhotometryError {
         match value {
             crate::camera::CameraError::Cancelled => Self::Cancelled,
             other => Self::Camera(other),
+        }
+    }
+}
+
+impl From<crate::tracer::RenderExecutionError> for PhotometryError {
+    fn from(value: crate::tracer::RenderExecutionError) -> Self {
+        match value {
+            crate::tracer::RenderExecutionError::Tracer(error) => error.into(),
+            crate::tracer::RenderExecutionError::Executor(fs_exec::RunError::Cancelled {
+                ..
+            }) => Self::Cancelled,
+            other => Self::Execution(other),
         }
     }
 }

@@ -13,12 +13,14 @@
 //! error, geometric error or pixel integration. Total error remains unknown.
 
 use crate::tracer::photometric::FixtureTransport;
-use crate::tracer::{AdaptivePixelAccumulator, Sampler, Scene, Settings};
+use crate::tracer::{AdaptivePixelAccumulator, RenderExecutionConfig, Sampler, Scene, Settings};
 use fs_exec::Cx;
 
+use super::area::PhotometricEmitters;
 use super::source::PhotometricSource;
 use super::{PhotometryError, TransportOptions};
 
+mod execution;
 mod illuminance;
 pub use illuminance::{IlluminanceSampling, PathIlluminanceEstimate, PathIlluminanceJob};
 
@@ -26,9 +28,9 @@ pub use illuminance::{IlluminanceSampling, PathIlluminanceEstimate, PathIllumina
 pub use crate::tracer::photometric::FixtureMedium as PathMedium;
 
 /// Version of fixture-path admission, units and progressive accumulation.
-/// Version 2 adds probe hemispheres and consistent physical range admission
-/// for rigid instances and thermal volume-source connections.
-pub const PHOTOMETRIC_PATH_SEMANTICS_VERSION: u32 = 2;
+/// Version 3 adds lumen-calibrated finite mesh emitters with complementary
+/// source-hit and direct-light sampling. Point-only sample streams are retained.
+pub const PHOTOMETRIC_PATH_SEMANTICS_VERSION: u32 = 3;
 
 /// An accepted pixel estimate before exposure, white balance or tone mapping.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -84,6 +86,31 @@ impl<'scene, 'field> PathLuminanceJob<'scene, 'field> {
         settings: Settings,
         cx: &Cx<'_>,
     ) -> Result<Self, PhotometryError> {
+        Self::new_with_emitters(
+            scene,
+            PhotometricEmitters::points_only(sources),
+            medium,
+            options,
+            settings,
+            cx,
+        )
+    }
+
+    /// Admit calibrated point fixtures and finite Lambertian mesh sources.
+    ///
+    /// Each surface binding supplies total emitted lumens and a visible
+    /// spectrum. The original native mesh area and winding determine emitted
+    /// radiance; its original material continues to reflect incoming light.
+    /// Source hits and direct-light proposals use complementary MIS weights.
+    /// `BsdfOnly` is supported when no point fixture has positive flux.
+    pub fn new_with_emitters(
+        scene: &'scene Scene,
+        emitters: PhotometricEmitters<'scene>,
+        medium: PathMedium<'scene, 'field>,
+        options: TransportOptions,
+        settings: Settings,
+        cx: &Cx<'_>,
+    ) -> Result<Self, PhotometryError> {
         cx.checkpoint()?;
         if settings.width == 0 || settings.height == 0 || settings.spp == 0 {
             return Err(PhotometryError::InvalidOptions);
@@ -98,7 +125,9 @@ impl<'scene, 'field> PathLuminanceJob<'scene, 'field> {
         let target = count_u64
             .checked_mul(u64::from(settings.spp))
             .ok_or(PhotometryError::OutputBudgetExceeded)?;
-        let transport = FixtureTransport::try_new(scene, sources, medium, options, settings, cx)?;
+        let transport = FixtureTransport::try_new_with_emitters(
+            scene, emitters, medium, options, settings, cx,
+        )?;
         let mut moments = Vec::new();
         moments
             .try_reserve_exact(count)
@@ -147,6 +176,49 @@ impl<'scene, 'field> PathLuminanceJob<'scene, 'field> {
             self.completed += 1;
         }
         Ok((self.completed - start) as usize)
+    }
+
+    /// Advance on the native tile executor, with one parked crew for this call.
+    ///
+    /// Tile width times tile height sets the number of consecutive logical
+    /// paths per tile. Private waves contain at most two tiles per worker and
+    /// 65,536 paths. A whole wave publishes only after tracing and all moment
+    /// updates succeed; cancellation or refusal discards the current wave and
+    /// retains every earlier accepted wave. Serial and parallel calls may be
+    /// mixed freely, with the same pixel/sample addresses and accumulation bits.
+    ///
+    /// The execution memory ceiling covers retained moment payload, bounded
+    /// wave buffers and native executor metadata. Borrowed scene assets,
+    /// prepared emitter-proposal tables, allocator bookkeeping and worker
+    /// stacks are outside that accounting.
+    pub fn advance_with_execution(
+        &mut self,
+        cx: &Cx<'_>,
+        max_path_samples: usize,
+        execution: &RenderExecutionConfig,
+    ) -> Result<usize, PhotometryError> {
+        let transport = &self.transport;
+        let retained_capacity = self.moments.capacity();
+        execution::advance(
+            cx,
+            max_path_samples,
+            execution,
+            &mut self.moments,
+            retained_capacity,
+            &mut self.completed,
+            self.target,
+            |cx, pixel, sample, _| {
+                Ok(execution::PathSample {
+                    xyz: transport.sample(cx, pixel, sample)?,
+                    direct_lux: None,
+                })
+            },
+            |moment, sample| {
+                moment
+                    .push(sample.xyz)
+                    .map_err(|_| PhotometryError::NonFiniteResult)
+            },
+        )
     }
 
     /// Read one pixel. An out-of-range or not-yet-sampled pixel returns `None`,

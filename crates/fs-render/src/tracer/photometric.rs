@@ -7,6 +7,7 @@
 
 use super::*;
 use crate::camera::{Aperture, PhysicalCamera};
+use crate::photometry::area::PhotometricEmitters;
 use crate::photometry::medium::HomogeneousMedium;
 use crate::photometry::source::{LUMINOUS_EFFICACY_LM_W, PhotometricSource};
 use crate::photometry::transport::PhotometricMedium;
@@ -15,6 +16,8 @@ use crate::photometry::{
 };
 use crate::volumes::transport::AbsorbingGrid;
 use crate::volumes::transport::scattering::{PhaseFunction, ScatteringGrid};
+
+pub(super) mod area;
 
 #[cfg(test)]
 mod thermal_range_tests;
@@ -33,6 +36,7 @@ pub enum FixtureMedium<'view, 'field> {
 /// Immutable fixture state and finite transport support for one render job.
 pub(super) struct FixtureLighting<'a> {
     sources: &'a [PhotometricSource],
+    pub(super) areas: area::AreaLighting<'a>,
     options: TransportOptions,
     medium_bounds_m: Option<([f64; 3], [f64; 3])>,
     scattering: bool,
@@ -59,22 +63,22 @@ pub(crate) struct FixtureTransport<'scene, 'field> {
 }
 
 impl<'scene, 'field> FixtureTransport<'scene, 'field> {
-    pub(crate) fn try_new(
+    pub(crate) fn try_new_with_emitters(
         scene: &'scene Scene,
-        sources: &'scene [PhotometricSource],
+        emitters: PhotometricEmitters<'scene>,
         medium: FixtureMedium<'scene, 'field>,
         options: TransportOptions,
         settings: Settings,
         cx: &Cx<'_>,
     ) -> Result<Self, PhotometryError> {
-        Self::try_admit(scene, sources, medium, options, settings, true, cx)
+        Self::try_admit(scene, emitters, medium, options, settings, true, cx)
     }
 
     /// Admit probe addresses without reading or validating the unused camera.
     /// The receiver index occupies the existing deterministic pixel address.
-    pub(crate) fn try_for_probes(
+    pub(crate) fn try_for_probes_with_emitters(
         scene: &'scene Scene,
-        sources: &'scene [PhotometricSource],
+        emitters: PhotometricEmitters<'scene>,
         medium: FixtureMedium<'scene, 'field>,
         options: TransportOptions,
         settings: Settings,
@@ -90,12 +94,12 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
             height: 1,
             ..settings
         };
-        Self::try_admit(scene, sources, medium, options, settings, false, cx)
+        Self::try_admit(scene, emitters, medium, options, settings, false, cx)
     }
 
     fn try_admit(
         scene: &'scene Scene,
-        sources: &'scene [PhotometricSource],
+        emitters: PhotometricEmitters<'scene>,
         medium: FixtureMedium<'scene, 'field>,
         options: TransportOptions,
         settings: Settings,
@@ -103,9 +107,11 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
         cx: &Cx<'_>,
     ) -> Result<Self, PhotometryError> {
         cx.checkpoint()?;
+        let sources = emitters.points;
         if settings.spp == 0
             || settings.max_depth == 0
-            || settings.strategy == DirectStrategy::BsdfOnly
+            || (settings.strategy == DirectStrategy::BsdfOnly
+                && sources.iter().any(|source| source.flux_lm() > 0.0))
             || !matches!(settings.sampler, Sampler::Iid | Sampler::OwenSobol)
         {
             return Err(PhotometryError::InvalidOptions);
@@ -141,6 +147,7 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
                 Aperture::try_circular(0.0)?,
             )?;
         }
+        let areas = area::AreaLighting::try_new(scene, emitters.surfaces, cx)?;
         let (medium, medium_bounds_m, scattering) = match medium {
             FixtureMedium::Vacuum => (None, None, false),
             FixtureMedium::Absorbing(grid) if grid.is_vacuum() => (None, None, false),
@@ -175,6 +182,7 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
             direct_scene,
             fixtures: FixtureLighting {
                 sources,
+                areas,
                 options,
                 medium_bounds_m,
                 scattering,
@@ -289,13 +297,26 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
             // receiver or invent a larger physical exclusion distance.
             return Err(TracerError::InvalidInput);
         }
+        let previous_bsdf = if self.fixtures.areas.has_emission() {
+            let pdf = normal.dot(direction).max(0.0) / PI;
+            Some(PreviousBsdf {
+                pdf: DirectionalPdfPair::continuous(pdf, pdf).ok_or(TracerError::InvalidInput)?,
+                // The primary area-light proposal does not compete with the
+                // independently integrated physical volume-emission term.
+                volume_emission_competitor: false,
+                opaque_source_geometric_normal: Some(normal),
+                smooth_slab: None,
+            })
+        } else {
+            None
+        };
         let state = SpectralPathState {
             ray: Ray {
                 origin,
                 dir: direction,
             },
             throughput: [1.0; PACKET],
-            previous_bsdf: None,
+            previous_bsdf,
             prev_origin: position,
             // Only geometry uses the offset. Medium transport starts at the
             // exact receiver, retaining even cells thinner than ray epsilon.
@@ -317,6 +338,28 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
             remaining_smooth_dielectric_splits: SMOOTH_DIELECTRIC_SPLIT_BUDGET,
         };
         let render_cx = cx.with_stream_seed(self.settings.seed);
+        let area_xyz = if self.fixtures.areas.has_emission() {
+            let wavelengths = wavelength_packet(ul);
+            let direct = self.fixtures.areas.direct_contribution(
+                self.scene,
+                &self.fixtures,
+                &render_cx,
+                &self.settings,
+                0,
+                self.medium,
+                position,
+                area::Receiver::Probe { normal },
+                &wavelengths,
+                &state.rng,
+            )?;
+            Some(packet_radiance_to_xyz(
+                direct,
+                &wavelengths,
+                LUMINOUS_EFFICACY_LM_W,
+            ))
+        } else {
+            None
+        };
         let result = trace_path_with_emitters(
             self.scene,
             &self.lighting,
@@ -338,13 +381,28 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
         )?;
         // cos(theta)/pdf = pi for the sampled receiving hemisphere. This is
         // the irradiance integral, with no receiver BRDF or additional cosine.
-        let xyz = result.xyz.map(|value| PI * value);
+        let mut xyz = result.xyz.map(|value| PI * value);
+        if let Some(area_xyz) = area_xyz {
+            for channel in 0..3 {
+                xyz[channel] += area_xyz[channel];
+            }
+        }
         if xyz.iter().any(|value| !value.is_finite()) {
             return Err(TracerError::InvalidInput);
         }
         cx.checkpoint()?;
         Ok(xyz)
     }
+}
+
+/// Shared calibrated packet for incoming paths and probe-primary area NEE.
+/// Its 20-bin lane spacing retains the source's represented photopic integral.
+pub(super) fn wavelength_packet(ul: f64) -> [f64; PACKET] {
+    let hero = crate::photometry::source::wavelength_nm(
+        ((ul * crate::photometry::source::SPECTRAL_BINS as f64) as usize)
+            .min(crate::photometry::source::SPECTRAL_BINS - 1),
+    );
+    hero_wavelength_packet::<PACKET>(hero, LAMBDA_MIN, LAMBDA_MAX)
 }
 
 impl FixtureLighting<'_> {

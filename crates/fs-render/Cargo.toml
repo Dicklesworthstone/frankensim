@@ -54,7 +54,7 @@ differentiable = ["chart-backends", "dep:fs-ad"]
 # [F]-gated per the Ambition-Tag rule (bead 872c): the spectral path
 # tracer v1 — hero-wavelength MIS over the chart backends, EXR out.
 tracer = ["chart-backends", "dep:fs-alloc", "dep:fs-rand", "dep:fs-img", "dep:fs-substrate"]
-# Calibrated, headless point-fixture transport in SI photometric units.
+# Calibrated, headless fixture and finite-emitter transport in SI photometric units.
 # Explicitly opt-in while the observer/model error remains unbounded.
 photometry = ["tracer", "volumes"]
 # Resolve optical/thermal appearance from the same material state as mechanics.

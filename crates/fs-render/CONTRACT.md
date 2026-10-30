@@ -1771,3 +1771,63 @@ unknown, including the finite-depth remainder and physical-model uncertainty.
 `photometric_stage --total-csv` writes positions, direct/continuous/total lux,
 estimated IID standard error, sample count and explicit unknown total bounds
 for a stage grid using heterogeneous spectral haze and reflected light.
+
+### Native CPU execution of calibrated paths
+
+Both calibrated path jobs expose `advance_with_execution`, using the existing
+`RenderExecutionConfig`, native `RenderWorkerPool`, parked crews and caller `Cx`.
+One crew serves a complete advance call. Work tiles contain contiguous absolute
+sample addresses, with `tile_width * tile_height` paths per tile. Worker count,
+scheduling weights and tile size do not enter the spectral sample identity.
+
+Each wave privately stages at most 65,536 paths, also bounded by twice the worker
+count times the tile area and by the caller's requested work. Its moment updates
+replay in ascending absolute address order using the original accumulator.
+Only a fully successful wave publishes; cancellation or numerical refusal keeps
+the previously accepted prefix. Subsequent serial or parallel calls resume from
+that prefix. Direct probe lux remains cached with the first accepted sample.
+Completed sample sets retain the serial XYZ, lux and estimated-error bits.
+
+The existing operation-memory lease accounts for retained moment capacity,
+bounded wave samples, private candidate moments and native executor metadata.
+Advancing a job does not copy its geometry, fixtures or fields. Prepared emitter
+proposal tables, allocator bookkeeping and native thread stacks remain outside
+this payload accounting. Memory/executor
+refusals retain their structured errors; a physical transport refusal is not
+relabelled as ordinary cancellation.
+
+The example accepts `--paths --workers N` and `--total-csv --workers N`; the CSV
+schema and physical values are shared with serial execution. This execution
+bridge changes scheduling and publication granularity, not the transport model
+or its finite-depth and uncertainty limitations.
+
+### Finite calibrated surface emitters
+
+`PhotometricAreaEmitter` binds total lumens, a linear dimmer and the original
+80-bin source spectrum to a native mesh primitive. `PhotometricEmitters` combines
+these bindings with existing point fixtures. Both path jobs accept this set;
+static rigid instances share the original geometry and material abstractions.
+One-sided luminance is `flux/(pi*area)` and two-sided luminance is
+`flux/(2*pi*area)`, using the actual world-space triangle area and winding.
+Polygonal apertures use their represented mesh area, without claiming an exact
+curved aperture. Emission adds to the existing material's reflected radiance.
+
+Finite-source proposals select emitters by flux and triangles by area. Source
+hits and surface/phase/probe proposals use complementary MIS with the original
+BSDF/phase density and physical-medium survival probability. A terminal path
+vertex gives its direct proposal full weight. Visibility tests the actual
+endpoint; another face of the emitting primitive can occlude it. The complete
+source spectrum participates in the original absorption and scattering paths.
+
+Probe `continuous_lux` includes directly observed finite sources. Its area NEE
+and hemisphere-path contributions are combined before moment accumulation, so
+the sampling-error estimate describes the complete sample. The cached
+`direct_lux` term remains point-fixture-only. Point-only paths retain their
+original sample streams. `BsdfOnly` admits area-only scenes but refuses active
+point fixtures, whose delta directions cannot be sampled by a continuous BSDF.
+
+The stage example accepts `--paths --panels` or `--total-csv --panels`, optionally
+with `--workers N`. Sources remain uniform Lambertian patches: lenses, spatial
+gobos, refraction, non-Lambertian finite apertures and animated fixture emission
+are not provided by these bindings. Calibration, finite depth, spectral and
+geometric uncertainty retain their explicit unknown total-error bounds.
