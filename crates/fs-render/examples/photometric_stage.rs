@@ -11,6 +11,8 @@
 //! Append `--panels` to include two finite, lumen-calibrated emitting meshes.
 //! Append `--projector-focus 5` to project a passive gobo onto the stage with
 //! an ideal thin lens focused at 5 metres; changing that distance defocuses it.
+//! Append `--point-connections 4` to sample at most four point-fixture
+//! connections per path vertex; direct calculation-grid lux remains exact.
 //! These declared fixture profiles and gray haze are examples, not measurements.
 
 use std::error::Error;
@@ -27,7 +29,8 @@ use fs_render::photometry::area::{
 use fs_render::photometry::image::LuminanceJob;
 use fs_render::photometry::medium::{HomogeneousMedium, PhaseFunction, ScatterSettings};
 use fs_render::photometry::path::{
-    IlluminanceSampling, PathIlluminanceJob, PathLuminanceJob, PathMedium,
+    IlluminanceSampling, MAX_POINT_CONNECTIONS_PER_VERTEX, PathIlluminanceJob, PathLuminanceJob,
+    PathMedium, PointFixtureSampling,
 };
 use fs_render::photometry::source::{AngularDistribution, PhotometricSource, SourceSpectrum};
 use fs_render::photometry::{CalculationGrid, IlluminanceJob, PhotometricScene, TransportOptions};
@@ -44,11 +47,12 @@ use fs_render::volumes::transport::{AbsorbingGrid, AbsorbingGridBudget, MassAbso
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    const USAGE: &str = "usage: photometric_stage [--csv | --paths | --total-csv] [--panels] [--projector-focus METRES] [--workers N]; options require a path mode";
+    const USAGE: &str = "usage: photometric_stage [--csv | --paths | --total-csv] [--panels] [--projector-focus METRES] [--point-connections K] [--workers N]; options require a path mode";
     let mode = args.first().map_or("", String::as_str);
     let mut workers = None;
     let mut panels = false;
     let mut projector_focus_m = None;
+    let mut point_connections = None;
     let mut extra = args.get(1..).unwrap_or_default().iter();
     while let Some(flag) = extra.next() {
         match flag.as_str() {
@@ -56,6 +60,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 workers = Some(extra.next().ok_or(USAGE)?.parse::<usize>()?);
             }
             "--panels" if !panels => panels = true,
+            "--point-connections" if point_connections.is_none() => {
+                let count = extra.next().ok_or(USAGE)?.parse::<u32>()?;
+                if !(1..=MAX_POINT_CONNECTIONS_PER_VERTEX).contains(&count) {
+                    return Err("point connections must be between 1 and 32".into());
+                }
+                point_connections = Some(count);
+            }
             "--projector-focus" if projector_focus_m.is_none() => {
                 let distance = extra.next().ok_or(USAGE)?.parse::<f64>()?;
                 if !distance.is_finite() || distance <= 0.0 {
@@ -75,7 +86,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         "--total-csv" => (false, false, true),
         _ => return Err(USAGE.into()),
     };
-    if (workers.is_some() || panels || projector_focus_m.is_some()) && !(paths || total_csv) {
+    if (workers.is_some() || panels || projector_focus_m.is_some() || point_connections.is_some())
+        && !(paths || total_csv)
+    {
         return Err(USAGE.into());
     }
     let execution = workers
@@ -103,6 +116,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             total_csv,
             panels,
             projector_focus_m,
+            point_connections,
             execution.as_ref(),
         )
     })
@@ -115,6 +129,7 @@ fn run(
     total_csv: bool,
     panels: bool,
     projector_focus_m: Option<f64>,
+    point_connections: Option<u32>,
     execution: Option<&RenderExecutionConfig>,
 ) -> Result<(), Box<dyn Error>> {
     // Right-handed world, Z up, metres. Local source +Z is its optical axis.
@@ -215,6 +230,7 @@ fn run(
             total_csv,
             panels,
             projector_focus_m,
+            point_connections,
             execution,
         );
     }
@@ -270,6 +286,7 @@ fn run_paths(
     total_csv: bool,
     panels: bool,
     projector_focus_m: Option<f64>,
+    point_connections: Option<u32>,
     execution: Option<&RenderExecutionConfig>,
 ) -> Result<(), Box<dyn Error>> {
     // A back wall receives reflected floor light through the same material law.
@@ -407,6 +424,16 @@ fn run_paths(
         MassScatteringSpectrum::constant(0.025)?,
         GridPhase::henyey_greenstein(0.7)?,
     )?;
+    let point_sampling = point_connections.map_or(PointFixtureSampling::All, |count| {
+        PointFixtureSampling::Importance {
+            connections_per_vertex: count,
+        }
+    });
+    if !total_csv {
+        println!(
+            "Point-fixture path sampling: {point_sampling:?}; direct probe lux uses all fixtures"
+        );
+    }
     if total_csv {
         let mut job = PathIlluminanceJob::for_grid_with_emitters(
             &scene,
@@ -425,6 +452,7 @@ fn run_paths(
             },
             cx,
         )?;
+        job.set_point_sampling(point_sampling)?;
         while !job.is_complete() {
             if let Some(execution) = execution {
                 job.advance_with_execution(cx, 16_384, execution)?;
@@ -476,6 +504,7 @@ fn run_paths(
         settings,
         cx,
     )?;
+    image.set_point_sampling(point_sampling)?;
     while !image.is_complete() {
         if let Some(execution) = execution {
             image.advance_with_execution(cx, 16_384, execution)?;

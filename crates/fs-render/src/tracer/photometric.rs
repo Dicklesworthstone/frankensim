@@ -1,14 +1,16 @@
 //! Calibrated point fixtures feed the existing spectral surface/volume paths.
 //!
-//! Every admitted fixture is evaluated at each scattering vertex. These delta
-//! position sources have no competing continuous BSDF/phase hit technique, so
-//! their direct contribution has unit MIS weight. The established area-light
-//! mixture and its random-number consumption are unchanged.
+//! Fixture connections are either summed or sampled by receiver-dependent
+//! importance, as explicitly requested by the path job. These delta position
+//! sources have no competing continuous BSDF/phase hit technique, so their
+//! direct contribution has unit MIS weight. The established area-light mixture
+//! and its random-number consumption are unchanged.
 
 use super::*;
 use crate::camera::{Aperture, PhysicalCamera};
 use crate::photometry::area::PhotometricEmitters;
 use crate::photometry::medium::HomogeneousMedium;
+use crate::photometry::path::PointFixtureSampling;
 use crate::photometry::source::{LUMINOUS_EFFICACY_LM_W, PhotometricSource};
 use crate::photometry::transport::PhotometricMedium;
 use crate::photometry::{
@@ -18,6 +20,7 @@ use crate::volumes::transport::AbsorbingGrid;
 use crate::volumes::transport::scattering::{PhaseFunction, ScatteringGrid};
 
 pub(super) mod area;
+mod point_sampling;
 
 #[cfg(test)]
 mod thermal_range_tests;
@@ -40,6 +43,7 @@ pub(super) struct FixtureLighting<'a> {
     options: TransportOptions,
     medium_bounds_m: Option<([f64; 3], [f64; 3])>,
     scattering: bool,
+    point_sampling: PointFixtureSampling,
 }
 
 struct FixtureSegment {
@@ -186,6 +190,7 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
                 options,
                 medium_bounds_m,
                 scattering,
+                point_sampling: PointFixtureSampling::All,
             },
             lighting,
             medium,
@@ -194,6 +199,19 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
             sobol,
             path_sobol,
         })
+    }
+
+    pub(crate) fn set_point_sampling(
+        &mut self,
+        policy: PointFixtureSampling,
+    ) -> Result<(), PhotometryError> {
+        policy.validate()?;
+        self.fixtures.point_sampling = policy;
+        Ok(())
+    }
+
+    pub(crate) fn point_sampling(&self) -> PointFixtureSampling {
+        self.fixtures.point_sampling
     }
 
     /// Return one unaccumulated absolute photometric XYZ sample. Y is cd/m²;
@@ -524,26 +542,38 @@ pub(super) fn surface_contribution(
     outgoing: Vec3,
     brushed: Option<&crate::surface_detail::ShadingFrame>,
     wavelengths: &[f64; PACKET],
+    rng: &PathRng,
+    depth: u32,
 ) -> Result<[f64; PACKET], TracerError> {
-    contribution(
-        scene,
-        fixtures,
-        cx,
-        medium,
-        point,
-        wavelengths,
-        |incoming, lambda| {
-            let cosine = normal.dot(incoming).max(0.0);
-            if cosine == 0.0 {
-                Ok(0.0)
-            } else {
-                Ok(cosine
-                    * opaque_bsdf_eval(
-                        material, normal, outgoing, incoming, lambda, None, brushed,
-                    )?)
-            }
-        },
-    )
+    let response = |incoming, lambda| {
+        let cosine = normal.dot(incoming).max(0.0);
+        if cosine == 0.0 {
+            Ok(0.0)
+        } else {
+            Ok(cosine
+                * opaque_bsdf_eval(material, normal, outgoing, incoming, lambda, None, brushed)?)
+        }
+    };
+    match fixtures.point_sampling {
+        PointFixtureSampling::All => {
+            contribution(scene, fixtures, cx, medium, point, wavelengths, response)
+        }
+        PointFixtureSampling::Importance {
+            connections_per_vertex,
+        } => point_sampling::contribution(
+            scene,
+            fixtures,
+            cx,
+            medium,
+            point,
+            wavelengths,
+            rng,
+            depth,
+            connections_per_vertex,
+            |incoming| Ok(normal.dot(incoming).max(0.0)),
+            response,
+        ),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -556,16 +586,36 @@ pub(super) fn volume_contribution(
     point: Point3,
     incoming_travel: Vec3,
     wavelengths: &[f64; PACKET],
+    rng: &PathRng,
+    depth: u32,
 ) -> Result<[f64; PACKET], TracerError> {
-    contribution(
-        scene,
-        fixtures,
-        cx,
-        Some(medium),
-        point,
-        wavelengths,
-        |towards_source, _| Ok(phase.eval_cos(incoming_travel.dot(towards_source))?),
-    )
+    let response = |towards_source, _| Ok(phase.eval_cos(incoming_travel.dot(towards_source))?);
+    match fixtures.point_sampling {
+        PointFixtureSampling::All => contribution(
+            scene,
+            fixtures,
+            cx,
+            Some(medium),
+            point,
+            wavelengths,
+            response,
+        ),
+        PointFixtureSampling::Importance {
+            connections_per_vertex,
+        } => point_sampling::contribution(
+            scene,
+            fixtures,
+            cx,
+            Some(medium),
+            point,
+            wavelengths,
+            rng,
+            depth,
+            connections_per_vertex,
+            |towards_source| Ok(phase.eval_cos(incoming_travel.dot(towards_source))?),
+            response,
+        ),
+    }
 }
 
 fn contribution(

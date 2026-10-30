@@ -1773,6 +1773,10 @@ midpoints as source normalization, and XYZ accumulation uses 683 rather than
 the legacy display-white normalization. Y therefore reports cd/m². The old
 entry points pass no fixture context and retain their previous arithmetic.
 
+The default point-fixture policy remains the complete source sum. The optional
+receiver-dependent connection policy below samples that sum without changing
+the underlying source, material or medium models.
+
 The image advances in row-major sample passes and reuses the existing Welford
 accumulator. Each complete path and moment update commits atomically. IID
 estimates expose a sample-based standard error after two paths; Owen–Sobol
@@ -1968,3 +1972,53 @@ agreement with the ideal model does not certify a manufactured fixture.
 `photometric_stage --paths --projector-focus 5 --workers 4` exercises this
 source together with native material reflection and heterogeneous spectral
 haze. The same option works with `--total-csv` for surface lux.
+
+### Receiver-dependent point-fixture sampling
+
+`PointFixtureSampling::Importance { connections_per_vertex }` is an opt-in
+policy on both calibrated path jobs, selected with `with_point_sampling` or
+`set_point_sampling` before any path has committed. The retained policy is
+queryable; invalid counts or changes after progress refuse. The mutating setter
+preserves the job and its accepted prefix on refusal. `All` remains the default
+and retains the original source sum, arithmetic and sample streams.
+
+At a surface vertex, proposal weight is the actual fixture intensity toward
+the receiver divided by squared physical distance, times receiving cosine.
+At a volume vertex the phase response replaces that cosine. Thus off-axis
+beam structure, fixture orientation and receiver position affect selection.
+All active source distances, exclusion radii and angular intensities are
+examined, including sources whose proposal response is zero. Whole-segment
+point-source exclusion in scattering media remains unchanged.
+
+Between 1 and 32 independent weighted reservoirs select connections with
+replacement. For proposal marginal `p_j`, a whole path includes the average
+of `C_j/p_j` over its connection draws. `C_j` uses the original visibility,
+spectral source, physical Beer attenuation and BSDF/phase response. Point
+sources still have unit MIS weight because continuous paths cannot hit their
+delta positions. Duplicate selected identities share one expensive connection
+evaluation with the corresponding multiplicity. Finite-area/projector source
+proposals and their complementary MIS are unchanged.
+
+Reservoir storage is fixed-size and path-local; no per-vertex heap allocation
+or shared mutable sampler is introduced. Independent Philox domains depend on
+logical path, vertex and source/draw identities, without consuming camera,
+wavelength, BSDF, phase or area-source draws. Same-ISA serial/parallel and
+progressive replay retain identical values for the same policy and seed.
+Positive importance that cannot retain represented proposal support refuses
+explicitly; callers can use `All` for such extreme mixtures. Finite arithmetic
+and random-word resolution are not rigorous numerical error enclosures.
+
+The direct unscattered point-fixture lux cached by each illuminance probe
+always uses the complete original sum. Importance sampling affects only its
+reflected/scattered paths, and point contributions to camera paths. All
+connection draws belong to one path sample, so the existing IID standard error
+includes their selection variance. Owen–Sobol retains its no-IID-error-claim
+policy, and total model/transport error remains unknown.
+
+The policy bounds costly shadow, medium and spectral shading evaluations by
+the connection count. It still performs `O(N*K)` inexpensive reservoir work for
+`N` sources and at most `K=32` draws; it is not a light-tree or sublinear source
+traversal claim. The proposal does not predict visibility, colored attenuation
+or sharp material lobes, so variance and error per second remain scene-dependent.
+Path semantics version 6 adds this policy. The headless stage example accepts
+`--point-connections K` with either path mode; omitted means `All`.

@@ -106,6 +106,7 @@ fn reflected_thermal_nee_obeys_calibrated_physical_range() {
             },
             medium_bounds_m: Some(grid.bounds_m()),
             scattering: false,
+            point_sampling: PointFixtureSampling::All,
         };
         let admitted = evaluate(Some(&calibrated)).unwrap();
         for (actual, expected) in admitted.into_iter().zip(legacy) {

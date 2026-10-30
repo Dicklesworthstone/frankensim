@@ -11,7 +11,7 @@ use crate::tracer::{
 };
 use fs_exec::Cx;
 
-use super::PathMedium;
+use super::{PathMedium, PointFixtureSampling};
 
 /// Fixed sampling policy for surface probes, independent of image dimensions.
 #[derive(Debug, Clone, Copy)]
@@ -110,6 +110,37 @@ pub struct PathIlluminanceJob<'scene, 'field> {
 }
 
 impl<'scene, 'field> PathIlluminanceJob<'scene, 'field> {
+    /// Select point-fixture sampling for reflected and scattered paths while
+    /// constructing an unstarted job. The cached unscattered direct-lux sum
+    /// still evaluates every fixture exactly as before.
+    pub fn with_point_sampling(
+        mut self,
+        policy: PointFixtureSampling,
+    ) -> Result<Self, PhotometryError> {
+        self.set_point_sampling(policy)?;
+        Ok(self)
+    }
+
+    /// Change the connection policy only before any path has committed.
+    /// Refusals preserve this job and all existing estimates. Source-selection
+    /// variance belongs to the whole incoming-path sample and its ordinary
+    /// IID standard-error estimate; total physical error remains unknown.
+    pub fn set_point_sampling(
+        &mut self,
+        policy: PointFixtureSampling,
+    ) -> Result<(), PhotometryError> {
+        if self.completed != 0 {
+            return Err(PhotometryError::InvalidOptions);
+        }
+        self.transport.set_point_sampling(policy)
+    }
+
+    /// Retained point-fixture policy; direct probe lux is always a complete sum.
+    #[must_use]
+    pub fn point_sampling(&self) -> PointFixtureSampling {
+        self.transport.point_sampling()
+    }
+
     /// Admit a nonempty set of one-sided receiver points. Supported geometry,
     /// materials, fixtures and media match [`super::PathLuminanceJob`].
     #[allow(clippy::too_many_arguments)]

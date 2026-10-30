@@ -28,11 +28,51 @@ pub use illuminance::{IlluminanceSampling, PathIlluminanceEstimate, PathIllumina
 pub use crate::tracer::photometric::FixtureMedium as PathMedium;
 
 /// Version of fixture-path admission, units and progressive accumulation.
-/// Version 5 adds finite-aperture thin-lens projectors with passive gobos.
-/// The same position/direction emission law is used by source hits and direct
-/// proposals; previously admitted source laws and sample streams are retained.
+/// Version 6 adds optional receiver-dependent point-fixture sampling. The
+/// default complete source sum and all existing path streams remain unchanged.
 /// Active point fixtures with glass still require missing specular connections.
-pub const PHOTOMETRIC_PATH_SEMANTICS_VERSION: u32 = 5;
+pub const PHOTOMETRIC_PATH_SEMANTICS_VERSION: u32 = 6;
+
+/// Maximum sampled point-fixture connections at one surface or volume vertex.
+/// The bounded proposal storage is local to that path, with no per-vertex heap
+/// allocation or shared mutable sampler state.
+pub const MAX_POINT_CONNECTIONS_PER_VERTEX: u32 = 32;
+
+/// Point-fixture connection policy for the shared spectral path estimator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PointFixtureSampling {
+    /// Evaluate every fixture at every surface/volume interaction. This is the
+    /// original deterministic source sum, without source-selection variance.
+    #[default]
+    All,
+    /// Independently select a bounded number of fixtures, weighted by their
+    /// actual beam intensity, inverse-square distance and receiving cosine or
+    /// phase response. Each contribution is divided by its selection
+    /// probability. Visibility, spectral transmission and material response
+    /// remain physical evaluations, not approximations from these weights.
+    ///
+    /// All source distances are still checked. Sampling reduces expensive
+    /// shadow/medium/BSDF work; it does not promise sublinear source traversal
+    /// or universally better error per second. The exact cached direct-lux
+    /// term of an illuminance probe is unaffected.
+    Importance {
+        /// Positive independent connection draws, at most
+        /// [`MAX_POINT_CONNECTIONS_PER_VERTEX`], included in each whole path.
+        connections_per_vertex: u32,
+    },
+}
+
+impl PointFixtureSampling {
+    pub(crate) fn validate(self) -> Result<(), PhotometryError> {
+        match self {
+            Self::All => Ok(()),
+            Self::Importance {
+                connections_per_vertex,
+            } if (1..=MAX_POINT_CONNECTIONS_PER_VERTEX).contains(&connections_per_vertex) => Ok(()),
+            Self::Importance { .. } => Err(PhotometryError::InvalidOptions),
+        }
+    }
+}
 
 /// An accepted pixel estimate before exposure, white balance or tone mapping.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -155,6 +195,38 @@ impl<'scene, 'field> PathLuminanceJob<'scene, 'field> {
             completed: 0,
             target,
         })
+    }
+
+    /// Select point-fixture sampling while constructing an unstarted job.
+    /// Use [`Self::set_point_sampling`] when retaining ownership on refusal is
+    /// required. Existing camera, wavelength and continuation streams are not
+    /// consumed by fixture selection.
+    pub fn with_point_sampling(
+        mut self,
+        policy: PointFixtureSampling,
+    ) -> Result<Self, PhotometryError> {
+        self.set_point_sampling(policy)?;
+        Ok(self)
+    }
+
+    /// Change the policy before any path has committed. Invalid policies and
+    /// changes after progress refuse without modifying the job or its prefix.
+    /// Estimated IID standard error includes source-selection variance because
+    /// all connection draws are accumulated as part of one complete path.
+    pub fn set_point_sampling(
+        &mut self,
+        policy: PointFixtureSampling,
+    ) -> Result<(), PhotometryError> {
+        if self.completed != 0 {
+            return Err(PhotometryError::InvalidOptions);
+        }
+        self.transport.set_point_sampling(policy)
+    }
+
+    /// Retained source-connection policy for this immutable sampling run.
+    #[must_use]
+    pub fn point_sampling(&self) -> PointFixtureSampling {
+        self.transport.point_sampling()
     }
 
     /// Commit at most `max_path_samples` additional complete paths.

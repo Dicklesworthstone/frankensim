@@ -13527,6 +13527,8 @@ fn trace_path_with_regions(
                         event.position,
                         direction,
                         &lambdas,
+                        &rng,
+                        depth,
                     )?;
                     for lane in 0..PACKET {
                         let contribution = throughput[lane] * direct[lane];
@@ -14028,6 +14030,8 @@ fn trace_path_with_regions(
                 ray.dir.scale(-1.0),
                 brushed_frame.as_ref(),
                 &lambdas,
+                &rng,
+                depth,
             )?;
             for lane in 0..PACKET {
                 let contribution = throughput[lane] * direct[lane];

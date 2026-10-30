@@ -24,6 +24,9 @@ mod brushed;
 #[path = "photometric_path/projector.rs"]
 mod projector;
 
+#[path = "photometric_path/point_sampling.rs"]
+mod point_sampling;
+
 use core::f64::consts::{FRAC_PI_2, PI};
 
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
