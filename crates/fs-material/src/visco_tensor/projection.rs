@@ -4,6 +4,7 @@
 use super::*;
 
 mod transfer;
+pub use transfer::TensorThermalState;
 
 /// Cold projection limits; all columns and all six rows of every branch survive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

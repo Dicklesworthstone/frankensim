@@ -74,6 +74,7 @@ impl TensorMaterialHistory<'_> {
                 steps: self.steps,
                 work: self.work,
                 parameter_work,
+                thermal_coefficient_work: self.thermal_coefficient_work,
                 heat: self.heat,
                 initial_energy: self.initial_energy,
             },

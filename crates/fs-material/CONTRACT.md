@@ -5525,3 +5525,23 @@ eddy/excess loss, Curie extrapolation or measured authority for synthetic fits.
 Three focused G0/G1/G3 regressions cover independent two-branch work/remanence,
 geometry reduction, data-defined branch sharing, source-domain/quantity refusal
 and memory-preserving temperature continuation.
+
+
+### Affine tensor thermal potentials
+
+`visco_tensor::source::thermal::AffineTensorThermal` admits source-derived
+affine stored tensors over every original selected temperature knot.
+Isotropic E(T) requires fixed Poisson ratio; orthotropic Young and shear
+moduli share a common affine scale with fixed Poisson ratios. Each of the
+21 coefficients of every symmetric Maxwell branch may have an independent
+affine slope, including signed cross terms. Positive piecewise-linear
+relaxation times remain supported. Reference density and strain validity
+remain fixed.
+
+`ProjectedTensorProny::thermal_state` evaluates Helmholtz free energy psi,
+entropy S=-psi_T, and internal energy U=psi+T*S using the original strain map
+and complete native factor memory. Physical Maxwell strain recovery shares
+the native checked transfer inverse. Varying singular factors refuse even
+at zero actual memory; unchanged singular factors retain their original
+free energy with zero thermal entropy. Non-affine stored tensors, thermal
+expansion and finite-strain thermodynamics are outside this admission.

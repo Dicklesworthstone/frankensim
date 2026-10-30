@@ -17,6 +17,9 @@ use crate::{IsotropicElastic, OrthotropicElastic};
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::{Density, Dims, Pressure, QuantitySpec};
 
+/// Affine stored-tensor thermodynamics with original material source paths.
+pub mod thermal;
+
 /// Canonical equilibrium elastic data, before any spatial rotation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TensorElasticity {

@@ -2,6 +2,15 @@
 
 use super::*;
 
+/// Original point's mechanical thermodynamic contributions. Entropy and U
+/// are signed contributions relative to its unstressed caloric material.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TensorThermalState {
+    pub free_energy_j: f64,
+    pub entropy_j_k: f64,
+    pub internal_energy_j: f64,
+}
+
 fn recoverable_factor(
     stiffness: &Tangent6,
     rows: &Tangent6,
@@ -27,6 +36,33 @@ fn recoverable_factor(
         }
     }
     Ok(factor)
+}
+
+fn recover_strain(
+    stiffness: &Tangent6,
+    rows: &Tangent6,
+    z: &[f64],
+    root: f64,
+    tolerance: f64,
+) -> Result<Voigt> {
+    let factor = recoverable_factor(stiffness, rows, tolerance)?;
+    let mut strain = core::array::from_fn(|i| (0..6).map(|j| rows[j][i] * z[j] / root).sum());
+    factor.solve(&mut strain);
+    if !finite(&strain) {
+        return Err(invalid("Maxwell spring-strain recovery overflow"));
+    }
+    let recovered = apply(rows, &strain).map(|x| root * x);
+    let scale = z.iter().fold(0.0_f64, |s, x| s.max(x.abs()));
+    let residual = recovered
+        .iter()
+        .zip(z)
+        .fold(0.0_f64, |s, (a, b)| s.max((a - b).abs()));
+    if !finite(&recovered) || !residual.is_finite() || residual > tolerance * scale {
+        return Err(invalid(
+            "Maxwell spring-strain reconstruction exceeds its relative allowance",
+        ));
+    }
+    Ok(strain)
 }
 
 impl ProjectedTensorProny {
@@ -79,26 +115,8 @@ impl ProjectedTensorProny {
                 output.extend_from_slice(z);
                 continue;
             }
-            let factor = recoverable_factor(&old.c_pa, &old_rows, relative_tolerance)?;
+            let strain = recover_strain(&old.c_pa, &old_rows, z, root, relative_tolerance)?;
             recoverable_factor(&new.c_pa, &new_rows, relative_tolerance)?;
-            let mut strain: [f64; 6] =
-                core::array::from_fn(|i| (0..6).map(|j| old_rows[j][i] * z[j] / root).sum());
-            factor.solve(&mut strain);
-            if !finite(&strain) {
-                return Err(invalid("Maxwell spring-strain recovery overflow"));
-            }
-            let recovered = apply(&old_rows, &strain).map(|x| root * x);
-            let scale = z.iter().fold(0.0_f64, |s, x| s.max(x.abs()));
-            let residual = recovered
-                .iter()
-                .zip(z)
-                .fold(0.0_f64, |s, (a, b)| s.max((a - b).abs()));
-            if !finite(&recovered) || !residual.is_finite() || residual > relative_tolerance * scale
-            {
-                return Err(invalid(
-                    "Maxwell spring-strain reconstruction exceeds its relative allowance",
-                ));
-            }
             let transformed = apply(&new_rows, &strain).map(|x| root * x);
             if !finite(&transformed) {
                 return Err(invalid("transferred Maxwell factor coordinates overflow"));
@@ -107,5 +125,79 @@ impl ProjectedTensorProny {
         }
         poll(&mut cancelled)?;
         Ok(output)
+    }
+
+    /// Evaluate psi, S=-psi_T and U=psi+T*S using this ORIGINAL projected
+    /// strain map and complete volume-scaled factor memory. Derivatives must
+    /// come from the same source law and reference frame as this projection;
+    /// the source/coupling owner establishes that identity.
+    ///
+    /// Every varying branch recovers physical elastic strain through the same
+    /// checked factor inverse used by native memory transfer. A varying singular
+    /// branch refuses even at zero actual memory. An unchanged singular branch
+    /// contributes its original free energy and zero thermal entropy.
+    pub fn thermal_state(
+        &self,
+        derivative: &source::thermal::TensorTemperatureDerivative,
+        displacement: &[f64],
+        memory: &[f64],
+        temperature_k: f64,
+        relative_memory_tolerance: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<TensorThermalState> {
+        poll(&mut cancelled)?;
+        if memory.len() != 6 * self.model.branches.len()
+            || derivative.branches_pa_k.len() != self.model.branches.len()
+            || memory.iter().any(|v| !v.is_finite())
+            || !(derivative.interval_k[0]..=derivative.interval_k[1]).contains(&temperature_k)
+            || !relative_memory_tolerance.is_finite()
+            || relative_memory_tolerance <= 0.0
+            || relative_memory_tolerance > 1e-8
+        {
+            return Err(invalid(
+                "thermal tensor state needs complete memory, bounded temperature and reconstruction tolerance",
+            ));
+        }
+        let strain = mandel(&self.strain(displacement)?);
+        let n = self.coordinates();
+        let mut free_energy_j = 0.0;
+        for i in 0..n {
+            for j in 0..n {
+                free_energy_j +=
+                    0.5 * displacement[i] * self.equilibrium[i * n + j] * displacement[j];
+            }
+        }
+        let mut entropy_j_k =
+            -0.5 * self.volume_m3 * dot(&strain, &apply(&derivative.equilibrium_pa_k, &strain));
+        let root = det::sqrt(self.volume_m3);
+        for (index, (branch, slope)) in self
+            .model
+            .branches
+            .iter()
+            .zip(&derivative.branches_pa_k)
+            .enumerate()
+        {
+            poll(&mut cancelled)?;
+            let z = &memory[6 * index..6 * index + 6];
+            free_energy_j += 0.5 * z.iter().map(|v| v * v).sum::<f64>();
+            if slope.iter().flatten().any(|v| *v != 0.0) {
+                let rows = branch.resolved_gram_rows(&self.model.factors[index]);
+                let q = recover_strain(&branch.c_pa, &rows, z, root, relative_memory_tolerance)?;
+                entropy_j_k -= 0.5 * self.volume_m3 * dot(&q, &apply(slope, &q));
+            }
+        }
+        let internal_energy_j = temperature_k.mul_add(entropy_j_k, free_energy_j);
+        if !free_energy_j.is_finite() || !entropy_j_k.is_finite() || !internal_energy_j.is_finite()
+        {
+            return Err(invalid(
+                "tensor mechanical thermodynamic contribution overflow",
+            ));
+        }
+        poll(&mut cancelled)?;
+        Ok(TensorThermalState {
+            free_energy_j,
+            entropy_j_k,
+            internal_energy_j,
+        })
     }
 }

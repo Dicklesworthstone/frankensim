@@ -240,7 +240,7 @@ impl TensorMaterialBody {
         }
         self.admit_state(&state)?;poll(gate)?;
         let initial_energy=self.system.hamiltonian(&state);
-        Ok(TensorMaterialHistory {body:self,state,time:0.0,steps:0,work:0.0,parameter_work:0.0,heat:0.0,initial_energy})
+        Ok(TensorMaterialHistory {body:self,state,time:0.0,steps:0,work:0.0,parameter_work:0.0,thermal_coefficient_work:0.0,heat:0.0,initial_energy})
     }
 }
 
@@ -275,6 +275,7 @@ pub struct TensorMaterialHistory<'a> {
     steps:u64,
     work:f64,
     parameter_work:f64,
+    thermal_coefficient_work:f64,
     heat:f64,
     initial_energy:f64,
 }
@@ -294,7 +295,9 @@ impl TensorMaterialHistory<'_> {
     pub fn time_s(&self)->f64 {self.time}
     /// Number of accepted positive-duration steps.
     pub fn steps(&self)->u64 {self.steps}
-    /// Current kinetic + equilibrium + recoverable branch energy [J].
+    /// Current kinetic + equilibrium/branch mechanical potential [J]. For an
+    /// evolving thermal law the spring contribution is Helmholtz free energy;
+    /// its thermal owner separately includes T*S to obtain internal energy.
     pub fn stored_energy_j(&self)->f64 {self.body.system.hamiltonian(&self.state)}
     /// Integrated force-port work since initialization [J]. Source-coefficient
     /// work is retained separately by `parameter_work_j`.
@@ -302,10 +305,16 @@ impl TensorMaterialHistory<'_> {
     /// Signed external work from admitted source-coefficient changes at fixed
     /// displacement and physical Maxwell spring strains. Never thermal heat.
     pub fn parameter_work_j(&self)->f64 {self.parameter_work}
+    /// Internal change of mechanical FREE energy under solved temperature
+    /// updates [J]. The thermal owner balances this with reversible exchange
+    /// and T*S; it is neither external parameter work nor physical dissipation.
+    pub fn thermal_coefficient_work_j(&self)->f64 {self.thermal_coefficient_work}
     /// Independently integrated material dashpot heat since initialization [J].
     pub fn dissipated_heat_j(&self)->f64 {self.heat}
-    /// Complete history balance, not a correction applied to any channel [J].
-    pub fn balance_residual_j(&self)->f64 {self.stored_energy_j()-self.initial_energy+self.heat-self.work-self.parameter_work}
+    /// Native mechanical-potential balance, including distinct external and
+    /// internal coefficient changes [J]. Closed physical U/caloric accounting
+    /// belongs to the coupled thermal report; no correction is applied here.
+    pub fn balance_residual_j(&self)->f64 {self.stored_energy_j()-self.initial_energy+self.heat-self.work-self.parameter_work-self.thermal_coefficient_work}
 
     /// Advance the full coupled system under a constant force during dt.
     /// The existing exact-ZOH propagator owns state, work and heat integration.

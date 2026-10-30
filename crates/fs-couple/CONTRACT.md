@@ -15723,3 +15723,26 @@ remain required. Gases remain homogeneous and fixed-volume. Wall geometry
 and sequential thermoelastic interpretation retain their existing limits.
 Jet thrust, spatial flames, moving boundaries, pressure traction and
 reciprocal thermoelastic heat are not claimed.
+
+
+### Closed affine tensor thermal feedback
+
+`TensorSolidHistory::advance_affine_thermal_candidate` reuses the original
+source-operator rebind, native tensor trajectory and shared finite-cell
+thermal residual. Caloric exchange equals dashpot loss minus native
+coefficient free-energy work minus delta(T*S), allowing signed reversible
+cooling. The physical balance uses U=psi+T*S; native mechanical-potential
+accounting retains psi and a separate cumulative
+`thermal_coefficient_work_j()` account. Thermal coefficient changes never
+increment external `parameter_work_j()`, and dissipation enters the thermal
+receiver once.
+
+Original card identity, selected claims, complete query context, frame,
+exact caloric law, whole-element mass/volume, complete Maxwell memory and
+common clock remain required. Geometry, density, supports, eigenstrain and
+basis remain fixed; phase change and varying singular factors refuse. The
+endpoint-coefficient split is first order and requires physical timestep
+refinement. Rejected or cancelled candidates leave accepted mechanical and
+thermal histories unchanged. Five focused regressions cover continuing
+memory and physical U balance, lossless cooling, full anisotropic rotated
+entropy, orthotropic common-scale admission and non-affine/late refusal.

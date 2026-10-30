@@ -18,7 +18,7 @@ use crate::{Tangent6, Voigt};
 use fs_math::det;
 
 mod projection;
-pub use projection::{ProjectedPronyBranch, ProjectedTensorProny, TensorProjectionBudget};
+pub use projection::{ProjectedPronyBranch, ProjectedTensorProny, TensorProjectionBudget, TensorThermalState};
 
 mod reduction;
 pub use reduction::{Complex3, HarmonicPlateSection, PlaneStressModulus};
