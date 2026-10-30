@@ -299,6 +299,47 @@ test('resolved primary gas refuses snapshot models while exterior models retain 
     'dg_exterior thermochemical 300 100000 mass 1 original-N2 1'));
 });
 
+test('source-bound reservoir fixtures retain their binding through common-pressure edits and native packets', async () => {
+  for (const name of ['resolved-dg-radiating-mouth.performance', 'resolved-dg-side-aperture.performance',
+    'resolved-dg-slit-edge.performance', 'resolved-dg-si-slit-edge.performance', 'resolved-dg-transverse-drive.performance']) {
+    const source = await fixture(name);
+    const binding = source.split('\n').find(line => /^reservoir_aperture(?:_m)? /.test(line));
+    assert.match(binding, /^reservoir_aperture(?:_m)? [012] (?:low|high) reference /);
+    const primary = nativeGasRegions(source).find(region => region.key === 'gas');
+    const changed = editNativeGasRegion(source, primary, {...primary.values, pressure:'90000'}, true);
+    const regions = nativeGasRegions(changed);
+    assert(regions.every(region => region.values.pressure === '90000'));
+    assert.equal(changed, source.replace('gas dry-air 300 100000', 'gas dry-air 300 90000')
+      .replace('dg_exterior 300 100000 0', 'dg_exterior 300 90000 0'));
+    const bytes = new TextEncoder().encode(serializeNativeExperiment(changed, [], {renderer:'resolved'}));
+    const packet = validateInput(bytes, true);
+    assert.equal(new TextDecoder().decode(packet.source), changed);
+    assert.equal(packet.renderer, 'resolved');
+    // The reference state is evaluated by the Rust material owner. The browser
+    // does not calculate a replacement density or rewrite physical controls.
+    assert(changed.split('\n').includes(binding));
+  }
+});
+
+test('source-bound radiating mouth keeps the same aperture through thermochemical atmosphere substitutions', async () => {
+  const source = (await fixture('resolved-dg-radiating-mouth.performance'))
+    .replace('bulk_viscosity', 'energy_solve 0.01 24\nbulk_viscosity');
+  const values = {kind:'thermochemical', temperature:'310', pressure:'90000', basis:'mole',
+    components:[{species:'source-N2', fraction:'0.7'}, {species:'source-O2', fraction:'0.2'},
+      {species:'source-He', fraction:'0.1'}]};
+  const primary = nativeGasRegions(source).find(region => region.key === 'gas');
+  const inside = editNativeGasRegion(source, primary, values, true);
+  const exterior = nativeGasRegions(inside).find(region => region.key === 'dg_exterior');
+  const changed = editNativeGasRegion(inside, exterior, values);
+  const declaration = 'thermochemical 310 90000 mole 3 source-N2 0.7 source-O2 0.2 source-He 0.1';
+  assert.equal(changed, source.replace('gas dry-air 300 100000', `gas ${declaration}`)
+    .replace('dg_exterior 300 100000 0', `dg_exterior ${declaration}`));
+  assert.match(changed, /^reservoir_aperture 1 high reference 1$/m);
+  assert.match(changed, /^reservoir_feedback -20 20 16 16$/m);
+  assert.deepEqual(nativeGasRegions(changed).map(region => region.values.components),
+    [values.components, values.components]);
+});
+
 test('resolved gas model changes require the user to author or remove energy-solve controls', async () => {
   const source = (await fixture('resolved-dg.performance')).replaceAll('\n', '\r\n');
   const primary = nativeGasRegions(source)[0];

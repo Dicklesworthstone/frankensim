@@ -113,14 +113,24 @@ source-flow, interface and acoustic convergence remain required.
 
 An original `NsfReservoirAperture` can also open explicit tiles in a stationary
 wall on a different axis. It coexists with either the complete-face bore or a
-selected bore patch. Its density, Cartesian velocity and temperature are
-physical inputs; the original NSF material law supplies pressure, calorics and
-transport. It is a prescribed reservoir with the same composition law as the
+selected bore patch. Its density, Cartesian velocity and temperature can be
+explicit physical inputs; the original NSF material law supplies pressure,
+calorics and transport. It is a prescribed reservoir with the same composition law as the
 resolved volume, not an independently mixed atmosphere or transparent acoustic
 termination. The canonical `examples/resolved-dg-side-aperture.performance`
 and matching Instrument Lab starter expose this original owner through native
-playback. Its declared dry-air density corresponds to 300 K and 100000 Pa;
-changing other gas data does not silently change that explicit reservoir state.
+playback. `reservoir_aperture AXIS low|high reference COUNT` binds a quiescent
+opening to the original source's resolved density and temperature during native
+assembly. Pressure, temperature or thermochemical composition edits then update
+the opening through the same material owner, with geometry retained. The Lab's
+side-opening, slit/edge and joint-radiation fixtures use this binding.
+
+The explicit `DENSITY_KG_M3 VX_M_S VY_M_S VZ_M_S TEMPERATURE_K COUNT` form
+remains available for an independently prescribed reservoir; gas edits do not
+reinterpret those physical values. `reference` selects the initial state and
+does not change subsequent absolute `boundary reservoir` pressure/temperature
+controls. Joint radiation still requires the source and computed exterior to
+share their physical gas state; it solves pressure through the existing owner.
 
 Tiles must be unique fluid cells on the declared transverse face, clear of the
 two-cell characteristic collars, other domain edges and solids, with the
@@ -507,7 +517,8 @@ wall adiabatic
 [optional sgs exploration MODEL COEFFICIENT FILTER_WIDTH_LU MAX_EDDY_TO_MOLECULAR TURBULENT_PRANDTL]
 characteristic AXIS low|high MAX_RELATIVE_PERTURBATION
 [optional coupled_patch OR source_patch START0 END0 START1 END1 pressure REMAINDER_OFFSET_PA]
-[optional reservoir_aperture AXIS low|high DENSITY_KG_M3 VX_M_S VY_M_S VZ_M_S TEMPERATURE_K COUNT]
+[optional reservoir_aperture AXIS low|high reference COUNT]
+[or explicit reservoir_aperture AXIS low|high DENSITY_KG_M3 VX_M_S VY_M_S VZ_M_S TEMPERATURE_K COUNT]
 [exactly COUNT reservoir_cell X Y Z records when an aperture is declared]
 initial rest
 solids COUNT
@@ -743,7 +754,9 @@ Physical interface, geometry, quadrature and clock refinement remain required.
 `resolved-dg-radiating-mouth.performance` is a native integration fixture that
 selects the joint feedback and material observation paths. It retains twelve
 original NSF steps per 8 kHz acoustic interval and is a numerical example,
-not a measured instrument or a realism preset.
+not a measured instrument or a realism preset. The Instrument Lab includes it
+as a starter with the same original data. Its reference-gas aperture follows
+source pressure/composition changes without a separately reauthored air density.
 
 The existing `resolved-dg-slit-edge.performance` Instrument Lab source now also
 selects this reaction and the original per-tile microphone. Its 27 escape cells
@@ -826,6 +839,7 @@ The existing source and bore aperture records also accept physical bounds:
 source_patch_m A0 A1 B0 B1 pressure PA
 coupled_patch_m A0 A1 B0 B1 characteristic M_S
 reservoir_aperture_m AXIS low|high RHO VX VY VZ T A0 A1 B0 B1
+reservoir_aperture_m AXIS low|high reference A0 A1 B0 B1
 ```
 
 Only one characteristic patch is allowed. Its remainder can use the same
@@ -835,6 +849,10 @@ for normal y they are x,z. Bounds are half-open and select original face-tile
 centers. The physical reservoir record generates its original cell list and
 does not take subsequent `reservoir_cell` rows. Low/high retains the original
 normal orientation and flux sign.
+
+The `reference` form binds the same original resolved gas state as the indexed
+reservoir record. Its density and temperature follow the source material data,
+while its physical aperture bounds remain unchanged.
 
 The resulting solids use the existing halfway bounce-back walls; openings use
 the original face quadrature. Each represented aperture edge is within half a

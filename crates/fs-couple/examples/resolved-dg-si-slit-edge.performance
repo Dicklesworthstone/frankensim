@@ -8,7 +8,7 @@ bulk_viscosity 0.73 manufactured-SI-slit-edge-Cramer2012-N2-ratio-not-mixture-va
 wall adiabatic
 characteristic 0 high 0.05
 coupled_patch_m 0 0.003 0 0.0025 pressure 0
-reservoir_aperture_m 1 high 1.1612254519912633 0 0 0 300 0.005 0.0095 0.0005 0.002
+reservoir_aperture_m 1 high reference 0.005 0.0095 0.0005 0.002
 initial rest
 solid_geometry 3 4320
 solid_box add 0.001 0 0 0.004 0.006 0.0025

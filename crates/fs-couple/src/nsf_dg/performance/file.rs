@@ -119,6 +119,18 @@ impl<'a> Row<'a> {
         }
         Ok(value)
     }
+    fn reservoir_state(&mut self, reference: &GasState) -> Result<NsfOpenState, ResolvedDgInputError> {
+        if self.fields.clone().next() == Some("reference") {
+            self.word()?;
+            // Bind the original resolved material state, including a complete
+            // thermochemical mixture. Do not infer density from a gas name or
+            // retain an independently authored air density after substitution.
+            return Ok(NsfOpenState { density_kg_m3: reference.density,
+                velocity_m_s: [0.0; 3], temperature_k: reference.temperature });
+        }
+        let [density_kg_m3, x, y, z, temperature_k] = self.state()?;
+        Ok(NsfOpenState { density_kg_m3, velocity_m_s: [x, y, z], temperature_k })
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -328,11 +340,7 @@ impl ResolvedDgFilePerformance {
                 "low" => false, "high" => true,
                 _ => return Err(bad(row.line, "reservoir face requires low or high")),
             };
-            let state = NsfOpenState {
-                density_kg_m3: row.scalar()?,
-                velocity_m_s: [row.scalar()?, row.scalar()?, row.scalar()?],
-                temperature_k: row.scalar()?,
-            };
+            let state = row.reservoir_state(&gas)?;
             let selected = if physical_reservoir {
                 let bounds = [row.scalar()?, row.scalar()?, row.scalar()?, row.scalar()?];
                 let (start, end) = geometry::face_rectangle(dims, axis, dx_m, bounds, &gate)

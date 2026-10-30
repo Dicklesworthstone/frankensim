@@ -3,6 +3,103 @@
 //! not a qualified flute aperture, jet or radiation boundary.
 use super::*;
 
+#[test]
+fn reference_reservoir_state_uses_the_admitted_material_state() {
+    let states = [
+        GasState::try_new(&GasSpec::dry_air_ussa1976(), 300.0, 100000.0).unwrap(),
+        GasState::try_new(&GasSpec::dry_air_ussa1976(), 315.0, 75000.0).unwrap(),
+        GasState::try_new(&GasSpec::water_vapor_nist(), 350.0, 75000.0).unwrap(),
+    ];
+    for gas in states {
+        let mut row = Row { fields: "reference 3".split_ascii_whitespace(), line: 1 };
+        let state = row.reservoir_state(&gas).ok().expect("source reference");
+        assert_eq!(state.density_kg_m3, gas.density);
+        assert_eq!(state.temperature_k, gas.temperature);
+        assert_eq!(state.velocity_m_s, [0.0; 3]);
+        assert_eq!(row.number::<usize>().ok(), Some(3));
+        assert!(row.end().is_ok());
+        let mut physical = Row {
+            fields: "reference 0.005 0.0095 0.0005 0.002".split_ascii_whitespace(), line: 1,
+        };
+        assert_eq!(physical.reservoir_state(&gas).ok(), Some(state));
+        let bounds = std::array::from_fn::<_, 4, _>(|_| physical.scalar().ok().expect("physical bounds"));
+        assert_eq!(bounds, [0.005, 0.0095, 0.0005, 0.002]);
+        assert!(physical.end().is_ok());
+        // An independent authored source keeps its physical state after the
+        // surrounding reference material changes.
+        let mut explicit = Row { fields: "1.5 0.1 -0.2 0.3 320 2".split_ascii_whitespace(), line: 1 };
+        assert_eq!(explicit.reservoir_state(&gas).ok(), Some(NsfOpenState {
+            density_kg_m3: 1.5, velocity_m_s: [0.1, -0.2, 0.3], temperature_k: 320.0,
+        }));
+        assert_eq!(explicit.number::<usize>().ok(), Some(2));
+        assert!(explicit.end().is_ok());
+    }
+}
+
+#[test]
+fn reference_reservoir_refuses_ambiguous_or_nonphysical_records() {
+    let gas = reference(100000.0);
+    for text in ["reference", "reference 3 extra", "reference NaN", "reference -1",
+        "ref 3", "NaN 0 0 0 300 3", "-1 0 0 0 300 3", "1 0 0 0 0 3"] {
+        let mut row = Row { fields: text.split_ascii_whitespace(), line: 1 };
+        let result = row.reservoir_state(&gas).and_then(|_| row.number::<usize>())
+            .and_then(|_| row.end());
+        assert!(result.is_err(), "admitted {text}");
+    }
+}
+
+#[test]
+fn reference_reservoir_pressure_edits_keep_geometry_and_baseline_replay() {
+    let text = input(100000.0).replace(&record(100000.0), "reservoir_aperture 1 low reference 3");
+    let (explicit, old) = render(read(&input(100000.0), 8), 8);
+    let (bound, reference) = render(read(&text, 3), 3);
+    assert_eq!(explicit, bound);
+    assert_eq!(old.system().zone().state_hash(), reference.system().zone().state_hash());
+    for pressure in [75000.0, 125000.0] {
+        let edited = text.replace("gas dry-air 300 100000", &format!("gas dry-air 300 {pressure}"));
+        let file = read(&edited, 8);
+        let zone = file.renderer().system().zone();
+        let gas = file.gas_records()[0].state();
+        let opening = zone.reservoir_aperture().unwrap();
+        assert_eq!(opening.state.density_kg_m3, gas.density);
+        assert_eq!(opening.state.temperature_k, gas.temperature);
+        assert_eq!(opening.cells, vec![[7, 0, 1], [5, 0, 1], [6, 0, 1]]);
+        assert_eq!(zone.law().dx_m, old.system().zone().law().dx_m);
+        let physical = edited.replace(
+            "reservoir_aperture 1 low reference 3\nreservoir_cell 7 0 1\nreservoir_cell 5 0 1\nreservoir_cell 6 0 1",
+            &format!("reservoir_aperture_m 1 low reference {:.17e} {:.17e} {:.17e} {:.17e}",
+                5.0*zone.law().dx_m, 8.0*zone.law().dx_m, zone.law().dx_m, 2.0*zone.law().dx_m),
+        );
+        let metric = read(&physical, 8);
+        let metric_zone = metric.renderer().system().zone();
+        assert_eq!(metric_zone.reservoir_aperture().unwrap().state, opening.state);
+        assert_eq!(metric_zone.last_reservoir_flows(), zone.last_reservoir_flows());
+    }
+}
+
+#[test]
+fn reference_reservoir_follows_complete_thermochemical_sources() {
+    let mut densities = Vec::new();
+    for molar_mass in [0.028, 0.044] {
+        let packs = support::packs("synthetic-alpha", molar_mass, 3.5, 200.0);
+        let bindings = [packs.binding()];
+        let sources = ThermochemicalSources { species: &bindings, water_species: None,
+            phase: ThermochemicalPhase::FrozenGas };
+        let declaration = "thermochemical 300 100000 mole 1 synthetic-alpha 1";
+        let text = fixture(reference(100000.0), declaration).replace("initial rest",
+            "reservoir_aperture 1 low reference 1\nreservoir_cell 6 0 1\ninitial rest");
+        let file = ResolvedDgFilePerformance::from_bytes_with_sources(text.as_bytes(), 8,
+            Arc::new(CancelGate::new_clock_free()), Some(&sources),
+            |_| Err("no material wall in this fixture".into())).unwrap();
+        let original = file.gas_records()[0].state();
+        let aperture = file.renderer().system().zone().reservoir_aperture().unwrap();
+        assert_eq!(aperture.state.density_kg_m3, original.density);
+        assert_eq!(aperture.state.temperature_k, original.temperature);
+        densities.push(aperture.state.density_kg_m3);
+    }
+    assert_ne!(densities[0], densities[1]);
+}
+
 fn record(pressure_pa: f64) -> String {
     format!(
         "reservoir_aperture 1 low {:.17e} 0 0 0 300 3",

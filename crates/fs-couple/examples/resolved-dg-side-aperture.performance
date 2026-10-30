@@ -7,7 +7,7 @@ fluid_limits 144 250 600 0.2 1 17 1
 bulk_viscosity 0.73 numerical-fixture-Cramer2012-N2-293K-not-mixture-validation
 wall adiabatic
 characteristic 0 high 0.05
-reservoir_aperture 1 high 1.1612254519912633 0 0 0 300 1
+reservoir_aperture 1 high reference 1
 reservoir_cell 5 2 1
 initial rest
 solids 4

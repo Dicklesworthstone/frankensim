@@ -7,7 +7,9 @@ import resolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg.per
 import pressureResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-pressure.performance?raw";
 import splitApertureResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-split-aperture.performance?raw";
 import sideApertureResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-side-aperture.performance?raw";
+import radiatingMouthResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-radiating-mouth.performance?raw";
 import slitEdgeResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-slit-edge.performance?raw";
+import siSlitEdgeResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-si-slit-edge.performance?raw";
 import upstreamResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-upstream.performance?raw";
 import molecularFlueSource from "../../../crates/fs-couple/examples/flue-dg-molecular.performance?raw";
 import nolleMolecularFlueSource from "../../../crates/fs-couple/examples/flue-dg-nolle-molecular.performance?raw";
@@ -98,8 +100,17 @@ const EXAMPLES = [
     renderer: "resolved",
     source: sideApertureResolvedDgSource,
     decimate: true,
-    intro: "Starter: a pressure-driven gas field has a separate opening in its side wall, while the original end face feeds the bore. Edit the opening cells and prescribed gas state to explore how ventilation changes the same resolved flow and bore pressure.",
-    help: "reservoir_aperture declares physical density, velocity and temperature; the original material law determines pressure. Cells must avoid wall corners, solids and the characteristic collars. Reservoir mass and energy have separate accounts. The opening is a prescribed reservoir, not a transparent acoustic boundary, and the microphone observes the bore outlet. This coarse fixture does not qualify flute geometry or jet turbulence.",
+    intro: "Starter: a pressure-driven gas field has a separate opening in its side wall, while the original end face feeds the bore. Change the gas or opening cells to explore ventilation through the same resolved flow; the microphone observes both openings.",
+    help: "reservoir_aperture reference binds the quiescent opening to the original gas material, so pressure, temperature and composition changes also update its density. Explicit density, velocity and temperature remain available for an independent reservoir. Cells retain their original wall and characteristic collars; reservoir mass and energy have separate accounts. This coarse prescribed-boundary fixture does not qualify flute geometry or jet turbulence.",
+  },
+  {
+    name: "resolved-dg-radiating-mouth.performance",
+    label: "Resolved flow — mouth and bore radiation feedback",
+    renderer: "resolved",
+    source: radiatingMouthResolvedDgSource,
+    decimate: false,
+    intro: "Starter: the resolved side opening and bore outlets push back through one shared exterior radiation model. Change the source gas, matching exterior atmosphere, opening geometry or pressure history to change the physical flow and emitted pressure together.",
+    help: "reservoir_feedback solves the original mouth pressure and bore flow together, including their mutual radiation. The reference aperture follows the original source gas; the joint exterior must use the same material state. Common pressure edits reach both gas records. This short 8 kHz numerical fixture retains its declared quadrature and work limits and is not a measured flute.",
   },
   {
     name: "resolved-dg-slit-edge.performance",
@@ -109,6 +120,15 @@ const EXAMPLES = [
     decimate: true,
     intro: "Starter: blowing pressure drives air through a solid slit nozzle, across a free gap and past a solid edge. The same fluid field feeds a bore aperture and a separate atmospheric opening; the microphone observes the bore outlet.",
     help: "This manufactured geometry uses a 0.5 mm grid, a 1 mm slit and an explicit solid wedge. Edit solids, pressure or gas to change the original flow; no jet card or noise generator supplies the sound. The physical solver keeps its own clock while native decimation produces 48 kHz playback. This short coarse example needs grid and interface refinement before edge-tone or instrument claims.",
+  },
+  {
+    name: "resolved-dg-si-slit-edge.performance",
+    label: "Resolved flow — slit and edge in physical coordinates",
+    renderer: "resolved",
+    source: siSlitEdgeResolvedDgSource,
+    decimate: true,
+    intro: "Starter: edit the nozzle, slit and solid edge in metres while the original gas solver resolves their flow. The atmospheric opening follows the selected gas material and the bore retains its original radiation and microphone.",
+    help: "solid_geometry rasterizes the declared boxes and wedge on the selected grid; changing geometry or mesh data changes the original solid mask. reservoir_aperture_m reference binds the opening's physical bounds and original gas state without reauthoring cells or density. This manufactured 0.5 mm example remains subject to grid, interface and jet refinement; native decimation preserves the physical clock.",
   },
   {
     name: "resolved-dg-upstream.performance",
