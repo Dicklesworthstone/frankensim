@@ -5,7 +5,10 @@
 //! caloric driver adds its original work/storage/heat to the mechanical account;
 //! no RC integrator, material evaluator or second temperature is introduced.
 
+mod contact;
 use super::*;
+use crate::circuit_enthalpy::contacts::ContactThermalCoefficients;
+use crate::material_circuit::contacts::SeriesElectricalContact;
 use crate::material_circuit::{
     MaterialCircuit, MaterialCircuitCandidate, MaterialCircuitStep, MaterialResistor,
 };
@@ -16,9 +19,10 @@ use fs_thermal::enthalpy::{CellId, DepositionError};
 /// Empty ports mean the circuit is powered solely by its finite C/L stores.
 pub use crate::frame_vibration::thermoelastic::FrameElectricalInput as RelaxationElectricalInput;
 
-pub(super) struct Binding {
+pub(super) struct Binding<'n, 'a> {
     pub(super) circuit: MaterialCircuit,
     destinations: BTreeMap<usize, CellId>,
+    contacts: Option<contact::Binding<'n, 'a>>,
 }
 
 impl<'m, 'f, 'n, 'a, F> FrameRelaxationThermalSystem<'m, 'f, 'n, 'a, F> {
@@ -37,7 +41,8 @@ impl<'m, 'f, 'n, 'a, F> FrameRelaxationThermalSystem<'m, 'f, 'n, 'a, F> {
     /// This binding does not infer
     /// temperature-dependent field storage, motional EMF or electromagnetic
     /// forces. Electrical contacts need their own two-sided source/heat owner
-    /// and are refused here rather than having their heat silently discarded.
+    /// and use `bind_material_contact_circuit`; this bulk-only entry point refuses
+    /// them rather than silently discarding interface heat.
     /// Rate-only solid storage and the original first-order thermal split apply.
     pub fn bind_material_circuit(
         &mut self,
@@ -47,23 +52,10 @@ impl<'m, 'f, 'n, 'a, F> FrameRelaxationThermalSystem<'m, 'f, 'n, 'a, F> {
         electrical_bases: &[(usize, ElectricalPropertyBasis)],
         gate: &CancelGate,
     ) -> Result<()> {
-        check(gate)?;
-        if self.electrical.is_some() || self.mechanical.samples_rendered() != 0
-            || thermal.time_s().to_bits() != self.origin_s.to_bits()
-            || !core::ptr::eq(source.cells, self.source.cells)
-            || !core::ptr::eq(source.links, self.source.links)
-        {
-            return Err(invalid("electrical relaxation binding requires its original cold clock and same cell/link owners"));
-        }
+        self.admit_electrical_binding(thermal, source, &circuit, gate)?;
         if !circuit.contacts().is_empty() {
             return Err(invalid("electrical contact heat requires explicit original two-sided receivers"));
         }
-        if !circuit.storage().is_empty() {
-            return Err(invalid("source-bound electrical storage requires its original field/thermal work owner"));
-        }
-        self.admit_temperatures(thermal, gate)?;
-        propose_shared(&self.materials, &self.mechanical, self.source, &self.receivers,
-            &self.layer_ranges, thermal, gate)?;
         let prepared = source.prepare_with_bases(thermal, electrical_bases,
             || gate.is_requested()).map_err(network)?;
         let mut resolved = prepared.resolve(thermal, || gate.is_requested())
@@ -79,7 +71,7 @@ impl<'m, 'f, 'n, 'a, F> FrameRelaxationThermalSystem<'m, 'f, 'n, 'a, F> {
         // is shared, not rebuilt by a second network or exposed mutable circuit.
         self.prepared = prepared;
         self.source = source;
-        self.electrical = Some(Binding { circuit, destinations });
+        self.electrical = Some(Binding { circuit, destinations, contacts: None });
         Ok(())
     }
 
@@ -111,10 +103,30 @@ impl<'m, 'f, 'n, 'a, F> FrameRelaxationThermalSystem<'m, 'f, 'n, 'a, F> {
     }
 }
 
+// Keep original source selection and contact context evaluation in their
+// published owner. Both paths feed the same native circuit/caloric transaction.
+pub(super) fn resolve(
+    binding: Option<&Binding<'_, '_>>,
+    prepared: &PreparedMaterialNetwork<'_, '_>,
+    thermal: &DepositionSimulation<'_>,
+    gate: &CancelGate,
+) -> Result<ContactThermalCoefficients<MaterialNetworkSample>> {
+    check(gate)?;
+    match binding.and_then(|binding| binding.contacts.as_ref()) {
+        Some(contact) => contact.prepared.resolve(thermal, || gate.is_requested())
+            .map_err(contact::source_error),
+        None => Ok(ContactThermalCoefficients {
+            bulk: prepared.resolve(thermal, || gate.is_requested()).map_err(network)?,
+            contacts: Vec::new(),
+        }),
+    }
+}
+
 pub(super) fn advance(
-    binding: Option<&Binding>,
+    binding: Option<&Binding<'_, '_>>,
     input: Option<RelaxationElectricalInput<'_>>,
     resistors: Vec<MaterialResistor>,
+    contacts: Vec<SeriesElectricalContact>,
     duration: f64,
     gate: &CancelGate,
 ) -> Result<Option<MaterialCircuitCandidate>> {
@@ -122,11 +134,11 @@ pub(super) fn advance(
     match (binding, input) {
         (Some(binding), Some(input)) => Ok(Some(
             crate::circuit_enthalpy::contacts::advance_circuit(
-                &binding.circuit, resistors, Vec::new(), input.ports, duration,
+                &binding.circuit, resistors, contacts, input.ports, duration,
                 input.solve, || gate.is_requested(),
             )?,
         )),
-        (None, None) if resistors.is_empty() => Ok(None),
+        (None, None) if resistors.is_empty() && contacts.is_empty() => Ok(None),
         _ => Err(invalid("electrical source and accepted relaxation owner disagree")),
     }
 }
@@ -177,7 +189,7 @@ impl ThermalDriver for ElectricalDriver {
 }
 
 pub(super) fn deposit(
-    binding: Option<&Binding>,
+    binding: Option<&Binding<'_, '_>>,
     driver: &ElectricalDriver,
     duration: f64,
     powers: &mut BTreeMap<CellId, f64>,
@@ -186,7 +198,6 @@ pub(super) fn deposit(
     match (binding, &driver.electrical) {
         (Some(binding), Some(candidate)) => {
             if candidate.step().resistors.len() != binding.destinations.len()
-                || !candidate.step().contacts.is_empty()
             {
                 return Err(invalid("electrical heat coverage changed in the shared relaxation trial"));
             }
@@ -202,7 +213,13 @@ pub(super) fn deposit(
                 }
                 powers.insert(*cell, next);
             }
-            Ok(())
+            match &binding.contacts {
+                Some(contact) => crate::circuit_enthalpy::contacts::deposit(
+                    &candidate.step().contacts, &contact.routes, duration, powers, checkpoint,
+                ),
+                None if candidate.step().contacts.is_empty() => Ok(()),
+                None => Err(invalid("electrical interface losses lack their original two-sided receivers")),
+            }
         }
         (None, None) => Ok(()),
         _ => Err(invalid("electrical candidate and heat receiver owner disagree")),

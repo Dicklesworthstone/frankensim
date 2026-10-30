@@ -28,6 +28,7 @@ use std::collections::{BTreeMap,BTreeSet};
 pub enum RelaxationHeatSourceError {
     Material(FrameRelaxationError),
     Network(MaterialNetworkError),
+    Contact(crate::circuit_enthalpy::contacts::material::ElectricalContactNetworkError),
     Native(ModalCouplingError),
     Port(fs_ports::CoupleError),
 }
@@ -115,7 +116,7 @@ pub struct FrameRelaxationThermalSystem<'m,'f,'n,'a,F> {
     mechanical:CoupledModalSystem,
     source:&'n MaterialNetwork<'a>,
     prepared:PreparedMaterialNetwork<'n,'a>,
-    electrical:Option<electrical::Binding>,
+    electrical:Option<electrical::Binding<'n,'a>>,
     receivers:Vec<Receiver>,
     groups:Vec<core::ops::Range<usize>>,
     outside_groups:Vec<usize>,
@@ -293,10 +294,11 @@ impl<'m,'f,'n,'a,F> FrameRelaxationThermalSystem<'m,'f,'n,'a,F> {
                 let (candidate,next_circuit,audit,entropy)=cell_driver_candidate_entropy_option(thermal,target,controls(solve),energy_guess_j,
                     |trial,_remaining| -> Result<_> {
                         check(gate)?;
-                        let coefficients=prepared.resolve(trial,||gate.is_requested()).map_err(network)?;
+                        let resolved=electrical::resolve(electrical.as_ref(),prepared,trial,gate)?;
+                        let coefficients=resolved.bulk;
                         let update=propose_shared(materials,mechanical,source,receivers,layer_ranges,trial,gate)?;
                         let circuit=electrical::advance(electrical.as_ref(),electrical_input,
-                            coefficients.resistors,target-start,gate)?;
+                            coefficients.resistors,resolved.contacts,target-start,gate)?;
                         let driver=ElectricalDriver::new(
                             Driver {frame:frame.clone(),before,heat:selected,outside},circuit)?;
                         Ok(DrivenCoefficients {circuit:driver,

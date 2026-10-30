@@ -247,3 +247,5 @@ fn finite_flux_and_charge_follow_native_rlc_midpoint_with_same_endpoint_material
         assert!(heat.temperature_k(CellId(0)).unwrap()>300.0);
     });
 }
+
+mod contacts;
