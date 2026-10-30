@@ -118,6 +118,7 @@ impl ConductionThermalNetwork<'_> {
                 ports,
                 &destinations,
                 graph_resistors,
+                &[],
                 Some(fields),
                 assembly,
                 field_controls,

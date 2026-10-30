@@ -166,6 +166,46 @@ impl PreparedHeatNetwork<'_, '_> {
         controls: CircuitEnthalpySolve,
         initial_energy_increments_j: &[f64],
     ) -> Result<ConductionEnthalpyCandidate<'t, C, HeatNetworkSample>, Error> {
+        self.step_conduction_contacts_candidate(
+            cx,
+            thermal,
+            target_s,
+            problem,
+            drive,
+            &[],
+            regions,
+            volume_tolerance_m3,
+            assembly,
+            field_controls,
+            controls,
+            initial_energy_increments_j,
+        )
+    }
+
+    /// Advance source-backed electrical contacts through this SAME complete
+    /// thermal-contact/radiation network. Surface voltage-jump losses enter
+    /// their actual adjacent material cells under each explicit heat fraction.
+    /// Interface and bulk electrical laws refresh at the same endpoint as all
+    /// heat-transport sources. No separate thermal step or loss account is added.
+    /// All restrictions of [`Self::step_conduction_candidate`] and the native
+    /// stationary contact-field owner remain; graph electrical work requires
+    /// its own circuit owner and cannot be omitted from this field-only lane.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_conduction_contacts_candidate<'t, C: PlanarConductorMaterial>(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        problem: &PlanarConduction<C>,
+        drive: ConductionDrive<'_>,
+        contacts: &[contacts::ConductionContactThermal<'_>],
+        regions: &[ConductionRegion],
+        volume_tolerance_m3: f64,
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+    ) -> Result<ConductionEnthalpyCandidate<'t, C, HeatNetworkSample>, Error> {
         let cancel = RefCell::new(|| cx.checkpoint().is_err());
         check(&cancel)?;
         let bulk = self.thermal_material_network().map_err(heat_error)?;
@@ -180,6 +220,7 @@ impl PreparedHeatNetwork<'_, '_> {
             target_s,
             problem,
             drive,
+            contacts,
             assembly,
             field_controls,
             controls,

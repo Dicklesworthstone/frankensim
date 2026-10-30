@@ -187,11 +187,6 @@ impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
         if cancelled() {
             return Err(CircuitEnthalpyError::Cancelled);
         }
-        if !problem.contacts().is_empty() {
-            return Err(invalid(
-                "electrical contact heat evolution is unsupported without a surface heat partition and source refresh",
-            ));
-        }
         admit_graph(&graph)?;
         if !time_s.is_finite()
             || time_s < 0.0
@@ -419,6 +414,7 @@ impl ConductionThermalNetwork<'_> {
             ports,
             graph_resistors,
             &[],
+            &[],
             None,
             assembly,
             field_controls,
@@ -473,6 +469,54 @@ impl ConductionThermalNetwork<'_> {
             ports,
             &destinations,
             graph_resistors,
+            &[],
+            None,
+            assembly,
+            field_controls,
+            controls,
+            initial_energy_increments_j,
+            cancelled,
+        )
+        .map(ConductionCircuitEnthalpyCandidate::without_thermal_fields)
+    }
+
+    /// Couple native RLC storage to spatial bulk AND surface conduction, with
+    /// contact heat entering the original two material bodies. Every trial
+    /// refreshes pinned interface and bulk sources at the same enthalpies,
+    /// restamps the true terminal resistance and advances the original circuit.
+    /// The native midpoint field supplies all Joule heat exactly once.
+    ///
+    /// Other graph resistors require their complete original material bindings;
+    /// pass an empty slice when the spatial body is the only resistor. Contact
+    /// geometry and declared heat partitions stay fixed over the interval.
+    /// There is no surface storage, opening/arc law or automatic heat split.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_contact_circuit_candidate<'t, C: PlanarConductorMaterial>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        circuit: &ConductionCircuit<C>,
+        ports: &[f64],
+        graph_resistors: &[CellResistor],
+        contact_bindings: &[contacts::ConductionContactThermal<'_>],
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ConductionCircuitEnthalpyCandidate<'t, C>, Error> {
+        let destinations = graph_resistors
+            .iter()
+            .map(|binding| binding.destination)
+            .collect::<Vec<_>>();
+        self.step_circuit_bound(
+            thermal,
+            target_s,
+            circuit,
+            ports,
+            &destinations,
+            graph_resistors,
+            contact_bindings,
             None,
             assembly,
             field_controls,
@@ -492,6 +536,7 @@ impl ConductionThermalNetwork<'_> {
         ports: &[f64],
         graph_resistors: &[ResistorCell],
         material_resistors: &[CellResistor],
+        contact_bindings: &[contacts::ConductionContactThermal<'_>],
         field_bindings: Option<&[FieldThermalBinding]>,
         assembly: WeightedAssemblyLimits,
         field_controls: ConductionControls,
@@ -587,6 +632,14 @@ impl ConductionThermalNetwork<'_> {
         let accepted = prepared
             .resolve(thermal, || (*cancel.borrow_mut())())
             .map_err(material)?;
+        let contacts = contacts::PreparedContacts::new(
+            self,
+            problem,
+            contact_bindings,
+            &routes,
+            &accepted.source,
+            &cancel,
+        )?;
         for original in &circuit.material_resistors {
             check(&cancel)?;
             let next = accepted
@@ -633,11 +686,15 @@ impl ConductionThermalNetwork<'_> {
                     .resolve(state, || (*cancel.borrow_mut())())
                     .map_err(material)?;
                 let sources = self.materials_at(problem, &coefficients.source, &routes, &cancel)?;
-                let next =
-                    PlanarConduction::new(problem.mesh().clone(), sources, assembly, &mut || {
-                        (*cancel.borrow_mut())()
-                    })
-                    .map_err(field_error)?;
+                let contact_sources = contacts.refresh(problem, &coefficients.source, &cancel)?;
+                let next = PlanarConduction::new_with_contacts(
+                    problem.mesh().clone(),
+                    sources,
+                    contact_sources,
+                    assembly,
+                    &mut || (*cancel.borrow_mut())(),
+                )
+                .map_err(field_error)?;
                 let refreshed = fields
                     .as_ref()
                     .map(|fields| {
@@ -660,6 +717,7 @@ impl ConductionThermalNetwork<'_> {
                     ports,
                     field_controls,
                     controls.circuit,
+                    &contacts,
                     &cancel,
                 )?;
                 let source = if let (Some(fields), Some((rebound, samples))) = (&fields, refreshed)
@@ -713,6 +771,7 @@ impl ConductionThermalNetwork<'_> {
                     checkpoint()?;
                     add(graph_routes[&heat.branch], heat.power_w)?;
                 }
+                contacts::deposit(&candidate.step.spatial.contacts, &mut powers, checkpoint)?;
                 Ok(powers)
             },
             || (*cancel.borrow_mut())(),
@@ -735,6 +794,7 @@ impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
         ports: &[f64],
         field_controls: ConductionControls,
         controls: MaterialCircuitSolve,
+        contacts: &contacts::PreparedContacts<'_, '_>,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<CircuitFieldCandidate<C>, Error> {
         check(cancel)?;
@@ -830,6 +890,7 @@ impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
             electric_field_v_m: field.electric_field_v_m().to_vec(),
             current_density_a_m2: field.current_density_a_m2().to_vec(),
             cell_power_w: field.cell_power_w().to_vec(),
+            contacts: contacts.heat(field.contact_response())?,
             nodal_boundary_current_a: field.nodal_boundary_current_a().to_vec(),
             nodal_applied_current_a: field.nodal_applied_current_a().to_vec(),
             boundary_current_a: field.boundary_current_a(),

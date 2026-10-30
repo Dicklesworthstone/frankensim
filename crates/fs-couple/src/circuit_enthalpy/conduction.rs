@@ -7,6 +7,8 @@
 
 /// Spatial conductor terminals coupled to native circuit storage and finite heat.
 pub mod circuit;
+/// Source-refreshed surface conduction and explicit two-sided Joule heating.
+pub mod contacts;
 /// Retained dielectric charge and local conduction heat on this same material network.
 pub mod dielectric;
 /// Source-driven nonlinear spatial current and the original finite heat network.
@@ -183,6 +185,9 @@ pub struct ConductionThermalStep {
     pub electric_field_v_m: Vec<[f64; 2]>,
     pub current_density_a_m2: Vec<[f64; 2]>,
     pub cell_power_w: Vec<f64>,
+    /// Surface losses and their explicit receiving cells, separate from bulk
+    /// triangle powers. Their sum is included once in `heat_j`.
+    pub contacts: Vec<contacts::ConductionContactHeat>,
     /// Positive INTO the conductor at each prescribed boundary vertex.
     pub nodal_boundary_current_a: Vec<Option<f64>>,
     /// Authored current-density trace loads integrated by the native field
@@ -337,6 +342,7 @@ impl ConductionThermalNetwork<'_> {
             target_s,
             problem,
             drive,
+            &[],
             assembly,
             field_controls,
             controls,
@@ -417,6 +423,7 @@ impl ConductionThermalNetwork<'_> {
         target_s: f64,
         problem: &PlanarConduction<C>,
         drive: ConductionDrive<'_>,
+        contact_bindings: &[contacts::ConductionContactThermal<'_>],
         assembly: WeightedAssemblyLimits,
         field_controls: ConductionControls,
         controls: CircuitEnthalpySolve,
@@ -426,16 +433,24 @@ impl ConductionThermalNetwork<'_> {
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<ConductionEnthalpyCandidate<'t, C, S>, Error> {
         check(cancel)?;
-        let dt = self.admit_step(
+        let dt = self.admit_mesh_step(
             thermal,
             target_s,
-            problem,
+            problem.mesh(),
             assembly,
             controls,
             initial_energy_increments_j,
         )?;
         let routes = self.admit_routes(thermal, problem, cancel)?;
         let accepted = resolve(thermal)?;
+        let contacts = contacts::PreparedContacts::new(
+            self,
+            problem,
+            contact_bindings,
+            &routes,
+            sample(&accepted.source),
+            cancel,
+        )?;
         let initial = self.materials_at(problem, sample(&accepted.source), &routes, cancel)?;
         if initial.iter().zip(problem.conductors()).any(|(a, b)| {
             !a.has_same_electrical_source(b)
@@ -456,11 +471,16 @@ impl ConductionThermalNetwork<'_> {
                 let coefficients = resolve(state)?;
                 let sources =
                     self.materials_at(problem, sample(&coefficients.source), &routes, cancel)?;
-                let next =
-                    PlanarConduction::new(problem.mesh().clone(), sources, assembly, &mut || {
-                        (*cancel.borrow_mut())()
-                    })
-                    .map_err(field_error)?;
+                let contact_sources =
+                    contacts.refresh(problem, sample(&coefficients.source), cancel)?;
+                let next = PlanarConduction::new_with_contacts(
+                    problem.mesh().clone(),
+                    sources,
+                    contact_sources,
+                    assembly,
+                    &mut || (*cancel.borrow_mut())(),
+                )
+                .map_err(field_error)?;
                 let field = drive.solve(&next, field_controls, &mut || (*cancel.borrow_mut())())?;
                 let heat_j = finite(dt * field.power_w())?;
                 let supplied_work_j = finite(
@@ -484,6 +504,7 @@ impl ConductionThermalNetwork<'_> {
                     electric_field_v_m: field.electric_field_v_m().to_vec(),
                     current_density_a_m2: field.current_density_a_m2().to_vec(),
                     cell_power_w: field.cell_power_w().to_vec(),
+                    contacts: contacts.heat(field.contact_response())?,
                     nodal_boundary_current_a: field.nodal_boundary_current_a().to_vec(),
                     nodal_applied_current_a: field.nodal_applied_current_a().to_vec(),
                     boundary_current_a: field.boundary_current_a(),
@@ -505,7 +526,10 @@ impl ConductionThermalNetwork<'_> {
                 })
             },
             |candidate, _dt, checkpoint| {
-                self.deposit_power(&candidate.step.cell_power_w, &routes, checkpoint)
+                let mut powers =
+                    self.deposit_power(&candidate.step.cell_power_w, &routes, checkpoint)?;
+                contacts::deposit(&candidate.step.contacts, &mut powers, checkpoint)?;
+                Ok(powers)
             },
             || (*cancel.borrow_mut())(),
         )?;
