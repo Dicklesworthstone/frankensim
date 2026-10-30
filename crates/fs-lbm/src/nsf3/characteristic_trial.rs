@@ -3,7 +3,8 @@
 //! topology already excludes manufactured volume sources. Every physical state,
 //! boundary force chart, source material and cumulative ledger remains retained.
 
-use super::{EnergyLedger, NsfBoundaryDrive, NsfBoundaryExchange, NsfError, NsfGrid3, NsfOpenState, NsfReservoirFlow};
+use super::{EnergyLedger, NsfBoundaryDrive, NsfBoundaryExchange, NsfError, NsfGrid3,
+    NsfOpenState, NsfReservoirExchange, NsfReservoirFlow};
 use crate::lattice3::Lattice3;
 
 /// A complete unpublished interval. Dropping it changes no accepted field,
@@ -18,6 +19,7 @@ pub struct NsfCharacteristicTrial<'a, L: Lattice3<27>> {
     energy_before_j: f64,
     reservoir_mass_out_kg: f64,
     reservoir_flows: Vec<NsfReservoirFlow>,
+    reservoir_exchange: Option<NsfReservoirExchange>,
 }
 
 impl<L: Lattice3<27>> NsfCharacteristicTrial<'_, L> {
@@ -43,6 +45,12 @@ impl<L: Lattice3<27>> NsfCharacteristicTrial<'_, L> {
     /// original step, with pressure work summed over the complete interval.
     /// Tile identity and signs are retained, independently of mass/energy flux.
     pub fn reservoir_flows(&self) -> &[NsfReservoirFlow] { &self.reservoir_flows }
+    /// Aggregate original FV pressure work over the complete trial interval.
+    /// Means use every substep; covariance is recomputed for this interval,
+    /// not summed from shorter projections with different temporal means.
+    pub const fn reservoir_exchange(&self) -> Option<&NsfReservoirExchange> {
+        self.reservoir_exchange.as_ref()
+    }
     /// Publish the already admitted complete candidate. No fallible work follows.
     pub fn accept(self) { *self.owner = self.candidate; }
 }
@@ -132,6 +140,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let mut patch_exchange = candidate.characteristic_patch.map(|_| NsfBoundaryExchange::default());
         let mut ledger = EnergyLedger::default();
         let mut reservoir_mass_out_kg = 0.0;
+        let mut reservoir_exchange = candidate.empty_reservoir_exchange();
         let mut reservoir_flows = candidate.last_reservoir_flows.clone();
         for flow in &mut reservoir_flows {
             flow.outward_volume_flow_m3_s = 0.0;
@@ -146,6 +155,21 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             }
             let step = candidate.step()?;
             reservoir_mass_out_kg += candidate.last_reservoir_mass_out_kg().unwrap_or(0.0);
+            if let Some(total) = &mut reservoir_exchange {
+                let step = candidate.last_reservoir_exchange().ok_or(NsfError::Input(
+                    "original reservoir work account disappeared during the interval",
+                ))?;
+                if step.area_m2 != total.area_m2
+                    || step.reference_pressure_pa != total.reference_pressure_pa
+                {
+                    return Err(NsfError::Input("reservoir work changed its original area or reference"));
+                }
+                total.mean_pressure_pa += step.mean_pressure_pa;
+                total.mean_acoustic_pressure_pa += step.mean_acoustic_pressure_pa;
+                total.normal_volume_flow_m3_s += step.normal_volume_flow_m3_s;
+                total.pressure_work_out_j += step.pressure_work_out_j;
+                total.acoustic_pressure_work_out_j += step.acoustic_pressure_work_out_j;
+            }
             for (total, flow) in reservoir_flows.iter_mut().zip(candidate.last_reservoir_flows()) {
                 total.outward_volume_flow_m3_s += flow.outward_volume_flow_m3_s;
                 total.mean_pressure_pa += flow.mean_pressure_pa;
@@ -196,6 +220,14 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             flow.mean_pressure_pa /= steps as f64;
             flow.mean_acoustic_pressure_pa /= steps as f64;
         }
+        if let Some(total) = &mut reservoir_exchange {
+            total.mean_pressure_pa /= steps as f64;
+            total.mean_acoustic_pressure_pa /= steps as f64;
+            total.normal_volume_flow_m3_s /= steps as f64;
+            total.projection_covariance_j = total.acoustic_pressure_work_out_j
+                - total.mean_acoustic_pressure_pa * total.normal_volume_flow_m3_s
+                    * (steps as f64 * candidate.law.dt_s);
+        }
         if let Some(face) = &mut patch_exchange {
             face.mean_pressure_pa /= steps as f64;
             face.mean_acoustic_pressure_pa /= steps as f64;
@@ -211,6 +243,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             face.mean_acoustic_pressure_pa, face.acoustic_pressure_work_out_j,
         ].into_iter().chain(face.momentum_out_kg_m_s).all(f64::is_finite))
             || reservoir_flows.iter().any(|flow| !flow.is_finite())
+            || reservoir_exchange.is_some_and(|exchange| !exchange.is_finite())
             || ![mass_before_kg, energy_before_j, energy, candidate.total_mass_kg(),
                 ledger.internal_j, ledger.kinetic_j, ledger.viscous_heating_j,
                 ledger.unresolved_internal_exchange_j, ledger.pressure_work_j,
@@ -226,7 +259,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         }
         Ok(NsfCharacteristicTrial {
             owner: self, candidate, exchange, patch_exchange, ledger, mass_before_kg, energy_before_j,
-            reservoir_mass_out_kg, reservoir_flows,
+            reservoir_mass_out_kg, reservoir_flows, reservoir_exchange,
         })
     }
 
@@ -247,6 +280,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             reservoir_aperture: self.reservoir_aperture.clone(),
             last_reservoir_mass_out_kg: self.last_reservoir_mass_out_kg,
             last_reservoir_flows: self.last_reservoir_flows.clone(),
+            last_reservoir_exchange: self.last_reservoir_exchange,
             last_boundary_exchange: self.last_boundary_exchange, steps: self.steps,
             last_patch_exchange: self.last_patch_exchange,
             cumulative: self.cumulative, edge_velocity: self.edge_velocity,

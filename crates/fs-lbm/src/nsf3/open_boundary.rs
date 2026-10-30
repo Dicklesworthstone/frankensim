@@ -138,6 +138,13 @@ pub(super) struct BoundaryFlux {
     pub internal_out: [f64; 2],
     pub prescribed_out: f64,
     pub patch_total_out: f64,
+    /// Localized reservoir moments from this original FV predictor evaluation.
+    /// Pressure sums use identical tile areas; work rates use avg(p*u), not
+    /// the product of separately interpolated pressure and velocity.
+    pub reservoir_pressure_sum_pa: f64,
+    pub reservoir_acoustic_pressure_sum_pa: f64,
+    pub reservoir_pressure_power_w: f64,
+    pub reservoir_acoustic_pressure_power_w: f64,
 }
 
 #[derive(Clone, Copy, Debug)]

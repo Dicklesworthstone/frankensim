@@ -8,7 +8,7 @@
 //! acoustic non-reflection condition. In particular a prescribed state does not
 //! preserve the outgoing characteristic of an impinging sound wave.
 
-use super::{NsfError, NsfGrid3, THETA0, check_state};
+use super::{BoundaryFlux, NsfError, NsfGrid3, THETA0, check_state};
 use crate::lattice3::Lattice3;
 
 /// Physical state at an exterior ghost centre, held until explicitly changed.
@@ -69,6 +69,43 @@ impl NsfReservoirFlow {
         [self.outward_volume_flow_m3_s, self.mean_pressure_pa,
             self.mean_acoustic_pressure_pa, self.pressure_work_out_j,
             self.acoustic_pressure_work_out_j].iter().all(|x| x.is_finite())
+    }
+}
+
+/// Aggregate acoustic projection of the original reservoir FV boundary.
+/// Pressure moments and work use the SAME cached predictor evaluations as the
+/// conservative total-energy flux. The pressure-work term is the original
+/// spatial average of p*u, not the product of midpoint p and midpoint u.
+/// The separate per-tile endpoint traces remain available for observation.
+/// This account omits advected internal/kinetic energy, conduction and viscous
+/// work; it never replaces the original reservoir mass/total-energy ledger.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct NsfReservoirExchange {
+    /// Actual combined tile area [m²].
+    pub area_m2: f64,
+    /// Fixed original source pressure [Pa], independent of warm ghost controls.
+    pub reference_pressure_pa: f64,
+    /// Area-and-time mean absolute midpoint face pressure [Pa].
+    pub mean_pressure_pa: f64,
+    /// Same mean relative to the fixed reference, subtracting before reduction.
+    pub mean_acoustic_pressure_pa: f64,
+    /// Interval mean of the original per-tile outward volume flows [m³/s].
+    pub normal_volume_flow_m3_s: f64,
+    /// Original FV absolute pressure-work contribution integrated over time [J].
+    pub pressure_work_out_j: f64,
+    /// Original FV reference-relative pressure work [J], positive outward.
+    pub acoustic_pressure_work_out_j: f64,
+    /// Original acoustic work minus mean(p')*mean(Q)*duration [J]. Contains
+    /// spatial and temporal projection error; never dissipation or source work.
+    pub projection_covariance_j: f64,
+}
+impl NsfReservoirExchange {
+    pub(super) fn is_finite(&self) -> bool {
+        self.area_m2 > 0.0 && self.reference_pressure_pa > 0.0
+            && [self.area_m2, self.reference_pressure_pa, self.mean_pressure_pa,
+                self.mean_acoustic_pressure_pa, self.normal_volume_flow_m3_s,
+                self.pressure_work_out_j, self.acoustic_pressure_work_out_j,
+                self.projection_covariance_j].iter().all(|value| value.is_finite())
     }
 }
 
@@ -263,6 +300,72 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     #[must_use]
     pub fn last_reservoir_flows(&self) -> &[NsfReservoirFlow] {
         &self.last_reservoir_flows
+    }
+
+    /// Original FV pressure-work projection of the last accepted step.
+    /// Cold or absent apertures return None. Rebinding a held source preserves
+    /// this accepted record while rebasing the next interval's flux history.
+    pub const fn last_reservoir_exchange(&self) -> Option<&NsfReservoirExchange> {
+        self.last_reservoir_exchange.as_ref()
+    }
+
+    /// Called inside the original energy-flux evaluation, before the thermal
+    /// corrector changes its predictor. These moments are cached with that
+    /// exact flux through rebinding, accepted steps and unpublished trials.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn accumulate_reservoir_work(
+        &self, index: usize, axis: usize, direction: i64,
+        rho: &[f64], velocity: &[[f64; 3]], theta: &[f64], flux: &mut BoundaryFlux,
+    ) {
+        let Some(ghost) = self.reservoir_ghost(index, axis, usize::from(direction > 0)) else {
+            return;
+        };
+        let cell_pressure = self.law.pressure_pa(rho[index], theta[index]);
+        let ghost_pressure = self.law.pressure_pa(ghost.rho, ghost.theta);
+        let cell_acoustic = cell_pressure - self.spec.pressure_pa;
+        let ghost_acoustic = ghost_pressure - self.spec.pressure_pa;
+        let flow_unit = direction as f64 * self.law.dx_m.powi(3) / self.law.dt_s;
+        flux.reservoir_pressure_sum_pa += 0.5 * (cell_pressure + ghost_pressure);
+        flux.reservoir_acoustic_pressure_sum_pa += 0.5 * (cell_acoustic + ghost_acoustic);
+        // This is the pressure part of 0.5*((E_i+p_i)u_i+(E_g+p_g)u_g),
+        // exactly the original reservoir FV stencil. Q is never inferred from
+        // compressible streamed mass and p is never replaced by ghost pressure.
+        flux.reservoir_pressure_power_w += 0.5 * flow_unit
+            * (cell_pressure * velocity[index][axis] + ghost_pressure * ghost.u[axis]);
+        flux.reservoir_acoustic_pressure_power_w += 0.5 * flow_unit
+            * (cell_acoustic * velocity[index][axis] + ghost_acoustic * ghost.u[axis]);
+    }
+
+    pub(super) fn empty_reservoir_exchange(&self) -> Option<NsfReservoirExchange> {
+        let aperture = self.reservoir_aperture.as_ref()?;
+        Some(NsfReservoirExchange {
+            area_m2: self.law.dx_m * self.law.dx_m * aperture.indices.len() as f64,
+            reference_pressure_pa: self.spec.pressure_pa,
+            ..NsfReservoirExchange::default()
+        })
+    }
+
+    pub(super) fn finish_reservoir_exchange(
+        &self, after: BoundaryFlux, flows: &[NsfReservoirFlow],
+    ) -> Result<Option<NsfReservoirExchange>, NsfError> {
+        let Some(mut exchange) = self.empty_reservoir_exchange() else { return Ok(None); };
+        let before = self.open_out;
+        let count = flows.len() as f64;
+        exchange.mean_pressure_pa = 0.5
+            * (before.reservoir_pressure_sum_pa + after.reservoir_pressure_sum_pa) / count;
+        exchange.mean_acoustic_pressure_pa = 0.5
+            * (before.reservoir_acoustic_pressure_sum_pa + after.reservoir_acoustic_pressure_sum_pa) / count;
+        exchange.normal_volume_flow_m3_s = flows.iter().map(|flow| flow.outward_volume_flow_m3_s).sum();
+        exchange.pressure_work_out_j = 0.5 * self.law.dt_s
+            * (before.reservoir_pressure_power_w + after.reservoir_pressure_power_w);
+        exchange.acoustic_pressure_work_out_j = 0.5 * self.law.dt_s
+            * (before.reservoir_acoustic_pressure_power_w + after.reservoir_acoustic_pressure_power_w);
+        exchange.projection_covariance_j = exchange.acoustic_pressure_work_out_j
+            - exchange.mean_acoustic_pressure_pa * exchange.normal_volume_flow_m3_s * self.law.dt_s;
+        if !exchange.is_finite() {
+            return Err(NsfError::Input("reservoir finite-volume exchange overflowed"));
+        }
+        Ok(Some(exchange))
     }
 
     pub(super) fn reservoir_volume_flows(
@@ -511,6 +614,8 @@ mod tests {
     use crate::nsf3::{MAX_QUALIFIED_MACH, NsfCharacteristicAxis, NsfCharacteristicBoundary,
         NsfSpec, WallThermal};
     use fs_material::gas::{GasSpec, GasState};
+
+    mod work;
 
     fn spec(axis: usize, workers: usize) -> NsfSpec {
         let mut dims = [3; 3];
