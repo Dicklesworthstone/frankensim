@@ -473,3 +473,6 @@ fn inverse_mass(mass: &[f64], n: usize, tolerance: f64, gate: &CancelGate) -> Re
 
 #[cfg(test)]
 mod tests;
+
+/// Prepared native stepping and source-pinned, fixed-inertia viscosity feedback.
+pub mod viscosity;
