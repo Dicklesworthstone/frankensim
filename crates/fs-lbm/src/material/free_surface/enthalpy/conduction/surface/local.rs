@@ -39,7 +39,7 @@ impl FreeSurfaceLocalPatch {
     pub fn with_exchange(
         self,
         distances_m: [f64; 2],
-        emissivity: f64,
+        emissivity: impl Into<FreeSurfaceEmissivity>,
         surroundings_k: f64,
     ) -> FreeSurfaceInterfaceFace {
         FreeSurfaceInterfaceFace {
@@ -49,7 +49,7 @@ impl FreeSurfaceLocalPatch {
                 area_m2: self.area_m2,
                 distances_m,
             },
-            emissivity,
+            emissivity: emissivity.into(),
             surroundings_k,
         }
     }

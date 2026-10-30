@@ -70,7 +70,7 @@ fn heat_surface() -> FreeSurfaceInterfaceFace {
             area_m2: DX * DX,
             distances_m: [0.25 * DX, 0.5 * DX],
         },
-        emissivity: 0.8,
+        emissivity: 0.8.into(),
         surroundings_k: 400.0,
     }
 }

@@ -29,8 +29,9 @@ pub use implicit::{FreeSurfaceImplicitReport, FreeSurfaceImplicitSolve};
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FreeSurfaceInterfaceFace {
     pub face: FreeSurfaceGasFace,
-    /// Diffuse-gray opaque-surface emissivity in [0, 1]; zero omits radiation.
-    pub emissivity: f64,
+    /// Prescribed or original material gray emissivity. Material response uses
+    /// the SOLVED interface temperature, independently of the bulk liquid T.
+    pub emissivity: FreeSurfaceEmissivity,
     /// Black isothermal surroundings [K], with prescribed view factor one.
     /// This reservoir is independent of the gas and its source temperature range.
     pub surroundings_k: f64,
@@ -59,7 +60,7 @@ impl FreeSurfaceHeightGraphPatch {
     pub fn with_exchange(
         self,
         distances_m: [f64; 2],
-        emissivity: f64,
+        emissivity: impl Into<FreeSurfaceEmissivity>,
         surroundings_k: f64,
     ) -> FreeSurfaceInterfaceFace {
         FreeSurfaceInterfaceFace {
@@ -69,7 +70,7 @@ impl FreeSurfaceHeightGraphPatch {
                 area_m2: self.area_m2,
                 distances_m,
             },
-            emissivity,
+            emissivity: emissivity.into(),
             surroundings_k,
         }
     }
@@ -125,6 +126,10 @@ pub struct FreeSurfaceInterfaceSample {
     pub gas: ResolvedThermochemicalGasState,
     pub liquid_temperature_k: f64,
     pub surface_temperature_k: f64,
+    /// Total hemispherical coefficient at the actual solved interface T.
+    pub emissivity: f64,
+    /// Pinned original material claim; None for an explicitly prescribed value.
+    pub emissivity_source: Option<ResolvedScalarProperty>,
     /// Original sigma source at the solved interface T when surface stress is
     /// active. The bulk liquid bundle retains its actual bulk temperature.
     pub surface_tension: Option<ResolvedScalarProperty>,
@@ -291,13 +296,12 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             for contact in surfaces {
                 poll(gate)?;
                 let surface = contact.surface;
+                surface.emissivity.admit()?;
                 if surface
                     .face
                     .distances_m
                     .iter()
                     .any(|d| !d.is_finite() || *d <= 0.0)
-                    || !surface.emissivity.is_finite()
-                    || !(0.0..=1.0).contains(&surface.emissivity)
                     || !surface.surroundings_k.is_finite()
                     || surface.surroundings_k <= 0.0
                 {
@@ -340,7 +344,11 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     ///
     /// Bulk liquid k and declared centroid distance form a finite-volume
     /// half-cell resistance. Gas k is reevaluated at the solved film temperature;
-    /// radiation uses that same surface temperature. The surface has no heat
+    /// radiation uses that same surface temperature. `Material` emissivity
+    /// queries only the original pinned total-emissivity claim at that solved
+    /// temperature; it never freezes the bulk value or re-evaluates bulk
+    /// transport at surface T. All nonthermal source coordinates survive.
+    /// The surface has no heat
     /// capacity, mass transfer or phase change. It must stay inside the current
     /// pure-liquid caloric interval. Gas claims are pinned to the admitted bath
     /// sources; no source switch or extrapolation supplies an interface root.
@@ -654,6 +662,10 @@ impl Conduction<'_, '_> {
         ))?;
         let mut lo = tl.min(tg).min(tr).max(liquid_lo).max(2.0 * film_lo - tg);
         let mut hi = tl.max(tg).max(tr).min(liquid_hi).min(2.0 * film_hi - tg);
+        if let Some((source_lo, source_hi)) = surface.emissivity.temperature_bounds(self.law)? {
+            lo = lo.max(source_lo);
+            hi = hi.min(source_hi);
+        }
         if !lo.is_finite() || !hi.is_finite() || lo > hi {
             return Err(Error::Invalid(
                 "surface and film temperature domains do not intersect",
@@ -664,7 +676,6 @@ impl Conduction<'_, '_> {
             liquid_conductivity.effective_w_m_k * surface.face.area_m2
                 / surface.face.distances_m[0],
         )?;
-        let radiation = surface.emissivity * STEFAN_BOLTZMANN * surface.face.area_m2;
         let mut ts = tl.clamp(lo, hi);
         let mut supported = None;
         let mut accepted = None;
@@ -699,6 +710,11 @@ impl Conduction<'_, '_> {
                 }
             };
             supported = Some(ts);
+            // Only the original surface property is sampled at Ts. Bulk
+            // viscosity, conductivity and caloric storage keep their own T.
+            let (emissivity, emissivity_source) =
+                surface.emissivity.resolve(self.law, &liquid, ts)?;
+            let radiation = emissivity * STEFAN_BOLTZMANN * surface.face.area_m2;
             let gg = environment::finite(
                 gas.state().thermal_conductivity * surface.face.area_m2
                     / surface.face.distances_m[1],
@@ -743,6 +759,8 @@ impl Conduction<'_, '_> {
                     gas,
                     liquid_temperature_k: tl,
                     surface_temperature_k: ts,
+                    emissivity,
+                    emissivity_source,
                     surface_tension,
                     gas_temperature_k: tg,
                     liquid_conductance_w_k: gl,
@@ -766,7 +784,8 @@ impl Conduction<'_, '_> {
             let slope = environment::finite(gl + gg + 4.0 * radiation * ts * ts * ts)?;
             let newton = ts + residual / slope;
             // Periodic bisection guarantees bounded bracket progress even
-            // when temperature-dependent gas k makes this slope inexact.
+            // when temperature-dependent gas k or emissivity makes this slope
+            // inexact. Acceptance always uses the original nonlinear watts.
             let next = if iteration % 4 != 0 && newton > lo && newton < hi {
                 newton
             } else {

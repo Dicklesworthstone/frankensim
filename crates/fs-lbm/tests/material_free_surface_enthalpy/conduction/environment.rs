@@ -61,6 +61,17 @@ fn with_exposed_caloric_liquid<T>(
         MaterialPropertySelection::SingleClaimOnly,
     )
     .unwrap();
+    with_exposed_law(card, moving, chart, initial_h, &law, run)
+}
+
+fn with_exposed_law<T>(
+    card: &MaterialCard,
+    moving: bool,
+    chart: &EquilibriumEnthalpyPhaseCurve,
+    initial_h: f64,
+    law: &LiquidTemperatureLaw<'_>,
+    run: impl FnOnce(&mut MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> T,
+) -> T {
     let source = resolve_liquid_surface_state(
         card,
         &point(400.0),
@@ -93,7 +104,7 @@ fn with_exposed_caloric_liquid<T>(
             .unwrap();
         let mut thermal = flow
             .with_enthalpy(
-                &law,
+                law,
                 chart,
                 FreeSurfaceEnthalpyControls::default(),
                 |_| initial_h,

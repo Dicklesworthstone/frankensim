@@ -7,6 +7,13 @@ use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Dims, QuantitySpec, Temperature};
 
+/// Total hemispherical, dimensionless surface emissivity. This is not a
+/// wavelength sample, directional absorptance or a bulk optical coefficient.
+pub const SURFACE_EMISSIVITY_PROPERTY: &str = "hemispherical-total-emissivity";
+
+/// Total hemispherical emissivity is dimensionless.
+pub const EMISSIVITY_DIMS: Dims = Dims::NONE;
+
 /// Original material and externally specified conditions of a finite thermal body.
 #[derive(Clone, Copy, Debug)]
 pub struct ThermalMaterialPoint<'a> {

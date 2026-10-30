@@ -285,7 +285,7 @@ changes, combined heat accounting, stiff exchange and transactional refusal.
 
 ### Surface radiation on the native free-surface thermal timeline
 
-`step_with_radiative_environment` adds prescribed gray diffuse radiation on
+`step_with_radiative_environment` adds gray diffuse radiation on
 explicitly exposed liquid/gas patches. The nonlinear Stefan–Boltzmann law is
 reevaluated every thermal substep, using a factored fourth-power difference
 to preserve fluxes near equilibrium. Its positive secant conductance joins
@@ -296,8 +296,17 @@ walls, source-bound interfaces, optional molecular heat and attached electrical
 sources retain their original owners. The resulting enthalpy feeds the actual
 material viscosity and native VOF momentum/transport transaction.
 
-This is a gray opaque surface with prescribed constant hemispherical emissivity,
-view factor one to black isothermal surroundings, and cell temperature used as
+`FreeSurfaceEmissivity::Prescribed` retains a declared constant in [0,1].
+`Material` consumes `hemispherical-total-emissivity` already selected in the
+original complete `LiquidTemperatureLaw` bundle; it never selects another claim
+or falls back to a supplied constant. Source values must be static, dimensionless
+and in [0,1]. A source-known zero retains a reflecting boundary, independently
+of absent data. The original pressure/composition/finish context and source receipt
+travel with each sample. Changing that material DATA changes radiant heat, finite
+enthalpy, viscosity and the native momentum trajectory without solver changes.
+
+This is a gray opaque surface with view factor one to black isothermal
+surroundings, and cell temperature used as
 surface temperature. It needs a resolved thermal boundary layer or a justified
 lumped-cell approximation, plus time refinement for the explicit first-order
 split. It does not infer emissivity, visibility, multiple reflections, spectral
@@ -306,6 +315,12 @@ geometry, budget and cancellation refusals publish no partial state. Focused
 G1/G3/G4 tests compare the analytic nonlinear cooling integral and its time
 refinement, combined gas/radiant energy, native viscosity/momentum response,
 stiff subcycling and atomic refusal on synthetic constitutive fixtures.
+The shared solved-interface path samples the same pinned emissivity at its
+actual surface temperature, independently of bulk liquid properties. Its
+nonlinear residual, finite-gas opposite heat and optional implicit enthalpy
+evaluations use that value, retaining their original conservation/rollback
+boundaries. Source bounds narrow the surface bracket; unsupported trials refuse.
+Temperature-dependent emissivity does not imply a spectral radiation model.
 
 ### Finite atmosphere on the native free-surface thermal timeline
 

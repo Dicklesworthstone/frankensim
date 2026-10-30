@@ -75,11 +75,7 @@ pub(crate) use ambient::{AmbientRadiationTrial, solve_ambient_radiation_with};
 /// CODATA exact SI value after the 2019 kelvin redefinition, W/(m² K⁴).
 pub const STEFAN_BOLTZMANN_W_M2_K4: f64 = 5.670_374_419e-8;
 
-/// Canonical `fs-matdb` property consumed by the radiation models.
-pub const SURFACE_EMISSIVITY_PROPERTY: &str = "hemispherical-total-emissivity";
-
-/// Hemispherical emissivity is dimensionless.
-pub const EMISSIVITY_DIMS: fs_qty::Dims = fs_qty::Dims::NONE;
+pub use fs_material::thermal::source::{EMISSIVITY_DIMS, SURFACE_EMISSIVITY_PROPERTY};
 
 const VIEW_FACTOR_IDENTITY_DOMAIN: &str = "org.frankensim.fs-conduction.view-factors.v1";
 const RADIATION_MESH_IDENTITY_DOMAIN: &str = "org.frankensim.fs-conduction.radiation-mesh.v1";

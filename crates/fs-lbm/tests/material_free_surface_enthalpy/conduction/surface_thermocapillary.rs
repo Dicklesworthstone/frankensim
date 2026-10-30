@@ -12,7 +12,7 @@ fn patches() -> Vec<FreeSurfaceInterfaceFace> {
                     area_m2: DX * DX,
                     distances_m: [0.25 * DX, 0.5 * DX],
                 },
-                emissivity: 0.0,
+                emissivity: 0.0.into(),
                 surroundings_k: 400.0,
             })
         })
@@ -306,7 +306,7 @@ fn g4_surface_sigma_domain_complete_field_and_mode_publish_atomically_with_gas()
                     offered.pop();
                 } else {
                     for patch in &mut offered {
-                        patch.emissivity = 0.8;
+                        patch.emissivity = 0.8.into();
                         patch.surroundings_k = 2000.0;
                     }
                 }

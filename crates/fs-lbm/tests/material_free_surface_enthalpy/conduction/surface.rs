@@ -1,7 +1,8 @@
 //! Independent surface balance, finite-gas energy/pressure, stiffness and rollback.
 use super::*;
 use fs_lbm::material::free_surface::enthalpy::conduction::{
-    FreeSurfaceInterfaceContact, FreeSurfaceInterfaceFace, FreeSurfaceInterfaceSolve,
+    FreeSurfaceEmissivity, FreeSurfaceInterfaceContact, FreeSurfaceInterfaceFace,
+    FreeSurfaceInterfaceSolve,
 };
 use fs_material::thermochemical_gas::energy::{GasEnergySolve, IsochoricGasParcel};
 
@@ -13,7 +14,7 @@ fn face(surroundings_k: f64) -> FreeSurfaceInterfaceFace {
             area_m2: 1e-6,
             distances_m: [0.0005; 2],
         },
-        emissivity: 0.8,
+        emissivity: 0.8.into(),
         surroundings_k,
     }
 }
@@ -86,7 +87,7 @@ fn g1_unsupported_film_trial_backtracks_with_gas_outside_liquid_phase_range() {
     assert!(gas.evaluate(&gas_source::point(325.0, 100000.0)).is_err());
     with_exposed_liquid(&liquid, false, |thermal, gate| {
         let surface = FreeSurfaceInterfaceFace {
-            emissivity: 0.0,
+            emissivity: 0.0.into(),
             ..face(400.0)
         };
         let report = thermal
@@ -149,6 +150,146 @@ fn reference_surface(
     )
 }
 
+// Independent source-dependent nonlinear boundary, using fourth powers rather
+// than the production secant/Schur equations.
+fn reference_material_surface(tl: f64, tg: f64, tr: f64) -> (f64, f64, f64) {
+    let (mut lo, mut hi) = (300.0_f64, 500.0_f64);
+    for _ in 0..80 {
+        let ts = 0.5 * (lo + hi);
+        let eps = 0.2 + 0.003 * (ts - 300.0);
+        let ql = 0.0005 * (tl - 200.0) * 1e-6 / 0.0005 * (tl - ts);
+        let qg = 0.001 * 0.5 * (ts + tg) * 1e-6 / 0.0005 * (tg - ts);
+        let qr = eps * 5.670374419e-8 * 1e-6 * (tr.powi(4) - ts.powi(4));
+        if ql + qg + qr > 0.0 {
+            lo = ts;
+        } else {
+            hi = ts;
+        }
+    }
+    let ts = 0.5 * (lo + hi);
+    (
+        ts,
+        0.001 * 0.5 * (ts + tg) * 1e-6 / 0.0005 * (tg - ts),
+        (0.2 + 0.003 * (ts - 300.0)) * 5.670374419e-8 * 1e-6 * (tr.powi(4) - ts.powi(4)),
+    )
+}
+
+#[test]
+fn g1_original_surface_emissivity_drives_finite_gas_pressure_and_liquid_heat() {
+    use fs_material::thermal::source::SURFACE_EMISSIVITY_PROPERTY;
+    let liquid = radiation::emissive_card(1.0, 500.0);
+    let law = radiation::emissive_law(&liquid);
+    let chart = caloric(&liquid);
+    with_exposed_law(&liquid, false, &chart, 200000.0, &law, |thermal, gate| {
+        let mut gas = IsochoricGasParcel::new(
+            temperature_dependent_gas(),
+            gas_source::point(350.0, 100000.0),
+            1e-6,
+        )
+        .unwrap();
+        let gas_before = gas.state().specific_internal_energy_j_kg();
+        let before = thermal.total_enthalpy_j().unwrap();
+        let surface = FreeSurfaceInterfaceFace {
+            emissivity: FreeSurfaceEmissivity::Material,
+            ..face(800.0)
+        };
+        let report = thermal
+            .step_with_finite_gas_surface_exchange(
+                &[],
+                &[],
+                controls(),
+                &mut [],
+                &[],
+                &[],
+                &mut gas,
+                &[surface],
+                gas_controls(),
+                FreeSurfaceInterfaceSolve::default(),
+                false,
+                gate,
+            )
+            .unwrap()
+            .conduction;
+        let r = 8.314_462_618_153_24 / 0.028;
+        let mass = 100000.0 * 1e-6 / (r * 350.0);
+        let (mut tl, mut tg, mut qg_j, mut qr_j) = (400.0_f64, 350.0_f64, 0.0, 0.0);
+        for _ in 0..4 {
+            let (_, qg, qr) = reference_material_surface(tl, tg, 800.0);
+            let heat_from_gas = 0.00025 * qg;
+            tl += 0.00025 * (qg + qr) / 0.002;
+            tg = (((2.0 + 0.001 * tg).powi(2) - 0.002 * heat_from_gas / (mass * r)).sqrt() - 2.0)
+                / 0.001;
+            qg_j += heat_from_gas;
+            qr_j += 0.00025 * qr;
+        }
+        let exchange = report.surface.as_ref().unwrap();
+        let endpoint = &exchange.thermal_endpoint[0];
+        let (ts, qg, qr) = reference_material_surface(tl, tg, 800.0);
+        assert_eq!(report.thermal.substeps, 4);
+        near(endpoint.liquid_temperature_k, tl, 2e-11);
+        near(endpoint.surface_temperature_k, ts, 2e-11);
+        assert!(
+            (ts - tl).abs() > 1.0,
+            "surface must have its own physical T"
+        );
+        near(endpoint.emissivity, 0.2 + 0.003 * (ts - 300.0), 2e-11);
+        let source = endpoint.emissivity_source.as_ref().unwrap();
+        assert_eq!(
+            source.answer().receipt.selected,
+            law.reference_state()
+                .material()
+                .property(SURFACE_EMISSIVITY_PROPERTY)
+                .unwrap()
+                .answer()
+                .receipt
+                .selected
+        );
+        near(
+            source
+                .answer()
+                .receipt
+                .query_point
+                .iter()
+                .find(|(axis, _)| axis == "T")
+                .unwrap()
+                .1,
+            ts,
+            2e-11,
+        );
+        assert_eq!(
+            source
+                .answer()
+                .receipt
+                .query_point
+                .iter()
+                .find(|(axis, _)| axis == "pressure")
+                .unwrap()
+                .1,
+            100000.0
+        );
+        near(endpoint.heat_from_gas_w, qg, 2e-8);
+        near(endpoint.heat_from_radiation_w, qr, 2e-8);
+        near(exchange.heat_from_gas_j, qg_j, 2e-8);
+        near(exchange.heat_from_radiation_j, qr_j, 2e-8);
+        near(gas.state().state().temperature, tg, 2e-11);
+        near(gas.state().state().pressure, 100000.0 * tg / 350.0, 2e-11);
+        let gas_change = gas.mass_kg() * (gas.state().specific_internal_energy_j_kg() - gas_before);
+        near(
+            thermal.total_enthalpy_j().unwrap() - before + gas_change,
+            qr_j,
+            2e-8,
+        );
+        assert!(
+            report
+                .finite_gas
+                .unwrap()
+                .combined_thermal_balance_defect_j
+                .abs()
+                < 1e-9
+        );
+    });
+}
+
 #[test]
 fn g1_phase_conductivity_reaches_solved_surface_and_signed_energy_balance() {
     use fs_material::phase::conductivity::LiquidMassFractionConductivity;
@@ -156,39 +297,73 @@ fn g1_phase_conductivity_reaches_solved_surface_and_signed_energy_balance() {
     let gas = temperature_dependent_gas();
     let context = gas_source::point(350.0, 100000.0);
     with_exposed_liquid(&liquid, false, |thermal, gate| {
-        *thermal = thermal.clone().with_phase_conductivity(
-            LiquidMassFractionConductivity::declared(4.0, 3.0).unwrap(), gate,
-        ).unwrap();
+        *thermal = thermal
+            .clone()
+            .with_phase_conductivity(
+                LiquidMassFractionConductivity::declared(4.0, 3.0).unwrap(),
+                gate,
+            )
+            .unwrap();
         let before = thermal.total_enthalpy_j().unwrap();
-        let report = thermal.step_with_surface_exchange(
-            &[], &[], controls(), &mut [], &[], &[],
-            &[FreeSurfaceInterfaceContact { surface: face(800.0), model: &gas, context: &context }],
-            FreeSurfaceInterfaceSolve::default(), false, gate,
-        ).unwrap().conduction;
+        let report = thermal
+            .step_with_surface_exchange(
+                &[],
+                &[],
+                controls(),
+                &mut [],
+                &[],
+                &[],
+                &[FreeSurfaceInterfaceContact {
+                    surface: face(800.0),
+                    model: &gas,
+                    context: &context,
+                }],
+                FreeSurfaceInterfaceSolve::default(),
+                false,
+                gate,
+            )
+            .unwrap()
+            .conduction;
         let (mut t, mut gas_j, mut radiant_j) = (400.0, 0.0, 0.0);
         for _ in 0..4 {
-            let (_, qg, qr) = reference_surface(t, 350.0, 800.0, 0.8,
-                3.0 * 0.0005 * (t - 200.0), |film| 0.001 * film);
+            let (_, qg, qr) =
+                reference_surface(t, 350.0, 800.0, 0.8, 3.0 * 0.0005 * (t - 200.0), |film| {
+                    0.001 * film
+                });
             t += 0.00025 * (qg + qr) / 0.002;
             gas_j += 0.00025 * qg;
             radiant_j += 0.00025 * qr;
         }
-        let (ts, qg, qr) = reference_surface(t, 350.0, 800.0, 0.8,
-            3.0 * 0.0005 * (t - 200.0), |film| 0.001 * film);
+        let (ts, qg, qr) =
+            reference_surface(t, 350.0, 800.0, 0.8, 3.0 * 0.0005 * (t - 200.0), |film| {
+                0.001 * film
+            });
         let exchange = report.surface.as_ref().unwrap();
         let endpoint = &exchange.thermal_endpoint[0];
         assert_eq!(report.thermal.substeps, 4);
         near(endpoint.liquid_temperature_k, t, 2e-12);
         near(endpoint.surface_temperature_k, ts, 2e-11);
-        near(endpoint.liquid_conductivity.source_w_m_k, 0.0005 * (t - 200.0), 2e-12);
+        near(
+            endpoint.liquid_conductivity.source_w_m_k,
+            0.0005 * (t - 200.0),
+            2e-12,
+        );
         assert_eq!(endpoint.liquid_conductivity.phase_multiplier, 3.0);
-        near(endpoint.liquid_conductance_w_k, 3.0 * 0.0005 * (t - 200.0) * 1e-6 / 0.0005, 2e-12);
+        near(
+            endpoint.liquid_conductance_w_k,
+            3.0 * 0.0005 * (t - 200.0) * 1e-6 / 0.0005,
+            2e-12,
+        );
         near(endpoint.heat_from_gas_w, qg, 2e-8);
         near(endpoint.heat_from_radiation_w, qr, 2e-8);
         near(exchange.heat_from_gas_j, gas_j, 2e-8);
         near(exchange.heat_from_radiation_j, radiant_j, 2e-8);
         near(report.flow.external_heat_j, gas_j + radiant_j, 2e-8);
-        near(thermal.total_enthalpy_j().unwrap(), before + gas_j + radiant_j, 2e-12);
+        near(
+            thermal.total_enthalpy_j().unwrap(),
+            before + gas_j + radiant_j,
+            2e-12,
+        );
         assert!(endpoint.balance_residual_w.abs() < 1e-10);
     });
 }
@@ -201,7 +376,7 @@ fn g1_shared_surface_matches_independent_nonlinear_balance_and_film_source() {
     for emissivity in [0.0, 0.8] {
         with_exposed_liquid(&liquid, false, |thermal, gate| {
             let surface = FreeSurfaceInterfaceFace {
-                emissivity,
+                emissivity: emissivity.into(),
                 ..face(800.0)
             };
             let before = thermal.total_enthalpy_j().unwrap();
@@ -409,10 +584,10 @@ fn g3_hot_radiant_reservoir_outside_gas_domain_changes_native_heat_and_motion() 
     let liquid = conducting_card(1.0);
     let model = gas_source::model_with_temperature_limit(0.0, 250000.0, 100.0, 450.0);
     let context = gas_source::point(400.0, 100000.0);
-    let run = |emissivity| {
+    let run = |emissivity: f64| {
         with_exposed_liquid(&liquid, true, |thermal, gate| {
             let surface = FreeSurfaceInterfaceFace {
-                emissivity,
+                emissivity: emissivity.into(),
                 ..face(2000.0)
             };
             let report = thermal

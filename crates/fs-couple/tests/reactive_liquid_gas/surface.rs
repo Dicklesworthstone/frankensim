@@ -17,7 +17,7 @@ const DX: f64 = 0.001;
 fn surface(surroundings_k: f64, emissivity: f64) -> FreeSurfaceInterfaceFace {
     FreeSurfaceInterfaceFace {
         face: face(),
-        emissivity,
+        emissivity: emissivity.into(),
         surroundings_k,
     }
 }
@@ -147,7 +147,7 @@ fn planar_surfaces() -> Vec<FreeSurfaceInterfaceFace> {
                     area_m2: DX * DX,
                     distances_m: [0.25 * DX, 0.5 * DX],
                 },
-                emissivity: 0.8,
+                emissivity: 0.8.into(),
                 surroundings_k: 350.0 + 20.0 * x as f64,
             })
         })

@@ -28,7 +28,8 @@ pub use environment::{
 /// Gray surface radiation sharing the original thermal and native VOF interval.
 pub mod radiation;
 pub use radiation::{
-    FreeSurfaceRadiationExchange, FreeSurfaceRadiationFace, FreeSurfaceRadiationSample,
+    FreeSurfaceEmissivity, FreeSurfaceRadiationExchange, FreeSurfaceRadiationFace,
+    FreeSurfaceRadiationSample,
 };
 /// Solved liquid/gas/radiation interface temperatures with finite gas feedback.
 pub mod surface;

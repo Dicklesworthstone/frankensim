@@ -5,9 +5,154 @@
 //! Geometry is declared at the accepted configuration, not inferred from a fill
 //! fraction. Surface temperature is the resolved cell temperature: the caller
 //! must resolve the liquid thermal boundary layer or justify this lumped value.
+//! `Material` emissivity comes from the original liquid source bundle; the
+//! separately solved interface path evaluates that same claim at interface T.
 
 use super::*;
 use crate::conjugate::STEFAN_BOLTZMANN;
+use fs_material::state_point::{
+    MaterialPropertySelection, ResolvedScalarProperty, resolve_material_state_point,
+};
+use fs_material::thermal::source::{
+    EMISSIVITY_DIMS, SURFACE_EMISSIVITY_PROPERTY, ThermalMaterialPoint,
+};
+
+/// The explicitly selected diffuse-gray surface law. Geometry and radiation
+/// reservoirs remain boundary data; a material law follows the original liquid.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FreeSurfaceEmissivity {
+    /// A prescribed constant in [0, 1], including zero to omit radiation.
+    Prescribed(f64),
+    /// The canonical total hemispherical emissivity already present in the
+    /// original `LiquidTemperatureLaw` bundle. Its selected claim is retained
+    /// at every bulk or solved-surface temperature; there is no fresh selection.
+    /// A material value must lie in [0, 1]. A known zero is retained as a
+    /// reflecting surface; missing/unsupported data still refuses.
+    Material,
+}
+
+impl From<f64> for FreeSurfaceEmissivity {
+    fn from(value: f64) -> Self {
+        Self::Prescribed(value)
+    }
+}
+
+impl FreeSurfaceEmissivity {
+    pub(super) fn admit(self) -> Result<(), Error> {
+        match self {
+            Self::Prescribed(value) if !value.is_finite() || !(0.0..=1.0).contains(&value) => Err(
+                Error::Invalid("prescribed total emissivity must lie in [0,1]"),
+            ),
+            _ => Ok(()),
+        }
+    }
+
+    fn original<'a>(
+        self,
+        law: &'a LiquidTemperatureLaw<'_>,
+    ) -> Result<Option<&'a ResolvedScalarProperty>, Error> {
+        self.admit()?;
+        if self == Self::Material {
+            let original = law
+                .reference_state()
+                .material()
+                .property(SURFACE_EMISSIVITY_PROPERTY)
+                .ok_or(Error::Invalid(
+                    "material radiation needs the emissivity claim in the original liquid bundle",
+                ))?;
+            if original.requirement().dims() != EMISSIVITY_DIMS {
+                return Err(Error::Invalid(
+                    "total hemispherical emissivity must be dimensionless",
+                ));
+            }
+            Ok(Some(original))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Source validity bounds narrow the existing interface bracket. The exact
+    /// pinned query below still owns curve/hull support and may refuse a trial.
+    pub(super) fn temperature_bounds(
+        self,
+        law: &LiquidTemperatureLaw<'_>,
+    ) -> Result<Option<(f64, f64)>, Error> {
+        let Some(source) = self.original(law)? else {
+            return Ok(None);
+        };
+        let (mut lo, mut hi) = source
+            .answer()
+            .evidence
+            .model
+            .validity
+            .bound(law.temperature_axis())
+            .unwrap_or((0.0, f64::MAX));
+        let claim = law
+            .card()
+            .claims()
+            .claim(source.answer().receipt.selected)
+            .ok_or(Error::Invalid(
+                "material radiation lost its retained source claim",
+            ))?;
+        if let fs_matdb::PropertyValue::Curve {
+            abscissa, knots, ..
+        } = &claim.value
+        {
+            if abscissa == law.temperature_axis() {
+                lo = lo.max(knots[0].0);
+                hi = hi.min(knots[knots.len() - 1].0);
+            }
+        }
+        Ok(Some((lo, hi)))
+    }
+
+    pub(super) fn resolve(
+        self,
+        law: &LiquidTemperatureLaw<'_>,
+        liquid: &ResolvedLiquidState,
+        temperature_k: f64,
+    ) -> Result<(f64, Option<ResolvedScalarProperty>), Error> {
+        let Some(original) = self.original(law)? else {
+            let Self::Prescribed(value) = self else {
+                unreachable!("material has a source")
+            };
+            return Ok((value, None));
+        };
+        let point = liquid
+            .material()
+            .query()
+            .with(law.temperature_axis(), temperature_k)
+            .map_err(|_| Error::Invalid("invalid emissivity surface-temperature coordinate"))?;
+        let state = resolve_material_state_point(
+            law.card(),
+            &point,
+            std::slice::from_ref(original.requirement()),
+            MaterialPropertySelection::PinnedByProperty(vec![(
+                SURFACE_EMISSIVITY_PROPERTY.into(),
+                original.answer().receipt.selected,
+            )]),
+        )?;
+        let emissivity = state
+            .property(SURFACE_EMISSIVITY_PROPERTY)
+            .ok_or(Error::Invalid(
+                "material radiation lost its original emissivity source",
+            ))?;
+        ThermalMaterialPoint {
+            material: law.card(),
+            context: &point,
+            temperature_axis: law.temperature_axis(),
+            liquid_fraction_axis: None,
+        }
+        .admit_static(emissivity)?;
+        let value = emissivity.value_si();
+        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+            return Err(Error::Invalid(
+                "material total hemispherical emissivity must lie in [0,1]",
+            ));
+        }
+        Ok((value, Some(emissivity.clone())))
+    }
+}
 
 /// One exposed patch facing a black isothermal surrounding hemisphere.
 ///
@@ -23,19 +168,23 @@ pub struct FreeSurfaceRadiationFace {
     pub gas: [usize; 3],
     /// Radiating area [m2], bounded by one Cartesian face. Zero disables heat.
     pub area_m2: f64,
-    /// Prescribed total hemispherical gray emissivity, in [0, 1].
-    pub emissivity: f64,
+    /// Prescribed or original material total hemispherical gray emissivity.
+    pub emissivity: FreeSurfaceEmissivity,
     /// Absolute temperature of the prescribed surroundings [K], positive.
     pub surroundings_k: f64,
 }
 
 /// The physical flux and secant conductance used by one thermal substep.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FreeSurfaceRadiationSample {
     /// Declared exposed geometry and radiative bath for this sample.
     pub face: FreeSurfaceRadiationFace,
     /// Accepted caloric temperature at the sampling epoch [K].
     pub liquid_temperature_k: f64,
+    /// Actual coefficient at this temperature, not a reference-temperature cache.
+    pub emissivity: f64,
+    /// Original source value and receipt when material radiation was selected.
+    pub emissivity_source: Option<ResolvedScalarProperty>,
     /// eps sigma A (T + Ts) (T^2 + Ts^2) [W/K]. This is the exact
     /// secant of the fourth-power law, not a linearized radiation model.
     pub conductance_w_k: f64,
@@ -66,6 +215,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         let mut endpoints = Vec::with_capacity(radiation.len());
         for &face in radiation {
             poll(gate)?;
+            face.emissivity.admit()?;
             let id = cell_id(face.liquid)?;
             let separation = (0..3).fold(0usize, |sum, axis| {
                 sum.saturating_add(face.liquid[axis].abs_diff(face.gas[axis]))
@@ -86,8 +236,6 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 || !face.area_m2.is_finite()
                 || face.area_m2 < 0.0
                 || face.area_m2 > dx * dx
-                || !face.emissivity.is_finite()
-                || !(0.0..=1.0).contains(&face.emissivity)
                 || !face.surroundings_k.is_finite()
                 || face.surroundings_k <= 0.0
             {
@@ -109,7 +257,11 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     /// owners. If electrical heating is attached, its original owner also
     /// participates. The radiative bath is external; it is not finite gas energy.
     ///
-    /// Fourth-power radiation is reevaluated at every thermal substep. Its
+    /// Fourth-power radiation and an explicitly selected material emissivity
+    /// are reevaluated at every thermal substep. The original emissivity claim
+    /// must already belong to the complete liquid law. All nonthermal source
+    /// coordinates and claim identity survive; missing support refuses.
+    /// Its
     /// positive secant conductance is added to gas-film and internal-contact
     /// conductances in a SINGLE monotonicity bound. Strong radiation therefore
     /// shortens the step instead of overshooting the bath or clipping energy.
@@ -171,14 +323,22 @@ impl Conduction<'_, '_> {
                 return Err(Error::Invalid("radiation exceeds exposed liquid area"));
             }
             let temperature = thermal.temperature_k(id)?;
+            let (emissivity, emissivity_source) = match face.emissivity {
+                FreeSurfaceEmissivity::Prescribed(value) => (value, None),
+                FreeSurfaceEmissivity::Material => {
+                    let liquid =
+                        self.sample_liquid(id, thermal.cells()[&id].specific_h_j_kg, check)?;
+                    face.emissivity.resolve(self.law, &liquid, temperature)?
+                }
+            };
             // Factoring preserves small fluxes near equilibrium. No difference
             // of almost equal fourth powers and no empirical clipping occurs.
-            let conductance = if face.area_m2 == 0.0 || face.emissivity == 0.0 {
+            let conductance = if face.area_m2 == 0.0 || emissivity == 0.0 {
                 0.0
             } else {
                 let bath = face.surroundings_k;
                 let value = environment::finite(
-                    (face.emissivity * STEFAN_BOLTZMANN * face.area_m2)
+                    (emissivity * STEFAN_BOLTZMANN * face.area_m2)
                         * (temperature + bath)
                         * (temperature * temperature + bath * bath),
                 )?;
@@ -190,6 +350,8 @@ impl Conduction<'_, '_> {
             samples.push(FreeSurfaceRadiationSample {
                 face,
                 liquid_temperature_k: temperature,
+                emissivity,
+                emissivity_source,
                 conductance_w_k: conductance,
                 heat_into_liquid_w: environment::finite(
                     conductance * (face.surroundings_k - temperature),
