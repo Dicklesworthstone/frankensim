@@ -114,6 +114,7 @@ pub struct PreparedInteriorScattering<'a> {
     reference: Vec<f64>,
     roots: Vec<f64>,
     factor: LuComplex,
+    bulk_loss_factor: f64,
 }
 
 /// Complex pressure and flow coordinates, with their original FE amplitudes.
@@ -426,6 +427,73 @@ impl InteriorMultiport {
         )
     }
 
+    /// Prepare the original pressure operator with a source-evaluated uniform
+    /// bulk modulus K [Pa] in exp(+iwt). Passive K has Re(K)>0 and Im(K)>=0.
+    /// The mass coefficient is rho omega^2/K; momentum remains inviscid.
+    /// This is a frequency sample, not a broadband causal material realization.
+    ///
+    /// An existing boundary-layer overlay refuses: its equilibrium thermal
+    /// term does not represent the coupled molecular/thermal response with
+    /// complex K. The joint pressure/temperature molecular owner handles that
+    /// separate case. No additional dense matrix or empirical attenuation is
+    /// introduced here; the original basis, mass and loaded LU are reused.
+    pub fn prepare_scattering_with_bulk_modulus(
+        &self,
+        frequency_hz: f64,
+        bulk_modulus_pa: C64,
+        reference_resistance: &[f64],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<PreparedInteriorScattering<'_>, AcousticFeError> {
+        poll(cancelled)?;
+        self.validate_references(reference_resistance)?;
+        if self.reduced.boundary_layer.is_some() {
+            return Err(invalid(
+                "molecular bulk modulus cannot overlay Helmholtz boundary layers",
+            ));
+        }
+        if !frequency_hz.is_finite()
+            || frequency_hz <= 0.0
+            || !finite(bulk_modulus_pa)
+            || bulk_modulus_pa.re <= 0.0
+            || bulk_modulus_pa.im < 0.0
+        {
+            return Err(invalid(
+                "interior molecular frequency or passive bulk modulus",
+            ));
+        }
+        let compressibility = C64::ONE / bulk_modulus_pa;
+        let omega = core::f64::consts::TAU * frequency_hz;
+        let omega_rho = omega * self.reduced.medium.density_kg_m3;
+        let k2 = compressibility.scale(omega_rho * omega);
+        let bulk_loss_factor = -0.5 * omega * compressibility.im;
+        if !finite(compressibility)
+            || compressibility.re <= 0.0
+            || !finite(k2)
+            || !omega_rho.is_finite()
+            || !bulk_loss_factor.is_finite()
+        {
+            return Err(invalid("interior molecular operator overflow"));
+        }
+        let n = self.dim();
+        let mut a = vec![C64::ZERO; n * n];
+        for row in 0..n {
+            poll(cancelled)?;
+            for col in 0..n {
+                let i = row * n + col;
+                a[i] = C64::from_re(self.reduced.k_r[i]) - k2.scale(self.reduced.m_r[i]);
+            }
+        }
+        let mut prepared = self.prepare_scattering_operator(
+            a,
+            omega_rho,
+            frequency_hz,
+            reference_resistance,
+            cancelled,
+        )?;
+        prepared.bulk_loss_factor = bulk_loss_factor;
+        Ok(prepared)
+    }
+
     pub(super) fn scattering_operator(
         &self,
         a: Vec<C64>,
@@ -477,6 +545,7 @@ impl InteriorMultiport {
             reference: reference_resistance.to_vec(),
             roots,
             factor,
+            bulk_loss_factor: 0.0,
         })
     }
 
@@ -558,6 +627,43 @@ impl PreparedInteriorScattering<'_> {
     #[must_use]
     pub fn reference_resistance(&self) -> &[f64] {
         &self.reference
+    }
+
+    /// Independent volume dissipation [W] in the original pressure basis:
+    /// -omega Im(1/K) (p* M_r p)/2. M_r is the existing geometric mass
+    /// matrix, not a fitted loss or boundary power defect. The ordinary real
+    /// medium path returns zero. No loss clipping or extra dense array occurs.
+    pub fn bulk_dissipation_w(
+        &self,
+        amplitudes: &[[f64; 2]],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<f64, AcousticFeError> {
+        poll(cancelled)?;
+        let n = self.model.dim();
+        if amplitudes.len() != n || amplitudes.iter().flatten().any(|x| !x.is_finite()) {
+            return Err(invalid("interior bulk work pressure coordinates"));
+        }
+        if self.bulk_loss_factor == 0.0 {
+            return Ok(0.0);
+        }
+        let mut quadratic = 0.0;
+        for row in 0..n {
+            poll(cancelled)?;
+            let mut mass_re = 0.0;
+            let mut mass_im = 0.0;
+            for (col, p) in amplitudes.iter().enumerate() {
+                let mass = self.model.reduced.m_r[row * n + col];
+                mass_re += mass * p[0];
+                mass_im += mass * p[1];
+            }
+            quadratic += amplitudes[row][0] * mass_re + amplitudes[row][1] * mass_im;
+        }
+        let work = self.bulk_loss_factor * quadratic;
+        if !work.is_finite() {
+            return Err(invalid("interior bulk work overflow"));
+        }
+        poll(cancelled)?;
+        Ok(work)
     }
 
     /// Resolve simultaneous incident waves with the retained original LU.

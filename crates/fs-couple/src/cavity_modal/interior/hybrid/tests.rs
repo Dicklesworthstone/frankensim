@@ -269,8 +269,16 @@ fn source_hybrid_fields_work_and_original_duct_composition_match_independent_clo
     }
 }
 
-fn molecular(gas: GasState) -> RelaxationState {
-    let data = "declared 1 synthetic 1 vibration 1 900 1 power 101.325 293.15 0 200 500";
+fn molecular(gas: GasState, relaxing: bool, rate_scale: f64) -> RelaxationState {
+    // Synthetic caloric reservoir tests the source path, not measured air loss.
+    let data = if relaxing {
+        format!(
+            "declared 1 synthetic 1 vibration 1 900 1 power {} 293.15 0 200 500",
+            101.325 * rate_scale
+        )
+    } else {
+        "declared 1 synthetic 0".to_owned()
+    };
     let law = read_relaxation(&mut data.split_ascii_whitespace()).unwrap();
     let medium = RelaxingMedium::new(gas, vec![(law.species()[0].species.clone(), 1.0)]).unwrap();
     law.evaluate(&medium).unwrap()
@@ -313,13 +321,14 @@ fn source_hybrid_refuses_medium_molecular_band_reference_and_coordinate_mismatch
     assert!(HybridInterior::new(&wrong_wall, &source, &[1], &[0], &|| false).is_err());
     let relaxing = ThermoviscousInterior::from_relaxation(
         resolved_model(&lm, &lp, &gas),
-        molecular(gas),
+        molecular(gas, true, 1.0),
         BAND,
     )
     .unwrap();
-    // The current H owner has equilibrium real compression. Refuse a
-    // molecular source rather than silently applying its calorics to L only.
-    assert!(HybridInterior::new(&h, &relaxing, &[1], &[0], &|| false).is_err());
+    assert!(HybridInterior::new(&h, &relaxing, &[1], &[0], &|| false).is_ok());
+    // The pressure-volume calorics are now dynamic, but its original thin
+    // thermal-wall law still uses equilibrium cp/gamma. Refuse that combination.
+    assert!(HybridInterior::new(&same_wall, &relaxing, &[1], &[0], &|| false).is_err());
     assert!(HybridInterior::new(&h, &source, &[1], &[0], &|| true).is_err());
     let hybrid = HybridInterior::new(&h, &source, &[1], &[0], &|| false).unwrap();
     let reference = gas.characteristic_impedance / (HEIGHT * WIDTH);
@@ -354,4 +363,134 @@ fn source_hybrid_refuses_medium_molecular_band_reference_and_coordinate_mismatch
     let three = HybridInterior::new(&h_three, &source, &[1], &[0], &|| false).unwrap();
     assert_eq!(three.inner().external_port_count(), 3);
     assert!(three.duct_two_port(300.0, reference, &|| false).is_err());
+}
+
+#[test]
+fn one_molecular_source_drives_both_regions_and_matches_independent_complex_bulk_duct() {
+    let gas = gas();
+    let (hm, cube) = kuhn_cube(2);
+    let hp = positions(&cube, false);
+    let (lm, cube) = kuhn_cube(2);
+    let lp = positions(&cube, true);
+    let h = pressure_model(&hm, &hp, medium(&gas), false, None);
+    let plain = ThermoviscousInterior::from_gas(resolved_model(&lm, &lp, &gas), gas, BAND).unwrap();
+    let source = |relaxing, rate| {
+        ThermoviscousInterior::from_relaxation(
+            resolved_model(&lm, &lp, &gas),
+            molecular(gas, relaxing, rate),
+            BAND,
+        )
+        .unwrap()
+    };
+    let empty = source(false, 1.0);
+    let relaxing = source(true, 1.0);
+    let changed = source(true, 0.1);
+    let baseline = HybridInterior::new(&h, &plain, &[1], &[0], &|| false).unwrap();
+    let empty_hybrid = HybridInterior::new(&h, &empty, &[1], &[0], &|| false).unwrap();
+    let hybrid = HybridInterior::new(&h, &relaxing, &[1], &[0], &|| false).unwrap();
+    let changed_hybrid = HybridInterior::new(&h, &changed, &[1], &[0], &|| false).unwrap();
+    assert!(core::ptr::eq(hybrid.source(), &relaxing));
+    assert_eq!(hybrid.source().relaxation().unwrap().gas(), &gas);
+    let frequency = 300.0;
+    let omega = core::f64::consts::TAU * frequency;
+    let reference = gas.characteristic_impedance / (HEIGHT * WIDTH);
+    let incident = [C64::new(1.0, 0.3), C64::new(-0.2, 0.1)];
+    let solve = |model: &HybridInterior<'_, '_>| {
+        model
+            .prepare(frequency, &[reference; 2], &[reference; 2], &|| false)
+            .unwrap()
+            .response(&incident, &|| false)
+            .unwrap()
+    };
+    let base = solve(&baseline);
+    let parity = solve(&empty_hybrid);
+    for (actual, expected) in parity.outgoing.iter().zip(&base.outgoing) {
+        assert!((*actual - *expected).abs() < 2e-10 * expected.abs().max(1e-12));
+    }
+    assert_eq!(parity.power.helmholtz_bulk_w, 0.0);
+    let field = solve(&hybrid);
+    let rate = solve(&changed_hybrid);
+    assert!(field.power.helmholtz_bulk_w > 0.0);
+    assert!(field.power.thermoviscous.caloric_w > 0.0);
+    assert!(field.power.thermoviscous.viscous_w > 0.0);
+    assert!(field.power.thermoviscous.conductive_w > 0.0);
+    assert!(
+        field.power.balance_residual_w().abs() < 2e-8 * field.power.external_input_w,
+        "{:?}",
+        field.power
+    );
+    let effect = field
+        .outgoing
+        .iter()
+        .zip(&rate.outgoing)
+        .map(|(a, b)| (*a - *b).abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        effect > 1e-5,
+        "inactive original molecular rates: {effect:e}"
+    );
+
+    // Independent analytic uniform pressure-acoustic guide with the original
+    // material's complex bulk modulus, connected to the original source-owned
+    // resolved L block by the established duct composition. This does not use
+    // the hybrid interface condensation or the H finite-element mass matrix.
+    let material = relaxing
+        .relaxation()
+        .unwrap()
+        .caloric_response(omega)
+        .unwrap();
+    let bulk = material.bulk_modulus_pa;
+    let k = (C64::from_re(gas.density) / bulk).sqrt().scale(omega);
+    let specific = (bulk.scale(gas.density)).sqrt();
+    let analytic_h = TwoPort::from_wave(
+        &Segment::Cylinder {
+            radius: (HEIGHT * WIDTH / core::f64::consts::PI).sqrt(),
+            length: H_LENGTH,
+        },
+        &SegmentWave {
+            wavenumber: k,
+            characteristic_impedance: specific.scale(1.0 / (HEIGHT * WIDTH)),
+            specific_impedance: specific,
+            shear_number: f64::INFINITY,
+        },
+        reference,
+    )
+    .unwrap();
+    let l = relaxing
+        .duct_two_port(frequency, reference, &mut || false)
+        .unwrap();
+    let joint = hybrid
+        .duct_two_port(frequency, reference, &|| false)
+        .unwrap();
+    let plus = hybrid
+        .prepare(frequency, &[reference; 2], &[reference; 2], &|| false)
+        .unwrap()
+        .scattering(&|| false)
+        .unwrap();
+    for (minus, plus) in joint.scattering.iter().zip(plus) {
+        assert_eq!(minus.re.to_bits(), plus.re.to_bits());
+        assert_eq!(minus.im.to_bits(), (-plus.im).to_bits());
+    }
+    let options = ComposeOptions {
+        rule: Composition::Scattering,
+        maximum_condition: 1e10,
+        maximum_blocks: 2,
+        preserve_well_conditioned_bits: false,
+    };
+    let load = Some(C64::new(0.8 * reference, 0.3 * reference));
+    let expected = compose_chain(&[analytic_h, l], load, options).unwrap();
+    let actual = compose_chain(&[joint], load, options).unwrap();
+    let error = (actual.z_in - expected.z_in).abs() / expected.z_in.abs();
+    assert!(
+        error < 1e-4,
+        "complex-bulk guide integration error={error:e}"
+    );
+    assert!(
+        (actual.u_out_over_u_in - expected.u_out_over_u_in).abs()
+            < 1e-4 * expected.u_out_over_u_in.abs()
+    );
+    eprintln!(
+        "joint source molecular rate_effect={effect:e} analytic_H_L_error={error:e} power={:?}",
+        field.power
+    );
 }

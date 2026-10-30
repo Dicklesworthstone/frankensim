@@ -356,6 +356,40 @@ fn nonorthogonal_source_traces_close_original_fields_and_all_physical_work() {
     for (&a, b) in s.iter().zip(other) {
         assert!((a - b).abs() < 2e-10);
     }
+
+    // The consistent molecular material pair must act in BOTH regions.
+    // The existing equilibrium thermal BL overlay is deliberately refused;
+    // the LNS solid remains in its full joint heat/caloric equations.
+    let bulk = cp.scale(g.pressure_pa) / (cp - C64::from_re(g.gas_constant_j_kg_k()));
+    assert!(
+        hybrid
+            .prepare_with_bulk_modulus(f, cp, bulk, &hr, &lr, &|| false)
+            .is_err()
+    );
+    let plain_h = InteriorMultiport::new(&hf, &complete(&hf), &hs, false, &|| false).unwrap();
+    let molecular = HybridInterior::new(&plain_h, &l, &[1, 2], &[0, 2], &|| false).unwrap();
+    let prepared = molecular
+        .prepare_with_bulk_modulus(f, cp, bulk, &hr, &lr, &|| false)
+        .unwrap();
+    let result = prepared.response(&incident, &|| false).unwrap();
+    let power = result.power;
+    assert!(power.helmholtz_bulk_w > 0.0 && power.thermoviscous.caloric_w > 0.0);
+    assert!(power.thermoviscous.solid_conductive_w > 0.0);
+    assert!(
+        (power.balance_residual_w()).abs() < 2e-8 * power.external_input_w,
+        "{power:?}"
+    );
+    assert!(power.interface_residual_w().abs() < 1e-10 * power.external_input_w);
+    let waves = 0.5
+        * (incident.iter().map(|z| z.norm_sq()).sum::<f64>()
+            - result.outgoing.iter().map(|z| z.norm_sq()).sum::<f64>());
+    assert!((waves - power.dissipated_w()).abs() < 2e-8 * waves);
+    let lossless_h = molecular
+        .prepare(f, cp, &hr, &lr, &|| false)
+        .unwrap()
+        .response(&incident, &|| false)
+        .unwrap();
+    assert!(relative(result.pressure_pa[0], lossless_h.pressure_pa[0]) > 1e-5);
 }
 
 #[test]

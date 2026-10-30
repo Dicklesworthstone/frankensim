@@ -296,6 +296,42 @@ impl<'a, 'c> HybridInterior<'a, 'c> {
         let h = self
             .helmholtz
             .prepare_scattering(frequency_hz, helmholtz_reference, cancelled)?;
+        self.prepare_loaded(frequency_hz, cp, h, thermoviscous_reference, cancelled)
+    }
+
+    /// Use source-evaluated complex cp in LNS and bulk modulus K in Helmholtz,
+    /// both in exp(+iwt). This carries caloric relaxation through both regions
+    /// without adding a second compressibility loss to the resolved LNS owner.
+    /// Helmholtz boundary-layer overlays refuse; resolved LNS conductive solids
+    /// remain supported by its original joint velocity/pressure/heat equations.
+    pub fn prepare_with_bulk_modulus(
+        &self,
+        frequency_hz: f64,
+        cp: C64,
+        bulk_modulus_pa: C64,
+        helmholtz_reference: &[f64],
+        thermoviscous_reference: &[f64],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<PreparedHybrid<'_, 'c>, HybridError> {
+        poll(cancelled)?;
+        let h = self.helmholtz.prepare_scattering_with_bulk_modulus(
+            frequency_hz,
+            bulk_modulus_pa,
+            helmholtz_reference,
+            cancelled,
+        )?;
+        self.prepare_loaded(frequency_hz, cp, h, thermoviscous_reference, cancelled)
+    }
+
+    fn prepare_loaded<'p>(
+        &'p self,
+        frequency_hz: f64,
+        cp: C64,
+        h: PreparedInteriorScattering<'p>,
+        thermoviscous_reference: &[f64],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<PreparedHybrid<'p, 'c>, HybridError> {
+        let helmholtz_reference = h.reference_resistance();
         let l = self.thermoviscous.prepare_scattering(
             frequency_hz,
             cp,
@@ -432,6 +468,8 @@ pub struct HybridPower {
     pub helmholtz_interface_w: f64,
     pub thermoviscous_interface_w: f64,
     pub helmholtz_wall: BoundaryLayerPower,
+    /// Molecular compression work in the original Helmholtz volume [W].
+    pub helmholtz_bulk_w: f64,
     pub thermoviscous: ThermoviscousPower,
 }
 impl HybridPower {
@@ -445,6 +483,7 @@ impl HybridPower {
     pub fn dissipated_w(self) -> f64 {
         self.helmholtz_wall.viscous_w
             + self.helmholtz_wall.thermal_w
+            + self.helmholtz_bulk_w
             + self.thermoviscous.dissipated_w()
     }
     #[must_use]
@@ -591,6 +630,7 @@ impl PreparedHybrid<'_, '_> {
             helmholtz_wall: self
                 .h_owner
                 .boundary_layer_power(self.frequency_hz, &h.amplitudes)?,
+            helmholtz_bulk_w: self.h.bulk_dissipation_w(&h.amplitudes, cancelled)?,
             thermoviscous: l.power,
         };
         let interface_pressure_residual_pa = (0..m)

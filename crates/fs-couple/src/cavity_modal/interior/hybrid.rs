@@ -5,10 +5,12 @@
 //! regions meet through the original geometry-verified modal traction/flow
 //! interface. The source frequency band remains explicit.
 //!
-//! This adapter currently admits calorically perfect source gas only. A
-//! molecular source would require its dispersive bulk response in the pressure
-//! region as well as cp in the resolved region; applying it to only one side
-//! would silently change the physical model and therefore refuses here.
+//! An original molecular source is evaluated once per frequency. Its complex
+//! bulk modulus enters pressure-region compression and its cp enters the
+//! resolved gas heat equation, with both loss channels independently reported.
+//! Molecular pressure regions currently require insulated/slip acoustic walls:
+//! their approximate thermal boundary-layer overlay is not combined with this
+//! bulk law. Finite solids in the resolved region remain fully supported.
 //!
 //! Fields use exp(+i omega t); exported duct scattering is conjugated once to
 //! exp(-i omega t). Retained spatial modes, real power references and thermal
@@ -18,12 +20,14 @@ use super::thermoviscous::ThermoviscousInterior;
 use fs_duct::{DuctError, compose::TwoPort};
 use fs_feec::acoustics::helmholtz::multiport::InteriorMultiport;
 use fs_feec::acoustics::hybrid::{HybridError, HybridInterior as SpatialHybrid, PreparedHybrid};
+use fs_material::MaterialError;
 use fs_math::c64::C64;
 
 /// Source admission and original finite-element/duct failures remain distinct.
 #[derive(Debug)]
 pub enum HybridSourceError {
     InvalidInput(&'static str),
+    Material(MaterialError),
     Hybrid(HybridError),
     Duct(DuctError),
 }
@@ -31,12 +35,18 @@ impl core::fmt::Display for HybridSourceError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::InvalidInput(what) => write!(f, "source hybrid acoustics: {what}"),
+            Self::Material(error) => error.fmt(f),
             Self::Hybrid(error) => error.fmt(f),
             Self::Duct(error) => error.fmt(f),
         }
     }
 }
 impl std::error::Error for HybridSourceError {}
+impl From<MaterialError> for HybridSourceError {
+    fn from(error: MaterialError) -> Self {
+        Self::Material(error)
+    }
+}
 impl From<HybridError> for HybridSourceError {
     fn from(error: HybridError) -> Self {
         Self::Hybrid(error)
@@ -68,9 +78,9 @@ impl<'a, 'c> HybridInterior<'a, 'c> {
         thermoviscous_modes: &[usize],
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Self, HybridSourceError> {
-        if source.relaxation().is_some() {
+        if source.relaxation().is_some() && helmholtz.boundary_layer_transport().is_some() {
             return Err(HybridSourceError::InvalidInput(
-                "hybrid molecular gas requires dispersive compression in both regions",
+                "molecular pressure region cannot also use an independent boundary-layer overlay",
             ));
         }
         let medium = helmholtz.medium();
@@ -130,19 +140,37 @@ impl<'a, 'c> HybridInterior<'a, 'c> {
         thermoviscous_reference: &[f64],
         cancelled: &dyn Fn() -> bool,
     ) -> Result<PreparedHybrid<'_, 'c>, HybridSourceError> {
+        if cancelled() {
+            return Err(HybridError::Cancelled.into());
+        }
         let band = self.source.band_hz();
         if !frequency_hz.is_finite() || frequency_hz < band[0] || frequency_hz > band[1] {
             return Err(HybridSourceError::InvalidInput(
                 "hybrid source frequency outside declared band",
             ));
         }
-        Ok(self.model.prepare(
-            frequency_hz,
-            C64::from_re(self.source.gas().specific_heat_cp),
-            helmholtz_reference,
-            thermoviscous_reference,
-            cancelled,
-        )?)
+        match self.source.relaxation() {
+            Some(source) => {
+                let caloric = source.caloric_response(core::f64::consts::TAU * frequency_hz)?;
+                // Original material response is exp(-iwt); conjugate both
+                // coefficients once for the shared FE exp(+iwt) convention.
+                Ok(self.model.prepare_with_bulk_modulus(
+                    frequency_hz,
+                    caloric.cp_j_kg_k.conj(),
+                    caloric.bulk_modulus_pa.conj(),
+                    helmholtz_reference,
+                    thermoviscous_reference,
+                    cancelled,
+                )?)
+            }
+            None => Ok(self.model.prepare(
+                frequency_hz,
+                C64::from_re(self.source.gas().specific_heat_cp),
+                helmholtz_reference,
+                thermoviscous_reference,
+                cancelled,
+            )?),
+        }
     }
 
     /// Complete external power scattering in the original duct convention.
