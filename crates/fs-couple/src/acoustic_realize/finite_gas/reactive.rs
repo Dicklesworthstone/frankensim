@@ -8,6 +8,8 @@
 
 /// Simultaneous endpoint chemistry and reciprocal solid/gas thermal exchange.
 pub mod exchange;
+/// Conservative species/enthalpy exchange after the reacting thermal endpoint.
+pub mod flow;
 
 use super::{
     FiniteGasStringCandidate, FiniteGasStringError, FiniteGasStringFrame, FiniteGasStringHeat,

@@ -263,6 +263,7 @@ impl ThermalMaterialStringRuntime {
                     Ok::<_, ConductionError>(thermal)
                 },
                 |thermal| &mut thermal.coupled,
+                |_, _| Ok(()),
             )
         })?;
         // The shared flow owner has already admitted and atomically published

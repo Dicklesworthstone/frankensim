@@ -120,6 +120,7 @@ impl ThermalMaterialStringRuntime {
                 )
             },
             |thermal| thermal,
+            |_, _| Ok(()),
         )
     }
 
@@ -178,6 +179,7 @@ impl ThermalMaterialStringRuntime {
                 )
             },
             |thermal| &mut thermal.coupled,
+            |_, _| Ok(()),
         )
     }
 
@@ -187,6 +189,8 @@ impl ThermalMaterialStringRuntime {
     // An implicit source may distinguish applied heat from actual boundary
     // work by its admitted residual. That correction is audited here, before
     // publication, instead of renormalizing either gas or solid energy.
+    // A thermal extension may also admit the transported endpoint against its
+    // original source catalog before ANY of the three owners are published.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn step_with_finite_gas_nozzle<R, E>(
         &mut self,
@@ -203,6 +207,7 @@ impl ThermalMaterialStringRuntime {
         source_work_tolerance_j: f64,
         advance: impl FnOnce(&mut Self, &mut IsochoricGasParcel, FiniteGasStringHeat) -> Result<R, E>,
         account: impl FnOnce(&mut R) -> &mut FiniteGasStringFrame,
+        admit_endpoint: impl FnOnce(&IsochoricGasParcel, &ClosedGasParcel) -> Result<(), E>,
     ) -> Result<FiniteGasStringFlowFrame<R>, E>
     where
         E: From<FiniteGasStringError>,
@@ -259,6 +264,7 @@ impl ThermalMaterialStringRuntime {
                 "gas heating and species exchange exceeded the per-sample temperature-increment limit",
             ).into());
         }
+        admit_endpoint(&next_gas, &next_reservoir)?;
         self.refresh_finite_gas_medium(
             cx,
             forces,

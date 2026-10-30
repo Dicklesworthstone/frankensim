@@ -6120,6 +6120,19 @@ Focused `reactive/exchange.rs` regressions independently solve both endpoint
 equations, check composition-dependent conductance, insulated trajectory parity,
 late publication refusal, identical retry and cancellation after gas proposal.
 
+The `reactive::flow` entries compose those same heated chemical endpoints with
+conservative nozzle exchange on the same audio interval. The ordinary flow
+owner transports species and upstream enthalpy once, measures both finite gas
+storage changes, and publishes the string, local gas and reservoir together.
+The reaction/thermal report describes the pre-flow endpoint; final drag and
+compact pressure use the transported mixture. The original reaction catalog
+admits final local species, caloric/transport sources and explicit water identity
+before publication, including newly incoming inert species. Unknown inflow
+cannot strand the next chemical sample in an unsupported accepted state.
+Formation energy and transported enthalpy are never additional heat credits.
+This retains first-order heat/reaction-then-flow splitting and diagnostic sound;
+it does not resolve a flame, jet momentum or reciprocal acoustic loading.
+
 ### Reciprocal thermal exchange with finite surrounding gas
 
 The original `step_with_isochoric_gas` remains the insulated solid/gas API.

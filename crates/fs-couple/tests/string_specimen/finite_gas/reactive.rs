@@ -19,12 +19,15 @@ mod source;
 #[path = "reactive/exchange.rs"]
 mod exchange;
 
+#[path = "reactive/flow.rs"]
+mod flow;
+
 const RATE: f64 = 200_000.0;
-const RELEASE: f64 = 3000.0;
+pub(super) const RELEASE: f64 = 3000.0;
 const DT: f64 = 1.0 / 48000.0;
 const R: f64 = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
 
-fn law(release: f64) -> GasReaction {
+pub(super) fn law(release: f64) -> GasReaction {
     let components =
         [("A", 0.0, 1.7e-5), ("B", -release, 4.0e-5)].map(|(name, formation, viscosity)| {
             let (thermo, mut transport) = source::component(name, 0.028, formation);
@@ -136,7 +139,7 @@ fn law(release: f64) -> GasReaction {
     .unwrap()
 }
 
-fn policy() -> ImplicitMechanismSolve {
+pub(super) fn policy() -> ImplicitMechanismSolve {
     ImplicitMechanismSolve {
         extent_brackets_mol: [(ReactionId::new("isomerization").unwrap(), [-0.04, 0.04])].into(),
         extent_tolerance_mol: 1e-12,
@@ -154,7 +157,7 @@ fn policy() -> ImplicitMechanismSolve {
         },
     }
 }
-fn controls() -> ReactiveFiniteGasStringSolve {
+pub(super) fn controls() -> ReactiveFiniteGasStringSolve {
     ReactiveFiniteGasStringSolve {
         reaction: GasReactionSolve {
             gas: solve().gas,
@@ -165,7 +168,7 @@ fn controls() -> ReactiveFiniteGasStringSolve {
         maximum_gas_temperature_increment_k: 100.0,
     }
 }
-fn gas(law: &GasReaction) -> IsochoricGasParcel {
+pub(super) fn gas(law: &GasReaction) -> IsochoricGasParcel {
     let typed = |kind| QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
     IsochoricGasParcel::new(
         law.catalog().clone(),
