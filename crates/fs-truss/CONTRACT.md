@@ -81,6 +81,12 @@ steel-and-concrete flagship's engine (§15.2).
 
 ## Invariants
 
+Applied nodal loads use the global geometry axes. With a member direction from
+endpoint a to b, positive tension maps to external loads `[-direction, +direction]`.
+LP assembly and post-prune force refitting share that exact column owner, so a
+push toward a support activates compression buckling and a pull activates tension.
+The axial-direction regression checks both signs along all four coordinate directions.
+
 ### Source-bound material assignments
 
 `material::TrussMaterial` resolves exactly density, axial Young's modulus and

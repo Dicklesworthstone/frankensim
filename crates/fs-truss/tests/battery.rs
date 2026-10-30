@@ -1770,6 +1770,38 @@ fn truss_005_sizing_and_catalog_audit() {
     });
 }
 
+#[test]
+fn applied_axial_load_sign_selects_tension_or_compression_and_buckling() {
+    with_active_cx(|cx| {
+        // G1: pull away from the support -> tension; push toward it ->
+        // compression. Check all coordinate directions, through BOTH owners.
+        for direction in [[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]] {
+            let gs = hand_structure(cx, &[[0.0, 0.0], direction], &[(0, 1)]);
+            for sign in [1.0, -1.0] {
+                let case = LayoutCase::try_new(
+                    vec![[true, true], [direction[0] == 0.0, direction[1] == 0.0]],
+                    vec![[0.0, 0.0], [sign * direction[0], sign * direction[1]]],
+                    2,
+                )
+                .unwrap();
+                let lp =
+                    LayoutLp::try_assemble(&gs, &case, 1.0, LayoutLimits::default(), cx).unwrap();
+                let (forces, _, _) = lp.solve(None, None, PdhgSettings::default()).unwrap();
+                assert!((forces[0] - forces[1] - sign).abs() < 1e-5);
+                let audit = size_and_snap(&gs, &lp, &forces, 1.0, 1000.0, &[1.1], 1e-3);
+                assert!(audit.all_pass);
+                assert!((audit.members[0].force - sign).abs() < 1e-12);
+                if sign > 0.0 {
+                    assert_eq!(audit.members[0].area_buckling, 0.0);
+                } else {
+                    let expected = (12.0 / (std::f64::consts::PI.powi(2) * 1000.0)).sqrt();
+                    assert!((audit.members[0].area_buckling - expected).abs() < 1e-12);
+                }
+            }
+        }
+    });
+}
+
 // ---------------------------------------------------------------- truss-006
 
 #[test]

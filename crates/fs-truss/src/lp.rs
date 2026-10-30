@@ -5,6 +5,8 @@
 //! Constraints: nodal equilibrium `B·(q⁺ − q⁻) = f` on FREE degrees of
 //! freedom (supports drop their rows). Standard form:
 //! `min cᵀx  s.t.  A x = b, x ≥ 0`.
+//! Here `f` is the APPLIED external load. A positive tensile member contributes
+//! `[-direction, +direction]` at its endpoints to balance its inward forces.
 //!
 //! PDHG (Chambolle–Pock): `x ← Π₊(x − τ(c + Aᵀy))`,
 //! `y ← y + σ(A(2x − x_prev) − b)`, with `τσ‖A‖² < 1` from a
@@ -45,7 +47,9 @@ fn stable_usize_bytes(value: usize) -> [u8; 8] {
     u64::try_from(value).unwrap_or(u64::MAX).to_le_bytes()
 }
 
-/// Immutable support mask and nodal loads admitted for one ground structure.
+/// Immutable support mask and applied external nodal loads for one ground
+/// structure. Load components follow the geometry's global coordinate axes;
+/// they are not the opposite internal forces exerted by the members.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayoutCase {
     supported: Vec<[bool; 2]>,
@@ -379,6 +383,19 @@ fn first_nonzero_column(matrix: &Csr, cx: &Cx<'_>) -> Result<usize, TrussConstru
     })
 }
 
+// One external-load convention for LP assembly and post-prune force refitting.
+// A tensile member pulls inward; the balancing applied loads point outward.
+pub(crate) fn member_equilibrium_entries(
+    nodes: &[[f64; 2]],
+    member: (usize, usize),
+    length: f64,
+) -> [(usize, f64); 4] {
+    let (a, b) = member;
+    let dx = (nodes[b][0] - nodes[a][0]) / length;
+    let dy = (nodes[b][1] - nodes[a][1]) / length;
+    [(2 * a, -dx), (2 * a + 1, -dy), (2 * b, dx), (2 * b + 1, dy)]
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // One checked canonical CSR construction.
 fn assemble_equilibrium(
     nodes: &[[f64; 2]],
@@ -486,9 +503,7 @@ fn assemble_equilibrium(
         if member % LAYOUT_POLL_STRIDE == 0 {
             poll(cx, "layout sparse fill")?;
         }
-        let dx = (nodes[b][0] - nodes[a][0]) / lengths[member];
-        let dy = (nodes[b][1] - nodes[a][1]) / lengths[member];
-        for (dof, value) in [(2 * a, dx), (2 * a + 1, dy), (2 * b, -dx), (2 * b + 1, -dy)] {
+        for (dof, value) in member_equilibrium_entries(nodes, (a, b), lengths[member]) {
             if let Some(row) = dof_map[dof] {
                 for _ in 0..2 {
                     if staged_entries_visited.is_multiple_of(LAYOUT_POLL_STRIDE) {

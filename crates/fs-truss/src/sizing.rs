@@ -178,10 +178,9 @@ fn refit_forces(gs: &GroundStructure, lp: &LayoutLp, survivors: &[usize]) -> (Ve
         out.clear();
         out.resize(nrow, 0.0);
         // A's q⁺ column k = signed geometry column.
-        let (a, b) = gs.members()[k];
-        let dx = (gs.nodes()[b][0] - gs.nodes()[a][0]) / gs.lengths()[k];
-        let dy = (gs.nodes()[b][1] - gs.nodes()[a][1]) / gs.lengths()[k];
-        for (dof, v) in [(2 * a, dx), (2 * a + 1, dy), (2 * b, -dx), (2 * b + 1, -dy)] {
+        for (dof, v) in
+            crate::lp::member_equilibrium_entries(gs.nodes(), gs.members()[k], gs.lengths()[k])
+        {
             if let Some(row) = lp.dof_map()[dof] {
                 out[row] = v;
             }

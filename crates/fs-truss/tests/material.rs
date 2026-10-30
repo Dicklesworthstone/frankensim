@@ -112,7 +112,7 @@ fn unrepresentable_physical_volume_is_not_published() {
     with_cx(|cx, _| {
         let source = card([8000.0; 2], [200e9; 2], [1e-320; 2]);
         let states = [material(&source, 300.0)];
-        let (ground, case) = two_members(cx, -1.0);
+        let (ground, case) = two_members(cx, 1.0);
         let layout = MaterialLayout::try_new(
             &ground,
             &case,
@@ -172,7 +172,7 @@ fn temperature_and_member_materials_change_yield_cost_sizing_and_mass() {
             states[0].resolved().identity(),
             states[1].resolved().identity()
         );
-        let (ground, case) = two_members(cx, -1.0);
+        let (ground, case) = two_members(cx, 1.0);
         let layout = MaterialLayout::try_new(
             &ground,
             &case,
@@ -210,7 +210,7 @@ fn compression_buckling_uses_each_members_modulus_not_global_steel() {
     with_cx(|cx, _| {
         let source = card([8000.0, 8000.0], [200e9, 50e9], [300e6, 300e6]);
         let states = [material(&source, 300.0), material(&source, 600.0)];
-        let (ground, case) = two_members(cx, 1.0);
+        let (ground, case) = two_members(cx, -1.0);
         let layout = MaterialLayout::try_new(
             &ground,
             &case,
@@ -250,7 +250,7 @@ fn swapping_member_assignments_changes_actual_optimum_load_path() {
         .unwrap();
         let case = LayoutCase::try_new(
             vec![[true, true], [true, true], [true, true], [false, false]],
-            vec![[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [-1.0, 0.0]],
+            vec![[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [1.0, 0.0]],
             4,
         )
         .unwrap();
@@ -298,7 +298,7 @@ fn incomplete_sources_invalid_assignments_and_cancelled_publication_refuse() {
     );
     with_cx(|cx, gate| {
         let states = [material(&source, 300.0)];
-        let (ground, case) = two_members(cx, 1.0);
+        let (ground, case) = two_members(cx, -1.0);
         assert!(
             MaterialLayout::try_new(&ground, &case, &states, &[0], LayoutLimits::default(), cx)
                 .is_err()
