@@ -197,6 +197,7 @@ impl ApertureDg<LoadedAperture> {
                 inlet_work_j: up_work, terminals: up_terminals, port_work_residual_j: up_defect,
             }),
             terminal, terminals, stored_energy_j, storage_change_j,
+            parameter_work_j: 0.0,
             inferred_total_dissipation_j, upstream_work_j, body_work_j,
             port_work_residual_j: up_defect + down_defect,
         })

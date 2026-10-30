@@ -8578,6 +8578,36 @@ transfer with per-cell momentum and kinetic work in both channel geometries,
 and refusal/cancellation/exact retry. Native execution and measured physical
 validation remain separate gates. This advances MR05/MR06/MR33/MR67.
 
+## Finite thermochemical feedback through the moving aperture
+
+`ApertureDg::step_with_finite_gas_controlled` composes the same complete-load
+transaction with the original scalar aperture, or `LoadedAperture` single,
+paired and material-modal mechanics. The source and acoustic load advance
+once in the initial medium. The finite inventory then pays the actual bore
+and channel parameter work, and the original source consumes the accepted
+density, viscosity and exact load impedance without losing mechanical or
+material memory. Independent blade forces and modal pressure work remain in
+their original owners. The heat convenience shares the existing caloric owner.
+
+`FiniteGasApertureDgStep` reports one accepted interval. Its `gas.acoustic`
+and `coupled.duct` are the same acoustic account and must not be summed.
+Held-force/flow integrals retain the medium in which they were advanced;
+endpoint pressure and storage use the final gas. `DgApertureFrame` exposes
+the signed `parameter_work_j` separately, and its balance subtracts that
+intervention. The combined gas/mechanical/acoustic residual includes actual
+drives, original losses, signed exterior exchange, heat and transported
+enthalpy exactly once. All fallible checks and the final cancellation poll
+precede joint publication of gas, mechanics and the complete load.
+
+An attached upstream tract is refused before any trial: two independent
+finite gas inventories require a joint solve. The first-order fixed-volume
+partition does not infer mean-pressure prestress, thermodynamic mass flow
+from acoustic flow, or heating from mechanical/acoustic dissipation.
+Focused synthetic regressions cover scalar caloric/wave-work feedback,
+independent paired-blade motion, exact retry after source refusal or final
+cancellation, and rejection of an unowned second inventory. Native execution
+and measured physical validation remain separate gates.
+
 ## Continuing spatial dielectric charge through thermal phase change
 
 `ConductionThermalNetwork::step_dielectric_candidate` connects the native

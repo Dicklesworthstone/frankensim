@@ -24,6 +24,8 @@ use crate::dg_port::{DgTerminalFrame, sum_terminal_work};
 
 /// Original single, paired and material-modal sources on the shared DG load.
 pub mod loaded;
+/// Finite thermochemical energy feedback through the complete moving source and load.
+pub mod finite_gas;
 mod tract;
 mod gas;
 /// Actual upstream tract exchange and cold preparation of the series load.
@@ -61,6 +63,10 @@ pub struct DgApertureFrame {
     pub terminals: Vec<DgTerminalFrame>,
     /// Change in the aperture and DG storage [J].
     pub storage_change_j: f64,
+    /// Signed material-intervention work INTO the represented load [J]. Zero
+    /// for an ordinary frozen-material step. A finite background reports the
+    /// matching thermodynamic debit separately; it is not mechanical loss.
+    pub parameter_work_j: f64,
     /// Aperture loss plus inferred duct loss [J]. This is NOT an independent
     /// wall/terminal heat integral when `duct.ledger.balance_checked` is false.
     pub inferred_total_dissipation_j: f64,
@@ -81,6 +87,7 @@ impl DgApertureFrame {
     pub fn balance_residual_j(&self) -> f64 {
         let residual = self.storage_change_j + self.inferred_total_dissipation_j
             + sum_terminal_work(&self.terminals)
+            - self.parameter_work_j
             - self.upstream_work_j
             - self.body_work_j
             - self.aperture.mechanical_work_j;
@@ -238,7 +245,7 @@ fn accept_acoustic_candidate(
     }
     let duct = acoustic.accept();
     Ok(DgApertureFrame {
-        aperture, spatial_pressure, duct, upstream: None, terminal, terminals, stored_energy_j, storage_change_j, inferred_total_dissipation_j,
+        aperture, spatial_pressure, duct, upstream: None, terminal, terminals, stored_energy_j, storage_change_j, parameter_work_j: 0.0, inferred_total_dissipation_j,
         upstream_work_j, body_work_j, port_work_residual_j,
     })
 }
