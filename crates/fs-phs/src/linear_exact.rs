@@ -740,7 +740,7 @@ fn exact_zoh(
     u: &[f64],
     dt: f64,
 ) -> Result<StepRecord, PhsError> {
-    exact_zoh_loss(sys, split, x0, u, dt, &sys.r, true)
+    exact_zoh_loss(sys, split, x0, u, dt, &sys.r, None, true)
 }
 
 /// Integrate one declared PSD resistance channel along the SAME complete
@@ -754,6 +754,33 @@ pub fn integrated_resistance_loss(
     u: &[f64],
     dt: f64,
     resistance: &[f64],
+) -> Result<f64, PhsError> {
+    integrated_resistance_loss_inner(sys, split, x0, u, dt, resistance, None)
+}
+
+/// Integrate a source's checked positive resistance squares along the SAME
+/// complete coupled trajectory, retaining a rank-deficient channel's physical
+/// nullspace. The channel never replaces the dynamics' R. Original split,
+/// state, clock, PSD and entrywise factor-reconstruction admissions still apply.
+pub fn integrated_resistance_loss_with_witness(
+    sys: &PortHamiltonian,
+    split: &LinearSplit,
+    x0: &[f64],
+    u: &[f64],
+    dt: f64,
+    witness: &crate::ResistanceWitness,
+) -> Result<f64, PhsError> {
+    integrated_resistance_loss_inner(sys, split, x0, u, dt, &witness.matrix, Some(witness))
+}
+
+fn integrated_resistance_loss_inner(
+    sys: &PortHamiltonian,
+    split: &LinearSplit,
+    x0: &[f64],
+    u: &[f64],
+    dt: f64,
+    resistance: &[f64],
+    witness: Option<&crate::ResistanceWitness>,
 ) -> Result<f64, PhsError> {
     let n = split.n;
     if sys.n != n
@@ -777,9 +804,10 @@ pub fn integrated_resistance_loss(
     }
     crate::require_symmetric(resistance, n, "loss channel R")?;
     crate::require_psd(resistance, n, "loss channel R")?;
-    Ok(exact_zoh_loss(sys, split, x0, u, dt, resistance, false)?.dissipated)
+    Ok(exact_zoh_loss(sys, split, x0, u, dt, resistance, witness, false)?.dissipated)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn exact_zoh_loss(
     sys: &PortHamiltonian,
     split: &LinearSplit,
@@ -787,6 +815,7 @@ fn exact_zoh_loss(
     u: &[f64],
     dt: f64,
     loss_resistance: &[f64],
+    loss_witness: Option<&crate::ResistanceWitness>,
     check_balance: bool,
 ) -> Result<StepRecord, PhsError> {
     if !split.quadratic.exact {
@@ -868,8 +897,13 @@ fn exact_zoh_loss(
             end[i] += flow.transition[i * d + j] * initial[j];
         }
     }
-    let dissipated = positive_heat::PositiveHeat::new(sys, split, dt, loss_resistance)?
-        .evaluate(sys, x0, u)?;
+    let heat = match loss_witness {
+        Some(witness) => positive_heat::PositiveHeat::from_factor(
+            sys, split, dt, loss_resistance, witness.root.clone(),
+        )?,
+        None => positive_heat::PositiveHeat::new(sys, split, dt, loss_resistance)?,
+    };
+    let dissipated = heat.evaluate(sys, x0, u)?;
     let x: Vec<_> = (0..n)
         .map(|i| (0..n).map(|j| inverse[i * n + j] * end[j]).sum())
         .collect();

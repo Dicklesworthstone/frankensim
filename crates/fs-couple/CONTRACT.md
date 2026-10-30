@@ -13836,3 +13836,7 @@ finite two-capacity thermal root. They cover high static capacity, continued
 post-stop conduction, temperature-dependent stopping, bulk rate variance,
 post-stop rolling heat, authenticated continuation and late failure/retry.
 The fixtures retain the unmodified original quasistatic material gates.
+
+## Source-positive damping in the shared exact modal owner
+
+The original exact modal owner retains every component and signed connection-dashpot source square before assembling its unchanged resistance matrix. Total resistance carries its checked native `ResistanceWitness` through material-memory and acoustic-load composition. Summed connection heat and each original link's work use the corresponding source factors against the same full augmented trajectory, while modal, material and radiation accounts retain their original owners. The source-factor path changes neither damping values nor mechanical dynamics and does not allocate a total heat remainder among channels. Original componentwise reconstruction, positivity, complete state/work admission and energy-balance checks still apply.

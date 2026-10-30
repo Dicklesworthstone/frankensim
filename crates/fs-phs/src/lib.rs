@@ -437,13 +437,65 @@ pub struct PortHamiltonian {
     resistance_witness: Option<ResistanceWitness>,
 }
 
-// A physical source may supply its positive resistor squares before summing
-// them into R. Keep the exact represented matrix beside the factor: changing
-// a numerical working R cannot accidentally reuse a witness for another law.
+/// Positive resistor squares retained by their physical source before summing
+/// them into `R`. The exact represented matrix stays beside the checked factor:
+/// a witness cannot be reused for a different resistance law.
+///
+/// This carries source evidence through composition and independent heat
+/// accounts; it does not change the admitted resistance or clip its eigenvalues.
 #[derive(Clone)]
-struct ResistanceWitness {
+pub struct ResistanceWitness {
     matrix: Vec<f64>,
     root: Vec<f64>,
+}
+
+impl ResistanceWitness {
+    /// Preserve the original row-major source squares `rows`: physical power
+    /// is `sum_k (rows[k] dot effort)^2`. Every row has `n` entries, and `matrix`
+    /// is the source's already assembled `n x n` resistance, left unchanged.
+    /// Rectangular factors are compressed by the existing positive QR owner;
+    /// every represented entry must still pass its componentwise reconstruction
+    /// gate. Zero rows and exact loss nullspaces remain present.
+    ///
+    /// # Errors
+    /// Refuses malformed/nonfinite source data, asymmetric resistance, or a
+    /// factor that cannot reconstruct the original matrix within roundoff.
+    pub fn try_from_source_rows(
+        n: usize, matrix: Vec<f64>, mut rows: Vec<f64>,
+    ) -> Result<Self, PhsError> {
+        let square = n.checked_mul(n).ok_or(PhsError::Dimension {
+            what: "source resistance square extent",
+        })?;
+        if n == 0 || matrix.len() != square || rows.len() % n != 0
+            || matrix.iter().chain(&rows).any(|value| !value.is_finite())
+        {
+            return Err(PhsError::Dimension {
+                what: "finite complete source resistance rows and matrix required",
+            });
+        }
+        require_symmetric(&matrix, n, "source resistance R")?;
+        let height = rows.len() / n;
+        let root = if height > n {
+            linear_exact::positive_heat::compress(&rows, height, n)?
+        } else {
+            rows.resize(square, 0.0);
+            rows
+        };
+        linear_exact::positive_heat::check_resistance_root(&matrix, &root, n)?;
+        // Source products can differ by an ulp across the diagonal. Apply the
+        // SAME reconstruction gate to the lower triangle too; global symmetry
+        // admission alone must not hide an unsupported small matrix entry.
+        let mut transpose = matrix.clone();
+        for i in 0..n {
+            for j in 0..i {
+                transpose.swap(i * n + j, j * n + i);
+            }
+        }
+        if transpose != matrix {
+            linear_exact::positive_heat::check_resistance_root(&transpose, &root, n)?;
+        }
+        Ok(Self { matrix, root })
+    }
 }
 
 fn compose_resistance_witness(
@@ -675,6 +727,22 @@ impl PortHamiltonian {
             storage,
             resistance_witness: None,
         })
+    }
+
+    /// Retain checked physical source squares for this system's exact original
+    /// resistance. The dynamics, storage and ordinary structural admission are
+    /// unchanged. Subsequent physical composition retains the witness.
+    ///
+    /// # Errors
+    /// Refuses a witness whose represented matrix differs from this system's R.
+    pub fn with_resistance_witness(mut self, witness: ResistanceWitness) -> Result<Self, PhsError> {
+        if witness.matrix != self.r || witness.root.len() != self.n * self.n {
+            return Err(PhsError::LinearSplitBudget {
+                what: "source witness must match the original system resistance",
+            });
+        }
+        self.resistance_witness = Some(witness);
+        Ok(self)
     }
 
     /// Bypass admission — for mutation batteries and trusted callers

@@ -3,9 +3,10 @@
 use super::*;
 use fs_math::det;
 use fs_phs::linear_exact::{
-    LinearSplit, LinearSplitBudget, integrated_resistance_loss, split_quadratic, step_render,
+    LinearSplit, LinearSplitBudget, integrated_resistance_loss,
+    integrated_resistance_loss_with_witness, split_quadratic, step_render,
 };
-use fs_phs::{PortHamiltonian, QuadraticStorage, StepRecord};
+use fs_phs::{PortHamiltonian, QuadraticStorage, ResistanceWitness, StepRecord};
 
 pub(super) mod prepared;
 pub(super) mod dg;
@@ -407,13 +408,13 @@ impl ExactNetwork {
             } else if block.connection_r.iter().all(|v| *v == 0.0) {
                 0.0
             } else {
-                integrated_resistance_loss(
+                integrated_resistance_loss_with_witness(
                     &block.system,
                     &block.split,
                     &local_x,
                     &local_u,
                     dt,
-                    &block.connection_r,
+                    &block.connection_witness,
                 )
                 .map_err(ModalCouplingError::Propagation)?
             };
@@ -444,6 +445,8 @@ struct ExactBlock {
     rest_force: Vec<f64>,
     component_r: Vec<f64>,
     connection_r: Vec<f64>,
+    connection_witness: ResistanceWitness,
+    link_loss_rows: Vec<Option<Vec<f64>>>,
     material_r: Vec<f64>,
     radiation_r: Vec<f64>,
     memory_indices: Vec<usize>,
@@ -499,6 +502,14 @@ impl ExactBlock {
         let mut j = vec![0.0; n * n];
         let mut r = vec![0.0; n * n];
         let mut g = vec![0.0; n * count];
+        // These are the original positive modal/dashpot squares, before their
+        // rounded sum becomes R. Retain every signed column; a source-null loss
+        // direction must not be reconstructed through a tiny eigenvalue.
+        let source_entries = count.checked_add(links.len())
+            .and_then(|rows| rows.checked_mul(n))
+            .ok_or_else(|| invalid("complete source resistance row extent"))?;
+        let mut source_rows = Vec::with_capacity(source_entries);
+        let mut link_loss_rows = Vec::with_capacity(links.len());
         let mut at = 0;
         for mode in modes {
             poll(Some(gate))?;
@@ -510,6 +521,11 @@ impl ExactBlock {
             j[pi * n + qi] = -1.0;
             g[pi * count + at] = 1.0;
             r[pi * n + pi] = 2.0 * mode.damping_ratio * mode.angular_frequency_rad_s;
+            if r[pi * n + pi] != 0.0 {
+                let mut row = vec![0.0; n];
+                row[pi] = finite(det::sqrt(r[pi * n + pi]))?;
+                source_rows.extend_from_slice(&row);
+            }
             at += 1;
         }
         let mut component_r = r.clone();
@@ -517,6 +533,18 @@ impl ExactBlock {
         let mut rest_force = vec![0.0; count];
         for (column, link) in columns.iter().zip(links) {
             poll(Some(gate))?;
+            let row = if link.damping_n_s_m == 0.0 {
+                None
+            } else {
+                let weight = finite(det::sqrt(link.damping_n_s_m))?;
+                let mut row = vec![0.0; n];
+                for (i, value) in column.iter().enumerate() {
+                    row[2 * i + 1] = finite(weight * value)?;
+                }
+                source_rows.extend_from_slice(&row);
+                Some(row)
+            };
+            link_loss_rows.push(row);
             for a in 0..count {
                 rest_force[a] += link.stiffness_n_m * link.rest_extension_m * column[a];
                 for b in 0..count {
@@ -529,8 +557,11 @@ impl ExactBlock {
         for (value, extra) in r.iter_mut().zip(&connection_r) {
             *value += extra;
         }
+        let resistance_witness = ResistanceWitness::try_from_source_rows(n, r.clone(), source_rows)
+            .map_err(ModalCouplingError::Propagation)?;
         let storage = QuadraticStorage::new(q, n).map_err(ModalCouplingError::Propagation)?;
         let mut system = PortHamiltonian::new(n, count, j, r, g, Box::new(storage))
+            .and_then(|system| system.with_resistance_witness(resistance_witness))
             .map_err(ModalCouplingError::Propagation)?;
         let mut material_r = Vec::new();
         if !branches.is_empty() {
@@ -580,6 +611,20 @@ impl ExactBlock {
             system = system.with_parallel_load(load, &(0..count).collect::<Vec<_>>())
                 .map_err(ModalCouplingError::Propagation)?;
         }
+        // Additional material/air states do not alter these dashpot columns.
+        // Embed their source rows alongside the unchanged channel matrix so
+        // both the summed account and each original link use the full trajectory.
+        let connection_entries = link_loss_rows.iter().filter(|row| row.is_some()).count()
+            .checked_mul(augmented)
+            .ok_or_else(|| invalid("augmented source resistance row extent"))?;
+        let mut connection_rows = Vec::with_capacity(connection_entries);
+        for row in link_loss_rows.iter_mut().flatten() {
+            row.resize(augmented, 0.0);
+            connection_rows.extend_from_slice(row);
+        }
+        let connection_witness = ResistanceWitness::try_from_source_rows(
+            augmented, connection_r.clone(), connection_rows,
+        ).map_err(ModalCouplingError::Propagation)?;
         let split = split_quadratic(
             &system,
             LinearSplitBudget {
@@ -595,6 +640,8 @@ impl ExactBlock {
             rest_force,
             component_r,
             connection_r,
+            connection_witness,
+            link_loss_rows,
             material_r,
             radiation_r,
             memory_indices: Vec::new(),
@@ -646,7 +693,7 @@ impl ExactBlock {
                     .map_err(ModalCouplingError::Propagation)
             };
             let component = integrate(&self.component_r)?;
-            let connection = integrate(&self.connection_r)?;
+            let connection = self.connection_loss(x, u, dt)?;
             let material = integrate(&self.material_r)?;
             let radiation = integrate(&self.radiation_r)?;
             let scale = self.system.hamiltonian(x).abs().max(total.abs()).max(f64::MIN_POSITIVE);
@@ -664,9 +711,7 @@ impl ExactBlock {
         let component =
             integrated_resistance_loss(&self.system, &self.split, x, u, dt, &self.component_r)
                 .map_err(ModalCouplingError::Propagation)?;
-        let connection =
-            integrated_resistance_loss(&self.system, &self.split, x, u, dt, &self.connection_r)
-                .map_err(ModalCouplingError::Propagation)?;
+        let connection = self.connection_loss(x, u, dt)?;
         let scale = self
             .system
             .hamiltonian(x)
@@ -679,6 +724,15 @@ impl ExactBlock {
             ));
         }
         Ok((component, connection, 0.0, 0.0))
+    }
+
+    fn connection_loss(&self, x: &[f64], u: &[f64], dt: f64) -> Result<f64, ModalCouplingError> {
+        if self.connection_r.iter().all(|value| *value == 0.0) {
+            return Ok(0.0);
+        }
+        integrated_resistance_loss_with_witness(
+            &self.system, &self.split, x, u, dt, &self.connection_witness,
+        ).map_err(ModalCouplingError::Propagation)
     }
 
     // Work INTO the retained bodies from each signed connection column:
@@ -703,7 +757,8 @@ impl ExactBlock {
         columns
             .iter()
             .zip(links)
-            .map(|(column, link)| {
+            .enumerate()
+            .map(|(link_index, (column, link))| {
                 poll(gate)?;
                 let coordinate = |state: &[f64]| -> Result<f64, ModalCouplingError> {
                     let sum = column
@@ -729,7 +784,11 @@ impl ExactBlock {
                                 link.damping_n_s_m * left * right;
                         }
                     }
-                    integrated_resistance_loss(&self.system, &self.split, x, u, dt, &resistance)
+                    let row = self.link_loss_rows[link_index].as_ref()
+                        .ok_or_else(|| invalid("complete physical dashpot source row required"))?;
+                    let witness = ResistanceWitness::try_from_source_rows(n, resistance, row.clone())
+                        .map_err(ModalCouplingError::Propagation)?;
+                    integrated_resistance_loss_with_witness(&self.system, &self.split, x, u, dt, &witness)
                         .map_err(ModalCouplingError::Propagation)?
                 };
                 let work =

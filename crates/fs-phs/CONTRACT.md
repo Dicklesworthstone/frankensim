@@ -1044,3 +1044,7 @@ Focused G1 tests compare a two-port scalar decay with its independent analytical
 integral, retain full cross damping and warm Maxwell history, and preserve the
 energy-datum invariant. The existing 1,000-step allocation check now includes
 mean-port prediction and still observes zero allocations.
+
+## Original positive resistance factors through coupled heat
+
+Physical producers may retain their complete positive resistance source rows in a checked `ResistanceWitness` bound to the exact assembled R. `try_from_source_rows` uses the existing positive QR owner when necessary and checks both represented matrix triangles componentwise. `PortHamiltonian::with_resistance_witness` requires the exact original R; native material-memory and parallel-load composition preserve that witness. `integrated_resistance_loss_with_witness` integrates a declared channel along the same complete system trajectory without replacing the system resistance. Ordinary structural admission, the original matrices, reconstruction bounds, clock and energy checks remain unchanged. Rank-deficient physical loss no longer requires recovering a source-null direction from rounded eigenvalues. Raw matrices, unsupported entries and mismatched witnesses retain refusal behavior; no eigenvalue clipping or artificial damping is introduced.
