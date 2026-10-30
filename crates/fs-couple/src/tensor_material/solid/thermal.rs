@@ -8,6 +8,10 @@
 //! explicitly admitted constant-coefficient self-heating approximation, not
 //! temperature-dependent viscoelasticity or reciprocal thermoelastic coupling.
 
+/// Closed source-backed relaxation/temperature feedback on the existing
+/// implicit thermal residual; stored elastic tensors remain constant.
+pub mod relaxation;
+
 use super::{SolidError, SolidStep, TensorSolidHistory};
 use fs_exec::CancelGate;
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, PhaseStateError};

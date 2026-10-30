@@ -153,6 +153,117 @@ impl ResolvedTensorMaterial {
         )
     }
 
+    /// Admit the bounded thermal model in which ONLY Maxwell relaxation times
+    /// depend on temperature. Stored elastic tensors, strain bounds and reference
+    /// density must be validity-wide scalar constants, not two equal samples of
+    /// a varying law. There is then no mechanical entropy or coefficient-work
+    /// contribution: temperature changes the dissipative kinetics only.
+    ///
+    /// Every selected source retains its original claim and external context.
+    /// One-dimensional linearly interpolated relaxation curves must cover the
+    /// complete interval, and every interior knot must remain positive. This
+    /// admission supplies no thermal integrator, expansion or phase transition.
+    pub fn admit_thermal_relaxation(
+        &self,
+        card: &MaterialCard,
+        temperature_axis: &str,
+        interval_k: [f64; 2],
+    ) -> Result<()> {
+        use fs_matdb::{InterpolationPolicy, PropertyValue};
+        use fs_qty::{
+            Temperature,
+            semantic::{QuantityKind, SemanticType, ValueForm},
+        };
+
+        let invalid = |s: &str| TensorSourceError::Invalid(s.into());
+        let [low, high] = interval_k;
+        let temperature = self
+            .state
+            .state_coordinate(temperature_axis)
+            .ok_or_else(|| {
+                invalid("thermal relaxation requires its original temperature coordinate")
+            })?;
+        let quantity = self.state.axis_quantities().get(temperature_axis);
+        let absolute = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature,
+            ValueForm::Static,
+        ));
+        if !low.is_finite()
+            || !high.is_finite()
+            || low <= 0.0
+            || high <= low
+            || !(low..=high).contains(&temperature)
+            || quantity.is_some_and(|q| {
+                *q != absolute && *q != QuantitySpec::dimensional(Temperature::DIMS)
+            })
+            || quantity.is_none() && temperature_axis != "T"
+        {
+            return Err(invalid(
+                "thermal relaxation needs a bounded absolute-temperature interval containing its original state",
+            ));
+        }
+        for property in self.state.properties() {
+            if !property.has_only_fixed_external_conditions(Some(temperature_axis), true) {
+                return Err(invalid(
+                    "thermal relaxation cannot freeze unowned material response or validity coordinates",
+                ));
+            }
+            let claim = card
+                .claims()
+                .claim(property.answer().receipt.selected)
+                .ok_or_else(|| invalid("original thermal relaxation claim is absent"))?;
+            let relaxation = self
+                .properties
+                .branches
+                .iter()
+                .any(|branch| branch.relaxation_time == property.requirement().name());
+            match (&claim.value, claim.interpolation) {
+                (PropertyValue::Scalar { .. }, InterpolationPolicy::ConstantWithinValidity) => {}
+                (
+                    PropertyValue::Curve {
+                        abscissa,
+                        abscissa_dims,
+                        knots,
+                        ..
+                    },
+                    InterpolationPolicy::LinearInside,
+                ) if relaxation
+                    && abscissa == temperature_axis
+                    && *abscissa_dims == Temperature::DIMS =>
+                {
+                    if knots.len() < 2
+                        || knots.first().unwrap().0 > low
+                        || knots.last().unwrap().0 < high
+                        || knots.iter().any(|&(t, tau)| {
+                            (low..=high).contains(&t) && (!tau.is_finite() || tau <= 0.0)
+                        })
+                    {
+                        return Err(invalid(
+                            "relaxation curve must cover the interval with positive interior knots",
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(invalid(
+                        "thermal feedback permits temperature-dependent relaxation only; stored tensors and density require constant source laws",
+                    ));
+                }
+            }
+        }
+        // Fixed-context interpolation and rectangular validity have no hidden
+        // gap between these endpoints. The canonical owner also checks card
+        // identity, exact selected claims, units and positive endpoint rates.
+        for temperature in interval_k {
+            let point = self
+                .state
+                .query()
+                .with(temperature_axis, temperature)
+                .map_err(|e| invalid(&e.to_string()))?;
+            self.at_query_point(card, &point)?;
+        }
+        Ok(())
+    }
+
     /// Original same-card query, property selections and receipts.
     pub const fn state(&self) -> &ResolvedMaterialStatePoint {
         &self.state

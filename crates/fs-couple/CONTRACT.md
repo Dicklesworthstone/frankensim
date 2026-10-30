@@ -15581,3 +15581,56 @@ reciprocal thermoelastic heat, flame fronts and a whole-system entropy
 theorem are not claimed. Numerical refinement remains necessary for
 backward-Euler time accuracy. Source, geometry, work, numerical and
 cancellation refusals publish no partial state.
+
+### Source-bound tensor relaxation with finite thermal feedback
+
+`tensor_material::solid::thermal::relaxation` couples original source-bound
+tetrahedral tensor dynamics to the original finite enthalpy network.
+Every endpoint trial resolves the original material cards at the proposed
+caloric temperatures, rebuilds the original material operators on unchanged
+geometry/basis/inertia, preserves every accepted Maxwell memory coordinate,
+and advances the existing exact-ZOH tensor/PHS trajectory. Independently
+integrated element dashpot losses enter their actual caloric receivers once.
+The existing common cell-driver, `BackwardEulerStep`, and Newton owner retain
+the local thermal residuals, conduction, boundaries, trial budgets, and
+fresh final energy admission.
+
+The admitted thermodynamic model has temperature-independent stored elastic
+tensors and reference density. Only original positive Maxwell relaxation
+times may vary with temperature. Stored coefficients must be validity-wide
+scalar constants; equal samples or flat tabulations do not qualify.
+Every relaxation curve must continuously cover the complete admitted interval
+with positive interior knots. Source validity cannot freeze unowned dynamic
+coordinates. The original frequency applicability remains authoritative; this
+adapter adds no trajectory-wide frequency qualification.
+
+Mechanical and caloric bindings require the same original card and full query,
+unchanged selected density claim, actual borrowed caloric law, and matching
+original element mass and volume. Each whole element has one unique thermal
+receiver. The caloric chart is fully solid with constant density. Other finite
+thermal cells and independent source/conductance callbacks participate in the
+same residual; the callback must not duplicate mechanical heat or mutate live
+histories.
+
+`RelaxationThermalCandidate` retains one complete proposed thermal/source/
+mechanical endpoint. `RelaxingSolid` owns the rebuilt body and the entire native
+history; its borrowed history cannot accidentally use another body's factors.
+Displacement, momentum, constitutive memory, clock, accepted step count,
+cumulative force work, prior parameter work, material heat, and initial energy
+survive continuation. A relaxation-only update performs zero parameter work.
+Failed source admission, nonlinear iteration, energy checks, or cancellation
+publishes none of the candidate.
+
+Thermal rates use backward Euler and endpoint relaxation rates are held during
+the original exact mechanical interval. The coupled method is first order in
+general; nonlinear tolerances do not certify time accuracy or uniqueness.
+Original event cuts and accepted left-limit semantics apply. Geometry,
+supports, basis, and reference mass remain fixed. Thermal expansion,
+temperature-dependent elastic entropy, phase change, finite deformation, and
+basis adaptation are outside this bounded dissipative-kinetics model.
+
+Focused regressions in
+`tests/tensor_material_source/thermal_relaxation.rs` compare against independent
+physical-strain integration and thermal balance, exercise shared conductive
+feedback under companion-material substitution, and preserve accepted state
+through unsupported laws, domain exit, context mismatch, and cancellation.

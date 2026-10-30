@@ -4,6 +4,9 @@
 #[path = "tensor_material_source/continuation.rs"]
 mod tensor_continuation;
 
+#[path = "tensor_material_source/thermal_relaxation.rs"]
+mod thermal_relaxation;
+
 use fs_couple::tensor_material::{
     InitialMemory, TensorMaterialBudget,
     membrane::{

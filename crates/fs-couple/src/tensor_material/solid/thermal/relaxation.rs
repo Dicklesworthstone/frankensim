@@ -1,0 +1,498 @@
+//! Temperature-dependent tensor relaxation on the original finite heat residual.
+//!
+//! With constant elastic tensors, psi(e,z) has no explicit T derivative. Only
+//! the dissipative branch rates 1/tau(T) change, so the original exact tensor
+//! trajectory's dashpot loss is the complete mechanical heat source. Every
+//! implicit endpoint trial rebuilds the original source operators, starts from
+//! the same accepted physical memory, and enters the existing enthalpy/Newton
+//! owner. No scalar damping fit, thermal solver or material entropy is invented.
+
+use super::super::{SolidError, SolidStep, TensorSolidBody, TensorSolidHistory};
+use crate::circuit_enthalpy::{
+    CircuitEnthalpyError, CircuitEnthalpySolve, DrivenCoefficients, DriverAccount, ThermalDriver,
+    cell_driver_candidate,
+};
+use crate::material_circuit::MaterialCircuitSolve;
+use crate::tensor_material::{MaterialChangeBudget, TensorMaterialBudget, TensorMaterialHistory};
+use fs_exec::CancelGate;
+use fs_material::phase::{PhaseStateError, ResolvedHeatCapacityCurve};
+use fs_material::thermal::source::{ThermalMaterialError, ThermalMaterialPoint};
+use fs_solid::linear3::visco::SolidProjectionBudget;
+use fs_solver::{NewtonKrylovConfig, NewtonReport};
+use fs_thermal::enthalpy::backward_euler::StepCoefficients;
+use fs_thermal::enthalpy::{CellId, DepositionSimulation, EnergyAudit, ThermalLaw};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// One complete original element and its whole finite caloric receiver.
+/// Bindings follow original mesh-element order, never reduced mode order.
+#[derive(Clone, Copy)]
+pub struct RelaxationThermalCell<'m> {
+    pub cell: CellId,
+    /// Source-resolved Cp/density chart used by the actual thermal cell.
+    pub caloric: &'m ResolvedHeatCapacityCurve,
+    /// Same original card, full external query and owned temperature axis.
+    pub point: ThermalMaterialPoint<'m>,
+    /// Complete admitted solid interval, covered by every selected source.
+    pub temperature_interval_k: [f64; 2],
+}
+
+/// Physical and numerical controls for the native shared cell-energy solve.
+#[derive(Clone, Copy, Debug)]
+pub struct RelaxationThermalSolve {
+    pub maximum_cells: usize,
+    /// Complete mechanical proposals, including finite-difference stencils and
+    /// the final fresh independent admission; not merely Newton iterations.
+    pub maximum_trials: usize,
+    pub maximum_iterations: usize,
+    pub difference_step_j: f64,
+    pub cell_energy_tolerance_j: f64,
+    pub thermal_energy_tolerance_j: f64,
+    /// Element heat attribution and the complete mechanical/caloric balance.
+    pub total_energy_tolerance_j: f64,
+    /// Relative geometry/mass correspondence allowance, in [0, 1e-8].
+    pub inventory_relative_tolerance: f64,
+    pub newton: NewtonKrylovConfig,
+    pub projection: SolidProjectionBudget,
+    pub dynamics: TensorMaterialBudget,
+}
+impl RelaxationThermalSolve {
+    fn native(self) -> CircuitEnthalpySolve {
+        CircuitEnthalpySolve {
+            maximum_cells: self.maximum_cells,
+            maximum_circuit_trials: self.maximum_trials,
+            maximum_newton_iterations: self.maximum_iterations,
+            difference_step_j: self.difference_step_j,
+            cell_energy_tolerance_j: self.cell_energy_tolerance_j,
+            thermal_energy_tolerance_j: self.thermal_energy_tolerance_j,
+            total_energy_tolerance_j: self.total_energy_tolerance_j,
+            newton: self.newton,
+            // The common cell-driver path never invokes a circuit solver.
+            circuit: MaterialCircuitSolve {
+                energy_tolerance_j: self.total_energy_tolerance_j,
+                power_tolerance_w: 0.0,
+            },
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum RelaxationThermalError<E> {
+    Solid(SolidError),
+    Phase(PhaseStateError),
+    Material(ThermalMaterialError),
+    HeatSource(E),
+}
+impl<E: core::fmt::Debug> core::fmt::Display for RelaxationThermalError<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "tensor relaxation/thermal source: {self:?}")
+    }
+}
+impl<E: std::error::Error + 'static> std::error::Error for RelaxationThermalError<E> {}
+/// Retains the existing thermal/Newton errors and concrete physical cause.
+pub type Error<E> = CircuitEnthalpyError<RelaxationThermalError<E>>;
+fn invalid<E>(s: &'static str) -> Error<E> {
+    CircuitEnthalpyError::Invalid(s)
+}
+fn check<E>(gate: &CancelGate) -> Result<(), Error<E>> {
+    if gate.is_requested() {
+        Err(CircuitEnthalpyError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+fn solid<E>(e: SolidError) -> Error<E> {
+    CircuitEnthalpyError::Source(RelaxationThermalError::Solid(e))
+}
+fn finite<E>(x: f64) -> Result<f64, Error<E>> {
+    if x.is_finite() {
+        Ok(x)
+    } else {
+        Err(invalid("nonfinite tensor/thermal arithmetic"))
+    }
+}
+
+// A private lossless copy of the native history, never user-authored or reset.
+// Keeping the source body beside this data avoids a self-referential owner.
+struct Memory {
+    state: Vec<f64>,
+    time: f64,
+    steps: u64,
+    work: f64,
+    parameter_work: f64,
+    heat: f64,
+    initial_energy: f64,
+}
+impl Memory {
+    fn retain(history: &TensorMaterialHistory<'_>) -> Self {
+        Self {
+            state: history.state.clone(),
+            time: history.time,
+            steps: history.steps,
+            work: history.work,
+            parameter_work: history.parameter_work,
+            heat: history.heat,
+            initial_energy: history.initial_energy,
+        }
+    }
+}
+
+/// Rebuilt original body and its full accepted native history. Readout borrows
+/// this exact body, so factors and retained memory cannot be mixed by callers.
+pub struct RelaxingSolid<'s> {
+    body: TensorSolidBody<'s>,
+    memory: Memory,
+}
+impl<'s> RelaxingSolid<'s> {
+    pub const fn body(&self) -> &TensorSolidBody<'s> {
+        &self.body
+    }
+    pub fn history(&self) -> TensorSolidHistory<'_, 's> {
+        TensorSolidHistory {
+            solid: &self.body,
+            inner: TensorMaterialHistory {
+                body: &self.body.body,
+                state: self.memory.state.clone(),
+                time: self.memory.time,
+                steps: self.memory.steps,
+                work: self.memory.work,
+                parameter_work: self.memory.parameter_work,
+                heat: self.memory.heat,
+                initial_energy: self.memory.initial_energy,
+            },
+        }
+    }
+}
+
+/// Exact original mechanical record, native thermal account and final sources.
+pub struct RelaxationThermalReport<S> {
+    pub mechanical: SolidStep,
+    pub thermal: EnergyAudit,
+    pub source: S,
+    pub nonlinear: NewtonReport,
+    pub maximum_cell_residual_j: f64,
+    pub mechanical_trials: usize,
+    pub deposited_material_heat_j: f64,
+    /// Authored and callback heat, excluding the internal material loss.
+    pub external_thermal_heat_j: f64,
+    pub total_energy_residual_j: f64,
+}
+/// One complete endpoint: source queries, memory, inertia, clock and heat.
+pub struct RelaxationThermalCandidate<'s, 't, S> {
+    model: RelaxingSolid<'s>,
+    thermal: DepositionSimulation<'t>,
+    report: RelaxationThermalReport<S>,
+}
+impl<'s, 't, S> RelaxationThermalCandidate<'s, 't, S> {
+    pub const fn model(&self) -> &RelaxingSolid<'s> {
+        &self.model
+    }
+    pub const fn thermal(&self) -> &DepositionSimulation<'t> {
+        &self.thermal
+    }
+    pub const fn report(&self) -> &RelaxationThermalReport<S> {
+        &self.report
+    }
+    pub fn into_parts(
+        self,
+    ) -> (
+        RelaxingSolid<'s>,
+        DepositionSimulation<'t>,
+        RelaxationThermalReport<S>,
+    ) {
+        (self.model, self.thermal, self.report)
+    }
+}
+
+struct Trial<'s> {
+    model: RelaxingSolid<'s>,
+    step: SolidStep,
+    energy_change_j: f64,
+}
+impl<'s> ThermalDriver for Trial<'s> {
+    type Model = RelaxingSolid<'s>;
+    type Step = SolidStep;
+    fn account(&self) -> DriverAccount<'_> {
+        DriverAccount {
+            resistors: &[],
+            contacts: &[],
+            heat_j: self.step.dynamics.dissipated,
+            numerical_dissipation_j: 0.0,
+            stored_change_j: self.energy_change_j,
+            supplied_j: self.step.dynamics.supplied,
+        }
+    }
+    fn into_parts(self) -> (Self::Model, Self::Step) {
+        (self.model, self.step)
+    }
+}
+
+impl<'s> TensorSolidHistory<'_, 's> {
+    /// Close temperature-dependent relaxation, tensor motion, local physical
+    /// dissipation and the original finite heat network on ONE implicit step.
+    /// The callback supplies independent heat/conductance data at that SAME
+    /// endpoint and must not include mechanical heat or mutate live histories.
+    /// Existing prepared material conduction/contact/radiation owners may be
+    /// used; passive thermal cells remain in the same residual.
+    ///
+    /// Initial guesses are cell-energy increments [J] in sorted CellId order.
+    /// Process pending start events and split at interior events, as required
+    /// by the existing BackwardEulerStep. Target events remain pending.
+    /// Every trial starts from the same complete accepted mechanical history.
+    ///
+    /// Endpoint relaxation rates are held during native exact-ZOH mechanics;
+    /// coupled time accuracy is first order in general. Refine the physical
+    /// interval independently of nonlinear tolerances. Constant elasticity and
+    /// density, fixed geometry/supports, small strain, fully solid caloric cells
+    /// and source-supported temperatures are required. Thermal expansion,
+    /// stiffness-dependent entropy, phase change and basis adaptation remain
+    /// outside this dissipative-kinetics model. No thermal parameter work is
+    /// introduced, and prior external parameter-work accounts are preserved.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_relaxation_thermal_candidate<'t, S, E>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        force_n: &[[f64; 3]],
+        cells: &[RelaxationThermalCell<'_>],
+        controls: RelaxationThermalSolve,
+        guess_j: &[f64],
+        resolve: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
+        gate: &CancelGate,
+    ) -> Result<RelaxationThermalCandidate<'s, 't, S>, Error<E>> {
+        check(gate)?;
+        let sources = self.solid.material_sources().ok_or_else(|| {
+            invalid("thermal relaxation requires original tensor source bindings")
+        })?;
+        if self.inner.time_s().to_bits() != thermal.time_s().to_bits()
+            || cells.len() != sources.len()
+            || !controls.inventory_relative_tolerance.is_finite()
+            || !(0.0..=1e-8).contains(&controls.inventory_relative_tolerance)
+            || !controls.total_energy_tolerance_j.is_finite()
+            || controls.total_energy_tolerance_j <= 0.0
+        {
+            return Err(invalid(
+                "one shared clock, one receiver per original element and bounded physical tolerances required",
+            ));
+        }
+        crate::circuit_enthalpy::admit_driver_unknowns(thermal, controls.native(), guess_j)?;
+        let mut volumes = vec![0.0; sources.len()];
+        for (point, &element) in self
+            .solid
+            .projection
+            .material_points()
+            .iter()
+            .zip(self.solid.projection.point_elements())
+        {
+            check(gate)?;
+            volumes[element] = finite(volumes[element] + point.volume_m3())?;
+        }
+        let mut seen = BTreeSet::new();
+        for ((binding, source), &volume) in cells.iter().zip(sources).zip(&volumes) {
+            check(gate)?;
+            if !seen.insert(binding.cell) {
+                return Err(invalid(
+                    "each whole-element caloric receiver must be unique",
+                ));
+            }
+            let cell = thermal
+                .cells()
+                .get(&binding.cell)
+                .ok_or_else(|| invalid("inactive element caloric receiver"))?;
+            let curve = binding.caloric.curve();
+            if !thermal.uses_material_law(cell.material_id, curve as &dyn ThermalLaw)
+                || curve.material_card_identity() != source.material.state().card_identity()
+                || binding.point.material.content_hash() != source.material.state().card_identity()
+            {
+                return Err(invalid(
+                    "tensor and caloric owners must retain the same original card and exact borrowed caloric law",
+                ));
+            }
+            let state = curve
+                .state_at_specific_enthalpy(cell.specific_h_j_kg)
+                .map_err(|e| CircuitEnthalpyError::Source(RelaxationThermalError::Phase(e)))?;
+            let query = binding
+                .point
+                .at(state)
+                .map_err(|e| CircuitEnthalpyError::Source(RelaxationThermalError::Material(e)))?;
+            if query != source.material.state().query() {
+                return Err(invalid(
+                    "tensor and caloric initial temperatures and complete physical queries must agree",
+                ));
+            }
+            source
+                .material
+                .admit_thermal_relaxation(
+                    binding.point.material,
+                    binding.point.temperature_axis,
+                    binding.temperature_interval_k,
+                )
+                .map_err(|e| solid(SolidError::MaterialSource(e)))?;
+            let [low, high] = binding.temperature_interval_k;
+            let density = source.material.density_kg_m3();
+            let knots = curve.knots();
+            if knots[0].temperature_k > low
+                || knots[knots.len() - 1].temperature_k < high
+                || knots.iter().any(|k| {
+                    k.liquid_mass_fraction != 0.0
+                        || k.bulk_density_kg_m3.to_bits() != density.to_bits()
+                })
+                || knots
+                    .windows(2)
+                    .any(|k| k[1].temperature_k <= k[0].temperature_k)
+                || volume <= 0.0
+                || ((cell.geometry.volume_m3 / volume) - 1.0).abs()
+                    > controls.inventory_relative_tolerance
+                || ((cell.mass_kg / (volume * density)) - 1.0).abs()
+                    > controls.inventory_relative_tolerance
+            {
+                return Err(invalid(
+                    "caloric law must cover the solid source interval with the original element volume and constant reference mass",
+                ));
+            }
+            let density_claim = source
+                .material
+                .state()
+                .property("density")
+                .unwrap()
+                .answer()
+                .receipt
+                .selected;
+            if binding.caloric.receipts().is_empty()
+                || binding.caloric.receipts().len() % 2 != 0
+                || binding
+                    .caloric
+                    .receipts()
+                    .chunks_exact(2)
+                    .any(|pair| pair[1].property != "density" || pair[1].selected != density_claim)
+                || binding.caloric.receipts().iter().any(|receipt| {
+                    receipt.axis_quantities != *source.material.state().axis_quantities()
+                        || !receipt
+                            .query_point
+                            .iter()
+                            .filter(|(a, _)| a != binding.point.temperature_axis)
+                            .eq(source
+                                .material
+                                .state()
+                                .query_point()
+                                .iter()
+                                .filter(|(a, _)| a != binding.point.temperature_axis))
+                        || receipt.property == "density" && receipt.selected != density_claim
+                })
+            {
+                return Err(invalid(
+                    "caloric source receipts must preserve the complete original context and density claim",
+                ));
+            }
+        }
+        let cards: Vec<_> = cells.iter().map(|b| b.point.material).collect();
+        let before = self.inner.stored_energy_j();
+        let dt = target_s - thermal.time_s();
+        let (thermal, model, report) = cell_driver_candidate(
+            thermal,
+            target_s,
+            controls.native(),
+            guess_j,
+            |trial, _remaining| {
+                check(gate)?;
+                let mut points = Vec::with_capacity(cells.len());
+                for binding in cells {
+                    check(gate)?;
+                    let cell = trial.cells().get(&binding.cell).ok_or_else(|| {
+                        invalid("element receiver disappeared during thermal proposal")
+                    })?;
+                    let phase = binding
+                        .caloric
+                        .curve()
+                        .state_at_specific_enthalpy(cell.specific_h_j_kg)
+                        .map_err(|e| {
+                            CircuitEnthalpyError::Source(RelaxationThermalError::Phase(e))
+                        })?;
+                    let [low, high] = binding.temperature_interval_k;
+                    if !phase.is_fully_solid() || !(low..=high).contains(&phase.temperature_k()) {
+                        return Err(invalid(
+                            "thermal trial left the admitted fully-solid relaxation interval",
+                        ));
+                    }
+                    points.push(binding.point.at(phase).map_err(|e| {
+                        CircuitEnthalpyError::Source(RelaxationThermalError::Material(e))
+                    })?);
+                }
+                let body = self
+                    .solid
+                    .at_query_points(
+                        &cards,
+                        &points,
+                        controls.projection,
+                        controls.dynamics,
+                        gate,
+                    )
+                    .map_err(solid)?;
+                let rebound = self
+                    .rebind_materials(
+                        &body,
+                        MaterialChangeBudget {
+                            max_absolute_parameter_work_j: 0.0,
+                            relative_memory_tolerance: 1e-12,
+                        },
+                        gate,
+                    )
+                    .map_err(solid)?;
+                let mut history = rebound.history;
+                let step = history
+                    .advance(force_n, dt, controls.total_energy_tolerance_j, gate)
+                    .map_err(solid)?;
+                if history.inner.time_s().to_bits() != target_s.to_bits() {
+                    return Err(invalid(
+                        "tensor and thermal endpoints must share the exact accepted clock",
+                    ));
+                }
+                let change = finite(history.inner.stored_energy_j() - before)?;
+                let memory = Memory::retain(&history.inner);
+                let coefficients = resolve(trial).map_err(|e| {
+                    CircuitEnthalpyError::Source(RelaxationThermalError::HeatSource(e))
+                })?;
+                check(gate)?;
+                Ok(DrivenCoefficients {
+                    circuit: Trial {
+                        model: RelaxingSolid { body, memory },
+                        step,
+                        energy_change_j: change,
+                    },
+                    sources_w: coefficients.sources_w,
+                    conductances_w_k: coefficients.conductances_w_k,
+                    source: coefficients.payload,
+                    circuit_trials: 1,
+                })
+            },
+            |candidate, duration, checkpoint| {
+                let mut powers = BTreeMap::new();
+                for (binding, &heat) in cells.iter().zip(&candidate.step.element_heat_j) {
+                    checkpoint()?;
+                    let power = finite(heat / duration)?;
+                    if heat != 0.0 && power == 0.0 {
+                        return Err(invalid("tensor material heat underflows power conversion"));
+                    }
+                    powers.insert(binding.cell, power);
+                }
+                Ok(powers)
+            },
+            || gate.is_requested(),
+        )?;
+        check(gate)?;
+        Ok(RelaxationThermalCandidate {
+            model,
+            thermal,
+            report: RelaxationThermalReport {
+                mechanical: report.electrical,
+                thermal: report.thermal,
+                source: report.source,
+                nonlinear: report.nonlinear,
+                maximum_cell_residual_j: report.maximum_cell_residual_j,
+                mechanical_trials: report.circuit_trials,
+                deposited_material_heat_j: report.deposited_joule_j,
+                external_thermal_heat_j: report.non_electrical_heat_j,
+                total_energy_residual_j: report.total_energy_residual_j,
+            },
+        })
+    }
+}
