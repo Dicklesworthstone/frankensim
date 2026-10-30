@@ -1025,3 +1025,32 @@ clock. Four focused G1/G3 groups in `tests/hertz_phases.rs` check exact moving
 translation and spin, unequal shared moving/static capacities, zero kinetic
 traction and combined rolling recovery; original source parameters remain
 unchanged on success, refusal and retry.
+
+
+## Integrated original viscoelastic rolling paths — v0
+
+`rolling_loss::viscoelastic::path::ExponentialRatePath` evaluates the held
+scalar equation `q'=drive-decay*q` and keeps endpoint rate, signed integral,
+squared-rate integral and integrated displacement as separate quantities.
+Weak decay uses bounded compensated analytic series with a positive Gram
+form for squared rate. Strong decay uses endpoint interpolation and positive
+variance, retaining finite transient work even when decay times duration
+overflows. Numerical nonrepresentability or unresolved positivity refuses;
+no negative heat is clamped. Cancellation is checked at bounded intervals.
+
+`RollingLossLaw::advance_exponential_sphere_path` admits only the original
+viscoelastic sphere card and integrates its actual `M=-A*N*R*omega` law.
+It returns moment impulse `-A*N*R*integral(omega)` and independently physical
+bulk heat `A*N*R*integral(omega^2)`. The original rolling receipt owns the
+integrated work, cumulative heat and lineage-bound checkpoint; its wrench is
+explicitly the endpoint wrench. A mean rate cannot replace squared-rate work,
+and an RMS rate cannot replace signed impulse. Both monotone rate endpoints
+must meet the original source, patch, temperature, frequency and speed gates.
+
+The caller owns the held geometry, original normal load, angular axis and
+mechanical trajectory. This path utility adds no material calibration, normal
+work, thermal storage or contact event detection. Seven G1/G3 groups in
+`tests/rolling_viscoelastic_path.rs` compare analytic limits and independent
+refined time integrals, weak/strong decay, signed reversal, split continuation,
+zero loss and original source/cancellation refusals. A reversal with zero net
+impulse retains its positive original bulk heat.

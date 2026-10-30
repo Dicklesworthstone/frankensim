@@ -26,6 +26,8 @@ use super::{
 };
 use crate::{HertzSpherePlane, InputAuthority, InterfaceSystemRef};
 
+pub mod path;
+
 /// Published constitutive form; the material source remains separately named.
 pub const VISCOELASTIC_SPHERE_LAW_ID: &str = "first-order Kelvin-Voigt sphere rolling v1";
 
