@@ -7,6 +7,7 @@
 //! zero-duration material intervention, and account its actual storage change.
 use super::*;
 use super::super::viscothermal::ViscothermalMemory;
+use fs_material::fluid_acoustics::thermoviscous::{ThermoviscousFluid, ThermoviscousFluidState};
 
 impl DgDuct {
     /// Change a live uniform gas without resetting its circular wall diffusion.
@@ -93,8 +94,56 @@ impl DgDuct {
     ) -> Result<DgGasMaterialUpdate, DuctError> {
         poll(cancelled)?;
         crate::validate_gas(&gas)?;
+        let previous = self.gas.thermoviscous_state().map_err(|_| {
+            invalid("original gas has no coherent thermoviscous state")
+        })?;
+        let replacement = gas.thermoviscous_state().map_err(|_| {
+            invalid("replacement gas has no coherent thermoviscous state")
+        })?;
+        self.rebind_uniform_viscothermal_medium_data(
+            state,
+            gas,
+            field,
+            previous,
+            replacement,
+            gas.prandtl,
+            maximum_relative_error,
+            maximum_absolute_parameter_work_j,
+            cancelled,
+        )
+    }
+}
+
+impl<M: DgMedium> DgDuct<M> {
+    // Shared transfer of the native dimensionless Bessel sections. Frozen
+    // caloric data identify their original storage; source refresh cannot
+    // reevaluate the old material and silently change that history.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::dg) fn rebind_uniform_viscothermal_medium_data(
+        &mut self,
+        state: &mut DgState,
+        gas: M,
+        field: Option<AxialGasField>,
+        old_material: ThermoviscousFluidState,
+        material: ThermoviscousFluidState,
+        // Preserve the originating owner's admitted Pr arithmetic, including
+        // the legacy gas constructor's mu*Cp/k evaluation order.
+        source_prandtl: f64,
+        maximum_relative_error: f64,
+        maximum_absolute_parameter_work_j: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<DgMaterialUpdate, DuctError> {
+        poll(cancelled)?;
+        gas.admit()?;
+        if old_material.acoustic().density_kg_m3().to_bits() != self.gas.density_kg_m3().to_bits()
+            || old_material.acoustic().sound_speed_m_s().to_bits() != self.gas.sound_speed_m_s().to_bits()
+            || material.acoustic().density_kg_m3().to_bits() != gas.density_kg_m3().to_bits()
+            || material.acoustic().sound_speed_m_s().to_bits() != gas.sound_speed_m_s().to_bits()
+        {
+            return Err(invalid("live diffusion transfer requires the original coherent fluid snapshots"));
+        }
         if self.molecular.is_some() {
-            return Err(invalid("live gas updates require a molecular history-transfer law"));
+            return Err(invalid("live fluid updates require a molecular history-transfer law"));
         }
         let Some(ViscothermalMemory::Uniform(previous)) = &self.viscothermal else {
             return Err(invalid(
@@ -102,7 +151,7 @@ impl DgDuct {
             ));
         };
         if self.gas_field.as_ref().is_some_and(|f| f.uniform_state().is_none()) {
-            return Err(invalid("live diffusion transfer cannot average a spatial gas field"));
+            return Err(invalid("live diffusion transfer cannot average a spatial fluid field"));
         }
         let radius = self.uniform_radius_m.ok_or_else(|| {
             invalid("live diffusion transfer requires the original circular radius")
@@ -126,21 +175,22 @@ impl DgDuct {
                 "live diffusion transfer needs its original finite state and finite work budget",
             ));
         }
-        if (self.gas.gamma == 1.0) != (gas.gamma == 1.0) {
+        if (old_material.heat_capacity_ratio() == 1.0) != (material.heat_capacity_ratio() == 1.0) {
             return Err(invalid(
                 "live diffusion transfer cannot create or discard thermal arm support",
             ));
         }
         let energy_before_j = state.stored_energy_j();
         let acoustic_energy_before_j = energy(&state.tilde[..prefix]);
-        let old_bulk = self.gas.density * self.gas.sound_speed * self.gas.sound_speed;
-        let new_bulk = gas.density * gas.sound_speed * gas.sound_speed;
+        let old_bulk = self.gas.density_kg_m3() * self.gas.sound_speed_m_s() * self.gas.sound_speed_m_s();
+        let new_bulk = gas.density_kg_m3() * gas.sound_speed_m_s() * gas.sound_speed_m_s();
         let pressure_scale = det::sqrt(new_bulk) / det::sqrt(old_bulk);
-        let momentum_scale = det::sqrt(self.gas.density) / det::sqrt(gas.density);
+        let momentum_scale = det::sqrt(self.gas.density_kg_m3()) / det::sqrt(gas.density_kg_m3());
         let thermal_scale = if shunt_count == 0 {
             pressure_scale
         } else {
-            pressure_scale * (det::sqrt(self.gas.gamma - 1.0) / det::sqrt(gas.gamma - 1.0))
+            pressure_scale * (det::sqrt(old_material.heat_capacity_ratio() - 1.0)
+                / det::sqrt(material.heat_capacity_ratio() - 1.0))
         };
         if !energy_before_j.is_finite()
             || [old_bulk, new_bulk, pressure_scale, momentum_scale, thermal_scale]
@@ -154,15 +204,15 @@ impl DgDuct {
         // through a Hz conversion. Admission uses the NEW gas.
         let model = fs_phs::ZkDiffusive::new(
             radius,
-            gas.density,
-            gas.dynamic_viscosity,
-            gas.gamma,
-            gas.prandtl,
+            gas.density_kg_m3(),
+            material.transport().dynamic_viscosity_pa_s(),
+            material.heat_capacity_ratio(),
+            source_prandtl,
             series_count,
             previous.band_rad_s(),
             maximum_relative_error,
         ).map_err(|_| invalid(
-            "replacement gas does not resolve the original Bessel diffusion band",
+            "replacement fluid does not resolve the original Bessel diffusion band",
         ))?;
         if model.series_terms().len() != series_count || model.shunt_terms().len() != shunt_count {
             return Err(invalid("replacement diffusion changed native arm support"));
@@ -171,8 +221,9 @@ impl DgDuct {
         // The native cold assembly owns the new mass matrices, reciprocal wave
         // operator, matched impedances, physical ports and complete diffusion
         // block. No second spatial or stepping solver is introduced.
-        let mut candidate = DgDuct::new(
-            &self.geometry, &gas, self.mesh, self.inlet, self.outlet,
+        let mut candidate = Self::assemble(
+            &self.geometry, &gas, &gas, self.mesh, self.inlet, self.outlet, None,
+            &mut |_| Ok::<_, DuctError>(gas.clone()),
         )?.with_side_ports(&self.side_ports)?.with_uniform_viscothermal_model(model)?;
         if candidate.total_dofs() != prefix || candidate.elements.len() != self.elements.len() {
             return Err(invalid("replacement diffusion changed the original spatial basis"));

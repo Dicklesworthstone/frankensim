@@ -100,7 +100,7 @@ pub use port_response::{DgMultiportResponse, DgPortResponse};
 mod side_ports;
 pub use side_ports::{DgSidePort, DgSidePortSource, MAX_DG_SIDE_PORTS};
 mod gas_update;
-pub use gas_update::DgGasMaterialUpdate;
+pub use gas_update::{DgGasMaterialUpdate, DgMaterialUpdate};
 mod molecular;
 pub use molecular::heat::DgMolecularHeat;
 

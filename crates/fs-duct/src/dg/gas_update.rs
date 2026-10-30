@@ -8,9 +8,9 @@ use super::*;
 
 mod viscothermal;
 
-/// Measured storage change from one accepted uniform gas intervention.
+/// Measured storage change from one accepted uniform fluid intervention.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct DgGasMaterialUpdate {
+pub struct DgMaterialUpdate {
     /// Complete acoustic and wall storage before the intervention [J].
     pub energy_before_j: f64,
     /// Complete acoustic and unchanged wall storage afterwards [J].
@@ -20,9 +20,12 @@ pub struct DgGasMaterialUpdate {
     /// Updated acoustic storage, including any admitted diffusion memory [J].
     pub acoustic_energy_after_j: f64,
     /// Signed external work INTO the represented acoustic system [J].
-    /// The owner changing the background gas owes this transfer separately.
+    /// The owner changing the background material owes this transfer separately.
     pub parameter_work_j: f64,
 }
+
+/// Compatibility name for the existing gas-specific update entry points.
+pub type DgGasMaterialUpdate = DgMaterialUpdate;
 
 fn invalid(what: &'static str) -> DuctError {
     DuctError::BadParameter { what }
@@ -114,7 +117,7 @@ impl DgDuct {
                 "source-backed gas updates require a complete replacement gas field",
             ));
         }
-        self.rebind_uniform_gas_data(
+        self.rebind_uniform_medium_data(
             state,
             gas,
             None,
@@ -149,7 +152,7 @@ impl DgDuct {
                 )
             })?
             .state();
-        self.rebind_uniform_gas_data(
+        self.rebind_uniform_medium_data(
             state,
             gas,
             Some(field.clone()),
@@ -158,16 +161,21 @@ impl DgDuct {
         )
     }
 
-    fn rebind_uniform_gas_data(
+}
+
+impl<M: DgMedium> DgDuct<M> {
+    // Shared native mass/state/work update. The caller supplies the complete
+    // replacement medium; gas and source-preserving fluids use this SAME path.
+    pub(super) fn rebind_uniform_medium_data(
         &mut self,
         state: &mut DgState,
-        gas: GasState,
+        gas: M,
         field: Option<AxialGasField>,
         maximum_absolute_parameter_work_j: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<DgGasMaterialUpdate, DuctError> {
         poll(cancelled)?;
-        crate::validate_gas(&gas)?;
+        gas.admit()?;
         let m = self.field_dofs;
         let n = self.total_dofs();
         if self.molecular.is_some()
@@ -178,7 +186,7 @@ impl DgDuct {
                 .is_some_and(|field| field.uniform_state().is_none())
         {
             return Err(invalid(
-                "live gas update requires uniform gas without viscothermal gas histories",
+                "live fluid update requires uniform fluid without viscothermal or molecular histories",
             ));
         }
         if state.operator_identity != self.operator_identity
@@ -191,7 +199,7 @@ impl DgDuct {
             || !state.cumulative_parameter_work_j.is_finite()
         {
             return Err(invalid(
-                "live gas update needs its original finite state and a finite nonnegative work budget",
+                "live fluid update needs its original finite state and a finite nonnegative work budget",
             ));
         }
         let energy_before_j = state.stored_energy_j();
@@ -199,11 +207,13 @@ impl DgDuct {
         if !energy_before_j.is_finite() {
             return Err(invalid("original acoustic storage is not finite"));
         }
-        let old_bulk = self.gas.density * self.gas.sound_speed * self.gas.sound_speed;
-        let new_bulk = gas.density * gas.sound_speed * gas.sound_speed;
+        let old_bulk = self.gas.density_kg_m3()
+            * self.gas.sound_speed_m_s()
+            * self.gas.sound_speed_m_s();
+        let new_bulk = gas.density_kg_m3() * gas.sound_speed_m_s() * gas.sound_speed_m_s();
         let pressure_scale = det::sqrt(new_bulk) / det::sqrt(old_bulk);
-        let momentum_scale = det::sqrt(self.gas.density) / det::sqrt(gas.density);
-        let speed_scale = gas.sound_speed / self.gas.sound_speed;
+        let momentum_scale = det::sqrt(self.gas.density_kg_m3()) / det::sqrt(gas.density_kg_m3());
+        let speed_scale = gas.sound_speed_m_s() / self.gas.sound_speed_m_s();
         if [
             old_bulk,
             new_bulk,
@@ -215,7 +225,7 @@ impl DgDuct {
         .any(|x| !x.is_finite() || *x <= 0.0)
         {
             return Err(invalid(
-                "updated gas bulk modulus or coordinate scales are unrepresentable",
+                "updated fluid bulk modulus or coordinate scales are unrepresentable",
             ));
         }
         let mut candidate = self.clone();
@@ -259,7 +269,7 @@ impl DgDuct {
             poll(cancelled)?;
             if column[m..].iter().any(|value| *value != 0.0) {
                 return Err(invalid(
-                    "live gas update requires the original pressure/volume-flow port convention",
+                    "live fluid update requires the original pressure/volume-flow port convention",
                 ));
             }
             for value in &mut column[..m] {
@@ -269,7 +279,7 @@ impl DgDuct {
         if let Some(wall) = &mut candidate.compliant_wall {
             wall.rescale_uniform_gas_observation(pressure_scale)?;
         }
-        candidate.gas = gas;
+        candidate.gas = gas.clone();
         candidate.outlet_gas = gas;
         candidate.gas_field = field;
         candidate.operator_identity = hash_operator(
@@ -311,7 +321,7 @@ impl DgDuct {
             || (state.cumulative_parameter_work_j != 0.0 && accumulated == parameter_work_j)
         {
             return Err(invalid(
-                "live gas parameter work exceeded its budget or finite physical resolution",
+                "live fluid parameter work exceeded its budget or finite physical resolution",
             ));
         }
         if candidate.compliant_wall.is_some() {

@@ -6,8 +6,10 @@
 
 use super::*;
 use crate::fluid::FluidDuctError;
-use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid;
+use fs_material::fluid_acoustics::thermoviscous::{ThermoviscousFluid, ThermoviscousFluidState};
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
+
+mod update;
 
 mod sealed {
     pub trait Medium {}
@@ -47,6 +49,9 @@ impl DgMedium for GasState {
 pub struct DgFluidMaterial<M> {
     source: M,
     acoustic: FluidAcousticState,
+    // Frozen caloric/transport tuple that produced the actual diffusion arms.
+    // A live refresh must not reevaluate a changed source to infer old storage.
+    thermoviscous: Option<ThermoviscousFluidState>,
 }
 
 impl<M> DgFluidMaterial<M> {
@@ -92,7 +97,9 @@ impl DgDuct {
     /// transforms, boundaries and time propagator as gas ducts. All original
     /// source properties and receipts are retained. A later source refresh
     /// must be explicitly rebound; changing this frozen operator is not a heat,
-    /// species, mean-flow or parameter-work evolution.
+    /// species or mean-flow evolution. The live `rebind_uniform_material` and
+    /// `rebind_uniform_viscothermal_material` methods preserve physical state
+    /// and account the work of an explicitly prescribed background change.
     ///
     /// The resulting owner supports ordinary native state initialization,
     /// propagation, exact pressure/flow work, side ports, continuous harmonic
@@ -109,6 +116,7 @@ impl DgDuct {
         let medium = DgFluidMaterial {
             source: material.clone(),
             acoustic,
+            thermoviscous: None,
         };
         Ok(DgDuct::assemble(
             duct,
@@ -132,6 +140,10 @@ impl<M: Clone> DgDuct<DgFluidMaterial<M>> {
     pub const fn acoustic_material(&self) -> FluidAcousticState {
         self.gas.acoustic()
     }
+    /// Exact frozen tuple used by the current diffusion arms, if attached.
+    pub const fn thermoviscous_material(&self) -> Option<ThermoviscousFluidState> {
+        self.gas.thermoviscous
+    }
 }
 
 impl<M: ThermoviscousFluid + Clone> DgDuct<DgFluidMaterial<M>> {
@@ -144,7 +156,7 @@ impl<M: ThermoviscousFluid + Clone> DgDuct<DgFluidMaterial<M>> {
     /// original sampled band/error admission and complete-state DOF cap apply.
     /// Cp == Cv creates no thermal arms, while retaining viscous diffusion.
     pub fn with_viscothermal(
-        self,
+        mut self,
         poles: usize,
         band_hz: [f64; 2],
         maximum_relative_error: f64,
@@ -172,6 +184,8 @@ impl<M: ThermoviscousFluid + Clone> DgDuct<DgFluidMaterial<M>> {
         .map_err(|_| DuctError::BadParameter {
             what: "DG fluid viscothermal Bessel pole data or declared band is unresolved",
         })?;
+        self.gas.thermoviscous = Some(state);
+        self.outlet_gas.thermoviscous = Some(state);
         Ok(self.with_uniform_viscothermal_model(model)?)
     }
 }
