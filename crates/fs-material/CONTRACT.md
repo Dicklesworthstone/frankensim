@@ -4692,3 +4692,48 @@ neither a closed-cycle efficiency nor a reservoir-entropy claim. Equipment
 endpoint connections do not imply automatic temperature-path stitching of
 Region 1/2/3, transient machine dynamics, pressure-drop/flow-rate laws, phase
 kinetics, or resolved two-phase flow.
+
+## Ordered material layer stacks (2026-10-29)
+
+`thermal::transport::stack::PreparedLayerStackConduction` binds 1–64 physical
+layers to their original scalar conductivity sources, thicknesses, common area
+and explicit area-specific contact resistances. Each layer retains its stable
+ID, immutable card identity, complete typed source context, selected receipts
+and uncertainty. Physical order is preserved and contributes to identity;
+repeated materials may have distinct layer IDs. No common-grid resampling or
+effective-conductivity claim replaces the individual source curves.
+
+The shared `thermal::conduction::LayerStackConduction` kernel solves one
+conserved flux with exact piecewise-affine conductivity integrals. A signed
+analytic Kirchhoff inverse traverses original breakpoints; safeguarded
+Newton/bisection closes the final layer without a dense interface solve.
+Explicit contact jumps determine the layer-face temperatures. Every source
+chart must cover the entire endpoint-temperature interval, and trial steps
+that cross the cold boundary tighten the bracket without extrapolation.
+
+The response exposes all ordered face temperatures, signed power, secant
+conductance, both physical endpoint derivatives, and separate layer-heat and
+contact-temperature residuals. Each layer's reconstructed power must meet the
+requested heat tolerance. Contact representation allowances remain distinct
+from that physical acceptance test. Equal-temperature and single-layer cases
+have direct solutions. Successful evaluation allocates nothing, performs no
+source queries or hashes, and runs checkpoints per layer and iteration under
+the caller's finite iteration budget. Cancelled or failed work publishes no
+response and mutates no prepared input.
+
+Feed the secant conductance into the existing thermal owner's candidate-state
+coefficient callback; endpoint derivatives serve a separate Newton assembly.
+The original timeline continues to own storage, time integration, sources,
+energy acceptance and optional sensible entropy. The caller declares fixed
+planar geometry, source-free interiors and alignment of scalar conductivity
+with heat flow. Unknown source orientation remains unknown. No internal layer
+storage, radiation, lateral transport, phase law or inferred contact law is
+supplied by this steady constitutive relation.
+
+Four focused tests in `xtask/tests/material_layer_stack.rs` pass against the
+production modules: signed inversion and analytic resistance, independent
+nonlinear four-layer interfaces and derivatives, refusal/cancellation/budget
+behavior, and actual compiled FSRI gypsum/mineral-wool/plywood sources. The
+source integration independently constructs 0.1 W conduction and exercises
+50 J transfer on the original thermal timeline with energy and sensible-entropy
+closure. Existing two-layer parity and the 64-layer limit are included.

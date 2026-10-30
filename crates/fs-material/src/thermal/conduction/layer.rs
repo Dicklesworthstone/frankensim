@@ -110,6 +110,96 @@ impl ConductivityCurve {
         }
         Ok(sign * positive(sum)?)
     }
+
+    /// Invert a signed Kirchhoff difference on this same conductivity chart.
+    /// Positive integral raises temperature. Each crossed affine segment has
+    /// a scaled quadratic inverse; no iterative solve or extrapolation occurs.
+    /// Relative integration retains small differences near a large temperature.
+    pub fn temperature_after_integral_w_m(
+        &self,
+        initial: f64,
+        integral: f64,
+    ) -> Result<f64, DepositionError> {
+        self.segment(initial)?;
+        if !integral.is_finite() {
+            return Err(invalid("conductivity integral must be finite"));
+        }
+        if integral == 0.0 {
+            return Ok(initial);
+        }
+        let heating = integral > 0.0;
+        let span = self.temperature_range_k();
+        let boundary = if heating { span[1] } else { span[0] };
+        let target = integral.abs();
+        if let Ok(available) = self.integral_w_m(initial, boundary) {
+            if target > available.abs() {
+                return Err(DepositionError::MaterialDomain);
+            }
+            if target == available.abs() {
+                return Ok(boundary);
+            }
+        }
+        let mut index = if heating {
+            self.segment(initial)?
+        } else {
+            self.knots
+                .partition_point(|k| k[0] < initial)
+                .saturating_sub(1)
+        };
+        let mut current = initial;
+        let mut cumulative = 0.0;
+        let mut correction = 0.0;
+        for _ in 0..self.knots.len() - 1 {
+            let end = self.knots[if heating { index + 1 } else { index }][0];
+            let a = self.on_segment(index, current)?;
+            let b = self.on_segment(index, end)?;
+            let mean = 0.5 * a + 0.5 * b;
+            let width = (end - current).abs();
+            let amount = mean * width;
+            if amount.is_nan() || amount <= 0.0 {
+                return Err(DepositionError::Arithmetic);
+            }
+            let corrected = amount - correction;
+            let next = cumulative + corrected;
+            if target <= next {
+                if target == next {
+                    return Ok(end);
+                }
+                let energy_fraction = if amount.is_finite() {
+                    (target - cumulative) / amount
+                } else {
+                    ((target - cumulative) / mean) / width
+                };
+                let scale = a.max(b);
+                let (a, b) = (a / scale, b / scale);
+                let root = ((1.0 - energy_fraction) * a * a + energy_fraction * b * b).sqrt();
+                let fraction = energy_fraction * (a + b) / (a + root);
+                let t = current + fraction * (end - current);
+                if !fraction.is_finite()
+                    || !(0.0..=1.0).contains(&fraction)
+                    || !t.is_finite()
+                    || t == initial
+                    || t < current.min(end)
+                    || t > current.max(end)
+                {
+                    return Err(DepositionError::Arithmetic);
+                }
+                return Ok(t);
+            }
+            correction = (next - cumulative) - corrected;
+            cumulative = next;
+            current = end;
+            if current == boundary {
+                break;
+            }
+            if heating {
+                index += 1;
+            } else {
+                index -= 1;
+            }
+        }
+        Err(DepositionError::MaterialDomain)
+    }
 }
 
 /// Explicit scalar work and heat-continuity allowances, independent of spatial

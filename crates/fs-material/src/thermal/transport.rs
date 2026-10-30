@@ -28,6 +28,10 @@ pub mod expanding;
 #[path = "transport/storage.rs"]
 pub mod storage;
 
+/// Source-qualified ordered multilayer conductivity and contact response.
+#[path = "transport/stack.rs"]
+pub mod stack;
+
 // Shared affine-capacity integration and inversion, independent of its units.
 #[path = "transport/capacity.rs"]
 mod capacity;

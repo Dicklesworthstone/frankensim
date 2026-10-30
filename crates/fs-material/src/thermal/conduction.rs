@@ -10,6 +10,9 @@ pub use layer::{
     TwoLayerConduction,
 };
 
+mod stack;
+pub use stack::{LayerStackConduction, LayerStackResponse, MAX_CONDUCTION_LAYERS};
+
 /// Endpoint coefficients for the original conservative thermal network.
 pub mod network;
 /// Source-qualified preparation on an original pure-phase caloric branch.
