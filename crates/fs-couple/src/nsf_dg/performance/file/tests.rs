@@ -9,6 +9,7 @@ mod upstream;
 mod molecular;
 mod patch;
 mod reservoir;
+mod aperture;
 
 #[path = "../../../render/schedule/reed/field_input/tests/support.rs"]
 mod support;

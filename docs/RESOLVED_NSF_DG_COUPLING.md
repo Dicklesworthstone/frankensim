@@ -87,6 +87,24 @@ checking total fluid energy. Mixed-boundary unresolved internal exchange retains
 the original ledger classification and is not reported as resolved viscous heat.
 No reservoir flux is inserted into either acoustic duct or the bore microphone.
 
+The signs and nonoverlapping accounts can be checked directly on each accepted
+frame, up to numerical roundoff:
+
+```text
+flow_mass_change_kg + reservoir_mass_out_kg
+    + faces[0].mass_out_kg + faces[1].mass_out_kg = 0
+flow_energy_change_j = flow.open_energy_j + flow.open_boundary_energy_j
+    + flow.wall_heat_j + flow.source_energy_j
+```
+
+The optional `coupled_patch` is already contained in its complete characteristic
+face account. Native reservoir provenance names the mass and energy fields,
+their SI units and their opposite sign conventions explicitly. Complementary
+tests in `nsf_dg/performance/file/tests/aperture.rs` check original fluid/duct
+replay, retained thermochemical sources and finite-upstream feedback together
+with the opening. Numerical/interface regressions do not qualify a physical
+mouth or its acoustic transparency.
+
 ### Physical pressure control
 
 `NsfBoundaryDrive::PressureOffset(delta_p)` fixes the other face's pressure

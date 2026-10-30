@@ -435,7 +435,7 @@ pub(super) fn resolved_provenance(
     });
     let reservoir = system.zone().reservoir_aperture().map_or_else(String::new, |opening| {
         let state = opening.state;
-        format!(",\"reservoir_aperture\":{{\"normal_axis\":{},\"high_face\":{},\"cell_count\":{},\"area_m2\":{:e},\"density_kg_m3\":{:e},\"velocity_m_s\":[{:e},{:e},{:e}],\"temperature_k\":{:e},\"scope\":\"original material-owned prescribed reservoir on transverse wall tiles; separate streamed mass and signed open_energy_j; not a transparent acoustic boundary or a separate radiating microphone source\"}}",
+        format!(",\"reservoir_aperture\":{{\"kind\":\"prescribed-exterior-ghost-state\",\"normal_axis\":{},\"high_face\":{},\"cell_count\":{},\"area_m2\":{:e},\"density_kg_m3\":{:e},\"velocity_m_s\":[{:e},{:e},{:e}],\"temperature_k\":{:e},\"mass_account\":{{\"field\":\"reservoir_mass_out_kg\",\"unit\":\"kg\",\"positive\":\"out of resolved fluid\"}},\"energy_account\":{{\"field\":\"flow.open_energy_j\",\"unit\":\"J\",\"positive\":\"into resolved fluid\"}},\"scope\":\"original material-owned prescribed reservoir on transverse wall tiles; separate streamed mass and signed open_energy_j; not a transparent acoustic boundary or a separate radiating microphone source\"}}",
             opening.axis, opening.high, opening.cells.len(), opening.cells.len() as f64 * law.dx_m.powi(2),
             state.density_kg_m3, state.velocity_m_s[0], state.velocity_m_s[1], state.velocity_m_s[2], state.temperature_k)
     });

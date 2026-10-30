@@ -151,6 +151,7 @@ fn native_reservoir_refuses_malformed_states_and_ambiguous_wall_topology() {
         text.replace("300 3\nreservoir_cell", "300 109\nreservoir_cell"),
         text.replace("reservoir_cell 7 0 1", "reservoir_cell 5 0 1"),
         text.replace("solids 0", "solids 1\nsolid 6 1 1"),
+        text.replace("grid 12 3 3", "grid 12 1 3"),
     ];
     // Out-of-grid, wrong face, characteristic collar, and transverse corner.
     for cell in ["12 0 1", "6 1 1", "1 0 1", "6 0 0"] {

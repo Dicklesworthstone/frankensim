@@ -13,13 +13,20 @@ fn input() -> String {
         .replace("boundary 3\nhold 128 -0.1\nhold 256 0.1\nhold 2048 0", "boundary 2\nhold 128 -0.1\nhold 256 0")
 }
 
+fn side_aperture_input() -> String {
+    include_str!("../../examples/resolved-dg-side-aperture.performance")
+        .replace("output 2048 20", "output 256 0.1")
+        .replace("boundary pressure 3\nhold 128 20\nhold 256 -20\nhold 2048 0",
+            "boundary pressure 2\nhold 128 20\nhold 256 0")
+}
+
 #[test]
 fn resolved_cli_keeps_original_pressure_decimation_and_physical_source_receipts() {
     let dir = directory();
     // Temperature changes the ORIGINAL lattice/DG clock at the same mesh and
     // microphone timing. No field dimensions, source duration or output gain
     // change in the second description.
-    for (case, text) in [input(), input().replace("gas dry-air 300 100000", "gas dry-air 310 100000")]
+    for (case, text) in [input(), input().replace("gas dry-air 300 100000", "gas dry-air 310 100000"), side_aperture_input()]
         .into_iter().enumerate()
     {
         let source = ResolvedDgFilePerformance::from_bytes(text.as_bytes(), 37,
@@ -50,6 +57,12 @@ fn resolved_cli_keeps_original_pressure_decimation_and_physical_source_receipts(
                 assert!(metadata.contains(token), "{token}: {metadata}");
             }
             assert!(metadata.contains(&format!("\"nsf_dt_s\":{dt:e}")));
+            if case == 2 {
+                assert!(metadata.contains("\"reservoir_aperture\":{\"kind\":\"prescribed-exterior-ghost-state\""));
+                assert!(metadata.contains("\"cell_count\":1"));
+                assert!(metadata.contains("\"mass_account\":{\"field\":\"reservoir_mass_out_kg\",\"unit\":\"kg\",\"positive\":\"out of resolved fluid\"}"));
+                assert!(metadata.contains("\"energy_account\":{\"field\":\"flow.open_energy_j\",\"unit\":\"J\",\"positive\":\"into resolved fluid\"}"));
+            }
         }
     }
 }

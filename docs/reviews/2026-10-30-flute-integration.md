@@ -151,3 +151,25 @@ Published implementation checkpoints are
 contains no fresh graded listening result or recording comparison.
 
 The late concurrent boundary commits implement the separate aperture topology described earlier; these three consumer repairs and their completed native checks do not establish its numerical qualification. The dominant source limitations remain those documented above and in realism beads `.135`, `.138`, `.188`, `.207`, and `.320`–`.323`: playing-Re excitation, complete embouchure/bore geometry, correct closed-loop regimes, and measured listener output. Plan M3.2–M3.4 and §6.8 require that physical composition. Existing forced-Bickley register failures and the Nolle/Price whistle failures recorded in `.320` comments 7303/7325 still preclude treating a default-model switch as the completed repair.
+
+## Reservoir owner checkpoint and complementary composition coverage
+
+Commit [`9296d4fe2`](https://github.com/Dicklesworthstone/frankensim/commit/9296d4fe28e814b0175103e2cee421a632972153) added the localized transverse `NsfReservoirAperture` owner selected by this audit. It retains the original gas/material law, population streaming, pressure force and finite-volume energy flux. Sparse sorted tile ownership keeps aperture-edge streaming and independently counted mass consistent; cold admission, reversible trials and cancellation retain the same physical owner. Mixed-boundary internal/kinetic exchange is reported as unresolved instead of being relabeled viscous heating.
+
+The subsequent selected-patch/native implementation cited above also connected this reservoir to the native reader and both NSF/DG frame constructors. The final reconciliation preserves that implementation and its source grammar: the reservoir declaration precedes `initial`, the count follows the SI state, and tiles use `reservoir_cell`. It preserves both native examples, selected-patch feedback, separate reservoir mass, the existing dry-air/conservation tests and the parallel review supplement.
+
+Complementary regressions in `crates/fs-couple/src/nsf_dg/performance/file/tests/aperture.rs` add three distinct composition checks:
+
+- Exact replay through the original fluid trial and original DG load, including reservoir mass and energy, with a warmer reservoir and cancellation/retry.
+- Retained thermochemical species, NASA9 caloric and transport sources after the borrowed inputs are dropped; changing only calorics at fixed geometry, mechanical clock and reservoir state must change solved pressure.
+- A finite upstream duct together with the side reservoir; upstream termination must affect the main bore, all three physical openings retain their accounts, and cancellation or an unbracketed pressure rise must preserve the fluid and both ducts before retry.
+
+Native reservoir provenance now explicitly names the mass/energy account fields, SI units and opposite positive directions. The native CLI regression also consumes the existing side-aperture example through the same original pressure/decimation comparison and checks those receipt fields. The current native grammar, characteristic patch and independently maintained observer integrations are preserved.
+
+### Verification boundary for this checkpoint
+
+The pinned compiler and genuine production dependencies passed **23 focused native runtime tests** on the reservoir-owner checkpoint: six new aperture tests, fourteen existing open-boundary tests and three existing characteristic-trial tests. These were rebuilt and passed after rebuilding the current material dependency. The aperture tests compile the exact original NSF module tree; they do not substitute numerical models or stubs.
+
+The patched full `fs-couple` production library and actual `music_render` binary source also passed metadata compilation on the pre-reconciliation verification tree. Those checks establish type integration for that tree; they do not cover the later selected-characteristic-patch implementation now preserved on main. The broad local unit-test check did not complete and supplies no passing result. Its old local import/API diagnostics were already corrected on concurrent main and are not reported as current-main defects.
+
+The three complementary coupled cases and the extended native CLI case are **added but not runtime-verified**. The linked build was constrained by exhausted shared storage. The native-client suite passed 21 tests, including exact forwarding of resolved sources. These checks are not a clean Cargo/lockfile workspace rebuild, full-preset render, physical-mouth convergence study or new listening result. The published flute's source/regime problems remain open even though its physical gas observation and the resolved-source boundary topology have advanced.
