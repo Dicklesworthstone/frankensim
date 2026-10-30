@@ -5,6 +5,8 @@
 //! impulse solver are reused. Each gas keeps its own composition, source cards,
 //! caloric state, transport, pressure and acoustic properties.
 
+/// Reciprocal pressure/flow work with additional fixed acoustic domains.
+pub mod acoustic;
 /// Reciprocal circuit force/back-emf on the original shared mechanical state.
 pub mod electrical;
 /// Geometry-driven internal gas exchange on the same two-sided motion.
@@ -77,7 +79,8 @@ pub struct DoublePistonStep {
     pub velocity_m_s: [f64; 2],
     /// Independently measured change of the ONE wall's kinetic energy [J].
     pub kinetic_energy_change_j: f64,
-    /// Prescribed extra force times the common displacement [J].
+    /// Actual accepted additional-force work [J]. Acoustic candidates include
+    /// their reciprocal pressure reaction; standalone steps use prescribed force.
     pub external_force_work_j: f64,
     /// M*dv - dt*(A_primary*p_primary - A_opposing*p_opposing + F) [N s].
     pub momentum_residual_n_s: f64,
@@ -92,6 +95,26 @@ pub struct DoublePistonStep {
     /// Total gas proposals, including discarded trials: TWO per impulse trial.
     /// Each retains its own bounded caloric inversion and source resolution.
     pub material_trials: usize,
+}
+
+/// Evaluate a held affine midpoint load on the original displacement coordinate.
+/// Zero resistance preserves the original prescribed-force value bit for bit.
+pub(in crate::cavity_phs::piston) fn midpoint_force_n(
+    input: DoublePistonInput, resistance_n_s_m: f64, displacement_m: f64,
+) -> Result<f64, PistonError> {
+    if !positive(input.duration_s) || !input.external_force_n.is_finite()
+        || !resistance_n_s_m.is_finite() || resistance_n_s_m < 0.0
+        || !displacement_m.is_finite()
+    {
+        return Err(invalid("invalid affine midpoint force, resistance or displacement"));
+    }
+    if resistance_n_s_m == 0.0 { return Ok(input.external_force_n); }
+    let velocity = displacement_m / input.duration_s;
+    let force = input.external_force_n - resistance_n_s_m * velocity;
+    if !velocity.is_finite() || !force.is_finite() {
+        return Err(invalid("affine midpoint force is unrepresentable"));
+    }
+    Ok(force)
 }
 
 struct PairedTrial {
@@ -173,6 +196,13 @@ impl DoubleActingGasPiston {
         &self, volume: f64, input: DoublePistonInput, controls: DoublePistonSolve,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<impulse::Trial<PairedTrial>, PistonError> {
+        self.trial_with_midpoint_resistance(volume, input, controls, 0.0, cancelled)
+    }
+
+    fn trial_with_midpoint_resistance(
+        &self, volume: f64, input: DoublePistonInput, controls: DoublePistonSolve,
+        resistance_n_s_m: f64, cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<impulse::Trial<PairedTrial>, PistonError> {
         poll(cancelled)?;
         let opposing_volume = self.opposing_volume(volume)?;
         let opposing = self.opposing.midpoint_heat_volume(
@@ -185,15 +215,23 @@ impl DoubleActingGasPiston {
         if !positive(exterior) {
             return Err(invalid("opposing pressure load is unrepresentable"));
         }
+        let displacement = (volume - self.primary.gas().volume_m3()) / self.primary.area_m2();
         let primary_input = PistonInput {
             duration_s: input.duration_s, heat_j: input.heat_j[0],
-            exterior_pressure_pa: exterior, external_force_n: input.external_force_n,
+            exterior_pressure_pa: exterior,
+            external_force_n: midpoint_force_n(input, resistance_n_s_m, displacement)?,
         };
         let primary = self.primary.trial(volume, primary_input, controls.piston, cancelled)?;
         // dV_opposing/dV_primary=-A_opposing/A_primary. Both material tangents
         // are of the SAME discrete heat-volume update, not -gamma*p/V.
         let tangent = primary.tangent - input.duration_s * self.opposing_area_m2 * ratio
             * opposing.step().pressure_final_volume_derivative_pa_m3;
+        // d[-dt*(-R*v_mid)]/dV_primary = R/A_primary, with
+        // v_mid=(V_primary-V_initial)/(A_primary*dt). This belongs to the
+        // original impulse Jacobian; no outer pressure iteration is needed.
+        let tangent = if resistance_n_s_m == 0.0 { tangent } else {
+            tangent + resistance_n_s_m / self.primary.area_m2()
+        };
         let volume_residual = (opposing.endpoint().volume_m3() - self.opposing.volume_m3())
             + self.opposing_area_m2 * primary.displacement;
         if !positive(tangent) || !volume_residual.is_finite()
@@ -226,12 +264,27 @@ impl DoubleActingGasPiston {
         &mut self,
         input: DoublePistonInput,
         controls: DoublePistonSolve,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<DoublePistonStep, PistonError> {
+        self.step_with_midpoint_resistance(input, controls, 0.0, cancelled)
+    }
+
+    /// Internal reciprocal-load seam. The resistance is a reaction coefficient,
+    /// not automatically heat; its work remains in the native external-force
+    /// account for the composing acoustic owner to cancel.
+    pub(in crate::cavity_phs::piston) fn step_with_midpoint_resistance(
+        &mut self,
+        input: DoublePistonInput,
+        controls: DoublePistonSolve,
+        resistance_n_s_m: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<DoublePistonStep, PistonError> {
         poll(&mut cancelled)?;
         let [lo, hi] = controls.piston.volume_bracket_m3;
         if !positive(input.duration_s) || !input.heat_j.iter().all(|q| q.is_finite())
-            || !input.external_force_n.is_finite() || !positive(controls.volume_tolerance_m3)
+            || !input.external_force_n.is_finite()
+            || !resistance_n_s_m.is_finite() || resistance_n_s_m < 0.0
+            || !positive(controls.volume_tolerance_m3)
             || !positive(controls.piston.energy_tolerance_j)
             || !positive(lo) || !positive(hi) || lo >= hi
             || self.primary.gas().volume_m3() < lo || self.primary.gas().volume_m3() > hi
@@ -241,9 +294,19 @@ impl DoubleActingGasPiston {
         self.opposing_volume(lo)?;
         self.opposing_volume(hi)?;
         let solved = impulse::solve(self.primary.gas().volume_m3(), controls.piston, |volume| {
-            self.trial(volume, input, controls, &mut cancelled)
+            if resistance_n_s_m == 0.0 {
+                self.trial(volume, input, controls, &mut cancelled)
+            } else {
+                self.trial_with_midpoint_resistance(
+                    volume, input, controls, resistance_n_s_m, &mut cancelled)
+            }
         })?;
         let PairedTrial { primary, opposing, primary_input, volume_residual } = solved.value;
+        // The accepted force, not the affine intercept, supplies all original
+        // momentum, energy and port-account audits at the actual displacement.
+        let input = DoublePistonInput {
+            external_force_n: primary_input.external_force_n, ..input
+        };
         // Finish the original owner only on a private candidate. The accepted
         // pair remains untouched even if the final all-owner audit is refused.
         let opposing_midpoint = opposing.midpoint().clone();

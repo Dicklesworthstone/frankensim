@@ -8919,6 +8919,52 @@ independent paired-blade motion, exact retry after source refusal or final
 cancellation, and rejection of an unowned second inventory. Native execution
 and measured physical validation remain separate gates.
 
+## Reciprocal acoustic loads on a shared gas-driven wall
+
+`cavity_phs::piston::double_acting::acoustic` connects additional
+signed-area faces of the original translating body to independently sourced
+`DgPortLoad` owners. The finite thermodynamic chambers remain the original
+two source-backed gas inventories. The acoustic domains are distinct physical
+regions; their pressure storage is not a second copy of a chamber.
+DG pressures are perturbations. Any uncompensated mean pressure on the added
+faces belongs in the prescribed external force or a balanced reference state.
+
+For each accepted load the original mean relation is
+`p_i = H_i + Z_i * Q_i`, with `Q_i = a_i * dx/dt`. Its reciprocal reaction
+is `F = -sum(a_i*H_i) - sum(a_i*a_i*Z_i)*dx/dt`. The constant history force and
+nonnegative velocity resistance enter the original paired gas/impulse solve.
+Its exact displacement derivative includes the resistance contribution;
+neither a delayed pressure sample nor another mechanical integrator is added.
+
+Each complete DG load advances once at the accepted displacement flow.
+The existing propagator, finite branches, wall/diffusion histories, terminal
+channels and rational exterior owner retain their own dynamics and admissions.
+No acoustic exponential is rebuilt and no DG trial runs inside the nonlinear
+gas solve. This removes repeated acoustic marching by construction; no measured
+runtime-speedup claim is made.
+
+The candidate retains all original gas/wall and acoustic endpoints until
+common-clock, face-count, source, pressure, work, storage and cancellation
+gates pass. Reusing the same live load as two faces is refused. Driven exterior-mouth
+topologies remain explicitly unsupported by this face coupling. Actual native
+inlet work cancels actual mechanical reaction work; original acoustic loss and
+signed terminal exchange remain explicit. The enclosing residual includes the
+gas and single-wall kinetic account without depositing acoustic losses as
+unmodeled gas heat. Zero signed area preserves the original mechanical path
+while the corresponding acoustic history still advances on the common clock.
+
+This is a small-displacement fixed-geometry mean-port coupling. Acoustic gases
+may differ from each other and from both chambers. It does not turn valve mass
+flow into equal volume flow, introduce a moving-mesh bore, or model a
+heterogeneous through-flow junction. A rational terminal's signed work is not
+an invented storage certificate or an external microphone waveform.
+
+Three focused native regression groups cover independent caloric/acoustic
+energy and reciprocal work, reaction-dependent motion and retained terminal
+history, exact decoupled reduction, refusal/cancellation and retry/suffix
+continuation. They are authored but unexecuted in the unavailable native
+workspace; parser/formatter checks are not numerical or experimental proof.
+
 ## One finite thermal body on the moving two-gas valve
 
 `DoubleActingGasPiston::thermal_valve_candidate` composes the metering valve
