@@ -12,13 +12,13 @@
 //! every trial state; changing interval loads are validated separately.
 //!
 //! This bounded path has fixed supports, held referential nodal/body loads,
-//! optional uniform pressure on the complete closed current boundary,
+//! optional held pressure on the current exterior faces,
 //! compressible isothermal hyperelasticity and conforming P1 tetrahedra.
 //! Nonlinear midpoint has a signed energy defect: it is reported and gated,
 //! never converted into physical heat. The optional mean-expansion source path
 //! prepares an isotropic thermal reference at a held temperature per element.
-//! No evolving heat equation, plasticity, contact, moving supports, open-patch
-//! pressure, mixed incompressible formulation or continuous-in-time
+//! No evolving heat equation, plasticity, contact, moving supports,
+//! fluid feedback, mixed incompressible formulation or continuous-in-time
 //! nonintersection claim is made.
 
 /// Source-declared engineering thermal reference preparation.
@@ -37,7 +37,7 @@ use fs_material::state_point::{
 };
 use fs_qty::Density;
 use fs_solid::hyper3::prepared::PreparedHyperTetProblem;
-use fs_solid::hyper3::pressure::ClosedTetPressureSurface;
+use fs_solid::hyper3::pressure::{ClosedTetPressureSurface, TetPressure};
 use fs_solid::hyper3::{HyperTetError, HyperTetProblem, HyperelasticLawField};
 use fs_solver::{FlexiblePreconditioner, SolveReport};
 use fs_sparse::{Coo, Csr};
@@ -234,10 +234,12 @@ pub struct FiniteSolidStep {
     pub kinetic_after_j: f64,
     pub strain_before_j: f64,
     pub strain_after_j: f64,
-    /// Held referential load work plus exact held-pressure volume work.
+    /// Held referential load work plus held-pressure work along the interval.
     pub source_work_j: f64,
-    /// -p (V_after - V_before) on the complete closed boundary, or zero for
-    /// the dead-load path. Midpoint force work is not substituted for this.
+    /// Uniform pressure uses -p (V_after - V_before). Per-face pressure uses
+    /// exact work along the straight nodal-displacement segment; this is
+    /// path-dependent, and the physical curved trajectory needs time refinement.
+    /// Midpoint force work is not substituted for either expression.
     pub pressure_work_j: f64,
     /// Delta kinetic + delta strain - source work. Signed numerical defect;
     /// it is never exported as thermal energy.
@@ -277,20 +279,22 @@ impl<'a> FiniteSolidBody<'a> {
         controls: FiniteSolidInitialization,
         cx: &Cx<'_>,
     ) -> Result<Self, FiniteSolidError> {
-        Self::initialize(problem, None, 0.0, displacement_m, velocity_m_s, time_s, controls, cx)
+        Self::initialize(problem, None, TetPressure::Uniform(0.0), displacement_m, velocity_m_s, time_s, controls, cx)
     }
 
-    /// Bind a prepared complete exterior and include pressure in the native
-    /// initial mass solve. Positive pressure is inward on the CURRENT area.
+    /// Bind a prepared exterior and include pressure in the native initial
+    /// mass solve. Positive pressure is inward on the CURRENT area. A scalar
+    /// loads the entire boundary; [`TetPressure::PerFace`] supplies one value
+    /// per canonical face, with zero selecting unloaded parts of the exterior.
     ///
     /// The surface must match the original coordinates and connectivity
     /// exactly. Every later interval must explicitly supply its held pressure
     /// through `step_candidate_with_pressure`; it cannot silently disappear.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_pressure(
+    pub fn new_with_pressure<'p>(
         problem: HyperTetProblem<'a, FiniteSolidMaterial>,
         surface: Arc<ClosedTetPressureSurface>,
-        pressure_pa: f64,
+        pressure_pa: impl Into<TetPressure<'p>>,
         displacement_m: &[[f64; 3]],
         velocity_m_s: &[[f64; 3]],
         time_s: f64,
@@ -298,7 +302,7 @@ impl<'a> FiniteSolidBody<'a> {
         cx: &Cx<'_>,
     ) -> Result<Self, FiniteSolidError> {
         Self::initialize(
-            problem, Some(surface), pressure_pa, displacement_m, velocity_m_s,
+            problem, Some(surface), pressure_pa.into(), displacement_m, velocity_m_s,
             time_s, controls, cx,
         )
     }
@@ -307,7 +311,7 @@ impl<'a> FiniteSolidBody<'a> {
     fn initialize(
         problem: HyperTetProblem<'a, FiniteSolidMaterial>,
         pressure_surface: Option<Arc<ClosedTetPressureSurface>>,
-        pressure_pa: f64,
+        pressure: TetPressure<'_>,
         displacement_m: &[[f64; 3]],
         velocity_m_s: &[[f64; 3]],
         time_s: f64,
@@ -315,9 +319,10 @@ impl<'a> FiniteSolidBody<'a> {
         cx: &Cx<'_>,
     ) -> Result<Self, FiniteSolidError> {
         checkpoint(cx)?;
-        if !pressure_pa.is_finite() {
-            return Err(FiniteSolidError::Invalid("finite held pressure required"));
-        }
+        let unloaded = match &pressure_surface {
+            Some(surface) => surface.validate_pressure(pressure, cx)?,
+            None => true,
+        };
         if pressure_surface.as_ref().is_some_and(|surface|
             !surface.matches_reference(problem.nodes_m, problem.tetrahedra)
         ) {
@@ -391,8 +396,8 @@ impl<'a> FiniteSolidBody<'a> {
         let free_mass = Arc::new(free_mass);
         // Skipping zero-pressure arithmetic preserves the original native
         // state and replay exactly, including the consistent initialization.
-        let pressure = pressure_surface.as_deref().filter(|_| pressure_pa != 0.0)
-            .map(|surface| (surface, pressure_pa));
+        let pressure = pressure_surface.as_deref().filter(|_| !unloaded)
+            .map(|surface| (surface, pressure));
         let operator = DynamicOperator::new(&prepared, &free_mass, &free, &fixed, pressure, cx);
         let preconditioner = MassDiagonal { mass: &free_mass };
         let result = second_order_acceleration(
@@ -465,19 +470,21 @@ impl<'a> FiniteSolidBody<'a> {
         self.step_with_loads(duration_s, nodal_forces_n, body_force_n_m3, None, controls, cx)
     }
 
-    /// Advance with a finite signed uniform pressure held over this interval.
+    /// Advance with signed pressure held on each material face for this interval.
     ///
-    /// Pressure follows the current closed boundary in both the residual and
-    /// its analytic tangent. The receipt includes exact endpoint-volume work;
-    /// the difference from midpoint work remains a signed integration defect.
+    /// Pressure follows current face areas in both the residual and analytic
+    /// tangent. Per-face fields retain their generally nonsymmetric tangent
+    /// through the original Newton/FGMRES solve. The receipt includes exact
+    /// endpoint-volume work for uniform pressure or straight-segment work for
+    /// a face field; neither silently converts integration defects into heat.
     /// Reference mass, stationary supports and the native integrator are unchanged.
     #[allow(clippy::too_many_arguments)]
-    pub fn step_candidate_with_pressure(
+    pub fn step_candidate_with_pressure<'p>(
         &self,
         duration_s: f64,
         nodal_forces_n: &[(usize, f64)],
         body_force_n_m3: [f64; 3],
-        pressure_pa: f64,
+        pressure_pa: impl Into<TetPressure<'p>>,
         controls: FiniteSolidControls,
         cx: &Cx<'_>,
     ) -> Result<(Self, FiniteSolidStep), FiniteSolidError> {
@@ -485,10 +492,9 @@ impl<'a> FiniteSolidBody<'a> {
         let surface = self.pressure_surface.as_deref().ok_or(FiniteSolidError::Invalid(
             "pressure must be bound during initial acceleration preparation",
         ))?;
-        if !pressure_pa.is_finite() {
-            return Err(FiniteSolidError::Invalid("finite held pressure required"));
-        }
-        let pressure = (pressure_pa != 0.0).then_some((surface, pressure_pa));
+        let pressure = pressure_pa.into();
+        let unloaded = surface.validate_pressure(pressure, cx)?;
+        let pressure = (!unloaded).then_some((surface, pressure));
         self.step_with_loads(duration_s, nodal_forces_n, body_force_n_m3, pressure, controls, cx)
     }
 
@@ -498,7 +504,7 @@ impl<'a> FiniteSolidBody<'a> {
         duration_s: f64,
         nodal_forces_n: &[(usize, f64)],
         body_force_n_m3: [f64; 3],
-        pressure: Option<(&ClosedTetPressureSurface, f64)>,
+        pressure: Option<(&ClosedTetPressureSurface, TetPressure<'_>)>,
         controls: FiniteSolidControls,
         cx: &Cx<'_>,
     ) -> Result<(Self, FiniteSolidStep), FiniteSolidError> {
@@ -605,7 +611,7 @@ fn inflate(reduced: &[f64], free: &[usize], fixed: &[f64]) -> Vec<f64> {
 fn subtract_pressure_force(
     internal: &mut [f64],
     displacement: &[f64],
-    pressure: Option<(&ClosedTetPressureSurface, f64)>,
+    pressure: Option<(&ClosedTetPressureSurface, TetPressure<'_>)>,
     cx: &Cx<'_>,
 ) -> Result<(), HyperTetError> {
     if let Some((surface, pressure_pa)) = pressure {
@@ -659,7 +665,7 @@ struct DynamicOperator<'a, 'b, 'cx> {
     mass: &'b Csr,
     free: &'b [usize],
     fixed: &'b [f64],
-    pressure: Option<(&'b ClosedTetPressureSurface, f64)>,
+    pressure: Option<(&'b ClosedTetPressureSurface, TetPressure<'b>)>,
     cx: &'b Cx<'cx>,
     tangent: RefCell<Option<(Vec<f64>, Csr)>>,
     // Void native operator callbacks communicate a persistent error here.
@@ -673,7 +679,7 @@ impl<'a, 'b, 'cx> DynamicOperator<'a, 'b, 'cx> {
         mass: &'b Csr,
         free: &'b [usize],
         fixed: &'b [f64],
-        pressure: Option<(&'b ClosedTetPressureSurface, f64)>,
+        pressure: Option<(&'b ClosedTetPressureSurface, TetPressure<'b>)>,
         cx: &'b Cx<'cx>,
     ) -> Self {
         Self {

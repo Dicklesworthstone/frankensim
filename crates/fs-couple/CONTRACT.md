@@ -1,5 +1,25 @@
 # CONTRACT: fs-couple
 
+## Material-bound finite bodies under spatial follower pressure
+
+`finite_solid::FiniteSolidBody` accepts the original pressure owner's
+`TetPressure::PerFace` through its existing pressure constructor and candidate
+step. One held differential pressure per canonical exterior face permits
+localized patches and separate pressure regions. The original material laws,
+reference mass, supports, initialization and implicit-midpoint time owner are
+unchanged; the Newton/FGMRES operator retains the generally nonsymmetric pressure
+tangent without symmetrization. Every interval still requires an explicit load.
+
+Uniform pressure retains endpoint-volume work. Face fields use the pressure
+owner's exact straight-displacement-segment work, including rigid translation
+of loaded patches. This is a path-dependent approximation to a curved dynamic
+trajectory and requires temporal refinement. Numerical integration defects
+remain signed energy-admission checks, never physical heat. Invalid pressure
+coverage, material/geometry refusal, failed energy admission and cancellation
+preserve the accepted body. G1 material-backed axial-load tests use independent
+acceleration/midpoint/work formulas for two material cards; G3 checks uniform
+and zero-load compatibility; G4 checks failure and deterministic retry.
+
 
 ## Source-owned moving-sphere collision and support
 
