@@ -1,4 +1,7 @@
 //! One material store, one reciprocal heat transfer, and continuing acoustic state.
+#[path = "thermal/shared.rs"]
+mod shared;
+
 use super::*;
 use fs_couple::cavity_phs::piston::thermal::{HeatExchangeSolve, layers::MaterialConductionLayers};
 use fs_couple::dg_port::finite_gas::transport::assembly::reactive::thermal::{
