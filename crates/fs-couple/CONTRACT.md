@@ -15071,3 +15071,30 @@ and saturating references, contact/emissivity substitutions and continuation, th
 check field applicability, source-domain exits and cancellation rollback. New
 modules pass formatting and whitespace checks; native execution remains unverified
 after the unchanged runtime dependency exceeded the authoring worker's memory limit.
+
+### Generated stationary gas on every authored DG wind source
+
+The shared `DgSourceInput` admits `gas_steady CELLS INJECTIONS mole COUNT ID...`
+after a `dg_bore` header. The existing inlet, cell, injection and solver records
+follow the original cylinder/cone geometry. The same specific input builder now
+serves reed and DG sources; it derives cell volumes and lateral wall areas from
+the authored bore and invokes the original `SteadyAxialGas` thermal/species
+solver. No transport kernel, caloric law or acoustic integrator is duplicated.
+The accepted solution's exact `AxialGasField` drives native DG propagation,
+viscothermal memory and source inlet feedback. Computed exterior reaction and
+microphone observation retain their independently declared common-pressure gas.
+
+Thermal cells and solve controls remain separate from DG mesh/order/wall
+quadrature. `DgSourceInput::steady_gas()` exposes the original problem, controls
+and solution before preparation. Source, phase, balance, mean-Mach and aggregate
+work limits remain active; the existing `CancelGate` reaches geometry and the
+original thermal solve. Side openings/chimneys and finite terminal passages or
+closures refuse because their steady mass flow and thermal volumes are absent
+from this axial model. The field remains stationary throughout playback;
+transient gas evolution, condensation and mean-flow acoustics are not added.
+
+Focused native tests compare generated and prescribed fields/records/DG
+operators, independent cell geometry, actual flue pressure and callback
+partitioning, thermal/species interventions, malformed/source/work refusals and
+late thermal cancellation. The bundled flue example reaches computed baffled
+radiation, the original microphone and explicit CLI decimation/PCM output.

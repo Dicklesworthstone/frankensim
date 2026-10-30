@@ -27,6 +27,8 @@ use fs_material::gas_field::{AxialGasField, MAX_FIELD_STATIONS};
 use fs_material::gas_species::input::{
     GasInputError, GasRecord, ThermochemicalSources, read_gas_record,
 };
+use crate::gas_field_input::{SteadyGasInput, SteadyGasInputError};
+pub use crate::gas_field_input::SteadyGasPerformance;
 use std::str::SplitAsciiWhitespace;
 
 /// Shared source-backed solid wall declaration for every authored DG wind path.
@@ -37,6 +39,7 @@ pub mod wall;
 pub enum DgSourceError {
     Input { line: usize, what: &'static str },
     Gas { line: usize, source: fs_material::MaterialError },
+    SteadyGas { line: usize, source: fs_material::gas_field::steady::SteadyGasError },
     Material { line: usize, source: fs_material::state_point::MaterialStatePointError },
     Physics(AcousticRealizeError),
     Radiation { line: usize, source: MimoRadiationInputError },
@@ -46,6 +49,7 @@ impl core::fmt::Display for DgSourceError {
         match self {
             Self::Input { line, what } => write!(f, "DG source line {line}: {what}"),
             Self::Gas { line, source } => write!(f, "DG material line {line}: {source}"),
+            Self::SteadyGas { line, source } => write!(f, "DG steady gas line {line}: {source}"),
             Self::Material { line, source } => write!(f, "DG solid material line {line}: {source}"),
             Self::Physics(source) => write!(f, "DG source physics: {source}"),
             Self::Radiation { line, source } => write!(f, "DG radiation line {line}: {source}"),
@@ -53,6 +57,16 @@ impl core::fmt::Display for DgSourceError {
     }
 }
 impl std::error::Error for DgSourceError {}
+impl From<SteadyGasInputError> for DgSourceError {
+    fn from(error: SteadyGasInputError) -> Self {
+        match error {
+            SteadyGasInputError::Input { line, what } => Self::Input { line, what },
+            SteadyGasInputError::Gas { line, source } => Self::Gas { line, source },
+            SteadyGasInputError::Geometry(source) => Self::Physics(AcousticRealizeError::Duct(source)),
+            SteadyGasInputError::SteadyGas { line, source } => Self::SteadyGas { line, source },
+        }
+    }
+}
 fn bad(line: usize, what: &'static str) -> DgSourceError {
     DgSourceError::Input { line, what }
 }
@@ -109,6 +123,7 @@ impl<'a, 'b> Row<'a, 'b> {
 pub struct DgSourceInput {
     geometry: Duct,
     field: Option<AxialGasField>,
+    steady_gas: Option<SteadyGasPerformance>,
     outlet: DgBoundary,
     radiation: Option<(ComputedBaffledInput, GasRecord)>,
     side_openings: Vec<(DgSidePort, CircularOpening)>,
@@ -159,6 +174,12 @@ impl DgSourceInput {
     /// Its station rows follow the geometry: gas_station X T FRACTION...
     /// The already declared ambient supplies common static pressure. Every
     /// local acoustic/slit coefficient comes from the bound inlet/field.
+    /// Alternatively append gas_steady CELLS INJECTIONS mole SPECIES_COUNT ID...
+    /// and place the shared gas_inlet/gas_cell/gas_injection/gas_solve records
+    /// after geometry. The original stationary heat/species owner generates
+    /// the SAME field; DG mesh/order/wall quadrature remain its acoustic axes.
+    /// This route requires an unbranched bore without finite terminal passages;
+    /// those mean-flow/thermal volumes are not part of the axial generator.
     ///
     /// OUTLET may also be baffled, followed after geometry and any gas stations
     /// by dg_radiation computed-baffled plus the original fourteen bake fields,
@@ -247,16 +268,22 @@ impl DgSourceInput {
         {
             return Err(bad(line, "unresolved DG mesh, band, wall rule or tolerance").into());
         }
-        let columns = if row.fields.clone().next() == Some("gas_field") {
+        let mut steady_input = None;
+        let columns = if matches!(row.fields.clone().next(), Some("gas_field" | "gas_steady")) {
             if wall_quadrature.is_none() {
                 return Err(bad(line, "a gas field needs explicit dg_bore wall quadrature").into());
             }
-            row.word()?;
-            let stations = row.count(MAX_FIELD_STATIONS)?;
-            if stations < 2 { return Err(bad(line, "a gas field needs at least two stations").into()); }
-            let columns = PrimitiveGasColumns::read(row.fields, sources, stations)
-                .map_err(|error| gas_error(line, error))?;
-            Some((stations, columns))
+            if row.word()? == "gas_steady" {
+                steady_input = Some(SteadyGasInput::header(line, row.fields, sources)
+                    .map_err(DgSourceError::from)?);
+                None
+            } else {
+                let stations = row.count(MAX_FIELD_STATIONS)?;
+                if stations < 2 { return Err(bad(line, "a gas field needs at least two stations").into()); }
+                let columns = PrimitiveGasColumns::read(row.fields, sources, stations)
+                    .map_err(|error| gas_error(line, error))?;
+                Some((stations, columns))
+            }
         } else { None };
         row.finish()?;
         if kind == "dg_bore" {
@@ -283,7 +310,7 @@ impl DgSourceInput {
             }
         }
         let mut source = Self {
-            geometry: Duct { segments }, field: None, outlet, radiation: None,
+            geometry: Duct { segments }, field: None, steady_gas: None, outlet, radiation: None,
             side_openings: Vec::new(), chimneys: Vec::new(), mesh, poles, band_hz,
             terminal_channels: Vec::new(), maximum_terminal_transverse_cells: 0,
             maximum_relative_error, exponential_tolerance, maximum_dofs, wall_quadrature,
@@ -323,10 +350,21 @@ impl DgSourceInput {
             }
             source.field = Some(field);
         }
+        if let Some(input) = steady_input {
+            let generated = input.read(next_row, ambient.pressure, &source.geometry.segments,
+                records, &mut || gate.is_requested())
+                .map_err(|error| error.into_error(|source| DgSourceError::from(source).into()))?;
+            source.field = Some(generated.solution().field().clone());
+            source.steady_gas = Some(generated);
+        }
         if matches!(outlet, DgBoundary::Port(_)) {
             checkpoint(gate, line)?;
             let (mut radiation_line, mut fields) = next_row()?;
             if fields.clone().next() == Some("dg_side_openings") {
+                if source.steady_gas.is_some() {
+                    return Err(bad(radiation_line,
+                        "gas_steady needs an unbranched DG bore; side-branch mean flow is not specified").into());
+                }
                 let mut row = Row { line: radiation_line, fields: &mut fields };
                 row.word()?;
                 let count = row.count(MAX_DG_SIDE_PORTS)?;
@@ -381,6 +419,10 @@ impl DgSourceInput {
                 (radiation_line, fields) = next_row()?;
             }
             if fields.clone().next() == Some("dg_terminal_channels") {
+                if source.steady_gas.is_some() {
+                    return Err(bad(radiation_line,
+                        "gas_steady does not include finite DG terminal passages or closures").into());
+                }
                 let mut row = Row { line: radiation_line, fields: &mut fields };
                 row.word()?;
                 let count = row.count(source.side_openings.len() + 1)?;
@@ -569,6 +611,12 @@ impl DgSourceInput {
     /// Original exterior source, required by composition-sensitive observers.
     pub fn exterior_gas_record(&self) -> Option<&GasRecord> {
         self.radiation.as_ref().map(|(_, record)| record)
+    }
+
+    /// Original stationary problem and solution used to bind this bore.
+    /// Prescribed fields and homogeneous sources return None.
+    pub fn steady_gas(&self) -> Option<&SteadyGasPerformance> {
+        self.steady_gas.as_ref()
     }
 
     fn closed_chimney(&self, port: PortId) -> bool {

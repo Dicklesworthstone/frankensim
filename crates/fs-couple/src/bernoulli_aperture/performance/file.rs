@@ -78,6 +78,8 @@ pub enum PlateValveInputError {
         /// Original material/phase/composition refusal.
         source: fs_material::MaterialError,
     },
+    /// Original stationary heat/species field refusal.
+    SteadyGas { line: usize, source: fs_material::gas_field::steady::SteadyGasError },
     /// Caller-supplied normalized material artifact could not be loaded.
     MaterialSource { /// One-based declaration line.
         line: usize, /// Original source refusal.
@@ -102,6 +104,7 @@ impl core::fmt::Display for PlateValveInputError {
         match self {
             Self::Input { line, what } => write!(f,"plate-valve input line {line}: {what}"),
             Self::Gas { line, source } => write!(f,"plate-valve gas line {line}: {source}"),
+            Self::SteadyGas { line, source } => write!(f,"plate-valve steady gas line {line}: {source}"),
             Self::MaterialSource { line, source } => write!(f,"plate-valve material source line {line}: {source}"),
             Self::RadiationSource { line, source } => write!(f,"plate-valve radiation source line {line}: {source}"),
             Self::Material { line, source } => write!(f,"plate-valve material line {line}: {source}"),
@@ -115,6 +118,7 @@ impl std::error::Error for PlateValveInputError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Gas { source, .. } => Some(source),
+            Self::SteadyGas { source, .. } => Some(source),
             Self::Material { source, .. } => Some(source),
             Self::RadiationSource { source, .. } => Some(source),
             _ => None,

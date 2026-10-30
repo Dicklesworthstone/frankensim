@@ -69,6 +69,7 @@ pub mod finite_solid;
 pub mod frame_vibration;
 pub mod flue_loop;
 pub mod gesture_path;
+mod gas_field_input;
 pub mod glottis;
 pub mod iqn_ils;
 /// Declared gas chemistry, finite atmospheric heat and native moving liquid.

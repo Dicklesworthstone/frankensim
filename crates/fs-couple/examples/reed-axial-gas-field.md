@@ -261,3 +261,45 @@ retain their exact formulas. Refine profile `STEPS`, thermal cells and
 `gas_steady continuous STEPS_PER_SPAN` separately: they control geometry,
 stationary transport and acoustic field integration, respectively. No geometric
 error enclosure, condensation law or additional material data is implied.
+
+## Generated fields on the shared DG wind path
+
+Moving plate valves, material-modal valves, flues and resolved-flow sources all
+use the same `dg_bore` reader. Its header can select the original steady
+generator instead of supplying `gas_station` values:
+
+```text
+dg_bore SEGMENTS OUTLET K P POLES FMIN FMAX WALL_ERROR EXP_ERROR MAX_DOFS Q gas_steady CELLS INJECTIONS mole SPECIES_COUNT ID...
+dg_segment cylinder RADIUS_M LENGTH_M
+gas_inlet MASS_FLOW_KG_S T_K FRACTION...
+gas_cell END_M WALL_CONDUCTANCE_W_K WALL_T_K INITIAL_T_K
+gas_injection CELL MASS_FLOW_KG_S T_K FRACTION...
+gas_solve MIN_T MAX_T H_TOL MAX_ITER DT MAX_RELAX MAX_SUBSTEPS P_TOL E_TOL MAX_MACH
+```
+
+Supply exactly `SEGMENTS` cylinder/cone geometry rows, `CELLS` thermal rows and
+`INJECTIONS` injection rows. Zero injections is allowed. The geometry determines
+each thermal volume and lateral area, including cells crossing segment joints.
+The source model, complete field and phase checks are the same as the reed
+generator. DG mesh elements `K`, polynomial order `P` and spatial wall quadrature
+`Q` provide the acoustic refinement axes; there is no separate continuous or
+midpoint selector in this header. Thermal cells and steady-solve tolerances
+remain independent refinement axes.
+
+[flue-dg-steady-gas.performance](flue-dg-steady-gas.performance) supplies a
+heated N2/CO2 inlet, wall cooling and downstream nitrogen injection. Its exact
+generated field drives the original DG wave and viscothermal memories and the
+original flue source. Its separately declared room mixture drives both computed
+baffled radiation and microphone propagation. Use the same source-pack loading
+command above with this performance path, add `--decimate` for its declared
+96 kHz physical clock, and select a new output filename.
+
+`DgSourceInput::steady_gas()` exposes the original problem, controls and accepted
+solution before preparation. The prepared DG duct retains that exact field;
+changing a heat or species input changes physical propagation, not a pressure
+postprocessing filter. Missing source packs, nonconvergence and cancellation
+return their original failures. Generated fields require `dg_bore` with explicit
+wall quadrature. Side openings/chimneys and finite terminal channels or closures
+are refused because their steady flow and thermal volumes are not described by
+this axial generator. Prescribed `gas_field` sources retain their existing
+branch support. The generated field remains stationary during playback.
