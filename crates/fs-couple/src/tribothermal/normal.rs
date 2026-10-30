@@ -515,6 +515,34 @@ impl<'a, M: NormalModulus> CaloricNormalContact<'a, M> {
         resolve: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<NormalThermalCandidate<'a, 't, S, M>, NormalThermalError<E>> {
+        self.step_candidate_with_patch(
+            thermal,
+            target_s,
+            indentation_m,
+            controls,
+            guess_j,
+            |state, _, _| resolve(state),
+            cancelled,
+        )
+    }
+
+    /// Compose another physical channel inside the SAME thermal endpoint.
+    /// The original normal owner supplies its already evaluated patch and work.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn step_candidate_with_patch<'t, S, E>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        indentation_m: f64,
+        controls: NormalThermalSolve,
+        guess_j: &[f64],
+        resolve: impl Fn(
+            &DepositionSimulation<'t>,
+            &PointNormalPatchReceipt,
+            &NormalContactWork,
+        ) -> Result<StepCoefficients<S>, E>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<NormalThermalCandidate<'a, 't, S, M>, NormalThermalError<E>> {
         let cancel = RefCell::new(cancelled);
         let poll = || {
             if (*cancel.borrow_mut())() {
@@ -709,7 +737,7 @@ impl<'a, M: NormalModulus> CaloricNormalContact<'a, M> {
                         mut sources_w,
                         conductances_w_k,
                         payload,
-                    } = resolve(state).map_err(NormalThermalError::Source)?;
+                    } = resolve(state, &endpoint, &work).map_err(NormalThermalError::Source)?;
                     let external_heat_j = finite(
                         dt * state.external_step_power_w(&sources_w, &conductances_w_k, poll)?,
                     )?;
@@ -920,3 +948,6 @@ pub mod material;
 
 /// Two-body inertial normal motion with the same reciprocal finite thermal solve.
 pub mod dynamics;
+
+/// Evolving Hertz load/area, source directional sliding and one finite heat solve.
+pub mod directional;

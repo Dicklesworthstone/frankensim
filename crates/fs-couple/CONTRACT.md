@@ -10150,6 +10150,35 @@ The constitutive model supplies the reduced modulus and its two-temperature grad
 Geometry/curvature and declared damping remain fixed over the segment. This first-order composition prescribes normal motion; it does not implement flight/impact event localization, thermal expansion, phase change, moving curvature, simultaneous tangential/body motion or complete Euler thermal closure. Seven focused native G1/G3 tests cover analytic reciprocal cooling, loaded heating, integrated damping on compression/release, circular degeneration and tiny increments, first-order refinement, capacity refusal and transactional failure/replay. Sources are authored references, not measured calibration.
 
 
+### Evolving normal contact with directional friction and finite heat
+
+`tribothermal::normal::directional::NormalDirectionalContact` joins the original
+Hertz/Hunt--Crossley normal owner to the source-owned associated Coulomb ellipse
+inside the same finite-enthalpy solve. Each thermal trial uses the normal
+owner's actual endpoint load and circular or elliptic patch area. Their mean
+pressure, the two original surface temperatures, declared mean temperature,
+prescribed sliding speed and unsigned path refresh the same selected friction
+claims. Normal reversible heat/storage and physical frictional dissipation
+remain separate.
+
+The original normal callback supplies its already evaluated patch and work;
+there is no second normal or thermal solver. Actual traction--slip work is
+partitioned explicitly between the two original caloric cells and a named
+outside destination. The outer account excludes that internal friction-heat
+exchange from external supply and independently balances normal internal
+energy, finite heat, normal/tangential mechanical work and exported work.
+Normal, friction, path and caloric candidates publish together; source-domain,
+work-budget or cancellation failures leave all accepted owners unchanged.
+
+Indentation and actual tangent displacement are prescribed. Tangential load
+and pressure use the endpoint normal patch, so changing load/material response
+requires time refinement and has first-order temporal accuracy. Curvature and
+the tangent/material frame stay fixed. This does not locate contact/separation
+events or solve simultaneous normal/tangential inertia, rotation or moving
+footprints. Five focused G1/G3 groups exercise the held-patch limit, actual
+Hertz area/pressure feedback, thermal/normal reciprocity, continuous-work
+refinement, rotated path continuation and transactional refusal.
+
 ### Original material sources in reciprocal normal contact
 
 `tribothermal::normal::material::MaterialNormalModulus` binds the original `ThermalHertzPair` to `CaloricNormalContact`. Every thermal iterate re-queries each solid at its own temperature and uses the original nonlinear reduced modulus, gradient and Hessian in native normal response and reversible heat. Both ordered caloric charts must share the exact original material cards, external query context and density claims; the normal owner then retains those exact caloric objects. The reference normal request must match the native reduced modulus and limiting yield strength. No representative bulk temperature, reset of normal storage, coefficient-work heat credit or changed reference mass is introduced.

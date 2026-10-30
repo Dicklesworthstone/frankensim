@@ -11,6 +11,9 @@ use fs_tribo::{HeatPartition, InputAuthority, InterfaceMedium, InterfaceSystemRe
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 
+#[path = "normal/directional.rs"]
+mod directional;
+
 const CELLS: [CellId; 2] = [CellId(30), CellId(10)];
 
 fn near(a: f64, b: f64) {
