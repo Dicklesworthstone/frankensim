@@ -43,7 +43,7 @@ pub use fs_material::plane_stress_viscosity::PlaneStressViscosity;
 /// Immutable source-bound elastic data and physical striker geometry for kit builders.
 pub mod materials;
 
-/// Baked exterior modal loading of drum heads' non-volume motion.
+/// Baked exterior modal loading of drum heads' motion beyond their compact volume model.
 pub mod radiation;
 
 /// Air loss laws read from the gas record: oscillating-cylinder drag and the
@@ -588,13 +588,17 @@ pub struct Body {
     pub area: f64,
     /// Air mass loading the volume motion (one side: 8 rho a^3 / 3 for a baffled piston) [kg].
     pub air_mass: f64,
-    /// Exterior radiation resistance and air mass of non-volume head shapes.
+    /// Exterior air mass, radiation resistance and viscous layer of the head shapes
+    /// it retains: the table's m >= 1 set, or every resolved shape once the head's
+    /// own loss is modelled (the volume shapes then less their compact share).
     head_radiation: Option<Box<radiation::ModalAirLoad>>,
     radiated_j: f64,
     /// The film's generalized-Maxwell law on the bending operator (`film`), if attached.
     film: Option<Box<film::FilmField>>,
     /// Whether `stiff` also holds support springs (it is then not the bending operator alone).
     support_springs: bool,
+    /// Whether `s0`/`s1` hold the legacy fitted T60 surface loss, which lumps every loss path.
+    surface_t60: bool,
 }
 
 /// C = G'G is the assembled curvature-rate damping matrix. Retaining G lets
@@ -965,7 +969,7 @@ impl Body {
             name: name.into(), h, n, xy, rest_z, grid_index, mass, s0: s0v, s1, lap, stiff, viscosity, modal: None, tension: s.tension, berger, vk,
             w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: true, area, air_mass: 0.0, head_radiation: None, radiated_j: 0.0,
-            film: None, support_springs: s.support.is_some(),
+            film: None, support_springs: s.support.is_some(), surface_t60: s0 > 0.0 || s1 > 0.0,
         })
     }
 
@@ -986,7 +990,7 @@ impl Body {
             tension: tension / h, berger: 0.0, vk: None, // tension/h: the chain energy T/2 sum (dw)^2/h
             w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: false, area: 0.0, air_mass: 0.0, head_radiation: None, radiated_j: 0.0,
-            film: None, support_springs: false,
+            film: None, support_springs: false, surface_t60: 6.907755 / t60 > 0.0,
         }
     }
 
@@ -1005,6 +1009,7 @@ impl Body {
         }
         let mut b = Body::string(name, n, h, mass_per_m, tension, f64::INFINITY, x0, y);
         b.s0 = vec![0.0; n];
+        b.surface_t60 = false;
         // stiff = (B/h^3) lap lap, lap the chain's (2, -1) stencil with zero ghosts
         let lrows: Vec<BTreeMap<usize, f64>> = (0..n).map(|a| {
             let mut r = BTreeMap::new();
@@ -1061,15 +1066,17 @@ impl Body {
             tension: 0.0, berger: 0.0, vk: None,
             w: vec![0.0], wp: vec![0.0], wn: vec![0.0], f: vec![0.0], bias: vec![0.0], tmp: vec![0.0], lw: vec![0.0], lwp: vec![0.0], g: vec![0.0], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: false, area: 0.0, air_mass: 0.0, head_radiation: None, radiated_j: 0.0,
-            film: None, support_springs: false,
+            film: None, support_springs: false, surface_t60: false,
         }
     }
 
     /// Attach the exterior load of a clamped full circular head of `radius`
     /// (its nodes centred on the rim's centre) from `table` in `gas`. Mass
     /// and stiffness are this body's own; returns the receipt lines. The
-    /// optional compact net-volume resistance [Pa s/m^3] is only compared
-    /// with the baked volume shapes in the receipt.
+    /// optional compact net-volume resistance [Pa s/m^3] is compared with the
+    /// baked volume shapes in the receipt; on a head carrying a film law (the
+    /// load then retains every resolved shape) the volume shapes (0,n>=2) also
+    /// take the baffled load less its share.
     pub fn attach_head_radiation(&mut self, table: &radiation::RadiationTable, radius: f64, gas: &GasState,
         compact_volume_resistance: Option<f64>) -> Result<Vec<String>, String> {
         self.attach_head_radiation_impl(table, radius, gas, compact_volume_resistance, None)
@@ -1179,7 +1186,9 @@ impl Body {
     /// mode. The tension (a pre-stress) and the Berger in-plane stretching
     /// stay elastic. Returns the receipt lines. A shallow shell, a plate
     /// without bending, one whose stiffness operator also holds support
-    /// springs, or one with another bending loss refuses.
+    /// springs, one with another bending loss or the fitted T60 surface loss
+    /// (which already lumps the film's), a second law, or a law attached after
+    /// the head radiation refuses.
     pub fn attach_film_maxwell(&mut self, law: film::FilmLaw) -> Result<Vec<String>, String> {
         if self.vk.is_some() || self.n < 2 || self.stiff.col.is_empty() {
             return Err(format!(
@@ -1193,9 +1202,12 @@ impl Body {
                 self.name
             ));
         }
-        if self.viscosity.is_some() || self.modal.is_some() {
+        if self.film.is_some() {
+            return Err(format!("{}: a film law attaches once", self.name));
+        }
+        if self.viscosity.is_some() || self.modal.is_some() || self.surface_t60 {
             return Err(format!(
-                "{}: a film law and another bending loss are exclusive",
+                "{}: a film law and another bending loss, or the fitted T60 surface loss that lumps it, are exclusive",
                 self.name
             ));
         }
@@ -1208,7 +1220,12 @@ impl Body {
         // The highest grid mode at the card's E (tension and bending), before the law is attached.
         let top_hz = self.max_rate2().sqrt() / (2.0 * PI);
         let (lo, hi) = law.band_hz;
-        let place = if top_hz <= hi {
+        let place = if top_hz < lo {
+            format!(
+                "below the curve's {lo} Hz, where the law continues it, law tan delta {:.4} there",
+                law.tan_delta(top_hz)
+            )
+        } else if top_hz <= hi {
             format!(
                 "inside the curve's band, law tan delta {:.4} there",
                 law.tan_delta(top_hz)
@@ -1866,6 +1883,7 @@ impl Body {
     /// The negative dt/4 v'C v correction is numerical stored energy, never
     /// reported as material heat. Positivity needs the admitted damping CFL.
     /// Coupling/contact/source work belongs to the complete instrument balance.
+    /// With a film law it includes the branches' storage, and the law's midpoint heat is one more loss.
     pub fn discrete_energy(&self, k: f64) -> f64 {
         let velocity: Vec<f64> = self.w.iter().zip(&self.wp).map(|(w, wp)| (w - wp) / k).collect();
         let mut kw = vec![0.0; self.n];
@@ -3225,9 +3243,11 @@ impl Instrument {
     }
 
     /// Everything one time step reads, as plain data: for a stepper outside this crate, the CUDA renderer
-    /// in apps/instrument-lab/render-gpu. Exporting changes nothing the steps compute, and `step` stays the
-    /// reference that stepper is checked against. It prepares the microphones' taps as the first step would,
-    /// so place microphones and bodies before exporting (a later move would no longer re-prepare them).
+    /// in apps/instrument-lab/render-gpu. A head's film law and radiation load are not in it, so such a
+    /// stepper must refuse them (render-gpu's plan does). Exporting changes nothing the steps compute, and
+    /// `step` stays the reference that stepper is checked against. It prepares the microphones' taps as the
+    /// first step would, so place microphones and bodies before exporting (a later move would no longer
+    /// re-prepare them).
     pub fn image(&mut self) -> InstrumentImage {
         if !self.prepared {
             self.prepare();

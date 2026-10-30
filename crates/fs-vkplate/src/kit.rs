@@ -256,13 +256,14 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
     // outside air on each head's volume motion: a baffled piston's radiation mass, 8 rho a^3 / 3
     batter.air_mass = 8.0 * gas.density * s.radius.powi(3) / 3.0;
     reso.air_mass = batter.air_mass;
-    // Without the fitted T60 (which lumped it in), the non-volume shapes take
-    // their exterior resistance and air mass from the baked table, in this
-    // gas, whatever the film-loss source.
+    // Without the fitted T60 (which lumped it in), the heads take their exterior
+    // resistance, air mass and viscous layer from the baked table, in this gas,
+    // whatever the film-loss source. The viscous layer is always attached, so
+    // the load retains every shape the grid resolves.
     if !matches!(batter_loss, FilmLoss::FittedT60) {
         let table = crate::radiation::RadiationTable::shipped()?;
-        // The volume shapes stay on the compact monopole below; the receipt
-        // states its error against the baked baffled self-resistance.
+        // (0,1) stays on the compact monopole below; the volume shapes (0,n>=2)
+        // take the baffled load less the monopole's share (each receipt says so).
         let compact = RadDamp::monopole(vec![], f01(s.radius, s.batter, primary.2), &gas).resistance;
         let film = materials.filter(|m| m.has_film_loss_curve());
         for (index, head, label, hd, elastic) in [

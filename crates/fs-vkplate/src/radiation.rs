@@ -1,19 +1,21 @@
-//! Exterior air loading of a drum head's non-volume (m >= 1) motion from a
-//! baked, dimensionless modal radiation table (bead .370, ruling 6310).
+//! Exterior air loading of a drum head's motion beyond its compact volume model,
+//! from a baked, dimensionless modal radiation table (bead .370, ruling 6310).
 //!
 //! The table holds `zhat_rs(ka) = Z_rs / (rho c a^2)` for clamped-membrane
 //! shapes on a unit disk in an infinite rigid baffle, computed with
 //! `fs_bem::modal_loading` by `examples/bake_head_radiation.rs`. A head of
 //! radius `a` in the current gas sees `Z_rs(omega) = rho c a^2 zhat_rs(omega a / c)`,
-//! so density and sound speed always come from the instrument's gas. Only
-//! `m >= 1` families load the head: the volume (`m = 0`) motion keeps the
-//! kit builder's compact monopole, piston air mass and cavity, and its baked
-//! family only states that compact model's error in the receipt. A head whose
-//! own losses are modelled (a film law on its bending operator,
-//! `Body::attach_film_maxwell`, or a viscous face layer) extends the load to
-//! every shape its grid resolves (`ModalAirLoad::new_with_losses`), so that the
-//! air mass and the viscous layer reach every resolved mode. The film's loss is
-//! never in this load: the film law is the plate's own.
+//! so density and sound speed always come from the instrument's gas. The
+//! volume (`m = 0`) motion keeps the kit builder's compact monopole, piston
+//! air mass and cavity. By default only `m >= 1` families load the head, and
+//! the baked `m = 0` family only states that compact model's error in the
+//! receipt. A head whose own losses are modelled (a film law on its bending
+//! operator, `Body::attach_film_maxwell`, or a viscous face layer) extends the
+//! load to every shape its grid resolves (`ModalAirLoad::new_with_losses`), so
+//! that the air mass and the viscous layer reach every resolved mode; its
+//! volume shapes `(0,n)`, `n >= 2`, then take the baked load less the compact
+//! model's share, and `(0,1)` stays compact. The film's loss is never in this
+//! load: the film law is the plate's own.
 //!
 //! The time-domain load is narrowband. Each retained mode gets the diagonal
 //! resistance `Re Z_rr` and air mass `-Im Z_rr / omega` at its own loaded
@@ -950,7 +952,7 @@ impl ModalAirLoad {
                     ),
                 };
                 let line = if applied {
-                    line.replace("diagnostic, not applied", "applied: the shape takes the baffled load less this compact share")
+                    line.replace("diagnostic, not applied", "applied: the shape takes the baffled load less this compact share, unless a dropped-shape line names it")
                 } else {
                     line
                 };
@@ -1246,7 +1248,8 @@ impl ModalAirLoad {
             let loss = match (r.in_table, r.below_resolution) {
                 (true, None) => format!("radiation T60 {:.3} s", t60(r.resistance + r_c)),
                 (true, Some(bound)) => format!(
-                    "radiation below the table's resolution, none applied: its T60 is an upper bound (true radiation T60 > {:.3e} s)",
+                    "radiation below the table's resolution, none applied{}: its T60 is an upper bound (true radiation T60 > {:.3e} s)",
+                    if r_c > 0.0 { format!(" beyond the compact monopole's (T60 {:.3e} s)", t60(r_c)) } else { String::new() },
                     t60(bound)
                 ),
                 (false, _) => format!(
@@ -1262,7 +1265,10 @@ impl ModalAirLoad {
                 (true, false) => " [volume untabulated]",
             };
             let interpolation = if r.in_table {
-                format!("ka interpolation <= {:.1e}; dropped in-family coupling <= {:.1e} of its resistance, {:.1e} of its air mass",
+                // The bound sums tabulated partners only: an untabulated one has no coupling entry.
+                let untabulated = retained.iter().any(|b| !b.in_table && b.sine == r.sine && shapes[b.shape].m == shape.m);
+                let partners = if untabulated { " to its tabulated partners (its untabulated partners' is not bounded)" } else { "" };
+                format!("ka interpolation <= {:.1e}; dropped in-family coupling{partners} <= {:.1e} of its resistance, {:.1e} of its air mass",
                     table.interpolation_error(r.shape, r.ka), share.0, share.1)
             } else {
                 "ka interpolation n/a; dropped in-family coupling not tabulated".to_string()
@@ -1316,7 +1322,7 @@ impl ModalAirLoad {
         let mut summary = String::new();
         let _ = write!(
             summary,
-            "head radiation: {n} shapes from table {:016x} ({ROUTE}, {GEOMETRY}, {MODE_SET}); largest dropped in-family coupling, first order: {:.2e} of a retained resistance, {:.2e} of a retained air mass; narrowband: Re Z_rr and -Im Z_rr/omega at each mode's loaded frequency (fixed point, refused beyond {MAX_LOADED_ITERATIONS} iterations); ka interpolation <= {:.1e} over the whole table (each shape states its own), discretization <= {:.1e} (relative); {} m >= 1 entries dropped as upper bounds (modes the grid cannot resolve, shapes the table refused); {refused_note}; {low_mac} shapes below MAC {LOW_MAC}",
+            "head radiation: {n} shapes from table {:016x} ({ROUTE}, {GEOMETRY}, {MODE_SET}); largest dropped in-family coupling between tabulated shapes, first order: {:.2e} of a retained resistance, {:.2e} of a retained air mass; narrowband: Re Z_rr and -Im Z_rr/omega at each mode's loaded frequency (fixed point, refused beyond {MAX_LOADED_ITERATIONS} iterations); ka interpolation <= {:.1e} over the whole table (each shape states its own), discretization <= {:.1e} (relative); {} shapes dropped as upper bounds (modes the grid cannot resolve, shapes the table refused, volume shapes kept on the compact model alone); {refused_note}; {low_mac} shapes below MAC {LOW_MAC}",
             table.content_hash,
             loss_share,
             mass_share,
@@ -1344,7 +1350,7 @@ impl ModalAirLoad {
             let (low, high) = retained.iter().map(|r| r.viscous_resistance / (r.mass * r.omega))
                 .fold((f64::INFINITY, 0.0_f64), |(lo, hi), eta| (lo.min(eta), hi.max(eta)));
             let uncovered = if extend.is_some() {
-                "(0,1) and the shapes the grid cannot resolve carry none"
+                "(0,1) and the dropped shapes carry none"
             } else {
                 "m = 0 and dropped shapes carry none"
             };

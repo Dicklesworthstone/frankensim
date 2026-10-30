@@ -100,15 +100,21 @@ impl FilmLaw {
             .iter()
             .map(|t| relax(t.1))
             .fold(f64::INFINITY, f64::min);
+        let anchor = if self.anchor_hz == matsuzawa_anchor_hz() {
+            format!(
+                "the log-centre of Matsuzawa 1959's {}-{} c/s, where he found it almost constant",
+                MATSUZAWA_BAND_HZ.0, MATSUZAWA_BAND_HZ.1
+            )
+        } else {
+            "the caller's anchor".to_string()
+        };
         format!(
-            "film law: generalized Maxwell, {} of {} branches kept (relaxation {slow:.1} Hz to {fast:.0} Hz; the ladder holds {BRANCHES_PER_DECADE} per decade from {LADDER_MARGIN_DECADES} decade below to {LADDER_MARGIN_DECADES} decade above the curve's band); fitted by non-negative least squares to the head card's tan delta curve alone over {lo}-{hi} Hz, never to a recording; sup |tan delta / curve - 1| {:.2} % on {} log-spaced points; storage modulus = the card's E at {:.1} Hz (the log-centre of Matsuzawa 1959's {}-{} c/s, where he found it almost constant); causality then gives E' {:+.1} % at {lo} Hz and {:+.1} % at {hi} Hz, relaxed x{:.4}, glassy x{:.4}",
+            "film law: generalized Maxwell, {} of {} branches kept (relaxation {slow:.1} Hz to {fast:.0} Hz; the ladder holds {BRANCHES_PER_DECADE} per decade from {LADDER_MARGIN_DECADES} decade below to {LADDER_MARGIN_DECADES} decade above the curve's band); fitted by non-negative least squares to the head card's tan delta curve alone over {lo}-{hi} Hz, never to a recording; sup |tan delta / curve - 1| {:.2} % on {} log-spaced points; storage modulus = the card's E at {:.1} Hz ({anchor}); causality then gives E' {:+.1} % at {lo} Hz and {:+.1} % at {hi} Hz, relaxed x{:.4}, glassy x{:.4}",
             self.law.terms.len(),
             self.ladder,
             100.0 * self.sup_rel_tan_delta_err,
             self.verification_points,
             self.anchor_hz,
-            MATSUZAWA_BAND_HZ.0,
-            MATSUZAWA_BAND_HZ.1,
             100.0 * (self.storage(lo) - 1.0),
             100.0 * (self.storage(hi) - 1.0),
             self.law.e_inf,

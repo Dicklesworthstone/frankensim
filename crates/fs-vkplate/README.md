@@ -186,7 +186,7 @@ film route (not in the browser), it adds up to +36 % per output sample.
 The drum's notes carry the law's receipts and
 `materials::EDGE_LOSS_STATED_UNKNOWN_RECEIPT`, since no edge, hoop, shell or mount
 loss law exists, and `info_json` has `filmLossCurve`. Only the native card route
-uses it; live and browser drums keep the stated unknown.
+uses it, offline and in `live`; the browser page's drums keep the stated unknown.
 
 `packs/head-film-pet-mylar-dupont-matsuzawa1959.fsmatpk` is a sourced head-film
 card, compiled with `xtask matdb-pack` from
@@ -413,9 +413,11 @@ The GPU and CUDA planners refuse a head with this load. Render it natively.
 ### Head viscous layer
 
 Native card-built drums also apply the two-face Stokes boundary-layer loss
-from `air_loss::plate_viscous_layer` to every retained non-volume head shape,
-evaluated at its loaded frequency and its own areal density. Volume and
-dropped shapes carry none, so their decays remain upper bounds. Every admitted
+from `air_loss::plate_viscous_layer` to every retained head shape (with the
+layer the load retains every shape the grid resolves, the volume shapes
+(0,n>=2) included), evaluated at its loaded frequency and its own areal
+density. (0,1) and the dropped shapes carry none, so their decays remain
+upper bounds. Every admitted
 shape must be below coincidence. This is a gas-owned loss, not a decay-time
 fit; live keeps its existing installed decays.
 

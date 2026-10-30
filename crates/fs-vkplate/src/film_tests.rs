@@ -182,8 +182,34 @@ fn g0_admission_takes_the_film_law_at_its_glassy_modulus() {
         "{glassy} / {elastic} against {}",
         law.glassy()
     );
-    // Refusals: a stiffness operator that also holds support springs, a body without bending.
+    // Refusals: a second law, a plate whose fitted T60 surface loss already lumps the film's,
+    // a stiffness operator that also holds support springs, a body without bending.
+    let second = plate.attach_film_maxwell(law.clone()).unwrap_err();
+    assert!(second.contains("attaches once"), "{second}");
     let (thickness, rest) = (|_: f64| 1.9e-4, |_: f64| 0.0);
+    let mut fitted = Body::plate(
+        "fitted",
+        &PlateSpec {
+            radius: 0.32,
+            hole: 0.0,
+            grid: 0.02,
+            edge: Edge::Clamped,
+            thickness: &thickness,
+            rest_height: &rest,
+            young: 4.9e9,
+            poisson: 0.38,
+            density: 1390.0,
+            tension: 100.0,
+            bending: true,
+            nonlinear: Nonlinear::None,
+            t60: [(100.0, 1.0), (1000.0, 1.0)],
+            support: None,
+            muffle: None,
+        },
+    )
+    .unwrap();
+    let lumped = fitted.attach_film_maxwell(law.clone()).unwrap_err();
+    assert!(lumped.contains("fitted T60"), "{lumped}");
     let mut supported = Body::plate_without_surface_loss(
         "supported",
         &PlateSpec {

@@ -1028,17 +1028,43 @@ fn rim_friction_sticks_inside_its_cone_and_contracts_backward_slip() {
 
 #[test]
 fn g0_head_viscous_layer_increases_modal_damping() {
+    // The layer also extends the retained shapes, so compare loads on the SAME
+    // extended shapes: only the layer differs between them.
     let gas = standard_gas();
     let table = radiation::RadiationTable::shipped().unwrap();
-    let mut plain = kit::drum(&kit::snare_wires_off(), &[]).unwrap();
-    let mut layered = kit::drum(&kit::snare_wires_off(), &[]).unwrap();
-    plain.instrument.bodies[0].attach_head_radiation(&table, 0.1703, &gas, None).unwrap();
-    layered.instrument.bodies[0].attach_head_radiation_with_viscous(&table, 0.1703, &gas, None, 140_000.0).unwrap();
-    let plain_damping: f64 = plain.instrument.bodies[0].head_radiation().unwrap().damping.iter().sum();
-    let layered_damping: f64 = layered.instrument.bodies[0].head_radiation().unwrap().damping.iter().sum();
-    assert!(layered_damping > plain_damping, "viscous layer did not add loss: {layered_damping} <= {plain_damping}");
-    assert!(layered.instrument.bodies[0].head_radiation().unwrap().rate_bound
-        > plain.instrument.bodies[0].head_radiation().unwrap().rate_bound);
+    let piece = kit::drum(&kit::snare_wires_off(), &[]).unwrap();
+    let b = &piece.instrument.bodies[0];
+    let stiffness = |v: &[f64]| {
+        let mut out = vec![0.0; v.len()];
+        b.stiff.mul_add(v, 1.0, &mut out);
+        b.lap.mul_add(v, b.tension, &mut out);
+        out
+    };
+    let piston = if b.air_mass > 0.0 { b.air_mass / (b.area * b.area) } else { 0.0 };
+    let areal = b.mass.iter().sum::<f64>() / b.area;
+    let load = |viscous, extend| {
+        radiation::ModalAirLoad::new_with_losses(&table, 0.1703, b.h, &b.xy, &b.mass, &stiffness, &gas, None, viscous, extend)
+            .unwrap()
+    };
+    let table_only = load(None, None);
+    let (plain, layered) = (load(None, Some(piston)), load(Some((areal, 140_000.0)), Some(piston)));
+    assert_eq!(plain.cols.len(), layered.cols.len());
+    assert!(plain.cols.len() > table_only.cols.len(), "the extension retained no shape beyond the table's");
+    let n = plain.cols.len();
+    let trace = |l: &radiation::ModalAirLoad| (0..n).map(|i| l.damping[i * n + i]).sum::<f64>();
+    assert!(trace(&layered) > trace(&plain), "viscous layer did not add loss: {} <= {}", trace(&layered), trace(&plain));
+    assert!(layered.rate_bound > plain.rate_bound);
+    // Beyond the table a shape takes its evanescent air mass; on the table's own high
+    // shapes (j_mn >= 15) that law agrees with the baked load (-9 % to -0.5 % on the kit
+    // heads), which a wrong factor in it would not.
+    let summary = plain.receipt.iter().find(|l| l.contains("against the table's own shapes with j_mn >= 15")).unwrap();
+    let range: Vec<f64> = summary.rsplit(": ").next().unwrap().split(" % to ")
+        .map(|v| v.trim_end_matches(" %").parse().unwrap()).collect();
+    assert!(range.len() == 2 && range.iter().all(|v: &f64| v.abs() < 15.0), "{summary}");
+    // The public attachment builds exactly the layered load.
+    let mut attached = kit::drum(&kit::snare_wires_off(), &[]).unwrap();
+    attached.instrument.bodies[0].attach_head_radiation_with_viscous(&table, 0.1703, &gas, None, 140_000.0).unwrap();
+    assert_eq!(attached.instrument.bodies[0].head_radiation().unwrap().damping, layered.damping);
 }
 
 #[test]
