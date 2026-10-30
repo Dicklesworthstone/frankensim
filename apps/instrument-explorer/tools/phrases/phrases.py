@@ -281,13 +281,15 @@ def voice_note(stem, dur):
     base = read(f"{SRC}/voice/{stem}.performance")
     out, done = [], False
     pressure = max((l.split()[2] for l in base if l.startswith("subglottal ")), key=float)
+    # the card's own rise: when its schedule first reaches the plateau (150 ms, Fant and Kruckenberg 2005; d5a4816a0)
+    rise = next(l.split()[1] for l in base if l.startswith("subglottal ") and l.split()[2] == pressure)
     for l in base:
         if l.startswith("audio "):
             a = l.split()
             out.append(f"audio {a[1]} {round((dur + 0.25) * 48000)} {a[3]}")
         elif l.startswith("subglottal "):
             if not done:
-                out += ["subglottal 0 0", f"subglottal 0.06 {pressure}",
+                out += ["subglottal 0 0", f"subglottal {rise} {pressure}",
                         f"subglottal {dec(dur - 0.1)} {pressure}", f"subglottal {dec(dur)} 0"]
                 done = True
         else:
