@@ -12790,3 +12790,41 @@ physical owners. G1/G3/G4 tests include simultaneous three-body stopping and
 restart, constrained internal elastic motion, per-site order covariance,
 zero-strength recovery of the original complete prepared network, reduction
 to the single-junction owner, source/rank admission and joint rollback.
+
+
+## Finite-rotation native rigid cohesive patches
+
+`cohesive_contact::rigid::RigidCohesiveSystem` evolves two original
+`fs_mbd::RigidBodyState` owners and their original full `MassProperties` through
+a single finite cohesive patch. Every site retains its source-bound original
+point, irreversible history, reference area, body attachment arms and material
+frame fixed in body A. Ordered receiving material identities and actual initial
+geometry are mandatory; construction does not infer or reset a bond.
+
+A joint twelve-variable wrench solve replays both original native Cayley steps
+and all original objective constitutive trials. Its fixed dense dimension does
+not grow with quadrature; material work is linear in the site count per residual
+evaluation, with preallocated site scratch, prepared LU and explicit evaluation
+budgets. The actual midpoint arms transmit patch moments. The original frame
+couple acts on body A, and spatial moments use the inverse arithmetic rotation
+average, tau_body = R0^T (M - c cross M / 2). These conventions retain reciprocal
+force, total angular impulse and the original finite-rotation work identity.
+
+Actual native storage, original cohesive storage, intrinsic fracture loss, bond
+viscosity, external force/couple work and gravity are checked independently.
+Body states, every point, accepted observations and the clock publish jointly
+after force/moment, energy, momentum, source, geometry and final cancellation
+gates. Late refusals leave an identical retry possible. Failed bonds retain
+fragment motion and damage; the original compression penalty provides
+frictionless reclosure within its declared domain.
+
+Source conditions, attachments and topology are fixed. This is a bounded local
+branch solve over straight local constitutive paths, not a proof of global
+softening-branch uniqueness or intrastep trajectory accuracy. Rotation-chart
+and original material/rate limits remain mandatory. Bond creation, healing,
+collision discovery and damaged-area friction are outside this owner.
+`tests/rigid_cohesive.rs` checks an independent axial oscillator, global frame
+covariance, finite-patch peeling with separate fracture/viscous losses, full
+native free motion after failure, reclosure, gravity/external work, source and
+geometry refusal, work-budget/cancellation refusal, strict energy refusal, and
+late body-budget rollback with bit-identical retry.

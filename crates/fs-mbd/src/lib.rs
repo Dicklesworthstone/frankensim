@@ -1431,6 +1431,41 @@ impl RigidBodyIntegrator {
         wrench: Wrench,
         duration_seconds: f64,
     ) -> Result<StepReceipt, DynamicsError> {
+        self.step_with_attitude(state, properties, wrench, duration_seconds, false)
+    }
+
+    /// Advance with the original implicit Euler-top solve and a Cayley attitude
+    /// update in every case, including spherical and single-axis rotation.
+    ///
+    /// This explicitly selected chart makes `c_body = dt * omega_mid` the
+    /// finite rotation increment conjugate to body torque work. For the
+    /// arithmetic rotation average `Rbar = (R0 + R1)/2`, the actual spatial
+    /// angular impulse is `dt * Rbar * torque_body`. A geometric work owner
+    /// supplying a spatial moment must therefore pull it back with `Rbar^-1`,
+    /// not with a normalized midpoint orientation. No energy or momentum is
+    /// projected, and the original full inertia and refusal semantics remain.
+    ///
+    /// Callers must bound the Cayley increment and refine near a half-turn;
+    /// this method does not claim exact constant-axis angular phase. The
+    /// default [`Self::step`] retains its exact exponential special cases.
+    pub fn step_cayley(
+        self,
+        state: RigidBodyState,
+        properties: MassProperties,
+        wrench: Wrench,
+        duration_seconds: f64,
+    ) -> Result<StepReceipt, DynamicsError> {
+        self.step_with_attitude(state, properties, wrench, duration_seconds, true)
+    }
+
+    fn step_with_attitude(
+        self,
+        state: RigidBodyState,
+        properties: MassProperties,
+        wrench: Wrench,
+        duration_seconds: f64,
+        use_cayley_everywhere: bool,
+    ) -> Result<StepReceipt, DynamicsError> {
         if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
             return Err(DynamicsError::InvalidStepDuration);
         }
@@ -1459,6 +1494,7 @@ impl RigidBodyIntegrator {
             properties,
             wrench.torque_body,
             duration_seconds,
+            use_cayley_everywhere,
         )?;
 
         let state_after = RigidBodyState::new(
@@ -1686,6 +1722,7 @@ fn implicit_rotation_step(
     properties: MassProperties,
     torque: Vec3,
     h: f64,
+    use_cayley_everywhere: bool,
 ) -> Result<(Vec3, UnitQuaternion), DynamicsError> {
     if properties.principal_to_body != UnitQuaternion::IDENTITY {
         let (principal_after, principal_increment) = implicit_rotation_step(
@@ -1694,6 +1731,7 @@ fn implicit_rotation_step(
             properties.principal_properties(),
             properties.to_principal(torque),
             h,
+            use_cayley_everywhere,
         )?;
         let increment = properties.increment_in_body(principal_increment)?;
         let q = orientation.multiply(increment);
@@ -1718,11 +1756,20 @@ fn implicit_rotation_step(
     .count()
         <= 1;
     if spherical || single_axis {
-        // No gyroscopic term. Preserve exact finite-angle constant-axis spin,
-        // including consumers that request a whole elapsed display interval.
+        // No gyroscopic term. The default retains exact constant-axis spin;
+        // geometric work owners explicitly select the conjugate Cayley chart.
         let after = before.add(impulse);
         let mid = before.scale(0.5).add(after.scale(0.5));
         let rotation = properties.angular_velocity_body_checked(mid)?.scale(h);
+        if use_cayley_everywhere {
+            let half = rotation.scale(0.5);
+            let increment = UnitQuaternion::new(1.0, half.x, half.y, half.z)?;
+            let product = orientation.multiply(increment);
+            return Ok((
+                after,
+                UnitQuaternion::new(product.w, product.x, product.y, product.z)?,
+            ));
+        }
         return Ok((after, orientation.right_exp(rotation)?));
     }
 

@@ -290,7 +290,7 @@ fn validate_config(config: ObjectiveCohesiveConfig) -> Result<(), ObjectiveCohes
     Ok(())
 }
 
-fn cayley_increment(
+pub(super) fn cayley_increment(
     old: UnitQuaternion,
     new: UnitQuaternion,
     maximum: f64,

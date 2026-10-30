@@ -1829,3 +1829,19 @@ under a 1e9 m/s common axial boost; bit-identical empty spatial loads; and
 invalid/late/cancelled refusal with exact retry. All eight existing continuous
 articulated trajectory cases also pass. Focused native checks are not a full
 Cargo/DSR or cross-ISA qualification.
+
+
+## Explicit Cayley work chart for native rigid coupling
+
+`RigidBodyIntegrator::step_cayley` uses the same original full-inertia Euler-top
+midpoint solve and translation as `step`, while explicitly selecting a Cayley
+attitude update for spherical and single-axis rotation too. The default `step`
+keeps its original exponential special cases. With the arithmetic rotation
+average Rbar, the actual spatial spin impulse is dt Rbar tau_body, and kinetic
+work is dt tau_body dot omega_mid. Geometric work owners must pull a spatial
+moment back with Rbar inverse and must impose their own finite-rotation chart
+limits. No momentum/energy projection or modified inertia is introduced. The
+Cayley chart is a second-order angular-phase approximation, not exact spin.
+`tests/cayley_work.rs` checks original default behavior, nonprincipal and
+spherical inertia, finite kinematic/work identities, spatial torque impulse,
+and long free-rotation energy/momentum retention.
