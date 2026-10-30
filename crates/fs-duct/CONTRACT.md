@@ -1914,3 +1914,19 @@ For frozen pressure mass root `E` and inverse root `F`, weak compression is `E (
 Structural displacement, velocity and Kelvin/Maxwell histories survive unchanged. Reciprocal pressure coupling follows the new frozen mass while physical wall observation maps retain their original geometry. The exact quadratic storage change enters the existing signed parameter-work ledger once; original time, initial energy, prior port work and dissipation survive. Source, support, finite-value, work-budget and cancellation refusals are transactional. An empty molecular declaration delegates to the existing spatial viscothermal transfer. This is a prescribed instantaneous background intervention, not a heat/species/inventory transport solver, mean-flow model, condensation process or mean-pressure wall traction.
 
 Focused regressions in `dg::molecular::update::spatial::tests` independently reconstruct the weak ideal-gas EOS and local entropies on a separate mass quadrature, preserve momentum through a live noncommuting mass map, exercise uniform/nonuniform round trips, keep nonzero structural Maxwell histories and continue the original dissipative propagator, preserve exact no-op/empty-law behavior, and check cancellation/composition/station/work-budget rollback.
+
+### Molecular field wavefront travel
+
+`MolecularDuct::field_travel_times_s` integrates gas-frozen slowness on the
+same original field/geometry Gauss pairs that prepare the harmonic operator.
+It returns terminal time and each open/vented mouth time, with the finite
+chimney evaluated in its own local molecular state. It performs no additional
+material evaluations and introduces no independent axial discretization.
+Uniform fields preserve direct length/speed arithmetic. These are gas-wavefront
+times, not frequency-dependent group delay or a claim about a general bound
+mechanical wall's high-frequency asymptote.
+
+Two new native tests pass: uniform parity and an independent Simpson integral
+with live fourth-order 4/8/16-step refinement, local chimney timing and terminal
+relative error below 2e-8. The same primitive state and retained molecular law
+remain the single source of density, frozen calorics and relaxation.

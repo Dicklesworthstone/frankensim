@@ -13327,3 +13327,23 @@ Four new native physical-transfer tests and five existing uniform-transfer
 regressions passed using actual DG/material owners. The added complete branch,
 channel and mutual-terminal integration test is present but was not executed
 because the full coupling dependency graph is unavailable in this checkout.
+
+### Continuous molecular fields in feedback and opening sound
+
+`MolecularDrivingPoint::from_gas_field` and its material-wall counterpart bind
+the original primitive `AxialGasField` and molecular law to the same characteristic
+pressure feedback, terminal flow and finite-chimney mouth observations. Axial
+Magnus resolution, radial diffusion resolution and FIR length remain separate
+axes. Inlet loading uses the exact inlet gas, exterior radiation uses the explicit
+exterior gas, and terminal/side-mouth causal delays use the core's frozen-slowness
+quadrature and each chimney's local gas. Uniform field arithmetic is preserved.
+The source-resolved local material wall is shared with the propagation owner;
+its positive surface mass preserves the gas-frozen wavefront.
+
+The existing whole-field coverage, source band, common pressure, internal mutual
+hole and work-cap refusals remain. The existing reed constructor accepts this
+prepared driving point. The field is prescribed and frozen during playback;
+this does not solve species transport or add nonlocal structural/exterior loading.
+The two core wavefront regressions ran natively. Three added full feedback/FIR
+consumer regressions are present but unexecuted because the complete coupling
+and material-wall dependency graph is unavailable in this environment.

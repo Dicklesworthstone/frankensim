@@ -7,7 +7,7 @@
 //! added. The source gas stays at local equilibrium for the inlet pressure/flow
 //! reference, while the original frozen sound speed sets the wavefront delay.
 //!
-//! This retains the owner's frozen homogeneous plane-wave model and explicit
+//! This retains the owner's frozen plane-wave model and explicit
 //! gas shear/thermal diffusion choice. Compact finite tone-hole chimneys use
 //! those SAME reservoirs and wall law. Their independent flanged mouth loads
 //! and the terminal radiation use the explicitly bound exterior gas. An
@@ -33,6 +33,7 @@ use std::sync::Arc;
 
 mod outlet;
 pub use outlet::MAX_MOLECULAR_OUTLET_BINS;
+mod field;
 
 /// Original molecular gas, geometry and exterior load carried into time playback.
 #[derive(Debug, Clone)]
@@ -43,6 +44,7 @@ pub struct MolecularDrivingPoint {
     composition: ComposeOptions,
     one_way_wavefront_s: f64,
     open_hole_sites: Vec<MolecularHoleSite>,
+    open_hole_wavefront_s: Vec<f64>,
     material_wall: Option<Arc<LocalMaterialWall>>,
 }
 
@@ -108,21 +110,7 @@ impl MolecularDrivingPoint {
         composition: ComposeOptions,
         exterior: GasState,
     ) -> Result<Self, DrivingPointError> {
-        exterior
-            .validate_coherence()
-            .map_err(DrivingPointError::Material)?;
-        if exterior.pressure != state.gas().pressure {
-            return Err(DrivingPointError::Invalid {
-                what: "exterior and molecular duct need a common static pressure; mean flow is not modeled",
-            });
-        }
-        if matches!(geometry.segments.first(), Some(Segment::ToneHole { .. }))
-            || matches!(geometry.segments.last(), Some(Segment::ToneHole { .. }))
-        {
-            return Err(DrivingPointError::Invalid {
-                what: "molecular characteristic playback requires axial inlet and terminal segments",
-            });
-        }
+        Self::admit_geometry_exterior(geometry, state.gas(), &exterior)?;
         let material = match &material_wall {
             Some(material) => MolecularDuct::new_with_compliant_wall(
                 geometry,
@@ -134,12 +122,62 @@ impl MolecularDrivingPoint {
             )?,
             None => MolecularDuct::new(geometry, state, wall, cones, composition.maximum_blocks)?,
         };
-        let open_hole_sites = material.open_hole_sites();
-        let one_way_wavefront_s =
-            duct_axial_length(geometry) / material.state().frozen_sound_speed_m_s();
-        if !one_way_wavefront_s.is_finite() || one_way_wavefront_s <= 0.0 {
+        Self::from_prepared(geometry, material, material_wall, composition, exterior)
+    }
+
+    fn admit_geometry_exterior(
+        geometry: &Duct,
+        inlet: &GasState,
+        exterior: &GasState,
+    ) -> Result<(), DrivingPointError> {
+        exterior
+            .validate_coherence()
+            .map_err(DrivingPointError::Material)?;
+        if exterior.pressure != inlet.pressure {
             return Err(DrivingPointError::Invalid {
-                what: "molecular line needs finite positive axial wavefront time",
+                what: "exterior and molecular duct need a common static pressure; mean flow is not modeled",
+            });
+        }
+        if matches!(geometry.segments.first(), Some(Segment::ToneHole { .. }))
+            || matches!(geometry.segments.last(), Some(Segment::ToneHole { .. }))
+        {
+            return Err(DrivingPointError::Invalid {
+                what: "molecular characteristic playback requires axial inlet and terminal segments",
+            });
+        }
+        Ok(())
+    }
+
+    fn from_prepared(
+        geometry: &Duct,
+        material: MolecularDuct,
+        material_wall: Option<Arc<LocalMaterialWall>>,
+        composition: ComposeOptions,
+        exterior: GasState,
+    ) -> Result<Self, DrivingPointError> {
+        let open_hole_sites = material.open_hole_sites();
+        let (one_way_wavefront_s, open_hole_wavefront_s) =
+            if let Some(times) = material.field_travel_times_s() {
+                (times.terminal_s, times.open_mouths_s)
+            } else {
+                let speed = material.state().frozen_sound_speed_m_s();
+                (
+                    duct_axial_length(geometry) / speed,
+                    open_hole_sites
+                        .iter()
+                        .map(|site| (site.axial_position_m + site.open_chimney_length_m) / speed)
+                        .collect(),
+                )
+            };
+        if !one_way_wavefront_s.is_finite()
+            || one_way_wavefront_s <= 0.0
+            || open_hole_wavefront_s.len() != open_hole_sites.len()
+            || open_hole_wavefront_s
+                .iter()
+                .any(|t| !t.is_finite() || *t <= 0.0)
+        {
+            return Err(DrivingPointError::Invalid {
+                what: "molecular line and every open mouth need finite positive wavefront times",
             });
         }
         Ok(Self {
@@ -149,6 +187,7 @@ impl MolecularDrivingPoint {
             composition,
             one_way_wavefront_s,
             open_hole_sites,
+            open_hole_wavefront_s,
             material_wall,
         })
     }
@@ -196,6 +235,13 @@ impl MolecularDrivingPoint {
     #[must_use]
     pub fn open_hole_sites(&self) -> &[MolecularHoleSite] {
         &self.open_hole_sites
+    }
+
+    /// Inlet-to-mouth gas wavefront times, in `open_hole_sites()` order [s].
+    /// Each finite chimney uses its local material; exterior delay is separate.
+    #[must_use]
+    pub fn open_hole_wavefront_times_s(&self) -> &[f64] {
+        &self.open_hole_wavefront_s
     }
 
     fn hole_mouth_loads(&self, omega: f64) -> Result<Vec<C64>, DrivingPointError> {

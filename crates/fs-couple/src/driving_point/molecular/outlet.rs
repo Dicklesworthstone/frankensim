@@ -193,17 +193,16 @@ impl MolecularDrivingPoint {
             terminal_delay_speed_m_s,
         )?;
         let length = super::duct_axial_length(&self.geometry);
-        let speed = self.material.state().frozen_sound_speed_m_s();
         let mut holes = Vec::with_capacity(self.open_hole_sites.len());
-        for (site, &delay_speed) in self.open_hole_sites.iter().zip(hole_delay_speeds_m_s) {
+        for ((site, &time), &delay_speed) in self
+            .open_hole_sites
+            .iter()
+            .zip(&self.open_hole_wavefront_s)
+            .zip(hole_delay_speeds_m_s)
+        {
             let mut position = receiver;
             position.position_m[0] += length - site.axial_position_m;
-            holes.push(build(
-                site.hole_radius_m,
-                (site.axial_position_m + site.open_chimney_length_m) / speed,
-                position,
-                delay_speed,
-            )?);
+            holes.push(build(site.hole_radius_m, time, position, delay_speed)?);
         }
         Ok((terminal, holes))
     }

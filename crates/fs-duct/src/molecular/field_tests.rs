@@ -438,3 +438,116 @@ fn field_binding_reuses_constant_spans_and_admits_actual_work() {
         .is_err()
     );
 }
+
+#[test]
+fn uniform_molecular_field_wavefront_retains_direct_arithmetic() {
+    let source = field([300.0, 300.0], [0.75, 0.75], 101325.0);
+    let duct = Duct {
+        segments: vec![
+            Segment::Cylinder {
+                radius: 0.0073,
+                length: 0.21,
+            },
+            Segment::ToneHole {
+                hole_radius: 0.002,
+                bore_radius: 0.0073,
+                chimney_height: 0.004,
+                state: HoleState::Vent(0.4),
+            },
+            Segment::Cylinder {
+                radius: 0.0073,
+                length: source.length_m() - 0.21,
+            },
+        ],
+    };
+    let model = bind(&duct, &source, &law(true), None, 8);
+    let times = model.field_travel_times_s().unwrap();
+    let speed = model.state().frozen_sound_speed_m_s();
+    let site = model.open_hole_sites()[0];
+    assert_eq!(times.terminal_s, source.length_m() / speed);
+    assert_eq!(
+        times.open_mouths_s,
+        vec![(0.21 + site.open_chimney_length_m) / speed]
+    );
+    let direct = MolecularDuct::new(
+        &duct,
+        model.state().clone(),
+        None,
+        ConeSlices::Fixed(8),
+        4096,
+    )
+    .unwrap();
+    assert!(direct.field_travel_times_s().is_none());
+}
+
+#[test]
+fn molecular_field_wavefront_integrates_frozen_slowness_and_local_chimney() {
+    let source = field([280.0, 410.0], [0.80, 0.98], 101325.0);
+    let material = law(true);
+    let duct = Duct {
+        segments: vec![
+            Segment::Cylinder {
+                radius: 0.0073,
+                length: 0.21,
+            },
+            Segment::ToneHole {
+                hole_radius: 0.002,
+                bore_radius: 0.0073,
+                chimney_height: 0.004,
+                state: HoleState::Open,
+            },
+            Segment::Cone {
+                inlet_radius: 0.0073,
+                outlet_radius: 0.009,
+                length: source.length_m() - 0.21,
+            },
+        ],
+    };
+    // Independent composite Simpson integration of the gas-frozen ideal-gas
+    // acoustic modulus. It uses fresh source evaluations, no prepared points.
+    let slowness = |x| {
+        let state = evaluate(&source, &material, x).unwrap();
+        let gas = state.gas();
+        let cv = state.frozen_cv_j_kg_k();
+        let modulus = gas.pressure * (1.0 + gas.specific_gas_constant / cv);
+        (gas.density / modulus).sqrt()
+    };
+    let integral = |length: f64| {
+        let n = 4096;
+        let h = length / n as f64;
+        let mut sum = slowness(0.0) + slowness(length);
+        for i in 1..n {
+            sum += (if i % 2 == 0 { 2.0 } else { 4.0 }) * slowness(i as f64 * h);
+        }
+        sum * h / 3.0
+    };
+    let exact = integral(source.length_m());
+    let exact_prefix = integral(0.21);
+    let mut errors = Vec::new();
+    for steps in [4, 8, 16] {
+        let model = bind(&duct, &source, &material, None, steps);
+        let times = model.field_travel_times_s().unwrap();
+        let site = model.open_hole_sites()[0];
+        let mouth = exact_prefix + site.open_chimney_length_m * slowness(0.21);
+        errors.push((times.terminal_s - exact).abs());
+        assert!((times.open_mouths_s[0] - mouth).abs() < 2e-10);
+    }
+    assert!(
+        errors[0] > 1e-12,
+        "wavefront refinement must be live: {errors:?}"
+    );
+    for pair in errors.windows(2) {
+        let order = (pair[0] / pair[1]).log2();
+        assert!((3.8..4.2).contains(&order), "{errors:?}, order={order}");
+    }
+    assert!(errors[2] / exact < 2e-8, "{errors:?}");
+    let inlet_only = source.length_m() * slowness(0.0);
+    let equilibrium = GasFieldDuct::new(&duct, &source, RiccatiSteps(64))
+        .unwrap()
+        .one_way_time_s();
+    assert!(
+        (inlet_only - exact).abs() / exact > 0.01,
+        "inlet={inlet_only}, integrated={exact}"
+    );
+    assert!((equilibrium - exact).abs() / exact > 0.001);
+}

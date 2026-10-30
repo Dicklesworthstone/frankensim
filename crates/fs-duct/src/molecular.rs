@@ -46,6 +46,7 @@ use std::collections::BTreeMap;
 mod holes;
 pub use holes::{MolecularHoleFlow, MolecularHoleSite, MolecularResponse};
 mod field;
+pub use field::MolecularFieldTravel;
 mod exterior;
 pub use exterior::{MolecularExteriorResponse, MolecularPortScattering};
 mod compliant_wall;
@@ -652,3 +653,4 @@ mod tests;
 
 #[cfg(test)]
 mod holes_tests;
+

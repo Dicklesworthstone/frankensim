@@ -78,6 +78,18 @@ impl From<GasFieldDuctError> for MolecularDuctError {
     }
 }
 
+/// Gas-frozen travel times on the original field/geometry quadrature [s].
+/// These describe the acoustic gas wavefront, before any independently bound
+/// mechanical wall law or exterior propagation. They are not group delays.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MolecularFieldTravel {
+    /// Axial inlet-to-terminal integral of `1 / c_frozen(x)`.
+    pub terminal_s: f64,
+    /// Inlet-to-mouth times in exactly `open_hole_sites()` order, including
+    /// each finite open chimney at its own source-bound local gas state.
+    pub open_mouths_s: Vec<f64>,
+}
+
 impl MolecularDuct {
     /// Resolve temperature, composition and molecular relaxation at every
     /// original gas-field quadrature sample and tone-hole station.
@@ -137,8 +149,15 @@ impl MolecularDuct {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, MolecularDuctError> {
         Self::from_gas_field_bound_controlled(
-            duct, field, law, wall, None, steps_per_span, uniform_cones,
-            maximum_blocks, cancelled,
+            duct,
+            field,
+            law,
+            wall,
+            None,
+            steps_per_span,
+            uniform_cones,
+            maximum_blocks,
+            cancelled,
         )
     }
 
@@ -169,7 +188,13 @@ impl MolecularDuct {
         }
         if field.uniform_state().is_some() {
             let mut result = Self::new_bound_controlled(
-                duct, inlet, wall, compliant_wall, uniform_cones, maximum_blocks, cancelled,
+                duct,
+                inlet,
+                wall,
+                compliant_wall,
+                uniform_cones,
+                maximum_blocks,
+                cancelled,
             )?;
             result.field_binding = Some(FieldBinding {
                 field: field.clone(),
@@ -328,6 +353,60 @@ impl MolecularDuct {
     /// Original source-backed molecular law for a field-bound duct.
     pub fn field_relaxation_law(&self) -> Option<&RelaxationAbsorption> {
         self.field_binding.as_ref().map(|binding| &binding.law)
+    }
+
+    /// Frozen molecular wavefront times for a field-bound duct.
+    ///
+    /// Reuses the exact material evaluations and fourth-order quadrature that
+    /// prepared the propagation operator. No endpoint-average sound speed,
+    /// second field discretization or new material evaluation is introduced.
+    /// Uniform fields retain the direct length/speed arithmetic. The result
+    /// is independent of the finite reservoir rates and gas diffusion poles.
+    /// A general compliant wall can have its own high-frequency asymptote;
+    /// consumers must establish that it preserves this gas wavefront.
+    #[must_use]
+    pub fn field_travel_times_s(&self) -> Option<MolecularFieldTravel> {
+        let binding = self.field_binding.as_ref()?;
+        if binding.states.is_empty() {
+            let speed = self.state.frozen_sound_speed_m_s();
+            return Some(MolecularFieldTravel {
+                terminal_s: binding.field.length_m() / speed,
+                open_mouths_s: self
+                    .open_hole_sites()
+                    .iter()
+                    .map(|site| (site.axial_position_m + site.open_chimney_length_m) / speed)
+                    .collect(),
+            });
+        }
+        let mut terminal_s = 0.0;
+        let mut open_mouths_s = Vec::new();
+        for piece in &self.pieces {
+            match piece {
+                Piece::Magnus { h, points, .. } => {
+                    terminal_s += -0.5
+                        * h
+                        * (1.0 / self.state_at_point(points[0]).frozen_sound_speed_m_s()
+                            + 1.0 / self.state_at_point(points[1]).frozen_sound_speed_m_s());
+                }
+                Piece::ToneHole(hole) => {
+                    if hole.site.open_fraction > 0.0 {
+                        open_mouths_s.push(
+                            terminal_s
+                                + hole.site.open_chimney_length_m
+                                    / self.state_at_point(hole.point).frozen_sound_speed_m_s(),
+                        );
+                    }
+                }
+                Piece::Wave { geometry, point } => {
+                    terminal_s += geometry.axial_length()
+                        / self.state_at_point(*point).frozen_sound_speed_m_s();
+                }
+            }
+        }
+        Some(MolecularFieldTravel {
+            terminal_s,
+            open_mouths_s,
+        })
     }
 
     /// Exact outlet molecular material; this does not specify exterior gas.
