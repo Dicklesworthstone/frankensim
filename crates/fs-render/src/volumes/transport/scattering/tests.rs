@@ -187,6 +187,14 @@ fn g1_lte_emission_uses_absorption_and_the_complete_segment() {
                 + (-1.0_f64).exp() * planck_si(2200.0, 550.0) * (1.0 - (-0.5_f64).exp()));
         close(collision.emission_w_m2_sr_nm[0], source, 2e-12);
         assert_eq!(collision.emission_w_m2_sr_nm, escape.emission_w_m2_sr_nm);
+        let deterministic = medium
+            .transport(cx, origin, direction, f64::INFINITY, &[550.0])
+            .unwrap();
+        close(deterministic.transmittance[0], (-1.5_f64).exp(), 2e-13);
+        assert_eq!(
+            deterministic.emission_w_m2_sr_nm, collision.emission_w_m2_sr_nm,
+            "source-light transport must share the complete free-flight source integral"
+        );
     });
 }
 

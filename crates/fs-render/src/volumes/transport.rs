@@ -16,6 +16,8 @@ use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
 mod cells;
+/// Physical emitting-cell direction proposals and their solid-angle density.
+pub mod emission;
 /// Spectral free flights and phase functions for physical participating media.
 pub mod scattering;
 /// Immutable accepted medium snapshots on one physical observation clock.
@@ -84,7 +86,8 @@ impl MassAbsorptionSpectrum {
 /// Caller-owned limits for admission and per-ray traversal.
 #[derive(Clone, Copy, Debug)]
 pub struct AbsorbingGridBudget {
-    /// Maximum number of borrowed cells scanned at admission.
+    /// Maximum number of borrowed cells scanned at admission. Emitting fields
+    /// may also retain at most one cumulative f64 weight per cell plus one.
     pub max_grid_cells: usize,
     /// Maximum visited cells per ray segment, including zero-length crossings.
     pub max_steps_per_segment: u32,
@@ -116,7 +119,7 @@ pub enum VolumeTransportError {
     Wavelength,
     /// Ray direction is not finite and unit, or distance is negative/NaN.
     Ray,
-    /// Admission scan or per-segment work exceeds the caller's limit.
+    /// Admission storage/scan or per-segment work exceeds the caller's limit.
     Budget,
     /// Finite arithmetic cannot resolve a cell crossing or physical radiance.
     Unrepresentable,
@@ -148,10 +151,12 @@ pub struct AbsorbingGrid<'a> {
     max_steps: u32,
     identity: ContentHash,
     vacuum: bool,
+    emission: emission::EmissionDistribution,
 }
 
 impl<'a> AbsorbingGrid<'a> {
-    /// Validate, hash and borrow the original simulation buffers once.
+    /// Validate, hash and borrow the original simulation buffers; cache bounded
+    /// emission proposal weights when a visible thermal source is present.
     pub fn try_new(
         cx: &Cx<'_>,
         grid: VolumeGrid<'a>,
@@ -216,6 +221,11 @@ impl<'a> AbsorbingGrid<'a> {
             || absorption.knots[..absorption.count]
                 .iter()
                 .all(|(_, k)| *k == 0.0);
+        let emission = if !vacuum && let Some(temperatures) = temperature_k {
+            emission::EmissionDistribution::try_new(cx, &grid, temperatures)?
+        } else {
+            emission::EmissionDistribution::default()
+        };
         Ok(Self {
             grid,
             absorption,
@@ -223,6 +233,7 @@ impl<'a> AbsorbingGrid<'a> {
             max_steps: budget.max_steps_per_segment,
             identity: hash.finalize(),
             vacuum,
+            emission,
         })
     }
 

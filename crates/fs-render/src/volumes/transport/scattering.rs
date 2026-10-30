@@ -17,7 +17,8 @@
 
 use super::cells::{CellRay, validate_ray};
 use super::{
-    AbsorbingGrid, MassAbsorptionSpectrum, VolumeTransportError, checkpoint, positive_product,
+    AbsorbingGrid, MassAbsorptionSpectrum, SegmentTransport, VolumeTransportError, checkpoint,
+    positive_product,
 };
 use crate::thermal_surface::planck_radiance_w_m2_sr_nm;
 use fs_blake3::{ContentHash, DomainHasher};
@@ -251,6 +252,75 @@ impl<'a> ScatteringGrid<'a> {
         Ok(depth.map(|tau| det::exp(-tau)))
     }
 
+    /// Exact attenuation and LTE source on a segment, without sampling a collision.
+    ///
+    /// Direct source-light sampling needs the deterministic emission term of the
+    /// transfer equation. Scattering contributes extinction here, while only
+    /// absorption creates thermal radiation. The stochastic in-scattering term
+    /// remains the responsibility of [`Self::sample_segment`].
+    pub fn transport<const N: usize>(
+        &self,
+        cx: &Cx<'_>,
+        origin: Point3,
+        direction: Vec3,
+        max_distance_m: f64,
+        wavelengths_nm: &[f64; N],
+    ) -> Result<SegmentTransport<N>, VolumeTransportError> {
+        checkpoint(cx)?;
+        validate_ray(origin, direction, max_distance_m)?;
+        let (absorption, _, extinction) = self.coefficients(wavelengths_nm)?;
+        if !self.has_scattering {
+            return self.absorption.transport(
+                cx,
+                origin,
+                direction,
+                max_distance_m,
+                wavelengths_nm,
+            );
+        }
+        let mut result = SegmentTransport {
+            transmittance: [1.0; N],
+            emission_w_m2_sr_nm: [0.0; N],
+        };
+        let Some(mut ray) = CellRay::clip(
+            &self.absorption.grid,
+            origin,
+            direction,
+            max_distance_m,
+            self.absorption.max_steps,
+        )?
+        else {
+            return Ok(result);
+        };
+        let mut depth = [0.0; N];
+        let mut source_cache = [(f64::NAN, 0.0); N];
+        while let Some(segment) = ray.next(cx)? {
+            let rho = self.absorption.grid.data[segment.cell];
+            if rho == 0.0 || segment.length_m == 0.0 {
+                continue;
+            }
+            let tau = extinction.map(|k| {
+                if k == 0.0 {
+                    0.0
+                } else {
+                    positive_product(rho, k, segment.length_m)
+                }
+            });
+            self.integrate_source_cell(
+                segment.cell,
+                &tau,
+                &absorption,
+                &extinction,
+                wavelengths_nm,
+                &mut depth,
+                &mut source_cache,
+                &mut result.emission_w_m2_sr_nm,
+            )?;
+        }
+        result.transmittance = depth.map(|tau| det::exp(-tau));
+        Ok(result)
+    }
+
     /// Sample a complete spectral mixture free flight, without allocating.
     ///
     /// Both variates lie in `[0,1)`: one selects a uniform packet lane and the
@@ -356,40 +426,16 @@ impl<'a> ScatteringGrid<'a> {
             if result.event.is_none() {
                 remaining_tau -= tau[hero];
             }
-            for lane in 0..N {
-                if absorption[lane] > 0.0
-                    && let Some(temperatures) = self.absorption.temperature_k
-                {
-                    let opacity = -det::expm1(-tau[lane]);
-                    if opacity > 0.0 && depth[lane].is_finite() {
-                        if source_cache[lane].0 != temperatures[segment.cell] {
-                            source_cache[lane] = (
-                                temperatures[segment.cell],
-                                planck_radiance_w_m2_sr_nm(
-                                    temperatures[segment.cell],
-                                    wavelengths_nm[lane],
-                                )
-                                .map_err(|_| VolumeTransportError::Unrepresentable)?,
-                            );
-                        }
-                        let source = source_cache[lane].1;
-                        let fraction = absorption[lane] / extinction[lane];
-                        let mut contribution = det::exp(-depth[lane]) * opacity * fraction * source;
-                        if contribution == 0.0 && source > 0.0 {
-                            contribution = det::exp(
-                                -depth[lane] + det::ln(opacity) + det::ln(absorption[lane])
-                                    - det::ln(extinction[lane])
-                                    + det::ln(source),
-                            );
-                        }
-                        result.emission_w_m2_sr_nm[lane] += contribution;
-                        if !result.emission_w_m2_sr_nm[lane].is_finite() {
-                            return Err(VolumeTransportError::Unrepresentable);
-                        }
-                    }
-                }
-                depth[lane] += tau[lane];
-            }
+            self.integrate_source_cell(
+                segment.cell,
+                &tau,
+                &absorption,
+                &extinction,
+                wavelengths_nm,
+                &mut depth,
+                &mut source_cache,
+                &mut result.emission_w_m2_sr_nm,
+            )?;
         }
         if result.event.is_none() {
             let minimum = depth.into_iter().fold(f64::INFINITY, f64::min);
@@ -403,6 +449,52 @@ impl<'a> ScatteringGrid<'a> {
                 depth.iter().map(|tau| det::exp(-tau)).sum::<f64>() / N as f64;
         }
         Ok(result)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn integrate_source_cell<const N: usize>(
+        &self,
+        cell: usize,
+        tau: &[f64; N],
+        absorption: &[f64; N],
+        extinction: &[f64; N],
+        wavelengths_nm: &[f64; N],
+        depth: &mut [f64; N],
+        source_cache: &mut [(f64, f64); N],
+        emission: &mut [f64; N],
+    ) -> Result<(), VolumeTransportError> {
+        for lane in 0..N {
+            if absorption[lane] > 0.0
+                && let Some(temperatures) = self.absorption.temperature_k
+            {
+                let opacity = -det::expm1(-tau[lane]);
+                if opacity > 0.0 && depth[lane].is_finite() {
+                    if source_cache[lane].0 != temperatures[cell] {
+                        source_cache[lane] = (
+                            temperatures[cell],
+                            planck_radiance_w_m2_sr_nm(temperatures[cell], wavelengths_nm[lane])
+                                .map_err(|_| VolumeTransportError::Unrepresentable)?,
+                        );
+                    }
+                    let source = source_cache[lane].1;
+                    let fraction = absorption[lane] / extinction[lane];
+                    let mut contribution = det::exp(-depth[lane]) * opacity * fraction * source;
+                    if contribution == 0.0 && source > 0.0 {
+                        contribution = det::exp(
+                            -depth[lane] + det::ln(opacity) + det::ln(absorption[lane])
+                                - det::ln(extinction[lane])
+                                + det::ln(source),
+                        );
+                    }
+                    emission[lane] += contribution;
+                    if !emission[lane].is_finite() {
+                        return Err(VolumeTransportError::Unrepresentable);
+                    }
+                }
+            }
+            depth[lane] += tau[lane];
+        }
+        Ok(())
     }
 }
 
