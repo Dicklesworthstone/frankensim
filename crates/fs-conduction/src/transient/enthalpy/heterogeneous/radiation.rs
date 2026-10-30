@@ -78,6 +78,52 @@ impl EnthalpyHeatStep {
 }
 
 impl HeterogeneousEnthalpyBackwardEuler<'_, '_> {
+    /// Evaluate the original physical residual at a supplied endpoint under
+    /// the selected existing radiation owner. No history or nonlinear solve
+    /// is advanced. An outer coupled solver must admit both the local balances
+    /// and complete energy account before publishing its joint endpoint.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_endpoint_with_radiation(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_specific_h: &[f64],
+        candidate_specific_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        radiation: EnthalpyRadiation<'_>,
+    ) -> Result<super::super::EnthalpyEndpointEvaluation, EnthalpyError> {
+        match radiation {
+            EnthalpyRadiation::None => self.evaluate_endpoint(
+                cx, problem, interfaces, old_specific_h, candidate_specific_h,
+                dt_s, config, None,
+            ),
+            EnthalpyRadiation::Ambient { patches, config: radiation_config } => {
+                radiation_config.validate()?;
+                self.evaluate_endpoint(
+                    cx, problem, interfaces, old_specific_h, candidate_specific_h,
+                    dt_s, config, Some(patches),
+                )
+            }
+            EnthalpyRadiation::Enclosure { enclosure, config: radiation_config } =>
+                self.evaluate_endpoint_with_enclosure(
+                    cx, problem, interfaces, old_specific_h, candidate_specific_h,
+                    dt_s, config, enclosure, radiation_config,
+                ),
+            EnthalpyRadiation::PointwiseAmbient(owner) =>
+                self.evaluate_endpoint_with_pointwise_ambient_radiation(
+                    cx, problem, interfaces, old_specific_h, candidate_specific_h,
+                    dt_s, config, owner,
+                ),
+            EnthalpyRadiation::PointwiseEnclosure(owner) =>
+                self.evaluate_endpoint_with_pointwise_enclosure_radiation(
+                    cx, problem, interfaces, old_specific_h, candidate_specific_h,
+                    dt_s, config, owner,
+                ),
+        }
+    }
+
     /// Advance the same immutable history through an explicitly selected
     /// existing radiation owner. All native residual, source-domain, energy,
     /// allocation, iteration and cancellation gates remain authoritative.

@@ -24,6 +24,11 @@ use crate::{
 pub struct EnthalpyEndpointEvaluation {
     /// Candidate temperatures resolved from each vertex's declared phase chart, K.
     pub temperature: Vec<f64>,
+    /// Original assembled balance in canonical vertex order, in joules.
+    /// Prescribed-temperature rows are zero after their exact enthalpy check;
+    /// their physical heat reaction remains in `dirichlet_in_w`. Coupled owners
+    /// may solve these rows directly without assembling a second heat operator.
+    pub residual_j: Vec<f64>,
     /// Euclidean norm of the full nodal balance, including local radiation
     /// where selected: `m*(h-h_old) + dt*(A(T,f)*T-b+q_rad)`, in joules.
     pub residual_norm_j: f64,
@@ -290,6 +295,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
         poll(cx, n)?;
         Ok(EnthalpyEndpointEvaluation {
             temperature,
+            residual_j: residual,
             residual_norm_j,
             free_dofs: dofs.n(),
             stored_energy_change_j,

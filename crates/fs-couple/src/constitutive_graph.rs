@@ -10,6 +10,9 @@
 /// Original material equations coupled to finite enthalpy and heat transport.
 pub mod enthalpy;
 
+/// The same material equations coupled to native spatial nodal enthalpy.
+pub mod spatial;
+
 use fs_exec::Cx;
 use fs_material::graph::{ConstitutiveGraph, GraphError, GraphOutput};
 use fs_qty::Dims;

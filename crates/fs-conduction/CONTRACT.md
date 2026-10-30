@@ -2124,3 +2124,9 @@ separate. External source entropy cannot be inferred from supplied joules.
 Entropy is evaluated only after acceptance, outside contact bisection. G1/G3
 checks cover analytic storage, isolated balance, timestep refinement, latent
 transfer, side reversal, supplied heat, equilibrium and zero duration.
+
+## Original heterogeneous endpoint residual for coupled feedback
+
+`EnthalpyEndpointEvaluation::residual_j` exposes the original assembled heterogeneous endpoint residual in mesh-vertex order. It is moved from the existing assembly into the report, without a second operator or a second assembly. Prescribed-temperature rows are zero after their exact enthalpy checks; their physical reaction remains in `dirichlet_in_w`. Coupled owners can therefore close every free nodal energy balance instead of substituting a global scalar energy condition.
+
+`HeterogeneousEnthalpyBackwardEuler::evaluate_endpoint_with_radiation` dispatches the existing `EnthalpyRadiation` choice to the original endpoint evaluation for no radiation, mean ambient/enclosure exchange or pointwise ambient/enclosure exchange. Existing radiation controls and source admission remain authoritative; this read-only dispatch performs no nonlinear solve or history advancement. The material-graph spatial integration tests exercise consistent P1 heating, heterogeneous charts and prescribed bath reactions. New native test execution is pending the authoring environment's unchanged runtime dependency/resource blocker.
