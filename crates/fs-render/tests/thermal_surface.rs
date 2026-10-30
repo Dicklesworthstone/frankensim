@@ -15,6 +15,8 @@ use fs_render::tracer::{
 
 #[path = "thermal_surface/lighting.rs"]
 mod lighting;
+#[path = "thermal_surface/moving.rs"]
+mod moving;
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new_clock_free();

@@ -1,12 +1,17 @@
 //! Physical thermal emission in the existing surface-path estimator.
 //!
-//! The proposal uses actual static mesh faces, including rigidly placed body
-//! boundaries. Thermal charts and moving bodies retain camera-path support.
+//! The proposal uses actual mesh faces, including rigidly placed body
+//! boundaries. Moving meshes retain one local hierarchy and evaluate rigid
+//! placement at the same shutter time as every visibility ray. Thermal charts
+//! retain camera-path support.
 //! No spectrum is converted through RGB, and observing light never updates
 //! the thermal owner's stored energy.
 
 use super::*;
 use crate::lighting::{ThermalLightSample, ThermalTriangleLight};
+
+mod moving;
+pub(super) use moving::MovingThermalLights;
 
 pub(super) fn triangles(
     scene: &Scene,

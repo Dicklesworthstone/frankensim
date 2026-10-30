@@ -180,13 +180,16 @@ pub const MATERIAL_CONTENT_IDENTITY_DOMAIN: &str = "org.frankensim.render.materi
 /// Bit-affecting semantics of construction-order-independent multi-light and
 /// environment sampling. The legacy one-rectangle/no-environment path remains
 /// under [`TRACER_BIT_SEMANTICS_VERSION`] and keeps its frozen stream.
-// v5 uses a deterministic spatial importance hierarchy above eight positive
-// thermal mesh faces. Smaller and nonthermal scenes retain their old bits.
-pub const LIGHTING_TRACER_BIT_SEMANTICS_VERSION: u32 = 5;
+// v6 samples rigidly moving thermal meshes through prepared body-local
+// hierarchies at the path's absolute time. Static-only streams are unchanged.
+pub const LIGHTING_TRACER_BIT_SEMANTICS_VERSION: u32 = 6;
 
 /// Dedicated Philox counter domain for the two lens coordinates. Lens draws
 /// never advance [`PathRng`] and therefore cannot perturb light or BSDF draws.
 const CAMERA_LENS_SAMPLE_DOMAIN_V1: u32 = 0x6c65_6e73;
+/// Moving thermal proposals have disjoint support from the static mixture and
+/// a separate counter domain, preserving its light/BSDF/lens/flight streams.
+const MOVING_THERMAL_SAMPLE_DOMAIN_V1: u32 = 0x6d74_6872;
 
 const PI: f64 = core::f64::consts::PI;
 /// Hero-wavelength packet width (the bead's 4-wavelength packets).
@@ -218,6 +221,57 @@ struct PathTime {
 struct CachedAnimatedInstance {
     primitive_index: usize,
     instance: GeometryInstance,
+}
+
+/// Per-admission light preparation shared unchanged by all paths and workers.
+/// The static mixture keeps its existing PDFs; moving thermal sources are a
+/// disjoint direct-light technique with their own matching hit density.
+struct SceneLighting<'scene> {
+    stationary: AdmittedLighting<'scene>,
+    moving: Option<thermal_lighting::MovingThermalLights<'scene>>,
+}
+
+impl<'scene> core::ops::Deref for SceneLighting<'scene> {
+    type Target = AdmittedLighting<'scene>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.stationary
+    }
+}
+
+impl<'scene> From<AdmittedLighting<'scene>> for SceneLighting<'scene> {
+    fn from(stationary: AdmittedLighting<'scene>) -> Self {
+        Self {
+            stationary,
+            moving: None,
+        }
+    }
+}
+
+impl SceneLighting<'_> {
+    fn sample_moving_thermal(
+        &self,
+        cx: &Cx<'_>,
+        time: Option<&PathTime>,
+        point: Point3,
+        rng: &PathRng,
+        depth: u32,
+    ) -> Result<Option<crate::lighting::ThermalLightSample>, TracerError> {
+        let Some(moving) = &self.moving else {
+            return Ok(None);
+        };
+        let [u0, u1, u2, _] = philox4x32_10(
+            [
+                rng.pixel,
+                rng.sample,
+                depth,
+                MOVING_THERMAL_SAMPLE_DOMAIN_V1,
+            ],
+            rng.key,
+        )
+        .map(u32_unit);
+        moving.sample(cx, time, point, [u0, u1, u2])
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2552,7 +2606,7 @@ struct PendingAdaptiveRenderState {
 #[must_use = "resume or retain the pending render; dropping it discards private progress"]
 pub struct PendingRender<'assets> {
     scene: &'assets Scene,
-    lighting: AdmittedLighting<'assets>,
+    lighting: SceneLighting<'assets>,
     settings: Settings,
     shutter: Option<ShutterInterval>,
     camera_path: CameraPath<'assets>,
@@ -2601,7 +2655,7 @@ pub struct RenderCheckpointYield<'assets> {
 #[must_use = "resume or retain the pending adaptive render; dropping it discards private progress"]
 pub struct PendingAdaptiveRender<'assets> {
     scene: &'assets Scene,
-    lighting: AdmittedLighting<'assets>,
+    lighting: SceneLighting<'assets>,
     settings: Settings,
     policy: AdaptiveSamplingConfig,
     shutter: Option<ShutterInterval>,
@@ -3952,7 +4006,7 @@ enum RenderTileFailure {
 
 struct ParallelRenderKernel<'run, 'assets> {
     scene: &'assets Scene,
-    lighting: &'run AdmittedLighting<'assets>,
+    lighting: &'run SceneLighting<'assets>,
     settings: &'run Settings,
     base_xyz: Option<&'run [[f64; 3]]>,
     staging: &'run Mutex<Vec<[f64; 3]>>,
@@ -4133,7 +4187,7 @@ enum CinematicAovTileFailure {
 
 struct ParallelCinematicAovKernel<'run, 'assets> {
     scene: &'assets Scene,
-    lighting: &'run AdmittedLighting<'assets>,
+    lighting: &'run SceneLighting<'assets>,
     camera: &'assets AnimatedCamera,
     exposure: CameraExposure<'assets>,
     cut_side: CutSide,
@@ -4363,7 +4417,7 @@ struct FixedSampleCinematicAovStaging {
 
 struct ParallelFixedSampleCinematicAovKernel<'run, 'assets> {
     scene: &'assets Scene,
-    lighting: &'run AdmittedLighting<'assets>,
+    lighting: &'run SceneLighting<'assets>,
     camera: &'assets AnimatedCamera,
     exposure: CameraExposure<'assets>,
     cut_side: CutSide,
@@ -4691,7 +4745,7 @@ struct AdaptiveCinematicAovStaging {
 
 struct ParallelAdaptiveCinematicAovKernel<'run, 'assets> {
     scene: &'assets Scene,
-    lighting: &'run AdmittedLighting<'assets>,
+    lighting: &'run SceneLighting<'assets>,
     camera: &'assets AnimatedCamera,
     exposure: CameraExposure<'assets>,
     cut_side: CutSide,
@@ -4986,7 +5040,7 @@ fn adaptive_state_bytes(pixel_count: usize) -> Result<u64, RenderExecutionError>
 #[allow(clippy::too_many_arguments)]
 fn trace_adaptive_pixel(
     scene: &Scene,
-    lighting: &AdmittedLighting<'_>,
+    lighting: &SceneLighting<'_>,
     cx: &Cx<'_>,
     settings: &Settings,
     policy: AdaptiveSamplingConfig,
@@ -5030,7 +5084,7 @@ fn trace_adaptive_pixel(
 
 struct AdaptiveRenderKernel<'run, 'assets> {
     scene: &'assets Scene,
-    lighting: &'run AdmittedLighting<'assets>,
+    lighting: &'run SceneLighting<'assets>,
     settings: &'run Settings,
     policy: AdaptiveSamplingConfig,
     state: &'run Mutex<AdaptiveRenderState>,
@@ -5195,7 +5249,7 @@ impl TileKernel for AdaptiveRenderKernel<'_, '_> {
 
 struct PendingAdaptiveRenderKernel<'run, 'assets> {
     scene: &'assets Scene,
-    lighting: &'run AdmittedLighting<'assets>,
+    lighting: &'run SceneLighting<'assets>,
     settings: &'run Settings,
     policy: AdaptiveSamplingConfig,
     state: &'run Mutex<PendingAdaptiveRenderState>,
@@ -5393,7 +5447,7 @@ impl TileKernel for PendingAdaptiveRenderKernel<'_, '_> {
 
 struct PendingRenderKernel<'run, 'assets> {
     scene: &'assets Scene,
-    lighting: &'run AdmittedLighting<'assets>,
+    lighting: &'run SceneLighting<'assets>,
     settings: &'run Settings,
     state: &'run Mutex<PendingRenderState>,
     failures: &'run Mutex<Option<(u64, RenderTileFailure)>>,
@@ -9513,7 +9567,7 @@ pub fn trace_cinematic_pixel_sample(
 #[allow(clippy::too_many_arguments)]
 fn trace_pixel_sample(
     scene: &Scene,
-    lighting: &AdmittedLighting<'_>,
+    lighting: &SceneLighting<'_>,
     cx: &Cx<'_>,
     settings: &Settings,
     kn: f64,
@@ -9546,7 +9600,7 @@ fn trace_pixel_sample(
 #[allow(clippy::too_many_arguments)]
 fn trace_pixel_sample_with_primary(
     scene: &Scene,
-    lighting: &AdmittedLighting<'_>,
+    lighting: &SceneLighting<'_>,
     cx: &Cx<'_>,
     settings: &Settings,
     kn: f64,
@@ -9581,7 +9635,7 @@ fn trace_pixel_sample_with_primary(
 #[allow(clippy::too_many_arguments)]
 fn trace_pixel_sample_with_primary_and_medium(
     scene: &Scene,
-    lighting: &AdmittedLighting<'_>,
+    lighting: &SceneLighting<'_>,
     cx: &Cx<'_>,
     settings: &Settings,
     kn: f64,
@@ -12777,7 +12831,7 @@ fn competing_dielectric_event_probability(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // one integrator, one story
 fn trace_path(
     scene: &Scene,
-    lighting: &AdmittedLighting<'_>,
+    lighting: &SceneLighting<'_>,
     cx: &Cx<'_>,
     s: &Settings,
     kn: f64,
@@ -12816,7 +12870,7 @@ fn trace_path(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn trace_path_with_medium(
     scene: &Scene,
-    lighting: &AdmittedLighting<'_>,
+    lighting: &SceneLighting<'_>,
     cx: &Cx<'_>,
     s: &Settings,
     kn: f64,
@@ -12858,7 +12912,7 @@ fn trace_path_with_medium(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn trace_path_with_emitters(
     scene: &Scene,
-    lighting: &AdmittedLighting<'_>,
+    lighting: &SceneLighting<'_>,
     cx: &Cx<'_>,
     s: &Settings,
     kn: f64,
@@ -12875,7 +12929,7 @@ fn trace_path_with_emitters(
     #[cfg(feature = "volumes")] medium: Option<PathMedium<'_, '_>>,
     #[cfg(feature = "photometry")] fixtures: Option<&photometric::FixtureLighting<'_>>,
 ) -> Result<PathTraceSample, TracerError> {
-    let legacy_light_weights = lighting.is_legacy_compatibility_path();
+    let legacy_light_weights = lighting.is_legacy_compatibility_path() && lighting.moving.is_none();
     // The frozen surface-only estimator predates terminal-vertex NEE weights.
     // Physical media are a new estimator and must not inherit its missing
     // energy when the final vertex has no evaluated BSDF continuation.
@@ -13124,6 +13178,34 @@ fn trace_path_with_emitters(
                     }
                 }
                 if s.strategy != DirectStrategy::BsdfOnly {
+                    if let Some(light) =
+                        lighting.sample_moving_thermal(cx, ray_time, event.position, &rng, depth)?
+                    {
+                        let direct = scattering::direct_contribution(
+                            scene,
+                            cx,
+                            ray_time,
+                            s,
+                            depth,
+                            medium,
+                            phase,
+                            event.position,
+                            direction,
+                            LightSample::ThermalSurface(light),
+                            &lambdas,
+                        )?;
+                        for lane in 0..PACKET {
+                            let contribution = throughput[lane] * direct[lane];
+                            radiance[lane] += contribution;
+                            if let Some(contributions) = &mut contribution_radiance {
+                                contributions.record(
+                                    direct_contribution_class(depth),
+                                    lane,
+                                    contribution,
+                                );
+                            }
+                        }
+                    }
                     let (u1, u2) = rng.path_pair(path_sobol, depth, 0);
                     if let Some(light) = lighting.sample(event.position, u1, u2) {
                         let direct = scattering::direct_contribution(
@@ -13425,14 +13507,28 @@ fn trace_path_with_emitters(
             // Only straight thermal connections compete with this hit. A path
             // through smooth refractive interfaces has no thermal manifold
             // proposal and retains its full camera-path contribution.
-            let weight = thermal_lighting::hit_weight(
-                lighting,
-                s.strategy,
-                previous_bsdf,
-                prim_idx,
-                prev_origin,
-                hit.point,
-            );
+            let moving_pdf = if let Some(moving) = &lighting.moving
+                && previous_bsdf.is_some_and(|previous| {
+                    !previous.pdf.is_delta() && previous.smooth_slab.is_none()
+                })
+                && s.strategy != DirectStrategy::BsdfOnly
+            {
+                moving.hit_pdf(cx, ray_time, prim_idx, prev_origin, hit.point)?
+            } else {
+                0.0
+            };
+            let weight = if moving_pdf > 0.0 {
+                emissive_hit_weight(s.strategy, previous_bsdf, Some(moving_pdf))
+            } else {
+                thermal_lighting::hit_weight(
+                    lighting,
+                    s.strategy,
+                    previous_bsdf,
+                    prim_idx,
+                    prev_origin,
+                    hit.point,
+                )
+            };
             for (lane, &lambda) in lambdas.iter().enumerate() {
                 let emitted = surface
                     .radiance_w_m2_sr_nm(lambda)
@@ -13532,6 +13628,40 @@ fn trace_path_with_emitters(
 
         // Next-event estimation.
         if s.strategy != DirectStrategy::BsdfOnly {
+            let moving_receiver = match prim.material {
+                Material::Dielectric { surface, .. } => surface.roughness_alpha().is_some(),
+                _ => true,
+            };
+            if moving_receiver
+                && let Some(light) =
+                    lighting.sample_moving_thermal(cx, ray_time, hit.point, &rng, depth)?
+            {
+                let direct = thermal_lighting::direct_contribution(
+                    scene,
+                    cx,
+                    ray_time,
+                    s,
+                    depth,
+                    light,
+                    &prim.material,
+                    hit.point,
+                    frame,
+                    ray.dir.scale(-1.0),
+                    &medium_stack,
+                    dielectric_boundary,
+                    brushed_frame.as_ref(),
+                    &lambdas,
+                    #[cfg(feature = "volumes")]
+                    medium,
+                )?;
+                for lane in 0..PACKET {
+                    let contribution = throughput[lane] * direct[lane];
+                    radiance[lane] += contribution;
+                    if let Some(contributions) = &mut contribution_radiance {
+                        contributions.record(direct_contribution_class(depth), lane, contribution);
+                    }
+                }
+            }
             match prim.material {
                 Material::Dielectric { surface, .. } => {
                     if let Some(alpha) = surface.roughness_alpha() {
@@ -15294,7 +15424,7 @@ fn validate_scene<'scene>(
     scene: &'scene Scene,
     cx: &Cx<'_>,
     shutter: Option<ShutterInterval>,
-) -> Result<AdmittedLighting<'scene>, TracerError> {
+) -> Result<SceneLighting<'scene>, TracerError> {
     validate_scene_with_medium_emission(scene, cx, shutter, false)
 }
 
@@ -15303,7 +15433,7 @@ fn validate_scene_with_medium_emission<'scene>(
     cx: &Cx<'_>,
     shutter: Option<ShutterInterval>,
     has_medium_emission: bool,
-) -> Result<AdmittedLighting<'scene>, TracerError> {
+) -> Result<SceneLighting<'scene>, TracerError> {
     let mut thermal_emission = false;
     for primitive in &scene.primitives {
         cx.checkpoint()?;
@@ -15358,6 +15488,13 @@ fn validate_scene_with_medium_emission<'scene>(
             instance.trajectory().admit_shutter(shutter)?;
         }
     }
+    let mut lighting = SceneLighting::from(lighting);
+    if thermal_emission {
+        let moving = thermal_lighting::MovingThermalLights::try_new(scene, cx)?;
+        if !moving.is_empty() {
+            lighting.moving = Some(moving);
+        }
+    }
     cx.checkpoint()?;
     Ok(lighting)
 }
@@ -15372,7 +15509,7 @@ fn preflight_render<'a>(
     to: u32,
     shutter: Option<ShutterInterval>,
     camera_path: CameraPath<'_>,
-) -> Result<(AdmittedLighting<'a>, FilmTimeMode), TracerError> {
+) -> Result<(SceneLighting<'a>, FilmTimeMode), TracerError> {
     preflight_render_with_medium_emission(
         scene,
         cx,
@@ -15397,7 +15534,7 @@ fn preflight_render_with_medium_emission<'a>(
     shutter: Option<ShutterInterval>,
     camera_path: CameraPath<'_>,
     has_medium_emission: bool,
-) -> Result<(AdmittedLighting<'a>, FilmTimeMode), TracerError> {
+) -> Result<(SceneLighting<'a>, FilmTimeMode), TracerError> {
     cx.checkpoint()?;
     let expected_len = checked_pixel_len(settings.width, settings.height)?;
     if to < from {
@@ -16252,7 +16389,8 @@ mod tests {
                     half_tan: 0.0,
                 },
             };
-            let lighting = AdmittedLighting::try_new(&scene.lights, None).unwrap();
+            let lighting =
+                SceneLighting::from(AdmittedLighting::try_new(&scene.lights, None).unwrap());
             let settings = Settings {
                 width: 1,
                 height: 1,
@@ -16345,7 +16483,8 @@ mod tests {
                     half_tan: 0.0,
                 },
             };
-            let lighting = AdmittedLighting::try_new(&scene.lights, None).unwrap();
+            let lighting =
+                SceneLighting::from(AdmittedLighting::try_new(&scene.lights, None).unwrap());
             let settings = Settings {
                 width: 1,
                 height: 1,
@@ -16890,7 +17029,8 @@ mod tests {
                     half_tan: 0.0,
                 },
             };
-            let lighting = AdmittedLighting::try_new(&scene.lights, None).unwrap();
+            let lighting =
+                SceneLighting::from(AdmittedLighting::try_new(&scene.lights, None).unwrap());
             let settings = Settings {
                 width: 1,
                 height: 1,
@@ -17179,7 +17319,8 @@ mod tests {
             ));
             let boundary = discover_planar_manifold_boundary(&scene, &shadow, first, None)
                 .expect("closed convex wedge must admit the finite manifold connector");
-            let lighting = AdmittedLighting::try_new(&scene.lights, None).unwrap();
+            let lighting =
+                SceneLighting::from(AdmittedLighting::try_new(&scene.lights, None).unwrap());
             let direct_pdf = lighting.rect_mixture_pdf(0, source, target);
             let direct = PreparedDirectLight {
                 direction: straight_direction,
@@ -17374,7 +17515,8 @@ mod tests {
                 light_primitive,
                 "canonical same-side T-R-T path must not rely on a dielectric blocker"
             );
-            let lighting = AdmittedLighting::try_new(&scene.lights, None).unwrap();
+            let lighting =
+                SceneLighting::from(AdmittedLighting::try_new(&scene.lights, None).unwrap());
             let direct_pdf = lighting.rect_mixture_pdf(0, source, target);
             let direct = PreparedDirectLight {
                 direction,
@@ -17842,7 +17984,8 @@ mod tests {
     fn reverse_slab_mis_has_no_competitor_when_the_straight_ray_misses_a_finite_plate() {
         with_test_cx(|cx| {
             let (scene, slab_path, target) = reverse_edge_fixture(cx, false);
-            let lighting = AdmittedLighting::try_new(&scene.lights, None).unwrap();
+            let lighting =
+                SceneLighting::from(AdmittedLighting::try_new(&scene.lights, None).unwrap());
             let straight = unit(target.delta_from(slab_path.source_origin));
             let first = intersect(
                 &scene,
@@ -17875,7 +18018,8 @@ mod tests {
     fn reverse_slab_mis_has_no_competitor_when_an_opaque_primitive_blocks_the_straight_ray() {
         with_test_cx(|cx| {
             let (scene, slab_path, target) = reverse_edge_fixture(cx, true);
-            let lighting = AdmittedLighting::try_new(&scene.lights, None).unwrap();
+            let lighting =
+                SceneLighting::from(AdmittedLighting::try_new(&scene.lights, None).unwrap());
             let straight = unit(target.delta_from(slab_path.source_origin));
             let first = intersect(
                 &scene,

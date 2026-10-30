@@ -1295,13 +1295,66 @@ impl<'a> AdmittedLighting<'a> {
         hit_point: Point3,
         total: f64,
     ) -> f64 {
+        self.thermal_mixture_pdf_with_total_and_tolerance(
+            primitive_index,
+            origin,
+            hit_point,
+            total,
+            0.0,
+        )
+    }
+
+    /// Explicit local-space support uncertainty for rigidly transformed
+    /// endpoints. Static callers retain the zero-uncertainty path above.
+    pub(crate) fn thermal_mixture_pdf_with_tolerance(
+        &self,
+        primitive_index: usize,
+        origin: Point3,
+        hit_point: Point3,
+        support_tolerance_m: f64,
+    ) -> f64 {
+        let total = self.total_weight(origin);
+        if !(total > 0.0
+            && total.is_finite()
+            && support_tolerance_m >= 0.0
+            && support_tolerance_m.is_finite())
+        {
+            return 0.0;
+        }
+        self.thermal_mixture_pdf_with_total_and_tolerance(
+            primitive_index,
+            origin,
+            hit_point,
+            total,
+            support_tolerance_m,
+        )
+    }
+
+    fn thermal_mixture_pdf_with_total_and_tolerance(
+        &self,
+        primitive_index: usize,
+        origin: Point3,
+        hit_point: Point3,
+        total: f64,
+        support_tolerance_m: f64,
+    ) -> f64 {
         if let Some(tree) = &self.thermal_tree {
-            return tree.mixture_pdf(
+            if support_tolerance_m == 0.0 {
+                return tree.mixture_pdf(
+                    &self.thermal_triangles,
+                    primitive_index,
+                    origin,
+                    hit_point,
+                    tree.weight(&self.thermal_triangles, origin) / total,
+                );
+            }
+            return tree.mixture_pdf_with_tolerance(
                 &self.thermal_triangles,
                 primitive_index,
                 origin,
                 hit_point,
                 tree.weight(&self.thermal_triangles, origin) / total,
+                support_tolerance_m,
             );
         }
         self.candidates
@@ -1314,7 +1367,11 @@ impl<'a> AdmittedLighting<'a> {
                 if triangle.source.primitive_index != primitive_index {
                     return None;
                 }
-                let conditional_pdf = triangle.directional_pdf(origin, hit_point);
+                let conditional_pdf = if support_tolerance_m == 0.0 {
+                    triangle.directional_pdf(origin, hit_point)
+                } else {
+                    triangle.directional_pdf_with_tolerance(origin, hit_point, support_tolerance_m)
+                };
                 if conditional_pdf == 0.0 {
                     // Most faces of a body cannot generate this endpoint.
                     // Reject their area support before the three normalized
@@ -1380,6 +1437,25 @@ impl<'a> AdmittedLighting<'a> {
         self.rectangles.len() == 1
             && !self.has_positive_thermal
             && self.environment.is_none_or(EnvironmentMap::is_black)
+    }
+
+    /// Logarithm of the thermal sources' area-weighted visible luminance.
+    /// This admission-only aggregate allows a rigid body's local emitter
+    /// hierarchy to be reused at every shutter time without revisiting its
+    /// triangles. Logarithms retain finite proposal weights at extreme scales.
+    pub(crate) fn thermal_log_power(&self, cx: &Cx<'_>) -> Result<Option<f64>, LightingError> {
+        let mut total: Option<f64> = None;
+        for triangle in &self.thermal_triangles {
+            cx.checkpoint().map_err(|_| LightingError::Cancelled)?;
+            if triangle.luminance == 0.0 {
+                continue;
+            }
+            let power = det::ln(triangle.area) + det::ln(triangle.luminance);
+            total = Some(total.map_or(power, |previous| {
+                previous.max(power) + det::ln(1.0 + det::exp(-(previous - power).abs()))
+            }));
+        }
+        Ok(total)
     }
 
     fn total_weight(&self, origin: Point3) -> f64 {

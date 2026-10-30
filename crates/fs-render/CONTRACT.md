@@ -903,6 +903,23 @@ Lighting bit-semantics v5 adds a deterministic thermal light hierarchy above
   The small-source sampler and all nonthermal image streams remain unchanged.
   Sampling is logarithmic in thermal face count; reverse queries are spatially
   pruned, with worst-case linear work for fully overlapping source bounds.
+Lighting bit-semantics v6 adds direct sampling of rigidly moving thermal mesh
+  sources in the existing motion, cinematic, adaptive and physical-medium
+  exposure paths. Each body's local-space hierarchy is prepared once; a
+  stable-object-ordered area/luminance CDF selects a body with logarithmic
+  lookup and a uniform support component. Only the selected rigid placement is
+  evaluated at the path's absolute shutter time, reusing the geometry pose
+  cache when available. Source points, visibility and reverse hit PDFs share
+  that time. Proper-rigid motion preserves area and solid angle; neither mesh
+  positions nor light hierarchies are rebuilt per ray. Moving sources have a
+  separate light technique and counter domain, so static-only light/BSDF/lens
+  streams are unchanged. Opaque and rough-interface receivers, and physical
+  medium phase vertices, use matching direct/hit MIS with complete final-vertex
+  weight. Static and moving source sets are disjoint. Spectral radiance remains
+  the accepted graybody Planck law; transforms and observation do not update
+  temperature or debit thermal energy. Focused tests include independent
+  area/time integrals, mixed-source energy, moving occlusion, physical extinction,
+  matched source densities and exact tiled/progressive replay.
 Camera-path transport exposes both balance-heuristic and squared-power-
 heuristic MIS. Both use the same reciprocal proposal densities and partition
 unity; the power variant is an unbiased variance policy, not radiance clipping
@@ -1127,10 +1144,11 @@ its prior 872c freeze was four-quadrant, and 8ll9 requires current-tree replay.
   visualization placements only: they do not alter mass properties, contact
   geometry, mechanics state, material parameters, or emission. Only proper
   rigid transforms are supported. Time-varying proper-rigid placements and
-  motion blur are implemented under the contracts below; deformation, scaling,
-  and time-varying emission or animated NEE-light sampling remain successor
-  work. Emissive geometry may move with its instance, but its emission itself is
-  time-invariant.
+  motion blur are implemented under the contracts below. Rigidly moving thermal
+  meshes support direct-light proposals; deforming emission, scaling, moving
+  chart-source proposals and time-varying surface emission remain successor
+  work. Emissive geometry may move with its instance, but its material emission
+  itself is time-invariant.
 - v1 includes the scalar-BVH spectral path tracer. Wide-BVH SIMD traversal,
   watertight ray-triangle tests, a LIGHT-BVH for large emitter populations,
   heterogeneous scattering/dielectric coupling, ray-stream sorting, and
@@ -1359,7 +1377,10 @@ legacy static entry point refuses with `MissingRayTime`; a shutter outside any
 animated trajectory refuses before film publication. Legacy static rendering
 does not draw the motion dimension, and rendering static geometry through the
 motion entry point is bit-identical in XYZ output. A zero-width shutter at an animated
-keyframe is bit-identical to the equivalent static instance. G0/G3/G5 coverage
+keyframe is bit-identical to the equivalent static instance when no moving thermal
+NEE technique is active. Moving thermal sources have equal physical expectation
+under the same pose, but their dedicated proposal stream is different from the
+static mixture. G0/G3/G5 coverage
 includes malformed/full/zero exposures, deterministic strata and progressive
 partitions, trajectory admission and interpolation, moving-camera/object
 relative intersection, conservative sampled bounds, transactional

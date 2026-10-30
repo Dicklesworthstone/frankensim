@@ -144,7 +144,18 @@ impl AdmittedThermalTriangle {
     }
 
     pub(super) fn directional_pdf(self, origin: Point3, point: Point3) -> f64 {
-        if !self.contains(point) {
+        self.directional_pdf_with_tolerance(origin, point, 0.0)
+    }
+
+    /// Absolute endpoint uncertainty from a world/local rigid round trip.
+    /// This changes only support classification, never area or PDF normalization.
+    pub(super) fn directional_pdf_with_tolerance(
+        self,
+        origin: Point3,
+        point: Point3,
+        support_tolerance_m: f64,
+    ) -> f64 {
+        if !self.contains(point, support_tolerance_m) {
             return 0.0;
         }
         let Some((direction, distance)) = normalized(point.delta_from(origin)) else {
@@ -162,7 +173,7 @@ impl AdmittedThermalTriangle {
         }
     }
 
-    fn contains(self, point: Point3) -> bool {
+    fn contains(self, point: Point3, support_tolerance_m: f64) -> bool {
         let relative = point.delta_from(self.source.vertices[0]);
         let plane_error = relative.dot(self.normal).abs();
         let scale = self
@@ -170,7 +181,9 @@ impl AdmittedThermalTriangle {
             .max(point.x.abs())
             .max(point.y.abs())
             .max(point.z.abs());
-        if !plane_error.is_finite() || plane_error > 128.0 * f64::EPSILON * scale {
+        if !plane_error.is_finite()
+            || plane_error > 128.0 * f64::EPSILON * scale + support_tolerance_m
+        {
             return false;
         }
         // Project away the largest normal coordinate. Scale all coordinates
@@ -198,11 +211,24 @@ impl AdmittedThermalTriangle {
         let u = (p[0] * b[1] - p[1] * b[0]) / determinant;
         let v = (a[0] * p[1] - a[1] * p[0]) / determinant;
         let tolerance = 128.0 * f64::EPSILON;
+        // Propagate the same metric uncertainty through the two projected
+        // area ratios. A fixed barycentric epsilon alone cannot cover a tiny
+        // local mesh translated far from the world origin. Zero retains the
+        // static support predicate and arithmetic exactly.
+        let [error_u, error_v] = if support_tolerance_m == 0.0 {
+            [0.0; 2]
+        } else {
+            let error = (support_tolerance_m / edge_scale) / determinant.abs();
+            [
+                error * (b[0].abs() + b[1].abs()),
+                error * (a[0].abs() + a[1].abs()),
+            ]
+        };
         u.is_finite()
             && v.is_finite()
-            && u >= -tolerance
-            && v >= -tolerance
-            && u + v <= 1.0 + tolerance
+            && u >= -(tolerance + error_u)
+            && v >= -(tolerance + error_v)
+            && u + v <= 1.0 + tolerance + error_u + error_v
     }
 }
 

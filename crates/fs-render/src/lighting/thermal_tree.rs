@@ -52,6 +52,10 @@ impl Bounds {
     }
 
     fn contains(self, point: Point3) -> bool {
+        self.contains_with_tolerance(point, 0.0)
+    }
+
+    fn contains_with_tolerance(self, point: Point3, support_tolerance_m: f64) -> bool {
         let coordinates = [point.x, point.y, point.z];
         let scale = coordinates
             .into_iter()
@@ -62,7 +66,7 @@ impl Bounds {
         // The narrow phase admits rounded plane/barycentric coordinates.
         // This broader envelope includes that entire tolerance, including
         // shared edges, translated geometry, and exactly zero-thickness boxes.
-        let tolerance = 1024.0 * f64::EPSILON * scale;
+        let tolerance = 1024.0 * f64::EPSILON * scale + support_tolerance_m;
         coordinates.into_iter().enumerate().all(|(axis, value)| {
             value >= self.lo[axis] - tolerance && value <= self.hi[axis] + tolerance
         })
@@ -379,6 +383,26 @@ impl ThermalLightTree {
         point: Point3,
         tree_probability: f64,
     ) -> f64 {
+        self.mixture_pdf_with_tolerance(
+            triangles,
+            primitive_index,
+            origin,
+            point,
+            tree_probability,
+            0.0,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn mixture_pdf_with_tolerance(
+        &self,
+        triangles: &[AdmittedThermalTriangle],
+        primitive_index: usize,
+        origin: Point3,
+        point: Point3,
+        tree_probability: f64,
+        support_tolerance_m: f64,
+    ) -> f64 {
         self.point_pdf(
             0,
             triangles,
@@ -386,9 +410,11 @@ impl ThermalLightTree {
             origin,
             point,
             tree_probability,
+            support_tolerance_m,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn point_pdf(
         &self,
         index: usize,
@@ -397,18 +423,32 @@ impl ThermalLightTree {
         origin: Point3,
         point: Point3,
         probability: f64,
+        support_tolerance_m: f64,
     ) -> f64 {
         let node = self.nodes[index];
         if probability == 0.0
             || primitive_index < node.primitive_min
             || primitive_index > node.primitive_max
-            || !node.bounds.contains(point)
         {
+            return 0.0;
+        }
+        let contains = if support_tolerance_m == 0.0 {
+            node.bounds.contains(point)
+        } else {
+            node.bounds
+                .contains_with_tolerance(point, support_tolerance_m)
+        };
+        if !contains {
             return 0.0;
         }
         match node.kind {
             Kind::Leaf(triangle) => {
-                probability * triangles[triangle].directional_pdf(origin, point)
+                probability
+                    * triangles[triangle].directional_pdf_with_tolerance(
+                        origin,
+                        point,
+                        support_tolerance_m,
+                    )
             }
             Kind::Branch { left, right } => {
                 let Some(probabilities) = self.child_probabilities(triangles, origin, left, right)
@@ -422,6 +462,7 @@ impl ThermalLightTree {
                     origin,
                     point,
                     probability * probabilities[0],
+                    support_tolerance_m,
                 ) + self.point_pdf(
                     right,
                     triangles,
@@ -429,6 +470,7 @@ impl ThermalLightTree {
                     origin,
                     point,
                     probability * probabilities[1],
+                    support_tolerance_m,
                 )
             }
         }

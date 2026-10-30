@@ -50,7 +50,7 @@ pub(crate) struct FixtureTransport<'scene, 'field> {
     scene: &'scene Scene,
     direct_scene: PhotometricScene<'scene>,
     fixtures: FixtureLighting<'scene>,
-    lighting: AdmittedLighting<'scene>,
+    lighting: SceneLighting<'scene>,
     medium: Option<PathMedium<'scene, 'field>>,
     settings: Settings,
     key: [u32; 2],
