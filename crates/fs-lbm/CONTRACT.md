@@ -5175,3 +5175,48 @@ Three focused G1/G3/G4 regressions cover independent finite-store balances,
 solid-data changes reaching actual liquid populations through the common gas,
 aggregate small-gas timestep control, geometry/coverage/domain refusal,
 cancellation, retained histories and successful retry.
+
+
+### Independent fragment conservation in tetrahedral liquid ingress
+
+The original `free_surface3_from_tetrahedra` and
+`free_surface3_from_tetrahedra_with_enthalpy` paths identify face-connected
+pieces through the original shared vertex indices. Each piece uses the SAME
+tet/Cartesian overlap geometry, P1 integrals and native dense momentum
+correction independently. A detached component cannot supply another's
+linear or angular impulse during remapping.
+
+`TetLiquidTransferReport::components` retains source tetrahedron indices,
+receiving native cell coordinates, actual source/target moments, centroid
+displacement and signed kinetic/gravitational projection changes for each
+piece. Components are ordered by their lowest source tetrahedron index.
+A receiving cell occupied by two disconnected pieces refuses: unresolved
+coalescence cannot replace separate states. Repeated tet vertices and more
+than two cells incident to one indexed face also refuse. This topological
+admission is not a global geometric nonintersection certificate.
+
+Mass and both momentum budgets bound sums of absolute component errors
+(momentum uses Euclidean norms). The mechanical error budget bounds the sum
+over pieces of absolute kinetic change plus absolute gravitational change.
+Each component also meets the original centroid limit. Opposite errors cannot
+cancel between fragments or independently spend the full shared allowance.
+
+The enthalpy extension retains actual source and receiving mass*h accounts
+per component, in the same order as the mechanical reports. Their summed
+absolute discrepancies meet the original thermal allowance. Mechanical
+projection changes remain numerical representation error and never become
+heat. Source-card, pinned-claim, caloric, density, native scaling, work-budget
+and cancellation gates remain in force.
+
+These constructors still admit already-liquid, stress-free, uniform-material
+snapshots with explicitly neglected capillarity. They do not release solid
+elastic energy, transport plastic history, create a pressure projection,
+support different fluids in one cell or claim a complete melting transition.
+The component mapping is ingress lineage, not persistent fragment tracking
+after native VOF evolution or coalescence. Failed admission returns no
+candidate and leaves supplied fields unchanged.
+
+Three G1/G3/G4 regressions cover independently translating/counter-rotating
+heated cubes with actual continued native flow, isolated-component
+equivalence, equal/opposite numerical-energy errors that cannot cancel,
+unresolved component aliasing, cancellation and retry.

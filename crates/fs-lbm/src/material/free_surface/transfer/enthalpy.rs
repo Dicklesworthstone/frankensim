@@ -45,12 +45,12 @@ pub struct TetEnthalpyTransferLimits {
     /// Bound on source-node, caloric-knot and source-property-line samples.
     /// The total caloric knot count must also fit this bound before scanning.
     pub max_source_queries: usize,
-    /// Absolute allowed target minus source extensive enthalpy [J].
+    /// Allowed sum of absolute per-component target minus source enthalpy [J].
     pub enthalpy_tolerance_j: f64,
 }
 
 /// Separate thermal conservation and mechanical representation discrepancies.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TetEnthalpyTransferReport {
     /// Original geometric transfer and its signed kinetic/potential changes.
     pub mechanical: TetLiquidTransferReport,
@@ -62,6 +62,16 @@ pub struct TetEnthalpyTransferReport {
     pub enthalpy_defect_j: f64,
     /// Actual source-node, caloric-knot and property-line sample queries.
     pub source_queries: usize,
+    /// Each face-connected piece's actual extensive caloric transfer, in the
+    /// SAME order as `mechanical.components`. Errors cannot cancel across pieces.
+    pub components: Vec<TetComponentEnthalpyTransfer>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TetComponentEnthalpyTransfer {
+    pub source_enthalpy_j: f64,
+    pub target_enthalpy_j: f64,
+    pub enthalpy_defect_j: f64,
 }
 
 /// Original geometric/momentum or thermal/material refusal.
@@ -110,6 +120,8 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
     /// The caller supplies the execution context and its cancellation gate.
     /// Both are checked before publication. No input field or accepted flow is
     /// mutated on any source, projection, thermal, budget or cancellation refusal.
+    /// Every original face-connected piece also retains its own extensive
+    /// enthalpy alongside the original component momentum and lineage audit.
     #[allow(clippy::too_many_arguments)]
     pub fn free_surface3_from_tetrahedra_with_enthalpy<'m>(
         self,
@@ -197,6 +209,32 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
         {
             return Err(invalid("geometric transfer exceeds its extensive enthalpy bound").into());
         }
+        let mut components = Vec::with_capacity(mechanical.components.len());
+        let mut absolute_defect = 0.0;
+        let cell_volume = self.cell_size_m().powi(3);
+        for (component, &source_enthalpy_j) in mechanical.components.iter()
+            .zip(&transferred.source_by_component_j)
+        {
+            checkpoint(cx)?;
+            let mut target_enthalpy_j = 0.0;
+            for &[x, y, z] in &component.target_cells {
+                checkpoint(cx)?;
+                let cell = thermal.flow().sample_at_si(x, y, z)
+                    .map_err(TetLiquidTransferError::from)?
+                    .ok_or_else(|| invalid("native receiver lost a component thermal cell"))?;
+                let h = thermal.specific_enthalpy_at([x, y, z])
+                    .ok_or_else(|| invalid("native component lost its extensive enthalpy"))?;
+                target_enthalpy_j += cell.density_kg_m3 * cell.fill_fraction * cell_volume * h;
+            }
+            let enthalpy_defect_j = target_enthalpy_j - source_enthalpy_j;
+            absolute_defect += enthalpy_defect_j.abs();
+            if !absolute_defect.is_finite() || absolute_defect > limits.enthalpy_tolerance_j {
+                return Err(invalid("component enthalpy exceeds the shared absolute transfer budget").into());
+            }
+            components.push(TetComponentEnthalpyTransfer {
+                source_enthalpy_j, target_enthalpy_j, enthalpy_defect_j,
+            });
+        }
         checkpoint(cx)?;
         if gate.is_requested() {
             return Err(TetLiquidTransferError::Cancelled.into());
@@ -207,6 +245,7 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
             target_enthalpy_j,
             enthalpy_defect_j,
             source_queries,
+            components,
         }))
     }
 }

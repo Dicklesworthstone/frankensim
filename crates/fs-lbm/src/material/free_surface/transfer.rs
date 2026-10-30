@@ -2,7 +2,10 @@
 //!
 //! The geometry owner constructs actual tet/cell intersections. Their moments
 //! integrate a P1 velocity field; a mass-weighted rigid correction preserves
-//! its linear and angular momentum at the receiving cell centres. Both signs
+//! EACH face-connected piece's linear and angular momentum at receiving cell
+//! centres. Disconnected fragments cannot exchange impulse or torque through
+//! remapping, and aliasing them into one receiving cell requires refinement.
+//! Both signs
 //! of the resulting kinetic/potential energy change are numerical projection
 //! error, bounded by the caller, never heat. The returned report describes
 //! ingress only; subsequent evolution belongs to the original VOF solver.
@@ -19,6 +22,9 @@ use std::collections::BTreeMap;
 
 /// Conservative P1 enthalpy ingress into the original moving-liquid owner.
 pub mod enthalpy;
+
+mod components;
+pub use components::TetLiquidComponentTransfer;
 
 use fs_exec::Cx;
 use fs_la::factor::{cholesky, lu};
@@ -51,15 +57,17 @@ pub struct TetLiquidTransferLimits {
     pub max_wet_cells: usize,
     /// Relative volume partition/overfill roundoff tolerance, in [0, 1e-6].
     pub relative_volume_tolerance: f64,
-    /// Absolute total mass discrepancy [kg].
+    /// Sum of absolute per-component mass discrepancies [kg].
     pub mass_tolerance_kg: f64,
-    /// Euclidean linear-momentum discrepancy [kg m/s].
+    /// Sum of per-component Euclidean linear-momentum discrepancies [kg m/s].
     pub momentum_tolerance_kg_m_s: f64,
-    /// Euclidean angular-momentum discrepancy about the grid origin [kg m²/s].
+    /// Sum of per-component angular-momentum discrepancy norms [kg m²/s],
+    /// all about the same grid origin.
     pub angular_momentum_tolerance_kg_m2_s: f64,
-    /// Maximum displacement of mass centroid due to cell-centre representation [m].
+    /// Maximum displacement of EACH piece's mass centroid due to cell-centre representation [m].
     pub maximum_centroid_shift_m: f64,
-    /// Bound on |change in kinetic energy| + |change in gravity potential| [J].
+    /// Bound on the SUM over pieces of |change in kinetic energy| +
+    /// |change in gravity potential| [J]. Opposite errors cannot cancel.
     pub maximum_projection_energy_change_j: f64,
 }
 
@@ -79,7 +87,7 @@ pub struct LiquidTransferMoments {
 }
 
 /// Frozen ingress accounting, not a conservation claim for subsequent steps.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TetLiquidTransferReport {
     /// Origin used by every reported first/angular moment [m].
     pub grid_origin_m: [f64; 3],
@@ -97,6 +105,10 @@ pub struct TetLiquidTransferReport {
     pub overlap_tests: usize,
     /// Actual occupied target cells.
     pub wet_cells: usize,
+    /// Original face-connected source pieces and their actual native cells.
+    /// Every piece independently preserves mass and both momenta. These are
+    /// ingress lineage and audits, not persistent labels after native merging.
+    pub components: Vec<TetLiquidComponentTransfer>,
 }
 
 /// A geometric, physical, projection, budget or cancellation refusal.
@@ -130,6 +142,7 @@ impl From<MaterialLbmError> for TetLiquidTransferError {
 
 #[derive(Default)]
 struct CellIntegral {
+    component: usize,
     volume: f64,
     momentum: [f64; 3],
     enthalpy_j: f64,
@@ -139,6 +152,7 @@ struct CellIntegral {
 struct TransferredEnthalpy {
     by_cell: BTreeMap<[usize; 3], f64>,
     source_j: f64,
+    source_by_component_j: Vec<f64>,
 }
 
 fn invalid(what: &'static str) -> TetLiquidTransferError {
@@ -204,6 +218,10 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
     /// return no candidate. Native material speed/Mach gates also apply after
     /// the angular correction. Ill-resolved spin, excessive centroid/energy
     /// error, geometry outside the domain and target overfill require refinement.
+    /// Face connectivity uses the original shared vertex indices. Each
+    /// disconnected piece is corrected and audited independently; pieces that
+    /// occupy the same receiving cell refuse. Source-tet and target-cell lineage
+    /// describes ingress only; subsequent coalescence belongs to native VOF.
     pub fn free_surface3_from_tetrahedra(
         self,
         domain: MaterialFreeSurfaceDomain3<'_>,
@@ -258,12 +276,15 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         {
             return Err(invalid("unrepresentable physical grid extent"));
         }
+        let (component_for_tet, mut components) = components::partition(source, cx)?;
         let mut cells: BTreeMap<[usize; 3], CellIntegral> = BTreeMap::new();
         let mut original = LiquidTransferMoments::default();
         let mut thermal = TransferredEnthalpy::default();
+        thermal.source_by_component_j.resize(components.len(), 0.0);
         let mut overlap_tests = 0usize;
-        for indices in source.tetrahedra {
+        for (tet_index, indices) in source.tetrahedra.iter().enumerate() {
             checkpoint(cx)?;
+            let component = component_for_tet[tet_index];
             if indices
                 .iter()
                 .any(|&i| i as usize >= source.positions_m.len())
@@ -295,13 +316,16 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
                 ));
             }
             integrate_source(&mut original, p, v, whole.volume * rho, grid_origin_m);
+            integrate_source(&mut components[component].source, p, v, whole.volume * rho, grid_origin_m);
             let gradient = field_gradient(p, v)?;
             let h = source_h.map(|values| indices.map(|i| values[i as usize]));
             let h_gradient = h.map(|values| field_gradient(p, values.map(|value| [value])))
                 .transpose()?;
             if let Some(values) = h {
-                thermal.source_j += rho * whole.volume
+                let energy = rho * whole.volume
                     * (values.into_iter().map(|value| 0.25 * value).sum::<f64>());
+                thermal.source_j += energy;
+                thermal.source_by_component_j[component] += energy;
             }
             let first: [usize; 3] = core::array::from_fn(|a| {
                 (((lower_tet[a] - grid_origin_m[a]) / dx).floor() as usize).min(domain.cells[a] - 1)
@@ -333,7 +357,14 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
                         {
                             return Err(invalid("occupied target-cell budget exhausted"));
                         }
-                        let target = cells.entry(c).or_default();
+                        let target = cells.entry(c).or_insert_with(|| CellIntegral {
+                            component, ..CellIntegral::default()
+                        });
+                        if target.component != component {
+                            return Err(invalid(
+                                "disconnected source pieces share a receiving cell; refine before transfer",
+                            ));
+                        }
                         target.volume += overlap.volume;
                         if let (Some(values), Some(gradient)) = (h, h_gradient) {
                             target.enthalpy_j += rho
@@ -360,6 +391,7 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
             ));
         }
         let mut initial = Vec::with_capacity(cells.len());
+        let mut component_for_cell = Vec::with_capacity(cells.len());
         for (coordinates, integral) in cells {
             checkpoint(cx)?;
             let fill = integral.volume / cell_volume;
@@ -384,13 +416,16 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
                 fill_fraction,
                 velocity_m_s: scale(integral.momentum, 1.0 / mass),
             });
+            components[integral.component].cell_indices.push(initial.len() - 1);
+            component_for_cell.push(integral.component);
         }
-        correct_momenta(&mut initial, rho * cell_volume, dx, &original, limits, cx)?;
+        components::correct(&mut initial, &components, rho * cell_volume, dx, limits, cx)?;
         let predicted = integrate_cells(&initial, rho * cell_volume, dx, cx)?;
         check_projection(&original, &predicted, domain.gravity_m_s2, limits)?;
         let flow = self.free_surface3_from_cells(domain, &initial, cx)?;
         let mut actual = LiquidTransferMoments::default();
-        for cell in &initial {
+        let mut actual_components = vec![LiquidTransferMoments::default(); components.len()];
+        for (index, cell) in initial.iter().enumerate() {
             checkpoint(cx)?;
             let [x, y, z] = cell.coordinates;
             let sample = flow
@@ -402,6 +437,11 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
                 centre(cell.coordinates, dx),
                 sample.velocity_m_s,
             );
+            accumulate_cell(
+                &mut actual_components[component_for_cell[index]],
+                sample.density_kg_m3 * sample.fill_fraction * cell_volume,
+                centre(cell.coordinates, dx), sample.velocity_m_s,
+            );
         }
         if (flow.ledger_mass_kg()? - actual.mass_kg).abs() > limits.mass_tolerance_kg {
             return Err(invalid(
@@ -410,6 +450,9 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         }
         let (centroid_shift_m, kinetic_energy_change_j, gravitational_energy_change_j) =
             check_projection(&original, &actual, domain.gravity_m_s2, limits)?;
+        let components = components::reports(
+            components, actual_components, &initial, domain.gravity_m_s2, limits, cx,
+        )?;
         checkpoint(cx)?;
         Ok((
             flow,
@@ -422,6 +465,7 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
                 gravitational_energy_change_j,
                 overlap_tests,
                 wet_cells: initial.len(),
+                components,
             },
             thermal,
         ))
