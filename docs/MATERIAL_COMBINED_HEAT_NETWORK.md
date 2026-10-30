@@ -205,6 +205,43 @@ separate existing thermal entry; this adapter does not infer it from cooling
 the load. Fixed heat geometry and the original first-order thermal coupling
 require the same domain admission and timestep refinement.
 
+## Temperature-dependent ceramic response with finite coolant
+
+`circuit_enthalpy::piezoelectric::thermal::heat::step_candidate` accepts the
+same `HeatAssembly` and an explicit `PiezoelectricThermalBinding`. Its
+original ceramic driver resolves compliance, signed piezoelectric coupling
+and permittivity at the same proposed temperature as the coolant and load.
+The complete ceramic source, caloric receiver and rod reference volume must
+agree. Changing the coolant transport or heat capacity can therefore change
+the actual ceramic coefficients, charge and continuing mechanical response.
+
+```rust,ignore
+let proposal =
+    fs_couple::circuit_enthalpy::piezoelectric::thermal::heat::step_candidate(
+        &provider, &cx, &thermal, target_s, &piezoelectric_circuit,
+        &electrical_ports, force_n, &ceramic_binding, controls, &energy_guess_j,
+    )?;
+let accepted_heat_and_fluid = &proposal.report().coupled.source.network;
+```
+
+The existing driver retains ceramic free energy, entropy and internal energy.
+Reversible ceramic heat and native Joule heat enter their original caloric
+destinations once. Finite coolant exchange remains internal; prescribed
+reservoirs remain external, and the original physical energy gate excludes
+closed-radiation roundoff from external supply. Typed provider failures remain
+inside `PiezoelectricThermalError::Heat`; cancellation and work refusal retain
+their native classifications. The concrete prepared-network method delegates
+to this entry.
+
+The finite-coolant ceramic regression compares continued endpoints with an
+independent 2-by-2 constitutive inverse, midpoint circuit/motion equations and
+caloric-plus-internal-energy balance. It changes viscosity, coolant heat
+capacity and ceramic coefficient slopes only in source data, and checks
+retained source identity and refused-candidate history. This uses the existing
+fully solid, uniform, small-signal ceramic and positive combined capacity
+envelope. Thermal strain, depoling and dielectric loss require their own
+admitted laws; fixed heat geometry and first-order endpoint coupling remain.
+
 ## Energy and scope
 
 The standard circuit/enthalpy report preserves the actual source arithmetic,

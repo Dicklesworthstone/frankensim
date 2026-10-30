@@ -223,6 +223,20 @@ Its finite-links regression compares independent midpoint and two-cell energy
 equations under viscosity/Cp substitutions, preserves full source records,
 and exercises late typed source refusal, circuit budget and cancellation.
 
+The temperature-dependent ceramic entry
+`fs_couple::circuit_enthalpy::piezoelectric::thermal::heat::step_candidate`
+consumes this same provider and an explicit whole-ceramic thermal binding.
+Compliance, signed coupling, permittivity, load resistance and fluid transport
+resolve at one proposed endpoint. The original ceramic driver owns entropy,
+internal energy and reversible heat; the native circuit owns Joule loss.
+The complete coolant sample survives in `report.coupled.source.network`,
+and typed provider refusals remain under `PiezoelectricThermalError::Heat`.
+The finite-links ceramic regression checks independent constitutive, midpoint
+and two-body internal-energy equations over continuing steps, source-only
+coolant/ceramic substitutions and late source/budget/cancellation refusal.
+Uniform fully solid material, fixed geometry and original capacity/source
+limits remain; thermal strain, depoling and dielectric loss are not inferred.
+
 ### Complete material heat on the native explicit timeline
 
 `SourceConvectionHeatNetwork::observe_with_links` composes the complete prepared

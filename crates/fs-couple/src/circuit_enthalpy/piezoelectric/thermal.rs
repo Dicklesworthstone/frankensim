@@ -8,7 +8,7 @@
 use super::*;
 
 // Complete sourced heat transport shares the same ceramic/circuit residual.
-mod heat;
+pub mod heat;
 
 use crate::circuit_enthalpy::material::{MaterialNetwork, MaterialNetworkError, MaterialNetworkSample};
 use fs_material::{
@@ -29,32 +29,33 @@ pub struct PiezoelectricThermalBinding {
 }
 
 #[derive(Debug)]
-pub enum PiezoelectricThermalError {
+pub enum PiezoelectricThermalError<E = crate::circuit_enthalpy::contacts::heat::HeatNetworkError> {
     Network(MaterialNetworkError),
-    Heat(crate::circuit_enthalpy::contacts::heat::HeatNetworkError),
+    Heat(E),
     Material(PiezoelectricError),
     Invalid(&'static str),
 }
-impl core::fmt::Display for PiezoelectricThermalError {
+impl<E: core::fmt::Debug> core::fmt::Display for PiezoelectricThermalError<E> {
     fn fmt(&self,f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f,"piezoelectric ceramic/enthalpy: {self:?}")
     }
 }
-impl std::error::Error for PiezoelectricThermalError {}
-type Error = CircuitEnthalpyError<PiezoelectricThermalError>;
-fn invalid(message: &'static str) -> Error {
+impl<E: core::fmt::Debug> std::error::Error for PiezoelectricThermalError<E> {}
+type Error<E = crate::circuit_enthalpy::contacts::heat::HeatNetworkError> =
+    CircuitEnthalpyError<PiezoelectricThermalError<E>>;
+fn invalid<E>(message: &'static str) -> Error<E> {
     CircuitEnthalpyError::Source(PiezoelectricThermalError::Invalid(message))
 }
-fn source(error: PiezoelectricError) -> Error {
+fn source<E>(error: PiezoelectricError) -> Error<E> {
     CircuitEnthalpyError::Source(PiezoelectricThermalError::Material(error))
 }
-fn network(error: MaterialNetworkError) -> Error {
+fn network<E>(error: MaterialNetworkError) -> Error<E> {
     match error {
         MaterialNetworkError::Thermal(DepositionError::Cancelled) => CircuitEnthalpyError::Cancelled,
         other => CircuitEnthalpyError::Source(PiezoelectricThermalError::Network(other)),
     }
 }
-fn check(cancel: &RefCell<impl FnMut() -> bool>) -> Result<(),Error> {
+fn check<E>(cancel: &RefCell<impl FnMut() -> bool>) -> Result<(),Error<E>> {
     if (*cancel.borrow_mut())() { Err(CircuitEnthalpyError::Cancelled) } else { Ok(()) }
 }
 
@@ -123,13 +124,13 @@ pub fn step_candidate<'t>(
 // same driver. Only coefficient/source resolution differs; accepted histories,
 // ceramic reversible heat and native mechanical/electrical stepping do not.
 #[allow(clippy::too_many_arguments)]
-fn resolved_candidate<'t, S>(
+fn resolved_candidate<'t, S, E>(
     material: &MaterialNetwork<'_>, thermal: &DepositionSimulation<'t>, target_s: f64,
     model: &PiezoelectricCircuit, electrical_ports: &[f64], force_n: f64,
     ceramic: &PiezoelectricThermalBinding, controls: CircuitEnthalpySolve, guess_j: &[f64],
-    resolve: impl Fn(&DepositionSimulation<'t>) -> Result<CircuitThermalCoefficients<S>,Error>,
+    resolve: impl Fn(&DepositionSimulation<'t>) -> Result<CircuitThermalCoefficients<S>,Error<E>>,
     radiation_net_w: impl Fn(&S) -> f64, cancelled: impl FnMut() -> bool,
-) -> Result<PiezoelectricThermalCandidate<'t, S>,Error> {
+) -> Result<PiezoelectricThermalCandidate<'t, S>,Error<E>> {
     let cancel=RefCell::new(cancelled); check(&cancel)?;
     super::super::admit_driver_unknowns(thermal,controls,guess_j)?;
     let cell=thermal.cells().get(&ceramic.cell).ok_or_else(||invalid("ceramic caloric receiver is inactive"))?;
