@@ -10,6 +10,8 @@
 //! no valve mass flow is inferred from acoustic volume flow, and no density
 //! equality is required between independently sourced acoustic environments.
 
+/// Reciprocal electrical force and back-emf under the same acoustic load.
+pub mod electrical;
 /// One finite material/phase body exchanging heat under the same acoustic load.
 pub mod thermal;
 /// Original metering and shared finite-body heat on the same loaded motion.

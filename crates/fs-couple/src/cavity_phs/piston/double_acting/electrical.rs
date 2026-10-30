@@ -262,6 +262,23 @@ impl DoubleActingGasPiston {
         piston_controls: DoublePistonSolve, controls: ElectricalMotionSolve,
         initial_midpoint_velocity_m_s: f64, cancelled: impl FnMut() -> bool,
     ) -> Result<ElectricalPistonCandidate, ElectricalMotionError<super::PistonError>> {
+        self.electrical_candidate_with_midpoint_resistance(electrical, input, piston_controls,
+            controls, initial_midpoint_velocity_m_s, 0.0, cancelled)
+    }
+
+    // Shared by the original electrical path and reciprocal acoustic loads.
+    // Only the mechanical callback sees the affine load; all circuit stencils
+    // retain the original accepted charge/flux and the same held material laws.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::cavity_phs::piston) fn electrical_candidate_with_midpoint_resistance(
+        &self, electrical: ElectricalMotionInput<'_>, input: DoublePistonInput,
+        piston_controls: DoublePistonSolve, controls: ElectricalMotionSolve,
+        initial_midpoint_velocity_m_s: f64, resistance_n_s_m: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ElectricalPistonCandidate, ElectricalMotionError<super::PistonError>> {
+        if !resistance_n_s_m.is_finite() || resistance_n_s_m < 0.0 {
+            return Err(ElectricalMotionError::Invalid("midpoint load resistance must be finite and nonnegative"));
+        }
         let cancelled = RefCell::new(cancelled);
         let coupled = solve(electrical, input.duration_s, controls, initial_midpoint_velocity_m_s, &cancelled, |force| {
             let total_force = input.external_force_n+force;
@@ -269,8 +286,9 @@ impl DoubleActingGasPiston {
                 return Err(super::PistonError::Invalid("electromagnetic force vanished or overflowed in mechanical load"));
             }
             let mut next = self.clone();
-            let step = next.step(DoublePistonInput { external_force_n:total_force, ..input }, piston_controls,
-                || (*cancelled.borrow_mut())())?;
+            let step = next.step_with_midpoint_resistance(
+                DoublePistonInput { external_force_n:total_force, ..input }, piston_controls,
+                resistance_n_s_m, || (*cancelled.borrow_mut())())?;
             Ok(MotionTrial { displacement_m:step.displacement_m,
                 midpoint_velocity_m_s:f64::midpoint(step.velocity_m_s[0], step.velocity_m_s[1]), state:(next,step) })
         });
@@ -280,11 +298,20 @@ impl DoubleActingGasPiston {
         };
         let (piston, step) = coupled.mechanical;
         let e = coupled.circuit.step();
+        // The actual native force work includes both transducers. Remove only
+        // the electrical work when enclosing circuit + gas + wall; the caller
+        // owning a velocity-dependent mechanical load must close the remainder.
+        // Keep the original arithmetic on the exact zero-resistance path.
+        let external_mechanical_work_j = if resistance_n_s_m == 0.0 {
+            input.external_force_n*step.displacement_m
+        } else {
+            step.external_force_work_j-coupled.step.mechanical_work_j
+        };
         let total = (e.stored_after_j-e.stored_before_j)+e.heat_j
             +step.gas[0].stored_energy_change_j+step.gas[1].stored_energy_change_j+step.kinetic_energy_change_j
             -coupled.step.external_electrical_work_j-input.heat_j[0]-input.heat_j[1]
-            -input.external_force_n*step.displacement_m;
-        if !total.is_finite() || total.abs() > controls.energy_tolerance_j {
+            -external_mechanical_work_j;
+        if !external_mechanical_work_j.is_finite() || !total.is_finite() || total.abs() > controls.energy_tolerance_j {
             return Err(ElectricalMotionError::Invalid("circuit, both gases and one kinetic store do not close external work"));
         }
         if (*cancelled.borrow_mut())() { return Err(ElectricalMotionError::Cancelled); }
@@ -293,4 +320,4 @@ impl DoubleActingGasPiston {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

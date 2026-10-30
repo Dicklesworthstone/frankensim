@@ -8968,6 +8968,46 @@ independent paired-blade motion, exact retry after source refusal or final
 cancellation, and rejection of an unowned second inventory. Native execution
 and measured physical validation remain separate gates.
 
+## Reciprocal electrical and acoustic drive on one shared piston
+
+`DoubleActingGasPiston::electroacoustic_candidate` composes the original
+material circuit/transducer, both finite thermochemical gases, the single
+moving body and independently sourced `DgPortLoad` faces. Acoustic pressure
+changes the actual midpoint velocity used by the original back-emf residual;
+the resulting circuit current changes force in that same solve. The circuit,
+gas, momentum and acoustic owners remain the only integrators.
+
+The original affine acoustic relation is prepared once. Its history force
+and nonnegative velocity resistance enter each original electrical/momentum
+trial, including the existing impulse tangent. Each complete acoustic load
+advances once after the electrical residual has converged. No DG state is
+marched inside electrical finite-difference stencils, and no propagator is
+rebuilt. This is an operation-count property, not a measured speedup claim.
+
+The native circuit retains source work, stored charge/flux energy and
+resistor heat. Actual mechanical force work separates authored drive,
+electromagnetic transfer and acoustic transfer. Enclosing the participants
+cancels the two internal work pairs; original duct storage, physical loss and
+signed terminal work remain explicit. The final gate uses the smaller
+electrical/acoustic energy tolerance, without energy renormalization.
+Resistor heat is an output of this base path, not an implicit finite-body
+temperature update.
+
+Every original owner stays immutable until the full candidate is returned.
+Clock/face admission, source refusal, bounded electrical work or final
+cancellation returns no partial endpoint. Zero-area faces retain the exact
+original electrical/mechanical path while their free acoustic histories
+continue. Additional acoustic domains are separate from the two finite
+chambers; fixed acoustic geometry, held interval flow, frozen linear
+transducer factor and the original circuit/gas assumptions remain.
+
+Three focused G1/G3/G4 regression groups exercise independent midpoint RC
+feedback, native force and complete energy accounts over twelve steps,
+original DG replay, exact zero-area reduction, late refusal and repeatable
+retry/continuation. They are authored but unexecuted in this session:
+native build prerequisites are unavailable. Source parsing/format checks do
+not establish numerical or experimental validation.
+
 ## Reciprocal acoustic loads on a shared gas-driven wall
 
 `cavity_phs::piston::double_acting::acoustic` connects additional

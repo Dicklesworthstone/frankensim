@@ -56,7 +56,11 @@ fn resistor(r: f64) -> MaterialResistor {
         .unwrap(),
     }
 }
-fn circuit(r: f64, charge: f64, extra: bool) -> MaterialCircuit {
+pub(in crate::cavity_phs::piston::double_acting) fn circuit(
+    r: f64,
+    charge: f64,
+    extra: bool,
+) -> MaterialCircuit {
     let mut branches = vec![
         (1, 0, Branch::Capacitor { farads: 0.01 }),
         (1, 2, Branch::Resistor { ohms: 999.0 }),
@@ -82,7 +86,7 @@ fn circuit(r: f64, charge: f64, extra: bool) -> MaterialCircuit {
     )
     .unwrap()
 }
-pub(super) fn piston(velocity: f64) -> DoubleActingGasPiston {
+pub(in crate::cavity_phs::piston::double_acting) fn piston(velocity: f64) -> DoubleActingGasPiston {
     DoubleActingGasPiston::new(
         GasPiston::new(gas(0.75, 0.001), 1.0, 0.01, velocity).unwrap(),
         gas(0.75, 0.001),
@@ -90,21 +94,21 @@ pub(super) fn piston(velocity: f64) -> DoubleActingGasPiston {
     )
     .unwrap()
 }
-pub(super) fn input() -> DoublePistonInput {
+pub(in crate::cavity_phs::piston::double_acting) fn input() -> DoublePistonInput {
     DoublePistonInput {
         duration_s: 0.00005,
         heat_j: [0.0; 2],
         external_force_n: 0.0,
     }
 }
-pub(super) fn mechanical() -> DoublePistonSolve {
+pub(in crate::cavity_phs::piston::double_acting) fn mechanical() -> DoublePistonSolve {
     DoublePistonSolve {
         piston: gas_controls(),
         opposing_gas: gas_controls().gas,
         volume_tolerance_m3: 1e-15,
     }
 }
-pub(super) fn solve() -> ElectricalMotionSolve {
+pub(in crate::cavity_phs::piston::double_acting) fn solve() -> ElectricalMotionSolve {
     ElectricalMotionSolve {
         circuit: MaterialCircuitSolve {
             energy_tolerance_j: 1e-8,
@@ -124,7 +128,7 @@ pub(super) fn solve() -> ElectricalMotionSolve {
         energy_tolerance_j: 1e-7,
     }
 }
-pub(super) fn electrical<'a>(
+pub(in crate::cavity_phs::piston::double_acting) fn electrical<'a>(
     c: &'a MaterialCircuit,
     inputs: &'a [f64],
     factor: f64,
