@@ -16,6 +16,7 @@ mod characteristic;
 mod eos;
 mod evolve;
 mod flux;
+mod normal;
 mod wall;
 
 /// Conservative shockwaves and species mixing through finite-plenum networks.
@@ -39,12 +40,14 @@ pub use crate::dynamics::{
 pub use eos::MixtureGas;
 pub use evolve::{MixtureEuler1d, StepReport, Totals};
 pub use flux::FaceFlux;
+pub use normal::{NormalCell, NormalPrimitive};
 
 use fs_thermochem::{ThermochemErrorV1, kinetics::KineticsErrorV1};
 
 /// Same bounded species axis as the original thermochemical owner.
 pub const MAX_SPECIES: usize = 128;
 const MAX_COMPONENTS: usize = MAX_SPECIES + 2;
+const MAX_NORMAL_COMPONENTS: usize = MAX_SPECIES + 3;
 
 /// Owned conservative cell average, in canonical source-species order.
 #[derive(Clone, Debug, PartialEq)]

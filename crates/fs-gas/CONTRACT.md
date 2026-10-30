@@ -419,6 +419,29 @@ claimed. There is no fully discrete entropy-stability certificate, physical
 species diffusion, viscosity, moving mesh, arbitrary junction or multi-D flow
 claim.
 
+### Shared planar faces for evolving species
+
+`MixtureGas` also admits borrowed `NormalCell` and `NormalPrimitive` traces.
+The canonical output axis is every original species, normal momentum,
+transverse momentum, then full species-referenced energy. Its axial and planar
+consumers share one HLLC/HLL implementation; transverse momentum is not appended
+to an independently solved one-dimensional flux. Both kinetic components enter
+star-state and HLL intermediate-state admission through the original caloric
+owner. In particular, shear mixing cannot hide heat outside the source interval.
+
+The reconstructed-primitive entry reuses thermodynamics computed by the original
+source constructor, avoiding an immediate second temperature inversion. All
+successful face evaluations use bounded stack scratch and caller output storage.
+Stationary slip walls retain the original composition-local shock/rarefaction
+pressure; species, tangential momentum and energy wall fluxes are zero. Output
+is scratch until success; neither input trace nor the species source is mutated.
+
+Five focused native regressions cover exact axial parity, analytical material
+contact transport, transverse-boost covariance on HLLC and HLL, formation-gauge
+invariance, source refusal under shear heating, primitive/conservative parity,
+wall pressure and cancellation. These are source-kernel claims, not a spatial
+convergence, entropy-stability, chemistry or physical diffusion theorem.
+
 ## Coupled finite-rate multicomponent flow
 
 `multicomponent::reactive::ReactingEuler1d` binds one conservative mixture field
