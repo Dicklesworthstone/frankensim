@@ -8,12 +8,16 @@ use super::super::shear_layer::dry::BowDryContactHeat;
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
 use crate::render::schedule::force::coupled::ModalCouplingError;
+use crate::render::schedule::force::coupled::contact::friction::multiple::FrictionPortFrame;
 use crate::render::schedule::force::coupled::contact::friction::multiple::layer::thermal::{
     LayerThermalCell, LayerThermalFrame, LayerThermalSolve, SeriesDriveHeatDestination,
 };
 use fs_exec::CancelGate;
 use fs_thermal::enthalpy::{DepositionSimulation, backward_euler::StepCoefficients};
 use std::marker::PhantomData;
+
+type TrialHeatSource<'p, 't, S, E> = dyn Fn(&DepositionSimulation<'t>, &[FrictionPortFrame])
+    -> Result<StepCoefficients<S>, E> + Send + Sync + 'p;
 
 /// A finite canonical performance and its original thermal network on one clock.
 /// Source material/caloric cards remain borrowed, and the accepted network can
@@ -36,6 +40,7 @@ pub struct ContactThermalPerformance<'p, 't, 'm, 'g, F, S, E> {
     controls: LayerThermalSolve,
     gate: &'g CancelGate,
     resolve: F,
+    trial_resolve: Option<Box<TrialHeatSource<'p, 't, S, E>>>,
     energy_guess_j: Vec<f64>,
     last_frame: Option<LayerThermalFrame<S>>,
     error: PhantomData<fn() -> E>,
@@ -86,6 +91,7 @@ impl MultiBowPerformance {
             controls,
             gate,
             resolve,
+            trial_resolve: None,
             energy_guess_j,
             last_frame: None,
             error: PhantomData,
@@ -114,7 +120,26 @@ impl MultiBowPerformance {
         }
         let energy_guess_j = vec![0.0; thermal.cells().len()];
         Ok(ContactThermalPerformance { performance: self, thermal, bindings: Vec::new(),
-            series_heat, dry, controls, gate, resolve, energy_guess_j, last_frame: None, error: PhantomData })
+            series_heat, dry, controls, gate, resolve, trial_resolve: None,
+            energy_guess_j, last_frame: None, error: PhantomData })
+    }
+}
+
+impl<'p, 't, F, S, E> ContactThermalPerformance<'p, 't, '_, '_, F, S, E> {
+    /// Replace the state-only source callback with a source that observes the
+    /// same candidate's actual slip. Retained-film conduction can then move over
+    /// finite counterface material without a commanded or lagged stroke cursor.
+    /// Original film mass/history and the fixed mechanical patch are retained.
+    pub fn with_trial_heat_source(
+        mut self,
+        resolve: impl Fn(&DepositionSimulation<'t>, &[FrictionPortFrame])
+            -> Result<StepCoefficients<S>, E> + Send + Sync + 'p,
+    ) -> Result<Self, RenderError> {
+        if !self.dry.is_empty() || self.bindings.is_empty() {
+            return Err(render_invalid("trial film heat requires the original retained-film thermal owner"));
+        }
+        self.trial_resolve = Some(Box::new(resolve));
+        Ok(self)
     }
 }
 
@@ -169,6 +194,7 @@ where
             controls,
             gate,
             resolve,
+            trial_resolve,
             energy_guess_j,
             last_frame,
             ..
@@ -182,7 +208,11 @@ where
             for (guess, cell) in energy_guess_j.iter_mut().zip(thermal.cells().values()) {
                 *guess = cell.mass_kg * cell.specific_h_j_kg;
             }
-            let accepted = if dry.is_empty() {
+            let accepted = if let Some(source) = trial_resolve.as_ref() {
+                bank.step_with_contact_thermal_feedback_and_stops(thermal, bindings, series_heat,
+                    *controls, energy_guess_j, forces, drives, motion.stop_stations,
+                    motion.stop_offsets_m, gate, &**source)?
+            } else if dry.is_empty() {
                 bank.step_with_contact_thermal_network_and_stops(
                     thermal,
                     bindings,

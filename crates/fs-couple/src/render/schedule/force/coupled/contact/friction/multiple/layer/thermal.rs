@@ -17,14 +17,17 @@
 //! internal-energy changes here, with no evolving pressure-volume work.
 //! Affine G contributes zero fixed-strain heat-capacity correction. Endpoint
 //! thermal stepping can produce numerical entropy; it is not plastic heating.
-//! The grid is stationary; callers must justify its uniform cells and conduction.
+//! Cells retain material coordinates; callers must justify their uniform state.
+//! A trial-aware source may conduct into the actual sliding counterface footprint.
 //! Independent normal supports may move through the original contact-work owner.
-//! Moving film footprints, layer advection, expansion, melting and flash-temperature
+//! Moving mechanical film maps, layer advection, expansion, melting and flash-temperature
 //! approximations are not supplied. Endpoint thermal feedback is first order;
 //! solver convergence is not temporal/spatial convergence or a real-rosin claim.
 
 /// Material-coordinate finite-cell dry friction heat and contact conduction.
 pub mod dry;
+/// Moving counterface heat around an original material-attached shear film.
+pub mod film_surface;
 mod source;
 
 use super::*;
@@ -460,6 +463,33 @@ impl MultiFrictionModalSystem {
         gate: &CancelGate,
         resolve: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
     ) -> Result<LayerThermalFrame<S>, LayerThermalError<E>> {
+        self.step_with_contact_thermal_feedback(thermal, bindings, series_heat, controls,
+            energy_guess_j, external, drives, obstacle_geometry, obstacle_offsets, gate,
+            |endpoint, _ports| resolve(endpoint))
+    }
+
+    /// Resolve other heat from the SAME candidate thermal state and mechanical
+    /// port displacements. This closes moving-counterface heat feedback without
+    /// advancing a separate stroke cursor or using the previous sample's slip.
+    /// Retained films keep their original patch, mass and shear history. The
+    /// callback must not redeposit plastic/drive loss already owned here, and
+    /// internal transfers must balance over the original receiving cells.
+    /// Failed source/coverage checks publish neither motion nor thermal history.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_contact_thermal_feedback<'t, S, E>(
+        &mut self,
+        thermal: &mut DepositionSimulation<'t>,
+        bindings: &[LayerThermalCell<'_>],
+        series_heat: &[SeriesDriveHeatDestination],
+        controls: LayerThermalSolve,
+        energy_guess_j: &[f64],
+        external: &[f64],
+        drives: &[FrictionDrive],
+        obstacle_geometry: Option<&[obstacles::geometry::ObstacleGeometry]>,
+        obstacle_offsets: Option<&[f64]>,
+        gate: &CancelGate,
+        resolve: impl Fn(&DepositionSimulation<'t>, &[FrictionPortFrame]) -> Result<StepCoefficients<S>, E>,
+    ) -> Result<LayerThermalFrame<S>, LayerThermalError<E>> {
         self.step_with_contact_thermal_inner(thermal, bindings, series_heat, &[], controls,
             energy_guess_j, external, drives, obstacle_geometry, obstacle_offsets, false, gate, resolve)
     }
@@ -479,7 +509,7 @@ impl MultiFrictionModalSystem {
         obstacle_offsets: Option<&[f64]>,
         contact_patch_motion: bool,
         gate: &CancelGate,
-        resolve: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
+        resolve: impl Fn(&DepositionSimulation<'t>, &[FrictionPortFrame]) -> Result<StepCoefficients<S>, E>,
     ) -> Result<LayerThermalFrame<S>, LayerThermalError<E>> {
         let checkpoint = || {
             if gate.is_requested() {
@@ -691,12 +721,12 @@ impl MultiFrictionModalSystem {
                         dry_heat_j = number(dry_heat_j + report.friction_heat_j)?;
                         dry_frames.push(report);
                     }
-                    drop(system);
                     let StepCoefficients {
                         mut sources_w,
                         conductances_w_k,
                         payload,
-                    } = resolve(endpoint).map_err(LayerThermalError::Source)?;
+                    } = resolve(endpoint, &system.staged_ports).map_err(LayerThermalError::Source)?;
+                    drop(system);
                     let external_heat_j = number(
                         dt * endpoint.external_step_power_w(
                             &sources_w,
@@ -769,7 +799,7 @@ impl MultiFrictionModalSystem {
             |x: &[f64]| evaluate(x).map(|t| {
                 let mut residual = t.residual_j().to_vec();
                 for (index, source) in temperatures.iter().enumerate() {
-                    let frame = t.payload().12.iter().find(|frame| frame.port == source.port)
+                    let frame = t.payload().13.iter().find(|frame| frame.port == source.port)
                         .expect("one report per admitted dry source");
                     residual.push(if frame.interface_temperature_k.is_some() {
                         frame.interface_energy_residual_j
@@ -809,7 +839,7 @@ impl MultiFrictionModalSystem {
         // this thermal endpoint. Nothing evaluates another trial after it.
         let trial = evaluate(&solver.x)?;
         let maximum_cell_residual_j = trial.maximum_cell_residual_j();
-        if trial.payload().12.iter().any(|contact|
+        if trial.payload().13.iter().any(|contact|
             contact.interface_energy_residual_j.abs() > controls.total_energy_tolerance_j) {
             return Err(LayerThermalError::Invalid(
                 "dry interface fluxes do not close the same temperature-dependent friction work",

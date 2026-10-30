@@ -175,6 +175,56 @@ same conservation account. Profile cells must refer to already loaded
 assembly packs; introducing an unrelated reservoir material requires an
 explicit material source owner before this route can use it.
 
+## Version 3: a retained film against moving thermal material
+
+`frankensim-contact-thermal-v3` retains the version 2 records and adds a
+`film-surfaces` block immediately after `films`. The film remains attached to
+its original string patch, with the same finite mass and elastic/plastic history.
+The opposing material slides through its thermal footprint. Each receiving cell
+retains its heat when contact leaves and revisits it.
+
+For example, after declaring an existing `film 0 10`, a new block can read:
+
+```text
+film-surfaces 1
+film-surface 0 +1
+film-footprint 0.00025 0.00035 0.01 0.00005
+surface 4
+strip 20 0.0000 0.0001 0.01 0.00001
+strip 21 0.0001 0.0002 0.01 0.00001
+strip 22 0.0002 0.0003 0.01 0.00001
+strip 23 0.0003 0.0004 0.01 0.00001
+```
+
+These are illustrative geometry records, not measured instrument dimensions.
+All named cells must already exist. The film footprint fields are its initial
+counterface-coordinate endpoints, width and film centre-to-interface distance
+in metres. Its area and full thickness must match the original mechanical film.
+Each receiver strip uses the same finite-volume geometry and sourced transport
+requirements as a dry thermal strip. This route uses `dry-contacts 0` and the
+original retained-film mechanical map.
+
+The orientation is exactly `+1` or `-1`. At each nonlinear trial the receiver
+interval translates by minus this orientation times the **actual candidate
+elastic plus plastic relative displacement**. The commanded bow velocity does
+not substitute for that displacement. Changing traction can therefore change
+both the resulting motion and which receiving material is heated in that same
+coupled endpoint. No separate stroke cursor advances during a rejected trial.
+
+Heat crosses the original half-film and half-body Fourier resistances in series,
+using their respective candidate temperatures and pinned conductivity claims.
+Equal and opposite signed rates enter the existing cell energy equations;
+plastic and viscoelastic relaxation heat remain deposited once by the original
+layer owner. Fixed film-to-substrate links may remain, but a second link from the
+film to a declared receiving strip refuses because it would duplicate conduction.
+Finite coverage is checked before output and at every trial. Leaving the strip
+refuses the step while preserving accepted motion, heat, trace and output state.
+
+This is an attached-film, sliding-counterface approximation with adiabatic outer
+boundaries. It does not transport rosin mass, renew or reset shear history, change
+the mechanical contact map, model wear, or supply missing interface measurements.
+Thermal cells and time steps still require physical resolution/refinement.
+
 ## Scope and output
 
 This route retains fixed film geometry and tangent frames, positive

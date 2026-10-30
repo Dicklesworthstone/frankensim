@@ -25,6 +25,9 @@ use fs_thermal::enthalpy::{
 #[path = "contact_thermal/dry.rs"]
 mod dry;
 
+#[path = "contact_thermal/film_surface.rs"]
+mod film_surface;
+
 #[cfg(test)]
 #[path = "contact_thermal/tests.rs"]
 mod tests;
@@ -53,6 +56,7 @@ pub struct Profile {
     cells: Vec<Cell>,
     dry: Vec<dry::Route>,
     films: Vec<(usize, CellId)>,
+    film_surfaces: Vec<film_surface::Route>,
     series: Vec<SeriesDriveHeatDestination>,
     links: Vec<Link>,
     controls: LayerThermalSolve,
@@ -131,10 +135,11 @@ impl Profile {
         let format = match rows.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next()) {
             Some("frankensim-contact-thermal-v1") => 1,
             Some("frankensim-contact-thermal-v2") => 2,
+            Some("frankensim-contact-thermal-v3") => 3,
             _ => return Err("unsupported contact-thermal profile version".into()),
         };
-        rows.row(if format == 1 { "frankensim-contact-thermal-v1" }
-            else { "frankensim-contact-thermal-v2" })?.end()?;
+        rows.row(match format { 1 => "frankensim-contact-thermal-v1",
+            2 => "frankensim-contact-thermal-v2", _ => "frankensim-contact-thermal-v3" })?.end()?;
         let mut boundary = rows.row("boundary")?;
         if boundary.word()? != "adiabatic" {
             return Err("contact-thermal requires an explicit adiabatic outer boundary".into());
@@ -200,7 +205,7 @@ impl Profile {
                 geometry,
             });
         }
-        let dry = if format == 2 { dry::parse(&mut rows, &cells)? } else { Vec::new() };
+        let dry = if format >= 2 { dry::parse(&mut rows, &cells)? } else { Vec::new() };
         let mut films = Vec::new();
         for _ in 0..rows.count("films", 64)? {
             let mut row = rows.row("film")?;
@@ -214,6 +219,8 @@ impl Profile {
             }
             films.push((port, cell));
         }
+        let film_surfaces = if format == 3 { film_surface::parse(&mut rows, &cells, &films)? }
+            else { Vec::new() };
         let mut series = Vec::<SeriesDriveHeatDestination>::new();
         for _ in 0..rows.count("series", 64)? {
             let mut row = rows.row("series-heat")?;
@@ -272,6 +279,7 @@ impl Profile {
             cells,
             dry,
             films,
+            film_surfaces,
             series,
             links,
             caloric_error_j_kg,
@@ -417,6 +425,7 @@ impl Profile {
         let prepared = Prepared {
             profile: self.clone(),
             sources,
+            sample_period_s: 1.0 / f64::from(ready.spec.rate),
         };
         // Validate the source masses, geometry and initial conductances before
         // creating any output. This processes only birth/contact events at t=0.
@@ -432,6 +441,7 @@ impl Profile {
             route.heat.admit::<std::convert::Infallible>(
                 ready.performance.bank().system(), &network, self.controls.maximum_cells)?;
         }
+        prepared.film_routes(ready, &network)?;
         drop(network);
         Ok(prepared)
     }
@@ -448,6 +458,7 @@ struct CellSource {
 pub struct Prepared {
     profile: Profile,
     sources: Vec<CellSource>,
+    sample_period_s: f64,
 }
 impl Prepared {
     fn conductance(&self, link: &Link, temperatures: [f64; 2]) -> Result<f64> {
@@ -567,7 +578,7 @@ impl Prepared {
     }
     pub fn describe(&self) {
         eprintln!(
-            "contact_thermal=source-bound finite solid cells; adiabatic exterior; fixed compressed films or moving dry footprints; original sample clock"
+            "contact_thermal=source-bound finite solid cells; adiabatic exterior; retained films with optional sliding thermal counterfaces or moving dry footprints; original sample clock"
         );
         for (cell, source) in self.profile.cells.iter().zip(&self.sources) {
             eprintln!(
@@ -606,6 +617,7 @@ impl Prepared {
         gate: &CancelGate,
     ) -> Result<(W, WavStreamSummary)> {
         let network = self.network(gate)?;
+        let film_routes = self.film_routes(ready, &network)?;
         let bindings = self
             .profile
             .films
@@ -637,6 +649,10 @@ impl Prepared {
                 network, dry, self.profile.series.clone(), self.profile.controls, gate, resolve,
             )?
         };
+        if !film_routes.is_empty() {
+            performance = performance.with_trial_heat_source(|endpoint, ports|
+                self.resolve_with_films(endpoint, ports, &film_routes))?;
+        }
         let result = match trace {
             Some(trace) => write_traced_pressure(
                 &mut performance, output, trace, &ready.spec, decimate, gate,

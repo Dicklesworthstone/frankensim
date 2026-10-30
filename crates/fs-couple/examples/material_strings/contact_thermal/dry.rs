@@ -12,11 +12,11 @@ use fs_couple::render::schedule::force::coupled::contact::friction::multiple::la
 use fs_material::thermal::source::ThermalMaterialPoint;
 
 #[derive(Clone, Debug)]
-struct Strip {
-    cell: CellId,
-    interval: [f64; 2],
-    width: f64,
-    half_depth: f64,
+pub(super) struct Strip {
+    pub(super) cell: CellId,
+    pub(super) interval: [f64; 2],
+    pub(super) width: f64,
+    pub(super) half_depth: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -59,28 +59,7 @@ pub(super) fn parse(rows: &mut Rows<'_>, cells: &[Cell]) -> Result<Vec<Route>> {
         let mut surfaces: [Vec<Strip>; 2] = [Vec::new(), Vec::new()];
         let mut occupied = std::collections::BTreeSet::new();
         for surface in &mut surfaces {
-            let count = rows.count("surface", MAX_CELLS)?;
-            if count == 0 {
-                return Err("each dry participant needs a finite material surface".into());
-            }
-            for _ in 0..count {
-                let mut row = rows.row("strip")?;
-                let strip = Strip {
-                    cell: CellId(row.parse()?),
-                    interval: [row.scalar()?, row.scalar()?],
-                    width: row.positive()?,
-                    half_depth: row.positive()?,
-                };
-                row.end()?;
-                if !cells.iter().any(|cell| cell.id == strip.cell)
-                    || !occupied.insert(strip.cell)
-                    || strip.interval[0] >= strip.interval[1]
-                    || surface.last().is_some_and(|previous| previous.interval[1] != strip.interval[0])
-                {
-                    return Err("dry strips require existing distinct cells and contiguous positive intervals".into());
-                }
-                surface.push(strip);
-            }
+            *surface = parse_surface(rows, cells, &mut occupied)?;
         }
         routes.push(Route {
             port, string_origin, receiver, surfaces,
@@ -88,6 +67,26 @@ pub(super) fn parse(rows: &mut Rows<'_>, cells: &[Cell]) -> Result<Vec<Route>> {
         });
     }
     Ok(routes)
+}
+
+pub(super) fn parse_surface(rows: &mut Rows<'_>, cells: &[Cell],
+    occupied: &mut std::collections::BTreeSet<CellId>) -> Result<Vec<Strip>> {
+    let count = rows.count("surface", MAX_CELLS)?;
+    if count == 0 { return Err("a contact participant needs a finite material surface".into()); }
+    let mut surface: Vec<Strip> = Vec::with_capacity(count);
+    for _ in 0..count {
+        let mut row = rows.row("strip")?;
+        let strip = Strip { cell: CellId(row.parse()?), interval: [row.scalar()?, row.scalar()?],
+            width: row.positive()?, half_depth: row.positive()? };
+        row.end()?;
+        if !cells.iter().any(|cell| cell.id == strip.cell) || !occupied.insert(strip.cell)
+            || strip.interval[0] >= strip.interval[1]
+            || surface.last().is_some_and(|previous| previous.interval[1] != strip.interval[0]) {
+            return Err("thermal strips require existing distinct cells and contiguous positive intervals".into());
+        }
+        surface.push(strip);
+    }
+    Ok(surface)
 }
 
 fn centre_matches(interval: [f64; 2], origin: f64, position: f64) -> bool {
@@ -98,6 +97,18 @@ fn centre_matches(interval: [f64; 2], origin: f64, position: f64) -> bool {
 }
 
 impl Prepared {
+    pub(super) fn thermal_strip(&self, strip: &Strip) -> Result<DryThermalCell<'_>> {
+        let index = self.profile.cells.iter().position(|cell| cell.id == strip.cell)
+            .ok_or("thermal strip cell is absent")?;
+        let source = &self.sources[index];
+        Ok(DryThermalCell { cell: strip.cell,
+            material: ThermalMaterialPoint { material: &source.card, context: &source.query,
+                temperature_axis: "T", liquid_fraction_axis: None },
+            caloric: &source.curve, transport: &source.state,
+            conductivity_property: "thermal_conductivity", density_property: "density",
+            interval_m: strip.interval, width_m: strip.width, half_depth_m: strip.half_depth })
+    }
+
     pub(super) fn dry_routes(&self, ready: &Ready) -> Result<Vec<BowDryContactHeat<'_>>> {
         let mut result = Vec::with_capacity(self.profile.dry.len());
         for route in &self.profile.dry {
@@ -138,22 +149,7 @@ impl Prepared {
                     if source.card.id() != &participants[side] {
                         return Err("dry thermal cells must retain the original ordered interface material identities".into());
                     }
-                    surfaces[side].push(DryThermalCell {
-                        cell: strip.cell,
-                        material: ThermalMaterialPoint {
-                            material: &source.card,
-                            context: &source.query,
-                            temperature_axis: "T",
-                            liquid_fraction_axis: None,
-                        },
-                        caloric: &source.curve,
-                        transport: &source.state,
-                        conductivity_property: "thermal_conductivity",
-                        density_property: "density",
-                        interval_m: strip.interval,
-                        width_m: strip.width,
-                        half_depth_m: strip.half_depth,
-                    });
+                    surfaces[side].push(self.thermal_strip(strip)?);
                 }
             }
             result.push(BowDryContactHeat {

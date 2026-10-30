@@ -8,6 +8,9 @@ use fs_matdb::{
 use fs_scenario::gesture::{GestureTrack, GestureValue};
 use std::io::Cursor;
 
+#[path = "film_surface_tests.rs"]
+mod film_surface;
+
 fn scoped(f: impl FnOnce(&Cx<'_>, &CancelGate)) {
     let gate = CancelGate::new_clock_free();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());

@@ -78,7 +78,7 @@ fn positive<E>(v: f64) -> Result<f64, LayerThermalError<E>> {
 }
 
 impl DryThermalCell<'_> {
-    fn conductance<E>(
+    pub(super) fn conductance<E>(
         &self,
         thermal: &DepositionSimulation<'_>,
         area: f64,
@@ -413,7 +413,7 @@ impl MultiFrictionModalSystem {
             normal_offsets_m,
             false,
             gate,
-            resolve,
+            |endpoint, _ports| resolve(endpoint),
         )
     }
 
@@ -459,7 +459,7 @@ impl MultiFrictionModalSystem {
                     normal_offsets_m,
                     normal_geometry.is_some(),
                     gate,
-                    resolve,
+                    |endpoint, _ports| resolve(endpoint),
                 )
             },
         )

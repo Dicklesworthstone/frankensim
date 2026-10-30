@@ -11,6 +11,7 @@ use fs_exec::CancelGate;
 use fs_material::state_point::ResolvedShearLayer;
 use fs_thermal::enthalpy::{DepositionSimulation, backward_euler::StepCoefficients};
 use crate::render::schedule::force::coupled::contact::friction::{FrictionDrive,
+    multiple::FrictionPortFrame,
     multiple::layer::thermal::{LayerThermalCell, LayerThermalSolve, LayerThermalFrame, LayerThermalError,
         SeriesDriveHeatDestination}};
 
@@ -127,13 +128,36 @@ impl MultiBowStringBank {
         gate: &CancelGate,
         resolve: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
     ) -> Result<LayerThermalFrame<S>, RenderError> {
+        self.step_with_contact_thermal_feedback_and_stops(thermal, bindings, series_heat,
+            controls, energy_guess_j, external, drives, stations, offsets_m, gate,
+            |endpoint, _ports| resolve(endpoint))
+    }
+
+    /// The original fixed-film/stop transaction with trial-dependent heat
+    /// transfer. Actual candidate port slip determines which opposing material
+    /// cells meet the retained film; source evaluation never advances a cursor.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_contact_thermal_feedback_and_stops<'t, S, E: core::fmt::Display>(
+        &mut self,
+        thermal: &mut DepositionSimulation<'t>,
+        bindings: &[LayerThermalCell<'_>],
+        series_heat: &[SeriesDriveHeatDestination],
+        controls: LayerThermalSolve,
+        energy_guess_j: &[f64],
+        external: &[f64],
+        drives: &[FrictionDrive],
+        stations: Option<&[f64]>,
+        offsets_m: Option<&[f64]>,
+        gate: &CancelGate,
+        resolve: impl Fn(&DepositionSimulation<'t>, &[FrictionPortFrame]) -> Result<StepCoefficients<S>, E>,
+    ) -> Result<LayerThermalFrame<S>, RenderError> {
         if self.bow_station_motion_limits().is_some() {
             return Err(RenderError::Control {
                 what: "contact heat requires transported bow geometry and material history",
             });
         }
         let endpoints = stations.map(|s| self.prepare_stop_station_geometry(s, gate)).transpose()?;
-        let accepted = self.system.step_with_contact_thermal_network_and_obstacles(
+        let accepted = self.system.step_with_contact_thermal_feedback(
             thermal, bindings, series_heat, controls, energy_guess_j, external,
             drives, endpoints.as_deref(), offsets_m, gate, resolve,
         ).map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error.to_string())))?;
