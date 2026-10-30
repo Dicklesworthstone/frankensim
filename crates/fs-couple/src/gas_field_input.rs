@@ -12,6 +12,9 @@ use fs_material::gas_species::input::{GasInputError, GasRecord, ThermochemicalSo
 use fs_material::thermochemical_gas::energy::GasEnergySolve;
 use std::str::SplitAsciiWhitespace;
 
+/// Geometry-bound stationary gas transport through a bore and open side paths.
+pub mod branched;
+
 /// The actual thermal/species problem and accepted solution behind a performance.
 /// These are owner results, not a separate reconstruction from acoustic output.
 #[derive(Clone, Debug)]

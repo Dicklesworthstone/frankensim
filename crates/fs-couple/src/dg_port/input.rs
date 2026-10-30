@@ -29,6 +29,8 @@ use fs_material::gas_species::input::{
 };
 use crate::gas_field_input::{SteadyGasInput, SteadyGasInputError};
 pub use crate::gas_field_input::SteadyGasPerformance;
+pub use crate::gas_field_input::branched::BranchedGasPerformance;
+use crate::gas_field_input::branched::{self, GasSideGeometry};
 use std::str::SplitAsciiWhitespace;
 
 /// Shared source-backed solid wall declaration for every authored DG wind path.
@@ -124,6 +126,7 @@ pub struct DgSourceInput {
     geometry: Duct,
     field: Option<AxialGasField>,
     steady_gas: Option<SteadyGasPerformance>,
+    steady_network: Option<BranchedGasPerformance>,
     outlet: DgBoundary,
     radiation: Option<(ComputedBaffledInput, GasRecord)>,
     side_openings: Vec<(DgSidePort, CircularOpening)>,
@@ -180,6 +183,26 @@ impl DgSourceInput {
     /// the SAME field; DG mesh/order/wall quadrature remain its acoustic axes.
     /// This route requires an unbranched bore without finite terminal passages;
     /// those mean-flow/thermal volumes are not part of the axial generator.
+    ///
+    /// A baffled bore with side openings can instead place the following block
+    /// AFTER its side/terminal declarations and BEFORE dg_radiation:
+    /// dg_gas_network mole SPECIES_COUNT ID...
+    /// gas_inlet MASS_KG_S T_K FRACTION...
+    /// gas_bore CELLS OUTLET_MASS_KG_S
+    /// gas_cell END_M WALL_CONDUCTANCE_W_K WALL_T_K INITIAL_T_K
+    /// gas_side PORT_ID JUNCTION_M OUTLET_MASS_KG_S CELLS
+    /// gas_cell ... (for every finite chimney)
+    /// gas_solve ... (the same original caloric/work/balance controls)
+    /// One gas_side follows each unsealed original side opening, in its declared
+    /// order; flush openings require zero cells, finite chimneys positive cells.
+    /// Exact thermal cell boundaries must coincide with the original DG faces.
+    /// The inlet mass rate equals all discharges. The single stationary graph
+    /// owns cooling/species in every open path, including decreasing main-bore
+    /// flow; sealed chimneys retain their independent gas. Finite terminal
+    /// passages, closed axial outlets and reverse mean flow are not represented.
+    /// Every open region uses the explicit network source instead of its old
+    /// homogeneous gas. This frozen played field does not advect the live NSF
+    /// state or infer mean mass flow from acoustic volume flow.
     ///
     /// OUTLET may also be baffled, followed after geometry and any gas stations
     /// by dg_radiation computed-baffled plus the original fourteen bake fields,
@@ -310,7 +333,8 @@ impl DgSourceInput {
             }
         }
         let mut source = Self {
-            geometry: Duct { segments }, field: None, steady_gas: None, outlet, radiation: None,
+            geometry: Duct { segments }, field: None, steady_gas: None, steady_network: None,
+            outlet, radiation: None,
             side_openings: Vec::new(), chimneys: Vec::new(), mesh, poles, band_hz,
             terminal_channels: Vec::new(), maximum_terminal_transverse_cells: 0,
             maximum_relative_error, exponential_tolerance, maximum_dofs, wall_quadrature,
@@ -484,6 +508,31 @@ impl DgSourceInput {
                 }
                 (radiation_line, fields) = next_row()?;
             }
+            if fields.clone().next() == Some("dg_gas_network") {
+                if source.field.is_some() || source.wall_quadrature.is_none()
+                    || source.terminal_channels.iter().any(|channel|
+                        channel.kind.section().is_some() || channel.port == PortId(1))
+                {
+                    return Err(bad(radiation_line,
+                        "branched gas requires a dg_bore with one gas source, spatial wall quadrature and open axial discharge; finite terminal passages need their own mean-flow thermal volumes").into());
+                }
+                fields.next();
+                let sides: Vec<_> = source.side_openings.iter()
+                    .filter(|(port, _)| !source.terminal_channels.iter().any(|channel|
+                        channel.port == port.id && matches!(channel.kind, DgTerminalChannelKind::Closed)))
+                    .map(|(port, _)| GasSideGeometry {
+                        port: port.id.0,
+                        cylinder: source.chimneys.iter().find(|chimney| chimney.port == port.id)
+                            .map(|chimney| (chimney.radius_m, chimney.length_m)),
+                    }).collect();
+                let generated = branched::read(radiation_line, &mut fields, next_row,
+                    ambient.pressure, &source.geometry.segments, &sides, sources, records,
+                    &mut || gate.is_requested())
+                    .map_err(|error| error.into_error(|source| DgSourceError::from(source).into()))?;
+                source.field = Some(generated.main_field().clone());
+                source.steady_network = Some(generated);
+                (radiation_line, fields) = next_row()?;
+            }
             let radiating = source.side_openings.len() + 1 - source.chimneys.iter()
                 .filter(|chimney| source.closed_chimney(chimney.port)).count();
             if radiating > MAX_BAFFLED_MIMO_PORTS {
@@ -542,17 +591,29 @@ impl DgSourceInput {
     // Before construction, check_state_budget reserves its acoustic/wall state;
     // prepare checks the exact augmented count here before allocating it.
     fn check_complete_state_budget(&self, bore_dofs: usize) -> Result<(), DgSourceError> {
-        let mut total = bore_dofs + self.chimneys.iter()
-            .map(|chimney| chimney.state_dofs(self.poles)).sum::<usize>();
+        let mut total = bore_dofs + self.chimneys.iter().map(|chimney| {
+            if self.branch_field(chimney.port).is_some() {
+                2 * chimney.mesh.elements * (chimney.mesh.order + 1)
+                    + chimney.mesh.elements * self.wall_quadrature.expect("field quadrature")
+                        * 2 * self.poles
+            } else { chimney.state_dofs(self.poles) }
+        }).sum::<usize>();
         if let Some(law) = &self.molecular_law {
             for chimney in &self.chimneys {
-                let medium = fs_material::relaxation::input::medium_from_record(&chimney.gas)
+                let gas = if let Some(field) = self.branch_field(chimney.port) {
+                    GasRecord::Thermochemical(field.state_at(0.0)
+                        .map_err(|source| DgSourceError::Gas { line: self.line, source })?)
+                } else { chimney.gas.clone() };
+                let medium = fs_material::relaxation::input::medium_from_record(&gas)
                     .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
                 let state = law.evaluate(&medium)
                     .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
                 let active = state.processes().iter()
                     .filter(|process| process.heat_capacity_j_kg_k > 0.0).count();
-                total += chimney.mesh.elements * (chimney.mesh.order + 1)
+                let points = if self.branch_field(chimney.port).is_some() {
+                    self.wall_quadrature.expect("field quadrature")
+                } else { chimney.mesh.order + 1 };
+                total += chimney.mesh.elements * points
                     * self.poles * active;
             }
         }
@@ -598,10 +659,21 @@ impl DgSourceInput {
         // Validate every region now. A missing partner or unsupported local
         // temperature must refuse before a propagator or radiation bake starts.
         for chimney in &self.chimneys {
-            let medium = fs_material::relaxation::input::medium_from_record(&chimney.gas)
-                .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
-            law.evaluate(&medium)
-                .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
+            if let Some(field) = self.branch_field(chimney.port) {
+                for &position in field.stations_m() {
+                    let state = field.state_at(position)
+                        .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
+                    let medium = fs_material::relaxation::RelaxingMedium::from_thermochemical(&state)
+                        .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
+                    law.evaluate(&medium)
+                        .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
+                }
+            } else {
+                let medium = fs_material::relaxation::input::medium_from_record(&chimney.gas)
+                    .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
+                law.evaluate(&medium)
+                    .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
+            }
         }
         self.molecular_law = Some(law);
         self.check_state_budget(ambient.state())?;
@@ -617,6 +689,16 @@ impl DgSourceInput {
     /// Prescribed fields and homogeneous sources return None.
     pub fn steady_gas(&self) -> Option<&SteadyGasPerformance> {
         self.steady_gas.as_ref()
+    }
+
+    /// Original joint heat/species solve for the main bore and open side paths.
+    pub fn steady_gas_network(&self) -> Option<&BranchedGasPerformance> {
+        self.steady_network.as_ref()
+    }
+
+    fn branch_field(&self, port: PortId) -> Option<&AxialGasField> {
+        self.steady_network.as_ref()?.branches().iter()
+            .find(|branch| branch.port() == port.0).map(|branch| branch.field())
     }
 
     fn closed_chimney(&self, port: PortId) -> bool {
@@ -635,13 +717,27 @@ impl DgSourceInput {
             let outlet = if self.closed_chimney(chimney.port) {
                 DgBoundary::Closed
             } else { DgBoundary::Port(PortId(1)) };
-            let duct = DgDuct::new(
-                &geometry, chimney.gas.state(), chimney.mesh,
-                DgBoundary::Port(PortId(0)), outlet,
-            ).and_then(|duct| duct.with_viscothermal(
-                self.poles, self.band_hz, self.maximum_relative_error,
-            )).map_err(|error| DgSourceError::Physics(AcousticRealizeError::Duct(error)))?;
-            let duct = if let Some(law) = &self.molecular_law {
+            let field = self.branch_field(chimney.port);
+            let duct = if let Some(field) = field {
+                DgDuct::new_with_gas_field(&geometry, field, chimney.mesh,
+                    DgBoundary::Port(PortId(0)), outlet)
+                    .and_then(|duct| duct.with_spatial_viscothermal(DgWallResolution {
+                        poles_per_field: self.poles,
+                        quadrature_points: self.wall_quadrature.expect("field quadrature"),
+                        band_rad_s: self.band_hz.map(|f| core::f64::consts::TAU * f),
+                        maximum_relative_error: self.maximum_relative_error,
+                    })).map_err(|error| field_error(self.line, error))?
+            } else {
+                DgDuct::new(&geometry, chimney.gas.state(), chimney.mesh,
+                    DgBoundary::Port(PortId(0)), outlet)
+                    .and_then(|duct| duct.with_viscothermal(
+                        self.poles, self.band_hz, self.maximum_relative_error,
+                    )).map_err(|error| DgSourceError::Physics(AcousticRealizeError::Duct(error)))?
+            };
+            let duct = if let (Some(_), Some(law)) = (field, &self.molecular_law) {
+                duct.with_molecular_relaxation_field_controlled(law.clone(), &mut || gate.is_requested())
+                    .map_err(|error| field_error(self.line, error))?
+            } else if let Some(law) = &self.molecular_law {
                 let medium = fs_material::relaxation::input::medium_from_record(&chimney.gas)
                     .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
                 let state = law.evaluate(&medium)
@@ -721,6 +817,17 @@ impl DgSourceInput {
         let ports: Vec<_> = self.side_openings.iter().map(|(port, _)| *port).collect();
         let owner = owner.with_side_ports(&ports)
             .map_err(|error| DgSourceError::Physics(AcousticRealizeError::Duct(error)))?;
+        if let Some(network) = &self.steady_network {
+            for &(port, station) in network.junctions() {
+                checkpoint(gate, self.line)?;
+                let actual = owner.side_port_source(PortId(port))
+                    .map_err(|error| field_error(self.line, error))?.station_m;
+                if (actual - station).abs() > 32.0 * f64::EPSILON * actual.abs().max(station.abs()) {
+                    return Err(bad(self.line,
+                        "thermal side junction must coincide with its original DG mesh face"));
+                }
+            }
+        }
         let owner = if let Some(points) = self.wall_quadrature {
             owner.with_spatial_viscothermal(DgWallResolution {
                 poles_per_field: self.poles,
@@ -747,6 +854,12 @@ impl DgSourceInput {
         let (owner, wall_source) = bind_wall(owner)?;
         checkpoint(gate, self.line)?;
         let branches = bind_branches(self.prepare_chimneys(gate)?)?;
+        let complete_dofs = owner.total_dofs()
+            + branches.iter().map(|branch| branch.duct.total_dofs()).sum::<usize>();
+        if complete_dofs > self.maximum_dofs {
+            return Err(bad(self.line,
+                "complete native bore and branch gas/wall state exceeds its DOF allowance"));
+        }
         let sealed: Vec<_> = branches
             .iter()
             .filter(|branch| branch.duct.outlet() == DgBoundary::Closed)
