@@ -35,7 +35,13 @@
 //! section <area_m2> <length_m>                       (repeat, glottis first)
 //! microphone <x_m> <y_m> <z_m> <radial_rings> <angular_points> <max_frequency_hz>
 //! subglottal <time_s> <pressure_pa>                  (repeat, strictly increasing time)
+//! tension_modulation <rate_hz> <relative_amplitude>  (optional; vibrato)
 //! ```
+//!
+//! `tension_modulation` is a cricothyroid gesture: the fold's three stiffnesses are scaled by
+//! `1 + a sin(2 pi r t)` ([`GlottalIsland::set_tension`]), so the emergent f0 swings by about
+//! `1731 e a` cents peak (`e` ~ 0.5, f0 ~ sqrt(stiffness)). Without the key the tension is never touched
+//! and a performance is bit-identical to one written before the key existed.
 
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::driving_point::LineLadder;
@@ -48,6 +54,7 @@ use crate::tract::{TractChart, TractSection};
 use fs_duct::Termination;
 use fs_material::gas::GasState;
 use fs_material::gas_species::input::{GasRecord, ThermochemicalSources, read_gas_record};
+use fs_math::det;
 use fs_phs::WallPin;
 use fs_vfit::discretize::DelayedFilter;
 
@@ -92,6 +99,9 @@ pub struct VoiceDescription {
     pub microphone: CircularOutletReceiver,
     /// Subglottal pressure breakpoints `(time_s, pressure_pa)`.
     pub subglottal: Vec<(f64, f64)>,
+    /// Vibrato as a fold-tension gesture `(rate_hz, relative_amplitude)`: the stiffnesses scale by
+    /// `1 + a sin(2 pi r t)`. `None` leaves the tension at the card's value for the whole performance.
+    pub tension_modulation: Option<(f64, f64)>,
 }
 
 fn field(rest: &[&str], i: usize, what: &str) -> Result<f64, String> {
@@ -173,6 +183,7 @@ impl VoiceDescription {
         let mut microphone = None;
         let mut sections: Vec<TractSection> = Vec::new();
         let mut subglottal: Vec<(f64, f64)> = Vec::new();
+        let mut tension_modulation = None;
         for line in lines {
             let mut tokens = line.split_whitespace();
             let key = tokens.next().unwrap_or_default();
@@ -314,6 +325,19 @@ impl VoiceDescription {
                     }
                     subglottal.push(point);
                 }
+                "tension_modulation" => {
+                    arity(&rest, 2, key)?;
+                    let rate = field(&rest, 0, "tension modulation rate")?;
+                    let amplitude = field(&rest, 1, "tension modulation amplitude")?;
+                    if !(rate > 0.0 && rate <= 30.0) {
+                        return Err("tension modulation rate must be in (0, 30] Hz".into());
+                    }
+                    // 1 -+ a must stay inside the island's admitted tension range (1/4..=4).
+                    if !(0.0..=0.5).contains(&amplitude) {
+                        return Err("tension modulation amplitude must be in 0..=0.5".into());
+                    }
+                    once(&mut tension_modulation, (rate, amplitude), key)?;
+                }
                 other => return Err(format!("unknown key {other:?}")),
             }
         }
@@ -341,6 +365,7 @@ impl VoiceDescription {
             tract_licence: licence.ok_or_else(|| missing("tract_licence"))?,
             microphone: microphone.ok_or_else(|| missing("microphone"))?,
             subglottal,
+            tension_modulation,
         })
     }
 
@@ -431,6 +456,7 @@ impl VoiceDescription {
                 points: self.subglottal.clone(),
                 cursor: 0,
             },
+            tension_modulation: self.tension_modulation,
             trace: vec![0.0; self.mechanics_per_output as usize],
             ratio: self.mechanics_per_output as usize,
             mechanics_rate,
@@ -521,6 +547,7 @@ pub struct VoicePerformance {
     mouth: DelayedFilter,
     receiver: BaffledPressure,
     schedule: Schedule,
+    tension_modulation: Option<(f64, f64)>,
     trace: Vec<f64>,
     ratio: usize,
     mechanics_rate: u32,
@@ -566,6 +593,13 @@ impl VoicePerformance {
     fn sample(&mut self) -> Result<f64, String> {
         for j in 0..self.ratio {
             let t = self.steps as f64 / f64::from(self.mechanics_rate);
+            // The gesture is far slower than the audio clock, so the tension is set once per output sample.
+            if let (0, Some((rate_hz, amplitude))) = (j, self.tension_modulation) {
+                let tension = 1.0 + amplitude * det::sin(core::f64::consts::TAU * rate_hz * t);
+                self.island
+                    .set_tension(tension)
+                    .map_err(|e| format!("fold tension refused: {e:?}"))?;
+            }
             let drive = self.schedule.at(t);
             let frame = self
                 .island
@@ -871,5 +905,179 @@ mod tests {
         assert_eq!(whole.samples_rendered(), 600);
         let past = split.validate_sample_count(2400);
         assert!(past.is_err(), "a request past the declared end must refuse");
+    }
+
+    // Test fixture, not data: the licensed standard two-mass card (80 / 8 / 25 N/m) at 1400 Pa on a uniform
+    // 17.6 cm tube of 1 cm radius with a flanged mouth, 1.3 s long. The tube is the one the island's own
+    // tests phonate against; it stands for no vowel.
+    fn modulation_text(extra: &str) -> String {
+        let mut text = String::from(
+            "frankensim-voice-performance-v1\n\
+             audio 48000 62400 2\n\
+             full_scale_pa 2.0\n\
+             ambient moist_air 310.15 101325 1.0\n\
+             fold two_mass 1.25e-4 2.5e-5 80 8 25 0.1 3.57e-4 1.4e-2 2.5e-3\n\
+             termination flanged\n\
+             tract_source test-fixture\n\
+             tract_licence test fixture, not data\n\
+             microphone 0 0 0.3 4 16 4000\n\
+             subglottal 0 0\n\
+             subglottal 0.03 1400\n",
+        );
+        for _ in 0..8 {
+            text.push_str("section 3.14e-4 0.022\n");
+        }
+        text.push_str(extra);
+        text
+    }
+
+    fn render(text: &str) -> Vec<f64> {
+        let description = VoiceDescription::from_bytes(text.as_bytes()).expect("parses");
+        let mut performance = description.build().expect("builds");
+        let mut out = vec![0.0; description.samples as usize];
+        for block in out.chunks_mut(4096) {
+            performance.block(block).expect("renders");
+        }
+        out
+    }
+
+    /// The period of a steady tone: the shortest lag within 70..400 Hz whose autocorrelation reaches 95 % of the
+    /// best, so a subharmonic peak cannot win. Only used as the prior of [`f0_track`].
+    fn steady_f0_hz(pcm: &[f64], rate: f64) -> f64 {
+        let (lo, hi) = ((rate / 400.0) as usize, (rate / 70.0) as usize);
+        let n = pcm.len() - hi;
+        let r: Vec<f64> = (lo..=hi)
+            .map(|lag| (0..n).map(|i| pcm[i] * pcm[i + lag]).sum::<f64>())
+            .collect();
+        let best = r.iter().copied().fold(f64::MIN, f64::max);
+        let lag = lo + r.iter().position(|&v| v >= 0.95 * best).expect("a peak");
+        rate / lag as f64
+    }
+
+    /// f0 track `(time, Hz)`: autocorrelation of 40 ms windows every 10 ms, the lag searched within +-25 % of
+    /// `prior_hz`, parabolic peak interpolation.
+    fn f0_track(pcm: &[f64], rate: f64, prior_hz: f64) -> Vec<(f64, f64)> {
+        let (win, hop) = ((0.040 * rate) as usize, (0.010 * rate) as usize);
+        let lo = (rate / (1.25 * prior_hz)) as usize;
+        let hi = (rate / (0.75 * prior_hz)) as usize + 1;
+        let mut track = Vec::new();
+        let mut start = 0;
+        while start + win + hi + 2 <= pcm.len() {
+            let seg = &pcm[start..start + win + hi + 2];
+            let r: Vec<f64> = (lo - 1..=hi + 1)
+                .map(|lag| (0..win).map(|i| seg[i] * seg[i + lag]).sum::<f64>())
+                .collect();
+            let k = (1..r.len() - 1)
+                .max_by(|&a, &b| r[a].total_cmp(&r[b]))
+                .expect("lags");
+            let curvature = r[k - 1] - 2.0 * r[k] + r[k + 1];
+            let shift = if curvature < 0.0 {
+                0.5 * (r[k - 1] - r[k + 1]) / curvature
+            } else {
+                0.0
+            };
+            let lag = (lo - 1 + k) as f64 + shift;
+            track.push(((start + win / 2) as f64 / rate, rate / lag));
+            start += hop;
+        }
+        track
+    }
+
+    /// Amplitude of the component of `y(t)` at `freq` (mean-removed projection onto one sinusoid; exact for whole
+    /// periods and an even sampling).
+    fn amplitude_at(points: &[(f64, f64)], freq: f64) -> f64 {
+        let n = points.len() as f64;
+        let mean = points.iter().map(|p| p.1).sum::<f64>() / n;
+        let (mut re, mut im) = (0.0_f64, 0.0_f64);
+        for &(t, y) in points {
+            let w = core::f64::consts::TAU * freq * t;
+            re += (y - mean) * det::cos(w);
+            im += (y - mean) * det::sin(w);
+        }
+        2.0 * re.hypot(im) / n
+    }
+
+    #[test]
+    fn tension_modulation_parses_and_is_refused_by_name() {
+        let ok = VoiceDescription::from_bytes(modulation_text("tension_modulation 5.9 0.082\n").as_bytes())
+            .expect("parses");
+        assert_eq!(ok.tension_modulation, Some((5.9, 0.082)));
+        let none = VoiceDescription::from_bytes(modulation_text("").as_bytes()).expect("parses");
+        assert_eq!(none.tension_modulation, None);
+        for (extra, needle) in [
+            ("tension_modulation 5.9\n", "takes 2 fields"),
+            ("tension_modulation x 0.08\n", "not a number"),
+            ("tension_modulation 0 0.08\n", "rate"),
+            ("tension_modulation 31 0.08\n", "rate"),
+            ("tension_modulation 5.9 0.6\n", "amplitude"),
+            ("tension_modulation 5.9 -0.1\n", "amplitude"),
+            (
+                "tension_modulation 5.9 0.08\ntension_modulation 6 0.08\n",
+                "only appear once",
+            ),
+        ] {
+            let error = VoiceDescription::from_bytes(modulation_text(extra).as_bytes()).expect_err(extra);
+            assert!(error.contains(needle), "{extra:?} -> {error}");
+        }
+    }
+
+    #[test]
+    fn zero_amplitude_modulation_is_bit_identical_to_no_key_and_a_real_one_is_not() {
+        let plain = render(&fixture(""));
+        let zero = render(&fixture("tension_modulation 5.9 0\n"));
+        assert!(
+            plain.iter().zip(&zero).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "a zero-amplitude gesture must leave the tension untouched"
+        );
+        let swung = render(&fixture("tension_modulation 5.9 0.08\n"));
+        assert!(swung.iter().all(|v| v.is_finite()));
+        assert_ne!(plain, swung, "a real gesture must reach the radiated pressure");
+    }
+
+    /// Gauntlet G1 with a planted negative. The radiated f0 swings at the gesture rate by about `1731 e a` cents
+    /// peak (`e` the square-root exponent, 0.3..0.8): nothing without the key, and DOUBLING the amplitude about
+    /// doubles the extent. The extent is measured on the radiated pressure of a 1.3 s render.
+    #[test]
+    fn tension_modulation_swings_the_radiated_pitch_at_the_gesture_rate() {
+        let rate = 48_000.0_f64;
+        let gesture_hz = 6.0_f64;
+        let steady = render(&modulation_text(""));
+        let prior = steady_f0_hz(&steady[(0.4 * rate) as usize..(0.9 * rate) as usize], rate);
+        // Five whole periods of the gesture, after the onset transient.
+        let (i0, i1) = (
+            (0.30 * rate) as usize,
+            (0.30 * rate + 5.0 / gesture_hz * rate) as usize + 4096,
+        );
+        let measure = |pcm: &[f64]| -> (f64, f64, f64) {
+            // 83 hops of 10 ms: five periods of the gesture to within one hop, so the 3.6 and 8.4 Hz
+            // projections are (nearly) whole-period nulls.
+            let track: Vec<(f64, f64)> = f0_track(&pcm[i0..i1], rate, prior).into_iter().take(83).collect();
+            assert_eq!(track.len(), 83, "the render is long enough for five periods");
+            let mean = track.iter().map(|p| p.1).sum::<f64>() / track.len() as f64;
+            let cents: Vec<(f64, f64)> = track
+                .iter()
+                .map(|&(t, f)| (t, 1200.0 * det::ln(f / mean) / core::f64::consts::LN_2))
+                .collect();
+            let at = amplitude_at(&cents, gesture_hz);
+            let off = amplitude_at(&cents, gesture_hz - 2.4).max(amplitude_at(&cents, gesture_hz + 2.4));
+            (at, off, mean)
+        };
+        let (none, _, mean_none) = measure(&steady);
+        let (small, _, _) = measure(&render(&modulation_text("tension_modulation 6 0.04\n")));
+        let (full, off, mean_full) = measure(&render(&modulation_text("tension_modulation 6 0.08\n")));
+        let per_a = 1200.0 / core::f64::consts::LN_2;
+        println!(
+            "{{\"suite\":\"fs-couple\",\"case\":\"voice-tension-modulation\",\"prior_hz\":{prior:.2},\"steady_hz\":{mean_none:.2},\"mean_hz_modulated\":{mean_full:.2},\"peak_cents_none\":{none:.2},\"peak_cents_a0p04\":{small:.1},\"peak_cents_a0p08\":{full:.1},\"max_cents_off_rate\":{off:.1}}}"
+        );
+        assert!(
+            (0.3 * 0.08 * per_a..=0.8 * 0.08 * per_a).contains(&full),
+            "f0 swing {full:.1} cents peak for a = 0.08"
+        );
+        assert!(none < 0.2 * full, "no key, yet {none:.1} cents at the gesture rate");
+        assert!(
+            (1.6..=2.4).contains(&(full / small)),
+            "doubling the amplitude gave {small:.1} -> {full:.1} cents"
+        );
+        assert!(full > 4.0 * off, "{full:.1} cents at the rate against {off:.1} cents off it");
     }
 }

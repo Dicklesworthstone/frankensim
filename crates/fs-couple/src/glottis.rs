@@ -179,6 +179,9 @@ pub struct GlottalFrame {
     pub dissipated_j: f64,
     /// Fold Hamiltonian after the step [J].
     pub fold_energy_j: f64,
+    /// Work done on the fold by [`GlottalIsland::set_tension`] calls since the previous step [J]. The stored
+    /// energy changed by this plus `fold_energy_j` (the step's own `H(x1) - H(x0)`).
+    pub tension_work_j: f64,
 }
 
 enum Valve {
@@ -207,6 +210,10 @@ pub struct GlottalIsland {
     /// thickness / c_mucosal with c_mucosal = 1 m/s AUTHORED Estimate
     /// (physiological 1-3 m/s).
     gap_history: std::collections::VecDeque<f64>,
+    /// Common factor on the card's three stiffnesses, 1.0 = the card as written ([`GlottalIsland::set_tension`]).
+    tension: f64,
+    /// Work done by tension changes since the last step [J], reported by the next frame.
+    tension_work_j: f64,
 }
 
 /// Build the coupled two-mass pHS: state `[q1, p1, q2, p2]`,
@@ -287,6 +294,51 @@ fn junction_flow(a_coef: f64, z_series: f64, p_drive: f64) -> f64 {
     if p_drive < 0.0 { -mag } else { mag }
 }
 
+/// Fold tension admitted by [`GlottalIsland::set_tension`]: a common stiffness factor of 1/4 to 4 moves the fold
+/// frequency by an octave either way (f ~ sqrt(k)), far beyond any vibrato.
+const TENSION_RANGE: core::ops::RangeInclusive<f64> = 0.25..=4.0;
+
+/// The stiffness-dependent parts of an island at fold tension `tension`: the pHS, its exact linear split and the
+/// collision law. Tension is one common factor on the card's lower, upper and coupling stiffnesses, which is what a
+/// card's pitch trim already applies once; here it may also vary in time. Damping follows as `2 zeta sqrt(k m)`, and
+/// the collision spring stays the Steinecke-Herzel `3 k1 / gap`. `tension = 1.0` multiplies by exactly one, so the
+/// card's own island is reproduced bit for bit.
+fn tensioned_fold(
+    card: &FoldCard,
+    two_mass: bool,
+    tension: f64,
+) -> Result<(PortHamiltonian, fs_phs::linear_exact::LinearSplit, Obstacle), GlottisError> {
+    let mut scaled = *card;
+    scaled.stiffness_lower_n_m *= tension;
+    scaled.stiffness_upper_n_m *= tension;
+    scaled.coupling_n_m *= tension;
+    let phs = if two_mass {
+        two_mass_phs(&scaled)?
+    } else {
+        let m = scaled.mass_lower_kg + scaled.mass_upper_kg;
+        let k = scaled.stiffness_lower_n_m + scaled.stiffness_upper_n_m;
+        let c = 2.0 * scaled.damping_ratio * det::sqrt(k * m);
+        mass_spring_damper(m, k, c)?
+    };
+    let linear = fs_phs::linear_exact::split_quadratic(
+        &phs,
+        fs_phs::linear_exact::LinearSplitBudget {
+            max_modes: phs.state_dim(),
+            max_omega_dt: core::f64::consts::PI,
+        },
+    )?;
+    // Collision: the S-H convention triples the spring at closure.
+    // The slit-lay obstacle's stiffness multiplies pen^alpha, so
+    // scale it to deliver F = 3 k1 h0 at one rest-gap penetration
+    // (the first authored 3*k1 delivered MICRONEWTONS at real
+    // penetrations - measured 2.4e-6 N at 0.1 mm - because the
+    // units are per pen^2, not per pen).
+    let k_col = 3.0 * scaled.stiffness_lower_n_m / scaled.rest_gap_m;
+    let obstacle =
+        crate::unilateral_contact::slit_lay(k_col, 2.0).and_then(|o| o.with_internal_loss(0.1))?;
+    Ok((phs, linear, obstacle))
+}
+
 impl GlottalIsland {
     /// Build an island (`two_mass = false` selects the 1-DOF image)
     /// against a tract duct realized as a characteristic line.
@@ -351,6 +403,7 @@ impl GlottalIsland {
             // flattened R toward +1 (found via the tract lane)
             wall,
         )?;
+        let (phs, linear, obstacle) = tensioned_fold(&card, two_mass, 1.0)?;
         let valve = if two_mass {
             // The S-H rest state is an UNSTABLE equilibrium whose
             // driving pressure is exactly zero while the masses stay
@@ -360,32 +413,13 @@ impl GlottalIsland {
             // scaled to the card.
             let mut x = vec![0.0; 4];
             x[0] = 0.1 * card.rest_gap_m;
-            Valve::TwoMass {
-                phs: two_mass_phs(&card)?,
-                x,
-            }
+            Valve::TwoMass { phs, x }
         } else {
-            let m = card.mass_lower_kg + card.mass_upper_kg;
-            let k = card.stiffness_lower_n_m + card.stiffness_upper_n_m;
-            let c = 2.0 * card.damping_ratio * det::sqrt(k * m);
             Valve::OneDof {
-                phs: mass_spring_damper(m, k, c)?,
+                phs,
                 x: vec![0.0; 2],
             }
         };
-        let phs = match &valve { Valve::OneDof {phs,..} | Valve::TwoMass {phs,..} => phs };
-        let linear = fs_phs::linear_exact::split_quadratic(phs,
-            fs_phs::linear_exact::LinearSplitBudget {max_modes:phs.state_dim(),
-                max_omega_dt:core::f64::consts::PI})?;
-        // Collision: the S-H convention triples the spring at closure.
-        // The slit-lay obstacle's stiffness multiplies pen^alpha, so
-        // scale it to deliver F = 3 k1 h0 at one rest-gap penetration
-        // (the first authored 3*k1 delivered MICRONEWTONS at real
-        // penetrations - measured 2.4e-6 N at 0.1 mm - because the
-        // units are per pen^2, not per pen).
-        let k_col = 3.0 * card.stiffness_lower_n_m / card.rest_gap_m;
-        let obstacle = crate::unilateral_contact::slit_lay(k_col, 2.0)
-            .and_then(|o| o.with_internal_loss(0.1))?;
         let mucosal_delay = ((card.thickness_m / 1.0) * f64::from(sample_rate_hz)).round() as usize;
         Ok(Self {
             valve,
@@ -403,7 +437,46 @@ impl GlottalIsland {
                 card.rest_gap_m;
                 mucosal_delay.max(1)
             ]),
+            tension: 1.0,
+            tension_work_j: 0.0,
         })
+    }
+
+    /// The present fold tension (1.0 = the card as written).
+    #[must_use]
+    pub fn tension(&self) -> f64 {
+        self.tension
+    }
+
+    /// Set the fold tension: a common factor on the card's lower, upper and coupling stiffnesses, which is how a
+    /// cricothyroid gesture acts on the lumped fold (`1.0` is the card as written, and f0 follows about its square
+    /// root). The fold state is kept; the exact linear split, the damping `2 zeta sqrt(k m)` and the collision
+    /// spring are rebuilt for the new stiffness. A stiffness change at fixed displacement changes the stored
+    /// energy `H = x^T Q x / 2` by `H_new(x) - H_old(x)`: work the muscle does on the fold. It is returned, and the
+    /// next frame reports it as `tension_work_j`, so the energy ledger stays closed. Setting the present factor is
+    /// a no-op that returns 0. Determinism class: a pure function of the call sequence.
+    ///
+    /// # Errors
+    /// A factor outside 1/4..=4 or non-finite; pHS, split or collision admission of the rebuilt fold.
+    pub fn set_tension(&mut self, tension: f64) -> Result<f64, GlottisError> {
+        if !(tension.is_finite() && TENSION_RANGE.contains(&tension)) {
+            return Err(GlottisError::Invalid {
+                what: "fold tension",
+            });
+        }
+        if tension == self.tension {
+            return Ok(0.0);
+        }
+        let two_mass = matches!(self.valve, Valve::TwoMass { .. });
+        let (phs, linear, obstacle) = tensioned_fold(&self.card, two_mass, tension)?;
+        let (Valve::OneDof { phs: slot, x } | Valve::TwoMass { phs: slot, x }) = &mut self.valve;
+        let work = phs.hamiltonian(&x[..]) - slot.hamiltonian(&x[..]);
+        *slot = phs;
+        self.linear = linear;
+        self.obstacle = obstacle;
+        self.tension = tension;
+        self.tension_work_j += work;
+        Ok(work)
     }
 
     /// Wave incident on the tract during the last `step`, referenced to
@@ -552,6 +625,7 @@ impl GlottalIsland {
             gap_m: self.gap_m(),
             dissipated_j: record.dissipated,
             fold_energy_j,
+            tension_work_j: core::mem::take(&mut self.tension_work_j),
         })
     }
 }
@@ -1170,6 +1244,214 @@ mod glottis_tests {
         );
         println!(
             "{{\"suite\":\"fs-couple\",\"case\":\"gl-009-junction-identity\",\"checked\":{checked},\"worst_rel_miss\":{worst:e},\"verdict\":\"pass\"}}"
+        );
+    }
+
+    fn fold_energy(isl: &GlottalIsland) -> f64 {
+        match &isl.valve {
+            Valve::OneDof { phs, x } | Valve::TwoMass { phs, x } => phs.hamiltonian(x),
+        }
+    }
+
+    /// Cycle-by-cycle f0 [Hz] against time [s]: the positive-going mean crossings of the flow, each located by
+    /// linear interpolation, spurious ripple crossings (closer than half the median period) dropped.
+    fn cycle_f0(flows: &[f64], rate: f64) -> Vec<(f64, f64)> {
+        let mean = flows.iter().sum::<f64>() / flows.len() as f64;
+        let mut crossings = Vec::new();
+        for k in 1..flows.len() {
+            let (a, b) = (flows[k - 1] - mean, flows[k] - mean);
+            if a <= 0.0 && b > 0.0 {
+                crossings.push((k - 1) as f64 + (-a) / (b - a));
+            }
+        }
+        let mut gaps: Vec<f64> = crossings.windows(2).map(|w| w[1] - w[0]).collect();
+        gaps.sort_by(f64::total_cmp);
+        let median = gaps[gaps.len() / 2];
+        let mut marks = vec![crossings[0]];
+        for &c in &crossings[1..] {
+            if c - marks[marks.len() - 1] > 0.5 * median {
+                marks.push(c);
+            }
+        }
+        marks
+            .windows(2)
+            .map(|w| (0.5 * (w[0] + w[1]) / rate, rate / (w[1] - w[0])))
+            .collect()
+    }
+
+    /// Amplitude of the component of `y(t)` at `freq`, from the mean-removed projection onto one sinusoid; exact
+    /// for whole periods of `freq` and an even sampling.
+    fn amplitude_at(points: &[(f64, f64)], freq: f64) -> f64 {
+        let n = points.len() as f64;
+        let mean = points.iter().map(|p| p.1).sum::<f64>() / n;
+        let (mut re, mut im) = (0.0_f64, 0.0_f64);
+        for &(t, y) in points {
+            let w = core::f64::consts::TAU * freq * t;
+            re += (y - mean) * det::cos(w);
+            im += (y - mean) * det::sin(w);
+        }
+        2.0 * re.hypot(im) / n
+    }
+
+    /// Gauntlet G0/G5. Tension 1.0 is the card: calling `set_tension(1.0)` before every step leaves the island
+    /// bit-identical. A change at a displaced state does exactly the work the stiffness difference stores,
+    /// `1/2 (s - 1) (k1 q1^2 + k2 q2^2 + kc (q1 - q2)^2)`, and refused factors change nothing.
+    #[test]
+    fn gl_010_tension_one_is_the_card_and_a_change_does_its_exact_work() {
+        let (mut plain, mut held) = (island(true, 1.0), island(true, 1.0));
+        for k in 0..2400 {
+            let p = 1200.0 * (f64::from(k) / 1440.0).min(1.0);
+            let a = plain.step(p).expect("plain");
+            assert_eq!(held.set_tension(1.0).expect("1.0"), 0.0);
+            let b = held.step(p).expect("held");
+            assert_eq!(a.flow_m3_s.to_bits(), b.flow_m3_s.to_bits());
+            assert_eq!(a.gap_m.to_bits(), b.gap_m.to_bits());
+            assert_eq!(b.tension_work_j, 0.0);
+        }
+        let mut isl = island(true, 1.0);
+        let card = isl.card;
+        let (q1, q2) = (-0.6 * card.rest_gap_m, 0.4 * card.rest_gap_m);
+        if let Valve::TwoMass { x, .. } = &mut isl.valve {
+            x[0] = q1;
+            x[1] = 3.0e-5;
+            x[2] = q2;
+            x[3] = -1.0e-6;
+        }
+        let before = fold_energy(&isl);
+        let work = isl.set_tension(1.2).expect("tension");
+        let after = fold_energy(&isl);
+        let expected = 0.5
+            * 0.2
+            * (card.stiffness_lower_n_m * q1 * q1
+                + card.stiffness_upper_n_m * q2 * q2
+                + card.coupling_n_m * (q1 - q2) * (q1 - q2));
+        assert!(
+            (work - expected).abs() <= 1.0e-10 * expected,
+            "work {work:e} against {expected:e}"
+        );
+        assert!(
+            (before + work - after).abs() <= 1.0e-10 * after,
+            "{before:e} + {work:e} != {after:e}"
+        );
+        assert_eq!(isl.step(0.0).expect("step").tension_work_j, work);
+        assert_eq!(isl.step(0.0).expect("step").tension_work_j, 0.0);
+        let mut one_dof = island(false, 1.0);
+        if let Valve::OneDof { x, .. } = &mut one_dof.valve {
+            x[0] = -0.5 * card.rest_gap_m;
+            x[1] = 2.0e-5;
+        }
+        let before = fold_energy(&one_dof);
+        let work = one_dof.set_tension(0.8).expect("tension");
+        assert!(work < 0.0, "a slackening does negative work ({work:e})");
+        assert!((before + work - fold_energy(&one_dof)).abs() <= 1.0e-10 * before);
+        for bad in [0.0, 0.2, 4.1, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                isl.set_tension(bad),
+                Err(GlottisError::Invalid {
+                    what: "fold tension"
+                })
+            ));
+        }
+        assert_eq!(isl.tension(), 1.2, "a refused factor changes nothing");
+        println!(
+            "{{\"suite\":\"fs-couple\",\"case\":\"gl-010-tension-work\",\"work_j\":{work:e},\"verdict\":\"pass\"}}"
+        );
+    }
+
+    /// Gauntlet G1. A held tension moves the phonating fold frequency about as the square root of stiffness
+    /// (the cards' own pitch trims measured exponents of 0.50 and 0.56). The exponent is measured per factor and
+    /// logged; the asserted bracket 0.3..0.8 is the physical one for a stiffness-controlled oscillator.
+    #[test]
+    fn gl_011_held_tension_moves_f0_with_the_square_root_of_stiffness() {
+        let f0_at = |tension: f64| -> f64 {
+            let mut isl = island(true, 1.0);
+            isl.set_tension(tension).expect("tension");
+            let n = (f64::from(RATE) * 0.6) as usize;
+            let (mut flows, mut gaps) = (Vec::with_capacity(n), Vec::with_capacity(n));
+            for k in 0..n {
+                let attack = (k as f64 / (0.03 * f64::from(RATE))).min(1.0);
+                let frame = isl.step(1400.0 * attack).expect("step");
+                flows.push(frame.flow_m3_s);
+                gaps.push(frame.gap_m);
+            }
+            let tail = n / 2;
+            glottal_qois(&flows[tail..], &gaps[tail..], f64::from(RATE)).f0_hz
+        };
+        let f1 = f0_at(1.0);
+        let mut previous = 0.0_f64;
+        for &s in &[0.8, 0.9, 1.0, 1.1, 1.25] {
+            let f = if s == 1.0 { f1 } else { f0_at(s) };
+            assert!(
+                f > previous,
+                "f0 must rise with tension ({previous} then {f} at {s})"
+            );
+            previous = f;
+            if s != 1.0 {
+                let exponent = det::ln(f / f1) / det::ln(s);
+                println!(
+                    "{{\"suite\":\"fs-couple\",\"case\":\"gl-011-tension-exponent\",\"tension\":{s},\"f0_hz\":{f:.2},\"exponent\":{exponent:.3}}}"
+                );
+                assert!(
+                    (0.3..=0.8).contains(&exponent),
+                    "f0 exponent {exponent:.3} at tension {s} ({f:.2} Hz against {f1:.2} Hz)"
+                );
+            }
+        }
+    }
+
+    /// Gauntlet G1/G5. A sinusoidal tension of relative amplitude `a` at 6 Hz makes the phonating f0 swing at 6 Hz
+    /// by `1731 e a` cents peak (`e` the square-root exponent, 0.3..0.8, so 42..111 cents for a = 0.08), with no
+    /// comparable content at 3.6 or 8.4 Hz (whole-period nulls of the 5-period window), and the stored energy
+    /// ledger closes: the sum of every step's `H(x1) - H(x0)` and every tension work is `H_end - H_start`.
+    #[test]
+    fn gl_012_sinusoidal_tension_modulates_f0_at_the_gesture_rate_and_closes_the_ledger() {
+        let (rate_hz, a) = (6.0_f64, 0.08_f64);
+        let mut isl = island(true, 1.0);
+        let h_start = fold_energy(&isl);
+        let n = (f64::from(RATE) * 1.3) as usize;
+        let mut flows = Vec::with_capacity(n);
+        let (mut ledger, mut h_max) = (0.0_f64, h_start);
+        for k in 0..n {
+            let t = k as f64 / f64::from(RATE);
+            isl.set_tension(1.0 + a * det::sin(core::f64::consts::TAU * rate_hz * t))
+                .expect("tension");
+            let attack = (k as f64 / (0.03 * f64::from(RATE))).min(1.0);
+            let frame = isl.step(1400.0 * attack).expect("step");
+            assert!(frame.dissipated_j >= -1.0e-15);
+            ledger += frame.fold_energy_j + frame.tension_work_j;
+            flows.push(frame.flow_m3_s);
+            h_max = h_max.max(fold_energy(&isl));
+        }
+        let miss = (ledger - (fold_energy(&isl) - h_start)).abs();
+        assert!(
+            miss <= 1.0e-9 * h_max,
+            "energy ledger miss {miss:e} J of {h_max:e} J"
+        );
+        // Five whole periods of the gesture, after the onset transient.
+        let (i0, i1) = (
+            (0.30 * f64::from(RATE)) as usize,
+            (0.30 * f64::from(RATE) + 5.0 / rate_hz * f64::from(RATE)) as usize,
+        );
+        let f0s = cycle_f0(&flows[i0..i1], f64::from(RATE));
+        let f_mean = f0s.iter().map(|p| p.1).sum::<f64>() / f0s.len() as f64;
+        let cents: Vec<(f64, f64)> = f0s
+            .iter()
+            .map(|&(t, f)| (t, 1200.0 * det::ln(f / f_mean) / core::f64::consts::LN_2))
+            .collect();
+        let at_rate = amplitude_at(&cents, rate_hz);
+        let off = amplitude_at(&cents, rate_hz - 2.4).max(amplitude_at(&cents, rate_hz + 2.4));
+        let per_a = 1200.0 / core::f64::consts::LN_2;
+        println!(
+            "{{\"suite\":\"fs-couple\",\"case\":\"gl-012-tension-modulation\",\"cycles\":{},\"f0_mean_hz\":{f_mean:.2},\"peak_cents_at_6hz\":{at_rate:.1},\"max_cents_at_3p6_8p4hz\":{off:.1},\"ledger_miss_j\":{miss:e}}}",
+            cents.len()
+        );
+        assert!(
+            (0.3 * a * per_a..=0.8 * a * per_a).contains(&at_rate),
+            "f0 swing {at_rate:.1} cents peak at {rate_hz} Hz"
+        );
+        assert!(
+            at_rate > 5.0 * off,
+            "modulation {at_rate:.1} cents against {off:.1} cents off the gesture rate"
         );
     }
 }
