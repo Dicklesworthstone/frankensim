@@ -43,6 +43,13 @@ PCM path. The bow track is released; this example does not validate a bow-contac
 law. No pitch correction, recorded waveform, or audio filter supplies the
 string response.
 
+The fixture selects `prepared-linear 64 67108864 200000000000`. The existing
+fixed-system owner precomputes the coupled physical propagator and its work
+integrals once, making playback practical without repeatedly integrating the
+same operator. The original material coefficients, mechanical clock, state
+variables, reciprocal couplings and work model remain in force. The three
+explicit allowances bound modes, preparation bytes and preparation work.
+
 To open the same sources in Instrument Lab:
 
 ```bash

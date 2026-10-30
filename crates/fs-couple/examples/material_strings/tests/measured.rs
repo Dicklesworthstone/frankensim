@@ -6,6 +6,8 @@ use fs_couple::material_assembly::measured_string::{
     MeasuredStringProperties, ResolvedMeasuredStringSpecimen,
 };
 
+const PREPARED: &str = "prepared-linear 64 67108864 200000000000";
+
 fn text() -> String {
     include_str!("../measured-cello-g.material-strings")
         .replace("48000 4096 0.01 128", "48000 128 0.01 128")
@@ -251,21 +253,38 @@ fn measured_setup_and_explicit_elastic_scope_are_not_silently_replaced() {
             "1 temperature_known 0",
             "2 temperature_known 0 temperature_known 0",
         ),
-        ("cavity none", "bending-loss kelvin-voigt\ncavity none"),
-        (
-            "cavity none",
-            "bending-loss prony 1 modulus time\ncavity none",
-        ),
-        (
-            "cavity none",
-            "longitudinal-waves 0.2 0.01 64 100000 1e-11 1e-10 2 1 2\nlongitudinal-memory 8 equilibrium 1 delta tau\ncavity none",
-        ),
     ] {
         assert!(
             input::Spec::parse(original.replace(from, to).as_bytes()).is_err(),
             "accepted {to}"
         );
     }
+    for record in [
+        "bending-loss kelvin-voigt",
+        "bending-loss prony 1 modulus time",
+    ] {
+        let invalid = original.replace(PREPARED, &format!("{record}\n{PREPARED}"));
+        let error = input::Spec::parse(invalid.as_bytes())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            error.contains("measured whole strings do not supply an intrinsic bending-loss law"),
+            "{error}"
+        );
+    }
+    // Unsupported history must reach source admission, not a prepared-owner refusal.
+    let unprepared = original.replace(&format!("{PREPARED}\n"), "");
+    let invalid = unprepared.replace("cavity none",
+        "longitudinal-waves 0.2 0.01 64 100000 1e-11 1e-10 2 1 2\nlongitudinal-memory 8 equilibrium 1 delta tau\ncavity none");
+    let error = input::Spec::parse(invalid.as_bytes())
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        error.contains("measured whole strings do not supply axial material history"),
+        "{error}"
+    );
     scoped(|cx, gate| {
         for (from, to, field) in [
             ("0.7 0.000575", "0.71 0.000575", "length"),
@@ -292,23 +311,23 @@ fn measured_setup_and_explicit_elastic_scope_are_not_silently_replaced() {
             )
             .is_err()
         );
-        for (from, to) in [
-            ("tension 116.3", "extension 0.699 0.01"),
-            ("116.3 4 0 0.8", "116.3 4 1 0.8"),
-            (
-                "cavity none",
-                "tension-loss lampis-2024-dominant-cello-g\ncavity none",
+        for invalid in [
+            original.replace("tension 116.3", "extension 0.699 0.01"),
+            original.replace("116.3 4 0 0.8", "116.3 4 1 0.8"),
+            original.replace(
+                PREPARED,
+                &format!("tension-loss lampis-2024-dominant-cello-g\n{PREPARED}"),
             ),
-            (
+            unprepared.replace(
                 "cavity none",
                 "geometric-stretching 0.2 64 100000 1e-11 1e-10\ncavity none",
             ),
-            (
+            unprepared.replace(
                 "cavity none",
                 "longitudinal-waves 0.2 0.01 64 100000 1e-11 1e-10 2 1 2\ncavity none",
             ),
         ] {
-            let spec = input::Spec::parse(original.replace(from, to).as_bytes()).unwrap();
+            let spec = input::Spec::parse(invalid.as_bytes()).unwrap();
             let error = ready(cx, gate, spec, 1.0).err().unwrap().to_string();
             assert!(error.contains("measured whole strings"), "{error}");
         }

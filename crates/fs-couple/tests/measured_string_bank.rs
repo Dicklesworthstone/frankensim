@@ -18,7 +18,9 @@ use fs_couple::modal_acoustic_time::{
 use fs_couple::render::schedule::force::coupled::contact::friction::{
     FrictionDrive, ModalFrictionConfig,
 };
-use fs_couple::render::schedule::force::coupled::{ModalAttachment, ModalCouplingConfig};
+use fs_couple::render::schedule::force::coupled::{
+    ModalAttachment, ModalCouplingConfig, PreparedModalBudget,
+};
 use fs_evidence::ValidityDomain;
 use fs_exec::{CancelGate, Cx};
 use fs_matdb::{
@@ -186,6 +188,15 @@ fn build(cx: &Cx<'_>, gate: &CancelGate, medium: GasState) -> ReciprocalStringBa
         gate,
     )
     .unwrap()
+    .with_prepared_linear_propagation(
+        PreparedModalBudget {
+            max_modes: 64,
+            max_dense_bytes: 67_108_864,
+            max_multiply_terms: 200_000_000_000,
+        },
+        gate,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -272,8 +283,7 @@ fn measured_string_force_reaches_sympathetic_string_fluid_and_body_with_closed_w
         assert!(sympathetic > 0.0 && fluid > 0.0 && pressure_change > 1e-18);
         assert!(work > 1e-9 && dissipated > 0.0);
         assert!(
-            (a.system().total_energy_j().unwrap() + dissipated - work).abs()
-                < 2e-13 + 1e-8 * work
+            (a.system().total_energy_j().unwrap() + dissipated - work).abs() < 2e-13 + 1e-8 * work
         );
     });
 }

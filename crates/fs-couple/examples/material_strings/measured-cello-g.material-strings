@@ -7,6 +7,7 @@ strings 1
 string cello-g-whole.fsmatpk 0.7 0.000575 tension 116.3 4 0 0.8 3000 0.1
 section measured 1 temperature_known 0 playing_length diameter_dominant tension_dominant linear_density_dominant bending_stiffness_dominant no-intrinsic-loss
 polarizations two 0.6 0.8 1 0
+prepared-linear 64 67108864 200000000000
 cavity none
 friction stribeck 0.8 0.4 0.1 0
 forces preload 1 1
