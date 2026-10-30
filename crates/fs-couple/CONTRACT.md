@@ -3738,6 +3738,14 @@ None.
   modeled and silent linear forte is the lie the refusal prevents.
   Card = authored datasheet-class Estimate; low-ka piston load
   disclosed; cabinet IR packs are FORBIDDEN and absent.
+  `TsDriver::new_with_media` and `MagneticTsDriver::new_with_media` retain
+  distinct exterior and sealed-cavity gas snapshots. Exterior gas owns the
+  original radiation load and pressure observer; cavity `rho*c^2/V` owns
+  compression and reciprocal cone/panel coupling. A box needs an explicit
+  cavity gas, and both static pressures must match: pressure-bias equilibrium
+  is not modeled. The single-gas constructors retain identical-medium behavior.
+  `ThermalMagneticTsDriver::from_material_with_media` uses that same assembly;
+  coil-heating trials preserve both gas states without inventing gas heat flow.
   The opt-in `MagneticTsDriver` retains that original mechanical assembly and
   admits caller-supplied quadratic Bl(x)/L(x) profiles over an explicit closed
   displacement interval. L must remain positive throughout, including interior

@@ -187,6 +187,40 @@ impl<'n, 'a> ThermalMagneticTsDriver<'n, 'a> {
         thermal: &DepositionSimulation<'_>,
         network: &'n MaterialNetwork<'a>,
         basis: ElectricalPropertyBasis,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        Self::from_material_with_media(
+            mechanics,
+            box_volume_m3,
+            panel,
+            gas,
+            box_volume_m3.map(|_| gas),
+            profile,
+            thermal,
+            network,
+            basis,
+            cancelled,
+        )
+    }
+
+    /// Resolve the same whole material coil with distinct exterior/cavity media.
+    ///
+    /// Gas-region roles and static-pressure admission are exactly those of
+    /// `MagneticTsDriver::new_with_media`. Coil heating retains both media and
+    /// their original mechanical operators; it does not silently heat either
+    /// gas or replace the sealed fill with the exterior. Any finite heat exchange
+    /// remains an explicit original thermal-network binding.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_material_with_media(
+        mechanics: SpeakerMechanics,
+        box_volume_m3: Option<f64>,
+        panel: Option<PanelMode>,
+        exterior_gas: GasState,
+        cavity_gas: Option<GasState>,
+        profile: VoiceCoilMagnetics,
+        thermal: &DepositionSimulation<'_>,
+        network: &'n MaterialNetwork<'a>,
+        basis: ElectricalPropertyBasis,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, Error> {
         if cancelled() {
@@ -211,8 +245,15 @@ impl<'n, 'a> ThermalMagneticTsDriver<'n, 'a> {
             sd_m2: mechanics.sd_m2,
             x_max_m: mechanics.x_max_m,
         };
-        let mut driver = MagneticTsDriver::new_with_gas(card, box_volume_m3, panel, gas, profile)
-            .map_err(speaker)?;
+        let mut driver = MagneticTsDriver::new_with_media(
+            card,
+            box_volume_m3,
+            panel,
+            exterior_gas,
+            cavity_gas,
+            profile,
+        )
+        .map_err(speaker)?;
         driver.time_s = thermal.time_s();
         if cancelled() {
             return Err(CircuitEnthalpyError::Cancelled);

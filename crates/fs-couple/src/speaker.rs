@@ -36,8 +36,8 @@ use fs_phs::linear_exact::{
 use fs_phs::{PhsError, PortHamiltonian, QuadraticStorage, StepRecord};
 
 mod magnetic;
-pub use magnetic::{MagneticCoilSample, MagneticTsDriver, VoiceCoilMagnetics};
 pub use magnetic::thermal;
+pub use magnetic::{MagneticCoilSample, MagneticTsDriver, VoiceCoilMagnetics};
 
 /// Thiele–Small parameter card (datasheet-class, with provenance).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -143,7 +143,9 @@ pub struct TsDriver {
     linear: LinearSplit,
     x: Vec<f64>,
     card: TsCard,
-    rho: f64,
+    exterior_gas: GasState,
+    cavity_gas: Option<GasState>,
+    moving_mass_kg: f64,
     /// Index of the cone-displacement coordinate.
     ix_cone: usize,
     has_panel: bool,
@@ -208,8 +210,49 @@ impl TsDriver {
         panel: Option<PanelMode>,
         gas: GasState,
     ) -> Result<Self, SpeakerError> {
-        let DriverAssembly { n, q, j, r, g, .. } =
-            assemble_driver(card, box_volume_m3, panel, &gas)?;
+        Self::new_with_media(card, box_volume_m3, panel, gas, box_volume_m3.map(|_| gas))
+    }
+
+    /// Compose with independently resolved exterior and sealed-cavity gases.
+    ///
+    /// Exterior density and sound speed supply the original radiation load
+    /// and microphone pressure. Only the cavity's bulk modulus `rho*c*c`
+    /// supplies sealed-volume storage and reciprocal cone/panel coupling.
+    /// Changing a sealed fill therefore cannot replace the surrounding gas.
+    /// The existing compact radiation and spatially uniform, adiabatic cavity
+    /// approximations remain; these are fixed gas snapshots, not gas transport,
+    /// heat exchange, molecular relaxation or finite-amplitude compression.
+    ///
+    /// A cavity gas is required exactly when a box volume is supplied. Both
+    /// regions must have the same static pressure because this model is
+    /// linearized about zero displacement and contains no pressure-bias load.
+    /// Temperature and composition may differ. Source authority stays with
+    /// the caller's original material models; both complete snapshots are kept.
+    ///
+    /// # Errors
+    /// Refuses incoherent media, missing/extra cavity gas, unequal static
+    /// pressures and the original card, box, panel and pHS admission failures.
+    pub fn new_with_media(
+        card: TsCard,
+        box_volume_m3: Option<f64>,
+        panel: Option<PanelMode>,
+        exterior_gas: GasState,
+        cavity_gas: Option<GasState>,
+    ) -> Result<Self, SpeakerError> {
+        let DriverAssembly {
+            n,
+            q,
+            j,
+            r,
+            g,
+            moving_mass_kg,
+        } = assemble_driver(
+            card,
+            box_volume_m3,
+            panel,
+            &exterior_gas,
+            cavity_gas.as_ref(),
+        )?;
         let storage = Box::new(QuadraticStorage::new(q, n)?);
         let phs = PortHamiltonian::new(n, 1, j, r, g, storage)?;
         let linear = split_quadratic(
@@ -224,7 +267,9 @@ impl TsDriver {
             linear,
             x: vec![0.0; n],
             card,
-            rho: gas.density,
+            exterior_gas,
+            cavity_gas,
+            moving_mass_kg,
             ix_cone: 1,
             has_panel: panel.is_some(),
         })
@@ -260,11 +305,22 @@ impl TsDriver {
             });
         }
         // a = dv/dt from the momentum update (Mms+air mass folded in).
-        let a_eff = (self.card.sd_m2 / core::f64::consts::PI).sqrt();
-        let m_tot = self.card.mms_kg + 8.0 * self.rho * a_eff.powi(3) / 3.0;
-        let accel = (self.x[2] - v_before) / (m_tot * dt.max(1e-300));
-        let p_1m = self.rho * self.card.sd_m2 * accel / (4.0 * core::f64::consts::PI);
+        let accel = (self.x[2] - v_before) / (self.moving_mass_kg * dt.max(1e-300));
+        let p_1m =
+            self.exterior_gas.density * self.card.sd_m2 * accel / (4.0 * core::f64::consts::PI);
         Ok((rec, p_1m))
+    }
+
+    /// Original surrounding medium used by radiation loading and observation.
+    #[must_use]
+    pub const fn exterior_gas(&self) -> &GasState {
+        &self.exterior_gas
+    }
+
+    /// Original sealed fill used by cavity compression, absent in free air.
+    #[must_use]
+    pub const fn cavity_gas(&self) -> Option<&GasState> {
+        self.cavity_gas.as_ref()
     }
 
     /// Voice-coil current [A].
@@ -290,10 +346,26 @@ fn assemble_driver(
     card: TsCard,
     box_volume_m3: Option<f64>,
     panel: Option<PanelMode>,
-    gas: &GasState,
+    exterior_gas: &GasState,
+    cavity_gas: Option<&GasState>,
 ) -> Result<DriverAssembly, SpeakerError> {
     card.validate()?;
-    gas.validate_coherence().map_err(SpeakerError::Gas)?;
+    exterior_gas
+        .validate_coherence()
+        .map_err(SpeakerError::Gas)?;
+    if box_volume_m3.is_some() != cavity_gas.is_some() {
+        return Err(SpeakerError::Invalid {
+            what: "a sealed box requires its own cavity gas; free air has no cavity gas",
+        });
+    }
+    if let Some(gas) = cavity_gas {
+        gas.validate_coherence().map_err(SpeakerError::Gas)?;
+        if gas.pressure != exterior_gas.pressure {
+            return Err(SpeakerError::Invalid {
+                what: "cavity and exterior need equal static pressure; pressure-bias equilibrium is not modeled",
+            });
+        }
+    }
     if let Some(v) = box_volume_m3
         && !(v.is_finite() && v > 0.0)
     {
@@ -310,9 +382,9 @@ fn assemble_driver(
     // small frequency-independent resistance class (disclosed
     // approximation).
     let a_eff = (card.sd_m2 / core::f64::consts::PI).sqrt();
-    let m_air = 8.0 * gas.density * a_eff.powi(3) / 3.0;
+    let m_air = 8.0 * exterior_gas.density * a_eff.powi(3) / 3.0;
     let m_tot = card.mms_kg + m_air;
-    let r_rad = gas.density * gas.sound_speed * card.sd_m2 * 0.05;
+    let r_rad = exterior_gas.density * exterior_gas.sound_speed * card.sd_m2 * 0.05;
     let k_susp = 1.0 / card.cms_m_per_n;
     // State: [phi_Le, x_cone, p_cone] (+ [x_p, p_p] with a panel).
     let n = if panel.is_some() { 5 } else { 3 };
@@ -320,7 +392,7 @@ fn assemble_driver(
     q[0] = 1.0 / card.le_h;
     q[n + 1] = k_susp;
     q[2 * n + 2] = 1.0 / m_tot;
-    if let Some(vb) = box_volume_m3 {
+    if let (Some(vb), Some(gas)) = (box_volume_m3, cavity_gas) {
         let k_box_scale = gas.density * gas.sound_speed * gas.sound_speed / vb;
         if let Some(p) = panel {
             if !(p.frequency_hz > 0.0 && p.mass_kg > 0.0 && p.area_m2 > 0.0) {
@@ -646,7 +718,7 @@ mod speaker_tests {
                 "admitted density and sound speed set box stiffness"
             );
             assert_eq!(
-                driver.rho.to_bits(),
+                driver.exterior_gas().density.to_bits(),
                 gas.density.to_bits(),
                 "observer pressure retains the admitted density"
             );
@@ -654,7 +726,7 @@ mod speaker_tests {
 
         let default_driver = TsDriver::new(c, Some(box_volume_m3), None).expect("default");
         assert_eq!(
-            default_driver.rho.to_bits(),
+            default_driver.exterior_gas().density.to_bits(),
             declared_air().density.to_bits(),
             "the public convenience wrapper retains its declared-air provenance"
         );
@@ -728,6 +800,115 @@ mod speaker_tests {
         )
         .unwrap();
         let driver = TsDriver::new_with_gas(card(), Some(0.02), None, changed).unwrap();
-        assert_eq!(driver.rho, 2.0 * original.density);
+        assert_eq!(driver.exterior_gas().density, 2.0 * original.density);
+    }
+
+    #[test]
+    fn separate_gases_drive_only_their_own_cavity_and_exterior_operators() {
+        // G1/G3: independently check adiabatic pV storage, including its
+        // reciprocal panel reaction, and exterior inertia/radiation scaling.
+        let air = declared_air();
+        let helium = GasState::try_new(
+            &fs_material::gas_species::GasSpecies::Helium.spec(),
+            air.temperature,
+            air.pressure,
+        )
+        .unwrap();
+        let c = card();
+        let panel = PanelMode {
+            frequency_hz: 90.0,
+            mass_kg: 0.3,
+            area_m2: 0.05,
+            damping_ratio: 0.02,
+        };
+        let volume = 0.02;
+        let baseline =
+            TsDriver::new_with_media(c, Some(volume), Some(panel), air, Some(air)).unwrap();
+        let mut filled =
+            TsDriver::new_with_media(c, Some(volume), Some(panel), air, Some(helium)).unwrap();
+        let outside =
+            TsDriver::new_with_media(c, Some(volume), Some(panel), helium, Some(air)).unwrap();
+        let displacement = [0.0, 2e-4, 0.0, -1e-4, 0.0];
+        assert_eq!(
+            baseline.phs.effort(&displacement),
+            outside.phs.effort(&displacement)
+        );
+        assert_eq!(baseline.phs.structure(), filled.phs.structure());
+        assert_eq!(baseline.moving_mass_kg, filled.moving_mass_kg);
+        assert!(outside.moving_mass_kg < baseline.moving_mass_kg);
+        assert_eq!(filled.exterior_gas(), &air);
+        assert_eq!(filled.cavity_gas(), Some(&helium));
+
+        let effort = filled.phs.effort(&displacement);
+        let compression = c.sd_m2 * displacement[1] - panel.area_m2 * displacement[3];
+        let k = helium.gamma * helium.pressure / volume;
+        let expected_cone = displacement[1] / c.cms_m_per_n + k * c.sd_m2 * compression;
+        let expected_panel =
+            panel.mass_kg * (core::f64::consts::TAU * panel.frequency_hz).powi(2) * displacement[3]
+                - k * panel.area_m2 * compression;
+        assert!((effort[1] - expected_cone).abs() < 2e-14 * expected_cone.abs());
+        assert!((effort[3] - expected_panel).abs() < 2e-14 * expected_panel.abs());
+        assert!(effort[1] > baseline.phs.effort(&displacement)[1]);
+
+        let mut baseline = baseline;
+        let mut distinct_pressure = false;
+        for _ in 0..120 {
+            let previous_momentum = filled.x[2];
+            let (record, pressure) = filled.step(0.02, 1.0 / 48_000.0).unwrap();
+            let (_, reference) = baseline.step(0.02, 1.0 / 48_000.0).unwrap();
+            let expected_pressure =
+                air.density * c.sd_m2 * (record.x[2] - previous_momentum) * 48_000.0
+                    / (filled.moving_mass_kg * 4.0 * core::f64::consts::PI);
+            assert!(
+                (pressure - expected_pressure).abs() < 1e-12 * expected_pressure.abs().max(1e-30)
+            );
+            assert!((record.delta_h + record.dissipated - record.supplied).abs() < 1e-12);
+            distinct_pressure |= (pressure - reference).abs() > 1e-9;
+        }
+        assert!(
+            distinct_pressure,
+            "the fill must change solved motion and external pressure"
+        );
+    }
+
+    #[test]
+    fn equal_media_preserve_the_complete_legacy_driver() {
+        let gas = declared_air();
+        for volume in [None, Some(0.02)] {
+            let mut old = TsDriver::new_with_gas(card(), volume, None, gas).unwrap();
+            let mut explicit =
+                TsDriver::new_with_media(card(), volume, None, gas, volume.map(|_| gas)).unwrap();
+            for voltage in [0.1, 0.2, 0.0, -0.1] {
+                let (a, pa) = old.step(voltage, 1.0 / 48_000.0).unwrap();
+                let (b, pb) = explicit.step(voltage, 1.0 / 48_000.0).unwrap();
+                assert_eq!(a.x, b.x);
+                assert_eq!(
+                    (a.supplied, a.dissipated, pa),
+                    (b.supplied, b.dissipated, pb)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sealed_media_require_coherent_states_and_a_supported_static_equilibrium() {
+        let gas = declared_air();
+        assert!(TsDriver::new_with_media(card(), Some(0.02), None, gas, None).is_err());
+        assert!(TsDriver::new_with_media(card(), None, None, gas, Some(gas)).is_err());
+        let biased = GasState::try_new(
+            &GasSpec::dry_air_ussa1976(),
+            gas.temperature,
+            2.0 * gas.pressure,
+        )
+        .unwrap();
+        assert!(TsDriver::new_with_media(card(), Some(0.02), None, gas, Some(biased)).is_err());
+        let mut stale = gas;
+        stale.sound_speed *= 1.1;
+        for (exterior, cavity) in [(stale, gas), (gas, stale)] {
+            assert!(matches!(
+                TsDriver::new_with_media(card(), Some(0.02), None, exterior, Some(cavity)),
+                Err(SpeakerError::Gas(_)),
+            ));
+        }
     }
 }

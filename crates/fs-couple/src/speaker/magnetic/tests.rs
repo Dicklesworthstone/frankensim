@@ -198,6 +198,47 @@ fn nonlinear_magnetic_speaker_and_cabinet_keep_native_work_and_heat_balance() {
 }
 
 #[test]
+fn distinct_cavity_gas_changes_magnetic_motion_without_changing_exterior_observation() {
+    let air = declared_air();
+    let fill = GasState::try_new(
+        &fs_material::gas_species::GasSpecies::Helium.spec(),
+        air.temperature,
+        air.pressure,
+    )
+    .unwrap();
+    let panel = Some(PanelMode {
+        frequency_hz: 2.0,
+        mass_kg: 0.05,
+        area_m2: 0.001,
+        damping_ratio: 0.02,
+    });
+    let mut filled =
+        MagneticTsDriver::new_with_media(card(), Some(0.02), panel, air, Some(fill), profile(true))
+            .unwrap();
+    let mut baseline =
+        MagneticTsDriver::new_with_gas(card(), Some(0.02), panel, air, profile(true)).unwrap();
+    for _ in 0..40 {
+        let previous = filled.x[2];
+        let (record, pressure) = filled.step(0.2, 0.005).unwrap();
+        baseline.step(0.2, 0.005).unwrap();
+        near(
+            pressure,
+            air.density * card().sd_m2 * (record.x[2] - previous)
+                / (filled.moving_mass_kg * 0.005 * 4.0 * core::f64::consts::PI),
+            1e-15,
+        );
+        near(record.delta_h + record.dissipated, record.supplied, 3e-12);
+    }
+    assert!((filled.excursion_m() - baseline.excursion_m()).abs() > 1e-7);
+    let refreshed = filled.with_coil_resistance(1.1).unwrap();
+    assert_eq!(refreshed.exterior_gas(), &air);
+    assert_eq!(refreshed.cavity_gas(), Some(&fill));
+    assert_eq!(refreshed.x, filled.x);
+    assert_eq!(refreshed.time_s(), filled.time_s());
+    assert_eq!(refreshed.storage.mechanical, filled.storage.mechanical);
+}
+
+#[test]
 fn magnetic_domain_and_nonfinite_input_failures_leave_the_driver_unchanged() {
     let narrow =
         VoiceCoilMagnetics::new([-1e-6, 1e-6], 0.01, [1.2, -0.4, -0.2], [0.6, 0.15, 0.08]).unwrap();

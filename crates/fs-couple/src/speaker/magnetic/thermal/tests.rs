@@ -507,6 +507,72 @@ fn source_profile() -> VoiceCoilMagnetics {
 }
 
 #[test]
+fn material_coil_heating_retains_distinct_cavity_and_exterior_media() {
+    let basis = ElectricalPropertyBasis::Resistivity;
+    let (card, curve) = material(0.005, basis, 2000.0);
+    let context = point(300.0);
+    let (cells, resistors) = bindings(&card, &curve, &context);
+    let network = MaterialNetwork {
+        cells: &cells,
+        resistors: &resistors,
+        links: &[],
+    };
+    let mut thermal = initial(&curve, 300.0, 0.0);
+    let exterior = crate::speaker::declared_air();
+    let cavity = GasState::try_new(
+        &fs_material::gas_species::GasSpecies::Helium.spec(),
+        310.0,
+        exterior.pressure,
+    )
+    .unwrap();
+    let mut coupled = ThermalMagneticTsDriver::from_material_with_media(
+        source_mechanics(),
+        Some(0.02),
+        None,
+        exterior,
+        Some(cavity),
+        source_profile(),
+        &thermal,
+        &network,
+        basis,
+        || false,
+    )
+    .unwrap();
+    let original_mechanics = coupled.driver().storage.mechanical.clone();
+    let initial_resistance = coupled.driver().coil_resistance_ohm();
+    let mut emitted = false;
+    for tick in 1..=5 {
+        let proposal = coupled
+            .step_candidate(
+                &thermal,
+                f64::from(tick) * 0.001,
+                0.2,
+                controls(),
+                &[0.0],
+                || false,
+            )
+            .unwrap();
+        let accepted = proposal.driver().driver();
+        assert_eq!(accepted.exterior_gas(), &exterior);
+        assert_eq!(accepted.cavity_gas(), Some(&cavity));
+        assert_eq!(accepted.storage.mechanical, original_mechanics);
+        assert_eq!(accepted.time_s(), proposal.thermal().time_s());
+        assert_eq!(
+            proposal.report().electrical.coil.material().card_identity(),
+            card.content_hash()
+        );
+        near(proposal.report().total_energy_residual_j, 0.0, 2e-9);
+        emitted |= proposal.report().electrical.pressure_pa.abs() > 1e-9;
+        let (next_thermal, next_driver, _) = proposal.into_parts();
+        thermal = next_thermal;
+        coupled = next_driver;
+    }
+    assert!(emitted);
+    assert!(thermal.temperature_k(COIL).unwrap() > 300.0);
+    assert!(coupled.driver().coil_resistance_ohm() > initial_resistance);
+}
+
+#[test]
 fn source_coil_mass_and_resistance_swaps_reach_native_motion_and_pressure() {
     let mut first_steps = Vec::new();
     for (density, resistance_scale, basis) in [

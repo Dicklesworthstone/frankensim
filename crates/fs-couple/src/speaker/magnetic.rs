@@ -227,7 +227,8 @@ pub struct MagneticTsDriver {
     profile: VoiceCoilMagnetics,
     x: Vec<f64>,
     card: TsCard,
-    rho: f64,
+    exterior_gas: GasState,
+    cavity_gas: Option<GasState>,
     moving_mass_kg: f64,
     has_panel: bool,
     time_s: f64,
@@ -255,6 +256,32 @@ impl MagneticTsDriver {
         gas: GasState,
         profile: VoiceCoilMagnetics,
     ) -> Result<Self, SpeakerError> {
+        Self::new_with_media(
+            card,
+            box_volume_m3,
+            panel,
+            gas,
+            box_volume_m3.map(|_| gas),
+            profile,
+        )
+    }
+
+    /// Compose the same magnetic driver with distinct exterior and cavity gas.
+    ///
+    /// The original shared assembly assigns radiation inertia, resistance and
+    /// observation to the exterior, and sealed compression and panel coupling
+    /// to the cavity. Both snapshots are retained through material coil-heating
+    /// updates. The cavity must exist exactly when a box volume does, and its
+    /// static pressure must match the exterior: no unmodeled bias force is
+    /// balanced by the suspension. All original magnetic and gas limits apply.
+    pub fn new_with_media(
+        card: TsCard,
+        box_volume_m3: Option<f64>,
+        panel: Option<PanelMode>,
+        exterior_gas: GasState,
+        cavity_gas: Option<GasState>,
+        profile: VoiceCoilMagnetics,
+    ) -> Result<Self, SpeakerError> {
         let DriverAssembly {
             n,
             mut q,
@@ -262,7 +289,13 @@ impl MagneticTsDriver {
             r,
             g,
             moving_mass_kg,
-        } = assemble_driver(card, box_volume_m3, panel, &gas)?;
+        } = assemble_driver(
+            card,
+            box_volume_m3,
+            panel,
+            &exterior_gas,
+            cavity_gas.as_ref(),
+        )?;
         let origin = profile.sample(0.0)?;
         if (origin.force_factor_tm - card.bl).abs() > 1e-12 * card.bl
             || (origin.inductance_h - card.le_h).abs() > 1e-12 * card.le_h
@@ -302,7 +335,8 @@ impl MagneticTsDriver {
             profile,
             x: vec![0.0; n],
             card,
-            rho: gas.density,
+            exterior_gas,
+            cavity_gas,
             moving_mass_kg,
             has_panel: panel.is_some(),
             time_s: 0.0,
@@ -337,7 +371,8 @@ impl MagneticTsDriver {
         } else {
             (record.x[2] - self.x[2]) / (self.moving_mass_kg * duration_s)
         };
-        let pressure = self.rho * self.card.sd_m2 * acceleration / (4.0 * core::f64::consts::PI);
+        let pressure = self.exterior_gas.density * self.card.sd_m2 * acceleration
+            / (4.0 * core::f64::consts::PI);
         if !pressure.is_finite() {
             return Err(invalid("magnetic speaker pressure is unrepresentable"));
         }
@@ -373,7 +408,8 @@ impl MagneticTsDriver {
             profile: self.profile,
             x: self.x.clone(),
             card: self.card,
-            rho: self.rho,
+            exterior_gas: self.exterior_gas,
+            cavity_gas: self.cavity_gas,
             moving_mass_kg: self.moving_mass_kg,
             has_panel: self.has_panel,
             time_s: self.time_s,
@@ -383,6 +419,18 @@ impl MagneticTsDriver {
     /// Accepted physical clock [s]. A refused step leaves this unchanged.
     pub const fn time_s(&self) -> f64 {
         self.time_s
+    }
+
+    /// Original surrounding medium used by radiation loading and observation.
+    #[must_use]
+    pub const fn exterior_gas(&self) -> &GasState {
+        &self.exterior_gas
+    }
+
+    /// Original sealed fill used by cavity compression, absent in free air.
+    #[must_use]
+    pub const fn cavity_gas(&self) -> Option<&GasState> {
+        self.cavity_gas.as_ref()
     }
 
     /// Resistance used by the accepted electrical model [ohm]. The thermal
