@@ -167,6 +167,44 @@ the solid field cell's law. Pressure, composition and flow retain their declared
 provider ownership. This does not add fluid momentum, advection, pressure work,
 or new electrical/magnetic constitutive laws. Time refinement remains necessary.
 
+## Reciprocal piezoelectric motion with the same heat assembly
+
+`circuit_enthalpy::piezoelectric::heat::step_candidate` consumes the same
+`HeatAssembly`, including the airflow provider and its finite-link view.
+It advances the original rod, circuit and finite thermal history in one
+candidate. The existing raw-coefficient piezoelectric API delegates to the
+same private driver.
+
+```rust,ignore
+let proposal = fs_couple::circuit_enthalpy::piezoelectric::heat::step_candidate(
+    &provider, &cx, &thermal, target_s, &piezoelectric_circuit,
+    &electrical_ports, force_n, controls, &energy_guess_j,
+)?;
+let (next_thermal, next_model, report) = proposal.into_parts();
+let accepted_heat_and_fluid = &report.source;
+```
+
+Source-bound load resistance, convection, contacts/layers and radiation are
+resolved at the same proposed temperatures. The original reciprocal electrical
+and mechanical solve supplies the actual current, force-displacement work and
+Joule heat. A coolant material substitution can therefore change load
+temperature, current, charge and continuing rod motion without changing that
+solver or inserting a motion multiplier.
+
+The entry checks accepted conductor identity and native heat destinations,
+refuses unsupported electrical-contact work and unowned field-dependent heat
+boundaries, and retains the complete accepted source sample. Closed radiation
+remains internal under the original total-energy gate. Source failure, budget
+exhaustion or cancellation returns no partially accepted thermal or mechanical/
+electrical history.
+
+This is the base small-signal rod model: ceramic coefficients, source context
+and reference inertia remain independently held. The finite load and coolant
+temperatures evolve. Temperature-dependent ceramic storage retains its
+separate existing thermal entry; this adapter does not infer it from cooling
+the load. Fixed heat geometry and the original first-order thermal coupling
+require the same domain admission and timestep refinement.
+
 ## Energy and scope
 
 The standard circuit/enthalpy report preserves the actual source arithmetic,

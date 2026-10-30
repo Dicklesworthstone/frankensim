@@ -214,6 +214,15 @@ Original whole-volume field capacity admission, uniform thermal cells, fixed
 geometry and timestep-refinement requirements remain unchanged. Pressure,
 composition and relative flow retain their original provider ownership.
 
+The same assembly also feeds
+`fs_couple::circuit_enthalpy::piezoelectric::heat::step_candidate`. Original
+rod/circuit reciprocity, source-bound load resistance and finite coolant heat
+share one accepted candidate. The base ceramic coefficients remain held;
+cooling changes actual current and continuing motion through the original load.
+Its finite-links regression compares independent midpoint and two-cell energy
+equations under viscosity/Cp substitutions, preserves full source records,
+and exercises late typed source refusal, circuit budget and cancellation.
+
 ### Complete material heat on the native explicit timeline
 
 `SourceConvectionHeatNetwork::observe_with_links` composes the complete prepared
