@@ -172,6 +172,41 @@ fn prepare(
     })
 }
 
+impl LocalMaterialWall {
+    /// Prepare the existing native material transfer for an acoustic host that
+    /// retains source laws separately from its sole continuing DG operator.
+    /// The caller publishes the returned operator, state, propagator and source
+    /// together after rebuilding its own original algebraic connections.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_dg_update(
+        previous_walls: &[Self],
+        walls: &[Self],
+        retained_band_hz: [f64; 2],
+        duct: &DgDuct,
+        state: &DgState,
+        propagator: &DgPropagator,
+        maximum_absolute_parameter_work_j: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(DgDuct, DgState, DgPropagator, DgWallMaterialUpdate), AcousticRealizeError> {
+        let proposal = prepare(
+            duct,
+            state,
+            propagator,
+            previous_walls,
+            walls,
+            retained_band_hz,
+            maximum_absolute_parameter_work_j,
+            cancelled,
+        )?;
+        Ok((
+            proposal.duct,
+            proposal.state,
+            proposal.propagator,
+            proposal.account,
+        ))
+    }
+}
+
 impl MaterialWallDg {
     /// Refresh the continuing uniform gas from its complete shared source field.
     ///

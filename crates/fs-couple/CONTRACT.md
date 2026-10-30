@@ -15527,3 +15527,28 @@ Three G1/G3/G4 regressions compare six-component factor transfer, live tetrahedr
 continuation against independent physical-strain ODE integration, signed work,
 native heat, source/mass/domain boundaries and rollback. These are manufactured
 constitutive references, not experimental validation.
+
+## Source-retaining material walls on complete DG loads
+
+`DgPortLoad` can retain an original uniform or regional material-wall source
+alongside its one native duct, propagator and accepted state. Source-bound
+constructors and the authored DG input path preserve these queries, selected
+claims, thicknesses, restraints and loss-property roles instead of discarding
+them when extracting a duct. Coefficient-only loads do not acquire invented
+material sources.
+
+`rebind_wall_temperature_controlled` resolves the original card at one supplied
+temperature through the existing pinned-source resolver. Native transfer retains
+wall displacement, momentum and admitted Kelvin/Maxwell histories, reports
+signed material work, and rebuilds the complete mean-port relation. Original
+branches, finite passages, rational terminal poles and accepted clocks remain
+with their existing owners. The source, state, propagator and coupling update
+publish together only after all admissions and cancellation checks.
+
+The held-flow trial can integrate the original solid-wall dissipation using its
+actual solved inlet, terminal and branch-junction inputs. It retains the main
+bore's own dissipation allowance before complete-load aggregation; a branch
+cannot conceal excessive deposition into a main-wall body. Continuous
+trajectories require their own matching source integral and refuse this held
+input route. A native heat integral is a physical source report, not permission
+to credit a thermal body without a complete energy transaction.

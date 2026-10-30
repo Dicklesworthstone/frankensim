@@ -6,7 +6,7 @@
 use super::{DgMaterialWallInput, DgMaterialWallRecord, MAX_DG_WALL_PACK_BYTES};
 use super::super::{DgSourceError, Row, bad, checkpoint};
 use crate::bernoulli_aperture::wall::material::RegionalMaterialWallDg;
-use crate::dg_port::DgBranch;
+use crate::dg_port::{DgBranch, DgPortWallSource};
 use fs_duct::dg::{DgDuct, PortId};
 use fs_exec::CancelGate;
 use fs_matdb::NormalizedMaterialCardPack;
@@ -282,12 +282,21 @@ impl DgMaterialWallLayout {
     /// native operator. Refining an aligned mesh repeats source assignments;
     /// an interface that cuts an element refuses instead of mixing materials.
     pub fn bind(&self, duct: DgDuct, gate: &CancelGate) -> Result<DgDuct, DgSourceError> {
+        self.bind_with_source(duct, gate).map(|(duct, _)| duct)
+    }
+
+    /// Retain the exact original main-bore sources alongside the one operator.
+    /// Regional source order follows actual elements after physical admission.
+    pub(crate) fn bind_with_source(
+        &self, duct: DgDuct, gate: &CancelGate,
+    ) -> Result<(DgDuct, Option<DgPortWallSource>), DgSourceError> {
         checkpoint(gate, self.line)?;
         if let Some(source) = &self.uniform {
             return source.wall().clone().bind_dg_controlled(duct, &mut || gate.is_requested())
-                .map(|bound| bound.into_duct()).map_err(DgSourceError::Physics);
+                .map(|bound| (bound.into_duct(), Some(DgPortWallSource::Uniform(source.wall().clone()))))
+                .map_err(DgSourceError::Physics);
         }
-        if self.regions.is_empty() { return Ok(duct); }
+        if self.regions.is_empty() { return Ok((duct, None)); }
         let mesh = duct.mesh();
         if self.regions.len() > mesh.elements {
             return Err(bad(self.line, "each DG material region needs at least one original element"));
@@ -327,6 +336,9 @@ impl DgMaterialWallLayout {
             return Err(bad(self.line, "DG wall regions leave original elements uncovered"));
         }
         RegionalMaterialWallDg::new_controlled(walls, duct, &mut || gate.is_requested())
-            .map(|bound| bound.into_duct()).map_err(DgSourceError::Physics)
+            .map(|bound| {
+                let source = DgPortWallSource::Regional(bound.walls().to_vec());
+                (bound.into_duct(), Some(source))
+            }).map_err(DgSourceError::Physics)
     }
 }

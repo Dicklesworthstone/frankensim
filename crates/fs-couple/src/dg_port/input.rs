@@ -674,8 +674,9 @@ impl DgSourceInput {
         self.prepare_with_solid_wall(ambient, dt, gate, wall.map(|wall| wall.band_hz()), |owner| {
             if let Some(wall) = wall {
                 wall.clone().bind_dg_controlled(owner, &mut || gate.is_requested())
-                    .map(|bound| bound.into_duct()).map_err(DgSourceError::Physics)
-            } else { Ok(owner) }
+                    .map(|bound| (bound.into_duct(), Some(super::DgPortWallSource::Uniform(wall.clone()))))
+                    .map_err(DgSourceError::Physics)
+            } else { Ok((owner, None)) }
         }, Ok)
     }
 
@@ -687,7 +688,7 @@ impl DgSourceInput {
         wall: &wall::regions::DgMaterialWallLayout,
     ) -> Result<DgPortLoad, DgSourceError> {
         self.prepare_with_solid_wall(ambient, dt, gate, wall.complete_band_hz(),
-            |owner| wall.bind(owner, gate), |branches| wall.bind_chimneys(branches, gate))
+            |owner| wall.bind_with_source(owner, gate), |branches| wall.bind_chimneys(branches, gate))
     }
 
     fn prepare_with_solid_wall(
@@ -696,7 +697,7 @@ impl DgSourceInput {
         dt: f64,
         gate: &CancelGate,
         wall_band_hz: Option<[f64; 2]>,
-        bind_wall: impl FnOnce(DgDuct) -> Result<DgDuct, DgSourceError>,
+        bind_wall: impl FnOnce(DgDuct) -> Result<(DgDuct, Option<super::DgPortWallSource>), DgSourceError>,
         bind_branches: impl FnOnce(Vec<DgBranch>) -> Result<Vec<DgBranch>, DgSourceError>,
     ) -> Result<DgPortLoad, DgSourceError> {
         checkpoint(gate, self.line)?;
@@ -743,7 +744,7 @@ impl DgSourceInput {
             owner.with_molecular_relaxation_controlled(molecular.clone(), &mut || gate.is_requested())
                 .map_err(|error| DgSourceError::Physics(AcousticRealizeError::Duct(error)))?
         } else { owner };
-        let owner = bind_wall(owner)?;
+        let (owner, wall_source) = bind_wall(owner)?;
         checkpoint(gate, self.line)?;
         let branches = bind_branches(self.prepare_chimneys(gate)?)?;
         let sealed: Vec<_> = branches
@@ -751,7 +752,7 @@ impl DgSourceInput {
             .filter(|branch| branch.duct.outlet() == DgBoundary::Closed)
             .map(|branch| branch.port)
             .collect();
-        let load = if let Some((controls, exterior)) = self.radiation {
+        let mut load = if let Some((controls, exterior)) = self.radiation {
             let mut openings = Vec::with_capacity(self.side_openings.len() + 1);
             openings.push((PortId(1), CircularOpening {
                 center_m: [0.0; 2],
@@ -768,6 +769,8 @@ impl DgSourceInput {
             DgPortLoad::new(owner, dt, self.exponential_tolerance, self.maximum_dofs)
                 .map_err(DgSourceError::Physics)?
         };
+        // Retain the exact source bound above beside the sole native operator.
+        load.wall_source = wall_source;
         checkpoint(gate, self.line)?;
         let terminal_channels = self
             .terminal_channels

@@ -14,6 +14,9 @@ pub mod radiation;
 /// Finite thermochemical storage and feedback on this complete continuing load.
 pub mod finite_gas;
 
+mod wall;
+pub use wall::{DgPortWallSource, DgPortWallUpdate};
+
 mod gas;
 pub use gas::{
     DgBranchGasInput, DgBranchGasUpdate, DgGasRefresh, DgPortGasUpdate, DgRegionalGasUpdate,
@@ -83,6 +86,7 @@ pub(crate) fn sum_terminal_work(frames: &[DgTerminalFrame]) -> f64 {
 #[derive(Debug, Clone)]
 pub struct DgPortLoad {
     duct: DgDuct,
+    wall_source: Option<DgPortWallSource>,
     propagator: DgPropagator,
     state: DgState,
     inlet: PortId,
@@ -230,7 +234,7 @@ impl DgPortLoad {
             }
         };
         let mut load = Self {
-            duct, propagator, state, inlet, impedance_pa_s_m3: 0.0,
+            duct, wall_source: None, propagator, state, inlet, impedance_pa_s_m3: 0.0,
             terminal, terminal_coupling, last_terminal_frame: None,
             last_terminal_frames: Vec::new(), last_driven_mouth_frame: None,
             last_independent_mouth_frame: None, radiation_record: None,
@@ -483,7 +487,7 @@ impl DgPortLoad {
         {
             return Err(invalid("aggregate DG/channel port work does not equal inlet minus exterior work"));
         }
-        Ok(DgPortTrial { owner: self, state, output, terminal, terminal_frame, terminal_frames,
+        Ok(DgPortTrial { owner: self, main_inputs: Some(main_inputs), state, output, terminal, terminal_frame, terminal_frames,
             inlet_work_j, source_work_j, driven_mouth_frame, independent_mouth_frame,
             branch_states, branch_frames,
             terminal_channels, terminal_channel_frames })
@@ -493,6 +497,8 @@ impl DgPortLoad {
 /// A trial borrows the only accepted histories. Dropping it publishes nothing.
 pub(crate) struct DgPortTrial<'a> {
     owner: &'a mut DgPortLoad,
+    // Only the mean-port backend has held inputs on the original main operator.
+    main_inputs: Option<Vec<PortInput>>,
     state: DgState,
     output: DgStepOutput,
     terminal: Option<PreparedMimoLoad>,

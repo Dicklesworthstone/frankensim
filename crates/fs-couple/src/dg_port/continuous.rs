@@ -488,6 +488,7 @@ impl DgPortLoad {
         };
         Ok(DgPortTrial {
             owner: self,
+            main_inputs: None,
             state,
             output,
             terminal,
