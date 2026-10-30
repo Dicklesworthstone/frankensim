@@ -12521,9 +12521,10 @@ angular-frequency band are explicit data. The same resolved inlet drives the
 reed flow, and the same exterior drives terminal loading and observation.
 Native sidecars retain the actual reservoirs, frozen sound speed and source
 wavefront time. Observer absorption remains a separate declared exterior law.
-Legacy gas without species, per-segment overrides, axial or steady-generated
-fields refuse on this homogeneous molecular route; no law is
-silently dropped. Existing files without these records keep their prior path.
+Homogeneous molecular propagation requires explicit source species. Per-segment
+overrides and midpoint field images refuse. Explicitly continuous axial and
+steady-generated fields use the field-bound molecular route described below;
+the field's own source admits reservoirs even with a legacy ambient record. Existing files without these records keep their prior path.
 The runnable `examples/reed-molecular-synthetic.performance` uses authored
 synthetic coefficients, not measured N2/O2 material data. Focused file tests
 exercise data-only rate changes, physical pressure, exact block replay and
@@ -13385,3 +13386,15 @@ positive Simpson heat references cover contact entry, penetration and release,
 with original contact potential, jet heat, mouth/body work and refusal replay.
 Existing contact regressions remain active. These bounded numerical checks do
 not establish measured-instrument fidelity or arbitrary-clock nonlinear accuracy.
+
+### Molecular gas fields in authored reed performances
+
+`ReedPerformance` accepts the existing `molecular`, `molecular_resolution` and `molecular_wall` records after an explicitly continuous `gas_field` or `gas_steady` block, or with a field injected through `from_bytes_with_field_resolution`. The parser retains the complete `RelaxationAbsorption` declaration and admits it against the actual field inlet. The continuous molecular owner then reevaluates the same law at every original field/geometry quadrature point, including species absent at the inlet but present downstream. The legacy homogeneous path retains its original evaluated-state constructor and arithmetic.
+
+The exact field inlet supplies excitation and feedback; the exact outlet supplies the default baffled exterior, with explicit exterior records retaining precedence. The same molecular operator drives the ordinary reed voice, terminal/chimney volume flows and pressure observation. Authored-segment inlet samples remain read-only metadata; they do not replace continuous quadrature. Field/source/steady-solve receipts and observer-law selection retain their existing meanings. Injected fields retain their complete source owner while `gas_records` continues to mean authored records.
+
+Molecular fields require `GasFieldResolution::Continuous`; midpoint input refuses instead of being silently reinterpreted. Explicit segment gases remain unsupported by this molecular grammar. Existing source domains, composition limits, common-pressure admission, finite work caps, internal mutual-hole refusals, FIR approximation and frozen-field scope remain in force. No new grammar, transport model, source fitting or audio effect is introduced. The new `molecular_input::field_tests` cover actual authored/injected field-to-pressure/block replay, law sensitivity, downstream source/domain refusals and the existing stationary thermal/species generator feeding the molecular performance. These full coupling/render tests require the complete workspace test lane.
+
+All three new full coupling/render regressions are unexecuted in this environment.
+Rust formatting/parser checks passed; the constituent molecular field and wavefront
+operators have separate native evidence, without claiming a full render run.

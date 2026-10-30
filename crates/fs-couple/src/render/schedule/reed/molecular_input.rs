@@ -1,4 +1,4 @@
-//! Native homogeneous molecular-bore input, using the original material parser.
+//! Native molecular-bore input, using the original material parser and field.
 //!
 //! Three records precede `compile_limits`:
 //! `molecular <fs-material relaxation declaration>`,
@@ -8,6 +8,9 @@
 //! and Nyquist. Wall and cone resolution are independent of the FIR ladder.
 //! All source/domain refusals remain with their original owners. A declared
 //! reservoir is authored constitutive data, not a measurement certificate.
+//! A preceding continuous gas_field or gas_steady block supplies the complete
+//! molecular medium. Its exact inlet, rather than an unrelated ambient record,
+//! admits the law; the retained declaration is then evaluated along the field.
 
 use super::{GasRecord, Reader, ReedPerformanceError, bad};
 use crate::acoustic_realize::map_drive;
@@ -16,12 +19,14 @@ use fs_duct::compose::{ComposeOptions, MAX_COMPOSITION_BLOCKS};
 use fs_duct::molecular::MolecularWallResolution;
 use fs_duct::{ConeSlices, Duct};
 use fs_material::gas::GasState;
+use fs_material::gas_field::AxialGasField;
 use fs_material::relaxation::{
-    RelaxationState,
+    RelaxationAbsorption, RelaxationState, RelaxingMedium,
     input::{medium_from_record, read_relaxation},
 };
 
 pub(super) struct MolecularInput {
+    law: RelaxationAbsorption,
     state: RelaxationState,
     cones: ConeSlices,
     maximum_blocks: usize,
@@ -31,14 +36,20 @@ pub(super) struct MolecularInput {
 pub(super) fn read(
     reader: &mut Reader<'_>,
     ambient: &GasRecord,
+    field: Option<&AxialGasField>,
 ) -> Result<MolecularInput, ReedPerformanceError> {
     let mut row = reader.row("molecular")?;
     let line = row.line;
     let law = read_relaxation(&mut row.words)
         .map_err(|source| ReedPerformanceError::Gas { line, source })?;
     row.finish()?;
-    let medium =
-        medium_from_record(ambient).map_err(|source| ReedPerformanceError::Gas { line, source })?;
+    let medium = match field {
+        Some(field) => field
+            .state_at(0.0)
+            .and_then(|state| RelaxingMedium::from_thermochemical(&state)),
+        None => medium_from_record(ambient),
+    }
+    .map_err(|source| ReedPerformanceError::Gas { line, source })?;
     let state = law
         .evaluate(&medium)
         .map_err(|source| ReedPerformanceError::Gas { line, source })?;
@@ -77,6 +88,7 @@ pub(super) fn read(
     };
     row.finish()?;
     Ok(MolecularInput {
+        law,
         state,
         cones: ConeSlices::Fixed(slices),
         maximum_blocks,
@@ -103,7 +115,33 @@ impl MolecularInput {
         )
         .map_err(|error| ReedPerformanceError::Model(map_drive(error)))
     }
+
+    pub(super) fn bind_field(
+        self,
+        geometry: &Duct,
+        field: &AxialGasField,
+        steps_per_span: fs_duct::RiccatiSteps,
+        exterior: GasState,
+    ) -> Result<MolecularDrivingPoint, ReedPerformanceError> {
+        MolecularDrivingPoint::from_gas_field(
+            geometry,
+            field,
+            &self.law,
+            self.wall,
+            steps_per_span,
+            self.cones,
+            ComposeOptions {
+                maximum_blocks: self.maximum_blocks,
+                ..ComposeOptions::default()
+            },
+            exterior,
+        )
+        .map_err(|error| ReedPerformanceError::Model(map_drive(error)))
+    }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod field_tests;

@@ -96,7 +96,7 @@ fn unsupported_sources_and_missing_species_refuse_instead_of_dropping_the_law() 
     assert!(
         matches!(ReedPerformance::from_bytes_with_gas_field(INPUT.as_bytes(), 37,
         ObservationPolicy::Diagnostic, None, field, 8),
-        Err(ReedPerformanceError::Input { what, .. }) if what.contains("homogeneous ambient species"))
+        Err(ReedPerformanceError::Input { what, .. }) if what.contains("explicit continuous"))
     );
     for input in [
         INPUT.replace(AMBIENT, "ambient 293.15 101325 0"),
@@ -176,3 +176,4 @@ fn molecular_resolution_and_source_bands_are_explicit_and_bounded() {
             .is_none()
     );
 }
+

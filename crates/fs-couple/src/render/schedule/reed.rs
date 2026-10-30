@@ -6,8 +6,10 @@
 //! temperatures and mole fractions through explicitly loaded source packs.
 //! An alternative gas_steady block generates that same field from the existing
 //! conservative thermal/species owner, using the authored bore geometry.
-//! A homogeneous explicit-species source can instead declare `molecular`,
-//! `molecular_resolution` and `molecular_wall` records before `compile_limits`.
+//! An explicit-species source can declare `molecular`, `molecular_resolution`
+//! and `molecular_wall` records before `compile_limits`, with either its
+//! homogeneous ambient or the same continuous authored/injected/steady field.
+//! A molecular field requires the explicit continuous spatial-resolution axis.
 //! The shared molecular reservoirs then reach both pressure feedback and the
 //! physical terminal and side mouths, independently of the listener's exterior
 //! absorption law. Molecular side mouths apply that law at their own ranges.
@@ -780,11 +782,17 @@ impl ReedPerformance {
         }
         let molecular = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("molecular") {
-            if explicit_segment_gas || gas_field.is_some() {
+            if explicit_segment_gas {
                 return Err(bad(r.line + 1,
-                    "molecular bore propagation requires homogeneous ambient species, no segment gas or axial field"));
+                    "molecular bore propagation requires homogeneous ambient species or a continuous field, no segment gas"));
             }
-            Some(molecular_input::read(&mut r, &gas_records[0])?)
+            if matches!(&gas_field, Some((_, GasFieldResolution::Midpoint(_)))) {
+                return Err(bad(r.line + 1,
+                    "molecular gas fields require explicit continuous spatial resolution, not midpoint cells"));
+            }
+            Some(molecular_input::read(
+                &mut r, &gas_records[0], gas_field.as_ref().map(|(field, _)| field),
+            )?)
         } else { None };
         let mut row = r.row("compile_limits")?;
         let max_work: u64 = row.parse()?;
@@ -873,12 +881,37 @@ impl ReedPerformance {
         let outlet_radius_m = duct.segments.last().map_or(0.0, Segment::outlet_radius);
         let band_top_hz = observer_band_top_hz(observation.declared_band_hz(), rate);
         let (voice, terminal, observer, observer_omission) = if let Some(molecular) = molecular {
-            let medium = observer_medium(baffled, &air, &air);
+            let outlet_gas = match &gas_field {
+                Some((field, _)) => *field.state_at(field.length_m())
+                    .map_err(|source| ReedPerformanceError::Gas { line: 0, source })?.state(),
+                None => air,
+            };
+            let medium = observer_medium(baffled, &air, &outlet_gas);
+            let exterior_gas = baffled.and_then(|(_, exterior)| exterior).unwrap_or(outlet_gas);
             let observer =
                 observer_filter(declared_law, &medium, &gas_records, observer_range_m, rate)?;
             admit_receiver_delay(&observer, baffled, outlet_radius_m, medium.sound_speed)?;
             let omission = observer_omission(&medium, &gas_records, observer_range_m, band_top_hz);
-            let point = molecular.bind(&duct, medium)?;
+            let point = match &gas_field {
+                Some((field, GasFieldResolution::Continuous(steps))) => {
+                    let point = molecular.bind_field(&duct, field, *steps, exterior_gas)?;
+                    // Read-only metadata uses the same authored-segment inlet
+                    // samples as the continuous equilibrium field route. The
+                    // actual molecular operator keeps its local quadrature.
+                    let mut position = 0.0;
+                    segment_gases = duct.segments.iter().map(|segment| {
+                        let sample = field.state_at(position)
+                            .map_err(|source| ReedPerformanceError::Gas { line: 0, source })?;
+                        position += segment.axial_length();
+                        Ok(*sample.state())
+                    }).collect::<Result<_, ReedPerformanceError>>()?;
+                    point
+                }
+                None => molecular.bind(&duct, exterior_gas)?,
+                Some((_, GasFieldResolution::Midpoint(_))) => {
+                    unreachable!("molecular field resolution admitted before compilation")
+                }
+            };
             let (voice, terminal) = observation.build_molecular(
                 point, reed, termination, rate, samples as usize,
                 observer.receipt().delay_speed_m_s.unwrap_or(medium.sound_speed),
@@ -1360,3 +1393,4 @@ mod lay_tests;
 
 #[cfg(test)]
 mod viscous_tests;
+
