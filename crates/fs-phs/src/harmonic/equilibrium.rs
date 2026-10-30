@@ -9,6 +9,8 @@
 use super::{HarmonicBudget, HarmonicError, HarmonicModel, MAX_HARMONIC_DIMENSION};
 use crate::{DescriptorPortHamiltonian, PortHamiltonian, Storage};
 
+/// Matrix-free original stationary equations for the shared nonlinear solver.
+pub mod stationary;
 mod dissipation;
 pub use dissipation::NonlinearDissipation;
 

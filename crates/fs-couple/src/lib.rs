@@ -115,6 +115,8 @@ pub mod shock_loading;
 pub mod speaker;
 /// Shared enthalpy and material fields driving native three-dimensional solid equilibrium.
 pub mod solid_enthalpy;
+/// Original stationary operating points on the shared Newton--Krylov owner.
+pub mod stationary_equilibrium;
 pub mod stribeck_friction;
 pub mod string_specimen;
 pub mod strip_enthalpy;
