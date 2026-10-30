@@ -187,7 +187,8 @@ fn resolve_properties(name:&str, catalog:&mut Catalog,
     requirements:&[Requirement]) -> Result<ResolvedMaterialStatePoint>
 {
     load_pack(name,catalog,loader)?;
-    let query=material_inputs::query(&catalog[name].card,spec.temperature,spec.omega)?;
+    let query=material_inputs::query_with_environment(&catalog[name].card,spec.temperature,spec.omega,
+        spec.material_states.get(name).map_or(&[], Vec::as_slice))?;
     Ok(resolve_material_state_point(&catalog[name].card,&query,requirements,Pick::SingleClaimOnly)?)
 }
 #[derive(Debug)]
@@ -240,6 +241,7 @@ impl input::Spec {
         profile:Option<body::Profile>,stop_profile:Option<stops::Profile>,harmonic_only:bool,
         mut loader:impl FnMut(&str)->Result<P>)->Result<ReadyBank> {
         poll(gate)?;
+        self.validate_material_states()?;
         self.friction.validate_thermal_mode(self.dry_contact_thermal)?;
         let preparation = if harmonic_only {
             if !profile.as_ref().is_some_and(body::Profile::has_shell_material_basis) {
@@ -516,6 +518,9 @@ impl input::Spec {
             layers.bind(&self,bank,&mut catalog,&mut loader,gate)?
         } else { bank };
         poll(gate)?;
+        if self.material_states.keys().any(|name| !catalog.contains_key(name)) {
+            return Err("material-state names a bulk pack unused by this assembly".into());
+        }
         Ok(ReadyBank { spec:self,catalog,bank,body_profile:profile,
             rotational_bridge_baselines_m:baselines,stop_profile,body_radiation,bow_station_program })
     }

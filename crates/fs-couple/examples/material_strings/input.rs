@@ -194,6 +194,9 @@ pub struct CavityMolecular {
 pub struct Spec {
     pub bytes: Vec<u8>, pub rate: u32, pub samples: u64, pub full_scale: f64, pub block: usize,
     pub temperature: f64, pub omega: f64, pub gas: GasState, pub body: Body, pub strings: Vec<Wire>,
+    /// Additional held source coordinates, keyed by the original bulk-pack path.
+    /// Temperature and frequency keep the global state convention.
+    pub material_states: BTreeMap<String, Vec<(String, f64)>>,
     /// Retain original thermochemical composition and pack authority with the coefficients.
     pub gas_record: GasRecord,
     /// Optional independent interior atmosphere. Omission inherits gas_record;
@@ -267,6 +270,23 @@ impl Spec {
         let mut row = r.row("state")?;
         let temperature = row.positive()?; let omega = row.scalar()?; row.end()?;
         if omega < 0.0 { return Err("source angular frequency must be nonnegative".into()); }
+        let mut material_states = BTreeMap::new();
+        if r.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next()) == Some("material-states") {
+            let mut row = r.row("material-states")?;
+            let count = row.count(64)?; row.end()?;
+            for _ in 0..count {
+                let mut row = r.row("material-state")?;
+                let pack = row.path()?;
+                let count = row.count(8)?;
+                if count == 0 { return Err("a material-state record needs at least one coordinate".into()); }
+                let mut axes = Vec::with_capacity(count);
+                for _ in 0..count { axes.push((row.label()?, row.scalar()?)); }
+                row.end()?;
+                if material_states.insert(pack, axes).is_some() {
+                    return Err("material-state records must name distinct pack paths".into());
+                }
+            }
+        }
         let mut row = r.row("gas")?;
         let gas_record = read_gas_record(&mut row.words, None, sources)?; row.end()?;
         let gas = *gas_record.state();
@@ -1056,17 +1076,47 @@ impl Spec {
         }
         friction.validate_tracks(&schedule)?;
         let spec = Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
-            gas, gas_record, cavity_gas_record, cavity_molecular, body, strings, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
+            gas, gas_record, cavity_gas_record, cavity_molecular, body, strings, material_states, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
             rotational_bridges, translational_bridges, cylinder_gas_loading, prepared_linear, residual_flexibility, geometric_stretching,
             longitudinal_waves, longitudinal_loss, longitudinal_memory, axial_bearings, bending_memory, body_radiation, shell_bem_angular_refinement,
             plate_observer, shell_observer, shell_receiver_quadrature, one_way_observer, cavity, friction, contact_thermal: false, dry_contact_thermal: false, retained_string_films: false, bow_ribbon, bow_fibers,
             bow_station_motion, forces, schedule };
+        spec.validate_material_states()?;
         spec.bow_station_program(&CancelGate::new_clock_free())?;
         spec.validate_cavity_gas()?;
         spec.validate_shell_observer()?;
         if let Some(layers) = spec.friction.shear_layers() { layers.preflight(&spec)?; }
         spec.network_dimensions(false)?;
         Ok(spec)
+    }
+
+    /// Bound the extra fixed environment independently of source-pack I/O.
+    pub fn validate_material_states(&self) -> Result<()> {
+        if self.material_states.len() > 64 {
+            return Err("material states exceed 64 source packs".into());
+        }
+        for (pack, axes) in &self.material_states {
+            if pack.is_empty() || pack.len() > 512 || !std::path::Path::new(pack).components()
+                .all(|part| matches!(part, std::path::Component::Normal(_)))
+                || axes.is_empty() || axes.len() > 8
+            {
+                return Err("material states require relative pack paths and one to eight coordinates".into());
+            }
+            for (index, (axis, value)) in axes.iter().enumerate() {
+                if axis.is_empty() || axis.len() > 256 || axis.chars().any(char::is_control)
+                    || axis == "T" || axis == "omega" || !value.is_finite()
+                    || axes[..index].iter().any(|(prior, _)| prior == axis)
+                {
+                    return Err("held material coordinates must be distinct finite values outside reserved T/omega".into());
+                }
+            }
+            if self.strings.iter().any(|wire| wire.pack == *pack
+                && matches!(&wire.section, WireSection::Measured { .. }))
+            {
+                return Err("measured whole strings retain their own explicit observation coordinates; material-state cannot replace them".into());
+            }
+        }
+        Ok(())
     }
 
     /// The complete source record for interior pressure, inertia and heat loss.

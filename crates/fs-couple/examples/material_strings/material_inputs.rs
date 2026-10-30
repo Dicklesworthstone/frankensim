@@ -86,6 +86,17 @@ impl MaterialPack {
 /// source quantity metadata without reinterpreting these numbers as delta-T,
 /// hertz, or a different physical axis. Bare historical axes remain bare.
 pub fn query(card: &MaterialCard, temperature: f64, omega: f64) -> Result<QueryPoint> {
+    query_with_environment(card, temperature, omega, &[])
+}
+
+/// Extra coordinates are held source states, never a sorption, mixing or
+/// transport model. Every declaring claim must agree on the exact semantics.
+pub fn query_with_environment(
+    card: &MaterialCard, temperature: f64, omega: f64, environment: &[(String, f64)],
+) -> Result<QueryPoint> {
+    if environment.len() > 8 {
+        return Err("material state exceeds eight extra held coordinates".into());
+    }
     for (axis, kind) in [
         ("T", QuantityKind::AbsoluteTemperature),
         (
@@ -103,11 +114,40 @@ pub fn query(card: &MaterialCard, temperature: f64, omega: f64) -> Result<QueryP
             }
         }
     }
-    // Use the same typed-axis construction as material reeds, walls and plates.
+    let mut axes = vec![("T".into(), temperature), ("omega".into(), omega)];
+    for (index, (axis, value)) in environment.iter().enumerate() {
+        if axis.is_empty() || axis.len() > 256 || axis.chars().any(char::is_control)
+            || axis == "T" || axis == "omega" || !value.is_finite()
+            || environment[..index].iter().any(|(prior, _)| prior == axis)
+        {
+            return Err("held material coordinates must be distinct finite values outside reserved T/omega".into());
+        }
+        let mut quantity = None;
+        for (_, claim) in card.claims().claims_ordered() {
+            if claim.validity.bound(axis).is_none() { continue; }
+            let declared = claim.validity.axis_quantities().get(axis)
+                .copied().ok_or("held material coordinates require explicit source quantity semantics")?;
+            if quantity.is_some_and(|prior| prior != declared) {
+                return Err(format!("material claims disagree on coordinate {axis} semantics").into());
+            }
+            quantity = Some(declared);
+        }
+        let quantity = quantity.ok_or("held material coordinate is absent from the source card")?;
+        if !quantity.semantic_type().is_some_and(|semantic|
+            semantic.form() == ValueForm::Static && matches!(semantic.kind(),
+                QuantityKind::Pressure | QuantityKind::Composition(_) | QuantityKind::Moisture(_)
+                    | QuantityKind::MassConcentration | QuantityKind::AmountConcentration))
+        {
+            return Err("held material coordinates require static pressure, composition, moisture or concentration; temperature/frequency retain the global state convention".into());
+        }
+        axes.push((axis.clone(), *value));
+    }
+    // Use the same typed-axis construction as material reeds, walls and plates,
+    // after checking all declarations rather than selecting the first claim.
     Ok(fs_couple::material_source::MaterialRecord {
         pack: String::new(),
         state: card.id().process.clone(),
-        axes: vec![("T".into(), temperature), ("omega".into(), omega)],
+        axes,
     }
     .query_point(card)?)
 }

@@ -48,6 +48,53 @@ schemas across both bulk materials and the interface: mixing a bare legacy
 axis with a typed axis refuses. Canonical loading preserves that distinction;
 it does not rewrite source cards to make their schemas appear equal.
 
+### Held material environment
+
+An optional block immediately after `state` supplies additional source
+coordinates for individual bulk packs:
+
+```text
+state 293.15 1000
+material-states 2
+material-state wire.fsmatpk 1 moisture_content 0.12
+material-state body.fsmatpk 1 moisture_content 0.08
+gas mixture 293.15 101325 mole 2 N2 0.8 O2 0.2
+```
+
+Each row gives the original relative pack path, coordinate count, then pairs
+of source axis name and value. The example requires packs that explicitly
+declare those moisture axes; the supplied constant wire/body fixtures do not,
+and refuse that extra coordinate. Up to 64 packs and eight extra coordinates
+per pack are supported. Repeated pack paths or axes, unused pack paths, missing
+source semantics, incompatible declarations across claims and out-of-domain
+states refuse. `T` and `omega` remain reserved for the original `state` row.
+
+A held coordinate must be source-qualified static pressure, composition,
+moisture or concentration. Its exact quantity and basis come from the source
+card. In particular, the solid's declared moisture content is a supplied
+material state; the renderer does not infer it from atmospheric relative
+humidity. Changing that coordinate re-resolves the original density, moduli
+and supported loss coefficients. Source-declared curves and surfaces therefore
+alter the existing string, section, fiber and isotropic plate laws, and their
+joint pressure output, without replacing the immutable material card or
+choosing a different instrument model. The resolved state identity changes
+with the coordinates.
+
+The existing support prescription remains authoritative: maintained force stays
+fixed, while fixed extension changes its resulting force with the resolved
+axial stiffness. There is no implicit pitch correction. Temperature re-queries
+for explicit contact-thermal profiles retain the same extra coordinates;
+thermal expansion still needs its existing qualified source law and reference
+state. This input does not supply a sorption, diffusion, swelling or evolving
+composition law. A dynamic or otherwise unsupported constitutive dependency
+still refuses, and every retained frequency must remain in the source's
+applicability band.
+
+`section measured` keeps its own explicit observation axes, including unknown
+measurement conditions. A bulk `material-state` binding for such a string
+refuses instead of overriding those observations. Existing performances with
+no `material-states` block keep their original query and behavior.
+
 ## Run without editing Rust
 
 `material_strings` is also an installable executable. Its binary target and the
