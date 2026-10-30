@@ -39,6 +39,9 @@ use std::{cell::RefCell, collections::BTreeMap};
 
 /// One original field branch and its whole, thermally uniform material volume.
 /// Every capacitor and inductor requires a binding, including constant laws.
+/// Several independent field branches may occupy the same whole material cell;
+/// their field energy, entropy and heat-capacity contributions add while the
+/// cell's caloric inventory is counted exactly once.
 pub struct FieldThermalBinding {
     pub branch: usize,
     pub cell: CellId,
@@ -281,7 +284,11 @@ fn admit(
         ));
     }
     let mut branches = BTreeMap::new();
-    let mut cells = BTreeMap::new();
+    // One caloric cell may own several independent field coordinates. Accumulate
+    // their conservative capacity floors first; checking prefixes would make
+    // admission depend on binding order and would spend the caloric capacity
+    // once per branch.
+    let mut cell_capacity = BTreeMap::<CellId, (f64, f64)>::new();
     let mut result = Vec::with_capacity(bindings.len());
     for binding in bindings {
         check(cancel)?;
@@ -289,10 +296,9 @@ fn admit(
         if !bound.is_finite()
             || bound < 0.0
             || branches.insert(binding.branch, ()).is_some()
-            || cells.insert(binding.cell, ()).is_some()
         {
             return Err(invalid(
-                "unique field branches and whole material cells with finite coordinate bounds required",
+                "unique field branches with finite coordinate bounds required",
             ));
         }
         let source = circuit
@@ -377,13 +383,19 @@ fn admit(
             .law
             .minimum_heat_capacity_j_k(bound)
             .map_err(field)?;
-        if !minimum_caloric_capacity.is_finite()
-            || finite(minimum_caloric_capacity + minimum_field_capacity)? <= 0.0
-        {
+        if !minimum_caloric_capacity.is_finite() {
             return Err(invalid(
-                "caloric plus field heat capacity must stay positive over the declared state envelope",
+                "field caloric capacity is absent over the declared temperature envelope",
             ));
         }
+        let capacity = cell_capacity
+            .entry(binding.cell)
+            .or_insert((minimum_caloric_capacity, 0.0));
+        // Every branch bound to this cell was independently checked against the
+        // same active cell and caloric curve. Use the most conservative caloric
+        // floor if roundoff differs, and sum each physical field contribution.
+        capacity.0 = capacity.0.min(minimum_caloric_capacity);
+        capacity.1 = finite(capacity.1 + minimum_field_capacity)?;
         let coordinate = *initial
             .get(&binding.branch)
             .ok_or_else(|| invalid("thermal field mapping is not an original storage branch"))?;
@@ -397,6 +409,14 @@ fn admit(
             coordinate,
             state: current.state(coordinate).map_err(field)?,
         });
+    }
+    for (_, (caloric, fields)) in cell_capacity {
+        check(cancel)?;
+        if finite(caloric + fields)? <= 0.0 {
+            return Err(invalid(
+                "caloric plus all co-located field heat capacities must stay positive over the declared state envelope",
+            ));
+        }
     }
     check(cancel)?;
     Ok(result)

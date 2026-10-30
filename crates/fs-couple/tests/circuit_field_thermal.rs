@@ -551,3 +551,77 @@ fn invalid_capacity_mapping_source_context_and_late_failure_leave_both_histories
     assert_eq!(thermal.cells(), &saved);
     assert_eq!(circuit, old);
 }
+
+
+#[test]
+fn multiple_field_branches_share_one_material_cell_without_duplicating_caloric_storage() {
+    let card = card(false, 0.001, 2.0);
+    let caloric = caloric(&card);
+    let thermal = thermal(&caloric, 0.0);
+    let context = point(300.0);
+    let cells = [cell(&card, &caloric, &context)];
+    let resistor = CellResistor {
+        destination: ResistorCell { branch: 2, cell: CELL },
+        selection: MaterialPropertySelection::SingleClaimOnly,
+        length_m: 1.0,
+        area_m2: 1.0,
+    };
+    let resistors = [resistor];
+    let material = MaterialNetwork { cells: &cells, resistors: &resistors, links: &[] };
+    let selection = MaterialPropertySelection::SingleClaimOnly;
+    let first = ResolvedCapacitor::resolve(&card, &point(300.0), selection, 1.0, 1.0).unwrap();
+    let second = ResolvedCapacitor::resolve(&card, &point(300.0), selection, 1.0, 1.0).unwrap();
+    let law = ThermalFieldStorage::capacitor(&card, &first, "T", [250.0, 500.0]).unwrap();
+    let circuit = MaterialCircuit::new_with_storage(
+        CircuitGraph {
+            node_count: 2,
+            branches: vec![
+                (1, 0, Branch::Capacitor { farads: f64::NAN }),
+                (1, 0, Branch::Capacitor { farads: f64::NAN }),
+                (1, 0, Branch::Resistor { ohms: f64::NAN }),
+            ],
+            transformers: vec![],
+        },
+        material.resolve(&thermal, || false).unwrap().resistors,
+        vec![
+            MaterialStorage { branch: 0, element: MaterialStorageElement::Capacitor(first) },
+            MaterialStorage { branch: 1, element: MaterialStorageElement::Capacitor(second) },
+        ],
+        vec![],
+        vec![10.0, 6.0],
+        &[],
+    ).unwrap();
+    let fields = [
+        FieldThermalBinding { branch: 0, cell: CELL, law: law.clone(), maximum_abs_coordinate: 10.0 },
+        FieldThermalBinding { branch: 1, cell: CELL, law, maximum_abs_coordinate: 6.0 },
+    ];
+    let bases = [(2, ElectricalPropertyBasis::Resistivity)];
+    let next = field_storage::step_candidate(
+        &material, &thermal, 0.2, &circuit, &[], &fields, &bases,
+        controls(), &[0.0], || false,
+    ).unwrap();
+
+    assert_eq!(next.report().coupled.source.fields.len(), 2);
+    assert!(next.report().coupled.source.fields.iter().all(|field| field.cell == CELL));
+    near(next.report().total_energy_residual_j, 0.0);
+    near(next.report().external_heat_j, 0.0);
+    near(
+        next.thermal().energy_j() + next.report().coupled.source.field_internal_energy_j[1],
+        thermal.energy_j() + next.report().coupled.source.field_internal_energy_j[0],
+    );
+    assert_ne!(next.circuit().charges_c(), circuit.charges_c());
+    near(
+        next.report().coupled.source.reversible_heat_j,
+        next.report().coupled.source.fields.iter().map(|field| field.reversible_heat_j).sum(),
+    );
+
+    // Branch identity remains unique even though cell ownership may be shared.
+    let duplicate_branch = [
+        FieldThermalBinding { branch: 0, cell: CELL, law: fields[0].law.clone(), maximum_abs_coordinate: 10.0 },
+        FieldThermalBinding { branch: 0, cell: CELL, law: fields[1].law.clone(), maximum_abs_coordinate: 6.0 },
+    ];
+    assert!(field_storage::step_candidate(
+        &material, &thermal, 0.2, &circuit, &[], &duplicate_branch, &bases,
+        controls(), &[0.0], || false,
+    ).is_err());
+}
