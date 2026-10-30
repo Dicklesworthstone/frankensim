@@ -6,6 +6,10 @@
 //! other circuit storage and caloric enthalpy against actual external supply.
 
 use super::*;
+
+// Complete sourced heat transport shares the same ceramic/circuit residual.
+mod heat;
+
 use crate::circuit_enthalpy::material::{MaterialNetwork, MaterialNetworkError, MaterialNetworkSample};
 use fs_material::{
     conductor::ElectricalPropertyBasis,
@@ -27,6 +31,7 @@ pub struct PiezoelectricThermalBinding {
 #[derive(Debug)]
 pub enum PiezoelectricThermalError {
     Network(MaterialNetworkError),
+    Heat(crate::circuit_enthalpy::contacts::heat::HeatNetworkError),
     Material(PiezoelectricError),
     Invalid(&'static str),
 }
@@ -54,8 +59,8 @@ fn check(cancel: &RefCell<impl FnMut() -> bool>) -> Result<(),Error> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct PiezoelectricThermalSource {
-    pub network: MaterialNetworkSample,
+pub struct PiezoelectricThermalSource<S = MaterialNetworkSample> {
+    pub network: S,
     pub cell: CellId,
     pub temperature_k: [f64; 2],
     /// Original [axial strain, axial D] coordinates at the accepted endpoints.
@@ -64,21 +69,24 @@ pub struct PiezoelectricThermalSource {
     pub material: LongitudinalPiezoelectric,
     pub reversible_heat_j: f64,
 }
-pub struct PiezoelectricThermalReport {
-    pub coupled: PiezoelectricEnthalpyReport<PiezoelectricThermalSource>,
+pub struct PiezoelectricThermalReport<S = MaterialNetworkSample> {
+    pub coupled: PiezoelectricEnthalpyReport<PiezoelectricThermalSource<S>>,
+    /// Authored heat, excluding reversible ceramic exchange and closed radiation.
     pub external_heat_j: f64,
+    /// Retained numerical net of the closed enclosure, never external supply.
+    pub closed_radiation_net_j: f64,
     pub total_energy_residual_j: f64,
 }
-pub struct PiezoelectricThermalCandidate<'t> {
+pub struct PiezoelectricThermalCandidate<'t, S = MaterialNetworkSample> {
     thermal: DepositionSimulation<'t>,
     model: PiezoelectricCircuit,
-    report: PiezoelectricThermalReport,
+    report: PiezoelectricThermalReport<S>,
 }
-impl<'t> PiezoelectricThermalCandidate<'t> {
+impl<'t, S> PiezoelectricThermalCandidate<'t, S> {
     pub fn thermal(&self) -> &DepositionSimulation<'t> { &self.thermal }
     pub fn model(&self) -> &PiezoelectricCircuit { &self.model }
-    pub fn report(&self) -> &PiezoelectricThermalReport { &self.report }
-    pub fn into_parts(self) -> (DepositionSimulation<'t>,PiezoelectricCircuit,PiezoelectricThermalReport) {
+    pub fn report(&self) -> &PiezoelectricThermalReport<S> { &self.report }
+    pub fn into_parts(self) -> (DepositionSimulation<'t>,PiezoelectricCircuit,PiezoelectricThermalReport<S>) {
         (self.thermal,self.model,self.report)
     }
 }
@@ -105,6 +113,25 @@ pub fn step_candidate<'t>(
     let cancel=RefCell::new(cancelled); check(&cancel)?;
     super::super::admit_driver_unknowns(thermal,controls,guess_j)?;
     let prepared=material.prepare_with_bases(thermal,electrical_bases,||(*cancel.borrow_mut())()).map_err(network)?;
+    resolved_candidate(material,thermal,target_s,model,electrical_ports,force_n,
+        ceramic,controls,guess_j,
+        |trial| prepared.resolve(trial,||(*cancel.borrow_mut())()).map_err(network),
+        |_| 0.0,||(*cancel.borrow_mut())())
+}
+
+// Both the original bulk network and the complete heat assembly enter this
+// same driver. Only coefficient/source resolution differs; accepted histories,
+// ceramic reversible heat and native mechanical/electrical stepping do not.
+#[allow(clippy::too_many_arguments)]
+fn resolved_candidate<'t, S>(
+    material: &MaterialNetwork<'_>, thermal: &DepositionSimulation<'t>, target_s: f64,
+    model: &PiezoelectricCircuit, electrical_ports: &[f64], force_n: f64,
+    ceramic: &PiezoelectricThermalBinding, controls: CircuitEnthalpySolve, guess_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'t>) -> Result<CircuitThermalCoefficients<S>,Error>,
+    radiation_net_w: impl Fn(&S) -> f64, cancelled: impl FnMut() -> bool,
+) -> Result<PiezoelectricThermalCandidate<'t, S>,Error> {
+    let cancel=RefCell::new(cancelled); check(&cancel)?;
+    super::super::admit_driver_unknowns(thermal,controls,guess_j)?;
     let cell=thermal.cells().get(&ceramic.cell).ok_or_else(||invalid("ceramic caloric receiver is inactive"))?;
     let binding=material.cells.iter().find(|s|s.cell==ceramic.cell)
         .ok_or_else(||invalid("ceramic requires its original material/caloric binding"))?;
@@ -160,7 +187,7 @@ pub fn step_candidate<'t>(
         circuit:model.circuit(),ports:electrical_ports,destinations:&destinations,
     },&[],controls,guess_j,|trial,_remaining| {
         check(&cancel)?;
-        let mut coefficients=prepared.resolve(trial,||(*cancel.borrow_mut())()).map_err(network)?;
+        let mut coefficients=resolve(trial)?;
         let at=ceramic.law.at_temperature(trial.temperature_k(ceramic.cell)?).map_err(source)?;
         let candidate=model.step_with_thermal_material_candidate(&ceramic.law,at.temperature_k(),
             coefficients.resistors,electrical_ports,force_n,dt,controls.circuit,||(*cancel.borrow_mut())())?;
@@ -191,7 +218,9 @@ pub fn step_candidate<'t>(
             },
         })
     },||(*cancel.borrow_mut())())?;
-    let external_heat_j=finite(report.non_electrical_heat_j-report.source.reversible_heat_j)?;
+    let closed_radiation_net_j=finite(dt*radiation_net_w(&report.source.network))?;
+    let external_heat_j=finite(report.non_electrical_heat_j-report.source.reversible_heat_j
+        -closed_radiation_net_j)?;
     let kinetic_after=finite(0.5*model.momentum_kg_m_s()*model.velocity_m_s())?;
     let total_energy_residual_j=finite(report.source.state[1].internal_energy_j-before.internal_energy_j
         +kinetic_after-kinetic_before
@@ -203,5 +232,6 @@ pub fn step_candidate<'t>(
     }
     check(&cancel)?;
     Ok(PiezoelectricThermalCandidate { thermal,model,
-        report:PiezoelectricThermalReport { coupled:report,external_heat_j,total_energy_residual_j } })
+        report:PiezoelectricThermalReport { coupled:report,external_heat_j,closed_radiation_net_j,
+            total_energy_residual_j } })
 }

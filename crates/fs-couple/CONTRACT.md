@@ -10838,6 +10838,20 @@ generally first order; energy closure is not an unconditional entropy/stability
 or time-error certificate. Thermal strain, depoling, pyroelectric offsets and
 irreversible ceramic losses require their own admitted laws.
 
+`PreparedHeatNetwork::step_piezoelectric_candidate` uses this same ceramic
+driver with the complete original thermal assembly. Source-integrated layers,
+thermal contact resistance and closed gray-diffuse radiation are re-evaluated
+at the same trial temperatures as the ceramic coefficients and resistors.
+The accepted report retains the full `HeatNetworkSample`. Closed-radiation
+net roundoff remains visible in `closed_radiation_net_j`, is excluded from
+external heat, and enters the same physical total-energy acceptance gate.
+Geometry, contact areas and view factors stay fixed during the small-signal
+step. Electrical interfaces refuse because this rod/circuit driver does not
+own their work and two-sided Joule heat. New G1/G3 regression definitions
+exercise two finite bodies against independent thermal/mechanical balances
+and data-only contact/emissivity changes. Native execution of this extension
+remains unverified in the resource-constrained environment.
+
 Four focused regression definitions cover independent full-block potentials and
 derivatives, signed poling reversal/zero coupling, continued material-load motion
 and physical energy, an isolated fixed-charge caloric limit, fixed-source native

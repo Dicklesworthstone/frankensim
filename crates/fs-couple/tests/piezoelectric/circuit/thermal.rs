@@ -1,5 +1,7 @@
 //! Synthetic numerical ceramic: independent constitutive and midpoint references.
 //! These intentionally scaled numbers are not measured ceramic calibration.
+
+mod heat;
 use super::{near, thermal_controls};
 use fs_couple::circuit_enthalpy::{CircuitEnthalpyError, ResistorCell};
 use fs_couple::circuit_enthalpy::material::{CellResistor, MaterialCell, MaterialNetwork};
