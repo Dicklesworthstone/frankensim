@@ -2,6 +2,10 @@
 //! These authored laws are regression fixtures, not measured material data.
 #[path = "wall/memory.rs"]
 mod memory;
+#[path = "wall/orthotropic.rs"]
+mod orthotropic;
+#[path = "wall/regional.rs"]
+mod regional;
 
 use super::*;
 use fs_couple::bernoulli_aperture::wall::material::{
