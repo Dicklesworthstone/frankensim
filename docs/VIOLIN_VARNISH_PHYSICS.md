@@ -264,6 +264,52 @@ For a row driven by a 1 N peak force, each film's sufficient scale is its author
 
 For a chosen force factor within the applicable model domain, pressure and displacement scale linearly, and mean heat/power scale quadratically. The new strain report lets a varnish-to-pressure comparison carry this coating-amplitude qualification. It remains a bound on the **retained linear harmonic increment**, with ordinary deterministic floating-point arithmetic and the original condensation conditioning. It is not an outward-rounded interval certificate. Unmodeled static/preload/cure strains, transients, omitted modes, continuum error and nonlinear playback remain outside this observation; other materials and contacts can impose stricter amplitude limits. No change to stiffness, damping, acoustic response or accepted history is made by requesting the report.
 
+### Check the coating during the actual performance
+
+`MultiBowPerformance::with_material_shell_coating_monitor` attaches the same
+source-bound observer to the original accepted body displacement. It checks
+the initial state and **every mechanical endpoint**, before the pressure
+observer, output decimation or PCM encoding. The shared performance loop also
+owns contact-thermal playback, so the check does not create another integrator
+or inspect only audio-rate samples. All original component films and retained
+modes participate. Static displacement already present in the retained
+coordinates is included; removed prestress and cure strains are not inferred.
+
+For the native renderer or the violin launcher, select:
+
+```text
+--coating-strain-guard MAX_BYTES MAX_WORK
+```
+
+The positive allowances cover preparation, fixed retained buffers, the initial
+query and the complete scheduled mechanical horizon. They are additional to
+the existing physics budgets. Maps are prepared once per coated facet; the
+real-snapshot path applies one map and a real tensor norm, avoiding imaginary
+buffers and harmonic cycle maximization. The observer borrows the original
+modal basis and material sources and reuses its per-film numeric results.
+It performs no per-endpoint heap allocation. Large meshes and long high-rate
+performances still require correspondingly large declared work allowances;
+there is no realtime performance claim.
+
+The native log reports each film's original material, component, region,
+signed faces and authored envelope, plus its maximum Frobenius bound,
+limit ratio, mechanical sample and ruling element/control/face. Six component
+bounds are aggregated separately and need not share a time or location.
+The report remains available after a failed callback. A bound above the
+authored envelope stops output and poisons continuation; the already accepted
+mechanical state is retained. The bound can be conservative, so this refusal
+does not establish actual damage or actual overstrain. It prevents completing
+a guarded render whose modeled coating applicability could not be established.
+
+Attach the library monitor after preload and other state-changing setup.
+Subsequent changes to the checked initial body displacement are refused before
+the next mechanical step. The retained caller cancellation gate also reaches
+the element calculations. A successful check covers the represented linear
+shell field at the observed endpoints, with ordinary floating-point roundoff;
+it does not certify intersample peaks, omitted modes, continuum error or
+three-dimensional interlaminar strain. A harmonic force-scale bound cannot be
+reinterpreted as a bow-force or bow-speed limit for nonlinear playing.
+
 ### Verification and remaining qualification
 
 Seven focused native shell checks cover the physical section and projection path, equilibrium stiffness counted once, unchanged coating mass, full off-diagonal reconstruction, unique-time aggregation, and transactional refusals. Four original prepared-owner tests cover state, work and heat against an independent full fs-phs realization, step subdivision, histories beyond the previous small-state ceiling, and stiff relaxation. Four unloaded harmonic checks cover force/velocity and power identities, source support and bare/assembly response.
@@ -281,6 +327,26 @@ The local-strain extension adds six passing native tests using the original curr
 The current frontend seam passes five exact production parser tests and seven writer/response tests. It compiles the structural writer, loaded writer, new strain adapter and checked original body slice. It verifies unchanged default schemas, opt-in structural v2/loaded v3, all-bridge query counts, metadata/column order and units, zero-bound `inf`, complete rows, and no partial output on early or late refusal. Numerical transport values come from the original coupled harmonic fixture; source, receiver and strain-report containers in this writer seam are explicitly synthetic. These checks validate report transport, not source-law strain or a complete bank/BEM build.
 
 These checks exercise the original numerical owners through focused native builds. The complete Cargo workspace and full violin WAV were not executed in that environment because required sibling constellation repositories were absent. No mesh/mode/time convergence, evolving coating-strain certificate, listening comparison or recording-level validation is claimed. Those are still required before attributing a particular audible difference to varnish.
+
+The transient extension subsequently passes all eight production `fs-plate`
+strain tests in a native Cargo build with the pinned toolchain and actual
+dependencies. Four additional focused checks compile the exact source-bound
+observer with the original MITC and cancellation owners, using source/image
+containers in place of material resolution and global modal construction.
+They cover coherent real motion, retained offsets, source identity across
+moves, complete assembly coordinates, buffer reuse, resources and refusals.
+These source containers do not establish a complete coupled-bank or full
+violin render.
+
+Three further focused checks compile the exact performance monitor and
+frontend diagnostic writer against explicit accepted-state/clock containers,
+plus the same original source and numerical owners. They verify initial and
+runtime refusal, retained diagnostics, clocks, cancellation and resource
+boundaries. The four production CLI parser tests and ten existing launcher
+tests also pass. The three authored full-bank monitor regressions remain
+unrun: after the native core Cargo run succeeded, shared disk exhaustion
+prevented further coupling/example compilation. No complete thermal, BEM or
+WAV run is inferred from these focused checks.
 
 ## Remaining physical limits
 

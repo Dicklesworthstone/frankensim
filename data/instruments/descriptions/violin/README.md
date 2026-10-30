@@ -231,6 +231,37 @@ supported frequencies. No independent audio normalization or sound-pressure
 gain is introduced. Both response commands validate all samples before a
 create-new report write.
 
+### Check coating applicability while rendering sound
+
+The native renderer and common violin launcher accept
+`--coating-strain-guard MAX_BYTES MAX_WORK`. For an already staged coated run:
+
+```bash
+target/release/material_strings \
+  /path/to/new-varnished-violin-run/G3/performance.material-strings \
+  /path/to/new-varnished-violin-run/G3/guarded.wav \
+  --body-profile /path/to/new-varnished-violin-run/G3/body.profile \
+  --coating-strain-guard 536870912 100000000000000
+```
+
+These are explicit example allowances, not a measured runtime or a guarantee
+that an arbitrary geometry fits. The renderer admits the complete initial
+state plus every mechanical endpoint before creating output; no film, mode or
+endpoint is dropped to fit. Add the same option to `render.sh` to collect the
+per-film peak bounds, limit ratios and sample locations in each `render.log`.
+The guard also runs before native pressure decimation and with contact heat.
+It is currently a native playback option; the launcher refuses combining it
+with a lab-experiment export whose packet cannot retain the setting.
+
+An unresolved authored small-strain envelope stops the render, retains its
+diagnostic and prevents continuation. Already accepted mechanics and any
+incomplete WAV prefix remain explicit. The source envelope is a modeling
+assumption, not a measured damage threshold, and a conservative bound can
+refuse without proving actual overstrain. The check observes the represented
+shell displacement, including retained static offsets; it does not establish
+intersample, omitted-mode, continuum or missing-prestress accuracy. Passing
+does not establish a perceptual improvement or historical violin fidelity.
+
 ### Inspect coating strain and the supported drive scale
 
 The loaded and unloaded response commands can now report local film-strain

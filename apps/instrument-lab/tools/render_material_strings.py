@@ -177,6 +177,8 @@ def main(argv=None) -> int:
     parser.add_argument("--string-index", type=int)
     parser.add_argument("--bow-distance-from-bridge", type=float)
     parser.add_argument("--decimate", action="store_true", help="use the native 48 kHz output decimator without changing the mechanical clock")
+    parser.add_argument("--coating-strain-guard", nargs=2, type=int, metavar=("MAX_BYTES", "MAX_WORK"),
+                        help="check all coating films at every native mechanical endpoint with explicit resources; native audio only")
     parser.add_argument("--lab-experiment", action="store_true", help="also save experiment.native.json for Open experiment in Instrument Lab")
     parser.add_argument("--prepare-only", action="store_true", help="stage sources and save the lab experiment without rendering audio")
     parser.add_argument("--analysis", type=Path, help="also write standard calibrated listening pairs for build_instruments.py")
@@ -192,6 +194,13 @@ def main(argv=None) -> int:
         parser.error("--renderer must name an available material_strings executable")
     renderer = str(Path(renderer).resolve()) if renderer else None
     export_experiment = args.lab_experiment or args.prepare_only
+    if args.coating_strain_guard:
+        if min(args.coating_strain_guard) <= 0:
+            parser.error("--coating-strain-guard needs positive byte and work allowances")
+        if export_experiment:
+            parser.error("the lab experiment packet does not encode --coating-strain-guard; select native audio rendering")
+        if not (args.body_profile or args.shell_table):
+            parser.error("--coating-strain-guard requires a shell body profile or shell table")
     if args.prepare_only and args.analysis:
         parser.error("--prepare-only cannot export listening analysis without an audio render")
     if export_experiment and (args.gas_component or args.gas_water or args.gas_phase):
@@ -286,6 +295,8 @@ def main(argv=None) -> int:
         command += ["--contact-thermal", str(output / "contact-thermal.profile")]
     if args.decimate:
         command += ["--decimate"]
+    if args.coating_strain_guard:
+        command += ["--coating-strain-guard", *map(str, args.coating_strain_guard)]
     for component in gas_components:
         command += ["--gas-component", *(str(output / name) for name in component.values())]
     for key in ("water", "phase"):

@@ -123,20 +123,37 @@ class MaterialPreparation(unittest.TestCase):
         gas = "mixture 293.15 50662.5 mole 3 N2 0.7 O2 0.2 He 0.1"
         thermal = root / "source.contact-thermal"
         thermal.write_bytes(b"frankensim-contact-thermal-v1\r\nboundary adiabatic\r\n")
+        body = root / "source.body"
+        body.write_bytes(b"original coated shell profile\r\n")
         args = ["--renderer", str(executable), "--performance", str(source), "--out", str(root / "run"),
                 "--gas-record", gas, "--pack", f"wire.fsmatpk={other}", "--full-scale-pa", "5",
-                "--contact-thermal", str(thermal)]
+                "--contact-thermal", str(thermal), "--body-profile", str(body),
+                "--coating-strain-guard", "536870912", "1000000000000"]
         self.assertEqual(R.main(args), 0)
         witness = json.loads((root / "run/render.log").read_text())
         self.assertIn("gas " + gas, witness["performance"])
         self.assertEqual(witness["wire"], "different-density-and-stiffness")
         self.assertEqual(witness["thermal"], thermal.read_bytes().hex())
         self.assertEqual((root / "run/contact-thermal.profile").read_bytes(), thermal.read_bytes())
-        self.assertEqual(witness["args"], ["--contact-thermal", str(root / "run/contact-thermal.profile")])
+        self.assertEqual(witness["args"], ["--body-profile", str(root / "run/body.profile"),
+            "--contact-thermal", str(root / "run/contact-thermal.profile"),
+            "--coating-strain-guard", "536870912", "1000000000000"])
         self.assertEqual(R.row(witness["performance"].splitlines(), "string"), R.row(original.splitlines(), "string"))
         self.assertEqual(source.read_text(), original)
         with self.assertRaises(FileExistsError):
             R.main(args)
+
+    def test_coating_guard_is_never_silently_dropped_from_an_exported_experiment(self):
+        root = Path(tempfile.mkdtemp())
+        # Refuse before reading sources or making a directory: the current lab
+        # packet has no playback-guard field and must not imply guarded replay.
+        for index, budget in enumerate((["1", "2"], ["0", "2"])):
+            output = root / f"refused-{index}"
+            with self.assertRaises(SystemExit):
+                R.main(["--prepare-only", "--performance", str(root / "unread"),
+                        "--out", str(output), "--body-profile", str(root / "unread-body"),
+                        "--coating-strain-guard", *budget])
+            self.assertFalse(output.exists())
 
     def test_prepare_only_exports_complete_profiles_and_original_gas_sources_without_an_engine(self):
         root = Path(tempfile.mkdtemp())

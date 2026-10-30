@@ -14374,3 +14374,34 @@ is a composition/algebra check, not a continuum or instrument accuracy bound.
 The mixed solver's mesh, geometry, equilibrium, thermal-boundary and harmonic
 scope limits remain in force. No automatic Helmholtz/LNS mesh interface,
 moving mean inventory or nonlinear time-domain excitation loop is inferred.
+
+
+## Local coating applicability during accepted string performances
+
+`MultiBowPerformance::with_material_shell_coating_monitor` binds an explicitly
+budgeted, source-bound real-displacement observer before playback. It checks
+the actual initial body coordinates and every accepted mechanical endpoint in
+the shared ordinary/contact-thermal step owner, before pressure observation or
+resampling. Cached original MITC maps, retained modes, regions, signed film
+faces and authored full-tensor strain limits remain unchanged. Detached internal
+plans compare immutable source allocation identity without cloning images or
+hashing each sample; numeric results, body coordinates and film maxima reuse
+fixed admitted storage. No per-endpoint heap allocation or new dynamics solve
+is introduced. Preparation and all planned queries are admitted together.
+
+The shared caller cancellation gate reaches local field work. Nonfinite motion,
+missing source extents, exhausted resources and an unresolved authored envelope
+refuse output. A refused accepted endpoint poisons continuation and retains its
+film/sample/bound/limit diagnostics; already accepted physics is not rolled back.
+The borrowed report retains original film identity and per-film peak values.
+Later preload changes cannot silently replace the checked initial body state.
+Bounds cover the represented linear field at observed instants, including mean
+motion retained in q; they do not infer missing prestress/cure strain, bound
+intersample peaks, certify continuum/omitted-mode behavior, or predict damage.
+Nonlinear bow drive limits cannot be inferred from a displacement scale.
+
+Verification: eight actual native Cargo MITC strain tests passed. Four source
+plan and three monitor checks compile the exact production owners with original
+numerical/cancellation kernels and explicit source/accepted-state containers.
+Four exact CLI parser checks and ten launcher tests also pass. These transport
+checks do not claim a full coupled-bank, thermal, BEM or violin WAV execution.

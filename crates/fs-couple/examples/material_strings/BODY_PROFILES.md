@@ -853,6 +853,31 @@ exclude unmodeled preload/cure strains, transients, omitted modes, continuum
 error and three-dimensional interlaminar recovery. They do not enforce local
 strain during a subsequent nonlinear WAV render.
 
+### Local coating strain during playback
+
+Add `--coating-strain-guard MAX_BYTES MAX_WORK` to a WAV command to check the
+initial retained shell displacement and every accepted mechanical endpoint.
+It works with curved and assembled shell profiles, including hereditary film
+stacks, contact-thermal playback, bow tracing and pressure decimation. The
+positive allowances cover preparation and the entire scheduled horizon;
+inadequate allowances refuse before the WAV is created. Response-only commands
+use `--body-response-strain` instead.
+
+The original cached MITC map observes real body coordinates without per-sample
+allocation, source cloning, pressure normalization or a second dynamics solve.
+The native log records per-film maximum Frobenius and component bounds, the
+authored-limit ratio and mechanical sample, retaining source identity and the
+ruling element/control/face. An unresolved envelope stops output and poisons
+the performance. Its last accepted mechanics are not rolled back, and any
+partial WAV remains explicitly incomplete under the existing writer policy.
+
+The check includes static offsets present in the retained body coordinates.
+It does not infer absent prestress or cure strain, bound motion between sample
+endpoints, predict damage, or certify omitted modes/continuum behavior. Bounds
+are deterministic floating-point spatial enclosures of the represented field,
+not outward-rounded interval certificates. Bind the library monitor after
+state-changing setup; a later preload cannot replace its checked initial state.
+
 ## Separate exterior and cavity pressure surfaces
 
 A v3 profile can declare which original triangles participate in exterior

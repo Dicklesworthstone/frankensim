@@ -10,6 +10,8 @@ mod material_inputs;
 mod body;
 #[path = "material_strings/body_response.rs"]
 mod body_response;
+#[path = "material_strings/coating_strain.rs"]
+mod coating_strain;
 #[path = "material_strings/stops.rs"]
 mod stops;
 #[path = "material_strings/bow_interfaces.rs"]
@@ -683,6 +685,7 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     if raw.get(1).is_some_and(|a| a=="assemble-shell") { return assemble_shell(&raw[2..]); }
     let (args, gas_options)=thermochemical::Options::extract_os(raw)?;
     let (args, response_options)=body_response::Options::extract(&args)?;
+    let (args, coating_options)=coating_strain::Options::extract(&args)?;
     let response_only=response_options.as_ref().is_some_and(body_response::Options::analysis_only);
     let loaded_response_only=response_only
         && response_options.as_ref().is_some_and(body_response::Options::loaded);
@@ -716,6 +719,10 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     if response_options.is_some() && !profile.as_ref().is_some_and(body::Profile::has_shell_material_basis) {
         return Err("--body-response requires --body-profile with curved or assembled shell mechanics".into());
     }
+    if let Some(options)=coating_options {
+        options.validate_context(response_only,
+            profile.as_ref().is_some_and(body::Profile::has_shell_material_basis))?;
+    }
     if let Some(dir)=store_dir {
         profile.as_mut().ok_or("--observer-store requires --body-profile")?.keep_observer_setups(dir)?;
     }
@@ -732,7 +739,8 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
         return Err("loaded shell response requires its shell or acoustic-skin receiver; a planar microphone is incompatible".into());
     }
     spec.contact_thermal=thermal_profile.is_some();
-    let gate=CancelGate::new_clock_free();let pool=fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    let gate=std::sync::Arc::new(CancelGate::new_clock_free());
+    let pool=fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     let mut remaining=input::MAX_TOTAL_PACK_BYTES;
     if let Some(stops) = &stop_profile { stops.validate_performance(&spec,&gate)?; }
     if let Some(body) = &mut profile {
@@ -800,6 +808,10 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
             .write_loaded_for_spec(&bound.bank,&bound.spec,bound.body_profile.as_ref(),work,&gate);
     }
     let mut ready=bound.into_performance(&gate)?;
+    if let Some(options)=coating_options {
+        ready.performance=ready.performance.with_material_shell_coating_monitor(
+            options.budget(),std::sync::Arc::clone(&gate))?;
+    }
     let contact_heat=thermal_profile.as_ref().map(|profile|profile.prepare(&ready,&gate)).transpose()?;
     if let Some(heat)=&contact_heat { heat.describe(); }
     for (path,source) in &ready.catalog {
@@ -976,6 +988,7 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
         Some(heat)=>heat.write_observed(&mut ready,output,trace_writer,source_options.decimate,&gate),
         None=>ready.write_observed(output,trace_writer,source_options.decimate,&gate),
     };
+    coating_strain::describe(&ready.performance,&mut std::io::stderr().lock())?;
     if let Some(trace)=trace.as_mut() { trace.flush()?; }
     let (_,summary)=written.map_err(|e|format!("WAV not completed; keep/discard its partial prefix explicitly: {e}"))?;
     if let Some(frame)=ready.performance.fiber_support_frame() {
