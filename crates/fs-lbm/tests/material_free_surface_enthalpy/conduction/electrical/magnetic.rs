@@ -3,6 +3,8 @@
 use super::*;
 use fs_lbm::material::free_surface::enthalpy::conduction::electrical::FreeSurfaceMagneticInput;
 
+mod isolated;
+
 fn field(bz: f64, maximum_change: f64) -> FreeSurfaceMagneticInput {
     FreeSurfaceMagneticInput {
         magnetic_flux_density_t: vec![[0.0, 0.0, bz]; 3],

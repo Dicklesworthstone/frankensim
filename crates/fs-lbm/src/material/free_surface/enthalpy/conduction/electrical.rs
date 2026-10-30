@@ -14,6 +14,17 @@ use fs_material::conductor::ResolvedConductorState;
 pub mod magnetic;
 pub use magnetic::{FreeSurfaceMagneticInput, FreeSurfaceMagneticState, FreeSurfaceMagneticMotion};
 
+/// Electrical supply/reference convention, independent of liquid mechanics.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FreeSurfaceCurrentBoundary {
+    /// Each connected conductor requires the original electrode reference.
+    Electrodes,
+    /// No electrodes or electrical supply. The native current owner gauges
+    /// every conducting component without changing its material or resistance.
+    /// Kirchhoff current balance is checked at every cell, including the gauge.
+    Isolated { current_tolerance_a: f64 },
+}
+
 /// A fixed Cartesian electrical subdomain inside the moving liquid.
 ///
 /// Every selected cell, including ideal electrode cells, must remain a native
@@ -50,6 +61,8 @@ pub struct FreeSurfaceElectricalInput {
 pub struct FreeSurfaceElectricalState {
     /// Time within this thermal/flow interval, beginning at zero [s].
     pub time_s: f64,
+    /// Actual reference/supply choice used by this current solve.
+    pub current_boundary: FreeSurfaceCurrentBoundary,
     /// Core-local voxel order, each entry naming the actual liquid cell.
     pub coordinates: Vec<[usize; 3]>,
     pub specific_enthalpy_j_kg: Vec<f64>,
@@ -91,11 +104,24 @@ pub(crate) struct ElectricalCore {
     input: FreeSurfaceElectricalInput,
     domain: VoxelDomain,
     coordinates: Vec<[usize; 3]>,
+    current_boundary: FreeSurfaceCurrentBoundary,
     magnetic: Option<FreeSurfaceMagneticInput>,
 }
 
 impl ElectricalCore {
-    fn new(input: FreeSurfaceElectricalInput, dx: f64, limit: usize) -> Result<Self, Error> {
+    fn new(input: FreeSurfaceElectricalInput, dx: f64, limit: usize,
+        current_boundary: FreeSurfaceCurrentBoundary) -> Result<Self, Error> {
+        if let FreeSurfaceCurrentBoundary::Isolated {
+            current_tolerance_a,
+        } = current_boundary
+            && (!input.setup.electrodes.is_empty()
+                || !current_tolerance_a.is_finite()
+                || current_tolerance_a < 0.0)
+        {
+            return Err(Error::Invalid(
+                "isolated liquid current needs no electrodes and a finite nonnegative KCL limit",
+            ));
+        }
         let count = input.dimensions.iter().try_fold(1usize, |n, &width| n.checked_mul(width))
             .ok_or(Error::Invalid("electrical core cell count overflows"))?;
         if count == 0 || count > input.maximum_cells || input.maximum_cells > limit
@@ -112,7 +138,7 @@ impl ElectricalCore {
             let p = domain.coords(cell);
             core::array::from_fn(|axis| input.origin[axis] + p[axis])
         }).collect();
-        Ok(Self { input, domain, coordinates, magnetic: None })
+        Ok(Self { input, domain, coordinates, current_boundary, magnetic: None })
     }
 
     pub(crate) fn admit(
@@ -162,12 +188,65 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     /// electrical work equals Joule heat to the native solve tolerance; no
     /// pressure work, capillary energy or numerical dissipation is thermalized.
     pub fn with_electrical_core(
-        mut self,
+        self,
         input: FreeSurfaceElectricalInput,
         gate: &CancelGate,
     ) -> Result<Self, Error> {
+        self.with_electrical_boundary(input, FreeSurfaceCurrentBoundary::Electrodes, gate)
+    }
+
+    /// Bind an electrically isolated conducting liquid to the same native
+    /// current, enthalpy and free-surface flow owners. The core has no physical
+    /// electrodes and supplies no external electrical power. Add an imposed
+    /// magnetic field to resolve motional circulating currents, Joule heat and
+    /// reciprocal magnetic braking from the original liquid material data.
+    ///
+    /// The native isolated-current owner chooses only an arbitrary potential
+    /// offset per conducting component; its gauge cells keep their complete
+    /// resistivity, heat and Lorentz force. Every cell must satisfy the supplied
+    /// absolute current-continuity allowance [A], independently of power/energy
+    /// tolerances. Absence of B gives zero motional current, not a fictitious
+    /// ground or leakage path. Uniform motion through uniform B can likewise
+    /// polarize an isolated body without a circulating current.
+    ///
+    /// The same actual T/shear source epoch supplies current and heat at every
+    /// thermal substep. Its sampled Lorentz work is the negative of Joule heat
+    /// to the original tolerance, and its integrated force reaches native Guo
+    /// forcing once. The unchanged explicit flow-split velocity gate bounds
+    /// accepted motion; it is not a total LBM energy-conservation claim.
+    ///
+    /// All complete-cell, fixed-core, low-induction, source, work and transaction
+    /// requirements of with_electrical_core/with_imposed_magnetic_field apply.
+    /// No transient magnetic induction, permeability law, empirical core loss,
+    /// electrical capacitance or partial-VOF-cell current is inferred.
+    pub fn with_isolated_electrical_core(
+        self,
+        input: FreeSurfaceElectricalInput,
+        current_tolerance_a: f64,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        self.with_electrical_boundary(
+            input,
+            FreeSurfaceCurrentBoundary::Isolated {
+                current_tolerance_a,
+            },
+            gate,
+        )
+    }
+
+    fn with_electrical_boundary(
+        mut self,
+        input: FreeSurfaceElectricalInput,
+        current_boundary: FreeSurfaceCurrentBoundary,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
         poll(gate)?;
-        let core = ElectricalCore::new(input, self.flow.scaling.cell_size_m(), self.controls.max_cells)?;
+        let core = ElectricalCore::new(
+            input,
+            self.flow.scaling.cell_size_m(),
+            self.controls.max_cells,
+            current_boundary,
+        )?;
         core.admit(&self.flow.lattice, &self.states, gate)?;
         self.electrical = Some(core);
         Ok(self)
@@ -177,6 +256,12 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     #[must_use]
     pub fn electrical_core(&self) -> Option<&FreeSurfaceElectricalInput> {
         self.electrical.as_ref().map(|core| &core.input)
+    }
+
+    /// Explicit reference/supply convention of the retained electrical core.
+    #[must_use]
+    pub fn electrical_current_boundary(&self) -> Option<FreeSurfaceCurrentBoundary> {
+        self.electrical.as_ref().map(|core| core.current_boundary)
     }
 }
 
@@ -303,6 +388,7 @@ impl Conduction<'_, '_> {
         check()?;
         Ok(Some(FreeSurfaceElectricalState {
             time_s: thermal.time_s(),
+            current_boundary: core.current_boundary,
             coordinates: core.coordinates.clone(),
             specific_enthalpy_j_kg: enthalpy,
             temperature_k: temperature,

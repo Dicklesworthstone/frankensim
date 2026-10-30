@@ -3809,6 +3809,44 @@ split-gate rollback. The seven changed Rust files passed Tree-sitter syntax
 parsing, and independent scalar current/force/energy references were executed.
 Native compilation, Cargo tests and rustfmt remain unexecuted in this environment.
 
+### Isolated current loops in the moving material liquid core
+
+`MaterialFreeSurfaceEnthalpy3::with_isolated_electrical_core` selects the existing
+isolated moving-current owner explicitly. The original electrode-bound entry
+retains its previous behavior. The isolated input must have no electrodes and a
+finite nonnegative per-cell current-continuity tolerance. Each current epoch
+records the selected `FreeSurfaceCurrentBoundary`; no empty drive is silently
+interpreted as isolation.
+
+The native owner gauges each conducting component without replacing its gauge
+voxel with an ideal electrode. All original resistivity, contact resistance,
+Joule heat and reciprocal Lorentz force remain present, including at the gauge.
+Every cell's Kirchhoff balance is checked. The same accepted physical velocity
+and original T/shear material bundle drive each thermal substep's current, heat
+and force. With no electrical supply, conductor-frame Joule heat is balanced by
+negative sampled Lorentz work. Integrated forces enter native Guo forcing once;
+accepted-state continuation does not retain a stale magnetic half-force.
+
+Nonuniform imposed B can therefore brake and heat an electrically isolated
+moving liquid. Material conductivity/resistivity substitutions change both
+responses. Uniform translation through uniform B instead develops a potential
+gradient with no circulating current; omitting B also supplies no current or
+invented leakage. No additional empirical magnetic loss is added.
+
+The core remains a fixed, fully occupied Cartesian current region with explicitly
+declared insulating/symmetry exterior boundaries. This is not a partial-VOF-cell
+electrical closure or time-dependent field-induction model. Original source,
+current/thermal budget, power/energy, velocity-change and atomic liquid/wall/gas
+gates remain active. Sampled mechanical work remains distinct from the observed
+LBM control-volume kinetic change; no discrepancy becomes compensating heat.
+
+Synthetic regressions in `material_free_surface_enthalpy/conduction/electrical/`
+`magnetic/isolated.rs` independently reconstruct a four-edge current loop, every
+cell's charge balance, gauge-cell heat, magnetic impulse and Joule/work exchange.
+They cover equivalent source bases, conductivity substitution, B reversal,
+actual native motion and continuation, uniform-field polarization, zero-B
+isolation, forbidden physical electrodes and late current-budget rollback.
+
 ### Source-driven planar thermocapillary flow (MR26/MR27 increment)
 
 `MaterialFreeSurfaceScaling::free_surface3_from_cells_with_thermocapillarity`

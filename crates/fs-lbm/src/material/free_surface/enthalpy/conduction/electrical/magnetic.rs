@@ -78,7 +78,9 @@ impl ElectricalCore {
     pub(super) fn velocities(&self, lattice: &FreeSurface3, scaling: &MaterialFreeSurfaceScaling<'_>)
         -> Result<Vec<[f64; 3]>, Error>
     {
-        if self.magnetic.is_none() { return Ok(Vec::new()); }
+        if self.magnetic.is_none()
+            && self.current_boundary == FreeSurfaceCurrentBoundary::Electrodes
+        { return Ok(Vec::new()); }
         self.coordinates.iter().map(|&p| {
             let sample = lattice.sample_at(p[0], p[1], p[2])
                 .ok_or(Error::Invalid("magnetic core has no native velocity"))?;
@@ -117,31 +119,71 @@ impl ElectricalCore {
 }
 
 impl ElectricalTimeline {
-    pub(super) fn solve_current(&self, temperature: &[f64], materials: &[ResolvedConductorState],
-        gate: &CancelGate) -> Result<(ElectricSolution, Option<FreeSurfaceMagneticState>), Error>
-    {
+    pub(super) fn solve_current(
+        &self,
+        temperature: &[f64],
+        materials: &[ResolvedConductorState],
+        gate: &CancelGate,
+    ) -> Result<(ElectricSolution, Option<FreeSurfaceMagneticState>), Error> {
         let core = &self.core;
-        if let Some(input) = &core.magnetic {
-            let result = core.input.setup.solve_with_cell_motion(
-                &core.domain, temperature, &core.input.contacts,
-                ElectricMotionInput {
-                    velocity_m_s: &self.velocity_m_s,
-                    magnetic_flux_density_t: &input.magnetic_flux_density_t,
-                    max_cells: core.input.maximum_cells,
-                    power_tolerance_w: core.input.power_tolerance_w,
-                }, |cell, _, _| Ok(Some(materials[cell].resistivity_ohm_m())), gate,
-            )?;
-            Ok((result.electric, Some(FreeSurfaceMagneticState {
+        if core.magnetic.is_some()
+            || matches!(
+                core.current_boundary,
+                FreeSurfaceCurrentBoundary::Isolated { .. }
+            )
+        {
+            // The isolated zero-B path keeps its native gauge/KCL owner too.
+            // It cannot silently substitute a grounded electrode. Both modes
+            // use the same retained material and sampled physical velocity.
+            let field = match &core.magnetic {
+                Some(input) => std::borrow::Cow::Borrowed(input.magnetic_flux_density_t.as_slice()),
+                None => std::borrow::Cow::Owned(vec![[0.0; 3]; core.coordinates.len()]),
+            };
+            let motion = ElectricMotionInput {
+                velocity_m_s: &self.velocity_m_s,
+                magnetic_flux_density_t: &field,
+                max_cells: core.input.maximum_cells,
+                power_tolerance_w: core.input.power_tolerance_w,
+            };
+            let result = match core.current_boundary {
+                FreeSurfaceCurrentBoundary::Electrodes => core.input.setup.solve_with_cell_motion(
+                    &core.domain,
+                    temperature,
+                    &core.input.contacts,
+                    motion,
+                    |cell, _, _| Ok(Some(materials[cell].resistivity_ohm_m())),
+                    gate,
+                )?,
+                FreeSurfaceCurrentBoundary::Isolated {
+                    current_tolerance_a,
+                } => core.input.setup.solve_isolated_cell_motion(
+                    &core.domain,
+                    temperature,
+                    &core.input.contacts,
+                    motion,
+                    current_tolerance_a,
+                    |cell, _, _| Ok(Some(materials[cell].resistivity_ohm_m())),
+                    gate,
+                )?,
+            };
+            let magnetic = core.magnetic.as_ref().map(|_| FreeSurfaceMagneticState {
                 velocity_m_s: self.velocity_m_s.clone(),
                 lorentz_force_density_n_m3: result.lorentz_force_density_n_m3,
                 mechanical_power_w: result.mechanical_power_w,
                 transfer_defect_w: result.transfer_defect_w,
-            })))
+            });
+            Ok((result.electric, magnetic))
         } else {
-            Ok((core.input.setup.solve_with_cell_contacts(
-                &core.domain, temperature, &core.input.contacts,
-                |cell, _, _| Ok(Some(materials[cell].resistivity_ohm_m())), gate,
-            )?, None))
+            Ok((
+                core.input.setup.solve_with_cell_contacts(
+                    &core.domain,
+                    temperature,
+                    &core.input.contacts,
+                    |cell, _, _| Ok(Some(materials[cell].resistivity_ohm_m())),
+                    gate,
+                )?,
+                None,
+            ))
         }
     }
 
