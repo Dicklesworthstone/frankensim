@@ -30,6 +30,9 @@ mod point_sampling;
 #[path = "photometric_path/spectral_reference.rs"]
 mod spectral_reference;
 
+#[path = "photometric_path/uncertainty_reference.rs"]
+mod uncertainty_reference;
+
 #[path = "photometric_path/tabulated_phase.rs"]
 mod tabulated_phase;
 

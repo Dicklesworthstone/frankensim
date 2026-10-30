@@ -1803,6 +1803,15 @@ progressive replay tests remain in the photometry batteries.
 - A conservative-scattering diffuse-cube furnace tests all-order radiance and
   energy balance at two path depths. Its acceptance tolerance does not provide
   a general bound on scattering-order truncation.
+- `photometric_path::uncertainty_reference` measures one unresolved finite
+  panel and two disjoint panels with different luminances. Independently
+  flattened photopic spectra make each entire path a member of a known
+  discrete population. Exact pixel-area probabilities then give both mean
+  luminance and population variance, independently of the renderer's sample
+  moments. Fixed sample prefixes check absolute cd/m², estimated IID standard
+  error and its inverse-square-root sample-count scaling. Single-sample and
+  Owen–Sobol results retain no IID error claim. These fixed regression
+  tolerances are neither confidence certificates nor total-error bounds.
 
 These original analytic scenes are not reproductions of CIE 171 test cases.
 The public CIE 171:2006 description does not supply the complete reference case
