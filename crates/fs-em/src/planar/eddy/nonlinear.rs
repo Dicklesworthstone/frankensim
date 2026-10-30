@@ -11,7 +11,8 @@
 //! work for a fixed law. A source-pinned linear mu(T) refresh adds explicit
 //! parameter work P=psi_next(B_old)-psi_old(B_old), so delta psi + heat + D
 //! equals source work + P. D is never material heat; a thermal owner must close
-//! P and the field entropy. Nonlinear H(B) laws remain fixed. This is first-order
+//! P and the field entropy. Explicit source-scaled H(B,T) may also refresh;
+//! arbitrary nonlinear/recoil source changes still refuse. This is first-order
 //! fixed-geometry isotropic reversible MQS, without hysteresis or remanence.
 
 use super::{
@@ -154,8 +155,9 @@ impl Deref for MagneticOwner<'_> {
     }
 }
 
-/// Preserve every original source and law kind. Nonlinear magnetic entropy
-/// requires additional constitutive data, so only linear regions may change.
+/// Preserve every original source and law kind. An explicit separable nonlinear
+/// thermal law may refresh alongside linear mu(T); its parameter work remains
+/// in the native receipt and needs an external or finite thermal energy owner.
 pub(crate) fn admit_material_refresh(
     before: &[IsotropicMagneticMaterial],
     after: &[IsotropicMagneticMaterial],
@@ -175,11 +177,11 @@ pub(crate) fn admit_material_refresh(
             (
                 IsotropicMagneticMaterial::Reversible(a),
                 IsotropicMagneticMaterial::Reversible(b),
-            ) if a == b => {}
+            ) => { a.admit_temperature_refresh(b).map_err(EddyError::from)?; }
             (IsotropicMagneticMaterial::Recoil(a), IsotropicMagneticMaterial::Recoil(b))
                 if a == b => {}
             _ => return Err(EddyError::Invalid(
-                "temperature refresh preserves linear sources and complete fixed nonlinear/recoil laws",
+                "temperature refresh preserves linear/separable sources and complete fixed recoil laws",
             )
             .into()),
         }
@@ -433,9 +435,9 @@ impl<'m> PlanarNonlinearEddy<'m> {
         )
     }
 
-    /// Reassemble the original geometry with source-pinned linear mu(T), while
-    /// retaining accepted A and the original field-energy reference. The full
-    /// nonlinear H(B) entries stay unchanged. Endpoints include signed material
+    /// Reassemble the original geometry with source-pinned linear mu(T) or an
+    /// explicitly declared separable nonlinear H(B,T), retaining accepted A and
+    /// the original field-energy reference. Endpoints include signed material
     /// work; this operation does not identify that work with physical heating.
     #[allow(clippy::too_many_arguments)]
     pub fn step_with_materials_candidate(

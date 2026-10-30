@@ -291,7 +291,7 @@ impl<'m> SpatialNonlinearInduction<'m> {
                         let slope = (segment[1].1.evidence.value.value
                             - segment[0].1.evidence.value.value)
                             / (segment[1].0 - segment[0].0);
-                        minimum = minimum.min(slope);
+                        minimum = minimum.min(slope * law.field_scale());
                     }
                     minimum.recip()
                 }

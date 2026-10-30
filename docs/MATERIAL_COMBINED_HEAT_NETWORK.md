@@ -78,6 +78,39 @@ the spatial tensor-conduction owner. Source intervals, nonnegative principal
 conductivities, unit directions and unchanged material endpoints remain explicit
 admission conditions.
 
+## Planar induction and finite heat
+
+The prepared assembly also exposes `step_eddy_thermal_candidate` for the
+original planar induction history. It uses the same thermal interfaces,
+integrated material layers, directional conductivities and enclosure radiation
+as ordinary heat/circuit stepping. All coefficients use the candidate cell
+temperatures that drive the field's conductivity and magnetic storage law.
+The original field solver supplies local Joule heat and parameter work; the
+shared magnetic caloric owner supplies reversible heat and `U = psi + T*S`.
+
+The caller supplies the original triangle-to-cell regions and source-backed
+magnetic thermal laws. The prepared heat assembly remains the authority for
+the material cards, caloric cells and links. Thermal contact resistance and
+emissivity must be independent of unowned field coordinates. Graph resistors,
+graph electrical contacts and circuit source bindings refuse because a spatial
+field step does not evolve their current/work history.
+
+The accepted report retains the complete `HeatNetworkSample` in
+`report.coupled.source.material.network`, including per-contact, integrated
+conduction and radiation results. Its top-level external-heat and physical
+internal-energy accounts exclude the closed enclosure's roundoff net. Both
+the native field/heat balance and the physical magnetic/caloric balance must
+pass before either accepted history is returned.
+
+`step_nonlinear_eddy_thermal_candidate` uses the same assembly for a nonlinear
+field history. Each receiving region selects a `MagneticConstitutiveThermalLaw`:
+the existing linear permeability model or an explicitly sourced separable
+`H(B,T) = s(T) H_ref(B)` model. Linear conductors and nonlinear cores can share
+one thermal solve. The positive affine scale and original reference curve stay
+source-pinned; arbitrary two-coordinate magnetic laws are not inferred.
+Backward-Euler magnetic convexity loss remains a numerical export and is
+never deposited as material heat.
+
 ## Energy and scope
 
 The standard circuit/enthalpy report preserves the actual source arithmetic,

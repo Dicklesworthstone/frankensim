@@ -13,7 +13,16 @@ use crate::circuit_enthalpy::{CircuitEnthalpyError, finite, material::MaterialNe
 use fs_material::{
     field_storage::{
         FieldStorageError, MAGNETIC_PERMEABILITY_PROPERTY,
-        thermal::{FieldThermalState, magnetic::ThermalMagneticMaterial},
+        nonlinear::{
+            REVERSIBLE_FIELD_STRENGTH_PROPERTY,
+            thermal::{
+                ResolvedThermalReversibleMagneticMaterial, ThermalReversibleMagneticMaterial,
+            },
+        },
+        thermal::{
+            FieldThermalState,
+            magnetic::{ResolvedThermalMagneticMaterial, ThermalMagneticMaterial},
+        },
     },
     state_point::ResolvedMaterialStatePoint,
 };
@@ -28,10 +37,137 @@ use std::{cell::RefCell, collections::BTreeMap};
 /// One original magnetic triangle's complete source and admitted field envelope.
 /// Its receiving cell comes from the shared magnetic thermal-region map.
 #[derive(Clone, Debug, PartialEq)]
-pub struct MagneticThermalLaw {
+pub struct MagneticThermalLaw<L = ThermalMagneticMaterial> {
     pub triangle: usize,
-    pub law: ThermalMagneticMaterial,
+    pub law: L,
     pub maximum_flux_density_t: f64,
+}
+
+/// Supported source laws can coexist in one nonlinear field/heat assembly:
+/// e.g. a source-separable magnetic core and ordinary linear winding/air cells.
+/// Both variants use the same finite caloric receiver and original source pins.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MagneticConstitutiveThermalLaw {
+    Linear(ThermalMagneticMaterial),
+    Separable(ThermalReversibleMagneticMaterial),
+}
+
+// Both original constitutive owners provide their own source/energy functions.
+// This private dispatch keeps one capacity admission, entropy transfer and
+// source-continuation owner; it cannot manufacture an independent thermal law.
+pub(in crate::circuit_enthalpy) trait MagneticCaloricLaw {
+    type State: MagneticCaloricState;
+    fn card(&self) -> &fs_matdb::MaterialCard;
+    fn temperature_axis(&self) -> &str;
+    fn temperature_range_k(&self) -> [f64; 2];
+    fn at_temperature(&self, temperature_k: f64) -> Result<Self::State, FieldStorageError>;
+    fn minimum_heat_capacity_j_k(&self, b_t: f64, volume_m3: f64)
+    -> Result<f64, FieldStorageError>;
+}
+pub(in crate::circuit_enthalpy) trait MagneticCaloricState {
+    fn material(&self) -> &ResolvedMaterialStatePoint;
+    fn temperature_k(&self) -> f64;
+    fn state(&self, b_t: f64, volume_m3: f64) -> Result<FieldThermalState, FieldStorageError>;
+}
+macro_rules! original_thermal_law {
+    ($law:ty, $state:ty) => {
+        impl MagneticCaloricLaw for $law {
+            type State = $state;
+            fn card(&self) -> &fs_matdb::MaterialCard {
+                <$law>::card(self)
+            }
+            fn temperature_axis(&self) -> &str {
+                <$law>::temperature_axis(self)
+            }
+            fn temperature_range_k(&self) -> [f64; 2] {
+                <$law>::temperature_range_k(self)
+            }
+            fn at_temperature(&self, t: f64) -> Result<Self::State, FieldStorageError> {
+                <$law>::at_temperature(self, t)
+            }
+            fn minimum_heat_capacity_j_k(&self, b: f64, v: f64) -> Result<f64, FieldStorageError> {
+                <$law>::minimum_heat_capacity_j_k(self, b, v)
+            }
+        }
+        impl MagneticCaloricState for $state {
+            fn material(&self) -> &ResolvedMaterialStatePoint {
+                <$state>::material(self)
+            }
+            fn temperature_k(&self) -> f64 {
+                <$state>::temperature_k(self)
+            }
+            fn state(&self, b: f64, v: f64) -> Result<FieldThermalState, FieldStorageError> {
+                <$state>::state(self, b, v)
+            }
+        }
+    };
+}
+original_thermal_law!(ThermalMagneticMaterial, ResolvedThermalMagneticMaterial);
+original_thermal_law!(
+    ThermalReversibleMagneticMaterial,
+    ResolvedThermalReversibleMagneticMaterial
+);
+
+pub(in crate::circuit_enthalpy) enum ResolvedMagneticConstitutiveThermalLaw {
+    Linear(ResolvedThermalMagneticMaterial),
+    Separable(ResolvedThermalReversibleMagneticMaterial),
+}
+impl MagneticCaloricLaw for MagneticConstitutiveThermalLaw {
+    type State = ResolvedMagneticConstitutiveThermalLaw;
+    fn card(&self) -> &fs_matdb::MaterialCard {
+        match self {
+            Self::Linear(law) => law.card(),
+            Self::Separable(law) => law.card(),
+        }
+    }
+    fn temperature_axis(&self) -> &str {
+        match self {
+            Self::Linear(law) => law.temperature_axis(),
+            Self::Separable(law) => law.temperature_axis(),
+        }
+    }
+    fn temperature_range_k(&self) -> [f64; 2] {
+        match self {
+            Self::Linear(law) => law.temperature_range_k(),
+            Self::Separable(law) => law.temperature_range_k(),
+        }
+    }
+    fn at_temperature(&self, t: f64) -> Result<Self::State, FieldStorageError> {
+        match self {
+            Self::Linear(law) => law
+                .at_temperature(t)
+                .map(ResolvedMagneticConstitutiveThermalLaw::Linear),
+            Self::Separable(law) => law
+                .at_temperature(t)
+                .map(ResolvedMagneticConstitutiveThermalLaw::Separable),
+        }
+    }
+    fn minimum_heat_capacity_j_k(&self, b: f64, v: f64) -> Result<f64, FieldStorageError> {
+        match self {
+            Self::Linear(law) => law.minimum_heat_capacity_j_k(b, v),
+            Self::Separable(law) => law.minimum_heat_capacity_j_k(b, v),
+        }
+    }
+}
+impl MagneticCaloricState for ResolvedMagneticConstitutiveThermalLaw {
+    fn material(&self) -> &ResolvedMaterialStatePoint {
+        match self {
+            Self::Linear(at) => at.material(),
+            Self::Separable(at) => at.material(),
+        }
+    }
+    fn temperature_k(&self) -> f64 {
+        match self {
+            Self::Linear(at) => at.temperature_k(),
+            Self::Separable(at) => at.temperature_k(),
+        }
+    }
+    fn state(&self, b: f64, v: f64) -> Result<FieldThermalState, FieldStorageError> {
+        match self {
+            Self::Linear(at) => at.state(b, v),
+            Self::Separable(at) => at.state(b, v),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -71,8 +207,8 @@ struct Initial {
     state: FieldThermalState,
 }
 
-pub(in crate::circuit_enthalpy) struct PreparedMagneticCaloric<'a> {
-    laws: BTreeMap<usize, &'a MagneticThermalLaw>,
+pub(in crate::circuit_enthalpy) struct PreparedMagneticCaloric<'a, L = ThermalMagneticMaterial> {
+    laws: BTreeMap<usize, &'a MagneticThermalLaw<L>>,
     initial: BTreeMap<usize, Initial>,
     fixed: BTreeMap<usize, ResolvedMaterialStatePoint>,
     triangle_count: usize,
@@ -85,7 +221,7 @@ fn magnitude<const D: usize>(b: [f64; D]) -> f64 {
     b.into_iter().fold(0.0_f64, f64::hypot)
 }
 
-impl<'a> PreparedMagneticCaloric<'a> {
+impl<'a, L: MagneticCaloricLaw> PreparedMagneticCaloric<'a, L> {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::circuit_enthalpy) fn new(
         network: &MagneticThermalNetwork<'_>,
@@ -93,7 +229,7 @@ impl<'a> PreparedMagneticCaloric<'a> {
         mesh: &TriComplex2,
         materials: &[&ResolvedMaterialStatePoint],
         flux_density_t: &[[f64; 2]],
-        bindings: &'a [MagneticThermalLaw],
+        bindings: &'a [MagneticThermalLaw<L>],
         routes: &MagneticRoutes,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<Self, Error> {
@@ -124,7 +260,7 @@ impl<'a> PreparedMagneticCaloric<'a> {
         volumes_m3: &[f64],
         materials: &[&ResolvedMaterialStatePoint],
         flux_density_t: &[[f64; D]],
-        bindings: &'a [MagneticThermalLaw],
+        bindings: &'a [MagneticThermalLaw<L>],
         routes: &MagneticRoutes,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<Self, Error> {
@@ -281,21 +417,30 @@ impl<'a> PreparedMagneticCaloric<'a> {
                 continue;
             }
             let m = materials[triangle];
-            let property = m
-                .property(MAGNETIC_PERMEABILITY_PROPERTY)
-                .ok_or_else(|| invalid("fixed magnetic region lacks permeability"))?;
-            if property.source_axes().iter().any(|(name, _)| {
-                name == "T"
-                    || m.axis_quantities().get(name)
-                        == Some(&QuantitySpec::dimensional(Temperature::DIMS))
-                    || m.axis_quantities()
-                        .get(name)
-                        .copied()
-                        .and_then(QuantitySpec::semantic_type)
-                        .is_some_and(|q| {
-                            q.kind() == QuantityKind::AbsoluteTemperature
-                                && q.form() == ValueForm::Static
-                        })
+            let properties = [
+                MAGNETIC_PERMEABILITY_PROPERTY,
+                REVERSIBLE_FIELD_STRENGTH_PROPERTY,
+            ]
+            .map(|name| m.property(name));
+            if properties.iter().all(Option::is_none) {
+                return Err(invalid(
+                    "fixed magnetic region lacks an original field source",
+                ));
+            }
+            if properties.into_iter().flatten().any(|property| {
+                property.source_axes().iter().any(|(name, _)| {
+                    name == "T"
+                        || m.axis_quantities().get(name)
+                            == Some(&QuantitySpec::dimensional(Temperature::DIMS))
+                        || m.axis_quantities()
+                            .get(name)
+                            .copied()
+                            .and_then(QuantitySpec::semantic_type)
+                            .is_some_and(|q| {
+                                q.kind() == QuantityKind::AbsoluteTemperature
+                                    && q.form() == ValueForm::Static
+                            })
+                })
             }) {
                 return Err(invalid(
                     "temperature-dependent magnetic regions require a thermal receiver and derivative law",

@@ -198,6 +198,13 @@ impl SpatialMagneticThermalNetwork<'_> {
             volume_tolerance_m3: self.volume_tolerance_m3,
         };
         let problem = field.problem();
+        for original in problem.materials() {
+            check(cancel)?;
+            if matches!(original, SpatialNonlinearMaterial::Reversible(law)
+                if law.field_scale_slope_per_k().is_some_and(|s| s != 0.0)) {
+                return Err(invalid("temperature-scaled nonlinear magnetism requires an explicit spatial field-entropy receiver"));
+            }
+        }
         let originals = problem
             .materials()
             .iter()

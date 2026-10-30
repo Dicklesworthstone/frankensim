@@ -2,6 +2,8 @@ use super::*;
 use fs_couple::circuit_enthalpy::eddy::thermal::MagneticThermalLaw;
 use fs_material::field_storage::thermal::magnetic::ThermalMagneticMaterial;
 
+mod heat;
+
 fn thermal_curves(cards: &[MaterialCard; 2]) -> [ResolvedHeatCapacityCurve; 2] {
     use fs_material::phase::{HeatCapacitySourceQuery, SolidLiquidPhase};
     use fs_material::state_point::SPECIFIC_HEAT_CAPACITY_DIMS;

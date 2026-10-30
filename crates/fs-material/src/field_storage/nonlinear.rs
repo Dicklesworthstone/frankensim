@@ -19,6 +19,8 @@ use fs_matdb::{ClaimSelection, MaterialCard, PropertyLineSlice, QueryPoint};
 use fs_qty::QuantitySpec;
 
 mod convexity;
+/// Explicit source-scaled H(B,T) and its reversible thermal energy.
+pub mod thermal;
 
 /// Magnitude H [A/m] of an explicitly reversible, isotropic, zero-remanence law.
 /// A major hysteresis loop, coercivity or secant permeability is not this key.
@@ -34,6 +36,9 @@ pub struct ReversibleMagneticMaterial {
     energy_at_knots_j_m3: Vec<f64>,
     coenergy_at_knots_j_m3: Vec<f64>,
     slopes_a_m_t: Vec<f64>,
+    // Only the explicit separable thermal constructor creates this binding.
+    // The original path/receipts remain H_ref, never synthesized H(B,T) data.
+    temperature_scale: Option<thermal::TemperatureScale>,
 }
 
 impl ReversibleMagneticMaterial {
@@ -48,6 +53,24 @@ impl ReversibleMagneticMaterial {
         refreshed: &ResolvedMaterialStatePoint,
     ) -> Result<(), FieldStorageError> {
         let invalid = FieldStorageError::Invalid;
+        if let Some(scale) = &self.temperature_scale {
+            let original = self
+                .material
+                .property(&scale.property)
+                .ok_or(invalid("prepared magnetic scale source is missing"))?;
+            let actual = refreshed.property(&scale.property).ok_or(invalid(
+                "refreshed conductor lost the magnetic scale source",
+            ))?;
+            if original.requirement() != actual.requirement()
+                || original.answer().receipt.selected != actual.answer().receipt.selected
+                || original.source_axes() != actual.source_axes()
+                || actual.value_si().to_bits() != scale.value.to_bits()
+            {
+                return Err(invalid(
+                    "fixed magnetic refresh cannot change its source scale without parameter work and entropy",
+                ));
+            }
+        }
         let original = self
             .material
             .property(REVERSIBLE_FIELD_STRENGTH_PROPERTY)
@@ -134,6 +157,33 @@ impl ReversibleMagneticMaterial {
         Ok(())
     }
 
+    /// Admit an explicit separable thermal refresh of this original curve.
+    /// Reference path, scale claim, affine law, physical temperature range and
+    /// every other source role remain fixed. Native owners must report the
+    /// resulting parameter work; a finite thermal owner must close field entropy.
+    pub fn admit_temperature_refresh(&self, after: &Self) -> Result<(), FieldStorageError> {
+        if self == after {
+            return Ok(());
+        }
+        let (Some(a), Some(b)) = (&self.temperature_scale, &after.temperature_scale) else {
+            return Err(FieldStorageError::Invalid(
+                "nonlinear magnetic temperature refresh requires an explicit separable source law",
+            ));
+        };
+        if a.property != b.property
+            || a.slope_per_k.to_bits() != b.slope_per_k.to_bits()
+            || a.reference_temperature_k.to_bits() != b.reference_temperature_k.to_bits()
+            || a.temperature_range_k != b.temperature_range_k
+            || self.path != after.path
+            || self.card.content_hash() != after.card.content_hash()
+        {
+            return Err(FieldStorageError::Invalid(
+                "separable magnetic refresh changed its original reference or scale law",
+            ));
+        }
+        super::admit_source_temperature_refresh(&self.material, &after.material)
+    }
+
     /// Nonnegative backward-Euler magnetic loss density [J/m3],
     /// H(after).(after-before) - (psi(after)-psi(before)).
     /// This is numerical dissipation, NEVER constitutive Joule heat.
@@ -181,7 +231,7 @@ impl ReversibleMagneticMaterial {
             self.path.knots[first..=last + 1]
                 .windows(2)
                 .zip(&self.slopes_a_m_t[first..=last])
-                .map(|(pair, &slope)| (pair[0].0, pair[1].0, slope)),
+                .map(|(pair, &slope)| (pair[0].0, pair[1].0, slope * self.field_scale())),
         )
         .ok_or(FieldStorageError::Invalid(
             "magnetic numerical dissipation is unrepresentable",
@@ -354,6 +404,7 @@ impl ReversibleMagneticMaterial {
             energy_at_knots_j_m3,
             coenergy_at_knots_j_m3,
             slopes_a_m_t,
+            temperature_scale: None,
         })
     }
 
@@ -361,7 +412,10 @@ impl ReversibleMagneticMaterial {
     pub fn material(&self) -> &ResolvedMaterialStatePoint {
         &self.material
     }
-    /// Canonical point answers at every source breakpoint, retaining provenance.
+    /// Canonical reference-curve answers at every source breakpoint. An
+    /// explicitly thermal-scaled law retains these original H_ref receipts;
+    /// `evaluate` applies its separately sourced `field_scale` without inventing
+    /// new measured H(B,T) answers.
     pub fn source_path(&self) -> &PropertyLineSlice {
         &self.path
     }
@@ -372,7 +426,24 @@ impl ReversibleMagneticMaterial {
 
     /// Maximum admitted field-strength magnitude [A/m] on the same source path.
     pub fn maximum_field_strength_a_m(&self) -> f64 {
-        self.path.knots.last().unwrap().1.evidence.value.value
+        self.field_scale() * self.path.knots.last().unwrap().1.evidence.value.value
+    }
+
+    /// Positive source scale of an explicitly prepared separable thermal law;
+    /// ordinary reversible curves retain exactly one.
+    pub fn field_scale(&self) -> f64 {
+        self.temperature_scale
+            .as_ref()
+            .map_or(1.0, |scale| scale.value)
+    }
+
+    /// Derivative of an explicitly declared separable scale, if present.
+    /// A nonzero value carries field entropy even at fixed temperature when B
+    /// changes, so finite thermal consumers require its caloric receiver.
+    pub fn field_scale_slope_per_k(&self) -> Option<f64> {
+        self.temperature_scale
+            .as_ref()
+            .map(|scale| scale.slope_per_k)
     }
 
     /// Invert the SAME strictly increasing source curve, returning |B| [T] for
@@ -393,6 +464,13 @@ impl ReversibleMagneticMaterial {
         if field_strength_a_m == self.maximum_field_strength_a_m() {
             return Ok(self.maximum_flux_density_t());
         }
+        let reference_field = field_strength_a_m / self.field_scale();
+        if !reference_field.is_finite() || field_strength_a_m > 0.0 && reference_field == 0.0 {
+            return Err(FieldStorageError::Invalid(
+                "scaled inverse magnetic response is unrepresentable",
+            ));
+        }
+        let field_strength_a_m = reference_field;
         let segment = self
             .path
             .knots
@@ -430,6 +508,43 @@ impl ReversibleMagneticMaterial {
         &self,
         flux_density_t: f64,
     ) -> Result<ReversibleMagneticResponse, FieldStorageError> {
+        let mut response = self.reference_response(flux_density_t)?;
+        let scale = self.field_scale();
+        if scale == 1.0 {
+            return Ok(response);
+        }
+        response.field_strength_a_m *= scale;
+        response.secant_reluctivity_m_h *= scale;
+        response.differential_reluctivity_m_h *= scale;
+        response.energy_density_j_m3 *= scale;
+        response.coenergy_density_j_m3 *= scale;
+        if [
+            response.field_strength_a_m,
+            response.secant_reluctivity_m_h,
+            response.differential_reluctivity_m_h,
+            response.energy_density_j_m3,
+            response.coenergy_density_j_m3,
+        ]
+        .iter()
+        .any(|value| !value.is_finite())
+            || response.secant_reluctivity_m_h <= 0.0
+            || response.differential_reluctivity_m_h <= 0.0
+            || flux_density_t > 0.0
+                && (response.field_strength_a_m <= 0.0
+                    || response.energy_density_j_m3 <= 0.0
+                    || response.coenergy_density_j_m3 <= 0.0)
+        {
+            return Err(FieldStorageError::Invalid(
+                "scaled magnetic response or energy is unrepresentable",
+            ));
+        }
+        Ok(response)
+    }
+
+    fn reference_response(
+        &self,
+        flux_density_t: f64,
+    ) -> Result<ReversibleMagneticResponse, FieldStorageError> {
         let invalid = FieldStorageError::Invalid;
         if !flux_density_t.is_finite()
             || flux_density_t < 0.0
@@ -447,7 +562,7 @@ impl ReversibleMagneticMaterial {
         let (h, energy, coenergy) = if flux_density_t == self.maximum_flux_density_t() {
             // Preserve canonical endpoint values and the prepared integrals.
             (
-                self.maximum_field_strength_a_m(),
+                self.path.knots.last().unwrap().1.evidence.value.value,
                 *self.energy_at_knots_j_m3.last().unwrap(),
                 *self.coenergy_at_knots_j_m3.last().unwrap(),
             )

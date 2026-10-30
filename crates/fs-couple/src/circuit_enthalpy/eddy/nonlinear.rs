@@ -6,6 +6,9 @@
 //! The original finite enthalpy owner receives ONLY physical sigma E^2 heat.
 //! Backward-Euler magnetic convexity loss stays in the driver work account.
 
+/// Explicitly separable nonlinear magnetic entropy and finite thermal feedback.
+pub mod thermal;
+
 use super::{
     CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients,
     DriverAccount, EddyThermalSample, ThermalDriver, cell_driver_candidate, deposit_cell_heat,
@@ -109,6 +112,17 @@ impl MagneticThermalNetwork<'_> {
         ),
         Error,
     > {
+        // Fixed H refresh cannot close entropy from changing B, even if T is
+        // held and its scale value happens to stay unchanged. This shared gate
+        // also protects the original nonlinear winding/enthalpy consumer and
+        // explicitly fixed external regions.
+        for original in problem.materials() {
+            check(cancelled)?;
+            if matches!(original, IsotropicMagneticMaterial::Reversible(law)
+                if law.field_scale_slope_per_k().is_some_and(|s| s != 0.0)) {
+                return Err(invalid("temperature-scaled nonlinear magnetism requires the explicit field-entropy thermal owner"));
+            }
+        }
         let originals: Vec<_> = problem
             .materials()
             .iter()

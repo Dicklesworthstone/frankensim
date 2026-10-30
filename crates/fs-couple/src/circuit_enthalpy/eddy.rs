@@ -28,8 +28,8 @@ use fs_thermal::enthalpy::{CellId,DepositionError,DepositionSimulation};
 use std::{cell::RefCell, collections::BTreeMap};
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct EddyThermalSample {
-    pub network: MaterialNetworkSample,
+pub struct EddyThermalSample<S = MaterialNetworkSample> {
+    pub network: S,
     pub magnetic: Vec<MagneticThermalSample>,
 }
 pub struct EddyEnthalpyCandidate<'t, 'm> {

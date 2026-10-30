@@ -3,6 +3,9 @@
 #[path = "../../fs-em/tests/nonlinear_eddy/common.rs"]
 mod field;
 
+#[path = "nonlinear_eddy_enthalpy/thermal.rs"]
+mod thermal_coupling;
+
 use fs_couple::{
     circuit_enthalpy::{
         CircuitEnthalpyError, CircuitEnthalpySolve,

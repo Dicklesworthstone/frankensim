@@ -102,7 +102,7 @@ fn maximum_permeability(
                 poll(cancelled)?;
                 let slope = (pair[1].1.evidence.value.value - pair[0].1.evidence.value.value)
                     / (pair[1].0 - pair[0].0);
-                minimum = minimum.min(slope);
+                minimum = minimum.min(slope * law.field_scale());
             }
             minimum.recip()
         }
