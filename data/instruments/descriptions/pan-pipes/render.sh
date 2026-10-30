@@ -13,6 +13,9 @@
 # J. Acoust. Soc. Am. 117(1), 2005, pp. 370-374, Eq. 1 (d = 1.32 L^0.43, mm, Eastern European panpipes), and the length of each tube is computed
 # from the stopped-pipe formula L = c / (4 f) - 0.6133 a (open-end correction of a thin-walled pipe, Davies, Pinho and English 2006, Eq. 5), with
 # dry air at 20 C. Those derived rows are labelled DERIVED in fingerings.tsv and unknowns.tsv (u-tube-lengths).
+# Gas: the tubes hold the gas Coltman 1968 measured in a played flute's bore (the cards' explicit `gas mixture` row, 26.15 C saturated, 2.5 percent dry
+# CO2; ledger coltman-1968-flute-bore-gas), applied to stopped pipes by analogy; it sounds every tube 16.6 to 16.7 cents above the dry air the lengths
+# were cut for (unknowns u-bore-gas, whose bracket runs down to that dry air). The observer and radiation exterior stay dry 20 C air.
 # Player: no measurement of a pan-pipe player's pressure or jet length is in the library. Blowing pressure and jet length at each tube's equal-tempered
 # pitch are Fletcher 1975's median relations measured on four flute players (J. Acoust. Soc. Am. 57(1), pp. 233-237, Eq. 1 and Eq. 2): p [mbar] =
 # 0.008 nu [Hz] and l [mm] = 1.8 + 100 nu^(-1/2), i.e. 117.5 Pa and 10.05 mm at D3 to 395.1 Pa and 6.30 mm at B4, the card pressure printed to five
