@@ -191,6 +191,25 @@ not finite airway storage or a measured flute. Explicit `boundary characteristic
 and legacy `boundary COUNT` remain incoming-wave controls in m/s. Optional
 `dg_molecular` uses the same source-bound DG loss reader as the wind performers.
 
+The **Resolved flow — bore aperture and escaping air** starter opens
+`resolved-dg-split-aperture.performance`. `coupled_patch` selects a rectangular
+subset of the original resolved boundary cells and couples its actual pressure
+and volume flow to the bore. Its area must match the bore inlet; surrounding
+cells retain their explicit ambient-pressure or incoming-wave condition. The
+same resolved motion can therefore feed the bore and escape outside. The
+microphone still observes bore-outlet radiation, not radiation from escaped
+mouth flow. This small manufactured fixture does not establish a realistic
+flute jet, labium or complete radiating mouth.
+
+The **Resolved flow — transverse opening to the atmosphere** starter opens
+`resolved-dg-side-aperture.performance`. It retains the complete end-face bore
+interface and declares a separate side-wall reservoir aperture. Density,
+velocity, temperature and selected cells are explicit; the original material
+law supplies the reservoir pressure. Its mass and energy exchange stay separate
+from the two characteristic faces. The prescribed reservoir is not a
+transparent acoustic termination, and its flow is not a separate microphone
+source. The same original geometry/collar/halo restrictions remain enforced.
+
 The **Resolved flow — upstream acoustic feedback** starter opens
 `resolved-dg-upstream.performance`. `upstream_dg` attaches a second original
 finite material duct to the source zone. Its pressure and flow are solved with

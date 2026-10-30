@@ -5,6 +5,8 @@ import flueExampleSource from "../../../crates/fs-couple/examples/flue-nolle.per
 import flueDgSource from "../../../crates/fs-couple/examples/flue-dg-baffled.performance?raw";
 import resolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg.performance?raw";
 import pressureResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-pressure.performance?raw";
+import splitApertureResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-split-aperture.performance?raw";
+import sideApertureResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-side-aperture.performance?raw";
 import upstreamResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-upstream.performance?raw";
 import molecularFlueSource from "../../../crates/fs-couple/examples/flue-dg-molecular.performance?raw";
 import nolleMolecularFlueSource from "../../../crates/fs-couple/examples/flue-dg-nolle-molecular.performance?raw";
@@ -79,6 +81,24 @@ const EXAMPLES = [
     decimate: true,
     intro: "Starter: a declared pressure history drives the original resolved gas field and spatial bore. The returning wave and actual gas properties determine inlet flow; the native exterior microphone observes the resulting pressure.",
     help: "boundary pressure gives pascals relative to the original source-face pressure. Change the gas, stationary geometry or pressure history in the source, keeping the declared numerical limits. This is an ideal pressure boundary in the existing local-linear characteristic domain, not finite airway storage or a measured flute. Native decimation preserves the physical solver clock.",
+  },
+  {
+    name: "resolved-dg-split-aperture.performance",
+    label: "Resolved flow — bore aperture and escaping air",
+    renderer: "resolved",
+    source: splitApertureResolvedDgSource,
+    decimate: true,
+    intro: "Starter: a pressure-driven gas field can flow into a declared bore aperture or escape through the surrounding opening. Change the aperture bounds, matching bore area or surrounding pressure to explore their effect on the coupled flow and microphone pressure.",
+    help: "coupled_patch selects original boundary cells; its area must match the bore inlet. The remaining cells keep their explicit pressure or incoming-wave condition. The microphone observes bore-outlet radiation; escaped mouth flow has no separate radiation observer yet. This small numerical fixture is not measured flute geometry or a qualified turbulent jet. Native decimation preserves the physical solver clock.",
+  },
+  {
+    name: "resolved-dg-side-aperture.performance",
+    label: "Resolved flow — transverse opening to the atmosphere",
+    renderer: "resolved",
+    source: sideApertureResolvedDgSource,
+    decimate: true,
+    intro: "Starter: a pressure-driven gas field has a separate opening in its side wall, while the original end face feeds the bore. Edit the opening cells and prescribed gas state to explore how ventilation changes the same resolved flow and bore pressure.",
+    help: "reservoir_aperture declares physical density, velocity and temperature; the original material law determines pressure. Cells must avoid wall corners, solids and the characteristic collars. Reservoir mass and energy have separate accounts. The opening is a prescribed reservoir, not a transparent acoustic boundary, and the microphone observes the bore outlet. This coarse fixture does not qualify flute geometry or jet turbulence.",
   },
   {
     name: "resolved-dg-upstream.performance",

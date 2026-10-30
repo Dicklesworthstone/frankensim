@@ -1,0 +1,28 @@
+frankensim-resolved-dg-performance-v1
+clock 96000 1
+output 2048 20
+gas dry-air 300 100000
+grid 16 3 3 0.0052945752017603985 0 0 0
+fluid_limits 144 250 600 0.2 1 17 1
+bulk_viscosity 0.73 numerical-fixture-Cramer2012-N2-293K-not-mixture-validation
+wall adiabatic
+characteristic 0 high 0.05
+coupled_patch 1 2 1 2 pressure 0
+initial rest
+solids 4
+solid 7 0 0
+solid 7 0 2
+solid 7 2 0
+solid 7 2 2
+states 0
+coupling 64 9216 -0.5 0.5 1e-7 1e-9 0 1
+dg_tube 0.1 0.0029871441781434767 baffled 1 2 32 50 2000 0.01 1e-11 256
+dg_radiation computed-baffled 20 65 4 8 12 20 0.1 67108864 2 100 1e-8 64 1048576 257
+dg_exterior 300 100000 0
+observation baffled 0 0 0.2 8 32 2000
+observer_gas stokes-kirchhoff 4096 1000000 50000000
+boundary pressure 3
+hold 128 20
+hold 256 -20
+hold 2048 0
+end

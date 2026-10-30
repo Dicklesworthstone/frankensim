@@ -423,6 +423,22 @@ pub(super) fn resolved_provenance(
     let solid_wall = dg_wall_provenance(p.wall_layout());
     let radiation = super::duct_metadata::dg_radiation_provenance(load);
     let propagation = super::duct_metadata::observer_gas_provenance(renderer.observer_gas());
+    let aperture = system.coupled_patch().map_or_else(String::new, |patch| {
+        let (kind, value, units) = match system.patch_background_drive().expect("explicit patch background") {
+            fs_lbm::nsf3::NsfBoundaryDrive::PressureOffset(value) => ("prescribed-pressure-offset", value, "Pa"),
+            fs_lbm::nsf3::NsfBoundaryDrive::IncomingCharacteristic(value) => ("incoming-characteristic", value, "m/s"),
+        };
+        let open = system.zone().characteristic_axis().expect("original characteristic axis");
+        let (high, _) = system.zone().characteristic_patch().expect("declared coupled patch");
+        format!(",\"coupled_patch\":{{\"normal_axis\":{},\"high_face\":{},\"start\":[{},{}],\"end\":[{},{}],\"bounds\":\"half-open original cells on increasing tangential axes\",\"remainder_boundary\":{{\"kind\":\"{kind}\",\"value\":{value:e},\"units\":\"{units}\"}},\"scope\":\"selected aperture pressure, volume flow and acoustic work feed the bore; complete face mass and energy include escaping flow; no exterior radiation observer on the remainder\"}}",
+            open.axis, high, patch.start[0], patch.start[1], patch.end[0], patch.end[1])
+    });
+    let reservoir = system.zone().reservoir_aperture().map_or_else(String::new, |opening| {
+        let state = opening.state;
+        format!(",\"reservoir_aperture\":{{\"normal_axis\":{},\"high_face\":{},\"cell_count\":{},\"area_m2\":{:e},\"density_kg_m3\":{:e},\"velocity_m_s\":[{:e},{:e},{:e}],\"temperature_k\":{:e},\"scope\":\"original material-owned prescribed reservoir on transverse wall tiles; separate streamed mass and signed open_energy_j; not a transparent acoustic boundary or a separate radiating microphone source\"}}",
+            opening.axis, opening.high, opening.cells.len(), opening.cells.len() as f64 * law.dx_m.powi(2),
+            state.density_kg_m3, state.velocity_m_s[0], state.velocity_m_s[1], state.velocity_m_s[2], state.temperature_k)
+    });
     let boundary = match renderer.drive_history().first().expect("finite native drive history") {
         fs_couple::nsf_dg::NsfDgDrive::Boundary(fs_lbm::nsf3::NsfBoundaryDrive::PressureOffset(_)) =>
             ",\"external_boundary\":{\"kind\":\"prescribed-pressure-offset\",\"units\":\"Pa\",\"reference\":\"original source-face material pressure\",\"flow\":\"determined by the live outgoing characteristic at every original face reconstruction\"}",
@@ -443,7 +459,7 @@ pub(super) fn resolved_provenance(
         load.propagator().dt(), info.physical_intervals,
         load.propagator().dt() * info.physical_intervals as f64,
         info.sample_rate_hz, info.samples, info.samples as f64 / f64::from(info.sample_rate_hz));
-    format!("\"resolved_input\":{{\"schema\":\"frankensim-resolved-dg-performance-v1\",\"blake3\":\"{}\",\"source_owner\":\"original-NsfGrid3-D3Q27\",\"dimensions\":[{},{},{}],\"solid_cells\":{},\"initial_state_cells\":{},\"boundary_segments\":{},\"dx_m\":{:e},\"nsf_dt_s\":{:e},\"substeps\":{},\"source_gas\":{gas},\"bulk_to_shear_ratio\":{:e},\"bulk_ratio_source\":{},\"coupled_area_m2\":{:e},\"maximum_root_evaluations\":{},\"maximum_cell_steps\":{},\"pressure_absolute_tolerance_pa\":{:e},\"pressure_relative_tolerance\":{:e},\"projection_absolute_tolerance_j\":{:e},\"projection_relative_tolerance\":{:e},\"duct_operator_identity\":\"{}\",\"duct_total_dofs\":{},\"pressure_point\":\"{point}\",\"observer_gas\":{propagation},\"model_scope\":\"original resolved fixed-composition fluid and live material DG bore; uniform acoustic interface projection with separate mass/energy flux; stationary voxel walls and two-cell fluid collars; source, geometry, boundary and coupling convergence remain required; no measured flute/reed qualification\"{boundary}{upstream}{timing}{observer}{radiation}{solid_wall}{gas_sources}}}",
+    format!("\"resolved_input\":{{\"schema\":\"frankensim-resolved-dg-performance-v1\",\"blake3\":\"{}\",\"source_owner\":\"original-NsfGrid3-D3Q27\",\"dimensions\":[{},{},{}],\"solid_cells\":{},\"initial_state_cells\":{},\"boundary_segments\":{},\"dx_m\":{:e},\"nsf_dt_s\":{:e},\"substeps\":{},\"source_gas\":{gas},\"bulk_to_shear_ratio\":{:e},\"bulk_ratio_source\":{},\"coupled_area_m2\":{:e},\"maximum_root_evaluations\":{},\"maximum_cell_steps\":{},\"pressure_absolute_tolerance_pa\":{:e},\"pressure_relative_tolerance\":{:e},\"projection_absolute_tolerance_j\":{:e},\"projection_relative_tolerance\":{:e},\"duct_operator_identity\":\"{}\",\"duct_total_dofs\":{},\"pressure_point\":\"{point}\",\"observer_gas\":{propagation},\"model_scope\":\"original resolved fixed-composition fluid and live material DG bore; uniform acoustic interface projection with separate mass/energy flux; stationary voxel walls and two-cell fluid collars; source, geometry, boundary and coupling convergence remain required; no measured flute/reed qualification\"{aperture}{reservoir}{boundary}{upstream}{timing}{observer}{radiation}{solid_wall}{gas_sources}}}",
         info.input_hash.to_hex(), info.dimensions[0], info.dimensions[1], info.dimensions[2],
         info.solid_cells, info.initial_state_cells, info.boundary_segments, law.dx_m, law.dt_s,
         limits.substeps, law.bulk_to_shear_ratio, json_string(system.zone().bulk_ratio_source()),
@@ -1407,3 +1423,4 @@ mod tests {
         assert!(load(physical.as_bytes(), 37, ObservationPolicy::Acceptance).is_ok());
     }
 }
+

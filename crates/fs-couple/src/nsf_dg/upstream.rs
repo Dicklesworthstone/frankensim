@@ -128,6 +128,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
         let limits = self.limits;
         let mut evaluations = 0;
         let mut last_residual = 0.0;
+        let patch_background = self.patch_background;
         let zone = &mut self.zone;
         let mut evaluate = |incoming: [f64; 2]| -> Result<([f64; 2], [f64; 2]), NsfDgError> {
             poll(gate)?;
@@ -139,24 +140,14 @@ impl<L: Lattice3<27>> NsfDg<L> {
                 });
             }
             evaluations += 1;
-            let trial = zone
-                .preview_characteristic_interval(
-                    incoming,
-                    limits.substeps,
-                    limits.maximum_cell_steps,
-                    || gate.is_requested(),
-                )
-                .map_err(|e| {
-                    if gate.is_requested() {
-                        NsfDgError::Cancelled
-                    } else {
-                        NsfDgError::Flow(e)
-                    }
-                })?;
+            let trial = preview_interval(zone,
+                incoming.map(NsfBoundaryDrive::IncomingCharacteristic), side,
+                patch_background, limits, gate)?;
             let mut residuals = [0.0; 2];
             let mut scales = [0.0; 2];
             for face in 0..2 {
-                let exchange = trial.boundary_exchange()[face];
+                let exchange = coupled_exchange(&trial, face,
+                    face == side && patch_background.is_some())?;
                 let dynamic = relations[face].impedance_pa_s_m3 * exchange.normal_volume_flow_m3_s;
                 residuals[face] = exchange.mean_acoustic_pressure_pa
                     - (relations[face].history_pressure_pa + dynamic + rises[face]);
@@ -187,27 +178,18 @@ impl<L: Lattice3<27>> NsfDg<L> {
         let mut incoming = [upstream_incoming; 2];
         incoming[side] = downstream_incoming;
         evaluations += 1;
-        let fluid = zone
-            .preview_characteristic_interval(
-                incoming,
-                limits.substeps,
-                limits.maximum_cell_steps,
-                || gate.is_requested(),
-            )
-            .map_err(|e| {
-                if gate.is_requested() {
-                    NsfDgError::Cancelled
-                } else {
-                    NsfDgError::Flow(e)
-                }
-            })?;
+        let fluid = preview_interval(zone,
+            incoming.map(NsfBoundaryDrive::IncomingCharacteristic), side,
+            patch_background, limits, gate)?;
         let dt = self.load.propagator().dt();
         let main_inlet = self.load.inlet();
         let upstream_inlet = upstream.load.inlet();
         let faces = *fluid.boundary_exchange();
+        let coupled_patch = fluid.patch_exchange().copied();
+        let main_face = coupled_exchange(&fluid, side, patch_background.is_some())?;
         let main = self
             .load
-            .preview_step(faces[side].normal_volume_flow_m3_s)
+            .preview_step(main_face.normal_volume_flow_m3_s)
             .map_err(NsfDgError::Acoustic)?;
         let source = upstream
             .load
@@ -232,7 +214,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
             ))?
             .conjugate_rate;
         let main_audit = audit(
-            faces[side],
+            main_face,
             main_p,
             main.inlet_work_j(),
             0.0,
@@ -252,9 +234,10 @@ impl<L: Lattice3<27>> NsfDg<L> {
             limits,
         )?;
         let flow = *fluid.energy_ledger();
+        let reservoir_mass_out_kg = fluid.reservoir_mass_out_kg();
         let mass_change = fluid.grid().total_mass_kg() - fluid.previous_mass_kg();
         let energy_change = fluid.grid().total_energy_j() - fluid.previous_energy_j();
-        if ![mass_change, energy_change].iter().all(|x| x.is_finite()) {
+        if ![mass_change, energy_change, reservoir_mass_out_kg].iter().all(|x| x.is_finite()) {
             return Err(NsfDgError::Input(
                 "two-sided resolved extensive accounts overflowed",
             ));
@@ -286,12 +269,14 @@ impl<L: Lattice3<27>> NsfDg<L> {
                 mass_projection_difference_kg: source_audit.mass,
             }),
             faces,
+            coupled_patch,
+            reservoir_mass_out_kg,
             flow,
             flow_mass_change_kg: mass_change,
             flow_energy_change_j: energy_change,
             duct,
             terminals,
-            inlet_flow_m3_s: faces[side].normal_volume_flow_m3_s,
+            inlet_flow_m3_s: main_face.normal_volume_flow_m3_s,
             inlet_pressure_pa: main_p,
             pressure_residual_pa: main_audit.pressure,
             projection_covariance_j: main_audit.covariance,

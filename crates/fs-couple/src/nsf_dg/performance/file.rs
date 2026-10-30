@@ -19,8 +19,9 @@ use fs_blake3::{ContentHash, hash_domain};
 use fs_exec::CancelGate;
 use fs_lbm::d3q27::D3q27;
 use fs_lbm::nsf3::{
-    NsfBoundaryDrive, NsfCharacteristicAxis, NsfCharacteristicBoundary, NsfError, NsfGasMedium,
-    NsfGrid3, NsfSpec, ThermochemicalNsfGas, WallThermal,
+    NsfBoundaryDrive, NsfCharacteristicAxis, NsfCharacteristicBoundary, NsfCharacteristicPatch,
+    NsfError, NsfGasMedium, NsfGrid3, NsfOpenState, NsfReservoirAperture, NsfSpec,
+    ThermochemicalNsfGas, WallThermal,
 };
 use fs_matdb::NormalizedMaterialCardPack;
 use fs_material::gas::{GasSpec, GasState};
@@ -252,6 +253,47 @@ impl ResolvedDgFilePerformance {
         let maximum_relative_perturbation = row.scalar()?;
         row.end()?;
         if axis >= 3 || periodic[axis] { return Err(bad(rows.line, "characteristic axis must be a nonperiodic physical axis")); }
+        let coupled_patch = if rows.next_is("coupled_patch") {
+            let mut row = rows.row("coupled_patch")?;
+            let start0 = row.number()?;
+            let end0 = row.number()?;
+            let start1 = row.number()?;
+            let end1 = row.number()?;
+            let background = match row.word()? {
+                "pressure" => NsfBoundaryDrive::PressureOffset(row.scalar()?),
+                "characteristic" => NsfBoundaryDrive::IncomingCharacteristic(row.scalar()?),
+                _ => return Err(bad(row.line, "patch remainder requires pressure PA or characteristic M_S")),
+            };
+            row.end()?;
+            Some((NsfCharacteristicPatch { start: [start0, start1], end: [end0, end1] }, background))
+        } else { None };
+        let reservoir_aperture = if rows.next_is("reservoir_aperture") {
+            let mut row = rows.row("reservoir_aperture")?;
+            let axis: usize = row.number()?;
+            let high = match row.word()? {
+                "low" => false, "high" => true,
+                _ => return Err(bad(row.line, "reservoir face requires low or high")),
+            };
+            let state = NsfOpenState {
+                density_kg_m3: row.scalar()?,
+                velocity_m_s: [row.scalar()?, row.scalar()?, row.scalar()?],
+                temperature_k: row.scalar()?,
+            };
+            let count: usize = row.number()?;
+            row.end()?;
+            if axis >= 3 || count == 0 || count > cells {
+                return Err(bad(rows.line, "reservoir aperture requires a physical axis and bounded nonempty cell list"));
+            }
+            let mut selected = Vec::with_capacity(count);
+            for n in 0..count {
+                if n % 256 == 0 { poll(&gate)?; }
+                let mut row = rows.row("reservoir_cell")?;
+                let index = row.index(dims)?;
+                row.end()?;
+                selected.push([index % dims[0], (index / dims[0]) % dims[1], index / (dims[0] * dims[1])]);
+            }
+            Some(NsfReservoirAperture { axis, high, cells: selected, state })
+        } else { None };
         let mut row = rows.row("initial")?;
         let initial = match row.word()? {
             "rest" => [gas.density, 0.0, 0.0, 0.0, gas.temperature],
@@ -407,12 +449,26 @@ impl ResolvedDgFilePerformance {
             reference_pressure_pa: gas.pressure, reference_temperature_k: gas.temperature,
             reference_velocity_m_s: [0.0; 3], incoming_characteristic_m_s: 0.0,
         };
-        let zone = zone.with_characteristic_axis(NsfCharacteristicAxis {
+        let mut zone = zone.with_characteristic_axis(NsfCharacteristicAxis {
             axis, faces: [face; 2], maximum_relative_perturbation,
         }).map_err(ResolvedDgInputError::Flow)?;
+        if let Some((patch, background)) = coupled_patch {
+            let mut drives = zone.boundary_drives().expect("constructed characteristic axis");
+            drives[usize::from(high)] = background;
+            zone.set_boundary_drives(drives).map_err(ResolvedDgInputError::Flow)?;
+            zone = zone.with_characteristic_patch(high, patch,
+                NsfBoundaryDrive::IncomingCharacteristic(0.0)).map_err(ResolvedDgInputError::Flow)?;
+        }
+        if let Some(aperture) = reservoir_aperture {
+            zone = zone.with_reservoir_aperture(aperture).map_err(ResolvedDgInputError::Flow)?;
+        }
         poll(&gate)?;
         let load = source.prepare_with_material_wall_layout(&gas, dt, &gate, &wall)?;
-        let mut system = NsfDg::new(zone, load, high, limits, &gate).map_err(ResolvedDgInputError::Coupling)?;
+        let mut system = if coupled_patch.is_some() {
+            NsfDg::new_on_patch(zone, load, high, limits, &gate)
+        } else {
+            NsfDg::new(zone, load, high, limits, &gate)
+        }.map_err(ResolvedDgInputError::Coupling)?;
         let upstream_wall = if let Some((source, wall)) = upstream {
             let load = source.prepare_with_material_wall_layout(&gas, dt, &gate, &wall)?;
             system = system.with_upstream_load(load, &gate).map_err(ResolvedDgInputError::Coupling)?;

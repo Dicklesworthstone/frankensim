@@ -7,6 +7,8 @@ use fs_material::gas_species::input::{ThermochemicalPhase, read_gas_record};
 mod pressure;
 mod upstream;
 mod molecular;
+mod patch;
+mod reservoir;
 
 #[path = "../../../render/schedule/reed/field_input/tests/support.rs"]
 mod support;

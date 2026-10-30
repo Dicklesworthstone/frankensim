@@ -1,6 +1,6 @@
 //! Original resolved NSF flow coupled to the original causal DG bore.
 //!
-//! One complete planar characteristic face is projected onto the uniform
+//! A complete planar characteristic face or one explicit aperture patch is projected onto the uniform
 //! acoustic mode. Its interval mean pressure and volume flow obey the SAME
 //! current DG law p = H + Z Q; only the incoming NSF characteristic is solved.
 //! The NSF lattice step, thermochemical owner and DG propagator are unchanged.
@@ -21,7 +21,8 @@ use fs_duct::dg::{DgPortResponse, DgStepOutput};
 use fs_exec::CancelGate;
 use fs_lbm::lattice3::Lattice3;
 use fs_lbm::nsf3::{
-    EnergyLedger, NsfBoundaryDrive, NsfBoundaryExchange, NsfCharacteristicTrial, NsfError, NsfGrid3,
+    EnergyLedger, NsfBoundaryDrive, NsfBoundaryExchange, NsfCharacteristicPatch,
+    NsfCharacteristicTrial, NsfError, NsfGrid3,
 };
 use fs_material::gas::GasState;
 
@@ -159,7 +160,16 @@ pub struct NsfDgFrame {
     /// Original NSF face accounts: low, high. Flux/work are summed over all
     /// substeps; pressure and continuum flow are their interval means.
     pub faces: [NsfBoundaryExchange; 2],
-    /// Original NSF energy accounting; its viscous heating is a budget remainder.
+    /// Selected aperture exchange when only part of the downstream face is
+    /// coupled. The complete face accounts above also include the independently
+    /// driven surrounding opening; that escaping flow never enters the bore.
+    pub coupled_patch: Option<NsfBoundaryExchange>,
+    /// Original streamed mass leaving a transverse reservoir aperture [kg].
+    /// This is separate from both characteristic faces; zero when absent.
+    pub reservoir_mass_out_kg: f64,
+    /// Original NSF energy accounts, including reservoir energy in `open_energy_j`.
+    /// Mixed-boundary unresolved exchange retains its original classification;
+    /// it is never relabeled as resolved viscous heat by this adapter.
     pub flow: EnergyLedger,
     /// Actual change of original NSF mass [kg], independent of the face sum.
     pub flow_mass_change_kg: f64,
@@ -198,6 +208,7 @@ pub struct NsfDg<L: Lattice3<27>> {
     area_m2: f64,
     steps: u64,
     upstream: Option<upstream::UpstreamLoad>,
+    patch_background: Option<NsfBoundaryDrive>,
 }
 
 fn poll(gate: &CancelGate) -> Result<(), NsfDgError> {
@@ -217,6 +228,30 @@ impl<L: Lattice3<27>> NsfDg<L> {
         zone: NsfGrid3<L>, load: DgPortLoad, high: bool,
         limits: NsfDgLimits, gate: &CancelGate,
     ) -> Result<Self, NsfDgError> {
+        Self::bind(zone, load, high, limits, gate, false)
+    }
+
+    /// Couple the grid's explicitly declared rectangular aperture patch to the
+    /// bore. The remainder of that face retains its original boundary drive,
+    /// independently of the solved aperture pressure and flow. The other whole
+    /// face remains the pressure/characteristic source or finite upstream load.
+    ///
+    /// This permits resolved flow to split between a bore and its surroundings.
+    /// Only the selected area enters the DG inlet. Complete fluid mass/energy
+    /// flux and selected-patch acoustic work remain separately observable.
+    /// The boundary is still the original plane-normal, first-order interface;
+    /// aperture geometry and flow resolution require their own convergence.
+    pub fn new_on_patch(
+        zone: NsfGrid3<L>, load: DgPortLoad, high: bool,
+        limits: NsfDgLimits, gate: &CancelGate,
+    ) -> Result<Self, NsfDgError> {
+        Self::bind(zone, load, high, limits, gate, true)
+    }
+
+    fn bind(
+        zone: NsfGrid3<L>, load: DgPortLoad, high: bool,
+        limits: NsfDgLimits, gate: &CancelGate, use_patch: bool,
+    ) -> Result<Self, NsfDgError> {
         poll(gate)?;
         if limits.maximum_cells == 0 || zone.cell_count() > limits.maximum_cells {
             return Err(NsfDgError::Input("resolved grid exceeds the declared retained-cell budget"));
@@ -224,8 +259,17 @@ impl<L: Lattice3<27>> NsfDg<L> {
         let open = zone.characteristic_axis().ok_or(NsfDgError::Input(
             "resolved coupling requires the original characteristic axis"))?;
         let reference = zone.characteristic_reference_gas(high).map_err(NsfDgError::Flow)?;
-        let traces = zone.open_boundary_traces(high).ok_or(NsfDgError::Input(
-            "resolved coupling requires complete original face quadrature"))?;
+        let patch_background = match (use_patch, zone.characteristic_patch()) {
+            (true, Some((patch_high, _))) if patch_high == high => Some(
+                zone.boundary_drives().ok_or(NsfDgError::Input(
+                    "aperture coupling requires the original surrounding boundary drive"))?[usize::from(high)]),
+            (false, None) => None,
+            _ => return Err(NsfDgError::Input(
+                "select the declared aperture explicitly on the coupled face; whole-face coupling cannot hide a patch")),
+        };
+        let traces = if use_patch { zone.open_patch_traces() }
+            else { zone.open_boundary_traces(high) }
+            .ok_or(NsfDgError::Input("resolved coupling requires original interface quadrature"))?;
         // The original Cartesian face has one identical area per trace. A
         // count/product avoids resolution-dependent accumulated-sum roundoff.
         let area = traces.first().ok_or(NsfDgError::Input(
@@ -242,7 +286,8 @@ impl<L: Lattice3<27>> NsfDg<L> {
         {
             return Err(NsfDgError::Input("NSF/DG requires cold matching gas, area and clock, zero reference flow and finite complete work/projection budgets"));
         }
-        Ok(Self { zone, load, limits, high, reference, area_m2: area, steps: 0, upstream: None })
+        Ok(Self { zone, load, limits, high, reference, area_m2: area, steps: 0,
+            upstream: None, patch_background })
     }
     /// Original resolved fluid state and thermochemical source.
     pub const fn zone(&self) -> &NsfGrid3<L> { &self.zone }
@@ -250,8 +295,16 @@ impl<L: Lattice3<27>> NsfDg<L> {
     pub const fn load(&self) -> &DgPortLoad { &self.load }
     /// Complete reference material state used by this interface.
     pub const fn reference_gas(&self) -> &GasState { &self.reference }
-    /// Actual complete characteristic face area [m²].
+    /// Actual coupled area [m²]: the selected aperture or complete face.
     pub const fn area_m2(&self) -> f64 { self.area_m2 }
+    /// Original grid-cell aperture bounds, if explicitly selected.
+    pub fn coupled_patch(&self) -> Option<NsfCharacteristicPatch> {
+        self.zone.characteristic_patch().map(|(_, patch)| patch)
+    }
+    /// Original drive retained on the uncoupled remainder of a patched face.
+    pub const fn patch_background_drive(&self) -> Option<NsfBoundaryDrive> {
+        self.patch_background
+    }
     /// Original explicit numerical limits.
     pub const fn limits(&self) -> &NsfDgLimits { &self.limits }
     /// Accepted coupled intervals.
@@ -306,10 +359,9 @@ impl<L: Lattice3<27>> NsfDg<L> {
             evaluations = evaluation;
             let mut drive = [external_boundary; 2];
             drive[side] = NsfBoundaryDrive::IncomingCharacteristic(incoming);
-            let candidate = self.zone.preview_boundary_interval(
-                drive, limits.substeps, limits.maximum_cell_steps, || gate.is_requested(),
-            ).map_err(|e| if gate.is_requested() { NsfDgError::Cancelled } else { NsfDgError::Flow(e) })?;
-            let face = candidate.boundary_exchange()[side];
+            let candidate = preview_interval(&mut self.zone, drive, side,
+                self.patch_background, limits, gate)?;
+            let face = coupled_exchange(&candidate, side, self.patch_background.is_some())?;
             let flow = face.normal_volume_flow_m3_s;
             let residual = face.mean_acoustic_pressure_pa
                 - (relation.history_pressure_pa + relation.impedance_pa_s_m3 * flow);
@@ -323,7 +375,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
             if residual.abs() <= allowance {
                 let frame = accept_candidate(candidate, &mut self.load, side, relation,
                     self.reference, limits, incoming, external_boundary,
-                    evaluation, self.steps + 1, gate)?;
+                    evaluation, self.steps + 1, self.patch_background.is_some(), gate)?;
                 self.steps += 1;
                 return Ok(frame);
             }
@@ -360,14 +412,40 @@ impl<L: Lattice3<27>> NsfDg<L> {
     }
 }
 
+fn preview_interval<'a, L: Lattice3<27>>(
+    zone: &'a mut NsfGrid3<L>, mut drives: [NsfBoundaryDrive; 2], side: usize,
+    patch_background: Option<NsfBoundaryDrive>, limits: NsfDgLimits, gate: &CancelGate,
+) -> Result<NsfCharacteristicTrial<'a, L>, NsfDgError> {
+    let result = if let Some(background) = patch_background {
+        let aperture = drives[side];
+        drives[side] = background;
+        zone.preview_boundary_interval_with_patch(drives, aperture, limits.substeps,
+            limits.maximum_cell_steps, || gate.is_requested())
+    } else {
+        zone.preview_boundary_interval(drives, limits.substeps,
+            limits.maximum_cell_steps, || gate.is_requested())
+    };
+    result.map_err(|error| if gate.is_requested() { NsfDgError::Cancelled }
+        else { NsfDgError::Flow(error) })
+}
+
+fn coupled_exchange<L: Lattice3<27>>(
+    trial: &NsfCharacteristicTrial<'_, L>, side: usize, use_patch: bool,
+) -> Result<NsfBoundaryExchange, NsfDgError> {
+    if use_patch {
+        trial.patch_exchange().copied().ok_or(NsfDgError::Input(
+            "original aperture exchange disappeared during the coupled trial"))
+    } else { Ok(trial.boundary_exchange()[side]) }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn accept_candidate<L: Lattice3<27>>(
     fluid: NsfCharacteristicTrial<'_, L>, load: &mut DgPortLoad, side: usize,
     relation: DgPortResponse, reference: GasState, limits: NsfDgLimits,
     incoming: f64, external_boundary: NsfBoundaryDrive,
-    evaluations: usize, step: u64, gate: &CancelGate,
+    evaluations: usize, step: u64, use_patch: bool, gate: &CancelGate,
 ) -> Result<NsfDgFrame, NsfDgError> {
-    let face = fluid.boundary_exchange()[side];
+    let face = coupled_exchange(&fluid, side, use_patch)?;
     let q = face.normal_volume_flow_m3_s;
     let dt = load.propagator().dt();
     let inlet = load.inlet();
@@ -397,12 +475,14 @@ fn accept_candidate<L: Lattice3<27>>(
         return Err(NsfDgError::Projection { residual_j: work_residual, allowance_j: allowance });
     }
     let faces = *fluid.boundary_exchange();
+    let coupled_patch = fluid.patch_exchange().copied();
+    let reservoir_mass_out_kg = fluid.reservoir_mass_out_kg();
     let flow = *fluid.energy_ledger();
     let mass_change = fluid.grid().total_mass_kg() - fluid.previous_mass_kg();
     let energy_change = fluid.grid().total_energy_j() - fluid.previous_energy_j();
     let mass_projection = face.mass_out_kg - reference.density * (q * dt);
     let terminals = acoustic.terminal_frames().to_vec();
-    if ![mass_change, energy_change, mass_projection].iter().all(|x| x.is_finite()) {
+    if ![mass_change, energy_change, mass_projection, reservoir_mass_out_kg].iter().all(|x| x.is_finite()) {
         return Err(NsfDgError::Input("resolved interval mass or energy difference overflowed"));
     }
     poll(gate)?;
@@ -412,7 +492,8 @@ fn accept_candidate<L: Lattice3<27>>(
     let duct = acoustic.accept();
     Ok(NsfDgFrame {
         step, evaluations, incoming_characteristic_m_s: incoming,
-        drive: NsfDgDrive::Boundary(external_boundary), upstream: None, faces, flow,
+        drive: NsfDgDrive::Boundary(external_boundary), upstream: None, faces, coupled_patch,
+        reservoir_mass_out_kg, flow,
         flow_mass_change_kg: mass_change, flow_energy_change_j: energy_change, duct, terminals,
         inlet_flow_m3_s: q, inlet_pressure_pa: p, pressure_residual_pa: pressure_residual,
         projection_covariance_j: covariance, acoustic_work_residual_j: work_residual,

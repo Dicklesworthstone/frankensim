@@ -13,7 +13,8 @@ instrument-specific solver.
 ## Physical interface
 
 The fluid zone must already have its original characteristic axis. Select either
-complete face; its outward normal flow is positive into the DG inlet. The other
+complete face, or an explicitly declared rectangular aperture on that face;
+its outward normal flow is positive into the DG inlet. The other
 face receives either a caller-supplied incoming characteristic in metres per
 second or a physical pressure relative to its original reference in pascals.
 For a zero-velocity reference, the original boundary uses
@@ -25,6 +26,66 @@ the original NSF owner advances from the same accepted state while the original
 DG owner supplies its current step-mean law `p_DG = H + Z Q`. The scalar solve
 matches the mean reference-relative NSF face pressure to that law, using the
 face's actual integrated continuum volume flow.
+
+### Bore aperture and surrounding escape
+
+`NsfGrid3::with_characteristic_patch` declares one rectangular subset of the
+original face quadrature before stepping. `NsfDg::new_on_patch` couples that
+subset to the original DG inlet. Its actual area must match the inlet area;
+the constructor never resizes the bore or infers an aperture from it. The two
+half-open bounds run along the increasing Cartesian axes other than the normal
+axis. The patch retains the original face gas and two-cell fluid collar.
+
+The remaining cells keep an independently declared pressure or incoming-wave
+condition. For example, `PressureOffset(0.0)` leaves the surrounding opening at
+the reference ambient pressure while bore pressure feeds back only through the
+selected aperture. The original resolved field can consequently divide its
+flow between the bore and the surroundings. This is one fluid solve and one
+boundary reconstruction, with no empirical split fraction or added source.
+
+The root solve uses only the patch's mean pressure and integrated volume flow.
+Its acoustic-work, covariance and mass-projection checks use the same selected
+quadrature. `NsfDgFrame::coupled_patch` exposes that exchange; `faces` retains
+both **complete** face exchanges, already including the aperture. Never add the
+patch account to the complete face account. The other complete face can still
+carry the finite upstream acoustic load. Patch controls, fields, exchanges and
+both duct histories publish together only after all checks succeed.
+
+This enables a split boundary topology, not a complete flute mouth. It does not
+create a labium wall at the patch edge, resolve an unmeshed jet, remove the
+original first-order plane-normal characteristic approximation, or admit SGS
+through open boundaries. The complement remains an ideal prescribed boundary;
+escaping flow has no separate exterior-radiation observer or mutual radiation
+reaction. Current pressure playback still observes the main DG bore. Geometry,
+source-flow, interface and acoustic convergence remain required.
+
+### Transverse reservoir opening
+
+An original `NsfReservoirAperture` can also open explicit tiles in a stationary
+wall on a different axis. It coexists with either the complete-face bore or a
+selected bore patch. Its density, Cartesian velocity and temperature are
+physical inputs; the original NSF material law supplies pressure, calorics and
+transport. It is a prescribed reservoir with the same composition law as the
+resolved volume, not an independently mixed atmosphere or transparent acoustic
+termination. The canonical `examples/resolved-dg-side-aperture.performance`
+and matching Instrument Lab starter expose this original owner through native
+playback. Its declared dry-air density corresponds to 300 K and 100000 Pa;
+changing other gas data does not silently change that explicit reservoir state.
+
+Tiles must be unique fluid cells on the declared transverse face, clear of the
+two-cell characteristic collars, other domain edges and solids, with the
+original one-cell fluid halo. The backend retains its symmetric link ownership
+at aperture/wall edges, characteristic feedback and conservative energy flux.
+All these admission rules remain active in the native reader.
+
+`NsfDgFrame::reservoir_mass_out_kg` reports the original streamed mass leaving
+this opening, separately from both characteristic faces. The complete fluid
+mass balance uses the two face fluxes **plus** this reservoir flux. Signed
+reservoir energy entering the fluid remains `flow.open_energy_j`; it must be
+included with `flow.open_boundary_energy_j`, wall heat and source work when
+checking total fluid energy. Mixed-boundary unresolved internal exchange retains
+the original ledger classification and is not reported as resolved viscous heat.
+No reservoir flux is inserted into either acoustic duct or the bore microphone.
 
 ### Physical pressure control
 
@@ -101,7 +162,7 @@ accounts retain their original meaning. Both faces remain acoustic projections:
 neither DG duct acquires NSF advected mass, entropy or enthalpy.
 
 The complete reference gas state, including transport properties, must equal the
-DG inlet gas. The actual complete face area must match inlet area. The DG interval
+DG inlet gas. The actual selected area must match inlet area. The DG interval
 must equal a positive integer number of original NSF steps, allowing only
 floating-point roundoff in derived clocks. Both characteristic reference
 velocities must be zero. These conditions prevent an unowned mean-flow interface
@@ -272,6 +333,9 @@ fluid_limits MAX_CELLS TMIN_K TMAX_K MAX_MACH MAX_TEMPERATURE_RATIO TRANSPORT_PO
 bulk_viscosity BULK_TO_SHEAR_RATIO SOURCE_TOKEN
 wall adiabatic
 characteristic AXIS low|high MAX_RELATIVE_PERTURBATION
+[optional coupled_patch START0 END0 START1 END1 pressure REMAINDER_OFFSET_PA]
+[optional reservoir_aperture AXIS low|high DENSITY_KG_M3 VX_M_S VY_M_S VZ_M_S TEMPERATURE_K COUNT]
+[exactly COUNT reservoir_cell X Y Z records when an aperture is declared]
 initial rest
 solids COUNT
 solid X Y Z
@@ -296,6 +360,15 @@ end
 
 Alternatives use the same original parsers and owners:
 
+- `coupled_patch START0 END0 START1 END1 pressure PA` selects an explicit bore
+  aperture immediately after `characteristic`; `characteristic M_S` can replace
+  `pressure PA` for an incoming-wave condition on its remainder. Cell bounds are
+  half-open, nonempty, and inside the original transverse grid. The selected
+  aperture area must match the main DG inlet. Omitting the record preserves the
+  existing complete-face path. The canonical
+  `examples/resolved-dg-split-aperture.performance` and Instrument Lab starter
+  exercise the native aperture, surrounding ambient condition and bore-outlet
+  microphone together. This coarse manufactured fixture is not flute geometry.
 - `gas thermochemical T_K P_PA mole|mass COUNT ID FRACTION ...` selects a complete
   source-backed thermochemical model. An `energy_solve ENERGY_J_KG_TOL MAXITER`
   record is then mandatory immediately after `fluid_limits`. Source packs and
@@ -339,7 +412,7 @@ Alternatives use the same original parsers and owners:
   original load. Its subsidiary geometry, regional gas, chimney and radiation
   records use the same shared parser as the main load. `upstream_molecular` and
   `upstream_wall` retain the original gas relaxation and material-wall readers.
-  Both loads must match their own complete NSF reference gas, face area and
+  Both loads must match their own complete NSF reference gas, selected area and
   actual coupled interval. An active reciprocal exterior-mouth port is refused
   at either interface. `boundary upstream-pressure COUNT` then declares series
   pressure rises in Pa. This control requires the upstream load; the prescribed
