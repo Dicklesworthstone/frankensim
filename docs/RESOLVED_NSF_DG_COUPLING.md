@@ -1054,3 +1054,112 @@ and controls publish together after the original pressure, work and cancellation
 checks. The characteristic-collar, projection, explicit thermal-backflow and
 frozen-composition limits still apply. Two apertures do not establish resolved
 lip anatomy, full bore heat/species transport or qualified flute sound.
+
+## Finite thermochemical source chamber
+
+A selected transverse opening can now exchange mass and complete total energy
+with a finite rigid chamber. Attach it with
+`NsfDg::with_finite_reservoir(aperture, volume_m3, limits, gate)`, then advance
+with `NsfDgDrive::FiniteReservoir { aperture }`. The initial inventory comes
+from that opening's original density and temperature and the **same frozen
+thermochemical source model** owned by the NSF grid. The legacy constant-caloric
+dry-air medium is not interchangeable with this original NASA9 law and refuses.
+
+The chamber's accepted pressure and temperature drive the original reservoir
+ghost during the next complete NSF/DG interval. Actual streamed mass and the
+original conservative FV total-energy exchange update its `ClosedGasParcel`.
+Both directions and nonzero energy with zero net mass use the same original
+caloric inverse; no discharge coefficient, authored jet speed, or replacement
+EOS enters this connection. Incoming kinetic energy thermalizes in the
+quiescent well-mixed chamber. Its rigid support carries the unmodeled momentum
+reaction; this owner provides mass and energy storage, not resolved chamber
+momentum or player anatomy.
+
+### Native records
+
+After all reservoir aperture records and before `initial`, add:
+
+```text
+finite_reservoir APERTURE VOLUME_M3 MAX_REL_MASS MAX_REL_ENERGY MASS_ABS_KG ENERGY_ABS_J REL_TOL
+```
+
+The two movement fractions must be strictly between zero and one; absolute
+mass and energy balance tolerances must be positive; the relative balance
+tolerance is in `(0, 1e-3]`. The selected opening must have zero imposed ghost
+velocity. Its authored density and temperature initialize the source, including
+its initial pressure through the original material EOS.
+
+The boundary history names the same opening and holds only its ownership:
+
+```text
+boundary finite-reservoir 0 1
+hold 64
+end
+```
+
+The endpoint is on the existing observation clock. No pressure or temperature
+values follow it. Prescribed source controls, a different selected opening,
+or an authored ramp conflict with this finite inventory and refuse. Existing
+pressure/temperature/characteristic holds and ramps retain their original
+grammar for sources without a finite chamber.
+
+A separate opening can retain `reservoir_feedback` and its material microphone.
+The source also composes with the original downstream duct, optional finite
+upstream/cork duct, and independently selected axial patches. The finite source
+and passive radiation cannot own the same opening, in either attachment order.
+Chamber reconstruction and conservation checks occur before publication at all
+three fluid/acoustic acceptance sites. Failed inversion, insufficient inventory,
+unsupported source states, failed balances or cancellation leave every physical
+owner at the preceding accepted interval.
+
+### Energy chart and interval limits
+
+The original NSF total energy uses a fixed sensible chart,
+`u_s(T) = u_NASA(T) - u_offset`. With `dm` and `dE_s` positive **out of NSF
+and into the chamber**, the original-law inversion uses:
+
+```text
+m_next = m_old + dm
+rho_next = m_next / chamber_volume
+du = (dE_s - dm * u_s(T_old)) / m_next
+```
+
+The reconstructed parcel's actual mass is audited against `dm`. Its energy
+audit uses the original cancellation-safe NASA internal-energy increment:
+
+```text
+stored_change = m_actual_next * delta_u_NASA
+              + (m_actual_next - m_old) * u_s(T_old)
+energy_residual = stored_change - dE_s
+```
+
+The full FV energy already contains pressure work, advection, conduction and
+viscous work. Adding pressure work or acoustic work again would debit it twice.
+The streamed mass is not replaced by the distinct continuum volume-flow
+quadrature. Absolute tolerances and change-scaled relative tolerances bound
+both accepted residuals; absolute formation energy never scales those budgets.
+
+Each original substep records the absolute mass and energy transferred through
+each aperture. Interval trials sum these variations before opposite signs can
+cancel. The chamber bounds those sums relative to its starting inventory and
+checks all corners of the resulting mass/energy envelope against the original
+caloric temperature bracket. A short withdrawal followed by reverse flow
+therefore cannot hide depletion or an unsupported temperature behind a small
+net exchange. Nonzero increments that cannot change the represented inventory
+refuse instead of silently disappearing. Zero net mass and energy preserve an
+exact parcel clone after the movement checks.
+
+Library callers inspect `finite_reservoir()`, `finite_reservoir_limits()`,
+and `NsfDgFrame::finite_reservoir` for accepted mass, pressure, temperature,
+source exchange, sensible storage change and conservation residuals. Native
+metadata retains the chamber volume, source identity, limits and partition.
+
+This is an **explicit first-order source partition**: pressure and temperature
+are held over each coupled physical interval, then updated. Refine that interval
+and the grid for source-feedback accuracy. The acoustic DG ducts still omit
+mean mass/enthalpy advection; the chamber does not fill that separate gap.
+There is no mechanical breathing effort, source refill, moving chamber wall,
+composition evolution or experimental flute qualification in this attachment.
+The focused integration and native-input regressions are authored numerical
+checks; the direct GitHub implementation session did not execute native builds,
+runtime tests, convergence campaigns or listening comparisons.

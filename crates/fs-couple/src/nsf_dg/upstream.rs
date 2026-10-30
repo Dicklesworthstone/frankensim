@@ -120,6 +120,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
         control: NsfDgDrive, gate: &CancelGate,
     ) -> Result<NsfDgFrame, NsfDgError> {
         poll(gate)?;
+        self.admit_finite_reservoir_drive(control)?;
         if self.reservoir_radiation.is_some() {
             return self.step_with_reservoir_drive(control, gate);
         }
@@ -291,10 +292,12 @@ impl<L: Lattice3<27>> NsfDg<L> {
         }
         let terminals = main.terminal_frames().to_vec();
         let upstream_terminals = source.terminal_frames().to_vec();
+        let finite_candidate = finite_reservoir::prepare(self.finite_reservoir.as_ref(), &fluid, gate)?;
         poll(gate)?;
         fluid.accept();
         let duct = main.accept();
         let source_duct = source.accept();
+        let finite_reservoir = finite_reservoir::publish(&mut self.finite_reservoir, finite_candidate);
         self.steps += 1;
         Ok(NsfDgFrame {
             step: self.steps,
@@ -322,6 +325,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
             reservoir_flows,
             reservoir_exchanges,
             reservoir_radiation: None,
+            finite_reservoir,
             flow,
             flow_mass_change_kg: mass_change,
             flow_energy_change_j: energy_change,

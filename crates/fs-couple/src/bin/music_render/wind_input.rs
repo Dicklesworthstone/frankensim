@@ -458,7 +458,10 @@ pub(super) fn resolved_provenance(
         let openings = (0..system.zone().reservoir_aperture_count()).map(|aperture| {
             let opening = system.zone().reservoir_aperture_at(aperture).expect("declared original aperture");
             let state = opening.state;
-            format!("{{\"aperture\":{aperture},\"kind\":\"prescribed-exterior-ghost-state\",\"normal_axis\":{},\"high_face\":{},\"cell_count\":{},\"area_m2\":{:e},\"density_kg_m3\":{:e},\"velocity_m_s\":[{:e},{:e},{:e}],\"temperature_k\":{:e},\"mass_account\":{{\"field\":\"reservoir_exchanges[aperture].mass_out_kg\",\"unit\":\"kg\",\"positive\":\"out of resolved fluid\"}},\"energy_account\":{{\"field\":\"reservoir_exchanges[aperture].total_energy_out_j\",\"unit\":\"J\",\"positive\":\"out of resolved fluid\"}},\"scope\":\"original material-owned reservoir on independent transverse wall tiles; per-owner streamed mass and conservative FV energy; observation and acoustic reaction select an explicit owner\"}}",
+            let kind = if system.finite_reservoir_aperture() == Some(aperture) {
+                "finite-thermochemical-chamber"
+            } else { "prescribed-exterior-ghost-state" };
+            format!("{{\"aperture\":{aperture},\"kind\":\"{kind}\",\"normal_axis\":{},\"high_face\":{},\"cell_count\":{},\"area_m2\":{:e},\"density_kg_m3\":{:e},\"velocity_m_s\":[{:e},{:e},{:e}],\"temperature_k\":{:e},\"mass_account\":{{\"field\":\"reservoir_exchanges[aperture].mass_out_kg\",\"unit\":\"kg\",\"positive\":\"out of resolved fluid\"}},\"energy_account\":{{\"field\":\"reservoir_exchanges[aperture].total_energy_out_j\",\"unit\":\"J\",\"positive\":\"out of resolved fluid\"}},\"scope\":\"original material-owned reservoir on independent transverse wall tiles; per-owner streamed mass and conservative FV energy; observation and acoustic reaction select an explicit owner\"}}",
                 opening.axis, opening.high, opening.cells.len(), opening.cells.len() as f64 * law.dx_m.powi(2),
                 state.density_kg_m3, state.velocity_m_s[0], state.velocity_m_s[1], state.velocity_m_s[2], state.temperature_k)
         }).collect::<Vec<_>>().join(",");
@@ -494,17 +497,29 @@ pub(super) fn resolved_provenance(
             ",\"external_boundary\":{\"kind\":\"incoming-characteristic\",\"units\":\"m/s\",\"definition\":\"delta outward normal velocity minus delta pressure over reference material impedance\"}",
         fs_couple::nsf_dg::NsfDgDrive::UpstreamPressureRise(_) =>
             ",\"external_boundary\":{\"kind\":\"upstream-series-pressure-rise\",\"units\":\"Pa\",\"definition\":\"resolved face pressure minus finite upstream duct pressure\",\"flow\":\"both original acoustic loads and resolved faces solved on the same physical interval\",\"source_work\":\"minus pressure rise times outward upstream volume flow times physical interval\"}",
+        fs_couple::nsf_dg::NsfDgDrive::FiniteReservoir { .. } =>
+            ",\"external_boundary\":{\"kind\":\"finite-thermochemical-reservoir\",\"pressure_units\":\"Pa absolute\",\"temperature_units\":\"K\",\"definition\":\"accepted finite inventory supplies held pressure and temperature to the original aperture; its streamed mass and complete FV energy update the same inventory atomically with fluid and ducts\",\"partition\":\"explicit first order over each original physical interval; refine interval for source feedback accuracy\"}",
         fs_couple::nsf_dg::NsfDgDrive::Reservoir { .. }
         | fs_couple::nsf_dg::NsfDgDrive::ReservoirAperture { .. } =>
             ",\"external_boundary\":{\"kind\":\"transverse-reservoir-pressure-temperature\",\"pressure_units\":\"Pa absolute\",\"temperature_units\":\"K\",\"definition\":\"original gas derives density and energy at held pressure and temperature; declared ghost velocity retained\",\"flow\":\"resolved fluid and both attached acoustic loads respond together with zero axial series effort; an unloaded other face receives its unperturbed incoming characteristic\"}",
     };
     let boundary = match renderer.drive_history().first().expect("finite native drive history") {
-        fs_couple::nsf_dg::NsfDgDrive::ReservoirAperture { aperture, .. } =>
+        fs_couple::nsf_dg::NsfDgDrive::ReservoirAperture { aperture, .. }
+        | fs_couple::nsf_dg::NsfDgDrive::FiniteReservoir { aperture } =>
             format!("{boundary},\"driven_reservoir_aperture\":{aperture}"),
         fs_couple::nsf_dg::NsfDgDrive::Reservoir { .. } =>
             format!("{boundary},\"driven_reservoir_aperture\":0"),
         _ => boundary.to_string(),
     };
+    let finite_reservoir = system.finite_reservoir().map_or_else(String::new, |parcel| {
+        let aperture = system.finite_reservoir_aperture().expect("bound finite source");
+        let limits = system.finite_reservoir_limits().expect("bound finite source limits");
+        let gas = super::duct_metadata::gas_state(parcel.state().state());
+        format!(",\"finite_reservoir\":{{\"aperture\":{aperture},\"volume_m3\":{:e},\"mass_kg\":{:e},\"gas\":{gas},\"maximum_relative_mass_exchange\":{:e},\"maximum_relative_energy_exchange\":{:e},\"mass_absolute_tolerance_kg\":{:e},\"energy_absolute_tolerance_j\":{:e},\"relative_tolerance\":{:e},\"scope\":\"same original frozen thermochemical model; rigid well-mixed chamber thermalizes incoming kinetic energy; original substep exchange variations bound hidden withdrawal and energy excursions; complete FV energy includes work already; no stored source momentum, mechanical breathing effort, pump, or mean transport into acoustic ducts\"}}",
+            parcel.volume_m3(), parcel.mass_kg(), limits.maximum_relative_mass_exchange,
+            limits.maximum_relative_energy_exchange, limits.mass_absolute_tolerance_kg,
+            limits.energy_absolute_tolerance_j, limits.relative_tolerance)
+    });
     let upstream = system.upstream_load().map_or_else(String::new, |upstream| {
         let duct = upstream.duct();
         let gas = super::duct_metadata::gas_state(duct.inlet_gas());
@@ -517,7 +532,7 @@ pub(super) fn resolved_provenance(
         load.propagator().dt(), info.physical_intervals,
         load.propagator().dt() * info.physical_intervals as f64,
         info.sample_rate_hz, info.samples, info.samples as f64 / f64::from(info.sample_rate_hz));
-    format!("\"resolved_input\":{{\"schema\":\"frankensim-resolved-dg-performance-v1\",\"blake3\":\"{}\",\"source_owner\":\"original-NsfGrid3-D3Q27\",\"dimensions\":[{},{},{}],\"solid_cells\":{},\"initial_state_cells\":{},\"boundary_segments\":{},\"boundary_ramps\":{},\"dx_m\":{:e},\"nsf_dt_s\":{:e},\"substeps\":{},\"source_gas\":{gas},\"bulk_to_shear_ratio\":{:e},\"bulk_ratio_source\":{},\"coupled_area_m2\":{:e},\"maximum_root_evaluations\":{},\"maximum_cell_steps\":{},\"pressure_absolute_tolerance_pa\":{:e},\"pressure_relative_tolerance\":{:e},\"projection_absolute_tolerance_j\":{:e},\"projection_relative_tolerance\":{:e},\"duct_operator_identity\":\"{}\",\"duct_total_dofs\":{},\"pressure_point\":\"{point}\",\"observer_gas\":{propagation},\"model_scope\":\"original resolved fixed-composition fluid and live material DG bore; uniform acoustic interface projection with separate mass/energy flux; stationary voxel walls and two-cell fluid collars; source, geometry, boundary and coupling convergence remain required; no measured flute/reed qualification\"{sgs}{aperture}{reservoir}{boundary}{upstream}{timing}{observer}{radiation}{solid_wall}{gas_sources}{reservoir_observation}{reservoir_feedback}}}",
+    format!("\"resolved_input\":{{\"schema\":\"frankensim-resolved-dg-performance-v1\",\"blake3\":\"{}\",\"source_owner\":\"original-NsfGrid3-D3Q27\",\"dimensions\":[{},{},{}],\"solid_cells\":{},\"initial_state_cells\":{},\"boundary_segments\":{},\"boundary_ramps\":{},\"dx_m\":{:e},\"nsf_dt_s\":{:e},\"substeps\":{},\"source_gas\":{gas},\"bulk_to_shear_ratio\":{:e},\"bulk_ratio_source\":{},\"coupled_area_m2\":{:e},\"maximum_root_evaluations\":{},\"maximum_cell_steps\":{},\"pressure_absolute_tolerance_pa\":{:e},\"pressure_relative_tolerance\":{:e},\"projection_absolute_tolerance_j\":{:e},\"projection_relative_tolerance\":{:e},\"duct_operator_identity\":\"{}\",\"duct_total_dofs\":{},\"pressure_point\":\"{point}\",\"observer_gas\":{propagation},\"model_scope\":\"original resolved fixed-composition fluid and live material DG bore; uniform acoustic interface projection with separate mass/energy flux; stationary voxel walls and two-cell fluid collars; source, geometry, boundary and coupling convergence remain required; no measured flute/reed qualification\"{sgs}{aperture}{reservoir}{boundary}{upstream}{timing}{observer}{radiation}{solid_wall}{gas_sources}{reservoir_observation}{reservoir_feedback}{finite_reservoir}}}",
         info.input_hash.to_hex(), info.dimensions[0], info.dimensions[1], info.dimensions[2],
         info.solid_cells, info.initial_state_cells, info.boundary_segments, info.boundary_ramps, law.dx_m, law.dt_s,
         limits.substeps, law.bulk_to_shear_ratio, json_string(system.zone().bulk_ratio_source()),

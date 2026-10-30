@@ -14,7 +14,7 @@ use super::{NsfDgPerformance, ReservoirObservation, source_intervals_for};
 use crate::bernoulli_aperture::performance::ApertureObservation;
 use crate::dg_port::input::{DgSourceError, DgSourceInput};
 use crate::dg_port::input::wall::regions::{DgMaterialWallLayout, DgMaterialWallLayoutInput};
-use crate::nsf_dg::{NsfDg, NsfDgDrive, NsfDgError, NsfDgLimits, NsfDgReservoirRadiation, same_clock};
+use crate::nsf_dg::{NsfDg, NsfDgDrive, NsfDgError, NsfDgLimits, NsfDgReservoirRadiation, NsfFiniteReservoirLimits, same_clock};
 use crate::pcm_wav::baffled::CircularOutletReceiver;
 use crate::pcm_wav::baffled::gas::GasPropagation;
 use crate::render::RenderError;
@@ -398,6 +398,26 @@ impl ResolvedDgFilePerformance {
                     "combined reservoir tiles exceed the original cell budget"))?;
             reservoir_apertures.push(NsfReservoirAperture { axis, high, cells: selected, state });
         }
+        // The initial inventory uses the selected aperture's original material
+        // and state. It owns that aperture's future pressure/temperature.
+        let finite_reservoir = if rows.next_is("finite_reservoir") {
+            let mut row = rows.row("finite_reservoir")?;
+            let aperture: usize = row.number()?;
+            let volume_m3 = row.scalar()?;
+            let limits = NsfFiniteReservoirLimits {
+                maximum_relative_mass_exchange: row.scalar()?,
+                maximum_relative_energy_exchange: row.scalar()?,
+                mass_absolute_tolerance_kg: row.scalar()?,
+                energy_absolute_tolerance_j: row.scalar()?,
+                relative_tolerance: row.scalar()?,
+            };
+            row.end()?;
+            if aperture >= reservoir_apertures.len() || volume_m3 <= 0.0 {
+                return Err(bad(rows.line, "finite_reservoir needs a declared aperture and positive volume in m3"));
+            }
+            limits.validate().map_err(ResolvedDgInputError::Coupling)?;
+            Some((aperture, volume_m3, limits))
+        } else { None };
         let mut row = rows.row("initial")?;
         let initial = match row.word()? {
             "rest" => [gas.density, 0.0, 0.0, 0.0, gas.temperature],
@@ -512,6 +532,7 @@ impl ResolvedDgFilePerformance {
             Some("upstream-pressure") => { row.word()?; 2 }
             Some("reservoir") => { row.word()?; 3 }
             Some("aperture") => { row.word()?; 5 }
+            Some("finite-reservoir") => { row.word()?; 6 }
             Some("pressure-temperature") => { row.word()?; 4 }
             Some("characteristic") => { row.word()?; 0 }
             _ => 0,
@@ -523,7 +544,7 @@ impl ResolvedDgFilePerformance {
                 }
                 Some(0)
             }
-            5 => {
+            5 | 6 => {
                 let aperture: usize = row.number()?;
                 if aperture >= reservoir_apertures.len() {
                     return Err(bad(row.line, "reservoir controls require a declared aperture index"));
@@ -532,6 +553,12 @@ impl ResolvedDgFilePerformance {
             }
             _ => None,
         };
+        match (finite_reservoir.as_ref(), boundary_kind, driven_aperture) {
+            (Some((aperture, _, _)), 6, Some(driven)) if *aperture == driven => {},
+            (None, kind, _) if kind != 6 => {},
+            _ => return Err(bad(row.line,
+                "finite-reservoir controls must exclusively name the declared finite chamber aperture")),
+        }
         if driven_aperture.is_some_and(|source|
             reservoir_feedback.is_some_and(|(escape, _)| escape == source))
         {
@@ -552,6 +579,10 @@ impl ResolvedDgFilePerformance {
         for n in 0..boundary_segments {
             if n % 256 == 0 { poll(&gate)?; }
             let ramp = rows.next_is("ramp");
+            if ramp && boundary_kind == 6 {
+                return Err(bad(rows.line + 1,
+                    "finite reservoir pressure and temperature evolve from inventory, not authored ramps"));
+            }
             let mut row = rows.row(if ramp { "ramp" } else { "hold" })?;
             let end: usize = row.number()?;
             let first = read_drive(&mut row, boundary_kind, driven_aperture, temperature_window_k)?;
@@ -648,6 +679,10 @@ impl ResolvedDgFilePerformance {
             system = system.with_reservoir_radiation_at(aperture, input, &gate)
                 .map_err(ResolvedDgInputError::Coupling)?;
         }
+        if let Some((aperture, volume_m3, limits)) = finite_reservoir {
+            system = system.with_finite_reservoir(aperture, volume_m3, limits, &gate)
+                .map_err(ResolvedDgInputError::Coupling)?;
+        }
         let mut renderer = NsfDgPerformance::new_resampled_with_drives(system, observation, sample_rate_hz,
             boundary, samples as u64, maximum_block, Arc::clone(&gate)).map_err(ResolvedDgInputError::Render)?;
         if let Some((aperture, input)) = reservoir_observation {
@@ -730,6 +765,12 @@ impl BoundarySegment {
 fn read_drive(row: &mut Row<'_>, kind: u8, aperture: Option<usize>, window: [f64; 2])
     -> Result<NsfDgDrive, ResolvedDgInputError>
 {
+    // Finite-source holds carry no externally authored pressure or temperature.
+    if kind == 6 {
+        return Ok(NsfDgDrive::FiniteReservoir {
+            aperture: aperture.expect("validated finite reservoir index"),
+        });
+    }
     let value = row.scalar()?;
     Ok(match kind {
         4 => {

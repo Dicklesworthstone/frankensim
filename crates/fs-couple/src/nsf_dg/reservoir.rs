@@ -75,6 +75,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
     ) -> Result<Self, NsfDgError> {
         poll(gate)?;
         if self.steps != 0 || self.reservoir_radiation.is_some()
+            || self.finite_reservoir_aperture() == Some(aperture)
             || !input.origin_m.iter().chain(input.pressure_bracket_pa.iter()).all(|x| x.is_finite())
             || input.pressure_bracket_pa[0] >= input.pressure_bracket_pa[1]
             || input.cells.iter().any(|n| !(1..=512).contains(n))
@@ -157,6 +158,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
         &mut self, drive: NsfDgDrive, gate: &CancelGate,
     ) -> Result<NsfDgFrame, NsfDgError> {
         poll(gate)?;
+        self.admit_finite_reservoir_drive(drive)?;
         let (external, rise, breath) = match drive {
             NsfDgDrive::Boundary(value) => (value, 0.0, None),
             NsfDgDrive::UpstreamPressureRise(value) =>
@@ -168,11 +170,16 @@ impl<L: Lattice3<27>> NsfDg<L> {
                     .map_err(NsfDgError::Flow)?;
                 (NsfBoundaryDrive::IncomingCharacteristic(0.0), 0.0, Some((aperture, state)))
             }
+            NsfDgDrive::FiniteReservoir { aperture } => {
+                let state = self.finite_reservoir_state(aperture)?;
+                (NsfBoundaryDrive::IncomingCharacteristic(0.0), 0.0, Some((aperture, state)))
+            }
         };
         let misplaced = match drive {
             NsfDgDrive::Boundary(_) => self.upstream.is_some(),
             NsfDgDrive::UpstreamPressureRise(_) => self.upstream.is_none(),
-            NsfDgDrive::Reservoir { .. } | NsfDgDrive::ReservoirAperture { .. } => false,
+            NsfDgDrive::Reservoir { .. } | NsfDgDrive::ReservoirAperture { .. }
+            | NsfDgDrive::FiniteReservoir { .. } => false,
         };
         if !drive.is_finite() || self.steps >= self.limits.maximum_steps || misplaced
         {
@@ -319,6 +326,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
         if ![mass_change, energy_change, reservoir_mass_out_kg].iter().all(|x| x.is_finite()) {
             return Err(NsfDgError::Input("resolved joint exterior extensive accounts overflowed"));
         }
+        let finite_candidate = finite_reservoir::prepare(self.finite_reservoir.as_ref(), &fluid, gate)?;
         poll(gate)?;
         fluid.accept();
         let duct = acoustic.accept();
@@ -331,11 +339,12 @@ impl<L: Lattice3<27>> NsfDg<L> {
                 projection_covariance_j: audit.covariance, acoustic_work_residual_j: audit.work,
                 port_work_residual_j: audit.port, mass_projection_difference_kg: audit.mass,
             });
+        let finite_reservoir = finite_reservoir::publish(&mut self.finite_reservoir, finite_candidate);
         self.steps += 1;
         Ok(NsfDgFrame {
             step: self.steps, evaluations, incoming_characteristic_m_s: downstream, drive,
             upstream, faces, coupled_patch, source_patch, reservoir_mass_out_kg, reservoir_flows,
-            reservoir_exchanges,
+            reservoir_exchanges, finite_reservoir,
             reservoir_radiation: Some(NsfDgReservoirFrame {
                 resolved_exchange,
                 ghost_pressure_offset_pa: pressure_offset,

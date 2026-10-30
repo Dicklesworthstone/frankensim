@@ -185,7 +185,13 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
             || boundary.is_empty()
             || boundary.len() as u64 > system.limits().maximum_steps
             || !boundary.iter().all(|x| x.is_finite())
-            || boundary.iter().any(|drive| match drive {
+            || boundary.iter().any(|drive| {
+                if let Some(aperture) = system.finite_reservoir_aperture() {
+                    if !matches!(drive, NsfDgDrive::FiniteReservoir { aperture: driven } if *driven == aperture) {
+                        return true;
+                    }
+                }
+                match drive {
                 NsfDgDrive::Boundary(_) => system.upstream_load().is_some(),
                 NsfDgDrive::UpstreamPressureRise(_) => system.upstream_load().is_none(),
                 NsfDgDrive::Reservoir { pressure_pa, temperature_k } =>
@@ -194,6 +200,9 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
                 NsfDgDrive::ReservoirAperture { aperture, pressure_pa, temperature_k } =>
                     system.reservoir_radiation_aperture() == Some(*aperture)
                         || system.zone().reservoir_aperture_state_for(*aperture, *pressure_pa, *temperature_k).is_err(),
+                NsfDgDrive::FiniteReservoir { aperture } =>
+                    system.finite_reservoir_aperture() != Some(*aperture),
+                }
             })
             || output_samples == 0
         {

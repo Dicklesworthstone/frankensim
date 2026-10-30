@@ -32,6 +32,8 @@ mod upstream;
 pub use upstream::NsfDgUpstreamFrame;
 mod reservoir;
 pub use reservoir::{NsfDgReservoirFrame, NsfDgReservoirRadiation};
+mod finite_reservoir;
+pub use finite_reservoir::{NsfFiniteReservoirFrame, NsfFiniteReservoirLimits};
 
 /// Physical drive location and units remain explicit in the coupled source.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -49,6 +51,9 @@ pub enum NsfDgDrive {
     /// Explicit independent transverse source in the grid's authored order.
     /// A distinct aperture may simultaneously receive passive exterior pressure.
     ReservoirAperture { aperture: usize, pressure_pa: f64, temperature_k: f64 },
+    /// The selected finite thermochemical chamber supplies its own held p/T.
+    /// Original mass and total-energy exchange update its inventory on acceptance.
+    FiniteReservoir { aperture: usize },
 }
 impl NsfDgDrive {
     pub fn is_finite(self) -> bool {
@@ -58,6 +63,7 @@ impl NsfDgDrive {
             Self::Reservoir { pressure_pa, temperature_k }
             | Self::ReservoirAperture { pressure_pa, temperature_k, .. } =>
                 pressure_pa.is_finite() && temperature_k.is_finite(),
+            Self::FiniteReservoir { .. } => true,
         }
     }
 }
@@ -71,6 +77,8 @@ pub enum NsfDgError {
     Flow(NsfError),
     /// Original acoustic material, port or step refusal.
     Acoustic(AcousticRealizeError),
+    /// Original finite chamber source law or caloric inversion refusal.
+    FiniteReservoir(fs_material::thermochemical_gas::energy::GasEnergyError),
     /// Cancellation publishes neither candidate.
     Cancelled,
     /// Caller-supplied incoming-characteristic bracket contains no sign change.
@@ -208,6 +216,8 @@ pub struct NsfDgFrame {
     pub reservoir_exchanges: Vec<fs_lbm::nsf3::NsfReservoirExchange>,
     /// Live self/mutual exterior reaction at the independent escape opening.
     pub reservoir_radiation: Option<NsfDgReservoirFrame>,
+    /// Finite source storage, accepting the original conservative exchange once.
+    pub finite_reservoir: Option<NsfFiniteReservoirFrame>,
     /// Original NSF energy accounts, including reservoir energy in `open_energy_j`.
     /// Mixed-boundary unresolved exchange retains its original classification;
     /// it is never relabeled as resolved viscous heat by this adapter.
@@ -251,6 +261,7 @@ pub struct NsfDg<L: Lattice3<27>> {
     upstream: Option<upstream::UpstreamLoad>,
     patch_background: [Option<NsfBoundaryDrive>; 2],
     reservoir_radiation: Option<reservoir::ReservoirRadiation>,
+    finite_reservoir: Option<finite_reservoir::FiniteReservoir>,
 }
 
 fn poll(gate: &CancelGate) -> Result<(), NsfDgError> {
@@ -364,7 +375,8 @@ impl<L: Lattice3<27>> NsfDg<L> {
             return Err(NsfDgError::Input("NSF/DG requires cold matching gas, area and clock, zero reference flow and finite complete work/projection budgets"));
         }
         Ok(Self { zone, load, limits, high, reference, area_m2: area, steps: 0,
-            upstream: None, patch_background, reservoir_radiation: None })
+            upstream: None, patch_background, reservoir_radiation: None,
+            finite_reservoir: None })
     }
     /// Original resolved fluid state and thermochemical source.
     pub const fn zone(&self) -> &NsfGrid3<L> { &self.zone }
@@ -408,6 +420,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
     pub fn step_with_drive(&mut self, drive: NsfDgDrive, gate: &CancelGate)
         -> Result<NsfDgFrame, NsfDgError>
     {
+        self.admit_finite_reservoir_drive(drive)?;
         match drive {
             NsfDgDrive::Boundary(value) => self.step_with_boundary(value, gate),
             NsfDgDrive::UpstreamPressureRise(value) => self.step_with_upstream_pressure_rise(value, gate),
@@ -415,6 +428,8 @@ impl<L: Lattice3<27>> NsfDg<L> {
                 self.step_with_reservoir(pressure_pa, temperature_k, gate),
             NsfDgDrive::ReservoirAperture { aperture, pressure_pa, temperature_k } =>
                 self.step_with_reservoir_aperture(aperture, pressure_pa, temperature_k, gate),
+            NsfDgDrive::FiniteReservoir { aperture } =>
+                self.step_with_finite_reservoir(aperture, gate),
         }
     }
 
@@ -488,6 +503,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
         control: NsfDgDrive, gate: &CancelGate,
     ) -> Result<NsfDgFrame, NsfDgError> {
         poll(gate)?;
+        self.admit_finite_reservoir_drive(control)?;
         if self.reservoir_radiation.is_some() {
             return self.step_with_reservoir_drive(control, gate);
         }
@@ -525,7 +541,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
             let allowance = limits.pressure_absolute_tolerance_pa
                 + limits.pressure_relative_tolerance * scale;
             if residual.abs() <= allowance {
-                let frame = accept_candidate(candidate, &mut self.load, side, relation,
+                let frame = accept_candidate(candidate, &mut self.load, &mut self.finite_reservoir, side, relation,
                     self.reference, limits, incoming, control,
                     evaluation, self.steps + 1, gate)?;
                 self.steps += 1;
@@ -603,7 +619,8 @@ fn coupled_exchange<L: Lattice3<27>>(
 
 #[allow(clippy::too_many_arguments)]
 fn accept_candidate<L: Lattice3<27>>(
-    fluid: NsfCharacteristicTrial<'_, L>, load: &mut DgPortLoad, side: usize,
+    fluid: NsfCharacteristicTrial<'_, L>, load: &mut DgPortLoad,
+    finite_owner: &mut Option<finite_reservoir::FiniteReservoir>, side: usize,
     relation: DgPortResponse, reference: GasState, limits: NsfDgLimits,
     incoming: f64, control: NsfDgDrive,
     evaluations: usize, step: u64, gate: &CancelGate,
@@ -651,15 +668,18 @@ fn accept_candidate<L: Lattice3<27>>(
     if ![mass_change, energy_change, mass_projection, reservoir_mass_out_kg].iter().all(|x| x.is_finite()) {
         return Err(NsfDgError::Input("resolved interval mass or energy difference overflowed"));
     }
+    let finite_candidate = finite_reservoir::prepare(finite_owner.as_ref(), &fluid, gate)?;
     poll(gate)?;
     // All source, allocation, pressure, work and cancellation checks precede
     // publication of either original owner.
     fluid.accept();
     let duct = acoustic.accept();
+    let finite_reservoir = finite_reservoir::publish(finite_owner, finite_candidate);
     Ok(NsfDgFrame {
         step, evaluations, incoming_characteristic_m_s: incoming,
         drive: control, upstream: None, faces, coupled_patch, source_patch,
-        reservoir_mass_out_kg, reservoir_flows, reservoir_exchanges, reservoir_radiation: None, flow,
+        reservoir_mass_out_kg, reservoir_flows, reservoir_exchanges, reservoir_radiation: None,
+        finite_reservoir, flow,
         flow_mass_change_kg: mass_change, flow_energy_change_j: energy_change, duct, terminals,
         inlet_flow_m3_s: q, inlet_pressure_pa: p, pressure_residual_pa: pressure_residual,
         projection_covariance_j: covariance, acoustic_work_residual_j: work_residual,
