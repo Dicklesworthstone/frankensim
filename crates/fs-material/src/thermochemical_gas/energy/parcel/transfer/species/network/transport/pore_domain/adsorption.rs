@@ -8,14 +8,16 @@
 //!
 //! Geometry stays rigid: bound molecules are site occupancy, not a prescribed
 //! liquid saturation. No sorption-to-permeability law, capillary work, moving
-//! pore volume, separate Darcy heating or skeleton conduction is inferred.
+//! pore volume or separate Darcy heating is inferred. Explicit skeleton heat
+//! paths retain the original dry caloric, conductivity and interface sources.
 
 use super::*;
 use crate::adsorption::{
     AdsorptionError,
     competitive::{
         CompetitiveSolid, CompetitiveSolve,
-        network::{self, AdsorptionNetworkBinding, AdsorptionNetworkError, AdsorptionNetworkStep},
+        network::{self, AdsorptionNetworkBinding, AdsorptionNetworkError, AdsorptionNetworkStep,
+            conduction::AdsorbentConductionLink},
     },
 };
 
@@ -39,6 +41,17 @@ pub struct PoreAdsorptionTransfer {
     pub gross_desorption_mol: f64,
 }
 
+/// Gross internal heat streams survive direction changes across the window.
+/// Original source identities and the final actual layer/interface sample are
+/// retained by `AdsorbingPoreStep::pore.last_substep.conduction`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PoreConductionTransfer {
+    pub id: u64,
+    pub cells: [usize; 2],
+    pub gross_a_to_b_j: f64,
+    pub gross_b_to_a_j: f64,
+}
+
 /// Bounded window accounting, retaining the actual final native source report.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AdsorbingPoreStep {
@@ -46,6 +59,7 @@ pub struct AdsorbingPoreStep {
     /// `pore_mass_change_kg` remains the change of free gas in pore bodies.
     pub pore: PoreDomainStep<AdsorptionNetworkStep>,
     pub adsorption: Vec<PoreAdsorptionTransfer>,
+    pub conduction: Vec<PoreConductionTransfer>,
     pub adsorbed_mass_change_kg: f64,
     /// Sum of the original dry+bound sensible and binding-energy increments.
     pub solid_energy_change_j: f64,
@@ -121,6 +135,27 @@ impl AdsorbingPoreDomain {
         endpoints: &[GasEnergySolve],
         controls: PoreDomainSolve,
         adsorption_controls: &BTreeMap<usize, CompetitiveSolve>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<AdsorbingPoreCandidate, PoreDomainError> {
+        self.step_candidate_with_conduction(duration_s, faces, endpoints, controls,
+            adsorption_controls, &[], cancelled)
+    }
+
+    /// Evolve explicitly authored source-backed skeleton heat paths on the same
+    /// pore timeline. Link solid IDs are the zero-based pore-cell indices.
+    /// Flux is frozen at each accepted starting state; later intervals observe
+    /// the resulting temperatures through the original adsorption/flow owners.
+    /// Every source, energy, entropy and cancellation refusal preserves the
+    /// original gas, site, thermal and clock histories.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_candidate_with_conduction(
+        &self,
+        duration_s: f64,
+        faces: &[PoreFace<'_>],
+        endpoints: &[GasEnergySolve],
+        controls: PoreDomainSolve,
+        adsorption_controls: &BTreeMap<usize, CompetitiveSolve>,
+        links: &[AdsorbentConductionLink<'_, '_>],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<AdsorbingPoreCandidate, PoreDomainError> {
         check(&mut cancelled)?;
@@ -139,6 +174,7 @@ impl AdsorbingPoreDomain {
         let mut entropy = Sum::default();
         let mut solid_energy = Sum::default();
         let mut surface_totals: BTreeMap<(usize, SpeciesId), [Sum; 2]> = BTreeMap::new();
+        let mut heat_totals: BTreeMap<u64, ([usize; 2], [Sum; 2])> = BTreeMap::new();
         let run = self.domain.run_window(
             duration_s,
             faces,
@@ -155,7 +191,7 @@ impl AdsorbingPoreDomain {
                         solve: adsorption_controls[&cell],
                     })
                     .collect();
-                let candidate = network::step_candidate(
+                let candidate = network::step_candidate_with_conduction(
                     parcels,
                     paths,
                     &bindings,
@@ -163,6 +199,7 @@ impl AdsorbingPoreDomain {
                     dt,
                     endpoints,
                     transport,
+                    links,
                     &mut *cancelled,
                 )
                 .map_err(PoreAdvanceError::Adsorption)?;
@@ -183,6 +220,22 @@ impl AdsorbingPoreDomain {
                             .or_insert_with(|| [Sum::default(), Sum::default()]);
                         add(&mut totals[0], row.sites.gross_adsorption_mol[i])?;
                         add(&mut totals[1], row.sites.gross_desorption_mol[i])?;
+                    }
+                }
+                for sample in &step.conduction {
+                    if cancelled() {
+                        return Err(PoreAdvanceError::Adsorption(
+                            AdsorptionNetworkError::Cancelled,
+                        ));
+                    }
+                    let (_, totals) = heat_totals.entry(sample.id).or_insert_with(|| (
+                        sample.solids.map(|id| id as usize),
+                        [Sum::default(), Sum::default()],
+                    ));
+                    if sample.energy_a_to_b_j >= 0.0 {
+                        add(&mut totals[0], sample.energy_a_to_b_j)?;
+                    } else {
+                        add(&mut totals[1], -sample.energy_a_to_b_j)?;
                     }
                 }
                 solids = updated
@@ -212,6 +265,10 @@ impl AdsorbingPoreDomain {
                 gross_desorption_mol: totals[1].value,
             })
             .collect();
+        let conduction = heat_totals.into_iter().map(|(id, (cells, totals))|
+            PoreConductionTransfer {
+                id, cells, gross_a_to_b_j: totals[0].value, gross_b_to_a_j: totals[1].value,
+            }).collect();
         check(&mut cancelled)?;
         let (domain, pore) = run.finish((mass, species, energy.value, entropy.value, pore_mass));
         Ok(AdsorbingPoreCandidate {
@@ -223,6 +280,7 @@ impl AdsorbingPoreDomain {
             step: AdsorbingPoreStep {
                 pore,
                 adsorption,
+                conduction,
                 adsorbed_mass_change_kg: bound_mass,
                 solid_energy_change_j: solid_energy.value,
             },
@@ -238,14 +296,32 @@ impl AdsorbingPoreDomain {
         endpoints: &[GasEnergySolve],
         controls: PoreDomainSolve,
         adsorption_controls: &BTreeMap<usize, CompetitiveSolve>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<AdsorbingPoreStep, PoreDomainError> {
+        self.advance_with_conduction(duration_s, faces, endpoints, controls,
+            adsorption_controls, &[], cancelled)
+    }
+
+    /// Atomically publish the same native gas/site/thermal candidate with
+    /// explicitly sourced internal heat paths and full-window heat receipts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_conduction(
+        &mut self,
+        duration_s: f64,
+        faces: &[PoreFace<'_>],
+        endpoints: &[GasEnergySolve],
+        controls: PoreDomainSolve,
+        adsorption_controls: &BTreeMap<usize, CompetitiveSolve>,
+        links: &[AdsorbentConductionLink<'_, '_>],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<AdsorbingPoreStep, PoreDomainError> {
-        let candidate = self.step_candidate(
+        let candidate = self.step_candidate_with_conduction(
             duration_s,
             faces,
             endpoints,
             controls,
             adsorption_controls,
+            links,
             &mut cancelled,
         )?;
         check(&mut cancelled)?;

@@ -25,6 +25,8 @@ use crate::thermochemical_gas::energy::{GasEnergySolve, parcel::transfer::{
 }};
 use std::collections::BTreeSet;
 mod entropy;
+/// Source-integrated heat exchange between the same finite dry skeletons.
+pub mod conduction;
 
 /// A distinct finite site population exposed to one original gas volume.
 /// Multiple populations may share a volume, but may not alias the same solid.
@@ -46,6 +48,8 @@ pub enum AdsorptionNetworkError {
     Gas(SpeciesNetworkError),
     Adsorption { id: u64, error: AdsorptionError },
     Thermodynamic(AdsorptionError),
+    /// Original source/geometry/flux refusal, attributed to the physical link.
+    Conduction { id: u64, reason: String },
     Cancelled,
 }
 impl core::fmt::Display for AdsorptionNetworkError {
@@ -93,6 +97,8 @@ pub struct AdsorptionNetworkSolidStep {
     pub dry_sensible_energy_change_j: f64,
     pub bound_sensible_energy_change_j: f64,
     pub solid_energy_change_j: f64,
+    /// Signed physical heat received from the other retained finite solids.
+    pub conductive_heat_j: f64,
     pub energy_residual_j: f64,
     pub thermal_iterations: usize,
 }
@@ -102,6 +108,8 @@ pub struct AdsorptionNetworkStep {
     pub transport: GasTransportRates,
     pub exchange: SpeciesNetworkStep,
     pub solids: Vec<AdsorptionNetworkSolidStep>,
+    /// Original layer/interface sources and the actually applied internal heat.
+    pub conduction: Vec<conduction::AdsorbentConductionSample>,
     pub total_mass_residual_kg: f64,
     pub maximum_species_mass_residual_kg: f64,
     /// Reference-cancelled sum of original gas and finite solid caloric defects.
@@ -133,6 +141,23 @@ pub fn step_candidate(
     parcels:&BTreeMap<u64,ClosedGasParcel>, paths:GasTransportPaths<'_>,
     bindings:&[AdsorptionNetworkBinding<'_>], catalog:&ThermochemicalGasModel,
     duration_s:f64, endpoints:&BTreeMap<u64,GasEnergySolve>, controls:GasTransportSolve,
+    cancelled:impl FnMut()->bool,
+)->NetworkResult<AdsorptionNetworkCandidate> {
+    step_candidate_with_conduction(parcels,paths,bindings,catalog,duration_s,endpoints,
+        controls,&[],cancelled)
+}
+
+/// Advance original gas paths, finite adsorption heat and internal skeleton
+/// conduction from one accepted snapshot. Source layers and optional ordered
+/// interfaces are sampled at the actual solid temperatures. Their equal and
+/// opposite heat increments enter the SAME original finite caloric inversion.
+/// Endpoint source and complete-system entropy admission remain transactional.
+#[allow(clippy::too_many_arguments)]
+pub fn step_candidate_with_conduction(
+    parcels:&BTreeMap<u64,ClosedGasParcel>, paths:GasTransportPaths<'_>,
+    bindings:&[AdsorptionNetworkBinding<'_>], catalog:&ThermochemicalGasModel,
+    duration_s:f64, endpoints:&BTreeMap<u64,GasEnergySolve>, controls:GasTransportSolve,
+    links:&[conduction::AdsorbentConductionLink<'_, '_>],
     mut cancelled:impl FnMut()->bool,
 )->NetworkResult<AdsorptionNetworkCandidate> {
     poll(&mut cancelled)?;
@@ -159,11 +184,13 @@ pub fn step_candidate(
         binding.solve.validate(duration_s).map_err(|e|site_error(binding.id,e))?;
         entropy_limit=entropy_limit.min(binding.solve.entropy_tolerance_j_k);
     }
+    let heat=conduction::sample(&ordered,links,duration_s,&mut cancelled)?;
     let sampled=transport::sample_transfers(parcels,paths,duration_s,endpoints,controls,&mut cancelled)?;
     let mut prepared=Vec::with_capacity(bindings.len());
     for (&id,&binding) in &ordered {
         let proposal=prepare_adsorption(binding.solid,&parcels[&binding.parcel],catalog,
-            duration_s,binding.solve,&mut cancelled).map_err(|e|site_error(id,e))?;
+            duration_s,binding.solve,heat.into_solid_j.get(&id).copied().unwrap_or(0.0),
+            &mut cancelled).map_err(|e|site_error(id,e))?;
         prepared.push((binding,proposal));
     }
     let boundaries:Vec<_>=prepared.iter().map(|(binding,proposal)|SpeciesNetworkBoundary {
@@ -172,7 +199,9 @@ pub fn step_candidate(
         &boundaries,endpoints,controls.exchange,&mut cancelled)?;
     sampled.rates.admit_endpoint_driving_forces(gas.parcels(),&mut cancelled)?;
     let mut solid_reports=Vec::with_capacity(prepared.len());
-    let mut defects=vec![gas.step().total_energy_residual_j];
+    // Include any representational residual in the antisymmetric link lowering
+    // in the one closed-system gate; it is never an external heat supply.
+    let mut defects=vec![gas.step().total_energy_residual_j,heat.balance_residual_j];
     for (binding,proposal) in &prepared {
         poll(&mut cancelled)?;
         let old=binding.solid; let next=&proposal.next;
@@ -207,8 +236,10 @@ pub fn step_candidate(
             solid_temperature_k:[old.temperature_k,next.temperature_k],
             dry_sensible_energy_change_j:proposal.sensible[0],bound_sensible_energy_change_j:proposal.sensible[1],
             solid_energy_change_j:finite(sum(proposal.sensible)?+sum(proposal.binding.iter().copied())?)?,
+            conductive_heat_j:heat.into_solid_j.get(&binding.id).copied().unwrap_or(0.0),
             energy_residual_j:defect,thermal_iterations:proposal.iterations });
     }
+    conduction::admit_endpoint(&prepared,links,&mut cancelled)?;
     let energy_residual=sum(defects)?;
     if energy_residual.abs()>controls.exchange.energy_tolerance_j {
         return Err(Error::Invalid("complete gas/solid energy residual exceeds the single interval budget"));
@@ -223,7 +254,8 @@ pub fn step_candidate(
     let (parcels,exchange)=gas.into_parts();
     let solids=prepared.into_iter().map(|(binding,proposal)|(binding.id,proposal.next)).collect();
     Ok(AdsorptionNetworkCandidate { parcels,solids,step:AdsorptionNetworkStep { duration_s,
-        transport:sampled.rates,exchange,solids:solid_reports,total_mass_residual_kg:mass_residual,
+        transport:sampled.rates,exchange,solids:solid_reports,conduction:heat.samples,
+        total_mass_residual_kg:mass_residual,
         maximum_species_mass_residual_kg:maximum_species,total_energy_residual_j:energy_residual,
         entropy_change_j_k:entropy } })
 }

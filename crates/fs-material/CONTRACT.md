@@ -3605,8 +3605,9 @@ report is retained. The total omitted throat void volume is measured against
 stored pore-body volume and must fit an explicitly declared geometric bound.
 This first-order fixed-volume model needs temporal refinement. The adsorbing
 variant below connects original finite-site and solid-heat owners to this same
-window loop. Moving porosity, skeleton conduction and a resolved nonlinear
-throat profile remain separate physical models.
+window loop. Moving porosity and a resolved nonlinear throat profile remain
+separate physical models. Explicit skeleton conduction uses the finite-adsorbent
+extension below.
 
 Five focused regressions cover delayed forwarding, first-order convergence
 against the independent three-volume diffusion eigenmodes, heterogeneous
@@ -3682,13 +3683,47 @@ source/model refusals do not. A late refusal publishes no gas, site or clock.
 Rigid geometry and fixed gas-filled pore volume remain explicit. Adsorbed site
 occupancy does not become liquid saturation or an invented permeability law.
 No Darcy work, adsorption heat or formation-reference energy is counted twice;
-skeleton conduction, swelling, capillarity and moving pore-volume work are not
-inferred. The original native adsorption near-isothermal and frozen-forcing
+swelling, capillarity and moving pore-volume work are not inferred. Skeleton
+conduction requires the explicit original-source paths described below. The original native adsorption near-isothermal and frozen-forcing
 limits remain active; successful bounded stepping is not a time-error estimate.
 
 Four focused native regressions cover the independent two-species site/finite
 heat formula, changed subsequent dusty-gas throughput with persistent loading
 history, typed inventory-driven refinement and atomic late failure.
+
+
+### Source-backed conduction between retained finite adsorbents
+
+`adsorption::competitive::network::step_candidate_with_conduction` and the corresponding
+`AdsorbingPoreDomain::step_candidate_with_conduction` / `advance_with_conduction`
+consume explicit `AdsorbentConductionLink` paths. Each side binds the exact
+retained dry-skeleton caloric object and its original `ResolvedConductionLayer`.
+The existing integrated k(T) owner evaluates the physical path; optional
+`AdsorbentThermalContact` retains the ordered original interface card and
+selected resistance claims. Interface and caloric material identities must
+agree in order, including the exact card hashes.
+
+All links sample the same accepted gas/site/solid snapshot. Equal-and-opposite
+conductive heat enters the original dry-plus-bound caloric inversion together
+with sorption heat, exactly once. The native gas inventory, endpoint source,
+complete-system entropy and single-window closed-energy gates remain active.
+A heat step that exceeds physical admission refuses without clipping its flux
+or altering any participant. The original no-link APIs use this same candidate
+with an empty link list.
+
+The existing bounded pore timeline preserves accepted gas, site and thermal
+history. Later intervals use the changed temperatures in original adsorption
+and actual dusty-gas transport. Whole-window reports retain gross heat in both
+directions, and the final substep retains original layer/interface sources.
+Geometry is authored explicitly; site occupancy does not infer saturation or
+permeability. No separate thermal integrator, extra Darcy heat, moving geometry
+or unconditional stability is introduced. The original first-order,
+frozen-forcing limits and temporal refinement requirements remain.
+
+Six manufactured regressions cover finite heat/contact arithmetic, data-only
+conductivity substitution, exact retained caloric identity, endpoint source
+refusal, total-entropy rejection of oversized heat, subsequent pore-flow
+feedback and continuing-window atomicity.
 
 
 ## Variable-caloric off-design converging-diverging nozzle

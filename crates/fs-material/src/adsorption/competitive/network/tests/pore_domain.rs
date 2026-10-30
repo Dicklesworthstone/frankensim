@@ -1,4 +1,5 @@
 //! Native transient pore flow, finite site storage and finite skeleton heat.
+mod skeleton_heat;
 use super::*;
 use crate::porous::permeability::{
     DarcyGasBarrier, IntrinsicPermeability, PorousGasLayer, PorousGasSupport,

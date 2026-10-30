@@ -79,6 +79,9 @@ impl CompetitiveAdsorbent {
     pub fn channels(&self) -> &[LangmuirAdsorbent] { &self.channels }
     pub fn capacity_mol_kg_dry(&self) -> f64 { self.channels[0].capacity_mol_kg_dry }
     pub const fn temperature_range_k(&self) -> [f64; 2] { self.temperature_range_k }
+    /// Original finite dry-skeleton chart, shared by all retained site channels.
+    /// Bind source-qualified heat paths to this exact borrowed caloric object.
+    pub fn dry_skeleton_calorics(&self) -> &ResolvedHeatCapacityCurve { self.dry() }
     fn dry(&self) -> &ResolvedHeatCapacityCurve { &self.channels[0].calorics.dry_skeleton }
 }
 
@@ -311,6 +314,7 @@ struct PreparedAdsorption {
 }
 fn prepare_adsorption(solid: &CompetitiveSolid, gas: &ClosedGasParcel,
     catalog: &ThermochemicalGasModel, duration_s: f64, controls: CompetitiveSolve,
+    conductive_heat_j: f64,
     mut cancelled: impl FnMut()->bool) -> Result<PreparedAdsorption> {
     use crate::thermochemical_gas::energy::parcel::transfer::species::network::boundary::BoundarySpeciesTransfer;
     controls.validate(duration_s)?; poll(&mut cancelled)?;
@@ -368,7 +372,11 @@ fn prepare_adsorption(solid: &CompetitiveSolid, gas: &ClosedGasParcel,
             relative_energy_into_gas_j:finite(-sites.gross_desorption_mol[i]*dh)? });
         transfers.push(SpeciesBoundaryTransfer { species:law.species.clone(),mass_into_gas_kg:-dm,energy_into_gas_j:energy });
     }
-    let heat=sum(heats)?;
+    // The original finite dry+bound caloric inversion receives all physical
+    // heat once. Internal conduction is debited by the shared network owner;
+    // it neither changes the kinetic snapshot nor supplies a second h chart.
+    let heat=if conductive_heat_j==0.0 { sum(heats)? }
+        else { sum(heats.into_iter().chain(std::iter::once(conductive_heat_j)))? };
     let (temperature,sensible,iterations)=solve_temperature(solid,&sites.final_moles,heat,
         0.5*controls.gas.energy_tolerance_j,controls.maximum_iterations,&mut cancelled)?;
     if (temperature-ts).abs()>controls.maximum_temperature_change_k { return Err(invalid("competitive solid heating exceeds frozen-rate allowance")); }
@@ -385,7 +393,7 @@ pub fn advance_candidate<'catalog>(solid: &CompetitiveSolid, gas: &ClosedGasParc
     mut cancelled: impl FnMut()->bool) -> Result<CompetitiveCandidate<'catalog>> {
     use crate::thermochemical_gas::energy::parcel::transfer::species::boundary::SpeciesBoundaryRelativeTransfer;
     let PreparedAdsorption { next,sites,before,transfers,boundary,sensible,heat,binding,iterations } =
-        prepare_adsorption(solid,gas,catalog,duration_s,controls,&mut cancelled)?;
+        prepare_adsorption(solid,gas,catalog,duration_s,controls,0.0,&mut cancelled)?;
     let (ts,tg)=(solid.temperature_k,gas.state().state().temperature);
     let temperature=next.temperature_k;
     // The source already separates each stream's old-gas partial enthalpy from

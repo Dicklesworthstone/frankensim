@@ -1,5 +1,6 @@
 //! G1/G3/G4: actual gas transport and finite sites, no material presets.
 mod pore_domain;
+mod skeleton_heat;
 use super::*;
 use super::super::tests::{fixture, controls as pair_controls};
 use crate::thermochemical_gas::tests::point;
