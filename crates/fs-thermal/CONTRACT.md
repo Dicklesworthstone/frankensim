@@ -460,3 +460,40 @@ No gas-volume displacement or pressure work is inferred. Pore transport,
 permeability/porosity evolution, char oxidation, cracking, multi-step wood
 chemistry, latent phases, complete burnout transitions and an experimentally
 validated wood material remain outside this closure.
+
+
+## Geometric conduction with evolving material conductivity
+
+`enthalpy::conduction::ConductionObserver` prepares existing thermal links with
+explicit centre-to-face distances, contact resistances and immutable scalar
+`ConductivityLaw` bindings. It queries each participating cell once per actual
+explicit substep and shares that value across incident faces. Internal links
+reuse the original series resistance owner. A surface reservoir adds the
+half-cell material resistance and an explicit areal film/contact resistance;
+zero external resistance prescribes temperature at the face, not at the cell
+centre. Zero conductivity explicitly insulates. Geometry, reference mass,
+material identities and face bindings remain fixed and are checked on reuse.
+Material selection and mixed-phase microstructure remain the constitutive
+owner's responsibility.
+
+The original observer protocol now accepts step-local reservoir conductances.
+Both pairwise links and reservoirs enter the same original heat-rate and CFL
+calculation. Their authored values are restored before accepted-step hooks and
+events. No reservoir heat is reclassified as an applied source. Composed
+observers reject conflicting reservoir ownership, and the existing advection
+wrapper forwards the hook. `advance_observed_with_entropy` forwards each
+physical hook once and retains the exact applied sources, links and reservoirs
+for the original entropy account, including actual bath temperatures. General
+internal transfers and applied sources retain explicitly unclassified entropy
+contributions; temporal entropy defects remain distinct from physical
+conduction production. Failure or cancellation publishes no partial physical
+state.
+
+The prepared graph uses O(cells + faces) storage and
+O((cells + faces) log(cells)) work per substep with ordered maps. This is an
+algorithmic bound, not a measured throughput claim. The existing explicit
+coefficient-freezing and caloric CFL applies; it is not an implicit solver or
+a time/spatial error certificate. Focused G0/G1/G3 tests cover series/Robin
+resistance, dynamic boundary CFL and entropy, exact event splitting, independent
+nonlinear transient and Stefan front/heat refinement, composition, insulation,
+domain/work limits and transactional cancellation.

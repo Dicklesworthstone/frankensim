@@ -39,6 +39,10 @@ pub mod advection;
 #[path = "enthalpy/entropy.rs"]
 pub mod entropy;
 
+/// State-dependent spatial link and resolved surface-reservoir conductances.
+#[path = "enthalpy/conduction.rs"]
+pub mod conduction;
+
 /// Conservative sublimation and deposition on this same thermal timeline.
 #[path = "enthalpy/sublimation.rs"]
 pub mod sublimation;

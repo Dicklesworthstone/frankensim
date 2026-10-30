@@ -92,9 +92,30 @@ impl DepositionSimulation<'_> {
         config: StepConfig,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(Self, EnergyAudit, EntropyAudit), DepositionError> {
-        let (next, observer, energy) =
-            self.advance_observed(&EntropyObserver::default(), target_s, config, checkpoint)?;
-        Ok((next, energy, observer.audit))
+        let (next, (), energy, entropy) =
+            self.advance_observed_with_entropy(&(), target_s, config, checkpoint)?;
+        Ok((next, energy, entropy))
+    }
+
+    /// Advance a physical observer and entropy on the SAME original substeps.
+    /// Source, link and reservoir overrides are retained for the entropy rate
+    /// audit before the timeline restores authored coefficients. Reservoir
+    /// entropy therefore uses the actual bath temperature and applied flux.
+    /// Unclassified internal transfers contribute their signed entropy-at-cell
+    /// terms; they are not assumed to be passive conduction. Every hook is
+    /// forwarded once. Failure discards thermal, observer and entropy candidates.
+    pub fn advance_observed_with_entropy<O: DepositionObserver>(
+        &self, observer: &O, target_s: f64, config: StepConfig,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, O, EnergyAudit, EntropyAudit), O::Error> {
+        let wrapped = EntropyObserver {
+            inner: observer.clone(), initial_h: BTreeMap::new(),
+            sources: BTreeMap::new(), conductances: BTreeMap::new(),
+            reservoirs: BTreeMap::new(), transfers: Vec::new(),
+            interval_sources: BTreeMap::new(), audit: EntropyAudit::default(),
+        };
+        let (next, wrapped, energy) = self.advance_observed(&wrapped, target_s, config, checkpoint)?;
+        Ok((next, wrapped.inner, energy, wrapped.audit))
     }
 
     // `self` is the candidate AFTER changing enthalpy, but with the SAME
@@ -105,6 +126,19 @@ impl DepositionSimulation<'_> {
         initial_h: &BTreeMap<CellId, f64>,
         temperatures: &BTreeMap<CellId, f64>,
         duration_s: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<EntropyAudit, DepositionError> {
+        self.entropy_step_audit_with_coefficients(initial_h, temperatures, duration_s,
+            &BTreeMap::new(), &BTreeMap::new(), &BTreeMap::new(), checkpoint)
+    }
+
+    // Optional TOTAL source rates and conductance replacements reproduce the
+    // applied flux without cloning the thermal graph or reevaluating material k.
+    #[allow(clippy::too_many_arguments)]
+    fn entropy_step_audit_with_coefficients(
+        &self, initial_h: &BTreeMap<CellId, f64>, temperatures: &BTreeMap<CellId, f64>,
+        duration_s: f64, sources: &BTreeMap<CellId, f64>,
+        conductances: &BTreeMap<u64, f64>, reservoirs: &BTreeMap<CellId, f64>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<EntropyAudit, DepositionError> {
         checkpoint()?;
@@ -141,7 +175,8 @@ impl DepositionSimulation<'_> {
             }
             let ta = temperatures[&link.a];
             let tb = temperatures[&link.b];
-            let power = finite(link.conductance_w_k * (tb - ta))?;
+            let g = conductances.get(&link.id).copied().unwrap_or(link.conductance_w_k);
+            let power = finite(g * (tb - ta))?;
             // q*(1/Ta - 1/Tb), evaluated without subtracting reciprocals.
             generation.add(finite((power / ta) * ((tb - ta) / tb))?)?;
             let areas = self.contact_areas(link);
@@ -168,12 +203,14 @@ impl DepositionSimulation<'_> {
             generation.add(finite((q / t) * ((ambient - t) / ambient))?)?;
             if let Some(reservoir) = cell.boundary.reservoir {
                 let tr = reservoir.temperature_k;
-                let q = finite(reservoir.conductance_w_k * (tr - t))?;
+                let g = reservoirs.get(&id).copied().unwrap_or(reservoir.conductance_w_k);
+                let q = finite(g * (tr - t))?;
                 boundary.add(finite(q / tr)?)?;
                 generation.add(finite((q / t) * ((tr - t) / tr))?)?;
             }
-            source.add(finite(cell.boundary.source_w / t)?)?;
-            has_source |= cell.boundary.source_w != 0.0;
+            let watts = sources.get(&id).copied().unwrap_or(cell.boundary.source_w);
+            source.add(finite(watts / t)?)?;
+            has_source |= watts != 0.0;
         }
         let mut audit = EntropyAudit {
             thermal_storage_change_j_k: storage.total()?,
@@ -194,13 +231,23 @@ impl DepositionSimulation<'_> {
     }
 }
 
-#[derive(Clone, Default)]
-struct EntropyObserver {
+#[derive(Clone)]
+struct EntropyObserver<O> {
+    inner: O,
     initial_h: BTreeMap<CellId, f64>,
+    sources: BTreeMap<CellId, f64>,
+    conductances: BTreeMap<u64, f64>,
+    reservoirs: BTreeMap<CellId, f64>,
+    transfers: Vec<HeatTransfer>,
+    interval_sources: BTreeMap<CellId, f64>,
     audit: EntropyAudit,
 }
-impl DepositionObserver for EntropyObserver {
-    type Error = DepositionError;
+impl<O: DepositionObserver> DepositionObserver for EntropyObserver<O> {
+    type Error = O::Error;
+    fn begin(&mut self) -> Result<(), Self::Error> {
+        self.audit = EntropyAudit::default();
+        self.inner.begin()
+    }
     fn sources(
         &mut self,
         thermal: &DepositionSimulation<'_>,
@@ -213,25 +260,77 @@ impl DepositionObserver for EntropyObserver {
             }
             self.initial_h.insert(id, cell.specific_h_j_kg);
         }
-        Ok(BTreeMap::new())
+        self.sources = self.inner.sources(thermal, checkpoint)?;
+        Ok(self.sources.clone())
     }
-    fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
-        Ok(())
+    fn conductances(&mut self, thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<u64, f64>, Self::Error> {
+        self.conductances = self.inner.conductances(thermal, checkpoint)?;
+        Ok(self.conductances.clone())
+    }
+    fn reservoir_conductances(&mut self, thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        self.reservoirs = self.inner.reservoir_conductances(thermal, checkpoint)?;
+        Ok(self.reservoirs.clone())
+    }
+    fn heat_transfers(&mut self, thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Vec<HeatTransfer>, Self::Error> {
+        self.transfers = self.inner.heat_transfers(thermal, checkpoint)?;
+        Ok(self.transfers.clone())
+    }
+    fn requires_step_interval(&self) -> bool { self.inner.requires_step_interval() }
+    fn step_sources(&mut self, thermal: &DepositionSimulation<'_>,
+        start_s: f64, dt_s: f64, end_s: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        self.interval_sources = self.inner.step_sources(thermal, start_s, dt_s, end_s, checkpoint)?;
+        Ok(self.interval_sources.clone())
+    }
+    fn limit_timestep_s(&mut self, thermal: &DepositionSimulation<'_>, proposed_s: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<f64, Self::Error> {
+        self.inner.limit_timestep_s(thermal, proposed_s, checkpoint)
+    }
+    fn event(&mut self, event: &Event, thermal: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
+        self.inner.event(event, thermal)
     }
     fn step(
         &mut self,
-        _: f64,
+        start_s: f64,
         duration_s: f64,
         temperatures: &BTreeMap<CellId, f64>,
         thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), Self::Error> {
-        self.audit.accumulate(thermal.entropy_step_audit(
-            &self.initial_h,
-            temperatures,
-            duration_s,
-            checkpoint,
-        )?)
+        let mut sources = BTreeMap::new();
+        let mut has_unclassified = false;
+        for (i, (&id, cell)) in thermal.cells.iter().enumerate() {
+            if i % 256 == 0 { checkpoint()?; }
+            let generated = self.sources.get(&id).copied().unwrap_or(0.0);
+            let interval = self.interval_sources.get(&id).copied().unwrap_or(0.0);
+            has_unclassified |= cell.boundary.source_w != 0.0 || generated != 0.0 || interval != 0.0;
+            if generated != 0.0 || interval != 0.0 {
+                sources.insert(id, finite(finite(cell.boundary.source_w + generated)? + interval)?);
+            }
+        }
+        for (i, transfer) in self.transfers.iter().enumerate() {
+            if i % 256 == 0 { checkpoint()?; }
+            has_unclassified |= transfer.power_w != 0.0;
+            for (id, sign) in [(transfer.a, -1.0), (transfer.b, 1.0)] {
+                let old = sources.get(&id).copied().unwrap_or(thermal.cells[&id].boundary.source_w);
+                sources.insert(id, finite(old + sign * transfer.power_w)?);
+            }
+        }
+        let mut audit = thermal.entropy_step_audit_with_coefficients(
+            &self.initial_h, temperatures, duration_s, &sources,
+            &self.conductances, &self.reservoirs, checkpoint,
+        )?;
+        audit.has_unclassified_sources |= has_unclassified;
+        self.audit.accumulate(audit)?;
+        self.inner.step(start_s, duration_s, temperatures, thermal, checkpoint)
     }
 }
 

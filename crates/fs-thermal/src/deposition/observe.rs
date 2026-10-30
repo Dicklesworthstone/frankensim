@@ -57,6 +57,16 @@ pub trait DepositionObserver: Clone {
     fn conductances(&mut self, _thermal: &DepositionSimulation<'_>,
         _checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>)
         -> Result<BTreeMap<u64, f64>, Self::Error> { Ok(BTreeMap::new()) }
+    /// Step-local reservoir conductances [W/K], evaluated after `conductances`.
+    /// Each key must name an active cell with an authored reservoir. The
+    /// reservoir's actual temperature and covered area are retained; only its
+    /// total conductance changes for this step. This represents a resolved
+    /// half-cell/material resistance without treating reservoir heat as an
+    /// unclassified source. Both the original flux and CFL use these values.
+    /// Authored values are restored before `step` and scheduled events.
+    fn reservoir_conductances(&mut self, _thermal: &DepositionSimulation<'_>,
+        _checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<BTreeMap<CellId, f64>, Self::Error> { Ok(BTreeMap::new()) }
     /// Internal pairwise watts at the same start state, after `conductances`.
     /// Unlike `sources`, these are conservative exchanges, not external heat.
     /// At most `DepositionBudget::max_links` transfers may be submitted per step.
@@ -173,6 +183,31 @@ impl<'a> DepositionSimulation<'a> {
         Ok(authored)
     }
 
+    pub(super) fn set_step_reservoir_conductances(
+        &mut self, values: &BTreeMap<CellId, f64>,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Vec<(CellId, f64)>, DepositionError> {
+        if values.len() > self.cells.len() {
+            return Err(DepositionError::InvalidInput("too many step-local reservoir conductances"));
+        }
+        let mut authored = Vec::with_capacity(values.len());
+        for (index, (&id, &g)) in values.iter().enumerate() {
+            if index % 256 == 0 { checkpoint()?; }
+            let reservoir = self.cells.get(&id).and_then(|cell| cell.boundary.reservoir)
+                .ok_or(DepositionError::InvalidInput("inactive step-local reservoir"))?;
+            if !nonnegative(g) {
+                return Err(DepositionError::InvalidInput("reservoir conductance must be finite and nonnegative"));
+            }
+            authored.push((id, reservoir.conductance_w_k));
+        }
+        checkpoint()?;
+        for (&id, &g) in values {
+            self.cells.get_mut(&id).expect("validated reservoir cell").boundary.reservoir
+                .as_mut().expect("validated reservoir").conductance_w_k = g;
+        }
+        Ok(authored)
+    }
+
     // Duration-dependent losses enter the SAME rate field and external-energy
     // audit after dt is fixed. Never evaluate boundaries/conduction a second time.
     fn add_interval_sources(&self, rates: &mut HeatRates, sources: &BTreeMap<CellId, f64>,
@@ -247,8 +282,10 @@ impl<'a> DepositionSimulation<'a> {
         }
         let sources = observer.sources(&candidate, &mut checkpoint)?;
         let conductances = observer.conductances(&candidate, &mut checkpoint)?;
+        let reservoirs = observer.reservoir_conductances(&candidate, &mut checkpoint)?;
         let transfers = observer.heat_transfers(&candidate, &mut checkpoint)?;
         candidate.set_step_conductances(&conductances, &mut checkpoint)?;
+        candidate.set_step_reservoir_conductances(&reservoirs, &mut checkpoint)?;
         candidate.add_step_sources(&sources, &mut checkpoint)?;
         let mut rates = candidate.heat_rates(f64::MAX, &mut checkpoint)?;
         candidate.add_step_transfers(&mut rates, &transfers, &mut checkpoint)?;
@@ -314,9 +351,12 @@ impl<'a> DepositionSimulation<'a> {
             checkpoint()?;
             let conductances = observer.conductances(&next, &mut checkpoint)?;
             checkpoint()?;
+            let reservoirs = observer.reservoir_conductances(&next, &mut checkpoint)?;
+            checkpoint()?;
             let transfers = observer.heat_transfers(&next, &mut checkpoint)?;
             checkpoint()?;
             let original_links = next.set_step_conductances(&conductances, &mut checkpoint)?;
+            let original_reservoirs = next.set_step_reservoir_conductances(&reservoirs, &mut checkpoint)?;
             let authored = next.add_step_sources(&sources, &mut checkpoint)?;
             let step: Result<_, O::Error> = (|| {
                 let mut rates = next.heat_rates(config.max_dt_s, &mut checkpoint)?;
@@ -348,6 +388,10 @@ impl<'a> DepositionSimulation<'a> {
             }
             for (id, g) in original_links {
                 next.links.get_mut(&id).expect("validated active link").conductance_w_k = g;
+            }
+            for (id, g) in original_reservoirs {
+                next.cells.get_mut(&id).expect("validated reservoir cell").boundary.reservoir
+                    .as_mut().expect("validated reservoir").conductance_w_k = g;
             }
             let (dt, end_s, old_temperatures) = step?;
             next.time_s = end_s;
