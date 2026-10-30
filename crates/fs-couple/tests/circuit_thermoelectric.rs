@@ -20,6 +20,8 @@ use fs_thermal::enthalpy::*;
 
 #[path = "circuit_thermoelectric/motion.rs"]
 mod motion_tests;
+#[path = "circuit_thermoelectric/graph.rs"]
+mod graph_tests;
 
 fn source(s: f64, resistance: f64, k: f64) -> (MaterialCard, ResolvedHeatCapacityCurve) {
     source_value(PropertyValue::Scalar { value: s, dims: SEEBECK_DIMS },

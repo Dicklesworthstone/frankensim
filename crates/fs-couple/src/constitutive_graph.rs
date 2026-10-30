@@ -153,8 +153,11 @@ pub struct MaterialGraphResidual<'a, 'scope> {
 
 impl<'a, 'scope> MaterialGraphResidual<'a, 'scope> {
     /// Admit a square, dimensionally consistent feedback block over the original
-    /// graph and committed state schema. Fixed values and unknowns may name only
-    /// external inputs; constitutive history remains borrowed and unchanged.
+    /// graph and committed state schema. An empty block admits prescribed-input
+    /// material evolution: the native solver still evaluates the complete graph
+    /// and the final source/history proposal, with zero nonlinear iterations.
+    /// Fixed values and unknowns may name only external inputs; constitutive
+    /// history remains borrowed and unchanged.
     pub fn new(
         cx: &'a Cx<'scope>,
         graph: &'a ConstitutiveGraph,
@@ -170,15 +173,14 @@ impl<'a, 'scope> MaterialGraphResidual<'a, 'scope> {
             .newton
             .validate()
             .map_err(MaterialGraphError::Newton)?;
-        if unknowns.is_empty()
-            || unknowns.len() != equations.len()
+        if unknowns.len() != equations.len()
             || unknowns.len() > controls.maximum_unknowns
             || controls.maximum_evaluations == 0
             || controls.maximum_iterations == 0
             || !positive(controls.equation_tolerance)
         {
             return Err(MaterialGraphError::Invalid(
-                "nonempty square system and positive finite work/tolerance controls required",
+                "square system and positive finite work/tolerance controls required",
             ));
         }
         graph.state_schema().decode(version, state)?;

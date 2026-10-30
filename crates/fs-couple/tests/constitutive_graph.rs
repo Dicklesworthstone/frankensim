@@ -286,6 +286,108 @@ fn electrothermal_graph() -> ConstitutiveGraph {
         .unwrap();
     graph
 }
+
+#[test]
+fn prescribed_inputs_use_native_zero_iteration_admission_and_one_history_update() {
+    with_cx(|cx, _| {
+        let graph = electrothermal_graph();
+        let state = [300.0];
+        let fixed = BTreeMap::from([
+            (key("resistor", "temperature"), 310.0),
+            (key("resistor", "current"), 2.0),
+        ]);
+        let mut budget = controls();
+        budget.maximum_unknowns = 0;
+        budget.maximum_evaluations = 2;
+        let residual = MaterialGraphResidual::new(
+            cx,
+            &graph,
+            graph.state_schema().version(),
+            &state,
+            fixed,
+            vec![],
+            vec![],
+            budget,
+        )
+        .unwrap();
+        let candidate = residual.solve(vec![]).unwrap();
+        close(candidate.graph.outputs[&key("resistor", "voltage")], 4.04);
+        close(candidate.graph.outputs[&key("resistor", "heat")], 8.08);
+        close(candidate.graph.next_state[0], 300.0 + 0.2 * 8.08);
+        assert!(candidate.coordinates.is_empty());
+        assert_eq!(candidate.nonlinear.iterations, 0);
+        assert!(candidate.nonlinear.converged);
+        assert_eq!(candidate.evaluations, 2);
+        assert_eq!(state, [300.0]);
+    });
+}
+
+#[test]
+fn empty_algebraic_block_still_propagates_source_budget_and_cancellation_refusals() {
+    with_cx(|cx, gate| {
+        let graph = electrothermal_graph();
+        let state = [300.0];
+        for (temperature, allowance) in [(600.0, 2), (310.0, 1)] {
+            let mut budget = controls();
+            budget.maximum_evaluations = allowance;
+            let fixed = BTreeMap::from([
+                (key("resistor", "temperature"), temperature),
+                (key("resistor", "current"), 2.0),
+            ]);
+            let residual = MaterialGraphResidual::new(
+                cx,
+                &graph,
+                graph.state_schema().version(),
+                &state,
+                fixed,
+                vec![],
+                vec![],
+                budget,
+            )
+            .unwrap();
+            let error = residual.solve(vec![]).unwrap_err();
+            if allowance == 1 {
+                assert!(matches!(error, MaterialGraphError::EvaluationBudget));
+            } else {
+                assert!(matches!(
+                    error,
+                    MaterialGraphError::Graph(GraphError::CardMismatch { .. })
+                ));
+            }
+            assert_eq!(state, [300.0]);
+        }
+        let residual = MaterialGraphResidual::new(
+            cx,
+            &graph,
+            graph.state_schema().version(),
+            &state,
+            BTreeMap::new(),
+            vec![],
+            vec![],
+            controls(),
+        )
+        .unwrap();
+        assert!(matches!(
+            residual.solve(vec![]),
+            Err(MaterialGraphError::Graph(_))
+        ));
+        gate.request();
+        assert!(matches!(
+            MaterialGraphResidual::new(
+                cx,
+                &graph,
+                graph.state_schema().version(),
+                &state,
+                BTreeMap::new(),
+                vec![],
+                vec![],
+                controls()
+            ),
+            Err(MaterialGraphError::Cancelled)
+        ));
+        assert_eq!(state, [300.0]);
+    });
+}
 fn unknowns() -> Vec<MaterialUnknown> {
     vec![
         MaterialUnknown {
