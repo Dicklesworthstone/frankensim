@@ -9,9 +9,8 @@ use super::{Cell, Error as FlowError, MixtureGas, positive};
 use fs_math::det;
 use fs_qty::{DynViscosity, Length, Time};
 
-#[cfg(feature = "material")]
+/// Original thermal laws in finite gas-wall storage, including latent plateaus.
 mod caloric;
-#[cfg(feature = "material")]
 pub use caloric::{MaterialWallCaloric, WallCaloricConstraint, exchange_cell_with_heat_storage};
 
 /// Stationary radial wall drag; its lost kinetic energy stays in the gas.
@@ -92,6 +91,17 @@ pub enum WallThermal {
         /// Complete nonnegative exposed h*A [W/K].
         conductance_w_per_k: f64,
     },
+    /// Finite storage on an original immutable thermal law. Its source binding
+    /// must be supplied to the caloric exchange entry or the network operator.
+    /// The coordinate is h or u exactly as declared by that law.
+    Caloric {
+        /// Fixed wall mass [kg].
+        mass_kg: f64,
+        /// Current original specific thermal-storage coordinate [J/kg].
+        specific_energy_j_kg: f64,
+        /// Complete nonnegative exposed h*A [W/K].
+        conductance_w_per_k: f64,
+    },
 }
 
 /// One cell's stationary radial momentum and thermal contact.
@@ -114,6 +124,10 @@ impl WallContact {
                 temperature_k, heat_capacity_j_per_k, conductance_w_per_k,
             } => positive(temperature_k)
                 && positive(heat_capacity_j_per_k)
+                && nonnegative(conductance_w_per_k),
+            WallThermal::Caloric {
+                mass_kg, specific_energy_j_kg, conductance_w_per_k,
+            } => positive(mass_kg) && specific_energy_j_kg.is_finite()
                 && nonnegative(conductance_w_per_k),
         };
         if valid { Ok(()) } else { Err(WallExchangeError::Invalid("wall thermal inputs")) }
@@ -167,6 +181,8 @@ pub enum WallExchangeError {
     /// Original fixed-amount wall heat-storage source refused.
     #[cfg(feature = "material")]
     Caloric(fs_material::thermal::transport::ThermalTransportError),
+    /// Original finite-wall thermal source refused its state or geometry.
+    Thermal(fs_thermal::enthalpy::DepositionError),
     /// Actual cell state is outside the declared developed-wall approximation.
     TransportDomain {
         /// Physical quantity whose applicability interval was exceeded.
@@ -196,6 +212,14 @@ impl core::fmt::Display for WallExchangeError {
     }
 }
 impl std::error::Error for WallExchangeError {}
+impl From<fs_thermal::enthalpy::DepositionError> for WallExchangeError {
+    fn from(value: fs_thermal::enthalpy::DepositionError) -> Self {
+        match value {
+            fs_thermal::enthalpy::DepositionError::Cancelled => Self::Cancelled,
+            other => Self::Thermal(other),
+        }
+    }
+}
 impl From<FlowError> for WallExchangeError {
     fn from(value: FlowError) -> Self {
         match value {
@@ -212,6 +236,7 @@ impl From<super::dissipation::DissipationError> for WallExchangeError {
         }
     }
 }
+
 #[cfg(feature = "material")]
 impl From<fs_material::thermal::transport::ThermalTransportError> for WallExchangeError {
     fn from(value: fs_material::thermal::transport::ThermalTransportError) -> Self {
@@ -230,11 +255,13 @@ pub struct WallCellReport {
     pub drag_heating_j: f64,
     /// Actual heat entering gas [J].
     pub heat_to_gas_j: f64,
-    /// Actual represented finite-wall energy change [J].
+    /// Actual represented finite-wall thermal-storage change [J], in the
+    /// original law's declared h/u coordinate for a caloric wall.
     pub wall_energy_change_j: f64,
     /// Heat entering gas from a prescribed reservoir only [J].
     pub external_heat_to_gas_j: f64,
-    /// Actual gas-plus-wall energy change minus reservoir heat [J].
+    /// Actual gas-plus-wall thermal-storage change minus reservoir heat [J].
+    /// An enthalpy wall retains its original pressure-work convention.
     pub energy_residual_j: f64,
     /// Actual implicit heat-equation residual [J].
     pub thermal_residual_j: f64,
@@ -323,6 +350,9 @@ pub fn exchange_cell(
         WallThermal::Lumped {
             temperature_k, heat_capacity_j_per_k, conductance_w_per_k,
         } => Some((temperature_k, conductance_w_per_k, Some(heat_capacity_j_per_k))),
+        WallThermal::Caloric { .. } => {
+            return Err(WallExchangeError::Invalid("caloric wall requires its original thermal law"));
+        }
     };
     if let Some((wall_t, conductance, capacity)) = thermal {
         let integrated = conductance * dt;
@@ -341,7 +371,8 @@ pub fn exchange_cell(
             let domain = gas.domain();
             let lo = primitive.temperature.min(wall_t).max(domain.minimum_temperature);
             let hi = primitive.temperature.max(wall_t).min(domain.maximum_temperature);
-            let equation = |t: f64, _: &mut dyn FnMut() -> bool| -> Result<(f64, f64, f64), WallExchangeError> {
+            let equation = |t: f64, _: &mut dyn FnMut() -> bool|
+                -> Result<(f64, Option<f64>, f64), WallExchangeError> {
                 let (thermal, cv) = gas.caloric(state.partial_densities, t)?;
                 let change = (thermal - target) * volume_m3;
                 let heat = effective * (wall_t - t);
@@ -350,7 +381,7 @@ pub fn exchange_cell(
                 if !residual.is_finite() || !positive(slope) || !heat.is_finite() {
                     return Err(WallExchangeError::Invalid("wall thermal equation"));
                 }
-                Ok((residual, slope, change.abs().max(heat.abs())))
+                Ok((residual, Some(slope), change.abs().max(heat.abs())))
             };
             let (temperature, iterations) = solve_scalar(
                 lo, hi, primitive.temperature, control, equation, &mut cancelled,
@@ -410,14 +441,15 @@ pub fn exchange_cell(
     Ok(WallUpdate { momentum, energy, contact: updated, report })
 }
 
-// The same safeguarded scalar owner serves constant capacity in temperature
-// coordinates and source storage in exchanged-energy coordinates.
+/// One safeguarded monotone equation owner for authored and original-source
+/// storage. A source without an exact tangent uses the same bounded bisection.
 fn solve_scalar(
     mut lo: f64,
     mut hi: f64,
     initial: f64,
     control: WallControl,
-    mut equation: impl FnMut(f64, &mut dyn FnMut() -> bool) -> Result<(f64, f64, f64), WallExchangeError>,
+    mut equation: impl FnMut(f64, &mut dyn FnMut() -> bool)
+        -> Result<(f64, Option<f64>, f64), WallExchangeError>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(f64, usize), WallExchangeError> {
     let lower = equation(lo, cancelled)?;
@@ -433,11 +465,10 @@ fn solve_scalar(
             return Ok((value, iteration));
         }
         if residual < 0.0 { lo = value; } else { hi = value; }
-        let newton = value - residual / slope;
-        let next = if newton.is_finite() && newton > lo && newton < hi {
-            newton
-        } else {
-            0.5 * lo + 0.5 * hi
+        let newton = slope.map(|slope| value - residual / slope);
+        let next = match newton {
+            Some(next) if next.is_finite() && next > lo && next < hi => next,
+            _ => 0.5 * lo + 0.5 * hi,
         };
         if next == value { break; }
         value = next;

@@ -190,7 +190,7 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
     /// only after the complete accepted duration; all restart together on retry.
     pub fn step_with_sources(
         &mut self, maximum_duration: Time, controls: DissipatingStepControl,
-        sources: NetworkSources<'_>, cancelled: impl FnMut() -> bool,
+        sources: NetworkSources<'_, '_>, cancelled: impl FnMut() -> bool,
     ) -> Result<DissipatingNetworkReport, DissipatingNetworkError> {
         self.step_impl(maximum_duration, controls, sources, cancelled)
     }

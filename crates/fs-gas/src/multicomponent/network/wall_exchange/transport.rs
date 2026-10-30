@@ -76,7 +76,7 @@ pub(super) struct CircularWallTransport {
     binary: Vec<f64>,
 }
 
-impl NetworkWallOperator {
+impl NetworkWallOperator<'_> {
     /// Bind original transport data to selected developed circular branches.
     ///
     /// `Some` replaces that branch's authored drag and conductance coefficients
@@ -214,6 +214,10 @@ impl CircularWallTransport {
                 ..
             }
             | WallThermal::Lumped {
+                conductance_w_per_k,
+                ..
+            }
+            | WallThermal::Caloric {
                 conductance_w_per_k,
                 ..
             } => {

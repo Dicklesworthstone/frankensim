@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 // Synthetic source C(T)=a+bT J/K, using one explicit kilogram. This is not a
 // measured material or a claimed phase-stability interval.
-fn source(a: f64, b: f64, low: f64, high: f64) -> MaterialWallCaloric {
+fn source(a: f64, b: f64, low: f64, high: f64) -> MaterialWallCaloric<'static> {
     let key = PropertyKey::new("constant_volume_specific_heat", Dims([2, 0, -2, -1, 0, 0]));
     let mut claims = ClaimSet::new();
     claims
@@ -176,7 +176,7 @@ fn material_substitution_changes_actual_network_and_keeps_one_wall_state() {
     let mut identities = Vec::new();
     for slope in [0.0, 0.5] {
         let law = source(1.0, slope, 1.0, 10.0);
-        identities.push(law.storage().identity());
+        identities.push(law.storage().unwrap().identity());
         let mut n = network(&g, &[0.0], true);
         let initial = n.totals().absolute_energy(&g).unwrap();
         let contact = law.contact(5.0, 0.3, WallDrag::None).unwrap();
@@ -191,8 +191,9 @@ fn material_substitution_changes_actual_network_and_keeps_one_wall_state() {
             wall.branch_heat_storage(0).unwrap()[0]
                 .as_ref()
                 .unwrap()
-                .storage(),
-            law.storage()
+                .storage()
+                .unwrap(),
+            law.storage().unwrap()
         ));
         assert_eq!(wall.plenum_heat_storage().len(), 1);
         let mut reported = 0.0;

@@ -225,7 +225,7 @@ impl ReactingNetwork1d {
     /// accepted reports and wall storage publish only with the final gas state.
     pub fn step_with_sources(
         &mut self, maximum_duration: Time, controls: ReactiveStepControl,
-        sources: NetworkSources<'_>, cancelled: impl FnMut() -> bool,
+        sources: NetworkSources<'_, '_>, cancelled: impl FnMut() -> bool,
     ) -> Result<ReactiveNetworkReport, ReactiveNetworkError> {
         self.step_impl::<ConstantTransport>(maximum_duration, controls, None,
             DissipationControl::default(), sources, cancelled)
@@ -246,7 +246,7 @@ impl ReactingNetwork1d {
     pub fn step_with_dissipation_and_sources<L: TransportLaw>(
         &mut self, operator: &mut NetworkDissipationOperator<L>, maximum_duration: Time,
         controls: ReactiveStepControl, dissipation_controls: DissipationControl,
-        sources: NetworkSources<'_>, cancelled: impl FnMut() -> bool,
+        sources: NetworkSources<'_, '_>, cancelled: impl FnMut() -> bool,
     ) -> Result<ReactiveNetworkReport, ReactiveNetworkError> {
         self.step_impl(maximum_duration, controls, Some(operator), dissipation_controls, sources, cancelled)
     }

@@ -12,13 +12,14 @@ layer = "L3"
 
 [features]
 default = []
-experimental-euler = []
+experimental-euler = ["dep:fs-thermal"]
 material = ["dep:fs-material", "dep:fs-matdb"]
 
 [dependencies]
 fs-math = { path = "../fs-math" }
 fs-qty = { path = "../fs-qty" }
 fs-thermochem = { path = "../fs-thermochem" }
+fs-thermal = { path = "../fs-thermal", optional = true }
 fs-material = { path = "../fs-material", optional = true }
 fs-matdb = { path = "../fs-matdb", optional = true }
 

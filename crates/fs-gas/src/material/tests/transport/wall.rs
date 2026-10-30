@@ -16,7 +16,7 @@ fn geometry() -> CircularLaminarWall {
     }
 }
 
-fn wall(n: &MixtureNetwork1d, material: ThermochemicalGasModel) -> NetworkWallOperator {
+fn wall(n: &MixtureNetwork1d, material: ThermochemicalGasModel) -> NetworkWallOperator<'static> {
     NetworkWallOperator::new(
         n,
         vec![vec![
@@ -165,4 +165,62 @@ fn new_product_material_refusal_rolls_back_whole_reacting_network_and_finite_wal
     assert_eq!(reactive.last_report(), None);
     assert_eq!(wall.branch_contacts(0).unwrap(), contacts);
     assert_eq!(wall.last_report(), None);
+}
+
+#[test]
+fn borrowed_original_solid_chart_and_current_gas_materials_share_reacting_wall_storage() {
+    use crate::multicomponent::wall_exchange::MaterialWallCaloric;
+    use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve};
+    use fs_thermal::enthalpy::{Boundary, CellGeometry, CellId, DepositedCell, MaterialId};
+    let mut heat = Vec::new();
+    for capacity in [100.0, 1000.0] {
+        let knot = |h, t, liquid| EnthalpyPhaseKnot {
+            specific_enthalpy_j_kg: h, temperature_k: t,
+            liquid_mass_fraction: liquid, bulk_density_kg_m3: 1000.0,
+        };
+        // Deliberately authored verification chart, with retained original
+        // material owner; no experimentally calibrated solid is claimed.
+        let curve = EquilibriumEnthalpyPhaseCurve::try_new(ClaimSet::new().content_hash(),
+            vec![knot(0.0, 350.0, 0.0), knot(100.0*capacity, 450.0, 0.0),
+                knot(200.0*capacity, 500.0, 0.0), knot(300.0*capacity, 500.0, 1.0)]).unwrap();
+        let original = curve.pure_solid_thermal_law().unwrap();
+        let material = model(0.02, 5.0, 2000.0);
+        let initial = flow(&material, 2, |_| (0.1, 400.0));
+        let n = MixtureNetwork1d::new(vec![initial], Vec::new(), Vec::new(), || false).unwrap();
+        let initial_gas = n.totals().absolute_energy(n.gas()).unwrap();
+        let make_wall = |id| MaterialWallCaloric::from_thermal_law(original, DepositedCell {
+            id: CellId(id), segment_id: 1, body_id: 1, material_id: MaterialId(47),
+            mass_kg: 0.01, specific_h_j_kg: 100.0*capacity,
+            geometry: CellGeometry { start_m: [0.0; 3], end_m: [1.0, 0.0, 0.0],
+                volume_m3: 1e-5, surface_area_m2: 1.0 },
+            boundary: Boundary { ambient_k: 400.0, htc_w_m2_k: 0.0, reservoir: None, source_w: 0.0 },
+        }, original.enthalpy_range_j_kg()).unwrap();
+        let contact = make_wall(0).initial_contact(999.0, WallDrag::None).unwrap();
+        let mut walls = NetworkWallOperator::new(&n,
+            vec![vec![contact; 2]],
+            vec![], || false).unwrap()
+            .with_material_heat_storage(vec![vec![Some(make_wall(0)), Some(make_wall(1))]], vec![], || false).unwrap()
+            .with_circular_laminar_transport(adapter(material), vec![Some(geometry())], || false).unwrap();
+        let (_, mechanism, _) = fixture(0.0, 2000.0);
+        let mut reacting = ReactingNetwork1d::new(n, mechanism, controls().chemistry, || false).unwrap();
+        let mut wall_change = 0.0;
+        for _ in 0..3 {
+            let report = reacting.step_with_wall(&mut walls, Time::new(1e-4),
+                ReactiveStepControl::default(), WallControl::default(), || false).unwrap();
+            close(report.absolute_energy_residual_j, 0.0, 1e-7);
+            wall_change += walls.last_report().unwrap().wall_energy_change_j;
+        }
+        let mut actual_wall_change = 0.0;
+        for contact in walls.branch_contacts(0).unwrap() {
+            let WallThermal::Caloric { mass_kg, specific_energy_j_kg, conductance_w_per_k } = contact.thermal else { panic!("original wall lost") };
+            assert!(conductance_w_per_k < 999.0, "current gas material supplies actual heat transfer");
+            assert!(curve.temperature_at_specific_enthalpy(specific_energy_j_kg).unwrap() < 450.0);
+            actual_wall_change += mass_kg*(specific_energy_j_kg-100.0*capacity);
+        }
+        assert!(reacting.branches()[0].cell(0).unwrap().partial_densities[1] > 0.0);
+        close(actual_wall_change, wall_change, 1e-9);
+        close((reacting.totals().absolute_energy(reacting.gas()).unwrap()-initial_gas)+actual_wall_change, 0.0, 1e-6);
+        heat.push(-actual_wall_change);
+    }
+    assert!(heat[1] > heat[0], "source-only wall capacity substitution must alter evolving heat exchange");
 }

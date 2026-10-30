@@ -5,7 +5,7 @@ impl ReactingNetwork1d {
     pub(super) fn step_impl<L: TransportLaw>(
         &mut self, maximum_duration: Time, controls: ReactiveStepControl,
         mut operator: Option<&mut NetworkDissipationOperator<L>>,
-        dissipation_controls: DissipationControl, mut sources: NetworkSources<'_>,
+        dissipation_controls: DissipationControl, mut sources: NetworkSources<'_, '_>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ReactiveNetworkReport, ReactiveNetworkError> {
         poll(&mut cancelled)?;

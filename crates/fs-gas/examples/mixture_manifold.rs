@@ -391,7 +391,7 @@ fn write_cell(
 fn finite_walls(
     network: &MixtureNetwork1d,
     profiles: &[(f64, f64, f64); 3],
-) -> Result<NetworkWallOperator> {
+) -> Result<NetworkWallOperator<'static>> {
     let thermal = |area: f64| WallThermal::Lumped {
         temperature_k: WALL_INITIAL_TEMPERATURE_K,
         heat_capacity_j_per_k: WALL_AREAL_CAPACITY_J_M2_K * area,

@@ -1615,20 +1615,48 @@ committed as source evidence rather than claimed runtime evidence.
 
 ## Original material calorics in finite gas walls
 
-`MaterialWallCaloric` binds the existing `PreparedHeatStorage` to finite branch-cell
-and plenum walls. Its explicit caloric constraint declares fixed-volume
-internal-energy capacity or the stationary-solid negligible-expansion approximation;
-Cp is never silently converted to Cv. Original source lines, fixed constituent
-amounts and temperature support remain attached.
+`MaterialWallCaloric` binds the existing `PreparedHeatStorage` to finite
+branch-cell and plenum walls. Its explicit caloric constraint declares
+fixed-volume internal-energy capacity or the stationary-solid
+negligible-expansion approximation; Cp is never silently converted to Cv.
+Original source lines, fixed constituent amounts and temperature support remain
+attached. Source integrals determine actual storage; a temperature contact's
+capacity is only its refreshed tangent cache.
 
-The existing safeguarded wall solve uses exchanged energy, with a bracket
-intersecting both gas and wall domains. Actual wall storage comes from the source
-integral; contact capacity is a refreshed tangent cache only. Original gas calorics,
-drag-to-gas heating, evolving transport binding and reacting/dissipating network
-transactions retain ownership and atomic publication. Three new tests cover an
-independent nonlinear calorimetric reference, source-only substitutions and
-reaction/cancellation rollback. New modules pass formatting and whitespace checks;
-native execution remains unverified after unchanged asupersync was SIGKILLed in
-the authoring worker. This model has fixed geometry and constituent amounts,
-sensible lumped storage, and no inferred phase change, wall deformation, spatial
-wall conduction or pressure work.
+The same binding's `from_thermal_law` retains an original
+`fs-thermal::ThermalLaw`, its physical reference cell, fixed mass and explicit
+supported energy interval. Both owned phase charts and adapters borrowing
+prepared material sources can be bound without copying a fitted heat capacity.
+`NetworkWallOperator::with_material_heat_storage` supplies either source to the existing
+ordinary, molecular, reacting and valve-composed network transactions.
+Developed pipe-wall transport continues to query current gas composition,
+viscosity and conductivity; it replaces only drag/conductance, preserving the
+original wall source and evolving stored energy.
+
+The source step solves one monotone backward-Euler equation in transferred heat:
+`Q = dt G [T_wall(e0-Q/m)-T_gas(E0+Q/V)]`. The original gas calorics recover gas
+temperature and the original wall law supplies T(h/u), including exact latent
+plateaus. The same safeguarded scalar owner uses exact source tangents when
+available and bisection otherwise. No apparent capacity or separate latent-heat
+source is added. Actual
+represented gas energy, wall storage and heat-flux residuals must all meet the
+existing joule allowance. Source/geometry/range/work/cancellation failure returns
+no candidate; the original complete-network transaction publishes every gas and
+wall state together. Source storage is immutable and numerical work is reused.
+
+The law's storage basis remains explicit: internal energy describes an admitted
+fixed-volume source; enthalpy retains the material's own pressure-work convention.
+The combined report sums the selected thermal coordinates and does not relabel
+wall enthalpy as rigid-vessel internal energy. Reference heat-transfer geometry,
+uniform-wall applicability, imposed conductance and any external pressure work
+remain caller/source responsibilities. Melting-wall motion, loss of mechanical
+support, wall sharing between cells, nucleation, and spatial wall conduction are
+not inferred by this finite-store coupling.
+
+Focused tests check independent nonlinear calorimetric references, original
+source-only substitutions, reaction/domain/cancellation rollback, latent storage
+and full plateau traversal in both heat directions, accepted-history rollback
+and replay, continuing molecular/wave energy conservation, and the original
+borrowed solid material chart in a reacting network with current gas-card losses.
+Native execution remains unverified in the authoring worker: the unchanged
+asupersync dependency was SIGKILLed during code generation under its memory cap.

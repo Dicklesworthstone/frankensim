@@ -14,20 +14,17 @@
 
 use super::MixtureNetwork1d;
 use crate::multicomponent::wall_exchange::{
-    WallCellReport, WallContact, WallControl, WallDrag, WallExchangeError, WallThermal,
-    exchange_cell,
+    MaterialWallCaloric, WallCellReport, WallContact, WallControl, WallDrag, WallExchangeError, WallThermal,
+    exchange_cell, exchange_cell_with_heat_storage,
 };
 use crate::multicomponent::{Cell, Mesh1d, MixtureGas, allocated, sum};
 use fs_qty::Time;
 
+mod caloric;
+
 mod transport;
 pub use transport::CircularLaminarWall;
 use transport::CircularWallTransport;
-
-#[cfg(feature = "material")]
-mod caloric;
-#[cfg(feature = "material")]
-use crate::multicomponent::wall_exchange::MaterialWallCaloric;
 
 /// Source-only exchanges over a complete interval, or both composed wall halves.
 ///
@@ -41,7 +38,8 @@ pub struct NetworkWallReport {
     pub elapsed: Time,
     /// Energy transferred to gas by finite walls and reservoirs [J].
     pub heat_to_gas_j: f64,
-    /// Actual represented energy change of finite walls [J].
+    /// Actual represented thermal-storage change of finite walls [J]. Original
+    /// caloric laws retain their declared enthalpy/internal-energy convention.
     pub wall_energy_change_j: f64,
     /// Heat into gas from prescribed-temperature reservoirs only [J].
     pub external_heat_to_gas_j: f64,
@@ -78,9 +76,9 @@ struct BranchShape {
 /// bulk momentum and therefore admit only `WallDrag::None`.
 /// [`Self::with_circular_laminar_transport`] derives selected branch coefficients
 /// from current source-owned gas properties instead of retaining authored values.
-/// With the `material` feature, `with_material_heat_storage` additionally binds
-/// original nonlinear wall calorics without adding a second temperature history.
-pub struct NetworkWallOperator {
+/// [`Self::with_material_heat_storage`] supplies original source-dependent finite thermal
+/// storage, including exact latent plateaus, instead of a constant capacity.
+pub struct NetworkWallOperator<'law> {
     gas: MixtureGas,
     branches: Vec<BranchShape>,
     plenum_volumes: Vec<f64>,
@@ -95,27 +93,10 @@ pub struct NetworkWallOperator {
     trial_report: Option<NetworkWallReport>,
     trial_active: bool,
     transport: Option<CircularWallTransport>,
-    #[cfg(feature = "material")]
-    caloric: Vec<Option<MaterialWallCaloric>>,
+    caloric: Vec<Option<MaterialWallCaloric<'law>>>,
 }
 
-impl NetworkWallOperator {
-    #[allow(clippy::too_many_arguments)]
-    fn exchange_for(
-        &self, index: usize, state: Cell<'_>, volume_m3: f64, duration: Time,
-        contact: WallContact, controls: WallControl, cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<crate::multicomponent::wall_exchange::WallUpdate, WallExchangeError> {
-        #[cfg(feature = "material")]
-        if let Some(wall) = &self.caloric[index] {
-            return crate::multicomponent::wall_exchange::exchange_cell_with_heat_storage(
-                &self.gas, state, volume_m3, duration, contact, wall, controls, cancelled,
-            );
-        }
-        #[cfg(not(feature = "material"))]
-        let _ = index;
-        exchange_cell(&self.gas, state, volume_m3, duration, contact, controls, cancelled)
-    }
-
+impl<'law> NetworkWallOperator<'law> {
     /// Prepare one contact per original branch cell and finite plenum.
     ///
     /// Conductance is the complete exposed `h*A` in W/K for that cell, not a
@@ -204,7 +185,6 @@ impl NetworkWallOperator {
             trial_report: None,
             trial_active: false,
             transport: None,
-            #[cfg(feature = "material")]
             caloric: allocated(count, None)?,
         };
         poll(&mut cancelled)?;
@@ -413,6 +393,25 @@ impl NetworkWallOperator {
         network.last_report = None;
         self.trial_report = Some(complete);
         Ok(report)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn exchange_for(
+        &self,
+        index: usize,
+        state: Cell<'_>,
+        volume: f64,
+        duration: Time,
+        contact: WallContact,
+        controls: WallControl,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<crate::multicomponent::wall_exchange::WallUpdate, WallExchangeError> {
+        if let Some(source) = &self.caloric[index] {
+            return exchange_cell_with_heat_storage(
+                &self.gas, state, volume, duration, contact, source, controls, cancelled,
+            );
+        }
+        exchange_cell(&self.gas, state, volume, duration, contact, controls, cancelled)
     }
 
     pub(super) fn publish_trial_report(&mut self) {

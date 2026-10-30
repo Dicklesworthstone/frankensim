@@ -10,7 +10,7 @@ use crate::multicomponent::{Boundary, Conserved};
 
 type Flow = DissipatingNetwork1d<ConstantTransport>;
 
-fn coupled(g: &MixtureGas, contact: WallContact) -> (Flow, NetworkWallOperator) {
+fn coupled(g: &MixtureGas, contact: WallContact) -> (Flow, NetworkWallOperator<'static>) {
     let branch = MixtureEuler1d::new(
         g.clone(),
         Length::new(0.5),

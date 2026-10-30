@@ -83,7 +83,7 @@ pub(super) fn raw(mechanism: &IdealGasKineticsV1) -> MixtureNetwork1d {
 pub(super) fn orifice(area: f64) -> Orifice {
     Orifice::new(Area::new(area), 0.8, 1.0, ValveDirection::Bidirectional).unwrap()
 }
-pub(super) fn sources(n: &MixtureNetwork1d) -> (NetworkWallOperator, NetworkValveOperator) {
+pub(super) fn sources(n: &MixtureNetwork1d) -> (NetworkWallOperator<'static>, NetworkValveOperator) {
     let contact = WallContact { drag: WallDrag::Linear { rate_per_s: 0.4 },
         thermal: WallThermal::Lumped { temperature_k: 3.0, heat_capacity_j_per_k: 0.2, conductance_w_per_k: 0.03 } };
     let walls = NetworkWallOperator::new(n,
@@ -96,7 +96,7 @@ pub(super) fn sources(n: &MixtureNetwork1d) -> (NetworkWallOperator, NetworkValv
 pub(super) fn molecular(n: &MixtureNetwork1d) -> Diffusion {
     NetworkDissipationOperator::new(n, law(n.gas(), 1.0), vec![Length::new(0.1); n.connections().len()], || false).unwrap()
 }
-pub(super) fn reacting(heat: f64, rate: f64) -> (ReactingNetwork1d, Diffusion, NetworkWallOperator, NetworkValveOperator) {
+pub(super) fn reacting(heat: f64, rate: f64) -> (ReactingNetwork1d, Diffusion, NetworkWallOperator<'static>, NetworkValveOperator) {
     let m = mechanism(heat, rate);
     let n = raw(&m);
     let (wall, valve) = sources(&n);

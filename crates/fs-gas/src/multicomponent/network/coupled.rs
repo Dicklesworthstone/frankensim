@@ -19,9 +19,9 @@ use fs_qty::Time;
 /// forward then reverse retained order. Symmetric ordering does not promote the
 /// first-order source solvers to a certified second-order method.
 #[derive(Default)]
-pub struct NetworkSources<'a> {
+pub struct NetworkSources<'a, 'law> {
     /// Optional stationary drag, reservoir heat and finite-wall heat storage.
-    pub wall: Option<(&'a mut NetworkWallOperator, WallControl)>,
+    pub wall: Option<(&'a mut NetworkWallOperator<'law>, WallControl)>,
     /// Optional original-source finite-plenum valve transport.
     pub valves: Option<(&'a mut NetworkValveOperator, ValveSolve)>,
 }
@@ -50,7 +50,7 @@ impl SourceStage {
         )
     }
 }
-impl NetworkSources<'_> {
+impl NetworkSources<'_, '_> {
     pub(super) fn is_empty(&self) -> bool { self.wall.is_none() && self.valves.is_none() }
     pub(super) fn validate(&self) -> Result<(), SourceError> {
         if let Some((_, controls)) = &self.wall { controls.validate()?; }

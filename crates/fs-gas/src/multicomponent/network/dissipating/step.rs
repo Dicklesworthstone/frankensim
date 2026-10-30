@@ -4,7 +4,7 @@ use super::*;
 impl<L: TransportLaw> DissipatingNetwork1d<L> {
     pub(super) fn step_impl(
         &mut self, maximum_duration: Time, controls: DissipatingStepControl,
-        mut sources: NetworkSources<'_>, mut cancelled: impl FnMut() -> bool,
+        mut sources: NetworkSources<'_, '_>, mut cancelled: impl FnMut() -> bool,
     ) -> Result<DissipatingNetworkReport, DissipatingNetworkError> {
         poll(&mut cancelled)?;
         if !positive(maximum_duration.value()) || controls.maximum_coupling_retries > 32

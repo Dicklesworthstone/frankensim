@@ -2,13 +2,14 @@
 
 use super::*;
 
-impl NetworkWallOperator {
+impl<'law> NetworkWallOperator<'law> {
     /// Bind original material calorics to selected finite walls before evolution.
     ///
     /// Each `Some` consumes a complete fixed-amount storage binding. Original
-    /// contact temperatures and conductances remain authoritative; the capacity
-    /// field becomes the material's refreshed local tangent, never a substitute
-    /// for its integrated storage change. `None` retains the authored wall path.
+    /// contact temperatures or h/u and conductances remain authoritative. A
+    /// temperature contact's capacity becomes the source's refreshed tangent;
+    /// an energy contact retains latent storage directly. `None` retains the
+    /// authored wall path. Construct the contact on its same source first.
     /// Distinct contacts still represent distinct wall masses even if their
     /// immutable source tables share an Arc. A shared physical wall needs its
     /// own spatial thermal owner instead of duplicating its storage here.
@@ -18,8 +19,8 @@ impl NetworkWallOperator {
     /// reaction half, source domain or cancellation publishes no accepted wall.
     pub fn with_material_heat_storage(
         mut self,
-        branches: Vec<Vec<Option<MaterialWallCaloric>>>,
-        plenums: Vec<Option<MaterialWallCaloric>>,
+        branches: Vec<Vec<Option<MaterialWallCaloric<'law>>>>,
+        plenums: Vec<Option<MaterialWallCaloric<'law>>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, WallExchangeError> {
         poll(&mut cancelled)?;
@@ -57,14 +58,17 @@ impl NetworkWallOperator {
     }
 
     /// Original material owners in this branch's original cell order.
-    pub fn branch_heat_storage(&self, branch: usize) -> Option<&[Option<MaterialWallCaloric>]> {
+    pub fn branch_heat_storage(
+        &self,
+        branch: usize,
+    ) -> Option<&[Option<MaterialWallCaloric<'law>>]> {
         self.branches
             .get(branch)
             .map(|shape| &self.caloric[shape.start..shape.start + shape.mesh.cell_count()])
     }
 
     /// Original material owners in the original finite-plenum order.
-    pub fn plenum_heat_storage(&self) -> &[Option<MaterialWallCaloric>] {
+    pub fn plenum_heat_storage(&self) -> &[Option<MaterialWallCaloric<'law>>] {
         &self.caloric[self.plenum_start..]
     }
 }

@@ -1777,6 +1777,7 @@ dependencies = [
  "fs-material",
  "fs-math",
  "fs-qty",
+ "fs-thermal",
  "fs-thermochem",
 ]
 

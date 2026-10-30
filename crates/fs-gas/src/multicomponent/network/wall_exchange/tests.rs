@@ -50,7 +50,7 @@ fn lumped() -> WallContact {
         },
     }
 }
-fn uniform_operator(n: &MixtureNetwork1d, contact: WallContact) -> NetworkWallOperator {
+fn uniform_operator(n: &MixtureNetwork1d, contact: WallContact) -> NetworkWallOperator<'static> {
     NetworkWallOperator::new(
         n,
         n.branches()
@@ -67,6 +67,7 @@ fn wall_temperature(contact: WallContact) -> f64 {
         WallThermal::Lumped { temperature_k, .. }
         | WallThermal::Reservoir { temperature_k, .. } => temperature_k,
         WallThermal::Adiabatic => panic!("test expected thermal wall storage"),
+        WallThermal::Caloric { .. } => panic!("caloric temperature requires original source"),
     }
 }
 fn relaxation_error(steps: usize) -> f64 {
@@ -374,3 +375,4 @@ mod coupled;
 mod transport;
 #[cfg(feature = "material")]
 mod caloric;
+mod thermal_law;
