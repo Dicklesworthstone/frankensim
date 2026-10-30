@@ -218,6 +218,10 @@ impl MixtureEuler1d {
     pub const fn mesh(&self) -> &Mesh1d {
         &self.mesh
     }
+    /// Declared endpoint conditions of this accepted flow.
+    pub fn boundaries(&self) -> Boundaries {
+        self.boundaries
+    }
     /// Current accepted time.
     pub fn time(&self) -> Time {
         Time::new(self.time)

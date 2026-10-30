@@ -53,6 +53,23 @@ states use an HLL fallback; its intermediate state is checked, with bounded
 wave-speed expansion if required. These local checks are not a proof of global
 entropy stability or positivity for arbitrary EOS data.
 
+`NormalConserved` and `FrozenGas::hllc_normal_flux` expose the same closure to
+two-dimensional spatial owners in an orthonormal normal/tangent frame. They
+carry both momentum components and full referenced total energy. Transverse
+momentum and kinetic energy follow the same HLLC/HLL waves as the normal
+equations; HLL intermediate-state admission includes heat produced by numerical
+shear mixing. No extra constant-gamma source or independent passive-scalar flux
+is introduced. `normal_conserved` refuses loss of sensible-energy precision
+when adding transverse kinetic energy, and `normal_primitive` removes that
+energy exactly once before the original caloric inversion. The stationary slip
+wall adapter reuses the thermally perfect shock/rarefaction wall solve and
+returns zero mass, transverse momentum and energy flux. Spatial reconstruction,
+mesh evolution and timestep acceptance remain with the consuming spatial owner.
+Focused G0/G3/G4 tests cover axial correspondence, moving shear contacts,
+transverse-boost covariance on both flux branches, shear-heating source-domain
+refusal, slip-wall pressure and cancellation. This adds no entropy theorem,
+viscous wall model, three-dimensional closure or physical shock-thickness claim.
+
 MUSCL uses monotonized-central primitive slopes, reduced together when needed
 to retain positive density/pressure and the declared source interval. SSP RK2
 uses one shared oriented flux per face. Periodic end faces share the same flux

@@ -113,6 +113,9 @@ const OPEN: Boundaries = Boundaries::Ends {
 #[path = "geometry_tests.rs"]
 mod geometry_tests;
 
+#[path = "normal_flux_tests.rs"]
+mod normal_flux_tests;
+
 #[test]
 fn g0_source_energy_gauge_variable_cv_and_supersonic_round_trip() {
     let ordinary = gas(0.4, 0.0);
