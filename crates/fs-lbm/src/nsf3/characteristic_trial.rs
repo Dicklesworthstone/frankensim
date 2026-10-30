@@ -66,6 +66,8 @@ impl<L: Lattice3<27>> NsfCharacteristicTrial<'_, L> {
         self.reservoir_exchanges.get(aperture)
     }
     /// Original per-owner interval accounts in declared aperture order.
+    /// Exchange variations sum the absolute original substep transfers, retaining
+    /// chronological reversals independently of the signed interval totals.
     pub fn reservoir_exchanges(&self) -> &[NsfReservoirExchange] { &self.reservoir_exchanges }
     /// Original interval-mean tile flows of one owner, preserving signed flow.
     pub fn reservoir_flows_at(&self, aperture: usize) -> &[NsfReservoirFlow] {
@@ -253,6 +255,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 total.acoustic_pressure_work_out_j += step.acoustic_pressure_work_out_j;
                 total.mass_out_kg += step.mass_out_kg;
                 total.total_energy_out_j += step.total_energy_out_j;
+                total.mass_exchange_variation_kg += step.mass_exchange_variation_kg;
+                total.energy_exchange_variation_j += step.energy_exchange_variation_j;
             }
             for (total, flow) in reservoir_flows.iter_mut().zip(candidate.last_reservoir_flows()) {
                 total.outward_volume_flow_m3_s += flow.outward_volume_flow_m3_s;

@@ -95,6 +95,14 @@ pub struct NsfReservoirExchange {
     /// Original conservative FV total energy leaving this aperture [J].
     /// Includes advective, pressure, conductive and viscous contributions.
     pub total_energy_out_j: f64,
+    /// Sum of absolute original substep mass exchanges [kg]. One completed
+    /// lattice step contributes abs(mass_out_kg); interval trials retain every
+    /// substep before signs can cancel. This is not microscopic gross link flow.
+    pub mass_exchange_variation_kg: f64,
+    /// Sum of absolute original substep FV total-energy exchanges [J]. This
+    /// bounds energy excursions hidden by a small signed interval total; it is
+    /// neither heat nor dissipation and does not split the original FV flux.
+    pub energy_exchange_variation_j: f64,
     /// Actual combined tile area [m²].
     pub area_m2: f64,
     /// Fixed original source pressure [Pa], independent of warm ghost controls.
@@ -116,11 +124,13 @@ pub struct NsfReservoirExchange {
 impl NsfReservoirExchange {
     pub(super) fn is_finite(&self) -> bool {
         self.area_m2 > 0.0 && self.reference_pressure_pa > 0.0
+            && self.mass_exchange_variation_kg >= 0.0 && self.energy_exchange_variation_j >= 0.0
             && [self.area_m2, self.reference_pressure_pa, self.mean_pressure_pa,
                 self.mean_acoustic_pressure_pa, self.normal_volume_flow_m3_s,
                 self.pressure_work_out_j, self.acoustic_pressure_work_out_j,
                 self.projection_covariance_j, self.mass_out_kg,
-                self.total_energy_out_j].iter().all(|value| value.is_finite())
+                self.total_energy_out_j, self.mass_exchange_variation_kg,
+                self.energy_exchange_variation_j].iter().all(|value| value.is_finite())
     }
 }
 
@@ -475,6 +485,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             exchange.mass_out_kg = mass_out_kg[owner];
             exchange.total_energy_out_j = 0.5 * self.law.energy_unit_j()
                 * (before.total_energy_out_lu + after.total_energy_out_lu);
+            exchange.mass_exchange_variation_kg = exchange.mass_out_kg.abs();
+            exchange.energy_exchange_variation_j = exchange.total_energy_out_j.abs();
             if !exchange.is_finite() {
                 return Err(NsfError::Input("reservoir finite-volume exchange overflowed"));
             }
@@ -1057,12 +1069,14 @@ mod tests {
         let mut original = build();
         for _ in 0..2 { grid.step().unwrap(); original.step().unwrap(); }
         let before = (grid.state_hash(), grid.steps(), grid.reservoir_aperture().cloned(),
-            grid.cumulative_ledger(), grid.last_reservoir_mass_out_kg(), grid.sgs_transport.clone());
+            grid.cumulative_ledger(), grid.last_reservoir_mass_out_kg(), grid.sgs_transport.clone(),
+            grid.last_reservoir_exchanges().to_vec());
         let state = grid.reservoir_aperture_state_at(101345.0, 293.35).unwrap();
         let drives = grid.boundary_drives().unwrap();
         let first = grid.preview_boundary_interval_with_reservoir(
             drives, None, state, 3, 3 * 729, || false).unwrap();
-        let expected = (first.grid().state_hash(), *first.energy_ledger(), first.reservoir_mass_out_kg());
+        let expected = (first.grid().state_hash(), *first.energy_ledger(), first.reservoir_mass_out_kg(),
+            *first.reservoir_exchange().unwrap());
         let mass_error = first.grid().total_mass_kg() - first.previous_mass_kg()
             + first.reservoir_mass_out_kg()
             + first.boundary_exchange().iter().map(|face| face.mass_out_kg).sum::<f64>();
@@ -1071,21 +1085,33 @@ mod tests {
         assert!(first.energy_ledger().open_energy_j.abs() > 0.0);
         drop(first);
         assert_eq!((grid.state_hash(), grid.steps(), grid.reservoir_aperture().cloned(),
-            grid.cumulative_ledger(), grid.last_reservoir_mass_out_kg(), grid.sgs_transport.clone()), before);
+            grid.cumulative_ledger(), grid.last_reservoir_mass_out_kg(), grid.sgs_transport.clone(),
+            grid.last_reservoir_exchanges().to_vec()), before);
         let calls = std::cell::Cell::new(0);
         assert!(grid.preview_boundary_interval_with_reservoir(
             drives, None, state, 3, 3 * 729, || {
                 calls.set(calls.get() + 1); calls.get() == 3
             }).is_err());
         assert_eq!((grid.state_hash(), grid.steps(), grid.reservoir_aperture().cloned(),
-            grid.cumulative_ledger(), grid.last_reservoir_mass_out_kg(), grid.sgs_transport.clone()), before);
+            grid.cumulative_ledger(), grid.last_reservoir_mass_out_kg(), grid.sgs_transport.clone(),
+            grid.last_reservoir_exchanges().to_vec()), before);
         let retry = grid.preview_boundary_interval_with_reservoir(
             drives, None, state, 3, 3 * 729, || false).unwrap();
-        assert_eq!((retry.grid().state_hash(), *retry.energy_ledger(), retry.reservoir_mass_out_kg()), expected);
+        assert_eq!((retry.grid().state_hash(), *retry.energy_ledger(), retry.reservoir_mass_out_kg(),
+            *retry.reservoir_exchange().unwrap()), expected);
         retry.accept();
         original.set_reservoir_aperture_state(state).unwrap();
         original.set_boundary_drives(drives).unwrap();
-        for _ in 0..3 { original.step().unwrap(); }
+        let mut original_variation = (0.0, 0.0);
+        for _ in 0..3 {
+            original.step().unwrap();
+            let exchange = original.last_reservoir_exchange().unwrap();
+            original_variation.0 += exchange.mass_out_kg.abs();
+            original_variation.1 += exchange.total_energy_out_j.abs();
+        }
+        assert_eq!((expected.3.mass_exchange_variation_kg, expected.3.energy_exchange_variation_j),
+            original_variation);
+        assert_eq!(grid.last_reservoir_exchanges(), original.last_reservoir_exchanges());
         assert_eq!(grid.state_hash(), original.state_hash());
         assert_eq!(grid.cumulative_ledger(), original.cumulative_ledger());
         assert_eq!(grid.reservoir_aperture(), original.reservoir_aperture());
