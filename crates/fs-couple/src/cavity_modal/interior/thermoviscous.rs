@@ -322,6 +322,24 @@ impl<'c, S> ThermoviscousInterior<'c, S> {
             .response(traction_pa, cancelled)?)
     }
 
+    /// Simultaneous source-bound fluid traction and original structural force.
+    /// The FE must have been assembled with its original modal moving wall.
+    /// Forces use N/sqrt(kg) and both drives use exp(+i omega t); gas molecular
+    /// calorics, material fluid EOS and finite wall heat remain in this same solve.
+    pub fn response_with_wall_forces(
+        &self,
+        frequency_hz: f64,
+        traction_pa: &[C64],
+        wall_forces_n_per_sqrt_kg: &[C64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ThermoviscousField, ThermoviscousSourceError> {
+        let cp = self.heat_capacity(frequency_hz, cancelled)?;
+        Ok(self
+            .fe
+            .prepare_with_heat_capacity(frequency_hz, cp, cancelled)?
+            .response_with_wall_forces(traction_pa, wall_forces_n_per_sqrt_kg, cancelled)?)
+    }
+
     /// Row-major Q=Y P [m3/(Pa s)] in the FE's exp(+i omega t) convention.
     /// The original owner factors once for all excitation columns.
     pub fn admittance(
@@ -344,6 +362,11 @@ impl<'c, S> ThermoviscousInterior<'c, S> {
         reference_resistance: &[f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<C64>, ThermoviscousSourceError> {
+        if self.fe.port_mode_count() == 0 {
+            return Err(invalid(
+                "a closed moving-wall cavity has no duct scattering coordinates",
+            ));
+        }
         let cp = self.heat_capacity(frequency_hz, cancelled)?;
         let mut s = self.fe.scattering_with_heat_capacity(
             frequency_hz,

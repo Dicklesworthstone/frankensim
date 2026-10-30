@@ -14,7 +14,10 @@
 //! replaces their volume operators. See Kampinga, *Viscothermal acoustics using
 //! finite elements* (2010), section 2.4.
 //!
-//! Walls are stationary no-slip, with explicit isothermal and finite conductive
+//! Walls are stationary no-slip by default. [`moving_wall::MovingWall`] imposes
+//! the full vector motion of an original structural modal source and receives
+//! the reciprocal fluid traction in the SAME solve, on the fixed reference mesh.
+//! Walls have explicit isothermal and finite conductive
 //! subsets; remaining walls and all pressure ports have zero normal conductive
 //! heat flux. Finite solids use the original local normal conduction owner;
 //! the gas temperature and velocity fields remain fully resolved. A port
@@ -44,6 +47,9 @@ use std::collections::BTreeSet;
 
 pub mod wall;
 use wall::PreparedWallTraces;
+/// Reciprocal full-vector moving solid boundaries in the original mixed solve.
+pub mod moving_wall;
+use moving_wall::{MovingWall, MovingWallField};
 
 /// Hard dense-solver cap, independent of the caller's smaller budget.
 pub const MAX_LNS_DOFS: usize = 1536;
@@ -305,6 +311,7 @@ pub struct ThermoviscousFe<'c> {
     isothermal_faces: BTreeSet<[u32; 3]>,
     conductive: PreparedWallTraces,
     pub(crate) physical_modes: Vec<Vec<PhysicalTrace>>,
+    moving_wall: Option<MovingWall>,
 }
 
 /// One reusable factorization at a single frequency and caloric state.
@@ -330,7 +337,7 @@ pub struct PreparedThermoviscousScattering<'a, 'c> {
 /// Cycle-averaged work [W]; no clipping of loss or residual is performed.
 #[derive(Debug, Clone, Copy)]
 pub struct ThermoviscousPower {
-    /// Work entering through prescribed total traction.
+    /// Work entering through prescribed total traction and structural forces.
     pub input_w: f64,
     /// Deviatoric shear-viscous dissipation.
     pub viscous_w: f64,
@@ -343,12 +350,19 @@ pub struct ThermoviscousPower {
     pub solid_conductive_w: f64,
     /// Molecular/caloric relaxation from passive complex heat capacity.
     pub caloric_w: f64,
+    /// Original structural modal damping; excludes the resolved fluid losses.
+    pub structural_damping_w: f64,
 }
 impl ThermoviscousPower {
     /// Sum of fluid-volume and solid-wall dissipation.
     #[must_use]
     pub fn dissipated_w(self) -> f64 {
-        self.viscous_w + self.bulk_w + self.conductive_w + self.solid_conductive_w + self.caloric_w
+        self.viscous_w
+            + self.bulk_w
+            + self.conductive_w
+            + self.solid_conductive_w
+            + self.caloric_w
+            + self.structural_damping_w
     }
     /// Input minus fluid-volume and solid-wall dissipation [W].
     #[must_use]
@@ -372,6 +386,8 @@ pub struct ThermoviscousField {
     pub temperature_k: Vec<C64>,
     /// Independently integrated resolved losses and boundary input work.
     pub power: ThermoviscousPower,
+    /// Coupled structural velocity and full fluid reaction, empty for rigid walls.
+    pub moving_wall: MovingWallField,
 }
 impl ThermoviscousField {
     /// Mean traction work entering the domain [W].
@@ -401,6 +417,7 @@ impl<'c> ThermoviscousFe<'c> {
             thermodynamics,
             true,
             boundary,
+            &BTreeSet::new(),
             limits,
             cancelled,
         )
@@ -429,6 +446,7 @@ impl<'c> ThermoviscousFe<'c> {
             thermodynamics,
             false,
             boundary,
+            &BTreeSet::new(),
             limits,
             cancelled,
         )
@@ -442,6 +460,7 @@ impl<'c> ThermoviscousFe<'c> {
         thermodynamics: ThermoviscousThermodynamics,
         ideal_gas: bool,
         boundary: &ThermoviscousBoundary,
+        moving_faces: &BTreeSet<[u32; 3]>,
         limits: ThermoviscousLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, ThermoviscousError> {
@@ -452,7 +471,7 @@ impl<'c> ThermoviscousFe<'c> {
             || limits.max_elements == 0
             || !limits.max_element_aspect_ratio.is_finite()
             || limits.max_element_aspect_ratio <= 0.0
-            || boundary.ports.is_empty()
+            || (boundary.ports.is_empty() && moving_faces.is_empty())
             || boundary.ports.len() > MAX_PORT_MODES
             || complex.tets.is_empty()
         {
@@ -529,6 +548,11 @@ impl<'c> ThermoviscousFe<'c> {
                 return Err(ThermoviscousError::InvalidInput("isothermal wall subset"));
             }
         }
+        if moving_faces.iter().any(|face| !walls.contains(face)) {
+            return Err(ThermoviscousError::InvalidInput(
+                "moving faces must be no-slip walls",
+            ));
+        }
         let mut covered = walls.clone();
         for mode in &boundary.ports {
             if mode.traces.is_empty() {
@@ -584,7 +608,10 @@ impl<'c> ThermoviscousFe<'c> {
                 .collect::<Vec<_>>();
             (map, count)
         };
-        let (velocity_map, nv) = mask(&walls);
+        // Release the selected wall trace only for assembly. The moving-wall
+        // constructor then imposes its exact modal kinematics by congruence.
+        let clamped = walls.difference(moving_faces).copied().collect();
+        let (velocity_map, nv) = mask(&clamped);
         let (temperature_map, nt) = mask(&thermal);
         let pressure_start = 3 * nv;
         let temperature_start = pressure_start + complex.vertex_count;
@@ -635,6 +662,7 @@ impl<'c> ThermoviscousFe<'c> {
             isothermal_faces: thermal,
             conductive: PreparedWallTraces::default(),
             physical_modes: Vec::new(),
+            moving_wall: None,
         };
         model.assemble(cancelled)?;
         for mode in &boundary.ports {
@@ -917,6 +945,21 @@ impl<'c> ThermoviscousFe<'c> {
     }
 
     fn operator_entry(&self, row: usize, col: usize, omega: f64, cp: C64) -> C64 {
+        let fluid = self.fluid_operator_entry(row, col, omega, cp);
+        if row == col && row >= 3 * self.velocity_count && row < self.pressure_start {
+            let mode = &self
+                .moving_wall
+                .as_ref()
+                .expect("moving coordinate")
+                .structure
+                .modes()[row - 3 * self.velocity_count];
+            fluid + moving_wall::modal_impedance(mode, omega)
+        } else {
+            fluid
+        }
+    }
+
+    fn fluid_operator_entry(&self, row: usize, col: usize, omega: f64, cp: C64) -> C64 {
         let i = row * self.n + col;
         let mut value = C64::new(self.constant[i], omega * self.mass[i]);
         if row >= self.temperature_start && col >= self.temperature_start {
@@ -1191,19 +1234,20 @@ impl PreparedThermoviscous<'_, '_> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ThermoviscousField, ThermoviscousError> {
         let x = self.solve(drive, cancelled)?;
-        self.field(drive, &x, cancelled)
+        self.field(drive, &[], &x, cancelled)
     }
 
     fn field(
         &self,
         drive: &[C64],
+        wall_forces: &[C64],
         x: &[C64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ThermoviscousField, ThermoviscousError> {
         let model = self.model;
         let nv = model.velocity_count;
         let pressure_pa = x[model.pressure_start..model.temperature_start].to_vec();
-        let velocity_m_s = model
+        let mut velocity_m_s = model
             .velocity_map
             .iter()
             .map(|id| match id {
@@ -1211,6 +1255,20 @@ impl PreparedThermoviscous<'_, '_> {
                 None => [C64::ZERO; 3],
             })
             .collect::<Vec<_>>();
+        let moving_wall = self.wall_field(drive, wall_forces, x, cancelled)?;
+        if let Some(wall) = &model.moving_wall {
+            for (shape, &u) in wall
+                .velocity_shapes
+                .iter()
+                .zip(&moving_wall.modal_velocity_m_sqrt_kg_per_s)
+            {
+                for (velocity, phi) in velocity_m_s.iter_mut().zip(shape) {
+                    for c in 0..3 {
+                        velocity[c] = velocity[c] + u.scale(phi[c]);
+                    }
+                }
+            }
+        }
         let temperature_k = model
             .temperature_map
             .iter()
@@ -1238,7 +1296,9 @@ impl PreparedThermoviscous<'_, '_> {
                 cancelled,
             )?,
             caloric_w: 0.0,
+            structural_damping_w: moving_wall.damping_w,
         };
+        power.input_w += moving_wall.external_input_w;
         let quad = duffy_quadrature(4);
         for t in 0..model.space.complex.tets.len() {
             poll(cancelled)?;
@@ -1300,6 +1360,7 @@ impl PreparedThermoviscous<'_, '_> {
             power.conductive_w,
             power.solid_conductive_w,
             power.caloric_w,
+            power.structural_damping_w,
         ]
         .iter()
         .any(|v| !v.is_finite())
@@ -1314,6 +1375,7 @@ impl PreparedThermoviscous<'_, '_> {
             velocity_m_s,
             temperature_k,
             power,
+            moving_wall,
         })
     }
 }
@@ -1376,7 +1438,7 @@ impl PreparedThermoviscousScattering<'_, '_> {
         if drive.iter().any(|&p| !finite(p)) {
             return Err(ThermoviscousError::NonFinite);
         }
-        self.inner.field(&drive, &x, cancelled)
+        self.inner.field(&drive, &[], &x, cancelled)
     }
 
     /// Full power scattering from the same loaded LU. Field quadrature is

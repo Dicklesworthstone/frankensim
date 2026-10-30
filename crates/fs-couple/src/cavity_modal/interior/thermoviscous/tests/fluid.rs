@@ -275,3 +275,82 @@ fn source_fluid_refuses_unknown_expansion_inconsistent_calorics_and_wrong_fe() {
     let (medium, thermo) = source_fluid_medium(&original, original.pressure, 0.0).unwrap();
     assert!((thermo.sound_speed_m_s(medium).unwrap() / original.sound_speed - 1.0).abs() < 2e-14);
 }
+
+#[test]
+fn source_liquid_and_original_structural_model_close_one_resolved_force_solve() {
+    use fs_feec::acoustics::thermoviscous::moving_wall::MovingWall;
+    use fs_modal::time::{ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel};
+    let (card, fluid) = liquid(Some(-2e-4), 0.004, 1.0);
+    let (mesh, xyz) = kuhn_cube(2);
+    let xyz = points(&xyz);
+    let (medium, thermo) = source_fluid_medium(&fluid, 101325.0, 0.002).unwrap();
+    let geometry = HelmholtzFe::new(
+        &mesh,
+        &xyz,
+        2,
+        Medium {
+            density_kg_m3: medium.density_kg_m3,
+            sound_speed_m_s: thermo.sound_speed_m_s(medium).unwrap(),
+        },
+    )
+    .unwrap();
+    let faces = geometry.boundary_faces();
+    let mut phi = vec![[0.0; 3]; mesh.vertex_count + mesh.edges.len()];
+    for face in &faces {
+        for &v in face {
+            phi[v as usize] = [100.0 * xyz[v as usize][0] / LENGTH, 0.0, 0.0];
+        }
+    }
+    let structure = ModalAcousticTimeModel::try_new(
+        48_000,
+        vec![ModalAcousticMode {
+            angular_frequency_rad_s: 500.0,
+            damping_ratio: 0.02,
+            pressure_per_modal_velocity: C64::ZERO,
+        }],
+        ModalAcousticTimeBudget::audible_reference(),
+    )
+    .unwrap();
+    let original_modes = structure.modes().to_vec();
+    let fe = ThermoviscousFe::new_with_moving_wall(
+        &mesh,
+        &xyz,
+        medium,
+        thermo,
+        &ThermoviscousBoundary {
+            no_slip_faces: faces.clone(),
+            isothermal_faces: vec![],
+            ports: vec![],
+        },
+        MovingWall {
+            faces,
+            velocity_shapes: vec![phi],
+            structure,
+        },
+        ThermoviscousLimits::default(),
+        &mut || false,
+    )
+    .unwrap();
+    let model = ThermoviscousInterior::from_material(fe, fluid, BAND).unwrap();
+    assert_eq!(
+        model.material_source().material().card_identity(),
+        card.content_hash()
+    );
+    assert_eq!(
+        model.inner().moving_wall().unwrap().structure.modes(),
+        original_modes
+    );
+    let field = model
+        .response_with_wall_forces(150.0, &[], &[C64::ONE], &mut || false)
+        .unwrap();
+    assert!(field.moving_wall.modal_velocity_m_sqrt_kg_per_s[0].abs() > 0.0);
+    assert!(field.moving_wall.fluid_force_n_per_sqrt_kg[0].abs() > 0.0);
+    assert!(field.power.conductive_w > 0.0 && field.power.structural_damping_w > 0.0);
+    assert!(field.power.balance_residual_w().abs() < 2e-8 * field.power.dissipated_w());
+    assert!(
+        model
+            .response_with_wall_forces(BAND[1] + 1.0, &[], &[C64::ONE], &mut || false)
+            .is_err()
+    );
+    assert!(model.duct_scattering(150.0, &[], &mut || false).is_err());
+}

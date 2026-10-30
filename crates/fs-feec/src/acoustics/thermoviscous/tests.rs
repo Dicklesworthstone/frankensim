@@ -2,6 +2,7 @@ use super::*;
 
 mod conductive;
 mod fluid;
+mod moving_wall;
 
 fn air() -> ThermoviscousMedium {
     let temperature = 293.15;
