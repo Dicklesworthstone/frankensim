@@ -6,10 +6,11 @@
 //! is nonlinear elimination of the existing chemical equations, not a new
 //! reaction/thermal solver or an adiabatic reaction-then-cooling split.
 
+use super::super::transport::GasHeatTransport;
 use super::super::{
-    Cx, DepositionSimulation, IsochoricGasParcel, PreparedMaterialNetwork, SolidEnthalpy,
-    SolidEnthalpyState, SolidGasCandidate, SolidGasContact, SolidGasError, SolidGasReport,
-    SolidGasSolve,
+    Cx, DepositionSimulation, HeatNetworkSample, IsochoricGasParcel, MaterialNetworkSample,
+    PreparedHeatNetwork, PreparedMaterialNetwork, SolidEnthalpy, SolidEnthalpyState,
+    SolidGasCandidate, SolidGasContact, SolidGasError, SolidGasReport, SolidGasSolve,
 };
 use crate::cavity_phs::piston::reactive::{
     GasReaction, GasReactionSolve, heat::HeatedGasReactionStep,
@@ -18,11 +19,11 @@ use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 
 /// The original accepted thermal candidate and its identical chemical endpoint.
 /// There is no second temperature, composition, clock or energy store.
-pub struct CoupledReactiveSolidGasCandidate<'m, 't> {
-    coupled: SolidGasCandidate<'m, 't>,
+pub struct CoupledReactiveSolidGasCandidate<'m, 't, S = MaterialNetworkSample> {
+    coupled: SolidGasCandidate<'m, 't, S>,
     reaction: HeatedGasReactionStep,
 }
-impl<'m, 't> CoupledReactiveSolidGasCandidate<'m, 't> {
+impl<'m, 't, S> CoupledReactiveSolidGasCandidate<'m, 't, S> {
     pub const fn thermal(&self) -> &DepositionSimulation<'t> {
         self.coupled.thermal()
     }
@@ -33,14 +34,14 @@ impl<'m, 't> CoupledReactiveSolidGasCandidate<'m, 't> {
         self.coupled.state()
     }
     /// The original local cell, patch, gas and combined energy balances.
-    pub const fn report(&self) -> &SolidGasReport {
+    pub const fn report(&self) -> &SolidGasReport<S> {
         self.coupled.report()
     }
     /// Actual endpoint channel equations, source evaluations and heat/entropy.
     pub const fn reaction(&self) -> &HeatedGasReactionStep {
         &self.reaction
     }
-    pub fn into_parts(self) -> (SolidGasCandidate<'m, 't>, HeatedGasReactionStep) {
+    pub fn into_parts(self) -> (SolidGasCandidate<'m, 't, S>, HeatedGasReactionStep) {
         (self.coupled, self.reaction)
     }
 }
@@ -85,6 +86,75 @@ impl<'m> SolidEnthalpy<'m> {
         initial_energy_increments_j: &[f64],
         cx: &Cx<'_>,
     ) -> Result<CoupledReactiveSolidGasCandidate<'m, 't>, SolidGasError> {
+        self.step_reacting_gas_with_transport(
+            thermal,
+            gas,
+            reaction,
+            target_s,
+            external_gas_heat_j,
+            contacts,
+            transport,
+            reaction_controls,
+            controls,
+            initial_energy_increments_j,
+            cx,
+        )
+    }
+
+    /// The same joint implicit chemistry/gas/solid endpoint with the complete
+    /// shared heat network. Source contact resistance, integrated material layers
+    /// and closed surface radiation respond to the SAME cell temperatures that
+    /// exchange energy with the reacting gas. Chemical formation energy stays in
+    /// the original gas inventory and is not added again as a heat source.
+    ///
+    /// All original mechanism, source, numerical and fixed-volume restrictions
+    /// remain. Electrical graph bindings refuse; surface radiation assumes a
+    /// nonparticipating gas and does not model volumetric radiative chemistry.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_coupled_reacting_isochoric_gas_heat_network<'t>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        gas: &IsochoricGasParcel,
+        reaction: &GasReaction,
+        target_s: f64,
+        external_gas_heat_j: f64,
+        contacts: &[SolidGasContact],
+        transport: &PreparedHeatNetwork<'_, '_>,
+        reaction_controls: GasReactionSolve,
+        controls: SolidGasSolve,
+        initial_energy_increments_j: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<CoupledReactiveSolidGasCandidate<'m, 't, HeatNetworkSample>, SolidGasError> {
+        self.step_reacting_gas_with_transport(
+            thermal,
+            gas,
+            reaction,
+            target_s,
+            external_gas_heat_j,
+            contacts,
+            transport,
+            reaction_controls,
+            controls,
+            initial_energy_increments_j,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_reacting_gas_with_transport<'t, T: GasHeatTransport>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        gas: &IsochoricGasParcel,
+        reaction: &GasReaction,
+        target_s: f64,
+        external_gas_heat_j: f64,
+        contacts: &[SolidGasContact],
+        transport: T,
+        reaction_controls: GasReactionSolve,
+        controls: SolidGasSolve,
+        initial_energy_increments_j: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<CoupledReactiveSolidGasCandidate<'m, 't, T::Sample>, SolidGasError> {
         cx.checkpoint().map_err(|_| SolidGasError::Cancelled)?;
         if reaction_controls.gas != controls.gas {
             return Err(SolidGasError::Invalid(

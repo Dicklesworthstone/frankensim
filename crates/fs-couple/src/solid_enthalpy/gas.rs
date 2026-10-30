@@ -8,7 +8,7 @@
 //!
 //! The gas is well mixed and its volume/composition stay fixed. Thermal geometry
 //! stays fixed. Internal links may retain authored conductances or resolve the
-//! original prepared material network at every proposed endpoint.
+//! original prepared material or complete heat network at every proposed endpoint.
 //! The returned solid field is a sequential quasistatic thermal load: reciprocal
 //! thermoelastic heat, gas pressure loads, gas flow and moving surfaces require
 //! their own closures. The caloric account does not include elastic energy.
@@ -28,8 +28,12 @@ use fs_thermal::enthalpy::backward_euler::{BackwardEulerStep, StepCoefficients};
 use std::cell::Cell;
 
 mod transport;
+use transport::{GasHeatTransport, GasTransportSample};
 /// Declared chemistry, finite gas heat and the same spatial solid state.
 pub mod reactive;
+use crate::circuit_enthalpy::contacts::heat::{
+    HeatNetworkError, HeatNetworkSample, PreparedHeatNetwork,
+};
 use crate::circuit_enthalpy::material::{
     MaterialNetworkError, MaterialNetworkSample, PreparedMaterialNetwork,
 };
@@ -74,6 +78,7 @@ pub enum SolidGasError {
     Reaction(crate::cavity_phs::piston::reactive::GasReactionError),
     Source(ThermalMaterialError),
     Transport(MaterialNetworkError),
+    HeatNetwork(HeatNetworkError),
     Newton(NewtonError),
     NotConverged(NewtonReport),
     Interrupted(SolverRunProgress),
@@ -137,6 +142,14 @@ impl From<MaterialNetworkError> for SolidGasError {
         }
     }
 }
+impl From<HeatNetworkError> for SolidGasError {
+    fn from(error: HeatNetworkError) -> Self {
+        match error {
+            HeatNetworkError::Cancelled => Self::Cancelled,
+            other => Self::HeatNetwork(other),
+        }
+    }
+}
 
 /// Exact endpoint material snapshot and reciprocal transfer of one patch.
 #[derive(Clone, Debug)]
@@ -152,12 +165,15 @@ pub struct SolidGasContactSample {
 
 /// Both original caloric accounts, with internal interface heats excluded from supply.
 #[derive(Clone, Debug)]
-pub struct SolidGasReport {
+pub struct SolidGasReport<S = MaterialNetworkSample> {
     pub thermal: EnergyAudit,
     pub gas: GasHeatStep,
     pub contacts: Vec<SolidGasContactSample>,
     /// Exact accepted cell and internal-link transport sources, when supplied.
-    pub transport: Option<MaterialNetworkSample>,
+    pub transport: Option<S>,
+    /// Signed roundoff net from the closed radiative enclosure. This remains
+    /// in the native thermal source report but is excluded from external supply.
+    pub closed_radiation_net_j: f64,
     pub external_thermal_heat_j: f64,
     pub external_gas_heat_j: f64,
     pub solid_to_gas_heat_j: f64,
@@ -170,13 +186,13 @@ pub struct SolidGasReport {
 
 /// Immutable proposal. Reduce/solve the returned solid field BEFORE publishing
 /// any endpoint when a downstream aperture, stability or support gate is needed.
-pub struct SolidGasCandidate<'m, 't> {
+pub struct SolidGasCandidate<'m, 't, S = MaterialNetworkSample> {
     thermal: DepositionSimulation<'t>,
     gas: IsochoricGasParcel,
     state: SolidEnthalpyState<'m>,
-    report: SolidGasReport,
+    report: SolidGasReport<S>,
 }
-impl<'m, 't> SolidGasCandidate<'m, 't> {
+impl<'m, 't, S> SolidGasCandidate<'m, 't, S> {
     pub const fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
@@ -186,7 +202,7 @@ impl<'m, 't> SolidGasCandidate<'m, 't> {
     pub const fn state(&self) -> &SolidEnthalpyState<'m> {
         &self.state
     }
-    pub const fn report(&self) -> &SolidGasReport {
+    pub const fn report(&self) -> &SolidGasReport<S> {
         &self.report
     }
     pub fn into_parts(
@@ -195,7 +211,7 @@ impl<'m, 't> SolidGasCandidate<'m, 't> {
         DepositionSimulation<'t>,
         IsochoricGasParcel,
         SolidEnthalpyState<'m>,
-        SolidGasReport,
+        SolidGasReport<S>,
     ) {
         (self.thermal, self.gas, self.state, self.report)
     }
@@ -341,6 +357,51 @@ impl<'m> SolidEnthalpy<'m> {
         )
     }
 
+    /// The same finite-gas/spatial-solid transaction with the complete source
+    /// heat network: bulk conduction, thermal contact resistance, integrated
+    /// nonlinear layers and a closed gray-diffuse radiative enclosure.
+    ///
+    /// All mechanisms resolve at the SAME proposed cell temperatures. Gas-facing
+    /// layers consume the exact bulk material snapshot, not a second selection.
+    /// The native thermal owner receives each signed radiative/contact transfer
+    /// once; closed-enclosure roundoff is never counted as external supply.
+    /// Graph electrical bindings refuse because this entry point advances no
+    /// circuit history. Fixed volume/composition, thermal geometry and sequential
+    /// quasistatic solid-response restrictions remain those of the original solve.
+    /// Enclosure radiation assumes a nonparticipating gas; volumetric absorption
+    /// and emission are not supplied by the surface radiosity owner.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_isochoric_gas_heat_network<'t>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        gas: &IsochoricGasParcel,
+        target_s: f64,
+        external_gas_heat_j: f64,
+        contacts: &[SolidGasContact],
+        transport: &PreparedHeatNetwork<'_, '_>,
+        controls: SolidGasSolve,
+        initial_energy_increments_j: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<SolidGasCandidate<'m, 't, HeatNetworkSample>, SolidGasError> {
+        self.step_gas_with_endpoint(
+            thermal,
+            gas,
+            target_s,
+            external_gas_heat_j,
+            contacts,
+            transport,
+            controls,
+            initial_energy_increments_j,
+            cx,
+            |heat| {
+                let mut next = gas.clone();
+                let report = next.add_heat(heat, controls.gas, || cx.checkpoint().is_err())?;
+                Ok((next, report, ()))
+            },
+        )
+        .map(|(candidate, ())| candidate)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn step_gas_with_transport<'t>(
         &self,
@@ -355,33 +416,44 @@ impl<'m> SolidEnthalpy<'m> {
         cx: &Cx<'_>,
     ) -> Result<SolidGasCandidate<'m, 't>, SolidGasError> {
         self.step_gas_with_endpoint(
-            thermal, gas, target_s, external_gas_heat_j, contacts, transport,
-            controls, initial_energy_increments_j, cx,
+            thermal,
+            gas,
+            target_s,
+            external_gas_heat_j,
+            contacts,
+            transport,
+            controls,
+            initial_energy_increments_j,
+            cx,
             |heat| {
                 let mut next = gas.clone();
                 let report = next.add_heat(heat, controls.gas, || cx.checkpoint().is_err())?;
                 Ok((next, report, ()))
             },
-        ).map(|(candidate, ())| candidate)
+        )
+        .map(|(candidate, ())| candidate)
     }
 
     // One original spatial heat residual and publication boundary. The gas
     // owner may resolve composition together with its total-energy increment;
     // its source/kinetic payload travels with the EXACT accepted thermal trial.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-    fn step_gas_with_endpoint<'t, P>(
+    fn step_gas_with_endpoint<'t, P, T: GasHeatTransport>(
         &self,
         thermal: &DepositionSimulation<'t>,
         gas: &IsochoricGasParcel,
         target_s: f64,
         external_gas_heat_j: f64,
         contacts: &[SolidGasContact],
-        transport: Option<&PreparedMaterialNetwork<'_, '_>>,
+        transport: T,
         controls: SolidGasSolve,
         initial_energy_increments_j: &[f64],
         cx: &Cx<'_>,
-        resolve_gas_endpoint: impl Fn(f64) -> Result<(IsochoricGasParcel, GasHeatStep, P), SolidGasError>,
-    ) -> Result<(SolidGasCandidate<'m, 't>, P), SolidGasError> {
+        resolve_gas_endpoint: impl Fn(
+            f64,
+        )
+            -> Result<(IsochoricGasParcel, GasHeatStep, P), SolidGasError>,
+    ) -> Result<(SolidGasCandidate<'m, 't, T::Sample>, P), SolidGasError> {
         let checkpoint = || cx.checkpoint().map_err(|_| DepositionError::Cancelled);
         checkpoint()?;
         controls.newton.validate()?;
@@ -410,7 +482,7 @@ impl<'m> SolidEnthalpy<'m> {
             ));
         }
         let initial = self.resolve(thermal, cx)?;
-        let (_, initial_transport) = self.resolve_gas_transport(transport, thermal, cx)?;
+        let initial_transport = transport.resolve(self, thermal, cx)?;
         let initial_gas_temperature_k = gas.state().state().temperature;
         let mut ordered: Vec<_> = contacts.iter().collect();
         ordered.sort_by_key(|contact| contact.id);
@@ -473,7 +545,10 @@ impl<'m> SolidEnthalpy<'m> {
                 &bound.source,
                 gas.state(),
                 initial.samples()[element].phase,
-                initial_transport.as_ref(),
+                initial_transport
+                    .sample
+                    .as_ref()
+                    .map(GasTransportSample::material),
             )?;
             prepared.push(entry);
         }
@@ -497,15 +572,19 @@ impl<'m> SolidEnthalpy<'m> {
                 &x[..n],
                 |endpoint| {
                     let state = self.resolve(endpoint, cx)?;
-                    let (conductances, transport_sample) =
-                        self.resolve_gas_transport(transport, endpoint, cx)?;
-                    let empty_sources = BTreeMap::new();
+                    let transport::GasTransportState {
+                        conductances_w_k: conductances,
+                        sources_w: mut sources,
+                        sample: transport_sample,
+                    } = transport.resolve(self, endpoint, cx)?;
+                    let closed_radiation_net_j = finite(
+                        dt * transport_sample
+                            .as_ref()
+                            .map_or(0.0, GasTransportSample::radiation_net_power_w),
+                    )?;
                     let external = finite(
-                        dt * endpoint.external_step_power_w(
-                            &empty_sources,
-                            &conductances,
-                            checkpoint,
-                        )?,
+                        dt * endpoint.external_step_power_w(&sources, &conductances, checkpoint)?
+                            - closed_radiation_net_j,
                     )?;
                     let mut heats = BTreeMap::<CellId, f64>::new();
                     let mut samples = Vec::with_capacity(prepared.len());
@@ -517,7 +596,7 @@ impl<'m> SolidEnthalpy<'m> {
                             &self.cells[entry.element].source,
                             next_gas.state(),
                             phase,
-                            transport_sample.as_ref(),
+                            transport_sample.as_ref().map(GasTransportSample::material),
                         )?;
                         let difference =
                             phase.temperature_k() - next_gas.state().state().temperature;
@@ -538,16 +617,20 @@ impl<'m> SolidEnthalpy<'m> {
                             source: sample.source,
                         });
                     }
-                    let mut sources = BTreeMap::new();
                     let mut transferred = 0.0;
                     for (cell, heat) in heats {
                         let power = finite(-heat / dt)?;
-                        let actual = finite(-dt * power)?;
+                        let previous = sources.get(&cell).copied().unwrap_or(0.0);
+                        let merged = finite(previous + power)?;
+                        let increment = finite(merged - previous)?;
+                        let actual = finite(-dt * increment)?;
                         let authored = endpoint.cells()[&cell].boundary.source_w;
-                        let combined = finite(authored + power)?;
+                        let combined_before = finite(authored + previous)?;
+                        let combined = finite(authored + merged)?;
                         if (heat != 0.0 && power == 0.0)
-                            || (power != 0.0 && combined == authored)
-                            || (authored != 0.0 && combined == power)
+                            || (power != 0.0 && (increment == 0.0 || combined == combined_before))
+                            || (previous != 0.0 && merged == power)
+                            || (authored != 0.0 && combined == merged)
                             || (actual - heat).abs() > controls.total_energy_tolerance_j
                         {
                             return Err(SolidGasError::Invalid(
@@ -555,7 +638,7 @@ impl<'m> SolidEnthalpy<'m> {
                             ));
                         }
                         transferred = finite(transferred + actual)?;
-                        sources.insert(cell, power);
+                        sources.insert(cell, merged);
                     }
                     if (transferred - net).abs() > controls.total_energy_tolerance_j {
                         return Err(SolidGasError::Invalid(
@@ -577,6 +660,7 @@ impl<'m> SolidEnthalpy<'m> {
                             gas_residual,
                             transport_sample,
                             gas_payload,
+                            closed_radiation_net_j,
                         ),
                     })
                 },
@@ -618,7 +702,18 @@ impl<'m> SolidEnthalpy<'m> {
         let maximum_cell_residual_j = trial.maximum_cell_residual_j();
         let (
             thermal,
-            (gas, gas_step, state, contacts, net, external, gas_energy_residual_j, transport, gas_payload),
+            (
+                gas,
+                gas_step,
+                state,
+                contacts,
+                net,
+                external,
+                gas_energy_residual_j,
+                transport,
+                gas_payload,
+                closed_radiation_net_j,
+            ),
             audit,
         ) = trial.accept(
             controls.cell_energy_tolerance_j,
@@ -632,7 +727,8 @@ impl<'m> SolidEnthalpy<'m> {
         )?;
         if gas_energy_residual_j.abs() > controls.gas_energy_tolerance_j
             || total.abs() > controls.total_energy_tolerance_j
-            || (audit.external_heat_j + net - external).abs() > controls.total_energy_tolerance_j
+            || (audit.external_heat_j + net - external - closed_radiation_net_j).abs()
+                > controls.total_energy_tolerance_j
             || (gas.state().state().temperature - initial_gas_temperature_k).abs()
                 > controls.maximum_gas_temperature_increment_k
         {
@@ -641,24 +737,28 @@ impl<'m> SolidEnthalpy<'m> {
             ));
         }
         checkpoint()?;
-        Ok((SolidGasCandidate {
-            thermal,
-            gas,
-            state,
-            report: SolidGasReport {
-                thermal: audit,
-                gas: gas_step,
-                contacts,
-                transport,
-                external_thermal_heat_j: external,
-                external_gas_heat_j,
-                solid_to_gas_heat_j: net,
-                gas_energy_residual_j,
-                combined_energy_residual_j: total,
-                maximum_cell_residual_j,
-                nonlinear: result.report,
-                trials: trials.get(),
+        Ok((
+            SolidGasCandidate {
+                thermal,
+                gas,
+                state,
+                report: SolidGasReport {
+                    thermal: audit,
+                    gas: gas_step,
+                    contacts,
+                    transport,
+                    closed_radiation_net_j,
+                    external_thermal_heat_j: external,
+                    external_gas_heat_j,
+                    solid_to_gas_heat_j: net,
+                    gas_energy_residual_j,
+                    combined_energy_residual_j: total,
+                    maximum_cell_residual_j,
+                    nonlinear: result.report,
+                    trials: trials.get(),
+                },
             },
-        }, gas_payload))
+            gas_payload,
+        ))
     }
 }

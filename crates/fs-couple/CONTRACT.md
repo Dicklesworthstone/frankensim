@@ -7536,6 +7536,36 @@ subsequent source refresh, conductivity changes reaching gas/motion, and
 wrong-context/chart or failed-trial refusal.
 
 
+### Complete material heat assembly and reacting finite gas
+
+`SolidEnthalpy::step_with_isochoric_gas_heat_network` connects the original
+`PreparedHeatNetwork` to that same spatial solid/gas endpoint. Source-resolved
+thermal contacts, integrated nonlinear conduction layers and gray-diffuse
+enclosure radiation accompany the existing bulk transport and gas-facing
+layers. Structural cells retain their original material ID, borrowed caloric
+chart and complete physical query. Gas contacts consume the exact accepted
+bulk snapshot; the generic candidate/report retains the complete heat sample.
+
+Every transfer enters the native thermal coefficients once. Gas heat adds to
+the original radiative sources rather than replacing them. The closed enclosure's
+signed roundoff net remains visible as `closed_radiation_net_j` and is excluded
+from external supply before the original local, gas and total energy gates.
+Electrical graph bindings refuse because this transaction advances no circuit.
+
+`step_with_coupled_reacting_isochoric_gas_heat_network` feeds the same transport
+owner into the original implicit chemistry/heat endpoint. It preserves one
+composition, gas energy inventory and thermal clock; chemical formation energy
+is never deposited again as an external heat source. Existing material-only
+APIs retain their default source payloads and the same solver/publication path.
+
+The gas remains well mixed and fixed-volume, thermal geometry is fixed, and
+the returned solid response is sequential quasistatic loading. Surface radiosity
+assumes a nonparticipating gas; gas absorption/emission and reciprocal elastic
+heat require their own physical owners. Three focused regression definitions
+cover independently assembled cell/photon/gas balances, source-only emissivity
+and contact changes, exact original-route reduction and failed-trial rollback.
+These are manufactured numerical fixtures, not measured validation.
+
 ## DG flue mouth observation and compact reaction
 
 `FlueDgPerformance::with_mouth_radiation` observes the source's actual flue

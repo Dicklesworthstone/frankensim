@@ -2,6 +2,9 @@
 use super::*;
 use fs_couple::circuit_enthalpy::material::{ConductionLink, MaterialCell, MaterialNetwork};
 
+#[path = "transport/heat.rs"]
+mod heat;
+
 fn nonlinear_card(slope: f64) -> (MaterialCard, ResolvedHeatCapacityCurve) {
     let (original, _) = transport_material(1.0);
     let mut claims = ClaimSet::new();
