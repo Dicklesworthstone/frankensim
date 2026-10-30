@@ -133,6 +133,80 @@ fn close(actual: f64, expected: f64, tolerance: f64) {
 }
 
 #[test]
+fn original_irreversible_source_preserves_forward_rate_and_signed_entropy() {
+    let reversible = isomers(0.0, rate(7.0, 0.7, 25000.0));
+    let mechanism = IdealGasKineticsV1::new(
+        reversible.thermodynamics().clone(),
+        "irreversible-isomer",
+        1,
+        vec![reversible.reactions()[0].clone().irreversible()],
+        1e-12,
+    )
+    .unwrap();
+    assert!(!mechanism.reactions()[0].is_reversible());
+    assert!(reversible.reactions()[0].is_reversible());
+    let mut work = KineticWorkspaceV1::new(&mechanism).unwrap();
+    let result = mechanism
+        .evaluate(Temperature::new(500.0), &[1.0, 10.0], &mut work, || false)
+        .unwrap();
+    close(work.reaction_rates()[0], 7.0, 1e-13);
+    close(work.rate_jacobian()[0], 7.0, 1e-13);
+    assert_eq!(work.rate_jacobian()[1], 0.0);
+    close(
+        work.temperature_derivatives()[0],
+        7.0 * (0.7 / 500.0 + 25000.0 / (R * 500.0 * 500.0)),
+        1e-13,
+    );
+    close(
+        result.entropy_production_w_m3_k,
+        -R * 7.0 * 10.0_f64.ln(),
+        1e-11,
+    );
+    assert_eq!(result.adiabatic_temperature_rate_k_s, 0.0);
+    // No reverse chemistry appears when only products are present.
+    let result = mechanism
+        .evaluate(Temperature::new(500.0), &[0.0, 10.0], &mut work, || false)
+        .unwrap();
+    assert_eq!(work.reaction_rates()[0], 0.0);
+    assert_eq!(work.rate_jacobian()[1], 0.0);
+    close(work.rate_jacobian()[0], 7.0, 1e-13);
+    assert_eq!(result.entropy_production_w_m3_k, 0.0);
+}
+
+#[test]
+fn irreversible_collider_derivatives_do_not_restore_reverse_progress() {
+    let reversible = isomers(0.0, rate(7.0, 0.0, 0.0));
+    let mechanism = IdealGasKineticsV1::new(
+        reversible.thermodynamics().clone(),
+        "irreversible-third-body",
+        1,
+        vec![
+            reversible.reactions()[0]
+                .clone()
+                .irreversible()
+                .with_pressure_dependence(PressureDependenceV1::ThirdBody(
+                    ThirdBodyEfficienciesV1::default(),
+                )),
+        ],
+        1e-12,
+    )
+    .unwrap();
+    let mut work = KineticWorkspaceV1::new(&mechanism).unwrap();
+    mechanism
+        .evaluate(Temperature::new(500.0), &[1.0, 10.0], &mut work, || false)
+        .unwrap();
+    close(work.reaction_rates()[0], 7.0 * 11.0, 1e-12);
+    close(work.rate_jacobian()[0], 7.0 * 12.0, 1e-12);
+    close(work.rate_jacobian()[1], 7.0, 1e-12);
+    mechanism
+        .evaluate(Temperature::new(500.0), &[0.0, 10.0], &mut work, || false)
+        .unwrap();
+    assert_eq!(work.reaction_rates()[0], 0.0);
+    close(work.rate_jacobian()[0], 70.0, 1e-12);
+    assert_eq!(work.rate_jacobian()[1], 0.0);
+}
+
+#[test]
 fn g1_arrhenius_reverse_rate_temperature_response_and_energy_share_sources() {
     let m = isomers(12000.0, rate(7.0, 0.7, 25000.0));
     let mut w = KineticWorkspaceV1::new(&m).unwrap();

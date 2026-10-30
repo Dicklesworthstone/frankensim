@@ -866,23 +866,23 @@ and cancellation. These are neutral ideal-gas numerical closures, not a
 finite-rate combustion, ignition, detonation, real-gas or phase-stability model,
 and the manufactured fixtures are not an external CEA validation.
 
-## Reversible elementary finite-rate kinetics algebra
+## Elementary finite-rate kinetics algebra
 
-`kinetics` binds up to 128 caller-authored reversible elementary Arrhenius
+`kinetics` binds up to 512 caller-authored elementary Arrhenius
 reactions to the original neutral NASA-9 bank and the exact `fs-qty`
 conservation certificate. Separate integer reactant/product orders retain
 explicit catalysts. Molecular-mass consistency is independently checked against
 the caller's bounded tolerance; species inventories are never repaired.
 
-Rates use concentrations normalized by 1 mol/m3. Reverse-rate equilibrium
+Rates use concentrations normalized by 1 mol/m3. Reversible-channel equilibrium
 constants include the original `p0/(R T)` concentration standard, and analytic
 concentration/temperature Jacobians include changing molecular count and exact
 zero species. The Gibbs-derived affinity is independent of a disabled rate or
 absent catalyst; an indeterminate both-sides-absent affinity is explicit.
 Species sources are evaluated once per trial into reusable bounded scratch;
 accepted rate evaluations allocate no heap storage. Near-equilibrium progress
-uses affinity and `expm1`, with the ideal-mixture entropy-production boundary
-limits retained. Original source thermodynamics supplies the adiabatic
+uses affinity and `expm1` for reversible channels, with their ideal-mixture
+entropy-production boundary limits retained. Original source thermodynamics supplies the adiabatic
 instantaneous temperature rate, with formation energy included once.
 
 Seven new native regressions cover Arrhenius scaling and heat release,
@@ -895,8 +895,8 @@ or cross-ISA qualification. The primary rate convention follows the
 [Cantera 3.2 elementary-reaction and modified-Arrhenius reference](https://cantera.org/3.2/reference/kinetics/reaction-rates.html).
 
 This L1 module owns immutable laws and algebra. It supplies no time integrator,
-empirical mechanism inference, generic collider/falloff law, irreversible or
-fractional-order global reaction, ions, or real-gas kinetics. A supplied
+empirical mechanism inference, unsupported pressure laws, fractional-order
+global reactions, ions, or real-gas kinetics. A supplied
 mechanism's physical accuracy remains a property of its original source data.
 
 ### Shared caloric-path admission for evolving gas
@@ -1331,3 +1331,46 @@ melting value, pressure/temperature boundaries and inverse budgets, and Cp
 enclosures across the admitted assumed-Ih chart. Original source attribution:
 https://iapws.org/technical-guidance/release/Ice-2009.download and
 https://iapws.org/technical-guidance/release/MeltSub.download.
+
+## Complete GRI-Mech 3.0 methane and nitrogen kinetics
+
+`kinetics::gri30::cantera_gri30` loads all 53 species and 325 channels from
+Cantera 3.2.0 commit `4a8358eb80cfeb50474386b5f9ec0b3a83519889`,
+`data/gri30.yaml` Git blob `9a62004ec17bbec8ac11e97785932d426dd58610`.
+Original GRI-Mech 3.0 attribution and the Cantera BSD redistribution notice
+are retained. Atomic weights come from the same pinned `Elements.cpp`
+source as the hydrogen mechanism. Source tables convert cm/mol/s and cal/mol
+once, preserving species and channel identities, duplicate contributions,
+nine explicit collision partners, twelve generic third-body laws, three
+Lindemann and 26 Troe falloff channels. No runtime dependency is added.
+
+`Gri30Calorics::Original` retains source NASA7 Cp/h/s and original seams.
+`ContinuousAt300K` preserves low-region h/s and all Cp values, using the
+existing continuity owner to bound high-region offsets by 0.2 J/mol and
+2e-4 J/(mol K). The largest offsets are approximately +0.156299 J/mol for
+C3H7 and +0.000148985 J/(mol K) for C3H8. These are numerical reconciliation
+budgets, not empirical uncertainty. Original species intervals and seams
+remain, including HCNO at 1382 K, HOCN at 1368 K and HNCO at 1478 K.
+The common admitted interval is 300–3000 K, limited above by CH3O.
+
+The elementary owner admits at most 512 channels.
+`ElementaryReactionV1::irreversible()` explicitly disables reverse progress
+and reverse derivatives; reversible construction remains the default.
+All 16 originally irreversible GRI channels retain that directionality.
+Their `R*q*affinity` contribution is signed, exposing physical incompatibility
+rather than changing source rates or manufacturing reverse chemistry. The
+closure operation version is 3. This does not relax a consumer's finite-step
+entropy gate or establish detailed balance or nonnegative entropy production
+for the complete mechanism.
+
+Five source tests compare all 325 net rates and all 53 Cp/h/s triples at
+700 and 1800 K with independent Cantera 3.2.0 output, check source identities,
+conservation, continuity/domain, derivatives across irreversible, duplicate,
+collider and falloff channels, and cancellation/reuse/pure-inert states.
+Two additional elementary regressions check forward-only progress,
+product-only states, signed entropy and collider derivatives. All 27 focused
+native kinetics tests pass. This establishes source and numerical conformance,
+not experimentally validated ignition, emissions or fire predictions.
+The source supplies methane/natural-gas chemistry with nitrogen species;
+it does not supply a soot model, PMMA/wood volatile mechanism, transport
+closure, sprays, real-gas phases or a time integrator.

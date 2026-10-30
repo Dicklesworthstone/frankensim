@@ -1,11 +1,13 @@
 //! Source-consistent elementary ideal-gas kinetics, without time integration.
 //!
-//! Each caller-authored reversible reaction uses integer elementary orders and
+//! Each caller-authored reaction uses integer elementary orders and
 //! an explicitly declared Arrhenius, third-body or falloff forward law. Reverse
-//! rates follow the original NASA-9 Gibbs energies, including the
-//! pressure-to-concentration standard-state conversion. No empirical mechanism,
-//! ignition criterion or falloff law is inferred. L3 consumers own state
-//! evolution and numerical step acceptance.
+//! rates of reversible reactions follow the original NASA-9 Gibbs energies,
+//! including the pressure-to-concentration standard-state conversion. No empirical mechanism,
+//! ignition criterion or falloff law is inferred. An explicitly irreversible
+//! source disables its reverse rate and exposes its signed entropy production;
+//! such a source does not acquire a detailed-balance theorem. L3 consumers own
+//! state evolution and numerical step acceptance.
 //!
 //! Concentrations are mol/m3. The rate scale is mol/(m3 s) at the reference
 //! temperature and at each participating concentration c*=1 mol/m3:
@@ -27,6 +29,8 @@ use fs_qty::{Pressure, Temperature};
 
 mod caloric;
 pub use caloric::admit_caloric_interval;
+/// Complete pinned GRI-Mech 3.0 source using these same kinetic owners.
+pub mod gri30;
 /// Pinned hydrogen/oxygen source mechanism using these same kinetic owners.
 pub mod hydrogen;
 mod pressure;
@@ -34,12 +38,13 @@ pub use pressure::{
     FalloffBroadeningV1, PressureDependenceV1, ThirdBodyEfficienciesV1, TroeFalloffV1,
 };
 
-/// Maximum admitted reversible elementary reactions in one mechanism.
-pub const MAX_KINETIC_REACTIONS_V1: usize = 128;
+/// Maximum admitted elementary reactions in one mechanism, including the
+/// 325-channel GRI-Mech source. Workspace allocation remains explicitly bounded.
+pub const MAX_KINETIC_REACTIONS_V1: usize = 512;
 /// Maximum sum of elementary exponents on either side of one reaction.
 pub const MAX_ELEMENTARY_ORDER_V1: u32 = 32;
 /// Fixed operation-tree version of the concentration-based kinetic closure.
-pub const IDEAL_GAS_KINETICS_VERSION_V1: u32 = 2;
+pub const IDEAL_GAS_KINETICS_VERSION_V1: u32 = 3;
 
 /// Invalid source declaration, input domain, arithmetic range or cancellation.
 #[derive(Clone, Debug, PartialEq)]
@@ -148,12 +153,12 @@ impl ArrheniusRateV1 {
     }
 }
 
-/// Original caller-declared reversible elementary reaction.
+/// Original caller-declared elementary reaction, reversible by default.
 ///
 /// Separate reactant/product sides retain explicit catalysts appearing on both
 /// sides. An optional authored pressure dependence multiplies both directions.
-/// Fractional/global empirical orders, ions and irreversible reactions are
-/// outside this thermodynamic closure.
+/// A source may explicitly disable the reverse direction. Fractional/global
+/// empirical orders and ions are outside this thermodynamic closure.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ElementaryReactionV1 {
     reaction: ReactionId,
@@ -161,6 +166,7 @@ pub struct ElementaryReactionV1 {
     products: Vec<(SpeciesId, u32)>,
     forward_rate: ArrheniusRateV1,
     pressure_dependence: PressureDependenceV1,
+    reversible: bool,
 }
 impl ElementaryReactionV1 {
     /// Canonicalize both sides and admit positive bounded integer orders.
@@ -198,6 +204,7 @@ impl ElementaryReactionV1 {
             products,
             forward_rate,
             pressure_dependence: PressureDependenceV1::Independent,
+            reversible: true,
         })
     }
     /// Attach an explicit collider/falloff law. For falloff, `forward_rate` is
@@ -206,6 +213,17 @@ impl ElementaryReactionV1 {
     pub fn with_pressure_dependence(mut self, pressure_dependence: PressureDependenceV1) -> Self {
         self.pressure_dependence = pressure_dependence;
         self
+    }
+    /// Retain an original irreversible source channel without inventing a
+    /// reverse reaction. Its chemical entropy production can be negative:
+    /// callers must retain their physical-domain and finite-step entropy gates.
+    pub fn irreversible(mut self) -> Self {
+        self.reversible = false;
+        self
+    }
+    /// Whether the reverse rate is derived from the original standard states.
+    pub const fn is_reversible(&self) -> bool {
+        self.reversible
     }
     /// Original reaction identity.
     pub const fn reaction(&self) -> &ReactionId {
@@ -219,7 +237,7 @@ impl ElementaryReactionV1 {
     pub fn products(&self) -> &[(SpeciesId, u32)] {
         &self.products
     }
-    /// Original forward Arrhenius law; the reverse is thermodynamically derived.
+    /// Original forward Arrhenius law; a retained reverse is thermodynamically derived.
     pub const fn forward_rate(&self) -> ArrheniusRateV1 {
         self.forward_rate
     }
@@ -540,9 +558,17 @@ impl IdealGasKineticsV1 {
                 work.temperature_derivatives[j] = 0.0;
                 continue;
             }
-            let log_reverse_scale = log_forward_scale - log_kc;
+            let log_reverse_scale = if source.reversible {
+                log_forward_scale - log_kc
+            } else {
+                f64::NEG_INFINITY
+            };
             let lf = side_log(&reaction.reactants, &work.log_c, None);
-            let lr = side_log(&reaction.products, &work.log_c, None);
+            let lr = if source.reversible {
+                side_log(&reaction.products, &work.log_c, None)
+            } else {
+                f64::NEG_INFINITY
+            };
             let forward = rate_from_log(log_forward_scale + lf)?;
             let reverse = rate_from_log(log_reverse_scale + lr)?;
             // An indeterminate both-sides-absent affinity has exact zero
@@ -560,7 +586,11 @@ impl IdealGasKineticsV1 {
             work.temperature_derivatives[j] = dt;
             for i in 0..ns {
                 let alpha = order(&reaction.reactants, i);
-                let beta = order(&reaction.products, i);
+                let beta = if source.reversible {
+                    order(&reaction.products, i)
+                } else {
+                    0
+                };
                 let mut derivative = if alpha == 0 && beta == 0 {
                     0.0
                 } else if concentrations[i] > 0.0 {
@@ -616,7 +646,7 @@ impl IdealGasKineticsV1 {
                 let production = R * rate * affinity;
                 if production.is_infinite() && production.is_sign_positive() {
                     infinite_entropy_rate = true;
-                } else if !production.is_finite() || production < 0.0 {
+                } else if !production.is_finite() || (source.reversible && production < 0.0) {
                     return Err(KineticsErrorV1::Arithmetic("chemical entropy production"));
                 } else {
                     entropy_rate.add(production);
@@ -763,8 +793,12 @@ pub struct KineticEvaluationV1 {
     pub thermodynamics: KineticThermodynamicsV1,
     /// dT/dt required by fixed-volume adiabatic conservation, K/s.
     pub adiabatic_temperature_rate_k_s: f64,
-    /// Local R sum(q_j affinity_j). Positive infinity denotes the exact ideal
-    /// mixture boundary limit, not a finite-step entropy increment.
+    /// Local R sum(q_j affinity_j), signed when original irreversible channels
+    /// are present. Reversible channels retain nonnegative production; an
+    /// irreversible source is not guaranteed to follow the thermodynamic force.
+    /// Positive infinity denotes the exact ideal mixture boundary limit, not a
+    /// finite-step entropy increment. This diagnostic never relaxes a consumer's
+    /// total finite-step entropy acceptance.
     pub entropy_production_w_m3_k: f64,
 }
 
