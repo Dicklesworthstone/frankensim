@@ -243,6 +243,12 @@ impl<'a> AbsorbingGrid<'a> {
         self.identity
     }
 
+    /// World-space bounds of the borrowed physical cell support, in metres.
+    #[must_use]
+    pub fn bounds_m(&self) -> ([f64; 3], [f64; 3]) {
+        self.grid.bounds()
+    }
+
     /// Every wavelength has identically zero absorption and emission.
     #[must_use]
     pub const fn is_vacuum(&self) -> bool {

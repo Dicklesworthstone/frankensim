@@ -74,6 +74,14 @@ required-features = ["photometry"]
 name = "photometric_image"
 required-features = ["photometry"]
 
+[[test]]
+name = "photometric_media"
+required-features = ["photometry"]
+
+[[test]]
+name = "photometric_path"
+required-features = ["photometry"]
+
 [[example]]
 name = "photometric_stage"
 required-features = ["photometry"]

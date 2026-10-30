@@ -149,6 +149,8 @@ pub use scattering::{
     render_absorbing_with_execution, render_scattering, render_scattering_range,
     render_scattering_range_with_execution, render_scattering_with_execution,
 };
+#[cfg(feature = "photometry")]
+pub(crate) mod photometric;
 mod transport;
 
 /// Bit-affecting semantic surface version of the tracer (see
@@ -1378,7 +1380,7 @@ pub enum AdaptiveDecision {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct AdaptivePixelAccumulator {
+pub(crate) struct AdaptivePixelAccumulator {
     sum_xyz: [f64; 3],
     mean_xyz: [f64; 3],
     m2_xyz: [f64; 3],
@@ -1387,7 +1389,7 @@ struct AdaptivePixelAccumulator {
 }
 
 impl AdaptivePixelAccumulator {
-    const EMPTY: Self = Self {
+    pub(crate) const EMPTY: Self = Self {
         sum_xyz: [0.0; 3],
         mean_xyz: [0.0; 3],
         m2_xyz: [0.0; 3],
@@ -1395,7 +1397,7 @@ impl AdaptivePixelAccumulator {
         decision: None,
     };
 
-    fn push(&mut self, xyz: [f64; 3]) -> Result<(), AdaptiveSamplingError> {
+    pub(crate) fn push(&mut self, xyz: [f64; 3]) -> Result<(), AdaptiveSamplingError> {
         if xyz.iter().any(|value| !value.is_finite()) {
             return Err(AdaptiveSamplingError::NonFiniteSample);
         }
@@ -1429,8 +1431,12 @@ impl AdaptivePixelAccumulator {
         Ok(())
     }
 
-    fn mean_xyz(self) -> [f64; 3] {
+    pub(crate) fn mean_xyz(self) -> [f64; 3] {
         self.mean_xyz
+    }
+
+    pub(crate) const fn sample_count(self) -> u32 {
+        self.samples
     }
 
     fn sample_variance_xyz(self) -> [f64; 3] {
@@ -1441,7 +1447,7 @@ impl AdaptivePixelAccumulator {
         self.m2_xyz.map(|m2| m2 * inverse)
     }
 
-    fn dispersion_proxy_xyz(self) -> [f64; 3] {
+    pub(crate) fn dispersion_proxy_xyz(self) -> [f64; 3] {
         let inverse_samples = 1.0 / f64::from(self.samples.max(1));
         self.sample_variance_xyz()
             .map(|variance| det::sqrt(variance * inverse_samples))
@@ -2860,6 +2866,20 @@ pub enum TracerError {
     Conductor(ConductorError),
     /// Lighting artifact, selection, or probability admission refused.
     Lighting(LightingError),
+    /// A calibrated fixture connection exceeded its admitted physical domain.
+    #[cfg(feature = "photometry")]
+    FixtureConnection {
+        /// Fixture in caller order.
+        source: usize,
+        /// Stable reason for refusing the connection.
+        reason: &'static str,
+    },
+    /// A calibrated source refused spectral or angular evaluation.
+    #[cfg(feature = "photometry")]
+    FixtureSource(crate::photometry::source::SourceError),
+    /// A calibrated path segment exceeded the declared metre-valued range.
+    #[cfg(feature = "photometry")]
+    FixturePathRange,
     /// Borrowed density/temperature transport refused a ray, field or budget.
     #[cfg(feature = "volumes")]
     Volume(crate::volumes::transport::VolumeTransportError),
@@ -2967,6 +2987,16 @@ impl core::fmt::Display for TracerError {
             Self::Dielectric(error) => write!(formatter, "dielectric transport refused: {error}"),
             Self::Conductor(error) => write!(formatter, "conductor transport refused: {error}"),
             Self::Lighting(error) => write!(formatter, "scene lighting refused: {error}"),
+            #[cfg(feature = "photometry")]
+            Self::FixtureConnection { source, reason } => {
+                write!(formatter, "fixture {source} connection refused: {reason}")
+            }
+            #[cfg(feature = "photometry")]
+            Self::FixtureSource(error) => write!(formatter, "fixture source refused: {error}"),
+            #[cfg(feature = "photometry")]
+            Self::FixturePathRange => {
+                formatter.write_str("calibrated path exceeds its distance budget")
+            }
             #[cfg(feature = "volumes")]
             Self::Volume(error) => write!(formatter, "scene medium refused: {error}"),
             #[cfg(feature = "volumes")]
@@ -12802,6 +12832,49 @@ fn trace_path_with_medium(
     resume: Option<SpectralPathState>,
     #[cfg(feature = "volumes")] medium: Option<PathMedium<'_, '_>>,
 ) -> Result<PathTraceSample, TracerError> {
+    trace_path_with_emitters(
+        scene,
+        lighting,
+        cx,
+        s,
+        kn,
+        pixel,
+        sample,
+        jx,
+        jy,
+        ul,
+        ray_time,
+        camera_path,
+        capture_primary,
+        path_sobol,
+        resume,
+        #[cfg(feature = "volumes")]
+        medium,
+        #[cfg(feature = "photometry")]
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn trace_path_with_emitters(
+    scene: &Scene,
+    lighting: &AdmittedLighting<'_>,
+    cx: &Cx<'_>,
+    s: &Settings,
+    kn: f64,
+    pixel: u32,
+    sample: u32,
+    jx: f64,
+    jy: f64,
+    ul: f64,
+    ray_time: Option<&PathTime>,
+    camera_path: CameraPath<'_>,
+    capture_primary: bool,
+    path_sobol: Option<&Sobol>,
+    resume: Option<SpectralPathState>,
+    #[cfg(feature = "volumes")] medium: Option<PathMedium<'_, '_>>,
+    #[cfg(feature = "photometry")] fixtures: Option<&photometric::FixtureLighting<'_>>,
+) -> Result<PathTraceSample, TracerError> {
     let legacy_light_weights = lighting.is_legacy_compatibility_path();
     // The frozen surface-only estimator predates terminal-vertex NEE weights.
     // Physical media are a new estimator and must not inherit its missing
@@ -12830,6 +12903,18 @@ fn trace_path_with_medium(
     };
     // Hero wavelengths: one stratified draw covers the packet.
     let hero = LAMBDA_MIN + ul * (LAMBDA_MAX - LAMBDA_MIN);
+    #[cfg(feature = "photometry")]
+    let hero = if fixtures.is_some() {
+        // The calibrated sources use the declared 80-bin midpoint observer.
+        // Packet spacing is 20 bins, so this preserves their exact represented
+        // photopic normalization while retaining the shared spectral estimator.
+        crate::photometry::source::wavelength_nm(
+            ((ul * crate::photometry::source::SPECTRAL_BINS as f64) as usize)
+                .min(crate::photometry::source::SPECTRAL_BINS - 1),
+        )
+    } else {
+        hero
+    };
     let lambdas = hero_wavelength_packet::<PACKET>(hero, LAMBDA_MIN, LAMBDA_MAX);
     let state = if let Some(state) = resume {
         state
@@ -12896,6 +12981,17 @@ fn trace_path_with_medium(
     for depth in state.next_depth..s.max_depth {
         cx.checkpoint()?;
         let intersection = intersect(scene, cx, &ray, ray_time)?;
+        #[cfg(feature = "photometry")]
+        let fixture_segment_length = fixtures
+            .map(|fixtures| {
+                fixtures.admit_segment(
+                    cx,
+                    segment_origin,
+                    ray.dir,
+                    intersection.map(|hit| hit.hit.point),
+                )
+            })
+            .transpose()?;
         #[cfg(feature = "volumes")]
         if let Some(medium) = medium
             && medium_stack.len() == 0
@@ -12917,6 +13013,8 @@ fn trace_path_with_medium(
                 };
                 (direction, distance)
             });
+            #[cfg(feature = "photometry")]
+            let distance = fixture_segment_length.unwrap_or(distance);
             let transport = medium.sample_segment(
                 cx,
                 segment_origin,
@@ -12959,6 +13057,30 @@ fn trace_path_with_medium(
                 let phase = medium.phase().ok_or(TracerError::InvalidInput)?;
                 if throughput.iter().all(|value| *value == 0.0) {
                     break;
+                }
+                #[cfg(feature = "photometry")]
+                if let Some(fixtures) = fixtures {
+                    let direct = photometric::volume_contribution(
+                        scene,
+                        fixtures,
+                        cx,
+                        medium,
+                        phase,
+                        event.position,
+                        direction,
+                        &lambdas,
+                    )?;
+                    for lane in 0..PACKET {
+                        let contribution = throughput[lane] * direct[lane];
+                        radiance[lane] += contribution;
+                        if let Some(contributions) = &mut contribution_radiance {
+                            contributions.record(
+                                direct_contribution_class(depth),
+                                lane,
+                                contribution,
+                            );
+                        }
+                    }
                 }
                 if has_volume_source_nee {
                     let direct = volume_emission::direct_contribution(
@@ -13324,6 +13446,27 @@ fn trace_path_with_medium(
             | Material::BrushedConductor { .. } => None,
         };
 
+        #[cfg(feature = "photometry")]
+        if let Some(fixtures) = fixtures {
+            let direct = photometric::surface_contribution(
+                scene,
+                fixtures,
+                cx,
+                medium,
+                &prim.material,
+                hit.point,
+                n,
+                ray.dir.scale(-1.0),
+                &lambdas,
+            )?;
+            for lane in 0..PACKET {
+                let contribution = throughput[lane] * direct[lane];
+                radiance[lane] += contribution;
+                if let Some(contributions) = &mut contribution_radiance {
+                    contributions.record(direct_contribution_class(depth), lane, contribution);
+                }
+            }
+        }
         #[cfg(feature = "volumes")]
         if let Some(medium) = medium
             && medium_stack.len() == 0
@@ -14415,8 +14558,9 @@ fn trace_path_with_medium(
             }
         }
     }
-    // Hero-wavelength estimator → XYZ (same normalization convention
-    // as `spectral::xyz_of_spectrum`: Y of unit radiance is 1).
+    // Hero-wavelength estimator → XYZ. Ordinary callers use the normalized
+    // `spectral::xyz_of_spectrum` convention; calibrated fixture callers pass
+    // the photopic efficacy instead, so Y is luminance in cd/m².
     let range = LAMBDA_MAX - LAMBDA_MIN;
     let mut xyz = [0.0f64; 3];
     for (k, &l) in lambdas.iter().enumerate() {

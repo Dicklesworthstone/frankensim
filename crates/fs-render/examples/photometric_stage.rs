@@ -2,6 +2,8 @@
 //!
 //! Run: cargo run -p fs-render --features photometry --example photometric_stage
 //! Add `-- --csv` to emit the direct-illuminance calculation grid as CSV.
+//! Add `-- --paths` for reflected and multiply scattered spectral fixture paths
+//! through a borrowed heterogeneous physical medium.
 //! These declared fixture profiles and gray haze are examples, not measurements.
 
 use std::error::Error;
@@ -13,17 +15,26 @@ use fs_render::charts::TriMesh;
 use fs_render::instances::RigidTransform;
 use fs_render::photometry::image::LuminanceJob;
 use fs_render::photometry::medium::{HomogeneousMedium, PhaseFunction, ScatterSettings};
+use fs_render::photometry::path::{PathLuminanceJob, PathMedium};
 use fs_render::photometry::source::{AngularDistribution, PhotometricSource, SourceSpectrum};
 use fs_render::photometry::{CalculationGrid, IlluminanceJob, PhotometricScene, TransportOptions};
 use fs_render::spectral::LiftedSpectrum;
-use fs_render::tracer::{Material, Primitive, Shape};
+use fs_render::tracer::{
+    Camera, DirectStrategy, Material, Primitive, Sampler, Scene, Settings, Shape,
+};
+use fs_render::volumes::VolumeGrid;
+use fs_render::volumes::transport::scattering::{
+    MassScatteringSpectrum, PhaseFunction as GridPhase, ScatteringGrid,
+};
+use fs_render::volumes::transport::{AbsorbingGrid, AbsorbingGridBudget, MassAbsorptionSpectrum};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let csv = match args.as_slice() {
-        [] => false,
-        [flag] if flag == "--csv" => true,
-        _ => return Err("usage: photometric_stage [--csv]".into()),
+    let (csv, paths) = match args.as_slice() {
+        [] => (false, false),
+        [flag] if flag == "--csv" => (true, false),
+        [flag] if flag == "--paths" => (false, true),
+        _ => return Err("usage: photometric_stage [--csv | --paths]".into()),
     };
     let gate = CancelGate::new_clock_free();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
@@ -40,11 +51,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             Budget::INFINITE,
             ExecMode::Deterministic,
         );
-        run(&cx, csv)
+        run(&cx, csv, paths)
     })
 }
 
-fn run(cx: &Cx<'_>, csv: bool) -> Result<(), Box<dyn Error>> {
+fn run(cx: &Cx<'_>, csv: bool, paths: bool) -> Result<(), Box<dyn Error>> {
     // Right-handed world, Z up, metres. Local source +Z is its optical axis.
     // This proper rotation turns +Z downward; changing these transforms and
     // constructing a new scene supplies another pan/tilt/fixture snapshot.
@@ -131,6 +142,9 @@ fn run(cx: &Cx<'_>, csv: bool) -> Result<(), Box<dyn Error>> {
         10.0,
         Aperture::try_circular(0.0)?, // Pinhole; no exposure or tone mapping.
     )?;
+    if paths {
+        return run_paths(cx, Vec::from(surfaces), &sources, &camera);
+    }
     let mut image = LuminanceJob::new(
         &scene,
         &camera,
@@ -170,6 +184,104 @@ fn run(cx: &Cx<'_>, csv: bool) -> Result<(), Box<dyn Error>> {
     );
     println!(
         "Total error: unknown (fixture/observer/geometry error, interreflection, and multiple scattering)."
+    );
+    Ok(())
+}
+
+fn run_paths(
+    cx: &Cx<'_>,
+    mut primitives: Vec<Primitive>,
+    sources: &[PhotometricSource],
+    camera: &PhysicalCamera,
+) -> Result<(), Box<dyn Error>> {
+    // A back wall receives reflected floor light through the same material law.
+    primitives.push(Primitive {
+        shape: Shape::Mesh(TriMesh::new(
+            vec![
+                [-5.0, 3.8, 0.0],
+                [-5.0, 3.8, 4.0],
+                [5.0, 3.8, 4.0],
+                [5.0, 3.8, 0.0],
+            ],
+            vec![[0, 1, 2], [0, 2, 3]],
+        )),
+        material: Material::Lambertian {
+            reflectance: LiftedSpectrum { c: [0.0; 3] },
+        },
+        emission: None,
+    });
+    let scene = Scene {
+        primitives,
+        lights: Vec::new(),
+        environment: None,
+        camera: Camera {
+            eye: camera.eye(),
+            forward: camera.forward(),
+            up: camera.up(),
+            half_tan: camera.projection().vertical_half_tan(),
+        },
+    };
+    // The original physical field is borrowed. rho*kappa has units m^-1;
+    // these illustrative coefficients are not measured haze-machine data.
+    let density: Vec<f64> = (0..32)
+        .map(|i| if i % 4 < 2 { 0.25 } else { 1.0 })
+        .collect();
+    let absorption = AbsorbingGrid::try_new(
+        cx,
+        VolumeGrid::new([4, 4, 2], &density, [-5.0, -4.0, 0.0], [2.5, 2.0, 3.0]),
+        MassAbsorptionSpectrum::table(&[(380.0, 0.01), (780.0, 0.002)])?,
+        None,
+        AbsorbingGridBudget {
+            max_grid_cells: 32,
+            max_steps_per_segment: 32,
+        },
+    )?;
+    let medium = ScatteringGrid::try_new(
+        cx,
+        absorption,
+        MassScatteringSpectrum::constant(0.025)?,
+        GridPhase::henyey_greenstein(0.7)?,
+    )?;
+    let settings = Settings {
+        width: 16,
+        height: 12,
+        spp: 128,
+        max_depth: 6,
+        sampler: Sampler::Iid,
+        strategy: DirectStrategy::Mis,
+        seed: 0x5052_4556_495a,
+    };
+    let mut image = PathLuminanceJob::new(
+        &scene,
+        sources,
+        PathMedium::Scattering(&medium),
+        TransportOptions {
+            max_outputs: 4096,
+            ..TransportOptions::default()
+        },
+        settings,
+        cx,
+    )?;
+    while !image.is_complete() {
+        image.advance(cx, 768)?;
+    }
+    let peak = image
+        .estimates()
+        .flatten()
+        .map(|p| p.luminance_cd_m2)
+        .fold(0.0, f64::max);
+    let stderr = image
+        .estimates()
+        .flatten()
+        .filter_map(|p| p.estimated_standard_error_cd_m2)
+        .fold(0.0, f64::max);
+    println!("16 x 12 spectral path image, 128 samples/pixel, maximum 6 surface/volume vertices");
+    println!("Reflections and multiple scattering: peak {peak:.6} cd/m^2");
+    println!(
+        "Largest estimated IID sampling standard error: {stderr:.6} cd/m^2 (not an error bound)"
+    );
+    println!(
+        "Total error unknown: calibration, observer/discretization, and finite-depth remainder."
     );
     Ok(())
 }

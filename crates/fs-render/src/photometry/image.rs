@@ -12,8 +12,11 @@ use crate::charts::Ray;
 use crate::tracer::{photometric_brdf, photometric_intersect};
 use fs_exec::Cx;
 
-use super::medium::{ScatterError, ScatterEstimate, ScatterSettings, single_scattered_luminance};
+use super::medium::{
+    HomogeneousMedium, ScatterError, ScatterEstimate, ScatterSettings, single_scattered_luminance,
+};
 use super::source::{LUMINOUS_EFFICACY_LM_W, SPECTRAL_BINS, photopic_weight_nm, wavelength_nm};
+use super::transport::gray_transmittance;
 use super::{CompensatedSum, PhotometricScene, PhotometryError, finite_point, scaled_norm, unit};
 
 /// Untonemapped luminance of one ray, with separate transport contributions.
@@ -31,6 +34,18 @@ pub struct LuminanceEstimate {
     pub total_error_bound_cd_m2: Option<f64>,
 }
 
+/// The direct fixture-lit surface component after extinction to the camera.
+/// This quantity excludes light scattered into the camera ray, medium thermal
+/// emission and surface interreflection, even when those processes exist in
+/// the borrowed physical scene. It is not a total image radiance estimate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SurfaceLuminanceEstimate {
+    /// Unscattered directly reflected surface luminance, cd/m².
+    pub surface_cd_m2: f64,
+    /// Unknown error from source/observer calibration, geometry and spectra.
+    pub total_error_bound_cd_m2: Option<f64>,
+}
+
 impl PhotometricScene<'_> {
     /// Trace one unit-direction camera ray over a finite declared range.
     /// Primary geometry terminates both visible surface and haze transport.
@@ -44,16 +59,43 @@ impl PhotometricScene<'_> {
         scatter: ScatterSettings,
     ) -> Result<LuminanceEstimate, PhotometryError> {
         cx.checkpoint()?;
-        validate_distance(self, distance_m)?;
-        if !finite_point(ray.origin)
-            || !ray.dir.x.is_finite()
-            || !ray.dir.y.is_finite()
-            || !ray.dir.z.is_finite()
-            || (ray.dir.norm() - 1.0).abs() > 1.0e-12
-            || !finite_point(ray.at(distance_m))
-        {
-            return Err(PhotometryError::InvalidCameraRay);
+        if let Some(medium) = self.medium.homogeneous() {
+            return self.homogeneous_luminance_along_ray(cx, ray, distance_m, scatter, medium);
         }
+        if let Some(reason) = self.medium.image_refusal() {
+            return Err(PhotometryError::UnsupportedMedium { reason });
+        }
+        // Passive absorbing grids have analytically zero haze and thermal
+        // source terms. Their coloured attenuation still stays inside the
+        // spectral BRDF integral on both physical connection legs.
+        let single_scatter = single_scattered_luminance(
+            &HomogeneousMedium::vacuum(),
+            ray,
+            distance_m,
+            scatter,
+            cx,
+            |_, _| Ok(0.0),
+        )
+        .map_err(scatter_error)?;
+        let surface = self.direct_surface_luminance_along_ray(cx, ray, distance_m)?;
+        Ok(LuminanceEstimate {
+            luminance_cd_m2: surface.surface_cd_m2,
+            surface_cd_m2: surface.surface_cd_m2,
+            single_scatter,
+            total_error_bound_cd_m2: None,
+        })
+    }
+
+    fn homogeneous_luminance_along_ray(
+        &self,
+        cx: &Cx<'_>,
+        ray: &Ray,
+        distance_m: f64,
+        scatter: ScatterSettings,
+        medium: HomogeneousMedium,
+    ) -> Result<LuminanceEstimate, PhotometryError> {
+        cx.checkpoint()?;
+        validate_camera_ray(self, ray, distance_m)?;
         let primary = photometric_intersect(self.primitives, cx, ray, distance_m)?;
         let limit = primary.as_ref().map_or(distance_m, |(_, hit)| hit.t);
         if !limit.is_finite() || limit < 0.0 || limit > distance_m {
@@ -62,7 +104,7 @@ impl PhotometricScene<'_> {
         // Point-source irradiance is singular at the source. Midpoint samples
         // can miss that singularity entirely, so admit the whole visible
         // camera segment before estimating its in-scattered radiance.
-        if self.medium.scattering_per_m() > 0.0 && limit > 0.0 {
+        if medium.scattering_per_m() > 0.0 && limit > 0.0 {
             for (index, source) in self.sources.iter().enumerate() {
                 cx.checkpoint()?;
                 if source.flux_lm() == 0.0 {
@@ -105,7 +147,7 @@ impl PhotometricScene<'_> {
                 if source.flux_lm() == 0.0 {
                     continue;
                 }
-                let connection = self.connection(source, index, hit.point)?;
+                let connection = self.connection(cx, source, index, hit.point)?;
                 let cosine = normal.dot(connection.towards_source).max(0.0);
                 if cosine == 0.0
                     || connection.illuminance_normal_lux == 0.0
@@ -139,9 +181,9 @@ impl PhotometricScene<'_> {
                 surface_sum.add(reflected);
             }
         }
-        let surface_cd_m2 = surface_sum.finish()? * self.medium.transmittance(limit)?;
+        let surface_cd_m2 = surface_sum.finish()? * medium.transmittance(limit)?;
         let single_scatter = single_scattered_luminance(
-            &self.medium,
+            &medium,
             ray,
             limit,
             scatter,
@@ -153,7 +195,7 @@ impl PhotometricScene<'_> {
                     if source.flux_lm() == 0.0 {
                         continue;
                     }
-                    let connection = self.connection(source, index, point)?;
+                    let connection = self.connection(cx, source, index, point)?;
                     if connection.illuminance_normal_lux == 0.0
                         || !self.visible(cx, source.position_m(), &connection)?
                     {
@@ -162,8 +204,7 @@ impl PhotometricScene<'_> {
                     // Both vectors are photon propagation directions. The
                     // source connection stores the opposite (toward-light) one.
                     let cosine = -connection.towards_source.dot(towards_camera);
-                    incident
-                        .add(connection.illuminance_normal_lux * self.medium.phase_per_sr(cosine)?);
+                    incident.add(connection.illuminance_normal_lux * medium.phase_per_sr(cosine)?);
                 }
                 incident.finish()
             },
@@ -178,6 +219,107 @@ impl PhotometricScene<'_> {
             luminance_cd_m2,
             surface_cd_m2,
             single_scatter,
+            total_error_bound_cd_m2: None,
+        })
+    }
+
+    /// Evaluate only unscattered fixture light reflected once by the first
+    /// opaque surface. Physical grid absorption and scattering both attenuate
+    /// each wavelength on both legs; grid emission and in-scattered light are
+    /// intentionally outside this explicitly named component.
+    pub fn direct_surface_luminance_along_ray(
+        &self,
+        cx: &Cx<'_>,
+        ray: &Ray,
+        distance_m: f64,
+    ) -> Result<SurfaceLuminanceEstimate, PhotometryError> {
+        cx.checkpoint()?;
+        validate_camera_ray(self, ray, distance_m)?;
+        let primary = photometric_intersect(self.primitives, cx, ray, distance_m)?;
+        let Some((primitive_index, hit)) = primary else {
+            return Ok(SurfaceLuminanceEstimate {
+                surface_cd_m2: 0.0,
+                total_error_bound_cd_m2: None,
+            });
+        };
+        if !hit.t.is_finite() || hit.t < 0.0 || hit.t > distance_m {
+            return Err(PhotometryError::NonFiniteResult);
+        }
+        let outgoing = ray.dir.scale(-1.0);
+        let mut normal = hit
+            .normal
+            .and_then(unit)
+            .ok_or(PhotometryError::InvalidPrimitive {
+                primitive: primitive_index,
+            })?;
+        if normal.dot(outgoing) < 0.0 {
+            normal = normal.scale(-1.0);
+        }
+        let camera_transmission = self.medium.transmittance(cx, ray.origin, ray.dir, hit.t)?;
+        let camera_gray = gray_transmittance(&camera_transmission);
+        let material = &self.primitives[primitive_index].material;
+        let mut total = CompensatedSum::default();
+        for (index, source) in self.sources.iter().enumerate() {
+            cx.checkpoint()?;
+            if source.flux_lm() == 0.0 {
+                continue;
+            }
+            let connection = self.unattenuated_connection(source, index, hit.point)?;
+            let cosine = normal.dot(connection.towards_source).max(0.0);
+            if cosine == 0.0
+                || connection.illuminance_normal_lux == 0.0
+                || !self.visible(cx, source.position_m(), &connection)?
+            {
+                continue;
+            }
+            let light_transmission = self.medium.transmittance(
+                cx,
+                source.position_m(),
+                connection.towards_source.scale(-1.0),
+                connection.distance_m,
+            )?;
+            let light_gray = gray_transmittance(&light_transmission);
+            let mut response = CompensatedSum::default();
+            for (bin, power) in source
+                .spectrum()
+                .bins_w_per_lumen_nm()
+                .iter()
+                .copied()
+                .enumerate()
+            {
+                if bin % 16 == 0 {
+                    cx.checkpoint()?;
+                }
+                let brdf = photometric_brdf(
+                    material,
+                    normal,
+                    outgoing,
+                    connection.towards_source,
+                    wavelength_nm(bin),
+                )?;
+                if !brdf.is_finite() || brdf < 0.0 {
+                    return Err(PhotometryError::NonFiniteResult);
+                }
+                let mut contribution = power * photopic_weight_nm(bin) * brdf;
+                if light_gray.is_none() {
+                    contribution *= light_transmission[bin];
+                }
+                if camera_gray.is_none() {
+                    contribution *= camera_transmission[bin];
+                }
+                response.add(contribution);
+            }
+            // Gray legs retain the original multiplication order exactly.
+            let incident = connection.illuminance_normal_lux * light_gray.unwrap_or(1.0);
+            total.add(incident * cosine * LUMINOUS_EFFICACY_LM_W * response.finish()?);
+        }
+        let surface_cd_m2 = total.finish()? * camera_gray.unwrap_or(1.0);
+        if !surface_cd_m2.is_finite() || surface_cd_m2 < 0.0 {
+            return Err(PhotometryError::NonFiniteResult);
+        }
+        cx.checkpoint()?;
+        Ok(SurfaceLuminanceEstimate {
+            surface_cd_m2,
             total_error_bound_cd_m2: None,
         })
     }
@@ -200,6 +342,24 @@ fn validate_distance(scene: &PhotometricScene<'_>, distance_m: f64) -> Result<()
     }
     if distance_m > scene.options.max_distance_m {
         return Err(PhotometryError::DistanceLimitExceeded);
+    }
+    Ok(())
+}
+
+fn validate_camera_ray(
+    scene: &PhotometricScene<'_>,
+    ray: &Ray,
+    distance_m: f64,
+) -> Result<(), PhotometryError> {
+    validate_distance(scene, distance_m)?;
+    if !finite_point(ray.origin)
+        || !ray.dir.x.is_finite()
+        || !ray.dir.y.is_finite()
+        || !ray.dir.z.is_finite()
+        || (ray.dir.norm() - 1.0).abs() > 1.0e-12
+        || !finite_point(ray.at(distance_m))
+    {
+        return Err(PhotometryError::InvalidCameraRay);
     }
     Ok(())
 }
@@ -230,6 +390,9 @@ impl<'a, 'scene> LuminanceJob<'a, 'scene> {
         scatter: ScatterSettings,
     ) -> Result<Self, PhotometryError> {
         validate_distance(scene, distance_m)?;
+        if let Some(reason) = scene.medium.image_refusal() {
+            return Err(PhotometryError::UnsupportedMedium { reason });
+        }
         if width == 0 || height == 0 || !camera.aperture().is_pinhole() {
             return Err(PhotometryError::InvalidCameraRay);
         }

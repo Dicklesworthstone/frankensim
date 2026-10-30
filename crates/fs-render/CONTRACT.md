@@ -1611,3 +1611,56 @@ primary truncation, singularity refusal and progressive cancellation/replay.
 The `photometric_stage` example accepts ordinary Rust fixture/scene data and
 prints an illuminance summary and luminance diagnostics, or a lux CSV with
 `--csv`; its fixture profiles and haze coefficients are declared examples.
+
+### Borrowed spectral physical media
+
+`PhotometricScene::try_with_medium` accepts `PhotometricMedium`, borrowing the
+same `AbsorbingGrid` or `ScatteringGrid` used by the spectral volume integrator.
+Original density buffers, mass-coefficient spectra, physical cell bounds,
+traversal budgets and cancellation remain authoritative. Direct lux integrates
+the 80 wavelength transmittances before the photopic conversion; a colored
+medium is not replaced by one attenuation factor on an already integrated lux
+value. Gray and vacuum segments retain the homogeneous calculation's bits.
+
+`direct_surface_luminance_along_ray` explicitly returns only fixture light
+reflected once by the first opaque surface and transmitted without scattering
+to the camera. Both leg transmittances enter its spectral BRDF integral.
+The deterministic `LuminanceJob` accepts passive absorption grids but refuses
+physical-grid scattering and LTE emission; those require the path estimator
+below rather than a zero contribution presented as a complete image.
+
+### Calibrated spectral fixture paths
+
+`PathLuminanceJob` connects the same `PhotometricSource` states to the original
+spectral surface and volume path integrator. Fixture connections are evaluated
+at each opaque surface and volume interaction. These point sources have delta
+position distributions: the continuous BSDF/phase hit technique cannot reach
+them, so their separately summed next-event terms have unit MIS weight. They
+do not alter the continuous-light sampling mixture or its random draws.
+
+The admitted scene uses native meshes/rigid mesh instances and opaque spectral
+materials. Relative area/environment/material emission refuses at this SI
+boundary. Borrowed physical grids supply spectral attenuation, scattering and
+their already calibrated LTE radiance. The camera is the existing pinhole
+`Scene::camera`. With fixtures present, hero wavelengths use the same 80-bin
+midpoints as source normalization, and XYZ accumulation uses 683 rather than
+the legacy display-white normalization. Y therefore reports cd/m². The old
+entry points pass no fixture context and retain their previous arithmetic.
+
+The image advances in row-major sample passes and reuses the existing Welford
+accumulator. Each complete path and moment update commits atomically. IID
+estimates expose a sample-based standard error after two paths; Owen–Sobol
+camera sampling exposes no IID standard-error claim. The blocked full-path
+Sobol mode refuses here: its repeated base dimensions have not qualified for
+these spectral physical references. A finite vertex ceiling omits higher-order
+transport, so neither sampling error nor apparent convergence bounds total
+image error. Fixture calibration, observer/discretization, geometry and that
+finite-depth remainder remain unknown.
+
+Every physical path segment and source connection respects the declared metre
+range. A geometry miss uses the finite physical-grid exit, preserving its
+foreground transport without an arbitrary truncated tail. Scattering segments
+refuse point-source exclusion-radius crossings before free-flight sampling.
+The `photometric_stage --paths` example shares ordinary fixture/scene data with
+the direct calculation and renders reflections plus multiple scattering through
+a borrowed heterogeneous, spectrally absorbing field.

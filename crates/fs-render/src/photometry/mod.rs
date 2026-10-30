@@ -23,10 +23,13 @@ use fs_geom::{Point3, Vec3};
 
 pub mod image;
 pub mod medium;
+pub mod path;
 pub mod source;
+pub mod transport;
 
 use medium::{HomogeneousMedium, MediumError};
 use source::{PhotometricSource, SourceError};
+use transport::{PhotometricMedium, photopic_transmittance};
 
 /// Version of the calibrated transport model and output interpretation.
 pub const PHOTOMETRY_SEMANTICS_VERSION: u32 = 1;
@@ -100,6 +103,13 @@ pub enum PhotometryError {
     Source(SourceError),
     /// Participating-medium validation/evaluation refusal.
     Medium(MediumError),
+    /// The original physical-grid transport refused a field, ray or budget.
+    PhysicalMedium(crate::volumes::transport::VolumeTransportError),
+    /// The requested image requires medium terms this estimator cannot supply.
+    UnsupportedMedium {
+        /// Use a component-specific or full spectral path entry point instead.
+        reason: &'static str,
+    },
     /// The original renderer's geometry backend refused the ray.
     Geometry(TracerError),
     /// The existing physical camera refused ray generation.
@@ -129,6 +139,15 @@ impl From<SourceError> for PhotometryError {
 impl From<MediumError> for PhotometryError {
     fn from(value: MediumError) -> Self {
         Self::Medium(value)
+    }
+}
+
+impl From<crate::volumes::transport::VolumeTransportError> for PhotometryError {
+    fn from(value: crate::volumes::transport::VolumeTransportError) -> Self {
+        match value {
+            crate::volumes::transport::VolumeTransportError::Cancelled => Self::Cancelled,
+            other => Self::PhysicalMedium(other),
+        }
     }
 }
 
@@ -285,7 +304,7 @@ pub struct IlluminanceEstimate {
 pub struct PhotometricScene<'a> {
     primitives: &'a [Primitive],
     sources: &'a [PhotometricSource],
-    medium: HomogeneousMedium,
+    medium: PhotometricMedium<'a>,
     options: TransportOptions,
 }
 
@@ -301,6 +320,27 @@ impl<'a> PhotometricScene<'a> {
         primitives: &'a [Primitive],
         sources: &'a [PhotometricSource],
         medium: HomogeneousMedium,
+        options: TransportOptions,
+        cx: &Cx<'_>,
+    ) -> Result<Self, PhotometryError> {
+        Self::try_with_medium(
+            primitives,
+            sources,
+            PhotometricMedium::Homogeneous(medium),
+            options,
+            cx,
+        )
+    }
+
+    /// Admit the same static scene with an original physical medium snapshot.
+    /// Direct illuminance includes only fixture light which has neither
+    /// scattered nor reflected. Temperature-dependent medium emission is not
+    /// part of that direct component. Image methods explicitly distinguish the
+    /// direct surface component from unsupported grid haze/thermal emission.
+    pub fn try_with_medium(
+        primitives: &'a [Primitive],
+        sources: &'a [PhotometricSource],
+        medium: PhotometricMedium<'a>,
         options: TransportOptions,
         cx: &Cx<'_>,
     ) -> Result<Self, PhotometryError> {
@@ -404,7 +444,7 @@ impl<'a> PhotometricScene<'a> {
             if source.flux_lm() == 0.0 {
                 continue;
             }
-            let connection = self.connection(source, index, probe.position_m)?;
+            let connection = self.connection(cx, source, index, probe.position_m)?;
             let cosine = probe.normal.dot(connection.towards_source).max(0.0);
             if cosine == 0.0 || connection.illuminance_normal_lux == 0.0 {
                 continue;
@@ -435,6 +475,36 @@ impl<'a> PhotometricScene<'a> {
 
     fn connection(
         &self,
+        cx: &Cx<'_>,
+        source: &PhotometricSource,
+        index: usize,
+        receiver: Point3,
+    ) -> Result<LightConnection, PhotometryError> {
+        let mut connection = self.unattenuated_connection(source, index, receiver)?;
+        if connection.illuminance_normal_lux == 0.0 {
+            return Ok(connection);
+        }
+        let transmission = match self.medium.homogeneous() {
+            Some(medium) => medium.transmittance(connection.distance_m)?,
+            None => {
+                let values = self.medium.transmittance(
+                    cx,
+                    source.position_m(),
+                    connection.towards_source.scale(-1.0),
+                    connection.distance_m,
+                )?;
+                photopic_transmittance(source.spectrum(), &values)?
+            }
+        };
+        connection.illuminance_normal_lux *= transmission;
+        if !connection.illuminance_normal_lux.is_finite() {
+            return Err(PhotometryError::NonFiniteResult);
+        }
+        Ok(connection)
+    }
+
+    fn unattenuated_connection(
+        &self,
         source: &PhotometricSource,
         index: usize,
         receiver: Point3,
@@ -451,8 +521,7 @@ impl<'a> PhotometricScene<'a> {
         }
         let intensity_cd = source.intensity_cd(towards_source.scale(-1.0))?;
         // Divide sequentially to avoid overflow of distance² for distant rigs.
-        let illuminance_normal_lux =
-            (intensity_cd / distance_m / distance_m) * self.medium.transmittance(distance_m)?;
+        let illuminance_normal_lux = intensity_cd / distance_m / distance_m;
         if !illuminance_normal_lux.is_finite() || illuminance_normal_lux < 0.0 {
             return Err(PhotometryError::NonFiniteResult);
         }
