@@ -42,7 +42,9 @@ pub struct NsfDgUpstreamFrame {
 }
 
 impl<L: Lattice3<27>> NsfDg<L> {
-    /// Attach an original finite acoustic duct to the other resolved face.
+    /// Attach an original finite acoustic duct to the other resolved face or
+    /// its explicitly selected source aperture. Surrounding opening flux is
+    /// never assigned to this duct or to the series pressure-rise source.
     /// Its propagation, material wall, molecular and terminal histories remain
     /// intact. Construction requires cold matching gas, area and physical clock.
     /// No steady mass/enthalpy flow into that acoustic duct is inferred.
@@ -57,11 +59,10 @@ impl<L: Lattice3<27>> NsfDg<L> {
             .zone
             .characteristic_reference_gas(high)
             .map_err(NsfDgError::Flow)?;
-        let traces = self
-            .zone
-            .open_boundary_traces(high)
+        let traces = if self.source_patch().is_some() { self.zone.open_patch_traces() }
+            else { self.zone.open_boundary_traces(high) }
             .ok_or(NsfDgError::Input(
-                "upstream coupling requires original complete face quadrature",
+                "upstream coupling requires original selected source quadrature",
             ))?;
         let area = traces
             .first()
@@ -98,7 +99,12 @@ impl<L: Lattice3<27>> NsfDg<L> {
     /// The declared pressure rise is placed between upstream duct and zone.
     /// It is neither an absolute boundary pressure nor a finite player model.
     /// Nested safeguarded scalar roots reuse each original trial from the same
-    /// accepted state. The existing total evaluation/cell-step budget covers
+    /// accepted state. For the explicit source aperture, accepted incoming
+    /// controls seed the roots and successive outer trials reuse the solved
+    /// main-face incoming, with a full bracket fallback at the original
+    /// residual bound. Existing complete-face and downstream-aperture owners
+    /// retain their original cold-start trial sequence.
+    /// The existing total evaluation/cell-step budget covers
     /// every inner, outer and final-restaging evaluation together.
     pub fn step_with_upstream_pressure_rise(
         &mut self,
@@ -119,11 +125,29 @@ impl<L: Lattice3<27>> NsfDg<L> {
                 "upstream pressure rise is nonfinite or the horizon is exhausted",
             ));
         }
+        let patch = self.patch_boundary();
+        let side = usize::from(self.high);
+        let other = 1 - side;
+        let seeds = if self.source_patch().is_some() {
+            let mut accepted = self.zone.boundary_drives().ok_or(NsfDgError::Input(
+                "two-sided coupling requires its original accepted boundary controls",
+            ))?;
+            accepted[other] = self.zone.characteristic_patch_drive().ok_or(NsfDgError::Input(
+                "two-sided coupling lost its original aperture control",
+            ))?;
+            accepted.map(|drive| Some(match drive {
+                NsfBoundaryDrive::IncomingCharacteristic(value) => value,
+                NsfBoundaryDrive::PressureOffset(_) => f64::midpoint(
+                    self.limits.incoming_bracket_m_s[0], self.limits.incoming_bracket_m_s[1]),
+            }))
+        } else {
+            // Preserve the exact preexisting numerical trajectory when no
+            // source aperture requested this new conditional-root strategy.
+            [None; 2]
+        };
         let upstream = self.upstream.as_mut().ok_or(NsfDgError::Input(
             "upstream pressure rise requires its original finite acoustic load",
         ))?;
-        let side = usize::from(self.high);
-        let other = 1 - side;
         let main_relation = self.load.port_response().map_err(NsfDgError::Acoustic)?;
         let upstream_relation = upstream
             .load
@@ -136,7 +160,6 @@ impl<L: Lattice3<27>> NsfDg<L> {
         let limits = self.limits;
         let mut evaluations = 0;
         let mut last_residual = 0.0;
-        let patch_background = self.patch_background;
         let zone = &mut self.zone;
         let mut evaluate = |incoming: [f64; 2]| -> Result<([f64; 2], [f64; 2]), NsfDgError> {
             poll(gate)?;
@@ -149,13 +172,12 @@ impl<L: Lattice3<27>> NsfDg<L> {
             }
             evaluations += 1;
             let trial = preview_interval(zone,
-                incoming.map(NsfBoundaryDrive::IncomingCharacteristic), side,
-                patch_background, reservoir_state, limits, gate)?;
+                incoming.map(NsfBoundaryDrive::IncomingCharacteristic), patch,
+                reservoir_state, limits, gate)?;
             let mut residuals = [0.0; 2];
             let mut scales = [0.0; 2];
             for face in 0..2 {
-                let exchange = coupled_exchange(&trial, face,
-                    face == side && patch_background.is_some())?;
+                let exchange = coupled_exchange(&trial, face)?;
                 let dynamic = relations[face].impedance_pa_s_m3 * exchange.normal_volume_flow_m3_s;
                 residuals[face] = exchange.mean_acoustic_pressure_pa
                     - (relations[face].history_pressure_pa + dynamic + rises[face]);
@@ -172,13 +194,18 @@ impl<L: Lattice3<27>> NsfDg<L> {
             last_residual = residuals.into_iter().map(f64::abs).fold(0.0, f64::max);
             Ok((residuals, scales))
         };
-        let (upstream_incoming, downstream_incoming) = solve_scalar(limits, |incoming_upstream| {
+        let mut main_seed = seeds[side];
+        let (upstream_incoming, downstream_incoming) = solve_scalar(limits, seeds[other], |incoming_upstream| {
             let mut incoming = [incoming_upstream; 2];
-            let (downstream, (residuals, scales)) = solve_scalar(limits, |incoming_main| {
+            let (downstream, (residuals, scales)) = solve_scalar(limits, main_seed, |incoming_main| {
                 incoming[side] = incoming_main;
                 let value = evaluate(incoming)?;
                 Ok((value.0[side], value.1[side], value))
             })?;
+            // All outer trials share the original accepted fluid snapshot.
+            // Rechecking this conditional root avoids repeating its entire
+            // wide-bracket search when the remote face has little influence.
+            if main_seed.is_some() { main_seed = Some(downstream); }
             Ok((residuals[other], scales[other], downstream))
         })?;
         // No numerical trial escapes with accepted state. Reevaluate exactly
@@ -187,21 +214,24 @@ impl<L: Lattice3<27>> NsfDg<L> {
         incoming[side] = downstream_incoming;
         evaluations += 1;
         let fluid = preview_interval(zone,
-            incoming.map(NsfBoundaryDrive::IncomingCharacteristic), side,
-            patch_background, reservoir_state, limits, gate)?;
+            incoming.map(NsfBoundaryDrive::IncomingCharacteristic), patch,
+            reservoir_state, limits, gate)?;
         let dt = self.load.propagator().dt();
         let main_inlet = self.load.inlet();
         let upstream_inlet = upstream.load.inlet();
         let faces = *fluid.boundary_exchange();
-        let coupled_patch = fluid.patch_exchange().copied();
-        let main_face = coupled_exchange(&fluid, side, patch_background.is_some())?;
+        let patch_on_main = patch.is_some_and(|(patch_side, _)| patch_side == side);
+        let coupled_patch = fluid.patch_exchange().copied().filter(|_| patch_on_main);
+        let source_patch = fluid.patch_exchange().copied().filter(|_| !patch_on_main);
+        let main_face = coupled_exchange(&fluid, side)?;
+        let source_face = coupled_exchange(&fluid, other)?;
         let main = self
             .load
             .preview_step(main_face.normal_volume_flow_m3_s)
             .map_err(NsfDgError::Acoustic)?;
         let source = upstream
             .load
-            .preview_step(faces[other].normal_volume_flow_m3_s)
+            .preview_step(source_face.normal_volume_flow_m3_s)
             .map_err(NsfDgError::Acoustic)?;
         let main_p = main
             .output()
@@ -232,7 +262,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
             limits,
         )?;
         let source_audit = audit(
-            faces[other],
+            source_face,
             source_p,
             source.inlet_work_j(),
             pressure_rise_pa,
@@ -268,7 +298,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
                 incoming_characteristic_m_s: upstream_incoming,
                 duct: source_duct,
                 terminals: upstream_terminals,
-                inlet_flow_m3_s: faces[other].normal_volume_flow_m3_s,
+                inlet_flow_m3_s: source_face.normal_volume_flow_m3_s,
                 inlet_pressure_pa: source_p,
                 source_work_j: source_audit.source_work,
                 pressure_residual_pa: source_audit.pressure,
@@ -279,6 +309,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
             }),
             faces,
             coupled_patch,
+            source_patch,
             reservoir_mass_out_kg,
             reservoir_flows,
             flow,
@@ -301,14 +332,28 @@ impl<L: Lattice3<27>> NsfDg<L> {
 // with the original owners. The bracket is a caller-declared domain, not a clamp.
 fn solve_scalar<T>(
     limits: NsfDgLimits,
+    initial: Option<f64>,
     mut evaluate: impl FnMut(f64) -> Result<(f64, f64, T), NsfDgError>,
 ) -> Result<(f64, T), NsfDgError> {
     let mut bracket = limits.incoming_bracket_m_s;
+    let seed = if let Some(initial) = initial {
+        let incoming = if initial.is_finite() && initial > bracket[0] && initial < bracket[1] {
+            initial
+        } else { f64::midpoint(bracket[0], bracket[1]) };
+        let (residual, scale, value) = evaluate(incoming)?;
+        if residual.abs()
+            <= limits.pressure_absolute_tolerance_pa + limits.pressure_relative_tolerance * scale
+        {
+            return Ok((incoming, value));
+        }
+        Some((incoming, residual))
+    } else { None };
     let mut residuals = [0.0; 2];
     let mut weights = [0.0; 2];
     let mut previous_replaced_side = None;
     let mut incoming = bracket[0];
-    for evaluation in 1..=limits.maximum_evaluations {
+    let remaining = limits.maximum_evaluations - usize::from(seed.is_some());
+    for evaluation in 1..=remaining {
         let (residual, scale, value) = evaluate(incoming)?;
         if residual.abs()
             <= limits.pressure_absolute_tolerance_pa + limits.pressure_relative_tolerance * scale
@@ -328,6 +373,14 @@ fn solve_scalar<T>(
                 return Err(NsfDgError::NoBracket {
                     residual_pa: residuals,
                 });
+            }
+            // The checked interior seed narrows the same signed physical
+            // bracket. Its evaluation is already charged to the shared budget.
+            if let Some((seed, seed_residual)) = seed {
+                let seed_side = usize::from(seed_residual.is_sign_positive() != residuals[0].is_sign_positive());
+                bracket[seed_side] = seed;
+                residuals[seed_side] = seed_residual;
+                weights[seed_side] = seed_residual;
             }
         } else {
             let side = usize::from(residual.is_sign_positive() != residuals[0].is_sign_positive());
@@ -353,11 +406,14 @@ fn solve_scalar<T>(
             f64::midpoint(bracket[0], bracket[1])
         };
         if incoming <= bracket[0] || incoming >= bracket[1] {
-            break;
+            return Err(NsfDgError::Resolution {
+                incoming_bracket_m_s: bracket,
+                residual_pa: residuals,
+            });
         }
     }
     Err(NsfDgError::Input(
-        "two-sided incoming-characteristic bracket exhausted its representable resolution",
+        "two-sided incoming-characteristic solve exhausted its local evaluation allowance",
     ))
 }
 

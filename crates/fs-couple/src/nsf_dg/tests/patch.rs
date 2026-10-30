@@ -1,5 +1,6 @@
 //! A resolved aperture and its escape opening retain distinct physical owners.
 use super::*;
+mod source;
 
 const DIMS: [usize; 3] = [8, 4, 4];
 const GRID_CELLS: usize = 128;
