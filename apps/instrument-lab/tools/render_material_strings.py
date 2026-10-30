@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render an existing material-string assembly and optionally add it to Instrument Lab.
+"""Render or analyze an existing material-string assembly through its native solver.
 
 All mechanics, material admission, gas resolution and PCM encoding stay in the
 native material_strings executable. This launcher stages its original inputs;
@@ -7,7 +7,8 @@ it neither estimates missing properties nor tunes a string after substitution.
 Contact profiles reach that same native solve. Optional native decimation changes
 only the observed audio clock, retaining the authored mechanical resolution.
 The output directory must be new. Python's standard library suffices for native
-rendering; --analysis additionally uses the existing instrgrade dependencies.
+rendering and harmonic analysis; --analysis additionally uses the existing
+instrgrade dependencies for listening exports.
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ import argparse
 import base64
 import json
 import math
+import re
 import shutil
 import subprocess
 import sys
@@ -156,11 +158,42 @@ def write_lab_experiment(source: Path, output: Path, attachments: list[str], pro
     return path
 
 
+def loaded_response_arguments(sweep: list[str] | None, forces: list[list[str]],
+                              strain: list[int] | None) -> list[str]:
+    """Transport native physical inputs without evaluating or normalizing them.
+
+    The native parser and original source own numerical bounds, actual bridge
+    existence, force summation, source bands and response units. This preflight
+    refuses options that would otherwise be discarded before staging any files.
+    """
+    if sweep is None:
+        if forces or strain is not None:
+            raise ValueError("body-response force/strain options require --loaded-response-only")
+        return []
+    coherent = sweep[3] == "coherent"
+    if coherent != bool(forces):
+        raise ValueError("select coherent with at least one --body-response-force; unit/all selections take no force records")
+    if len(forces) > 64:
+        raise ValueError("at most 64 body-response force records are supported")
+    if strain is not None and min(strain) <= 0:
+        raise ValueError("--body-response-strain needs positive byte and work allowances")
+    arguments = list(sweep)
+    for force in forces:
+        arguments += ["--body-response-force", *force]
+    if strain is not None:
+        arguments += ["--body-response-strain", *map(str, strain)]
+    return arguments
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--renderer", help="path to material_strings; required for audio rendering or shell assembly")
+    # argparse otherwise mistakes a signed scientific phasor such as -1e-3
+    # for an option. Numerical/source admission still belongs to the native CLI.
+    parser._negative_number_matcher = re.compile(r"^-(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$")
+
+    parser.add_argument("--renderer", help="path to material_strings; required for rendering, harmonic analysis or shell assembly")
     parser.add_argument("--performance", type=Path, required=True)
-    parser.add_argument("--out", type=Path, required=True, help="new directory for the staged sources, WAV and native log")
+    parser.add_argument("--out", type=Path, required=True, help="new directory for staged sources, native output and log")
     parser.add_argument("--pack-root", type=Path)
     parser.add_argument("--pack", action="append", default=[], metavar="REFERENCED_PATH=SOURCE_PACK")
     parser.add_argument("--body-profile", type=Path)
@@ -179,6 +212,13 @@ def main(argv=None) -> int:
     parser.add_argument("--decimate", action="store_true", help="use the native 48 kHz output decimator without changing the mechanical clock")
     parser.add_argument("--coating-strain-guard", nargs=2, type=int, metavar=("MAX_BYTES", "MAX_WORK"),
                         help="check all coating films at every native mechanical endpoint with explicit resources; native audio only")
+    parser.add_argument("--loaded-response-only", nargs=4, metavar=("MIN_HZ", "MAX_HZ", "POINTS", "BRIDGE"),
+                        help="save loaded-response.tsv through native released harmonic analysis; BRIDGE is an index, all or coherent")
+    parser.add_argument("--body-response-force", action="append", nargs=3, default=[],
+                        metavar=("BRIDGE", "REAL_N", "IMAG_N"),
+                        help="physical peak force phasor for coherent loaded analysis; repeat to add actuators")
+    parser.add_argument("--body-response-strain", nargs=2, type=int, metavar=("MAX_BYTES", "MAX_WORK"),
+                        help="include native coating-strain bounds in the loaded harmonic response")
     parser.add_argument("--lab-experiment", action="store_true", help="also save experiment.native.json for Open experiment in Instrument Lab")
     parser.add_argument("--prepare-only", action="store_true", help="stage sources and save the lab experiment without rendering audio")
     parser.add_argument("--analysis", type=Path, help="also write standard calibrated listening pairs for build_instruments.py")
@@ -189,6 +229,18 @@ def main(argv=None) -> int:
     parser.add_argument("--observer", help="actual receiver description, required when exporting to the lab")
     parser.add_argument("--recipe", default=str(Path(__file__).resolve()))
     args = parser.parse_args(argv)
+    try:
+        response_arguments = loaded_response_arguments(
+            args.loaded_response_only, args.body_response_force, args.body_response_strain)
+    except ValueError as error:
+        parser.error(str(error))
+    if response_arguments:
+        if args.prepare_only or args.lab_experiment or args.analysis:
+            parser.error("--loaded-response-only produces a native response, not an audio/lab-experiment export")
+        if args.decimate or args.contact_thermal or args.stop_profile or args.coating_strain_guard:
+            parser.error("loaded harmonic analysis cannot select playback decimation, nonlinear stops, contact heat or the transient coating guard")
+        if not (args.body_profile or args.shell_table):
+            parser.error("--loaded-response-only requires a shell body profile or shell table")
     renderer = shutil.which(args.renderer) if args.renderer else None
     if (args.renderer and renderer is None) or (renderer is None and (not args.prepare_only or args.shell_table)):
         parser.error("--renderer must name an available material_strings executable")
@@ -286,7 +338,12 @@ def main(argv=None) -> int:
     if args.prepare_only:
         return 0
     wav = output / "render.wav"
-    command = [renderer, str(source), str(wav)]
+    response = output / "loaded-response.tsv"
+    command = [renderer, str(source)]
+    if response_arguments:
+        command += ["--loaded-body-response-only", str(response), *response_arguments]
+    else:
+        command.append(str(wav))
     if profile:
         command += ["--body-profile", str(output / "body.profile")]
     if stop_profile is not None:
@@ -302,9 +359,10 @@ def main(argv=None) -> int:
     for key in ("water", "phase"):
         if value := getattr(args, "gas_" + key):
             command += ["--gas-" + key, value]
-    with (output / "render.log").open("x") as log:
+    log_name = "loaded-response.log" if response_arguments else "render.log"
+    with (output / log_name).open("x") as log:
         subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True)
-    print(wav)
+    print(response if response_arguments else wav)
     if args.analysis:
         _, audio = row(text.split("\nschedule\n", 1)[0].splitlines(), "audio")
         gas = " ".join(row(text.split("\nschedule\n", 1)[0].splitlines(), "gas")[1][1:])

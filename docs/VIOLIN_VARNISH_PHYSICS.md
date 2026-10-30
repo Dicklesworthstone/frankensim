@@ -348,6 +348,42 @@ endpoints, subject to its existing spatial/modal and small-strain limits.
 The compact default receiver and finite mesh/mode/time resolution still
 need qualification before an audible difference can be attributed to varnish.
 
+
+### Coherent force patterns and their varnish response
+
+The native loaded analysis now accepts a complete physical bridge-force
+pattern through `coherent` and repeated
+`--body-response-force BRIDGE REAL_N IMAG_N` records. This exposes the
+existing coupled phasor solver, exterior receiver and coating strain observer
+without constructing another mechanical model. The
+[violin recipe](../data/instruments/descriptions/violin/README.md#drive-several-bridges-coherently)
+includes opposing bridge loads and direct common-launcher commands.
+
+At each frequency the original source maps project the summed physical
+forces. The original solver then determines one coherent body/string/air
+response. Pressure is linear in the force phasors, while dissipated power
+and stored energy are quadratic in the resulting motion. Local strain
+bounds also depend on the coherent tensor field. Consequently, separate
+unit-column loss curves cannot be added to recover the heat of simultaneous
+actuators; relative phase and cross terms matter.
+
+The loaded v4 output retains the actual peak force vector in newtons,
+physical pressure, bridge velocity, mean power and stored energy. Its
+sufficient coating scale is dimensionless: it multiplies every force phasor
+by the same factor and preserves phase. It uses the existing bound divided
+into the authored strain limit; a bound above the limit still means
+applicability is unresolved by that sufficient bound, not observed damage.
+For a valid common real scale factor, response amplitudes scale linearly
+and mean power/energy scale quadratically within the original linear model.
+
+The same source and fitted-operator frequency supports apply. The command
+releases contact traction for a steady harmonic experiment; it does not
+linearize nonlinear bowed playing or replay transient pulse events. The
+selected receiver retains its existing compact, reciprocal or one-way
+scope. No new measured varnish property, historical composition claim,
+prestressed equilibrium, or mesh/mode/acoustic convergence result is
+introduced by exposing these original operators.
+
 ### Verification and remaining qualification
 
 Seven focused native shell checks cover the physical section and projection path, equilibrium stiffness counted once, unchanged coating mass, full off-diagonal reconstruction, unique-time aggregation, and transactional refusals. Four original prepared-owner tests cover state, work and heat against an independent full fs-phs realization, step subdivision, histories beyond the previous small-state ceiling, and stiff relaxation. Four unloaded harmonic checks cover force/velocity and power identities, source support and bare/assembly response.
@@ -397,6 +433,16 @@ test seam exercises original force mapping, coherent mixed loads, release,
 energy, reciprocal string/air response and callback-partition identity;
 its native execution remains pending. The committed pulse is a reproducible input;
 no resulting sound, decay shift or convergence result is claimed.
+
+
+The coherent native extension adds three parser regressions and three
+force-aggregation/unit-schema regressions, plus three common-launcher tests
+covering argument preservation, early refusal and staged native transport.
+These new tests were authored and source-reviewed but were not compiled or
+executed: the execution environment became unavailable. The existing
+coupled solve, receiver, numerical strain rows and material laws are reused;
+no successful coherent violin render or measured sound comparison is claimed.
+
 
 ## Remaining physical limits
 

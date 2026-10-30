@@ -934,6 +934,57 @@ are deterministic floating-point spatial enclosures of the represented field,
 not outward-rounded interval certificates. Bind the library monitor after
 state-changing setup; a later preload cannot replace its checked initial state.
 
+
+### Coherent physical bridge forces
+
+For a loaded response, `BRIDGE_INDEX` may also be `coherent`. Add one to
+64 `--body-response-force BRIDGE REAL_N IMAG_N` records, before or after the
+response option. Indices 0 through 7 are admitted by the file adapter, and
+the actual original shell or assembly must contain every named port. Both
+components are finite peak newtons with the existing `exp(-i omega t)`
+convention. Coherent selection requires at least one record; force records
+with a numeric bridge, `all`, an unloaded command or no response command
+refuse.
+
+Repeated actuators add in authored order, including their complex phase.
+Accumulation overflow refuses. Explicit zero loads and exact cancellation
+are admitted without normalization. The complete vector is assembled once
+in original source order before receiver or strain preparation. Each
+frequency uses the existing coherent bank/receiver response and one strain
+query. Existing per-frequency mechanical/receiver work and full-sweep strain
+budgets therefore account for one response per frequency, independent of
+the number of actuator records. The same source bands, 8 MiB report cap and
+create-new publication rule remain active.
+
+Coherent output selects `frankensim-loaded-body-response-v4`. Its constant
+summed force vector is recorded once in `physical_peak_force_N` metadata;
+rows have no single `drive_bridge` column. The schema uses actual SI units:
+
+| Quantity | Coherent v4 | Existing unit-force v2/v3 |
+|---|---|---|
+| Bridge motion | Velocity, m/s | Mobility, m/s/N |
+| Pressure | Pa | Pa/N |
+| Volume velocity | m³/s | m³/s/N |
+| Power and dissipation | W | W/N² |
+| Stored energy | J | J/N² |
+| Receiver gradient | Pa/m | Pa/m/N |
+| Sufficient coating input scale | Dimensionless common amplitude multiplier | Peak force, N |
+
+All pressure, heat and strain values come from the same combined motion.
+The new `coating_strain_sufficient_common_amplitude_scale` and per-film
+`strain_sufficient_amplitude_scale` multiply the whole physical force
+pattern while preserving relative phases. A scale below one means these
+sufficient bounds do not establish the authored envelope at the requested
+input; it does not prove damage. `inf` retains the existing zero-strain or
+no-film interpretation. Neither the numeric strain row nor its material
+envelope is renormalized by the frontend.
+
+See the [violin coherent-force commands](../../../../data/instruments/descriptions/violin/README.md#drive-several-bridges-coherently),
+including direct analysis through the common launcher. Default unit-force
+schemas, structural-only response and ordinary audio playback keep their
+existing behavior.
+
+
 ## Separate exterior and cavity pressure surfaces
 
 A v3 profile can declare which original triangles participate in exterior

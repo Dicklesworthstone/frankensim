@@ -283,6 +283,82 @@ supported frequencies. No independent audio normalization or sound-pressure
 gain is introduced. Both response commands validate all samples before a
 create-new report write.
 
+
+### Drive several bridges coherently
+
+The loaded harmonic command accepts physical force phasors at multiple
+original bridge ports. Select `coherent` and repeat
+`--body-response-force BRIDGE REAL_N IMAG_N` for each actuator:
+
+```bash
+target/release/material_strings \
+  /path/to/new-varnished-violin-run/G3/performance.material-strings \
+  --body-profile /path/to/new-varnished-violin-run/G3/body.profile \
+  --loaded-body-response-only /path/to/new-varnished-violin-run/G3/coherent-response.tsv 101 2000 32 coherent \
+  --body-response-force 0 0.01 0 \
+  --body-response-force 1 -0.01 0 \
+  --body-response-strain 536870912 1000000000000
+```
+
+This example applies opposite 0.01 N peak forces at declared ports 0 and 1.
+Their original positions and directions determine the resulting bridge
+motion; the command does not infer a torque or move a load to another
+footprint. Real and imaginary components use `exp(-i omega t)`. A
+nonzero imaginary component selects relative phase. The force pattern stays
+constant across the frequency sweep.
+
+The complete force vector enters one original coupled solve at each frequency.
+Pressure, coating dissipation, stored energy and strain are evaluated from
+that combined response. In particular, adding separate unit-column loss
+values would omit the interference terms. All original strings, cavity
+loading, material histories and the selected receiver retain their existing
+owners. Duplicate actuator records add in authored order; all unmentioned
+ports have zero force. The source validates actual port existence.
+
+Coherent reports use **loaded v4** and record the summed physical force
+vector in metadata. They report velocity in m/s, pressure in Pa, power in W,
+stored energy in J and receiver gradients in Pa/m. The strain column
+`coating_strain_sufficient_common_amplitude_scale` is a dimensionless
+multiplier of the entire authored force pattern, preserving its relative
+phases. It is not a force in newtons. The individual-film scale columns have
+the same meaning. Existing numeric-bridge and `all` selections keep their
+unit-force v2/v3 formats.
+
+The common launcher can perform this analysis directly while staging the same
+geometry and source packs. With the ordinary packs already available:
+
+```bash
+materials=crates/fs-couple/examples/material_strings
+geometry=data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026
+python3 apps/instrument-lab/tools/render_material_strings.py \
+  --renderer target/release/material_strings \
+  --performance "$materials/cannone-dominant-g3.material-strings" \
+  --pack-root "$materials/packs" \
+  --shell-table "$geometry/shell-assembly-h8.tsv" \
+  --assembly-options "$materials/cannone-h8.assembly" \
+  --loaded-response-only 101 2000 32 coherent \
+  --body-response-force 0 0.01 0 \
+  --body-response-force 1 -0.01 0 \
+  --body-response-strain 536870912 1000000000000 \
+  --out /path/to/new-bare-coherent-response
+```
+
+The new directory contains the staged performance, body profile, material
+packs, `loaded-response.tsv` and `loaded-response.log`. For the coated
+comparison, select `cannone-h8-varnish-memory.assembly`, supply its compiled
+varnish pack with the earlier `--pack` binding, and use another new output
+directory. Keep the force vector, frequency grid, geometry, retained modes,
+atmosphere and receiver equal. The allowances above are explicit examples,
+not runtime estimates.
+
+This selects a steady, released harmonic experiment. The performance's bow
+schedule and transient force events are not replayed. Playback decimation,
+contact-thermal and stop profiles, the transient strain guard, and audio/lab
+exports are incompatible with this launcher mode. Harmonic strain bounds use
+`--body-response-strain`. Source frequency support and the existing retained
+linear model limitations remain binding; no full-violin convergence or
+historical-recipe fidelity follows from this interface.
+
 ### Check coating applicability while rendering sound
 
 The native renderer and common violin launcher accept

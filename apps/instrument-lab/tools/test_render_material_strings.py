@@ -271,5 +271,99 @@ Path(sys.argv[2]).write_bytes(b'render witness')
         self.assertEqual(stops.read_bytes(), stop_bytes)
 
 
+class LoadedResponses(unittest.TestCase):
+    def test_coherent_arguments_preserve_physical_amplitude_phase_and_declaration_order(self):
+        sweep = ["101", "2000", "32", "coherent"]
+        forces = [["1", "0", "-2.5e-3"], ["0", "0.25", "0"], ["1", "0", "2.5e-3"]]
+        expected = [*sweep,
+                    "--body-response-force", "1", "0", "-2.5e-3",
+                    "--body-response-force", "0", "0.25", "0",
+                    "--body-response-force", "1", "0", "2.5e-3",
+                    "--body-response-strain", "1048576", "1000000"]
+        self.assertEqual(R.loaded_response_arguments(sweep, forces, [1048576, 1000000]), expected)
+        self.assertEqual(forces[0], ["1", "0", "-2.5e-3"])
+        self.assertEqual(R.loaded_response_arguments(None, [], None), [])
+        for bridge in ("0", "all"):
+            query = ["101", "2000", "32", bridge]
+            self.assertEqual(R.loaded_response_arguments(query, [], None), query)
+        for query, loads, strain in [
+            (None, [["0", "1", "0"]], None),
+            (None, [], [1, 2]),
+            (sweep, [], None),
+            (["101", "2000", "32", "all"], forces, None),
+            (sweep, forces * 22, None),
+            (sweep, forces, [0, 2]),
+        ]:
+            with self.assertRaises(ValueError):
+                R.loaded_response_arguments(query, loads, strain)
+
+    def test_harmonic_playback_and_export_conflicts_refuse_before_source_io(self):
+        base = ["--renderer", "native-strings", "--performance", "unread.material-strings",
+                "--out", "uncreated", "--body-profile", "unread.body",
+                "--loaded-response-only", "101", "2000", "8", "coherent",
+                "--body-response-force", "0", "-1e-3", "2e-3"]
+        for conflict in (["--decimate"], ["--contact-thermal", "unread.thermal"],
+                         ["--stop-profile", "unread.stops"],
+                         ["--coating-strain-guard", "1", "2"], ["--prepare-only"],
+                         ["--lab-experiment"], ["--analysis", "uncreated-analysis"]):
+            with mock.patch.object(R.Path, "read_text", side_effect=AssertionError("source I/O before refusal")), \
+                 mock.patch.object(R.Path, "read_bytes", side_effect=AssertionError("source I/O before refusal")), \
+                 mock.patch.object(R.Path, "mkdir", side_effect=AssertionError("directory before refusal")), \
+                 mock.patch.object(R.subprocess, "run", side_effect=AssertionError("native call before refusal")):
+                with self.assertRaises(SystemExit):
+                    R.main([*base, *conflict])
+
+    def test_loaded_native_launch_stages_original_sources_and_emits_no_wav(self):
+        root = Path(tempfile.mkdtemp())
+        executable = root / "material_strings"
+        # This is an I/O witness only. No harmonic or acoustic value is fabricated.
+        executable.write_text("""#!/usr/bin/env python3
+import json, sys
+from pathlib import Path
+assert sys.argv[2] == '--loaded-body-response-only'
+source = Path(sys.argv[1])
+body = Path(sys.argv[sys.argv.index('--body-profile') + 1])
+print(json.dumps({'performance': source.read_text(), 'body': body.read_bytes().hex(),
+                  'wire': (source.parent / 'wire.fsmatpk').read_bytes().hex(),
+                  'args': sys.argv[2:]}))
+Path(sys.argv[3]).write_text('transport witness only\\n')
+""")
+        executable.chmod(0o755)
+        original = (EXAMPLES / "pluck.material-strings").read_text()
+        source = root / "source.material-strings"
+        source.write_text(original)
+        (root / "wire.fsmatpk").write_bytes(b"original wire")
+        (root / "body.fsmatpk").write_bytes(b"original body")
+        replacement = root / "other.fsmatpk"
+        replacement.write_bytes(b"replacement wire with its own source identity")
+        profile = root / "source.body"
+        profile.write_bytes(b"original shell profile\r\n")
+        output = root / "loaded"
+        sweep = ["101", "2000", "8", "coherent"]
+        args = ["--renderer", str(executable), "--performance", str(source), "--out", str(output),
+                "--body-profile", str(profile), "--pack", f"wire.fsmatpk={replacement}",
+                "--loaded-response-only", *sweep,
+                "--body-response-force", "0", "-1e-3", "2e-3",
+                "--body-response-force", "0", "0.0005", "0",
+                "--body-response-strain", "1048576", "1000000000"]
+        self.assertEqual(R.main(args), 0)
+        witness = json.loads((output / "loaded-response.log").read_text())
+        self.assertEqual(witness["performance"], original)
+        self.assertEqual(witness["body"], profile.read_bytes().hex())
+        self.assertEqual(witness["wire"], replacement.read_bytes().hex())
+        self.assertEqual(witness["args"], [
+            "--loaded-body-response-only", str(output / "loaded-response.tsv"), *sweep,
+            "--body-response-force", "0", "-1e-3", "2e-3",
+            "--body-response-force", "0", "0.0005", "0",
+            "--body-response-strain", "1048576", "1000000000",
+            "--body-profile", str(output / "body.profile")])
+        self.assertEqual((output / "loaded-response.tsv").read_text(), "transport witness only\n")
+        self.assertFalse((output / "render.wav").exists())
+        self.assertFalse((output / "experiment.native.json").exists())
+        self.assertEqual(source.read_text(), original)
+        with self.assertRaises(FileExistsError):
+            R.main(args)
+
+
 if __name__ == "__main__":
     unittest.main()
