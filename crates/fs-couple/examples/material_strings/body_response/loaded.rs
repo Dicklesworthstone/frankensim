@@ -6,6 +6,7 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::MultiBowString
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::observation::harmonic::{
     ShellHarmonicReceiver, ShellHarmonicReceiverSelection,
 };
+use fs_couple::shear_shell::coating::strain::ShellCoatingStrainReport;
 
 impl Options {
     /// Observe the same microphone declaration selected for playback, using
@@ -59,7 +60,15 @@ impl Options {
             return Err("body-response bridge index is absent from this body".into());
         }
         let drives = self.bridge.map_or(ports.len(), |_| 1);
-        let columns = 2 * ports.len() + 23 + if receiver.is_some() { 6 } else { 0 };
+        let evaluations = self.points.checked_mul(drives)
+            .ok_or("coating strain evaluation count overflow")?;
+        let mut strain = self.strain.map(|options| options.prepare(
+            source.material_shell_image(), source.material_shell_assembly_image(), evaluations, gate))
+            .transpose()?;
+        let strain_columns = strain.as_ref().map(|observer| strain::additional_columns(observer.film_count()))
+            .transpose()?.unwrap_or(0);
+        let columns = (2 * ports.len() + 23 + if receiver.is_some() { 6 } else { 0 })
+            .checked_add(strain_columns).ok_or("loaded response column count overflow")?;
         if self.points.checked_mul(drives).and_then(|n| n.checked_mul(columns))
             .and_then(|n| n.checked_mul(32)).is_none_or(|bytes| bytes > 8 * 1_048_576) {
             return Err("loaded response exceeds 8 MiB; reduce its point count or select one bridge".into());
@@ -74,7 +83,7 @@ impl Options {
         }).transpose()?;
         let prepared = receiver.as_ref().map(|receiver| receiver.prepare(gate)).transpose()?;
         let mut text = String::new();
-        writeln!(text, "# frankensim-loaded-body-response-v2")?;
+        writeln!(text, "# frankensim-loaded-body-response-v{}", if strain.is_some() { 3 } else { 2 })?;
         writeln!(
             text,
             "# scope: continuous linear response of the actual coupled performer with bow/contact traction released"
@@ -127,6 +136,7 @@ impl Options {
                 )?;
             }
         }
+        if let Some(observer) = &strain { strain::metadata(&mut text, observer)?; }
         write!(text, "frequency_hz\tdrive_bridge")?;
         for port in 0..ports.len() {
             write!(
@@ -143,6 +153,7 @@ impl Options {
                 write!(text, "\treceiver_gradient_{axis}_re_Pa_per_m_per_N\treceiver_gradient_{axis}_im_Pa_per_m_per_N")?;
             }
         }
+        if let Some(observer) = &strain { strain::header(&mut text, observer.film_count())?; }
         writeln!(text)?;
         if text.len() > 8 * 1_048_576 {
             return Err("loaded response source metadata exceeds 8 MiB".into());
@@ -158,8 +169,11 @@ impl Options {
                     receiver.bridge_harmonic_matrix(omega, per_frequency, gate)?
                 };
                 for (column, value) in values.iter().enumerate() {
+                    let strain_report = if let Some(observer) = &mut strain {
+                        Some(observer.evaluate(value.body.body_displacement_m_sqrt_kg()?, gate)?)
+                    } else { None };
                     append_row(&mut text, frequency, self.bridge.unwrap_or(column), &value.body,
-                        value.receiver_pressure_pa, Some(&value.receiver_gradient_pa_per_m))?;
+                        value.receiver_pressure_pa, Some(&value.receiver_gradient_pa_per_m), strain_report.as_ref())?;
                 }
             } else {
                 let values = if let Some(bridge) = self.bridge {
@@ -168,8 +182,11 @@ impl Options {
                     bank.material_shell_bridge_harmonic_matrix(omega, per_frequency, gate)?
                 };
                 for (column, value) in values.iter().enumerate() {
+                    let strain_report = if let Some(observer) = &mut strain {
+                        Some(observer.evaluate(value.body_displacement_m_sqrt_kg()?, gate)?)
+                    } else { None };
                     append_row(&mut text, frequency, self.bridge.unwrap_or(column), value,
-                        value.released.observer_pressure_pa, None)?;
+                        value.released.observer_pressure_pa, None, strain_report.as_ref())?;
                 }
             }
         }
@@ -187,7 +204,8 @@ impl Options {
 }
 
 fn append_row(text: &mut String, frequency: f64, bridge: usize,
-    value: &ShellBridgeHarmonicResponse, receiver_pressure: C64, gradient: Option<&[C64; 3]>) -> Result<()> {
+    value: &ShellBridgeHarmonicResponse, receiver_pressure: C64, gradient: Option<&[C64; 3]>,
+    strain_report: Option<&ShellCoatingStrainReport<'_>>) -> Result<()> {
     let dynamics = &value.released.dynamics;
     write!(text, "{frequency:.17e}\t{bridge}")?;
     for port in &value.bridge_velocity_m_s {
@@ -210,6 +228,7 @@ fn append_row(text: &mut String, frequency: f64, bridge: usize,
             write!(text, "\t{:.17e}\t{:.17e}", component.re, component.im)?;
         }
     }
+    if let Some(report) = strain_report { strain::row(text, report)?; }
     writeln!(text)?;
     if text.len() > 8 * 1_048_576 {
         return Err("loaded response exceeds 8 MiB; reduce its point count".into());

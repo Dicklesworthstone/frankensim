@@ -12,6 +12,9 @@ use fs_math::c64::C64;
 /// Peak phasors in exp(-i omega t), for the caller's physical bridge force.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShellBridgeHarmonicResponse {
+    // Original body coordinates inside the already retained coupled response.
+    // Keep this private so an observer never has to reconstruct string offsets.
+    body_mode_range: core::ops::Range<usize>,
     /// All original coordinates, losses, material/air histories and pressure.
     pub released: ReleasedHarmonicResponse,
     /// Physical velocities in the original string/bridge declaration order.
@@ -30,6 +33,19 @@ pub struct ShellBridgeHarmonicResponse {
     /// Intersection of retained source/fitted-operator frequency supports.
     /// Discretization and finite-amplitude validity are separate questions.
     pub source_band_rad_s: (f64, f64),
+}
+
+impl ShellBridgeHarmonicResponse {
+    /// Borrow the original retained shell displacement without allocating or
+    /// reconstructing it from bridge velocities. This is the body basis used
+    /// by the source image's coating-strain observer, with every connected
+    /// string/cavity/load contribution already present in the solved motion.
+    /// The checked slice also refuses a caller-truncated public response.
+    pub fn body_displacement_m_sqrt_kg(&self) -> Result<&[C64], ReciprocalStringError> {
+        self.released.dynamics.displacement_m_sqrt_kg
+            .get(self.body_mode_range.clone())
+            .ok_or_else(|| invalid("harmonic response lost its original body coordinates"))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -379,6 +395,7 @@ fn finish(
         ));
     }
     Ok(ShellBridgeHarmonicResponse {
+        body_mode_range: start..start + trace.exterior.len(),
         released,
         bridge_velocity_m_s,
         exterior_volume_velocity_m3_s,

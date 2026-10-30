@@ -88,6 +88,18 @@ fn loaded_analysis_keeps_the_playback_bank_without_a_time_propagator() {
             let y = b.released.observer_pressure_pa;
             assert!((x-y).abs() <= 1e-10 * x.abs().max(y.abs()).max(1e-20));
             assert_eq!(a.source_band_rad_s, b.source_band_rad_s);
+            let body_q = a.body_displacement_m_sqrt_kg().unwrap();
+            assert_eq!(body_q.len(), body.radiators().len());
+            for (port, velocity) in body.force_ports().iter().zip(&a.bridge_velocity_m_s) {
+                let displacement = port.iter().zip(body_q).fold(C64::ZERO,
+                    |sum, (&shape, &q)| sum + q.scale(shape));
+                let expected = C64::new(displacement.im * omega, -displacement.re * omega);
+                assert!((expected - *velocity).abs() <= 1e-10 * velocity.abs().max(1e-20),
+                    "body observation must borrow the original coupled shell coordinates");
+            }
+            let mut truncated = a.clone();
+            truncated.released.dynamics.displacement_m_sqrt_kg.clear();
+            assert!(truncated.body_displacement_m_sqrt_kg().is_err());
             let matrix = bound.bank.material_shell_bridge_harmonic_matrix(omega, 100_000_000, gate).unwrap();
             assert_eq!(matrix.len(), body.force_ports().len());
             let drives: Vec<_> = (0..matrix.len()).map(|index| C64::new(0.2, -0.1 * (index + 1) as f64)).collect();

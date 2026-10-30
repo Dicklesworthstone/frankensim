@@ -11,6 +11,8 @@ use std::{ffi::OsString, fmt::Write as _, fs::OpenOptions, io::Write as _, path:
 
 #[path = "body_response/loaded.rs"]
 mod loaded;
+#[path = "body_response/strain.rs"]
+mod strain;
 
 pub(super) struct Options {
     analysis_only: bool,
@@ -21,14 +23,27 @@ pub(super) struct Options {
     points: usize,
     /// None requests every unit-force column of the loaded bridge matrix.
     bridge: Option<usize>,
+    /// Explicit additional resource allowance for a prepared local observer.
+    strain: Option<strain::Options>,
 }
 
 impl Options {
     pub(super) fn extract(args: &[OsString]) -> Result<(Vec<OsString>, Option<Self>)> {
         let mut retained = args.iter().take(2).cloned().collect::<Vec<_>>();
         let mut selected = None;
+        let mut strain = None;
         let mut index = 2;
         while index < args.len() {
+            if args[index] == "--body-response-strain" {
+                if strain.is_some() {
+                    return Err("select --body-response-strain only once".into());
+                }
+                let values = args.get(index + 1..index + 3)
+                    .ok_or("--body-response-strain needs MAX_BYTES MAX_WORK")?;
+                strain = Some(strain::Options::parse(values)?);
+                index += 3;
+                continue;
+            }
             if args[index] != "--body-response"
                 && args[index] != "--body-response-only"
                 && args[index] != "--loaded-body-response"
@@ -84,8 +99,13 @@ impl Options {
                 maximum_hz,
                 points,
                 bridge,
+                strain: None,
             });
             index += 6;
+        }
+        if let Some(strain) = strain {
+            selected.as_mut().ok_or("--body-response-strain requires a body-response command")?
+                .strain = Some(strain);
         }
         Ok((retained, selected))
     }
@@ -134,7 +154,12 @@ impl Options {
             .map(|&value| C64::from_re(value))
             .collect();
         let films = memory.map_or(0, |image| image.films().len());
-        let columns = 2 * ports.len() + films + 12;
+        let mut strain = self.strain.map(|options| options.prepare(shell, assembly, self.points, gate))
+            .transpose()?;
+        let strain_columns = strain.as_ref().map(|observer| strain::additional_columns(observer.film_count()))
+            .transpose()?.unwrap_or(0);
+        let columns = (2 * ports.len() + films + 12).checked_add(strain_columns)
+            .ok_or("body-response column count overflow")?;
         let bytes = self
             .points
             .checked_mul(columns)
@@ -157,14 +182,13 @@ impl Options {
             })
         };
         let mut text = String::new();
+        writeln!(text, "# frankensim-body-response-v{}", if strain.is_some() { 2 } else { 1 })?;
+        writeln!(text, "# scope: unloaded structural body\n# excluded: strings, bow/contact, cavity pressure feedback, exterior radiation reaction and configured microphone filters")?;
         writeln!(
             text,
-            "# frankensim-body-response-v1\n# scope: unloaded structural body\n# excluded: strings, bow/contact, cavity pressure feedback, exterior radiation reaction and configured microphone filters"
-        )?;
-        writeln!(
-            text,
-            "# peak phasors: exp(-i omega t); linear transfer normalized to a 1 N peak force at bridge {}\n# amplitude range: no per-element strain certificate\n# film law: exact source response at each admitted frequency; wood/glue: fixed reduced viscosity",
-            bridge
+            "# peak phasors: exp(-i omega t); linear transfer normalized to a 1 N peak force at bridge {}\n# amplitude range: {}\n# film law: exact source response at each admitted frequency; wood/glue: fixed reduced viscosity",
+            bridge, if strain.is_some() { "see optional local coating bounds; no continuum or nonlinear amplitude certificate" }
+                else { "no per-element strain certificate" }
         )?;
         writeln!(
             text,
@@ -191,6 +215,9 @@ impl Options {
                 )?;
             }
         }
+        if let Some(observer) = &strain {
+            strain::metadata(&mut text, observer)?;
+        }
         if text.len() > 8 * 1_048_576 {
             return Err("body-response source metadata exceeds 8 MiB".into());
         }
@@ -208,14 +235,19 @@ impl Options {
         for film in 0..films {
             write!(text, "\tfilm{film}_loss_W_per_N2")?;
         }
-        writeln!(
+        write!(
             text,
             "\ttotal_loss_W_per_N2\tpower_residual_W_per_N2\tsolve_relative_residual"
         )?;
+        if let Some(observer) = &strain { strain::header(&mut text, observer.film_count())?; }
+        writeln!(text)?;
         for point in 0..self.points {
             poll(gate)?;
             let frequency = self.frequency_hz(point);
             let value = response(core::f64::consts::TAU * frequency)?;
+            let strain_report = strain.as_mut().map(|observer| {
+                observer.evaluate(&value.displacement_m_sqrt_kg, gate)
+            }).transpose()?;
             write!(text, "{frequency:.17e}")?;
             for port in &value.force_port_velocity_m_s {
                 write!(text, "\t{:.17e}\t{:.17e}", port.re, port.im)?;
@@ -236,13 +268,15 @@ impl Options {
             for loss in &value.film_dissipation_w {
                 write!(text, "\t{loss:.17e}")?;
             }
-            writeln!(
+            write!(
                 text,
                 "\t{:.17e}\t{:.17e}\t{:.17e}",
                 value.total_dissipation_w(),
                 value.power_residual_w,
                 value.solve_relative_residual
             )?;
+            if let Some(report) = &strain_report { strain::row(&mut text, report)?; }
+            writeln!(text)?;
             if text.len() > 8 * 1_048_576 {
                 return Err("body-response exceeds 8 MiB; reduce its point count".into());
             }
@@ -391,5 +425,45 @@ mod tests {
                 "101", "2000", "32", bridge,
             ])).is_err());
         }
+    }
+
+    #[test]
+    fn strain_observer_budgets_attach_to_either_response_in_either_option_order() {
+        for command in ["--body-response-only", "--loaded-body-response-only"] {
+            for before in [false, true] {
+                let mut args = words(&["renderer", "performance"]);
+                let response = words(&[command, "new.tsv", "101", "2000", "8", "0"]);
+                let strain = words(&["--body-response-strain", "1048576", "100000000"]);
+                if before { args.extend(strain); args.extend(response); }
+                else { args.extend(response); args.extend(strain); }
+                args.extend(words(&["--body-profile", "body.profile"]));
+                let (retained, selected) = Options::extract(&args).unwrap();
+                assert_eq!(selected.unwrap().strain, Some(strain::Options {
+                    maximum_bytes: 1_048_576, maximum_work: 100_000_000,
+                }));
+                assert_eq!(retained, words(&["renderer", "performance", "--body-profile", "body.profile"]));
+            }
+        }
+    }
+
+    #[test]
+    fn strain_observation_requires_one_response_and_explicit_positive_resources() {
+        assert!(Options::extract(&words(&[
+            "renderer", "performance", "--body-response-strain", "1024", "1000",
+        ])).is_err());
+        for values in [vec![], vec!["1024"], vec!["0", "1000"], vec!["1024", "0"],
+            vec!["-1", "1000"], vec!["1.5", "1000"], vec!["1024", "NaN"],
+            vec!["184467440737095516160", "1000"]] {
+            let mut args = words(&[
+                "renderer", "performance", "--loaded-body-response-only", "new.tsv",
+                "101", "2000", "8", "all", "--body-response-strain",
+            ]);
+            args.extend(words(&values));
+            assert!(Options::extract(&args).is_err(), "{values:?}");
+        }
+        assert!(Options::extract(&words(&[
+            "renderer", "performance", "--loaded-body-response-only", "new.tsv", "101", "2000", "8", "all",
+            "--body-response-strain", "1024", "1000", "--body-response-strain", "1024", "1000",
+        ])).is_err());
     }
 }

@@ -681,3 +681,42 @@ requires positively oriented triangles and retains the original geometry
 refusals. This is the existing flat DKT discretization, not a shell or nonlinear
 strain model. The coupled full-tensor reed tests exercise the shared curvature
 and energy path; native execution of the new tests remains unverified.
+
+## Harmonic local layer-strain observation
+
+`shell::mitc::strain::PreparedElementStrain` observes the original MITC trial
+space with the same director interpolation, elastic bubble condensation and
+assumed transverse shear as stiffness and viscosity. It prepares a fixed 48x18
+real Bernstein observation map through the original point evaluator. The map
+uses 6,912 retained bytes; no physical-mode-sized map or duplicate geometry is
+retained. Coherent real/imaginary 18-DOF nodal motion is mapped once per query,
+and `HarmonicElementStrain` can serve multiple signed layer intervals. Published
+work ceilings are 1,048,576 setup, 8,192 per harmonic field and 4,096 per layer;
+these are conservative admission units, not benchmark timings. Only the selected
+facet is inspected, avoiding repeated whole-mesh audits.
+
+Six quadratic triangular Bernstein controls represent the complete membrane,
+curvature and assumed-shear field. Convexity bounds every point in the triangle
+and between the two layer faces. Each control's exact harmonic-cycle Frobenius
+peak is obtained from the real/imaginary Mandel Gram matrix, preserving phase.
+An isotropic constant-Poisson-ratio plane-stress film includes
+`epsilon_zz=-nu/(1-nu)*(epsilon_xx+epsilon_yy)`; engineering shears are divided by
+two and tensor shear has weight two in the squared norm. Tensor component order
+is [xx,yy,zz,xy,yz,zx]. Shear-energy correction is not applied to strain.
+
+Nonfinite motion, invalid layer faces or Poisson ratio, invalid geometry,
+unrepresentable arithmetic and cancellation refuse. Prepared maps are immutable
+and remain reusable after refusal. The controlling Bernstein coefficient is not
+an observed maximum location; independent component bounds can have different
+locations/phases. These are retained linear incremental-field bounds with the
+original floating-point/condensation roundoff, not outward-rounded interval,
+continuum or 3D interlaminar certificates. They exclude absent mean/prestrain,
+transients and omitted modes. The consumer supplies an authored applicability
+envelope; no damage or historical-material threshold is inferred.
+
+Six focused native tests pass using the current original geometry, sections,
+directors, condensation, field and fs_math owners with typed error-container
+facades. They cover physical norms/plane stress, coherent phase, both layer
+faces, tensor order, curved varying directors with nonzero coupled A/B/D,
+polynomial reproduction/enclosure, cached-map storage and cold/warm refusal.
+This does not establish a complete Cargo workspace or whole-instrument result.

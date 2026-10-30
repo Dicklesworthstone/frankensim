@@ -231,8 +231,48 @@ supported frequencies. No independent audio normalization or sound-pressure
 gain is introduced. Both response commands validate all samples before a
 create-new report write.
 
-Evolving coating strain checks, moisture/cure/aging effects, penetration and
-frequency-dependent Poisson ratio remain outside these coating options.
+### Inspect coating strain and the supported drive scale
+
+The loaded and unloaded response commands can now report local film-strain
+bounds. For a complete bridge matrix with this observation:
+
+```bash
+target/release/material_strings \
+  /path/to/new-varnished-violin-run/G3/performance.material-strings \
+  --body-profile /path/to/new-varnished-violin-run/G3/body.profile \
+  --loaded-body-response-only /path/to/new-varnished-violin-run/G3/strain-response.tsv 101 2000 32 all \
+  --body-response-strain 536870912 1000000000000
+```
+
+The extra option declares observer bytes and total preparation/sweep work.
+It prepares the original MITC observation once per coated triangle and reuses
+it at every frequency. Actual coupled body coordinates feed the observer;
+no bridge-velocity reconstruction or different shell basis is introduced.
+The full triangle and signed film thickness participate, with coherent phase,
+plane-stress thickness strain and correctly converted tensor shear.
+
+The strain-enabled loaded v3 report retains pressure, mobility and losses,
+and adds each film's Frobenius bound, tensor-component bounds, ratio to its
+authored envelope, sufficient force scale and ruling bound coefficients.
+`coating_strain_sufficient_peak_force_N` gives the common sufficient scale of
+that row's 1 N drive under these film bounds. A bound ratio above one does not
+prove material failure: the spatial bound is conservative and the source limit
+is an authored small-strain assumption. The ruling Bernstein coefficient is
+not an observed maximum location. `inf` means no finite cap from zero film
+strain or absence of films, not unlimited instrument strength.
+
+For a chosen common force factor, linear pressure and displacement scale with
+that factor, while cycle-mean power and heat scale with its square. The same
+source bands and all other model applicability limits still matter. This
+allows pressure comparisons to carry an explicit coating-amplitude check;
+it does not establish the instrument's overall allowed sound level.
+
+These are bounds on the retained linear harmonic increment, subject to the
+original floating-point/condensation roundoff. Unmodeled preload/cure strain,
+transients, missing modes, continuum error and 3D interlaminar recovery remain
+outside their scope. Evolving strain enforcement during nonlinear playback,
+moisture/cure/aging effects, penetration and frequency-dependent Poisson ratio
+remain outside these coating options.
 
 The [source-data guide](../../../matdb/seed-v1/VIOLIN_VARNISHES.md) distinguishes
 historical observations from modern DMA fits. The executable

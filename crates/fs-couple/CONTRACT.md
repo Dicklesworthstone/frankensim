@@ -5590,6 +5590,55 @@ gradient units, matrix row order and create-new/refusal behavior. These do not
 validate a BEM solve or complete CLI build. Closed-shell BEM and skin bank/receiver
 regressions remain authored and unrun.
 
+### Source-bound harmonic coating-strain envelopes
+
+Both material shell image types expose `prepare_coating_strain` on the original
+source, directors, sections and full physical mode basis. A single-shell image
+retains its original directors; assembled components retain their own. The
+observer caches one original MITC Bernstein map per unique coated triangle,
+gathers coherent complex physical nodal motion once per element/query, and
+shares the recovered field across every covering film. No element, film or
+retained mode is dropped. Exact source component/film order, identity, region,
+signed placement, Poisson ratio and authored strain limit remain attached.
+
+`ShellCoatingStrainBudget` explicitly declares maximum bytes, total work and
+planned successful evaluations. Admission covers all preparation and every
+planned query, plus prepared payload, one report and adapter element buffers;
+borrowed image storage, allocator overhead, original fixed-size numerical stack
+frames and caller-retained previous reports are excluded. Arithmetic is checked.
+Original cancellation is preserved and failed queries consume no successful
+count. Reports contain complete coverage, full tensor Frobenius and six component
+bounds, ruling element/control/face, limit ratios and a sufficient common motion
+scale. A ratio above one returns an unresolved sufficient-bound status without
+rejecting a normalized transfer load or asserting actual overstrain. Zero film
+strain/no films supplies no finite cap. Limits are authored applicability
+assumptions, not measured failure data. The same ordinary floating-point,
+retained incremental-field and no-interlaminar-recovery scope as fs-plate applies.
+
+`ShellBridgeHarmonicResponse::body_displacement_m_sqrt_kg` borrows the original
+body extent inside the coupled displacement vector without allocation or bridge
+velocity reconstruction. Its extent is retained by the original force-map owner;
+a caller-truncated public response refuses. The frontend's optional
+`--body-response-strain MAX_BYTES MAX_WORK` prepares one observer for the whole
+sweep, including every bridge column and selected microphone path. It adds
+12 per-film and 3 common columns with source metadata and sufficient unit-drive
+force scales. Strain-enabled structural/loaded output is v2/v3; default v1/v2 is
+unchanged. Additional observer allowances do not raise mechanics/receiver caps.
+The 8 MiB report and create-new/all-queries-before-write rules remain binding.
+This observation does not enforce strain during nonlinear time rendering.
+
+Three exact-production observer native tests pass against the original cached
+MITC core using source/image/error metadata containers: source/region/stacked
+coverage, coherent phase/cancellation, shared assembly coordinates, reporting
+above the envelope, and exact resource/refusal boundaries. Six original MITC
+checks pass separately. Five production parser and seven writer/response tests
+pass with original coupled numerical transport and synthetic source/receiver/
+strain-report containers; these cover default/opt-in schemas, complete matrix
+query counts, actual body slicing, metadata/units, zero caps and no partial file.
+Two complete material-source coupon tests and the normal bank regressions are
+authored but unrun; these native seams do not establish full source resolution,
+bank/BEM integration or a full violin audio/convergence result.
+
 `SharedMaterialShellBody` and
 `ReciprocalStringBank::from_material_shear_shell` connect that image to every
 original material string, its own physical bridge map, shared gas and optional

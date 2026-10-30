@@ -800,6 +800,59 @@ allowance and pass band also remain binding; use the intersection with the
 body/material source bands. Matrix output remains subject to the same 8 MiB
 report bound, so a many-bridge run can require fewer frequency points.
 
+### Local coating strain and sufficient drive scale
+
+Add `--body-response-strain MAX_BYTES MAX_WORK` to either structural or loaded
+response command to observe the complete retained harmonic coating field.
+The two positive integers explicitly admit the additional observer's storage
+and its preparation plus every requested query. For `all`, queries equal the
+number of frequencies times the number of bridge columns. These allowances
+do not replace or increase the mechanics/receiver allowance.
+
+```bash
+target/release/material_strings \
+  /path/to/new-memory-run/G3/performance.material-strings \
+  --loaded-body-response-only /path/to/new-memory-run/G3/strain-response.tsv 101 2000 32 all \
+  --body-profile /path/to/new-memory-run/G3/body.profile \
+  --body-response-strain 536870912 1000000000000
+```
+
+The observer uses each original physical mode, exact director field, elastic
+bubble condensation, material region and film placement. It prepares a fixed
+48-by-18 Bernstein observation map once per coated triangle; each response
+gathers coherent local nodal motion, applies this small map, and shares the
+result across stacked films. Both film faces and all triangle interiors are
+covered by the polynomial convex-hull bound. It includes plane-stress normal
+strain and converts engineering shear to tensor shear before evaluating the
+peak full-tensor Frobenius norm. No section shear-energy correction is applied
+to the recovered strain.
+
+The report records each film's source, component, signed faces, Poisson ratio
+and authored small-strain envelope. It appends `12 * film_count + 3` columns:
+whole-film Frobenius bounds, six tensor-component amplitude bounds, envelope
+ratios, sufficient peak-force scales and ruling element/control/face indices,
+plus the common ratio/scale/status. Component order is `[xx, yy, zz, xy, yz, zx]`
+in facet axes; independent component bounds need not share a phase or location.
+The controlling Bernstein coefficient is not generally a physical maximum
+location. The 8 MiB output limit still applies; a many-film matrix may need
+fewer frequency points.
+
+For each 1 N row, `coating_strain_sufficient_peak_force_N` is a sufficient common
+scale for these film bounds at this frequency. A ratio above one reports that
+compliance is unresolved by the bound; it does not reject a normalized transfer
+query or establish actual overstrain or damage. `inf` means no finite cap from
+these film bounds because all observed film strains are zero or there are no
+films. It is not an instrument strength claim. The authored envelope is a
+constitutive modeling assumption, not a measured failure threshold.
+
+Strain-enabled structural reports are v2 and loaded reports v3. Without this
+option the existing v1/v2 schemas and preparation paths remain unchanged. All
+queries finish before create-new output. Bounds apply to the retained linear
+harmonic increment, with ordinary floating-point/condensation roundoff; they
+exclude unmodeled preload/cure strains, transients, omitted modes, continuum
+error and three-dimensional interlaminar recovery. They do not enforce local
+strain during a subsequent nonlinear WAV render.
+
 ## Separate exterior and cavity pressure surfaces
 
 A v3 profile can declare which original triangles participate in exterior
