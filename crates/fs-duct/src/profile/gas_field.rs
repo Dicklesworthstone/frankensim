@@ -80,7 +80,7 @@ struct ToneHoleStep {
 /// Read-only geometry/material sample shared with the molecular constitutive
 /// binding. The original field owner alone chooses knots and quadrature.
 pub(crate) enum MolecularFieldStep<'a> {
-    Magnus { h: f64, radii: [f64; 2], positions_m: [f64; 2] },
+    Magnus { h: f64, radii: [f64; 2], positions_m: [f64; 2], slants: [f64; 2] },
     Hole { geometry: &'a Segment, axial_position_m: f64 },
 }
 
@@ -427,6 +427,7 @@ impl GasFieldDuct {
             axial += 1;
             Some(MolecularFieldStep::Magnus {
                 h: step.h, radii: step.radii, positions_m: step.positions_m,
+                slants: step.slants,
             })
         })
     }

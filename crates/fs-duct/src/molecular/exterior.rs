@@ -47,7 +47,9 @@ pub struct MolecularExteriorResponse {
     /// Total mean exterior work / squared inlet flow [Pa s/m3].
     pub exterior_power_per_squared_inlet_flow: f64,
     /// Input work minus exterior work, without clipping [Pa s/m3].
-    /// Includes molecular and wall heat in bore, open chimneys and sealed stubs.
+    /// Includes molecular/thermal/shear heat and compliant-wall work in the
+    /// bore, open chimneys and sealed stubs. A wall law owns the disposition of
+    /// that work; it may include structural loss or outward radiation.
     pub dissipated_power_per_squared_inlet_flow: f64,
     /// Infinity-norm condition of the dimensionless row-equilibrated closure.
     pub condition_estimate: f64,
@@ -97,6 +99,7 @@ impl MolecularDuct {
             .into());
         }
         let (waves, min_shear) = self.waves_controlled(omega, cancelled)?;
+        let mut wall_waves = BTreeMap::new();
         let reference = self.reference_impedance;
         let mut ports = Ports {
             n: 2,
@@ -108,7 +111,7 @@ impl MolecularDuct {
             poll(cancelled, i)?;
             if let Piece::ToneHole(hole) = piece {
                 let (series, junction, branch) = hole.exposed_parts(
-                    &waves[hole.point],
+                    &self.wall_wave(hole.point, 1.0, omega, &waves, &mut wall_waves)?,
                     self.state_at_point(hole.point).gas().density,
                     omega,
                     reference,
@@ -135,7 +138,7 @@ impl MolecularDuct {
                     ports.condition = ports.condition.max(condition);
                 }
             } else {
-                let block = self.piece_wave_block(piece, &waves)?;
+                let block = self.piece_wave_block(piece, &waves, omega, &mut wall_waves)?;
                 let (next, condition) = pending.star(block, options.maximum_condition)?;
                 pending = next;
                 ports.condition = ports.condition.max(condition);

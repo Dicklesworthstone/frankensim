@@ -6,7 +6,7 @@
 //!
 //! `kappa(s) = [1 - R sum_n w_n s/(s cp(s) + cp_eq lambda_n)]/(rho R T)`.
 //!
-//! Without a wall the sum is `1/cp(s)`. This is the SAME thermodynamic law
+//! Without thermal wall exchange the sum is `1/cp(s)`. This is the SAME thermodynamic law
 //! used by [`crate::dg::DgDuct::with_molecular_relaxation`], evaluated directly
 //! in frequency instead of eliminating a time-domain state matrix. Independent
 //! molecular and equilibrium thermal shunts would double-count storage and
@@ -17,7 +17,12 @@
 //! Preparation caches each distinct local radius's diffusion eigensolve;
 //! frequency sweeps only evaluate the retained rational coefficients.
 //!
-//! This is frozen, linear plane-wave acoustics with rigid walls. The homogeneous
+//! This is frozen, linear plane-wave acoustics, mechanically rigid by default.
+//! An explicit source-owned compliant wall adds its physical displacement
+//! admittance through the original WallLaw map, independently of gas heat and
+//! shear diffusion. Every bore, chimney and exterior-port response shares that
+//! binding; nonlocal shell motion and thermoelastic coupling remain separate.
+//! The homogeneous
 //! constructor uses the existing local-radius spherical-cone approximation;
 //! profiles and prescribed gas fields use the original Webster/Magnus owner.
 //! Molecular data, diffusion poles, cone slices and profile/field integration
@@ -43,6 +48,8 @@ pub use holes::{MolecularHoleFlow, MolecularHoleSite, MolecularResponse};
 mod field;
 mod exterior;
 pub use exterior::{MolecularExteriorResponse, MolecularPortScattering};
+mod compliant_wall;
+pub use compliant_wall::MolecularCompliantWall;
 
 /// Original constitutive or propagation refusal, without a fallback gas law.
 #[derive(Debug)]
@@ -100,18 +107,19 @@ struct MaterialPoint {
 #[derive(Debug, Clone)]
 enum Piece {
     Wave { geometry: Segment, point: usize },
-    Magnus { h: f64, points: [usize; 2] },
+    Magnus { h: f64, points: [usize; 2], slants: [f64; 2] },
     ToneHole(holes::ToneHole),
 }
 
 /// Prepared harmonic counterpart of the existing molecular DG duct.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MolecularDuct {
     state: RelaxationState,
     field_binding: Option<field::FieldBinding>,
     points: Vec<MaterialPoint>,
     pieces: Vec<Piece>,
     reference_impedance: f64,
+    compliant_wall: Option<MolecularCompliantWall>,
 }
 
 fn bad(what: &'static str) -> DuctError {
@@ -157,6 +165,19 @@ impl MolecularDuct {
         maximum_blocks: usize,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, MolecularDuctError> {
+        Self::new_bound_controlled(duct, state, wall, None, cones, maximum_blocks, cancelled)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_bound_controlled(
+        duct: &Duct,
+        state: RelaxationState,
+        wall: Option<MolecularWallResolution>,
+        compliant_wall: Option<MolecularCompliantWall>,
+        cones: ConeSlices,
+        maximum_blocks: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, MolecularDuctError> {
         poll(cancelled, 0)?;
         crate::validate_gas(state.gas())?;
         let first = duct.segments.first().ok_or(DuctError::EmptyDuct)?;
@@ -176,7 +197,7 @@ impl MolecularDuct {
                     ..
                 } => {
                     let n = cones.count(*inlet_radius, *outlet_radius)?;
-                    if wall.is_some() { n } else { 1 }
+                    if wall.is_some() || compliant_wall.is_some() { n } else { 1 }
                 }
                 Segment::Profile { steps, .. } => steps.0,
                 Segment::ToneHole { state, .. } => {
@@ -203,6 +224,7 @@ impl MolecularDuct {
             points: Vec::new(),
             pieces: Vec::with_capacity(count),
             reference_impedance: reference,
+            compliant_wall,
         };
         let mut cache = BTreeMap::new();
         let open_sites = crate::collect_open_hole_sites(duct);
@@ -222,7 +244,7 @@ impl MolecularDuct {
                     outlet_radius: b,
                     length,
                 } => {
-                    let n = if wall.is_some() {
+                    let n = if wall.is_some() || result.compliant_wall.is_some() {
                         cones.count(*a, *b)?
                     } else {
                         1
@@ -253,11 +275,16 @@ impl MolecularDuct {
                     for j in 0..steps.0 {
                         let right = -((j + 1) as f64) * h;
                         let mut points = [0; 2];
+                        let mut slants = [1.0; 2];
                         for (i, c) in [0.5 - root3 / 6.0, 0.5 + root3 / 6.0]
                             .into_iter()
                             .enumerate()
                         {
                             let x = right + c * h;
+                            if result.compliant_wall.is_some() {
+                                let slope = profile.slope(x)?;
+                                slants[i] = det::sqrt(1.0 + slope * slope);
+                            }
                             points[i] = result.point(
                                 profile.radius(x)?,
                                 origin + x,
@@ -266,7 +293,7 @@ impl MolecularDuct {
                                 cancelled,
                             )?;
                         }
-                        result.pieces.push(Piece::Magnus { h, points });
+                        result.pieces.push(Piece::Magnus { h, points, slants });
                     }
                 }
                 Segment::ToneHole { hole_radius, .. } => {
@@ -461,6 +488,7 @@ impl MolecularDuct {
             return Err(bad("molecular chimney loads must be finite and passive").into());
         }
         let (waves, min_shear) = self.waves_controlled(omega, cancelled)?;
+        let mut wall_waves = BTreeMap::new();
         let reference = self.reference_impedance;
         let mut blocks = Vec::with_capacity(self.blocks());
         let mut observations = Vec::new();
@@ -475,7 +503,7 @@ impl MolecularDuct {
                         None
                     };
                     let (local, observation) = hole.prepare(
-                        &waves[hole.point],
+                        &self.wall_wave(hole.point, 1.0, omega, &waves, &mut wall_waves)?,
                         self.state_at_point(hole.point).gas().density,
                         omega,
                         load,
@@ -487,7 +515,7 @@ impl MolecularDuct {
                     observations.push(observation);
                     continue;
                 }
-                _ => self.piece_wave_block(piece, &waves)?,
+                _ => self.piece_wave_block(piece, &waves, omega, &mut wall_waves)?,
             };
             blocks.push(block);
         }
@@ -549,23 +577,34 @@ impl MolecularDuct {
         &self,
         piece: &Piece,
         waves: &[SegmentWave],
+        omega: f64,
+        wall_waves: &mut BTreeMap<(usize, u64), SegmentWave>,
     ) -> Result<TwoPort, MolecularDuctError> {
         let reference = self.reference_impedance;
         Ok(match piece {
             Piece::Wave { geometry, point } => {
-                TwoPort::from_wave(geometry, &waves[*point], reference)?
+                let slant = match geometry {
+                    Segment::Cone { inlet_radius, outlet_radius, length }
+                        if self.compliant_wall.is_some() => {
+                        let slope = (outlet_radius - inlet_radius) / length;
+                        det::sqrt(1.0 + slope * slope)
+                    }
+                    _ => 1.0,
+                };
+                let wave = self.wall_wave(*point, slant, omega, waves, wall_waves)?;
+                TwoPort::from_wave(geometry, &wave, reference)?
             }
-            Piece::Magnus { h, points } => {
-                let generator = |point: usize| {
-                    let wave = waves[point];
+            Piece::Magnus { h, points, slants } => {
+                let mut generator = |point: usize, slant: f64| -> Result<_, MolecularDuctError> {
+                    let wave = self.wall_wave(point, slant, omega, waves, wall_waves)?;
                     let ik = C64::new(0.0, 1.0) * wave.wavenumber;
-                    (
+                    Ok((
                         ik * wave.characteristic_impedance.scale(1.0 / reference),
                         ik * wave.characteristic_impedance.recip().scale(reference),
-                    )
+                    ))
                 };
                 let mut matrix = crate::profile::magnus_step(
-                    generator(points[0]), generator(points[1]), *h, det::sqrt(3.0),
+                    generator(points[0], slants[0])?, generator(points[1], slants[1])?, *h, det::sqrt(3.0),
                 )?;
                 matrix[1] = matrix[1].scale(reference);
                 matrix[2] = matrix[2].scale(1.0 / reference);

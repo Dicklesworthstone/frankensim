@@ -136,6 +136,24 @@ impl MolecularDuct {
         maximum_blocks: usize,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, MolecularDuctError> {
+        Self::from_gas_field_bound_controlled(
+            duct, field, law, wall, None, steps_per_span, uniform_cones,
+            maximum_blocks, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn from_gas_field_bound_controlled(
+        duct: &Duct,
+        field: &AxialGasField,
+        law: &RelaxationAbsorption,
+        wall: Option<MolecularWallResolution>,
+        compliant_wall: Option<MolecularCompliantWall>,
+        steps_per_span: RiccatiSteps,
+        uniform_cones: ConeSlices,
+        maximum_blocks: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, MolecularDuctError> {
         poll(cancelled, 0)?;
         if maximum_blocks == 0 || maximum_blocks > compose::MAX_COMPOSITION_BLOCKS {
             return Err(bad("molecular duct composition block cap is invalid").into());
@@ -150,8 +168,9 @@ impl MolecularDuct {
             evaluate(field, law, x)?;
         }
         if field.uniform_state().is_some() {
-            let mut result =
-                Self::new_controlled(duct, inlet, wall, uniform_cones, maximum_blocks, cancelled)?;
+            let mut result = Self::new_bound_controlled(
+                duct, inlet, wall, compliant_wall, uniform_cones, maximum_blocks, cancelled,
+            )?;
             result.field_binding = Some(FieldBinding {
                 field: field.clone(),
                 law: law.clone(),
@@ -187,6 +206,7 @@ impl MolecularDuct {
             points: Vec::new(),
             pieces: Vec::with_capacity(count),
             reference_impedance: reference,
+            compliant_wall,
         };
         let mut point_cache = BTreeMap::new();
         let mut wall_cache: BTreeMap<(u64, GasKey), ZkDiffusive> = BTreeMap::new();
@@ -269,12 +289,14 @@ impl MolecularDuct {
                     h,
                     radii,
                     positions_m,
+                    slants,
                 } => Piece::Magnus {
                     h,
                     points: [
                         sample(radii[0], positions_m[0])?,
                         sample(radii[1], positions_m[1])?,
                     ],
+                    slants,
                 },
                 MolecularFieldStep::Hole {
                     geometry,

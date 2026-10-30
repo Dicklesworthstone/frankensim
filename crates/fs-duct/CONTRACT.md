@@ -1704,8 +1704,8 @@ Cone slices retain the local-radius spherical approximation and profiles
 retain their fourth-order Magnus axis. The explicit load owns exterior
 radiation; no exterior medium is inferred. Molecular tone-hole chimneys use
 explicit mouth loads as described below.
-No mean-flow, evolving-composition, deformable-wall or multidimensional claim
-is added. Wall band admission is the original sampled equilibrium Bessel
+No mean-flow, evolving-composition or multidimensional claim is added.
+Source-owned deformable walls are supported by the explicit binding below. Wall band admission is the original sampled equilibrium Bessel
 comparison, not a bound for the full coupled molecular response.
 
 `molecular/tests.rs` covers closed-form molecular waves, the original DG
@@ -1809,3 +1809,36 @@ The `molecular_exterior` example consumes explicit gas/relaxation declarations
 and a physical three-mouth impedance matrix file and reports solved pressures,
 flows and powers. It adds no default exterior medium, BEM kernel, nonlinear
 oscillation loop, radiation fit, resolved pads or time-domain realization.
+
+### Molecular gas with source-owned compliant walls
+
+`MolecularDuct::{new_with_compliant_wall,from_gas_field_with_compliant_wall}`
+bind an `Arc<dyn WallLaw + Send + Sync>` beside the existing molecular gas and
+optional radial heat/shear spectra. The shared `WallModel` constitutive map
+adds `2*pi*r*sqrt(1+(dr/dx)^2)/Z_surface` to the physical gas volume admittance.
+Molecular relaxation, thermal diffusion and displacement therefore act in one
+mass/momentum operator; wall displacement is not another gas thermal shunt.
+The original rigid constructors retain their wave arithmetic and cone route.
+The explicit compliant route makes `ConeSlices` live even without radial
+diffusion. Profiles and primitive gas fields use their original quadrature,
+including the actual surface slopes. Radius/material/slope response caching
+cannot alias different physical wall areas.
+
+Every existing scalar, finite-chimney, flow/work and coupled-exterior response
+uses that same immutable binding. Closed stubs retain wall loading, vent flows
+retain the original single opening weight, and exterior self/mutual matrices
+still act on physical outward volume flow. Passive finite nonzero impedance
+and source applicability are admitted by the original wall-law boundary at
+each queried frequency and radius; cancellation and composition caps remain.
+Input work minus exterior work includes gas loss and work delivered to the
+mechanical wall. A wall law may include radiation, so this balance is not
+exclusively gas heat. Local wall reaction does not resolve axial shell modes,
+nonlocal wall coupling, large displacement or thermoelastic heat exchange.
+
+Focused tests compare a cylinder to independently assembled Debye plus radial
+Bessel heat/momentum equations and a spatial work integral; refine mechanical
+cone slices without thermal diffusion; compare a varying primitive field and
+profile against independent physical-equation RK4; preserve uniform-field
+bits; and compare finite chimney flows and scalar/mutual exterior closures.
+Source-domain/passivity refusals, work caps, cancellation and repeated-radius
+response caching remain observable.

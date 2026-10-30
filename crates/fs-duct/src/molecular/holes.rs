@@ -29,7 +29,9 @@ pub struct MolecularHoleFlow {
     pub input_power_per_squared_inlet_flow: f64,
     /// Work delivered to the explicitly supplied mouth load, with the same units.
     pub mouth_power_per_squared_inlet_flow: f64,
-    /// Molecular plus wall heat in the chimney; raw balance, never clipped.
+    /// Work retained by the chimney gas and bound wall; raw balance, never
+    /// clipped. Includes molecular/thermal/shear heat and any mechanical wall
+    /// loss or radiation represented by the source-owned wall impedance.
     pub dissipated_power_per_squared_inlet_flow: f64,
 }
 
@@ -388,3 +390,4 @@ impl MolecularDuct {
         Ok(MolecularResponse { duct, holes })
     }
 }
+
