@@ -21,6 +21,7 @@ dg_tube 0.1 0.00896143253443043 baffled 1 2 32 50 2000 0.01 1e-11 256
 dg_radiation computed-baffled 20 65 4 8 12 20 0.1 67108864 2 100 1e-8 64 1048576 257
 dg_exterior 300 100000 0
 observation baffled 0 0 0.2 8 32 2000
+reservoir_observation baffled -0.08 0 0
 observer_gas stokes-kirchhoff 4096 1000000 50000000
 boundary pressure 3
 hold 128 20

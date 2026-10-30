@@ -167,6 +167,9 @@ pub struct NsfDgFrame {
     /// Original streamed mass leaving a transverse reservoir aperture [kg].
     /// This is separate from both characteristic faces; zero when absent.
     pub reservoir_mass_out_kg: f64,
+    /// Original per-tile reservoir continuum volume flow, averaged over all
+    /// original substeps. Kept separate from compressible streamed mass.
+    pub reservoir_flows: Vec<fs_lbm::nsf3::NsfReservoirFlow>,
     /// Original NSF energy accounts, including reservoir energy in `open_energy_j`.
     /// Mixed-boundary unresolved exchange retains its original classification;
     /// it is never relabeled as resolved viscous heat by this adapter.
@@ -477,6 +480,7 @@ fn accept_candidate<L: Lattice3<27>>(
     let faces = *fluid.boundary_exchange();
     let coupled_patch = fluid.patch_exchange().copied();
     let reservoir_mass_out_kg = fluid.reservoir_mass_out_kg();
+    let reservoir_flows = fluid.reservoir_flows().to_vec();
     let flow = *fluid.energy_ledger();
     let mass_change = fluid.grid().total_mass_kg() - fluid.previous_mass_kg();
     let energy_change = fluid.grid().total_energy_j() - fluid.previous_energy_j();
@@ -493,7 +497,7 @@ fn accept_candidate<L: Lattice3<27>>(
     Ok(NsfDgFrame {
         step, evaluations, incoming_characteristic_m_s: incoming,
         drive: NsfDgDrive::Boundary(external_boundary), upstream: None, faces, coupled_patch,
-        reservoir_mass_out_kg, flow,
+        reservoir_mass_out_kg, reservoir_flows, flow,
         flow_mass_change_kg: mass_change, flow_energy_change_j: energy_change, duct, terminals,
         inlet_flow_m3_s: q, inlet_pressure_pa: p, pressure_residual_pa: pressure_residual,
         projection_covariance_j: covariance, acoustic_work_residual_j: work_residual,

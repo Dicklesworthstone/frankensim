@@ -7,7 +7,7 @@
 //! card, noise generator, desired pitch or instrument name enters this path.
 //! See `docs/RESOLVED_NSF_DG_COUPLING.md` for the grammar and physical limits.
 
-use super::{NsfDgPerformance, source_intervals_for};
+use super::{NsfDgPerformance, ReservoirObservation, source_intervals_for};
 use crate::bernoulli_aperture::performance::ApertureObservation;
 use crate::dg_port::input::{DgSourceError, DgSourceInput};
 use crate::dg_port::input::wall::regions::{DgMaterialWallLayout, DgMaterialWallLayoutInput};
@@ -391,6 +391,15 @@ impl ResolvedDgFilePerformance {
             _ => return Err(bad(row.line, "observation requires inlet-pressure or baffled X Y Z RINGS ANGLES FMAX")),
         };
         row.end()?;
+        let reservoir_observation = if rows.next_is("reservoir_observation") {
+            let mut row = rows.row("reservoir_observation")?;
+            if row.word()? != "baffled" {
+                return Err(bad(row.line, "reservoir_observation requires baffled OX OY ANGLE_RAD"));
+            }
+            let input = ReservoirObservation { origin_m: [row.scalar()?, row.scalar()?], angle_rad: row.scalar()? };
+            row.end()?;
+            Some(input)
+        } else { None };
         let observer_gas = if rows.next_is("observer_gas") {
             let mut row = rows.row("observer_gas")?;
             let exterior = source.exterior_gas_record()
@@ -507,6 +516,9 @@ impl ResolvedDgFilePerformance {
         } else { None };
         let mut renderer = NsfDgPerformance::new_resampled_with_drives(system, observation, sample_rate_hz,
             boundary, samples as u64, maximum_block, Arc::clone(&gate)).map_err(ResolvedDgInputError::Render)?;
+        if let Some(input) = reservoir_observation {
+            renderer = renderer.with_reservoir_observation(input).map_err(ResolvedDgInputError::Render)?;
+        }
         if let Some(propagation) = observer_gas {
             renderer = renderer.with_observer_gas(&propagation).map_err(ResolvedDgInputError::Render)?;
         }

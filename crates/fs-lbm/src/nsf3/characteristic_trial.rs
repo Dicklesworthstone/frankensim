@@ -3,7 +3,7 @@
 //! topology already excludes manufactured volume sources. Every physical state,
 //! boundary force chart, source material and cumulative ledger remains retained.
 
-use super::{EnergyLedger, NsfBoundaryDrive, NsfBoundaryExchange, NsfError, NsfGrid3, NsfOpenState};
+use super::{EnergyLedger, NsfBoundaryDrive, NsfBoundaryExchange, NsfError, NsfGrid3, NsfOpenState, NsfReservoirFlow};
 use crate::lattice3::Lattice3;
 
 /// A complete unpublished interval. Dropping it changes no accepted field,
@@ -17,6 +17,7 @@ pub struct NsfCharacteristicTrial<'a, L: Lattice3<27>> {
     mass_before_kg: f64,
     energy_before_j: f64,
     reservoir_mass_out_kg: f64,
+    reservoir_flows: Vec<NsfReservoirFlow>,
 }
 
 impl<L: Lattice3<27>> NsfCharacteristicTrial<'_, L> {
@@ -38,6 +39,9 @@ impl<L: Lattice3<27>> NsfCharacteristicTrial<'_, L> {
     /// this interval [kg], independently counted from characteristic exchange.
     /// Zero when no aperture is attached.
     pub const fn reservoir_mass_out_kg(&self) -> f64 { self.reservoir_mass_out_kg }
+    /// Original per-tile continuum flow averaged over every original step.
+    /// Tile identity and sign are retained, independently of the mass ledger.
+    pub fn reservoir_flows(&self) -> &[NsfReservoirFlow] { &self.reservoir_flows }
     /// Publish the already admitted complete candidate. No fallible work follows.
     pub fn accept(self) { *self.owner = self.candidate; }
 }
@@ -127,12 +131,17 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let mut patch_exchange = candidate.characteristic_patch.map(|_| NsfBoundaryExchange::default());
         let mut ledger = EnergyLedger::default();
         let mut reservoir_mass_out_kg = 0.0;
+        let mut reservoir_flows = candidate.last_reservoir_flows.clone();
+        for flow in &mut reservoir_flows { flow.outward_volume_flow_m3_s = 0.0; }
         for _ in 0..steps {
             if cancelled() {
                 return Err(NsfError::Input("characteristic interval cancelled"));
             }
             let step = candidate.step()?;
             reservoir_mass_out_kg += candidate.last_reservoir_mass_out_kg().unwrap_or(0.0);
+            for (total, flow) in reservoir_flows.iter_mut().zip(candidate.last_reservoir_flows()) {
+                total.outward_volume_flow_m3_s += flow.outward_volume_flow_m3_s;
+            }
             ledger.internal_j = step.internal_j;
             ledger.kinetic_j = step.kinetic_j;
             ledger.viscous_heating_j += step.viscous_heating_j;
@@ -171,6 +180,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             face.mean_acoustic_pressure_pa /= steps as f64;
             face.normal_volume_flow_m3_s /= steps as f64;
         }
+        for flow in &mut reservoir_flows { flow.outward_volume_flow_m3_s /= steps as f64; }
         if let Some(face) = &mut patch_exchange {
             face.mean_pressure_pa /= steps as f64;
             face.mean_acoustic_pressure_pa /= steps as f64;
@@ -185,6 +195,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             face.normal_volume_flow_m3_s, face.pressure_work_out_j,
             face.mean_acoustic_pressure_pa, face.acoustic_pressure_work_out_j,
         ].into_iter().chain(face.momentum_out_kg_m_s).all(f64::is_finite))
+            || reservoir_flows.iter().any(|flow| !flow.outward_volume_flow_m3_s.is_finite())
             || ![mass_before_kg, energy_before_j, energy, candidate.total_mass_kg(),
                 ledger.internal_j, ledger.kinetic_j, ledger.viscous_heating_j,
                 ledger.unresolved_internal_exchange_j, ledger.pressure_work_j,
@@ -200,7 +211,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         }
         Ok(NsfCharacteristicTrial {
             owner: self, candidate, exchange, patch_exchange, ledger, mass_before_kg, energy_before_j,
-            reservoir_mass_out_kg,
+            reservoir_mass_out_kg, reservoir_flows,
         })
     }
 
@@ -219,6 +230,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             reservoir_faces: self.reservoir_faces, open_out: self.open_out,
             reservoir_aperture: self.reservoir_aperture.clone(),
             last_reservoir_mass_out_kg: self.last_reservoir_mass_out_kg,
+            last_reservoir_flows: self.last_reservoir_flows.clone(),
             last_boundary_exchange: self.last_boundary_exchange, steps: self.steps,
             last_patch_exchange: self.last_patch_exchange,
             cumulative: self.cumulative, edge_velocity: self.edge_velocity,

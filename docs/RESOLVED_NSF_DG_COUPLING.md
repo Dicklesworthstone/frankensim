@@ -85,7 +85,9 @@ reservoir energy entering the fluid remains `flow.open_energy_j`; it must be
 included with `flow.open_boundary_energy_j`, wall heat and source work when
 checking total fluid energy. Mixed-boundary unresolved internal exchange retains
 the original ledger classification and is not reported as resolved viscous heat.
-No reservoir flux is inserted into either acoustic duct or the bore microphone.
+The reservoir flux is not inserted into either acoustic duct. Its separate
+continuum volume flow can be observed at the shared exterior microphone with
+the explicit `reservoir_observation` selection described below.
 
 The signs and nonoverlapping accounts can be checked directly on each accepted
 frame, up to numerical roundoff:
@@ -517,6 +519,42 @@ obstacle mask, an explicitly cited illustrative bulk-viscosity ratio and loose
 projection-work tolerance. It is not a specimen description or measured flute
 calibration. Its purpose is to exercise the actual fluid → bore → radiation →
 material atmosphere → PCM path with data-owned geometry and source histories.
+
+### Resolved escape flow at the same exterior microphone
+
+`reservoir_observation baffled OX OY ANGLE_RAD`, immediately after `observation`
+and before `observer_gas`, includes the original transverse reservoir aperture
+in the same emitted pressure. `NsfDgPerformance::with_reservoir_observation`
+is the equivalent typed selection. Every actual fluid face tile has its own
+signed volume-flow input; the receiver does not substitute bore flow, infer a
+uniform mouth piston, or divide compressible mass flux by reference density.
+The source owner averages fluid/ghost velocity at that physical face and uses
+the original endpoint trapezoid and all physical substeps. The streamed mass
+and energy accounts remain separate. Failed trials retain all accepted fields
+and tile-flow accounts.
+
+Placement explicitly declares a common infinite baffle with the existing bore
+openings. For reservoir normal axis `a`, the local coordinates use grid axes
+`(a+1)%3` and `(a+2)%3`; the second coordinate reverses on a low face, preserving
+the outward normal. Grid edge zero maps to `[OX, OY]`, then the supplied angle
+rotates the actual tiles in the plane. Tile areas and spacing remain `dx²` and
+`dx`; neither aperture size nor surface flow is independently authored. The
+same microphone observes both surfaces with their separate travel times and
+signs. Overlapping openings, underresolved tile phase, more than 128 tile
+inputs, nonquiescent or mismatched reservoir/exterior reference gases refuse.
+
+The shared differentiating Rayleigh kernel observes every tile after the same
+conservative physical-to-output clock projection as the bore. A selected
+`observer_gas` law reaches both sets of paths, with only numerical padding
+aligned before their pressure sum. The native sidecar identifies original
+cell coordinates, placement, flow convention, path material and latency.
+`resolved-dg-side-aperture.performance` selects this complete observation.
+
+This is one-way observation of a prescribed-reservoir opening. It adds no
+reaction to the fluid, no transparent boundary, no acoustic/hydrodynamic
+decomposition, no free-field body scattering, and no separate observation of
+the complementary region of a characteristic patch. Source and boundary
+placement/refinement remain necessary; this is not measured flute validation.
 
 ## Scope and refinement
 

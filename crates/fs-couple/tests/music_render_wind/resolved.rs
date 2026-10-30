@@ -58,6 +58,9 @@ fn resolved_cli_keeps_original_pressure_decimation_and_physical_source_receipts(
             }
             assert!(metadata.contains(&format!("\"nsf_dt_s\":{dt:e}")));
             if case == 2 {
+                assert!(metadata.contains("\"reservoir_observation\":{\"kind\":\"original-tile-continuum-flow-Rayleigh\""));
+                assert!(metadata.contains("\"grid_cells\":[[5,2,1]]"));
+                assert!(metadata.contains("\"bore_observation_scope\":"));
                 assert!(metadata.contains("\"reservoir_aperture\":{\"kind\":\"prescribed-exterior-ghost-state\""));
                 assert!(metadata.contains("\"cell_count\":1"));
                 assert!(metadata.contains("\"mass_account\":{\"field\":\"reservoir_mass_out_kg\",\"unit\":\"kg\",\"positive\":\"out of resolved fluid\"}"));

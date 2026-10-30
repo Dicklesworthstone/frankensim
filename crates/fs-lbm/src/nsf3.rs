@@ -70,7 +70,7 @@ pub use material::{NsfGasMedium, ThermochemicalNsfGas};
 mod sgs;
 pub use sgs::{NsfSgsConfig, NsfSgsTransport};
 mod open;
-pub use open::{NsfOpenState, NsfReservoirAperture};
+pub use open::{NsfOpenState, NsfReservoirAperture, NsfReservoirFlow};
 mod open_boundary;
 use open_boundary::{BoundaryFlux, CharacteristicPatchBinding, IncomingPopulations, OpenFaces};
 pub use open_boundary::{
@@ -567,6 +567,7 @@ pub struct NsfGrid3<L: Lattice3<27>> {
     reservoir_faces: [[Option<open::OpenGhost>; 2]; 3],
     reservoir_aperture: Option<open::BoundReservoirAperture>,
     last_reservoir_mass_out_kg: Option<f64>,
+    last_reservoir_flows: Vec<NsfReservoirFlow>,
     open_out: BoundaryFlux,
     last_boundary_exchange: Option<[NsfBoundaryExchange; 2]>,
     last_patch_exchange: Option<NsfBoundaryExchange>,
@@ -766,6 +767,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             reservoir_faces: [[None; 2]; 3],
             reservoir_aperture: None,
             last_reservoir_mass_out_kg: None,
+            last_reservoir_flows: Vec::new(),
             open_out: BoundaryFlux::default(),
             last_boundary_exchange: None,
             last_patch_exchange: None,
@@ -1671,6 +1673,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             faces1.as_ref(),
             open1,
         );
+        let reservoir_flows = self.reservoir_volume_flows(&u0, &u1);
+        if reservoir_flows.iter().any(|flow| !flow.outward_volume_flow_m3_s.is_finite()) {
+            return Err(NsfError::Input("reservoir aperture continuum flow overflowed"));
+        }
         self.f = next;
         self.e = e1;
         self.material = material_new;
@@ -1687,6 +1693,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         self.last_boundary_exchange = boundary_exchange;
         self.last_patch_exchange = patch_exchange;
         self.last_reservoir_mass_out_kg = reservoir_mass_out_kg;
+        self.last_reservoir_flows = reservoir_flows;
         self.steps += 1;
         self.cumulative.viscous_heating_j += ledger.viscous_heating_j;
         self.cumulative.unresolved_internal_exchange_j += ledger.unresolved_internal_exchange_j;

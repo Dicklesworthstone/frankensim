@@ -39,6 +39,19 @@ pub struct NsfReservoirAperture {
     pub state: NsfOpenState,
 }
 
+/// Original continuum face flow on one localized reservoir tile.
+/// The face velocity is the midpoint of the adjacent fluid and prescribed
+/// ghost velocities, integrated with the same endpoint trapezoid as NSF
+/// energy transport. This is distinct from the streamed lattice mass account:
+/// compressible mass flux is not divided by a reference density to invent Q.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NsfReservoirFlow {
+    /// Adjacent original fluid cell, in canonical z/y/x order.
+    pub cell: [usize; 3],
+    /// Interval-mean outward volume flow [m³/s], retaining its sign.
+    pub outward_volume_flow_m3_s: f64,
+}
+
 #[derive(Clone)]
 pub(super) struct BoundReservoirAperture {
     pub source: NsfReservoirAperture,
@@ -140,6 +153,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let ghost = self.admit_open_state(source.state)?;
         self.reservoir_aperture = Some(BoundReservoirAperture { source, indices, ghost });
         self.last_reservoir_mass_out_kg = Some(0.0);
+        self.last_reservoir_flows = self.reservoir_aperture.as_ref().expect("bound aperture")
+            .indices.iter().map(|&index| NsfReservoirFlow {
+                cell: self.at(index), outward_volume_flow_m3_s: 0.0,
+            }).collect();
         let drives = self.boundary_drives().expect("admitted characteristic axis");
         self.set_boundary_drives(drives)?;
         Ok(self)
@@ -208,6 +225,30 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     #[must_use]
     pub const fn last_reservoir_mass_out_kg(&self) -> Option<f64> {
         self.last_reservoir_mass_out_kg
+    }
+
+    /// Accepted per-tile continuum flows in canonical grid order. Cold values
+    /// are zero; an absent aperture gives an empty slice. Failed steps and
+    /// dropped characteristic trials preserve this complete accepted record.
+    #[must_use]
+    pub fn last_reservoir_flows(&self) -> &[NsfReservoirFlow] {
+        &self.last_reservoir_flows
+    }
+
+    pub(super) fn reservoir_volume_flows(
+        &self, before: &[[f64; 3]], after: &[[f64; 3]],
+    ) -> Vec<NsfReservoirFlow> {
+        let Some(aperture) = &self.reservoir_aperture else { return Vec::new(); };
+        let axis = aperture.source.axis;
+        let sign = if aperture.source.high { 1.0 } else { -1.0 };
+        let unit = self.law.dx_m.powi(3) / self.law.dt_s;
+        aperture.indices.iter().map(|&index| NsfReservoirFlow {
+            cell: self.at(index),
+            // Average spatially at the physical face, then temporally over
+            // this step. The same fixed ghost participates at both endpoints.
+            outward_volume_flow_m3_s: sign * unit * 0.25
+                * (before[index][axis] + after[index][axis] + 2.0 * aperture.ghost.u[axis]),
+        }).collect()
     }
 
     pub(super) fn reservoir_link_mass_out_kg(

@@ -445,6 +445,58 @@ fn characteristic_patch_retains_disjoint_reservoir_escape_and_its_trial_accounts
 }
 
 #[test]
+fn reservoir_tile_flows_replay_the_original_face_and_time_quadrature() {
+    let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 300.0, 100000.0).unwrap();
+    for high in [false, true] {
+        let sign = if high { 1.0 } else { -1.0 };
+        let escape = NsfReservoirAperture {
+            axis: 1, high,
+            // Deliberately noncanonical source order; the accepted face basis
+            // is canonical and does not depend on authored list order.
+            cells: vec![[4, if high { 3 } else { 0 }, 2], [3, if high { 3 } else { 0 }, 1]],
+            state: NsfOpenState { density_kg_m3: gas.density,
+                velocity_m_s: [0.0, sign*0.001, 0.0], temperature_k: gas.temperature },
+        };
+        let make = || grid(0, 0.0, true).with_reservoir_aperture(escape.clone()).unwrap();
+        let mut direct = make();
+        let mut preview = make();
+        let drives = [NsfBoundaryDrive::PressureOffset(1.0), AMBIENT];
+        direct.set_boundary_drives(drives).unwrap();
+        let dx = direct.law().dx_m;
+        let unit = dx/direct.law().dt_s;
+        let mut sums = vec![0.0; escape.cells.len()];
+        for _ in 0..4 {
+            let before: Vec<_> = direct.last_reservoir_flows().iter()
+                .map(|flow| direct.cell(flow.cell).1[1]).collect();
+            direct.step().unwrap();
+            for (i, flow) in direct.last_reservoir_flows().iter().enumerate() {
+                let after = direct.cell(flow.cell).1[1];
+                let expected = sign*dx*dx*0.25
+                    * ((before[i]+after)*unit + 2.0*escape.state.velocity_m_s[1]);
+                assert!((flow.outward_volume_flow_m3_s-expected).abs()
+                    < 2e-13*expected.abs().max(1e-25));
+                sums[i] += flow.outward_volume_flow_m3_s;
+            }
+        }
+        assert!(sums.iter().any(|flow| flow.abs() > 1e-20));
+        let cold = preview.last_reservoir_flows().to_vec();
+        let trial = preview.preview_boundary_interval(drives, 4, 512, || false).unwrap();
+        for (flow, sum) in trial.reservoir_flows().iter().zip(&sums) {
+            assert_eq!(flow.outward_volume_flow_m3_s, sum/4.0);
+        }
+        assert_eq!(trial.grid().last_reservoir_flows(), direct.last_reservoir_flows());
+        drop(trial);
+        assert_eq!(preview.last_reservoir_flows(), cold);
+        let trial = preview.preview_boundary_interval(drives, 4, 512, || false).unwrap();
+        trial.accept();
+        let accepted = preview.last_reservoir_flows().to_vec();
+        assert_eq!(accepted, direct.last_reservoir_flows());
+        assert!(preview.preview_boundary_interval(drives, 1, 128, || true).is_err());
+        assert_eq!(preview.last_reservoir_flows(), accepted);
+    }
+}
+
+#[test]
 fn invalid_patch_topology_and_late_attachment_refuse() {
     for patch in [
         NsfCharacteristicPatch {

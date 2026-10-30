@@ -235,6 +235,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
         )?;
         let flow = *fluid.energy_ledger();
         let reservoir_mass_out_kg = fluid.reservoir_mass_out_kg();
+        let reservoir_flows = fluid.reservoir_flows().to_vec();
         let mass_change = fluid.grid().total_mass_kg() - fluid.previous_mass_kg();
         let energy_change = fluid.grid().total_energy_j() - fluid.previous_energy_j();
         if ![mass_change, energy_change, reservoir_mass_out_kg].iter().all(|x| x.is_finite()) {
@@ -271,6 +272,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
             faces,
             coupled_patch,
             reservoir_mass_out_kg,
+            reservoir_flows,
             flow,
             flow_mass_change_kg: mass_change,
             flow_energy_change_j: energy_change,
