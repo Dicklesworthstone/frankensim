@@ -12,8 +12,9 @@
 //! minimum curvature radius and half-gap, not the triangle diameter. A computed
 //! frequency interval enforces thin layers relative to those scales and `1/k`.
 //! That admission is an asymptotic condition, not a certified acoustic-error
-//! bound. Faceted geometry, corner layers, moving walls, molecular relaxation,
-//! finite wall heat capacity and narrow-gap LNS are not represented here.
+//! bound. Faceted geometry, corner layers, moving walls, molecular relaxation
+//! and narrow-gap LNS are not represented here. [`thermal_wall`] supplies
+//! optional finite-conductivity and finite-capacity stationary wall response.
 //! Wall-patch edges have the natural zero tangential conormal derivative.
 
 use super::{
@@ -21,6 +22,9 @@ use super::{
     sub3, tri_quadrature,
 };
 use std::collections::BTreeSet;
+
+pub mod thermal_wall;
+use thermal_wall::ThermalWall;
 
 /// Gas transport quantities evaluated by the caller's material owner.
 /// Density and sound speed come from the bound [`HelmholtzFe::medium`].
@@ -61,12 +65,12 @@ pub struct BoundaryLayerScales {
     pub wavelength_ratio: f64,
 }
 
-/// Mean cycle-averaged power transferred from acoustics to the stationary wall.
+/// Mean cycle-averaged dissipation in the gas and stationary wall boundary layers.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct BoundaryLayerPower {
     /// Viscous wall dissipation [W].
     pub viscous_w: f64,
-    /// Thermal wall dissipation [W].
+    /// Total thermal dissipation in gas and solid boundary layers [W].
     pub thermal_w: f64,
 }
 
@@ -289,6 +293,7 @@ pub(super) struct ReducedBoundaryLayer {
     geometry: BoundaryLayerGeometry,
     surface_stiffness: Vec<f64>,
     surface_mass: Vec<f64>,
+    thermal_wall: ThermalWall,
 }
 
 impl ReducedBoundaryLayer {
@@ -336,6 +341,7 @@ impl ReducedBoundaryLayer {
             geometry,
             surface_stiffness,
             surface_mass,
+            thermal_wall: ThermalWall::Isothermal,
         })
     }
 
@@ -362,6 +368,27 @@ impl ReducedBoundaryLayer {
         operator: &mut [[f64; 2]],
     ) -> Result<(), AcousticFeError> {
         let (viscous, thermal) = self.coefficients(medium, frequency_hz)?;
+        if self.thermal_wall != ThermalWall::Isothermal {
+            let response =
+                self.thermal_wall
+                    .response(self.transport, medium, self.geometry, frequency_hz)?;
+            let thermal_real = -thermal
+                * (response.gas_temperature_deficit[0] + response.gas_temperature_deficit[1]);
+            let thermal_imag = thermal * (response.gas_loss_factor + response.solid_loss_factor);
+            for ((entry, stiffness), mass) in operator
+                .iter_mut()
+                .zip(&self.surface_stiffness)
+                .zip(&self.surface_mass)
+            {
+                entry[0] += -viscous * stiffness + thermal_real * mass;
+                entry[1] += viscous * stiffness + thermal_imag * mass;
+                if entry.iter().any(|v| !v.is_finite()) {
+                    return Err(invalid("boundary-layer operator overflow"));
+                }
+            }
+            return Ok(());
+        }
+        // Keep the original isothermal operation order, including the zero-loss path.
         for ((entry, stiffness), mass) in operator
             .iter_mut()
             .zip(&self.surface_stiffness)
@@ -426,7 +453,16 @@ impl ReducedHelmholtz {
         let Some(wall) = &self.boundary_layer else {
             return Ok(BoundaryLayerPower::default());
         };
-        let (viscous, thermal) = wall.coefficients(self.medium, frequency_hz)?;
+        let (viscous, mut thermal) = wall.coefficients(self.medium, frequency_hz)?;
+        if wall.thermal_wall != ThermalWall::Isothermal {
+            let response = wall.thermal_wall.response(
+                wall.transport,
+                self.medium,
+                wall.geometry,
+                frequency_hz,
+            )?;
+            thermal *= response.gas_loss_factor + response.solid_loss_factor;
+        }
         let quadratic = |matrix: &[f64]| -> Result<f64, AcousticFeError> {
             let mut value = 0.0;
             let mut absolute = 0.0;

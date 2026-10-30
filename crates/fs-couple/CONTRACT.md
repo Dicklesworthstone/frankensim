@@ -13885,3 +13885,24 @@ The original exact modal owner retains every component and signed connection-das
 ## Joint molecular and spatial cavity thermal response
 
 `ReciprocalStringBank::with_material_shell_cavity_thermal_molecular` binds the original `RelaxationState` to the same pressure FE, heat eigenwindow and material-shell/string runtime. Each retained heat mode uses the shared positive caloric spectrum before pressure elimination; the positive unresolved pressure-space complement keeps the original adiabatic molecular spectrum. Their sum preserves frozen bulk storage without double-counting diffusion or dropping molecular reservoirs. Source identity, complete memory/local caloric work, native setup and instantaneous Nyquist gates remain binding. Pressure observation and the public normalized constitutive response use the same branch rows as mechanical force, storage and loss. Empty reservoirs recover the existing thermal trajectory exactly. This is a cold, frozen-mean, linear acoustic binding with isothermal solid boundaries and insulated mouths; it introduces no mean heating, phase/species evolution or finite solid-wall thermal store.
+
+### Source-owned conductive walls in spatial acoustic interiors
+
+`cavity_modal::interior::conductive_wall_transport` reads normal conductivity
+and volumetric heat capacity from an original `ThermalTransportSample`, whose
+prepared source identity remains on the supplied sample. It requires bitwise
+agreement of solid and source-gas equilibrium temperatures and validates the
+original gas coherence. No material-name constants, Cp/Cv conversion or second
+heat-capacity model is introduced. The caller retains source preparation,
+caloric constraint, direction and uncertainty ownership.
+
+`thermally_conductive_interior` binds that sample, physical solid depth,
+backside thermal condition and minimum tangential variation length to the
+original `thermoviscous_interior`. The same FE medium, pressure basis, surface
+matrices, response and input-work balance remain owners. The fs-feec normal
+Fourier profile supplies gas/solid thermal boundary exchange at fixed mean
+temperature; its geometry/admission and model-form limits remain in force.
+This is not finite mean-body heating or a second application of gas-wall heat.
+Two focused adapter regressions use original source cards/prepared transport
+and source gases, checking material-only conductivity/capacity substitutions,
+full FE work closure, and mismatched-temperature/incoherent-gas refusal.

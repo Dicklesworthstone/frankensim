@@ -1144,7 +1144,50 @@ order, normal-gradient exclusion and face orientation, layer scaling and band
 refusal, full-FE input/work closure, the zero-loss limit, and an axial box-mode
 ladder against analytic viscous/thermal surface integrals. The M2.4-W1b bead
 remains open: no curved isoparametric map, narrow-gap LNS, molecular wall/gas
-coupling, finite wall heat capacity, corner-layer resolution, Bessel-cylinder
-acceptance or final instrument-accuracy claim is made. Patch edges use natural
+coupling, corner-layer resolution, Bessel-cylinder acceptance or final
+instrument-accuracy claim is made. Finite wall thermal response is supplied
+by the extension below. Patch edges use natural
 zero tangential conormal flux. This frequency-domain wall approximation is not
 advertised as a passive time-domain realization.
+
+### Finite-conductivity and finite-capacity acoustic walls
+
+`boundary_layer::thermal_wall` extends the original Wentzell wall through
+temperature and normal heat-flux continuity. `ThermalWall` selects the original
+isothermal condition, an adiabatic thermal wall, or a homogeneous conductive
+half-space/finite slab. A slab explicitly selects zero temperature or zero
+normal heat flux at its backside. With `q=(1+i)/delta`, its exact normal heat
+admittance is `k*q*coth(q*d)` or `k*q*tanh(q*d)`. The gas temperature deficit
+`Y_wall/(Y_gas+Y_wall)` multiplies the original thermal pressure form. Density,
+heat capacity and directional conductivity come from the material owner.
+
+`ReducedHelmholtz::with_thermal_wall` retains the original pressure basis,
+projected surface matrices and viscous tangential form. Ordinary `response`
+and `boundary_layer_power` include the new thermal response. The default
+isothermal operation order remains unchanged. The thermal power is total
+gas-plus-solid diffusion loss; `ThermalWallResponse` exposes their separate
+nonnegative entropy-production factors and complex interface temperature.
+The imaginary operator coefficient uses these positive forms directly,
+avoiding cancellation of leading reactive terms for thin insulated walls.
+No loss is clipped. Scaled admittance division and small-depth analytic
+series avoid overflow/cancellation without introducing a fitted damping law.
+
+The original gas band remains enforced. Solid penetration depth, capped at
+finite wall thickness, must also be small against the real curvature radius,
+explicit minimum tangential variation length and acoustic wavelength. The
+declared tangential length includes pressure, material, thickness and backing
+variation, independently of face size. This is asymptotic applicability, not
+a certified observable-error bound. Properties are frozen at one common
+gas/solid equilibrium temperature; the selected heat capacity constraint and
+normal conductivity direction remain the caller's responsibility.
+
+Focused tests independently solve the solid normal heat equation with P1
+elements on 32/64/128 cells for both backside conditions, requiring order
+1.8--2.2 and finest relative error below 2e-5. They also cover half-space and
+thin/thick limits, gas/solid entropy partition, very small positive insulated
+wall loss, full original FE input/work closure, unchanged isothermal bits and
+invalid/unresolved-profile refusal. No molecular relaxation, thermoelastic
+heating, imperfect interface contact, lateral conduction, multilayer solid,
+mean thermal evolution or time-domain realization is supplied. Existing
+curved-map, narrow-gap, corner-layer and Bessel-cylinder limitations remain;
+M2.4-W1b is not closed by this extension.

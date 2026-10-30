@@ -4,6 +4,9 @@
 //! original pressure traces and the frequency solve stay in `fs-feec`. This
 //! adapter only binds their numerical views to the same coherent gas state.
 
+use fs_feec::acoustics::helmholtz::boundary_layer::thermal_wall::{
+    ConductiveThermalWall, ThermalWall, ThermalWallDepth, WallThermalTransport,
+};
 use fs_feec::acoustics::helmholtz::boundary_layer::{
     BoundaryLayerGeometry, BoundaryLayerTransport,
 };
@@ -11,6 +14,7 @@ use fs_feec::acoustics::helmholtz::{
     AcousticFeError, HelmholtzFe, HelmholtzModes, ReducedHelmholtz,
 };
 use fs_material::gas::GasState;
+use fs_material::thermal::transport::ThermalTransportSample;
 
 /// Read wall transport from one coherent source gas; no air constants or
 /// independent heat-capacity/Prandtl approximations are introduced.
@@ -61,12 +65,60 @@ pub fn thermoviscous_interior(
     )
 }
 
+/// Bind a source-evaluated solid to the same gas equilibrium temperature.
+/// The supplied sample retains its original prepared-material identity; the
+/// caller owns the source path, caloric constraint and wall-normal direction.
+/// No heat capacity is converted and no material constants are inferred.
+pub fn conductive_wall_transport(
+    gas: &GasState,
+    wall: &ThermalTransportSample,
+) -> Result<WallThermalTransport, AcousticFeError> {
+    boundary_layer_transport(gas)?;
+    if gas.temperature.to_bits() != wall.temperature_k().to_bits() {
+        return Err(AcousticFeError::InvalidInput {
+            what: "conductive acoustic wall and gas require one equilibrium temperature",
+        });
+    }
+    Ok(WallThermalTransport {
+        conductivity_w_m_k: wall.conductivity_w_m_k(),
+        volumetric_heat_capacity_j_m3_k: wall.volumetric_heat_capacity_j_m3_k(),
+    })
+}
+
+/// Original three-dimensional pressure FE with conjugate gas/solid thermal
+/// boundary layers and the original viscous tangential surface form. Material
+/// preparation occurs outside this builder; every response only evaluates the
+/// exact normal diffusion profile of a homogeneous solid at fixed equilibrium.
+/// Geometry, backing condition and local-layer admission remain explicit.
+pub fn thermally_conductive_interior(
+    fe: &HelmholtzFe<'_>,
+    modes: &HelmholtzModes,
+    ports: &[&[[u32; 3]]],
+    static_vectors: bool,
+    wall_faces: &[[u32; 3]],
+    gas: &GasState,
+    geometry: BoundaryLayerGeometry,
+    wall: &ThermalTransportSample,
+    depth: ThermalWallDepth,
+    minimum_tangential_scale_m: f64,
+) -> Result<ReducedHelmholtz, AcousticFeError> {
+    let transport = conductive_wall_transport(gas, wall)?;
+    thermoviscous_interior(fe, modes, ports, static_vectors, wall_faces, gas, geometry)?
+        .with_thermal_wall(ThermalWall::Conductive(ConductiveThermalWall {
+            transport,
+            depth,
+            minimum_tangential_scale_m,
+        }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use fs_feec::acoustics::helmholtz::Medium;
     use fs_feec::fixtures::single_tet;
     use fs_material::gas::GasSpec;
+
+    mod conductive;
 
     const GEOMETRY: BoundaryLayerGeometry = BoundaryLayerGeometry {
         minimum_curvature_radius_m: f64::INFINITY,

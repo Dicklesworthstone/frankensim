@@ -3,23 +3,23 @@ use crate::fixtures::kuhn_cube;
 use fs_modal::SliceOptions;
 use fs_rep_mesh::TetComplex;
 
-const AIR: Medium = Medium {
+pub(super) const AIR: Medium = Medium {
     density_kg_m3: 1.2,
     sound_speed_m_s: 343.0,
 };
-const TRANSPORT: BoundaryLayerTransport = BoundaryLayerTransport {
+pub(super) const TRANSPORT: BoundaryLayerTransport = BoundaryLayerTransport {
     dynamic_viscosity_pa_s: 1.84e-5,
     thermal_conductivity_w_m_k: 0.0257,
     cp_j_kg_k: 1005.0,
     heat_capacity_ratio: 1.4,
 };
-const GEOMETRY: BoundaryLayerGeometry = BoundaryLayerGeometry {
+pub(super) const GEOMETRY: BoundaryLayerGeometry = BoundaryLayerGeometry {
     minimum_curvature_radius_m: f64::INFINITY,
     minimum_half_gap_m: 0.02,
     maximum_layer_ratio: 0.05,
 };
 
-fn box_mesh(n: usize, dimensions: [f64; 3]) -> (TetComplex, Vec<[f64; 3]>) {
+pub(super) fn box_mesh(n: usize, dimensions: [f64; 3]) -> (TetComplex, Vec<[f64; 3]>) {
     let (complex, points) = kuhn_cube(n);
     (
         complex,
@@ -30,7 +30,7 @@ fn box_mesh(n: usize, dimensions: [f64; 3]) -> (TetComplex, Vec<[f64; 3]>) {
     )
 }
 
-fn end_faces(fe: &HelmholtzFe<'_>, x: f64) -> Vec<[u32; 3]> {
+pub(super) fn end_faces(fe: &HelmholtzFe<'_>, x: f64) -> Vec<[u32; 3]> {
     fe.boundary_faces()
         .into_iter()
         .filter(|face| {
@@ -40,7 +40,7 @@ fn end_faces(fe: &HelmholtzFe<'_>, x: f64) -> Vec<[u32; 3]> {
         .collect()
 }
 
-fn side_faces(fe: &HelmholtzFe<'_>, length: f64) -> Vec<[u32; 3]> {
+pub(super) fn side_faces(fe: &HelmholtzFe<'_>, length: f64) -> Vec<[u32; 3]> {
     let ends: BTreeSet<_> = end_faces(fe, 0.0)
         .into_iter()
         .chain(end_faces(fe, length))
@@ -51,7 +51,7 @@ fn side_faces(fe: &HelmholtzFe<'_>, length: f64) -> Vec<[u32; 3]> {
         .collect()
 }
 
-fn quadratic(matrix: &Csr, x: &[f64]) -> f64 {
+pub(super) fn quadratic(matrix: &Csr, x: &[f64]) -> f64 {
     let mut y = vec![0.0; x.len()];
     matrix.spmv(x, &mut y);
     x.iter().zip(y).map(|(a, b)| a * b).sum()
@@ -59,7 +59,7 @@ fn quadratic(matrix: &Csr, x: &[f64]) -> f64 {
 
 // A complete coordinate basis makes the existing Galerkin solver a full FE
 // solve. No eigenbasis truncation or synthetic numerical operator is involved.
-fn complete_basis(fe: &HelmholtzFe<'_>) -> HelmholtzModes {
+pub(super) fn complete_basis(fe: &HelmholtzFe<'_>) -> HelmholtzModes {
     let n = fe.ndof();
     HelmholtzModes {
         lambda: vec![0.0; n],
