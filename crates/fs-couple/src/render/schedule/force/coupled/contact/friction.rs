@@ -92,6 +92,8 @@ pub enum ModalFrictionError {
     Law(TriboError),
     /// Original adhesive source identity or geometry admission refused.
     AdhesiveSource(fs_contact::interface_binding::adhesive_shear::AdhesiveShearError),
+    /// Original selected thermal friction claims or owned coordinates refused.
+    ThermalSource(fs_contact::interface_binding::thermal_friction::SourceThermalCoulombError),
     /// Actual endpoint displacements failed the sticking constraint.
     Sticking { /// Signed mismatch [m].
         residual_m: f64, /// Explicit tolerance [m].
@@ -139,12 +141,16 @@ impl From<TriboError> for ModalFrictionError {
 impl From<fs_contact::interface_binding::adhesive_shear::AdhesiveShearError> for ModalFrictionError {
     fn from(value: fs_contact::interface_binding::adhesive_shear::AdhesiveShearError) -> Self { Self::AdhesiveSource(value) }
 }
+impl From<fs_contact::interface_binding::thermal_friction::SourceThermalCoulombError> for ModalFrictionError {
+    fn from(value: fs_contact::interface_binding::thermal_friction::SourceThermalCoulombError) -> Self { Self::ThermalSource(value) }
+}
 impl core::fmt::Display for ModalFrictionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Network(e) => write!(f, "friction network: {e}"),
             Self::Law(e) => write!(f, "friction law: {e}"),
             Self::AdhesiveSource(e) => write!(f, "friction source: {e}"),
+            Self::ThermalSource(e) => write!(f, "thermal friction source: {e}"),
             Self::Sticking { residual_m, tolerance_m } => write!(f,
                 "sticking mismatch {residual_m:e} m exceeds {tolerance_m:e} m"),
             Self::NonlinearEquilibrium { residual, tolerance, iterations } => write!(f,
@@ -445,6 +451,9 @@ impl FrictionModalSystem {
     fn step_inner(&mut self, external: &[f64], drive: FrictionDrive, gate: Option<&CancelGate>)
         -> Result<&FrictionModalFrame, ModalFrictionError>
     {
+        if self.interface.as_ref().is_some_and(|source| source.temperature_source().is_some()) {
+            return Err(invalid("temperature-dependent friction requires its finite-heat transaction").into());
+        }
         let (accepted, nonlinear_frame) = self.stage_candidate(external, drive, gate)?;
         self.network.validate_staged_material_points(gate)?;
         poll(gate)?;

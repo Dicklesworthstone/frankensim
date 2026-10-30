@@ -1054,19 +1054,28 @@ bow surface; texture, third body and named history remain part of the original
 source identity. Changing a string's outer material while retaining an interface
 for the old surface refuses instead of reusing its friction coefficients.
 
-The selected claims must provide constant coefficients with explicit finite
-bare-SI validity on `T`, `p` and `v`. The query chooses a supported immutable
-source; its pressure and speed are not imposed on the physical solver. The
-common applicability intersection is checked against the actual normal load
-divided by nominal area and the actual relative surface velocity, including
-torsional motion, at the original solver's initial, step-average and endpoint
-checks. Missing, conflicting, nonconstant or out-of-domain sources refuse. A
-released bow does not require positive-pressure friction data at zero load.
+Selected claims require explicit finite bare-SI validity on `T`, `p` and `v`.
+Constant coefficient sources retain the original path. A `coulomb` declaration
+may select coefficients that depend on `T` when every affected contact has an
+explicit finite-cell dry route in a version 2 `--contact-thermal` profile; see
+[CONTACT_THERMAL.md](CONTACT_THERMAL.md). The existing heat solver then solves
+interface temperature, source-refreshed traction and the original cell energies
+together. Coefficient response to pressure, speed or additional history is not
+supplied by this temperature-only route. Stribeck and hyperbolic coefficient
+sources remain constant throughout their applicability.
 
-Interface temperature, nominal area and source history are frozen inputs. This
-binding does not infer a Hertz patch, evolving hair compliance, rosin heating or
-wear. The original packs and property-use receipts survive with the performance;
-loading a source does not promote it to experimentally validated instrument data.
+The query chooses a supported immutable source; its pressure and speed are not
+imposed on the physical solver. Actual normal load divided by nominal area and
+actual relative surface velocity, including torsion, enter the original initial,
+step-average and endpoint checks. Missing, conflicting, unsupported or
+out-of-domain sources refuse. A released bow does not require positive-pressure
+friction data at zero load.
+
+Nominal area and declared surface history remain explicit inputs. The original
+packs, selected claims and actual coefficient-query receipts survive with the
+performance. This binding does not infer a Hertz patch, missing hair or rosin
+properties, a transported rosin layer, or wear; loading a source does not promote
+it to experimentally validated instrument data.
 
 An optional record immediately after the complete friction declaration selects
 a finite-width rigid ribbon instead of the default point bow:

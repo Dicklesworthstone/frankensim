@@ -25,9 +25,11 @@
 
 /// Material-coordinate finite-cell dry friction heat and contact conduction.
 pub mod dry;
+mod source;
 
 use super::*;
 use dry::{DryContactHeat, DryContactHeatFrame};
+use source::DryTemperatureUnknown;
 use fs_material::thermal::source::ThermalMaterialError;
 use fs_matdb::MaterialCard;
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, PhaseStateError};
@@ -532,6 +534,13 @@ impl MultiFrictionModalSystem {
             }
             route.admit(self, thermal, controls.maximum_cells)?;
         }
+        if (0..self.port_count()).any(|port|
+            self.interface(port).is_some_and(|source| source.temperature_source().is_some())
+                && !heated_dry.contains(&port)) {
+            return Err(LayerThermalError::Invalid(
+                "every temperature-dependent friction source needs its original finite dry heat route",
+            ));
+        }
         let mut heated_drives = BTreeSet::new();
         for route in series_heat {
             checkpoint()?;
@@ -576,11 +585,17 @@ impl MultiFrictionModalSystem {
         self.prepare_step(drives, obstacle_offsets, obstacle_geometry, contact_patch_motion, Some(gate))?;
         let step = BackwardEulerStep::new(thermal, target_s, checkpoint)?;
         let dt = step.duration_s();
+        let temperatures = DryTemperatureUnknown::prepare(self, dry, thermal, dt)?;
+        let cell_count = step.cell_ids().len();
+        let unknown_count = cell_count + temperatures.len();
         let trials = Cell::new(0usize);
         let mechanics = RefCell::new(self);
         let evaluate = |x: &[f64]| {
+            if x.len() != unknown_count {
+                return Err(LayerThermalError::Invalid("incomplete cell and interface-temperature iterate"));
+            }
             step.evaluate(
-                x,
+                &x[..cell_count],
                 |endpoint| {
                     checkpoint()?;
                     if trials.get() >= controls.maximum_mechanical_trials {
@@ -598,9 +613,14 @@ impl MultiFrictionModalSystem {
                         layers[binding.port] = Some(layer);
                         coefficient_changes.push(coefficient_work);
                     }
+                    let proposed_sources = temperatures.iter().zip(&x[cell_count..])
+                        .map(|(source, &coordinate)| source.binding(coordinate))
+                        .collect::<Result<Vec<_>, LayerThermalError<E>>>()?;
                     let mut system = mechanics.borrow_mut();
                     let original = std::mem::replace(&mut system.shear_layers, layers);
-                    let staged = system.stage_constitutive(external, drives, obstacle_offsets, Some(gate));
+                    let staged = system.stage_temperature_sources(
+                        &proposed_sources, external, drives, obstacle_offsets, gate,
+                    );
                     let candidate_layers = std::mem::replace(&mut system.shear_layers, original);
                     // Accepted source/strain was restored even if mechanics refused.
                     let frame = staged?;
@@ -646,11 +666,20 @@ impl MultiFrictionModalSystem {
                     let mut dry_frames = Vec::with_capacity(dry.len());
                     let mut dry_sources = Vec::with_capacity(dry.len());
                     let mut dry_heat_j = 0.0;
+                    let mut interface_residual_j = 0.0;
                     for route in dry {
                         checkpoint()?;
                         let port = &system.staged_ports[route.port];
-                        let report = route.evaluate(endpoint, port.normal_force_n,
-                            port.dissipation_j, dt, controls.total_energy_tolerance_j)?;
+                        let report = if let Some((index, source)) = temperatures.iter().enumerate()
+                            .find(|(_, source)| source.port == route.port) {
+                            let report = route.evaluate_at_temperature(endpoint, port.normal_force_n,
+                                port.dissipation_j, dt, source.temperature(x[cell_count + index])?)?;
+                            interface_residual_j = number(interface_residual_j + report.interface_energy_residual_j)?;
+                            report
+                        } else {
+                            route.evaluate(endpoint, port.normal_force_n,
+                                port.dissipation_j, dt, controls.total_energy_tolerance_j)?
+                        };
                         if let Some(temperature) = report.interface_temperature_k {
                             let source = system.validate_dry_temperature(route.port, temperature, drives[route.port])?;
                             dry_sources.push((route.port, source));
@@ -698,7 +727,8 @@ impl MultiFrictionModalSystem {
                             deposited_heat_j = number(deposited_heat_j + delivered)?;
                         }
                     }
-                    if number(deposited_heat_j - plastic_heat_j - reversible_heat_j - series_heat_j - dry_heat_j)?.abs()
+                    if number(deposited_heat_j - plastic_heat_j - reversible_heat_j - series_heat_j
+                        - dry_heat_j - interface_residual_j)?.abs()
                         > controls.total_energy_tolerance_j
                     {
                         return Err(LayerThermalError::Invalid(
@@ -728,13 +758,29 @@ impl MultiFrictionModalSystem {
             )
         };
         let problem = FallibleFiniteDifference::new(
-            step.cell_ids().len(),
+            unknown_count,
             controls.difference_step_j,
-            |x: &[f64]| evaluate(x).map(|t| t.residual_j().to_vec()),
+            |x: &[f64]| evaluate(x).map(|t| {
+                let mut residual = t.residual_j().to_vec();
+                for (index, source) in temperatures.iter().enumerate() {
+                    let frame = t.payload().12.iter().find(|frame| frame.port == source.port)
+                        .expect("one report per admitted dry source");
+                    residual.push(if frame.interface_temperature_k.is_some() {
+                        frame.interface_energy_residual_j
+                    } else {
+                        // No physical interface exists while released. Anchor
+                        // its unused numerical coordinate, without heat/storage.
+                        x[cell_count + index]
+                    });
+                }
+                residual
+            }),
         )
         .map_err(numerical)?;
+        let mut initial = energy_guess_j.to_vec();
+        initial.resize(unknown_count, 0.0);
         let construction =
-            NewtonKrylovState::new(&problem, energy_guess_j.to_vec(), controls.newton);
+            NewtonKrylovState::new(&problem, initial, controls.newton);
         if let Some(error) = problem.take_failure() {
             return Err(numerical(error));
         }
@@ -757,6 +803,12 @@ impl MultiFrictionModalSystem {
         // this thermal endpoint. Nothing evaluates another trial after it.
         let trial = evaluate(&solver.x)?;
         let maximum_cell_residual_j = trial.maximum_cell_residual_j();
+        if trial.payload().12.iter().any(|contact|
+            contact.interface_energy_residual_j.abs() > controls.total_energy_tolerance_j) {
+            return Err(LayerThermalError::Invalid(
+                "dry interface fluxes do not close the same temperature-dependent friction work",
+            ));
+        }
         let (
             next,
             (frame, layers, source, deposited_heat_j, plastic_heat_j, external_heat_j,
@@ -785,7 +837,8 @@ impl MultiFrictionModalSystem {
         // state/observer, and the existing thermal candidate without fallible work.
         system.shear_layers = layers;
         for (port, source) in dry_sources {
-            if port == 0 { system.core.interface = Some(source); }
+            if source.temperature_source().is_some() { system.install_dry_source(port, source); }
+            else if port == 0 { system.core.interface = Some(source); }
             else { system.interfaces[port - 1] = Some(source); }
         }
         let mechanics = system.publish_step(frame).clone();

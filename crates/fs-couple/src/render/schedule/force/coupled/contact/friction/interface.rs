@@ -6,13 +6,25 @@
 //! upgrade caller-declared/synthetic data into measured material evidence.
 
 use super::*;
-use fs_tribo::{DryFrictionState, DryInterfaceSystemCard};
+use fs_contact::interface_binding::thermal_friction::{
+    FrictionQueryAxisKind, SourceThermalCoulomb, SourceThermalCoulombError,
+};
+use fs_material::state_point::ResolvedInterfaceStatePoint;
+use fs_qty::Temperature;
+use fs_tribo::{DryFrictionApplicability, DryFrictionState, DryInterfaceSystemCard};
+use std::sync::Arc;
+
+#[derive(Clone, Debug, PartialEq)]
+struct TemperatureSource {
+    law: Arc<SourceThermalCoulomb>,
+    resolved: ResolvedInterfaceStatePoint,
+}
 
 /// Immutable interface data and the geometry/state needed to query its domain.
 /// The nominal area is NOT a Hertz patch and does not determine normal load.
-/// Ordinary stepping holds temperature and area. The shared finite-cell heat
-/// transaction may re-admit the original card at its solved interface temperature;
-/// this never invents temperature dependence in the card's constant traction law.
+/// Ordinary stepping holds temperature and area. An explicit temperature source
+/// instead requires the shared finite-cell heat transaction, which refreshes
+/// its original coefficient claims at the jointly solved interface temperature.
 /// The producer remains responsible for mapping the ordered surfaces
 /// to the actual participants of the mechanical port.
 #[derive(Clone, Debug, PartialEq)]
@@ -20,6 +32,7 @@ pub struct DryFrictionBinding {
     card: DryInterfaceSystemCard,
     temperature_kelvin: f64,
     nominal_area_m2: f64,
+    temperature_source: Option<TemperatureSource>,
 }
 impl DryFrictionBinding {
     /// Bind the complete original interface, without copying selected mu values.
@@ -37,7 +50,44 @@ impl DryFrictionBinding {
         let speed = domain.slip_speed_mps().minimum();
         card.validate_state(DryFrictionState::new(temperature_kelvin,
             domain.contact_pressure_pa().minimum(), speed)?)?;
-        Ok(Self { card, temperature_kelvin, nominal_area_m2 })
+        Ok(Self { card, temperature_kelvin, nominal_area_m2, temperature_source: None })
+    }
+
+    /// Bind existing source-pinned Coulomb coefficients to finite contact heat.
+    /// Only temperature may change coefficient VALUES here. Explicit pressure
+    /// and sliding-speed applicability are still checked on actual mechanics;
+    /// pressure-, speed-, path- or surface-temperature-dependent responses need
+    /// their own joint constitutive unknowns and refuse this owner.
+    pub fn new_temperature_source(
+        source: SourceThermalCoulomb,
+        applicability: DryFrictionApplicability,
+        nominal_area_m2: f64,
+    ) -> Result<Self, ModalFrictionError> {
+        if source.query_axes().iter().any(|axis| axis.kind != FrictionQueryAxisKind::SlidingSpeed)
+            || source.initial_source().properties().iter().any(|property|
+                property.source_axes().iter().any(|(axis, dims)|
+                    axis != &source.axes().temperature || *dims != Temperature::DIMS))
+        {
+            return Err(invalid("modal thermal Coulomb coefficients may respond only to their owned contact temperature").into());
+        }
+        let point = source.initial_source().query();
+        let temperature = *point.axes().get(&source.axes().temperature)
+            .ok_or_else(|| invalid("thermal friction lost its original temperature coordinate"))?;
+        let (resolved, law) = source.coefficients_at_query(&point)?;
+        let card = DryInterfaceSystemCard::new(source.interface().interface().clone(), law, applicability)?;
+        let mut binding = Self::new(card, temperature, nominal_area_m2)?;
+        binding.temperature_source = Some(TemperatureSource { law: Arc::new(source), resolved });
+        Ok(binding)
+    }
+
+    /// Original coefficient owner, never a fitted replacement for its claims.
+    pub fn temperature_source(&self) -> Option<&SourceThermalCoulomb> {
+        self.temperature_source.as_ref().map(|source| source.law.as_ref())
+    }
+
+    /// Latest accepted coefficient receipts at actual average slip and pressure.
+    pub fn resolved_temperature_source(&self) -> Option<&ResolvedInterfaceStatePoint> {
+        self.temperature_source.as_ref().map(|source| &source.resolved)
     }
     /// Complete ordered surface/history, law, authority and applicability.
     #[must_use] pub const fn card(&self) -> &DryInterfaceSystemCard { &self.card }
@@ -46,10 +96,53 @@ impl DryFrictionBinding {
     /// Original nominal contact area used to map prescribed load to pressure.
     #[must_use] pub const fn nominal_area_m2(&self) -> f64 { self.nominal_area_m2 }
 
-    /// Re-admit exactly the same interface, area and law at a physical thermal
-    /// endpoint. A domain failure leaves the accepted source unchanged.
+    /// Re-admit the same interface and area at a thermal trial. An explicit
+    /// temperature owner refreshes its pinned coefficients; a fixed law stays
+    /// fixed. Actual pressure/rates are admitted separately by the staged solve.
     pub(crate) fn at_temperature(&self, temperature_kelvin: f64) -> Result<Self, ModalFrictionError> {
-        Self::new(self.card.clone(), temperature_kelvin, self.nominal_area_m2)
+        let Some(source) = &self.temperature_source else {
+            return Self::new(self.card.clone(), temperature_kelvin, self.nominal_area_m2);
+        };
+        let point = source.resolved.query().with(&source.law.axes().temperature, temperature_kelvin)
+            .map_err(SourceThermalCoulombError::from)?;
+        let (resolved, law) = source.law.coefficients_at_query(&point)?;
+        let card = DryInterfaceSystemCard::new(
+            self.card.interface().clone(), law, self.card.applicability(),
+        )?;
+        let mut binding = Self::new(card, temperature_kelvin, self.nominal_area_m2)?;
+        binding.temperature_source = Some(TemperatureSource { law: source.law.clone(), resolved });
+        Ok(binding)
+    }
+
+    fn source_at_motion(&self, pressure: f64, speed: f64)
+        -> Result<Option<ResolvedInterfaceStatePoint>, ModalFrictionError>
+    {
+        let Some(source) = &self.temperature_source else { return Ok(None); };
+        let mut point = source.resolved.query();
+        if let Some(axis) = &source.law.axes().nominal_pressure {
+            point = point.with(axis, pressure).map_err(SourceThermalCoulombError::from)?;
+        }
+        for axis in source.law.query_axes() {
+            point = point.with(&axis.name, speed.abs()).map_err(SourceThermalCoulombError::from)?;
+        }
+        let (resolved, law) = source.law.coefficients_at_query(&point)?;
+        if law != *self.card.friction_law() {
+            return Err(invalid("actual pressure/speed changed a temperature-only friction coefficient").into());
+        }
+        Ok(Some(resolved))
+    }
+
+    pub(crate) fn at_average_motion(&self, normal: f64, speed: f64)
+        -> Result<Self, ModalFrictionError>
+    {
+        let mut binding = self.clone();
+        if normal != 0.0 {
+            self.check_speed(normal, speed)?;
+            if let Some(resolved) = self.source_at_motion(normal / self.nominal_area_m2, speed)? {
+                binding.temperature_source.as_mut().expect("retained source").resolved = resolved;
+            }
+        }
+        Ok(binding)
     }
 
     fn check_speed(&self, normal: f64, relative_speed: f64) -> Result<(), ModalFrictionError> {
@@ -64,6 +157,7 @@ impl DryFrictionBinding {
         // No per-sample source/receipt clone and no second traction evaluation.
         // The SAME admission is also used by the original receipt-producing query.
         self.card.validate_state(state)?;
+        self.source_at_motion(pressure, relative_speed)?;
         Ok(())
     }
 }

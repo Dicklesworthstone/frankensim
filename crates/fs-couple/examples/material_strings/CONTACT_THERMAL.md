@@ -144,9 +144,29 @@ Dry routes may share the network with explicit series-drive heat. Retained
 shear-film bindings and moving dry routes cannot be combined by this profile;
 set `films 0` for a dry profile. V1 film/series profiles keep their fixed-bow
 restriction. Missing hair thermal properties are not supplied from rosin or
-another material. This dry route retains its declared source friction law and
-checks its applicability at the solved interface temperature; it does not
-invent a temperature-dependent friction curve or a transported rosin layer.
+another material. Constant dry laws retain their original analytic interface
+temperature path. A `coulomb` bow declaration may instead select source
+coefficients that depend on `T`. Those original claims are pinned and evaluated
+at the interface temperature solved jointly with traction and finite-cell heat.
+The same slip work heats the cells, and their temperatures feed back into the
+next coupled endpoint. No coefficients are inferred from a recording.
+
+Temperature-dependent dry declarations require version 2 heat routes for every
+affected physical port, including each distributed ribbon contact. Missing routes
+refuse before output. The original `bow-interface` syntax and explicit T/p/v
+applicability are retained. Pressure and incoming, average and endpoint slip
+speed are checked against the real mechanics. Coefficient response to pressure,
+speed or additional history is not supplied by this temperature-only coupling;
+such response axes refuse rather than remaining frozen. Stribeck and hyperbolic
+coefficient sources retain their constant-only restriction.
+
+The interface temperature has no invented heat capacity. Its additional Newton
+coordinate is scaled by the actual original half-cell conductances and sample
+duration, solely for numerical units. Each accepted interface must close its
+own flux/friction-work balance as well as the existing cell and total energy
+accounts. Release disconnects heat exchange and preserves the source history;
+failed trials publish neither new coefficients nor mechanical or thermal state.
+This does not model a transported rosin layer or create missing rosin measurements.
 
 The explicit outer boundary is adiabatic. There is no inferred infinite
 heat bath or convective coefficient. A neighboring finite cell must have its

@@ -232,6 +232,7 @@ impl input::Spec {
         profile:Option<body::Profile>,stop_profile:Option<stops::Profile>,harmonic_only:bool,
         mut loader:impl FnMut(&str)->Result<P>)->Result<ReadyBank> {
         poll(gate)?;
+        self.friction.validate_thermal_mode(self.dry_contact_thermal)?;
         let preparation = if harmonic_only {
             if !profile.as_ref().is_some_and(body::Profile::has_shell_material_basis) {
                 return Err("loaded body-response-only requires a curved or assembled shell profile".into());
@@ -481,8 +482,12 @@ impl input::Spec {
             if let Some(binding)=self.friction.binding(&self.schedule.tracks()[0].id)? {
                 // The source declaration describes the WHOLE ribbon. Its load
                 // and area share the same quadrature, preserving nominal pressure.
-                let cell=DryFrictionBinding::new(binding.card().clone(),binding.temperature_kelvin(),
-                    binding.nominal_area_m2()/cells as f64)?;
+                let area=binding.nominal_area_m2()/cells as f64;
+                let cell=match binding.temperature_source() {
+                    Some(source)=>DryFrictionBinding::new_temperature_source(source.clone(),
+                        binding.card().applicability(),area)?,
+                    None=>DryFrictionBinding::new(binding.card().clone(),binding.temperature_kelvin(),area)?,
+                };
                 for port in 0..cells { bank=bank.with_bow_interface(port,cell.clone())?; }
             }
         } else {

@@ -478,6 +478,10 @@ impl MultiFrictionModalSystem {
         contact_patch_motion: bool, gate: Option<&CancelGate>)
         -> Result<&MultiFrictionFrame, ModalFrictionError>
     {
+        if (0..self.port_count()).any(|port|
+            self.interface(port).is_some_and(|source| source.temperature_source().is_some())) {
+            return Err(invalid("temperature-dependent friction requires its finite-heat transaction").into());
+        }
         self.prepare_step(drives, obstacle_offsets, obstacle_geometry, contact_patch_motion, gate)?;
         let p = self.points.len();
         if p == 1 && self.obstacles.is_none() && self.series_drives.iter().all(Option::is_none)

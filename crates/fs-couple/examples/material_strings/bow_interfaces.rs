@@ -1,10 +1,13 @@
 //! Ordered surface-data input for the existing simultaneous bow solver.
 //! This adapter selects coefficients and their common applicability; it owns
 //! no traction equation. The original packs and query receipts remain retained.
-//! Coefficients must be source-declared constants throughout T/p/v validity.
-//! Temperature, nominal area and interface history are frozen inputs, not a
-//! thermal rosin, wear or bow-hair model. Bare SI axes are named T, p and v.
+//! Constant laws retain their original path. Source-backed Coulomb mu(T)
+//! requires the joint finite-cell contact-heat owner; pressure and speed remain
+//! actual mechanical applicability coordinates. No rosin or wear law is inferred.
 use super::*;
+use fs_contact::interface_binding::{bind_dry_interface_system_card,
+    thermal_friction::{SourceThermalCoulomb, ThermalFrictionAxes, FrictionQueryAxis,
+        FrictionQueryAxisKind}};
 use fs_couple::render::schedule::force::coupled::contact::friction::interface::DryFrictionBinding;
 use fs_material::state_point::{ResolvedInterfaceStatePoint, resolve_interface_state_point};
 use fs_tribo::{
@@ -97,6 +100,13 @@ impl Inputs {
     }
     pub fn shear_layers(&self) -> Option<&shear_layers::Inputs> {
         self.layers.as_ref()
+    }
+    pub fn validate_thermal_mode(&self, dry_thermal: bool) -> Result<()> {
+        if !dry_thermal && self.bound.values().any(|bound|
+            bound.binding.temperature_source().is_some()) {
+            return Err("temperature-dependent bow friction requires explicit finite-cell dry-contact heat routes".into());
+        }
+        Ok(())
     }
     pub fn interfaces(declarations: Vec<Declaration>) -> Result<Self> {
         for (i, d) in declarations.iter().enumerate() {
@@ -279,13 +289,15 @@ fn resolve(d: &Declaration, pack: &NormalizedInterfacePack) -> Result<Bound> {
         .with("v", d.speed)?;
     let state =
         resolve_interface_state_point(pack.card(), &point, &requirements, Pick::SingleClaimOnly)?;
+    let thermal = matches!(d.model, Model::Coulomb) && state.properties().iter().any(|property|
+        property.answer().receipt.decision != fs_matdb::EvaluationDecision::ConstantWithinValidity);
     let mut ranges = [(0.0f64, f64::MAX); 3];
     for property in state.properties() {
-        if property.answer().receipt.decision
+        if !thermal && property.answer().receipt.decision
             != fs_matdb::EvaluationDecision::ConstantWithinValidity
         {
             return Err(
-                "bow coefficients must be source-declared constants across their applicability"
+                "temperature-dependent bow coefficients require the sourced Coulomb thermal owner"
                     .into(),
             );
         }
@@ -331,6 +343,22 @@ fn resolve(d: &Declaration, pack: &NormalizedInterfacePack) -> Result<Bound> {
     };
     let range = |i: usize| ApplicabilityRange::new(ranges[i].0, ranges[i].1);
     let domain = DryFrictionApplicability::new(range(0)?, range(1)?, range(2)?)?;
+    if thermal {
+        let point = point.with_quantity("v", fs_qty::QuantitySpec::dimensional(fs_qty::Velocity::DIMS), d.speed)?;
+        let pins = requirements.iter().map(|requirement| {
+            let property = state.property(requirement.name()).expect("resolved required property");
+            (requirement.name().to_owned(), property.answer().receipt.selected)
+        }).collect();
+        let source = SourceThermalCoulomb::resolve_with_query_axes(
+            bind_dry_interface_system_card(pack.card(), InputAuthority::CallerDeclared)?, point,
+            requirements[0].clone(), requirements[1].clone(), Pick::PinnedByProperty(pins),
+            ThermalFrictionAxes { temperature: "T".into(), nominal_pressure: Some("p".into()) },
+            vec![FrictionQueryAxis { name: "v".into(), kind: FrictionQueryAxisKind::SlidingSpeed }],
+        )?;
+        let state = source.initial_source().clone();
+        let binding = DryFrictionBinding::new_temperature_source(source, domain, d.area)?;
+        return Ok(Bound { state, binding });
+    }
     let reference = InterfaceSystemRef::new(
         format!("{}", pack.card().content_hash()),
         pack.card().history(),

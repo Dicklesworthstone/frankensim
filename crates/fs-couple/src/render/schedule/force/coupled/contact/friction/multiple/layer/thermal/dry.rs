@@ -60,6 +60,9 @@ pub struct DryContactHeatFrame {
     pub port: usize,
     pub interface_temperature_k: Option<f64>,
     pub friction_heat_j: f64,
+    /// Sum of actual body fluxes minus the same staged friction work [J].
+    /// Independently admitted before either mechanics or heat is published.
+    pub interface_energy_residual_j: f64,
     pub cell_heat_j: Vec<(CellId, f64)>,
     pub footprint: DryContactFootprint,
 }
@@ -278,6 +281,7 @@ impl DryContactHeat<'_> {
             port: self.port,
             interface_temperature_k: None,
             friction_heat_j,
+            interface_energy_residual_j: 0.0,
             cell_heat_j: Vec::new(),
             footprint,
         };
@@ -294,22 +298,11 @@ impl DryContactHeat<'_> {
             }
             return Ok(frame);
         }
-        let mut conductors = Vec::new();
+        let conductors = self.conductors(endpoint)?;
         let (mut sum_g, mut sum_gt) = (0.0, 0.0);
-        for (side, cells) in self.surfaces.iter().enumerate() {
-            let footprint = footprint.intervals_m[side];
-            for cell in cells {
-                let overlap =
-                    cell.interval_m[1].min(footprint[1]) - cell.interval_m[0].max(footprint[0]);
-                if overlap <= 0.0 {
-                    continue;
-                }
-                let (g, temperature) =
-                    cell.conductance(endpoint, overlap * self.footprint.widths_m[side])?;
-                sum_g = number(sum_g + g)?;
-                sum_gt = number(sum_gt + g * temperature)?;
-                conductors.push((cell.cell, g, temperature));
-            }
+        for &(_, g, temperature) in &conductors {
+            sum_g = number(sum_g + g)?;
+            sum_gt = number(sum_gt + g * temperature)?;
         }
         let temperature = positive((friction_heat_j / dt + sum_gt) / positive(sum_g)?)?;
         let mut sum = 0.0;
@@ -318,12 +311,70 @@ impl DryContactHeat<'_> {
             sum = number(sum + heat)?;
             frame.cell_heat_j.push((cell, heat));
         }
-        if number(sum - friction_heat_j)?.abs() > tolerance_j {
+        frame.interface_energy_residual_j = number(sum - friction_heat_j)?;
+        if frame.interface_energy_residual_j.abs() > tolerance_j {
             return Err(LayerThermalError::Invalid(
                 "dry interface fluxes do not close the actual friction loss",
             ));
         }
         frame.interface_temperature_k = Some(temperature);
+        Ok(frame)
+    }
+
+    fn conductors<E>(&self, endpoint: &DepositionSimulation<'_>)
+        -> Result<Vec<(CellId, f64, f64)>, LayerThermalError<E>>
+    {
+        let footprint = self.resolved_footprint();
+        let mut conductors = Vec::new();
+        for (side, cells) in self.surfaces.iter().enumerate() {
+            let interval = footprint.intervals_m[side];
+            for cell in cells {
+                let overlap = cell.interval_m[1].min(interval[1]) - cell.interval_m[0].max(interval[0]);
+                if overlap > 0.0 {
+                    let (g, temperature) = cell.conductance(endpoint, overlap * footprint.widths_m[side])?;
+                    conductors.push((cell.cell, g, temperature));
+                }
+            }
+        }
+        Ok(conductors)
+    }
+
+    /// Numerical J/K scaling from the original flux derivative. This creates
+    /// no interface heat capacity or additional physical energy store.
+    pub(super) fn temperature_scale<E>(&self, thermal: &DepositionSimulation<'_>, dt: f64)
+        -> Result<f64, LayerThermalError<E>>
+    {
+        let mut conductance = 0.0;
+        for (_, g, _) in self.conductors(thermal)? { conductance = number(conductance + g)?; }
+        positive(dt * positive(conductance)?)
+    }
+
+    /// Fluxes at a JOINT nonlinear temperature coordinate. Unlike the fixed-law
+    /// analytic elimination above, its interface residual may be nonzero during
+    /// Newton trials; the caller must admit it independently before publishing.
+    pub(super) fn evaluate_at_temperature<E>(
+        &self, endpoint: &DepositionSimulation<'_>, normal_force_n: f64,
+        friction_heat_j: f64, dt: f64, temperature: f64,
+    ) -> Result<DryContactHeatFrame, LayerThermalError<E>> {
+        if normal_force_n == 0.0 {
+            return self.evaluate(endpoint, normal_force_n, friction_heat_j, dt, 0.0);
+        }
+        positive(temperature)?;
+        if !friction_heat_j.is_finite() || friction_heat_j < 0.0 {
+            return Err(LayerThermalError::Invalid("dry physical friction heat must be nonnegative"));
+        }
+        let mut frame = DryContactHeatFrame {
+            port: self.port, interface_temperature_k: Some(temperature), friction_heat_j,
+            interface_energy_residual_j: 0.0, cell_heat_j: Vec::new(),
+            footprint: self.resolved_footprint(),
+        };
+        let mut sum = 0.0;
+        for (cell, g, body_temperature) in self.conductors(endpoint)? {
+            let heat = number(dt * g * (temperature - body_temperature))?;
+            sum = number(sum + heat)?;
+            frame.cell_heat_j.push((cell, heat));
+        }
+        frame.interface_energy_residual_j = number(sum - friction_heat_j)?;
         Ok(frame)
     }
 }
@@ -423,7 +474,9 @@ impl MultiFrictionModalSystem {
         let binding = self
             .interface(port)
             .expect("admitted dry source")
-            .at_temperature(temperature)?;
+            .at_temperature(temperature)?
+            .at_average_motion(self.staged_ports[port].normal_force_n,
+                self.staged_ports[port].slip_distance_m / self.sample_period_s())?;
         let original = if port == 0 {
             self.core.interface.replace(binding.clone())
         } else {

@@ -236,3 +236,106 @@ fn native_dry_profiles_refuse_wrong_participants_missing_thermal_data_and_false_
         }
     });
 }
+
+fn temperature_interface(slope: f64) -> NormalizedInterfacePack {
+    let original = interface("body.fsmatpk");
+    let mut claims = ClaimSet::new();
+    for (_, item) in original.card().claims().claims_ordered() {
+        let mut item = item.clone();
+        if item.key.name() == "mu_kinetic" {
+            item.value = PropertyValue::Curve { abscissa: "T".into(),
+                abscissa_dims: fs_qty::Temperature::DIMS,
+                knots: [280.0, 320.0].map(|t| (t, 0.4 - slope * (t - 293.15))).to_vec(),
+                dims: Dims::NONE };
+            item.interpolation = InterpolationPolicy::LinearInside;
+        }
+        claims.insert_claim(item).unwrap();
+    }
+    let pack = NormalizedPack::new("manufactured-thermal-dry-contact", "manufactured-v1",
+        fs_blake3::ContentHash([49; 32]), "manufactured CC0 fixture", claims, vec![], vec![]).unwrap();
+    NormalizedInterfacePack::new(original.card().surface_a().clone(),
+        original.card().surface_b().clone(), original.card().context().clone(), pack).unwrap()
+}
+
+fn temperature_ready(cx: &Cx<'_>, gate: &CancelGate, profile: &Profile,
+    cp: f64, slope: f64, block: usize) -> Ready {
+    let mut spec = input(false, block, 48_000);
+    profile.configure(&mut spec);
+    spec.friction.load(gate, |_| Ok(temperature_interface(slope))).unwrap();
+    spec.compile(cx, gate, |name| Ok(material(name, cp, None))).unwrap()
+}
+
+#[test]
+fn native_temperature_source_changes_traction_and_pressure_through_finite_heat() {
+    scoped(|cx, gate| {
+        let profile = Profile::parse(profile_text(false).as_bytes()).unwrap();
+        let mut runs = Vec::new();
+        for (cp, slope) in [(0.02, 0.005), (20.0, 0.005), (0.02, 0.0)] {
+            let mut source = temperature_ready(cx, gate, &profile, cp, slope, 37);
+            let prepared = profile.prepare(&source, gate).unwrap();
+            let routes = prepared.dry_routes(&source).unwrap();
+            let mut render = source.performance.with_dry_contact_thermal_network(
+                prepared.network(gate).unwrap(), routes, vec![], profile.controls, gate,
+                |endpoint| prepared.resolve(endpoint)).unwrap();
+            let mut pressure = vec![0.0; 128];
+            for block in pressure.chunks_mut(37) { render.block(block).unwrap(); }
+            let frame = render.last_frame().unwrap();
+            let temperature = frame.dry_contacts[0].interface_temperature_k.unwrap();
+            let binding = render.performance().bank().bow_interface(0).unwrap();
+            let receipt = binding.resolved_temperature_source().unwrap();
+            assert_eq!(receipt.query().axes()["T"], temperature);
+            assert!((receipt.property("mu_kinetic").unwrap().value_si()
+                - (0.4 - slope * (temperature - 293.15))).abs() < 1e-13);
+            assert_eq!(receipt.property("mu_kinetic").unwrap().answer().receipt.selected,
+                binding.temperature_source().unwrap().initial_source()
+                    .property("mu_kinetic").unwrap().answer().receipt.selected);
+            assert!(frame.total_energy_residual_j.abs() <= profile.controls.total_energy_tolerance_j);
+            assert!(temperature > 293.15);
+            runs.push((pressure, temperature));
+        }
+        assert!(runs[0].1 > runs[1].1);
+        assert!(runs[0].0.iter().zip(&runs[1].0).any(|(a, b)| a.to_bits() != b.to_bits()));
+        assert!(runs[0].0.iter().zip(&runs[2].0).any(|(a, b)| a.to_bits() != b.to_bits()));
+        let mut source = temperature_ready(cx, gate, &profile, 0.02, 0.005, 128);
+        let prepared = profile.prepare(&source, gate).unwrap();
+        let mut trace = Vec::new();
+        let (wav, summary) = prepared.write(&mut source, Cursor::new(Vec::new()),
+            Some(&mut trace), gate).unwrap();
+        assert_eq!(summary.samples, 128);
+        assert_eq!(wav.into_inner(), fs_couple::pcm_wav::encode_pcm16_wav(
+            &runs[0].0, 48_000, 0.01).unwrap().0);
+        assert_eq!(String::from_utf8(trace).unwrap().lines().count(), 129);
+    });
+}
+
+#[test]
+fn native_temperature_source_requires_complete_heat_routes_and_survives_ribbon_partition() {
+    scoped(|cx, gate| {
+        let mut spec = input(false, 37, 48_000);
+        spec.friction.load(gate, |_| Ok(temperature_interface(0.005))).unwrap();
+        let mut reads = 0;
+        let error = spec.compile(cx, gate, |name| {
+            reads += 1; Ok(material(name, 20.0, None))
+        }).err().unwrap();
+        assert!(error.to_string().contains("finite-cell dry-contact"));
+        assert_eq!(reads, 0);
+
+        let profile = Profile::parse(profile_text(false).as_bytes()).unwrap();
+        let mut spec = input(false, 37, 48_000);
+        profile.configure(&mut spec);
+        spec.bow_ribbon = Some((0.001, 3));
+        spec.friction.load(gate, |_| Ok(temperature_interface(0.005))).unwrap();
+        let source = spec.compile(cx, gate, |name| Ok(material(name, 20.0, None))).unwrap();
+        let first = source.performance.bank().bow_interface(0).unwrap();
+        for port in 0..3 {
+            let binding = source.performance.bank().bow_interface(port).unwrap();
+            assert_eq!(binding.temperature_source().unwrap().identity(),
+                first.temperature_source().unwrap().identity());
+            assert!((binding.nominal_area_m2() - 0.00002 / 3.0).abs() < 1e-20);
+        }
+        // This original one-port profile cannot silently leave two evolving laws unheated.
+        let error = profile.prepare(&source, gate).err().unwrap();
+        assert!(error.to_string().contains("every temperature-dependent dry port"));
+        assert_eq!(source.performance.samples_rendered(), 0);
+    });
+}

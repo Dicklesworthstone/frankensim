@@ -27,6 +27,9 @@ pub(super) struct Route {
     footprint: DryContactFootprint,
     surfaces: [Vec<Strip>; 2],
 }
+impl Route {
+    pub(super) const fn port(&self) -> usize { self.port }
+}
 
 pub(super) fn parse(rows: &mut Rows<'_>, cells: &[Cell]) -> Result<Vec<Route>> {
     let count = rows.count("dry-contacts", 64)?;

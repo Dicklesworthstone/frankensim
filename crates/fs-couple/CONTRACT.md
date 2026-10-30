@@ -1,5 +1,32 @@
 # CONTRACT: fs-couple
 
+## Joint sourced dry friction and finite contact heat
+
+A `DryFrictionBinding::new_temperature_source` retains the original
+`SourceThermalCoulomb` claims and ordered material pair. Each heated evolving
+contact contributes an interface-temperature unknown to the existing finite-cell
+enthalpy solve. At every trial endpoint the same pinned coefficient claims are
+queried at that candidate temperature, then the original simultaneous mechanical
+solve supplies traction, slip, normal pressure and dissipated friction work.
+
+For each massless contact plane the additional residual is
+`sum_i(dt * G_i * (T_contact - T_cell_i)) - D_friction = 0`.
+Signed fluxes enter the original cell enthalpy account. The temperature coordinate
+uses `dt * sum_i(G_i)` only as a numerical unit scale, not an added heat capacity.
+Interface, cell and total energy residuals must pass before coefficients, source
+receipts, mechanics and finite thermal histories publish together. Failed trials
+restore the accepted laws and load-line caches; release disconnects conduction
+and friction heat without querying a positive-pressure source at zero load.
+Constant laws retain their original analytic interface-temperature path.
+
+This route admits temperature-dependent Coulomb coefficient values. Actual
+normal pressure and incoming, average and endpoint slip remain applicability
+checks; pressure-, speed- or additional-history-dependent coefficient responses
+refuse. The native material-string input retains this source through ribbon area
+partition and requires a finite dry heat route for every evolving physical
+contact. No recording fit, invented reservoir, missing rosin data or transported
+third-body layer is supplied by this coupling.
+
 ## Sourced directional friction in articulated impacts
 
 `friction_heat::directional::articulated::resolve_source_articulated_elliptic_contacts`

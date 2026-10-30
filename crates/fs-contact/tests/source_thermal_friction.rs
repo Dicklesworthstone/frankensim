@@ -142,6 +142,27 @@ fn pressure_quantity() -> QuantitySpec {
 }
 
 #[test]
+fn coefficient_snapshot_reuses_pinned_source_without_inventing_a_mechanical_step() {
+    let law = resolve_at(&source_card(), query(300.0)).unwrap();
+    let accepted = law.initial_state();
+    let saved = accepted.clone();
+    let (source, coefficients) = law.coefficients_at_query(&query(310.0)).unwrap();
+    let actual = law.advance_sourced(&accepted, &input(310.0, [0.003, 0.004])).unwrap();
+    assert_eq!(&source, actual.state.friction_source());
+    close(coefficients.static_coefficient().unwrap(), 0.5);
+    close(coefficients.kinetic_coefficient(1.0).unwrap(), 0.3);
+    assert_eq!(accepted, saved);
+    assert_eq!(source.card_identity(), law.initial_source().card_identity());
+    for property in source.properties() {
+        assert_eq!(property.answer().receipt.selected,
+            law.initial_source().property(property.requirement().name()).unwrap().answer().receipt.selected);
+    }
+    assert!(law.coefficients_at_query(&query(321.0)).is_err());
+    assert!(law.coefficients_at_query(&query(310.0).with("new-axis", 1.0).unwrap()).is_err());
+    assert_eq!(accepted, saved);
+}
+
+#[test]
 fn original_temperature_curves_change_force_and_heat_without_resetting_slip() {
     let law = resolve_at(&source_card(), query(300.0)).unwrap();
     let cold = law

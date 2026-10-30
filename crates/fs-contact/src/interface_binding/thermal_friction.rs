@@ -275,6 +275,27 @@ impl SourceThermalCoulomb {
         self.identity
     }
 
+    /// Resolve the original selected coefficients without advancing friction.
+    ///
+    /// Coupled physical owners may need the law before solving their complete
+    /// mechanical system. This uses the same complete-query admission and
+    /// pinned claims as `advance_at_query`; it invents no slip increment or
+    /// constitutive checkpoint. The caller must close every evolving query
+    /// coordinate against that mechanical/thermal candidate before publication.
+    pub fn coefficients_at_query(
+        &self,
+        point: &QueryPoint,
+    ) -> Result<(ResolvedInterfaceStatePoint, FrictionLaw), SourceThermalCoulombError> {
+        let temperature = point.axes().get(&self.axes.temperature).copied();
+        let pressure = self.axes.nominal_pressure.as_ref()
+            .and_then(|axis| point.axes().get(axis).copied());
+        let source = self.source_at_query_conditions(
+            &self.initial_source, temperature, pressure, point,
+        )?;
+        let law = coefficients(&source, &self.static_property, &self.kinetic_property)?;
+        Ok((source, law))
+    }
+
     // Shared source refresh for isotropic and directional Coulomb owners. This
     // performs no mechanical step and never reselects an alternative claim.
     fn source_at_input(

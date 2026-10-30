@@ -1,4 +1,7 @@
 //! Manufactured conservation/contact-transport checks, not an instrument fit.
+#[path = "dry/temperature.rs"]
+mod temperature;
+
 use super::*;
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::{
     BowDryContactHeat, DryReceiverHeatPosition,

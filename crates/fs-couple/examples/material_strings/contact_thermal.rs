@@ -421,6 +421,13 @@ impl Profile {
         // Validate the source masses, geometry and initial conductances before
         // creating any output. This processes only birth/contact events at t=0.
         let network = prepared.network(gate)?;
+        let system = ready.performance.bank().system();
+        for port in 0..system.port_count() {
+            if system.interface(port).is_some_and(|binding| binding.temperature_source().is_some())
+                && !self.dry.iter().any(|route| route.port() == port) {
+                return Err("every temperature-dependent dry port requires its original finite-cell heat route".into());
+            }
+        }
         for route in prepared.dry_routes(ready)? {
             route.heat.admit::<std::convert::Infallible>(
                 ready.performance.bank().system(), &network, self.controls.maximum_cells)?;
