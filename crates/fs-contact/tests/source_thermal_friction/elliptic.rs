@@ -1,4 +1,7 @@
 //! G1/G3: original directional source claims, texture and physical work together.
+#[path = "elliptic/motion.rs"]
+mod motion;
+
 use super::*;
 use fs_contact::interface_binding::thermal_friction::elliptic::EllipticFrictionMode;
 use fs_contact::interface_binding::thermal_friction::elliptic::SourceThermalEllipticCoulomb;

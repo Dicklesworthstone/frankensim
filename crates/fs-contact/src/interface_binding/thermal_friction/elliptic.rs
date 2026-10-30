@@ -6,6 +6,9 @@
 //! pinned through every update. The effective interface texture direction is
 //! explicit geometry; it is not inferred from opaque texture-frame names.
 
+/// Close declared speed/path coordinates against actual full-matrix slip.
+pub mod motion;
+
 use fs_tribo::tangential::elliptic::{
     EllipticCoulomb, EllipticCoulombState, SymmetricTangentialCompliance,
 };

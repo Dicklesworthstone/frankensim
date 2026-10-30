@@ -224,6 +224,32 @@ off-diagonal compliance, independent associated work, static/kinetic
 continuation, exact owned query coordinates, original source pins and
 atomic source/budget refusals.
 
+### Actual-slip closure for directional material queries
+
+`SourceThermalEllipticCoulomb::advance_motion_consistent` closes the complete
+original source query against the direct full-matrix native response. Every
+declared speed is queried at `r/dt`; each declared accumulated path starts at
+its own accepted source value and advances by `r`. Both selected principal
+source bundles, fixed conditions, thermal/pressure owners and texture survive.
+
+`elliptic::motion::MotionQuerySolve` supplies an explicit finite distance
+bracket, absolute/relative length tolerances and a source-evaluation budget.
+The safeguarded scalar solve admits only an actual residual
+`r - norm(resolved_slip) <= 0` within tolerance. Bracket width alone cannot
+grant a result, and full-matrix slip is never bounded by released Euclidean
+displacement. Exact prescribed motion and motion-independent sources use one
+source/native evaluation where applicable. Source, budget, arithmetic,
+bracket and cancellation failures publish neither history nor source receipts.
+
+The bracket is a mechanical/source-domain input. Nonmonotone or discontinuous
+speed/path laws have no global existence, uniqueness or lowest-root claim;
+unresolved responses refuse. The reported length defect induces a speed defect
+of that length divided by the duration. Successive path defects remain visible
+to an outer physical path owner. Branch selection and arrest localization
+remain with mechanics. Four new G1/G3/G4 regression groups exercise independent
+associated roots, rotated frames, actual-slip amplification, path continuation,
+source pins, static/kinetic branches, one-query limits and atomic refusals.
+
 ### Source-backed thermal Hertz force and spin
 
 `SourceThermalCoulomb::hertz_at(T, p, N, a)` binds the same pinned coefficient
