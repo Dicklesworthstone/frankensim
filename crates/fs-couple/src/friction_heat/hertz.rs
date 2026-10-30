@@ -232,7 +232,8 @@ pub fn propose_rigid_hertz_heat<'m, P, E>(
         contact,
         route,
         controls.mechanical.geometry_tolerance_m,
-    )?;
+    )
+    .map_err(RigidHertzHeatError::Invalid)?;
     let step = FrictionHeatNetworkStep::new(thermal, target, &[route], 1, checkpoint)?;
     let trials = Cell::new(0usize);
     let evaluate = |x: &[f64], entropy: bool| {
@@ -337,27 +338,23 @@ pub fn propose_rigid_hertz_heat<'m, P, E>(
     })
 }
 
-fn validate_geometry<E>(
+pub(super) fn validate_geometry(
     point: [f64; 3],
     contact: RigidHertzHeatContact<'_>,
     route: &FrictionHeatRoute,
     tolerance: f64,
-) -> Result<(), RigidHertzHeatError<E>> {
+) -> Result<(), &'static str> {
     let geometry = route.geometry;
     let centre = [geometry[0].start_m, geometry[0].end_m]
         .into_iter()
         .find(|p| *p == geometry[1].start_m || *p == geometry[1].end_m)
-        .ok_or(RigidHertzHeatError::Invalid(
-            "thermal route has no shared face",
-        ))?;
+        .ok_or("thermal route has no shared face")?;
     let radius = det::sqrt(route.contact_area_m2() / core::f64::consts::PI);
     if norm(std::array::from_fn(|i| point[i] - centre[i])) > tolerance
         || !radius.is_finite()
         || (radius - contact.contact_radius_m).abs() > tolerance
     {
-        return Err(RigidHertzHeatError::Invalid(
-            "original Hertz centre/radius and thermal circular face must agree",
-        ));
+        return Err("original Hertz centre/radius and thermal circular face must agree");
     }
     let n = contact.frame.normal();
     for g in geometry {
@@ -368,9 +365,7 @@ fn validate_geometry<E>(
             a[0] * n[1] - a[1] * n[0],
         ]) > tolerance
         {
-            return Err(RigidHertzHeatError::Invalid(
-                "Hertz normal and finite-cell centrelines differ",
-            ));
+            return Err("Hertz normal and finite-cell centrelines differ");
         }
     }
     Ok(())

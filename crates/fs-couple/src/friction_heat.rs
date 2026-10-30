@@ -46,7 +46,10 @@ pub mod network;
 
 /// Prepared native articulated contacts and original finite-cell heat together.
 pub mod articulated;
+
+/// Source-backed Hertz sliding/spin recoil and finite-cell temperature feedback.
 pub mod hertz;
+pub mod hertz_rolling;
 pub mod rolling;
 
 fn invalid(message: &'static str) -> DepositionError {

@@ -10211,6 +10211,61 @@ spin loss, thermoelastic storage and temperature-dependent rheology remain
 separate physics. Endpoint heat transport is first order and needs time/spatial
 refinement independently of nonlinear convergence.
 
+### Simultaneous Hertz surface heat and sphere rolling bulk heat
+
+`friction_heat::hertz_rolling::propose_rigid_hertz_rolling_heat` combines the
+original five-coordinate native contact response with one original finite
+enthalpy network. It returns both body endpoints, the original rolling history,
+the thermal endpoint and final source-use receipts together. All accepted
+owners stay borrowed through preparation, nonlinear trials and admission.
+
+One prepared response is reused throughout. The original pinned friction
+claims resolve at the solved common interface temperature. The original
+constant-coefficient viscoelastic card instead uses the actual sphere bulk
+temperature; its before/midpoint/endpoint, source, frequency and normal-patch
+limits remain active. Both physical losses change together with native recoil,
+including rolling induced by surface traction from an initially zero rate.
+The original patch supplies the load and circular area/radius; nominal pressure
+remains an explicitly supplied original source coordinate.
+
+Hertz surface loss enters the existing massless interface through
+`FrictionHeatNetworkStep`; endpoint conductivities and original distances
+determine signed heat into both bodies. Bulk rolling loss enters the explicitly
+bound whole-sphere cell once. That cell must occupy the correct A/B route side,
+match native mass and declared thermal body/material IDs, and have its centre
+at the actual sphere COM. Duplicate active sphere inventory refuses. A thin
+surface cell cannot stand in for the whole sphere's heat capacity. The shared
+face, normal and circular radius retain the original Hertz geometry checks.
+Other caller-owned body/material correspondence remains explicit.
+
+Outside heat is measured before injecting bulk work. The inner interface report
+therefore retains an explicitly documented bulk-source contribution in its
+external account; the returned combined candidate separately exposes actual
+outside heat. Independent gates check
+`delta H-Qoutside-Dsurface-Dbulk` and
+`delta K_pair+delta H-Qoutside`, alongside the unchanged native work/momentum,
+cell, interface and thermal gates. No residual or numerical damping becomes
+heat. Mechanics and thermal transport share the actual representable
+endpoint-minus-start interval. Final source/temperature/mechanics/history
+receipts all come from the final restaged root.
+
+Five new native groups in the existing articulated thermal target use
+independently derived planar force/torque equations and an eliminated finite
+caloric network to bracket the source-temperature root. They check both losses
+and recoil, induced rolling, distinct interface/bulk temperatures and receipts,
+signed outside heat, zero-motion/viscosity conduction, original geometry and
+whole-sphere ownership, source/clock/effort/reversal admission, and loaded late
+source/cancellation/budget with exact retry. All five plus the eleven existing
+Hertz/articulated groups pass against the original full-inertia native build.
+
+The native normal/shear decoupling and held-geometry limits remain unchanged.
+Uniform sphere temperature and a common interface temperature are finite-cell
+approximations; backward-Euler transport requires independent refinement.
+Released zero-area patches, spatial loss density, variable viscosity,
+thermoelastic storage and entropy classification are not supplied by this
+adapter. Analytical synthetic fixtures are not measured validation or a full
+Cargo/DSR workspace gate.
+
 ## Finite-gas rocket propulsion and translation
 
 `rocket_blowdown::GasRocketState` binds an immutable source-bearing finite
