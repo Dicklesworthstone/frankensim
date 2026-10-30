@@ -1,5 +1,5 @@
 //! G0/G1/G3: actual reed-driven Foster ducts retain complete vibrating sources
-//! and close the quasistatic aperture against the current physical interval.
+//! and close moving apertures against the current physical interval.
 use super::*;
 use crate::thin_plate::CompactBody;
 use fs_nlmodal::SosModalStorage;
@@ -266,5 +266,164 @@ fn nonlinear_body_keeps_the_original_clock_refusal_instead_of_becoming_quadratic
             .state()
             .iter()
             .all(|value| *value == 0.0)
+    );
+}
+
+// Independently integrate the continuous coupled equations. Only the physical
+// bore matrices/storage are shared with the renderer: no prepared transition,
+// mean-port map, reed junction, contact solve or production stepper enters this
+// smooth, noncontact reference. The final coordinate integrates bore pressure.
+fn continuous_massive_reference(
+    reed: BeatingReed,
+    rate: u32,
+    windows: usize,
+    subdivisions: usize,
+) -> Vec<f64> {
+    let gas = gas();
+    let bore = ode_bore_chain(
+        &sections(),
+        ChainOutlet::PressureRelease,
+        1,
+        &[],
+        &gas,
+        None,
+    )
+    .unwrap();
+    let n = bore.state_dim();
+    let (j, r, g) = bore.structure();
+    let face = reed.stiffness_n_m * reed.rest_opening_m / reed.closing_pressure_pa;
+    let damping = 2.0 * reed.damping_ratio * (reed.stiffness_n_m * reed.mass_kg).sqrt();
+    let rhs = |state: &[f64]| {
+        let effort = bore.effort(&state[..n]);
+        let pressure: f64 = g.iter().zip(&effort).map(|(g, e)| g * e).sum();
+        let drop = reed.blowing_pressure_pa - pressure;
+        let opening = reed.rest_opening_m + state[n];
+        assert!(
+            opening > 0.5 * reed.rest_opening_m,
+            "smooth reference entered contact"
+        );
+        let jet = reed.width_m * opening * drop.signum() * (2.0 * drop.abs() / gas.density).sqrt();
+        let flow = jet - face * state[n + 1];
+        let mut result = vec![0.0; n + 3];
+        for row in 0..n {
+            result[row] = (0..n)
+                .map(|column| (j[row * n + column] - r[row * n + column]) * effort[column])
+                .sum::<f64>()
+                + g[row] * flow;
+        }
+        result[n] = state[n + 1];
+        result[n + 1] =
+            (-reed.stiffness_n_m * state[n] - damping * state[n + 1] - face * drop) / reed.mass_kg;
+        result[n + 2] = pressure;
+        result
+    };
+    let duration = 1.0 / f64::from(rate);
+    let h = duration / subdivisions as f64;
+    let mut state = vec![0.0; n + 3];
+    let mut pressure = Vec::with_capacity(windows);
+    for _ in 0..windows {
+        state[n + 2] = 0.0;
+        for _ in 0..subdivisions {
+            let a = rhs(&state);
+            let b = rhs(&state
+                .iter()
+                .zip(&a)
+                .map(|(x, d)| x + 0.5 * h * d)
+                .collect::<Vec<_>>());
+            let c = rhs(&state
+                .iter()
+                .zip(&b)
+                .map(|(x, d)| x + 0.5 * h * d)
+                .collect::<Vec<_>>());
+            let d = rhs(&state
+                .iter()
+                .zip(&c)
+                .map(|(x, d)| x + h * d)
+                .collect::<Vec<_>>());
+            for k in 0..state.len() {
+                state[k] += h * (a[k] + 2.0 * b[k] + 2.0 * c[k] + d[k]) / 6.0;
+            }
+        }
+        assert!(state.iter().all(|x| x.is_finite()));
+        pressure.push(state[n + 2] / duration);
+    }
+    pressure
+}
+
+fn resonant_reed(mass: f64) -> BeatingReed {
+    BeatingReed {
+        rest_opening_m: 4e-4,
+        width_m: 0.013,
+        closing_pressure_pa: 6000.0,
+        blowing_pressure_pa: 300.0,
+        attack_s: 0.0,
+        mass_kg: mass,
+        stiffness_n_m: 500.0,
+        damping_ratio: 0.04,
+    }
+}
+
+fn massive_trace(reed: BeatingReed, rate: u32, windows: usize) -> Vec<f64> {
+    realize_reed_ode(
+        &sections(),
+        ChainOutlet::PressureRelease,
+        &[],
+        reed,
+        &mut PlateBank::default(),
+        &gas(),
+        1.0,
+        rate,
+        windows,
+        None,
+    )
+    .unwrap()
+}
+
+#[test]
+fn massive_complete_bore_refines_to_the_simultaneous_continuous_equations() {
+    let reed = resonant_reed(1e-5);
+    let rate = 24_000;
+    let windows = 24;
+    let reference = continuous_massive_reference(reed, rate, windows, 512);
+    let mut errors = Vec::new();
+    for refinement in [1, 2, 4] {
+        let pressure = massive_trace(reed, rate * refinement as u32, windows * refinement);
+        // Compare the same physical windows, not a finer endpoint against a
+        // coarser interval mean. This also tests the renderer's output meaning.
+        let averaged: Vec<f64> = pressure
+            .chunks_exact(refinement)
+            .map(|chunk| chunk.iter().sum::<f64>() / refinement as f64)
+            .collect();
+        let error = relative_difference(&averaged, &reference);
+        assert!(error.is_finite());
+        errors.push(error);
+    }
+    assert!(
+        errors[2] < 2e-3,
+        "complete coupled pressure errors: {errors:?}"
+    );
+    for pair in errors.windows(2) {
+        assert!(
+            pair[0] > 3.0 * pair[1],
+            "same-window coupling must refine: {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn equal_static_compliance_with_distinct_reed_mass_changes_actual_bore_motion() {
+    let mut traces = Vec::new();
+    for mass in [1e-5, 4e-5] {
+        let reed = resonant_reed(mass);
+        let reference = continuous_massive_reference(reed, RATE, STEPS, 256);
+        let actual = massive_trace(reed, RATE, STEPS);
+        let error = relative_difference(&actual, &reference);
+        assert!(error < 4e-3, "mass={mass}, coupled bore error={error}");
+        traces.push(actual);
+    }
+    let difference = relative_difference(&traces[0], &traces[1]);
+    assert!(
+        difference > 1e-3,
+        "mass affected only an unobserved reed: {difference}"
     );
 }

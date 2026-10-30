@@ -48,6 +48,14 @@ impl OpeningPropagator<'_> {
 }
 
 #[derive(Clone, Copy)]
+pub(super) struct OpeningStep {
+    pub(super) outgoing: f64,
+    pub(super) opening: f64,
+    pub(super) velocity: f64,
+    pub(super) mean_velocity: f64,
+}
+
+#[derive(Clone, Copy)]
 struct Trial {
     residual: f64,
     scale: f64,
@@ -55,14 +63,14 @@ struct Trial {
     /// difference of junction pressures, so its error follows their
     /// magnitudes, not the (possibly cancelled) difference.
     floor: f64,
-    state: (f64, f64, f64),
+    state: OpeningStep,
 }
 
 fn resolved(trial: Trial) -> bool {
     trial.residual.abs() <= 1e-13 * trial.scale.max(f64::MIN_POSITIVE)
 }
 
-fn finish(trial: Trial) -> Result<(f64, f64, f64), AcousticRealizeError> {
+fn finish(trial: Trial) -> Result<OpeningStep, AcousticRealizeError> {
     // Adjacent floating-point endpoints alone cannot establish convergence.
     // The equation and its scale are impulses, not pressure-scaled flows.
     // Near rest the pressures nearly cancel; a residual inside the computed
@@ -137,6 +145,28 @@ fn step_with_opening_and_junction(
     propagator: OpeningPropagator<'_>,
     junction_pressure: impl Fn(f64, f64) -> Result<f64, AcousticRealizeError>,
 ) -> Result<(f64, f64, f64), AcousticRealizeError> {
+    let contact = ApertureContactStep::new(lay, y)
+        .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?;
+    step_with_contact_response(reed, rho, zc, p_minus, p_m, y, v, dt, u_body,
+        flow_opening, material_force, propagator, junction_pressure,
+        |after, velocity| contact.response(after, velocity)
+            .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string())))
+        .map(|step| (step.outgoing, step.opening, step.velocity))
+}
+
+/// Reuse the same mechanics and scalar root with an already admitted contact
+/// response. The full-body held-flow adapter uses the allocation-free unit-slit
+/// owner; existing characteristic callers retain their original contact path.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn step_with_contact_response(
+    reed: BeatingReed, rho: f64, zc: f64, p_minus: f64, p_m: f64,
+    y: f64, v: f64, dt: f64, u_body: f64,
+    flow_opening: impl Fn(f64) -> Result<f64, AcousticRealizeError>,
+    material_force: Option<&dyn Fn(f64) -> Result<f64, AcousticRealizeError>>,
+    propagator: OpeningPropagator<'_>,
+    junction_pressure: impl Fn(f64, f64) -> Result<f64, AcousticRealizeError>,
+    contact_response: impl Fn(f64, f64) -> Result<fs_dcontact::AffineContactResponse, AcousticRealizeError>,
+) -> Result<OpeningStep, AcousticRealizeError> {
     if material_force.is_some() && matches!(propagator, OpeningPropagator::Exact { .. }) {
         // The exact block already carries its Maxwell arms; a midpoint material
         // force on top would count the same memory twice.
@@ -176,8 +206,6 @@ fn step_with_opening_and_junction(
             what: "implicit reed contact requires finite admitted mechanics and positive time step",
         });
     }
-    let contact = ApertureContactStep::new(lay, y)
-        .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?;
     let face = reed_pressure_face(reed);
     let (stiffness, damping) = reed_structural(reed);
     let half_dt = 0.5 * dt;
@@ -220,8 +248,7 @@ fn step_with_opening_and_junction(
     }
     let evaluate = |velocity: f64| -> Result<Trial, AcousticRealizeError> {
         let next_y = y + dt * velocity;
-        let force = contact.response(next_y, velocity)
-            .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?.force;
+        let force = contact_response(next_y, velocity)?.force;
         // Clamp the MIDPOINT opening, not each endpoint separately. This is
         // the same configuration used by the midpoint spring and velocity.
         let opening = flow_opening(f64::midpoint(y, next_y))?;
@@ -263,7 +290,8 @@ fn step_with_opening_and_junction(
             residual,
             scale,
             floor,
-            state: (outgoing, next_y, next_v),
+            state: OpeningStep { outgoing, opening: next_y, velocity: next_v,
+                mean_velocity: velocity },
         })
     };
     let mut velocity = predicted;

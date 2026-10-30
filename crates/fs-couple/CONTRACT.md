@@ -13224,14 +13224,39 @@ hidden 5 Pa primer, extra initialization step or render-length-dependent model
 selection. Complete state/output buffers are reused. The reference-wave boundary
 account remains distinct from physical material heat in the shared owner.
 
-A massive reed retains its existing held-pressure/contact and swept-flow scheme;
-its original two-state exact propagator and the complete quadratic body propagator
-are prepared once. This is not a monolithic reed/contact/bore energy solve. A
-nonlinear body retains the original Gonzalez update and temporal refusal rather
-than being inferred quadratic from unit-state probes. Existing dense-state limits
-remain. Source histories seed a private one-shot render snapshot.
+For a massive reed and exactly quadratic body, the prepared complete body now
+supplies its current-window held-volume-flow response `p_bar = free + B*q`.
+`reed_bore::loaded::PreparedReedLoad` closes the original moving aperture, swept
+flow and lay reaction against that response through the existing scalar contact
+solver. The original linear reed mechanics evolve exactly under the interval's
+held pressure/contact force; the aperture uses the midpoint gap. The body's
+actual accepted mean pressure and work must agree with the condensed junction
+before both candidate states are published. No previous-sample pressure drives
+this quadratic path. Nonlinear bodies retain the original held-force Gonzalez
+path and temporal admission; they are not inferred quadratic from probes.
+Existing dense-state limits remain. Source histories seed a private one-shot
+render snapshot.
 
-Four focused native tests execute the complete renderer with original gas,
+The loaded reed retains original contact potential, exact integrated viscous
+heat, nonadhesive contact loss, and Bernoulli jet loss as separate quantities.
+It checks `deltaH_reed + viscous + contact + jet + body_work = mouth_work`.
+The exact held-flow body's original storage, material/acoustic loss and port work
+close the other side of that same interval. A finite strictly positive mean
+body impedance is required; there is no impedance clipping, state projection
+or substituted numerical damping. The source scenario's existing effective
+area and lay calibration are retained, without implying measured specimen
+authority. Exact linear propagation does not imply exact nonlinear continuous
+motion or root uniqueness; the nonlinear aperture/contact step needs temporal
+refinement.
+
+Preparation owns the existing exact maps and contact storage. Warm reed trials
+reuse the existing scalar solve and allocation-free original contact response;
+exact blade velocity and viscous-heat contractions no longer allocate temporary
+scaled states. A 1,000-candidate probe spanning open and contacting states
+observes zero allocations. This is an allocation result, not a real-time timing
+qualification.
+
+Focused native tests execute the complete renderer with original gas,
 viscothermal Foster, modal material, contact and numerical owners. They check both
 reed selections with mixed modes and non-diagonally-dominant damping, independent
 drive/surface maps, zero-blow silence and warm-memory response, render-length prefix
@@ -13347,3 +13372,16 @@ this does not solve species transport or add nonlocal structural/exterior loadin
 The two core wavefront regressions ran natively. Three added full feedback/FIR
 consumer regressions are present but unexecuted because the complete coupling
 and material-wall dependency graph is unavailable in this environment.
+
+### Independent massive reed/body coupling checks
+
+The actual full Foster-bore and massive-reed equations are compared with an
+independent fine RK4 reference. Relative interval-mean pressure errors at
+24/48/96 kHz are 2.215118e-4, 5.541245e-5 and 1.385526e-5, approximately fourfold
+reduction per refinement for the smooth constant-pressure fixture. Fourfold
+reed mass at unchanged static compliance changes actual bore pressure by 2.14463%
+under that test's relative norm. Independent analytical damped-oscillator and
+positive Simpson heat references cover contact entry, penetration and release,
+with original contact potential, jet heat, mouth/body work and refusal replay.
+Existing contact regressions remain active. These bounded numerical checks do
+not establish measured-instrument fidelity or arbitrary-clock nonlinear accuracy.

@@ -5716,7 +5716,7 @@ mod string_observer_tests {
     }
 
     #[test]
-    fn massive_reed_ode_observes_exact_held_flow() {
+    fn massive_reed_ode_closes_current_window_flow() {
         let gas = gas_state(AmbientGas::sea_level()).unwrap();
         let sections = [AcousticSection {
             length: 0.5,
@@ -5749,13 +5749,25 @@ mod string_observer_tests {
                 None,
             )
             .unwrap();
-            let pressure = blowing_envelope(reed, dt);
+            let drop = blowing_envelope(reed, dt) - out[1];
+            let (stiffness, damping) = reed_structural(reed);
+            let mechanics = mass_spring_damper(reed.mass_kg, stiffness, damping).unwrap();
+            let mechanics_split = prepare_render_linear(&mechanics).unwrap();
+            let next_reed = fs_phs::linear_exact::step_split(
+                &mechanics,
+                &mechanics_split,
+                fs_phs::linear_exact::LinearPropagator::ExactZoh,
+                &[0.0, 0.0],
+                &[-reed_pressure_face(reed) * drop],
+                dt,
+            )
+            .unwrap();
             let flow = bernoulli_volume_flow(
                 reed.width_m,
-                reed.rest_opening_m,
-                pressure,
+                reed.rest_opening_m + 0.5 * next_reed.x[0],
+                drop,
                 gas.density,
-            );
+            ) + reed_swept_flow(reed_pressure_face(reed), next_reed.y[0]);
             let line =
                 ode_bore_chain(&sections, ChainOutlet::PressureRelease, 1, &[], &gas, None).unwrap();
             let split = prepare_render_linear(&line).unwrap();
@@ -5769,7 +5781,8 @@ mod string_observer_tests {
             )
             .unwrap();
             assert_eq!(out[0], 0.0);
-            assert!((out[1] - expected.y[0]).abs() <= 1e-12 * expected.y[0].abs());
+            assert!(out[1] > 0.0 && out[1] < blowing_envelope(reed, dt));
+            assert!((out[1] - expected.y[0]).abs() <= 2e-11 * expected.y[0].abs());
         }
     }
 

@@ -210,6 +210,31 @@ impl ExactBlade {
         let n = self.side();
         z.iter().enumerate().map(|(j, value)| self.map[row * n + j] * value).sum()
     }
+    // Read the same scaled coordinates without allocating a temporary state.
+    // The contact island evaluates these rows at every trial velocity.
+    fn coordinate(&self, state: BladeState, force_n: f64, memory: &[f64], j: usize) -> f64 {
+        match j {
+            0 => self.omega * state.displacement_m,
+            1 => state.velocity_m_s,
+            2 => force_n / (self.mass * self.omega),
+            _ => self.omega * memory[j - 3] / self.arms[j - 3].coupling,
+        }
+    }
+    fn row_state(&self, row: usize, state: BladeState, force_n: f64, memory: &[f64]) -> f64 {
+        assert_eq!(memory.len(), self.arms.len(), "exact blade memory must name every arm");
+        let n = self.side();
+        (0..3 + self.arms.len()).map(|j|
+            self.map[row * n + j] * self.coordinate(state, force_n, memory, j)).sum()
+    }
+    fn form_state(&self, matrix: &[f64], state: BladeState, force_n: f64, memory: &[f64]) -> f64 {
+        assert_eq!(memory.len(), self.arms.len(), "exact blade memory must name every arm");
+        let core = 3 + self.arms.len();
+        (0..core).map(|i| {
+            let left = self.coordinate(state, force_n, memory, i);
+            (0..core).map(|j| left * matrix[i * core + j]
+                * self.coordinate(state, force_n, memory, j)).sum::<f64>()
+        }).sum()
+    }
     fn form(&self, matrix: &[f64], z: &[f64]) -> f64 {
         let core = z.len();
         (0..core).map(|i| (0..core).map(|j| z[i] * matrix[i * core + j] * z[j]).sum::<f64>()).sum()
@@ -219,18 +244,18 @@ impl ExactBlade {
         -> (f64, f64)
     {
         let eta = 3 + self.arms.len();
-        let free = self.row(eta, &self.scaled(state, external_n, memory)) / (self.omega * dt);
+        let free = self.row_state(eta, state, external_n, memory) / (self.omega * dt);
         let mobility = self.map[eta * self.side() + 2] / (self.mass * self.omega * self.omega * dt);
         (free, mobility)
     }
     pub(crate) fn end_velocity(&self, state: BladeState, held_n: f64, memory: &[f64]) -> f64 {
-        self.row(1, &self.scaled(state, held_n, memory))
+        self.row_state(1, state, held_n, memory)
     }
     pub(crate) fn mean_displacement(&self, state: BladeState, held_n: f64, dt: f64, memory: &[f64]) -> f64 {
         self.row(4 + self.arms.len(), &self.scaled(state, held_n, memory)) / (self.omega * self.omega * dt)
     }
     pub(crate) fn viscous_loss_j(&self, state: BladeState, held_n: f64, memory: &[f64]) -> f64 {
-        self.form(&self.viscous, &self.scaled(state, held_n, memory))
+        self.form_state(&self.viscous, state, held_n, memory)
     }
     /// End-of-step arm memories z_j, energy-normalized like the arms' own owner.
     pub(crate) fn end_memory(&self, state: BladeState, held_n: f64, memory: &[f64]) -> Vec<f64> {
