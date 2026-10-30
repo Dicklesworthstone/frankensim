@@ -278,6 +278,7 @@ impl<L: TransportLaw> PlanarTransport<L> {
         &mut self,
         cell: NormalCell<'_>,
         wall_distance: f64,
+        normal_sign: f64,
         wall_tangential_velocity: f64,
         thermal: WallThermalCondition,
         normal_velocity_gradient: f64,
@@ -292,6 +293,7 @@ impl<L: TransportLaw> PlanarTransport<L> {
             &mut self.law,
             trace.with_transverse([transverse_velocity]),
             wall_distance,
+            normal_sign,
             [wall_tangential_velocity],
             thermal,
             normal_velocity_gradient,
@@ -308,6 +310,7 @@ impl<L: TransportLaw> PlanarTransport<L> {
         &mut self,
         cell: NormalPrimitive<'_>,
         wall_distance: f64,
+        normal_sign: f64,
         wall_tangential_velocity: f64,
         thermal: WallThermalCondition,
         normal_velocity_gradient: f64,
@@ -322,6 +325,7 @@ impl<L: TransportLaw> PlanarTransport<L> {
             &mut self.law,
             trace.with_transverse([transverse_velocity]),
             wall_distance,
+            normal_sign,
             [wall_tangential_velocity],
             thermal,
             normal_velocity_gradient,
@@ -749,6 +753,7 @@ fn no_slip_wall_components<const TRANSVERSE: usize, L: TransportLaw>(
     law: &mut L,
     trace: VectorTrace<'_, TRANSVERSE>,
     wall_distance: f64,
+    normal_sign: f64,
     wall_tangential_velocity: [f64; TRANSVERSE],
     thermal: WallThermalCondition,
     normal_gradient: f64,
@@ -761,6 +766,7 @@ fn no_slip_wall_components<const TRANSVERSE: usize, L: TransportLaw>(
     let n = gas.species_count();
     if out.len() != n + 2 + TRANSVERSE
         || !positive(wall_distance)
+        || !matches!(normal_sign, -1.0 | 1.0)
         || !normal_gradient.is_finite()
         || !transverse_gradients.iter().all(|v| v.is_finite())
         || !wall_tangential_velocity.iter().all(|v| v.is_finite())
@@ -788,7 +794,8 @@ fn no_slip_wall_components<const TRANSVERSE: usize, L: TransportLaw>(
     let face_temperature = 0.5 * p.temperature + 0.5 * wall_temperature;
     let temperature_gradient = match thermal {
         WallThermalCondition::Adiabatic => 0.0,
-        WallThermalCondition::Isothermal(_) => (wall_temperature - p.temperature) / wall_distance,
+        WallThermalCondition::Isothermal(_) =>
+            normal_sign * (wall_temperature - p.temperature) / wall_distance,
     };
     let mut x = [0.0; MAX_SPECIES];
     fractions(gas, trace.densities, &mut x[..n])?;
@@ -812,8 +819,10 @@ fn no_slip_wall_components<const TRANSVERSE: usize, L: TransportLaw>(
     out[n] = -normal_stress;
     let mut wall_work = 0.0;
     for axis in 0..TRANSVERSE {
-        let shear =
-            mu * (wall_tangential_velocity[axis] - trace.transverse_velocity[axis]) / wall_distance;
+        let shear = mu
+            * normal_sign
+            * (wall_tangential_velocity[axis] - trace.transverse_velocity[axis])
+            / wall_distance;
         out[n + 1 + axis] = -shear;
         wall_work += wall_tangential_velocity[axis] * out[n + 1 + axis];
     }

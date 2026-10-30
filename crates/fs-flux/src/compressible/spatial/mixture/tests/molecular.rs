@@ -1,12 +1,13 @@
 use super::*;
 use crate::compressible::mixture::molecular::{MolecularTransport2d, PlanarTransport};
 use crate::compressible::spatial::mixture::molecular::{
-    DissipationControl, DissipationError, MolecularReport, MolecularTransport3d, SpatialTransport,
+    DissipationControl, DissipationError, MolecularReport, MolecularTransport3d, MolecularWall3d,
+    SpatialTransport, WallThermalCondition,
 };
 use fs_gas::multicomponent::dissipation::{
     ConstantTransport, TransportCoefficients, TransportDomain,
 };
-use fs_qty::DynViscosity;
+use fs_qty::{DynViscosity, Temperature};
 use fs_thermochem::transport::kinetic::ThermalConductivityQuantityV1;
 
 fn law(
@@ -590,4 +591,76 @@ fn g0_spatial_molecular_budget_capacity_and_boundary_ownership_are_explicit() {
         MolecularTransport3d::new(&flow, source, MAX_MIXTURE_WORKSPACE_BYTES, || false),
         Err(DissipationError::Invalid(_))
     ));
+}
+
+
+#[test]
+fn g1_no_slip_isothermal_wall_transfers_shear_and_heat_conservatively() {
+    let grid = CartesianGrid::new(3, 3, 3, 0.2, 0.2, 0.2).unwrap();
+    let mut flow = field(equal_mass_gas(), grid, Boundaries3d {
+        x: WALLS,
+        y: WALLS,
+        z: WALLS,
+    }, |_| ([1.0, 0.0, 0.0], [0.0, 0.2, -0.1], 1.0));
+    let source = SpatialTransport::new(
+        flow.gas().clone(),
+        law(flow.gas(), 0.0, 0.03, 0.01, 0.04),
+        || false,
+    )
+    .unwrap();
+    let bytes = MolecularTransport3d::required_workspace_bytes(&flow, &source).unwrap();
+    let mut operator = MolecularTransport3d::new(&flow, source, bytes, || false)
+        .unwrap()
+        .with_wall(
+            BoundarySide::XMin,
+            MolecularWall3d::NoSlip {
+                velocity: [0.0; 3],
+                thermal: WallThermalCondition::Isothermal(Temperature::new(0.8)),
+            },
+        )
+        .unwrap();
+    let report = operator
+        .advance(
+            &mut flow,
+            Time::new(0.0002),
+            DissipationControl::default(),
+            || false,
+        )
+        .unwrap();
+    check(report);
+    let xmin: Vec<_> = operator.boundary_impulses(BoundarySide::XMin).collect();
+    assert!(xmin.iter().all(|q| q.species_masses == [0.0; 3]));
+    assert!(xmin.iter().any(|q| q.momentum[1].abs() > 0.0));
+    assert!(xmin.iter().any(|q| q.momentum[2].abs() > 0.0));
+    assert!(xmin.iter().all(|q| q.energy > 0.0));
+    let outward_energy: f64 = BoundarySide::ALL
+        .into_iter()
+        .flat_map(|side| operator.boundary_impulses(side))
+        .map(|q| q.energy)
+        .sum();
+    close(
+        report.after.energy - report.before.energy + outward_energy,
+        0.0,
+        3e-11,
+    );
+    assert!(MolecularTransport3d::new(
+        &flow,
+        SpatialTransport::new(
+            flow.gas().clone(),
+            law(flow.gas(), 0.0, 0.03, 0.01, 0.04),
+            || false,
+        )
+        .unwrap(),
+        bytes,
+        || false,
+    )
+    .unwrap()
+    .with_wall(
+        BoundarySide::XMin,
+        MolecularWall3d::NoSlip {
+            velocity: [0.1, 0.0, 0.0],
+            thermal: WallThermalCondition::Adiabatic,
+        },
+    )
+    .is_err());
 }

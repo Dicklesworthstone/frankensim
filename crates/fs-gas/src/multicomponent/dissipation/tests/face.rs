@@ -370,6 +370,7 @@ fn planar_no_slip_wall_carries_shear_heat_and_prescribed_wall_work() {
     op.no_slip_wall_from_primitive(
         trace,
         0.25,
+        1.0,
         0.4,
         WallThermalCondition::Isothermal(Temperature::new(primitive.temperature - 0.5)),
         2.0,
@@ -391,6 +392,7 @@ fn planar_no_slip_wall_carries_shear_heat_and_prescribed_wall_work() {
     op.no_slip_wall_from_primitive(
         trace,
         0.25,
+        1.0,
         0.0,
         WallThermalCondition::Adiabatic,
         2.0,

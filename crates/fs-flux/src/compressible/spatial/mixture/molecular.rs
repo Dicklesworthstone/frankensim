@@ -15,10 +15,31 @@ use super::{
 use crate::compressible::AxisBoundaries;
 use crate::compressible::mixture::molecular::interval::{self, Action, Stage, parabolic};
 pub use fs_gas::multicomponent::dissipation::{
-    DissipationControl, DissipationError, SpatialTransport, TransportLaw,
+    DissipationControl, DissipationError, SpatialTransport, TransportLaw, WallThermalCondition,
 };
 use fs_gas::multicomponent::{MixtureGas, SpatialPrimitive};
 use fs_qty::Time;
+
+/// Molecular behavior of one physical reflecting wall.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MolecularWall3d {
+    /// Legacy stationary, adiabatic, impermeable slip wall.
+    SlipAdiabatic,
+    /// Impermeable no-slip wall. Velocity is in global Cartesian coordinates;
+    /// its normal component must be exactly zero because moving geometry is a
+    /// separate ALE/FSI problem.
+    NoSlip {
+        /// Prescribed wall velocity [m/s].
+        velocity: [f64; 3],
+        /// Adiabatic or prescribed-temperature thermal boundary.
+        thermal: WallThermalCondition,
+    },
+}
+impl Default for MolecularWall3d {
+    fn default() -> Self {
+        Self::SlipAdiabatic
+    }
+}
 
 /// Complete molecular interval; physical time remains with its composing owner.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -63,14 +84,16 @@ struct Workspace {
 /// Prepared molecular transport on the original evolving-species 3-D field.
 ///
 /// One stored face flux serves both neighbors, including exact periodic copies.
-/// Reflecting faces are stationary adiabatic impermeable slip walls: normal
-/// viscous traction loads the support, while species, shear traction, heat and
-/// work vanish. Transmissive Euler ends do not define a molecular reservoir
+/// Reflecting faces default to stationary adiabatic slip walls and may be
+/// configured as impermeable no-slip walls with prescribed tangential velocity
+/// and fixed-temperature or adiabatic heat transfer. Transmissive Euler ends do
+/// not define a molecular reservoir
 /// and refuse at preparation. All successful field stages reuse flat buffers.
 pub struct MolecularTransport3d<L: TransportLaw> {
     source: SpatialTransport<L>,
     grid: CartesianGrid,
     boundaries: Boundaries3d,
+    walls: [MolecularWall3d; 6],
     maximum_workspace_bytes: usize,
     boundary_impulses: Vec<f64>,
     last_step: Option<MolecularReport>,
@@ -157,6 +180,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             source,
             grid,
             boundaries: flow.boundaries,
+            walls: [MolecularWall3d::SlipAdiabatic; 6],
             maximum_workspace_bytes,
             boundary_impulses: allocated(boundary, 0.0)?,
             last_step: None,
@@ -183,6 +207,51 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         poll(&mut cancelled)?;
         Ok(result)
     }
+    /// Configure one physical reflecting side. Periodic axes have no wall.
+    /// Normal wall motion is refused until conservative moving geometry exists.
+    pub fn with_wall(
+        mut self,
+        side: BoundarySide,
+        wall: MolecularWall3d,
+    ) -> Result<Self, DissipationError> {
+        let Some(condition) = physical_condition(self.boundaries, side) else {
+            return Err(DissipationError::Invalid(
+                "periodic molecular side has no physical wall",
+            ));
+        };
+        if condition != BoundaryCondition::Reflecting {
+            return Err(DissipationError::Invalid(
+                "molecular wall model requires a reflecting Euler side",
+            ));
+        }
+        if let MolecularWall3d::NoSlip { velocity, thermal } = wall {
+            if velocity.iter().any(|v| !v.is_finite()) || velocity[side.axis()] != 0.0 {
+                return Err(DissipationError::Invalid(
+                    "no-slip wall velocity must be finite and tangential",
+                ));
+            }
+            if let WallThermalCondition::Isothermal(t) = thermal {
+                let value = t.value();
+                if !value.is_finite()
+                    || !(self.gas().domain().minimum_temperature
+                        ..=self.gas().domain().maximum_temperature)
+                        .contains(&value)
+                {
+                    return Err(DissipationError::Invalid(
+                        "molecular wall temperature outside caloric domain",
+                    ));
+                }
+            }
+        }
+        self.walls[side_index(side)] = wall;
+        Ok(self)
+    }
+
+    /// Configured molecular model for one side, including periodic placeholders.
+    pub fn wall(&self, side: BoundarySide) -> MolecularWall3d {
+        self.walls[side_index(side)]
+    }
+
     /// Exact original caloric source, species and admitted temperature interval.
     pub fn gas(&self) -> &MixtureGas {
         self.source.gas()
@@ -302,6 +371,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                             &mut self.source,
                             &self.grid,
                             self.boundaries,
+                            &self.walls,
                             &self.work.current,
                             &mut self.work.primitive,
                             &mut self.work.gradient,
@@ -319,6 +389,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                         &mut self.source,
                         &self.grid,
                         self.boundaries,
+                        &self.walls,
                         &self.work.current,
                         &mut self.work.primitive,
                         &mut self.work.gradient,
@@ -355,6 +426,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                     &mut self.source,
                     &self.grid,
                     self.boundaries,
+                    &self.walls,
                     &self.work.stage,
                     &mut self.work.primitive,
                     &mut self.work.gradient,
@@ -448,6 +520,7 @@ fn spatial<L: TransportLaw>(
     source: &mut SpatialTransport<L>,
     grid: &CartesianGrid,
     boundaries: Boundaries3d,
+    walls: &[MolecularWall3d; 6],
     states: &[f64],
     primitive: &mut [Primitive],
     gradient: &mut [[[f64; 3]; 3]],
@@ -461,25 +534,34 @@ fn spatial<L: TransportLaw>(
         *value = cell(row, species).primitive(source.gas(), &mut *cancelled)?;
     }
     // A single nine-derivative cache supplies both tangential directions of
-    // every face. Slip ghosts reflect only the wall-normal velocity.
+    // every face. Slip ghosts reflect only normal velocity; no-slip ghosts
+    // mirror every velocity component about the prescribed wall value.
     for (index, row) in gradient.iter_mut().enumerate() {
         poll(cancelled)?;
         for (axis, derivative) in row.iter_mut().enumerate() {
             let (low, reflect_low) = cartesian::neighbour(grid, boundaries, index, axis, false);
             let (high, reflect_high) = cartesian::neighbour(grid, boundaries, index, axis, true);
             for (component, value) in derivative.iter_mut().enumerate() {
-                let low = primitive[low].velocity[component]
-                    * if reflect_low && component == axis {
-                        -1.0
-                    } else {
-                        1.0
-                    };
-                let high = primitive[high].velocity[component]
-                    * if reflect_high && component == axis {
-                        -1.0
-                    } else {
-                        1.0
-                    };
+                let low = wall_velocity_sample(
+                    primitive,
+                    low,
+                    index,
+                    axis,
+                    false,
+                    component,
+                    reflect_low,
+                    walls,
+                );
+                let high = wall_velocity_sample(
+                    primitive,
+                    high,
+                    index,
+                    axis,
+                    true,
+                    component,
+                    reflect_high,
+                    walls,
+                );
                 *value = (high - low) / (2.0 * grid.spacing[axis]);
             }
         }
@@ -525,13 +607,31 @@ fn spatial<L: TransportLaw>(
                 cell,
                 sign,
                 condition: BoundaryCondition::Reflecting,
-            } => source.wall_from_primitive(
-                normal(cell, axis),
-                -sign * 2.0 * primitive[cell].velocity[axis] / grid.spacing[axis],
-                [gradient[cell][a][a], gradient[cell][b][b]],
-                output,
-                &mut *cancelled,
-            )?,
+            } => {
+                let side = side_for(axis, sign > 0.0);
+                match walls[side_index(side)] {
+                    MolecularWall3d::SlipAdiabatic => source.wall_from_primitive(
+                        normal(cell, axis),
+                        -sign * 2.0 * primitive[cell].velocity[axis] / grid.spacing[axis],
+                        [gradient[cell][a][a], gradient[cell][b][b]],
+                        output,
+                        &mut *cancelled,
+                    )?,
+                    MolecularWall3d::NoSlip { velocity, thermal } => {
+                        source.no_slip_wall_from_primitive(
+                            normal(cell, axis),
+                            0.5 * grid.spacing[axis],
+                            sign,
+                            [velocity[a], velocity[b]],
+                            thermal,
+                            -sign * 2.0 * primitive[cell].velocity[axis] / grid.spacing[axis],
+                            [gradient[cell][a][a], gradient[cell][b][b]],
+                            output,
+                            &mut *cancelled,
+                        )?
+                    }
+                }
+            },
             cartesian::FaceKind::Boundary { .. } => {
                 return Err(DissipationError::Invalid("unbound molecular reservoir"));
             }
@@ -556,6 +656,59 @@ fn spatial<L: TransportLaw>(
         ));
     }
     Ok(stats)
+}
+
+fn side_for(axis: usize, upper: bool) -> BoundarySide {
+    match (axis, upper) {
+        (0, false) => BoundarySide::XMin,
+        (0, true) => BoundarySide::XMax,
+        (1, false) => BoundarySide::YMin,
+        (1, true) => BoundarySide::YMax,
+        (2, false) => BoundarySide::ZMin,
+        (2, true) => BoundarySide::ZMax,
+        _ => unreachable!("Cartesian axis"),
+    }
+}
+fn side_index(side: BoundarySide) -> usize {
+    match side {
+        BoundarySide::XMin => 0,
+        BoundarySide::XMax => 1,
+        BoundarySide::YMin => 2,
+        BoundarySide::YMax => 3,
+        BoundarySide::ZMin => 4,
+        BoundarySide::ZMax => 5,
+    }
+}
+fn physical_condition(boundaries: Boundaries3d, side: BoundarySide) -> Option<BoundaryCondition> {
+    let AxisBoundaries::Ends { lower, upper } = boundaries.axis(side.axis()) else {
+        return None;
+    };
+    Some(if side.sign() < 0.0 { lower } else { upper })
+}
+#[allow(clippy::too_many_arguments)]
+fn wall_velocity_sample(
+    primitive: &[Primitive],
+    neighbour: usize,
+    cell: usize,
+    axis: usize,
+    upper: bool,
+    component: usize,
+    reflected: bool,
+    walls: &[MolecularWall3d; 6],
+) -> f64 {
+    if !reflected {
+        return primitive[neighbour].velocity[component];
+    }
+    let side = side_for(axis, upper);
+    match walls[side_index(side)] {
+        MolecularWall3d::SlipAdiabatic => {
+            primitive[cell].velocity[component]
+                * if component == axis { -1.0 } else { 1.0 }
+        }
+        MolecularWall3d::NoSlip { velocity, .. } => {
+            2.0 * velocity[component] - primitive[cell].velocity[component]
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
