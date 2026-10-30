@@ -174,6 +174,38 @@ impl<'m,'f,'n,'a,F> FrameRelaxationThermalSystem<'m,'f,'n,'a,F> {
     pub fn new_shared(bindings:Vec<(FrameRelaxationBinding<'m,'f,F>,Vec<FrameLayerCell>)>,
         mechanical:CoupledModalSystem,thermal:&DepositionSimulation<'_>,source:&'n MaterialNetwork<'a>,
         heat_budget:MaterialHeatBudget,gate:&CancelGate)->Result<Self> {
+        Self::new_shared_with_optional_links(bindings,mechanical,thermal,source,None,heat_budget,gate)
+    }
+
+    /// Bind the same original frames and caloric inventory when another physical
+    /// owner supplies some native thermal links (for example finite coolant
+    /// convection). `initial_links` and `source.links` must partition all native
+    /// links exactly; externally owned links require zero authored conductance.
+    /// The original material-network preparation owns these checks and pins.
+    ///
+    /// These initial coefficients are admission data, NOT cached boundary laws.
+    /// Continue through `step_heat_network_with` with fresh complete conductances
+    /// at EVERY caloric trial. Ordinary stepping refuses incomplete coverage; it
+    /// cannot silently replace a finite coolant by insulation or a frozen bath.
+    /// Cell masses, laws, material memory and all existing clocks stay original.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_shared_with_link_conductances(
+        bindings:Vec<(FrameRelaxationBinding<'m,'f,F>,Vec<FrameLayerCell>)>,
+        mechanical:CoupledModalSystem, thermal:&DepositionSimulation<'_>,
+        source:&'n MaterialNetwork<'a>, initial_links:&BTreeMap<u64,f64>,
+        heat_budget:MaterialHeatBudget, gate:&CancelGate,
+    )->Result<Self> {
+        Self::new_shared_with_optional_links(bindings,mechanical,thermal,source,
+            Some(initial_links),heat_budget,gate)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_shared_with_optional_links(
+        bindings:Vec<(FrameRelaxationBinding<'m,'f,F>,Vec<FrameLayerCell>)>,
+        mechanical:CoupledModalSystem, thermal:&DepositionSimulation<'_>,
+        source:&'n MaterialNetwork<'a>, initial_links:Option<&BTreeMap<u64,f64>>,
+        heat_budget:MaterialHeatBudget, gate:&CancelGate,
+    )->Result<Self> {
         check(gate)?;
         if mechanical.samples_rendered()!=0 || !source.resistors.is_empty() {
             return Err(invalid("relaxation heat requires a cold shared clock and a thermal-only source network"));
@@ -191,7 +223,10 @@ impl<'m,'f,'n,'a,F> FrameRelaxationThermalSystem<'m,'f,'n,'a,F> {
         }
         let (materials,destinations):(Vec<_>,Vec<_>)=bindings.into_iter().unzip();
         admit_bindings(&materials,&mechanical,gate)?;
-        let prepared=source.prepare(thermal,||gate.is_requested()).map_err(network)?;
+        let prepared=match initial_links {
+            Some(links)=>source.prepare_with_link_conductances(thermal,&[],links,||gate.is_requested()),
+            None=>source.prepare(thermal,||gate.is_requested()),
+        }.map_err(network)?;
         let mut used=BTreeSet::new();let mut receivers=Vec::with_capacity(count);
         let mut layer_ranges=Vec::with_capacity(materials.len());
         let mut selected=Vec::with_capacity(count);

@@ -80,12 +80,42 @@ impl<'m, 'f, 'n, 'a, F> FrameRelaxationThermalSystem<'m, 'f, 'n, 'a, F> {
         fields: Vec<FieldThermalBinding>,
         gate: &CancelGate,
     ) -> Result<()> {
+        self.bind_contact_circuit_with_links(thermal,source,circuit,fields,None,gate)
+    }
+
+    /// Preserve original electrical interfaces and two-sided Joule receivers
+    /// when other physical owners supply some thermal links. Non-Fourier links
+    /// are admitted through the ORIGINAL network at the initial state, then
+    /// must be freshly resolved by the complete heat callback each trial.
+    /// `fields` is empty for authored C/L or complete for sourced field storage.
+    /// No electrical or thermal history publishes on a refused binding.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bind_material_contact_circuit_with_link_conductances(
+        &mut self, thermal:&DepositionSimulation<'_>, source:&'n ElectricalContactNetwork<'a>,
+        circuit:MaterialCircuit, fields:Vec<FieldThermalBinding>,
+        initial_links:&BTreeMap<u64,f64>, gate:&CancelGate,
+    )->Result<()> {
+        self.bind_contact_circuit_with_links(thermal,source,circuit,fields,Some(initial_links),gate)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bind_contact_circuit_with_links(
+        &mut self, thermal:&DepositionSimulation<'_>, source:&'n ElectricalContactNetwork<'a>,
+        circuit:MaterialCircuit, fields:Vec<FieldThermalBinding>,
+        initial_links:Option<&BTreeMap<u64,f64>>, gate:&CancelGate,
+    )->Result<()> {
         self.admit_electrical_binding(thermal, source.bulk, &circuit, &fields, gate)?;
         if source.contacts.is_empty() {
             return Err(invalid("contact relaxation binding needs explicit original interfaces"));
         }
-        let prepared = source.prepare(thermal, || gate.is_requested()).map_err(source_error)?;
-        let mut initial = prepared.resolve(thermal, || gate.is_requested()).map_err(source_error)?;
+        let prepared = match initial_links {
+            Some(links)=>source.prepare_with_link_conductances(thermal,links,||gate.is_requested()),
+            None=>source.prepare(thermal,||gate.is_requested()),
+        }.map_err(source_error)?;
+        let mut initial = match initial_links {
+            Some(links)=>prepared.resolve_with_link_conductances(thermal,links,||gate.is_requested()),
+            None=>prepared.resolve(thermal,||gate.is_requested()),
+        }.map_err(source_error)?;
         initial.bulk.resistors.sort_unstable_by_key(|resistor| resistor.branch);
         if initial.bulk.resistors.as_slice() != circuit.resistors() {
             return Err(invalid("contact relaxation circuit changed original initial bulk sources or geometry"));

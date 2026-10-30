@@ -69,14 +69,44 @@ impl<'m, 'f, 'n, 'a, F> FrameRelaxationThermalSystem<'m, 'f, 'n, 'a, F> {
         fields: Vec<FieldThermalBinding>,
         gate: &CancelGate,
     ) -> Result<()> {
+        self.bind_bulk_circuit_with_links(thermal,source,circuit,electrical_bases,fields,None,gate)
+    }
+
+    /// Bind the original circuit beside independently owned finite thermal
+    /// links. Initial conductances must cover exactly the non-Fourier links;
+    /// they are not retained as a replacement for the live transport source.
+    /// Pass no `fields` for authored fixed C/L, or the complete original field
+    /// bindings for material C(T)/L(T). The same capacity, volume and conserved-
+    /// coordinate checks apply. Continue with a complete heat-network callback.
+    /// Failed preparation changes no accepted source, circuit or thermal state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bind_material_circuit_with_link_conductances(
+        &mut self, thermal:&DepositionSimulation<'_>, source:&'n MaterialNetwork<'a>,
+        circuit:MaterialCircuit, electrical_bases:&[(usize,ElectricalPropertyBasis)],
+        fields:Vec<FieldThermalBinding>, initial_links:&BTreeMap<u64,f64>, gate:&CancelGate,
+    )->Result<()> {
+        self.bind_bulk_circuit_with_links(thermal,source,circuit,electrical_bases,
+            fields,Some(initial_links),gate)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bind_bulk_circuit_with_links(
+        &mut self, thermal:&DepositionSimulation<'_>, source:&'n MaterialNetwork<'a>,
+        circuit:MaterialCircuit, electrical_bases:&[(usize,ElectricalPropertyBasis)],
+        fields:Vec<FieldThermalBinding>, initial_links:Option<&BTreeMap<u64,f64>>, gate:&CancelGate,
+    )->Result<()> {
         self.admit_electrical_binding(thermal, source, &circuit, &fields, gate)?;
         if !circuit.contacts().is_empty() {
             return Err(invalid("electrical contact heat requires explicit original two-sided receivers"));
         }
-        let prepared = source.prepare_with_bases(thermal, electrical_bases,
-            || gate.is_requested()).map_err(network)?;
-        let mut resolved = prepared.resolve(thermal, || gate.is_requested())
-            .map_err(network)?.resistors;
+        let prepared = match initial_links {
+            Some(links)=>source.prepare_with_link_conductances(thermal,electrical_bases,links,||gate.is_requested()),
+            None=>source.prepare_with_bases(thermal,electrical_bases,||gate.is_requested()),
+        }.map_err(network)?;
+        let mut resolved = match initial_links {
+            Some(links)=>prepared.resolve_with_link_conductances(thermal,links,||gate.is_requested()),
+            None=>prepared.resolve(thermal,||gate.is_requested()),
+        }.map_err(network)?.resistors;
         resolved.sort_unstable_by_key(|resistor| resistor.branch);
         if resolved.as_slice() != circuit.resistors() {
             return Err(invalid("electrical relaxation must retain every original initial resistor source and geometry"));
