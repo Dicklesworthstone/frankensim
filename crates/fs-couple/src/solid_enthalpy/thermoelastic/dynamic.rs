@@ -72,6 +72,25 @@ impl<'s, 'm> DynamicThermoelasticSolid<'s, 'm> {
         super::acoustic::resolve(self.source, &self.laws, &self.state, &self.response.stress, cx)
     }
 
+    /// Adiabatic constitutive tangent plus the ACTUAL inertial endpoint stress.
+    /// No equilibrium solve replaces the motion, no force/stress is resupplied,
+    /// and local reversible heat is not applied a second time.
+    ///
+    /// The returned signed pencil is a frozen conservative snapshot of a
+    /// possibly evolving trajectory, not a claim of stationary normal modes.
+    pub fn adiabatic_prestressed_state(
+        &self, cx: &Cx<'_>,
+    ) -> Result<super::acoustic::AdiabaticPrestressedSolidState<'m>, ThermoelasticFeedbackError> {
+        let material_state = self.adiabatic_state(cx)?;
+        let original = self.state.problem(&self.fixed_dofs);
+        let run = self.motion.bind(&original, cx).map_err(SolidEnthalpyError::from)?;
+        let tangent = run.assemble_prestressed_constitutive_tangent(
+            TetMaterialField::PerElement(material_state.materials()),
+            self.state.mesh_frame, self.state.maximum_absolute_mandel_strain, cx,
+        ).map_err(SolidEnthalpyError::from)?;
+        super::acoustic::with_prestress(material_state, tangent)
+    }
+
     /// Full accepted displacement, velocity and acceleration in native node order.
     pub fn nodal_motion(
         &self, cx: &Cx<'_>,

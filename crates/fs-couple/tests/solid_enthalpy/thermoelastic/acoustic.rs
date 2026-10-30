@@ -195,6 +195,28 @@ fn g3_accepted_inertial_strain_and_heat_feed_the_same_adiabatic_snapshot() {
         assert_eq!(acoustic.materials()[0].density_kg_m3, 6.0);
         let repeated = next.solid.adiabatic_state(cx).unwrap();
         assert_eq!(acoustic.materials(), repeated.materials());
+        let combined = next.solid.adiabatic_prestressed_state(cx).unwrap();
+        assert_eq!(combined.tangent().stress(), &next.solid.response().stress);
+        let only_material = acoustic.problem(&fixed).assemble(cx).unwrap();
+        let sigma_xx = next.solid.response().stress.elements()[0].stress_mandel_pa()[0];
+        near(
+            combined.tangent().geometric_stiffness().get(0, 0),
+            sigma_xx / 6.0,
+            1e-10,
+        );
+        near(
+            combined.tangent().pencil().stiffness.get(0, 0),
+            only_material.stiffness.get(0, 0) + sigma_xx / 6.0,
+            1e-9,
+        );
+        assert_eq!(
+            combined.tangent().pencil().mass.to_dense(),
+            only_material.mass.to_dense()
+        );
+        // Inertia means the accepted stress is NOT the instantaneous static
+        // force/area value. The new pencil must retain that distinction.
+        assert!((sigma_xx - 6.0 * 0.8).abs() > 0.01);
+        assert_eq!(next.solid.nodal_motion(cx).unwrap(), motion);
         assert_eq!(moving.step(), 0);
         assert_eq!(next.solid.step(), 1);
     });
@@ -264,5 +286,194 @@ fn g4_caloric_kinks_and_one_sided_source_domains_cannot_masquerade_as_wave_tange
             assert_eq!(body.time_s(), 0.0);
             assert_eq!(heat.time_s(), 0.0);
         }
+    });
+}
+
+// Independent local internal energy on an isentrope, using an authored nu=0,
+// constant-E/alpha potential and the reference caloric entropy. The virtual
+// Green-strain increment contributes the native initial-stress approximation.
+fn independent_adiabatic_virtual_energy(
+    scale: f64,
+    gradient: [[f64; 3]; 3],
+    base_temperature: f64,
+    young: f64,
+    alpha: f64,
+    caloric_capacity: f64,
+) -> f64 {
+    let free = alpha * (base_temperature - 300.0);
+    let strain: [[f64; 3]; 3] = core::array::from_fn(|i| {
+        core::array::from_fn(|j| {
+            let base = if i == j && i > 0 { free } else { 0.0 };
+            base + 0.5 * scale * (gradient[i][j] + gradient[j][i])
+                + 0.5 * scale * scale * (0..3).map(|k| gradient[k][i] * gradient[k][j]).sum::<f64>()
+        })
+    });
+    let entropy = |temperature: f64| {
+        let trace = (0..3).map(|i| strain[i][i]).sum::<f64>() - 3.0 * alpha * (temperature - 300.0);
+        caloric_capacity * (temperature / 300.0).ln() + young * alpha * trace
+    };
+    let target = caloric_capacity * (base_temperature / 300.0).ln() - young * alpha * free;
+    let mut low = base_temperature - 1.0;
+    let mut high = base_temperature + 1.0;
+    assert!(entropy(low) < target && entropy(high) > target);
+    for _ in 0..80 {
+        let mid = 0.5 * (low + high);
+        if entropy(mid) < target {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    let temperature = 0.5 * (low + high);
+    let thermal = alpha * (temperature - 300.0);
+    let elastic: [[f64; 3]; 3] = core::array::from_fn(|i| {
+        core::array::from_fn(|j| strain[i][j] - if i == j { thermal } else { 0.0 })
+    });
+    let energy = 0.5 * young * elastic.iter().flatten().map(|v| v * v).sum::<f64>();
+    let elastic_entropy = young * alpha * (0..3).map(|i| elastic[i][i]).sum::<f64>();
+    VOLUME * (caloric_capacity * (temperature - 300.0) + energy + temperature * elastic_entropy)
+}
+
+#[test]
+fn g1_restraint_heating_combines_adiabatic_stiffness_and_signed_prestress_in_native_modes() {
+    with_cx(|cx| {
+        let fixed = [0, 1, 2, 3, 6, 8, 9];
+        let young = 1000.0;
+        let alpha = 0.0003;
+        let cp = 0.2;
+        let mut eigenvalues = Vec::new();
+        for power in [-2.0, 0.0, 2.0] {
+            let (card, curve) = fixture(young, 0.0, alpha, cp, false);
+            let heat = thermal(&[&curve], &[cp], &[power], 0.0);
+            let context = context(300.0);
+            let source = SolidEnthalpy::try_new(
+                &heat,
+                &NODES,
+                &TETS,
+                vec![source(30, &card, &curve, &context)],
+                TetAssemblyBudget::standard(),
+                0.05,
+                mechanical().mesh_frame,
+                cx,
+            )
+            .unwrap();
+            let loads = source
+                .geometry()
+                .assemble(&[], VolumeLoad3::None, &[], cx)
+                .unwrap();
+            let body = ThermoelasticSolid::try_new(
+                &source,
+                &heat,
+                &loads,
+                &fixed,
+                &[[280.0, 360.0]],
+                mechanical(),
+                solve(),
+                cx,
+            )
+            .unwrap();
+            let next = body
+                .advance(&heat, &(), 0.1, &loads, thermal_controls(), solve(), cx)
+                .unwrap();
+            let response = next.solid.adiabatic_prestressed_state(cx).unwrap();
+            let material = response.material_state();
+            let tangent = response.tangent();
+            let pencil = tangent.pencil();
+            let temperature = next.thermal.temperature_k(IDS[0]).unwrap();
+            let stress = -young * alpha * (temperature - 300.0);
+            assert_eq!(tangent.stress(), &next.solid.equilibrium().solution.stress);
+            near(
+                tangent.stress().elements()[0].stress_mandel_pa()[0],
+                stress,
+                2e-8,
+            );
+            for value in &tangent.stress().elements()[0].stress_mandel_pa()[1..] {
+                near(*value, 0.0, 2e-8);
+            }
+            let only_material = material.problem(&fixed).assemble(cx).unwrap();
+            assert_eq!(
+                tangent.elastic_stiffness().to_dense(),
+                only_material.stiffness.to_dense()
+            );
+            assert_eq!(pencil.mass.to_dense(), only_material.mass.to_dense());
+            near(pencil.total_mass_kg, 1.0, 1e-14);
+            for (row, &dof) in pencil.free_dofs.iter().enumerate() {
+                for column in 0..pencil.free_dofs.len() {
+                    let expected = if row == column && (dof == 4 || dof == 5) {
+                        stress / 6.0
+                    } else {
+                        0.0
+                    };
+                    near(
+                        tangent.geometric_stiffness().get(row, column),
+                        expected,
+                        2e-8,
+                    );
+                    near(
+                        pencil.stiffness.get(row, column),
+                        only_material.stiffness.get(row, column) + expected,
+                        2e-8,
+                    );
+                }
+            }
+            let q = [0.02, -0.01, 0.03, 0.01, -0.02];
+            assert_eq!(q.len(), pencil.free_dofs.len());
+            let mut full = [[0.0; 3]; 4];
+            for (&dof, value) in pencil.free_dofs.iter().zip(q) {
+                full[dof / 3][dof % 3] = value;
+            }
+            let gradient =
+                core::array::from_fn(|i| core::array::from_fn(|j| full[j + 1][i] - full[0][i]));
+            let potential = |s| {
+                independent_adiabatic_virtual_energy(
+                    s,
+                    gradient,
+                    temperature,
+                    young,
+                    alpha,
+                    6.0 * cp,
+                )
+            };
+            let h = 0.01;
+            let expected = (-potential(-2.0 * h) + 16.0 * potential(-h) - 30.0 * potential(0.0)
+                + 16.0 * potential(h)
+                - potential(2.0 * h))
+                / (12.0 * h * h);
+            let mut applied = vec![0.0; q.len()];
+            pencil.stiffness.spmv(&q, &mut applied);
+            let actual: f64 = q.iter().zip(applied).map(|(a, b)| a * b).sum();
+            near(actual, expected, 2e-6);
+            let modes = fs_modal::eigh_gen_dense(
+                &pencil.stiffness.to_dense(),
+                &pencil.mass.to_dense(),
+                pencil.free_dofs.len(),
+            )
+            .unwrap();
+            eigenvalues.push(
+                modes
+                    .into_iter()
+                    .map(|mode| mode.lambda)
+                    .collect::<Vec<_>>(),
+            );
+            assert_eq!(material.time_s(), next.solid.time_s());
+            assert_eq!(body.time_s(), 0.0);
+            assert_eq!(heat.time_s(), 0.0);
+            let repeat = next.solid.adiabatic_prestressed_state(cx).unwrap();
+            assert_eq!(repeat.tangent().identity(), tangent.identity());
+        }
+        // Thermal restraint stiffens transverse motion in tension and softens
+        // it in compression. Other modes also see the distinct thermal tangent.
+        assert!(
+            eigenvalues[2]
+                .iter()
+                .zip(&eigenvalues[1])
+                .any(|(hot, base)| *hot < *base - 0.01)
+        );
+        assert!(
+            eigenvalues[0]
+                .iter()
+                .zip(&eigenvalues[1])
+                .any(|(cold, base)| *cold > *base + 0.01)
+        );
     });
 }

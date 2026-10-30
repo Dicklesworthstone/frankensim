@@ -51,6 +51,26 @@ impl FrozenThermal3 {
 }
 
 impl TetTransientRun3<'_, '_, '_, '_> {
+    /// Frozen initial-stress pencil from this actual accepted inertial state,
+    /// using an explicitly selected incremental material tangent.
+    ///
+    /// Native response recovery retains the run's exact motion, original
+    /// material/thermal field and supports; no quasistatic replacement solve
+    /// or external stress array enters the path. The replacement tangent must
+    /// preserve each reference density. Signed eigenvalues remain signed.
+    ///
+    /// This is a local conservative snapshot, not a normal-mode interpretation
+    /// of a generally time-varying trajectory. Damping, moving-support work,
+    /// follower loads and further coupled-state evolution are not added here.
+    pub fn assemble_prestressed_constitutive_tangent(
+        &self, constitutive_materials: crate::linear3::TetMaterialField<'_>,
+        mesh_frame: ContentHash, maximum_strain: f64, cx: &Cx<'_>,
+    ) -> Result<crate::prestress::PrestressedTetAssembly, TransientError3> {
+        let response = self.recover_response(mesh_frame, maximum_strain, cx)?;
+        self.problem.assemble_constitutive_tangent_from_stress(
+            response.stress, constitutive_materials, cx).map_err(TransientError3::from)
+    }
+
     /// Recover stress, inertia, damping and physical support forces WITHOUT a
     /// static solve, new constraints, force resampling or global reassembly.
     /// The accepted full external load (including constrained-node loads) and

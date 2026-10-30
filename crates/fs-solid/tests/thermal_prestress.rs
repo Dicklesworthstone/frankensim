@@ -184,3 +184,6 @@ fn fixed_dof_load_preserves_displacement_and_malformed_loads_refuse() {
 
 #[path = "thermal_prestress/column.rs"]
 mod column;
+
+#[path = "thermal_prestress/constitutive.rs"]
+mod constitutive;

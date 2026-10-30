@@ -1,7 +1,7 @@
 //! Initial-stress linearization of the existing three-dimensional solid operator.
 //!
 //! On the SAME reference mesh and supports as the accepted small-displacement
-//! thermal equilibrium, form K_t = K_e + K_g with
+//! state, form K_t = K_e + K_g with
 //! K_g[(a,i),(b,j)] = delta_ij integral grad(N_a)^T sigma_0 grad(N_b) dV.
 //! Tensile stress stiffens and compressive stress softens the relevant motions.
 //! K_g and K_t need not be positive definite: negative eigenvalues must not be
@@ -22,7 +22,8 @@ use fs_exec::Cx;
 use fs_la::batched::{BatchMat, batch_inv};
 use fs_sparse::{Coo, Csr};
 use crate::linear3::{TetElasticAssembly, TetElasticError, TetLinearElasticProblem,
-    TetThermalDisplacementSolution, TetThermalStrainField, TetThermalStressReport};
+    TetThermalDisplacementSolution, TetThermalStrainField, TetThermalStressReport,
+    TetMaterialField};
 use crate::linear3::{TetEigenstrainDisplacementSolution, eigenstrain::TetEigenstrainField};
 
 /// The original consistent-mass pencil with its source-bound stress correction.
@@ -38,11 +39,11 @@ pub struct PrestressedTetAssembly {
 impl PrestressedTetAssembly {
     /// Existing (K_t, M) carrier, directly consumable by fs-modal.
     pub const fn pencil(&self) -> &TetElasticAssembly { &self.pencil }
-    /// Original material stiffness K_e, without an inferred stress multiplier.
+    /// Selected incremental material stiffness K_e, without a stress multiplier.
     pub const fn elastic_stiffness(&self) -> &Csr { &self.elastic_stiffness }
     /// Signed initial-stress contribution K_g, in the same free-DOF order.
     pub const fn geometric_stiffness(&self) -> &Csr { &self.geometric_stiffness }
-    /// Actual recovered stress, checked against the supplied equilibrium inputs.
+    /// Actual recovered stress, checked against the original accepted state.
     pub const fn stress(&self) -> &TetThermalStressReport { &self.stress }
     /// Binds the approximation to its original geometry/material/support/solution.
     pub const fn identity(&self) -> ContentHash { self.identity }
@@ -102,6 +103,95 @@ impl TetLinearElasticProblem<'_> {
         let stress = self.recover_thermal_stress_with_nodal_forces(solution, thermal,
             nodal_forces_n, mesh_frame, maximum_absolute_mandel_strain, cx)?;
         self.assemble_tangent_from_stress(stress, cx)
+    }
+
+    /// Preserve the original recovered stress while using an explicitly
+    /// supplied INCREMENTAL material tangent. This is needed when eliminating
+    /// a coupled state changes d(sigma)/d(strain), as for local adiabatic
+    /// thermoelasticity, without changing the accepted finite stress.
+    ///
+    /// Recover stress against the exact original solution, thermal field and
+    /// dead loads FIRST. The replacement tangent is never used to reconstruct
+    /// that stress. Reference geometry, supports and each inertial density
+    /// remain unchanged. The caller owns the additional constitutive law and
+    /// its source identity; this API does not infer adiabaticity by itself.
+    ///
+    /// The signed geometric stiffness still comes from the single native
+    /// initial-stress kernel. Negative eigenvalues remain signed, and this
+    /// frozen conservative pencil is not a transient or stability certificate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn assemble_thermal_tangent_with_constitutive_materials(
+        &self, solution: &TetThermalDisplacementSolution,
+        thermal: TetThermalStrainField<'_>, nodal_forces_n: &[(usize, f64)],
+        constitutive_materials: TetMaterialField<'_>, mesh_frame: ContentHash,
+        maximum_absolute_mandel_strain: f64, cx: &Cx<'_>,
+    ) -> Result<PrestressedTetAssembly, TetElasticError> {
+        let stress = self.recover_thermal_stress_with_nodal_forces(
+            solution, thermal, nodal_forces_n, mesh_frame,
+            maximum_absolute_mandel_strain, cx)?;
+        self.assemble_constitutive_tangent_from_stress(stress, constitutive_materials, cx)
+    }
+
+    // Only native stress-recovery owners call this seam. In particular the
+    // transient owner recovers from its accepted motion; arbitrary public
+    // stress arrays cannot bypass original geometry/material/history binding.
+    pub(crate) fn assemble_constitutive_tangent_from_stress(
+        &self, stress: TetThermalStressReport,
+        constitutive_materials: TetMaterialField<'_>, cx: &Cx<'_>,
+    ) -> Result<PrestressedTetAssembly, TetElasticError> {
+        checkpoint(cx)?;
+        let count = self.tetrahedra.len();
+        for field in [self.materials, constitutive_materials] {
+            if let TetMaterialField::PerElement(values) = field {
+                if values.len() != count {
+                    return Err(TetElasticError::MaterialCountMismatch {
+                        expected: count, got: values.len(),
+                    });
+                }
+            }
+        }
+        let mut hash = DomainHasher::new(
+            "org.frankensim.fs-solid.reference-constitutive-initial-stress-pencil.v1");
+        hash.update(&(count as u64).to_le_bytes());
+        for element in 0..count {
+            if element % 64 == 0 { checkpoint(cx)?; }
+            let original = match self.materials {
+                TetMaterialField::Uniform(value) => value,
+                TetMaterialField::PerElement(values) => &values[element],
+            };
+            let tangent = match constitutive_materials {
+                TetMaterialField::Uniform(value) => value,
+                TetMaterialField::PerElement(values) => &values[element],
+            };
+            if original.density_kg_m3.to_bits() != tangent.density_kg_m3.to_bits() {
+                return Err(invalid(
+                    "an incremental constitutive tangent cannot replace reference inertial density"));
+            }
+            hash.update(&tangent.material_state_identity);
+            hash.update(&tangent.density_kg_m3.to_bits().to_le_bytes());
+            for value in tangent.stiffness_mandel_pa().iter().flatten() {
+                hash.update(&value.to_bits().to_le_bytes());
+            }
+        }
+        let problem = TetLinearElasticProblem {
+            nodes_m: self.nodes_m, tetrahedra: self.tetrahedra,
+            materials: constitutive_materials, fixed_dofs: self.fixed_dofs,
+            budget: self.budget,
+        };
+        let mut result = problem.assemble_tangent_from_stress(stress, cx)?;
+        // The original identity binds the accepted stress; the new one ALSO
+        // binds the selected incremental constitutive law and exact coefficients.
+        hash.update(result.identity().as_bytes());
+        // Dynamic stress recovery binds geometry and motion independently of
+        // supports. Bind the actual reduced pencil's canonical DOF order too.
+        hash.update(&(result.pencil.free_dofs.len() as u64).to_le_bytes());
+        for (i, dof) in result.pencil.free_dofs.iter().enumerate() {
+            if i % 4096 == 0 { checkpoint(cx)?; }
+            hash.update(&(*dof as u64).to_le_bytes());
+        }
+        result.identity = hash.finalize();
+        checkpoint(cx)?;
+        Ok(result)
     }
 
     fn assemble_tangent_from_stress(

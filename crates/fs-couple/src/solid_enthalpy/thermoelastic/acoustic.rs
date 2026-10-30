@@ -9,13 +9,17 @@
 //! Do not reapply thermal eigenstrain to this perturbation problem or add this
 //! adiabatic correction to a simulation already solving the same reversible
 //! heat exchange. It is the no-heat-flow incremental limit, not a model of
-//! thermoelastic attenuation, finite-frequency diffusion, or prestress geometry.
+//! thermoelastic attenuation or finite-frequency diffusion. The combined
+//! adiabatic/prestressed snapshot adds the existing native signed geometric
+//! stiffness from the SAME accepted stress, without recomputing that stress
+//! using the adiabatic tangent or advancing a new thermal state.
 
 use super::*;
 use fs_material::elastic::thermal::acoustic::{
     AdiabaticThermoelasticInput, AdiabaticThermoelasticState,
 };
 use fs_solid::linear3::TetThermalStressReport;
+use fs_solid::prestress::PrestressedTetAssembly;
 
 /// Frozen local entropy-constrained tangent on the original reference mesh.
 pub struct AdiabaticSolidState<'a> {
@@ -69,7 +73,70 @@ impl AdiabaticSolidState<'_> {
     }
 }
 
+/// Local adiabatic material tangent plus actual signed initial-stress stiffness.
+///
+/// The original reference mesh, supports and consistent mass are unchanged.
+/// A nonpositive spectral value is a stability warning, never an audible
+/// frequency. This remains the native small-displacement initial-stress
+/// approximation, not a finite-strain/follower-load tangent.
+pub struct AdiabaticPrestressedSolidState<'a> {
+    material_state: AdiabaticSolidState<'a>,
+    tangent: PrestressedTetAssembly,
+}
+
+impl<'a> AdiabaticPrestressedSolidState<'a> {
+    /// Source, caloric and accepted-strain inputs for each incremental material.
+    pub const fn material_state(&self) -> &AdiabaticSolidState<'a> {
+        &self.material_state
+    }
+    /// Existing (K_material + K_geometric, M) pencil with retained actual stress.
+    pub const fn tangent(&self) -> &PrestressedTetAssembly {
+        &self.tangent
+    }
+}
+
+pub(super) fn with_prestress<'a>(
+    material_state: AdiabaticSolidState<'a>,
+    tangent: PrestressedTetAssembly,
+) -> Result<AdiabaticPrestressedSolidState<'a>, ThermoelasticFeedbackError> {
+    if material_state.mechanical_response_identity != tangent.stress().identity() {
+        return Err(ThermoelasticFeedbackError::Invalid(
+            "adiabatic material and geometric stiffness must use the same accepted stress response",
+        ));
+    }
+    Ok(AdiabaticPrestressedSolidState {
+        material_state,
+        tangent,
+    })
+}
+
 impl<'s, 'm> ThermoelasticSolid<'s, 'm> {
+    /// Native material AND geometric stiffness at the accepted equilibrium.
+    ///
+    /// The old stress is recovered against its original material, source
+    /// thermal strain, supports and dead nodal loads. Only its incremental
+    /// constitutive derivative is replaced by the local adiabatic tangent.
+    /// Thus heating can alter both material stiffness and restraint stress.
+    pub fn adiabatic_prestressed_state(
+        &self,
+        cx: &Cx<'_>,
+    ) -> Result<AdiabaticPrestressedSolidState<'m>, ThermoelasticFeedbackError> {
+        let material_state = self.adiabatic_state(cx)?;
+        let original = self.state.problem(&self.fixed_dofs);
+        let tangent = original
+            .assemble_thermal_tangent_with_constitutive_materials(
+                &self.equilibrium.solution.displacement,
+                self.state.thermal_strains(),
+                &self.nodal_forces_n,
+                TetMaterialField::PerElement(material_state.materials()),
+                self.state.mesh_frame,
+                self.state.maximum_absolute_mandel_strain,
+                cx,
+            )
+            .map_err(SolidEnthalpyError::from)?;
+        with_prestress(material_state, tangent)
+    }
+
     /// Derive native adiabatic wave/modal data from the accepted equilibrium.
     /// No material constant, temperature, density or heat capacity is resupplied.
     pub fn adiabatic_state(
