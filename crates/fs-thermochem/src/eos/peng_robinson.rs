@@ -228,6 +228,8 @@ impl PengRobinsonMixtureV1 {
         let n = self.components.len();
         let r = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
         let mut ai = vec![0.0; n];
+        let mut dai_dt = vec![0.0; n];
+        let mut d2ai_dt2 = vec![0.0; n];
         let mut bi = vec![0.0; n];
         for i in 0..n {
             let component = self.components[i];
@@ -235,11 +237,20 @@ impl PengRobinsonMixtureV1 {
             let pc = component.critical_pressure.value();
             let omega = component.acentric_factor;
             let kappa = 0.374_64 + 1.542_26 * omega - 0.269_92 * omega * omega;
-            let alpha_base = 1.0 + kappa * (1.0 - det::sqrt(t / tc));
+            let sqrt_reduced_t = det::sqrt(t / tc);
+            let alpha_base = 1.0 + kappa * (1.0 - sqrt_reduced_t);
             let alpha = alpha_base * alpha_base;
-            ai[i] = 0.457_24 * r * r * tc * tc * alpha / pc;
+            let a0 = 0.457_24 * r * r * tc * tc / pc;
+            let dbase_dt = -kappa * sqrt_reduced_t / (2.0 * t);
+            let d2base_dt2 = kappa * sqrt_reduced_t / (4.0 * t * t);
+            ai[i] = a0 * alpha;
+            dai_dt[i] = 2.0 * a0 * alpha_base * dbase_dt;
+            d2ai_dt2[i] = 2.0 * a0
+                * (dbase_dt * dbase_dt + alpha_base * d2base_dt2);
             bi[i] = 0.077_80 * r * tc / pc;
-            if !ai[i].is_finite() || ai[i] <= 0.0 || !bi[i].is_finite() || bi[i] <= 0.0 {
+            if !ai[i].is_finite() || ai[i] <= 0.0
+                || !dai_dt[i].is_finite() || !d2ai_dt2[i].is_finite()
+                || !bi[i].is_finite() || bi[i] <= 0.0 {
                 return Err(PengRobinsonErrorV1::Unrepresentable {
                     what: "pure-component attraction/covolume",
                 });
@@ -248,6 +259,8 @@ impl PengRobinsonMixtureV1 {
 
         let mut aij = vec![0.0; n * n];
         let mut a_mix = 0.0;
+        let mut da_mix_dt = 0.0;
+        let mut d2a_mix_dt2 = 0.0;
         let mut b_mix = 0.0;
         for i in 0..n {
             b_mix += self.mole_fractions[i] * bi[i];
@@ -259,11 +272,29 @@ impl PengRobinsonMixtureV1 {
                         what: "binary attraction coefficient",
                     });
                 }
+                let li = dai_dt[i] / ai[i];
+                let lj = dai_dt[j] / ai[j];
+                let dlog = 0.5 * (li + lj);
+                let d2log = 0.5
+                    * (d2ai_dt2[i] / ai[i] - li * li
+                        + d2ai_dt2[j] / ai[j] - lj * lj);
+                let dvalue = value * dlog;
+                let d2value = value * (dlog * dlog + d2log);
+                if !dvalue.is_finite() || !d2value.is_finite() {
+                    return Err(PengRobinsonErrorV1::Unrepresentable {
+                        what: "binary attraction temperature derivatives",
+                    });
+                }
                 aij[i * n + j] = value;
-                a_mix += self.mole_fractions[i] * self.mole_fractions[j] * value;
+                let weight = self.mole_fractions[i] * self.mole_fractions[j];
+                a_mix += weight * value;
+                da_mix_dt += weight * dvalue;
+                d2a_mix_dt2 += weight * d2value;
             }
         }
-        if !a_mix.is_finite() || a_mix <= 0.0 || !b_mix.is_finite() || b_mix <= 0.0 {
+        if !a_mix.is_finite() || a_mix <= 0.0
+            || !da_mix_dt.is_finite() || !d2a_mix_dt2.is_finite()
+            || !b_mix.is_finite() || b_mix <= 0.0 {
             return Err(PengRobinsonErrorV1::Unrepresentable {
                 what: "mixture attraction/covolume",
             });
@@ -334,6 +365,11 @@ impl PengRobinsonMixtureV1 {
                 mass_density_kg_per_m3: density,
                 residual_gibbs_over_rt,
                 log_fugacity_coefficients: log_phi,
+                attraction_parameter: a_mix,
+                attraction_temperature_derivative: da_mix_dt,
+                attraction_second_temperature_derivative: d2a_mix_dt2,
+                covolume_m3_per_mol: b_mix,
+                temperature_k: t,
             });
         }
 
@@ -448,6 +484,11 @@ pub struct PengRobinsonPhaseRootV1 {
     mass_density_kg_per_m3: f64,
     residual_gibbs_over_rt: f64,
     log_fugacity_coefficients: Vec<f64>,
+    attraction_parameter: f64,
+    attraction_temperature_derivative: f64,
+    attraction_second_temperature_derivative: f64,
+    covolume_m3_per_mol: f64,
+    temperature_k: f64,
 }
 
 impl PengRobinsonPhaseRootV1 {
@@ -471,6 +512,103 @@ impl PengRobinsonPhaseRootV1 {
     pub fn log_fugacity_coefficients(&self) -> &[f64] {
         &self.log_fugacity_coefficients
     }
+
+    /// Residual internal energy U^R [J/mol] relative to the ideal-gas caloric
+    /// reference at the same T and composition.
+    #[must_use]
+    pub fn residual_internal_energy_j_mol(&self) -> f64 {
+        let b = self.covolume_m3_per_mol;
+        let v = self.molar_volume_m3_per_mol;
+        let sqrt_2 = det::sqrt(2.0);
+        let log_volume = det::ln(
+            (v + (1.0 + sqrt_2) * b) / (v + (1.0 - sqrt_2) * b)
+        );
+        (self.temperature_k * self.attraction_temperature_derivative
+            - self.attraction_parameter)
+            * log_volume / (2.0 * sqrt_2 * b)
+    }
+
+    /// Residual enthalpy H^R [J/mol].
+    #[must_use]
+    pub fn residual_enthalpy_j_mol(&self) -> f64 {
+        UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K
+            * self.temperature_k
+            * (self.compressibility_factor - 1.0)
+            + self.residual_internal_energy_j_mol()
+    }
+
+    /// Residual constant-volume heat capacity C_v^R [J/(mol K)].
+    #[must_use]
+    pub fn residual_cv_j_mol_k(&self) -> f64 {
+        let b = self.covolume_m3_per_mol;
+        let v = self.molar_volume_m3_per_mol;
+        let sqrt_2 = det::sqrt(2.0);
+        let log_volume = det::ln(
+            (v + (1.0 + sqrt_2) * b) / (v + (1.0 - sqrt_2) * b)
+        );
+        self.temperature_k * self.attraction_second_temperature_derivative
+            * log_volume / (2.0 * sqrt_2 * b)
+    }
+
+    /// (dp/dT)_v [Pa/K] and (dp/dv)_T [Pa mol/m^3] from the original PR law.
+    #[must_use]
+    pub fn pressure_derivatives(&self) -> (f64, f64) {
+        let r = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
+        let t = self.temperature_k;
+        let v = self.molar_volume_m3_per_mol;
+        let b = self.covolume_m3_per_mol;
+        let d = v * v + 2.0 * b * v - b * b;
+        let dp_dt_v = r / (v - b) - self.attraction_temperature_derivative / d;
+        let dp_dv_t = -r * t / ((v - b) * (v - b))
+            + self.attraction_parameter * (2.0 * v + 2.0 * b) / (d * d);
+        (dp_dt_v, dp_dv_t)
+    }
+
+    /// Complete Cp and isentropic sound speed after adding an ideal-reference
+    /// molar Cv from the SAME composition and T. Returns None for a mechanically
+    /// unstable root or nonpositive complete caloric response.
+    #[must_use]
+    pub fn caloric_mechanics(
+        &self,
+        ideal_molar_cv_j_mol_k: f64,
+        molar_mass_kg_mol: f64,
+    ) -> Option<PengRobinsonCaloricMechanicsV1> {
+        let cv = ideal_molar_cv_j_mol_k + self.residual_cv_j_mol_k();
+        let (dp_dt_v, dp_dv_t) = self.pressure_derivatives();
+        if !cv.is_finite() || cv <= 0.0
+            || !molar_mass_kg_mol.is_finite() || molar_mass_kg_mol <= 0.0
+            || !dp_dt_v.is_finite() || !dp_dv_t.is_finite() || dp_dv_t >= 0.0
+        {
+            return None;
+        }
+        let t = self.temperature_k;
+        let v = self.molar_volume_m3_per_mol;
+        let cp = cv - t * dp_dt_v * dp_dt_v / dp_dv_t;
+        let sound_speed_squared = v * v / molar_mass_kg_mol
+            * (-dp_dv_t + t * dp_dt_v * dp_dt_v / cv);
+        if !cp.is_finite() || cp <= cv
+            || !sound_speed_squared.is_finite() || sound_speed_squared <= 0.0
+        {
+            return None;
+        }
+        Some(PengRobinsonCaloricMechanicsV1 {
+            molar_cv_j_mol_k: cv,
+            molar_cp_j_mol_k: cp,
+            sound_speed_m_s: det::sqrt(sound_speed_squared),
+            dp_dt_v_pa_k: dp_dt_v,
+            dp_dv_t_pa_mol_m3: dp_dv_t,
+        })
+    }
+}
+
+/// Complete local caloric/mechanical derivatives for one stable PR root.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PengRobinsonCaloricMechanicsV1 {
+    pub molar_cv_j_mol_k: f64,
+    pub molar_cp_j_mol_k: f64,
+    pub sound_speed_m_s: f64,
+    pub dp_dt_v_pa_k: f64,
+    pub dp_dv_t_pa_mol_m3: f64,
 }
 
 /// Complete fixed-composition PT evaluation.
@@ -641,6 +779,42 @@ mod tests {
         let lb = rb.log_fugacity_coefficients();
         assert!((la[0] - lb[1]).abs() < 1e-14);
         assert!((la[1] - lb[0]).abs() < 1e-14);
+    }
+
+    #[test]
+    fn residual_calorics_and_sound_speed_match_independent_differentiation() {
+        let model = pure(methane());
+        let t = 300.0;
+        let p = 5.0e6;
+        let state = model.evaluate_pt(Temperature::new(t), Pressure::new(p)).unwrap();
+        let root = state.select(PengRobinsonPhaseV1::Stable);
+        let ideal_cv = 2.5 * UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
+        let mechanics = root.caloric_mechanics(ideal_cv, methane().molar_mass.value()).unwrap();
+
+        let dt = 1.0e-3;
+        let plus = model.evaluate_pt(Temperature::new(t + dt), Pressure::new(p)).unwrap();
+        let minus = model.evaluate_pt(Temperature::new(t - dt), Pressure::new(p)).unwrap();
+        let hp = plus.select(PengRobinsonPhaseV1::Stable).residual_enthalpy_j_mol();
+        let hm = minus.select(PengRobinsonPhaseV1::Stable).residual_enthalpy_j_mol();
+        let cp_departure_numeric = (hp - hm) / (2.0 * dt);
+        let cp_departure = mechanics.molar_cp_j_mol_k
+            - (ideal_cv + UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K);
+        assert!((cp_departure - cp_departure_numeric).abs()
+            <= 2.0e-4 * cp_departure_numeric.abs().max(1.0));
+
+        let v = root.molar_volume_m3_per_mol();
+        let dv = v * 1.0e-6;
+        let pressure_from_v = |volume: f64| {
+            let a = root.attraction_parameter;
+            let b = root.covolume_m3_per_mol;
+            UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * t / (volume - b)
+                - a / (volume * volume + 2.0 * b * volume - b * b)
+        };
+        let dpdv_numeric = (pressure_from_v(v + dv) - pressure_from_v(v - dv)) / (2.0 * dv);
+        assert!((mechanics.dp_dv_t_pa_mol_m3 / dpdv_numeric - 1.0).abs() < 2.0e-10);
+        assert!(mechanics.sound_speed_m_s.is_finite() && mechanics.sound_speed_m_s > 0.0);
+        assert!(root.residual_internal_energy_j_mol().is_finite());
+        assert!(root.residual_cv_j_mol_k().is_finite());
     }
 
     #[test]
