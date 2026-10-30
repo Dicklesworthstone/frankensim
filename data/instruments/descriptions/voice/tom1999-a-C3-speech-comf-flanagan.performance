@@ -23,7 +23,12 @@
 #   header for every citation): Ishizaka-Flanagan two-mass pack in the Steinecke-Herzel form with the Poiseuille drop,
 #   damping ratio 0.1 AUTHORED ESTIMATE; Flanagan wall via Birkholz, Haesner and Kuerbis (ICASSP 2022), K ASSUMED;
 #   saturated air at 310.15 K; flanged mouth; 0.30 m at 45 deg; 96 kHz mechanics clock.
-# SUBGLOTTAL PRESSURE: AUTHORED PLAYER INPUT, 900 Pa x q (tests/vowel_gates.rs vw-002 rule). Ramp 60 ms, hold, 150 ms release.
+# SUBGLOTTAL PRESSURE: AUTHORED PLAYER INPUT, 900 Pa x q (tests/vowel_gates.rs vw-002 rule). Ramp 150 ms, hold, 150 ms release.
+#   The 150 ms RISE is cited: Fant and Kruckenberg 2005, Interspeech, doi:10.21437/Interspeech.2005-425, Sec. 1 on Fig. 1: one male
+#   speaker (a laryngologist) reading prose, true subglottal pressure by sonde: 'the duration of the rise to an initial value of the
+#   order of 6-8 cm H2O is 120-180 ms' at the onset of a breath group; 150 ms is the centre of that range. LIMITS: speech, one subject,
+#   not a singer's gesture, no adduction trajectory. Only the rise time is cited; the plateau P is this card's own authored value,
+#   and their 3-5 and 6-8 cm H2O levels are NOT applied. The earlier 60 ms was authored. Steady state, and so the pitch trim, is unchanged.
 # PITCH CONTROL (model-only objective): the three fold stiffnesses are the pack values x q = 0.544097. q was
 #   iterated on the EMERGENT f0 of the radiated pressure (autocorrelation over 0.5-1.5 s of a 1.5 s trial render, same
 #   binary) until it was within 3 cents of C3 = 130.81 Hz (A4 = 440 Hz). No recording enters. Trace
@@ -40,7 +45,7 @@ tract_source tom-1999-ncvs-14-101-table-III-speech-comf
 tract_licence published measurements transcribed with citation (Tom et al. 1999 Tables III and IV); redistribution terms unconfirmed, owner to decide
 microphone 0.212132 0 0.212132 16 64 8000
 subglottal 0 0
-subglottal 0.06 489.687
+subglottal 0.15 489.687
 subglottal 2.85 489.687
 subglottal 3 0
 section 0.88e-4 0.3952273e-2

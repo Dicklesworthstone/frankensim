@@ -37,7 +37,12 @@
 # SUBGLOTTAL PRESSURE: AUTHORED PLAYER INPUT, 900 Pa x q: the drive rule of the in-repo vowel gate,
 #   tests/vowel_gates.rs vw-002, which scales the drive with the stiffness. UNKNOWN for the recorded speaker: Story (2008) reports none; a measured source
 #   would be Holmberg, Hillman & Perkell (1988) subglottal pressures. Q1 sweeps it (voice_q1_subglottal_pressure_metamorphic).
-#   Ramp 0 -> P over 60 ms, hold, ramp to 0 over the last 150 ms.
+#   Ramp 0 -> P over 150 ms, hold, ramp to 0 over the last 150 ms. The 150 ms RISE is cited: Fant and Kruckenberg 2005,
+#   Interspeech, doi:10.21437/Interspeech.2005-425, Sec. 1 on Fig. 1: one male speaker (a laryngologist) reading prose, true
+#   subglottal pressure by sonde: 'the duration of the rise to an initial value of the order of 6-8 cm H2O is 120-180 ms'
+#   at the onset of a breath group. 150 ms is the centre of that range. LIMITS: speech, one subject, not a singer's gesture,
+#   no adduction trajectory. Only the rise time is cited; the plateau P is this card's own authored value, and their
+#   3-5 and 6-8 cm H2O levels are NOT applied. The earlier 60 ms was authored. Steady state, and so the pitch trim, is unchanged.
 # GAS: saturated air at 310.15 K and 101325 Pa. UNKNOWN as a source: Story (2008) does not state the speed of sound
 #   its calculation used; the value is the declared physiological state of tract air, not fitted.
 # TERMINATION: flanged (the mouth modelled as a piston in an infinite baffle, matching the receiver below).
@@ -75,7 +80,7 @@ tract_source story-2008-jasa-123-327-table-I-e
 tract_licence published measurements transcribed with citation (Story 2008 Table I); redistribution terms unconfirmed, owner to decide
 microphone 0.212132 0 0.212132 16 64 8000
 subglottal 0 0
-subglottal 0.06 458.933
+subglottal 0.15 458.933
 subglottal 2.85 458.933
 subglottal 3 0
 section 0.29e-4 0.386e-2
