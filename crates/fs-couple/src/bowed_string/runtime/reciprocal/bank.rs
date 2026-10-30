@@ -23,7 +23,7 @@ use crate::modal_acoustic_time::{ModalAcousticMode, ModalAcousticTimeBudget, Mod
 use crate::render::schedule::{GestureCompileError, ScheduledRenderer};
 use crate::render::schedule::force::coupled::{
     ConstantLossConnection, CoupledModalSystem, ModalAttachment, ModalConnection, ModalCouplingConfig,
-    ModalCouplingError, PreparedModalBudget,
+    ModalCouplingError, ModalPreparation, PreparedModalBudget,
 };
 use crate::render::schedule::force::coupled::contact::friction::{
     FrictionDrive, FrictionModalFrame, FrictionModalSystem, ModalFrictionConfig,
@@ -161,7 +161,7 @@ pub struct MaterialStringBankSource {
     fluid_loading: Option<fluid::StringBankFluidLoading>,
     geometric_stretching: Option<nonlinear::bank::StringBankStretching>,
     longitudinal_waves: Option<nonlinear::longitudinal::StringBankLongitudinal>,
-    prepared_linear: Option<PreparedModalBudget>,
+    prepared_linear: ModalPreparation,
     material_plate: Option<plate::SharedMaterialPlateBody>,
     material_chart: Option<chart::SharedMaterialPlateChartBody>,
     material_chart_basis: Option<crate::thin_plate::RetainedPlateBasis>,
@@ -211,7 +211,10 @@ impl MaterialStringBankSource {
     /// Explicit complete-operator preparation budget, retained through fluid,
     /// torque, multiple-bow and scheduled-performance ownership.
     #[must_use]
-    pub const fn prepared_linear_budget(&self) -> Option<PreparedModalBudget> { self.prepared_linear }
+    pub const fn prepared_linear_budget(&self) -> Option<PreparedModalBudget> { self.prepared_linear.prepared_budget() }
+    /// The explicit construction purpose survives material, gas and connection rebuilds.
+    #[must_use]
+    pub const fn preparation(&self) -> ModalPreparation { self.prepared_linear }
     /// Original source-bound plate and complete physical bridge/observer inputs.
     #[must_use]
     pub const fn material_plate(&self) -> Option<&plate::SharedMaterialPlateBody> { self.material_plate.as_ref() }
@@ -300,7 +303,11 @@ impl ReciprocalStringBank {
         Self::with_body_connections_prepared(cx, strings, gas, bodies, body_connections, None, law, options, gate)
     }
 
-    /// `with_body_connections` on the explicit prepared exact propagation `prepared` (None is the ordinary owner).
+    /// `with_body_connections` with an explicit construction choice. An
+    /// `Option<PreparedModalBudget>` preserves ordinary/prepared playback;
+    /// `ModalPreparation::HarmonicOnly` retains the complete physical bank
+    /// without a time propagator and refuses playback. The choice survives
+    /// material, gas and connection rebuilding.
     /// A connected network above the ordinary dense block (42 coordinates) is refused by its own constructor, so the
     /// record has to be present at construction; `with_prepared_linear_propagation` afterwards cannot rescue it.
     /// The budget is kept in the bank's source for every later fluid/torsion rebuild, and must not be bound again.
@@ -311,11 +318,12 @@ impl ReciprocalStringBank {
     pub fn with_body_connections_prepared(
         cx: &Cx<'_>, strings: Vec<MaterialStringMember>, gas: GasState,
         bodies: Vec<ModalAcousticTimeModel>, body_connections: Vec<ModalConnection>,
-        prepared: Option<PreparedModalBudget>,
+        prepared: impl Into<ModalPreparation>,
         law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
     ) -> Result<Self, ReciprocalStringError> {
         poll(gate)?;
         preflight(&strings, &bodies, &options, body_connections.len())?;
+        let prepared = prepared.into();
         let mut cards = Vec::with_capacity(strings.len());
         for member in &strings {
             poll(gate)?;
@@ -347,7 +355,7 @@ impl ReciprocalStringBank {
     ) -> Result<Self, ReciprocalStringError> {
         self.system = self.system.with_prepared_linear_propagation(budget, gate)
             .map_err(ReciprocalStringError::Friction)?;
-        self.source.prepared_linear = Some(budget);
+        self.source.prepared_linear = ModalPreparation::Prepared(budget);
         poll(gate)?;
         Ok(self)
     }
@@ -560,7 +568,7 @@ fn assemble_sources(
     body_connections: &[ModalConnection],
     translational_body_connections: &[polarization::StringBodyTranslationConnection],
     rotational_body_connections: &[torsion::StringBodyRotationConnection],
-    fluid_loading: Option<&fluid::StringBankFluidLoading>, prepared: Option<PreparedModalBudget>,
+    fluid_loading: Option<&fluid::StringBankFluidLoading>, prepared: impl Into<ModalPreparation>,
     constant_loss: &[ConstantLossConnection], residual: bool, law: FrictionLaw,
     options: &StringBankOptions, gate: &CancelGate,
 ) -> Result<FrictionModalSystem, ReciprocalStringError> {
@@ -668,12 +676,8 @@ fn assemble_sources(
         let sources = sources.ok_or_else(|| invalid("cylinder loading requires original material string sources"))?;
         loading.append_components(cards, sources, &mut components, &mut links, options, gate)?;
     }
-    let network = match prepared {
-        Some(budget) => CoupledModalSystem::new_prepared_with_constant_loss(components, links, constant_loss,
-            options.network, budget, gate),
-        None if constant_loss.is_empty() => CoupledModalSystem::new(components, links, options.network, gate),
-        None => return Err(invalid("a constant-loss bridge needs the prepared exact owner")),
-    }.map_err(ReciprocalStringError::Network)?;
+    let network = CoupledModalSystem::new_with_preparation(components, links, constant_loss,
+        options.network, prepared.into(), gate).map_err(ReciprocalStringError::Network)?;
     let bow_card = &cards[options.bow.string];
     let bow_shape = match sources {
         Some(members) => members[options.bow.string].source.surface_shape(bow_card, options.bow.station_fraction)?,

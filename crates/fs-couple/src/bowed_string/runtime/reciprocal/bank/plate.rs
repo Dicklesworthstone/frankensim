@@ -156,7 +156,7 @@ pub(super) fn finish_material_body(
 pub(super) fn finish_material_body_with_ports(
     cx: &Cx<'_>, sources: Vec<MaterialStringSource>, bridges: &[SharedPlateBridge],
     string_modes: usize, gas: GasState, image: MaterialBodyImage,
-    ports: Option<&[Vec<f64>]>, prepared: Option<PreparedModalBudget>, law: FrictionLaw,
+    ports: Option<&[Vec<f64>]>, prepared: impl Into<ModalPreparation>, law: FrictionLaw,
     options: StringBankOptions, gate: &CancelGate,
 ) -> Result<ReciprocalStringBank, ReciprocalStringError> {
     poll(gate)?;

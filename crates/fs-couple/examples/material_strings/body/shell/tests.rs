@@ -43,6 +43,59 @@ fn response_projection_reuses_playback_body_without_loading_string_sources() {
 }
 
 #[test]
+fn loaded_analysis_keeps_the_playback_bank_without_a_time_propagator() {
+    use fs_math::c64::C64;
+    scoped(|cx, gate| {
+        let mut spec = shell_spec();
+        let budget = PreparedModalBudget {
+            max_modes: 64, max_dense_bytes: 268_435_456,
+            max_multiply_terms: 1_000_000_000_000,
+        };
+        spec.prepared_linear = Some(budget);
+        let load = |name: &str| Ok(if name == "body.fsmatpk" {
+            pack_with_shear(name, 1.0, 1.0, None)
+        } else { pack(name, 1.0, None) });
+        let bound = spec.clone().compile_bank_with_profiles(cx, gate,
+            Some(shell_profile()), None, true, load).unwrap();
+        let playback = spec.compile_with_body(cx, gate, Some(shell_profile()), load).unwrap();
+        let source = bound.bank.source().bank();
+        assert_eq!(source.preparation(), ModalPreparation::HarmonicOnly(budget));
+        assert_eq!(source.prepared_linear_budget(), Some(budget));
+        assert!(source.cylinder_gas_loading().is_some());
+        assert!(source.material_cavity().is_some());
+        assert_eq!(bound.bank.cards().len(), playback.performance.bank().cards().len());
+        for (a, b) in bound.bank.cards().iter().zip(playback.performance.bank().cards()) {
+            assert_eq!(a.fundamental_hz(), b.fundamental_hz());
+            assert_eq!(a.linear_density_kg_m, b.linear_density_kg_m);
+            assert_eq!(a.mode_count, b.mode_count);
+        }
+        let body = source.material_shell_image().unwrap();
+        let other = playback.performance.bank().source().bank().material_shell_image().unwrap();
+        assert_eq!(body.physical_modes(), other.physical_modes());
+        assert_eq!(body.force_ports(), other.force_ports());
+        let before: Vec<_> = bound.bank.system().components().iter()
+            .map(|model| model.states().to_vec()).collect();
+        for omega in [700.0, 2000.0, 6000.0] {
+            let a = bound.bank.material_shell_bridge_harmonic_response(
+                omega, 0, C64::from_re(0.001), 100_000_000, gate).unwrap();
+            let b = playback.performance.bank().material_shell_bridge_harmonic_response(
+                omega, 0, C64::from_re(0.001), 100_000_000, gate).unwrap();
+            for (x, y) in a.released.dynamics.displacement_m_sqrt_kg.iter()
+                .zip(&b.released.dynamics.displacement_m_sqrt_kg) {
+                assert!((*x - *y).abs() <= 1e-10 * x.abs().max(y.abs()).max(1e-20));
+            }
+            let x = a.released.observer_pressure_pa;
+            let y = b.released.observer_pressure_pa;
+            assert!((x-y).abs() <= 1e-10 * x.abs().max(y.abs()).max(1e-20));
+            assert_eq!(a.source_band_rad_s, b.source_band_rad_s);
+        }
+        assert_eq!(before, bound.bank.system().components().iter()
+            .map(|model| model.states().to_vec()).collect::<Vec<_>>());
+        assert!(bound.into_performance(gate).is_err());
+    });
+}
+
+#[test]
 fn independent_bridge_axis_projects_the_original_shell_and_reaches_pressure() {
     scoped(|cx, gate| {
         let text = include_str!("../../cylinder-flow.material-strings")

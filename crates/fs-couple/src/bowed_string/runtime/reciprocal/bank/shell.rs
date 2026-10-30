@@ -94,7 +94,10 @@ impl ReciprocalStringBank {
         Self::from_material_shell_assembly_prepared(cx, sources, gas, body, cavity, None, law, options, gate)
     }
 
-    /// `from_material_shell_assembly` on the explicit prepared exact propagation `prepared` (None is the ordinary owner).
+    /// `from_material_shell_assembly` with explicit ordinary, prepared or
+    /// harmonic-only construction. Existing `Option<PreparedModalBudget>`
+    /// callers retain their playback choice; harmonic-only banks retain all
+    /// physical bindings but have no time propagator and refuse playback.
     /// An assembled body whose modes, cavity, string planes and gas memory exceed the ordinary dense block (42 modal
     /// coordinates) is refused by its own constructor, so the record has to be present at construction. The budget is
     /// kept in the bank's source for every later rebuild and must not be bound again.
@@ -105,7 +108,7 @@ impl ReciprocalStringBank {
     pub fn from_material_shell_assembly_prepared(
         cx: &Cx<'_>, sources: Vec<MaterialStringSource>, gas: GasState,
         body: SharedMaterialShellAssemblyBody, cavity: Option<MaterialBodyCavity>,
-        prepared: Option<PreparedModalBudget>,
+        prepared: impl Into<ModalPreparation>,
         law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
     ) -> Result<Self, ReciprocalStringError> {
         poll(gate)?;
@@ -184,7 +187,10 @@ impl ReciprocalStringBank {
         Self::from_material_shear_shell_prepared(cx, sources, gas, body, cavity, None, law, options, gate)
     }
 
-    /// `from_material_shear_shell` on the explicit prepared exact propagation `prepared` (None is the ordinary owner).
+    /// `from_material_shear_shell` with explicit ordinary, prepared or
+    /// harmonic-only construction. Existing `Option<PreparedModalBudget>`
+    /// callers retain their playback choice; harmonic-only banks retain all
+    /// physical bindings but have no time propagator and refuse playback.
     /// A shell body whose retained modes, cavity, string planes and gas memory exceed the ordinary dense block (42
     /// modal coordinates) is refused by its own constructor, so the record has to be present at construction. The
     /// budget is kept in the bank's source for every later rebuild and must not be bound again.
@@ -195,7 +201,7 @@ impl ReciprocalStringBank {
     pub fn from_material_shear_shell_prepared(
         cx: &Cx<'_>, sources: Vec<MaterialStringSource>, gas: GasState,
         body: SharedMaterialShellBody, cavity: Option<MaterialBodyCavity>,
-        prepared: Option<PreparedModalBudget>,
+        prepared: impl Into<ModalPreparation>,
         law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
     ) -> Result<Self, ReciprocalStringError> {
         poll(gate)?;

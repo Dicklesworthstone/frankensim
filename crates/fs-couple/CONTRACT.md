@@ -205,6 +205,30 @@ frequency. G1 tests compare resonant amplitudes with the anchored one-mode law,
 and a three-clock ladder converges to the same response through the original
 prepared time owner with a nonproportional two-mode connection.
 
+`ModalPreparation::HarmonicOnly(PreparedModalBudget)` constructs these same
+continuous equations without a coupled time propagator, quadratic heat-integral
+matrices or held-step friction compliance. `Ordinary` and `Prepared` preserve
+the existing playback choices; conversion from `Option<PreparedModalBudget>`
+preserves existing callers. The shared preparation owner retains every original
+component, connection, material history and radiation pole, and prepares the
+same constant-loss `g(K)b` directions using the original stiffness/eigen owners.
+Coefficient, material, radiation and internal-component rebuilds preserve the
+chosen purpose. Time staging, prediction, compliance and joint-DG time
+preparation refuse for harmonic-only images before accepted state changes.
+Explicit mode, byte and work allowances still apply; the construction allowance
+includes conservative harmonic workspace and coefficient-preparation estimates.
+Original physical component initialization and shell reduction still run.
+
+Connection and material rank forms assemble on their exact nonzero support,
+using one reused ordered scratch vector. Only exact zero coefficients are
+skipped; there is no numerical sparsity threshold or physical truncation. All
+retained coordinates, the complex LU, original-equation residual and conservative
+work bound are unchanged. Two native support checks compare independent dense
+outer products; two native construction checks establish bit-for-bit response
+and constant-loss parity with prepared playback, including coefficient updates,
+and state-preserving refusal/cancellation. Full-bank and friction construction
+regressions remain authored but unrun.
+
 `SharedCavity::harmonic_response` maps original surface forces and incident
 neck pressure into that same solve and returns physical internal pressure,
 surface volume rate, outward neck flow, mutual exterior reaction and gas
@@ -5352,6 +5376,21 @@ one-way microphone filters refuse because they lie outside the returned native
 observer. Focused production harmonic/pressure and report-writer native checks
 pass; their small container facades do not validate complete bank construction.
 Normal-Cargo bank and projection integration regressions remain unexecuted.
+
+`--loaded-body-response-only` takes the same report arguments without a WAV
+positional path. The frontend shares physical bank construction with playback,
+selects `HarmonicOnly` from the required explicit `prepared-linear` resource
+record, then writes the loaded response before gesture scheduling. It creates
+no coupled time-transition or heat-integral matrices and performs no held-step
+bow-compliance solve. The multiply-work allowance bounds the complete sweep.
+The parser retains computed BEM/Rayleigh source declarations; actual prepared
+playback still refuses those backends before material I/O, while harmonic-only
+construction can retain admitted shell BEM or skin loading. The library's
+Rayleigh binding likewise distinguishes preparation purpose; this shell-only
+CLI does not admit a planar body. Source identity, geometry, gas, fit-band and
+resource gates remain unchanged. Playback-only options and additional microphone
+filters refuse. Two production option-parser tests pass natively; the added
+closed-shell BEM bank integration regression remains authored and unrun.
 
 `SharedMaterialShellBody` and
 `ReciprocalStringBank::from_material_shear_shell` connect that image to every

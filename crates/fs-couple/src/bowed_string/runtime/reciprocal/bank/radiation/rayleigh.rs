@@ -151,8 +151,9 @@ impl ReciprocalStringBank {
     ) -> Result<(Model, PlateRayleighReport), PlateRayleighError> {
         poll(gate)?;
         options.validate(self.source.options.sample_rate_hz)?;
-        if self.system.samples_rendered() != 0 || self.source.prepared_linear.is_some() {
-            return Err(PlateRayleighError::Invalid("computed radiation requires an unstarted exact modal bank"));
+        if self.system.samples_rendered() != 0
+            || matches!(self.source.prepared_linear, ModalPreparation::Prepared(_)) {
+            return Err(PlateRayleighError::Invalid("computed radiation requires an unstarted ordinary or harmonic-only modal bank"));
         }
         if options.sides == 2 && self.source.material_cavity.is_some() {
             return Err(PlateRayleighError::Invalid("a modeled interior cavity permits only one exterior half-space"));

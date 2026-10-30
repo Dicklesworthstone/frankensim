@@ -280,11 +280,20 @@ impl Spec {
         catalog: &mut Catalog, loader: &mut impl FnMut(&str) -> Result<MaterialPack>,
         settings: StringBankOptions, cx: &Cx<'_>, gate: &CancelGate) -> Result<ReciprocalStringBank>
     {
+        self.compile_with_preparation(spec, sources, catalog, loader, settings,
+            spec.prepared_linear.into(), cx, gate)
+    }
+
+    pub(super) fn compile_with_preparation(&self, spec: &input::Spec, sources: Vec<MaterialStringSource>,
+        catalog: &mut Catalog, loader: &mut impl FnMut(&str) -> Result<MaterialPack>,
+        settings: StringBankOptions, preparation: ModalPreparation, cx: &Cx<'_>, gate: &CancelGate)
+        -> Result<ReciprocalStringBank>
+    {
         let body = self.resolve_body(spec, catalog, loader, gate)?;
         // The prepared record, when the data declares one, must reach the constructor: a body above the ordinary
         // 42-coordinate block cannot be built without it.
         Ok(ReciprocalStringBank::from_material_shear_shell_prepared(cx, sources, spec.gas, body,
-            spec.cavity.clone(), spec.prepared_linear, spec.bow_law(0)?.clone(), settings, gate)?)
+            spec.cavity.clone(), preparation, spec.bow_law(0)?.clone(), settings, gate)?)
     }
 
     /// Resolve the same physical body without constructing strings or a time propagator.

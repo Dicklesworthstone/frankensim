@@ -738,6 +738,38 @@ observer's compact or admitted physical scope and provides no exterior-wave
 convergence or finite-amplitude strain certificate. Structural and loaded
 response options are mutually exclusive on one invocation.
 
+For the same connected response without constructing a time propagator or
+rendering a WAV, select `--loaded-body-response-only` and omit the WAV
+positional argument:
+
+```bash
+target/release/material_strings \
+  /path/to/new-memory-run/G3/performance.material-strings \
+  --loaded-body-response-only /path/to/new-memory-run/G3/loaded-response.tsv 101 2000 128 0 \
+  --body-profile /path/to/new-memory-run/G3/body.profile
+```
+
+This route uses the same source resolution, shell projection, string/body
+connections, gas loading, material memory and selected acoustic loading as the
+playback bank. The original coupled owner is explicitly constructed for
+harmonic analysis: it retains the physical coefficients and the same
+constant-loss damping columns, without allocating coupled time transition or
+heat integral matrices or solving bow step compliance. Shell reduction and the
+original physical components' initialization still run. Subsequent source/connection
+rebuilds preserve that construction purpose. The frontend refuses to schedule
+this bank, and attempts to advance its physical clock refuse.
+
+An explicit `prepared-linear` record is required for this loaded analysis; its
+mode, byte and multiply-work declarations are retained as resource limits,
+including the complete sweep work allowance. This selects no new default
+budget and does not prepare a time exponential. All original source and
+physical admission checks remain active. A declared shell BEM or skin load
+still binds its geometry-derived passive air reaction; a resource record alone
+does not select the prepared playback backend. Unsupported contact/nonlinear
+attachments and additional microphone filters still refuse; no connected
+physics is silently removed to make the analysis fit. The original
+`--loaded-body-response` option continues to prepare playback and render a WAV.
+
 ## Separate exterior and cavity pressure surfaces
 
 A v3 profile can declare which original triangles participate in exterior

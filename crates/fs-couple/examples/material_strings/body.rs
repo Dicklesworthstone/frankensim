@@ -205,10 +205,24 @@ impl Profile {
         catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result<MaterialPack>,
         settings:StringBankOptions, cx:&Cx<'_>, gate:&CancelGate) -> Result<ReciprocalStringBank>
     {
+        self.compile_with_preparation(spec, sources, catalog, loader, settings,
+            spec.prepared_linear.into(), cx, gate)
+    }
+    /// Share physical construction and attachment order across playback and
+    /// continuous response. The purpose changes no source or pressure map.
+    pub fn compile_with_preparation(&self, spec:&input::Spec, sources:Vec<MaterialStringSource>,
+        catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result<MaterialPack>,
+        settings:StringBankOptions, preparation:ModalPreparation, cx:&Cx<'_>, gate:&CancelGate)
+        -> Result<ReciprocalStringBank>
+    {
         let bank = match &self.model {
+            BodyModel::Plate(_) if matches!(preparation, ModalPreparation::HarmonicOnly(_)) =>
+                return Err("loaded body-response-only requires a curved or assembled shell".into()),
             BodyModel::Plate(plate) => plate.compile(spec, sources, catalog, loader, settings, cx, gate),
-            BodyModel::Shell(shell) => shell.compile(spec, sources, catalog, loader, settings, cx, gate),
-            BodyModel::Assembly(assembly) => assembly.compile(spec, sources, catalog, loader, settings, cx, gate),
+            BodyModel::Shell(shell) => shell.compile_with_preparation(spec, sources, catalog, loader,
+                settings, preparation, cx, gate),
+            BodyModel::Assembly(assembly) => assembly.compile_with_preparation(spec, sources, catalog,
+                loader, settings, preparation, cx, gate),
         }?;
         // Original string/body material histories are the fixed prefix of the
         // shared memory owner. Cavity thermal diffusion appends to that prefix

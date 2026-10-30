@@ -607,10 +607,9 @@ impl Spec {
             };
             row.end()?;
             options.validate(rate)?;
-            // The prepared owner carries the skin load in its air bank.
-            if prepared_linear.is_some() && !matches!(options, BodyRadiation::Skin(_)) {
-                return Err("body radiation requires the exact owner; prepared-linear has no acoustic storage".into());
-            }
+            // Construction selects ordinary/prepared playback or harmonic-only
+            // analysis after parsing. Keep the physical source declaration;
+            // that selected owner checks backend compatibility before pack I/O.
             Some(options)
         } else { None };
         let shell_bem_angular_refinement = if r.lines.clone().next()

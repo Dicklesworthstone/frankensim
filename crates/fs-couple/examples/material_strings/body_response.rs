@@ -30,6 +30,7 @@ impl Options {
             if args[index] != "--body-response"
                 && args[index] != "--body-response-only"
                 && args[index] != "--loaded-body-response"
+                && args[index] != "--loaded-body-response-only"
             {
                 retained.push(args[index].clone());
                 index += 1;
@@ -67,8 +68,10 @@ impl Options {
                 return Err("body-response requires finite 0 < MIN_HZ < MAX_HZ, 2..=1024 points and a bridge index in 0..8".into());
             }
             selected = Some(Self {
-                analysis_only: args[index] == "--body-response-only",
-                loaded: args[index] == "--loaded-body-response",
+                analysis_only: args[index] == "--body-response-only"
+                    || args[index] == "--loaded-body-response-only",
+                loaded: args[index] == "--loaded-body-response"
+                    || args[index] == "--loaded-body-response-only",
                 output: PathBuf::from(&values[0]),
                 minimum_hz,
                 maximum_hz,
@@ -313,6 +316,17 @@ mod tests {
         assert!(option.as_ref().unwrap().loaded());
         assert!(!option.unwrap().analysis_only());
         assert_eq!(retained, words(&["renderer", "performance", "render.wav"]));
+        let args = words(&[
+            "renderer", "performance", "--loaded-body-response-only",
+            "loaded.tsv", "101", "2000", "32", "0",
+            "--body-profile", "body.profile", "--self-contained",
+        ]);
+        let (retained, option) = Options::extract(&args).unwrap();
+        let option = option.unwrap();
+        assert!(option.loaded() && option.analysis_only());
+        assert_eq!(retained, words(&[
+            "renderer", "performance", "--body-profile", "body.profile", "--self-contained",
+        ]));
     }
 
     #[test]
@@ -335,6 +349,11 @@ mod tests {
             "2000",
             "32",
             "0",
+        ]));
+        assert!(Options::extract(&repeated).is_err());
+        repeated.truncate(first.len());
+        repeated.extend(words(&[
+            "--loaded-body-response-only", "other.tsv", "101", "2000", "32", "0",
         ]));
         assert!(Options::extract(&repeated).is_err());
         assert!(Options::extract(&words(&first[..7])).is_err());

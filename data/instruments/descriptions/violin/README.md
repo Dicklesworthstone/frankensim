@@ -155,15 +155,14 @@ per-element finite-amplitude strain certificate.
 ### Inspect the loaded bridge-to-pressure response
 
 To retain string loading, cavity feedback, material histories and selected
-exterior radiation reaction, query the actual performer before an ordinary
-WAV render:
+exterior radiation reaction, analyze the complete connected bank without
+preparing playback or creating a WAV:
 
 ```bash
 target/release/material_strings \
   /path/to/new-varnished-violin-run/G3/performance.material-strings \
-  /path/to/new-varnished-violin-run/G3/render.wav \
   --body-profile /path/to/new-varnished-violin-run/G3/body.profile \
-  --loaded-body-response /path/to/new-varnished-violin-run/G3/loaded-response.tsv 101 2000 128 0
+  --loaded-body-response-only /path/to/new-varnished-violin-run/G3/loaded-response.tsv 101 2000 128 0
 ```
 
 The logarithmic report includes complex receiver pressure in Pa/N, every
@@ -179,10 +178,24 @@ used for playback; the structural report evaluates the original fitted film
 law. Both enforce source support at every frequency. Coating heat comes from
 its original history range, with no fabricated allocation among films whose
 equal-time factors were combined. The query does not change accepted states
-or histories, and the ordinary WAV render then proceeds.
+or histories.
 
-This option still builds the full performer and prepared propagator. The
-declared `prepared-linear` multiply-work allowance covers the entire sweep.
+This command uses the same physical bank construction as playback, with an
+explicit harmonic-only policy in the original coupled owner. It creates no
+coupled time-transition or heat-integral matrices and performs no held-step
+bow-compliance solve. Shell reduction and original component initialization
+still run; connections, materials and acoustic loads retain their existing
+physical admission checks. Admitted shell BEM and skin loads remain available;
+declaring the analysis resource budget does not select the prepared playback
+backend's narrower acoustic compatibility. Rebuilding a source preserves the
+analysis policy, and attempts to advance this bank's clock refuse.
+
+The existing explicit `prepared-linear` record remains required as the mode,
+byte and work allowance; its multiply-work allowance covers the entire sweep.
+It does not request a time exponential in this mode. To export the same loaded
+response before an ordinary WAV render, supply the new-WAV positional path and
+use `--loaded-body-response` instead. That option still prepares playback.
+
 Unsupported nonlinear/contact attachments, residual-flexibility extensions
 without full direct force columns, and additional frontend microphone filters
 refuse. Pressure retains the selected observer's existing physical scope;

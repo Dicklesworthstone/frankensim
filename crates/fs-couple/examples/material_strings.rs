@@ -48,9 +48,10 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::torsion::{StringBodyRota
     SHEAR_VISCOSITY_REFERENCE_OMEGA as TORSION_REFERENCE,SHEAR_VISCOSITY_REFERENCE_OMEGA_DIMS as TORSION_REFERENCE_DIMS};
 use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::rayleigh::PlateRayleighReport;
 use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::bem::ShellBemReport;
-use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::MaterialBowContact;
+use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::{MaterialBowContact,MultiBowStringBank};
 use fs_couple::bowed_string::runtime::reciprocal::bank::nonlinear::longitudinal::{LongitudinalStringResolution,LongitudinalMaterialLoss};
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::{MultiBowPerformance,MultiBowPerformanceConfig};
+use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::bow_stations::BowStationProgram;
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::force::{StringForceCoupling,StringForcePort,StringForceProgram};
 use fs_couple::bowed_string::runtime::reciprocal::plate::MaterialBodyCavity;
 use fs_couple::cavity_modal::{HelmholtzModalCavity,CavityNeckLoss};
@@ -58,7 +59,7 @@ use fs_couple::modal_acoustic_time::ModalAcousticTimeBudget;
 use fs_couple::pcm_wav::observation::{DecimatedRenderer,PressureRenderer};
 use fs_couple::pcm_wav::stream::{Pcm16WavStream,WavStreamSummary,render_pressure_pcm16,ScheduledWavProgress};
 use fs_couple::render::schedule::force::{ForceInitialization,ForceRenderConfig,ModalForceEvent};
-use fs_couple::render::schedule::force::coupled::{ModalCouplingConfig,MAX_MODAL_CONNECTIONS,PreparedModalBudget};
+use fs_couple::render::schedule::force::coupled::{ModalCouplingConfig,ModalPreparation,MAX_MODAL_CONNECTIONS,PreparedModalBudget};
 use fs_couple::air_path::cylinder::CylinderFlowResolution;
 use fs_couple::render::schedule::force::coupled::contact::friction::ModalFrictionConfig;
 use fs_couple::render::schedule::force::coupled::contact::friction::interface::DryFrictionBinding;
@@ -193,6 +194,22 @@ impl core::fmt::Display for BodyRadiationReport {
 struct Ready { spec: input::Spec, catalog: Catalog, performance: MultiBowPerformance,
     body_profile: Option<body::Profile>, rotational_bridge_baselines_m: Vec<f64>,
     stop_profile: Option<stops::Profile>, body_radiation: Option<BodyRadiationReport> }
+/// The complete physical bank before gesture scheduling and microphone setup.
+/// Both analysis and playback pass through this one source-binding sequence.
+struct ReadyBank { spec: input::Spec, catalog: Catalog, bank: MultiBowStringBank,
+    body_profile: Option<body::Profile>, rotational_bridge_baselines_m: Vec<f64>,
+    stop_profile: Option<stops::Profile>, body_radiation: Option<BodyRadiationReport>,
+    bow_station_program: Option<BowStationProgram> }
+impl ReadyBank {
+    fn into_performance(self, gate: &CancelGate) -> Result<Ready> {
+        if matches!(self.bank.source().bank().preparation(), ModalPreparation::HarmonicOnly(_)) {
+            return Err("a harmonic-only bank cannot be scheduled for playback".into());
+        }
+        self.spec.schedule_bank(self.bank, self.catalog, self.body_profile,
+            self.rotational_bridge_baselines_m, self.stop_profile, self.body_radiation,
+            self.bow_station_program, gate)
+    }
+}
 impl input::Spec {
     fn compile<P: Into<MaterialPack>>(self,cx:&Cx<'_>,gate:&CancelGate,loader:impl FnMut(&str)->Result<P>)->Result<Ready> {
         self.compile_with_body(cx,gate,None,loader)
@@ -201,10 +218,23 @@ impl input::Spec {
         loader:impl FnMut(&str)->Result<P>)->Result<Ready> {
         self.compile_with_profiles(cx,gate,profile,None,loader)
     }
-    fn compile_with_profiles<P: Into<MaterialPack>>(mut self,cx:&Cx<'_>,gate:&CancelGate,profile:Option<body::Profile>,
+    fn compile_with_profiles<P: Into<MaterialPack>>(self,cx:&Cx<'_>,gate:&CancelGate,profile:Option<body::Profile>,
         stop_profile:Option<stops::Profile>,
-        mut loader:impl FnMut(&str)->Result<P>)->Result<Ready> {
+        loader:impl FnMut(&str)->Result<P>)->Result<Ready> {
+        self.compile_bank_with_profiles(cx,gate,profile,stop_profile,false,loader)?
+            .into_performance(gate)
+    }
+    fn compile_bank_with_profiles<P: Into<MaterialPack>>(mut self,cx:&Cx<'_>,gate:&CancelGate,
+        profile:Option<body::Profile>,stop_profile:Option<stops::Profile>,harmonic_only:bool,
+        mut loader:impl FnMut(&str)->Result<P>)->Result<ReadyBank> {
         poll(gate)?;
+        let preparation = if harmonic_only {
+            if !profile.as_ref().is_some_and(body::Profile::has_shell_material_basis) {
+                return Err("loaded body-response-only requires a curved or assembled shell profile".into());
+            }
+            ModalPreparation::HarmonicOnly(self.prepared_linear.ok_or(
+                "loaded body-response-only requires an explicit prepared-linear resource declaration")?)
+        } else { self.prepared_linear.into() };
         if self.longitudinal_waves.is_none()
             && !matches!(&self.longitudinal_loss, LongitudinalMaterialLoss::Elastic) {
             return Err("longitudinal material loss requires explicit axial coordinates".into());
@@ -227,8 +257,9 @@ impl input::Spec {
         if let Some(stops)=&stop_profile { stops.validate_performance(&self,gate)?; }
         if let Some(radiation) = self.body_radiation {
             radiation.validate(self.rate)?;
-            if self.prepared_linear.is_some() && !matches!(radiation, input::BodyRadiation::Skin(_)) {
-                return Err("computed body radiation requires the exact owner with acoustic storage".into());
+            if matches!(preparation, ModalPreparation::Prepared(_))
+                && !matches!(radiation, input::BodyRadiation::Skin(_)) {
+                return Err("prepared playback admits computed body radiation only through a skin load".into());
             }
             match radiation {
                 input::BodyRadiation::Rayleigh(options) => {
@@ -326,7 +357,8 @@ impl input::Spec {
         }
         self.friction.validate_surfaces(&self, &catalog)?;
         let bank=if let Some(body_profile)=&profile {
-            body_profile.compile(&self,sources,&mut catalog,&mut loader,settings.clone(),cx,gate)?
+            body_profile.compile_with_preparation(&self,sources,&mut catalog,&mut loader,
+                settings.clone(),preparation,cx,gate)?
         } else {
             if self.body.modes > input::MAX_PLATE_BODY_MODES {
                 return Err(format!("flat plate bodies admit 1..={} retained body modes",
@@ -455,6 +487,14 @@ impl input::Spec {
         let bank=if let Some(layers)=self.friction.shear_layers() {
             layers.bind(&self,bank,&mut catalog,&mut loader,gate)?
         } else { bank };
+        poll(gate)?;
+        Ok(ReadyBank { spec:self,catalog,bank,body_profile:profile,
+            rotational_bridge_baselines_m:baselines,stop_profile,body_radiation,bow_station_program })
+    }
+
+    fn schedule_bank(self, bank:MultiBowStringBank, catalog:Catalog, profile:Option<body::Profile>,
+        baselines:Vec<f64>, stop_profile:Option<stops::Profile>, body_radiation:Option<BodyRadiationReport>,
+        bow_station_program:Option<BowStationProgram>, gate:&CancelGate) -> Result<Ready> {
         let performance_config=MultiBowPerformanceConfig { samples:self.samples,max_block:self.block,
             max_work:input::MAX_WORK,max_events:input::MAX_CONTROLS };
         let mut performance=if self.bow_ribbon.is_some() {
@@ -640,11 +680,13 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     let (args, gas_options)=thermochemical::Options::extract_os(raw)?;
     let (args, response_options)=body_response::Options::extract(&args)?;
     let response_only=response_options.as_ref().is_some_and(body_response::Options::analysis_only);
+    let loaded_response_only=response_only
+        && response_options.as_ref().is_some_and(body_response::Options::loaded);
     let positional_count=if response_only {2} else {3};
     let (args, source_options)=if response_only { native_input::SourceOptions::extract_after(&args,2)? }
         else { native_input::SourceOptions::extract(&args)? };
     if args.len()<positional_count {
-        return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav [--body-response|--loaded-body-response NEW.tsv MIN_HZ MAX_HZ POINTS BRIDGE_INDEX] [options], or material_strings PERFORMANCE --body-response-only NEW.tsv MIN_HZ MAX_HZ POINTS BRIDGE_INDEX --body-profile PROFILE [source options]".into());
+        return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav [--body-response|--loaded-body-response NEW.tsv MIN_HZ MAX_HZ POINTS BRIDGE_INDEX] [options], or material_strings PERFORMANCE --body-response-only|--loaded-body-response-only NEW.tsv MIN_HZ MAX_HZ POINTS BRIDGE_INDEX --body-profile PROFILE [source options]".into());
     }
     if gas_options.record.is_some() {
         return Err("material-string gas records belong in the performance file".into());
@@ -658,13 +700,13 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     let (trace_path,options)=path_option(&options,"--bow-trace")?;
     let (thermal_path,options)=path_option(&options,"--contact-thermal")?;
     if response_only && (store_dir.is_some() || trace_path.is_some() || thermal_path.is_some() || source_options.decimate) {
-        return Err("--body-response-only accepts body/source options; playback observer stores, traces, contact heat and decimation need a WAV render".into());
+        return Err("response-only commands accept body/source options; playback observer stores, traces, contact heat and decimation need a WAV render".into());
     }
     let thermal_profile=thermal_path.map(|p|contact_thermal::Profile::parse(
         &sources.read_option(p,contact_thermal::MAX_BYTES)?)).transpose()?;
     let (body_path,stop_path)=stops::profile_paths(&options)?;
     if response_only && stop_path.is_some() {
-        return Err("--body-response-only is the unloaded structural body; --stop-profile requires the coupled performer".into());
+        return Err("response-only commands do not admit --stop-profile; no nonlinear contact linearization is selected".into());
     }
     let mut profile=body_path.map(|p|body::Profile::parse(&sources.read_option(p,body::MAX_SHELL_BYTES)?)).transpose()?;
     if response_options.is_some() && !profile.as_ref().is_some_and(body::Profile::has_shell_material_basis) {
@@ -696,7 +738,7 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
             Ok(NormalizedInterfacePack::from_bytes(&bytes)?)
         })?;
     }
-    if response_only {
+    if response_only && !loaded_response_only {
         let mut catalog=Catalog::new();
         let projected=profile.as_ref().ok_or("--body-response-only requires --body-profile")?
             .project_shell(&spec,&mut catalog,&mut |name| {
@@ -733,15 +775,27 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
             Ok(bytes)
         })?;
     }
-    let mut ready=pool.scope(|arena| {
+    let bound=pool.scope(|arena| {
         let cx=Cx::new(&gate,arena,fs_exec::StreamKey {seed:0,kernel_id:0,tile:0,iteration:0},
             fs_exec::Budget::INFINITE,fs_exec::ExecMode::Deterministic);
-        spec.compile_with_profiles(&cx,&gate,profile,stop_profile,|name| {
+        spec.compile_bank_with_profiles(&cx,&gate,profile,stop_profile,loaded_response_only,|name| {
             let bytes=sources.read_relative(name,input::MAX_PACK_BYTES.min(remaining))?;
             remaining=remaining.checked_sub(bytes.len()).ok_or("material pack byte budget exceeded")?;
             MaterialPack::from_bytes(&bytes)
         })
     })?;
+    if loaded_response_only {
+        let work=bound.spec.prepared_linear.ok_or(
+            "loaded body-response-only lost its explicit work declaration")?.max_multiply_terms;
+        for (path,source) in &bound.catalog {
+            eprintln!("coupled_source={path:?}; pack={:?}; hash={}; artifact={}",source.pack.pack_id(),
+                source.pack.content_hash(),source.pack.source_artifact());
+        }
+        eprintln!("loaded_response_preparation=harmonic_only; time_propagator=absent; state_clock=unadvanced");
+        return response_options.as_ref().expect("loaded response-only option checked")
+            .write_loaded(&bound.bank,work,&gate);
+    }
+    let mut ready=bound.into_performance(&gate)?;
     let contact_heat=thermal_profile.as_ref().map(|profile|profile.prepare(&ready,&gate)).transpose()?;
     if let Some(heat)=&contact_heat { heat.describe(); }
     for (path,source) in &ready.catalog {

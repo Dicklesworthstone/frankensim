@@ -337,6 +337,15 @@ impl Spec {
         cx: &Cx<'_>,
         gate: &CancelGate,
     ) -> Result<ReciprocalStringBank> {
+        self.compile_with_preparation(spec, sources, catalog, loader, settings,
+            spec.prepared_linear.into(), cx, gate)
+    }
+
+    pub(crate) fn compile_with_preparation(
+        &self, spec: &input::Spec, sources: Vec<MaterialStringSource>,
+        catalog: &mut Catalog, loader: &mut impl FnMut(&str) -> Result<MaterialPack>,
+        settings: StringBankOptions, preparation: ModalPreparation, cx: &Cx<'_>, gate: &CancelGate,
+    ) -> Result<ReciprocalStringBank> {
         let body = self.resolve_body(spec, catalog, loader, gate)?;
         let bank = ReciprocalStringBank::from_material_shell_assembly_prepared(
             cx,
@@ -344,7 +353,7 @@ impl Spec {
             spec.gas,
             body,
             spec.cavity.clone(),
-            spec.prepared_linear,
+            preparation,
             spec.bow_law(0)?.clone(),
             settings,
             gate,
