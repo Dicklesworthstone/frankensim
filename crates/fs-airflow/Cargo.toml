@@ -79,3 +79,8 @@ required-features = ["compartment-fire"]
 name = "radiating_compartment"
 path = "examples/radiating_compartment.rs"
 required-features = ["compartment-fire"]
+
+[[example]]
+name = "coupled_compartment_fire"
+path = "examples/coupled_compartment_fire.rs"
+required-features = ["compartment-fire"]

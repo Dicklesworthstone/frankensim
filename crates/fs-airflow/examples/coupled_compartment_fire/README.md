@@ -1,0 +1,176 @@
+# Coupled finite-rate compartment example
+
+Run the complete source-owned path from a heated, receding solid into reacting,
+ventilated gas and finite radiating walls:
+
+```bash
+cargo run --release -p fs-airflow --features compartment-fire \
+  --example coupled_compartment_fire -- all 0.1 0.001 12 kinetic
+```
+
+Arguments are `[all|closed|vented] [end_s=0.1] [max_dt_s=0.001]
+[solid_cells=12] [kinetic|frozen]`. CSV state histories go to stdout; work counts
+and maximum conservation residuals go to stderr. The timestep is an upper bound:
+the original network and chemistry owners can retry shorter intervals. The
+example refuses an exhausted source domain or work budget instead of clipping
+temperatures, supplying seed species, or repairing physical balances.
+
+## Physical owners
+
+- `fs-thermochem::kinetics::hydrogen::cantera_h2o2` provides the complete pinned
+  Cantera 3.2.0 hydrogen/oxygen submechanism: ten species and 29 reversible
+  reactions, including its third-body, explicit-collider, duplicate and Troe
+  channels. The example explicitly selects `ContinuousAt300K`, retaining the
+  original heat capacities and low-temperature reference while using the source
+  owner's bounded upper-region enthalpy/entropy continuity treatment. This is
+  the hydrogen subset, not the complete GRI methane mechanism.
+- `ZoneKinetics` advances the actual transported gas inventory in each network
+  pressure trial. Formation energies, reverse rates and pressure dependence
+  come from the same original mechanism. There is no prescribed heat-release
+  rate, additional heat of combustion, global reaction or radical seed.
+- `RecedingSlab` supplies implicit finite-volume conduction, finite-rate
+  decomposition, volatile enthalpy and conservative remapping of the shrinking
+  noncharring solid. `VolatileMixture` transfers its actual integrated pure-H2
+  release using the same NASA gas enthalpy and energy references.
+- `Wall1d` supplies a separate finite wall's stored heat and conduction.
+  `radiation::reactive` solves both surface temperatures with the existing
+  participating enclosure. The original material-card owner supplies the
+  explicitly authored surface emissivities.
+- `MolecularPlanck` uses actual local H2O partial pressure and temperature in
+  the published TNF/RADCAL Planck-mean fit. Other species are explicitly treated
+  as transparent. Using this emission mean as gray absorption across both
+  surface spectra and the finite path is an approximation, not spectroscopic
+  transfer or a certified optical error bound.
+- `ZoneNetwork` and the original stratified opening law solve ventilation
+  against the chemistry-inclusive pressure. The returned solid and wall
+  candidates are installed only with their matching accepted gas step.
+
+Mechanism source:
+[Cantera 3.2.0 h2o2.yaml at its pinned release commit](https://github.com/Cantera/cantera/blob/4a8358eb80cfeb50474386b5f9ec0b3a83519889/data/h2o2.yaml).
+Optical source: [TNF radiation reference](https://tnfworkshop.org/radiation/),
+corrected 7 June 2000; its fit is historical and deliberately simple.
+
+## Authored numerical fixture
+
+**The condensed fuel is a manufactured H2-releasing solid. It is not PMMA,
+wood, metal-hydride data, or an experimentally validated material.** Its
+composition is a bookkeeping choice that permits an elemental balance with
+the actual hydrogen mechanism. Its kinetic and thermal values are explicit
+inputs, not a calibration or a claim that this material exists.
+
+| Input | Value |
+| --- | --- |
+| Fixed gas volume | 0.02 m³: 0.1 m² floor area and 0.2 m height |
+| Initial gas | 1000 K, 101325 Pa; 10% O2 / 90% N2 by mole |
+| Gas layering | One active upper layer; the lower layer remains absent |
+| Ambient reservoir | Same authored diluted oxidizer at 300 K and 101325 Pa |
+| Vented opening | 0.2 m high, 0.001 m wide, discharge coefficient 0.7 |
+| Solid | Area 0.01 m², thickness 0.006 m, density 850 kg/m³ |
+| Solid thermal law | 1500 J/(kg K), conductivity 0.2 W/(m K), initially 500 K |
+| Solid decomposition | First-order Arrhenius: 10⁸ s⁻¹, activation energy 100 kJ/mol |
+| Solid formation reference | Original H2 specific enthalpy at 300 K minus 1 MJ/kg |
+| Solid temperature domain | 300–1200 K |
+| External absorbed irradiation | 450 W = 50000 W/m² × 0.01 m² × 0.9 |
+| Finite wall | Area 0.01 m², thickness 0.02 m, density 500 kg/m³, four cells |
+| Wall thermal law | 1000 J/(kg K), conductivity 1 W/(m K), initially 300 K |
+| Solid / wall emissivity | 0.9 / 0.7, constant diffuse-gray authored cards |
+| Gas contact coefficients | 10 / 8 W/(m² K) for solid / wall |
+| Optical geometry | Reciprocal normal chord between two 0.01 m² patches; 0.2 m gas path |
+| Molecular fit domain | 300–2500 K; no extrapolation |
+| Chemistry local controls | Relative tolerance 10⁻⁵; absolute amount tolerance 10⁻¹² mol |
+
+The patch geometry is not a whole-room enclosure. Unmodeled room surfaces are
+adiabatic. Solid recession does not change vessel volume or introduce pressure
+work. Both condensed back faces are insulated. The hot gas initialization
+provides a definite chemical initial state without pretending to model an
+ignition device.
+
+## Balance and comparison
+
+Every accepted step checks clocks, nonnegative gas inventories, species
+increments, complete gas-plus-solid molecular mass and elemental inventories,
+and gas-plus-solid-plus-wall physical energy. The gas owner's aggregate source
+report contains internal surface heat, volatile enthalpy and numerical
+chemical-reference changes. The example separates these to recover the
+external vent streams, then adds the absorbed heater exactly once to the
+combined storage balance. The same separation is applied to vent species.
+
+`net_chemical_H2_consumption_kg` is the integrated **net** H2 species change
+from all source reactions, including reversible dissociation. It is not a
+single reaction extent or an instantaneous complete-burning estimate.
+`gas_radiation_heat_w` is positive into gas. `endpoint_kappa_m_inv` is evaluated
+at the actual accepted gas endpoint; the coupled surface calculation used the
+previous accepted gas state over that interval.
+
+Useful comparisons keep the source data fixed:
+
+```bash
+# Finite-rate chemistry versus frozen chemistry; radiation still follows composition.
+cargo run --release -p fs-airflow --features compartment-fire \
+  --example coupled_compartment_fire -- closed 0.1 0.001 12 frozen
+
+# One timestep and one spatial refinement of the same closed case.
+cargo run --release -p fs-airflow --features compartment-fire \
+  --example coupled_compartment_fire -- closed 0.1 0.0005 12 kinetic
+cargo run --release -p fs-airflow --features compartment-fire \
+  --example coupled_compartment_fire -- closed 0.1 0.001 24 kinetic
+```
+
+Gas temperature, opacity and optical paths are frozen over each surface-source
+interval. Chemistry uses the original first-order implicit method inside the
+pressure solve. These compositions do not establish a globally second-order
+scheme or a fully discrete entropy theorem. The model is homogeneous ideal
+gas and authored condensed material, with no resolved flame structure,
+diffusive boundary layer, soot-production model, sprays, charring, pore flow,
+real-gas phase or experimental fire validation claim.
+
+## Executed native results
+
+The following runs reached **0.1 s** with the optimized Rust binary, using the
+original production fire and chemistry modules through the focused native
+manifest. This is executed numerical integration evidence, not a full-workspace
+DSR gate, G2 validation, or comparison against an experimental fire. Each run
+completed its mass, elemental, energy, source-domain and shared-clock gates.
+
+| Case | Maximum step (s) | Solid cells | Gas T (K) | Pressure (Pa) | Solid face T (K) | Gas H2O (kg) | Opacity (m⁻¹) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Closed, kinetic | 0.001 | 12 | 1331.047977 | 137365.460154 | 575.581792 | 1.620425103e-4 | 0.153803437 |
+| Vented, kinetic | 0.001 | 12 | 1295.158522 | 114614.158554 | 573.930881 | 1.481052751e-4 | 0.144886061 |
+| Closed, frozen chemistry | 0.001 | 12 | 989.028059 | 103913.655032 | 563.412549 | 0 | 0 |
+| Closed, kinetic, smaller step | 0.0005 | 12 | 1330.604570 | 137322.649575 | 575.647817 | 1.619122982e-4 | 0.153736972 |
+| Closed, kinetic, finer solid | 0.001 | 24 | 1331.611157 | 137428.397829 | 548.250225 | 1.623552811e-4 | 0.154027588 |
+
+The closed kinetic baseline emitted 1.816062521e-5 kg H2 and consumed a net
+1.815734218e-5 kg through the source reactions. Its remaining gas H2 was
+3.283029734e-9 kg. The vented case transported a net 9.957055456e-4 kg out of
+the gas volume, with the actual donor composition and enthalpy. At the final
+baseline intervals, radiation removed 102.880729 W from the closed gas and
+86.920753 W from the vented gas. In the frozen comparison no water forms, so
+the selected gas model stays transparent while surface-to-surface radiation
+and gas convection remain active.
+
+| Run | Maximum combined mass residual (kg) | Maximum combined energy residual (J) | Maximum elemental residual (mol) | Accepted chemistry substeps |
+| --- | ---: | ---: | ---: | ---: |
+| Closed, kinetic | 5.636e-17 | 8.293e-11 | 5.593e-14 | 79392 |
+| Vented, kinetic | 1.522e-17 | 7.617e-11 | 1.548e-14 | 73235 |
+| Closed, frozen | 3.123e-17 | 7.348e-11 | 3.098e-14 | 0 |
+| Smaller step | 2.288e-17 | 2.517e-10 | 2.237e-14 | 94417 |
+| Finer solid | 4.834e-17 | 1.637e-10 | 4.775e-14 | 79505 |
+
+All runs used 100 accepted network intervals, except the smaller-step run's
+200. None needed a network halving. The maximum vent pressure residual was
+9.509e-6 Pa; the maximum surface-power residual over all five runs was
+4.318e-7 W. Chemistry counters describe the payloads of accepted network
+intervals; discarded pressure trials perform additional work. Detailed
+first-order stiff chemistry is still expensive, so use the optimized build.
+
+Halving the network step changes final gas temperature by 0.443407 K. That
+small bulk change does **not** establish convergence of trace species: final
+residual H2 changes from 3.2830e-9 to 9.9499e-9 kg, and OH from 3.9220e-7 to
+5.2215e-7 kg. Increasing solid resolution from 12 to 24 cells changes gas
+temperature by 0.563181 K and emitted mass by about 0.193%, but changes the
+solid face temperature by **27.331567 K**. These two coarse meshes do not
+resolve the early surface thermal transient well enough for an accurate
+surface-temperature or pyrolysis prediction. The runs expose that sensitivity;
+they do not claim a convergence order, a mesh-independent flame prediction,
+or that small balance residuals imply small modeling/discretization errors.
