@@ -154,12 +154,12 @@ state/history integration. The audio command above rendered natively at
 |Z-Z^T|/|Z| = 8.06e-3, 246 load poles at complex RMS 0.0187 against the 0.02
 limit. A 480-frame bake of the same card at 5208aaa05 (the same impedance:
 identical asymmetry, poles and fit errors) gives the receipt as it now reads.
-The band's lowest power eigenvalue is -6.37e-8|Z| at 162.2 Hz, inside its
-refusal, and the least headroom is 5.87e-3|Z| at 305.9 Hz. The earlier receipt
-printed +1.03e-6|Z| at 305.9 Hz as the lowest: the eigenvalue at the frequency
-of least headroom, not the band's lowest. The fit margin is thin since
-88b352677 damped the fit's off-band storage poles; before it the same impedance
-fitted with 230 poles at 0.0071.
+The band's lowest power eigenvalue is -6.37e-8|Z| at 162.2 Hz. It is admitted:
+every frequency keeps at least 5.87e-3|Z| of headroom above its refusal, least
+at 305.9 Hz. The earlier receipt printed +1.03e-6|Z| at 305.9 Hz as the
+lowest: the eigenvalue at the frequency of least headroom, not the band's
+lowest. The fit margin is thin since 88b352677 damped the fit's off-band
+storage poles; before it the same impedance fitted with 230 poles at 0.0071.
 `data/instruments/descriptions/timpani/` holds the measured card.
 
 ## Preserved zero-thickness comparison surface
