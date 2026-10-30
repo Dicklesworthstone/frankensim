@@ -241,9 +241,14 @@ fn g3_opaque_mesh_shadows_the_fixture_to_haze_connection() {
             SourceSpectrum::equal_energy(),
         )];
         let medium = HomogeneousMedium::try_new(0.05, 0.1, PhaseFunction::Isotropic).unwrap();
-        let clear =
-            PhotometricScene::try_new(&[], &sources, medium, TransportOptions::default(), cx)
-                .unwrap();
+        let clear = PhotometricScene::try_new(
+            &[],
+            &sources,
+            medium.clone(),
+            TransportOptions::default(),
+            cx,
+        )
+        .unwrap();
         let shadow =
             PhotometricScene::try_new(&blockers, &sources, medium, TransportOptions::default(), cx)
                 .unwrap();
@@ -283,9 +288,14 @@ fn g1_henyey_greenstein_uses_propagation_directions_for_forward_scattering() {
         // From z=6 the incoming and outgoing propagation vectors are both -Z.
         for z in [6.0, -2.0] {
             let sources = [source([0.0, 0.0, z], 100.0, SourceSpectrum::equal_energy())];
-            let scene =
-                PhotometricScene::try_new(&[], &sources, medium, TransportOptions::default(), cx)
-                    .unwrap();
+            let scene = PhotometricScene::try_new(
+                &[],
+                &sources,
+                medium.clone(),
+                TransportOptions::default(),
+                cx,
+            )
+            .unwrap();
             let result = scene
                 .luminance_along_ray(cx, &forward_ray(), 4.0, settings)
                 .unwrap();
@@ -321,9 +331,14 @@ fn g3_first_opaque_surface_truncates_haze_at_the_real_hit_distance() {
             SourceSpectrum::equal_energy(),
         )];
         let medium = HomogeneousMedium::try_new(0.02, 0.08, PhaseFunction::Isotropic).unwrap();
-        let clear =
-            PhotometricScene::try_new(&[], &sources, medium, TransportOptions::default(), cx)
-                .unwrap();
+        let clear = PhotometricScene::try_new(
+            &[],
+            &sources,
+            medium.clone(),
+            TransportOptions::default(),
+            cx,
+        )
+        .unwrap();
         let wall =
             PhotometricScene::try_new(&surfaces, &sources, medium, TransportOptions::default(), cx)
                 .unwrap();
@@ -367,9 +382,14 @@ fn g3_haze_refuses_unsampled_point_source_singularities_on_the_camera_segment() 
         // quadrature tolerance must not turn its divergent integral finite.
         for x in [0.0, 0.5e-6] {
             let sources = [source([x, 0.0, 0.3], 100.0, SourceSpectrum::equal_energy())];
-            let scene =
-                PhotometricScene::try_new(&[], &sources, medium, TransportOptions::default(), cx)
-                    .unwrap();
+            let scene = PhotometricScene::try_new(
+                &[],
+                &sources,
+                medium.clone(),
+                TransportOptions::default(),
+                cx,
+            )
+            .unwrap();
             assert!(matches!(
                 scene.luminance_along_ray(cx, &forward_ray(), 1.0, settings),
                 Err(PhotometryError::SourceTooClose { source: 0 })

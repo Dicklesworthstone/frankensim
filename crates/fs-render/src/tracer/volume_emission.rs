@@ -61,7 +61,7 @@ pub(super) enum Receiver<'a> {
         source_side: SourceSide,
     },
     Phase {
-        phase: PhaseFunction,
+        phase: &'a PhaseFunction,
         incoming_travel: Vec3,
     },
 }

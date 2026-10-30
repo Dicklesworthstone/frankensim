@@ -24,23 +24,12 @@ use fs_math::det;
 
 use crate::{charts::Ray, volumes};
 
-/// Angular redistribution of light, normalized over the full sphere.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum PhaseFunction {
-    /// Equal probability per solid angle: `1/(4π)` sr⁻¹.
-    Isotropic,
-    /// Henyey–Greenstein scattering with mean scattering cosine `g`.
-    /// Positive `g` means forward scattering along the light's propagation.
-    HenyeyGreenstein {
-        /// Asymmetry in the strictly open interval `(-1,1)`.
-        g: f64,
-    },
-    /// Unpolarized Rayleigh scattering: `3(1+cos²θ)/(16π)` sr⁻¹.
-    Rayleigh,
-}
+// Gray quadrature and spectral paths retain the same immutable angular law.
+// The analytic gray evaluations below preserve their existing arithmetic.
+pub use crate::volumes::transport::scattering::{PhaseFunction, TabulatedPhase};
 
 /// Validated global, homogeneous, gray participating medium.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct HomogeneousMedium {
     absorption_per_m: f64,
     scattering_per_m: f64,
@@ -66,7 +55,7 @@ impl HomogeneousMedium {
         if !extinction_per_m.is_finite() {
             return Err(MediumError::ExtinctionOverflow);
         }
-        if let PhaseFunction::HenyeyGreenstein { g } = phase
+        if let PhaseFunction::HenyeyGreenstein { g } = &phase
             && (!g.is_finite() || g.abs() >= 1.0)
         {
             return Err(MediumError::Asymmetry);
@@ -92,31 +81,37 @@ impl HomogeneousMedium {
 
     /// Absorption coefficient, m⁻¹.
     #[must_use]
-    pub const fn absorption_per_m(self) -> f64 {
+    pub const fn absorption_per_m(&self) -> f64 {
         self.absorption_per_m
     }
 
     /// Scattering coefficient, m⁻¹.
     #[must_use]
-    pub const fn scattering_per_m(self) -> f64 {
+    pub const fn scattering_per_m(&self) -> f64 {
         self.scattering_per_m
     }
 
     /// Total extinction `sigma_a + sigma_s`, m⁻¹.
     #[must_use]
-    pub const fn extinction_per_m(self) -> f64 {
+    pub const fn extinction_per_m(&self) -> f64 {
         self.extinction_per_m
     }
 
     /// Declared scattering law.
     #[must_use]
-    pub const fn phase(self) -> PhaseFunction {
-        self.phase
+    pub fn phase(&self) -> PhaseFunction {
+        self.phase.clone()
+    }
+
+    /// Borrow the shared scattering law without cloning table storage.
+    #[must_use]
+    pub const fn phase_ref(&self) -> &PhaseFunction {
+        &self.phase
     }
 
     /// Direct, unscattered transmission over a finite nonnegative metric length.
     /// The exponent accounts for scattering out of the beam as well as absorption.
-    pub fn transmittance(self, distance_m: f64) -> Result<f64, MediumError> {
+    pub fn transmittance(&self, distance_m: f64) -> Result<f64, MediumError> {
         if !distance_m.is_finite() || distance_m < 0.0 {
             return Err(MediumError::Distance);
         }
@@ -127,17 +122,21 @@ impl HomogeneousMedium {
     /// **propagation** directions. For a point light, incoming propagation is
     /// from the light to the scattering point; outgoing is toward the camera.
     /// Tiny unit-vector dot-product roundoff beyond `[-1,1]` is clamped.
-    pub fn phase_per_sr(self, cos_scatter: f64) -> Result<f64, MediumError> {
+    pub fn phase_per_sr(&self, cos_scatter: f64) -> Result<f64, MediumError> {
         if !cos_scatter.is_finite() || cos_scatter.abs() > 1.0 + 32.0 * f64::EPSILON {
             return Err(MediumError::ScatteringCosine);
         }
         let cosine = cos_scatter.clamp(-1.0, 1.0);
-        Ok(match self.phase {
+        Ok(match &self.phase {
             PhaseFunction::Isotropic => 1.0 / (4.0 * PI),
             // volumes::hg_pdf_cos integrates to one over d(cosθ), so restore
             // the azimuthal 1/(2π) to obtain the solid-angle phase density.
-            PhaseFunction::HenyeyGreenstein { g } => volumes::hg_pdf_cos(g, cosine) / (2.0 * PI),
+            PhaseFunction::HenyeyGreenstein { g } => volumes::hg_pdf_cos(*g, cosine) / (2.0 * PI),
             PhaseFunction::Rayleigh => 3.0 * (1.0 + cosine * cosine) / (16.0 * PI),
+            PhaseFunction::Tabulated(_) => self
+                .phase
+                .eval_cos(cosine)
+                .map_err(|_| MediumError::ScatteringCosine)?,
         })
     }
 }
@@ -546,7 +545,7 @@ mod tests {
             PhaseFunction::HenyeyGreenstein { g: -0.7 },
             PhaseFunction::Rayleigh,
         ] {
-            let medium = HomogeneousMedium::try_new(0.0, 0.1, phase).unwrap();
+            let medium = HomogeneousMedium::try_new(0.0, 0.1, phase.clone()).unwrap();
             let mut integral = 0.0;
             for panel in 0..panels {
                 let cosine = -1.0 + 2.0 * (f64::from(panel) + 0.5) / f64::from(panels);
@@ -777,7 +776,7 @@ mod tests {
         with_cx(|_, cx| {
             let medium = HomogeneousMedium::try_new(0.1, 0.2, PhaseFunction::Isotropic).unwrap();
             let settings = ScatterSettings::default();
-            for (medium, distance) in [(HomogeneousMedium::vacuum(), 3.0), (medium, 0.0)] {
+            for (medium, distance) in [(HomogeneousMedium::vacuum(), 3.0), (medium.clone(), 0.0)] {
                 let result = single_scattered_luminance(
                     &medium,
                     &ray(),

@@ -19,9 +19,13 @@
 //! Append `--camera-lens 50 24 2.8 12` to `--paths` for a 50 mm focal length,
 //! 24 mm active sensor height, f/2.8 aperture and 12 m axial focus distance.
 //! The image remains pupil-averaged luminance; exposure is not applied.
+//! Append `--haze-phase CSV` to supply `(cos_theta, relative_density)` rows,
+//! with an optional header and `#` comments. Nonuniform knots must cover
+//! exactly [-1,1]. The same normalized table drives gray and spectral modes.
 //! These declared fixture profiles and gray haze are examples, not measurements.
 
 use std::error::Error;
+use std::io::Read;
 
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, RunId, StreamKey};
 use fs_geom::{Point3, Vec3};
@@ -50,24 +54,29 @@ use fs_render::tracer::{
     Shape,
 };
 use fs_render::volumes::VolumeGrid;
-use fs_render::volumes::transport::scattering::{
-    MassScatteringSpectrum, PhaseFunction as GridPhase, ScatteringGrid,
-};
+use fs_render::volumes::transport::scattering::{MassScatteringSpectrum, ScatteringGrid};
 use fs_render::volumes::transport::{AbsorbingGrid, AbsorbingGridBudget, MassAbsorptionSpectrum};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    const USAGE: &str = "usage: photometric_stage [--csv | --paths | --total-csv] [--panels] [--projector-focus METRES] [--projector-split BEAMS ANGLE_DEG] [--point-connections K] [--workers N] [--camera-lens FOCAL_MM SENSOR_HEIGHT_MM F_NUMBER FOCUS_M]; options require a path mode; splitting requires a projector; camera lens requires --paths";
-    let mode = args.first().map_or("", String::as_str);
+    const USAGE: &str = "usage: photometric_stage [--csv | --paths | --total-csv] [--haze-phase CSV] [--panels] [--projector-focus METRES] [--projector-split BEAMS ANGLE_DEG] [--point-connections K] [--workers N] [--camera-lens FOCAL_MM SENSOR_HEIGHT_MM F_NUMBER FOCUS_M]; options except haze phase require a path mode; splitting requires a projector; camera lens requires --paths";
+    let (mode, option_start) = match args.first().map(String::as_str) {
+        Some(mode @ ("--csv" | "--paths" | "--total-csv")) => (mode, 1),
+        _ => ("", 0),
+    };
     let mut workers = None;
     let mut panels = false;
     let mut projector_focus_m = None;
     let mut projector_split = None;
     let mut point_connections = None;
     let mut camera_lens = None;
-    let mut extra = args.get(1..).unwrap_or_default().iter();
+    let mut haze_phase = None;
+    let mut extra = args[option_start..].iter();
     while let Some(flag) = extra.next() {
         match flag.as_str() {
+            "--haze-phase" if haze_phase.is_none() => {
+                haze_phase = Some(read_haze_phase(extra.next().ok_or(USAGE)?)?);
+            }
             "--workers" if workers.is_none() => {
                 workers = Some(extra.next().ok_or(USAGE)?.parse::<usize>()?);
             }
@@ -162,9 +171,37 @@ fn main() -> Result<(), Box<dyn Error>> {
             projector_split,
             point_connections,
             camera_lens,
+            haze_phase.unwrap_or(PhaseFunction::HenyeyGreenstein { g: 0.7 }),
             execution.as_ref(),
         )
     })
+}
+
+fn read_haze_phase(path: &str) -> Result<PhaseFunction, Box<dyn Error>> {
+    // Bound this example's input independently of the library's knot budget.
+    const MAX_BYTES: u64 = 512 * 1024;
+    let mut input = String::new();
+    std::fs::File::open(path)?
+        .take(MAX_BYTES + 1)
+        .read_to_string(&mut input)?;
+    if input.len() as u64 > MAX_BYTES {
+        return Err("haze phase CSV exceeds 512 KiB".into());
+    }
+    let mut knots = Vec::new();
+    for (line_index, line) in input.lines().enumerate() {
+        let line = line.split('#').next().unwrap_or_default().trim();
+        if line.is_empty() || (knots.is_empty() && line == "cos_theta,relative_density") {
+            continue;
+        }
+        let Some((cosine, density)) = line.split_once(',') else {
+            return Err(format!("haze phase line {} needs two CSV columns", line_index + 1).into());
+        };
+        knots.push((
+            cosine.trim().parse::<f64>()?,
+            density.trim().parse::<f64>()?,
+        ));
+    }
+    Ok(PhaseFunction::tabulated(&knots)?)
 }
 
 fn run(
@@ -177,6 +214,7 @@ fn run(
     projector_split: Option<(usize, f64)>,
     point_connections: Option<u32>,
     camera_lens: Option<(CameraProjection, Aperture, f64)>,
+    phase: PhaseFunction,
     execution: Option<&RenderExecutionConfig>,
 ) -> Result<(), Box<dyn Error>> {
     // Keep machine-readable CSV on stdout and its interpretation on stderr.
@@ -187,6 +225,11 @@ fn run(
     eprintln!(
         "units=m,rad,lm,cd,lx,cd/m^2; numerical=NoClaim; fixture_calibration_error=unknown; spectral_discretization_error=unknown; geometry_material_medium_error=unknown"
     );
+    if matches!(phase, PhaseFunction::Tabulated(_)) {
+        eprintln!(
+            "haze_phase=tabulated; axis=propagation_cosine; interpolation=linear_cosine; angular_measurement_and_interpolation_error=unknown"
+        );
+    }
     if paths || total_csv {
         eprintln!(
             "sampling=IID; seed=0x50524556495a; standard_error=sample_estimate_only; confidence_interval=none; max_vertices=6; omitted_transport_error=unknown; total_error=unknown"
@@ -234,7 +277,7 @@ fn run(
     let medium = HomogeneousMedium::try_new(
         0.005, // absorption, m^-1
         0.025, // scattering, m^-1
-        PhaseFunction::HenyeyGreenstein { g: 0.7 },
+        phase.clone(),
     )?;
     let scene = PhotometricScene::try_new(
         &surfaces,
@@ -307,6 +350,7 @@ fn run(
             projector_focus_m,
             projector_split,
             point_connections,
+            phase,
             execution,
         );
     }
@@ -364,6 +408,7 @@ fn run_paths(
     projector_focus_m: Option<f64>,
     projector_split: Option<(usize, f64)>,
     point_connections: Option<u32>,
+    phase: PhaseFunction,
     execution: Option<&RenderExecutionConfig>,
 ) -> Result<(), Box<dyn Error>> {
     // A back wall receives reflected floor light through the same material law.
@@ -518,7 +563,7 @@ fn run_paths(
         cx,
         absorption,
         MassScatteringSpectrum::constant(0.025)?,
-        GridPhase::henyey_greenstein(0.7)?,
+        phase,
     )?;
     let point_sampling = point_connections.map_or(PointFixtureSampling::All, |count| {
         PointFixtureSampling::Importance {

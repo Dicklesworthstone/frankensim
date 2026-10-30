@@ -39,7 +39,7 @@ fn fixtures(scale: f64) -> Vec<PhotometricSource> {
 // weights, rather than the renderer's distance-space midpoint/Beer panels.
 // No production phase, transmittance, geometry or spectral function supplies
 // the expected value. The source's declared intensity is already in candela.
-fn airlight_reference(phase: PhaseFunction, absorption: f64, scattering: f64) -> f64 {
+fn airlight_reference(phase: &PhaseFunction, absorption: f64, scattering: f64) -> f64 {
     let panels = 4096;
     FIXTURES
         .iter()
@@ -57,6 +57,7 @@ fn airlight_reference(phase: PhaseFunction, absorption: f64, scattering: f64) ->
                         (1.0 - g * g) / (4.0 * PI * (1.0 + g * g - 2.0 * g * cosine).powf(1.5))
                     }
                     PhaseFunction::Rayleigh => 3.0 * (1.0 + cosine * cosine) / (16.0 * PI),
+                    PhaseFunction::Tabulated(_) => unreachable!("analytic reference fixtures only"),
                 };
                 let s = c + b * theta.tan();
                 let r = b / theta.cos();
@@ -82,7 +83,7 @@ fn g1_noncollinear_multi_fixture_airlight_matches_independent_reference() {
             PhaseFunction::HenyeyGreenstein { g: -0.45 },
             PhaseFunction::Rayleigh,
         ] {
-            let medium = HomogeneousMedium::try_new(0.04, 0.08, phase).unwrap();
+            let medium = HomogeneousMedium::try_new(0.04, 0.08, phase.clone()).unwrap();
             let scene =
                 PhotometricScene::try_new(&[], &sources, medium, TransportOptions::default(), cx)
                     .unwrap();
@@ -99,7 +100,7 @@ fn g1_noncollinear_multi_fixture_airlight_matches_independent_reference() {
                     },
                 )
                 .unwrap();
-            let expected = airlight_reference(phase, 0.04, 0.08);
+            let expected = airlight_reference(&phase, 0.04, 0.08);
             close(result.luminance_cd_m2, expected, 5.0e-8);
             assert_eq!(result.surface_cd_m2, 0.0);
             assert!(result.single_scatter.tolerance_met);

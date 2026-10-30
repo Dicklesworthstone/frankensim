@@ -677,7 +677,7 @@ pub(super) fn volume_contribution(
     fixtures: &FixtureLighting<'_>,
     cx: &Cx<'_>,
     medium: PathMedium<'_, '_>,
-    phase: PhaseFunction,
+    phase: &PhaseFunction,
     point: Point3,
     incoming_travel: Vec3,
     wavelengths: &[f64; PACKET],

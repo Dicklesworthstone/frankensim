@@ -5,12 +5,15 @@ use fs_blake3::DomainHasher;
 use fs_geom::Vec3;
 use fs_math::det;
 
+mod table;
+pub use table::{MAX_PHASE_KNOTS, TabulatedPhase};
+
 const INV_FOUR_PI: f64 = 1.0 / (4.0 * core::f64::consts::PI);
 
 /// Normalized phase probability per solid angle. Both directions describe
 /// forward path travel: positive HG asymmetry scatters along the incoming ray,
 /// unlike a surface convention with both vectors pointing away from a vertex.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PhaseFunction {
     /// Uniform direction, probability `1 / (4 pi)`.
     Isotropic,
@@ -21,6 +24,8 @@ pub enum PhaseFunction {
     },
     /// Unpolarized Rayleigh law `3 (1 + cos²(theta)) / (16 pi)`.
     Rayleigh,
+    /// Reciprocal, azimuthally symmetric tabulated law with a matched sampler.
+    Tabulated(TabulatedPhase),
 }
 
 /// An importance-sampled unit travel direction and its solid-angle density.
@@ -40,7 +45,12 @@ impl PhaseFunction {
         Ok(result)
     }
 
-    pub(super) fn validate(self) -> Result<(), VolumeTransportError> {
+    /// Normalize an angular table and construct its matched phase sampler.
+    pub fn tabulated(knots: &[(f64, f64)]) -> Result<Self, VolumeTransportError> {
+        TabulatedPhase::try_new(knots).map(Self::Tabulated)
+    }
+
+    pub(super) fn validate(&self) -> Result<(), VolumeTransportError> {
         if let Self::HenyeyGreenstein { g } = self
             && (!g.is_finite() || g.abs() >= 1.0)
         {
@@ -49,7 +59,7 @@ impl PhaseFunction {
         Ok(())
     }
 
-    pub(super) fn hash_into(self, hash: &mut DomainHasher) {
+    pub(super) fn hash_into(&self, hash: &mut DomainHasher) {
         match self {
             Self::Isotropic => hash.update(&[0]),
             Self::HenyeyGreenstein { g } => {
@@ -57,13 +67,17 @@ impl PhaseFunction {
                 hash.update(&g.to_bits().to_le_bytes());
             }
             Self::Rayleigh => hash.update(&[2]),
+            Self::Tabulated(table) => {
+                hash.update(&[3]);
+                table.hash_into(hash);
+            }
         }
     }
 
     /// Evaluate using `incoming_travel.dot(outgoing_travel)`; the result is
     /// both the physical phase value and the sampling PDF. Tiny dot-product
     /// roundoff outside the unit interval clamps, while invalid angles refuse.
-    pub fn eval_cos(self, cos_theta: f64) -> Result<f64, VolumeTransportError> {
+    pub fn eval_cos(&self, cos_theta: f64) -> Result<f64, VolumeTransportError> {
         self.validate()?;
         if !cos_theta.is_finite() || cos_theta.abs() > 1.0 + 2.0e-10 {
             return Err(VolumeTransportError::Phase);
@@ -74,7 +88,7 @@ impl PhaseFunction {
             Self::HenyeyGreenstein { g } => {
                 let a = g.abs();
                 // Keep the forward/backward peak stable as |g| approaches one.
-                let denominator = if g >= 0.0 {
+                let denominator = if *g >= 0.0 {
                     (1.0 - a) * (1.0 - a) + 2.0 * a * (1.0 - c)
                 } else {
                     (1.0 - a) * (1.0 - a) + 2.0 * a * (1.0 + c)
@@ -82,13 +96,14 @@ impl PhaseFunction {
                 (1.0 - a) * (1.0 + a) * INV_FOUR_PI / (denominator * det::sqrt(denominator))
             }
             Self::Rayleigh => 0.75 * INV_FOUR_PI * (1.0 + c * c),
+            Self::Tabulated(table) => table.eval_clamped(c),
         })
     }
 
     /// Sample the exact angular CDF and a uniform azimuth from `[0,1)` variates.
     /// No small-anisotropy isotropic approximation is used.
     pub fn sample(
-        self,
+        &self,
         incoming_travel: Vec3,
         u_cos: f64,
         u_azimuth: f64,
@@ -109,10 +124,10 @@ impl PhaseFunction {
                 // Algebraic HG inversion without subtracting nearly equal
                 // terms then dividing by g; exact also at g=0 and small |g|.
                 let a = g.abs();
-                let u = if g < 0.0 { 1.0 - u_cos } else { u_cos };
+                let u = if *g < 0.0 { 1.0 - u_cos } else { u_cos };
                 let q = (1.0 - a) / ((1.0 - a) + 2.0 * a * u);
                 let c = 1.0 - 2.0 * q * q * (1.0 - u) * (1.0 + a * u);
-                if g < 0.0 { -c } else { c }
+                if *g < 0.0 { -c } else { c }
             }
             Self::Rayleigh => {
                 // Invert c³+3c=8u-4 using 2*sinh(asinh(4u-2)/3).
@@ -122,6 +137,7 @@ impl PhaseFunction {
                 let e = det::expm1(t);
                 (e * (2.0 + e) / (1.0 + e)).copysign(r)
             }
+            Self::Tabulated(table) => table.sample_cosine(u_cos)?,
         }
         .clamp(-1.0, 1.0);
         let sine = det::sqrt(((1.0 - cosine) * (1.0 + cosine)).max(0.0));
@@ -140,9 +156,30 @@ impl PhaseFunction {
             tangent.z * x + bitangent.z * y + w.z * cosine,
         );
         let direction = raw.scale(1.0 / det::sqrt(raw.dot(raw)));
-        Ok(PhaseSample {
-            direction,
-            pdf: self.eval_cos(w.dot(direction))?,
-        })
+        let pdf = self.eval_cos(w.dot(direction))?;
+        if let Self::Tabulated(table) = self
+            && pdf == 0.0
+        {
+            // A zero-density CDF boundary has measure zero. A frame rotation
+            // may also round an edge sample just outside very narrow support.
+            // Use an actual interior direction in that same positive segment;
+            // never replace the physical PDF by a nonzero floor.
+            let cosine = table.interior_cosine(u_cos);
+            let sine = det::sqrt(((1.0 - cosine) * (1.0 + cosine)).max(0.0));
+            let x = sine * cos_phi;
+            let y = sine * sin_phi;
+            let raw = Vec3::new(
+                tangent.x * x + bitangent.x * y + w.x * cosine,
+                tangent.y * x + bitangent.y * y + w.y * cosine,
+                tangent.z * x + bitangent.z * y + w.z * cosine,
+            );
+            let direction = raw.scale(1.0 / det::sqrt(raw.dot(raw)));
+            let pdf = self.eval_cos(w.dot(direction))?;
+            if !(pdf > 0.0 && pdf.is_finite()) {
+                return Err(VolumeTransportError::Unrepresentable);
+            }
+            return Ok(PhaseSample { direction, pdf });
+        }
+        Ok(PhaseSample { direction, pdf })
     }
 }

@@ -100,7 +100,7 @@ impl PhotometricScene<'_> {
         ray: &Ray,
         distance_m: f64,
         scatter: ScatterSettings,
-        medium: HomogeneousMedium,
+        medium: &HomogeneousMedium,
     ) -> Result<LuminanceEstimate, PhotometryError> {
         cx.checkpoint()?;
         if !scatter.is_valid() {
@@ -204,7 +204,7 @@ impl PhotometricScene<'_> {
         }
         let surface_cd_m2 = surface_sum.finish()? * medium.transmittance(limit)?;
         let single_scatter = single_scattered_luminance_partitioned(
-            &medium,
+            medium,
             ray,
             limit,
             scatter,
