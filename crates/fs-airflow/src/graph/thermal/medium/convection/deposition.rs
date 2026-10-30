@@ -4,9 +4,12 @@
 //! store. One original transport snapshot supplies Re or Ra, Pr and h per binding.
 //! The original thermal owner supplies wall temperature and currently exposed
 //! area. Evaluate inside a thermal residual callback, never only at step start.
-//! Fluid property conditions, expansion and geometry are held fixed during an
-//! interval; the actual wall temperature still changes natural-convection Ra.
-//! This is not a resolved flow, film-temperature or evolving gas energy model.
+//! Borrowed-snapshot boundaries freeze fluid properties. The source-backed
+//! adapter re-evaluates transport and expansion at declared reservoir or film
+//! temperature inside the same residual. Geometry and reservoir energy remain
+//! prescribed; this is not a resolved-flow model.
+
+pub mod source;
 
 use std::collections::{BTreeMap, BTreeSet};
 use fs_conduction::transient::deposition::{CellId, DepositionError, DepositionSimulation};

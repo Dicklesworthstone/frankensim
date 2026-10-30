@@ -15,6 +15,8 @@ use fs_qty::semantic::{Composition, CompositionBasis};
 
 #[path = "material_cell_convection/thermal_source.rs"]
 mod thermal_source;
+#[path = "material_cell_convection/film_source.rs"]
+mod film_source;
 
 const IDS: [CellId;2] = [CellId(30), CellId(10)];
 const AREA: f64 = 0.01;

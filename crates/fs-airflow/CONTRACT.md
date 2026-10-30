@@ -87,6 +87,27 @@ heat-transfer calculations, material substitution, both heat directions,
 negative expansion, nonlinear accepted endpoints, ambient heater startup,
 mixed-law ownership and thermal-energy balance.
 
+### Source-resolved film convection on the same finite-cell residual
+
+`medium::convection::deposition::source::evaluate_source_cell_convection`
+re-evaluates the original fluid owner at an explicitly selected reservoir or
+mean film temperature for every proposed thermal endpoint. The property
+temperature never replaces the actual reservoir temperature in buoyancy or
+signed heat flow. Density, heat capacity, conductivity, viscosity and known
+signed isobaric expansion share one checked source state. Natural convection
+requires sourced expansion; forced convection does not invent it when absent.
+
+The result retains each concrete material owner and its thermal snapshot beside
+the original correlation, exposed-area and heat-source results. Prepared source
+laws retain pressure, composition and selected claims across trials; the generic
+transport interface does not establish that identity on a caller's behalf.
+Source support, duplicate-boundary ownership, work limits and cancellation
+remain transactional. The prescribed reservoir has no simulated finite energy
+store, and each correlation still requires its own supported property convention.
+`tests/material_cell_convection/film_source.rs` checks independent film-property
+algebra, signed expansion, source-only viscosity substitutions in accepted
+backward-Euler finite-body balances, retained claims and atomic refusals.
+
 ### Shared thermochemical medium in hydraulic and heat paths
 
 `FrozenFlowMedium::bind_fan_bank` connects the same original reference/inlet
