@@ -5,6 +5,9 @@
 //! refreshes that same acoustic endpoint. Every trial starts from the original
 //! gas and the same marched wave, branch, channel and exterior histories.
 
+/// One deliberately shared finite gas inventory spanning both original tracts.
+pub mod series;
+
 use super::{ApertureDg, DgApertureFrame, accept_acoustic_candidate};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::dynamic::ApertureDrive;

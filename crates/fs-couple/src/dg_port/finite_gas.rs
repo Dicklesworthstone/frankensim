@@ -61,7 +61,7 @@ pub(crate) struct FiniteGasDgPortCandidate<S> {
     pub step: FiniteGasDgPortStep<S>,
 }
 
-fn check<E>(cancelled: &mut impl FnMut() -> bool) -> Result<(), FiniteGasDgError<E>> {
+pub(crate) fn check<E>(cancelled: &mut impl FnMut() -> bool) -> Result<(), FiniteGasDgError<E>> {
     if cancelled() {
         Err(FiniteGasDgError::Cancelled)
     } else {
@@ -69,7 +69,7 @@ fn check<E>(cancelled: &mut impl FnMut() -> bool) -> Result<(), FiniteGasDgError
     }
 }
 
-fn acoustic<E>(error: AcousticRealizeError) -> FiniteGasDgError<E> {
+pub(crate) fn acoustic<E>(error: AcousticRealizeError) -> FiniteGasDgError<E> {
     match error {
         AcousticRealizeError::Cancelled => FiniteGasDgError::Cancelled,
         AcousticRealizeError::Duct(fs_duct::DuctError::Cancelled { .. }) => {
@@ -92,6 +92,24 @@ pub(crate) fn admit_initial<E>(
 ) -> Result<(), FiniteGasDgError<E>> {
     check(cancelled)?;
     admit_finite_gas_controls(controls)?;
+    let volume = admitted_volume(load, gas, cancelled)?;
+    if (gas.volume_m3() / volume - 1.0).abs() > 64.0 * f64::EPSILON {
+        return Err(FiniteGasDgError::Invalid(
+            "finite inventory volume must equal the main bore plus its finite terminal passages",
+        ));
+    }
+    Ok(())
+}
+
+/// Admit one original source and return its actual main-gas geometric volume.
+/// A deliberately shared parcel may span multiple complete loads; the caller
+/// checks their total volume once instead of assigning its mass to each load.
+pub(crate) fn admitted_volume<E>(
+    load: &DgPortLoad,
+    gas: &ClosedGasParcel,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, FiniteGasDgError<E>> {
+    check(cancelled)?;
     let original = load.duct().gas_field().ok_or(FiniteGasDgError::Invalid(
         "finite gas port coupling requires the original complete source field",
     ))?;
@@ -135,16 +153,80 @@ pub(crate) fn admit_initial<E>(
             } => core::f64::consts::PI * radius_m * radius_m * length_m,
         };
     }
-    if !volume.is_finite()
-        || volume <= 0.0
-        || (gas.volume_m3() / volume - 1.0).abs() > 64.0 * f64::EPSILON
-    {
+    if !volume.is_finite() || volume <= 0.0 {
         return Err(FiniteGasDgError::Invalid(
-            "finite inventory volume must equal the main bore plus its finite terminal passages",
+            "finite inventory geometric volume must be positive and representable",
         ));
     }
     load.port_response().map_err(acoustic)?;
-    check(cancelled)
+    check(cancelled)?;
+    Ok(volume)
+}
+
+pub(crate) fn refresh_kind(loss: FiniteGasDgLoss) -> DgGasRefresh {
+    match loss {
+        FiniteGasDgLoss::Lossless => DgGasRefresh::Lossless,
+        FiniteGasDgLoss::UniformViscothermal {
+            maximum_relative_error,
+        } => DgGasRefresh::UniformDiffusion {
+            maximum_relative_error,
+        },
+    }
+}
+
+/// The original finite gas must close its actual caloric/transport/work account
+/// before any acoustic region consumes the proposed medium.
+pub(crate) fn admit_background<S, E>(
+    gas: &ClosedGasParcel,
+    background: &FiniteGasDgBackground<S>,
+    work: f64,
+    controls: FiniteGasDgSolve,
+) -> Result<(f64, f64), FiniteGasDgError<E>> {
+    if background.gas.volume_m3() != gas.volume_m3()
+        || !background.supplied_heat_j.is_finite()
+        || !background.transported_enthalpy_j.is_finite()
+        || (background.gas.state().state().temperature - gas.state().state().temperature).abs()
+            > controls.maximum_temperature_increment_k
+    {
+        return Err(FiniteGasDgError::Invalid(
+            "finite background changed volume or exceeded thermal/source limits",
+        ));
+    }
+    let gas_change = finite_gas_stored_change(gas, &background.gas);
+    let gas_residual =
+        ((gas_change + work) - background.supplied_heat_j) - background.transported_enthalpy_j;
+    if !gas_change.is_finite()
+        || !gas_residual.is_finite()
+        || gas_residual.abs() > controls.energy_tolerance_j
+    {
+        return Err(FiniteGasDgError::Invalid(
+            "finite gas endpoint does not close its actual heat, enthalpy and work",
+        ));
+    }
+    Ok((gas_change, gas_residual))
+}
+
+pub(crate) fn feedback_error<E>(
+    error: feedback::ScalarError<FiniteGasDgError<E>>,
+) -> FiniteGasDgError<E> {
+    match error {
+        feedback::ScalarError::Evaluation(error) => error,
+        feedback::ScalarError::Invalid(message) => FiniteGasDgError::Invalid(message),
+        feedback::ScalarError::Cancelled => FiniteGasDgError::Cancelled,
+        feedback::ScalarError::OutsideBracket { lower, upper } => {
+            FiniteGasDgError::OutsideBracket {
+                lower_residual_j: lower,
+                upper_residual_j: upper,
+            }
+        }
+        feedback::ScalarError::NotConverged {
+            iterations,
+            residual,
+        } => FiniteGasDgError::NotConverged {
+            iterations,
+            residual_j: residual,
+        },
+    }
 }
 
 /// Complete a gas feedback proposal after the original source has advanced its
@@ -223,14 +305,7 @@ pub(crate) fn prepare_after_step<S, E, C: FnMut() -> bool>(
         ))?;
     let [lo, hi] = controls.work_bracket_j;
     let maximum_work = lo.abs().max(hi.abs());
-    let refresh_kind = match controls.loss {
-        FiniteGasDgLoss::Lossless => DgGasRefresh::Lossless,
-        FiniteGasDgLoss::UniformViscothermal {
-            maximum_relative_error,
-        } => DgGasRefresh::UniformDiffusion {
-            maximum_relative_error,
-        },
-    };
+    let refresh_kind = refresh_kind(controls.loss);
     let mut candidate = feedback::solve_scalar(
         controls.work_bracket_j,
         controls.work_tolerance_j,
@@ -239,28 +314,7 @@ pub(crate) fn prepare_after_step<S, E, C: FnMut() -> bool>(
             let background = evolve(gas, original.propagator().dt(), work, cancelled)
                 .map_err(FiniteGasDgError::Background)?;
             check(cancelled)?;
-            if background.gas.volume_m3() != gas.volume_m3()
-                || !background.supplied_heat_j.is_finite()
-                || !background.transported_enthalpy_j.is_finite()
-                || (background.gas.state().state().temperature - gas.state().state().temperature)
-                    .abs()
-                    > controls.maximum_temperature_increment_k
-            {
-                return Err(FiniteGasDgError::Invalid(
-                    "finite background changed volume or exceeded thermal/source limits",
-                ));
-            }
-            let gas_change = finite_gas_stored_change(gas, &background.gas);
-            let gas_residual = ((gas_change + work) - background.supplied_heat_j)
-                - background.transported_enthalpy_j;
-            if !gas_change.is_finite()
-                || !gas_residual.is_finite()
-                || gas_residual.abs() > controls.energy_tolerance_j
-            {
-                return Err(FiniteGasDgError::Invalid(
-                    "finite gas endpoint does not close its actual heat, enthalpy and work",
-                ));
-            }
+            let (gas_change, gas_residual) = admit_background(gas, &background, work, controls)?;
             let replacement = finite_gas_field(original_field, &background.gas)?;
             let mut load = marched.clone();
             let refresh = load
@@ -292,24 +346,7 @@ pub(crate) fn prepare_after_step<S, E, C: FnMut() -> bool>(
         },
         cancelled,
     )
-    .map_err(|error| match error {
-        feedback::ScalarError::Evaluation(error) => error,
-        feedback::ScalarError::Invalid(message) => FiniteGasDgError::Invalid(message),
-        feedback::ScalarError::Cancelled => FiniteGasDgError::Cancelled,
-        feedback::ScalarError::OutsideBracket { lower, upper } => {
-            FiniteGasDgError::OutsideBracket {
-                lower_residual_j: lower,
-                upper_residual_j: upper,
-            }
-        }
-        feedback::ScalarError::NotConverged {
-            iterations,
-            residual,
-        } => FiniteGasDgError::NotConverged {
-            iterations,
-            residual_j: residual,
-        },
-    })?;
+    .map_err(feedback_error)?;
 
     // Check extensive endpoints independently of the scalar residual. The
     // acoustic row's net port work already excludes the rational exterior.
@@ -324,22 +361,29 @@ pub(crate) fn prepare_after_step<S, E, C: FnMut() -> bool>(
             "finite gas plus complete acoustic storage, loss and boundary work do not close",
         ));
     }
+    refresh_output(&mut candidate.load, &mut output, cancelled)?;
+    candidate.step.acoustic = output;
+    candidate.step.combined_energy_residual_j = residual;
+    check(cancelled)?;
+    Ok(candidate)
+}
+
+/// Keep the original interval integrals while refreshing endpoint pressure and
+/// the complete current ledger after a zero-duration native gas intervention.
+pub(crate) fn refresh_output<E>(
+    load: &mut DgPortLoad,
+    output: &mut DgStepOutput,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), FiniteGasDgError<E>> {
     // Interval observations remain from the actual frozen-medium step. Only
     // endpoint pressure and current extensive storage follow the accepted gas.
-    candidate
-        .load
-        .propagator
-        .sync_nodal(&mut candidate.load.state)
+    load.propagator
+        .sync_nodal(&mut load.state)
         .map_err(native)?;
-    let main_pressures = candidate
-        .load
-        .duct()
-        .port_pressures(candidate.load.state())
-        .map_err(native)?;
+    let main_pressures = load.duct().port_pressures(load.state()).map_err(native)?;
     for port in &mut output.port_outputs {
         check(cancelled)?;
-        port.end_conjugate = if let Some(branch) = candidate
-            .load
+        port.end_conjugate = if let Some(branch) = load
             .branches()
             .iter()
             .find(|branch| branch.port() == port.id)
@@ -366,16 +410,15 @@ pub(crate) fn prepare_after_step<S, E, C: FnMut() -> bool>(
             "finite gas refresh lost an original external port",
         ))?;
     }
-    let initial_energy = candidate
-        .load
+    let initial_energy = load
         .branches()
         .iter()
-        .fold(candidate.load.state().initial_energy_j(), |sum, branch| {
+        .fold(load.state().initial_energy_j(), |sum, branch| {
             sum + branch.state().initial_energy_j()
         });
     let ledger = &mut output.ledger;
-    ledger.stored_energy_j = candidate.load.stored_energy_j();
-    ledger.cumulative_parameter_work_j = candidate.load.cumulative_parameter_work_j();
+    ledger.stored_energy_j = load.stored_energy_j();
+    ledger.cumulative_parameter_work_j = load.cumulative_parameter_work_j();
     ledger.energy_balance_residual_j = ledger.stored_energy_j
         - initial_energy
         - ledger.cumulative_port_work_j
@@ -391,10 +434,7 @@ pub(crate) fn prepare_after_step<S, E, C: FnMut() -> bool>(
             "refreshed complete acoustic ledger is not finite",
         ));
     }
-    candidate.step.acoustic = output;
-    candidate.step.combined_energy_residual_j = residual;
-    check(cancelled)?;
-    Ok(candidate)
+    check(cancelled)
 }
 
 impl DgPortLoad {

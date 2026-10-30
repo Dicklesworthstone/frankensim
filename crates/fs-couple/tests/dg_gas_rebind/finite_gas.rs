@@ -6,7 +6,7 @@ use fs_material::thermochemical_gas::energy::{GasEnergyError, GasEnergySolve};
 use fs_qty::QuantitySpec;
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 
-fn controls() -> FiniteGasDgSolve {
+pub(super) fn controls() -> FiniteGasDgSolve {
     FiniteGasDgSolve {
         work_bracket_j: [-1e-5, 1e-5],
         work_tolerance_j: 1e-15,
@@ -17,7 +17,7 @@ fn controls() -> FiniteGasDgSolve {
     }
 }
 
-fn energy_solve() -> GasEnergySolve {
+pub(super) fn energy_solve() -> GasEnergySolve {
     GasEnergySolve {
         minimum_temperature_k: 200.0,
         maximum_temperature_k: 900.0,
@@ -40,7 +40,7 @@ fn volume() -> f64 {
     core::f64::consts::PI * RADIUS * RADIUS * LENGTH + 0.002 * 4e-5 * 0.001
 }
 
-fn gas(cold: &AxialGasField) -> ClosedGasParcel {
+pub(super) fn gas(cold: &AxialGasField) -> ClosedGasParcel {
     let point = QueryPoint::new()
         .with_quantity(
             "temperature",
@@ -65,7 +65,7 @@ fn gas(cold: &AxialGasField) -> ClosedGasParcel {
     .unwrap()
 }
 
-fn channel_load(cold: &AxialGasField) -> DgPortLoad {
+pub(super) fn channel_load(cold: &AxialGasField) -> DgPortLoad {
     load(cold, false)
         .with_terminal_channels(
             vec![DgTerminalChannelInput {
@@ -83,7 +83,7 @@ fn scalar(cold: &AxialGasField) -> ApertureDg {
 }
 
 // Independent Gauss integration of the actual quadratic pressure polynomial.
-fn compression_energy(state: &DgState, gas: &GasState) -> f64 {
+pub(super) fn compression_energy(state: &DgState, gas: &GasState) -> f64 {
     let node = (3.0_f64 / 5.0).sqrt();
     let p = state.pressure();
     assert_eq!(p.len(), 3);

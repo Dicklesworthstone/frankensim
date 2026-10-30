@@ -8693,6 +8693,45 @@ independent paired-blade motion, exact retry after source refusal or final
 cancellation, and rejection of an unowned second inventory. Native execution
 and measured physical validation remain separate gates.
 
+## One finite gas inventory through the two-sided moving aperture
+
+`LoadedApertureDg::step_with_shared_finite_gas_controlled` advances the original
+two-sided moving source and both complete acoustic tracts against one explicitly
+shared, well-mixed `ClosedGasParcel`. Its volume must equal both main bores plus
+their main-gas finite terminal passages, and both original complete inlet states
+must match that parcel. Independently sourced side branches retain their own
+inventories. The heat convenience method uses the existing caloric gas owner.
+
+The original mechanics and both acoustic tracts advance once per accepted sample.
+A shared scalar feedback solve then pays the sum of both native gas-parameter
+work accounts with one debit from the original parcel. Each trial starts from
+the same original gas and the same marched acoustic histories; it does not
+repeat the mechanical step. The same native admission, background energy,
+memory transfer and endpoint-report helpers serve the existing single-tract
+finite-gas path and this two-tract path.
+
+Both refreshed loads retain their bore and finite-channel momentum, terminal
+pole histories and interval force/flow/work observations. One absolute-work
+allowance covers both sides. Endpoint storage, gas density/viscosity and the
+source's exact summed load impedance follow the accepted shared gas.
+`FiniteGasSeriesApertureDgStep` reports the ordered upstream/downstream native
+refreshes, one background result, one gas-work debit, and the enclosing
+gas/mechanics/acoustics/loss/exterior-work residual.
+
+Admission, source evolution, native transfers, whole-system energy closure and
+final cancellation all precede publication. A refusal leaves the gas, original
+moving blades and both complete tracts retryable. This remains a fixed-volume,
+first-order partition with one common gas background; it does not infer mean
+mass transport from acoustic volume flow or admit independently evolving inlet
+densities through the existing equal-gas valve.
+
+Three public regression groups in `tests/dg_gas_rebind/finite_series.rs` cover
+an independent caloric/two-bore-work reference and complete energy account,
+actual summed-volume/source admission, and late refusal/cancellation with exact
+retry. These tests are authored but have not been executed in this environment:
+the pinned native compiler/build route and required sibling Git checkouts are
+unavailable. Formatting/parser and whitespace checks are not native test results.
+
 ## Live regional gas fields through branches and moving apertures
 
 `DgPortLoad::rebind_regional_gas_fields_controlled` changes the optional main

@@ -15,7 +15,7 @@ use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::dynamic::ApertureDrive;
 use crate::bernoulli_aperture::paired::BladePropagator;
 use crate::bernoulli_aperture::tube::TubeDrive;
-use crate::bernoulli_aperture::two_sided::LoadedAperture;
+use crate::bernoulli_aperture::two_sided::{LoadedAperture, ValveTrial};
 use crate::dg_port::{DgTerminalFrame, sum_terminal_work};
 use fs_duct::dg::DgStepOutput;
 use fs_material::gas::GasState;
@@ -99,16 +99,34 @@ impl ApertureDg<LoadedAperture> {
         forces_n: [f64; 2],
         pressures_pa: [f64; 2],
     ) -> Result<DgApertureFrame, AcousticRealizeError> {
+        let upstream = self.upstream.as_mut().expect("selected upstream tract");
+        let (mechanical, frame) = prepare_upstream_step(
+            &self.aperture, upstream, &mut self.load, drive, forces_n, pressures_pa)?;
+        self.aperture.accept(mechanical);
+        Ok(frame)
+    }
+}
+
+/// Original native series sample. Acoustic candidates publish only after every
+/// pressure/work check; the mechanical trial stays private for the caller's
+/// final publication. Finite backgrounds call this once on private load copies.
+pub(super) fn prepare_upstream_step(
+    source: &LoadedAperture,
+    upstream: &mut ApertureDgLoad,
+    load: &mut ApertureDgLoad,
+    drive: TubeDrive,
+    forces_n: [f64; 2],
+    pressures_pa: [f64; 2],
+) -> Result<(ValveTrial, DgApertureFrame), AcousticRealizeError> {
         if !drive.upstream_pressure_pa.is_finite() || !drive.body_flow_m3_s.is_finite() {
             return Err(invalid("DG tract source pressure and body flow must be finite"));
         }
-        let upstream = self.upstream.as_mut().expect("selected upstream tract");
         let up = upstream.port_response()?;
-        let down = self.load.port_response()?;
-        let dt = self.load.propagator().dt();
+        let down = load.port_response()?;
+        let dt = load.propagator().dt();
         let effective_source = drive.upstream_pressure_pa + up.history_pressure_pa
             + up.impedance_pa_s_m3 * drive.body_flow_m3_s;
-        let mechanical = self.aperture.preview(ApertureDrive {
+        let mechanical = source.preview(ApertureDrive {
             upstream_pressure_pa: effective_source,
             incoming_pressure_pa: down.history_pressure_pa / 2.0,
             body_flow_m3_s: drive.body_flow_m3_s,
@@ -119,12 +137,12 @@ impl ApertureDg<LoadedAperture> {
         let through = q - drive.body_flow_m3_s;
         let expected_drop = effective_source - aperture.bore_pressure_pa;
         let up_id = upstream.inlet();
-        let down_id = self.load.inlet();
+        let down_id = load.inlet();
 
         // Both original candidates exist before either one can be accepted.
         // Dropping either trial leaves its complete material/acoustic state intact.
         let up_trial = upstream.preview_step(-through)?;
-        let down_trial = self.load.preview_step(q)?;
+        let down_trial = load.preview_step(q)?;
         let up_output = up_trial.output();
         let down_output = down_trial.output();
         let pu = up_output.port_outputs.iter().find(|p| p.id == up_id)
@@ -188,8 +206,7 @@ impl ApertureDg<LoadedAperture> {
         // No fallible operation follows the first publication.
         let up_duct = up_trial.accept();
         let duct = down_trial.accept();
-        self.aperture.accept(mechanical);
-        Ok(DgApertureFrame {
+        Ok((mechanical, DgApertureFrame {
             aperture, spatial_pressure, duct,
             upstream: Some(DgTractFrame {
                 duct: up_duct, inlet_pressure_pa: pu, inlet_flow_m3_s: -through,
@@ -200,8 +217,7 @@ impl ApertureDg<LoadedAperture> {
             parameter_work_j: 0.0,
             inferred_total_dissipation_j, upstream_work_j, body_work_j,
             port_work_residual_j: up_defect + down_defect,
-        })
-    }
+        }))
 }
 
 #[cfg(test)]
