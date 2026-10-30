@@ -170,3 +170,22 @@ not a phase-boundary discovery. Generated-chart interpolation and source error
 remain separate, and tighter chart tolerance can exhaust the existing knot cap.
 Finite time-step accuracy requires its own refinement study. No arbitrary-law
 Picard convergence, automatic timestep reduction or checkpoint/resume is claimed.
+
+## Directional solid heat transport
+
+The scene's optional material `thermal_conductivity` declaration is shared
+with the steady command: three source property names and explicitly
+grid-aligned principal axes feed the original per-cell heat operator.
+Each direction is re-resolved at the candidate temperature used for the
+same card's electrical response and sourced caloric storage. Changing
+principal values or their orientation changes spatial temperature evolution
+without changing fixed mass or inventing a different heat-capacity law.
+
+Transient results include both `solved_conductivity_grid_w_m_k` and
+`resolved_conductivity_grid_w_m_k` as per-cell `[kx, ky, kz]` triples;
+legacy scalar entries are null for unequal components. Material records
+retain the source property roles and principal axes. Orthotropic solids can
+border a prescribed isotropic fluid, while assigning an orthotropic tensor
+to the fluid reference itself remains unsupported. See
+[MATERIAL_ELECTROTHERMAL.md](MATERIAL_ELECTROTHERMAL.md#principal-material-directions)
+for the declaration, exact signed-permutation frame rule and refusal cases.

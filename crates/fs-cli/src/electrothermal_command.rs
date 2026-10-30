@@ -1,5 +1,5 @@
 //! `frankensim electrothermal`: canonical material packs -> coupled spatial fields.
-//! Fixed-geometry isotropic conduction with optional prescribed fluid transport.
+//! Fixed-geometry scalar current and sourced grid-axis heat conduction, with optional prescribed fluid transport.
 
 mod interfaces;
 mod source;
@@ -38,7 +38,7 @@ const MAX_MATERIALS: usize = 64;
 const MAX_SCENE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_PACK_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_TOTAL_PACK_BYTES: u64 = 64 * 1024 * 1024;
-const NO_CLAIM: &str = "steady fixed-geometry all-solid isotropic ohmic/thermal conduction; source nominal values, not propagated uncertainty or experimental qualification; optional source-backed exterior gray radiation to black isothermal unit-view reservoirs; zero-thickness electrical interfaces use explicit heat partition, thermal interfaces use independently sourced resistance; no phase change, thermal deformation, fluid flow, microscopic contact-area model or AC effects";
+const NO_CLAIM: &str = "steady fixed-geometry all-solid scalar ohmic and isotropic or grid-aligned orthotropic thermal conduction; source nominal values, not propagated uncertainty or experimental qualification; optional source-backed exterior gray radiation to black isothermal unit-view reservoirs; zero-thickness electrical interfaces use explicit heat partition, thermal interfaces use independently sourced resistance; no phase change, thermal deformation, fluid flow, microscopic contact-area model or AC effects";
 const HELP: &str = "Usage: frankensim [--json] electrothermal <scene.json> [--transient <time.json>]\n\nLoad canonical FSMCDPK material-card packs and solve spatial current, Joule\nheating and temperature together. Both resistivity and conductivity are\nre-resolved at every changed local temperature; unsupported states refuse.\nMaterial substitutions change pack data, not solver code. Optional\nelectrical_interfaces and thermal_interfaces bind canonical FSINTPK ordered\ninterface cards to voxel faces. Electrical heating and thermal resistance\nremain independent responses, evaluated at the same local temperatures.\n\nAn optional fluid object assigns one material to prescribed conservative flow,\nwith sourced frozen reference transport. See docs/MATERIAL_ELECTROTHERMAL_FLUID.md.\n\n--transient additionally requires sourced density and heat capacity over an\nexplicit temperature interval, and advances stored energy with scheduled\nelectrode drives and authored heat sources. Cell mass remains fixed.\n\nScene schema: frankensim.electrothermal.v1. Time request schema:\nfrankensim.electrothermal.transient.v1. See docs/MATERIAL_ELECTROTHERMAL.md,\ndocs/MATERIAL_ELECTROTHERMAL_TRANSIENT.md, docs/ELECTRICAL_CONTACTS.md and\ndocs/THERMAL_FACE_CONTACTS.md. For source-backed exterior radiation see docs/ELECTROTHERMAL_RADIATION.md.\nAll lengths are metres, temperatures kelvin,\ncurrent amperes and power watts. --json includes fields, source identities\nand coupling/energy defects.\n";
 
 pub fn run(args: &[OsString], json: bool) -> CommandOutput {
@@ -156,7 +156,7 @@ fn load(path: &Path) -> Result<Problem, String> {
     let mut materials = Vec::with_capacity(definitions.len());
     let mut total_bytes = 0u64;
     for definition in definitions {
-        fields(definition, &["pack", "conducting", "temperature_axis", "temperature_kind", "state"])?;
+        fields(definition, &["pack", "conducting", "temperature_axis", "temperature_kind", "state", "thermal_conductivity"])?;
         let pack_path = path.parent().unwrap_or(Path::new(".")).join(string(definition, "pack")?);
         let pack_bytes = read(&pack_path, MAX_PACK_BYTES.min(MAX_TOTAL_PACK_BYTES - total_bytes))?;
         total_bytes += pack_bytes.len() as u64;
@@ -166,9 +166,9 @@ fn load(path: &Path) -> Result<Problem, String> {
             _ => return Err("conducting must explicitly be true or false".into()),
         };
         let point = state_point(definition)?;
-        materials.push(Source::new(pack, point, string(definition, "temperature_axis")?.into(),
-            quantity(string(definition, "temperature_kind")?, Temperature::DIMS)?, conducting)
-            .map_err(|e| e.to_string())?);
+        materials.push(Source::with_conductivity(pack, point, string(definition, "temperature_axis")?.into(),
+            quantity(string(definition, "temperature_kind")?, Temperature::DIMS)?, conducting,
+            definition.get("thermal_conductivity")).map_err(|e| e.to_string())?);
     }
     let indices = array(&root, "material_indices", MAX_CELLS)?;
     if indices.len() != cells { return Err("material_indices needs exactly one assignment per cell".into()); }
@@ -316,8 +316,9 @@ fn render(problem: &Problem, result: &ResultField, json: bool) -> String {
             result.thermal_contact_relative_defect, no_claim);
     }
     let materials = problem.materials.iter().map(|m| format!(
-        "{{\"pack\":{},\"pack_identity\":{},\"card_identity\":{}}}",
+        "{{\"pack\":{},\"pack_identity\":{},\"card_identity\":{},\"thermal_conductivity\":{}}}",
         quote(m.pack.pack_id()), quote(&m.pack.content_hash().to_hex()), quote(&m.pack.card().content_hash().to_hex()),
+        m.conductivity.render(),
     )).collect::<Vec<_>>().join(",");
     let sources = result.sources.iter().enumerate().map(|(cell, state)| format!(
         "{{\"material_index\":{},\"thermal_state\":{},\"electrical_state\":{}}}",
@@ -333,6 +334,7 @@ fn render(problem: &Problem, result: &ResultField, json: bool) -> String {
         "{{\"schema\":\"frankensim.electrothermal.result.v1\",\"authority\":\"estimated-numerical\",",
         "\"cells\":{:?},\"cell_size_m\":{},\"temperature_k\":{},\"potential_v\":{},\"joule_w\":{},",
         "\"solved_conductivity_w_m_k\":{},\"resolved_conductivity_w_m_k\":{},",
+        "\"solved_conductivity_grid_w_m_k\":{},\"resolved_conductivity_grid_w_m_k\":{},",
         "\"total_joule_w\":{},\"electrode_power_w\":{},\"thermal_balance_residual_w\":{},",
         "\"thermal_balance_relative_residual\":{},\"passes\":{},\"thermal_solves\":{},",
         "\"temperature_defect_k\":{},\"joule_source_defect_w\":{},\"conductivity_relative_defect\":{},",
@@ -341,11 +343,24 @@ fn render(problem: &Problem, result: &ResultField, json: bool) -> String {
         "\"thermal_contact_relative_defect\":{},\"radiation\":{},\"no_claim\":{}}}\n"),
         problem.domain.dims(), problem.domain.dx(), values(r.thermal.temperature.iter().copied()),
         values(r.electric.potential_v.iter().copied()), values(r.electric.joule_w.iter().copied()),
-        values(r.thermal.conductivity.iter().map(|k| k[0])), values(result.sources.iter().map(|s| s.k)),
+        scalar_conductivities(r.thermal.conductivity.iter().copied()), scalar_conductivities(result.sources.iter().map(|s| s.k)),
+        grid_conductivities(r.thermal.conductivity.iter().copied()), grid_conductivities(result.sources.iter().map(|s| s.k)),
         r.electric.total_joule_w, r.electric.delivered_w, r.thermal.report.balance.residual_w,
         r.thermal.report.balance.relative_residual, r.report.passes, result.thermal_solves,
         r.report.temperature_change_k, r.report.joule_source_change_w, result.conductivity_relative_defect,
         materials, sources, electrodes, problem.fluid.as_ref().map_or_else(|| "null".into(), |f| f.render()),
         interfaces::render(problem, &result.interfaces), interfaces::render_thermal(problem, result),
         result.thermal_contact_relative_defect, radiation::render(&result.radiation), quote(no_claim))
+}
+
+/// Legacy scalar output is meaningful only when all three grid components agree.
+/// The complete field below is always authoritative, including isotropic cells.
+fn scalar_conductivities(field: impl IntoIterator<Item = [f64; 3]>) -> String {
+    format!("[{}]", field.into_iter().map(|k| {
+        if k[0] == k[1] && k[1] == k[2] { k[0].to_string() } else { "null".into() }
+    }).collect::<Vec<_>>().join(","))
+}
+
+fn grid_conductivities(field: impl IntoIterator<Item = [f64; 3]>) -> String {
+    format!("[{}]", field.into_iter().map(values).collect::<Vec<_>>().join(","))
 }

@@ -24,12 +24,14 @@ explicit chemistry/phase/process/revision-0 identity to a compiled claims pack;
 `to_bytes()` writes its runtime envelope. No label or filename infers this
 identity, and unrelated source conditions must not be silently merged.
 
-A conducting material needs positive `electrical_resistivity` in ohm metres
-and positive `thermal_conductivity` in W/(m K). An explicitly insulating
-material needs only conductivity. Only those properties are demanded, not
-mechanical, optical or acoustic data. Thermal conductivity preserves either
-the source's dimension-only descriptor or its static thermal-conductivity
-kind. Electrical admission is the existing `resolve_conductor_state` contract.
+A conducting material needs positive `electrical_resistivity` in ohm metres.
+Heat transport uses either positive scalar `thermal_conductivity` in W/(m K)
+or three explicitly bound principal conductivity properties, described below.
+An explicitly insulating material needs only the thermal properties. Only
+consumed properties are demanded, not mechanical, optical or acoustic data.
+Each conductivity preserves the source's dimension-only descriptor or its
+static thermal-conductivity kind. Electrical admission is the existing
+`resolve_conductor_state` contract.
 Conflicting keys, surviving claim-selection ties and unsupported states refuse.
 There is no fallback source, implicit averaging, or inferred temperature slope.
 
@@ -41,6 +43,47 @@ These modes are not interchangeable. The separate `temperature_axis` is
 updated at each cell's actual temperature; `temperature_kind` must be
 `legacy`, `dimensional` or `absolute-temperature`. Temperature is always
 absolute kelvin, never a temperature difference or a guessed offset.
+
+## Principal material directions
+
+A material can declare three source property roles and their orientation in
+the Cartesian heat grid. This optional object belongs inside a `materials`
+entry:
+
+```json
+"thermal_conductivity": {
+  "principal_properties": [
+    "conductivity_along_fibre",
+    "conductivity_across_fibre",
+    "conductivity_through_stack"
+  ],
+  "principal_axes": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+}
+```
+
+Names are caller-selected keys in the **same material card**. Every key must
+carry a positive thermal conductivity response with valid source support.
+No canonical scalar conductivity is required for this mode. No missing
+direction is averaged or copied from another direction. All three responses
+are re-resolved at the same actual cell temperature and complete pressure,
+composition and other state coordinates as the electrical response.
+
+Rows of `principal_axes` give each principal direction in grid coordinates.
+For example, `[[0,0,-1],[0,1,0],[1,0,0]]` maps the first material direction
+to grid z, the second to y, and the third to x. Changing this scene data
+changes actual heat flux. The admitted frames are exact signed permutations
+of the Cartesian unit axes; off-grid rotations are refused because the
+native stencil does not represent their off-diagonal cross-gradient terms.
+This does not approximate a rotated tensor by retaining only its diagonal.
+
+The existing spatial heat owner receives `[kx, ky, kz]` per cell. It keeps
+its original face-normal half-cell resistances, thermal interfaces,
+convection and radiation boundary exchange. The same source path operates
+in steady and transient solves, including orthotropic solid regions beside
+a prescribed isotropic fluid. The native fluid reference remains isotropic;
+declaring this directional role on the fluid itself refuses explicitly.
+
+Omitting the object retains the existing scalar isotropic material contract.
 
 ## Example scene structure
 
@@ -129,8 +172,12 @@ source-resolved conductivities, electrode currents/voltages, power balance,
 coupling defects, work counts, pack/card identities and final per-cell source
 state identities. The solved conductivity field is reported separately from
 the re-evaluated final field: they agree to the declared tolerance, not by
-pretending a finite iteration is exact. Unconnected electrical potentials are
-`null`, not zero. Failed input or physics admission prints only a diagnostic
+pretending a finite iteration is exact. The complete fields are
+`solved_conductivity_grid_w_m_k` and `resolved_conductivity_grid_w_m_k`,
+each an array of per-cell `[kx, ky, kz]` triples. Legacy scalar conductivity
+entries are `null` where the three components differ. Material records retain
+the principal property names and axes alongside pack/card identities.
+Unconnected electrical potentials are `null`, not zero. Failed input or physics admission prints only a diagnostic
 on stderr and returns nonzero; no partial result is published on stdout.
 
 ## Verification and limits
@@ -154,9 +201,24 @@ cargo test -p fs-lbm --lib conjugate::energy::material_field::tests
 cargo test -p fs-cli --bin frankensim electrothermal_command::tests
 ```
 
-The numerical model is steady, all-solid, isotropic DC conduction on fixed
-voxels. It does not model melting, phase topology, expansion, skin effects,
-inductance, electrical contact resistance, fluid flow or radiation. It uses
-nominal source values without uncertainty propagation and evaluates source
-support at discrete cell states; it does not certify a continuum trajectory
-or experimentally validate a real metal, joint or device.
+Five additional directional regressions exercise source-only principal
+properties, material orientation, independently varying temperature laws,
+native transverse face fluxes, backward-Euler storage and admission failures.
+The independent three-cell reference gives a centre rise of `3.375/kx` K
+for a 4.5 W source between 300 K end boundaries. With adiabatic boundaries,
+mass 2 kg, Cp 3 J/(kg K) and one 0.1 s step, changing only the orientation
+from kx=1 to kx=9 W/(m K) changes the centre rise from 0.072619047619 to
+0.059482758621 K while stored energy remains 0.45 J. Those independent
+arithmetic checks were executed and the changed Rust parsed with rustfmt;
+the new Rust tests could not be compiled or executed in the full-disk
+implementation environment.
+
+The command uses scalar DC electrical response and isotropic or grid-aligned
+orthotropic thermal response on fixed voxels. Optional transient evolution,
+prescribed fluid enthalpy transport, source-backed electrical and thermal
+interfaces, and exterior gray radiation use their existing owners. It does
+not model melting, changing phase topology, expansion, off-grid thermal
+tensors, anisotropic electrical transport, skin effects or inductance.
+Nominal source values have no propagated uncertainty; source support is
+checked at discrete states, without a certified continuum trajectory or
+experimental qualification of a real material, joint or device.

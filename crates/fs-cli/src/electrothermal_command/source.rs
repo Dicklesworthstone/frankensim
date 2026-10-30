@@ -2,6 +2,7 @@
 //! This is CLI orchestration, not a new constitutive law or discretization.
 
 pub(super) mod transient;
+mod conductivity;
 mod fluid;
 pub(super) use fluid::{Fluid, load_fluid};
 pub(super) use fluid::NO_CLAIM as FLUID_NO_CLAIM;
@@ -20,8 +21,7 @@ use fs_lbm::conjugate::{
 use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
 use fs_material::conductor::{ResolvedConductorState, resolve_conductor_state};
 use fs_material::state_point::{
-    MaterialPropertySelection, ResolvedMaterialStatePoint, ScalarAdmissibility,
-    ScalarPropertyRequirement, THERMAL_CONDUCTIVITY_DIMS, THERMAL_CONDUCTIVITY_PROPERTY,
+    MaterialPropertySelection, ResolvedMaterialStatePoint, THERMAL_CONDUCTIVITY_PROPERTY,
     resolve_material_state_point,
 };
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
@@ -30,6 +30,7 @@ use fs_qty::{QuantitySpec, Temperature};
 use super::interfaces::{self, InterfaceSource, ThermalInterfaceState};
 use super::radiation::{FaceReport, Radiation};
 use fs_lbm::conjugate::boundary_exchange::PreparedBoundaryExchange;
+use conductivity::Conductivity;
 
 pub(super) struct Source {
     pub pack: NormalizedMaterialCardPack,
@@ -37,22 +38,34 @@ pub(super) struct Source {
     pub(super) temperature_axis: String,
     temperature_quantity: Option<QuantitySpec>,
     pub conducting: bool,
-    conductivity: ScalarPropertyRequirement,
+    pub(super) conductivity: Conductivity,
 }
 
 pub(super) struct CellState {
     pub thermal: ResolvedMaterialStatePoint,
     pub conductor: Option<ResolvedConductorState>,
-    pub k: f64,
+    pub k: [f64; 3],
 }
 
 impl Source {
+    #[cfg(test)]
     pub fn new(
         pack: NormalizedMaterialCardPack,
         point: QueryPoint,
         temperature_axis: String,
         temperature_quantity: Option<QuantitySpec>,
         conducting: bool,
+    ) -> Result<Self, ChtError> {
+        Self::with_conductivity(pack, point, temperature_axis, temperature_quantity, conducting, None)
+    }
+
+    pub fn with_conductivity(
+        pack: NormalizedMaterialCardPack,
+        point: QueryPoint,
+        temperature_axis: String,
+        temperature_quantity: Option<QuantitySpec>,
+        conducting: bool,
+        declaration: Option<&super::J>,
     ) -> Result<Self, ChtError> {
         let absolute = QuantitySpec::semantic(SemanticType::new(
             QuantityKind::AbsoluteTemperature, ValueForm::Static,
@@ -65,25 +78,7 @@ impl Source {
         {
             return Err(invalid("material.temperature_axis", "declare one separate absolute kelvin axis"));
         }
-        // The property name selects the physical response. Preserve its exact
-        // dimensional/semantic schema; do not strip a source quantity kind.
-        let thermal_kind = QuantitySpec::semantic(SemanticType::new(
-            QuantityKind::ThermalConductivity, ValueForm::Static,
-        ));
-        let candidates = pack.card().claims_for(THERMAL_CONDUCTIVITY_PROPERTY);
-        let (_, first) = candidates.first().ok_or_else(|| {
-            invalid("material.thermal_conductivity", "card has no thermal-conductivity claim")
-        })?;
-        let key = &first.key;
-        if (key.quantity() != thermal_kind
-            && key.quantity() != QuantitySpec::dimensional(THERMAL_CONDUCTIVITY_DIMS))
-            || candidates.iter().any(|(_, claim)| claim.key != *key)
-        {
-            return Err(invalid("material.thermal_conductivity", "unsupported or conflicting conductivity quantity schemas"));
-        }
-        let conductivity = ScalarPropertyRequirement::try_with_key(
-            key, ScalarAdmissibility::StrictlyPositive,
-        ).map_err(|e| invalid("material.thermal_conductivity", e))?;
+        let conductivity = Conductivity::load(&pack, declaration)?;
         Ok(Self { pack, point, temperature_axis, temperature_quantity, conducting, conductivity })
     }
 
@@ -102,11 +97,10 @@ impl Source {
     pub fn at(&self, temperature: f64) -> Result<CellState, ChtError> {
         let point = self.point_at(temperature)?;
         let thermal = resolve_material_state_point(
-            self.pack.card(), &point, core::slice::from_ref(&self.conductivity),
+            self.pack.card(), &point, self.conductivity.requirements(),
             MaterialPropertySelection::SingleClaimOnly,
         ).map_err(|e| invalid("material.thermal_conductivity", e))?;
-        let k = thermal.property(THERMAL_CONDUCTIVITY_PROPERTY)
-            .expect("required conductivity was resolved").value_si();
+        let k = self.conductivity.grid_values(&thermal);
         let conductor = if self.conducting {
             Some(resolve_conductor_state(
                 self.pack.card(), &point, MaterialPropertySelection::SingleClaimOnly,
@@ -175,7 +169,8 @@ impl Problem {
         for (m, source) in self.materials.iter().enumerate() {
             let cell = self.material_indices.iter().position(|&i| i == m)
                 .ok_or_else(|| invalid("material_indices", "each declared material must be assigned to a cell"))?;
-            solids.push(SolidMaterial::new(source.pack.pack_id(), initial[cell].k));
+            solids.push(SolidMaterial::new(source.pack.pack_id(), initial[cell].k[0])
+                .with_orthotropic(initial[cell].k));
         }
         // Only all-solid scenes use this unconsumed placeholder. Fluid scenes
         // use their exact source-resolved reference and prescribed face flux.
@@ -243,7 +238,7 @@ impl Problem {
             |r| self.max_thermal_passes.min(r.config.max_iterations));
         for _ in 0..passes {
             poll(gate)?;
-            let field: Vec<[f64; 3]> = states.iter().map(|state| [state.k; 3]).collect();
+            let field: Vec<[f64; 3]> = states.iter().map(|state| state.k).collect();
             let joints = interfaces::resolve_thermal(&self.thermal_interfaces, &previous, gate)?;
             configured.face_contacts.clone_from(&setup.face_contacts);
             configured.face_contacts.extend(joints.iter().map(ThermalInterfaceState::face));
@@ -328,7 +323,8 @@ impl Problem {
 fn conductivity_defect(states: &[CellState], field: &[[f64; 3]]) -> f64 {
     if states.len() != field.len() { return f64::INFINITY; }
     states.iter().zip(field).flat_map(|(state, axes)| {
-        axes.iter().map(move |&k| (state.k - k).abs() / state.k.max(k))
+        state.k.iter().zip(axes).map(|(&resolved, &solved)|
+            (resolved - solved).abs() / resolved.max(solved))
     }).fold(0.0, f64::max)
 }
 

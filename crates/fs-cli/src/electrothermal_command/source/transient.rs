@@ -269,9 +269,9 @@ pub(crate) fn render(problem: &Problem, trajectory: &Trajectory, json: bool) -> 
         r.time_s, r.max_temperature_k, r.stored_energy_change_j, r.source_j, r.boundary_outflow_j, r.closure_j, r.radiated_w,
     )).collect::<Vec<_>>().join(",");
     let materials = problem.materials.iter().zip(&trajectory.curves).map(|(source, chart)| format!(
-        "{{\"pack_identity\":{},\"card_identity\":{},\"storage_chart_identity\":{},\"storage_receipts\":{}}}",
+        "{{\"pack_identity\":{},\"card_identity\":{},\"storage_chart_identity\":{},\"storage_receipts\":{},\"thermal_conductivity\":{}}}",
         quote(&source.pack.content_hash().to_hex()), quote(&source.pack.card().content_hash().to_hex()),
-        quote(&chart.curve().identity().to_hex()), chart.receipts().len(),
+        quote(&chart.curve().identity().to_hex()), chart.receipts().len(), source.conductivity.render(),
     )).collect::<Vec<_>>().join(",");
     let source_states = trajectory.last.sources.iter().enumerate().map(|(cell, state)| format!(
         "{{\"material_index\":{},\"initial_mass_state\":{},\"thermal_state\":{},\"electrical_state\":{}}}",
@@ -282,13 +282,17 @@ pub(crate) fn render(problem: &Problem, trajectory: &Trajectory, json: bool) -> 
         "{{\"schema\":\"frankensim.electrothermal.transient.result.v1\",\"authority\":\"estimated-numerical\",",
         "\"time_s\":{},\"steps\":{},\"cells\":{:?},\"cell_mass_kg\":{},\"temperature_k\":{},\"potential_v\":{},\"joule_w\":{},",
         "\"total_joule_w\":{},\"electrode_power_w\":{},\"resolved_conductivity_w_m_k\":{},",
+        "\"solved_conductivity_grid_w_m_k\":{},\"resolved_conductivity_grid_w_m_k\":{},",
         "\"thermal_solves\":{},\"records\":[{}],\"materials\":[{}],\"source_states\":[{}],",
         "\"electrical_interfaces\":{},\"thermal_interfaces\":{},",
         "\"thermal_contact_relative_defect\":{},\"radiation\":{},\"fluid_reference\":{},\"fluid_advection\":{},\"no_claim\":{}}}\n"),
         record.time_s, trajectory.records.len(), problem.domain.dims(), values(trajectory.masses.iter().copied()),
         values(last.thermal.temperature.iter().copied()), values(last.electric.potential_v.iter().copied()),
         values(last.electric.joule_w.iter().copied()), last.electric.total_joule_w, last.electric.delivered_w,
-        values(trajectory.last.sources.iter().map(|s| s.k)), trajectory.thermal_solves, records, materials,
+        super::super::scalar_conductivities(trajectory.last.sources.iter().map(|s| s.k)),
+        super::super::grid_conductivities(last.thermal.conductivity.iter().copied()),
+        super::super::grid_conductivities(trajectory.last.sources.iter().map(|s| s.k)),
+        trajectory.thermal_solves, records, materials,
         source_states, super::super::interfaces::render(problem, &trajectory.last.interfaces),
         super::super::interfaces::render_thermal(problem, &trajectory.last),
         trajectory.last.thermal_contact_relative_defect,

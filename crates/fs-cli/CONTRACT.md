@@ -2937,3 +2937,24 @@ but unrun under the environment's existing memory/build constraint. Read-only
 syntax/whitespace checks, independent API/sign review and reference arithmetic
 passed; the additional backflow regression and documentation were finalized in
 memory when the local disk filled, then published through GitHub.
+
+## Source-defined orthotropic electrothermal transport
+
+The file-driven electrothermal scene may bind three distinct thermal
+conductivity property keys from each existing material card to an explicit
+signed permutation of the Cartesian grid axes. Each key preserves its exact
+quantity schema and full state query. All components are resolved together
+at the actual candidate temperature; missing or invalid principal data and
+off-grid rotations refuse without a scalar fallback.
+
+The original per-cell conductivity field feeds steady and backward-Euler
+heat, directional half-cell/contact resistances and exterior radiation.
+Storage still uses the same card's caloric chart and fixed mass; electrical
+response remains the original independent scalar law. Isotropic fluid
+transport may border orthotropic solids, but a directional fluid role is
+refused at admission because its native reference is scalar.
+
+Steady/transient output retains the declared principal keys and axes and
+both solved/final [kx, ky, kz] fields. Legacy scalar entries are null when the
+three components differ. Source support, all-component nonlinear consistency,
+energy admission and atomic output publication remain mandatory.

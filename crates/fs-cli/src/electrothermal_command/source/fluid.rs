@@ -16,7 +16,7 @@ use fs_qty::Density;
 use super::{Source, invalid, poll};
 use super::super::{J, array, fields, integer, number, positive, quote, required, values};
 
-pub(crate) const NO_CLAIM: &str = "steady fixed-geometry isotropic ohmic/thermal conduction with prescribed volume-conservative fluid velocity; density, heat capacity and viscosity frozen at an explicit sourced reference state, local conductivity and resistivity re-resolved; no momentum/pressure solve, variable-density enthalpy transport, phase change, electrochemistry, Lorentz force, AC effects, propagated uncertainty or experimental qualification";
+pub(crate) const NO_CLAIM: &str = "steady fixed-geometry scalar ohmic and isotropic or grid-aligned orthotropic solid thermal conduction with prescribed volume-conservative isotropic fluid transport; density, heat capacity and viscosity frozen at an explicit sourced reference state, local conductivity and resistivity re-resolved; no momentum/pressure solve, variable-density enthalpy transport, phase change, electrochemistry, Lorentz force, AC effects, propagated uncertainty or experimental qualification";
 
 pub(super) const TRANSIENT_NO_CLAIM: &str = "fixed-geometry backward-Euler electrothermal evolution with prescribed volume-conservative fluid velocity; fluid density verified constant over the complete source interval, one sourced Cp/enthalpy chart for storage and first-order upwind face transport, viscosity frozen at the sourced reference, local conductivity and resistivity re-resolved; single-phase fixed cell masses, sourced fluid and solid Cp and exterior gray radiation; no momentum/pressure solve, variable-density fluid transport, phase change, deformation, electrochemistry, Lorentz force, AC effects, propagated uncertainty or experimental qualification; temporal accuracy requires time-step refinement";
 
@@ -61,7 +61,10 @@ pub(crate) fn load_fluid(
             _ => return Err("fluid flow faces must be wall or open (prescribed flux)".into()),
         };
     }
-    let mut requirements = vec![source.conductivity.clone()];
+    // The native reference transport is isotropic. Orthotropic solids can
+    // coexist with it, but a directional fluid must not lose its tensor here.
+    let mut requirements = vec![source.conductivity.isotropic_requirement()
+        .map_err(|e| e.to_string())?.clone()];
     for (name, dims) in [
         (DENSITY_PROPERTY, Density::DIMS),
         (SPECIFIC_HEAT_CAPACITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_DIMS),

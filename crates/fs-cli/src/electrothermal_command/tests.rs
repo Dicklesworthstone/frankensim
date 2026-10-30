@@ -1,6 +1,8 @@
 //! Exercises the real file -> pack decoder -> material resolver -> spatial
 //! electrical/thermal solver -> command output path. Synthetic data only.
 
+mod directional;
+
 use super::*;
 use fs_blake3::hash_bytes;
 use fs_evidence::ValidityDomain;
