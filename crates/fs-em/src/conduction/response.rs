@@ -105,6 +105,9 @@ pub struct ConductionResponseReport {
     pub electric_field_v_m: Vec<[f64; 2]>,
     pub current_density_a_m2: Vec<[f64; 2]>,
     pub cell_power_w: Vec<f64>,
+    /// Native surface losses in canonical contact order, excluded from bulk
+    /// `cell_power_w` and included exactly once in `power_w`.
+    pub contact_response: Vec<ConductionContactResponse>,
     pub power_w: f64,
     pub nodal_boundary_current_a: Vec<Option<f64>>,
     pub nodal_applied_current_a: Vec<Option<f64>>,
@@ -159,6 +162,20 @@ impl PlanarConductionResponse {
         limits: WeightedAssemblyLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, ConductionResponseError> {
+        Self::new_with_phase_contacts(mesh, sources, Vec::new(), Vec::new(), limits, cancelled)
+    }
+
+    /// Nonlinear bulk response and original matched-trace surface conduction.
+    /// Contact laws remain static at explicitly owned external/phase states;
+    /// only declared bulk E/J coordinates are closed by this response owner.
+    pub fn new_with_phase_contacts(
+        mesh: TriComplex2,
+        sources: Vec<ScalarConductorResponse>,
+        contacts: Vec<ConductionContact>,
+        liquid_mass_fraction_axes: Vec<[Option<String>; 2]>,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ConductionResponseError> {
         poll(cancelled)?;
         if sources.len() != mesh.faces().len() || sources.len() > limits.max_cells {
             return Err(ConductionResponseError::Invalid(
@@ -171,7 +188,15 @@ impl PlanarConductionResponse {
             source.admit(source.original())?;
             conductors.push(source.original().clone());
         }
-        let native = PlanarConduction::assemble(mesh, conductors, limits, cancelled, |_| true)?;
+        let native = PlanarConduction::assemble_with_phase_contacts(
+            mesh,
+            conductors,
+            contacts,
+            liquid_mass_fraction_axes,
+            limits,
+            cancelled,
+            |_| true,
+        )?;
         Ok(Self {
             native,
             sources: sources.into(),
@@ -187,6 +212,50 @@ impl PlanarConductionResponse {
     pub fn sources(&self) -> &[ScalarConductorResponse] {
         &self.sources
     }
+    pub fn contacts(&self) -> &[ConductionContact] {
+        self.native.contacts()
+    }
+    pub fn contact_liquid_mass_fraction_axes(&self) -> &[[Option<String>; 2]] {
+        self.native.contact_liquid_mass_fraction_axes()
+    }
+
+    fn admit_contacts(
+        &self,
+        contacts: &[ConductionContact],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), ConductionResponseError> {
+        if contacts.len() != self.contacts().len() {
+            return Err(ConductionResponseError::Invalid(
+                "complete original surface contact coverage required",
+            ));
+        }
+        for (next, original) in contacts.iter().zip(self.contacts()) {
+            poll(cancelled)?;
+            let before = original.source.resolved();
+            let after = next.source.resolved();
+            if next.first_vertices != original.first_vertices
+                || next.second_vertices != original.second_vertices
+                || next.source.surfaces() != original.source.surfaces()
+                || before.card_identity() != after.card_identity()
+                || before.axis_quantities() != after.axis_quantities()
+                || before.properties().len() != after.properties().len()
+                || before
+                    .properties()
+                    .iter()
+                    .zip(after.properties())
+                    .any(|(a, b)| {
+                        a.requirement() != b.requirement()
+                            || a.source_axes() != b.source_axes()
+                            || a.answer().receipt.selected != b.answer().receipt.selected
+                    })
+            {
+                return Err(ConductionResponseError::Invalid(
+                    "surface geometry, material and selected sources must remain pinned during response closure",
+                ));
+            }
+        }
+        Ok(())
+    }
 
     /// Transfer this operator AND its complete source laws to a continuing
     /// coupled owner. The operator alone is only a frozen linearization and
@@ -198,17 +267,17 @@ impl PlanarConductionResponse {
 
     /// Rejoin an external owner's retained spatial operator and original laws
     /// without assembling another matrix or selecting another source. Every
-    /// complete conductor is admitted by its original law. Surface contacts
-    /// retain a separate owner and cannot enter this bulk response closure.
+    /// complete conductor is admitted by its original law. Already admitted
+    /// native surface contacts and their phase-coordinate ownership are retained.
     pub fn from_frozen_parts(
         native: PlanarConduction,
         sources: Arc<[ScalarConductorResponse]>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, ConductionResponseError> {
         poll(cancelled)?;
-        if sources.len() != native.conductors().len() || !native.contacts().is_empty() {
+        if sources.len() != native.conductors().len() {
             return Err(ConductionResponseError::Invalid(
-                "complete bulk-only response laws required for the retained operator",
+                "complete bulk response laws required for the retained operator",
             ));
         }
         for (source, conductor) in sources.iter().zip(native.conductors()) {
@@ -259,8 +328,36 @@ impl PlanarConductionResponse {
         controls: ConductionResponseControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ConductionResponseCandidate, ConductionResponseError> {
+        self.solve_with_materials_and_contacts_candidate(
+            seeds,
+            self.contacts().to_vec(),
+            voltage,
+            currents,
+            assembly,
+            field_controls,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// The same actual-amplitude response solve with explicitly refreshed
+    /// original interface sources. Trace pairing, source cards, selected claims
+    /// and phase-coordinate roles remain pinned; no source policy is rerun.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_with_materials_and_contacts_candidate(
+        &self,
+        seeds: Vec<ResolvedConductorState>,
+        contacts: Vec<ConductionContact>,
+        voltage: &[(usize, f64)],
+        currents: &[ConductionCurrentTrace],
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: ConductionResponseControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ConductionResponseCandidate, ConductionResponseError> {
         self.solve_driven_with_materials_candidate(
             seeds,
+            contacts,
             ResponseDrive::Traces { voltage, currents },
             assembly,
             field_controls,
@@ -310,8 +407,37 @@ impl PlanarConductionResponse {
         controls: ConductionResponseControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ConductionResponseCandidate, ConductionResponseError> {
+        self.solve_current_with_materials_and_contacts_candidate(
+            seeds,
+            self.contacts().to_vec(),
+            positive,
+            negative,
+            current_a,
+            assembly,
+            field_controls,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Ideal total-current closure with the same explicitly refreshed bulk and
+    /// surface sources. Surface voltage jumps affect every native field trial.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_current_with_materials_and_contacts_candidate(
+        &self,
+        seeds: Vec<ResolvedConductorState>,
+        contacts: Vec<ConductionContact>,
+        positive: &[usize],
+        negative: &[usize],
+        current_a: f64,
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: ConductionResponseControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ConductionResponseCandidate, ConductionResponseError> {
         self.solve_driven_with_materials_candidate(
             seeds,
+            contacts,
             ResponseDrive::Current {
                 positive,
                 negative,
@@ -327,14 +453,16 @@ impl PlanarConductionResponse {
     fn solve_driven_with_materials_candidate(
         &self,
         seeds: Vec<ResolvedConductorState>,
+        contacts: Vec<ConductionContact>,
         drive: ResponseDrive<'_>,
         assembly: WeightedAssemblyLimits,
         field_controls: ConductionControls,
         controls: ConductionResponseControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ConductionResponseCandidate, ConductionResponseError> {
-        self.solve_coupled_with_materials_candidate(
+        self.solve_coupled_with_materials_and_contacts_candidate(
             seeds,
+            contacts,
             assembly,
             field_controls,
             controls,
@@ -388,6 +516,39 @@ impl PlanarConductionResponse {
         field_controls: ConductionControls,
         controls: ConductionResponseControls,
         cancelled: &mut impl FnMut() -> bool,
+        solve: impl for<'p> FnMut(
+            &'p PlanarConduction,
+            &mut dyn FnMut() -> bool,
+        ) -> Result<(ConductionField<'p>, D), E>,
+    ) -> Result<(ConductionResponseCandidate, D), E>
+    where
+        E: From<ConductionResponseError>,
+    {
+        self.solve_coupled_with_materials_and_contacts_candidate(
+            seeds,
+            self.contacts().to_vec(),
+            assembly,
+            field_controls,
+            controls,
+            cancelled,
+            solve,
+        )
+    }
+
+    /// Couple the same nonlinear bulk closure and refreshed original contacts
+    /// to a native circuit/physical driver. Interface laws are held at this
+    /// trial's declared thermal/phase context; an outer material owner evolves
+    /// those states. Every constitutive trial contains the surface operator,
+    /// so its current, voltage jump and Joule heat participate in native work.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_coupled_with_materials_and_contacts_candidate<D, E>(
+        &self,
+        seeds: Vec<ResolvedConductorState>,
+        contacts: Vec<ConductionContact>,
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: ConductionResponseControls,
+        cancelled: &mut impl FnMut() -> bool,
         mut solve: impl for<'p> FnMut(
             &'p PlanarConduction,
             &mut dyn FnMut() -> bool,
@@ -407,6 +568,7 @@ impl PlanarConductionResponse {
             )
             .into());
         }
+        self.admit_contacts(&contacts, cancelled)?;
         for (source, seed) in self.sources.iter().zip(&seeds) {
             poll(cancelled).map_err(ConductionResponseError::from)?;
             source.admit(seed).map_err(ConductionResponseError::from)?;
@@ -416,9 +578,11 @@ impl PlanarConductionResponse {
             (0.0_f64, 0.0_f64, 0.0_f64);
         for iteration in 1..=controls.maximum_iterations {
             poll(cancelled).map_err(ConductionResponseError::from)?;
-            let native = PlanarConduction::assemble(
+            let native = PlanarConduction::assemble_with_phase_contacts(
                 self.mesh().clone(),
                 applied,
+                contacts.clone(),
+                self.contact_liquid_mass_fraction_axes().to_vec(),
                 assembly,
                 cancelled,
                 |_| true,
@@ -502,6 +666,7 @@ impl PlanarConductionResponse {
                     electric_field_v_m: field.electric_field_v_m().to_vec(),
                     current_density_a_m2: field.current_density_a_m2().to_vec(),
                     cell_power_w: field.cell_power_w().to_vec(),
+                    contact_response: field.contact_response().to_vec(),
                     power_w: field.power_w(),
                     nodal_boundary_current_a: field.nodal_boundary_current_a().to_vec(),
                     nodal_applied_current_a: field.nodal_applied_current_a().to_vec(),

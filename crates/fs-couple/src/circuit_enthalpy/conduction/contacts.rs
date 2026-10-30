@@ -66,8 +66,33 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
         accepted: &MaterialNetworkSample,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<Self, Error> {
+        Self::new_for_contacts(
+            network,
+            problem.mesh(),
+            problem.contacts(),
+            problem.contact_liquid_mass_fraction_axes(),
+            bindings,
+            routes,
+            accepted,
+            cancel,
+        )
+    }
+
+    // Linear and nonlinear current owners share original geometry/source/heat
+    // admission without exposing a nonlinear law as a scalable frozen field.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_for_contacts(
+        network: &ConductionThermalNetwork<'_>,
+        mesh: &fs_rep_mesh::TriComplex2,
+        originals: &[ConductionContact],
+        liquid_mass_fraction_axes: &[[Option<String>; 2]],
+        bindings: &'a [ConductionContactThermal<'m>],
+        routes: &[CellId],
+        accepted: &MaterialNetworkSample,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<Self, Error> {
         check(cancel)?;
-        if bindings.len() != problem.contacts().len() {
+        if bindings.len() != originals.len() || liquid_mass_fraction_axes.len() != originals.len() {
             return Err(invalid(
                 "every spatial electrical contact requires its source and heat partition",
             ));
@@ -97,8 +122,7 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
                 binding.ok_or_else(|| invalid("spatial contact thermal binding is absent"))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let trace = problem
-            .mesh()
+        let trace = mesh
             .boundary_trace()
             .map_err(|_| invalid("spatial contact lost its original exterior traces"))?;
         let edge_key = |mut edge: [usize; 2]| {
@@ -116,9 +140,9 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
             })
             .collect();
         let mut cells = Vec::with_capacity(bindings.len());
-        for (contact, binding) in problem.contacts().iter().zip(&bindings) {
+        for (contact, binding) in originals.iter().zip(&bindings) {
             check(cancel)?;
-            if problem.contact_liquid_mass_fraction_axes()[binding.contact]
+            if liquid_mass_fraction_axes[binding.contact]
                 .each_ref()
                 .map(|axis| axis.as_deref())
                 != binding.point.liquid_fraction_axes
@@ -157,8 +181,8 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
             cells.push(receivers);
         }
         let prepared = Self { bindings, cells };
-        let refreshed = prepared.refresh(problem, accepted, cancel)?;
-        if refreshed.iter().zip(problem.contacts()).any(|(new, old)| {
+        let refreshed = prepared.refresh_contacts(originals, accepted, cancel)?;
+        if refreshed.iter().zip(originals).any(|(new, old)| {
             new.first_vertices != old.first_vertices
                 || new.second_vertices != old.second_vertices
                 || !same_interface(new.source.resolved(), old.source.resolved())
@@ -176,13 +200,22 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
         sample: &MaterialNetworkSample,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<Vec<ConductionContact>, Error> {
+        self.refresh_contacts(problem.contacts(), sample, cancel)
+    }
+
+    pub(super) fn refresh_contacts(
+        &self,
+        originals: &[ConductionContact],
+        sample: &MaterialNetworkSample,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<Vec<ConductionContact>, Error> {
+        if originals.len() != self.bindings.len() {
+            return Err(invalid(
+                "spatial contact source coverage changed during feedback",
+            ));
+        }
         let mut contacts = Vec::with_capacity(self.bindings.len());
-        for ((binding, cells), original) in self
-            .bindings
-            .iter()
-            .zip(&self.cells)
-            .zip(problem.contacts())
-        {
+        for ((binding, cells), original) in self.bindings.iter().zip(&self.cells).zip(originals) {
             check(cancel)?;
             let phases = cells.map(|cell| {
                 sample

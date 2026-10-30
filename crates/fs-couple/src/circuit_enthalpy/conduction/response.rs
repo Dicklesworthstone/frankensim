@@ -33,6 +33,8 @@ pub struct ConductionResponseThermalStep {
     pub start_s: f64,
     pub end_s: f64,
     pub field: ConductionResponseReport,
+    /// Actual native surface losses and their original two-body destinations.
+    pub contacts: Vec<contacts::ConductionContactHeat>,
     pub heat_j: f64,
     pub supplied_work_j: f64,
 }
@@ -126,6 +128,41 @@ impl ConductionThermalNetwork<'_> {
         initial_energy_increments_j: &[f64],
         cancelled: impl FnMut() -> bool,
     ) -> Result<ConductionResponseEnthalpyCandidate<'t>, Error> {
+        self.step_response_contact_candidate(
+            thermal,
+            target_s,
+            problem,
+            drive,
+            &[],
+            assembly,
+            field_controls,
+            response,
+            controls,
+            initial_energy_increments_j,
+            cancelled,
+        )
+    }
+
+    /// Close nonlinear bulk E/J response, native surface conduction and both
+    /// receiving enthalpies in the same residual. Each thermal trial refreshes
+    /// original contact sources and each constitutive trial retains that SAME
+    /// surface operator. Explicit interface coordinates and heat fractions keep
+    /// their original owners; field-dependent interface laws are not inferred.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_response_contact_candidate<'t>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        problem: &PlanarConductionResponse,
+        drive: ConductionDrive<'_>,
+        contact_bindings: &[contacts::ConductionContactThermal<'_>],
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        response: ConductionResponseControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ConductionResponseEnthalpyCandidate<'t>, Error> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
         let network = MaterialNetwork {
@@ -141,6 +178,7 @@ impl ConductionThermalNetwork<'_> {
             target_s,
             problem,
             drive,
+            contact_bindings,
             assembly,
             field_controls,
             response,
@@ -167,6 +205,7 @@ impl ConductionThermalNetwork<'_> {
         target_s: f64,
         problem: &PlanarConductionResponse,
         drive: ConductionDrive<'_>,
+        contact_bindings: &[contacts::ConductionContactThermal<'_>],
         assembly: WeightedAssemblyLimits,
         field_controls: ConductionControls,
         response: ConductionResponseControls,
@@ -200,6 +239,16 @@ impl ConductionThermalNetwork<'_> {
             Ok::<_, Error>(coefficients)
         };
         let accepted = resolve(thermal)?;
+        let contacts = contacts::PreparedContacts::new_for_contacts(
+            self,
+            problem.mesh(),
+            problem.contacts(),
+            problem.contact_liquid_mass_fraction_axes(),
+            contact_bindings,
+            &routes,
+            sample(&accepted.source),
+            cancel,
+        )?;
         let initial =
             self.response_materials_at(problem, sample(&accepted.source), &routes, cancel)?;
         if initial.iter().zip(problem.conductors()).any(|(a, b)| {
@@ -223,23 +272,31 @@ impl ConductionThermalNetwork<'_> {
                     &routes,
                     cancel,
                 )?;
+                let contact_sources = contacts.refresh_contacts(
+                    problem.contacts(),
+                    sample(&coefficients.source),
+                    cancel,
+                )?;
                 let bounded = ConductionResponseControls {
                     maximum_iterations: response.maximum_iterations.min(remaining),
                     ..response
                 };
                 let candidate = match drive {
-                    ConductionDrive::Voltage(voltage) => problem.solve_with_materials_candidate(
-                        sources,
-                        voltage,
-                        &[],
-                        assembly,
-                        field_controls,
-                        bounded,
-                        &mut || (*cancel.borrow_mut())(),
-                    ),
-                    ConductionDrive::CurrentDensity { voltage, currents } => problem
-                        .solve_with_materials_candidate(
+                    ConductionDrive::Voltage(voltage) => problem
+                        .solve_with_materials_and_contacts_candidate(
                             sources,
+                            contact_sources,
+                            voltage,
+                            &[],
+                            assembly,
+                            field_controls,
+                            bounded,
+                            &mut || (*cancel.borrow_mut())(),
+                        ),
+                    ConductionDrive::CurrentDensity { voltage, currents } => problem
+                        .solve_with_materials_and_contacts_candidate(
+                            sources,
+                            contact_sources,
                             voltage,
                             currents,
                             assembly,
@@ -251,8 +308,9 @@ impl ConductionThermalNetwork<'_> {
                         positive,
                         negative,
                         current_a,
-                    } => problem.solve_current_with_materials_candidate(
+                    } => problem.solve_current_with_materials_and_contacts_candidate(
                         sources,
+                        contact_sources,
                         positive,
                         negative,
                         current_a,
@@ -287,6 +345,7 @@ impl ConductionThermalNetwork<'_> {
                     ));
                 }
                 let circuit_trials = field.field_solves;
+                let contact_heat = contacts.heat(&field.contact_response)?;
                 Ok(DrivenCoefficients {
                     circuit: ResponseCandidate {
                         problem: next,
@@ -294,6 +353,7 @@ impl ConductionThermalNetwork<'_> {
                             start_s: thermal.time_s(),
                             end_s: target_s,
                             field,
+                            contacts: contact_heat,
                             heat_j,
                             supplied_work_j,
                         },
@@ -305,7 +365,10 @@ impl ConductionThermalNetwork<'_> {
                 })
             },
             |candidate, _dt, checkpoint| {
-                self.deposit_power(&candidate.step.field.cell_power_w, &routes, checkpoint)
+                let mut powers =
+                    self.deposit_power(&candidate.step.field.cell_power_w, &routes, checkpoint)?;
+                contacts::deposit(&candidate.step.contacts, &mut powers, checkpoint)?;
+                Ok(powers)
             },
             || (*cancel.borrow_mut())(),
         )?;

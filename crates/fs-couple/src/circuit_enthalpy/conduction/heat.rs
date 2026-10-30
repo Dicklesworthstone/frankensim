@@ -59,6 +59,44 @@ impl PreparedHeatNetwork<'_, '_> {
         controls: CircuitEnthalpySolve,
         initial_energy_increments_j: &[f64],
     ) -> Result<ConductionResponseEnthalpyCandidate<'t, HeatNetworkSample>, Error> {
+        self.step_conduction_response_contacts_candidate(
+            cx,
+            thermal,
+            target_s,
+            problem,
+            drive,
+            &[],
+            regions,
+            volume_tolerance_m3,
+            assembly,
+            field_controls,
+            response,
+            controls,
+            initial_energy_increments_j,
+        )
+    }
+
+    /// Nonlinear source-driven bulk current and source-refreshed electrical
+    /// contacts share this complete thermal-contact/radiation network. Native
+    /// volume and surface Joule losses enter their original receiving cells
+    /// exactly once; numerical constitutive defects never become heat.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_conduction_response_contacts_candidate<'t>(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        problem: &PlanarConductionResponse,
+        drive: ConductionDrive<'_>,
+        contacts: &[contacts::ConductionContactThermal<'_>],
+        regions: &[ConductionRegion],
+        volume_tolerance_m3: f64,
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        response: ConductionResponseControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+    ) -> Result<ConductionResponseEnthalpyCandidate<'t, HeatNetworkSample>, Error> {
         let cancel = RefCell::new(|| cx.checkpoint().is_err());
         check(&cancel)?;
         let bulk = self.thermal_material_network().map_err(heat_error)?;
@@ -91,6 +129,7 @@ impl PreparedHeatNetwork<'_, '_> {
             target_s,
             problem,
             drive,
+            contacts,
             assembly,
             field_controls,
             response,

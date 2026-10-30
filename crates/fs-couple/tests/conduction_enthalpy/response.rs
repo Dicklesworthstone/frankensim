@@ -3,6 +3,8 @@
 mod circuit;
 #[path = "response/heat.rs"]
 mod heat;
+#[path = "response/contacts.rs"]
+mod contacts;
 use super::{cells, config, ends, field_controls, initial, limits, mesh, near, network};
 use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyError,

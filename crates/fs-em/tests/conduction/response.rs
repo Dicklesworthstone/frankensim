@@ -3,6 +3,8 @@ use super::*;
 
 #[path = "response/current.rs"]
 mod current;
+#[path = "response/contacts.rs"]
+mod contacts;
 use fs_em::conduction::response::{
     ConductionResponseControls, ConductionResponseError, PlanarConductionResponse,
 };

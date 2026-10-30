@@ -85,6 +85,29 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
         limits: WeightedAssemblyLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, ConductionError> {
+        Self::assemble_with_phase_contacts(
+            mesh,
+            conductors,
+            contacts,
+            liquid_mass_fraction_axes,
+            limits,
+            cancelled,
+            |source| source.has_admitted_static_sources(),
+        )
+    }
+
+    // Constitutive response owners admit their own bulk coordinates; geometry,
+    // interface support, surface quadrature and current/heat stay native here.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn assemble_with_phase_contacts(
+        mesh: TriComplex2,
+        conductors: Vec<C>,
+        contacts: Vec<ConductionContact>,
+        liquid_mass_fraction_axes: Vec<[Option<String>; 2]>,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+        admit: impl Fn(&C) -> bool,
+    ) -> Result<Self, ConductionError> {
         poll(cancelled)?;
         if liquid_mass_fraction_axes.len() != contacts.len() {
             return Err(ConductionError::Invalid(
@@ -102,7 +125,7 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
                 "bulk and contact assembly exceed the declared triplet capacity",
             ));
         }
-        let mut problem = Self::new(mesh, conductors, limits, cancelled)?;
+        let mut problem = Self::assemble(mesh, conductors, limits, cancelled, admit)?;
         if contacts.is_empty() {
             return Ok(problem);
         }

@@ -162,6 +162,10 @@ impl ConductionResponseCircuit {
     pub fn conductors(&self) -> &[ResolvedConductorState] {
         self.circuit.problem.conductors()
     }
+    /// Original source-bound contacts in canonical native trace order.
+    pub fn contacts(&self) -> &[fs_em::conduction::ConductionContact] {
+        self.circuit.problem.contacts()
+    }
     /// Conserved magnetic coordinates in original inductor branch order.
     pub fn fluxes_wb(&self) -> &[f64] {
         self.circuit.fluxes_wb()
@@ -191,6 +195,8 @@ impl ConductionResponseCircuit {
     /// All source-dependent spatial resistance is solved inside that SAME
     /// interval from the original charge/flux. Local Joule heat is reported,
     /// not deposited; use `step_response_circuit_candidate` for finite heating.
+    /// Contact-bearing circuits require `step_response_contact_circuit_candidate`
+    /// so their original source refresh and heat destinations remain explicit.
     /// This Picard closure is bounded and may refuse instead of converging.
     #[allow(clippy::too_many_arguments)]
     pub fn step_candidate(
@@ -208,12 +214,14 @@ impl ConductionResponseCircuit {
         self.trial(
             &problem,
             problem.conductors().to_vec(),
+            problem.contacts().to_vec(),
             target_s,
             ports,
             assembly,
             field,
             response,
             circuit,
+            None,
             &cancel,
         )
     }
@@ -223,12 +231,14 @@ impl ConductionResponseCircuit {
         &self,
         problem: &PlanarConductionResponse,
         sources: Vec<ResolvedConductorState>,
+        contact_sources: Vec<fs_em::conduction::ConductionContact>,
         target_s: f64,
         ports: &[f64],
         assembly: WeightedAssemblyLimits,
         field: ConductionControls,
         response: ConductionResponseControls,
         controls: MaterialCircuitSolve,
+        contact_heat: Option<&contacts::PreparedContacts<'_, '_>>,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<ConductionResponseCircuitCandidate, Error> {
         check(cancel)?;
@@ -243,8 +253,9 @@ impl ConductionResponseCircuit {
                 "positive circuit interval and finite positive balance allowances required",
             ));
         }
-        let (candidate, trial) = problem.solve_coupled_with_materials_candidate(
+        let (candidate, trial) = problem.solve_coupled_with_materials_and_contacts_candidate(
             sources,
+            contact_sources,
             assembly,
             field,
             response,
@@ -257,7 +268,7 @@ impl ConductionResponseCircuit {
                     ports,
                     field,
                     controls,
-                    None,
+                    contact_heat,
                     cancel,
                 )
             },
@@ -347,6 +358,43 @@ impl ConductionThermalNetwork<'_> {
         initial_energy_increments_j: &[f64],
         cancelled: impl FnMut() -> bool,
     ) -> Result<ConductionResponseCircuitEnthalpyCandidate<'t>, Error> {
+        self.step_response_contact_circuit_candidate(
+            thermal,
+            target_s,
+            circuit,
+            ports,
+            graph_resistors,
+            &[],
+            assembly,
+            field,
+            response,
+            controls,
+            initial_energy_increments_j,
+            cancelled,
+        )
+    }
+
+    /// Solve native circuit storage, nonlinear bulk E/J response, original
+    /// contact resistance and finite two-sided heating at one endpoint. All
+    /// constitutive trials restart from the same conserved charge/flux and
+    /// include the native contact operator. Only accepted physical bulk/surface
+    /// losses enter the original enthalpy residual, under explicit heat splits.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_response_contact_circuit_candidate<'t>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        circuit: &ConductionResponseCircuit,
+        ports: &[f64],
+        graph_resistors: &[ResistorCell],
+        contact_bindings: &[contacts::ConductionContactThermal<'_>],
+        assembly: WeightedAssemblyLimits,
+        field: ConductionControls,
+        response: ConductionResponseControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ConductionResponseCircuitEnthalpyCandidate<'t>, Error> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
         if !(1..=MAX_RESPONSE_ITERATIONS).contains(&response.maximum_iterations)
@@ -384,6 +432,16 @@ impl ConductionThermalNetwork<'_> {
             Ok::<_, Error>(coefficients)
         };
         let accepted = resolve(thermal)?;
+        let contacts = contacts::PreparedContacts::new_for_contacts(
+            self,
+            problem.mesh(),
+            problem.contacts(),
+            problem.contact_liquid_mass_fraction_axes(),
+            contact_bindings,
+            &routes,
+            &accepted.source,
+            &cancel,
+        )?;
         let initial = self.response_materials_at(&problem, &accepted.source, &routes, &cancel)?;
         if initial.iter().zip(problem.conductors()).any(|(a, b)| {
             !a.has_same_electrical_source(b) || !same_material(a.material(), b.material())
@@ -401,6 +459,8 @@ impl ConductionThermalNetwork<'_> {
                 let coefficients = resolve(state)?;
                 let sources =
                     self.response_materials_at(&problem, &coefficients.source, &routes, &cancel)?;
+                let contact_sources =
+                    contacts.refresh_contacts(problem.contacts(), &coefficients.source, &cancel)?;
                 let bounded = ConductionResponseControls {
                     maximum_iterations: response.maximum_iterations.min(remaining),
                     ..response
@@ -409,12 +469,14 @@ impl ConductionThermalNetwork<'_> {
                     .trial(
                         &problem,
                         sources,
+                        contact_sources,
                         target_s,
                         ports,
                         assembly,
                         field,
                         bounded,
                         controls.circuit,
+                        Some(&contacts),
                         &cancel,
                     )
                     .map_err(|error| match error {
@@ -452,6 +514,11 @@ impl ConductionThermalNetwork<'_> {
                     }
                     powers.insert(cell, total);
                 }
+                contacts::deposit(
+                    &candidate.step.circuit.spatial.contacts,
+                    &mut powers,
+                    checkpoint,
+                )?;
                 Ok(powers)
             },
             || (*cancel.borrow_mut())(),

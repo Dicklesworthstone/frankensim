@@ -36,7 +36,7 @@ fn pressure_quantity() -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static))
 }
 
-fn interface(cards: &[MaterialCard; 2], r0: f64, beta: f64, upper: f64) -> InterfaceSystemCard {
+pub(super) fn interface(cards: &[MaterialCard; 2], r0: f64, beta: f64, upper: f64) -> InterfaceSystemCard {
     let mut claims = ClaimSet::new();
     claims
         .insert_claim(PropertyClaim {
@@ -87,7 +87,7 @@ fn interface(cards: &[MaterialCard; 2], r0: f64, beta: f64, upper: f64) -> Inter
     .unwrap()
 }
 
-fn interface_context(t: f64) -> QueryPoint {
+pub(super) fn interface_context(t: f64) -> QueryPoint {
     let mut point = QueryPoint::new();
     for axis in ["Ta", "Tb", "Tm"] {
         point = point
@@ -99,7 +99,7 @@ fn interface_context(t: f64) -> QueryPoint {
         .unwrap()
 }
 
-fn binding<'a>(
+pub(super) fn binding<'a>(
     cards: &'a [MaterialCard; 2],
     card: &'a InterfaceSystemCard,
     context: &'a QueryPoint,
@@ -119,7 +119,7 @@ fn binding<'a>(
     }
 }
 
-fn contact_mesh() -> TriComplex2 {
+pub(super) fn contact_mesh() -> TriComplex2 {
     TriComplex2::from_indexed_triangles(
         "two original bodies with matching finite-resistance traces",
         vec![
