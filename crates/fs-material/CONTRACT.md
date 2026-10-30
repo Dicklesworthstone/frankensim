@@ -4837,6 +4837,17 @@ coordinate and retain unknown expansion; a missing coefficient never means
 zero expansion. An explicit authored-state constructor can declare its own
 temperature and optional beta, without acquiring source-data authority.
 
+`ResolvedThermochemicalRealGasState` supplies the same thermal view from its
+original Peng-Robinson branch. Its local expansion is
+`beta = -(dp/dT)_v / (v * (dp/dv)_T)` at fixed composition, derived from the
+same analytic pressure derivatives that supply Cp and sound speed. Thermal
+and momentum views retain identical PR density/Cp and original transport
+coefficients; ideal-reference gas density or `1/T` is never substituted.
+G1 tests compare against independent constant-pressure density perturbations;
+G3 checks the dilute ideal limit and source-preserving dense-state substitution.
+The derivative does not establish phase equilibrium, a finite-temperature
+Boussinesq interval or empirical validity of the chosen critical/transport data.
+
 This is one evaluated state, not a temperature-dependent fluid law or evolving
 reservoir. Consumers must keep source/domain and frozen-property assumptions,
 and must verify agreement when binding mechanical and thermal snapshots.

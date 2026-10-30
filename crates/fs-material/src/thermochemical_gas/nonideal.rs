@@ -14,9 +14,13 @@ use fs_thermochem::eos::peng_robinson::{
 };
 use fs_thermochem::mixture::FrozenIdealGasMixtureEvaluationV1;
 
-use super::{ResolvedThermochemicalGasState, ThermochemicalGasModel, coordinates, failure, invalid};
+use super::{
+    ResolvedThermochemicalGasState, ThermochemicalGasModel, coordinates, failure, invalid,
+};
 use crate::MaterialError;
-use crate::fluid_transport::{FluidTransport, FluidTransportState};
+use crate::fluid_transport::{
+    FluidTransport, FluidTransportState, ThermalFluidTransport, ThermalFluidTransportState,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PengRobinsonSpeciesBinding {
@@ -129,13 +133,19 @@ impl ThermochemicalPengRobinsonModel {
         let gamma = cp / cv;
         let specific_gas_constant = fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / molar_mass;
         let characteristic_impedance = density * sound_speed;
+        // At fixed composition, dp = p_T dT + p_v dv. The SAME selected
+        // mechanically stable root therefore gives beta = (1/v)(dv/dT)_p
+        // = -p_T/(v*p_v). Do not attach ideal-gas 1/T to a PR density.
+        let volumetric_expansion_per_k =
+            -(caloric.dp_dt_v_pa_k / caloric.dp_dv_t_pa_mol_m3) / root.molar_volume_m3_per_mol();
         if ![
             cp, cv, density, sound_speed, gamma, specific_gas_constant,
             characteristic_impedance, specific_internal_energy_j_kg,
-            specific_enthalpy_j_kg,
+            specific_enthalpy_j_kg, volumetric_expansion_per_k,
         ].into_iter().all(|value| value.is_finite())
             || cp <= 0.0 || cv <= 0.0 || density <= 0.0 || sound_speed <= 0.0
             || gamma <= 0.0 || specific_gas_constant <= 0.0 || characteristic_impedance <= 0.0
+            || (caloric.dp_dt_v_pa_k != 0.0 && volumetric_expansion_per_k == 0.0)
         {
             return Err(invalid("resolved real-gas state is unrepresentable"));
         }
@@ -153,6 +163,7 @@ impl ThermochemicalPengRobinsonModel {
             characteristic_impedance_pa_s_m: characteristic_impedance,
             specific_internal_energy_j_kg,
             specific_enthalpy_j_kg,
+            volumetric_expansion_per_k,
         })
     }
 
@@ -201,31 +212,49 @@ pub struct ResolvedThermochemicalRealGasState {
     characteristic_impedance_pa_s_m: f64,
     specific_internal_energy_j_kg: f64,
     specific_enthalpy_j_kg: f64,
+    volumetric_expansion_per_k: f64,
 }
 impl ResolvedThermochemicalRealGasState {
-    #[must_use] pub const fn source(&self) -> &ResolvedThermochemicalGasState { &self.source }
-    #[must_use] pub const fn mechanics(&self) -> &PengRobinsonEvaluationV1 { &self.mechanics }
-    #[must_use] pub const fn root(&self) -> &PengRobinsonPhaseRootV1 { &self.root }
-    #[must_use] pub const fn density_kg_m3(&self) -> f64 { self.density_kg_m3 }
-    #[must_use] pub const fn sound_speed_m_s(&self) -> f64 { self.sound_speed_m_s }
-    #[must_use] pub const fn specific_heat_cp_j_kg_k(&self) -> f64 { self.specific_heat_cp_j_kg_k }
-    #[must_use] pub const fn specific_heat_cv_j_kg_k(&self) -> f64 { self.specific_heat_cv_j_kg_k }
-    #[must_use] pub const fn gamma(&self) -> f64 { self.gamma }
-    #[must_use] pub const fn specific_gas_constant_j_kg_k(&self) -> f64 {
+    #[must_use]pub const fn source(&self) -> &ResolvedThermochemicalGasState { &self.source }
+    #[must_use]pub const fn mechanics(&self) -> &PengRobinsonEvaluationV1 { &self.mechanics }
+    #[must_use]pub const fn root(&self) -> &PengRobinsonPhaseRootV1 { &self.root }
+    #[must_use]pub const fn density_kg_m3(&self) -> f64 { self.density_kg_m3 }
+    #[must_use]pub const fn sound_speed_m_s(&self) -> f64 { self.sound_speed_m_s }
+    #[must_use]pub const fn specific_heat_cp_j_kg_k(&self) -> f64 { self.specific_heat_cp_j_kg_k }
+    #[must_use]pub const fn specific_heat_cv_j_kg_k(&self) -> f64 { self.specific_heat_cv_j_kg_k }
+    #[must_use]pub const fn gamma(&self) -> f64 { self.gamma }
+    #[must_use]pub const fn specific_gas_constant_j_kg_k(&self) -> f64 {
         self.specific_gas_constant_j_kg_k
     }
-    #[must_use] pub const fn characteristic_impedance_pa_s_m(&self) -> f64 {
+    #[must_use]pub const fn characteristic_impedance_pa_s_m(&self) -> f64 {
         self.characteristic_impedance_pa_s_m
     }
-    #[must_use] pub const fn specific_internal_energy_j_kg(&self) -> f64 {
+    #[must_use]pub const fn specific_internal_energy_j_kg(&self) -> f64 {
         self.specific_internal_energy_j_kg
     }
-    #[must_use] pub const fn specific_enthalpy_j_kg(&self) -> f64 {
+    #[must_use]pub const fn specific_enthalpy_j_kg(&self) -> f64 {
         self.specific_enthalpy_j_kg
+    }
+    /// Local isobaric volumetric expansion [1/K] of the same frozen-composition
+    /// PR branch as density, Cp and sound speed. This is an EOS derivative,
+    /// not an ideal-gas assumption, a phase-equilibrium derivative or a
+    /// temperature interval over which a Boussinesq model is automatically valid.
+    #[must_use]
+    pub const fn volumetric_expansion_per_k(&self) -> f64 {
+        self.volumetric_expansion_per_k
     }
 }
 impl FluidTransport for ResolvedThermochemicalRealGasState {
     fn transport_state(&self) -> Result<FluidTransportState, MaterialError> { Ok(self.transport) }
+}
+impl ThermalFluidTransport for ResolvedThermochemicalRealGasState {
+    fn thermal_transport_state(&self) -> Result<ThermalFluidTransportState, MaterialError> {
+        ThermalFluidTransportState::try_new(
+            self.transport,
+            self.source.state().temperature,
+            Some(self.volumetric_expansion_per_k),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -317,6 +346,73 @@ mod tests {
         );
         assert!(dense.specific_internal_energy_j_kg().is_finite());
         assert!(dense.specific_enthalpy_j_kg().is_finite());
+    }
+
+    #[test]
+    fn g1_real_gas_expansion_matches_independent_isobaric_density_differences() {
+        for fractions in [vec![0.75, 0.25], vec![0.25, 0.75]] {
+            let bound =
+                ThermochemicalPengRobinsonModel::new(model(fractions, 0.001), bindings(), vec![])
+                    .unwrap();
+            for temperature in [260.0, 300.0, 450.0] {
+                for pressure in [1.0e5, 5.0e6, 8.0e6] {
+                    let evaluate = |t| {
+                        bound
+                            .evaluate_real_gas(&point(t, pressure), PengRobinsonPhaseV1::Stable)
+                            .unwrap()
+                    };
+                    let state = evaluate(temperature);
+                    let delta = 0.001;
+                    let numerical = -(evaluate(temperature + delta).density_kg_m3()
+                        - evaluate(temperature - delta).density_kg_m3())
+                        / (2.0 * delta * state.density_kg_m3());
+                    let beta = state.volumetric_expansion_per_k();
+                    assert!(
+                        (beta / numerical - 1.0).abs() < 2.0e-7,
+                        "T={temperature}, p={pressure}: {beta} != {numerical}"
+                    );
+                    let thermal = state.thermal_transport_state().unwrap();
+                    assert_eq!(thermal.transport(), state.transport_state().unwrap());
+                    assert_eq!(thermal.temperature_k(), temperature);
+                    assert_eq!(thermal.volumetric_expansion_per_k(), Some(beta));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g3_real_gas_thermal_view_retains_dense_response_and_ideal_limit() {
+        let source = crate::thermochemical_gas::tests::model_in_domains(
+            vec![0.75, 0.25],
+            0.0,
+            [200.0, 2000.0],
+            [200.0, 2000.0],
+            [1.0e-3, 1.0e7],
+        );
+        let bound = ThermochemicalPengRobinsonModel::new(source, bindings(), vec![]).unwrap();
+        let dilute = bound
+            .evaluate_real_gas(&point(300.0, 0.01), PengRobinsonPhaseV1::Vapor)
+            .unwrap();
+        assert!((dilute.volumetric_expansion_per_k() * 300.0 - 1.0).abs() < 2.0e-8);
+        let dense = bound
+            .evaluate_real_gas(&point(300.0, 5.0e6), PengRobinsonPhaseV1::Stable)
+            .unwrap();
+        assert!((dense.volumetric_expansion_per_k() * 300.0 - 1.0).abs() > 0.01);
+        // A heterogeneous consumer borrows the actual original source, not a
+        // detached transport tuple or the retained ideal-reference GasState.
+        let views: [&dyn ThermalFluidTransport; 2] = [&dilute, &dense];
+        let first = views[0].thermal_transport_state().unwrap();
+        let second = views[1].thermal_transport_state().unwrap();
+        assert_ne!(first.transport(), second.transport());
+        assert_ne!(
+            first.volumetric_expansion_per_k(),
+            second.volumetric_expansion_per_k()
+        );
+        assert_eq!(second.transport(), dense.transport_state().unwrap());
+        assert_ne!(
+            second.transport(),
+            dense.source().transport_state().unwrap()
+        );
     }
 
     #[test]
