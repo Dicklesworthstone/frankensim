@@ -1085,7 +1085,59 @@ and frozen-2-D compatibility, axis rotation, closed-wall balances, complete
 workspace admission, late cancellation/replay and shear-heating source refusal.
 All 18 compressible tests, including the existing molecular path, pass.
 
-This increment is Estimated stationary inviscid evolving-composition flow.
-It does not compose chemistry or molecular species diffusion, move the domain,
-preserve pressure exactly at moving unequal-caloric contacts, or establish a
-fully discrete entropy inequality or experimental validation.
+This field is Estimated stationary inviscid evolving-composition transport.
+The reactive adapter below composes chemistry; molecular species diffusion,
+moving domains, exact pressure preservation at moving unequal-caloric contacts,
+fully discrete entropy inequalities and experimental validation remain outside
+this lane.
+
+### Finite-rate chemistry in the same two-dimensional species field
+
+`compressible::mixture::reactive::ReactingEuler2d` composes the original
+`fs-gas::multicomponent::reactive::CellChemistry` with `MixtureEuler2d`.
+One original source owner converts conservative species densities to amounts,
+advances the prepared fixed-volume reactor and restores the conservative row.
+Both momentum components enter kinetic energy and remain fixed during local
+chemistry. The same species energy references convert chemical release into
+sensible energy exactly once; there is no additional heat-release source,
+species renormalization, trace seed or Cartesian reaction-rate implementation.
+Source identity and the complete admitted caloric domain must match exactly.
+
+Each accepted interval is chemistry(dt/2), shared Cartesian advection(dt),
+chemistry(dt/2). The post-reaction face CFL still owns the admissible acoustic
+step. If it shortens the interval, the whole trial restarts from the original
+field before either chemistry half step is accepted. The two existing full
+Cartesian workspaces and the original prepared reactor are reused. Their
+combined numerical heap capacity, including caller state-vector excess
+capacity, is checked against an explicit byte budget and the existing 1 GiB
+ceiling. Immutable sources/prepared caloric coefficients and bounded stack
+scratch are excluded. Accepted steps allocate no new numerical arrays.
+
+The coupled report includes both chemistry halves, the original transport
+report, per-species source changes, both momentum balances, referenced energy,
+total mass and physical chemical/thermal/kinetic energy. Physical energy is
+formed from conservative differences and original reference changes, avoiding
+subtraction of large absolute totals. Chemistry has no boundary flux, so the
+original advective per-face impulses are also the complete physical boundary
+exchange. The borrowed field's Euler metadata describes only the middle
+advection phase; the reactive owner's `last_step` describes the full interval.
+Failed source, chemistry-work, coupling-retry or cancellation checks preserve
+all accepted cells, clock, both reports and face impulses.
+
+Five focused G0/G1/G3/G4 regression groups cover a moving exothermic field
+against the original homogeneous reactor, heat-release-induced CFL retries,
+formation-energy-data changes reaching pressure and sound speed, oblique
+reaction/advection refinement against an analytic reversible-isomer solution,
+the original reacting 1-D owner and x/y rotation, closed-wall impulses,
+final-publication cancellation/replay, and total-workspace/source/work refusal.
+The manufactured sources establish numerical composition and accounting, not
+a calibrated chemical mechanism or measured combustion behavior.
+
+The original reactor's selected backward Euler or SDIRK2 method is retained.
+Symmetric composition alone does not establish coupled temporal order;
+limiting and first-order retries may also reduce observed order. No fully
+discrete entropy theorem follows from splitting. This rung remains stationary
+and inviscid: it does not add
+molecular species diffusion, flame-speed/thickness calibration, turbulence,
+moving boundaries, finite-rate chemistry in the 3-D field or experimental
+validation.

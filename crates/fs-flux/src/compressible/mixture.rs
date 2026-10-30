@@ -4,7 +4,11 @@
 //! the frozen-composition field. `fs-gas::MixtureGas` alone owns calorics,
 //! species energy references and planar HLLC/HLL/wall physics. All runtime
 //! arrays are flat and prepared once; no cell owns a heap-allocated species Vec.
-//! This inviscid lane does not yet compose molecular diffusion or chemistry.
+//! [`reactive`] composes the original finite-rate chemistry with this field.
+//! Molecular diffusion is not yet composed with this evolving-species lane.
+
+/// Source-owned finite-rate chemistry on the same conservative Cartesian field.
+pub mod reactive;
 
 use super::{
     Boundaries2d, BoundaryCondition, BoundarySide, CartesianGrid, Primitive, Reconstruction,

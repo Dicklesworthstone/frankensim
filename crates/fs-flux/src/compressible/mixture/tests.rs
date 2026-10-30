@@ -1,4 +1,6 @@
 use super::*;
+
+mod reactive;
 use crate::compressible::{AxisBoundaries, Euler2d, FrozenGas, SIDES, State};
 use fs_evidence::ValidityDomain;
 use fs_gas::multicomponent::{Boundaries, Boundary, CaloricDomain, MixtureEuler1d};
