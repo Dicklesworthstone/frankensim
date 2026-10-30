@@ -50,6 +50,8 @@ use wall::PreparedWallTraces;
 /// Reciprocal full-vector moving solid boundaries in the original mixed solve.
 pub mod moving_wall;
 use moving_wall::{MovingWall, MovingWallField};
+/// Complete causal motion and thermal storage through the original pHS owner.
+pub mod time;
 
 /// Hard dense-solver cap, independent of the caller's smaller budget.
 pub const MAX_LNS_DOFS: usize = 1536;

@@ -1,4 +1,35 @@
 use super::*;
+#[test]
+fn original_liquid_card_reaches_the_complete_causal_field_owner() {
+    let (card, source) = liquid(Some(-2e-4), 0.004, 1.0);
+    let (mesh, xyz) = kuhn_cube(1);
+    let xyz = points(&xyz);
+    let model =
+        ThermoviscousInterior::from_material(build_fluid(&mesh, &xyz, &source), source, BAND)
+            .unwrap();
+    let time = model
+        .prepare_time(
+            1.0 / 48_000.0,
+            ThermoviscousTimeLimits::default(),
+            &mut || false,
+        )
+        .unwrap();
+    assert_eq!(
+        model.material_source().material().card_identity(),
+        card.content_hash()
+    );
+    assert_eq!(
+        time.inner().thermodynamics().isobaric_expansion_per_k,
+        -2e-4
+    );
+    let step = time
+        .step(&time.zero_state(), &[1.0, 0.0], &[], &mut || false)
+        .unwrap();
+    assert!(step.work.pressure_work_j > 0.0 && step.work.final_energy_j > 0.0);
+    assert!(step.state.pressure_pa.iter().any(|p| p.abs() > 0.0));
+    assert!(step.state.temperature_k.iter().any(|t| t.abs() > 0.0));
+    assert!(step.work.balance_residual_j().abs() < 1e-10 * step.work.pressure_work_j);
+}
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,

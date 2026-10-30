@@ -1596,6 +1596,7 @@ dependencies = [
  "fs-math",
  "fs-modal",
  "fs-obs",
+ "fs-phs",
  "fs-ports",
  "fs-propcheck",
  "fs-qty",

@@ -15,6 +15,9 @@
 //! these coordinates are not automatically evanescent traveling-wave modes.
 
 use fs_duct::{DuctError, compose::TwoPort};
+use fs_feec::acoustics::thermoviscous::time::{
+    PreparedThermoviscousTime, ThermoviscousTimeError, ThermoviscousTimeLimits,
+};
 use fs_feec::acoustics::thermoviscous::{
     ThermoviscousError, ThermoviscousFe, ThermoviscousField, ThermoviscousMedium,
     ThermoviscousThermodynamics,
@@ -34,6 +37,7 @@ pub enum ThermoviscousSourceError {
     Material(MaterialError),
     Interior(ThermoviscousError),
     Duct(DuctError),
+    Time(ThermoviscousTimeError),
 }
 
 impl core::fmt::Display for ThermoviscousSourceError {
@@ -42,6 +46,7 @@ impl core::fmt::Display for ThermoviscousSourceError {
             Self::Material(e) => e.fmt(f),
             Self::Interior(e) => e.fmt(f),
             Self::Duct(e) => e.fmt(f),
+            Self::Time(e) => e.fmt(f),
         }
     }
 }
@@ -59,6 +64,11 @@ impl From<ThermoviscousError> for ThermoviscousSourceError {
 impl From<DuctError> for ThermoviscousSourceError {
     fn from(e: DuctError) -> Self {
         Self::Duct(e)
+    }
+}
+impl From<ThermoviscousTimeError> for ThermoviscousSourceError {
+    fn from(e: ThermoviscousTimeError) -> Self {
+        Self::Time(e)
     }
 }
 
@@ -280,6 +290,34 @@ impl<'c, S> ThermoviscousInterior<'c, S> {
     /// preparing the material, not inferred by the acoustic adapter.
     pub fn wall_sources(&self) -> &[ThermalTransportSample] {
         &self.wall_sources
+    }
+
+    /// Causal full-field motion and work with this SAME immutable fluid source.
+    /// The borrow retains the source, FE and structural model for every step.
+    /// Molecular calorics and finite-wall impedances require their actual time
+    /// states; they are refused, never replaced by their equilibrium values.
+    /// The clock must sample the declared source band; no frequency truncation
+    /// or proof of spatial/input-waveform resolution follows from that check.
+    pub fn prepare_time<'a>(
+        &'a self,
+        duration_s: f64,
+        limits: ThermoviscousTimeLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedThermoviscousTime<'a, 'c>, ThermoviscousSourceError> {
+        if cancelled() {
+            return Err(ThermoviscousError::Cancelled.into());
+        }
+        if self.relaxation.is_some() {
+            return Err(invalid(
+                "causal resolved molecular calorics require their original memory states",
+            ));
+        }
+        if duration_s * self.band_hz[1] > 0.5 {
+            return Err(invalid(
+                "resolved transient clock does not sample the declared source band",
+            ));
+        }
+        Ok(self.fe.prepare_time(duration_s, limits, cancelled)?)
     }
 
     fn heat_capacity(

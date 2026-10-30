@@ -28,6 +28,7 @@ fs-ivl = { path = "../fs-ivl" }
 fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
 fs-modal = { path = "../fs-modal" }
+fs-phs = { path = "../fs-phs" }
 fs-qty = { path = "../fs-qty" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-soa = { path = "../fs-soa" }
