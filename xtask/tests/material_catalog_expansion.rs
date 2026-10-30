@@ -1635,3 +1635,6 @@ mod viscoelastic_sources;
 
 #[path = "material_catalog_expansion/cubic_silver.rs"]
 mod cubic_silver;
+
+#[path = "material_catalog_expansion/isobaric_silver.rs"]
+mod isobaric_silver;

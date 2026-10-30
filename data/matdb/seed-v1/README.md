@@ -4348,3 +4348,33 @@ wall at a 3,000-second implicit step and passes original acceptance; that is
 algebraic convergence evidence, not a time-discretization accuracy claim.
 Full workspace Cargo validation remains blocked by seven missing sibling
 repositories.
+
+## Silver Cp, enthalpy and entropy on the native heat timeline
+
+`silver-pure-smith-fickett-nist1995` also retains all 78 rows of Table 8 in
+[Smith and Fickett, NIST (1995)](https://doi.org/10.6028/jres.100.012), reproduced
+from the NBS NSRDS-18 evaluation. Three independent source curves provide
+isobaric specific heat, enthalpy relative to 0 K, and specific entropy from
+1 to 300 K. The review's printed nominal pressure is retained as
+`p=101000` Pa; all queries also require `engineering-reference-model=1`.
+Linear interpolation is an authored engineering approximation with unstated
+error. The independently rounded H and S columns are not silently forced to
+equal integrals of the interpolated Cp curve.
+
+`fs_material::thermal::transport::isobaric::IsobaricHeatCapacityLaw` resolves
+the Cp curve on a fixed, explicitly supported pressure and plugs directly into
+the existing `fs_thermal::enthalpy::ThermalLaw` interface. It uses the shared
+capacity kernel for enthalpy increments, entropy and temperature inversion.
+A fixed specimen mass is sufficient: conductivity, current density and volume
+change are separate constitutive inputs. This permits finite-body heating and
+heat exchange without extending the pack's 293.15 K density observation into
+an invented density-temperature law. The thermal geometry remains authored
+reference geometry; the adapter does not supply moving-volume pressure work.
+
+The catalog regression heats 0.1 kg from 290 to 295 K with 117.2725 J,
+continues the same native timeline, and exchanges heat between two finite
+silver bodies while checking conserved enthalpy and increasing total entropy.
+It also checks data-only Cp substitutions, source pressure/temperature refusals
+and the distinction between integrated Cp and separately printed source H.
+These are bounded caloric-model checks, not qualification of a piano string,
+a particular silver specimen, or the separate adiabatic elastic observations.

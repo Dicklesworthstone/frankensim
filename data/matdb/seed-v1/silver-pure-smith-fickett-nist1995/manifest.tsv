@@ -1,6 +1,6 @@
 frankensim.matdb-manifest.v1
 pack_id	silver-pure-smith-fickett-nist1995
 redistribution	permitted	Work of the U.S. Government: the Journal of Research of NIST states its papers are in the public domain and not subject to copyright in the United States; retain author list, journal, DOI
-citation	Smith D.R., Fickett F.R. (1995), Low-Temperature Properties of Silver, Journal of Research of the National Institute of Standards and Technology 100(2):119-171; https://doi.org/10.6028/jres.100.012 (PMC4887198); Tables 1 and 9 and the stress-strain paragraph that quotes the Young's modulus of annealed silver. Table 9 cites Neighbours J.R., Alers G.A. (1958), Elastic Constants of Silver and Gold, Physical Review 111:707, https://doi.org/10.1103/PhysRev.111.707
+citation	Smith D.R., Fickett F.R. (1995), Low-Temperature Properties of Silver, Journal of Research of the National Institute of Standards and Technology 100(2):119-171; https://doi.org/10.6028/jres.100.012 (PMC4887198); Tables 1, 8 and 9 and the stress-strain paragraph that quotes the Young's modulus of annealed silver. Table 9 cites Neighbours J.R., Alers G.A. (1958), Elastic Constants of Silver and Gold, Physical Review 111:707, https://doi.org/10.1103/PhysRev.111.707. Table 8 cites Furukawa G.T., Saba W.G., Reilly M.L. (1968), Critical Analysis of the Heat-Capacity Data of the Literature and Evaluation of Thermodynamic Properties of Copper, Silver, and Gold from 0 to 300 K, NSRDS-NBS 18.
 license	Work-of-the-US-Government-Public-Use-Permitted
 source	primary	properties.tsv	material-tsv-v1

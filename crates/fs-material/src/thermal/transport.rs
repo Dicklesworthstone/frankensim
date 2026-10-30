@@ -32,6 +32,10 @@ pub mod storage;
 #[path = "transport/stack.rs"]
 pub mod stack;
 
+/// Source Cp(T) on the native constant-pressure, fixed-mass heat timeline.
+#[path = "transport/isobaric.rs"]
+pub mod isobaric;
+
 // Shared affine-capacity integration and inversion, independent of its units.
 #[path = "transport/capacity.rs"]
 mod capacity;

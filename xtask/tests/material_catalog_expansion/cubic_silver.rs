@@ -55,7 +55,7 @@ fn g1_g3_silver_table_reaches_the_same_oriented_wave_and_solid_law() {
         TetAssemblyBudget, TetElasticMaterial, TetLinearElasticProblem, TetMaterialField,
     };
 
-    let pack = compile("silver-pure-smith-fickett-nist1995", 13);
+    let pack = compile("silver-pure-smith-fickett-nist1995", 16);
     // Independently transcribed Table 9 facts: T, C11, C12, C44, B [K, GPa].
     for [t, c11, c12, c44, bulk] in [
         [10.0, 131.44, 97.30, 51.08, 108.68],
