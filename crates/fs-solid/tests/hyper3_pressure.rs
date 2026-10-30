@@ -3,7 +3,7 @@
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::hyper::{Hyperelastic, HyperelasticModel};
-use fs_solid::hyper3::pressure::ClosedTetPressureSurface;
+use fs_solid::hyper3::pressure::{ClosedTetPressureSurface, TetPressure};
 use fs_solid::hyper3::{
     HyperTetError, HyperTetProblem, HyperTetSettings, HyperelasticLawField,
 };
@@ -135,6 +135,109 @@ fn g0_current_area_force_tangent_and_exact_work_match_volume_derivatives() {
             2.0e-14,
         );
         assert_eq!(surface.force_n(&u, 0.0, cx).unwrap(), vec![0.0; 12]);
+    });
+}
+
+#[test]
+fn g0_face_pressure_localizes_load_and_keeps_the_nonsymmetric_follower_tangent() {
+    with_cx(|_, cx| {
+        let surface =
+            ClosedTetPressureSurface::new(&NODES, &TETS, TetAssemblyBudget::standard(), 4, cx)
+                .unwrap();
+        let mut values = vec![0.0; surface.faces().len()];
+        let index = surface.faces().iter().position(|face| !face.contains(&0)).unwrap();
+        values[index] = 3.0;
+        let pressure = TetPressure::PerFace(&values);
+        let force = surface.force_n(&[0.0; 12], pressure, cx).unwrap();
+        assert_eq!(&force[..3], &[0.0; 3]);
+        for value in &force[3..] { near(*value, -0.5, 1.0e-14); }
+
+        let u = [0.0, 0.0, 0.0, 0.3, 0.1, 0.0, 0.05, -0.1, 0.1, 0.1, 0.0, 0.2];
+        let tangent = surface.force_tangent(&u, pressure, cx).unwrap();
+        let mut antisymmetric: f64 = 0.0;
+        for column in 0..12 {
+            let mut plus = u;
+            let mut minus = u;
+            plus[column] += 1.0e-6;
+            minus[column] -= 1.0e-6;
+            let forward = surface.force_n(&plus, pressure, cx).unwrap();
+            let backward = surface.force_n(&minus, pressure, cx).unwrap();
+            for row in 0..12 {
+                near(tangent.get(row, column), (forward[row] - backward[row]) / 2.0e-6, 2.0e-9);
+                antisymmetric = antisymmetric.max(
+                    (tangent.get(row, column) - tangent.get(column, row)).abs(),
+                );
+            }
+        }
+        assert!(antisymmetric > 0.1, "an open loaded patch is not a conservative volume load");
+        let reverse = ClosedTetPressureSurface::new(
+            &NODES, &[[0, 2, 1, 3]], TetAssemblyBudget::standard(), 4, cx,
+        ).unwrap();
+        assert_eq!(reverse.faces(), surface.faces());
+        assert_eq!(reverse.force_n(&u, pressure, cx).unwrap(), surface.force_n(&u, pressure, cx).unwrap());
+    });
+}
+
+#[test]
+fn g1_face_pressure_work_retains_translation_and_the_actual_displacement_path() {
+    with_cx(|_, cx| {
+        let surface =
+            ClosedTetPressureSurface::new(&NODES, &TETS, TetAssemblyBudget::standard(), 4, cx)
+                .unwrap();
+        let mut values = vec![0.0; surface.faces().len()];
+        let index = surface.faces().iter().position(|face| !face.contains(&3)).unwrap();
+        values[index] = 2.4;
+        let pressure = TetPressure::PerFace(&values);
+        let before = [0.0; 12];
+        let mut after = [0.0; 12];
+        after[3] = 0.5;
+        after[7] = 0.8;
+        for node in 0..4 { after[3 * node + 2] = 0.3; }
+        // The loaded z=0 face remains planar: A(t)=1/2 (1+0.5t)(1+0.8t).
+        // Its inward resultant is +p A(t) e_z and its translation is dz=0.3dt.
+        let expected = 2.4 * 0.3 / 2.0 * (1.0 + (0.5 + 0.8) / 2.0 + 0.5 * 0.8 / 3.0);
+        let work = surface.work_j(&before, &after, pressure, cx).unwrap();
+        near(work, expected, 2.0e-14);
+        near(surface.work_j(&after, &before, pressure, cx).unwrap(), -work, 2.0e-14);
+        let midpoint = after.map(|value| 0.5 * value);
+        near(
+            surface.work_j(&before, &midpoint, pressure, cx).unwrap()
+                + surface.work_j(&midpoint, &after, pressure, cx).unwrap(),
+            work, 2.0e-14,
+        );
+        let mut expanded = after;
+        for node in 0..4 { expanded[3 * node + 2] = 0.0; }
+        let other_path = surface.work_j(&before, &expanded, pressure, cx).unwrap()
+            + surface.work_j(&expanded, &after, pressure, cx).unwrap();
+        near(other_path, 2.4 * 0.3 / 2.0 * 1.5 * 1.8, 2.0e-14);
+        assert!((other_path - work).abs() > 0.1);
+
+        let uniform = vec![2.4; surface.faces().len()];
+        assert_eq!(surface.force_n(&after, TetPressure::PerFace(&uniform), cx).unwrap(),
+            surface.force_n(&after, 2.4, cx).unwrap());
+        near(surface.work_j(&before, &after, TetPressure::PerFace(&uniform), cx).unwrap(),
+            surface.work_j(&before, &after, 2.4, cx).unwrap(), 2.0e-14);
+    });
+}
+
+#[test]
+fn g4_face_pressure_refuses_missing_extra_nonfinite_values_and_cancellation() {
+    with_cx(|gate, cx| {
+        let surface =
+            ClosedTetPressureSurface::new(&NODES, &TETS, TetAssemblyBudget::standard(), 4, cx)
+                .unwrap();
+        for values in [&[1.0; 3][..], &[1.0; 5][..], &[0.0, 1.0, f64::NAN, 0.0][..]] {
+            assert!(surface.force_n(&[0.0; 12], TetPressure::PerFace(values), cx).is_err());
+            assert!(surface.force_tangent(&[0.0; 12], TetPressure::PerFace(values), cx).is_err());
+            assert!(surface.work_j(&[0.0; 12], &[0.0; 12], TetPressure::PerFace(values), cx).is_err());
+        }
+        let pressure = TetPressure::PerFace(&[1.0; 4]);
+        assert!(surface.force_n(&[0.0; 12], pressure, cx).is_ok());
+        assert!(surface.work_j(&[0.0; 12], &[0.0; 11], pressure, cx).is_err());
+        gate.request();
+        assert!(surface.force_n(&[0.0; 12], pressure, cx).is_err());
+        assert!(surface.force_tangent(&[0.0; 12], pressure, cx).is_err());
+        assert!(surface.work_j(&[0.0; 12], &[0.0; 12], pressure, cx).is_err());
     });
 }
 

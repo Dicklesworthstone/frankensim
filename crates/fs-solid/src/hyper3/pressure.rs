@@ -1,7 +1,7 @@
-//! Uniform follower pressure on the complete, oriented boundary of a tet mesh.
+//! Follower pressure on the oriented exterior faces of a tet mesh.
 //!
-//! Positive pressure acts inward on CURRENT triangle areas. On a closed
-//! boundary its force is -p grad(V), its tangent is -p Hessian(V), and its
+//! Positive pressure acts inward on CURRENT triangle areas. Uniform pressure
+//! on a closed boundary has force -p grad(V), tangent -p Hessian(V), and
 //! mechanical work over a held-pressure interval is -p (V_after - V_before).
 //! The last expression is the endpoint volume difference, not midpoint force
 //! dotted with a displacement increment. P1 tetrahedral volume is cubic in
@@ -9,8 +9,13 @@
 //!
 //! Preparation reuses the native load-geometry incidence/quality admission,
 //! then requires exactly two oppositely oriented faces at every boundary edge.
-//! There is no selected open patch, nonuniform pressure, global injectivity
-//! certificate, fluid equation of state, or time integrator in this module.
+//! A per-face pressure field can load selected patches (zero on other faces)
+//! or separate pressure regions. Its tangent is generally nonsymmetric and
+//! its work is path-dependent. Held pressures have exact work along a straight
+//! nodal-displacement segment, because current face area is quadratic along
+//! that segment. This does not assert that a dynamic trajectory is straight.
+//! There is no global injectivity certificate, fluid equation of state, or
+//! time integrator in this module.
 
 use std::collections::BTreeMap;
 
@@ -20,6 +25,30 @@ use fs_sparse::{Coo, Csr};
 use super::{HyperTetError, checkpoint};
 use crate::linear3::TetAssemblyBudget;
 use crate::loads3::{LoadError3, TetLoadGeometry3};
+
+/// Signed differential pressure in Pa, held in material-face coordinates.
+/// Positive pressure acts inward; negative pressure prescribes outward traction.
+#[derive(Debug, Clone, Copy)]
+pub enum TetPressure<'a> {
+    /// One pressure on the complete closed boundary, with potential `p V`.
+    Uniform(f64),
+    /// One pressure per canonical [`ClosedTetPressureSurface::faces`] entry.
+    /// Zero leaves a face unloaded. No conservative potential is assumed.
+    PerFace(&'a [f64]),
+}
+
+impl From<f64> for TetPressure<'_> {
+    fn from(pressure_pa: f64) -> Self { Self::Uniform(pressure_pa) }
+}
+
+impl TetPressure<'_> {
+    fn at(self, face: usize) -> f64 {
+        match self {
+            Self::Uniform(value) => value,
+            Self::PerFace(values) => values[face],
+        }
+    }
+}
 
 /// Prepared complete exterior of one immutable reference tetrahedral mesh.
 ///
@@ -124,6 +153,34 @@ impl ClosedTetPressureSurface {
         &self.faces
     }
 
+    /// Admit finite pressures and exact face coverage before a solve begins.
+    /// A sparse patch is represented by explicit zeros on unselected faces.
+    /// Returns whether all faces are unloaded, without a second unbounded scan.
+    pub fn validate_pressure(
+        &self,
+        pressure: TetPressure<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<bool, HyperTetError> {
+        checkpoint(cx)?;
+        let unloaded = match pressure {
+            TetPressure::Uniform(value) => { finite(value)?; value == 0.0 }
+            TetPressure::PerFace(values) => {
+                if values.len() != self.faces.len() {
+                    return Err(invalid("pressure values must cover the canonical exterior faces exactly"));
+                }
+                let mut unloaded = true;
+                for (index, &value) in values.iter().enumerate() {
+                    if index % 1024 == 0 { checkpoint(cx)?; }
+                    finite(value)?;
+                    unloaded &= value == 0.0;
+                }
+                unloaded
+            }
+        };
+        checkpoint(cx)?;
+        Ok(unloaded)
+    }
+
     /// Exact reference-coordinate bits and ordered connectivity match.
     pub fn matches_reference(&self, nodes_m: &[[f64; 3]], tetrahedra: &[[usize; 4]]) -> bool {
         self.tetrahedra == tetrahedra
@@ -147,13 +204,13 @@ impl ClosedTetPressureSurface {
     /// Pressure is a finite signed differential pressure; positive values
     /// compress the solid. A negative value prescribes outward traction, not
     /// a claim about the tensile capability of any particular fluid.
-    pub fn force_n(
+    pub fn force_n<'p>(
         &self,
         displacement_m: &[f64],
-        pressure_pa: f64,
+        pressure_pa: impl Into<TetPressure<'p>>,
         cx: &Cx<'_>,
     ) -> Result<Vec<f64>, HyperTetError> {
-        self.force_and_volume(displacement_m, pressure_pa, cx)
+        self.force_and_volume_loading(displacement_m, pressure_pa.into(), cx)
             .map(|(force, _)| force)
     }
 
@@ -164,11 +221,21 @@ impl ClosedTetPressureSurface {
         pressure_pa: f64,
         cx: &Cx<'_>,
     ) -> Result<(Vec<f64>, f64), HyperTetError> {
-        finite(pressure_pa)?;
+        self.force_and_volume_loading(displacement_m, TetPressure::Uniform(pressure_pa), cx)
+    }
+
+    fn force_and_volume_loading(
+        &self,
+        displacement_m: &[f64],
+        pressure: TetPressure<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<f64>, f64), HyperTetError> {
+        self.validate_pressure(pressure, cx)?;
         let (positions, volume) = self.positions_and_volume(displacement_m, cx)?;
         let mut force = vec![0.0; displacement_m.len()];
-        for face in &self.faces {
+        for (index, face) in self.faces.iter().enumerate() {
             checkpoint(cx)?;
+            let pressure_pa = pressure.at(index);
             let [a, b, c] = face.map(|node| positions[node]);
             let area = area_vector(a, b, c)?;
             for &node in face {
@@ -187,19 +254,22 @@ impl ClosedTetPressureSurface {
     /// For an oriented face (a,b,c), each vertex receives -p/6 times
     /// (b-a) cross (c-a). Its variations are h cross (b-c), h cross
     /// (c-a), and h cross (a-b) for perturbations of a, b, and c.
-    /// Closed-boundary assembly is symmetric to rounding; this is the
-    /// EXTERNAL force Jacobian, which an internal residual must subtract.
-    pub fn force_tangent(
+    /// Uniform closed-boundary assembly is symmetric to rounding. Per-face
+    /// assembly is generally nonsymmetric and must not be symmetrized. This
+    /// is the EXTERNAL force Jacobian, which an internal residual subtracts.
+    pub fn force_tangent<'p>(
         &self,
         displacement_m: &[f64],
-        pressure_pa: f64,
+        pressure_pa: impl Into<TetPressure<'p>>,
         cx: &Cx<'_>,
     ) -> Result<Csr, HyperTetError> {
-        finite(pressure_pa)?;
+        let pressure = pressure_pa.into();
+        self.validate_pressure(pressure, cx)?;
         let (positions, _) = self.positions_and_volume(displacement_m, cx)?;
         let mut entries = Coo::new(displacement_m.len(), displacement_m.len());
-        for face in &self.faces {
+        for (index, face) in self.faces.iter().enumerate() {
             checkpoint(cx)?;
+            let pressure_pa = pressure.at(index);
             let [a, b, c] = face.map(|node| positions[node]);
             let variations = [difference(b, c)?, difference(c, a)?, difference(a, b)?];
             for (&column_node, edge) in face.iter().zip(variations) {
@@ -232,18 +302,49 @@ impl ClosedTetPressureSurface {
         Ok(tangent)
     }
 
-    /// Exact discrete endpoint-volume work of a held pressure, to rounding.
-    pub fn work_j(
+    /// Work of held pressure over the declared displacement segment.
+    ///
+    /// Uniform pressure uses exact endpoint-volume work, independently of
+    /// the path. Per-face pressure integrates force along the straight segment
+    /// with Simpson's rule, exact for the quadratic P1 area vector to rounding.
+    /// It retains common translation work on open patches. Subdividing a
+    /// curved trajectory is necessary to resolve its physical path work.
+    pub fn work_j<'p>(
         &self,
         before_m: &[f64],
         after_m: &[f64],
-        pressure_pa: f64,
+        pressure_pa: impl Into<TetPressure<'p>>,
         cx: &Cx<'_>,
     ) -> Result<f64, HyperTetError> {
-        finite(pressure_pa)?;
-        let before = self.volume_m3(before_m, cx)?;
-        let after = self.volume_m3(after_m, cx)?;
-        finite(-pressure_pa * finite(after - before)?)
+        let pressure = pressure_pa.into();
+        self.validate_pressure(pressure, cx)?;
+        if let TetPressure::Uniform(value) = pressure {
+            let before = self.volume_m3(before_m, cx)?;
+            let after = self.volume_m3(after_m, cx)?;
+            return finite(-value * finite(after - before)?);
+        }
+        let before_force = self.force_n(before_m, pressure, cx)?;
+        let after_force = self.force_n(after_m, pressure, cx)?;
+        let mut midpoint = Vec::with_capacity(before_m.len());
+        for (index, (&before, &after)) in before_m.iter().zip(after_m).enumerate() {
+            if index % 1024 == 0 { checkpoint(cx)?; }
+            midpoint.push(finite(0.5 * before + 0.5 * after)?);
+        }
+        let middle_force = self.force_n(&midpoint, pressure, cx)?;
+        let mut work = 0.0;
+        let mut compensation = 0.0;
+        for index in 0..before_m.len() {
+            if index % 1024 == 0 { checkpoint(cx)?; }
+            let average = finite(before_force[index] / 6.0
+                + (2.0 / 3.0) * middle_force[index] + after_force[index] / 6.0)?;
+            let increment = finite(average * finite(after_m[index] - before_m[index])?)?;
+            let corrected = finite(increment - compensation)?;
+            let next = finite(work + corrected)?;
+            compensation = (next - work) - corrected;
+            work = next;
+        }
+        checkpoint(cx)?;
+        finite(work)
     }
 
     fn positions_and_volume(

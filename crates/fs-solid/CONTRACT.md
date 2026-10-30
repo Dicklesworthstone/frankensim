@@ -1,5 +1,24 @@
 # fs-solid CONTRACT
 
+## Spatial follower pressure on finite-deformation exterior faces
+
+`hyper3::pressure::TetPressure::PerFace` supplies finite signed pressures in the
+canonical order of `ClosedTetPressureSurface::faces`. Explicit zeros select
+unloaded faces. The original prepared geometry and force/tangent kernel serve
+both a scalar uniform pressure and a face field. Positive pressure acts inward
+on current face area; a patch keeps its own resultant, torque and generally
+nonsymmetric external-force Jacobian. It is not assigned a volume potential.
+
+Held face pressures have exact work along a straight nodal-displacement segment
+to rounding, using Simpson integration of the quadratic P1 area vector. Common
+translation work on an open patch remains present. Curved physical trajectories
+require time refinement; this is not path independence or an injectivity proof.
+Uniform pressure retains its original exact endpoint-volume work and static
+solver path. Missing/extra/nonfinite face values and cancellation refuse before
+returning a load. G0/G1/G3/G4 tests check localized outward orientation, independent
+finite-difference tangents, path-dependent analytic work, uniform compatibility
+and refusal. Dynamic consumption belongs to `fs-couple::finite_solid`.
+
 ## Finite-deformation static follower pressure
 
 `hyper3::HyperTetProblem::solve_with_pressure` couples dead referential loads
