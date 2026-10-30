@@ -107,6 +107,7 @@ impl ReactingEuler2d {
                 flow.gas(),
                 flow.grid(),
             )?)
+            .and_then(|bytes| bytes.checked_add(flow.reservoirs.workspace_bytes()))
             .and_then(|bytes| bytes.checked_add(chemistry.workspace_bytes()))
             .and_then(|bytes| {
                 bytes.checked_add(
@@ -165,6 +166,8 @@ impl ReactingEuler2d {
             MixtureEuler2d::required_workspace_bytes(flow.gas(), flow.grid())?,
             &mut cancelled,
         )?;
+        trial.reservoirs = flow.reservoirs.try_clone(&mut cancelled)?;
+        trial.workspace_bytes += trial.reservoirs.workspace_bytes();
         trial.time = flow.time;
         trial.last_step = flow.last_step;
         copy_values(

@@ -1,5 +1,6 @@
 use super::*;
 mod molecular;
+mod reservoir;
 use crate::compressible::mixture::reactive::{
     CellChemistry, ReactingEuler2d, ReactiveError, ReactiveStepControl, ReactiveStepReport,
 };

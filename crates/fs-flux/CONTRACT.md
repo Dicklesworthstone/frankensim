@@ -1174,9 +1174,10 @@ is not an unconditional positivity, entropy or stability theorem.
 Periodic axes and stationary adiabatic impermeable slip walls are admitted.
 At a wall, both normal velocity and tangential divergence contribute to its
 normal viscous traction; species, tangential traction, heat and wall work are
-zero. Transmissive Euler ends refuse, since they do not supply a molecular
-reservoir's composition/temperature boundary law. Normal support traction
-includes signed `p-tau_nn` when composed with advection.
+zero. A transmissive Euler end without the explicit source-owned reservoir
+below still refuses molecular evolution: zero-gradient wave continuation
+supplies no molecular composition/temperature boundary law. Normal support
+traction includes signed `p-tau_nn` when composed with advection.
 
 The operator advances a complete requested duration through bounded SSP RK2
 substeps without changing the Euler clock or advection metadata. Its field,
@@ -1208,6 +1209,56 @@ with heat-driven CFL restarts, and atomic full reacting/molecular wall loads.
 These manufactured cases do not establish a measured chemical mechanism,
 flame speed or thickness, Soret/Dufour transport, no-slip boundary layers,
 rarefaction, turbulence or experimental validation.
+
+### Held source reservoirs for evolving-species planar gas
+
+`MixtureEuler2d::new_with_reservoirs` binds one immutable `ReservoirBoundary`
+to each selected transmissive side. A boundary supplies the field's canonical
+partial mass densities, Cartesian velocity and absolute pressure. The original
+`MixtureGas` admits temperature, caloric precision, sound speed and species
+energy references. Duplicate sides, periodic/reflecting sides, foreign species
+dimensions and inadmissible original-source states refuse before publication.
+Unbound sides retain their existing Euler condition; every open side must have
+an explicit admitted bath before molecular evolution is allowed.
+
+The same held state enters the original HLLC exterior Riemann trace and the
+original Maxwell--Stefan/Fourier/Newtonian molecular face. The wave solve
+determines actual inward/outward transport and backflow from both traces;
+neither a prescribed species flux nor an inflow-only switch replaces it.
+Exterior wave speeds also participate in the initial interval estimate.
+The bath lies at the physical boundary face, so the molecular normal distance
+is half a cell width. Cell velocity derivatives use reflected derivative
+neighbors about that same boundary velocity. A uniform bath has zero
+tangential derivatives; cross derivatives use the shared two-trace average.
+
+The original two-trace midpoint approximation supplies constitutive state,
+Maxwell--Stefan coefficients/gradients, traction and Fourier conduction.
+`PlanarTransport::reservoir_face_from_primitives` supplies boundary energy
+effort from the admitted bath itself: stress work uses its Cartesian velocity
+and species energy uses its original referenced partial enthalpies at the
+bath temperature. The adapter adds no second enthalpy table, work correction
+or viscous heat source. A stationary bath therefore supplies zero traction
+work, and prescribed linear Couette shear supplies the correct mechanical
+power independent of the number of cells. Boundary-layer refinement remains
+necessary for general nonuniform states and constitutive laws.
+
+Signed species, both momentum components and referenced/absolute energy reach
+the existing integrated face loads and conservation reports. The reacting
+owner retains the exact held source metadata in its independent full-step
+trial and includes both molecular halves plus advection in complete boundary
+transfers. Reservoir numeric rows and primitive caches count toward field,
+reacting-copy and combined molecular byte admission. Cancellation or refusal
+preserves both owners' accepted cells, clock, reports, loads and bath states.
+
+Five regression groups exercise supersonic composition inflow/outflow in both
+directions on both axes, refinement to an analytic prescribed-composition
+diffusion solution with unequal calorics and formation references, exact
+one-cell Fourier heating and Couette boundary work, original-source/topology/
+byte admission, late cancellation and replay, and coupled reacting boundary
+species/momentum/energy balance. These are externally maintained infinite
+reservoirs. Finite bath storage and feedback, time-varying/nonuniform boundary
+data, characteristic-pressure-only admission and nonreflecting acoustics are
+not implemented by this boundary model.
 
 ### Volumetric evolving-species shock fields
 
@@ -1402,6 +1453,13 @@ and RK boundary quadrature reuse the original spatial owner. One stored face
 flux serves both adjacent cells; periodic copies retain identical bits. The
 initial gradient/source pass supplies both the first SSP stage and its step
 estimate, avoiding a duplicate successful pass.
+
+Planar and volumetric molecular fields share one requested-duration controller
+for timestep selection, exact final-remainder accounting, bounded retries and
+accepted-stage extrema. Conservative stage updates and private face-load
+buffers remain with the original field owners. A failed attempt reconstructs
+the initial source faces before retrying; cancellation or exhausted work
+leaves accepted fields and published loads/reports unchanged.
 
 The prepared operator advances an exact requested duration using bounded SSP
 RK2 substeps, original source admission and an engineering parabolic estimate

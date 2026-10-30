@@ -11,13 +11,13 @@ use super::{
     MAX_MIXTURE_WORKSPACE_BYTES, MixtureEuler2d, Primitive, Totals, WIDTH_LIMIT, allocated,
     boundary_view, cartesian, cell, checked_totals, copy_values, sum_rows, update,
 };
-use crate::compressible::AxisBoundaries;
-use fs_gas::multicomponent::dissipation::TransportFaceReport;
+pub(in crate::compressible) mod interval;
 pub use fs_gas::multicomponent::dissipation::{
     DissipationControl, DissipationError, PlanarTransport, TransportLaw,
 };
 use fs_gas::multicomponent::{MixtureGas, NormalPrimitive};
 use fs_qty::Time;
+use interval::{Action, Stage, parabolic};
 
 // The shared face/capture loops require only cancellation and invalid-input
 // cases. Remaining trait methods retain the original molecular refusal types.
@@ -73,24 +73,6 @@ pub struct MolecularReport {
     pub absolute_energy_residual_j: f64,
 }
 
-#[derive(Clone, Copy, Default)]
-struct Stage {
-    rate: f64,
-    gradient_residual: f64,
-    mass_frame_residual: f64,
-}
-impl Stage {
-    fn add(&mut self, report: TransportFaceReport) {
-        self.rate = self.rate.max(report.diffusivity_m2_s);
-        self.gradient_residual = self
-            .gradient_residual
-            .max(report.maximum_gradient_residual_per_m);
-        self.mass_frame_residual = self
-            .mass_frame_residual
-            .max(report.mass_frame_residual_kg_m2_s.abs());
-    }
-}
-
 struct Workspace {
     current: Vec<f64>,
     stage: Vec<f64>,
@@ -109,9 +91,13 @@ struct Workspace {
 ///
 /// Periodic faces share identical flux bits. Reflecting faces are impermeable,
 /// adiabatic stationary slip walls: normal viscous traction loads their support,
-/// while species, tangent traction, heat and wall work vanish. Transmissive
-/// faces refuse at preparation; a molecular reservoir needs explicit species,
-/// temperature and transport boundary data absent from that Euler condition.
+/// while species, tangent traction, heat and wall work vanish. Open faces need
+/// the field's explicit original-source reservoir used by its HLLC boundary.
+/// Species, enthalpy, heat and full viscous work use one two-trace molecular
+/// flux at half-cell normal distance. Constitutive values use the shared
+/// midpoint approximation; boundary velocity and referenced species enthalpy
+/// supply the original bath energy effort. Refine the boundary layer independently.
+/// Unbound Transmissive faces still refuse.
 pub struct MolecularTransport2d<L: TransportLaw> {
     source: PlanarTransport<L>,
     grid: CartesianGrid,
@@ -175,22 +161,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                 "planar molecular source or caloric path differs",
             ));
         }
-        for boundary in [flow.boundaries.x, flow.boundaries.y] {
-            if matches!(
-                boundary,
-                AxisBoundaries::Ends {
-                    lower: BoundaryCondition::Transmissive,
-                    ..
-                } | AxisBoundaries::Ends {
-                    upper: BoundaryCondition::Transmissive,
-                    ..
-                }
-            ) {
-                return Err(DissipationError::Invalid(
-                    "transmissive Euler ends do not define a species/thermal molecular reservoir",
-                ));
-            }
-        }
+        flow.reservoirs.admit_molecular(flow.boundaries)?;
         let bytes = Self::required_workspace_bytes(flow, &source)?;
         if bytes > maximum_workspace_bytes || bytes > MAX_MIXTURE_WORKSPACE_BYTES {
             return Err(DissipationError::Invalid(
@@ -310,6 +281,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                 "planar molecular field ownership differs",
             ));
         }
+        flow.reservoirs.admit_molecular(flow.boundaries)?;
         let bytes = self
             .workspace_bytes()
             .checked_add(flow.workspace_bytes())
@@ -338,184 +310,125 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                 tile.fill(0.0);
             }
         }
-        let mut elapsed = 0.0;
-        let mut accepted_steps = 0;
-        let mut rejected_steps = 0;
-        let mut maximum_parabolic_number: f64 = 0.0;
-        let mut maximum_gradient_residual_per_m: f64 = 0.0;
-        let mut maximum_mass_frame_residual_kg_m2_s: f64 = 0.0;
-        while elapsed < duration.value() {
-            poll(cancelled)?;
-            if accepted_steps + rejected_steps >= controls.maximum_steps {
-                return Err(DissipationError::WorkLimit {
-                    elapsed_time_s: elapsed,
-                    accepted_steps,
-                    rejected_steps,
-                });
-            }
-            let first = spatial(
-                &mut self.source,
-                &self.grid,
-                self.boundaries,
-                &self.work.current,
-                &mut self.work.primitive,
-                &mut self.work.gradient,
-                &mut self.work.x_flux,
-                &mut self.work.y_flux,
-                controls,
-                cancelled,
-            )?;
-            let remaining = duration.value() - elapsed;
-            let mut dt = remaining.min(controls.maximum_step_s);
-            if first.rate > 0.0 {
-                dt = dt.min(controls.parabolic_cfl / first.rate);
-            }
-            for halving in 0..=controls.maximum_halvings {
-                poll(cancelled)?;
-                if accepted_steps + rejected_steps >= controls.maximum_steps {
-                    return Err(DissipationError::WorkLimit {
-                        elapsed_time_s: elapsed,
-                        accepted_steps,
-                        rejected_steps,
-                    });
-                }
-                if !positive(dt)
-                    || elapsed + dt <= elapsed
-                    || (dt < controls.minimum_step_s && dt != remaining)
-                {
-                    return Err(DissipationError::Invalid(
-                        "unrepresentable planar molecular substep",
-                    ));
-                }
-                let attempt = (|| {
-                    let first = if halving == 0 {
-                        first
-                    } else {
-                        spatial(
-                            &mut self.source,
-                            &self.grid,
-                            self.boundaries,
-                            &self.work.current,
-                            &mut self.work.primitive,
-                            &mut self.work.gradient,
-                            &mut self.work.x_flux,
-                            &mut self.work.y_flux,
-                            controls,
-                            cancelled,
-                        )?
-                    };
-                    parabolic(first.rate * dt, controls.parabolic_cfl)?;
-                    update(
-                        self.source.gas(),
-                        &self.grid,
-                        &self.work.current,
-                        &self.work.current,
-                        &self.work.x_flux,
-                        &self.work.y_flux,
-                        &mut self.work.stage,
-                        dt,
-                        false,
-                        cancelled,
-                    )?;
-                    capture(
-                        &self.grid,
-                        species,
-                        &self.work.x_flux,
-                        &self.work.y_flux,
-                        0.5 * dt,
-                        false,
-                        &mut self.work.boundary_step,
-                        cancelled,
-                    )?;
-                    let second = spatial(
+        let interval = interval::advance(
+            duration.value(),
+            controls,
+            cancelled,
+            |action, cancelled| {
+                if matches!(action, Action::First) {
+                    return spatial(
                         &mut self.source,
                         &self.grid,
                         self.boundaries,
-                        &self.work.stage,
+                        &flow.reservoirs,
+                        &self.work.current,
                         &mut self.work.primitive,
                         &mut self.work.gradient,
                         &mut self.work.x_flux,
                         &mut self.work.y_flux,
                         controls,
                         cancelled,
-                    )?;
-                    parabolic(second.rate * dt, controls.parabolic_cfl)?;
-                    update(
-                        self.source.gas(),
-                        &self.grid,
-                        &self.work.current,
-                        &self.work.stage,
-                        &self.work.x_flux,
-                        &self.work.y_flux,
-                        &mut self.work.candidate,
-                        dt,
-                        true,
-                        cancelled,
-                    )?;
-                    capture(
-                        &self.grid,
-                        species,
-                        &self.work.x_flux,
-                        &self.work.y_flux,
-                        0.5 * dt,
-                        true,
-                        &mut self.work.boundary_step,
-                        cancelled,
-                    )?;
-                    Ok::<_, DissipationError>((first, second))
-                })();
-                match attempt {
-                    Ok((first, second)) => {
-                        for (index, ((total, correction), change)) in self
-                            .work
-                            .boundary_trial
-                            .iter_mut()
-                            .zip(&mut self.work.boundary_correction)
-                            .zip(&self.work.boundary_step)
-                            .enumerate()
-                        {
-                            if index % 4096 == 0 {
-                                poll(cancelled)?;
-                            }
-                            let adjusted = change - *correction;
-                            let next = *total + adjusted;
-                            *correction = (next - *total) - adjusted;
-                            *total = next;
-                        }
-                        maximum_parabolic_number =
-                            maximum_parabolic_number.max(dt * first.rate.max(second.rate));
-                        maximum_gradient_residual_per_m = maximum_gradient_residual_per_m
-                            .max(first.gradient_residual)
-                            .max(second.gradient_residual);
-                        maximum_mass_frame_residual_kg_m2_s = maximum_mass_frame_residual_kg_m2_s
-                            .max(first.mass_frame_residual)
-                            .max(second.mass_frame_residual);
-                        std::mem::swap(&mut self.work.current, &mut self.work.candidate);
-                        elapsed = if dt == remaining {
-                            duration.value()
-                        } else {
-                            elapsed + dt
-                        };
-                        accepted_steps += 1;
-                        break;
-                    }
-                    Err(DissipationError::Cancelled) => return Err(DissipationError::Cancelled),
-                    Err(error) => {
-                        rejected_steps += 1;
-                        if halving == controls.maximum_halvings
-                            || dt * 0.5 < controls.minimum_step_s
-                        {
-                            return Err(DissipationError::StepFailure {
-                                elapsed_time_s: elapsed,
-                                step_s: dt,
-                                last: Box::new(error),
-                            });
-                        }
-                        dt *= 0.5;
-                    }
+                    );
                 }
-            }
-        }
+                let Action::Trial { dt, first, cached } = action else {
+                    unreachable!()
+                };
+                let first = if cached {
+                    first
+                } else {
+                    spatial(
+                        &mut self.source,
+                        &self.grid,
+                        self.boundaries,
+                        &flow.reservoirs,
+                        &self.work.current,
+                        &mut self.work.primitive,
+                        &mut self.work.gradient,
+                        &mut self.work.x_flux,
+                        &mut self.work.y_flux,
+                        controls,
+                        cancelled,
+                    )?
+                };
+                parabolic(first.rate * dt, controls.parabolic_cfl)?;
+                update(
+                    self.source.gas(),
+                    &self.grid,
+                    &self.work.current,
+                    &self.work.current,
+                    &self.work.x_flux,
+                    &self.work.y_flux,
+                    &mut self.work.stage,
+                    dt,
+                    false,
+                    cancelled,
+                )?;
+                capture(
+                    &self.grid,
+                    species,
+                    &self.work.x_flux,
+                    &self.work.y_flux,
+                    0.5 * dt,
+                    false,
+                    &mut self.work.boundary_step,
+                    cancelled,
+                )?;
+                let second = spatial(
+                    &mut self.source,
+                    &self.grid,
+                    self.boundaries,
+                    &flow.reservoirs,
+                    &self.work.stage,
+                    &mut self.work.primitive,
+                    &mut self.work.gradient,
+                    &mut self.work.x_flux,
+                    &mut self.work.y_flux,
+                    controls,
+                    cancelled,
+                )?;
+                parabolic(second.rate * dt, controls.parabolic_cfl)?;
+                update(
+                    self.source.gas(),
+                    &self.grid,
+                    &self.work.current,
+                    &self.work.stage,
+                    &self.work.x_flux,
+                    &self.work.y_flux,
+                    &mut self.work.candidate,
+                    dt,
+                    true,
+                    cancelled,
+                )?;
+                capture(
+                    &self.grid,
+                    species,
+                    &self.work.x_flux,
+                    &self.work.y_flux,
+                    0.5 * dt,
+                    true,
+                    &mut self.work.boundary_step,
+                    cancelled,
+                )?;
+                for (index, ((total, correction), change)) in self
+                    .work
+                    .boundary_trial
+                    .iter_mut()
+                    .zip(&mut self.work.boundary_correction)
+                    .zip(&self.work.boundary_step)
+                    .enumerate()
+                {
+                    if index % 4096 == 0 {
+                        poll(cancelled)?;
+                    }
+                    let adjusted = change - *correction;
+                    let next = *total + adjusted;
+                    *correction = (next - *total) - adjusted;
+                    *total = next;
+                }
+                std::mem::swap(&mut self.work.current, &mut self.work.candidate);
+                Ok(first.merge(second))
+            },
+        )?;
         let after = checked_totals(&self.work.current, &self.grid, species, cancelled)?;
         let outward = sum_rows(&self.work.boundary_trial, species + 3, 1.0, cancelled)?;
         let boundary_change = Totals::from_row(&outward.map(|value| -value), species);
@@ -534,11 +447,11 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
         let conservation_residual = Totals::from_row(&residual[..species + 3], species);
         let report = MolecularReport {
             elapsed: duration,
-            accepted_steps,
-            rejected_steps,
-            maximum_parabolic_number,
-            maximum_gradient_residual_per_m,
-            maximum_mass_frame_residual_kg_m2_s,
+            accepted_steps: interval.accepted_steps,
+            rejected_steps: interval.rejected_steps,
+            maximum_parabolic_number: interval.maximum_parabolic_number,
+            maximum_gradient_residual_per_m: interval.maximum_gradient_residual_per_m,
+            maximum_mass_frame_residual_kg_m2_s: interval.maximum_mass_frame_residual_kg_m2_s,
             before,
             after,
             boundary_change,
@@ -561,6 +474,7 @@ fn spatial<L: TransportLaw>(
     source: &mut PlanarTransport<L>,
     grid: &CartesianGrid,
     boundaries: Boundaries2d,
+    reservoirs: &super::reservoir::Reservoirs,
     states: &[f64],
     primitive: &mut [Primitive],
     gradient: &mut [[f64; 4]],
@@ -577,21 +491,11 @@ fn spatial<L: TransportLaw>(
     for (index, row) in gradient.iter_mut().enumerate() {
         poll(cancelled)?;
         for axis in 0..2 {
-            let (low, reflect_low) = cartesian::neighbour(grid, boundaries, index, axis, false);
-            let (high, reflect_high) = cartesian::neighbour(grid, boundaries, index, axis, true);
             for component in 0..2 {
-                let low = primitive[low].velocity[component]
-                    * if reflect_low && component == axis {
-                        -1.0
-                    } else {
-                        1.0
-                    };
-                let high = primitive[high].velocity[component]
-                    * if reflect_high && component == axis {
-                        -1.0
-                    } else {
-                        1.0
-                    };
+                let low = reservoirs
+                    .velocity_neighbour(grid, boundaries, primitive, index, axis, component, false);
+                let high = reservoirs
+                    .velocity_neighbour(grid, boundaries, primitive, index, axis, component, true);
                 row[2 * axis + component] = (high - low) / (2.0 * grid.spacing[axis]);
             }
         }
@@ -644,8 +548,37 @@ fn spatial<L: TransportLaw>(
                 output,
                 &mut *cancelled,
             )?,
-            cartesian::FaceKind::Boundary { .. } => {
-                return Err(DissipationError::Invalid("unbound molecular reservoir"));
+            cartesian::FaceKind::Boundary {
+                cell,
+                sign,
+                condition: BoundaryCondition::Transmissive,
+            } => {
+                let exterior = reservoirs
+                    .normal(axis, sign, species)
+                    .ok_or(DissipationError::Invalid("unbound molecular reservoir"))?;
+                let interior = normal(cell, axis);
+                let (left, right) = if sign < 0.0 {
+                    (exterior, interior)
+                } else {
+                    (interior, exterior)
+                };
+                // Uniform held bath has zero tangential derivatives. The same
+                // source kernel uses midpoint constitutive values and exact
+                // admitted bath enthalpies/velocity for boundary energy effort.
+                let tangential = [
+                    0.5 * gradient[cell][2 * tangent + axis],
+                    0.5 * gradient[cell][2 * tangent + tangent],
+                ];
+                source.reservoir_face_from_primitives(
+                    left,
+                    right,
+                    0.5 * grid.spacing[axis],
+                    tangential,
+                    sign < 0.0,
+                    controls.diffusion,
+                    output,
+                    &mut *cancelled,
+                )?
             }
             cartesian::FaceKind::PeriodicCopy { .. } => unreachable!(),
         };
@@ -698,20 +631,10 @@ fn capture(
         cancelled,
     )
 }
-fn parabolic(observed: f64, maximum: f64) -> Result<(), DissipationError> {
-    if !observed.is_finite() || observed > maximum * (1.0 + 32.0 * f64::EPSILON) {
-        Err(DissipationError::ParabolicNumber { observed, maximum })
-    } else {
-        Ok(())
-    }
-}
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), DissipationError> {
     if cancelled() {
         Err(DissipationError::Cancelled)
     } else {
         Ok(())
     }
-}
-fn positive(value: f64) -> bool {
-    value.is_finite() && value > 0.0
 }

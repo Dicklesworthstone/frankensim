@@ -13,7 +13,7 @@ use super::{
     update,
 };
 use crate::compressible::AxisBoundaries;
-use fs_gas::multicomponent::dissipation::TransportFaceReport;
+use crate::compressible::mixture::molecular::interval::{self, Action, Stage, parabolic};
 pub use fs_gas::multicomponent::dissipation::{
     DissipationControl, DissipationError, SpatialTransport, TransportLaw,
 };
@@ -45,24 +45,6 @@ pub struct MolecularReport {
     pub conservation_residual: Totals,
     /// Original reference transform of the conservative energy residual [J].
     pub absolute_energy_residual_j: f64,
-}
-
-#[derive(Clone, Copy, Default)]
-struct Stage {
-    rate: f64,
-    gradient_residual: f64,
-    mass_frame_residual: f64,
-}
-impl Stage {
-    fn add(&mut self, face: TransportFaceReport) {
-        self.rate = self.rate.max(face.diffusivity_m2_s);
-        self.gradient_residual = self
-            .gradient_residual
-            .max(face.maximum_gradient_residual_per_m);
-        self.mass_frame_residual = self
-            .mass_frame_residual
-            .max(face.mass_frame_residual_kg_m2_s.abs());
-    }
 }
 
 struct Workspace {
@@ -309,61 +291,14 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 tile.fill(0.0);
             }
         }
-        let mut elapsed = 0.0;
-        let mut accepted_steps = 0;
-        let mut rejected_steps = 0;
-        let mut maximum_parabolic_number: f64 = 0.0;
-        let mut maximum_gradient_residual_per_m: f64 = 0.0;
-        let mut maximum_mass_frame_residual_kg_m2_s: f64 = 0.0;
-        while elapsed < duration.value() {
-            poll(cancelled)?;
-            if accepted_steps + rejected_steps >= controls.maximum_steps {
-                return Err(DissipationError::WorkLimit {
-                    elapsed_time_s: elapsed,
-                    accepted_steps,
-                    rejected_steps,
-                });
-            }
-            // This first source/gradient pass both estimates the interval and
-            // supplies the first SSP stage. Only retries repeat it.
-            let first = spatial(
-                &mut self.source,
-                &self.grid,
-                self.boundaries,
-                &self.work.current,
-                &mut self.work.primitive,
-                &mut self.work.gradient,
-                &mut self.work.flux,
-                controls,
-                cancelled,
-            )?;
-            let remaining = duration.value() - elapsed;
-            let mut dt = remaining.min(controls.maximum_step_s);
-            if first.rate > 0.0 {
-                dt = dt.min(controls.parabolic_cfl / first.rate);
-            }
-            for halving in 0..=controls.maximum_halvings {
-                poll(cancelled)?;
-                if accepted_steps + rejected_steps >= controls.maximum_steps {
-                    return Err(DissipationError::WorkLimit {
-                        elapsed_time_s: elapsed,
-                        accepted_steps,
-                        rejected_steps,
-                    });
-                }
-                if !positive(dt)
-                    || elapsed + dt <= elapsed
-                    || (dt < controls.minimum_step_s && dt != remaining)
-                {
-                    return Err(DissipationError::Invalid(
-                        "unrepresentable volumetric molecular substep",
-                    ));
-                }
-                let attempt = (|| {
-                    let first = if halving == 0 {
-                        first
-                    } else {
-                        spatial(
+        let interval = interval::advance(
+            duration.value(),
+            controls,
+            cancelled,
+            |action, cancelled| {
+                let first = match action {
+                    Action::First => {
+                        return spatial(
                             &mut self.source,
                             &self.grid,
                             self.boundaries,
@@ -373,115 +308,101 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                             &mut self.work.flux,
                             controls,
                             cancelled,
-                        )?
-                    };
-                    parabolic(first.rate * dt, controls.parabolic_cfl)?;
-                    update(
-                        self.source.gas(),
-                        &self.grid,
-                        &self.work.current,
-                        &self.work.current,
-                        &self.work.flux,
-                        &mut self.work.stage,
-                        dt,
-                        false,
-                        cancelled,
-                    )?;
-                    capture(
-                        &self.grid,
-                        width,
-                        &self.work.flux,
-                        0.5 * dt,
-                        false,
-                        &mut self.work.boundary_step,
-                        cancelled,
-                    )?;
-                    let second = spatial(
+                        );
+                    }
+                    Action::Trial {
+                        first,
+                        cached: true,
+                        ..
+                    } => first,
+                    Action::Trial { .. } => spatial(
                         &mut self.source,
                         &self.grid,
                         self.boundaries,
-                        &self.work.stage,
+                        &self.work.current,
                         &mut self.work.primitive,
                         &mut self.work.gradient,
                         &mut self.work.flux,
                         controls,
                         cancelled,
-                    )?;
-                    parabolic(second.rate * dt, controls.parabolic_cfl)?;
-                    update(
-                        self.source.gas(),
-                        &self.grid,
-                        &self.work.current,
-                        &self.work.stage,
-                        &self.work.flux,
-                        &mut self.work.candidate,
-                        dt,
-                        true,
-                        cancelled,
-                    )?;
-                    capture(
-                        &self.grid,
-                        width,
-                        &self.work.flux,
-                        0.5 * dt,
-                        true,
-                        &mut self.work.boundary_step,
-                        cancelled,
-                    )?;
-                    Ok::<_, DissipationError>((first, second))
-                })();
-                match attempt {
-                    Ok((first, second)) => {
-                        for (index, ((total, correction), change)) in self
-                            .work
-                            .boundary_trial
-                            .iter_mut()
-                            .zip(&mut self.work.boundary_correction)
-                            .zip(&self.work.boundary_step)
-                            .enumerate()
-                        {
-                            if index % 4096 == 0 {
-                                poll(cancelled)?;
-                            }
-                            let adjusted = change - *correction;
-                            let next = *total + adjusted;
-                            *correction = (next - *total) - adjusted;
-                            *total = next;
-                        }
-                        maximum_parabolic_number =
-                            maximum_parabolic_number.max(dt * first.rate.max(second.rate));
-                        maximum_gradient_residual_per_m = maximum_gradient_residual_per_m
-                            .max(first.gradient_residual)
-                            .max(second.gradient_residual);
-                        maximum_mass_frame_residual_kg_m2_s = maximum_mass_frame_residual_kg_m2_s
-                            .max(first.mass_frame_residual)
-                            .max(second.mass_frame_residual);
-                        std::mem::swap(&mut self.work.current, &mut self.work.candidate);
-                        elapsed = if dt == remaining {
-                            duration.value()
-                        } else {
-                            elapsed + dt
-                        };
-                        accepted_steps += 1;
-                        break;
+                    )?,
+                };
+                let Action::Trial { dt, .. } = action else {
+                    unreachable!()
+                };
+                parabolic(first.rate * dt, controls.parabolic_cfl)?;
+                update(
+                    self.source.gas(),
+                    &self.grid,
+                    &self.work.current,
+                    &self.work.current,
+                    &self.work.flux,
+                    &mut self.work.stage,
+                    dt,
+                    false,
+                    cancelled,
+                )?;
+                capture(
+                    &self.grid,
+                    width,
+                    &self.work.flux,
+                    0.5 * dt,
+                    false,
+                    &mut self.work.boundary_step,
+                    cancelled,
+                )?;
+                let second = spatial(
+                    &mut self.source,
+                    &self.grid,
+                    self.boundaries,
+                    &self.work.stage,
+                    &mut self.work.primitive,
+                    &mut self.work.gradient,
+                    &mut self.work.flux,
+                    controls,
+                    cancelled,
+                )?;
+                parabolic(second.rate * dt, controls.parabolic_cfl)?;
+                update(
+                    self.source.gas(),
+                    &self.grid,
+                    &self.work.current,
+                    &self.work.stage,
+                    &self.work.flux,
+                    &mut self.work.candidate,
+                    dt,
+                    true,
+                    cancelled,
+                )?;
+                capture(
+                    &self.grid,
+                    width,
+                    &self.work.flux,
+                    0.5 * dt,
+                    true,
+                    &mut self.work.boundary_step,
+                    cancelled,
+                )?;
+                for (index, ((total, correction), change)) in self
+                    .work
+                    .boundary_trial
+                    .iter_mut()
+                    .zip(&mut self.work.boundary_correction)
+                    .zip(&self.work.boundary_step)
+                    .enumerate()
+                {
+                    if index % 4096 == 0 {
+                        poll(cancelled)?;
                     }
-                    Err(DissipationError::Cancelled) => return Err(DissipationError::Cancelled),
-                    Err(error) => {
-                        rejected_steps += 1;
-                        if halving == controls.maximum_halvings
-                            || dt * 0.5 < controls.minimum_step_s
-                        {
-                            return Err(DissipationError::StepFailure {
-                                elapsed_time_s: elapsed,
-                                step_s: dt,
-                                last: Box::new(error),
-                            });
-                        }
-                        dt *= 0.5;
-                    }
+                    let adjusted = change - *correction;
+                    let next = *total + adjusted;
+                    *correction = (next - *total) - adjusted;
+                    *total = next;
                 }
-            }
-        }
+                std::mem::swap(&mut self.work.current, &mut self.work.candidate);
+                Ok(first.merge(second))
+            },
+        )?;
         let after = checked_totals(&self.work.current, &self.grid, species, cancelled)?;
         let outward = sum_rows(&self.work.boundary_trial, width, 1.0, cancelled)?;
         let boundary_change = Totals::from_row(&outward.map(|value| -value), species);
@@ -500,11 +421,11 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         let conservation_residual = Totals::from_row(&residual[..width], species);
         let report = MolecularReport {
             elapsed: duration,
-            accepted_steps,
-            rejected_steps,
-            maximum_parabolic_number,
-            maximum_gradient_residual_per_m,
-            maximum_mass_frame_residual_kg_m2_s,
+            accepted_steps: interval.accepted_steps,
+            rejected_steps: interval.rejected_steps,
+            maximum_parabolic_number: interval.maximum_parabolic_number,
+            maximum_gradient_residual_per_m: interval.maximum_gradient_residual_per_m,
+            maximum_mass_frame_residual_kg_m2_s: interval.maximum_mass_frame_residual_kg_m2_s,
             before,
             after,
             boundary_change,
@@ -669,16 +590,6 @@ fn admit_workspace(bytes: usize, maximum: usize) -> Result<(), DissipationError>
         Ok(())
     }
 }
-fn parabolic(observed: f64, maximum: f64) -> Result<(), DissipationError> {
-    if !observed.is_finite() || observed > maximum * (1.0 + 32.0 * f64::EPSILON) {
-        Err(DissipationError::ParabolicNumber { observed, maximum })
-    } else {
-        Ok(())
-    }
-}
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), DissipationError> {
     stepping::poll::<DissipationError>(cancelled)
-}
-fn positive(value: f64) -> bool {
-    value.is_finite() && value > 0.0
 }

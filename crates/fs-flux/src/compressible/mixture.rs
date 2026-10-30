@@ -12,6 +12,8 @@
 pub mod molecular;
 /// Source-owned finite-rate chemistry on the same conservative Cartesian field.
 pub mod reactive;
+mod reservoir;
+pub use reservoir::ReservoirBoundary;
 
 use super::{
     Boundaries2d, BoundaryCondition, BoundarySide, CartesianGrid, Primitive, Reconstruction,
@@ -197,6 +199,7 @@ pub struct MixtureEuler2d {
     gas: MixtureGas,
     grid: CartesianGrid,
     boundaries: Boundaries2d,
+    reservoirs: reservoir::Reservoirs,
     states: Vec<f64>,
     time: f64,
     last_step: Option<StepReport>,
@@ -241,10 +244,55 @@ impl MixtureEuler2d {
         states: Vec<f64>,
         boundaries: Boundaries2d,
         maximum_workspace_bytes: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        Self::new_with_reservoirs(
+            gas,
+            grid,
+            states,
+            boundaries,
+            &[],
+            maximum_workspace_bytes,
+            cancelled,
+        )
+    }
+
+    /// Total numerical capacity with one immutable uniform exterior state per
+    /// selected side. The count does not admit a source or boundary topology;
+    /// [`Self::new_with_reservoirs`] performs those checks before publication.
+    pub fn required_workspace_bytes_with_reservoirs(
+        gas: &MixtureGas,
+        grid: &CartesianGrid,
+        reservoir_count: usize,
+    ) -> Result<usize, Error> {
+        Self::required_workspace_bytes(gas, grid)?
+            .checked_add(reservoir::Reservoirs::required_bytes(gas, reservoir_count)?)
+            .ok_or(Error::Invalid(
+                "Cartesian reservoir workspace size overflow",
+            ))
+    }
+
+    /// Bind externally maintained gas states at selected physical boundary
+    /// faces. Each selected side must be Transmissive in the Cartesian topology;
+    /// its original HLLC solve now uses the exterior trace. Unbound sides retain
+    /// their existing condition. Molecular evolution uses these SAME states.
+    ///
+    /// The reservoirs have no finite storage and remain fixed during every
+    /// trial and accepted interval. Their signed species, momentum and energy
+    /// exchanges are reported by the original boundary account. This is not a
+    /// nonreflecting condition or a finite-plenum time integrator.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_reservoirs(
+        gas: MixtureGas,
+        grid: CartesianGrid,
+        states: Vec<f64>,
+        boundaries: Boundaries2d,
+        reservoirs: &[ReservoirBoundary<'_>],
+        maximum_workspace_bytes: usize,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, Error> {
         cartesian::poll::<Error>(&mut cancelled)?;
-        let bytes = Self::required_workspace_bytes(&gas, &grid)?
+        let bytes = Self::required_workspace_bytes_with_reservoirs(&gas, &grid, reservoirs.len())?
             .checked_add(
                 (states.capacity() - states.len())
                     .checked_mul(size_of::<f64>())
@@ -270,10 +318,12 @@ impl MixtureEuler2d {
             *p = cell(q, width - 3).primitive(&gas, &mut cancelled)?;
         }
         checked_totals(&states, &grid, width - 3, &mut cancelled)?;
+        let reservoirs = reservoir::Reservoirs::new(&gas, boundaries, reservoirs, &mut cancelled)?;
         let result = Self {
             gas,
             grid,
             boundaries,
+            reservoirs,
             states,
             time: 0.0,
             last_step: None,
@@ -307,6 +357,10 @@ impl MixtureEuler2d {
     /// Admitted physical boundary conditions.
     pub const fn boundaries(&self) -> Boundaries2d {
         self.boundaries
+    }
+    /// Borrow the immutable original-source exterior state on one side.
+    pub fn reservoir(&self, side: BoundarySide) -> Option<ReservoirBoundary<'_>> {
+        self.reservoirs.boundary(side, self.gas.species_count())
     }
     /// Actual admitted numerical buffer requirement in bytes.
     pub const fn workspace_bytes(&self) -> usize {
@@ -379,6 +433,7 @@ impl MixtureEuler2d {
                     + (p.velocity[1].abs() + p.sound_speed) / self.grid.spacing[1],
             );
         }
+        rate = rate.max(self.reservoirs.maximum_rate(&self.grid));
         let before = checked_totals(&self.states, &self.grid, n, &mut cancelled)?;
         let accepted = cartesian::advance(
             maximum_duration.value(),
@@ -391,6 +446,7 @@ impl MixtureEuler2d {
                     &self.gas,
                     &self.grid,
                     self.boundaries,
+                    &self.reservoirs,
                     &self.states,
                     &mut self.work,
                     dt,
@@ -443,6 +499,7 @@ fn attempt(
     gas: &MixtureGas,
     grid: &CartesianGrid,
     boundaries: Boundaries2d,
+    reservoirs: &reservoir::Reservoirs,
     original: &[f64],
     work: &mut Workspace,
     dt: f64,
@@ -455,6 +512,7 @@ fn attempt(
             gas,
             grid,
             boundaries,
+            reservoirs,
             if final_stage { &work.stage } else { original },
             &mut work.primitive,
             &mut work.slopes,
@@ -521,6 +579,7 @@ fn spatial(
     gas: &MixtureGas,
     grid: &CartesianGrid,
     boundaries: Boundaries2d,
+    reservoirs: &reservoir::Reservoirs,
     states: &[f64],
     primitive: &mut [Primitive],
     slopes: &mut [f64],
@@ -633,36 +692,65 @@ fn spatial(
                 cell: k,
                 sign,
                 condition,
-            } => match (first_order, condition) {
-                (true, BoundaryCondition::Reflecting) => gas.stationary_wall_normal_flux(
-                    q(k),
-                    sign,
-                    &mut result[..width],
-                    &mut *cancelled,
-                )?,
-                (true, BoundaryCondition::Transmissive) => {
-                    gas.hllc_normal_flux(q(k), q(k), &mut result[..width], &mut *cancelled)?
-                }
-                (false, BoundaryCondition::Reflecting) => {
-                    face_trace(k, 0.5 * sign, &mut left[..width]);
-                    gas.stationary_wall_normal_flux_from_primitive(
-                        normal_primitive(&left[..width], n, axis),
-                        sign,
-                        &mut result[..width],
-                        &mut *cancelled,
-                    )?
-                }
-                (false, BoundaryCondition::Transmissive) => {
-                    face_trace(k, 0.5 * sign, &mut left[..width]);
-                    let p = normal_primitive(&left[..width], n, axis);
+            } => {
+                if let Some(exterior) = reservoirs.normal(axis, sign, n) {
+                    // The complete exterior state enters the original Riemann
+                    // problem. Outflow/backflow selection belongs to that solve.
+                    let interior = if first_order {
+                        NormalPrimitive {
+                            partial_densities: &states[k * width..k * width + n],
+                            normal_velocity: primitive[k].velocity[axis],
+                            transverse_velocity: primitive[k].velocity[1 - axis],
+                            pressure: primitive[k].pressure,
+                        }
+                    } else {
+                        face_trace(k, 0.5 * sign, &mut left[..width]);
+                        normal_primitive(&left[..width], n, axis)
+                    };
+                    let (left, right) = if sign < 0.0 {
+                        (exterior, interior)
+                    } else {
+                        (interior, exterior)
+                    };
                     gas.hllc_normal_flux_from_primitive(
-                        p,
-                        p,
+                        left,
+                        right,
                         &mut result[..width],
                         &mut *cancelled,
                     )?
+                } else {
+                    match (first_order, condition) {
+                        (true, BoundaryCondition::Reflecting) => gas.stationary_wall_normal_flux(
+                            q(k),
+                            sign,
+                            &mut result[..width],
+                            &mut *cancelled,
+                        )?,
+                        (true, BoundaryCondition::Transmissive) => {
+                            gas.hllc_normal_flux(q(k), q(k), &mut result[..width], &mut *cancelled)?
+                        }
+                        (false, BoundaryCondition::Reflecting) => {
+                            face_trace(k, 0.5 * sign, &mut left[..width]);
+                            gas.stationary_wall_normal_flux_from_primitive(
+                                normal_primitive(&left[..width], n, axis),
+                                sign,
+                                &mut result[..width],
+                                &mut *cancelled,
+                            )?
+                        }
+                        (false, BoundaryCondition::Transmissive) => {
+                            face_trace(k, 0.5 * sign, &mut left[..width]);
+                            let p = normal_primitive(&left[..width], n, axis);
+                            gas.hllc_normal_flux_from_primitive(
+                                p,
+                                p,
+                                &mut result[..width],
+                                &mut *cancelled,
+                            )?
+                        }
+                    }
                 }
-            },
+            }
             cartesian::FaceKind::PeriodicCopy { .. } => unreachable!(),
         };
         stats.fallback += usize::from(receipt.used_hll_fallback);
