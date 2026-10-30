@@ -50,6 +50,7 @@ fs-matdb = { path = "../fs-matdb" }
 fs-math = { path = "../fs-math" }
 fs-modal = { path = "../fs-modal" }
 fs-nlmodal = { path = "../fs-nlmodal" }
+fs-orbit = { path = "../fs-orbit" }
 fs-phs = { path = "../fs-phs" }
 fs-plate = { path = "../fs-plate" }
 fs-ports = { path = "../fs-ports" }
@@ -73,7 +74,6 @@ fs-ladder = { path = "../fs-ladder" }
 fs-ga = { path = "../fs-ga" }
 fs-geom = { path = "../fs-geom" }
 fs-io = { path = "../fs-io" }
-fs-orbit = { path = "../fs-orbit" }
 fs-psycho = { path = "../fs-psycho" }
 fs-substrate = { path = "../fs-substrate" }
 fs-material = { path = "../fs-material" }
