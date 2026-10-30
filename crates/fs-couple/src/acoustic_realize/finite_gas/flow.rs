@@ -107,6 +107,8 @@ impl ThermalMaterialStringRuntime {
             thermal_controls,
             nozzle,
             flow_controls,
+            0.0,
+            0.0,
             |candidate, gas, heat| {
                 candidate.step_with_isochoric_gas(
                     cx,
@@ -161,6 +163,8 @@ impl ThermalMaterialStringRuntime {
             thermal_controls,
             nozzle,
             flow_controls,
+            0.0,
+            0.0,
             |candidate, gas, heat| {
                 candidate.step_with_isochoric_gas_conduction(
                     cx,
@@ -180,6 +184,9 @@ impl ThermalMaterialStringRuntime {
     // One flow/accounting/publication owner for every thermal proposal. The
     // accessor only exposes the original shared finite-gas account; extension
     // reports and their source receipts stay attached to the same proposal.
+    // An implicit source may distinguish applied heat from actual boundary
+    // work by its admitted residual. That correction is audited here, before
+    // publication, instead of renormalizing either gas or solid energy.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn step_with_finite_gas_nozzle<R, E>(
         &mut self,
@@ -192,12 +199,24 @@ impl ThermalMaterialStringRuntime {
         thermal_controls: FiniteGasStringSolve,
         nozzle: GasNozzle,
         flow_controls: GasNozzleStepSolve,
+        source_work_correction_j: f64,
+        source_work_tolerance_j: f64,
         advance: impl FnOnce(&mut Self, &mut IsochoricGasParcel, FiniteGasStringHeat) -> Result<R, E>,
         account: impl FnOnce(&mut R) -> &mut FiniteGasStringFrame,
     ) -> Result<FiniteGasStringFlowFrame<R>, E>
     where
         E: From<FiniteGasStringError>,
     {
+        if !source_work_correction_j.is_finite()
+            || !source_work_tolerance_j.is_finite()
+            || source_work_tolerance_j < 0.0
+            || source_work_correction_j.abs() > source_work_tolerance_j
+        {
+            return Err(FiniteGasStringError::Admission(
+                "source work differs from deposited heat outside its finite residual allowance",
+            )
+            .into());
+        }
         self.admit_finite_gas_step(cx, expected_epoch, gas, heat, thermal_controls)?;
         let mut candidate = self.clone();
         let mut heated_gas = gas.clone();
@@ -270,6 +289,11 @@ impl ThermalMaterialStringRuntime {
             * (candidate.thermal.specific_enthalpy_j_kg() - self.thermal.specific_enthalpy_j_kg());
         let input =
             heated.string.vibration.acoustic.input_work_j + heat.string_heat_j + heat.gas_heat_j;
+        let input = if source_work_correction_j == 0.0 {
+            input
+        } else {
+            input + source_work_correction_j
+        };
         let dissipation = &heated.string.vibration.dissipation;
         let residual = input
             - (mechanical_storage
@@ -290,6 +314,7 @@ impl ThermalMaterialStringRuntime {
             + next_reservoir.mass_kg() * next_reservoir_u.abs();
         let tolerance = heated.energy_tolerance_j
             + flow_controls.transfer.energy_tolerance_j
+            + source_work_tolerance_j
             + 32.0 * f64::EPSILON * scale;
         if !residual.is_finite() || !tolerance.is_finite() || residual.abs() > tolerance {
             return Err(FiniteGasStringError::Admission(

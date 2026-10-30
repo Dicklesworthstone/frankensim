@@ -12,14 +12,14 @@ use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::{
 #[path = "flow/conduction.rs"]
 mod conduction;
 
-fn nozzle() -> GasNozzle {
+pub(super) fn nozzle() -> GasNozzle {
     GasNozzle {
         area_m2: 1e-4,
         discharge_coefficient: 0.8,
     }
 }
 
-fn flow_solve() -> GasNozzleStepSolve {
+pub(super) fn flow_solve() -> GasNozzleStepSolve {
     GasNozzleStepSolve {
         nozzle: solve().gas,
         transfer: GasMassTransferSolve {

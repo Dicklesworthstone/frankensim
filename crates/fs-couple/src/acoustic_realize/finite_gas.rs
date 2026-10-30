@@ -58,6 +58,8 @@ pub enum FiniteGasStringError {
     Gas(GasEnergyError),
     /// Original chemical mechanism, source, nonlinear or consumption refusal.
     Reaction(crate::cavity_phs::piston::reactive::GasReactionError),
+    /// Bounded endpoint electrical-work feedback did not admit a solution.
+    ElectricalFeedback(electrical::feedback::FiniteGasElectricalFeedbackError),
 }
 impl core::fmt::Display for FiniteGasStringError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

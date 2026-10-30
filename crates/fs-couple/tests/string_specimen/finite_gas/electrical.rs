@@ -7,6 +7,9 @@ use fs_material::conductor::{
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve};
 use fs_material::state_point::THERMAL_CONDUCTIVITY_DIMS;
 
+#[path = "electrical/feedback.rs"]
+mod feedback;
+
 const RATE: u32 = 48000;
 pub(super) const CP: f64 = 0.001; // Deliberately tiny manufactured capacity; no measured material claim.
 

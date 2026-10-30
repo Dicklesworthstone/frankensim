@@ -6214,6 +6214,36 @@ damping feedback into actual pressure, cumulative mechanical/solid/gas storage,
 and late refusal with deterministic retry and cancellation. Their manufactured
 coefficients establish integration behavior, not measured material validation.
 
+### Endpoint electrical work on the same material/gas trajectory
+
+`finite_gas::electrical::feedback` adds bounded backward-Euler source feedback
+to the original conduction transaction. Each private trial starts from the
+same accepted string/gas history, deposits work J through the shared electrical
+proposal owner, and resolves the original conductor at the thermal endpoint.
+The existing safeguarded scalar solver closes J - dt I_end^2 R_end = 0 with an
+explicit nonnegative work bracket, residual tolerance and iteration cap. Held
+voltage uses the original source's I_end = V/R_end. Inner thermal/thermoelastic
+work limits and material domains remain authoritative at every trial.
+
+`FiniteGasElectricalFeedbackFrame` distinguishes deposited heat from actual
+endpoint boundary work and retains their signed residual. The outer energy
+audit uses actual source work and includes the declared residual allowance;
+the nested original thermal account uses deposited J. No state or source is
+renormalized, and neither quantity is an extra heat credit beside the other.
+The nozzle variant transports species/enthalpy once AFTER convergence, over
+the same sample interval. Its common two-volume balance includes the admitted
+source-work correction before all three owners publish atomically. A failed
+bracket, work cap, source domain, final flow/observer check or cancellation
+preserves the accepted trajectory and input inventory for retry.
+
+The initial-law APIs remain available with their original source quadrature.
+Endpoint feedback changes electrical/thermal time discretization, not the
+frozen-initial mechanics or first-order heat-then-flow split. It supplies no
+finite circuit storage, induction, uniqueness or global-stability theorem.
+Focused regressions in `tests/string_specimen/finite_gas/electrical/feedback.rs`
+cover independent affine-resistance current/voltage roots, two-capacity thermal
+exchange, single-transfer composition, zero-flow parity and atomic refusal.
+
 ## Finite enthalpy heating through a pressure-loaded solid valve
 
 `solid_enthalpy::valve` binds each accepted P1 material/caloric state to the

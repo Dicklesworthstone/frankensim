@@ -5,6 +5,9 @@
 //! heat exchange and sound. Both proposals remain private until the endpoint
 //! electrical law is also admitted. No circuit or transport law is duplicated.
 
+/// Bounded endpoint Joule-work feedback on the same thermal/flow transactions.
+pub mod feedback;
+
 use super::exchange::{FiniteGasStringExchangeError, FiniteGasStringExchangeFrame};
 use super::flow::FiniteGasStringFlowFrame;
 use super::{
@@ -32,11 +35,13 @@ pub struct FiniteGasElectrothermalStringFrame<R = FiniteGasStringFrame> {
     pub coupled: R,
     /// Ideal source prescription, retained separately from resolved current.
     pub drive: OhmicDrive,
-    /// Initial current, frozen during this mechanical/thermal sample [A].
+    /// Initial current [A]. The explicit route freezes this value for source
+    /// work; the feedback route uses `final_current_a` for its boundary work.
     pub current_a: f64,
     /// Current demanded by the same source at accepted endpoint resistance [A].
     pub final_current_a: f64,
-    /// Electrical source work converted once to solid heat [J].
+    /// Electrical work deposited once as solid heat [J]. Endpoint feedback
+    /// separately reports actual source work and its bounded residual.
     pub joule_heat_j: f64,
     /// Caller-prescribed solid heat only [J], excluding Joule/dissipation/exchange.
     pub external_string_heat_j: f64,
@@ -44,6 +49,24 @@ pub struct FiniteGasElectrothermalStringFrame<R = FiniteGasStringFrame> {
     pub conductor_before: ResolvedConductor,
     /// Original source-resolved conductor at the final accepted temperature.
     pub conductor_after: ResolvedConductor,
+}
+
+impl<R> FiniteGasElectrothermalStringFrame<R> {
+    fn try_map_coupled<T, E>(
+        self,
+        map: impl FnOnce(R) -> Result<T, E>,
+    ) -> Result<FiniteGasElectrothermalStringFrame<T>, E> {
+        Ok(FiniteGasElectrothermalStringFrame {
+            coupled: map(self.coupled)?,
+            drive: self.drive,
+            current_a: self.current_a,
+            final_current_a: self.final_current_a,
+            joule_heat_j: self.joule_heat_j,
+            external_string_heat_j: self.external_string_heat_j,
+            conductor_before: self.conductor_before,
+            conductor_after: self.conductor_after,
+        })
+    }
 }
 
 impl ThermalMaterialStringRuntime {
@@ -247,6 +270,40 @@ impl ThermalMaterialStringRuntime {
     {
         let (conductor_before, current_a, joule_heat_j) =
             self.prepare_drive(cx, expected_epoch, drive)?;
+        self.propose_joule_work_and_finite_gas(
+            drive,
+            gas,
+            heat,
+            conductor_before,
+            current_a,
+            joule_heat_j,
+            advance,
+        )
+    }
+
+    // Initial-law and endpoint-law sources use the same deposition, thermal
+    // proposal and final conductor admission. Only work selection differs.
+    #[allow(clippy::too_many_arguments)]
+    fn propose_joule_work_and_finite_gas<R, E>(
+        &self,
+        drive: OhmicDrive,
+        gas: &IsochoricGasParcel,
+        heat: FiniteGasStringHeat,
+        conductor_before: ResolvedConductor,
+        current_a: f64,
+        joule_heat_j: f64,
+        advance: impl FnOnce(&mut Self, &mut IsochoricGasParcel, FiniteGasStringHeat) -> Result<R, E>,
+    ) -> Result<
+        (
+            Self,
+            IsochoricGasParcel,
+            FiniteGasElectrothermalStringFrame<R>,
+        ),
+        E,
+    >
+    where
+        E: From<ThermalStringError> + From<FiniteGasStringError>,
+    {
         let string_heat_j = heat.string_heat_j + joule_heat_j;
         if !heat.string_heat_j.is_finite()
             || !string_heat_j.is_finite()
