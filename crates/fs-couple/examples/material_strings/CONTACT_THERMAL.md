@@ -204,6 +204,23 @@ Each receiver strip uses the same finite-volume geometry and sourced transport
 requirements as a dry thermal strip. This route uses `dry-contacts 0` and the
 original retained-film mechanical map.
 
+With `bow_fibers`, a complete `film-surfaces` binding (one for every film)
+explicitly attaches those films to their original string material patches.
+`bow_fiber_motion` or `bow_fiber_program` may then accelerate, reverse and
+translate the opposing hair through the existing source-derived fiber model.
+Its changing material crossing changes the counterface velocity maps while
+the string-side tangent, film mass and elastic/plastic/Maxwell history remain
+attached. Every receiving strip must use the same original material card as
+the physical fibers. Incomplete bindings refuse moving-fiber playback.
+
+Canonical solved normal contacts and `bow_fiber_normal_program` use that same
+moving hair geometry, including the original normal attachment work and support
+inertia. The string-side film station must stay fixed: `bow_station_motion`
+still requires film mass/history transport and is not admitted on this path.
+Independent finger/fret motion remains supported through its original owner.
+An invalid thermal endpoint or geometry update advances neither support
+program, film history, finite cell state nor the accepted pressure sample.
+
 The orientation is exactly `+1` or `-1`. At each nonlinear trial the receiver
 interval translates by minus this orientation times the **actual candidate
 elastic plus plastic relative displacement**. The commanded bow velocity does
@@ -222,7 +239,7 @@ refuses the step while preserving accepted motion, heat, trace and output state.
 
 This is an attached-film, sliding-counterface approximation with adiabatic outer
 boundaries. It does not transport rosin mass, renew or reset shear history, change
-the mechanical contact map, model wear, or supply missing interface measurements.
+the string-side film attachment, model wear, or supply missing interface measurements.
 Thermal cells and time steps still require physical resolution/refinement.
 
 ## Scope and output
@@ -236,8 +253,9 @@ Their exact normal/attachment work enters the same mechanical and thermal
 transaction; rejected trials advance neither geometry nor heat. Changing
 callback size or enabling the trace does not switch to an isothermal step.
 
-The retained film footprint and thermal grid remain fixed. Moving a retained
-film, thermal expansion and melt/recontact history still require corresponding
+The film patch and thermal grid remain fixed in their material coordinates;
+the counterface region under the film follows the solved relative displacement.
+Moving the film itself, thermal expansion and melt/recontact history still require corresponding
 transport/work terms in the physical owner. Stop dissipation remains in its
 original mechanical loss account; it is not relabeled as film heat.
 Geometric stretching and retained longitudinal waves use their original

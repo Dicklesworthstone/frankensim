@@ -8,8 +8,10 @@
 //!
 //! Straight parallel fibers remain this rung's assumption. A canonical normal
 //! fiber receiver follows the SAME material crossing through the existing
-//! normal-contact product rule; its solved reaction supplies friction. Rosin
-//! and thermal patch histories are not transported. The
+//! normal-contact product rule; its solved reaction supplies friction. An
+//! explicit string-attached film retains its thermal/shear history on that
+//! fixed material patch while this opposing fiber crossing moves. Film mass
+//! and histories are not transported. The
 //! native mechanical ledger is a SUPPORT-FRAME balance: external work includes
 //! the inertial load. `FiberSupportFrame` additionally accounts for rigid
 //! translation and momentum cross terms in laboratory energy and support work.
@@ -233,7 +235,8 @@ impl MultiBowStringBank {
     ///
     /// Bind after source contacts. Canonical normal fiber receivers follow the
     /// same material crossing; the original unilateral law resolves load and
-    /// release in the joint friction solve. Shear/thermal history transport
+    /// release in the joint friction solve. Explicit string-attached films keep
+    /// their original material patch and thermal/shear state; film transport
     /// remains unsupported. Arbitrary authored normal receiver maps refuse.
     /// Initial speed declares an already co-moving state, not an impulse. A
     /// velocity step in a low-rate schedule remains a finite-interval acceleration
@@ -635,8 +638,8 @@ impl FiberSupportState {
         });
         let normal_translation_work = normal.map_or(0.0, |frame| frame.contact_translation_work_j);
         // Material-fiber banks have no lumped series-drive storage; retained
-        // fiber modes already represent that compliance. Moving shear/thermal
-        // patches remain inadmissible under this owner's transport restrictions.
+        // fiber modes already represent that compliance. A string-attached
+        // film retains its original storage while the opposing fiber moves.
         let laboratory_energy = frame.network_energy_j
             + frame.obstacle_energy_j
             + frame.obstacle_residual_energy_j

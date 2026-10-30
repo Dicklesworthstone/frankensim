@@ -130,14 +130,6 @@ impl Input {
                 );
             }
         }
-        if self.motion.is_some() || self.support_program.is_some() {
-            if (spec.contact_thermal && !spec.dry_contact_thermal) || spec.friction.shear_layers().is_some() {
-                return Err(
-                    "fiber support motion requires transported shear/thermal material patches"
-                        .into(),
-                );
-            }
-        }
         // An accelerating stroke must opt into source-derived inertia and
         // contact travel; omission retains the explicit frozen-station rung.
         for track in spec.schedule.tracks() {
@@ -175,6 +167,16 @@ impl Input {
     ) -> Result<TensionedFiberRibbon> {
         self.mode_count(spec)?;
         poll(gate)?;
+        // Profile ownership is available here, after parsing the performance
+        // and before resolving any fiber material. Dimension counting alone
+        // cannot reject a film whose separate thermal profile is not loaded yet.
+        if (self.motion.is_some() || self.support_program.is_some())
+            && ((spec.contact_thermal && !spec.dry_contact_thermal)
+                || spec.friction.shear_layers().is_some())
+            && !spec.retained_string_films
+        {
+            return Err("moving fibers require dry heat routes or a complete v3 film binding attached to the original string patches".into());
+        }
         let mut requirements = vec![
             Requirement::try_new("density", Density::DIMS, Admit::StrictlyPositive)?,
             Requirement::try_new("young_modulus", Pressure::DIMS, Admit::StrictlyPositive)?,

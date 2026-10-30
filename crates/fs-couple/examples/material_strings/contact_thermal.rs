@@ -297,10 +297,13 @@ impl Profile {
     }
 
     /// Select the actual thermal owner before geometry/material admission.
-    /// Only explicit dry routes permit transported bow/fiber footprints.
+    /// A complete v3 film/counterface binding retains film history on the string;
+    /// its opposing fibers may move without moving that original material patch.
     pub fn configure(&self, spec: &mut input::Spec) {
         spec.contact_thermal = true;
         spec.dry_contact_thermal = !self.dry.is_empty();
+        spec.retained_string_films = spec.bow_fibers.is_some() && !self.films.is_empty()
+            && self.film_surfaces.len() == self.films.len();
     }
 
     /// Compile thermal data from the SAME cached material objects as mechanics.

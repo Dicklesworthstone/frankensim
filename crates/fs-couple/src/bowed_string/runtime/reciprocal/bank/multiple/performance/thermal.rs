@@ -28,8 +28,9 @@ type TrialHeatSource<'p, 't, S, E> = dyn Fn(&DepositionSimulation<'t>, &[Frictio
 /// This inherits the fixed compressed-film, affine-modulus and solid-state
 /// limits of the shared contact/enthalpy owner. Independent finger/fret supports
 /// may press, release and migrate: their actuator work joins the SAME mechanical
-/// transaction at every thermal trial. Film footprints and thermal cells stay
-/// fixed; bow/film migration still needs transported material history. Initial
+/// transaction at every thermal trial. Explicit string-attached films permit
+/// the original fiber support motion while their string patch/cells stay fixed;
+/// migrating the film itself still needs transported material history. Initial
 /// material matching and all per-step domains remain checked by that owner.
 pub struct ContactThermalPerformance<'p, 't, 'm, 'g, F, S, E> {
     performance: &'p mut MultiBowPerformance,
@@ -71,15 +72,18 @@ impl MultiBowPerformance {
             return Err(RenderError::Coupled(ModalCouplingError::Cancelled));
         }
         let system = &self.bank.system;
-        if self.bank.bow_station_motion_limits().is_some()
+        if self.bow_station_motion.is_some()
             || thermal.time_s() != system.samples_rendered() as f64 * system.sample_period_s()
             || thermal.cells().is_empty()
             || thermal.cells().len() > controls.maximum_cells
             || (bindings.is_empty() && series_heat.is_empty())
         {
             return Err(render_invalid(
-                "contact heat needs matching physical clocks, finite cells, explicit routes and fixed bow/film geometry",
+                "contact heat needs matching clocks, finite cells, explicit routes and retained string-film stations",
             ));
+        }
+        if self.bank.bow_station_motion_limits().is_some() {
+            self.bank.admit_bow_station_sources().map_err(RenderError::Friction)?;
         }
         let energy_guess_j = vec![0.0; thermal.cells().len()];
         Ok(ContactThermalPerformance {

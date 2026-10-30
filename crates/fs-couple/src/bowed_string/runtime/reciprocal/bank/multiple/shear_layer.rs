@@ -47,6 +47,20 @@ impl MultiBowStringBank {
         Ok(self)
     }
 
+    /// Attach each declared film to its original STRING material patch.
+    /// The opposing straight fiber ribbon may translate and accelerate through
+    /// the existing support-motion owner. String station, tangent direction,
+    /// film mass/geometry and elastic/plastic/Maxwell history remain retained.
+    /// Normal and tangential reactions share the same moving hair receiver;
+    /// film-side migration, wear, opening and mass transport remain unsupported.
+    pub fn with_bow_shear_layers_attached_to_strings(
+        mut self, bindings: Vec<(usize, ResolvedShearLayer)>, gate: &CancelGate,
+    ) -> Result<Self, ReciprocalStringError> {
+        self.system = self.system.with_material_shear_layers_attached_to_left(bindings, gate)
+            .map_err(ReciprocalStringError::Friction)?;
+        Ok(self)
+    }
+
     /// Continue the original instrument and its retained-film thermal cells in
     /// one transaction. Temperature-dependent elasticity/yield/viscosity change the actual
     /// source traction, string/body/cavity motion and the SAME pressure observer.
@@ -70,10 +84,7 @@ impl MultiBowStringBank {
         gate: &CancelGate,
         resolve: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
     ) -> Result<LayerThermalFrame<S>, LayerThermalError<E>> {
-        if self.bow_station_motion_limits().is_some() {
-            return Err(LayerThermalError::Invalid("contact heat requires transported bow geometry and material history"));
-        }
-        self.system.step_with_layer_thermal_network(thermal, bindings, controls,
+        self.step_with_contact_thermal_network(thermal, bindings, &[], controls,
             energy_guess_j, external, drives, gate, resolve)
     }
 
@@ -99,7 +110,11 @@ impl MultiBowStringBank {
         resolve: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
     ) -> Result<LayerThermalFrame<S>, LayerThermalError<E>> {
         if self.bow_station_motion_limits().is_some() {
-            return Err(LayerThermalError::Invalid("contact heat requires transported bow geometry and material history"));
+            return self.with_bow_geometry(external, drives, None, None, None, gate,
+                |system, step| system.step_with_contact_thermal_geometry(thermal, bindings,
+                    series_heat, controls, energy_guess_j, step.external, step.drives,
+                    step.geometry, step.endpoints, step.normal_geometry, step.stop_offsets_m,
+                    step.config, gate, |endpoint, _ports| resolve(endpoint)));
         }
         self.system.step_with_contact_thermal_network(thermal, bindings, series_heat,
             controls, energy_guess_j, external, drives, gate, resolve)
@@ -133,7 +148,7 @@ impl MultiBowStringBank {
             |endpoint, _ports| resolve(endpoint))
     }
 
-    /// The original fixed-film/stop transaction with trial-dependent heat
+    /// The original retained-film/stop transaction with trial-dependent heat
     /// transfer. Actual candidate port slip determines which opposing material
     /// cells meet the retained film; source evaluation never advances a cursor.
     #[allow(clippy::too_many_arguments)]
@@ -151,16 +166,21 @@ impl MultiBowStringBank {
         gate: &CancelGate,
         resolve: impl Fn(&DepositionSimulation<'t>, &[FrictionPortFrame]) -> Result<StepCoefficients<S>, E>,
     ) -> Result<LayerThermalFrame<S>, RenderError> {
-        if self.bow_station_motion_limits().is_some() {
-            return Err(RenderError::Control {
-                what: "contact heat requires transported bow geometry and material history",
-            });
-        }
         let endpoints = stations.map(|s| self.prepare_stop_station_geometry(s, gate)).transpose()?;
-        let accepted = self.system.step_with_contact_thermal_feedback(
-            thermal, bindings, series_heat, controls, energy_guess_j, external,
-            drives, endpoints.as_deref(), offsets_m, gate, resolve,
-        ).map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error.to_string())))?;
+        let failure = |error: LayerThermalError<E>|
+            RenderError::Voice(AcousticRealizeError::Nonlinear(error.to_string()));
+        let accepted = if self.bow_station_motion_limits().is_some() {
+            self.with_bow_geometry(external, drives, None, endpoints.as_deref(), offsets_m, gate,
+                |system, step| system.step_with_contact_thermal_geometry(thermal, bindings,
+                    series_heat, controls, energy_guess_j, step.external, step.drives,
+                    step.geometry, step.endpoints, step.normal_geometry, step.stop_offsets_m,
+                    step.config, gate, resolve)).map_err(failure)?
+        } else {
+            self.system.step_with_contact_thermal_feedback(
+                thermal, bindings, series_heat, controls, energy_guess_j, external,
+                drives, endpoints.as_deref(), offsets_m, gate, resolve,
+            ).map_err(failure)?
+        };
         // The shared owner has published mechanics, normal geometry and heat.
         // No fallible operation may separate that sample from its station cursor.
         if let Some(stations) = stations {

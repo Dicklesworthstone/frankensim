@@ -3,8 +3,9 @@
 //! The constitutive owner is fs-tribo's midpoint elastic/viscoplastic simple-shear
 //! return map. This adapter supplies the actual held-force body compliance,
 //! retains the material claims and publishes history with the original network.
-//! Area, thickness, temperature and tangent frame are fixed. Normal opening,
-//! layer transport, wear and pressure-dependent yield are
+//! Area, thickness, temperature and tangent frame are fixed. An explicitly
+//! left-attached film can retain its material patch while the counterface moves.
+//! Normal opening, layer transport, wear and pressure-dependent yield are
 //! outside this retained-compressive-contact rung; none is replaced by a reset.
 //! The explicit thermal adapter continues this same state with affine elastic
 //! softening and its reversible heat; ordinary stepping remains isothermal.
@@ -52,6 +53,8 @@ pub(super) struct MaterialShearLayer {
     law: ThirdBodyLayerContact,
     state: ThirdBodyLayerState,
     staged: Option<TangentialStep<ThirdBodyLayerState>>,
+    /// Explicit material-side ownership, not permission to move the film itself.
+    attached_to_left: bool,
 }
 impl MaterialShearLayer {
     fn new(source: ResolvedShearLayer) -> Result<Self, ModalFrictionError> {
@@ -69,6 +72,7 @@ impl MaterialShearLayer {
             law,
             state,
             staged: None,
+            attached_to_left: false,
         })
     }
     pub(super) fn energy_j(&self) -> f64 {
@@ -222,8 +226,31 @@ impl MultiFrictionModalSystem {
     /// storage uses the existing joint discrete-gradient iteration, retaining
     /// this layer's accepted history and reversible energy in every trial.
     pub fn with_material_shear_layers(
-        mut self,
+        self,
         bindings: Vec<(usize, ResolvedShearLayer)>,
+        gate: &CancelGate,
+    ) -> Result<Self, ModalFrictionError> {
+        self.bind_material_shear_layers(bindings, false, gate)
+    }
+
+    /// Retain each film on the original LEFT material patch and tangent frame.
+    ///
+    /// Only the opposing body's velocity/normal maps may migrate. The film's
+    /// area, thickness, caloric cell, elastic/plastic and Maxwell history stay
+    /// with the same left material. A geometry producer must preserve physical
+    /// co-location, parallel contact directions and the finite film footprint.
+    /// This supplies no film advection, wear, detachment or area evolution.
+    /// Any mapped normal must use the same distinct pair of components.
+    pub fn with_material_shear_layers_attached_to_left(
+        self,
+        bindings: Vec<(usize, ResolvedShearLayer)>,
+        gate: &CancelGate,
+    ) -> Result<Self, ModalFrictionError> {
+        self.bind_material_shear_layers(bindings, true, gate)
+    }
+
+    fn bind_material_shear_layers(
+        mut self, bindings: Vec<(usize, ResolvedShearLayer)>, attached_to_left: bool,
         gate: &CancelGate,
     ) -> Result<Self, ModalFrictionError> {
         poll(Some(gate))?;
@@ -248,7 +275,21 @@ impl MultiFrictionModalSystem {
                 .map_err(|_| invalid("material shear layer must support static elastic storage"))?;
             source.require_angular_frequency_rad_s(core::f64::consts::PI / self.sample_period_s())
                 .map_err(|_| invalid("material shear layer must support the represented temporal band through Nyquist"))?;
-            self.shear_layers[port] = Some(MaterialShearLayer::new(source)?);
+            if attached_to_left {
+                let pair = &self.points[port].port;
+                if pair.right.as_ref().is_none_or(|right| right.component == pair.left.component) {
+                    return Err(invalid("a retained left film needs a distinct declared counterface").into());
+                }
+                if let Some(normal) = self.contact_loads[port].and_then(|i| self.obstacle(i)) {
+                    if normal.left.component != pair.left.component
+                        || Some(normal.right.component) != pair.right.as_ref().map(|r| r.component) {
+                        return Err(invalid("retained film normal and tangent must name the same material pair").into());
+                    }
+                }
+            }
+            let mut layer = MaterialShearLayer::new(source)?;
+            layer.attached_to_left = attached_to_left;
+            self.shear_layers[port] = Some(layer);
         }
         poll(Some(gate))?;
         Ok(self)
@@ -261,6 +302,13 @@ impl MultiFrictionModalSystem {
             .get(port)
             .and_then(Option::as_ref)
             .map(|layer| &layer.source)
+    }
+
+    /// Whether this film explicitly retains the original left material patch.
+    #[must_use]
+    pub fn material_shear_layer_attached_to_left(&self, port: usize) -> bool {
+        self.shear_layers.get(port).and_then(Option::as_ref)
+            .is_some_and(|layer| layer.attached_to_left)
     }
 
     /// Accepted constitutive history only; refused trials never appear here.

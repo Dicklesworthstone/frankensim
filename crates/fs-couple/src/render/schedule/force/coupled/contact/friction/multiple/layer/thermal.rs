@@ -20,7 +20,9 @@
 //! Cells retain material coordinates; callers must justify their uniform state.
 //! A trial-aware source may conduct into the actual sliding counterface footprint.
 //! Independent normal supports may move through the original contact-work owner.
-//! Moving mechanical film maps, layer advection, expansion, melting and flash-temperature
+//! An explicit material-side attachment permits the opposing body's maps to
+//! move while retaining the film patch. Film-side map motion, layer advection,
+//! expansion, melting and flash-temperature
 //! approximations are not supplied. Endpoint thermal feedback is first order;
 //! solver convergence is not temporal/spatial convergence or a real-rosin claim.
 
@@ -319,6 +321,7 @@ impl LayerThermalCell<'_> {
             ));
         }
         let mut next = MaterialShearLayer::new(refreshed)?;
+        next.attached_to_left = original.attached_to_left;
         let continuation = next
             .law
             .continue_state_with_work(&original.state)
@@ -492,6 +495,28 @@ impl MultiFrictionModalSystem {
     ) -> Result<LayerThermalFrame<S>, LayerThermalError<E>> {
         self.step_with_contact_thermal_inner(thermal, bindings, series_heat, &[], controls,
             energy_guess_j, external, drives, obstacle_geometry, obstacle_offsets, false, gate, resolve)
+    }
+
+    /// The original film/enthalpy solve under moving opposing-body maps.
+    /// Explicitly left-attached layers keep their material patch and history;
+    /// generic geometry admission rejects film-side motion. Normal product-rule
+    /// work, thermal source feedback, pressure and both clocks accept together.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_contact_thermal_geometry<'t, S, E>(
+        &mut self, thermal: &mut DepositionSimulation<'t>, bindings: &[LayerThermalCell<'_>],
+        series_heat: &[SeriesDriveHeatDestination], controls: LayerThermalSolve,
+        energy_guess_j: &[f64], external: &[f64], drives: &[FrictionDrive],
+        geometry: &[surfaces::geometry::FrictionGeometry],
+        endpoints: Option<&[surfaces::geometry::FrictionEndpointGeometry]>,
+        normal_geometry: Option<&[obstacles::geometry::ObstacleGeometry]>,
+        normal_offsets_m: Option<&[f64]>, config: surfaces::geometry::FrictionGeometryConfig,
+        gate: &CancelGate,
+        resolve: impl Fn(&DepositionSimulation<'t>, &[FrictionPortFrame]) -> Result<StepCoefficients<S>, E>,
+    ) -> Result<LayerThermalFrame<S>, LayerThermalError<E>> {
+        self.with_friction_geometry_and_endpoints(geometry, endpoints, normal_geometry,
+            config, gate, |system| system.step_with_contact_thermal_inner(
+                thermal, bindings, series_heat, &[], controls, energy_guess_j, external,
+                drives, normal_geometry, normal_offsets_m, normal_geometry.is_some(), gate, resolve))
     }
 
     #[allow(clippy::too_many_arguments)]

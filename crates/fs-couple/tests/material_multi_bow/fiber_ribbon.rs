@@ -478,7 +478,7 @@ fn physical_fibers_receive_opposite_traction_and_change_string_body_pressure() {
     });
 }
 
-fn normal_fiber_bank(cx: &Cx<'_>, gate: &CancelGate, tension: f64, gap_m: f64) -> MultiBowStringBank {
+pub(super) fn normal_fiber_bank(cx: &Cx<'_>, gate: &CancelGate, tension: f64, gap_m: f64) -> MultiBowStringBank {
     normal_fiber_bank_with_receiver_scale(cx, gate, tension, gap_m, 1.0)
 }
 

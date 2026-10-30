@@ -150,6 +150,10 @@ impl Inputs {
             }
         }
         poll(gate)?;
-        Ok(bank.with_bow_shear_layers(bindings, gate)?)
+        Ok(if spec.retained_string_films {
+            bank.with_bow_shear_layers_attached_to_strings(bindings, gate)?
+        } else {
+            bank.with_bow_shear_layers(bindings, gate)?
+        })
     }
 }

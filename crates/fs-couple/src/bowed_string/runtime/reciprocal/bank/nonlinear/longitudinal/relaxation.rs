@@ -10,6 +10,7 @@ use crate::bowed_string::runtime::reciprocal::bank::{
     ReciprocalStringError, invalid as bank_invalid,
 };
 use crate::render::schedule::force::coupled::contact::friction::FrictionModalSystem;
+use crate::render::schedule::force::coupled::ModalCouplingError;
 use fs_material::section::{ConcentricElasticSection, ConcentricMaterialLayer};
 use fs_material::section::relaxation::{ConcentricPronySection, LayerRelaxationProperties};
 use fs_phs::RelaxationBranch;
@@ -149,7 +150,7 @@ impl StringBankLongitudinalRelaxation {
         let dimension = system.mode_count().checked_mul(2)
             .ok_or_else(|| bank_invalid("axial history embedding overflow"))?;
         self.channels.iter().map(|channel| {
-            if gate.is_requested() { return Err(ReciprocalStringError::Cancelled); }
+            if gate.is_requested() { return Err(ReciprocalStringError::Network(ModalCouplingError::Cancelled)); }
             let start: usize = system.components()[..channel.axial_component].iter().map(|c| c.modes().len()).sum();
             let mut projection = vec![0.0; dimension];
             projection[2 * (start + channel.mode)] = channel.coupling_per_s;
@@ -174,7 +175,7 @@ fn elastic_section(source: &MaterialStringSource) -> Result<ConcentricElasticSec
 
 fn bank_error(error: ReciprocalStringError) -> ImpactError {
     match error {
-        ReciprocalStringError::Cancelled => ImpactError::Cancelled,
+        ReciprocalStringError::Network(ModalCouplingError::Cancelled) => ImpactError::Cancelled,
         error => ImpactError::Owner(error.to_string()),
     }
 }

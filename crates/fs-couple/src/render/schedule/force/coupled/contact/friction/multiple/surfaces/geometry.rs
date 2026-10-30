@@ -113,10 +113,14 @@ impl MultiFrictionModalSystem {
             .checked_sub(endpoint_terms).ok_or_else(|| invalid("friction endpoints exceed max_update_terms"))? };
         self.validate_friction_geometry_config(config)?;
         let mut controls = Vec::with_capacity(endpoints.len());
-        for (endpoint, old) in endpoints.iter().zip(&self.points) {
+        for (index, (endpoint, old)) in endpoints.iter().zip(&self.points).enumerate() {
             poll(Some(gate))?;
             if !endpoint.start_speed_m_s.is_finite() || !endpoint.end_speed_m_s.is_finite() {
                 return Err(invalid("friction endpoint speeds must be finite").into());
+            }
+            if self.material_shear_layer_attached_to_left(index)
+                && (endpoint.start.left != old.port.left || endpoint.end.left != old.port.left) {
+                return Err(invalid("retained film endpoints must keep the original left material patch").into());
             }
             let column = |map: &FrictionGeometry| {
                 if map.left.component != old.port.left.component
@@ -168,8 +172,9 @@ impl MultiFrictionModalSystem {
     /// supplies tangential friction. The geometry producer remains responsible
     /// for physical co-location and compatible normal/tangent directions, as
     /// with the original `ContactNormalLoad` binding: modal maps alone cannot
-    /// prove these. Retained material shear layers still require transport of
-    /// their patch histories and refuse migration.
+    /// prove these. Explicit left-attached films permit counterface migration
+    /// while retaining their left tangential and normal maps, material and
+    /// histories. Moving the film itself still requires material transport.
     /// Spatial/time refinement remains necessary; this is neither continuous
     /// contact kinematics nor an alias-free or allocation-free rendering claim.
     #[allow(clippy::too_many_arguments)]
@@ -206,18 +211,29 @@ impl MultiFrictionModalSystem {
             if moving && self.contact_loads[i].is_some() && normal_geometry.is_none() {
                 return Err(invalid("contact-loaded friction cannot migrate without its normal patch").into());
             }
-            if moving && self.shear_layers[i].is_some() {
+            let attached = self.material_shear_layer_attached_to_left(i);
+            if moving && self.shear_layers[i].is_some()
+                && (!attached || next.left != old.port.left) {
                 return Err(invalid("material shear cannot migrate without layer-history transport").into());
             }
             if self.shear_layers[i].is_some() {
                 if let (Some(contact), Some(endpoints)) = (self.contact_loads[i], normal_geometry) {
                     let next = endpoints.get(contact).ok_or_else(||
                         invalid("moving friction needs the complete normal geometry"))?;
-                    let column = contact_attachment_column(&self.core.network, &next.left, &next.right)?;
-                    let accepted = self.obstacle_normal_column(contact)
-                        .expect("bound normal belongs to the original obstacle set");
-                    if column.iter().zip(accepted).any(|(a, b)| a.to_bits() != b.to_bits()) {
-                        return Err(invalid("material shear cannot migrate without layer-history transport").into());
+                    if attached {
+                        let original = self.obstacle(contact).expect("bound normal belongs to the original obstacle set");
+                        if next.left != original.left
+                            || original.left.component != old.port.left.component
+                            || Some(next.right.component) != old.port.right.as_ref().map(|r| r.component) {
+                            return Err(invalid("retained film must keep its original normal material patch").into());
+                        }
+                    } else {
+                        let column = contact_attachment_column(&self.core.network, &next.left, &next.right)?;
+                        let accepted = self.obstacle_normal_column(contact)
+                            .expect("bound normal belongs to the original obstacle set");
+                        if column.iter().zip(accepted).any(|(a, b)| a.to_bits() != b.to_bits()) {
+                            return Err(invalid("material shear cannot migrate without layer-history transport").into());
+                        }
                     }
                 }
             }

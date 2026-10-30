@@ -74,6 +74,12 @@ impl PreparedRoute<'_> {
 impl Prepared {
     pub(super) fn film_routes<'a>(&'a self, ready: &Ready,
         network: &DepositionSimulation<'_>) -> Result<Vec<PreparedRoute<'a>>> {
+        let fiber_card = if ready.performance.bank().source().fiber_ribbon().is_some() {
+            let fibers = ready.spec.bow_fibers.as_ref()
+                .ok_or("film counterface lost its original fiber material description")?;
+            Some(&ready.catalog.get(&fibers.pack)
+                .ok_or("film counterface fiber material is absent")?.card)
+        } else { None };
         let mut routes = Vec::with_capacity(self.profile.film_surfaces.len());
         for route in &self.profile.film_surfaces {
             let layer = ready.performance.bank().bow_shear_layer(route.port)
@@ -83,6 +89,18 @@ impl Prepared {
                 material: film.material.material, caloric: film.caloric, temperature_axis: "T" };
             let surface = route.surface.iter().map(|strip| self.thermal_strip(strip))
                 .collect::<Result<Vec<_>>>()?;
+            if let Some(card) = fiber_card {
+                if surface.iter().any(|cell|
+                    cell.material.material.content_hash() != card.content_hash()) {
+                    return Err("film counterface heat must enter the same original material card as the physical fibers".into());
+                }
+            }
+            if ready.spec.retained_string_films
+                && !ready.performance.bank().system()
+                    .material_shear_layer_attached_to_left(route.port)
+            {
+                return Err("retained-film heat lost its original string-side mechanical attachment".into());
+            }
             let heat = RetainedFilmHeat::try_new(layer, binding, film, surface, network,
                 self.profile.controls.maximum_cells)?;
             // Prove original coverage before output is opened. Every candidate

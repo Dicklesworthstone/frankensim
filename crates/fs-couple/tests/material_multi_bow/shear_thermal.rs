@@ -1,6 +1,8 @@
 //! Manufactured first-principles feedback fixtures, not identified rosin data.
 #[path = "shear_thermal/film_surface.rs"]
 mod film_surface;
+#[path = "shear_thermal/retained_fiber.rs"]
+mod retained_fiber;
 
 use super::*;
 use fs_couple::render::schedule::force::coupled::contact::friction::multiple::layer::thermal::*;

@@ -140,7 +140,8 @@ impl MultiBowStringBank {
 
     pub(super) fn admit_bow_station_sources(&self) -> Result<(), ModalFrictionError> {
         for port in 0..self.source.bows.len() {
-            if self.system.material_shear_layer(port).is_some() {
+            if self.system.material_shear_layer(port).is_some()
+                && !self.system.material_shear_layer_attached_to_left(port) {
                 return Err(error(
                     "bow migration requires material shear-layer history transport",
                 ));
@@ -280,7 +281,10 @@ impl MultiBowStringBank {
         let support = state.fiber_support.as_ref()
             .map(|motion| motion.prepare(&self.source, &self.system, external, drives, stop_offsets_m, gate))
             .transpose()?;
-        for ((&end, &start), bow) in end.iter().zip(&state.accepted).zip(&self.source.bows) {
+        for (port, ((&end, &start), bow)) in end.iter().zip(&state.accepted).zip(&self.source.bows).enumerate() {
+            if self.system.material_shear_layer(port).is_some() && end.to_bits() != start.to_bits() {
+                return Err(error("a string-attached film cannot migrate along the string without material transport"));
+            }
             let distance = (end - start) * self.cards[bow.location.string].length_m;
             let speed = distance / self.system.sample_period_s();
             if !interior(end)
@@ -327,7 +331,8 @@ impl MultiBowStringBank {
         // the accepted endpoint, without altering vibration or material memory.
         let mut geometry = Vec::with_capacity(end.len());
         let mut string_centres_m = Vec::with_capacity(end.len());
-        let mut endpoints = (0..end.len()).any(|port| self.system.interface(port).is_some())
+        let mut endpoints = (0..end.len()).any(|port| self.system.interface(port).is_some()
+            || self.system.material_shear_layer_attached_to_left(port))
             .then(|| Vec::with_capacity(end.len()));
         for (i, ((&end, &start), bow)) in end
             .iter()

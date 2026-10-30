@@ -19,6 +19,8 @@ use fs_material::{
 use fs_qty::{Density, QuantitySpec, Temperature};
 use fs_thermal::enthalpy::*;
 
+mod heat;
+
 mod source;
 
 fn near(a: f64, b: f64, tol: f64) {
