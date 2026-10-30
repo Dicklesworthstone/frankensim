@@ -15,6 +15,8 @@
 //! is conservative and may exceed the actual maximum. Arithmetic is ordinary
 //! deterministic floating point, not an outward-rounded interval certificate;
 //! condensation conditioning and roundoff remain those of the original model.
+//! The cold observation map changes summation order relative to direct point
+//! evaluation; equivalence is to floating-point roundoff, not bit identity.
 //! This is an incremental, linear, equivalent-single-layer shell observation,
 //! not a three-dimensional interlaminar recovery or a measured damage limit.
 
@@ -33,20 +35,24 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), PlateError> {
     if cancelled() { Err(PlateError::Cancelled) } else { Ok(()) }
 }
 
-/// Reusable original element kinematics and equilibrium bubble condensation.
-/// No mode-sized map or per-frequency elastic factorization is retained.
+/// Fixed Bernstein observation of the original condensed element trial space.
+/// The 48-by-18 real map is prepared once from the original point evaluator.
+/// Its size is independent of the number of retained modes and frequencies.
+/// No geometry, duplicate kinematics or elastic factorization is retained.
 #[derive(Debug, Clone)]
 pub struct PreparedElementStrain {
-    field: element::PreparedStrainField,
+    observation: [[[f64; 18]; 8]; 6],
 }
 
 impl PreparedElementStrain {
     /// Coarse fixed scalar-work ceiling for one preparation, including the
-    /// original 20-by-20, seven-point elastic form and bubble condensation.
+    /// original 20-by-20, seven-point elastic form, bubble condensation and
+    /// observation of all 18 physical nodal basis vectors at six controls.
     /// Admission units are deliberately conservative, not CPU instructions.
-    pub const PREPARATION_WORK: usize = 262_144;
-    /// Coarse fixed scalar-work ceiling for both phasor parts at six controls.
-    pub const HARMONIC_FIELD_WORK: usize = 65_536;
+    pub const PREPARATION_WORK: usize = 1_048_576;
+    /// Coarse fixed scalar-work ceiling for the two 48-by-18 map products.
+    /// No original kinematic basis is evaluated on this response path.
+    pub const HARMONIC_FIELD_WORK: usize = 8_192;
     /// Coarse fixed scalar-work ceiling for one complete layer bound.
     pub const LAYER_BOUND_WORK: usize = 4_096;
     /// Work ceiling for the convenience field-plus-layer observation.
@@ -90,8 +96,20 @@ impl PreparedElementStrain {
         let field = element::PreparedStrainField::new(
             mesh, tri, geometry, normals, section, cancelled,
         )?;
+        let mut observation = [[[0.0; 18]; 8]; 6];
+        for column in 0..18 {
+            poll(cancelled)?;
+            let mut basis = [0.0; 18];
+            basis[column] = 1.0;
+            let controls = original_controls(&field, &basis, cancelled)?;
+            for control in 0..6 {
+                for component in 0..8 {
+                    observation[control][component][column] = controls[control][component];
+                }
+            }
+        }
         poll(cancelled)?;
-        Ok(Self { field })
+        Ok(Self { observation })
     }
 
     /// Reconstruct coherent Bernstein coefficients from physical global nodal
@@ -109,40 +127,27 @@ impl PreparedElementStrain {
         if real.iter().chain(imaginary).any(|v| !v.is_finite()) {
             return Err(invalid("nonfinite physical harmonic element displacement"));
         }
-        let real = self.controls(real, cancelled)?;
-        let imaginary = self.controls(imaginary, cancelled)?;
-        Ok(HarmonicElementStrain { real, imaginary })
-    }
-
-    fn controls(
-        &self,
-        displacement: &[f64; 18],
-        cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<Controls, PlateError> {
-        let expanded = self.field.expand(displacement);
-        if expanded.iter().any(|v| !v.is_finite()) {
-            return Err(invalid("unrepresentable condensed harmonic element displacement"));
-        }
-        let mut values = [[0.0; 8]; 6];
-        for (i, &(r, s)) in POINTS.iter().enumerate() {
+        let mut field = HarmonicElementStrain {
+            real: [[0.0; 8]; 6], imaginary: [[0.0; 8]; 6],
+        };
+        for control in 0..6 {
             poll(cancelled)?;
-            let (membrane, curvature, shear) = self.field.eval(&expanded, r, s);
-            values[i][..3].copy_from_slice(&membrane);
-            values[i][3..6].copy_from_slice(&curvature);
-            values[i][6..].copy_from_slice(&shear);
-        }
-        // B_ij = 2*p(mid_ij) - (p(vertex_i) + p(vertex_j))/2.
-        // Vertices remain untouched while all three edge controls are formed.
-        for (edge, &(i, j)) in EDGES.iter().enumerate() {
             for component in 0..8 {
-                values[3 + edge][component] = 2.0 * values[3 + edge][component]
-                    - 0.5 * values[i][component] - 0.5 * values[j][component];
+                let row = &self.observation[control][component];
+                let mut re = 0.0;
+                let mut im = 0.0;
+                for j in 0..18 {
+                    re += row[j] * real[j];
+                    im += row[j] * imaginary[j];
+                }
+                if !re.is_finite() || !im.is_finite() {
+                    return Err(invalid("unrepresentable harmonic Bernstein strain controls"));
+                }
+                field.real[control][component] = re;
+                field.imaginary[control][component] = im;
             }
         }
-        if values.iter().flatten().any(|v| !v.is_finite()) {
-            return Err(invalid("unrepresentable harmonic Bernstein strain controls"));
-        }
-        Ok(values)
+        Ok(field)
     }
 
     /// Convenience for one film. Reuse [`Self::harmonic_field`] when multiple
@@ -158,6 +163,39 @@ impl PreparedElementStrain {
         self.harmonic_field(real, imaginary, cancelled)?
             .isotropic_layer_bound(faces_m, poisson_ratio, cancelled)
     }
+}
+
+// Cold map construction samples the original condensed evaluator. Keeping this
+// conversion here avoids a second set of strain, tying or bubble formulas.
+fn original_controls(
+    field: &element::PreparedStrainField,
+    displacement: &[f64; 18],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Controls, PlateError> {
+    let expanded = field.expand(displacement);
+    if expanded.iter().any(|v| !v.is_finite()) {
+        return Err(invalid("unrepresentable condensed harmonic element displacement"));
+    }
+    let mut values = [[0.0; 8]; 6];
+    for (i, &(r, s)) in POINTS.iter().enumerate() {
+        poll(cancelled)?;
+        let (membrane, curvature, shear) = field.eval(&expanded, r, s);
+        values[i][..3].copy_from_slice(&membrane);
+        values[i][3..6].copy_from_slice(&curvature);
+        values[i][6..].copy_from_slice(&shear);
+    }
+    // B_ij = 2*p(mid_ij) - (p(vertex_i) + p(vertex_j))/2.
+    // Vertices remain untouched while all three edge controls are formed.
+    for (edge, &(i, j)) in EDGES.iter().enumerate() {
+        for component in 0..8 {
+            values[3 + edge][component] = 2.0 * values[3 + edge][component]
+                - 0.5 * values[i][component] - 0.5 * values[j][component];
+        }
+    }
+    if values.iter().flatten().any(|v| !v.is_finite()) {
+        return Err(invalid("unrepresentable harmonic Bernstein strain controls"));
+    }
+    Ok(values)
 }
 
 /// One coherent complex strain polynomial in the original element trial space.

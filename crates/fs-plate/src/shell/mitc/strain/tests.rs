@@ -209,3 +209,32 @@ fn harmonic_strain_refusals_leave_preparation_reusable_and_scaled_norms_finite()
     }
     assert!(tensor_cycle_norm(&[f64::MAX;6], &[0.0;6]).is_err());
 }
+
+#[test]
+fn harmonic_strain_cached_map_has_fixed_storage_and_cancellable_cold_and_warm_work() {
+    let (mesh, directors) = flat();
+    let section = section(1.0);
+    let mut polls = 0;
+    // Reach into cold observation-map construction after the original elastic
+    // preparation, rather than cancelling only before any work has begun.
+    assert!(matches!(PreparedElementStrain::new(&mesh, 0, &directors, &section,
+        &mut || { polls += 1; polls == 12 }), Err(PlateError::Cancelled)));
+    assert_eq!(polls, 12);
+    let prepared = PreparedElementStrain::new(&mesh, 0, &directors, &section,
+        &mut || false).unwrap();
+    assert_eq!(PreparedElementStrain::RETAINED_BYTES, core::mem::size_of_val(&prepared));
+    assert_eq!(PreparedElementStrain::RETAINED_BYTES, 6_912);
+    assert!(PreparedElementStrain::RETAINED_BYTES > core::mem::size_of::<element::PreparedStrainField>());
+    // Cold fixed storage/work is traded for two bounded map products per query.
+    assert!(PreparedElementStrain::PREPARATION_WORK > 262_144);
+    assert!(PreparedElementStrain::HARMONIC_FIELD_WORK < 65_536);
+    let real = core::array::from_fn(|i| ((i*7 % 11) as f64 - 5.0) * 2e-5);
+    let imaginary = core::array::from_fn(|i| ((i*3 % 13) as f64 - 6.0) * 1e-5);
+    let before = prepared.harmonic_field(&real, &imaginary, &mut || false).unwrap();
+    let mut polls = 0;
+    assert!(matches!(prepared.harmonic_field(&real, &imaginary,
+        &mut || { polls += 1; polls == 4 }), Err(PlateError::Cancelled)));
+    let after = prepared.harmonic_field(&real, &imaginary, &mut || false).unwrap();
+    assert_eq!(before.real, after.real);
+    assert_eq!(before.imaginary, after.imaginary);
+}

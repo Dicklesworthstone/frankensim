@@ -59,6 +59,7 @@ pub struct ShellReductionOptions {
 #[derive(Clone, Debug)]
 pub struct MaterialShellImage {
     source: ResolvedShearShell,
+    directors: NodalDirectors,
     physical_modes: Vec<Vec<f64>>,
     force_ports: Vec<Vec<f64>>,
     volume_shapes: Vec<f64>,
@@ -72,6 +73,8 @@ pub struct MaterialShellImage {
 impl MaterialShellImage {
     /// Exact original material, section and midsurface sources.
     pub const fn source(&self) -> &ResolvedShearShell { &self.source }
+    /// Exact original directors used by the MITC assembly and bubble condensation.
+    pub const fn directors(&self) -> &NodalDirectors { &self.directors }
     /// Mode-major GLOBAL displacements/rotations, six entries per physical node.
     /// Vectors retain the original fs-modal mass normalization and mode signs.
     pub fn physical_modes(&self) -> &[Vec<f64>] { &self.physical_modes }
@@ -217,7 +220,7 @@ impl ResolvedShearShell {
             CompactBody::from_mass_normalized_projection(w,volume_shapes[i],projected[0][i],pressure.exterior.area_m2()))
             .collect::<Result<Vec<_>,_>>()?;
         poll(gate)?;
-        Ok(MaterialShellImage { source:self.clone(),physical_modes,force_ports:projected,
+        Ok(MaterialShellImage { source:self.clone(),directors:directors.clone(),physical_modes,force_ports:projected,
             volume_shapes,cavity_volume_shapes,intervals,radiators,damping,interface_columns,coating_relaxation })
     }
 }
