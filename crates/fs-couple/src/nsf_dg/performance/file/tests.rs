@@ -12,6 +12,7 @@ mod patch;
 mod source_patch;
 mod reservoir;
 mod flue_geometry;
+mod geometry;
 mod aperture;
 mod sgs;
 

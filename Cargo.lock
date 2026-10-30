@@ -1341,6 +1341,7 @@ dependencies = [
  "fs-qty",
  "fs-query",
  "fs-rand",
+ "fs-rep-frep",
  "fs-rep-mesh",
  "fs-scenario",
  "fs-solid",

@@ -40,6 +40,7 @@ fs-feec = { path = "../fs-feec" }
 fs-fft = { path = "../fs-fft" }
 fs-flux = { path = "../fs-flux", optional = true, default-features = false, features = ["experimental-compressible"] }
 fs-gas = { path = "../fs-gas", optional = true, features = ["experimental-euler"] }
+fs-geom = { path = "../fs-geom" }
 fs-iface = { path = "../fs-iface" }
 fs-la = { path = "../fs-la" }
 fs-lbm = { path = "../fs-lbm", features = ["enthalpy-coupling"] }
@@ -56,6 +57,7 @@ fs-plate = { path = "../fs-plate" }
 fs-ports = { path = "../fs-ports" }
 fs-qty = { path = "../fs-qty" }
 fs-rand = { path = "../fs-rand" }
+fs-rep-frep = { path = "../fs-rep-frep" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-scenario = { path = "../fs-scenario" }
 fs-solid = { path = "../fs-solid" }
@@ -72,7 +74,6 @@ fs-convection = { path = "../fs-convection" }
 fs-modalid = { path = "../fs-modalid" }
 fs-ladder = { path = "../fs-ladder" }
 fs-ga = { path = "../fs-ga" }
-fs-geom = { path = "../fs-geom" }
 fs-io = { path = "../fs-io" }
 fs-psycho = { path = "../fs-psycho" }
 fs-substrate = { path = "../fs-substrate" }

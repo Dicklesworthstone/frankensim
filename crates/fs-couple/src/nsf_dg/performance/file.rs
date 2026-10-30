@@ -1,6 +1,7 @@
 //! Data-only assembly of the original NSF volume, DG bore and pressure observer.
 //!
-//! Geometry is an explicit Cartesian grid and stationary solid-cell mask. Gas
+//! Geometry is an explicit Cartesian grid and stationary solid-cell mask,
+//! optionally sampled from bounded SI boxes and clipped wedges. Gas
 //! evolution retains either the original dry-air law or complete thermochemical
 //! source models; a mixture snapshot is never converted into an invented law.
 //! Initial physical states and finite pressure/characteristic controls are data. No jet
@@ -32,6 +33,8 @@ use fs_material::gas_species::input::{
 use fs_material::thermochemical_gas::energy::GasEnergySolve;
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 use std::sync::Arc;
+
+mod geometry;
 
 pub const RESOLVED_DG_PERFORMANCE_SCHEMA: &str = "frankensim-resolved-dg-performance-v1";
 pub const MAX_RESOLVED_PERFORMANCE_BYTES: usize = 1024 * 1024;
@@ -342,19 +345,8 @@ impl ResolvedDgFilePerformance {
             _ => return Err(bad(row.line, "initial requires rest or uniform RHO VX VY VZ T")),
         };
         row.end()?;
-        let mut row = rows.row("solids")?;
-        let solid_cells: usize = row.number()?;
-        row.end()?;
-        if solid_cells >= cells { return Err(bad(rows.line, "solid mask must leave actual fluid cells")); }
-        let mut solid = vec![false; cells];
-        for n in 0..solid_cells {
-            if n % 256 == 0 { poll(&gate)?; }
-            let mut row = rows.row("solid")?;
-            let index = row.index(dims)?;
-            if solid[index] { return Err(bad(row.line, "duplicate solid cell")); }
-            solid[index] = true;
-            row.end()?;
-        }
+        let solid = read_solids(&mut rows, dims, dx_m, cells, &gate)?;
+        let solid_cells = solid.iter().filter(|&&value| value).count();
         let mut row = rows.row("states")?;
         let initial_state_cells: usize = row.number()?;
         row.end()?;
@@ -602,6 +594,52 @@ impl ResolvedDgFilePerformance {
     pub const fn wall_layout(&self) -> &DgMaterialWallLayout { &self.wall }
     pub fn upstream_wall_layout(&self) -> Option<&DgMaterialWallLayout> { self.upstream_wall.as_ref() }
     pub fn into_renderer(self) -> NsfDgPerformance<D3q27> { self.renderer }
+}
+
+fn read_solids(rows: &mut Rows<'_>, dims: [usize; 3], dx_m: f64, cells: usize,
+    gate: &CancelGate) -> Result<Vec<bool>, ResolvedDgInputError>
+{
+    if !rows.next_is("solid_geometry") {
+        let mut row = rows.row("solids")?;
+        let count: usize = row.number()?;
+        row.end()?;
+        if count >= cells { return Err(bad(rows.line, "solid mask must leave actual fluid cells")); }
+        let mut solid = vec![false; cells];
+        for n in 0..count {
+            if n % 256 == 0 { poll(gate)?; }
+            let mut row = rows.row("solid")?;
+            let index = row.index(dims)?;
+            if solid[index] { return Err(bad(row.line, "duplicate solid cell")); }
+            solid[index] = true;
+            row.end()?;
+        }
+        return Ok(solid);
+    }
+    let mut row = rows.row("solid_geometry")?;
+    let count: usize = row.number()?;
+    let maximum_cell_evaluations: usize = row.number()?;
+    row.end()?;
+    geometry::admit_work(dims, dx_m, count, maximum_cell_evaluations)
+        .map_err(|what| bad(rows.line, what))?;
+    let mut shapes = Vec::with_capacity(count);
+    for _ in 0..count {
+        poll(gate)?;
+        let wedge = rows.next_is("solid_wedge");
+        let mut row = rows.row(if wedge { "solid_wedge" } else { "solid_box" })?;
+        let add = match row.word()? {
+            "add" => true, "subtract" => false,
+            _ => return Err(bad(row.line, "solid operation requires add or subtract")),
+        };
+        let min = fs_geom::Point3::new(row.scalar()?, row.scalar()?, row.scalar()?);
+        let max = fs_geom::Point3::new(row.scalar()?, row.scalar()?, row.scalar()?);
+        let clip = if wedge {
+            Some((fs_geom::Vec3::new(row.scalar()?, row.scalar()?, row.scalar()?), row.scalar()?))
+        } else { None };
+        row.end()?;
+        shapes.push(geometry::Primitive { add, bounds: fs_geom::Aabb { min, max }, clip });
+    }
+    geometry::rasterize(dims, dx_m, &shapes, maximum_cell_evaluations, gate)
+        .map_err(|what| bad(rows.line, what))
 }
 
 // Both sides consume exactly the same geometry, gas, wall and molecular source
