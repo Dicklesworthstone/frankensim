@@ -13,9 +13,12 @@ use fs_math::c64::C64;
 /// with storage x^T x / 2. Every U is volume flow INTO this duct.
 /// Keeping L and B permits joint retained-state assembly even where an isolated
 /// duct impedance has a pole. No state, basis, material or boundary is reduced.
-#[derive(Clone, Copy)]
-pub struct DgContinuous<'a> {
-    duct: &'a DgDuct,
+pub struct DgContinuous<'a, M: DgMedium = GasState> {
+    duct: &'a DgDuct<M>,
+}
+impl<M: DgMedium> Copy for DgContinuous<'_, M> {}
+impl<M: DgMedium> Clone for DgContinuous<'_, M> {
+    fn clone(&self) -> Self { *self }
 }
 
 /// Original declared port, in boundary-then-side-port order.
@@ -80,10 +83,10 @@ fn lu_error(error: LuComplexError) -> DuctError {
     }
 }
 
-impl DgDuct {
+impl<M: DgMedium> DgDuct<M> {
     /// Immutable, allocation-free view of the exact source-bound spatial model.
     #[must_use]
-    pub const fn continuous_operator(&self) -> DgContinuous<'_> {
+    pub const fn continuous_operator(&self) -> DgContinuous<'_, M> {
         DgContinuous { duct: self }
     }
 
@@ -158,7 +161,7 @@ fn admit_tolerance(tolerance: f64) -> Result<(), DuctError> {
     }
 }
 
-impl DgContinuous<'_> {
+impl<M: DgMedium> DgContinuous<'_, M> {
     #[must_use]
     pub fn dimension(&self) -> usize {
         self.duct.total_dofs()
@@ -340,7 +343,7 @@ impl DgContinuous<'_> {
             ),
         ] {
             if boundary == DgBoundary::Matched {
-                let zc = gas.density * gas.sound_speed / area;
+                let zc = gas.density_kg_m3() * gas.sound_speed_m_s() / area;
                 matched_absorption_w += 0.25
                     * (pressure_pa[node].norm_sq() / zc + zc * volume_flow_m3_s[node].norm_sq());
             }

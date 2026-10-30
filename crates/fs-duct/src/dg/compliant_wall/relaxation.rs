@@ -19,7 +19,7 @@ fn admit_spectrum(material: &GeneralizedMaxwell) -> Result<GeneralizedMaxwell, D
         .map_err(|_| invalid("DG wall requires a passive generalized-Maxwell spectrum"))
 }
 
-impl DgDuct {
+impl<M: DgMedium> DgDuct<M> {
     /// Attach the existing generalized-Maxwell material spectrum to the same
     /// radial wall and gas operator. The base pin contains equilibrium stiffness
     /// K_inf; each source modulus E_j gives K_j = (K_inf/E_inf) E_j.

@@ -148,7 +148,7 @@ impl CompliantWall {
     }
 }
 
-impl DgDuct {
+impl<M: DgMedium> DgDuct<M> {
     /// Exact common radius from the original cylindrical geometry, if present.
     /// A sampled taper or profile is never inferred to be a uniform cylinder.
     #[must_use]

@@ -401,6 +401,9 @@ impl DgDuct {
         Ok(self)
     }
 
+}
+
+impl<M: DgMedium> DgDuct<M> {
     /// Original material evaluation; no fitted relaxation parameters.
     #[must_use]
     pub fn molecular_relaxation(&self) -> Option<&RelaxationState> {
@@ -409,7 +412,7 @@ impl DgDuct {
 
     pub(super) fn pressure_bulk_modulus(&self) -> f64 {
         self.molecular.as_ref().map_or(
-            self.gas.density * self.gas.sound_speed * self.gas.sound_speed,
+            self.gas.density_kg_m3() * self.gas.sound_speed_m_s() * self.gas.sound_speed_m_s(),
             |m| m.bulk,
         )
     }

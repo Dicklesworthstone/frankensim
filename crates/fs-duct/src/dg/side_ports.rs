@@ -40,7 +40,7 @@ pub struct DgSidePortSource {
 
 fn invalid(what: &'static str) -> DuctError { DuctError::BadParameter { what } }
 
-impl DgDuct {
+impl<M: DgMedium> DgDuct<M> {
     /// Attach independent held-inflow ports at existing interior faces.
     /// Each port is conjugate to the SAME pressure trace used by the original
     /// alternating through-flow flux. A load consumes the opposite flow sign.
@@ -100,6 +100,9 @@ impl DgDuct {
     #[must_use]
     pub fn side_ports(&self) -> &[DgSidePort] { &self.side_ports }
 
+}
+
+impl DgDuct {
     /// Read the actual face geometry and evaluate its original material source.
     /// Source/phase refusals propagate without substituting inlet or mean gas.
     /// Unknown IDs refuse; boundary ports retain their existing endpoint APIs.

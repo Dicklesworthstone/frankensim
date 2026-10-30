@@ -354,6 +354,9 @@ impl DgDuct {
         Ok(())
     }
 
+}
+
+impl<M: DgMedium> DgDuct<M> {
     /// Admission over every spatial wall quadrature point. A uniform
     /// exact-mass attachment is reported by viscothermal_model instead.
     #[must_use]

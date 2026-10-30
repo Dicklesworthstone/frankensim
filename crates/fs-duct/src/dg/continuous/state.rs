@@ -9,7 +9,7 @@ pub struct DgTrajectoryPort {
     pub pressure_impulse_pa_s: f64,
     pub work_into_duct_j: f64,
 }
-impl DgContinuous<'_> {
+impl<M: DgMedium> DgContinuous<'_, M> {
     /// All original acoustic and wall coordinates, after source identity checks.
     pub fn energy_coordinates<'s>(&self, state: &'s DgState) -> Result<&'s [f64], DuctError> {
         if state.operator_identity != self.duct.operator_identity

@@ -4,7 +4,7 @@
 //! # Governing equations
 //!
 //! On a 1-D axial domain $x \in [0, L]$ with positive cross-sectional area $A(x) = \pi r(x)^2$,
-//! prescribed equilibrium gas density $\rho(x)$, and adiabatic sound speed $c(x)$, acoustic pressure $p(x, t)$ [Pa]
+//! prescribed equilibrium fluid density $\rho(x)$, and adiabatic sound speed $c(x)$, acoustic pressure $p(x, t)$ [Pa]
 //! and volume velocity $q(x, t)$ [$\text{m}^3/\text{s}$] satisfy the lossless Webster conservation
 //! system:
 //!
@@ -63,7 +63,7 @@
 //!
 //! [`DgDuct::with_viscothermal`] optionally appends the exact-Bessel-derived
 //! positive viscous and thermal memory supplied by `fs_phs::ZkDiffusive`.
-//! Identical circular cylinders in a uniform material gas are supported. These
+//! Identical circular cylinders in a uniform admitted gas or fluid are supported. These
 //! states share the same dense exponential and energy coordinates; no midpoint
 //! relaxation or duplicated inviscid storage is introduced. Total energy then
 //! includes wall memory, and the dense ledger still reports inferred loss.
@@ -72,11 +72,18 @@
 //! locally reacting cylindrical wall to that SAME operator. Its pressure work
 //! is reciprocal and its elastic/kinetic storage is part of the native state.
 
+//! [`DgDuct::from_material`] admits the original checked liquid or other fluid
+//! source to these same operators. Legacy `DgDuct<GasState>` APIs retain their
+//! gas-specific source fields and molecular/live-gas update capabilities.
+
 use crate::profile::gas_field::GasFieldDuctError;
 use crate::{Duct, DuctError, Segment};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_la::eigen::{admit_jacobi_eigh, householder_eigh, jacobi_eigh};
 use fs_material::gas::GasState;
+
+mod fluid;
+pub use fluid::{DgFluidMaterial, DgMedium};
 use fs_material::gas_field::AxialGasField;
 use fs_math::det;
 
@@ -405,12 +412,12 @@ fn spd_sqrt_and_inv_sqrt(a: &[f64], m: usize) -> Result<(Vec<f64>, Vec<f64>), Du
 /// Element mass matrices `M_p = ∫ A/(ρc²) ℓ_i ℓ_j dx` and `M_q = ∫ ρ/A ℓ_i ℓ_j dx` over
 /// `[s_left, s_left + h]` of `span`, by Gauss–Legendre rules doubled from `2p + 4` points until
 /// both repeat to `MASS_QUADRATURE_ULPS` ulps of their largest entry.
-fn element_masses<E: From<DuctError>>(
+fn element_masses<E: From<DuctError>, M: DgMedium>(
     span: &AxialSpan,
     s_left: f64,
     h: f64,
     lgl: &LglRule,
-    gas_at: &mut impl FnMut(f64) -> Result<GasState, E>,
+    gas_at: &mut impl FnMut(f64) -> Result<M, E>,
 ) -> Result<(Vec<f64>, Vec<f64>), E> {
     let n_local = lgl.order + 1;
     let jac = 0.5 * h;
@@ -429,8 +436,9 @@ fn element_masses<E: From<DuctError>>(
                 .into());
             }
             let gas = gas_at(span.x_start + s)?;
-            let rho = gas.density;
-            let bulk = rho * gas.sound_speed * gas.sound_speed;
+            let rho = gas.density_kg_m3();
+            let speed = gas.sound_speed_m_s();
+            let bulk = rho * speed * speed;
             if !(rho.is_finite() && rho > 0.0 && bulk.is_finite() && bulk > 0.0) {
                 return Err(DuctError::BadParameter {
                     what: "DG gas density and bulk modulus must be finite and positive",
@@ -520,11 +528,11 @@ struct DgElement {
 /// Assembled 1-D variable-area discontinuous-Galerkin duct, optionally carrying
 /// admitted circular-tube viscothermal memory through the same exponential.
 #[derive(Debug, Clone)]
-pub struct DgDuct {
+pub struct DgDuct<M: DgMedium = GasState> {
     operator_identity: ContentHash,
     mesh: DgMesh,
-    gas: GasState,
-    outlet_gas: GasState,
+    gas: M,
+    outlet_gas: M,
     gas_field: Option<AxialGasField>,
     /// Exact source geometry eligibility, not inferred from sampled node radii.
     /// Original geometry retained for material-point wall integration.
@@ -622,7 +630,7 @@ impl DgDuct {
         inlet: DgBoundary,
         outlet: DgBoundary,
     ) -> Result<Self, DuctError> {
-        Self::assemble(duct, gas, mesh, inlet, outlet, None, &mut |_| Ok(*gas))
+        Self::assemble(duct, gas, gas, mesh, inlet, outlet, None, &mut |_| Ok(*gas))
     }
 
     /// Bind the shared primitive thermochemical field to the time-domain DG
@@ -662,19 +670,25 @@ impl DgDuct {
             return Ok(duct);
         }
         let gas = *field.state_at(0.0)?.state();
-        Self::assemble(duct, &gas, mesh, inlet, outlet, Some(field), &mut |x| {
+        let outlet_gas = *field.state_at(field.length_m())?.state();
+        Self::assemble(duct, &gas, &outlet_gas, mesh, inlet, outlet, Some(field), &mut |x| {
             Ok(*field.state_at(x)?.state())
         })
     }
 
-    fn assemble<E: From<DuctError>>(
+}
+
+impl<M: DgMedium> DgDuct<M> {
+    #[allow(clippy::too_many_arguments)]
+    fn assemble<E: From<DuctError>, A: DgMedium>(
         duct: &Duct,
-        gas: &GasState,
+        gas: &M,
+        outlet_material: &M,
         mesh: DgMesh,
         inlet: DgBoundary,
         outlet: DgBoundary,
         field: Option<&AxialGasField>,
-        gas_at: &mut impl FnMut(f64) -> Result<GasState, E>,
+        gas_at: &mut impl FnMut(f64) -> Result<A, E>,
     ) -> Result<Self, E> {
         if duct.segments.is_empty() {
             return Err(DuctError::EmptyDuct.into());
@@ -697,7 +711,7 @@ impl DgDuct {
             }
             .into());
         }
-        crate::validate_gas(gas)?;
+        gas.admit()?;
         if let (DgBoundary::Port(id_in), DgBoundary::Port(id_out)) = (inlet, outlet)
             && id_in == id_out
         {
@@ -935,7 +949,7 @@ impl DgDuct {
             }
             DgBoundary::Matched => {
                 // Upwind characteristic flux exiting at x = 0 (p_hat_L = 0.5*(p_0 - Zc*q_0), q_hat_L = -0.5*(p_0/Zc - q_0)):
-                let zc0 = gas.density * gas.sound_speed / elements[0].areas[0];
+                let zc0 = gas.density_kg_m3() * gas.sound_speed_m_s() / elements[0].areas[0];
                 kp[in_node * field_dofs + in_node] += 0.5;
                 d_pp[in_node * field_dofs + in_node] += 0.5 / zc0;
                 kq[in_node * field_dofs + in_node] += 0.5;
@@ -967,7 +981,7 @@ impl DgDuct {
                 kq[out_node * field_dofs + out_node] -= 1.0;
             }
             DgBoundary::Matched => {
-                let zc_l = outlet_gas.density * outlet_gas.sound_speed
+                let zc_l = outlet_gas.density_kg_m3() * outlet_gas.sound_speed_m_s()
                     / elements[last_elem].areas[n_local - 1];
                 kp[out_node * field_dofs + out_node] -= 0.5;
                 d_pp[out_node * field_dofs + out_node] += 0.5 / zc_l;
@@ -998,7 +1012,7 @@ impl DgDuct {
         let is_lossless_bcs =
             !matches!(inlet, DgBoundary::Matched) && !matches!(outlet, DgBoundary::Matched);
         if is_lossless_bcs {
-            Self::admit_lossless_transpose_pair(&g_mat, &h_mat, field_dofs, n_local)?;
+            DgDuct::admit_lossless_transpose_pair(&g_mat, &h_mat, field_dofs, n_local)?;
         }
         let mut l_tilde = vec![0.0; total_dofs * total_dofs];
         for i in 0..field_dofs {
@@ -1025,8 +1039,8 @@ impl DgDuct {
         Ok(Self {
             operator_identity,
             mesh,
-            gas: *gas,
-            outlet_gas,
+            gas: gas.clone(),
+            outlet_gas: outlet_material.clone(),
             gas_field: field.cloned(),
             geometry: duct.clone(),
             uniform_radius_m: viscothermal::uniform_radius(duct),
@@ -1045,43 +1059,6 @@ impl DgDuct {
             ports,
             side_ports: Vec::new(),
         })
-    }
-
-    /// Check the SBP identity H=-G^T before selecting the original lossless
-    /// time owner's exact transpose. Two local mass-normalization products and
-    /// the LGL/face arithmetic get a conservative 64*n_local^2*epsilon normwise
-    /// roundoff allowance (n_local <= 9); larger defects are source errors, not
-    /// damping to project away. Scaling before subtraction also avoids overflow.
-    fn admit_lossless_transpose_pair(
-        g: &[f64],
-        h: &[f64],
-        field_dofs: usize,
-        n_local: usize,
-    ) -> Result<(), DuctError> {
-        let mut scale = 0.0_f64;
-        for &value in g.iter().chain(h) {
-            if !value.is_finite() {
-                return Err(DuctError::BadParameter {
-                    what: "lossless DG weak operators must be finite",
-                });
-            }
-            scale = scale.max(value.abs());
-        }
-        if scale == 0.0 {
-            return Ok(());
-        }
-        let allowance = 64.0 * (n_local * n_local) as f64 * f64::EPSILON;
-        for i in 0..field_dofs {
-            for j in 0..field_dofs {
-                let defect = h[i * field_dofs + j] / scale + g[j * field_dofs + i] / scale;
-                if defect.abs() > allowance {
-                    return Err(DuctError::BadParameter {
-                        what: "lossless DG weak operators exceed the roundoff SBP transpose allowance",
-                    });
-                }
-            }
-        }
-        Ok(())
     }
 
     fn scale_operator(
@@ -1200,25 +1177,6 @@ impl DgDuct {
     #[must_use]
     pub const fn total_length(&self) -> f64 {
         self.total_length
-    }
-
-    /// Inlet reference state. This is the uniform medium for [`Self::new`];
-    /// a field-backed duct instead uses its local material at each point.
-    #[must_use]
-    pub const fn gas(&self) -> &GasState {
-        &self.gas
-    }
-
-    /// Exact inlet state used by the inlet characteristic boundary.
-    #[must_use]
-    pub const fn inlet_gas(&self) -> &GasState {
-        &self.gas
-    }
-
-    /// Exact outlet state used by the outlet characteristic boundary.
-    #[must_use]
-    pub const fn outlet_gas(&self) -> &GasState {
-        &self.outlet_gas
     }
 
     /// Physical inlet area from the original boundary geometry [m²].
@@ -2356,3 +2314,63 @@ impl DgPropagator {
 
 #[cfg(test)]
 mod tests;
+
+impl DgDuct {
+    /// Check the SBP identity H=-G^T before selecting the original lossless
+    /// time owner's exact transpose. Two local mass-normalization products and
+    /// the LGL/face arithmetic get a conservative 64*n_local^2*epsilon normwise
+    /// roundoff allowance (n_local <= 9); larger defects are source errors, not
+    /// damping to project away. Scaling before subtraction also avoids overflow.
+    fn admit_lossless_transpose_pair(
+        g: &[f64],
+        h: &[f64],
+        field_dofs: usize,
+        n_local: usize,
+    ) -> Result<(), DuctError> {
+        let mut scale = 0.0_f64;
+        for &value in g.iter().chain(h) {
+            if !value.is_finite() {
+                return Err(DuctError::BadParameter {
+                    what: "lossless DG weak operators must be finite",
+                });
+            }
+            scale = scale.max(value.abs());
+        }
+        if scale == 0.0 {
+            return Ok(());
+        }
+        let allowance = 64.0 * (n_local * n_local) as f64 * f64::EPSILON;
+        for i in 0..field_dofs {
+            for j in 0..field_dofs {
+                let defect = h[i * field_dofs + j] / scale + g[j * field_dofs + i] / scale;
+                if defect.abs() > allowance {
+                    return Err(DuctError::BadParameter {
+                        what: "lossless DG weak operators exceed the roundoff SBP transpose allowance",
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+
+    /// Inlet reference state. This is the uniform medium for [`Self::new`];
+    /// a field-backed duct instead uses its local material at each point.
+    #[must_use]
+    pub const fn gas(&self) -> &GasState {
+        &self.gas
+    }
+
+    /// Exact inlet state used by the inlet characteristic boundary.
+    #[must_use]
+    pub const fn inlet_gas(&self) -> &GasState {
+        &self.gas
+    }
+
+    /// Exact outlet state used by the outlet characteristic boundary.
+    #[must_use]
+    pub const fn outlet_gas(&self) -> &GasState {
+        &self.outlet_gas
+    }
+
+}

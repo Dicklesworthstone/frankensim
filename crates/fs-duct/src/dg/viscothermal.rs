@@ -100,6 +100,9 @@ impl DgDuct {
         self.with_uniform_viscothermal_model(model)
     }
 
+}
+
+impl<M: DgMedium> DgDuct<M> {
     // Stamp the SAME native uniform Bessel realization. Live material refresh
     // uses this owner with the original angular band, radius and pole count.
     pub(super) fn with_uniform_viscothermal_model(
