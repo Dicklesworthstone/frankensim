@@ -14584,3 +14584,12 @@ original full-network account. Finite pulses are held newton loads with
 explicit release samples, not implicit impulses, contact impact models or
 block-dependent gains. Pressure, material history, coating applicability
 and energy diagnostics retain their existing owners and physical limits.
+
+
+## Source gas and duct composition for hybrid spatial acoustic regions
+
+`cavity_modal::interior::hybrid::HybridInterior` borrows the original source-owned `ThermoviscousInterior` and original pressure `InteriorMultiport`. It verifies pressure-region rho/c and optional boundary-layer viscosity/conductivity/cp/gamma bitwise against the same source gas. Original resolved solid samples remain accessible through `source()`. The source's explicit frequency band applies to every preparation; original FE trace matching and field/work recovery stay in fs-feec. This source bridge currently requires a calorically perfect gas: a molecular source refuses because the pressure region has not yet acquired the same dispersive bulk compression as the resolved region.
+
+`prepare` returns the original reusable hybrid preparation. `duct_scattering` conjugates the complete external matrix exactly once from exp(+i omega t) to the existing duct exp(-i omega t) convention. `duct_two_port` requires exactly two external coordinates and uses the original `TwoPort`; no retained mode is dropped. Reference resistances are explicit positive real work-coordinate choices. The original mode/mesh/interface-placement and insulated thermal-interface qualifications are preserved.
+
+Two source integration cases pass in the focused native fallback. Actual original GasState drives both spatial regions and field/work recovery. Hybrid plus original analytic duct and complex load at 80/300/1100 Hz agrees within 2e-9 normalized error with an independent closure using original H impedance and L admittance. Tests pin exact phasor conjugation, source identity, optional H wall transport coherence, and medium/molecular/band/reference/coordinate/cancellation refusal. Together with the three FE hybrid cases, this adds five executed cases beyond the preceding finite-wall increment; no full instrument or full-workspace acceptance is inferred.

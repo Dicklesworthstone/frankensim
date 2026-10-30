@@ -4,3 +4,6 @@ pub mod helmholtz;
 
 /// Resolved velocity, pressure and temperature in viscous acoustic gaps.
 pub mod thermoviscous;
+
+/// Source-trace Galerkin coupling between pressure and resolved thermoviscous FE.
+pub mod hybrid;

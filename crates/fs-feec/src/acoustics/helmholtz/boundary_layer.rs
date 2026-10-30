@@ -289,7 +289,7 @@ impl HelmholtzFe<'_> {
 }
 
 pub(super) struct ReducedBoundaryLayer {
-    transport: BoundaryLayerTransport,
+    pub(super) transport: BoundaryLayerTransport,
     geometry: BoundaryLayerGeometry,
     surface_stiffness: Vec<f64>,
     surface_mass: Vec<f64>,

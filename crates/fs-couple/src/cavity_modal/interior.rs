@@ -13,6 +13,9 @@ pub mod molecular;
 /// Source-owned mixed velocity/pressure/temperature fields and duct composition.
 pub mod thermoviscous;
 
+/// Source gas and duct composition for hybrid pressure/resolved acoustic regions.
+pub mod hybrid;
+
 use fs_feec::acoustics::helmholtz::boundary_layer::thermal_wall::{
     ConductiveThermalWall, ThermalWall, ThermalWallDepth, WallThermalTransport,
 };

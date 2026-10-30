@@ -297,6 +297,17 @@ impl InteriorMultiport {
         self.reduced.medium
     }
 
+    /// Original gas coefficients used by the optional pressure-wall operator.
+    /// Source adapters can verify transport as well as volume rho/c without
+    /// replacing or reconstructing the original spatial wall matrices.
+    #[must_use]
+    pub fn boundary_layer_transport(&self) -> Option<BoundaryLayerTransport> {
+        self.reduced
+            .boundary_layer
+            .as_ref()
+            .map(|wall| wall.transport)
+    }
+
     pub(super) fn operator(
         &self,
         frequency_hz: f64,
