@@ -73,6 +73,9 @@ pub mod modal;
 pub use modal::MouthLoad;
 /// Stable wave/reflection and Redheffer composition with explicit conditioning.
 pub mod compose;
+/// Material-driven, lossless bulk acoustics for gases and liquids, with the
+/// same geometry, wall response and stable pressure/volume-flow composition.
+pub mod fluid;
 /// Smooth plane-wave profiles and declared integration/slice axes.
 pub mod profile;
 /// Harmonic molecular dispersion coupled to the original wall-diffusion law.
@@ -523,12 +526,16 @@ pub fn segment_wave(
     let k0 = omega / state.sound_speed;
     let z0 = state.density * state.sound_speed / area;
     match loss {
-        LossModel::Lossless => Ok(SegmentWave {
-            wavenumber: C64::from_re(k0),
-            characteristic_impedance: C64::from_re(z0),
-            specific_impedance: C64::from_re(state.density * state.sound_speed),
-            shear_number: f64::INFINITY,
-        }),
+        LossModel::Lossless => {
+            let acoustic = fs_material::fluid_acoustics::FluidAcousticState::try_new(
+                state.density,
+                state.sound_speed,
+            )
+            .map_err(|_| DuctError::BadParameter {
+                what: "lossless gas acoustic coefficients must be finite and positive",
+            })?;
+            fluid::wave_from_state(&acoustic, radius, omega)
+        }
         LossModel::WideTube => wide_tube_wave(state, radius, omega, k0, z0, true),
         LossModel::Bessel => bessel_wave(state, radius, omega),
     }

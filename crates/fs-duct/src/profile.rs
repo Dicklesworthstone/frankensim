@@ -3,7 +3,7 @@
 //! integration acts on [p, Z_ref U], so no scalar impedance pole is crossed.
 //! This converges to the plane-wave model, not the three-dimensional field.
 
-use crate::{DuctError, LossModel, mul2, segment_wave};
+use crate::{DuctError, LossModel, SegmentWave, mul2, segment_wave};
 use fs_material::gas::GasState;
 use fs_math::{c64::C64, det};
 use fs_phs::WallPin;
@@ -435,14 +435,18 @@ fn local_generator(
     slant: f64,
 ) -> Result<((C64, C64), f64), DuctError> {
     let wave = wall.apply(segment_wave(state, radius, omega, loss)?, radius, omega, slant)?;
+    Ok(wave_generator(wave, zref))
+}
+
+fn wave_generator(wave: SegmentWave, zref: f64) -> ((C64, C64), f64) {
     let ik = C64::new(0.0, 1.0) * wave.wavenumber;
-    Ok((
+    (
         (
             ik * wave.characteristic_impedance.scale(1.0 / zref),
             ik * wave.characteristic_impedance.recip().scale(zref),
         ),
         wave.shear_number,
-    ))
+    )
 }
 
 pub(crate) fn magnus_step(
@@ -555,9 +559,33 @@ pub(crate) fn profile_blocks_controlled<F: FnMut() -> bool>(
     cancel: &mut F,
 ) -> Result<(Vec<[C64; 4]>, f64), DuctError> {
     steps.validate()?;
+    let zref = gas_profile_reference(profile, state, omega)?;
+    profile_blocks_with_waves_controlled(
+        profile,
+        steps,
+        zref,
+        !wall.is_rigid(),
+        cancel,
+        &mut |radius, slant| {
+            wall.apply(segment_wave(state, radius, omega, loss)?, radius, omega, slant)
+        },
+    )
+}
+
+/// The existing Magnus and physical-block owner with an explicitly supplied
+/// local wave law. Liquids need no ideal-gas or invented transport state.
+pub(crate) fn profile_blocks_with_waves_controlled(
+    profile: &RadiusProfile,
+    steps: RiccatiSteps,
+    zref: f64,
+    slanted_wall: bool,
+    cancel: &mut impl FnMut() -> bool,
+    wave_at: &mut impl FnMut(f64, f64) -> Result<SegmentWave, DuctError>,
+) -> Result<(Vec<[C64; 4]>, f64), DuctError> {
+    steps.validate()?;
     let mut blocks = Vec::with_capacity(steps.0);
     let (rv, _) =
-        for_each_profile_step(profile, state, omega, loss, steps, wall, cancel, |mut e, zref| {
+        for_each_profile_step_with_waves(profile, steps, zref, slanted_wall, cancel, wave_at, |mut e, zref| {
             e[1] = e[1].scale(zref);
             e[2] = e[2].scale(1.0 / zref);
             if e.iter().any(|&v| !finite(v)) {
@@ -570,6 +598,22 @@ pub(crate) fn profile_blocks_controlled<F: FnMut() -> bool>(
     Ok((blocks, rv))
 }
 
+fn gas_profile_reference(
+    profile: &RadiusProfile,
+    state: &GasState,
+    omega: f64,
+) -> Result<f64, DuctError> {
+    if !positive(omega) || !positive(state.density) || !positive(state.sound_speed) {
+        return Err(bad("profile gas/frequency must be positive and finite"));
+    }
+    let r0 = profile.inlet_radius();
+    let zref = state.density * state.sound_speed / (core::f64::consts::PI * r0 * r0);
+    if !positive(zref) {
+        return Err(bad("profile reference impedance is not finite"));
+    }
+    Ok(zref)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn for_each_profile_step<F: FnMut() -> bool>(
     profile: &RadiusProfile,
@@ -579,14 +623,33 @@ fn for_each_profile_step<F: FnMut() -> bool>(
     steps: RiccatiSteps,
     wall: WallModel<'_>,
     cancel: &mut F,
+    visit: impl FnMut([C64; 4], f64) -> Result<(), DuctError>,
+) -> Result<(f64, f64), DuctError> {
+    steps.validate()?;
+    let zref = gas_profile_reference(profile, state, omega)?;
+    for_each_profile_step_with_waves(
+        profile,
+        steps,
+        zref,
+        !wall.is_rigid(),
+        cancel,
+        &mut |radius, slant| {
+            wall.apply(segment_wave(state, radius, omega, loss)?, radius, omega, slant)
+        },
+        visit,
+    )
+}
+
+fn for_each_profile_step_with_waves(
+    profile: &RadiusProfile,
+    steps: RiccatiSteps,
+    zref: f64,
+    slanted_wall: bool,
+    cancel: &mut impl FnMut() -> bool,
+    wave_at: &mut impl FnMut(f64, f64) -> Result<SegmentWave, DuctError>,
     mut visit: impl FnMut([C64; 4], f64) -> Result<(), DuctError>,
 ) -> Result<(f64, f64), DuctError> {
     steps.validate()?;
-    if !positive(omega) || !positive(state.density) || !positive(state.sound_speed) {
-        return Err(bad("profile gas/frequency must be positive and finite"));
-    }
-    let r0 = profile.inlet_radius();
-    let zref = state.density * state.sound_speed / (core::f64::consts::PI * r0 * r0);
     if !positive(zref) {
         return Err(bad("profile reference impedance is not finite"));
     }
@@ -595,13 +658,12 @@ fn for_each_profile_step<F: FnMut() -> bool>(
     let (c1, c2) = (0.5 - root3 / 6.0, 0.5 + root3 / 6.0);
     let mut min_shear = f64::INFINITY;
     let mut local = |x: f64| -> Result<(C64, C64), DuctError> {
-        let slant = if !wall.is_rigid() {
+        let slant = if slanted_wall {
             let slope = profile.slope(x)?;
             det::sqrt(1.0 + slope * slope)
         } else { 1.0 };
-        let (generator, shear) = local_generator(
-            state, profile.radius(x)?, omega, loss, zref, wall, slant,
-        )?;
+        let wave = wave_at(profile.radius(x)?, slant)?;
+        let (generator, shear) = wave_generator(wave, zref);
         min_shear = min_shear.min(shear);
         Ok(generator)
     };

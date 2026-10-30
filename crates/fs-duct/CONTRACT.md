@@ -10,6 +10,47 @@ doctrine: instrument bores, mufflers, HVAC runs and waveguides are the
 same object, and every medium property derives from
 `fs_material::gas::GasState` — no hardcoded air.
 
+### Shared gas and liquid pressure-wave propagation
+
+`fluid::{segment_wave,duct_chain,input_impedance_load}` consumes the original
+`fs_material::fluid_acoustics::FluidAcoustics` owner. Density and adiabatic
+sound speed are evaluated together once per chain; no ideal-gas caloric law or
+invented liquid transport coefficients are required. The existing gas
+`LossModel::Lossless` delegates to the same wave-coefficient owner, after its
+original complete gas-coherence admission. Sourced liquid water, IF97 fluids
+and resolved real gases therefore reach actual pipe impedance and transmitted
+pressure/volume flow through the same acoustic interface as ideal mixtures.
+
+The fluid path reuses the exact cylinder/cone wave bases, the original stable
+scattering composer, and the same fourth-order Magnus profile integrator.
+Rigid, uniform-fluid cones use one exact spherical-wave block. Compliant
+cones use explicit `ConeSlices`; profiles retain their authored Riccati steps.
+`WallModel::{Pin,Law}` supplies local storage/loss at the actual radius and
+surface slope. Thus fluid bulk compressibility and a source-owned wall law
+act through one pressure/volume-flow equation, rather than an output filter.
+The terminal load is explicit in Pa s/m3 and may come from the material-driven
+BEM owner or a supported tabulated load. `None` closes the end; zero releases
+pressure. A rigid cap retains its physical pressure transfer and zero flow.
+
+The original material error is retained as `FluidDuctError::Material`; native
+geometry, wall, conditioning and work refusals remain `FluidDuctError::Duct`.
+Cancellation is checked before material admission and at each segment/slice
+or profile step, publishing no partial chain. Existing block/condition limits
+apply. The caller retains the original material/query receipts; a numerical
+snapshot does not acquire additional source authority through this adapter.
+
+This is frozen, linear, lossless **bulk** acoustics with optional passive wall
+and terminal dissipation. It does not supply liquid viscothermal loss data,
+mean flow, cavitation, multiphase or finite-amplitude water hammer, a shell
+solve, or automatic liquid tone-hole radiation. Tone-hole branches refuse
+until their own boundary physics is explicitly represented. G1/G3 tests in
+`tests/fluid_acoustics.rs` compare native pressure/flow and matched travel
+phase for source-backed ideal mixtures and IF97 liquid states with independent
+line formulas, check gas pressure scaling and the combined liquid/wall
+compliance equation, and retain existing gas response through mixed
+cylinder/cone/profile geometry. These are numerical model checks, not
+experimental qualification.
+
 ### Independent exterior gas
 
 `exterior::{input_impedance,input_impedance_and_holes,input_reflection,input_impedance_load,
