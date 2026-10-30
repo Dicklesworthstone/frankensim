@@ -19,6 +19,10 @@
 
 use super::*;
 
+/// Structured implicit transport using the original backward-Euler residual.
+#[path = "conduction/implicit.rs"]
+pub mod implicit;
+
 /// Immutable, explicitly bound scalar conductivity on an enthalpy domain.
 /// A physical material owner supplies pressure, phase fractions, source data and
 /// any effective-medium closure. Zero is an explicit insulating state.

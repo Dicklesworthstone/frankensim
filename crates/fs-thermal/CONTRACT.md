@@ -497,3 +497,56 @@ a time/spatial error certificate. Focused G0/G1/G3 tests cover series/Robin
 resistance, dynamic boundary CFL and entropy, exact event splitting, independent
 nonlinear transient and Stefan front/heat refinement, composition, insulation,
 domain/work limits and transactional cancellation.
+
+
+## Implicit enthalpy transport on geometric conduction chains
+
+`enthalpy::backward_euler::BackwardEulerStep` additionally accepts optional
+endpoint reservoir-conductance replacements through
+`evaluate_with_reservoirs` and `evaluate_with_entropy_and_reservoirs`.
+Original bath temperatures, areas, heat rates and entropy remain authoritative;
+applied coefficients are restored before the endpoint can be accepted. Existing
+coefficient callbacks retain their original behavior. Unknown cells, absent
+baths, negative/nonfinite conductances and cancellation refuse transactionally.
+
+`enthalpy::conduction::implicit::ImplicitConductionChain` solves fixed-mass,
+nearest-neighbor chains using that same residual, not a second heat-rate owner.
+Every caloric and conductivity law is bound to the original borrowed object.
+A fused constitutive query supplies T(h), k(h), their analytic local derivatives
+and an explicit admitted enthalpy interval. Physical latent plateaus retain
+zero dT/dh while their conductivity may continue changing with phase inventory.
+The exact endpoint Jacobian differentiates both the temperature difference and
+the half-cell/contact/surface conductance, in cell ENERGY coordinates.
+
+Only three matrix diagonals are assembled. The reusable `fs-la` adjacent-pivot
+workspace keeps the linear solve O(cells) in work and storage; original
+map-based graph/constitutive bookkeeping remains. Newton candidates whose
+nonzero increment cannot change the stored enthalpy are represented by exactly
+zero increment before evaluation. This does not bypass or relax the original
+underflow policy, heat rates, per-cell residual or total-energy acceptance.
+Every resulting candidate is reevaluated by the original owner.
+
+Declared controls bound timestep, accepted intervals, Newton iterations,
+backtracks, interval halvings and total residual evaluations, including
+rejected trials and final entropy queries. Bounded backtracking respects the
+material domains; nonconvergence or a singular linear system may trigger a
+whole-interval retry. Scheduled events split intervals at their exact times.
+Only fully accepted intervals contribute heat or entropy. A complete call
+also checks independently summed original stored energy against all supplied
+heat. Failure may alter scratch but publishes no physical history. The report
+retains original heat/entropy, maximum accepted local residual and work counts.
+Every admitted caloric law must provide the original entropy integral.
+
+This path removes the explicit diffusion CFL restriction for an accepted
+implicit interval. Backward Euler remains first order; interval halving here
+is nonlinear globalization, not a time-error estimator. Global uniqueness,
+unconditional nonlinear convergence, a general graph solve, evolving geometry
+and constitutive accuracy beyond the supplied laws are not claimed.
+
+Five focused chain regressions cover stiff exact solutions, latent traversal,
+original-residual Jacobian differences, nonlinear time refinement, event
+splitting, cancellation/budget rollback, singular falling-conductivity retries,
+and a 96-cell diffusion tail with sub-ULP energy updates. Two added reservoir
+regressions check original heat and actual-bath entropy plus refusal/rollback.
+The full pinned-main native thermal source passes 191 tests, with one existing
+ignored test; required workspace/DSR gates remain a separate unavailable check.
