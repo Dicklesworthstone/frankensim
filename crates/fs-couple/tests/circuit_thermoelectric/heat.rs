@@ -16,6 +16,9 @@ use fs_matdb::{ClaimSelection, ClaimSet, InterfaceSystemCard, SurfaceSpec, Syste
 #[path = "../../../fs-conduction/tests/radiation_material/common.rs"]
 mod radiation_geometry;
 
+#[path = "heat/motion.rs"]
+mod motion;
+
 fn scoped<R>(run: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
     let gate = CancelGate::new();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());

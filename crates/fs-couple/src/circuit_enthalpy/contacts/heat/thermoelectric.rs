@@ -1,13 +1,17 @@
 //! Kelvin conversion, sourced interfaces and radiation on one accepted endpoint.
 
 use super::{HeatNetworkError, HeatNetworkSample, PreparedHeatNetwork};
-use crate::circuit_enthalpy::{CircuitEnthalpyError, CircuitEnthalpySolve};
-use crate::circuit_enthalpy::contacts::advance_circuit;
+use crate::circuit_enthalpy::{CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve};
+use crate::circuit_enthalpy::contacts::{admit_sources, advance_circuit};
 use crate::circuit_enthalpy::thermoelectric::{
-    Error, ThermoelectricCandidate, ThermoelectricLeg, ThermoelectricNetworkError,
+    Error, ThermoelectricCandidate, ThermoelectricDriver, ThermoelectricLeg,
+    ThermoelectricNetworkError, ThermoelectricSample,
     coupled_resolved_candidate, finish_candidate_with_internal_heat,
 };
-use crate::material_circuit::MaterialCircuit;
+use crate::circuit_enthalpy::thermoelectric::motion::{self, ThermoelectricMotionCandidate};
+use crate::material_circuit::{MaterialCircuit, MaterialResistor};
+use crate::material_circuit::contacts::SeriesElectricalContact;
+use crate::material_circuit::motion::{FieldMotionInput, MaterialFieldMotion};
 use fs_exec::Cx;
 use fs_thermal::enthalpy::DepositionSimulation;
 
@@ -48,6 +52,76 @@ impl PreparedHeatNetwork<'_, '_> {
         circuit: &MaterialCircuit, ports: &[f64], legs: &[ThermoelectricLeg],
         controls: CircuitEnthalpySolve, initial_energy_increments_j: &[f64],
     ) -> Result<ThermoelectricCandidate<'m, HeatNetworkSample>, Error> {
+        let (next, electrical, report) = self.thermoelectric_resolved_candidate(
+            cx, thermal, target_s, circuit, ports, legs, controls, initial_energy_increments_j,
+            |resistors, contacts, inputs, dt, cancelled| {
+                advance_circuit(circuit, resistors, contacts, inputs, dt,
+                    controls.circuit, cancelled)
+            },
+        )?;
+        let internal_heat_j = (target_s - thermal.time_s())
+            * report.source.network.radiation_net_power_w();
+        finish_candidate_with_internal_heat(next, electrical, report,
+            internal_heat_j, controls, || cx.checkpoint().is_err())
+    }
+
+    /// Convert a finite thermal gradient into reciprocal field-actuator motion
+    /// while contacts, conductive layers and radiation load the SAME junctions.
+    ///
+    /// The original Kelvin residual computes Seebeck voltage and deposits signed
+    /// Peltier/Thomson heat from the actual native circuit current. The original
+    /// field descriptor advances charge/flux, gap and momentum together; its
+    /// electrical back-reaction is part of that same current. Bulk and electrical
+    /// contact Joule heat reaches the original caloric cells exactly once.
+    /// Material thermal interfaces, integrated k(T) layers and enclosure radiation
+    /// are refreshed inside every proposed enthalpy solve, so changing their data
+    /// changes temperatures, generated current and physical actuator motion.
+    ///
+    /// All restrictions of `step_thermoelectric_candidate` apply, including
+    /// refusing unresolved contact temperature jumps on Kelvin legs. The moving
+    /// field medium, guided body and optional axial support retain their original
+    /// admitted material snapshots and inertia. This does not infer field entropy,
+    /// live support expansion, hysteresis, Lorentz transport or deforming thermal
+    /// geometry. The original first-order thermal split and motion limits apply.
+    ///
+    /// Closed radiation is internal, not external heat. Joint publication requires
+    /// field, kinetic, support and finite thermal storage to close against actual
+    /// external electrical work, force-displacement work and authored heat.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_thermoelectric_motion_candidate<'m>(
+        &self, cx: &Cx<'_>, thermal: &DepositionSimulation<'m>, target_s: f64,
+        model: &MaterialFieldMotion, ports: &[f64], external_force_n: f64,
+        legs: &[ThermoelectricLeg], controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+    ) -> Result<ThermoelectricMotionCandidate<'m, HeatNetworkSample>, Error> {
+        let circuit = model.circuit();
+        let (next, model, report) = self.thermoelectric_resolved_candidate(
+            cx, thermal, target_s, circuit, ports, legs, controls, initial_energy_increments_j,
+            |resistors, contacts, inputs, dt, cancelled| {
+                admit_sources(circuit, &contacts, &mut *cancelled)?;
+                Ok(model.step_with_contacts_candidate(resistors, contacts,
+                    FieldMotionInput { electrical_ports: inputs, external_force_n,
+                        duration_s: dt }, controls.circuit, cancelled)?)
+            },
+        )?;
+        let internal_heat_j = (target_s - thermal.time_s())
+            * report.source.network.radiation_net_power_w();
+        motion::finish_candidate(next, model, report, internal_heat_j,
+            controls, || cx.checkpoint().is_err())
+    }
+
+    // One admission/resolution path for both physical drivers. This prevents
+    // future thermal mechanisms or Kelvin-interface restrictions from silently
+    // disappearing in one composition while remaining present in the other.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn thermoelectric_resolved_candidate<'m, D: ThermoelectricDriver>(
+        &self, cx: &Cx<'_>, thermal: &DepositionSimulation<'m>, target_s: f64,
+        circuit: &MaterialCircuit, ports: &[f64], legs: &[ThermoelectricLeg],
+        controls: CircuitEnthalpySolve, initial_energy_increments_j: &[f64],
+        advance: impl Fn(Vec<MaterialResistor>, Vec<SeriesElectricalContact>, &[f64], f64,
+            &mut dyn FnMut() -> bool) -> Result<D, Error>,
+    ) -> Result<(DepositionSimulation<'m>, D::Model,
+        CircuitEnthalpyReport<ThermoelectricSample<HeatNetworkSample>, D::Step>), Error> {
         super::check(cx).map_err(heat_error)?;
         for leg in legs {
             super::check(cx).map_err(heat_error)?;
@@ -76,15 +150,8 @@ impl PreparedHeatNetwork<'_, '_> {
                     }
                 }
                 Ok(coefficients)
-            }, |source| &source.material,
-            |resistors, contacts, inputs, dt, cancelled| {
-                advance_circuit(circuit, resistors, contacts, inputs, dt,
-                    controls.circuit, cancelled)
-            }, false, || cx.checkpoint().is_err(),
+            }, |source| &source.material, advance, false, || cx.checkpoint().is_err(),
         )?;
-        let internal_heat_j = (target_s - thermal.time_s())
-            * report.source.network.radiation_net_power_w();
-        finish_candidate_with_internal_heat(next, electrical, report,
-            internal_heat_j, controls, || cx.checkpoint().is_err())
+        Ok((next, electrical, report))
     }
 }

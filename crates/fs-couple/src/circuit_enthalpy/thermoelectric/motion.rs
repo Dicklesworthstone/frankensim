@@ -18,34 +18,37 @@ impl ThermoelectricDriver for FieldMotionCandidate {
 /// All native transfers plus the complete external-supply balance. Internal
 /// Seebeck work and its opposite thermal transfer appear in `coupled` exactly
 /// once and are removed together from the external supply accounts below.
-pub struct ThermoelectricMotionReport {
+pub struct ThermoelectricMotionReport<S = MaterialNetworkSample> {
     /// The original field/kinetic/circuit and finite enthalpy accounts.
-    pub coupled: FieldMotionEnthalpyReport<ThermoelectricSample>,
+    pub coupled: FieldMotionEnthalpyReport<ThermoelectricSample<S>>,
     /// Original electrical source work, excluding the internal Seebeck ports.
     pub external_electrical_work_j: f64,
     /// Held external force times the ACTUAL accepted gap displacement [J].
     pub external_mechanical_work_j: f64,
     /// Thermal boundary/source work, excluding Joule and Kelvin transfers [J].
     pub external_heat_j: f64,
+    /// Signed numerical net of closed enclosure exchange [J]. Internal
+    /// radiation remains in the joint balance and is never external supply.
+    pub closed_radiation_net_j: f64,
     /// Field + mechanical + thermal storage minus all external supply [J].
     pub total_energy_residual_j: f64,
 }
 
 /// One publishable field/circuit, moving-body and thermal endpoint. Original
 /// material sources, charge/flux, momentum and thermal event history survive.
-pub struct ThermoelectricMotionCandidate<'m> {
+pub struct ThermoelectricMotionCandidate<'m, S = MaterialNetworkSample> {
     thermal: DepositionSimulation<'m>,
     motion: MaterialFieldMotion,
-    report: ThermoelectricMotionReport,
+    report: ThermoelectricMotionReport<S>,
 }
-impl<'m> ThermoelectricMotionCandidate<'m> {
+impl<'m, S> ThermoelectricMotionCandidate<'m, S> {
     pub const fn thermal(&self) -> &DepositionSimulation<'m> { &self.thermal }
     pub const fn motion(&self) -> &MaterialFieldMotion { &self.motion }
     pub fn circuit(&self) -> &MaterialCircuit { self.motion.circuit() }
-    pub const fn report(&self) -> &ThermoelectricMotionReport { &self.report }
+    pub const fn report(&self) -> &ThermoelectricMotionReport<S> { &self.report }
     /// Move all accepted histories together, without replaying any physical law.
     pub fn into_parts(self) -> (DepositionSimulation<'m>, MaterialFieldMotion,
-        ThermoelectricMotionReport) {
+        ThermoelectricMotionReport<S>) {
         (self.thermal, self.motion, self.report)
     }
 }
@@ -84,11 +87,25 @@ pub fn step_candidate<'m>(
         |sources, inputs, dt, cancelled| motion.step_candidate(sources,
             FieldMotionInput { electrical_ports: inputs, external_force_n, duration_s: dt },
             controls.circuit, cancelled), &mut cancelled)?;
+    finish_candidate(thermal, motion, coupled, 0.0, controls, cancelled)
+}
+
+// Fixed transport and complete contact/layer/radiation assemblies publish through
+// this SAME field/Kelvin/enthalpy account. Only their retained source payloads
+// differ; source resolvers never advance mechanical or electrical history.
+pub(crate) fn finish_candidate<'m, S>(
+    thermal: DepositionSimulation<'m>, motion: MaterialFieldMotion,
+    coupled: FieldMotionEnthalpyReport<ThermoelectricSample<S>>,
+    closed_radiation_net_j: f64, controls: CircuitEnthalpySolve,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<ThermoelectricMotionCandidate<'m, S>, Error> {
+    let closed_radiation_net_j = finite(closed_radiation_net_j)?;
     let field = &coupled.electrical;
     let external_electrical_work_j = finite(field.electrical_supply_j
         - coupled.source.reversible_electrical_work_j)?;
     let external_mechanical_work_j = finite(field.mechanical_supply_j)?;
-    let external_heat_j = finite(coupled.non_electrical_heat_j - coupled.source.reversible_heat_j)?;
+    let external_heat_j = finite(coupled.non_electrical_heat_j
+        - coupled.source.reversible_heat_j - closed_radiation_net_j)?;
     let total_energy_residual_j = finite(field.electrical_energy_j[1]-field.electrical_energy_j[0]
         + field.kinetic_energy_j[1]-field.kinetic_energy_j[0]
         + field.elastic_energy_j[1]-field.elastic_energy_j[0]
@@ -100,5 +117,5 @@ pub fn step_candidate<'m>(
     if cancelled() { return Err(CircuitEnthalpyError::Cancelled); }
     Ok(ThermoelectricMotionCandidate { thermal, motion, report: ThermoelectricMotionReport {
         coupled, external_electrical_work_j, external_mechanical_work_j, external_heat_j,
-        total_energy_residual_j } })
+        closed_radiation_net_j, total_energy_residual_j } })
 }
