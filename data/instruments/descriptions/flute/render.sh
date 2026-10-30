@@ -42,6 +42,16 @@
 # Cuadra 2008 Sec. 7), and the convection ratio is 0.4 (Auvray 2012; Terrien 2014; de la Cuadra: 0.3 to 0.5).
 # The binary must contain the jet-island phase fix (fs-couple 1718d79fb or later).
 #
+# Gas: the bore of a played flute, from Coltman's measurement on a flute (Physics Today 21(11), 1968, p.27;
+# ledger coltman-1968-flute-bore-gas): 26.5 C at the upper end to 25.8 C at the lower end in a 21 C room, taken
+# as its mean 26.15 C (299.30 K); CO2 about 2.5 percent, which alone flattens the notes by about 12 cents; his
+# water vapour is taken saturated as in the shared breath pack, and O2 18.5 percent dry is paired from that
+# pack's bracket because he gives none. The window, the holes and the receiver use the same gas (`exterior same`).
+# Against the UNSW measurement state the cards carried before (25 C, 58 percent, no breath CO2) every passive
+# mode is 3.2 cents lower (2.0 to 4.4 over his two end temperatures). Not in it: a profile along the bore
+# (unknowns.tsv, u-bore-gas-profile and u-bore-gas-composition). The generic woodwind breath pack (27 C, CO2
+# 4.5 percent, the top of its bracket) is not used, because Coltman measured this instrument.
+#
 # References (grading only, never an input): UIowa MIS Flute.nonvib.mf.B3B4 (D4, G4) and
 # Flute.nonvib.mf.C5B5 (A5), ids uiowa-flute-flute-nonvib-mf-b3b4 / -c5b5 in references.json.
 #

@@ -1,7 +1,7 @@
 frankensim-flue-performance-v1
 clock 288000 48000
 output 120000 5 1000000
-gas 298.15 101325 0.58
+gas mixture 299.30 101325 mole 5 N2 0.7546 O2 0.1788 Ar 0.0090 CO2 0.0242 H2O 0.0334
 exterior same
 network 40 39
 duct_node inlet

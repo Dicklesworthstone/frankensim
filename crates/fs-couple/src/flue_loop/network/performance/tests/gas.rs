@@ -1,4 +1,5 @@
-//! Synthetic constitutive integration controls; no measured flute claim.
+//! Synthetic constitutive integration controls; no measured flute claim. The one printed figure
+//! used, Coltman's carbon-dioxide flattening, cross-checks the gas path and is not an accuracy claim.
 use super::*;
 use crate::air_path::GasAbsorptionModel;
 use crate::bernoulli_aperture::fractional::FractionalTubePolicy;
@@ -6,7 +7,7 @@ use crate::flue_loop::network::performance::file::FlueFilePerformance;
 use crate::pcm_wav::baffled::gas::GasPropagation;
 use crate::pcm_wav::baffled::openings::CircularOpening;
 use fs_exec::CancelGate;
-use fs_material::gas_species::input::GasRecord;
+use fs_material::gas_species::input::{GasRecord, read_gas_record};
 
 const MOLECULAR: &str = "molecular 4096 1000000 50000000 declared 2 N2 1 vibration 1 1000 1 power 10 300 0 250 350 O2 0";
 
@@ -260,4 +261,61 @@ fn published_flute_cards_use_their_declared_exterior_without_changing_calibratio
         );
         assert_eq!(renderer.voice().samples_rendered(), 1536 * 6);
     }
+}
+
+/// The played flute's bore of ledger row `coltman-1968-flute-bore-gas` (Coltman, Physics Today
+/// 21(11), 1968, p.27): 26.15 C, saturated, CO2 2.5 % dry, O2 18.5 % dry paired from the shared
+/// breath pack's bracket.
+const COLTMAN_1968_BORE: &str =
+    "mixture 299.30 101325 mole 5 N2 0.7546 O2 0.1788 Ar 0.0090 CO2 0.0242 H2O 0.0334";
+/// The same temperature and water with the breath's CO2 and O2 deficit removed: ambient dry air
+/// (CO2 0.04 %, O2 20.95 % dry, N2 to Ar in the breath pack's ratio), humidified alike.
+const SAME_WATER_AMBIENT_AIR: &str =
+    "mixture 299.30 101325 mole 5 N2 0.7547 O2 0.2025 Ar 0.0090 CO2 0.0004 H2O 0.0334";
+
+fn record(text: &str) -> GasRecord {
+    read_gas_record(&mut text.split_ascii_whitespace(), None, None).unwrap()
+}
+
+#[test]
+fn published_flute_cards_carry_coltmans_measured_bore_gas() {
+    let expected = record(COLTMAN_1968_BORE);
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../data/instruments/descriptions/flute");
+    for name in [
+        "flute-d4.performance",
+        "flute-g4.performance",
+        "flute-a5.performance",
+    ] {
+        let bytes = std::fs::read(root.join(name)).expect("published flute source");
+        let source = FlueFilePerformance::from_bytes(&bytes, 97, &CancelGate::new_clock_free())
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(
+            source.gas_records()[0],
+            expected,
+            "{name}: the bore gas is Coltman's measured mixture"
+        );
+        let exterior = source.renderer().radiation_input().unwrap().exterior;
+        assert_eq!(
+            exterior,
+            *expected.state(),
+            "{name}: the window and holes radiate into the same gas"
+        );
+    }
+}
+
+/// Coltman prints "about 12 cents" of flattening from the breath's CO2 alone (p.27). The engine's
+/// sound speed for the card's mixture, against the same temperature and water in ambient air, must
+/// reproduce it within 2 cents: his figure is a whole-cent "about", and an independent ideal-gas
+/// sum gives -10.8. This checks the engine's gas path against a printed number; it is not a claim
+/// about any flute's pitch.
+#[test]
+fn engine_gas_state_reproduces_coltmans_printed_carbon_dioxide_flattening() {
+    let with_breath = record(COLTMAN_1968_BORE).state().sound_speed;
+    let ambient = record(SAME_WATER_AMBIENT_AIR).state().sound_speed;
+    let shift_cents = 1200.0 * (with_breath / ambient).log2();
+    assert!(
+        (shift_cents + 12.0).abs() <= 2.0,
+        "CO2 shift {shift_cents:.2} cents against Coltman's printed -12"
+    );
 }
