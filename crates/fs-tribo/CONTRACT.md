@@ -3,6 +3,24 @@
 > Status: `frankensim-ext-tribo-dry-baseline-tgbj` baseline. This is not an
 > admitted material-data result or an Euler-disc validation result.
 
+## Finite-arrest quadrature with ordinary anisotropy
+
+The full-stop integration chart in `EllipticCoulomb::relax_velocity` uses
+`z = x^8` and its Jacobian `8*x^7`. Nearly equal spectral decay rates can give
+the original finite clock an integrable fractional-power endpoint whose
+derivatives defeat recursive Simpson error allocation. The transformed clock
+and travel integrands vanish sufficiently smoothly at the stop endpoint.
+This is a change of variable in the same physical curve; coefficients, force
+limits, time/travel tolerances, recursion and evaluation budgets are unchanged.
+The short-duration exponential chart and closed-form impulse/heat stay intact.
+
+A G1 regression first reproduces the original `UnresolvedQuadrature` refusal
+for capacities [4,3], mobility diag(1,2), velocity [.4,.1]. Its pre-stop and
+complete-stop results are checked against an independently inverted analytic
+clock and separately integrated displacement/unsigned path. The 21-group native
+ellipse target retains analytic limits, frame covariance, stiff short steps and
+cancellation. Quadrature errors remain estimates, not certified enclosures.
+
 ## Purpose and layer
 
 `fs-tribo` is an L3 dry-contact constitutive leaf. It provides typed dry

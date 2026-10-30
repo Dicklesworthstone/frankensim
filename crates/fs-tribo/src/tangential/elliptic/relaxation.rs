@@ -398,11 +398,21 @@ impl EllipticCoulomb {
                     report.kinetic_phase_end_s = Some(stop);
                 }
             } else {
-                let integrand = |z: f64| {
+                let integrand = |x: f64| {
+                    // z=x^8 regularizes the finite-stop endpoint. In z the
+                    // clock contains z^(2*(ratio-1)), whose derivatives are
+                    // singular for ordinary nearly equal eigenvalues. The
+                    // Jacobian 8*x^7 makes the clock and travel integrands
+                    // sufficiently smooth for adaptive Simpson without changing
+                    // the physical curve, tolerance or recursion/work budget.
+                    let x2 = x * x;
+                    let x4 = x2 * x2;
+                    let z = x4 * x4;
+                    let jacobian = 8.0 * x4 * x2 * x;
                     let h = length([c[0] * power(z, ratio - 1.0), c[1]]);
                     let principal = from_eigen(axis, [c[0] * power(z, ratio), c[1] * z]);
                     let velocity = [principal[0] / d[0], principal[1] / d[1]];
-                    let clock = h / denominator;
+                    let clock = (h / denominator) * jacobian;
                     [
                         clock,
                         clock * velocity[0],
@@ -451,11 +461,11 @@ impl EllipticCoulomb {
                         if input.dt_s >= whole[0] - whole_error[0] {
                             return Err(Error::UnresolvedTime);
                         }
-                        let start = (1.0 - input.dt_s / whole[0]).clamp(0.0, 1.0);
-                        let (z, value, error, residual) =
+                        let start = power((1.0 - input.dt_s / whole[0]).clamp(0.0, 1.0), 0.125);
+                        let (x, value, error, residual) =
                             work.clock_root(&integrand, input.dt_s, start, false)?;
                         report.time_residual_s = residual;
-                        (-det::ln(z), value, error)
+                        (-8.0 * det::ln(x), value, error)
                     }
                 };
                 let remaining = [decay(s, ratio), decay(s, 1.0)];

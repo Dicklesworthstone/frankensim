@@ -321,3 +321,55 @@ fn short_time_and_stiff_anisotropy_retain_small_impulse_and_physical_work() {
         1e-13,
     );
 }
+
+#[test]
+fn ordinary_anisotropy_resolves_fractional_endpoint_and_finite_stop() {
+    // The original source fixture has caps=(4,3), W=diag(1,2), v=(.4,.1).
+    // Its eigenvalue ratio is 9/8. The original z chart has an endpoint term
+    // z^(1/4), which exhausted depth 48 even with ordinary coefficients.
+    // Independent reference: q=z^(1/8), v=(.4*q^8,.1*q^9),
+    // dt/dq=2*q^7*sqrt(.16+.005625*q^2). The time primitive is the polynomial
+    // 2/B^4*[t^9/9-3*A*t^7/7+3*A^2*t^5/5-A^3*t^3/3],
+    // t=sqrt(A+B*q^2), A=.16, B=.005625. Clock inversion used 65-digit
+    // decimal arithmetic; independent 16384/32768-panel Simpson displacement
+    // and path references differed by <8e-17 m.
+    let law = EllipticCoulomb::new([0.6, 0.7], [0.4, 0.3], [1.0, 0.0]).unwrap();
+    for (dt, velocity, displacement, distance) in [
+        (
+            0.1,
+            [0.005557644962472804, 0.0008141129425462053],
+            [0.0203061852166916, 0.004778781050303254],
+            0.02086270525153858,
+        ),
+        (
+            1.0,
+            [0.0, 0.0],
+            [0.020310066799811902, 0.00477931621688067],
+            0.020866623678189287,
+        ),
+    ] {
+        let report = relax(&law, input([0.4, 0.1], [[1.0, 0.0], [0.0, 2.0]], dt));
+        close2(report.velocity_after_m_s, velocity, 3e-11);
+        close2(report.slip_increment_m, displacement, 3e-11);
+        close(report.distance_m, distance, 3e-11);
+        close2(
+            report.traction_impulse_ns,
+            [0.4 - velocity[0], (0.1 - velocity[1]) / 2.0],
+            3e-11,
+        );
+        close(
+            report.dissipated_j,
+            0.0825 - velocity[0] * velocity[0] / 2.0 - velocity[1] * velocity[1] / 4.0,
+            3e-11,
+        );
+        if dt == 1.0 {
+            close(
+                report.kinetic_phase_end_s.unwrap(),
+                0.10139610258249089,
+                3e-12,
+            );
+        } else {
+            assert!(report.kinetic_phase_end_s.is_none());
+        }
+    }
+}
