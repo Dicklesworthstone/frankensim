@@ -8,6 +8,7 @@ import pressureResolvedDgSource from "../../../crates/fs-couple/examples/resolve
 import splitApertureResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-split-aperture.performance?raw";
 import sideApertureResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-side-aperture.performance?raw";
 import radiatingMouthResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-radiating-mouth.performance?raw";
+import separateOpeningsResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-separate-openings.performance?raw";
 import slitEdgeResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-slit-edge.performance?raw";
 import siSlitEdgeResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-si-slit-edge.performance?raw";
 import upstreamResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-upstream.performance?raw";
@@ -111,6 +112,15 @@ const EXAMPLES = [
     decimate: false,
     intro: "Starter: the resolved side opening and bore outlets push back through one shared exterior radiation model. Change the source gas, matching exterior atmosphere, opening geometry or pressure history to change the physical flow and emitted pressure together.",
     help: "reservoir_feedback solves the original mouth pressure and bore flow together, including their mutual radiation. The reference aperture follows the original source gas; the joint exterior must use the same material state. Common pressure edits reach both gas records. This short 8 kHz numerical fixture retains its declared quadrature and work limits and is not a measured flute.",
+  },
+  {
+    name: "resolved-dg-separate-openings.performance",
+    label: "Resolved flow — separate breath and acoustic escape",
+    renderer: "resolved",
+    source: separateOpeningsResolvedDgSource,
+    decimate: false,
+    intro: "Starter: warm air enters through one transverse opening while a distinct opening exchanges sound with the exterior. The same resolved gas field couples to the bore and a finite duct on the cork side.",
+    help: "boundary aperture selects the driven opening by its declared zero-based index; reservoir_observation aperture selects the escape opening that receives reservoir_feedback. Edit the pressure and temperature history, original gas data or opening cells. The microphone combines escape and bore radiation with their original paths. This short numerical integration fixture still requires physical geometry, grid and jet validation.",
   },
   {
     name: "resolved-dg-slit-edge.performance",

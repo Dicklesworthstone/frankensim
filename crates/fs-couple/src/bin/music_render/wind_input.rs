@@ -454,27 +454,34 @@ pub(super) fn resolved_provenance(
         Some(format!(",\"{name}\":{{\"normal_axis\":{},\"high_face\":{},\"start\":[{},{}],\"end\":[{},{}],\"bounds\":\"half-open original cells on increasing tangential axes\",\"remainder_boundary\":{{\"kind\":\"{kind}\",\"value\":{value:e},\"units\":\"{units}\"{temperature}}},\"scope\":\"{scope}\"}}",
             open.axis, high, patch.start[0], patch.start[1], patch.end[0], patch.end[1]))
     }).collect::<String>();
-    let reservoir = system.zone().reservoir_aperture().map_or_else(String::new, |opening| {
-        let state = opening.state;
-        format!(",\"reservoir_aperture\":{{\"kind\":\"prescribed-exterior-ghost-state\",\"normal_axis\":{},\"high_face\":{},\"cell_count\":{},\"area_m2\":{:e},\"density_kg_m3\":{:e},\"velocity_m_s\":[{:e},{:e},{:e}],\"temperature_k\":{:e},\"mass_account\":{{\"field\":\"reservoir_mass_out_kg\",\"unit\":\"kg\",\"positive\":\"out of resolved fluid\"}},\"energy_account\":{{\"field\":\"flow.open_energy_j\",\"unit\":\"J\",\"positive\":\"into resolved fluid\"}},\"scope\":\"original material-owned prescribed reservoir on transverse wall tiles; separate streamed mass and signed open_energy_j; observation is selected independently; not a transparent acoustic boundary\"}}",
-            opening.axis, opening.high, opening.cells.len(), opening.cells.len() as f64 * law.dx_m.powi(2),
-            state.density_kg_m3, state.velocity_m_s[0], state.velocity_m_s[1], state.velocity_m_s[2], state.temperature_k)
-    });
+    let reservoir = if system.zone().reservoir_aperture_count() == 0 { String::new() } else {
+        let openings = (0..system.zone().reservoir_aperture_count()).map(|aperture| {
+            let opening = system.zone().reservoir_aperture_at(aperture).expect("declared original aperture");
+            let state = opening.state;
+            format!("{{\"aperture\":{aperture},\"kind\":\"prescribed-exterior-ghost-state\",\"normal_axis\":{},\"high_face\":{},\"cell_count\":{},\"area_m2\":{:e},\"density_kg_m3\":{:e},\"velocity_m_s\":[{:e},{:e},{:e}],\"temperature_k\":{:e},\"mass_account\":{{\"field\":\"reservoir_exchanges[aperture].mass_out_kg\",\"unit\":\"kg\",\"positive\":\"out of resolved fluid\"}},\"energy_account\":{{\"field\":\"reservoir_exchanges[aperture].total_energy_out_j\",\"unit\":\"J\",\"positive\":\"out of resolved fluid\"}},\"scope\":\"original material-owned reservoir on independent transverse wall tiles; per-owner streamed mass and conservative FV energy; observation and acoustic reaction select an explicit owner\"}}",
+                opening.axis, opening.high, opening.cells.len(), opening.cells.len() as f64 * law.dx_m.powi(2),
+                state.density_kg_m3, state.velocity_m_s[0], state.velocity_m_s[1], state.velocity_m_s[2], state.temperature_k)
+        }).collect::<Vec<_>>().join(",");
+        format!(",\"reservoir_apertures\":[{openings}]")
+    };
     let reservoir_observation = renderer.reservoir_observation().map_or_else(String::new, |input| {
         // The old helper describes the bore component, while the complete
         // microphone now also contains the separately resolved escape surface.
         observer = observer.replacen("\"observation_scope\":", "\"bore_observation_scope\":", 1);
         let microphone = renderer.reservoir_receiver().expect("bound reservoir receiver");
         let material = super::duct_metadata::observer_gas_provenance(renderer.reservoir_observer_gas());
-        let tiles = system.zone().last_reservoir_flows().iter().map(|flow|
+        let aperture = renderer.reservoir_observation_aperture().expect("bound observed aperture");
+        let tiles = system.zone().last_reservoir_flows().iter()
+            .filter(|flow| flow.aperture == aperture).map(|flow|
             format!("[{},{},{}]", flow.cell[0], flow.cell[1], flow.cell[2])).collect::<Vec<_>>().join(",");
-        format!(",\"observation_scope\":\"signed pressure sum of original DG outlets and individual resolved reservoir tiles in one explicit rigid baffle and material exterior; observation adds no reaction or flow/noise source; no free-field body or room scattering\",\"reservoir_observation\":{{\"kind\":\"original-tile-continuum-flow-Rayleigh\",\"origin_m\":[{:e},{:e}],\"angle_rad\":{:e},\"grid_cells\":[{tiles}],\"tile_area_m2\":{:e},\"flow_account\":\"per-tile outward continuum volume flow; fluid/ghost face midpoint and original time trapezoid, distinct from streamed mass\",\"placement\":\"cyclic tangential axes, second reversed on low faces, rotated into common baffle\",\"kernel_support_observation_samples\":[{},{}],\"filter_delay_observation_samples\":{:e},\"observer_gas\":{material},\"radiation_feedback_added\":{}}}",
+        format!(",\"observation_scope\":\"signed pressure sum of original DG outlets and individual resolved reservoir tiles in one explicit rigid baffle and material exterior; observation adds no reaction or flow/noise source; no free-field body or room scattering\",\"reservoir_observation\":{{\"aperture\":{aperture},\"kind\":\"original-tile-continuum-flow-Rayleigh\",\"origin_m\":[{:e},{:e}],\"angle_rad\":{:e},\"grid_cells\":[{tiles}],\"tile_area_m2\":{:e},\"flow_account\":\"per-tile outward continuum volume flow; fluid/ghost face midpoint and original time trapezoid, distinct from streamed mass\",\"placement\":\"cyclic tangential axes, second reversed on low faces, rotated into common baffle\",\"kernel_support_observation_samples\":[{},{}],\"filter_delay_observation_samples\":{:e},\"observer_gas\":{material},\"radiation_feedback_added\":{}}}",
             input.origin_m[0], input.origin_m[1], input.angle_rad, law.dx_m.powi(2),
             microphone.delay_samples.0, microphone.delay_samples.1, microphone.filter_delay_samples(),
             system.reservoir_radiation().is_some())
     });
     let reservoir_feedback = system.reservoir_radiation().map_or_else(String::new, |input| {
-        format!(",\"reservoir_feedback\":{{\"kind\":\"same-interval-original-joint-DG-mouth-radiation\",\"origin_m\":[{:e},{:e}],\"mouth_quadrature\":[{},{}],\"ghost_pressure_bracket_pa\":[{:e},{:e}],\"flow_coordinates\":[\"into bore\",\"outward through resolved reservoir\"],\"scope\":\"independent original flows; full computed self and mutual exterior response; pressure and acoustic work use the original cached conservative FV predictors over the complete physical interval; endpoint tile traces remain observation-only; pressure and work checked before fluid, bore and radiation publish; uniform pressure projection on the original reservoir ghost boundary; no transparent-boundary or free-field qualification\"}}",
+        let aperture = system.reservoir_radiation_aperture().expect("bound reaction aperture");
+        format!(",\"reservoir_feedback\":{{\"aperture\":{aperture},\"kind\":\"same-interval-original-joint-DG-mouth-radiation\",\"origin_m\":[{:e},{:e}],\"mouth_quadrature\":[{},{}],\"ghost_pressure_bracket_pa\":[{:e},{:e}],\"flow_coordinates\":[\"into bore\",\"outward through resolved reservoir\"],\"scope\":\"independent original flows; full computed self and mutual exterior response; pressure and acoustic work use the original cached conservative FV predictors over the complete physical interval; endpoint tile traces remain observation-only; pressure and work checked before fluid, bore and radiation publish; uniform pressure projection on the original reservoir ghost boundary; no transparent-boundary or free-field qualification\"}}",
             input.origin_m[0], input.origin_m[1], input.cells[0], input.cells[1],
             input.pressure_bracket_pa[0], input.pressure_bracket_pa[1])
     });
@@ -487,8 +494,16 @@ pub(super) fn resolved_provenance(
             ",\"external_boundary\":{\"kind\":\"incoming-characteristic\",\"units\":\"m/s\",\"definition\":\"delta outward normal velocity minus delta pressure over reference material impedance\"}",
         fs_couple::nsf_dg::NsfDgDrive::UpstreamPressureRise(_) =>
             ",\"external_boundary\":{\"kind\":\"upstream-series-pressure-rise\",\"units\":\"Pa\",\"definition\":\"resolved face pressure minus finite upstream duct pressure\",\"flow\":\"both original acoustic loads and resolved faces solved on the same physical interval\",\"source_work\":\"minus pressure rise times outward upstream volume flow times physical interval\"}",
-        fs_couple::nsf_dg::NsfDgDrive::Reservoir { .. } =>
+        fs_couple::nsf_dg::NsfDgDrive::Reservoir { .. }
+        | fs_couple::nsf_dg::NsfDgDrive::ReservoirAperture { .. } =>
             ",\"external_boundary\":{\"kind\":\"transverse-reservoir-pressure-temperature\",\"pressure_units\":\"Pa absolute\",\"temperature_units\":\"K\",\"definition\":\"original gas derives density and energy at held pressure and temperature; declared ghost velocity retained\",\"flow\":\"resolved fluid and both attached acoustic loads respond together with zero axial series effort; an unloaded other face receives its unperturbed incoming characteristic\"}",
+    };
+    let boundary = match renderer.drive_history().first().expect("finite native drive history") {
+        fs_couple::nsf_dg::NsfDgDrive::ReservoirAperture { aperture, .. } =>
+            format!("{boundary},\"driven_reservoir_aperture\":{aperture}"),
+        fs_couple::nsf_dg::NsfDgDrive::Reservoir { .. } =>
+            format!("{boundary},\"driven_reservoir_aperture\":0"),
+        _ => boundary.to_string(),
     };
     let upstream = system.upstream_load().map_or_else(String::new, |upstream| {
         let duct = upstream.duct();

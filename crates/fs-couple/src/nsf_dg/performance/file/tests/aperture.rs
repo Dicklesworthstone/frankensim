@@ -323,3 +323,67 @@ fn published_transverse_source_keeps_both_acoustic_loads_in_native_playback() {
     assert_eq!(frame.reservoir_flows.len(), 1);
     assert_eq!(frame.reservoir_flows[0].cell, [5, 2, 1]);
 }
+
+
+#[test]
+fn indexed_breath_retains_si_escape_geometry_and_finite_upstream_load() {
+    let gas = reference(100_000.0);
+    let dx = (3.0 * gas.specific_gas_constant * gas.temperature).sqrt() / f64::from(RATE);
+    let radius = (9.0 * dx * dx / core::f64::consts::PI).sqrt();
+    let high = "reservoir_aperture 1 high reference 3\nreservoir_cell 5 2 1\nreservoir_cell 6 2 1\nreservoir_cell 7 2 1\n";
+    let openings = format!("reservoir_apertures 2\nreservoir_aperture 1 low reference 3\nreservoir_cell 5 0 1\nreservoir_cell 6 0 1\nreservoir_cell 7 0 1\n{high}initial rest");
+    let text = fixture(gas, "dry-air 300 100000")
+        .replace("initial rest", &openings)
+        .replace("boundary 1\nhold 32 -0.1", "boundary aperture 0 1\nhold 32 100020 303")
+        .replace("coupling 64 6912", "coupling 256 27648")
+        .replace("observation inlet-pressure", &format!(
+            "upstream_dg dg_tube 0.03 {radius:.17e} closed 1 2 32 50 2000 0.01 1e-11 512\nobservation inlet-pressure"));
+    let physical = text.replace(high, &format!(
+        "reservoir_aperture_m 1 high reference {:.17e} {:.17e} {:.17e} {:.17e}\n",
+        5.0 * dx, 8.0 * dx, dx, 2.0 * dx));
+    let indexed = read(&text, 8);
+    let physical = read(&physical, 3);
+    let zone = indexed.renderer().system().zone();
+    assert_eq!(zone.reservoir_aperture_count(), 2);
+    assert!(zone.reservoir_aperture().is_none());
+    assert!(indexed.renderer().system().upstream_load().is_some());
+    assert_eq!(zone.reservoir_aperture_at(0).unwrap().cells.len(), 3);
+    assert_eq!(zone.reservoir_aperture_at(1).unwrap().cells, vec![[5, 2, 1], [6, 2, 1], [7, 2, 1]]);
+    assert_eq!(zone.state_hash(), physical.renderer().system().zone().state_hash());
+    assert_eq!(indexed.renderer().drive_history(), physical.renderer().drive_history());
+    assert!(indexed.renderer().drive_history().iter().all(|drive|
+        *drive == NsfDgDrive::ReservoirAperture {
+            aperture: 0, pressure_pa: 100020.0, temperature_k: 303.0,
+        }));
+    for invalid in [
+        text.replace("boundary aperture 0 1", "boundary reservoir 1"),
+        text.replace("boundary aperture 0 1", "boundary aperture 2 1"),
+        text.replace("reservoir_apertures 2", "reservoir_apertures 17"),
+        text.replace("hold 32 100020 303", "hold 32 100020 601"),
+        text.replace("observation inlet-pressure", "observation inlet-pressure\nreservoir_observation baffled 0 0 0"),
+    ] {
+        assert!(matches!(ResolvedDgFilePerformance::from_bytes(invalid.as_bytes(), 8,
+            Arc::new(CancelGate::new_clock_free())), Err(ResolvedDgInputError::Input { .. })));
+    }
+}
+
+#[test]
+fn native_separate_opening_fixture_selects_breath_escape_reaction_and_microphone() {
+    let text = include_str!("../../../../../examples/resolved-dg-separate-openings.performance");
+    let file = read(text, 4);
+    let renderer = file.renderer();
+    let system = renderer.system();
+    assert_eq!(system.zone().reservoir_aperture_count(), 2);
+    assert_eq!(system.reservoir_radiation_aperture(), Some(1));
+    assert_eq!(renderer.reservoir_observation_aperture(), Some(1));
+    assert!(system.upstream_load().is_some());
+    assert!(renderer.observer_gas().is_some());
+    assert!(renderer.reservoir_observer_gas().is_some());
+    assert_eq!(renderer.reservoir_receiver().unwrap().input_count(), 1);
+    assert_eq!(renderer.drive_history()[0], NsfDgDrive::ReservoirAperture {
+        aperture: 0, pressure_pa: 100002.0, temperature_k: 300.15,
+    });
+    let conflicting = text.replace("boundary aperture 0 3", "boundary aperture 1 3");
+    assert!(matches!(ResolvedDgFilePerformance::from_bytes(conflicting.as_bytes(), 4,
+        Arc::new(CancelGate::new_clock_free())), Err(ResolvedDgInputError::Input { .. })));
+}

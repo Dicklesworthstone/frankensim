@@ -111,12 +111,12 @@ impl<L: Lattice3<27>> NsfDg<L> {
         pressure_rise_pa: f64,
         gate: &CancelGate,
     ) -> Result<NsfDgFrame, NsfDgError> {
-        self.step_with_upstream_conditions(pressure_rise_pa, None,
+        self.step_with_upstream_conditions(pressure_rise_pa, &[],
             NsfDgDrive::UpstreamPressureRise(pressure_rise_pa), gate)
     }
 
     pub(super) fn step_with_upstream_conditions(
-        &mut self, pressure_rise_pa: f64, reservoir_state: Option<NsfOpenState>,
+        &mut self, pressure_rise_pa: f64, reservoir_states: &[(usize, NsfOpenState)],
         control: NsfDgDrive, gate: &CancelGate,
     ) -> Result<NsfDgFrame, NsfDgError> {
         poll(gate)?;
@@ -181,7 +181,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
             evaluations += 1;
             let trial = preview_interval(zone,
                 incoming.map(NsfBoundaryDrive::IncomingCharacteristic), patch,
-                reservoir_state, limits, gate)?;
+                reservoir_states, limits, gate)?;
             let mut residuals = [0.0; 2];
             let mut scales = [0.0; 2];
             for face in 0..2 {
@@ -223,7 +223,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
         evaluations += 1;
         let fluid = preview_interval(zone,
             incoming.map(NsfBoundaryDrive::IncomingCharacteristic), patch,
-            reservoir_state, limits, gate)?;
+            reservoir_states, limits, gate)?;
         let dt = self.load.propagator().dt();
         let main_inlet = self.load.inlet();
         let upstream_inlet = upstream.load.inlet();
@@ -281,6 +281,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
         let flow = *fluid.energy_ledger();
         let reservoir_mass_out_kg = fluid.reservoir_mass_out_kg();
         let reservoir_flows = fluid.reservoir_flows().to_vec();
+        let reservoir_exchanges = fluid.reservoir_exchanges().to_vec();
         let mass_change = fluid.grid().total_mass_kg() - fluid.previous_mass_kg();
         let energy_change = fluid.grid().total_energy_j() - fluid.previous_energy_j();
         if ![mass_change, energy_change, reservoir_mass_out_kg].iter().all(|x| x.is_finite()) {
@@ -319,6 +320,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
             source_patch,
             reservoir_mass_out_kg,
             reservoir_flows,
+            reservoir_exchanges,
             reservoir_radiation: None,
             flow,
             flow_mass_change_kg: mass_change,

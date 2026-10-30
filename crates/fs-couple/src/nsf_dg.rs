@@ -46,13 +46,17 @@ pub enum NsfDgDrive {
     /// ghost velocity is retained. Both finite acoustic loads, when present,
     /// solve with zero series effort. Otherwise the other face has J-=0.
     Reservoir { pressure_pa: f64, temperature_k: f64 },
+    /// Explicit independent transverse source in the grid's authored order.
+    /// A distinct aperture may simultaneously receive passive exterior pressure.
+    ReservoirAperture { aperture: usize, pressure_pa: f64, temperature_k: f64 },
 }
 impl NsfDgDrive {
     pub fn is_finite(self) -> bool {
         match self {
             Self::Boundary(value) => value.is_finite(),
             Self::UpstreamPressureRise(value) => value.is_finite(),
-            Self::Reservoir { pressure_pa, temperature_k } =>
+            Self::Reservoir { pressure_pa, temperature_k }
+            | Self::ReservoirAperture { pressure_pa, temperature_k, .. } =>
                 pressure_pa.is_finite() && temperature_k.is_finite(),
         }
     }
@@ -194,12 +198,14 @@ pub struct NsfDgFrame {
     /// upstream duct or its series-source work. This is already part of the
     /// complete face account and must not be added to the fluid totals again.
     pub source_patch: Option<NsfBoundaryExchange>,
-    /// Original streamed mass leaving a transverse reservoir aperture [kg].
+    /// Original streamed mass leaving all transverse reservoir apertures [kg].
     /// This is separate from both characteristic faces; zero when absent.
     pub reservoir_mass_out_kg: f64,
     /// Original per-tile reservoir continuum volume flow, averaged over all
     /// original substeps. Kept separate from compressible streamed mass.
     pub reservoir_flows: Vec<fs_lbm::nsf3::NsfReservoirFlow>,
+    /// Separate original conservative interval accounts in authored owner order.
+    pub reservoir_exchanges: Vec<fs_lbm::nsf3::NsfReservoirExchange>,
     /// Live self/mutual exterior reaction at the independent escape opening.
     pub reservoir_radiation: Option<NsfDgReservoirFrame>,
     /// Original NSF energy accounts, including reservoir energy in `open_energy_j`.
@@ -407,6 +413,8 @@ impl<L: Lattice3<27>> NsfDg<L> {
             NsfDgDrive::UpstreamPressureRise(value) => self.step_with_upstream_pressure_rise(value, gate),
             NsfDgDrive::Reservoir { pressure_pa, temperature_k } =>
                 self.step_with_reservoir(pressure_pa, temperature_k, gate),
+            NsfDgDrive::ReservoirAperture { aperture, pressure_pa, temperature_k } =>
+                self.step_with_reservoir_aperture(aperture, pressure_pa, temperature_k, gate),
         }
     }
 
@@ -427,10 +435,27 @@ impl<L: Lattice3<27>> NsfDg<L> {
             .map_err(NsfDgError::Flow)?;
         let drive = NsfDgDrive::Reservoir { pressure_pa, temperature_k };
         if self.upstream.is_some() {
-            self.step_with_upstream_conditions(0.0, Some(state), drive, gate)
+            self.step_with_upstream_conditions(0.0, &[(0, state)], drive, gate)
         } else {
             self.step_with_boundary_conditions(NsfBoundaryDrive::IncomingCharacteristic(0.0),
-                Some(state), drive, gate)
+                &[(0, state)], drive, gate)
+        }
+    }
+
+    /// Drive one original transverse aperture while the axial loads and any
+    /// distinct passive escape opening solve in the same accepted interval.
+    pub fn step_with_reservoir_aperture(
+        &mut self, aperture: usize, pressure_pa: f64, temperature_k: f64, gate: &CancelGate,
+    ) -> Result<NsfDgFrame, NsfDgError> {
+        poll(gate)?;
+        let state = self.zone.reservoir_aperture_state_for(aperture, pressure_pa, temperature_k)
+            .map_err(NsfDgError::Flow)?;
+        let drive = NsfDgDrive::ReservoirAperture { aperture, pressure_pa, temperature_k };
+        if self.upstream.is_some() {
+            self.step_with_upstream_conditions(0.0, &[(aperture, state)], drive, gate)
+        } else {
+            self.step_with_boundary_conditions(NsfBoundaryDrive::IncomingCharacteristic(0.0),
+                &[(aperture, state)], drive, gate)
         }
     }
 
@@ -454,12 +479,12 @@ impl<L: Lattice3<27>> NsfDg<L> {
     pub fn step_with_boundary(&mut self, external_boundary: NsfBoundaryDrive, gate: &CancelGate)
         -> Result<NsfDgFrame, NsfDgError>
     {
-        self.step_with_boundary_conditions(external_boundary, None,
+        self.step_with_boundary_conditions(external_boundary, &[],
             NsfDgDrive::Boundary(external_boundary), gate)
     }
 
     fn step_with_boundary_conditions(
-        &mut self, external_boundary: NsfBoundaryDrive, reservoir_state: Option<NsfOpenState>,
+        &mut self, external_boundary: NsfBoundaryDrive, reservoir_states: &[(usize, NsfOpenState)],
         control: NsfDgDrive, gate: &CancelGate,
     ) -> Result<NsfDgFrame, NsfDgError> {
         poll(gate)?;
@@ -487,7 +512,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
             let mut drive = [external_boundary; 2];
             drive[side] = NsfBoundaryDrive::IncomingCharacteristic(incoming);
             let candidate = preview_interval(&mut self.zone, drive, patch,
-                reservoir_state, limits, gate)?;
+                reservoir_states, limits, gate)?;
             let face = coupled_exchange(&candidate, side)?;
             let flow = face.normal_volume_flow_m3_s;
             let residual = face.mean_acoustic_pressure_pa
@@ -546,7 +571,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
 
 fn preview_interval<'a, L: Lattice3<27>>(
     zone: &'a mut NsfGrid3<L>, mut drives: [NsfBoundaryDrive; 2],
-    patches: [Option<NsfBoundaryDrive>; 2], reservoir_state: Option<NsfOpenState>,
+    patches: [Option<NsfBoundaryDrive>; 2], reservoir_states: &[(usize, NsfOpenState)],
     limits: NsfDgLimits, gate: &CancelGate,
 ) -> Result<NsfCharacteristicTrial<'a, L>, NsfDgError> {
     let mut patch_drives = [None; 2];
@@ -556,8 +581,8 @@ fn preview_interval<'a, L: Lattice3<27>>(
             drives[side] = background;
         }
     }
-    let result = if let Some(state) = reservoir_state {
-        zone.preview_boundary_interval_with_patches_and_reservoir(drives, patch_drives, state,
+    let result = if !reservoir_states.is_empty() {
+        zone.preview_boundary_interval_with_patches_and_reservoirs(drives, patch_drives, reservoir_states,
             limits.substeps, limits.maximum_cell_steps, || gate.is_requested())
     } else {
         zone.preview_boundary_interval_with_patches(drives, patch_drives, limits.substeps,
@@ -617,6 +642,7 @@ fn accept_candidate<L: Lattice3<27>>(
     let source_patch = fluid.patch_exchange_on(side == 0).copied();
     let reservoir_mass_out_kg = fluid.reservoir_mass_out_kg();
     let reservoir_flows = fluid.reservoir_flows().to_vec();
+    let reservoir_exchanges = fluid.reservoir_exchanges().to_vec();
     let flow = *fluid.energy_ledger();
     let mass_change = fluid.grid().total_mass_kg() - fluid.previous_mass_kg();
     let energy_change = fluid.grid().total_energy_j() - fluid.previous_energy_j();
@@ -633,7 +659,7 @@ fn accept_candidate<L: Lattice3<27>>(
     Ok(NsfDgFrame {
         step, evaluations, incoming_characteristic_m_s: incoming,
         drive: control, upstream: None, faces, coupled_patch, source_patch,
-        reservoir_mass_out_kg, reservoir_flows, reservoir_radiation: None, flow,
+        reservoir_mass_out_kg, reservoir_flows, reservoir_exchanges, reservoir_radiation: None, flow,
         flow_mass_change_kg: mass_change, flow_energy_change_j: energy_change, duct, terminals,
         inlet_flow_m3_s: q, inlet_pressure_pa: p, pressure_residual_pa: pressure_residual,
         projection_covariance_j: covariance, acoustic_work_residual_j: work_residual,

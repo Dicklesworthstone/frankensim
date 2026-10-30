@@ -9,6 +9,7 @@ use super::{NsfDg, NsfDgDrive, NsfDgFrame, same_clock};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::performance::ApertureObservation;
 use crate::pcm_wav::baffled::BaffledPressure;
+use crate::pcm_wav::baffled::tiles::{BaffledTilePressure, TilePressureLimits};
 use crate::pcm_wav::baffled::gas::{GasPropagation, GasPropagationReport};
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
@@ -187,7 +188,12 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
             || boundary.iter().any(|drive| match drive {
                 NsfDgDrive::Boundary(_) => system.upstream_load().is_some(),
                 NsfDgDrive::UpstreamPressureRise(_) => system.upstream_load().is_none(),
-                NsfDgDrive::Reservoir { .. } => system.zone().reservoir_aperture().is_none(),
+                NsfDgDrive::Reservoir { pressure_pa, temperature_k } =>
+                    system.reservoir_radiation().is_some()
+                        || system.zone().reservoir_aperture_state_at(*pressure_pa, *temperature_k).is_err(),
+                NsfDgDrive::ReservoirAperture { aperture, pressure_pa, temperature_k } =>
+                    system.reservoir_radiation_aperture() == Some(*aperture)
+                        || system.zone().reservoir_aperture_state_for(*aperture, *pressure_pa, *temperature_k).is_err(),
             })
             || output_samples == 0
         {
@@ -234,9 +240,9 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
         }.map_err(RenderError::Voice)?;
         let mut reservoir_receiver = self.reservoir.as_ref().map(|reservoir| {
             let gas = self.system.load().radiation_record().expect("original exterior").gas_record().state();
-            BaffledPressure::new_multirate_gas_differentiating(&reservoir.surface,
-                reservoir.cells.len(), self.sample_rate_hz, self.sample_rate_hz,
-                location.position_m, gas, propagation, &mut || self.gate.is_requested())
+            BaffledTilePressure::new_gas_differentiating(&reservoir.surface,
+                self.sample_rate_hz, location.position_m, gas, propagation,
+                TilePressureLimits::surface_reference(), &mut || self.gate.is_requested())
                 .map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error)))
         }).transpose()?;
         if let Some((escape, escape_report)) = &mut reservoir_receiver {
@@ -346,7 +352,8 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
                 .map_err(|e| RenderError::Voice(AcousticRealizeError::Nonlinear(e)))?
         } else { inlet_pressure };
         if let Some(reservoir) = &mut self.reservoir {
-            pressure += reservoir.receiver.step_trace(&reservoir.flows)
+            pressure += reservoir.receiver.step_trace_with_cancel(
+                &reservoir.flows, &mut || self.gate.is_requested())
                 .map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error)))?;
         }
         if !pressure.is_finite() {

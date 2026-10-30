@@ -24,6 +24,7 @@ pub struct NsfDgReservoirRadiation {
 }
 
 pub(super) struct ReservoirRadiation {
+    aperture: usize,
     input: NsfDgReservoirRadiation,
     temperature_k: f64,
 }
@@ -60,7 +61,17 @@ impl<L: Lattice3<27>> NsfDg<L> {
     /// original boundary transparent or add mean gas transport into the bore.
     /// Arbitrary mouth shapes/rotations and a free-field body are not inferred.
     pub fn with_reservoir_radiation(
-        mut self, input: NsfDgReservoirRadiation, gate: &CancelGate,
+        self, input: NsfDgReservoirRadiation, gate: &CancelGate,
+    ) -> Result<Self, NsfDgError> {
+        if self.zone.reservoir_aperture_count() != 1 {
+            return Err(NsfDgError::Input("select the passive reservoir explicitly when multiple apertures exist"));
+        }
+        self.with_reservoir_radiation_at(0, input, gate)
+    }
+
+    /// Select the original escape owner independently of a prescribed breath inlet.
+    pub fn with_reservoir_radiation_at(
+        mut self, aperture: usize, input: NsfDgReservoirRadiation, gate: &CancelGate,
     ) -> Result<Self, NsfDgError> {
         poll(gate)?;
         if self.steps != 0 || self.reservoir_radiation.is_some()
@@ -70,7 +81,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
         {
             return Err(NsfDgError::Input("resolved reservoir radiation needs one cold finite placement, quadrature and pressure bracket"));
         }
-        let opening = self.zone.reservoir_aperture().ok_or(NsfDgError::Input(
+        let opening = self.zone.reservoir_aperture_at(aperture).ok_or(NsfDgError::Input(
             "resolved radiation requires the original transverse reservoir"))?;
         let record = self.load.radiation_record().ok_or(NsfDgError::Input(
             "resolved mouth reaction requires the bore's original computed exterior"))?;
@@ -116,7 +127,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
             terminal_angular_points: input.terminal_angular_points,
         };
         for offset in input.pressure_bracket_pa {
-            self.zone.reservoir_aperture_state_at(self.reference.pressure + offset, temperature_k)
+            self.zone.reservoir_aperture_state_for(aperture, self.reference.pressure + offset, temperature_k)
                 .map_err(NsfDgError::Flow)?;
         }
         // Reuse the original source's integer-Hz bake ceiling. Its runtime
@@ -129,7 +140,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
             .map_err(|error| if gate.is_requested() { NsfDgError::Cancelled }
                 else { NsfDgError::Acoustic(AcousticRealizeError::Nonlinear(error.to_string())) })?;
         poll(gate)?;
-        self.reservoir_radiation = Some(ReservoirRadiation { input, temperature_k });
+        self.reservoir_radiation = Some(ReservoirRadiation { aperture, input, temperature_k });
         Ok(self)
     }
 
@@ -137,24 +148,42 @@ impl<L: Lattice3<27>> NsfDg<L> {
         self.reservoir_radiation.as_ref().map(|owner| &owner.input)
     }
 
+    /// Stable original owner of the passive escape opening.
+    pub fn reservoir_radiation_aperture(&self) -> Option<usize> {
+        self.reservoir_radiation.as_ref().map(|owner| owner.aperture)
+    }
+
     pub(super) fn step_with_reservoir_drive(
         &mut self, drive: NsfDgDrive, gate: &CancelGate,
     ) -> Result<NsfDgFrame, NsfDgError> {
         poll(gate)?;
-        let (external, rise) = match drive {
-            NsfDgDrive::Boundary(value) => (value, 0.0),
+        let (external, rise, breath) = match drive {
+            NsfDgDrive::Boundary(value) => (value, 0.0, None),
             NsfDgDrive::UpstreamPressureRise(value) =>
-                (NsfBoundaryDrive::IncomingCharacteristic(0.0), value),
+                (NsfBoundaryDrive::IncomingCharacteristic(0.0), value, None),
             NsfDgDrive::Reservoir { .. } => return Err(NsfDgError::Input(
                 "one reservoir opening cannot own prescribed breath pressure and passive exterior pressure simultaneously")),
+            NsfDgDrive::ReservoirAperture { aperture, pressure_pa, temperature_k } => {
+                let state = self.zone.reservoir_aperture_state_for(aperture, pressure_pa, temperature_k)
+                    .map_err(NsfDgError::Flow)?;
+                (NsfBoundaryDrive::IncomingCharacteristic(0.0), 0.0, Some((aperture, state)))
+            }
         };
-        if !drive.is_finite() || self.steps >= self.limits.maximum_steps
-            || self.upstream.is_some() != matches!(drive, NsfDgDrive::UpstreamPressureRise(_))
+        let misplaced = match drive {
+            NsfDgDrive::Boundary(_) => self.upstream.is_some(),
+            NsfDgDrive::UpstreamPressureRise(_) => self.upstream.is_none(),
+            NsfDgDrive::Reservoir { .. } | NsfDgDrive::ReservoirAperture { .. } => false,
+        };
+        if !drive.is_finite() || self.steps >= self.limits.maximum_steps || misplaced
         {
             return Err(NsfDgError::Input("resolved joint exterior requires a finite correctly located source within its horizon"));
         }
         let owner = self.reservoir_radiation.as_ref().ok_or(NsfDgError::Input(
             "resolved joint exterior is not attached"))?;
+        let aperture = owner.aperture;
+        if breath.is_some_and(|(source, _)| source == aperture) {
+            return Err(NsfDgError::Input("prescribed breath and passive exterior require distinct original apertures"));
+        }
         let pressure_bracket = owner.input.pressure_bracket_pa;
         let temperature = owner.temperature_k;
         let relation = self.load.independent_mouth_response().map_err(NsfDgError::Acoustic)?;
@@ -179,9 +208,9 @@ impl<L: Lattice3<27>> NsfDg<L> {
             evaluations += 1;
             let mut drives = incoming.map(NsfBoundaryDrive::IncomingCharacteristic);
             if upstream_relation.is_none() { drives[other] = external; }
-            let trial = preview(zone, drives, side, patch, pressure, temperature, limits, gate)?;
+            let trial = preview(zone, drives, side, patch, aperture, breath, pressure, temperature, limits, gate)?;
             let bore = coupled_exchange(&trial, side)?;
-            let mouth = exchange(&trial)?;
+            let mouth = exchange(&trial, aperture)?;
             let flow = [bore.normal_volume_flow_m3_s, mouth.normal_volume_flow_m3_s];
             let pressure = [bore.mean_acoustic_pressure_pa, mouth.mean_acoustic_pressure_pa];
             let mut residuals = [0.0; 3];
@@ -237,14 +266,14 @@ impl<L: Lattice3<27>> NsfDg<L> {
         let mut drives = [external; 2];
         drives[side] = NsfBoundaryDrive::IncomingCharacteristic(downstream);
         if let Some(value) = upstream_incoming { drives[other] = NsfBoundaryDrive::IncomingCharacteristic(value); }
-        let fluid = preview(zone, drives, side, patch, pressure_offset, temperature, limits, gate)?;
+        let fluid = preview(zone, drives, side, patch, aperture, breath, pressure_offset, temperature, limits, gate)?;
         let faces = *fluid.boundary_exchange();
         let coupled_patch = fluid.patch_exchange_on(side != 0).copied();
         let source_patch = fluid.patch_exchange_on(other != 0).copied();
         let bore = coupled_exchange(&fluid, side)?;
         let source_face = coupled_exchange(&fluid, other)?;
-        let mouth = exchange(&fluid)?;
-        let resolved_exchange = *fluid.reservoir_exchange().ok_or(NsfDgError::Input(
+        let mouth = exchange(&fluid, aperture)?;
+        let resolved_exchange = *fluid.reservoir_exchange_at(aperture).ok_or(NsfDgError::Input(
             "joint exterior lost its conservative reservoir exchange"))?;
         let dt = self.load.propagator().dt();
         let inlet = self.load.inlet();
@@ -283,6 +312,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
         let flow = *fluid.energy_ledger();
         let reservoir_mass_out_kg = fluid.reservoir_mass_out_kg();
         let reservoir_flows = fluid.reservoir_flows().to_vec();
+        let reservoir_exchanges = fluid.reservoir_exchanges().to_vec();
         let mass_change = fluid.grid().total_mass_kg() - fluid.previous_mass_kg();
         let energy_change = fluid.grid().total_energy_j() - fluid.previous_energy_j();
         let terminals = acoustic.terminal_frames().to_vec();
@@ -305,6 +335,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
         Ok(NsfDgFrame {
             step: self.steps, evaluations, incoming_characteristic_m_s: downstream, drive,
             upstream, faces, coupled_patch, source_patch, reservoir_mass_out_kg, reservoir_flows,
+            reservoir_exchanges,
             reservoir_radiation: Some(NsfDgReservoirFrame {
                 resolved_exchange,
                 ghost_pressure_offset_pa: pressure_offset,
@@ -326,21 +357,27 @@ impl<L: Lattice3<27>> NsfDg<L> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn preview<'a, L: Lattice3<27>>(
     zone: &'a mut NsfGrid3<L>, drives: [NsfBoundaryDrive; 2], side: usize,
-    patch: [Option<NsfBoundaryDrive>; 2], pressure_offset: f64, temperature: f64,
+    patch: [Option<NsfBoundaryDrive>; 2], aperture: usize,
+    breath: Option<(usize, NsfOpenState)>, pressure_offset: f64, temperature: f64,
     limits: NsfDgLimits, gate: &CancelGate,
 ) -> Result<NsfCharacteristicTrial<'a, L>, NsfDgError> {
     let reference = zone.characteristic_reference_gas(side == 1).map_err(NsfDgError::Flow)?;
-    let state = zone.reservoir_aperture_state_at(reference.pressure + pressure_offset, temperature)
+    let state = zone.reservoir_aperture_state_for(aperture, reference.pressure + pressure_offset, temperature)
         .map_err(NsfDgError::Flow)?;
-    preview_interval(zone, drives, patch, Some(state), limits, gate)
+    // Stage both original ghost controls together; no candidate sees a lagged
+    // escape pressure or publishes the breath state before joint acceptance.
+    let controls = [breath.unwrap_or((aperture, state)), (aperture, state)];
+    let controls = if breath.is_some() { &controls[..] } else { &controls[1..] };
+    preview_interval(zone, drives, patch, controls, limits, gate)
 }
 
 fn exchange<L: Lattice3<27>>(
-    trial: &NsfCharacteristicTrial<'_, L>,
+    trial: &NsfCharacteristicTrial<'_, L>, aperture: usize,
 ) -> Result<NsfBoundaryExchange, NsfDgError> {
-    let source = trial.reservoir_exchange().ok_or(NsfDgError::Input(
+    let source = trial.reservoir_exchange_at(aperture).ok_or(NsfDgError::Input(
         "resolved exterior has no original conservative reservoir work quadrature"))?;
     // Match pressure and audit work from the SAME cached FV predictors that
     // update total energy. Endpoint midpoint-pressure times midpoint-velocity
@@ -348,7 +385,7 @@ fn exchange<L: Lattice3<27>>(
     // Streamed mass remains independent; no enthalpy, conduction or viscous
     // work is folded into the acoustic projection.
     Ok(NsfBoundaryExchange {
-        mass_out_kg: trial.reservoir_mass_out_kg(),
+        mass_out_kg: source.mass_out_kg,
         mean_pressure_pa: source.mean_pressure_pa,
         normal_volume_flow_m3_s: source.normal_volume_flow_m3_s,
         pressure_work_out_j: source.pressure_work_out_j,
