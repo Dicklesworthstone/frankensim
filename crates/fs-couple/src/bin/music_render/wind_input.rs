@@ -507,6 +507,8 @@ pub(super) fn resolved_provenance(
             ",\"external_boundary\":{\"kind\":\"incoming-characteristic\",\"units\":\"m/s\",\"definition\":\"delta outward normal velocity minus delta pressure over reference material impedance\"}",
         fs_couple::nsf_dg::NsfDgDrive::UpstreamPressureRise(_) =>
             ",\"external_boundary\":{\"kind\":\"upstream-series-pressure-rise\",\"units\":\"Pa\",\"definition\":\"resolved face pressure minus finite upstream duct pressure\",\"flow\":\"both original acoustic loads and resolved faces solved on the same physical interval\",\"source_work\":\"minus pressure rise times outward upstream volume flow times physical interval\"}",
+        fs_couple::nsf_dg::NsfDgDrive::FiniteReservoirActuation { .. } =>
+            ",\"external_boundary\":{\"kind\":\"finite-thermochemical-reservoir-actuation\",\"volume_rate_units\":\"m3/s; positive expands chamber\",\"heat_power_units\":\"W; positive adds heat to chamber\",\"definition\":\"accepted finite inventory supplies aperture pressure and temperature; authored chamber-volume and heat rates change that same thermochemical inventory\",\"partition\":\"explicit first order: original NSF flow exchange, then heat/volume solve over the same physical interval; refine interval for source feedback accuracy\"}",
         fs_couple::nsf_dg::NsfDgDrive::FiniteReservoir { .. } =>
             ",\"external_boundary\":{\"kind\":\"finite-thermochemical-reservoir\",\"pressure_units\":\"Pa absolute\",\"temperature_units\":\"K\",\"definition\":\"accepted finite inventory supplies held pressure and temperature to the original aperture; its streamed mass and complete FV energy update the same inventory atomically with fluid and ducts\",\"partition\":\"explicit first order over each original physical interval; refine interval for source feedback accuracy\"}",
         fs_couple::nsf_dg::NsfDgDrive::Reservoir { .. }
@@ -515,12 +517,19 @@ pub(super) fn resolved_provenance(
     };
     let boundary = match renderer.drive_history().first().expect("finite native drive history") {
         fs_couple::nsf_dg::NsfDgDrive::ReservoirAperture { aperture, .. }
-        | fs_couple::nsf_dg::NsfDgDrive::FiniteReservoir { aperture } =>
+        | fs_couple::nsf_dg::NsfDgDrive::FiniteReservoir { aperture }
+        | fs_couple::nsf_dg::NsfDgDrive::FiniteReservoirActuation { aperture, .. } =>
             format!("{boundary},\"driven_reservoir_aperture\":{aperture}"),
         fs_couple::nsf_dg::NsfDgDrive::Reservoir { .. } =>
             format!("{boundary},\"driven_reservoir_aperture\":0"),
         _ => boundary.to_string(),
     };
+    let finite_reservoir_actuation = renderer.drive_history().iter().find_map(|drive| match drive {
+        fs_couple::nsf_dg::NsfDgDrive::FiniteReservoirActuation {
+            maximum_relative_volume_change, ..
+        } => Some(*maximum_relative_volume_change),
+        _ => None,
+    });
     let finite_reservoir = system.finite_reservoir_inventory().map_or_else(String::new, |parcel| {
         let aperture = parcel.aperture;
         let limits = system.finite_reservoir_limits().expect("bound finite source limits");
@@ -529,7 +538,13 @@ pub(super) fn resolved_provenance(
             fs_couple::nsf_dg::NsfFiniteReservoirSource::Thermochemical => "thermochemical",
             fs_couple::nsf_dg::NsfFiniteReservoirSource::NamedMixture => "named-mixture",
         };
-        format!(",\"finite_reservoir\":{{\"aperture\":{aperture},\"source_kind\":\"{source_kind}\",\"volume_m3\":{:e},\"mass_kg\":{:e},\"gas\":{gas},\"sensible_energy_j\":{:e},\"energy_reference_j_kg\":{:e},\"maximum_relative_mass_exchange\":{:e},\"maximum_relative_energy_exchange\":{:e},\"mass_absolute_tolerance_kg\":{:e},\"energy_absolute_tolerance_j\":{:e},\"relative_tolerance\":{:e},\"scope\":\"same original frozen named-mixture or thermochemical law; rigid well-mixed chamber thermalizes incoming kinetic energy; original substep exchange variations bound hidden withdrawal and energy excursions; complete FV energy includes work already; no stored source momentum, mechanical breathing effort, pump, or mean transport into acoustic ducts\"}}",
+        let (scope, actuation) = if let Some(limit) = finite_reservoir_actuation {
+            ("original thermochemical law; well-mixed chamber thermalizes incoming kinetic energy; original substep exchange variations bound hidden withdrawal and energy excursions; prescribed heat and chamber-volume rates update the same parcel; no stored source momentum, anatomical player model, or mean transport into acoustic ducts",
+                format!(",\"actuation\":{{\"maximum_relative_volume_change\":{limit:e},\"volume_rate_units\":\"m3/s; positive expands chamber\",\"heat_power_units\":\"W; positive adds heat\",\"increments\":\"physical rates times original NSF/DG interval; independent of output sample clock\",\"mechanical_work\":\"midpoint pressure times volume change; positive work by gas on expansion; separate from complete FV energy already exchanged at aperture\",\"partition\":\"first-order original flow exchange then heat/volume solve; all owners publish atomically\",\"scope\":\"prescribed well-mixed chamber actuation; fixed composition and original thermochemical heat-volume law\"}}"))
+        } else {
+            ("same original frozen named-mixture or thermochemical law; rigid well-mixed chamber thermalizes incoming kinetic energy; original substep exchange variations bound hidden withdrawal and energy excursions; complete FV energy includes work already; no stored source momentum, mechanical breathing effort, pump, or mean transport into acoustic ducts", String::new())
+        };
+        format!(",\"finite_reservoir\":{{\"aperture\":{aperture},\"source_kind\":\"{source_kind}\",\"volume_m3\":{:e},\"mass_kg\":{:e},\"gas\":{gas},\"sensible_energy_j\":{:e},\"energy_reference_j_kg\":{:e},\"maximum_relative_mass_exchange\":{:e},\"maximum_relative_energy_exchange\":{:e},\"mass_absolute_tolerance_kg\":{:e},\"energy_absolute_tolerance_j\":{:e},\"relative_tolerance\":{:e},\"scope\":\"{scope}\"{actuation}}}",
             parcel.volume_m3, parcel.mass_kg, parcel.sensible_energy_j,
             parcel.energy_reference_j_kg, limits.maximum_relative_mass_exchange,
             limits.maximum_relative_energy_exchange, limits.mass_absolute_tolerance_kg,

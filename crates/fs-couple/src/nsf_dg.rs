@@ -33,8 +33,8 @@ pub use upstream::NsfDgUpstreamFrame;
 mod reservoir;
 pub use reservoir::{NsfDgReservoirFrame, NsfDgReservoirRadiation};
 mod finite_reservoir;
-pub use finite_reservoir::{NsfFiniteReservoirFrame, NsfFiniteReservoirInventory,
-    NsfFiniteReservoirLimits, NsfFiniteReservoirSource};
+pub use finite_reservoir::{NsfFiniteReservoirActuationFrame, NsfFiniteReservoirFrame,
+    NsfFiniteReservoirInventory, NsfFiniteReservoirLimits, NsfFiniteReservoirSource};
 
 /// Physical drive location and units remain explicit in the coupled source.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -52,9 +52,22 @@ pub enum NsfDgDrive {
     /// Explicit independent transverse source in the grid's authored order.
     /// A distinct aperture may simultaneously receive passive exterior pressure.
     ReservoirAperture { aperture: usize, pressure_pa: f64, temperature_k: f64 },
-    /// The selected finite thermochemical chamber supplies its own held p/T.
+    /// The selected finite material-owned chamber supplies its own held p/T.
     /// Original mass and total-energy exchange update its inventory on acceptance.
     FiniteReservoir { aperture: usize },
+    /// Hold the accepted finite source p/T during the fluid interval, then apply
+    /// volume motion and heat to the same original thermochemical parcel before
+    /// accepting all participants. Positive volume rate expands the chamber;
+    /// positive heat power heats it. Both are held over the physical interval.
+    /// This flow-first source partition remains first order in interval size.
+    FiniteReservoirActuation {
+        aperture: usize,
+        volume_rate_m3_s: f64,
+        heat_power_w: f64,
+        /// Absolute interval volume change divided by starting volume must not
+        /// exceed this explicitly supplied bound, strictly between zero and one.
+        maximum_relative_volume_change: f64,
+    },
 }
 impl NsfDgDrive {
     pub fn is_finite(self) -> bool {
@@ -65,6 +78,10 @@ impl NsfDgDrive {
             | Self::ReservoirAperture { pressure_pa, temperature_k, .. } =>
                 pressure_pa.is_finite() && temperature_k.is_finite(),
             Self::FiniteReservoir { .. } => true,
+            Self::FiniteReservoirActuation {
+                volume_rate_m3_s, heat_power_w, maximum_relative_volume_change, ..
+            } => [volume_rate_m3_s, heat_power_w, maximum_relative_volume_change]
+                .into_iter().all(f64::is_finite),
         }
     }
 }
@@ -429,8 +446,9 @@ impl<L: Lattice3<27>> NsfDg<L> {
                 self.step_with_reservoir(pressure_pa, temperature_k, gate),
             NsfDgDrive::ReservoirAperture { aperture, pressure_pa, temperature_k } =>
                 self.step_with_reservoir_aperture(aperture, pressure_pa, temperature_k, gate),
-            NsfDgDrive::FiniteReservoir { aperture } =>
-                self.step_with_finite_reservoir(aperture, gate),
+            NsfDgDrive::FiniteReservoir { aperture }
+            | NsfDgDrive::FiniteReservoirActuation { aperture, .. } =>
+                self.step_with_finite_reservoir(aperture, drive, gate),
         }
     }
 
@@ -669,7 +687,9 @@ fn accept_candidate<L: Lattice3<27>>(
     if ![mass_change, energy_change, mass_projection, reservoir_mass_out_kg].iter().all(|x| x.is_finite()) {
         return Err(NsfDgError::Input("resolved interval mass or energy difference overflowed"));
     }
-    let finite_candidate = finite_reservoir::prepare(finite_owner.as_ref(), &fluid, gate)?;
+    let finite_candidate = finite_reservoir::prepare(
+        finite_owner.as_ref(), &fluid, control, dt, gate,
+    )?;
     poll(gate)?;
     // All source, allocation, pressure, work and cancellation checks precede
     // publication of either original owner.

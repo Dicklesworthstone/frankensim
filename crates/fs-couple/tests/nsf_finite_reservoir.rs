@@ -218,3 +218,6 @@ fn finite_inventory_limits_refuse_without_publishing_a_partial_interval() {
             .with_finite_reservoir(0, volume, source_limits(), &gate).is_err());
     }
 }
+
+#[path = "nsf_finite_reservoir/actuation.rs"]
+mod actuation;

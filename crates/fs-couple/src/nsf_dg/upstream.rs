@@ -292,7 +292,9 @@ impl<L: Lattice3<27>> NsfDg<L> {
         }
         let terminals = main.terminal_frames().to_vec();
         let upstream_terminals = source.terminal_frames().to_vec();
-        let finite_candidate = finite_reservoir::prepare(self.finite_reservoir.as_ref(), &fluid, gate)?;
+        let finite_candidate = finite_reservoir::prepare(
+            self.finite_reservoir.as_ref(), &fluid, control, dt, gate,
+        )?;
         poll(gate)?;
         fluid.accept();
         let duct = main.accept();

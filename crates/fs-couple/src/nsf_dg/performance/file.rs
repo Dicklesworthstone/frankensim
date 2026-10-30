@@ -574,6 +574,7 @@ impl ResolvedDgFilePerformance {
             Some("reservoir") => { row.word()?; 3 }
             Some("aperture") => { row.word()?; 5 }
             Some("finite-reservoir") => { row.word()?; 6 }
+            Some("finite-reservoir-actuation") => { row.word()?; 7 }
             Some("pressure-temperature") => { row.word()?; 4 }
             Some("characteristic") => { row.word()?; 0 }
             _ => 0,
@@ -585,7 +586,7 @@ impl ResolvedDgFilePerformance {
                 }
                 Some(0)
             }
-            5 | 6 => {
+            5 | 6 | 7 => {
                 let aperture: usize = row.number()?;
                 if aperture >= reservoir_apertures.len() {
                     return Err(bad(row.line, "reservoir controls require a declared aperture index"));
@@ -595,8 +596,8 @@ impl ResolvedDgFilePerformance {
             _ => None,
         };
         match (finite_reservoir.as_ref(), boundary_kind, driven_aperture) {
-            (Some((aperture, _, _)), 6, Some(driven)) if *aperture == driven => {},
-            (None, kind, _) if kind != 6 => {},
+            (Some((aperture, _, _)), 6 | 7, Some(driven)) if *aperture == driven => {},
+            (None, kind, _) if kind != 6 && kind != 7 => {},
             _ => return Err(bad(row.line,
                 "finite-reservoir controls must exclusively name the declared finite chamber aperture")),
         }
@@ -609,6 +610,14 @@ impl ResolvedDgFilePerformance {
         if driven_aperture.is_none() && upstream.is_some() != (boundary_kind == 2) {
             return Err(bad(row.line, "upstream-pressure requires its declared upstream DG load; face controls require an unloaded source face"));
         }
+        let maximum_relative_volume_change = if boundary_kind == 7 {
+            let limit = row.scalar()?;
+            if limit <= 0.0 || limit >= 1.0 {
+                return Err(bad(row.line,
+                    "finite-reservoir-actuation requires a relative volume change limit strictly between zero and one"));
+            }
+            Some(limit)
+        } else { None };
         let boundary_segments: usize = row.number()?;
         row.end()?;
         if boundary_segments == 0 || boundary_segments > 16_384 || boundary_segments > samples {
@@ -626,11 +635,13 @@ impl ResolvedDgFilePerformance {
             }
             let mut row = rows.row(if ramp { "ramp" } else { "hold" })?;
             let end: usize = row.number()?;
-            let first = read_drive(&mut row, boundary_kind, driven_aperture, temperature_window_k)?;
+            let first = read_drive(&mut row, boundary_kind, driven_aperture,
+                temperature_window_k, maximum_relative_volume_change)?;
             let last = if ramp {
                 // Read and admit both endpoints, including an exclusive final
                 // temperature that the physical intervals may never sample.
-                let last = read_drive(&mut row, boundary_kind, driven_aperture, temperature_window_k)?;
+                let last = read_drive(&mut row, boundary_kind, driven_aperture,
+                    temperature_window_k, maximum_relative_volume_change)?;
                 boundary_ramps += 1;
                 Some(last)
             } else { None };
@@ -796,6 +807,17 @@ impl BoundarySegment {
                 if ia == ib => NsfDgDrive::ReservoirAperture {
                     aperture: ia, pressure_pa: interpolate(a, b), temperature_k: interpolate(ta, tb),
                 },
+            (NsfDgDrive::FiniteReservoirActuation {
+                aperture: ia, volume_rate_m3_s: va, heat_power_w: qa,
+                maximum_relative_volume_change: la,
+             },
+             NsfDgDrive::FiniteReservoirActuation {
+                aperture: ib, volume_rate_m3_s: vb, heat_power_w: qb,
+                maximum_relative_volume_change: lb,
+             }) if ia == ib && la == lb => NsfDgDrive::FiniteReservoirActuation {
+                aperture: ia, volume_rate_m3_s: interpolate(va, vb),
+                heat_power_w: interpolate(qa, qb), maximum_relative_volume_change: la,
+             },
             _ => return Err(bad(0, "ramp endpoints must retain the same physical drive and opening")),
         };
         if !value.is_finite() { return Err(bad(0, "interpolated boundary control is not finite")); }
@@ -803,7 +825,8 @@ impl BoundarySegment {
     }
 }
 
-fn read_drive(row: &mut Row<'_>, kind: u8, aperture: Option<usize>, window: [f64; 2])
+fn read_drive(row: &mut Row<'_>, kind: u8, aperture: Option<usize>, window: [f64; 2],
+    maximum_relative_volume_change: Option<f64>)
     -> Result<NsfDgDrive, ResolvedDgInputError>
 {
     // Finite-source holds carry no externally authored pressure or temperature.
@@ -814,6 +837,14 @@ fn read_drive(row: &mut Row<'_>, kind: u8, aperture: Option<usize>, window: [f64
     }
     let value = row.scalar()?;
     Ok(match kind {
+        7 => NsfDgDrive::FiniteReservoirActuation {
+            aperture: aperture.expect("validated finite reservoir index"),
+            // These are physical rates. The original coupled interval, not
+            // the output sample clock, determines heat and volume increments.
+            volume_rate_m3_s: value, heat_power_w: row.scalar()?,
+            maximum_relative_volume_change: maximum_relative_volume_change
+                .expect("validated finite chamber volume limit"),
+        },
         4 => {
             let temperature = row.scalar()?;
             if !(window[0]..=window[1]).contains(&temperature) {

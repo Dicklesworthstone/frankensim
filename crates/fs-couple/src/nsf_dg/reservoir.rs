@@ -170,7 +170,8 @@ impl<L: Lattice3<27>> NsfDg<L> {
                     .map_err(NsfDgError::Flow)?;
                 (NsfBoundaryDrive::IncomingCharacteristic(0.0), 0.0, Some((aperture, state)))
             }
-            NsfDgDrive::FiniteReservoir { aperture } => {
+            NsfDgDrive::FiniteReservoir { aperture }
+            | NsfDgDrive::FiniteReservoirActuation { aperture, .. } => {
                 let state = self.finite_reservoir_state(aperture)?;
                 (NsfBoundaryDrive::IncomingCharacteristic(0.0), 0.0, Some((aperture, state)))
             }
@@ -179,7 +180,8 @@ impl<L: Lattice3<27>> NsfDg<L> {
             NsfDgDrive::Boundary(_) => self.upstream.is_some(),
             NsfDgDrive::UpstreamPressureRise(_) => self.upstream.is_none(),
             NsfDgDrive::Reservoir { .. } | NsfDgDrive::ReservoirAperture { .. }
-            | NsfDgDrive::FiniteReservoir { .. } => false,
+            | NsfDgDrive::FiniteReservoir { .. }
+            | NsfDgDrive::FiniteReservoirActuation { .. } => false,
         };
         if !drive.is_finite() || self.steps >= self.limits.maximum_steps || misplaced
         {
@@ -326,7 +328,9 @@ impl<L: Lattice3<27>> NsfDg<L> {
         if ![mass_change, energy_change, reservoir_mass_out_kg].iter().all(|x| x.is_finite()) {
             return Err(NsfDgError::Input("resolved joint exterior extensive accounts overflowed"));
         }
-        let finite_candidate = finite_reservoir::prepare(self.finite_reservoir.as_ref(), &fluid, gate)?;
+        let finite_candidate = finite_reservoir::prepare(
+            self.finite_reservoir.as_ref(), &fluid, drive, dt, gate,
+        )?;
         poll(gate)?;
         fluid.accept();
         let duct = acoustic.accept();

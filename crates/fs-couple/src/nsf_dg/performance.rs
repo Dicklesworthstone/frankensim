@@ -187,7 +187,11 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
             || !boundary.iter().all(|x| x.is_finite())
             || boundary.iter().any(|drive| {
                 if let Some(aperture) = system.finite_reservoir_aperture() {
-                    if !matches!(drive, NsfDgDrive::FiniteReservoir { aperture: driven } if *driven == aperture) {
+                    if !matches!(drive,
+                        NsfDgDrive::FiniteReservoir { aperture: driven }
+                        | NsfDgDrive::FiniteReservoirActuation { aperture: driven, .. }
+                        if *driven == aperture)
+                    {
                         return true;
                     }
                 }
@@ -202,6 +206,11 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
                         || system.zone().reservoir_aperture_state_for(*aperture, *pressure_pa, *temperature_k).is_err(),
                 NsfDgDrive::FiniteReservoir { aperture } =>
                     system.finite_reservoir_aperture() != Some(*aperture),
+                NsfDgDrive::FiniteReservoirActuation { aperture, maximum_relative_volume_change, .. } =>
+                    system.finite_reservoir_aperture() != Some(*aperture)
+                        || system.finite_reservoir().is_none()
+                        || *maximum_relative_volume_change <= 0.0
+                        || *maximum_relative_volume_change >= 1.0,
                 }
             })
             || output_samples == 0

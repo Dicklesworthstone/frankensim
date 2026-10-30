@@ -3,7 +3,7 @@
 //! model owns a constant Cv, so its inverse is analytic; no transport/EOS fit or
 //! thermochemical source pack is synthesized from a numerical gas snapshot.
 
-use super::{NsfDgError, NsfFiniteReservoirSource, material, poll};
+use super::{NsfDgError, NsfFiniteReservoirActuationFrame, NsfFiniteReservoirSource, material, poll};
 use fs_exec::CancelGate;
 use fs_lbm::nsf3::{NamedMixtureNsfGas, NsfGasMedium, NsfOpenState};
 use fs_material::gas::GasState;
@@ -194,6 +194,28 @@ impl Inventory {
                 }, 0))
             }
         }
+    }
+
+    /// Preserve the original parcel's simultaneous heat/volume update, source
+    /// laws, fixed mass and midpoint work. Named mixtures remain usable for
+    /// passive finite storage; they do not have this original mechanical owner.
+    pub(super) fn midpoint_heat_volume(
+        &self, volume_m3: f64, heat_j: f64, gate: &CancelGate,
+    ) -> Result<(Self, NsfFiniteReservoirActuationFrame), NsfDgError> {
+        let Self::Thermochemical { gas, energy_solve, energy_reference_j_kg } = self else {
+            return Err(NsfDgError::Input(
+                "finite reservoir actuation requires its original thermochemical parcel",
+            ));
+        };
+        let candidate = gas.midpoint_heat_volume(
+            volume_m3, heat_j, *energy_solve, || gate.is_requested(),
+        ).map_err(material)?;
+        let midpoint_pressure_pa = candidate.midpoint().state().pressure;
+        let (gas, step) = candidate.into_parts();
+        Ok((Self::Thermochemical {
+            gas, energy_solve: *energy_solve,
+            energy_reference_j_kg: *energy_reference_j_kg,
+        }, NsfFiniteReservoirActuationFrame { midpoint_pressure_pa, step }))
     }
 
     /// Named Cv and R are constant and positive: T = E/(m Cv), p = E R/(V Cv).

@@ -1,15 +1,17 @@
-//! Finite rigid gas storage at one original NSF reservoir opening.
+//! Finite gas storage and original heat/volume work at one NSF reservoir opening.
 //!
 //! The accepted chamber pressure and temperature are held through one complete
 //! fluid/acoustic interval. Its actual streamed mass and conservative total
-//! energy then update the same source-owned gas inventory. This is an explicit
-//! first-order partition: interval refinement remains necessary. No nozzle law,
-//! mean transport into the acoustic bore, or separate acoustic work is added.
+//! energy then update the same source-owned gas inventory. Optional prescribed
+//! volume motion and heat use the original thermochemical midpoint owner AFTER
+//! that exchange, before the same atomic acceptance. This source partition is
+//! first order: interval refinement remains necessary. No nozzle law, mean
+//! transport into the acoustic bore, or separate acoustic work is added.
 
 use super::*;
 use fs_lbm::nsf3::NsfReservoirExchange;
 use fs_material::thermochemical_gas::energy::{
-    GasEnergyError, parcel::ClosedGasParcel,
+    GasEnergyError, parcel::{ClosedGasParcel, midpoint::GasHeatVolumeStep},
 };
 mod inventory;
 use inventory::Inventory;
@@ -20,12 +22,14 @@ pub struct NsfFiniteReservoirLimits {
     /// Sum of absolute original substep mass transfers divided by starting mass.
     /// Strictly between zero and one; opposing transfers cannot hide movement.
     pub maximum_relative_mass_exchange: f64,
-    /// Sum of absolute original substep energy transfers divided by the
-    /// magnitude of starting sensible-chart energy. Strictly between zero and one.
+    /// Sum of absolute original substep energy transfers, supplied heat and
+    /// volume work divided by the magnitude of starting sensible-chart energy.
+    /// Strictly between zero and one; cancelling heat/work cannot hide movement.
     pub maximum_relative_energy_exchange: f64,
     /// Absolute allowance for actual inventory change minus streamed mass [kg].
     pub mass_absolute_tolerance_kg: f64,
-    /// Absolute allowance for original-law sensible storage minus NSF energy [J].
+    /// Absolute allowance for original-law sensible storage minus NSF energy
+    /// and prescribed heat minus original midpoint work [J].
     pub energy_absolute_tolerance_j: f64,
     /// Relative allowance on the actual and requested changes, in (0, 1e-3].
     /// Formation energy and the complete starting inventory do not scale residuals.
@@ -80,12 +84,23 @@ pub struct NsfFiniteReservoirInventory {
     pub source_kind: NsfFiniteReservoirSource,
 }
 
+/// Original simultaneous heat/volume receipt for the post-exchange source.
+/// The midpoint pressure is the work-conjugate effort. No endpoint-pressure
+/// substitute or extra acoustic work is included in the original step.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NsfFiniteReservoirActuationFrame {
+    pub midpoint_pressure_pa: f64,
+    pub step: GasHeatVolumeStep,
+}
+
 /// Accepted chamber storage and the original source exchange that changed it.
-/// Positive source mass/energy leaves NSF and enters this rigid chamber.
+/// Positive source mass/energy leaves NSF and enters this finite chamber.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NsfFiniteReservoirFrame {
     pub aperture: usize,
+    /// Starting chamber volume, before exchange and optional actuation [m3].
     pub volume_m3: f64,
+    pub final_volume_m3: f64,
     pub initial_mass_kg: f64,
     pub final_mass_kg: f64,
     pub mass_change_kg: f64,
@@ -100,12 +115,17 @@ pub struct NsfFiniteReservoirFrame {
     /// Original source internal-energy increment plus actual mass change times
     /// original sensible specific energy; no absolute formation subtraction.
     pub sensible_energy_change_j: f64,
+    /// Actual whole-source storage minus streamed energy, supplied heat and
+    /// negative work by the gas: Delta U - (E_NSF + Q - W) [J].
     pub energy_residual_j: f64,
     pub energy_reference_j_kg: f64,
     /// Includes pressure work, advection, conduction and viscous work already.
     /// Acoustic pressure work is a diagnostic subset, never a second debit.
     pub source_exchange: NsfReservoirExchange,
-    /// Zero for the named source's analytic constant-Cv reconstruction.
+    /// Original post-exchange heat/volume step, if explicitly requested.
+    pub actuation: Option<NsfFiniteReservoirActuationFrame>,
+    /// Flow-reconstruction iterations, zero for the named source's analytic
+    /// constant-Cv inverse. Actuator iterations remain in its original receipt.
     pub caloric_iterations: usize,
 }
 
@@ -129,16 +149,18 @@ fn material(error: GasEnergyError) -> NsfDgError {
 }
 
 impl<L: Lattice3<27>> NsfDg<L> {
-    /// Attach one finite rigid source to an existing quiescent transverse opening.
+    /// Attach one finite source to an existing quiescent transverse opening.
     ///
     /// Its initial density and temperature come from that opening. The SAME
     /// named-mixture or thermochemical medium supplies pressure, composition,
     /// caloric reference and all transport properties. Source laws stay intact.
-    /// Only FiniteReservoir drives are admitted while this owner is attached.
+    /// Only finite-reservoir drives are admitted while this owner is attached.
     /// A distinct opening may retain passive radiation in either binding order.
     ///
     /// Incoming resolved kinetic energy thermalizes in this well-mixed chamber.
-    /// There is no stored chamber momentum, moving wall, pump or extra p*Q debit.
+    /// There is no stored chamber momentum or extra acoustic p*Q debit. Explicit
+    /// actuation uses the retained thermochemical parcel's original heat/volume
+    /// work; a passive source retains its volume.
     pub fn with_finite_reservoir(
         mut self,
         aperture: usize,
@@ -218,7 +240,22 @@ impl<L: Lattice3<27>> NsfDg<L> {
         match (self.finite_reservoir.as_ref(), drive) {
             (Some(owner), NsfDgDrive::FiniteReservoir { aperture })
                 if owner.aperture == aperture => Ok(()),
-            (None, NsfDgDrive::FiniteReservoir { .. }) => Err(NsfDgError::Input(
+            (Some(owner), NsfDgDrive::FiniteReservoirActuation {
+                aperture, maximum_relative_volume_change, ..
+            }) if owner.aperture == aperture => {
+                if !drive.is_finite()
+                    || !(0.0 < maximum_relative_volume_change
+                        && maximum_relative_volume_change < 1.0)
+                    || owner.gas.thermochemical().is_none()
+                {
+                    return Err(NsfDgError::Input(
+                        "finite source actuation requires its original thermochemical parcel, finite rates and a relative volume bound in (0,1)",
+                    ));
+                }
+                Ok(())
+            }
+            (None, NsfDgDrive::FiniteReservoir { .. }
+                | NsfDgDrive::FiniteReservoirActuation { .. }) => Err(NsfDgError::Input(
                 "finite reservoir drive requires its attached inventory",
             )),
             (Some(_), _) => Err(NsfDgError::Input(
@@ -239,11 +276,11 @@ impl<L: Lattice3<27>> NsfDg<L> {
     }
 
     pub(super) fn step_with_finite_reservoir(
-        &mut self, aperture: usize, gate: &CancelGate,
+        &mut self, aperture: usize, drive: NsfDgDrive, gate: &CancelGate,
     ) -> Result<NsfDgFrame, NsfDgError> {
         poll(gate)?;
+        self.admit_finite_reservoir_drive(drive)?;
         let state = self.finite_reservoir_state(aperture)?;
-        let drive = NsfDgDrive::FiniteReservoir { aperture };
         if self.upstream.is_some() {
             self.step_with_upstream_conditions(0.0, &[(aperture, state)], drive, gate)
         } else {
@@ -325,6 +362,8 @@ fn admit_envelope(
 pub(super) fn prepare<L: Lattice3<27>>(
     owner: Option<&FiniteReservoir>,
     fluid: &NsfCharacteristicTrial<'_, L>,
+    drive: NsfDgDrive,
+    dt: f64,
     gate: &CancelGate,
 ) -> Result<Option<Candidate>, NsfDgError> {
     let Some(owner) = owner else { return Ok(None); };
@@ -349,7 +388,7 @@ pub(super) fn prepare<L: Lattice3<27>>(
     {
         return Err(NsfDgError::Input("finite reservoir cannot exhaust or lose a streamed mass increment"));
     }
-    let (gas, iterations) = if dm == 0.0 && de == 0.0 {
+    let (mut gas, iterations) = if dm == 0.0 && de == 0.0 {
         (old.clone(), 0)
     } else {
         // Total FV energy already contains pressure/viscous work, advection and
@@ -363,56 +402,109 @@ pub(super) fn prepare<L: Lattice3<27>>(
         }
         old.reconstruct_energy_change(target_mass, change, gate)?
     };
-    // Admit the next held ghost through the same NSF owner before publishing
-    // storage. Material support alone does not imply the grid's local
-    // viscosity, temperature-ratio or Mach admission at the new density.
-    fluid.grid().reservoir_aperture_state_for(
-        owner.aperture, gas.state().pressure, gas.state().temperature,
-    ).map_err(NsfDgError::Flow)?;
-    let mass_change = gas.mass_kg() - old.mass_kg();
-    let mass_residual = mass_change - dm;
-    let du = old.specific_energy_change(old.state().temperature, gas.state().temperature,
-        "original caloric source refused the finite reservoir storage audit",
-    )?;
-    let stored = gas.mass_kg() * du + mass_change * sensible;
-    let final_energy = gas.mass_kg() * (sensible + du);
-    let energy_residual = stored - de;
-    let mass_allowance = owner.limits.mass_absolute_tolerance_kg
-        + owner.limits.relative_tolerance * (mass_change.abs() + dm.abs());
-    let energy_allowance = owner.limits.energy_absolute_tolerance_j
-        + owner.limits.relative_tolerance * (stored.abs() + de.abs());
-    if ![mass_change, mass_residual, du, stored, final_energy, energy_residual,
-        mass_allowance, energy_allowance].into_iter().all(f64::is_finite)
-        || mass_residual.abs() > mass_allowance
-        || energy_residual.abs() > energy_allowance
-        || (dm != 0.0 && (mass_change == 0.0
-            || mass_change.is_sign_positive() != dm.is_sign_positive()))
-        || (de != 0.0 && (stored == 0.0
-            || stored.is_sign_positive() != de.is_sign_positive()))
-    {
-        return Err(NsfDgError::Input(
-            "finite reservoir actual source inventory failed mass or sensible-energy conservation",
-        ));
-    }
-    let frame = NsfFiniteReservoirFrame {
-        aperture: owner.aperture,
-        volume_m3: old.volume_m3(),
-        initial_mass_kg: old.mass_kg(),
-        final_mass_kg: gas.mass_kg(),
-        mass_change_kg: mass_change,
-        mass_residual_kg: mass_residual,
-        initial_pressure_pa: old.state().pressure,
-        final_pressure_pa: gas.state().pressure,
-        initial_temperature_k: old.state().temperature,
-        final_temperature_k: gas.state().temperature,
-        initial_sensible_energy_j: energy,
-        final_sensible_energy_j: final_energy,
-        sensible_energy_change_j: stored,
-        energy_residual_j: energy_residual,
-        energy_reference_j_kg: old.energy_reference_j_kg(),
-        source_exchange: exchange,
-        caloric_iterations: iterations,
+    let audit = |gas: &Inventory, actuation: Option<NsfFiniteReservoirActuationFrame>| {
+        // Admit each source stage through the same NSF owner. Material support
+        // alone does not imply local viscosity, temperature-ratio or Mach
+        // admission at the new density, including the next actuated held ghost.
+        fluid.grid().reservoir_aperture_state_for(
+            owner.aperture, gas.state().pressure, gas.state().temperature,
+        ).map_err(NsfDgError::Flow)?;
+        let (heat, work) = actuation.map_or((0.0, 0.0), |receipt|
+            (receipt.step.supplied_heat_j, receipt.step.work_by_gas_j));
+        let expected = if actuation.is_some() { de + heat - work } else { de };
+        let mass_change = gas.mass_kg() - old.mass_kg();
+        let mass_residual = mass_change - dm;
+        let du = old.specific_energy_change(old.state().temperature, gas.state().temperature,
+            "original caloric source refused the finite reservoir storage audit",
+        )?;
+        let stored = gas.mass_kg() * du + mass_change * sensible;
+        let final_energy = gas.mass_kg() * (sensible + du);
+        let energy_residual = stored - expected;
+        let mass_allowance = owner.limits.mass_absolute_tolerance_kg
+            + owner.limits.relative_tolerance * (mass_change.abs() + dm.abs());
+        let energy_allowance = owner.limits.energy_absolute_tolerance_j
+            + owner.limits.relative_tolerance
+                * (stored.abs() + de.abs() + heat.abs() + work.abs());
+        if ![heat, work, expected, mass_change, mass_residual, du, stored,
+            final_energy, energy_residual, mass_allowance, energy_allowance]
+            .into_iter().all(f64::is_finite)
+            || mass_residual.abs() > mass_allowance
+            || energy_residual.abs() > energy_allowance
+            || (dm != 0.0 && (mass_change == 0.0
+                || mass_change.is_sign_positive() != dm.is_sign_positive()))
+            || (expected != 0.0 && (stored == 0.0
+                || stored.is_sign_positive() != expected.is_sign_positive()))
+        {
+            return Err(NsfDgError::Input(
+                "finite reservoir actual source inventory failed mass or sensible-energy conservation",
+            ));
+        }
+        Ok(NsfFiniteReservoirFrame {
+            aperture: owner.aperture,
+            volume_m3: old.volume_m3(),
+            final_volume_m3: gas.volume_m3(),
+            initial_mass_kg: old.mass_kg(),
+            final_mass_kg: gas.mass_kg(),
+            mass_change_kg: mass_change,
+            mass_residual_kg: mass_residual,
+            initial_pressure_pa: old.state().pressure,
+            final_pressure_pa: gas.state().pressure,
+            initial_temperature_k: old.state().temperature,
+            final_temperature_k: gas.state().temperature,
+            initial_sensible_energy_j: energy,
+            final_sensible_energy_j: final_energy,
+            sensible_energy_change_j: stored,
+            energy_residual_j: energy_residual,
+            energy_reference_j_kg: old.energy_reference_j_kg(),
+            source_exchange: exchange,
+            actuation,
+            caloric_iterations: iterations,
+        })
     };
+    // First certify the original flow exchange independently, so later heat or
+    // work cannot conceal its loss. All candidates remain private throughout.
+    let mut frame = audit(&gas, None)?;
+    if let NsfDgDrive::FiniteReservoirActuation {
+        aperture, volume_rate_m3_s, heat_power_w, maximum_relative_volume_change,
+    } = drive {
+        let initial_volume = gas.volume_m3();
+        let volume_change = volume_rate_m3_s * dt;
+        let heat = heat_power_w * dt;
+        let final_volume = initial_volume + volume_change;
+        let volume_allowance = maximum_relative_volume_change * initial_volume;
+        if aperture != owner.aperture
+            || ![dt, volume_rate_m3_s, heat_power_w, maximum_relative_volume_change,
+                volume_change, heat, final_volume, volume_allowance]
+                .into_iter().all(f64::is_finite)
+            || dt <= 0.0 || final_volume <= 0.0 || volume_allowance <= 0.0
+            || !(0.0 < maximum_relative_volume_change
+                && maximum_relative_volume_change < 1.0)
+            || (volume_rate_m3_s != 0.0 && volume_change == 0.0)
+            || (heat_power_w != 0.0 && heat == 0.0)
+            || (volume_change != 0.0 && final_volume == initial_volume)
+            || volume_change.abs() > volume_allowance
+            || (final_volume - initial_volume).abs() > volume_allowance
+        {
+            return Err(NsfDgError::Input(
+                "finite reservoir actuation loses an increment or exceeds its positive bounded volume movement; refine the interval",
+            ));
+        }
+        // The original simultaneous update supplies BOTH the endpoint and its
+        // work-conjugate midpoint pressure. Do not apply isentropic motion and
+        // heat sequentially or debit NSF/acoustic pressure work a second time.
+        let (next, receipt) = gas.midpoint_heat_volume(final_volume, heat, gate)?;
+        let energy_movement = exchange.energy_exchange_variation_j
+            + receipt.step.supplied_heat_j.abs() + receipt.step.work_by_gas_j.abs();
+        if !energy_movement.is_finite()
+            || energy_movement > owner.limits.maximum_relative_energy_exchange * energy.abs()
+        {
+            return Err(NsfDgError::Input(
+                "finite reservoir exchange, heat and volume work exceed the combined sensible-energy movement bound",
+            ));
+        }
+        frame = audit(&next, Some(receipt))?;
+        gas = next;
+    }
     poll(gate)?;
     Ok(Some(Candidate { gas, frame }))
 }
