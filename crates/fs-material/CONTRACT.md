@@ -4824,3 +4824,7 @@ cancellation refusal. Combined with the six regional caloric tests and the
 water integration has 24 passing tests. Both water examples compile and run.
 The full workspace/DSR gate remains unavailable in this checkout because the
 required sibling constellation repositories and DSR executable are absent.
+
+## Source-bound Ohmic constitutive graph
+
+`conductor::graph::MaterialOhmicNode` exposes the original scalar conductor as a public constitutive-law node with temperature-change and signed-current inputs, and signed-voltage and nonnegative-Joule-power outputs. It preserves the selected electrical property key and basis, original material bundle and claims, and continuously supported temperature slice, including fixed-context sampled surfaces. Conductivity is queried before conversion to resistance. Its piecewise-consistent tangent differentiates the native resistance and Joule-power equations; interior knots use the right interval and the final endpoint uses the left interval. Construction admits positive, representable native transport across every electrical source knot and refuses unsupported spans, unowned response coordinates, and phase-fraction evolution. This is fixed-geometry, memoryless scalar DC transport; thermal storage, time, contacts, skin effects, expansion, and phase evolution remain with their existing physical owners.

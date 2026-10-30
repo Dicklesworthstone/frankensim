@@ -1,4 +1,7 @@
 //! Native material cards and closed electrothermal feedback through public residuals.
+#[path = "constitutive_graph/enthalpy.rs"]
+mod enthalpy;
+
 use fs_couple::constitutive_graph::*;
 use fs_evidence::ValidityDomain;
 use fs_exec::{CancelGate, Cx};

@@ -7,6 +7,9 @@
 //! history until the caller accepts the returned candidate. Balance equations
 //! do not establish passivity, conservation or calibration of arbitrary laws.
 
+/// Original material equations coupled to finite enthalpy and heat transport.
+pub mod enthalpy;
+
 use fs_exec::Cx;
 use fs_material::graph::{ConstitutiveGraph, GraphError, GraphOutput};
 use fs_qty::Dims;
@@ -243,6 +246,11 @@ impl<'a, 'scope> MaterialGraphResidual<'a, 'scope> {
     /// Whether a solver callback has permanently refused this proposal.
     pub fn has_failed(&self) -> bool {
         self.failed.get()
+    }
+    /// Consumed value/Jacobian evaluations, including unsuccessful proposals.
+    /// A containing physical solve can bound all nested work with this count.
+    pub fn evaluations(&self) -> usize {
+        self.evaluations.get()
     }
     /// Taking the first error does not clear the permanent failure latch.
     pub fn take_failure(&self) -> Option<MaterialGraphError> {

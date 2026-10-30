@@ -158,10 +158,30 @@ impl ReciprocalStringBank {
     /// static preload, nonlinear contacts, thermal feedback and pressure output.
     /// This fixed-state homogeneous plate model does not infer shell, wet wood,
     /// finite-strain or temperature evolution; original source/capacity limits apply.
-    pub fn with_tensor_material_plate_relaxation(mut self,
+    pub fn with_tensor_material_plate_relaxation(self,
         properties:&[TensorPronyProperties], initial:InitialPlateMemory,
         limits:TensorPlateRelaxationLimits, gate:&CancelGate,
     ) -> Result<Self,ReciprocalStringError> {
+        self.with_tensor_plate_memory(properties,initial,limits,None,gate)
+    }
+
+    /// Share only bit-identically timed material coordinates through the
+    /// existing exact orthogonal transformation. Original point histories and
+    /// source-domain checks remain reconstructible without changing the body
+    /// basis or dropping relaxation rates to satisfy the native capacity cap.
+    /// Relaxed/unrelaxed initialization and every cold-binding guard remain
+    /// identical to the ordinary tensor-material attachment.
+    pub fn with_shared_tensor_material_plate_relaxation(self,
+        properties:&[TensorPronyProperties], initial:InitialPlateMemory,
+        limits:TensorPlateRelaxationLimits, max_factor_terms:usize, gate:&CancelGate,
+    ) -> Result<Self,ReciprocalStringError> {
+        self.with_tensor_plate_memory(properties,initial,limits,Some(max_factor_terms),gate)
+    }
+
+    fn with_tensor_plate_memory(mut self,properties:&[TensorPronyProperties],
+        initial:InitialPlateMemory,limits:TensorPlateRelaxationLimits,
+        sharing:Option<usize>,gate:&CancelGate,
+    )->Result<Self,ReciprocalStringError> {
         poll(gate)?;
         let source_count=self.source.source_memory_count(&self.cards,gate)?;
         if self.system.samples_rendered()!=0 || self.source.material_chart_relaxation.is_some()
@@ -178,8 +198,11 @@ impl ReciprocalStringBank {
         if body.reduction.damping_ratio!=0.0 || body.specimen.bending_viscosity().is_some() {
             return Err(invalid("complete tensor body memory cannot duplicate authored or selected intrinsic decay"));
         }
-        let image=TensorPlateRelaxation::from_chart(&body.specimen,basis,properties,limits,gate)
-            .map_err(ReciprocalStringError::Material)?;
+        let image=match sharing {
+            Some(work)=>TensorPlateRelaxation::from_chart_shared(
+                &body.specimen,basis,properties,limits,work,gate),
+            None=>TensorPlateRelaxation::from_chart(&body.specimen,basis,properties,limits,gate),
+        }.map_err(ReciprocalStringError::Material)?;
         let memory=match initial {
             InitialPlateMemory::Relaxed=>None,
             InitialPlateMemory::Unrelaxed=>Some(vec![0.0;image.coupling_rows_per_s().len()]),
