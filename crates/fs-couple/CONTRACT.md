@@ -10094,6 +10094,40 @@ analytic coupled mass/radiator response and dissipated work at second order.
 The fixed fit dictionaries and their geometric/frequency qualification are
 unchanged; admitting a pole regime alone does not validate a fitted exterior.
 
+## Source-owned directional rigid friction with resolved heat partition
+
+`friction_heat::directional::apply_source_directional_heat` closes original
+directional coefficient claims, full-tensor rigid recoil and finite enthalpy
+in one thermal endpoint solve. The existing rigid matrix owner supplies actual
+slip and physical traction-slip work. Its source callback uses
+`advance_motion_consistent` to close every declared speed/path coordinate.
+Each trial starts from the same accepted body momenta and source history.
+
+`DirectionalHeatMaterial` retains both original caloric objects and ordered
+material/interface identities. Both surface temperatures follow their own
+finite cells; an optional distinct Kelvin axis follows the solved common
+interface temperature. Nominal pressure is the held load divided by the
+actual thermal contact area. Dry contact refuses liquid surfaces.
+
+The existing `FrictionHeatStep` derives signed body transfers from each
+material conductivity, actual cell geometry and the common zero-capacity
+interface. It replaces the occupied direct link only in the trial, preserving
+coverage and preventing duplicate conduction. No heat fraction or additional
+thermal store is introduced. Other heat/conductances retain their original
+callback receipt; internal friction heat cancels once in the combined
+kinetic/contact/caloric account. Only the two selected bodies, original source
+history and finite thermal network publish, after independent mechanical,
+local thermal, interface and total-energy gates and final cancellation.
+
+The route retains its orthogonal prismatic, perfect-contact discretization.
+Thermal cells may be local contact volumes; they need not carry whole-body
+mass. Load, poses, arms and frame are held; the midpoint mechanical phase
+refuses unresolved slip events. Endpoint thermal/source coupling needs time
+refinement, and a nonmonotone motion-query root is not a uniqueness claim.
+Five G1/G3/G4 groups cover closed-form recoil/partition, solved-temperature
+weakening, full-tensor/frame-covariant motion queries, unequal-temperature
+exchange without friction power, and atomic failure/cancellation/retry.
+
 ## Native rigid-body partial-slip friction with finite thermal feedback
 
 `friction_heat::rigid::apply_rigid_friction_heat` jointly accepts one supplied

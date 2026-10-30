@@ -41,6 +41,9 @@ pub mod flash;
 /// Native rigid momenta, retained partial slip and finite heat accept together.
 pub mod rigid;
 
+/// Original directional material friction, rigid recoil and resolved heat partition.
+pub mod directional;
+
 /// Simultaneous friction sources on one original thermal network.
 pub mod network;
 
