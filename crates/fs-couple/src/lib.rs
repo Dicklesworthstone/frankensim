@@ -77,6 +77,8 @@ pub mod liquid_gas;
 pub mod material_assembly;
 /// Material-resolved branch heat and finite charge/flux storage on Kirchhoff circuits.
 pub mod material_circuit;
+/// One fluid source for native immersed motion, sourced additional inertia and gap films.
+pub mod material_immersed;
 /// Pack-backed material records and fixture labels for file-driven render inputs.
 pub mod material_source;
 pub mod mm_line;
