@@ -16,6 +16,7 @@ use fs_conduction::transient::enthalpy::EnthalpyStepSolution;
 use fs_convection::CorrelationRobinBoundary;
 use fs_exec::Cx;
 
+use super::LiquidResistanceModel;
 use super::{HeterogeneousStoredCoolingState, ParallelLiquidNetwork, PumpHeadCurve,
     StoredCoolingControls, StoredCoolingError, StoredCoolingStep, StoredSolidProblem,
     StoredThermalResponse, poll};
@@ -63,7 +64,7 @@ pub struct ContactStoredCoolingStep<'p, 'a> {
     pub total_krylov_iterations: usize,
 }
 
-impl<'n, 'a, 'card> ParallelLiquidNetwork<'n, 'a, 'card> {
+impl<'n, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'n, 'a, 'card, H> {
     /// Advance source-dependent solid interfaces, coolant, pump and reservoir
     /// on ONE immutable-history interval, optionally with ambient radiation.
     ///

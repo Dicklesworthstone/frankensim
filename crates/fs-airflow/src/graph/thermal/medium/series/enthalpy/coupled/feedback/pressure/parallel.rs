@@ -19,6 +19,8 @@ use fs_material::liquid::ResolvedLiquidState;
 use fs_material::phase::EquilibriumPhaseState;
 use fs_qty::{Pressure, Temperature};
 
+use super::porous::{LiquidResistanceModel, path_outlet_pressure};
+use super::MaterialFlowResistance;
 use super::{LiquidEnthalpyError, LiquidFeedbackBudget, LiquidFeedbackError,
     LiquidHeatMarch, LiquidHeatPath, LiquidResistanceSection, PressureDrivenBudget,
     PressureDrivenError, PressureDrivenSolution, checkpoint, positive};
@@ -30,13 +32,13 @@ pub const MAX_PARALLEL_LIQUID_REGIONS: usize = 1024;
 
 /// A complete existing thermal path and its exact pressure-loss assignments.
 #[derive(Clone, Copy, Debug)]
-pub struct ParallelLiquidBranch<'p, 'a, 'card> {
+pub struct ParallelLiquidBranch<'p, 'a, 'card, H = MaterialFlowResistance> {
     /// Unique branch label; thermal region names must also be globally unique.
     pub name: &'p str,
     /// Existing source-backed thermal description, including its common inlet.
     pub path: &'p LiquidHeatPath<'a, 'card>,
     /// Pressure loss assignments in this path's exact thermal-region order.
-    pub resistances: &'p [LiquidResistanceSection<'p>],
+    pub resistances: &'p [LiquidResistanceSection<'p, H>],
     /// Explicit supported mass-flow bracket and local pressure tolerances.
     pub pressure_budget: PressureDrivenBudget,
 }
@@ -128,18 +130,18 @@ pub struct ParallelLiquidSolution<'a> {
 
 /// Parallel topology with one common source and inlet, and no shared wall rows.
 #[derive(Debug)]
-pub struct ParallelLiquidNetwork<'p, 'a, 'card> {
-    branches: Vec<ParallelLiquidBranch<'p, 'a, 'card>>,
+pub struct ParallelLiquidNetwork<'p, 'a, 'card, H = MaterialFlowResistance> {
+    branches: Vec<ParallelLiquidBranch<'p, 'a, 'card, H>>,
     region_count: usize,
 }
-impl<'p, 'a, 'card> ParallelLiquidNetwork<'p, 'a, 'card> {
+impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'card, H> {
     /// Admit material/topology ownership before running a hydraulic or solid solve.
     /// All paths must retain identical liquid-law reference states and the same
     /// caloric chart identity and inlet. Equivalent independently resolved source
     /// objects are accepted; pointer identity is not required. Mixing unrelated
     /// material cards, phases or enthalpy reference conventions is not supported.
     pub fn try_new(
-        cx: &Cx<'_>, branches: &[ParallelLiquidBranch<'p, 'a, 'card>],
+        cx: &Cx<'_>, branches: &[ParallelLiquidBranch<'p, 'a, 'card, H>],
     ) -> Result<Self, ParallelPressureError> {
         checkpoint(cx)?;
         if branches.is_empty() || branches.len() > MAX_PARALLEL_LIQUID_BRANCHES {
@@ -148,10 +150,17 @@ impl<'p, 'a, 'card> ParallelLiquidNetwork<'p, 'a, 'card> {
         let first = branches[0].path;
         let mut names = BTreeSet::new();
         let mut regions = BTreeSet::new();
+        let mut outlet_pressure = None;
         for branch in branches {
             checkpoint(cx)?;
             if branch.name.trim().is_empty() || !names.insert(branch.name) {
                 return Err(ParallelPressureError::Invalid("parallel branch names must be nonempty and unique"));
+            }
+            if let Some(value) = path_outlet_pressure(branch.resistances)? {
+                if outlet_pressure.is_some_and(|previous| previous != value) {
+                    return Err(ParallelPressureError::Invalid("parallel porous branches require one absolute outlet manifold pressure"));
+                }
+                outlet_pressure = Some(value);
             }
             let path = branch.path;
             if path.inlet != first.inlet
@@ -186,7 +195,7 @@ impl<'p, 'a, 'card> ParallelLiquidNetwork<'p, 'a, 'card> {
 
     /// Original descriptions with their independent, supported flow brackets.
     #[must_use]
-    pub fn branches(&self) -> &[ParallelLiquidBranch<'p, 'a, 'card>] { &self.branches }
+    pub fn branches(&self) -> &[ParallelLiquidBranch<'p, 'a, 'card, H>] { &self.branches }
 
     /// Solve branch flow redistribution at common pressure and supplied walls.
     /// Every branch reuses the existing pressure/material/enthalpy solver; there

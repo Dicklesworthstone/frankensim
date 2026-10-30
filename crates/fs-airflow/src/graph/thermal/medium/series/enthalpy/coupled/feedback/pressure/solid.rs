@@ -14,7 +14,7 @@ use fs_qty::Pressure;
 
 use crate::AirflowError;
 use crate::conjugate::ConjugateConfig;
-use super::{LiquidFeedbackBudget, LiquidHeatPath, LiquidResistanceSection,
+use super::{LiquidFeedbackBudget, LiquidHeatPath, LiquidResistanceSection, LiquidResistanceModel,
     PressureDrivenBudget, PressureDrivenError, PressureDrivenSolution,
     checkpoint, solve_pressure_root};
 use super::super::solid::CoupledLiquidFeedbackSolution;
@@ -59,7 +59,7 @@ impl<'a, 'card> LiquidHeatPath<'a, 'card> {
     /// All existing source, thermal, pressure and cancellation refusals; a
     /// malformed assignment/configuration; or exhausted shared solid work.
     pub fn solve_pressure_coupled_iqn<R, F>(
-        &self, cx: &Cx<'_>, initial_walls_k: &[f64], resistances: &[LiquidResistanceSection<'_>],
+        &self, cx: &Cx<'_>, initial_walls_k: &[f64], resistances: &[LiquidResistanceSection<'_, impl LiquidResistanceModel>],
         drive: Pressure, controls: &PressureSolidControls, mut solid: F,
     ) -> Result<CoupledPressureSolution<'a, R>, PressureDrivenError>
     where F: FnMut(&Cx<'_>, &[CorrelationRobinBoundary]) -> Result<LiquidSolidResponse<R>, AirflowError>,

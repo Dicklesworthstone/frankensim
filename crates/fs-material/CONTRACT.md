@@ -5590,3 +5590,9 @@ Focused coupling regressions retain nonzero and singular Maxwell memory,
 rotated expansion, zero-alpha compatibility and source/domain refusals. They
 are authored but unrun here; syntax review and independent physical-coordinate
 arithmetic do not establish native runtime or experimental validation.
+
+### Shared intrinsic permeability in continuum hydraulic consumers
+
+`DarcyGasBarrier::continuum_geometry` borrows the original ordered intrinsic tensors, source receipts, compiled sum(L/k_normal) and intersected T/p support for native liquid or other continuum hydraulic owners. It constructs no gas state and introduces no second Darcy or transport law. Consumers use their actual viscosity, density, superficial area and solved flow, and admit both absolute face pressures and local temperature against the same original source limits. Normal permeability retains the existing planar-gradient, unconstrained transverse-flow convention. Zero intrinsic permeability remains exactly sealed.
+
+Every nonzero gas-slip calibration and every prescribed gas-only wet-mobility state refuses this view, including unit-mobility endpoints. Full single-fluid pore occupation is the admitted case; liquid relative permeability, capillarity, changing saturation, skeleton deformation and storage are not inferred. Native tests cover original rotated/layered geometry, unchanged source receipts and domains, signed speed limits, exact seals, and gas-calibration refusal.

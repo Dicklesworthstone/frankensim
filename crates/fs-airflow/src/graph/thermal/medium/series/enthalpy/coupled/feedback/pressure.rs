@@ -21,6 +21,9 @@ pub mod solid;
 pub mod heating;
 /// Parallel material-driven paths with enthalpy-conserving outlet mixing.
 pub mod parallel;
+/// Source-bound continuum permeability in the same native liquid solve.
+pub mod porous;
+use porous::{LiquidResistanceModel, PorousLiquidReceipt};
 
 use fs_exec::Cx;
 use fs_material::liquid::ResolvedLiquidState;
@@ -35,11 +38,11 @@ use super::{LiquidFeedbackBudget, LiquidFeedbackError, LiquidHeatMarch,
 /// Exact pressure-loss assignment in thermal-path order. Geometry coefficients
 /// are authored/calibrated assumptions, not another material-property table.
 #[derive(Clone, Copy, Debug)]
-pub struct LiquidResistanceSection<'a> {
+pub struct LiquidResistanceSection<'a, R = MaterialFlowResistance> {
     /// Must match the corresponding thermal region exactly.
     pub region: &'a str,
     /// Current-material pressure-loss law and explicit Reynolds support.
-    pub resistance: MaterialFlowResistance,
+    pub resistance: R,
 }
 
 /// Bounded positive-flow pressure solve, distinct from local thermal tolerances.
@@ -112,6 +115,8 @@ pub struct LiquidHydraulicRegion {
     pub material: ResolvedLiquidState,
     /// Original shape, material snapshot, pressure, flow, tangent and power.
     pub loss: ResistanceEvaluation,
+    /// Original porous skeleton and actual pressure faces, when present.
+    pub porous: Option<PorousLiquidReceipt>,
 }
 
 /// Pressure and dissipation evaluated on the SAME accepted coolant trajectory.
@@ -156,7 +161,7 @@ impl<'a, 'card> LiquidHeatPath<'a, 'card> {
     /// Invalid configuration/assignment, unsupported trials, cancellation,
     /// excessive neglected dissipation, missing bracket or pressure nonconvergence.
     pub fn solve_pressure_driven(
-        &self, cx: &Cx<'_>, walls: &[f64], resistances: &[LiquidResistanceSection<'_>],
+        &self, cx: &Cx<'_>, walls: &[f64], resistances: &[LiquidResistanceSection<'_, impl LiquidResistanceModel>],
         drive: Pressure, local: LiquidFeedbackBudget, budget: PressureDrivenBudget,
     ) -> Result<PressureDrivenSolution<LiquidHeatMarch<'a>>, PressureDrivenError> {
         checkpoint(cx)?;
@@ -175,7 +180,8 @@ impl<'a, 'card> LiquidHeatPath<'a, 'card> {
         })
     }
 
-    fn admit_resistances(&self, resistances: &[LiquidResistanceSection<'_>]) -> Result<(), PressureDrivenError> {
+    fn admit_resistances(&self, resistances: &[LiquidResistanceSection<'_, impl LiquidResistanceModel>]) -> Result<(), PressureDrivenError> {
+        porous::path_outlet_pressure(resistances)?;
         if resistances.len() != self.sections.len() {
             return Err(PressureDrivenError::Invalid("one resistance must be assigned per thermal section"));
         }
@@ -198,7 +204,7 @@ impl<'a, 'card> LiquidHeatPath<'a, 'card> {
     }
 
     fn pressure_state(
-        &self, cx: &Cx<'_>, resistances: &[LiquidResistanceSection<'_>],
+        &self, cx: &Cx<'_>, resistances: &[LiquidResistanceSection<'_, impl LiquidResistanceModel>],
         thermal: &LiquidHeatMarch<'a>, budget: PressureDrivenBudget,
     ) -> Result<LiquidPressureState, PressureDrivenError> {
         if thermal.regions.len() != resistances.len() {
@@ -212,19 +218,20 @@ impl<'a, 'card> LiquidHeatPath<'a, 'card> {
             if section.region != flow.region { return Err(PressureDrivenError::Invalid("pressure/heat region mismatch")); }
             let bulk = 0.5*flow.inlet.temperature_k() + 0.5*flow.outlet.temperature_k();
             let material = self.law.at_temperature(Temperature::new(bulk)).map_err(LiquidFeedbackError::from)?;
-            let loss = section.resistance.evaluate(&material, MassFlowRate::new(thermal.mass_flow_kg_per_s))
+            let loss = section.resistance.evaluate_material(&material, bulk, MassFlowRate::new(thermal.mass_flow_kg_per_s))
                 .map_err(|source| PressureDrivenError::Resistance { region: section.region.to_owned(), source })?;
             total_pressure += loss.pressure_drop_pa;
             total_power += loss.dissipated_power_w;
             if !positive(total_pressure) || !total_power.is_finite() {
                 return Err(PressureDrivenError::Invalid("aggregate pressure/power is unrepresentable"));
             }
-            regions.push(LiquidHydraulicRegion { region: section.region.to_owned(), material, loss });
+            regions.push(LiquidHydraulicRegion { region: section.region.to_owned(), material, loss, porous: None });
         }
         if total_power > budget.maximum_neglected_hydraulic_power_w {
             return Err(PressureDrivenError::NeglectedDissipation { power_w: total_power,
                 allowance_w: budget.maximum_neglected_hydraulic_power_w });
         }
+        self.admit_porous_trajectory(cx, resistances, &thermal.regions, &mut regions)?;
         checkpoint(cx)?;
         Ok(LiquidPressureState { regions, total_pressure_drop_pa: total_pressure, total_dissipated_power_w: total_power })
     }

@@ -18,6 +18,7 @@ use fs_exec::Cx;
 use fs_material::liquid::ResolvedLiquidState;
 use fs_qty::{Length, Pressure, VolumetricFlowRate};
 use crate::SourceProvenance;
+use super::LiquidResistanceModel;
 use super::{LiquidFeedbackBudget, ParallelLiquidNetwork, ParallelLiquidSolution,
     ParallelPressureBudget, ParallelPressureError, checkpoint, positive};
 
@@ -201,7 +202,7 @@ pub struct PumpOperatingPoint<'s, T> {
     pub total_solid_solves: usize,
 }
 
-impl<'p, 'a, 'card> ParallelLiquidNetwork<'p, 'a, 'card> {
+impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'card, H> {
     fn admit_pump_inlet(&self, cx: &Cx<'_>, pump: &PumpHeadCurve) -> Result<(), PumpOperatingError> {
         checkpoint(cx).map_err(ParallelPressureError::from)?;
         let path = self.branches[0].path;

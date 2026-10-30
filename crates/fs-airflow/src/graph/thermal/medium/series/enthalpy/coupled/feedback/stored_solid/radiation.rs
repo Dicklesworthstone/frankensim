@@ -20,6 +20,7 @@ use fs_conduction::transient::enthalpy::{EnthalpyStepSolution,
 use fs_convection::CorrelationRobinBoundary;
 use fs_exec::Cx;
 
+use super::LiquidResistanceModel;
 use super::{ParallelLiquidNetwork, PumpHeadCurve, StoredCoolingControls,
     StoredCoolingError, StoredMaterialCoolingState, StoredCoolingStep, StoredSolidProblem,
     SolidEnthalpyStorage,
@@ -67,7 +68,7 @@ pub struct RadiatingStoredCoolingStep<'p, 'a> {
     pub total_krylov_iterations: usize,
 }
 
-impl<'n, 'a, 'card> ParallelLiquidNetwork<'n, 'a, 'card> {
+impl<'n, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'n, 'a, 'card, H> {
     /// Advance both original histories with implicit ambient surface radiation.
     ///
     /// `boundary` maps current coolant rows and any explicitly radiating

@@ -1669,3 +1669,40 @@ the solid geometry and supplies no inferred vessel-volume displacement or
 pressure work. The existing first-order overall source/pressure/thermal
 composition, approximate gray radiation, finite chemistry domains and absence
 of an experimental fire/soot/emission validation remain explicit.
+
+### Original porous permeability in liquid operating points
+
+The native temperature-feedback pressure path now accepts a sealed resistance-owner
+abstraction while preserving the existing geometry-law default. Original continuum
+permeability supplies only the unchanged tensor/series sum of thickness over normal
+permeability divided by flow area. The existing hydraulic owner evaluates current
+liquid density, viscosity, Reynolds admission, pressure loss and dissipated power.
+Mixed ordinary/porous sections, the fully dissipative enthalpy march, coupled-solid
+pressure closure, parallel branches, pump-coupled networks, recirculating coolant
+and stored solid/contact/radiation transactions share that owner.
+
+A porous binding retains the original layers, frame, source claims and support and
+requires an explicit absolute downstream path pressure. Every local hydraulic
+sample admits its actual bulk temperature and superficial speed. Every complete
+trial (including bracket endpoints and rejected solid/flow candidates) reconstructs
+the actual regional absolute pressure faces by a reverse stream walk and admits
+those faces, fluid endpoint temperatures/speeds and bulk state against the original
+support. Porous sections and parallel manifolds must agree on the outlet datum.
+Accepted regional reports retain the original barrier and actual pressure faces.
+Changing permeability or liquid transport data therefore propagates through flow,
+heat transport, solid feedback and enthalpy-conserving outlet mixing.
+
+Scope remains the native positive-flow, low-compressibility regional liquid model:
+transport pressure stays at its declared reference, intrinsic permeability is
+constant within its source support, and the skeleton is rigid and fully liquid
+filled. Gas slip/relative saturation, a sealed positive-flow path, inconsistent
+pressure datums and unsupported trial states refuse without coefficient floors.
+No liquid wetting/multiphase mobility, evolving pore geometry, skeleton heat store,
+pressure EOS or inertial porous law is inferred. The opt-in hydraulic-heating path
+retains its explicit complete conversion to fluid heat; the other paths retain
+their original omitted-power allowance.
+
+Regression sources exercise data-only permeability/viscosity changes, independently
+derived pressure/heat operating points, hydraulic heat in the same enthalpy state,
+original source receipts, discarded-trial support refusal, sealed topology, solid
+feedback and parallel redistribution/mixing.

@@ -8,6 +8,7 @@ use fs_convection::CorrelationRobinBoundary;
 use fs_exec::Cx;
 use crate::AirflowError;
 use crate::graph::thermal::medium::series::enthalpy::coupled::LiquidSolidResponse;
+use super::super::LiquidResistanceModel;
 use super::super::solid::{CoupledParallelLiquidSolution, ParallelLiquidCouplingControls};
 use super::{PumpHeadCurve, PumpLoad, PumpOperatingControls, PumpOperatingError,
     PumpOperatingPoint, ParallelLiquidNetwork, ParallelLiquidSolution,
@@ -31,7 +32,7 @@ impl<R> PumpLoad for CoupledParallelLiquidSolution<'_, R> {
     fn solid_solves(&self) -> usize { self.iterations }
 }
 
-impl<'p, 'a, 'card> ParallelLiquidNetwork<'p, 'a, 'card> {
+impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'card, H> {
     /// Intersect a pump curve with fully coupled solid/material/branch states.
     /// The result retains the exact solid field, sent boundary states, recomputed
     /// coolant states and pump evaluation. Pump matching cannot bypass any inner

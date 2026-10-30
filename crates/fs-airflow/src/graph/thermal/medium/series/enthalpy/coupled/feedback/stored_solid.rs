@@ -31,6 +31,7 @@ use fs_exec::Cx;
 use crate::AirflowError;
 use crate::conjugate::SolidRegionState;
 use super::super::LiquidSolidResponse;
+use super::pressure::porous::LiquidResistanceModel;
 use super::pressure::parallel::ParallelLiquidNetwork;
 use super::pressure::parallel::solid::CoupledParallelLiquidSolution;
 use super::pressure::parallel::pump::{PumpHeadCurve, PumpOperatingPoint};
@@ -180,7 +181,7 @@ impl StoredThermalResponse for EnthalpyStepSolution {
     fn external_boundary_out_w(&self) -> f64 { 0.0 }
 }
 
-impl<'n, 'a, 'card> ParallelLiquidNetwork<'n, 'a, 'card> {
+impl<'n, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'n, 'a, 'card, H> {
     /// Advance the actual P1 solid enthalpy field AND the recirculating coolant.
     ///
     /// `boundary` only maps current rows to the original mesh. The numerical

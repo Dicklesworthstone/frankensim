@@ -370,3 +370,5 @@ fn acoustic_and_darcy_owners_share_intrinsic_geometry() {
     near(b.linear_volume_resistance(&gas(),1.0).unwrap().unwrap(),
         gas().dynamic_viscosity*0.1/acoustic.viscous_permeability_m2());
 }
+
+mod continuum;

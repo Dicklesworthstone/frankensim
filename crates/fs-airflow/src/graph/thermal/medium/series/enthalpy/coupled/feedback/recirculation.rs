@@ -17,6 +17,7 @@ use fs_qty::{MassFlowRate, Temperature};
 
 use super::{LiquidFeedbackBudget, LiquidFeedbackError, LiquidHeatPath, LiquidHeatSection,
     LiquidEnthalpyError, checkpoint, positive, state_at_temperature};
+use super::pressure::porous::LiquidResistanceModel;
 use super::pressure::parallel::{ParallelLiquidBranch, ParallelLiquidNetwork,
     ParallelLiquidSolution, ParallelPressureBudget, ParallelPressureError};
 use super::pressure::parallel::pump::{PumpHeadCurve, PumpOperatingControls,
@@ -110,7 +111,7 @@ pub struct RecirculatingLiquidStep<T> {
     pub total_solid_solves: usize,
 }
 
-impl<'p, 'a, 'card> ParallelLiquidNetwork<'p, 'a, 'card> {
+impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'card, H> {
     /// Bind an initial finite inventory to this network's actual liquid source.
     /// The reservoir is well mixed, fixed mass and at the same constant source
     /// pressure. Its initial temperature need not equal the template inlet.
@@ -187,7 +188,7 @@ impl<'p, 'a, 'card> ParallelLiquidNetwork<'p, 'a, 'card> {
     // survive inlet rebinding. Local paths are only descriptions, not new sources.
     fn with_reservoir_inlet<T>(
         &self, cx: &Cx<'_>, temperature: Temperature,
-        evaluate: impl FnOnce(&ParallelLiquidNetwork<'_, 'a, 'card>) -> Result<T, PumpOperatingError>,
+        evaluate: impl FnOnce(&ParallelLiquidNetwork<'_, 'a, 'card, H>) -> Result<T, PumpOperatingError>,
     ) -> Result<T, RecirculationError> {
         let mut paths = Vec::with_capacity(self.branches().len());
         for branch in self.branches() {
@@ -313,7 +314,7 @@ impl<R> ReservoirCircuit for PumpOperatingPoint<'_, CoupledParallelLiquidSolutio
     fn solid_solves(&self) -> usize { self.total_solid_solves }
 }
 
-impl<'p, 'a, 'card> ParallelLiquidNetwork<'p, 'a, 'card> {
+impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'card, H> {
     /// Advance finite coolant storage while resolving ONE common solid field,
     /// the pump operating point and all material-driven branches at each inlet.
     /// Reuses the same enthalpy time step as the fixed-wall path; every original

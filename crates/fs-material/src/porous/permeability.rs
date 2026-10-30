@@ -1,4 +1,8 @@
-//! Intrinsic pore permeability and quasi-steady, isothermal gas permeation.
+//! Intrinsic pore permeability, continuum geometry and isothermal gas permeation.
+//!
+//! [`ContinuumDarcyGeometry`] shares the original no-slip geometry and source
+//! support with native liquid/general-fluid hydraulic owners. It does not
+//! reinterpret gas slip or gas-only wet mobility as a liquid constitutive law.
 //!
 //! Darcy superficial velocity is u = -K grad(p)/mu. Ideal-gas conservation
 //! makes rho*u constant through a slab, not volume flow. Integrating
@@ -22,6 +26,9 @@
 use crate::{MaterialError, gas::GasState, state_point::ResolvedMaterialStatePoint,
     thermochemical_gas::ThermochemicalGasModel};
 use fs_qty::{Dims, QuantitySpec};
+
+mod continuum;
+pub use continuum::ContinuumDarcyGeometry;
 
 pub const INTRINSIC_PERMEABILITY_DIMS: Dims = Dims([2, 0, 0, 0, 0, 0]);
 /// Maximum compiled laminate size. Common-factor queries take constant work.
@@ -103,12 +110,7 @@ impl PorousGasSupport {
     }
     fn admit(self, gas: &GasState, left: f64, right: f64) -> Result<(), MaterialError> {
         gas.validate_coherence()?;
-        if gas.temperature < self.temperature_k.0 || gas.temperature > self.temperature_k.1
-            || [left, right, gas.pressure].iter().any(|&p| !p.is_finite()
-                || p < self.pressure_pa.0 || p > self.pressure_pa.1) {
-            return Err(invalid("gas permeability query lies outside source temperature/absolute-pressure support"));
-        }
-        Ok(())
+        self.admit_state(gas.temperature, &[left, right, gas.pressure])
     }
 }
 

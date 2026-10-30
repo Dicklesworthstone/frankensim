@@ -16,6 +16,7 @@ use crate::conjugate::{ConjugateConfig, Relaxation};
 use crate::graph::thermal::{admit, checked, iqn_error};
 use crate::graph::thermal::medium::{FlowHeatSection, FrozenFlowMedium, MediumFlowError};
 use crate::graph::thermal::medium::series::enthalpy::coupled::LiquidSolidResponse;
+use super::LiquidResistanceModel;
 use super::{ParallelLiquidNetwork, ParallelLiquidSolution, ParallelPressureBudget,
     ParallelPressureError, LiquidFeedbackBudget, LiquidFeedbackError, checkpoint, positive};
 
@@ -73,7 +74,7 @@ pub struct CoupledParallelLiquidSolution<'a, R> {
     pub residuals: ParallelLiquidResiduals,
 }
 
-impl<'p, 'a, 'card> ParallelLiquidNetwork<'p, 'a, 'card> {
+impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'card, H> {
     /// Close pressure-driven flow redistribution against one common solid.
     ///
     /// The callback receives every actual Robin row in branch-major/stream-wise

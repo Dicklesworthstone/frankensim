@@ -14,7 +14,7 @@ use super::super::{
     Section, checkpoint, positive,
 };
 use super::{
-    LiquidHydraulicRegion, LiquidPressureState, LiquidResistanceSection, PressureDrivenBudget,
+    LiquidHydraulicRegion, LiquidPressureState, LiquidResistanceSection, LiquidResistanceModel, PressureDrivenBudget,
     PressureDrivenError, PressureDrivenSolution, solve_pressure_root,
 };
 use crate::graph::thermal::medium::FrozenFlowMedium;
@@ -54,7 +54,7 @@ impl<'a, 'card> LiquidHeatPath<'a, 'card> {
         &self,
         cx: &Cx<'_>,
         walls: &[f64],
-        resistances: &[LiquidResistanceSection<'_>],
+        resistances: &[LiquidResistanceSection<'_, impl LiquidResistanceModel>],
         budget: LiquidFeedbackBudget,
     ) -> Result<LiquidDissipativeMarch<'a>, PressureDrivenError> {
         checkpoint(cx)?;
@@ -104,6 +104,7 @@ impl<'a, 'card> LiquidHeatPath<'a, 'card> {
                 "advected energy or heat balance is unrepresentable",
             ));
         }
+        self.admit_porous_trajectory(cx, resistances, &thermal, &mut hydraulic)?;
         checkpoint(cx)?;
         Ok(LiquidDissipativeMarch {
             thermal: LiquidHeatMarch {
@@ -132,7 +133,7 @@ impl<'a, 'card> LiquidHeatPath<'a, 'card> {
         &self,
         cx: &Cx<'_>,
         walls: &[f64],
-        resistances: &[LiquidResistanceSection<'_>],
+        resistances: &[LiquidResistanceSection<'_, impl LiquidResistanceModel>],
         drive: Pressure,
         local: LiquidFeedbackBudget,
         budget: PressureDrivenBudget,
@@ -159,7 +160,7 @@ impl<'a, 'card> LiquidHeatPath<'a, 'card> {
         section: &Section,
         inlet: EquilibriumPhaseState,
         wall: f64,
-        resistance: &LiquidResistanceSection<'_>,
+        resistance: &LiquidResistanceSection<'_, impl LiquidResistanceModel>,
         budget: LiquidFeedbackBudget,
     ) -> Result<(LiquidHeatRegion, LiquidHydraulicRegion), PressureDrivenError> {
         let mut guess = inlet.temperature_k();
@@ -212,7 +213,7 @@ impl<'a, 'card> LiquidHeatPath<'a, 'card> {
         inlet: EquilibriumPhaseState,
         wall: f64,
         guess: f64,
-        resistance: &LiquidResistanceSection<'_>,
+        resistance: &LiquidResistanceSection<'_, impl LiquidResistanceModel>,
     ) -> Result<(LiquidHeatRegion, LiquidHydraulicRegion), PressureDrivenError> {
         checkpoint(cx)?;
         let bulk = 0.5 * inlet.temperature_k() + 0.5 * guess;
@@ -222,7 +223,7 @@ impl<'a, 'card> LiquidHeatPath<'a, 'card> {
             .map_err(LiquidFeedbackError::from)?;
         let loss = resistance
             .resistance
-            .evaluate(&hydraulic_material, MassFlowRate::new(self.mass_flow))
+            .evaluate_material(&hydraulic_material, bulk, MassFlowRate::new(self.mass_flow))
             .map_err(|source| PressureDrivenError::Resistance {
                 region: section.name.clone(),
                 source,
@@ -299,6 +300,7 @@ impl<'a, 'card> LiquidHeatPath<'a, 'card> {
                 region: section.name.clone(),
                 material: hydraulic_material,
                 loss,
+                porous: None,
             },
         ))
     }
