@@ -1673,3 +1673,43 @@ cancellation retry. All seven, the ten existing Hertz groups and the seven
 existing pure-rolling groups pass against the current original-source
 full-inertia implementation. These analytical synthetic fixtures are separate
 from measured validation and a full Cargo/DSR workspace gate.
+
+## Partial separation into retained rigid subassemblies
+
+`assembly::partition::AssemblyPartition` prepares a complete partition of an
+existing rigid assembly. Every original component belongs to exactly one
+nonempty group; group IDs are contiguous, and original component order is
+retained within each child. Child mass, COM, complete rotated inertia and
+parallel-axis contributions are admitted once by the original assembly owner.
+Preparation/storage are O(parts + groups), with no dense multibody matrix.
+
+At release, separation impulse endpoints name original components. Each pair
+must cross a released interface and acts on the entire retained group at the
+original parent-COM-relative physical point. The original release kernel owns
+inherited rigid velocity fields, equal/opposite force impulses and free couples,
+full-inertia recoil, shared-group work cross terms and actual output momentum /
+energy gates. Events cost O(groups + impulses). There is no intermediate release
+of every leaf followed by an artificial inelastic relatch.
+
+Returned group states use the parent's reference axes. Each cached child can
+subsequently move independently, be partitioned again for further staging, or
+be expanded into original material-body states. Expansion retains child-local
+poses, world spin and `v_com + omega cross r`, checks each actual child balance,
+and restores original component indexing using O(parts) work and two reusable
+largest-group workspaces. Failed admission, balance or cancellation publishes
+no partial state and never mutates caller states or the prepared partition.
+
+The six focused partition cases check interleaved full-tensor groups against
+original material motion; analytic off-center two-stage recoil and work;
+independent native impulse application with shared-group work cross terms;
+independent free flight followed by a second separation; single-group and
+singleton limits; and malformed membership, caps and late cancellation/retry.
+The original seven assembly and nine native rocket rigid-mechanics cases remain
+passing in the focused native build. This is not a whole-workspace, target-ISA,
+real-time or physical-calibration qualification.
+
+The caller owns the physical connectivity decision, collision/geometric
+admissibility, and separation impulses. Retained groups remain perfectly rigid.
+This API does not discover fracture, model finite attachment forces or stored
+elastic energy, partition heat, or certify the exact continuum trajectory.
+

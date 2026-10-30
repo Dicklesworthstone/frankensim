@@ -14,6 +14,9 @@
 
 use crate::{DynamicsError, MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 
+/// Prepared separation into retained rigid subassemblies.
+pub mod partition;
+
 /// A component's original mass properties and COM pose in a common reference.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AssemblyPart {
@@ -64,7 +67,8 @@ pub struct AssemblyBalance {
     pub energy_residual_j: f64,
 }
 
-/// Every original component survives release as a native rigid-body state.
+/// Every released component survives as a native rigid-body state. For a
+/// prepared partition these components are the retained rigid groups.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AssemblyRelease {
     /// States in the original part order, each with its own body axes and COM.
