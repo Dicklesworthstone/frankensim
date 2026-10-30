@@ -9,6 +9,17 @@ observer and a player-pressure table. Nothing is defaulted: a missing key, a
 missing specimen row or a hole wider than its bore stops the run with the name
 of the field. Every bore station and chimney becomes one record; the bore is
 split at each chimney position and is never decimated.
+
+The authored reed geometry and constitutive response stay fixed when the player
+pressure changes. Changing embouchure requires changing its explicit physical
+description; a pressure table must not silently resize the reed opening.
+
+Optional exterior.* gas keys use exactly the ambient.* representations: gas_pack,
+temperature_k/pressure_pa/composition, or temperature_k/pressure_pa/relative_humidity.
+The native gas owner resolves both declarations and checks their compatibility.
+Omitting exterior.* retains the native same-medium behavior; it never invents
+room conditions. A supplied exterior reaches both opening loads and the physical
+microphone, including descriptions with open tone holes.
 """
 import csv
 import math
@@ -245,8 +256,8 @@ def tongue_record(desc):
     return f"tongue_contact {num(area_t)} {num(area_r)} {num(force_n)} {num(release_start)} {num(release_s)}\n"
 
 
-def reed_record(desc, pressure):
-    """The `reed` header values: literal keys, or per-area quantities with a lip-force rule.
+def reed_record(desc):
+    """The `reed` header values from the authored geometry and constitutive response.
 
     Per-area mode (reed.stiffness_per_area_pa_m present): at the published operating point
     p_m = reed.operating_blowing_pa (Chatziioannou and van Walstijn 2009 Table 1), the lip-reduced
@@ -264,48 +275,54 @@ def reed_record(desc, pressure):
     k_a = float(need(desc, "reed.stiffness_per_area_pa_m"))
     m_a = float(need(desc, "reed.mass_per_area_kg_m2"))
     g = float(need(desc, "reed.damping_rate_1_s"))
-    p_op = float(need(desc, "reed.operating_blowing_pa"))
-    if abs(pressure - p_op) <= 1e-12:
-        y_m = h0
-        closing = k_a * h0
-    else:
-        ratio = p_op / (k_a * h0)
-        closing = pressure / ratio
-        y_m = closing / k_a
-    if "reed.tip_opening_cap_m" in desc and y_m > float(desc["reed.tip_opening_cap_m"]):
-        refuse(f"equilibrium reed opening {y_m} m exceeds tip opening cap {desc['reed.tip_opening_cap_m']} m")
+    closing = k_a * h0
+    if "reed.tip_opening_cap_m" in desc and h0 > float(desc["reed.tip_opening_cap_m"]):
+        refuse(f"equilibrium reed opening {h0} m exceeds tip opening cap {desc['reed.tip_opening_cap_m']} m")
     stiffness = k_a * area
     mass = m_a * area
     zeta = g / (2.0 * math.sqrt(k_a / m_a))
-    return f"{num(y_m)} {width} {num(closing)} {mass!r} {stiffness!r} {zeta!r}"
+    return f"{num(h0)} {width} {num(closing)} {mass!r} {stiffness!r} {zeta!r}"
+
+
+def gas_record(desc, prefix):
+    """Serialize one physical gas declaration without deriving or replacing its properties.
+
+    Both the bore and the exterior go through the same native gas resolver.
+    A pack remains the authority when a description also retains its source
+    coordinates/composition as explanatory columns, as the clarinet does.
+    """
+    if f"{prefix}.gas_pack" in desc:
+        pack_id = need(desc, f"{prefix}.gas_pack")
+        manifest = os.path.join("data", "matdb", "seed-v1", pack_id, "manifest.tsv")
+        if not os.path.isfile(manifest):
+            refuse(f"missing gas pack manifest {manifest}")
+        return f"pack {pack_id}"
+    if f"{prefix}.composition" in desc:
+        return (
+            f"mixture {need(desc, f'{prefix}.temperature_k')} {need(desc, f'{prefix}.pressure_pa')} "
+            f"{need(desc, f'{prefix}.composition')}"
+        )
+    return " ".join(
+        need(desc, f"{prefix}.{key}")
+        for key in ("temperature_k", "pressure_pa", "relative_humidity")
+    )
 
 
 def performance(desc, records, pressure):
     rate = int(need(desc, "audio.rate_hz"))
     samples = round(float(need(desc, "audio.duration_s")) * rate)
-    reed = reed_record(desc, pressure)
-    if "ambient.gas_pack" in desc:
-        pack_id = need(desc, "ambient.gas_pack")
-        manifest = os.path.join("data", "matdb", "seed-v1", pack_id, "manifest.tsv")
-        if not os.path.isfile(manifest):
-            refuse(f"missing gas pack manifest {manifest}")
-        ambient = f"pack {pack_id}"
-    elif "ambient.composition" in desc:
-        ambient = (
-            f"mixture {need(desc, 'ambient.temperature_k')} {need(desc, 'ambient.pressure_pa')} "
-            f"{need(desc, 'ambient.composition')}"
-        )
-    else:
-        ambient = " ".join(
-            need(desc, key)
-            for key in ("ambient.temperature_k", "ambient.pressure_pa", "ambient.relative_humidity")
-        )
+    reed = reed_record(desc)
+    ambient = gas_record(desc, "ambient")
+    exterior = (
+        f"exterior {gas_record(desc, 'exterior')}\n"
+        if any(key.startswith("exterior.") for key in desc) else ""
+    )
     observer_law = f"observer_law {need(desc, 'observer.law')}\n" if "observer.law" in desc else ""
     head = (
         "frankensim-reed-performance-v1\n"
         f"audio {rate} {samples} {need(desc, 'audio.full_scale_pa')}\n"
         f"ambient {ambient}\nreed {reed}\n{tongue_record(desc)}{need(desc, 'observer.record')}\n"
-        f"{observer_law}termination {need(desc, 'observer.termination')}\nsegments {len(records)}\n"
+        f"{exterior}{observer_law}termination {need(desc, 'observer.termination')}\nsegments {len(records)}\n"
     )
     return head + "\n".join(records) + f"\ncompile_limits {need(desc, 'compile_limits')}\nschedule\n" + gesture(desc, pressure)
 
