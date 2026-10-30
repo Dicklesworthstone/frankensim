@@ -2,8 +2,8 @@
   "scope": "Authored methane-releasing solid coupled to existing ideal-gas calorics, instantaneous complete oxidation and pressure-driven ventilation; numerical integration example, not PMMA/wood or experimental fire validation",
   "verification": "Actual release-mode native runs on original fs-airflow/fs-gas/fs-thermal/fs-thermochem owners in focused supporting workspace; default four cases and one timestep refinement complete; no full-workspace/DSR claim",
   "commands": [
-    "cargo run --release -p fs-airflow --features compartment-fire --example pyrolyzing_compartment_fire -- all 30 0.02 24 50000",
-    "cargo run --release -p fs-airflow --features compartment-fire --example pyrolyzing_compartment_fire -- fan-exhaust 30 0.01 24 50000"
+    "cargo run --release -p fs-airflow --features compartment-fire --example pyrolyzing_compartment_fire -- all 30 0.02 24 50000 fixed",
+    "cargo run --release -p fs-airflow --features compartment-fire --example pyrolyzing_compartment_fire -- fan-exhaust 30 0.01 24 50000 fixed"
   ],
   "gas_source": {
     "species": [

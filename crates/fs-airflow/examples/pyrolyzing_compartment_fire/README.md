@@ -5,6 +5,8 @@ existing reacting gas and pressure-driven ventilation models. Heating determines
 the fuel release; neither a fuel-feed history nor combustion power is supplied.
 It exercises oxygen starvation, unburned fuel accumulation, natural ventilation
 and pressure-dependent mechanical exhaust with combined conservation accounts.
+The default solid now shrinks as material volatilizes, with implicit conduction
+and reaction followed by conservative remapping of retained enthalpy.
 
 The material is an **explicitly manufactured methane-releasing solid**. It is
 not PMMA, wood, or a calibrated experimental fire. The source-backed PMMA/TGA
@@ -15,12 +17,14 @@ substituted for the original gas's physical formation-enthalpy reference.
 
 ```sh
 cargo run --release -p fs-airflow --features compartment-fire \
-  --example pyrolyzing_compartment_fire -- all 30 0.02 24 50000
+  --example pyrolyzing_compartment_fire -- all 60 0.02 24 50000 receding
 ```
 
 Arguments are case (`all`, `closed`, `restricted`, `open`, `fan-exhaust`), end
-time in seconds, maximum timestep in seconds, solid cell count, and external
-irradiance in W/m². The values above are the defaults. CSV goes to stdout;
+time in seconds, maximum timestep in seconds, solid cell count, external
+irradiance in W/m², and geometry (`receding` or `fixed`). The values above are
+the defaults. `fixed` selects the earlier fixed-geometry explicit solid solver
+for comparison. CSV goes to stdout;
 source declarations and final balance summaries go to stderr. The face
 temperature in each row is the lagged face temperature used over the accepted
 interval, while the cell and gas temperatures are the accepted endpoint values.
@@ -32,10 +36,18 @@ within the model's physical domain.
 
 ## Existing owners and energy reference
 
-The solid uses the original `fs-thermal::enthalpy::pyrolysis::PyrolysisSimulation` on the
-original deposited-cell thermal graph. Its ordinary links conduct heat through
-the slab; its Arrhenius reaction changes retained mass and exports integrated
-volatile mass and enthalpy. The existing `VolatileMixture` uses the original
+The solid uses the original `fs-thermal::enthalpy::pyrolysis::PyrolysisSimulation`
+on the original deposited-cell thermal graph, wrapped by the existing
+`pyrolysis::slab::RecedingSlab` in the default mode. Its ordinary links conduct
+heat through the slab; its Arrhenius reaction changes retained mass and exports
+integrated volatile mass and enthalpy. The coupled implicit solver reuses that
+same local reaction/energy inversion. After each accepted solid interval, actual
+retained mass and the supplied constant density determine the slab thickness.
+Limited enthalpy reconstruction and overlap integrals rezone the retained mass
+onto equal-mass cells, and the original caloric inverse recovers temperatures.
+Geometry and series conductances are rebuilt with the back face fixed. This
+transfers extensive enthalpy, rather than averaging temperatures or inventing
+residual mass. The existing `VolatileMixture` uses the original
 NASA gas calorics to supply that outgoing enthalpy and map release onto the
 canonical gas species axis.
 
@@ -56,8 +68,9 @@ revision are reused unchanged from
 For each attempted network interval:
 
 1. Solve a bounded face energy balance using the accepted gas and front-cell
-   temperatures. The front half-cell conductance balances convection, absorbed
-   external irradiation, and radiation to a 300 K blackbody environment.
+   temperatures and current slab thickness. The front half-cell conductance
+   balances convection, absorbed external irradiation, and radiation to a 300 K
+   blackbody environment.
 2. Advance an unpublished solid candidate with that boundary power. Transfer
    every cell's actual integrated volatile release to the gas using the original
    formation-energy convention. Apply the opposite gas convection power once.
@@ -94,7 +107,10 @@ calibrated methane rate law.
 | Closed / restricted / open door width | 0 / 0.001 / 0.02 m |
 
 The gas occupies one active layer, the well-mixed limit of the original two-zone
-model. Other room walls are adiabatic. The small sealed room deliberately becomes
+model. The slab is an external fuel source thermally coupled to a fixed-volume
+gas vessel. Its lost volume is not added to the vessel volume; an immersed
+moving gas/solid interface would need a separate volume and pressure-work model.
+Other room walls are adiabatic. The small sealed room deliberately becomes
 highly pressurized; this is a rigid control-volume example, not a structural
 model of a room or vessel.
 
@@ -114,11 +130,76 @@ fraction is zero. The admitted donor/reference density ratio is 0.05–2, and
 the low-pressure domain limits the pressure fraction to 0.02. These are explicit
 authored fixture choices; no uncertain fan data are inferred.
 
-## Completed 30-second runs
+## Completed 60-second receding-slab runs
+
+The [retained actual outputs](../../../../data/reference/compartment_fire/receding_pyrolyzing_compartment_example.json)
+contain all four default cases, a fan-case timestep refinement and a separate
+fan-case mesh refinement. At maximum timestep 0.02 s and 24 solid cells:
+
+| Quantity | Closed | Restricted door | Open door | Fan exhaust |
+|---|---:|---:|---:|---:|
+| Released fuel (g) | 12.260347 | 9.822454 | 11.424330 | 10.149217 |
+| Burned fuel (g) | 1.368521 | 0.378477 | 2.300467 | 0.645526 |
+| Fuel remaining in gas (g) | 10.891826 | 5.355061 | 0.922996 | 3.615231 |
+| Final gas temperature (K) | 1452.101 | 654.250 | 1449.497 | 826.878 |
+| Final pressure (Pa) | 951799.424 | 101327.134 | 101324.411 | 101324.008 |
+| Final slab thickness (mm) | 4.557606 | 4.844417 | 4.655961 | 4.805974 |
+| Surface recession (mm) | 1.442394 | 1.155583 | 1.344039 | 1.194026 |
+| First oxygen-limited accepted time (s) | 17.92 | 12.30 | 12.29 | 12.30 |
+
+All four cases pass the executable mass, canonical-species, elemental,
+physical-energy, clock and pressure checks. The largest combined mass residual
+was 1.74e-16 kg, elemental residual 5.13e-14 mol, combined energy residual
+9.62e-7 J, and pressure residual 1.00e-5 Pa. The open case required eight
+whole-step halvings; the other three required none. Every accepted interval
+remapped the solid, with no geometry retries in these runs. Accumulated absolute
+remap energy residuals were below 6.31e-9 J. Those residuals measure conservation
+closure, not physical accuracy or the error introduced by redistribution.
+
+The exhaust fan ended at 9.67963e-4 m³/s and 0.0413375 W shaft power. It
+exhausted 0.0250541 kg of gas and delivered 3.69815 J of shaft energy downstream
+into ambient. Open cases export unburned fuel, so burned plus remaining fuel
+does not by itself equal released fuel.
+
+The two selected refinements keep all other inputs unchanged:
+
+```sh
+cargo run --release -p fs-airflow --features compartment-fire \
+  --example pyrolyzing_compartment_fire -- fan-exhaust 60 0.01 24 50000 receding
+cargo run --release -p fs-airflow --features compartment-fire \
+  --example pyrolyzing_compartment_fire -- fan-exhaust 60 0.02 48 50000 receding
+```
+
+| Change from the 24-cell, 0.02 s fan case | 0.01 s timestep | 48 solid cells |
+|---|---:|---:|
+| Released fuel | −0.002116% | +0.602647% |
+| Burned fuel | +0.125202% | +0.064552% |
+| Final gas temperature | +0.033386 K | −0.561744 K |
+| Surface recession | −0.0000253 mm | +0.007196 mm |
+
+Both runs pass the same checks. Their largest combined energy residuals were
+1.53e-6 J and 9.21e-7 J, respectively. These are two sensitivity checks, not a
+convergence-order or mesh-independence claim. The remap's independent quadratic
+enthalpy refinement and datum-invariance checks live with the thermal owner.
+
+CSV retains the original fields and appends `solid_thickness_m` and
+`surface_recession_m`. In receding mode, `minimum_retained_cell_fraction` compares
+current equal-mass spatial slots to their initial masses; slot identifiers no
+longer label individual material parcels. Actual remap and geometry-work counts
+appear in the final stderr summary.
+
+## Retained 30-second fixed-geometry comparison
 
 The [retained actual outputs](../../../../data/reference/compartment_fire/pyrolyzing_compartment_example.json)
-contain all four default cases and the fan case with a halved timestep. At
-maximum timestep 0.02 s and 24 solid cells:
+contain the earlier four fixed-geometry cases and the fan case with a halved
+timestep. Their reproduction command now explicitly selects the old mode:
+
+```sh
+cargo run --release -p fs-airflow --features compartment-fire \
+  --example pyrolyzing_compartment_fire -- all 30 0.02 24 50000 fixed
+```
+
+At maximum timestep 0.02 s and 24 solid cells:
 
 | Quantity | Closed | Restricted door | Open door | Fan exhaust |
 |---|---:|---:|---:|---:|
@@ -147,7 +228,7 @@ Halving only the fan case's maximum timestep to 0.01 s changed released fuel
 by about 0.0173%, burned fuel by 0.172%, and final gas temperature by 0.1942 K.
 All checks still passed; the maximum combined energy residual was 1.50e-5 J.
 This is a single temporal refinement on the same mesh, not a convergence-order
-or mesh-independence claim. A `closed 33 0.02 24 50000` scope check deliberately
+or mesh-independence claim. A `closed 33 0.02 24 50000 fixed` scope check deliberately
 exits with the named retained-mass/recession refusal; it is not a completed
 33-second prediction.
 
@@ -158,15 +239,21 @@ C/H/N/O elements, physical energy, common clock and pressure residual. The close
 case also checks the independent oxygen-capacity limit from the initial O2
 inventory. Tiny balance residuals alone do not establish time or mesh accuracy.
 
-Solid geometry and conductance stay fixed as material decomposes. The example
-refuses when any cell retains less than 1e-4 of its initial mass. A receding
-surface/remeshing model is required to continue through depletion; no residual
-mass, heat-capacity floor, or release clipping is introduced. This scope limit
-can be reached earlier on a finer mesh, so the maximum permitted input duration
-must not be read as a guaranteed run duration.
+The default receding model admits a homogeneous, noncharring slab with explicit
+constant density and conductivity. Geometry retries bound the fractional mass
+loss per solid interval. It preserves actual volatile mass and enthalpy while
+remapping retained material; it does not model char porosity, swelling, stress,
+thermal expansion, solid oxidation or complete burnout. The fixed comparison
+keeps its original 1e-4 initial-cell-mass refusal. Neither mode inserts residual
+mass, a heat-capacity floor or release clipping, and neither promises that every
+admitted duration will stay within the supplied caloric/model domain.
 
-The boundary and source composition is first order. The instantaneous,
+Implicit solid stepping and geometry remapping remain first order in time;
+the boundary and gas-source coupling is also first order. Symmetric composition
+would not by itself establish a second-order method or an entropy theorem.
+The instantaneous,
 well-mixed oxidation law does not predict ignition, extinction, flame structure,
 CO or soot yields, or high-temperature dissociation. The external optical
-boundary does not model smoke/flame radiative feedback. No pores, oxidation of
-the solid, char layer, shrinkage, sprays, or real-gas phases are inferred.
+boundary does not model smoke/flame radiative feedback. The separate
+`radiating_compartment` example exercises participating radiation coupled to
+finite walls. Sprays and real-gas phases remain outside this example.

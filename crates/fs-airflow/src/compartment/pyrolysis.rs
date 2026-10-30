@@ -32,6 +32,8 @@ use fs_gas::multicomponent::compartment::{Layer, LayerRates, TwoZone, ZoneError}
 use fs_gas::multicomponent::{MAX_SPECIES, MixtureGas};
 use fs_qty::{Energy, Temperature, Time};
 use fs_thermal::enthalpy::DepositionError;
+use fs_thermal::enthalpy::pyrolysis::implicit::ImplicitError;
+use fs_thermal::enthalpy::pyrolysis::slab::SlabError;
 pub use fs_thermal::enthalpy::pyrolysis::{VolatileEnthalpy, VolatileRelease};
 use fs_thermochem::mixture::{FrozenIdealGasMixtureErrorV1, FrozenIdealGasMixtureModelV1};
 use fs_thermochem::{Composition, CompositionBasis, MassSpecificEnergyQuantityV1};
@@ -64,6 +66,10 @@ pub enum VolatileGasError {
     Mixture(FrozenIdealGasMixtureErrorV1),
     /// Original solid owner refused a candidate.
     Thermal(DepositionError),
+    /// Original coupled implicit conduction/reaction owner refused a candidate.
+    Implicit(ImplicitError),
+    /// Original conservative shrinking-slab owner refused a candidate.
+    Recession(SlabError),
     /// Original layer-rate addition refused.
     Zone(ZoneError),
     /// Actual rate arithmetic exceeds the supplied conservation gate.
@@ -92,6 +98,22 @@ impl From<DepositionError> for VolatileGasError {
         match value {
             DepositionError::Cancelled => Self::Cancelled,
             other => Self::Thermal(other),
+        }
+    }
+}
+impl From<ImplicitError> for VolatileGasError {
+    fn from(value: ImplicitError) -> Self {
+        match value {
+            ImplicitError::Cancelled => Self::Cancelled,
+            other => Self::Implicit(other),
+        }
+    }
+}
+impl From<SlabError> for VolatileGasError {
+    fn from(value: SlabError) -> Self {
+        match value {
+            SlabError::Cancelled => Self::Cancelled,
+            other => Self::Recession(other),
         }
     }
 }

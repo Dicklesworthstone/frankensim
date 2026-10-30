@@ -1,7 +1,7 @@
 //! Heated solid -> original NASA volatile -> oxygen-limited compartment burning.
 //!
 //! cargo run -p fs-airflow --features compartment-fire --example pyrolyzing_compartment_fire --
-//!   [all|closed|restricted|open|fan-exhaust] [end_s=30] [max_dt_s=0.02] [cells=24] [irradiance_W_m2=50000]
+//!   [all|closed|restricted|open|fan-exhaust] [end_s=60] [max_dt_s=0.02] [cells=24] [irradiance_W_m2=50000] [receding|fixed]
 //!
 //! This is a manufactured coupling case, NOT a PMMA/wood material or experimental
 //! fire prediction. The authored condensed fuel releases pure methane, with an
@@ -14,8 +14,10 @@
 //! external heater, and radiates to an external 300 K blackbody environment.
 //! Convection is an internal equal/opposite transfer. All other walls are
 //! adiabatic. This deliberately simple optical boundary is not a smoke-radiation
-//! or flame-feedback closure. The solid is fixed geometry, non-charring, and
-//! non-oxidative. Burning is instantaneous complete oxidation limited by the
+//! or flame-feedback closure. The solid is non-charring and non-oxidative.
+//! Its retained mass sets the shrinking thickness at supplied constant density;
+//! conservative enthalpy remapping and implicit original conduction/reaction
+//! avoid depleted fixed cells. Burning is instantaneous complete oxidation limited by the
 //! actually transported oxygen/fuel; it is not an ignition or finite-rate model.
 //!
 //! Solid/boundary feedback is first-order explicit at the accepted gas state.
@@ -25,10 +27,11 @@
 //! the restricted doorway. Fan work is delivered downstream to ambient; it is
 //! reported but is not another heat source inside the finite room.
 //!
-//! This fixed-geometry example refuses when any cell retains less than 1e-4 of
-//! its initial mass. Near surface depletion the unchanged cell geometry and
-//! conductance require a recession/remeshing model; no seed mass, heat-capacity
-//! floor or release clipping is introduced to extend the simulation.
+//! The slab is an external source thermally coupled to a fixed-volume gas
+//! vessel. Shrinking solid volume is not silently added to that gas volume;
+//! gas moving-boundary work requires a separate closure. The optional `fixed`
+//! comparison retains the previous explicit solid solver and its 1e-4 initial
+//! cell-mass scope gate. Neither path adds seed mass or clips physical release.
 
 #[path = "ventilated_compartment_fire/nasa9.rs"]
 mod nasa9;
@@ -54,8 +57,11 @@ use fs_qty::{
     Acceleration, Amount, Area, Density, Dimensionless, Length, Pressure, Temperature, Time,
     VolumetricFlowRate,
 };
+use fs_thermal::enthalpy::pyrolysis::implicit::{ImplicitSolve, ImplicitWorkspace};
+use fs_thermal::enthalpy::pyrolysis::slab::{RecedingSlab, SlabGeometry, SlabSolve};
 use fs_thermal::enthalpy::pyrolysis::{
-    Arrhenius, CondensedCaloric, PyrolysisControls, PyrolysisMaterial, PyrolysisSimulation,
+    Arrhenius, CondensedCaloric, PyrolysisAudit, PyrolysisControls, PyrolysisMaterial,
+    PyrolysisSimulation,
 };
 use fs_thermal::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
@@ -79,6 +85,112 @@ const HTC: f64 = 10.0;
 const SIGMA: f64 = 5.670_374_419e-8;
 const MINIMUM_STEP_S: f64 = 1e-5;
 const MINIMUM_RETAINED_CELL_FRACTION: f64 = 1e-4;
+
+#[derive(Clone)]
+enum Solid<'a> {
+    Fixed(PyrolysisSimulation<'a>),
+    Receding(RecedingSlab<'a>),
+}
+
+#[derive(Clone, Copy, Default)]
+struct GeometryStep {
+    remaps: usize,
+    retries: usize,
+    absolute_mass_residual_kg: f64,
+    absolute_energy_residual_j: f64,
+}
+
+impl<'a> Solid<'a> {
+    fn state(&self) -> &PyrolysisSimulation<'a> {
+        match self {
+            Self::Fixed(s) => s,
+            Self::Receding(s) => s.state(),
+        }
+    }
+    fn fixed(&self) -> bool {
+        matches!(self, Self::Fixed(_))
+    }
+    fn time_s(&self) -> f64 {
+        self.state().time_s()
+    }
+    fn mass_kg(&self) -> f64 {
+        self.state().mass_kg()
+    }
+    fn energy_j(&self) -> f64 {
+        self.state().energy_j()
+    }
+    fn temperature_k(&self, id: CellId) -> Result<f64, DepositionError> {
+        self.state().temperature_k(id)
+    }
+    fn thickness_m(&self) -> f64 {
+        match self {
+            Self::Fixed(_) => SOLID_THICKNESS,
+            Self::Receding(s) => s.thickness_m(),
+        }
+    }
+    fn recession_m(&self) -> f64 {
+        match self {
+            Self::Fixed(_) => 0.0,
+            Self::Receding(s) => s.recession_m(),
+        }
+    }
+    fn front_conductance(&self) -> Result<f64, VolatileGasError> {
+        match self {
+            Self::Fixed(s) => {
+                let g = s.cells()[&CellId(0)].geometry;
+                let dx = g.end_m[0] - g.start_m[0];
+                Ok(series_conductance_w_k(
+                    SOLID_AREA,
+                    [0.25 * dx; 2],
+                    [SOLID_K; 2],
+                )?)
+            }
+            Self::Receding(s) => Ok(s.front_half_cell_conductance_w_k()?),
+        }
+    }
+    fn set_boundary(
+        &mut self,
+        id: CellId,
+        boundary: Boundary,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), VolatileGasError> {
+        match self {
+            Self::Fixed(s) => Ok(s.set_boundary(id, boundary, checkpoint)?),
+            Self::Receding(s) => Ok(s.set_boundary(id, boundary, checkpoint)?),
+        }
+    }
+    fn advance_to(
+        &self,
+        target: f64,
+        controls: PyrolysisControls,
+        workspace: &mut ImplicitWorkspace,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, PyrolysisAudit, GeometryStep), VolatileGasError> {
+        match self {
+            Self::Fixed(s) => {
+                let (next, audit) = s.advance_to(target, controls, checkpoint)?;
+                Ok((Self::Fixed(next), audit, GeometryStep::default()))
+            }
+            Self::Receding(s) => {
+                let (next, report) = s.advance_implicit_to(
+                    target,
+                    controls,
+                    ImplicitSolve::default(),
+                    SlabSolve::default(),
+                    workspace,
+                    checkpoint,
+                )?;
+                let geometry = GeometryStep {
+                    remaps: report.remaps,
+                    retries: report.rejected_geometry_attempts,
+                    absolute_mass_residual_kg: report.absolute_remap_mass_residual_kg,
+                    absolute_energy_residual_j: report.absolute_remap_energy_residual_j,
+                };
+                Ok((Self::Receding(next), report.pyrolysis, geometry))
+            }
+        }
+    }
+}
 
 struct SolidCaloric {
     h300: f64,
@@ -199,9 +311,12 @@ struct Face {
     from_gas_w: f64,
     from_external_w: f64,
 }
-fn face(center: f64, gas_t: f64, cells: usize, irradiance: f64) -> Result<Face, DepositionError> {
-    let dx = SOLID_THICKNESS / cells as f64;
-    let k = series_conductance_w_k(SOLID_AREA, [0.25 * dx; 2], [SOLID_K; 2])?;
+fn face(center: f64, gas_t: f64, k: f64, irradiance: f64) -> Result<Face, DepositionError> {
+    if !k.is_finite() || k <= 0.0 {
+        return Err(DepositionError::InvalidInput(
+            "positive front conductance required",
+        ));
+    }
     let powers = |t: f64| {
         let from_gas = HTC * SOLID_AREA * (gas_t - t);
         let from_external = EMISSIVITY
@@ -360,8 +475,9 @@ fn install_exhaust_fan(network: &mut ZoneNetwork) -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
-fn minimum_cell_fraction(solid: &PyrolysisSimulation<'_>, initial_cell_mass: f64) -> f64 {
+fn minimum_cell_fraction(solid: &Solid<'_>, initial_cell_mass: f64) -> f64 {
     solid
+        .state()
         .cells()
         .values()
         .map(|cell| cell.mass_kg / initial_cell_mass)
@@ -375,6 +491,7 @@ fn run(
     maximum_dt: f64,
     cells: usize,
     irradiance: f64,
+    receding: bool,
     output: &mut impl Write,
 ) -> Result<(), Box<dyn Error>> {
     let (gas, mechanism, air) = nasa9::source()?;
@@ -385,7 +502,22 @@ fn run(
             .value()
             - REACTION_ENTHALPY_AT_300,
     };
-    let mut solid = solid(&law, &volatile, cells)?;
+    let original = solid(&law, &volatile, cells)?;
+    let mut solid = if receding {
+        Solid::Receding(RecedingSlab::new(
+            original,
+            SlabGeometry {
+                area_m2: SOLID_AREA,
+                density_kg_m3: SOLID_DENSITY,
+                conductivity_w_m_k: SOLID_K,
+                source: "authored homogeneous incompressible methane-releasing slab; fixed back face; no char, pores, mechanical work or gas-volume displacement",
+            },
+            || Ok(()),
+        )?)
+    } else {
+        Solid::Fixed(original)
+    };
+    let mut thermal_workspace = solid.state().implicit_workspace()?;
     let mut network = network(&gas, &air, width)?;
     if name == "fan-exhaust" {
         install_exhaust_fan(&mut network)?;
@@ -417,11 +549,18 @@ fn run(
     let mut halvings = 0usize;
     let mut fan_exhaust_mass = 0.0;
     let mut fan_shaft_energy = 0.0;
+    let mut remaps = 0usize;
+    let mut geometry_retries = 0usize;
+    let mut absolute_remap_mass = 0.0;
+    let mut absolute_remap_energy = 0.0;
+    let mut thermal_substeps = 0usize;
     while solid.time_s() < end {
         if steps >= 200_000 {
             return Err("example accepted-step budget exhausted".into());
         }
-        if minimum_cell_fraction(&solid, initial_cell_mass) < MINIMUM_RETAINED_CELL_FRACTION {
+        if solid.fixed()
+            && minimum_cell_fraction(&solid, initial_cell_mass) < MINIMUM_RETAINED_CELL_FRACTION
+        {
             return Err("fixed-geometry example scope exhausted: retained cell mass below 1e-4 of initial; surface recession/remeshing required".into());
         }
         let remaining = end - solid.time_s();
@@ -430,7 +569,7 @@ fn run(
         } else {
             maximum_dt.min(remaining)
         };
-        let (report, (candidate, audit, face), chemistry) = network.step_with_pressure_sources(
+        let (report, (candidate, audit, face, geometry), chemistry) = network.step_with_pressure_sources(
             Time::new(dt),
             controls,
             |rooms, attempted, rates, cancel| {
@@ -442,7 +581,7 @@ fn run(
                         .temperature_k(CellId(0))
                         .map_err(VolatileGasError::from)?,
                     rooms[0].gas.layer(Layer::Upper).temperature().value(),
-                    cells,
+                    solid.front_conductance()?,
                     irradiance,
                 )
                 .map_err(VolatileGasError::from)?;
@@ -458,13 +597,14 @@ fn run(
                         }
                     })
                     .map_err(VolatileGasError::from)?;
-                let (candidate, audit) = prepared
+                let (candidate, audit, geometry) = prepared
                     .advance_to(
                         solid.time_s() + attempted.value(),
                         PyrolysisControls {
                             maximum_dt_s: attempted.value(),
                             ..PyrolysisControls::default()
                         },
+                        &mut thermal_workspace,
                         || {
                             if cancel() {
                                 Err(DepositionError::Cancelled)
@@ -474,7 +614,7 @@ fn run(
                         },
                     )
                     .map_err(VolatileGasError::from)?;
-                if minimum_cell_fraction(&candidate, initial_cell_mass) < MINIMUM_RETAINED_CELL_FRACTION {
+                if candidate.fixed() && minimum_cell_fraction(&candidate, initial_cell_mass) < MINIMUM_RETAINED_CELL_FRACTION {
                     return Err(NetworkError::Invalid(
                         "fixed-geometry example scope: retained cell mass below 1e-4 of initial; surface recession/remeshing required",
                     ));
@@ -491,7 +631,7 @@ fn run(
                         .add_to(Layer::Upper, &mut rates[0])?;
                 }
                 rates[0][Layer::Upper.index()].referenced_energy_w -= face.from_gas_w;
-                Ok((candidate, audit, face))
+                Ok((candidate, audit, face, geometry))
             },
             |rooms, attempted, _, additional, cancel| {
                 let room = &mut rooms[0].gas;
@@ -515,6 +655,11 @@ fn run(
         steps += 1;
         halvings += report.halvings;
         let actual_dt = report.elapsed.value();
+        remaps += geometry.remaps;
+        geometry_retries += geometry.retries;
+        absolute_remap_mass += geometry.absolute_mass_residual_kg;
+        absolute_remap_energy += geometry.absolute_energy_residual_j;
+        thermal_substeps += audit.thermal.substeps;
         let fan_point = network
             .last_fan_transfers()
             .first()
@@ -603,7 +748,7 @@ fn run(
         if solid.time_s() >= next_output || solid.time_s() >= end {
             writeln!(
                 output,
-                "{name},{:.9},{:.9},{:.9},{:.9},{:.9},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e}",
+                "{name},{:.9},{:.9},{:.9},{:.9},{:.9},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e}",
                 solid.time_s(),
                 room.layer(Layer::Upper).temperature().value(),
                 room.pressure().value(),
@@ -621,7 +766,9 @@ fn run(
                 fan_q,
                 fan_mass,
                 fan_shaft,
-                fan_gas
+                fan_gas,
+                solid.thickness_m(),
+                solid.recession_m()
             )?;
             next_output = solid.time_s().floor() + 1.0;
             output.flush()?;
@@ -639,14 +786,20 @@ fn run(
         extent * nasa9::MASSES[0],
         minimum_cell_fraction(&solid, initial_cell_mass)
     );
+    eprintln!(
+        "case={name} geometry={} thickness_m={:.12e} recession_m={:.12e} accepted_thermal_intervals={thermal_substeps} remaps={remaps} geometry_retries={geometry_retries} absolute_remap_mass_residual_kg={absolute_remap_mass:.12e} absolute_remap_energy_residual_j={absolute_remap_energy:.12e}",
+        if receding { "receding" } else { "fixed" },
+        solid.thickness_m(),
+        solid.recession_m()
+    );
     Ok(())
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.len() > 5 || args.first().is_some_and(|a| a == "--help") {
+    if args.len() > 6 || args.first().is_some_and(|a| a == "--help") {
         eprintln!(
-            "usage: pyrolyzing_compartment_fire [all|closed|restricted|open|fan-exhaust] [end_s=30] [max_dt_s=0.02] [cells=24] [irradiance_W_m2=50000]\nAuthored methane-releasing solid coupling case, not PMMA/wood calibration or experimental validation.\nFixed geometry refuses below 1e-4 initial cell mass; minimum network step 1e-5 s.\nAuthored fan: static curve 100 Pa at 0 m3/s to 0 Pa at 0.01 m3/s; total duct resistance 1e8 Pa/(m3/s)^2; outlet area 0.002 m2; total efficiency 0.5; reference density from initial room. All shaft heat goes downstream into ambient."
+            "usage: pyrolyzing_compartment_fire [all|closed|restricted|open|fan-exhaust] [end_s=60] [max_dt_s=0.02] [cells=24] [irradiance_W_m2=50000] [receding|fixed]\nAuthored methane-releasing solid coupling case, not PMMA/wood calibration or experimental validation.\nDefault receding geometry uses original implicit conduction/reaction and conservative enthalpy remapping. The external slab supplies a fixed-volume gas vessel; no gas moving-boundary work is inferred.\nThe fixed comparison retains the previous explicit solid and refuses below 1e-4 initial cell mass; minimum network step 1e-5 s.\nAuthored fan: static curve 100 Pa at 0 m3/s to 0 Pa at 0.01 m3/s; total duct resistance 1e8 Pa/(m3/s)^2; outlet area 0.002 m2; total efficiency 0.5; reference density from initial room. All shaft heat goes downstream into ambient."
         );
         return if args.len() <= 1 {
             Ok(())
@@ -670,7 +823,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             Err("arguments must be finite and positive".into())
         }
     };
-    let end = number(1, 30.0)?;
+    let end = number(1, 60.0)?;
     let dt = number(2, 0.02)?;
     let cells = args
         .get(3)
@@ -678,6 +831,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         .transpose()?
         .unwrap_or(24);
     let irradiance = number(4, 50_000.0)?;
+    let geometry_mode = args.get(5).map(String::as_str).unwrap_or("receding");
+    let receding = match geometry_mode {
+        "receding" => true,
+        "fixed" => false,
+        _ => return Err("geometry must be receding or fixed".into()),
+    };
     if end > 120.0
         || !(MINIMUM_STEP_S..=0.1).contains(&dt)
         || end / dt > 200_000.0
@@ -687,13 +846,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("bounds: end <= 120 s, 1e-5 <= dt <= 0.1 s, <= 200000 requested steps, cells 2..96, irradiance <= 100000 W/m2; depletion/domain may require escalation".into());
     }
     eprintln!(
-        "authored methane solid: area_m2={SOLID_AREA} thickness_m={SOLID_THICKNESS} density_kg_m3={SOLID_DENSITY} cp_j_kg_k={SOLID_CP} conductivity_w_m_k={SOLID_K} end_s={end} max_dt_s={dt} cells={cells} irradiance_w_m2={irradiance} gas_source={}",
+        "authored methane solid: area_m2={SOLID_AREA} thickness_m={SOLID_THICKNESS} density_kg_m3={SOLID_DENSITY} cp_j_kg_k={SOLID_CP} conductivity_w_m_k={SOLID_K} end_s={end} max_dt_s={dt} cells={cells} irradiance_w_m2={irradiance} geometry={geometry_mode} gas_source={}",
         nasa9::SOURCE_COMMIT
     );
     let mut out = BufWriter::new(io::stdout().lock());
     writeln!(
         out,
-        "case,time_s,gas_temperature_k,pressure_pa,lagged_front_face_k,front_cell_k,solid_mass_kg,emitted_fuel_kg,burned_fuel_kg,gas_fuel_kg,gas_oxygen_kg,reference300K_hrr_w,combined_mass_residual_kg,combined_energy_residual_j,minimum_retained_cell_fraction,fan_volume_rate_m3_s,fan_mass_rate_kg_s,fan_shaft_power_w,fan_downstream_gas_power_w"
+        "case,time_s,gas_temperature_k,pressure_pa,lagged_front_face_k,front_cell_k,solid_mass_kg,emitted_fuel_kg,burned_fuel_kg,gas_fuel_kg,gas_oxygen_kg,reference300K_hrr_w,combined_mass_residual_kg,combined_energy_residual_j,minimum_retained_cell_fraction,fan_volume_rate_m3_s,fan_mass_rate_kg_s,fan_shaft_power_w,fan_downstream_gas_power_w,solid_thickness_m,surface_recession_m"
     )?;
     for (name, width) in [
         ("closed", 0.0),
@@ -702,7 +861,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         ("fan-exhaust", 0.001),
     ] {
         if selected == "all" || selected == name {
-            run(name, width, end, dt, cells, irradiance, &mut out)?;
+            run(name, width, end, dt, cells, irradiance, receding, &mut out)?;
         }
     }
     out.flush()?;

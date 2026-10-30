@@ -1267,9 +1267,25 @@ enters downstream ambient and is not counted again inside the room. The solid
 is explicitly manufactured to release methane with compatible formation
 energy; it is not a PMMA or wood dataset. The case uses one active gas layer,
 instantaneous complete oxidation and a simple external optical boundary, not
-an ignition, finite-rate flame or smoke-feedback closure. Geometry stays fixed;
-the example refuses below an explicit retained-cell-mass threshold instead of
-adding seed mass or clipping release. Numerical coupling remains first order.
+an ignition, finite-rate flame or smoke-feedback closure. The default now uses
+the original implicit conduction/reaction solver and `RecedingSlab`: retained
+mass determines thickness at supplied density, the back face stays fixed, and
+limited enthalpy reconstruction conservatively rezones equal-mass spatial slots.
+Current geometry determines face and cell conductances. The original integrated
+volatile release is transferred unchanged, while actual remap residuals enter
+the combined energy audit once. The slab remains an external source to a rigid
+gas vessel; its lost volume does not silently create gas volume or pressure work.
+
+All four receding cases complete 60 seconds; the fan case also has independent
+timestep and mesh refinements. Actual outputs and reproduction commands are in
+`data/reference/compartment_fire/receding_pyrolyzing_compartment_example.json`.
+The old fixed-geometry explicit solver and retained-cell-mass refusal remain
+available through an explicit `fixed` argument; its earlier 30-second data are
+preserved separately. Neither mode adds seed mass or clips release. Typed
+implicit/slab refusals propagate through `VolatileGasError`, preserving direct
+cancellation. Solid implicit stepping, geometry updates and gas/boundary coupling
+remain first order. This homogeneous noncharring closure does not model pores,
+char shrinkage, mechanics, full burnout or moving gas-boundary work.
 
 ### Finite-rate chemistry inside the opening-pressure equation
 
