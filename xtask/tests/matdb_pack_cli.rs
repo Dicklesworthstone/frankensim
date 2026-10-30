@@ -20,6 +20,9 @@ mod thermochemical;
 #[path = "matdb_pack_cli/digitization.rs"]
 mod digitization;
 
+#[path = "matdb_pack_cli/liquid_buoyancy.rs"]
+mod liquid_buoyancy;
+
 #[test]
 fn g2_g3_redigitized_metal_source_bounds_reach_consumers() {
     digitization::source_bounds_reach_consumers();
@@ -2207,7 +2210,7 @@ mod common_material_acquisition {
         };
         assert_eq!(loaded, original);
         let claims = loaded.card().claims();
-        let claim = claims.claims_for("thermal-conductivity")[0].1;
+        let claim = claims.claims_for("thermal_conductivity")[0].1;
         let requirement = ScalarPropertyRequirement::try_with_key(
             &claim.key,
             ScalarAdmissibility::StrictlyPositive,
@@ -2241,7 +2244,7 @@ mod common_material_acquisition {
                     MaterialPropertySelection::SingleClaimOnly,
                 )
                 .unwrap();
-                let selected = state.property("thermal-conductivity").unwrap();
+                let selected = state.property("thermal_conductivity").unwrap();
                 close(selected.value_si(), expected);
                 assert_eq!(&selected.answer().receipt, receipt);
                 assert!(receipt.query_point.contains(&("pressure".into(), 100000.0)));
@@ -3175,9 +3178,9 @@ mod common_material_acquisition {
         };
         assert_eq!(loaded, original);
         let card = loaded.card();
-        let h = card.claims().claims_for("specific-enthalpy")[0].1;
+        let h = card.claims().claims_for("specific_enthalpy")[0].1;
         let rho = card.claims().claims_for("density")[0].1;
-        let k = card.claims().claims_for("thermal-conductivity")[0].1;
+        let k = card.claims().claims_for("thermal_conductivity")[0].1;
         let PropertyValue::Curve { knots: h_knots, .. } = &h.value else {
             panic!("source enthalpy curve required")
         };
@@ -3571,7 +3574,7 @@ mod common_material_acquisition {
             panic!("wrong property family")
         };
         assert_eq!(pack, original);
-        assert_eq!(pack.claims().claims_ordered().count(), 5);
+        assert_eq!(pack.claims().claims_ordered().count(), 6);
         check_claims(&pack);
 
         let equation = |t: f64| {
@@ -3608,31 +3611,27 @@ mod common_material_acquisition {
                 * (38.69269598 - 8.983025854 * (1.0 + tau.ln()) + sum(&a, alpha, 1)
                     - sum(&b, beta, 1));
             let cp = -r * (-8.983025854 + tau * (sum(&a, alpha, 2) + sum(&b, beta, 2)));
+            let volume_a = [
+                (6744.58446, 4),
+                (-222521.604, 5),
+                (100231247.0, 7),
+                (-1635521180.0, 8),
+                (8322996580.0, 9),
+            ];
+            let volume_b = [
+                (0.00578545292, 1),
+                (-0.0153195665, 2),
+                (0.0311337859, 3),
+                (-0.0423546241, 4),
+                (0.0338713507, 5),
+                (-0.0119946761, 6),
+            ];
             let volume = r * 10.0 / 100000.0
-                * (0.0193763157
-                    + sum(
-                        &[
-                            (6744.58446, 4),
-                            (-222521.604, 5),
-                            (100231247.0, 7),
-                            (-1635521180.0, 8),
-                            (8322996580.0, 9),
-                        ],
-                        alpha,
-                        0,
-                    )
-                    + sum(
-                        &[
-                            (0.00578545292, 1),
-                            (-0.0153195665, 2),
-                            (0.0311337859, 3),
-                            (-0.0423546241, 4),
-                            (0.0338713507, 5),
-                            (-0.0119946761, 6),
-                        ],
-                        beta,
-                        0,
-                    ));
+                * (0.0193763157 + sum(&volume_a, alpha, 0) + sum(&volume_b, beta, 0));
+            // Table 2 differentiates the original Eq. (2), not the TSV's
+            // piecewise-linear density interpolant. Table 3 gives beta=v_T/v.
+            let volume_t = r / 100000.0
+                * (sum(&volume_a, alpha, 1) - sum(&volume_b, beta, 1));
             let transport = |terms: &[(f64, f64)]| {
                 terms
                     .iter()
@@ -3655,19 +3654,26 @@ mod common_material_acquisition {
                     (61.131, -19.6),
                     (0.45903, -40.0),
                 ]),
+                volume_t / volume,
             ]
         };
         let cases = [
             ("density", "kg/m3", 997.047013, 0.000039252),
-            ("specific-heat-capacity", "J/kg/K", 4181.44618, 0.000078733),
+            ("specific_heat_capacity", "J/kg/K", 4181.44618, 0.000078733),
             (
-                "specific-enthalpy",
+                "specific_enthalpy",
                 "J/kg",
                 -4561.7537 + 298.15 * 367.20145,
                 0.000079557,
             ),
-            ("thermal-conductivity", "W/m/K", 0.606502308, 0.000188763),
-            ("dynamic-viscosity", "Pa*s", 889.996774e-6, 0.003833467),
+            ("thermal_conductivity", "W/m/K", 0.606502308, 0.000188763),
+            ("dynamic_viscosity", "Pa*s", 889.996774e-6, 0.003833467),
+            (
+                "volumetric_thermal_expansion_coefficient",
+                "K^-1",
+                997.047013 * 2.58054178e-7,
+                0.00833248,
+            ),
         ];
         for (index, (name, unit, table8, interpolation_limit)) in cases.into_iter().enumerate() {
             let claim = pack.claims().claims_for(name)[0].1;
@@ -3721,7 +3727,7 @@ mod common_material_acquisition {
                 "water {name}: 15 source knots, sampled relative interpolation discrepancy {maximum:.9}"
             );
         }
-        let enthalpy = pack.claims().claims_for("specific-enthalpy")[0].1;
+        let enthalpy = pack.claims().claims_for("specific_enthalpy")[0].1;
         assert!(
             pack.claims()
                 .query_typed(
@@ -3739,12 +3745,12 @@ mod common_material_acquisition {
             let dh = pair[1].1 - pair[0].1;
             let cp0 = sample(
                 &pack,
-                "specific-heat-capacity",
+                "specific_heat_capacity",
                 &[("temperature", pair[0].0)],
             );
             let cp1 = sample(
                 &pack,
-                "specific-heat-capacity",
+                "specific_heat_capacity",
                 &[("temperature", pair[1].0)],
             );
             assert!((dh - dt * 0.5 * (cp0 + cp1)).abs() <= 1.100);
@@ -3766,7 +3772,7 @@ mod common_material_acquisition {
         );
         assert_eq!(
             run.stdout.matches("\"status\":\"supported\"").count(),
-            5,
+            6,
             "{}",
             run.stdout
         );

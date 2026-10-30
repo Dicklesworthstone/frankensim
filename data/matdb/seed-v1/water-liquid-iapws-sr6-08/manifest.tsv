@@ -5,10 +5,11 @@ citation	International Association for the Properties of Water and Steam (2011),
 license	IAPWS-SR6-08-2011-Attribution-Permitted
 source	iapws-sr6-08-liquid-water	properties.tsv	material-tsv-v1
 property	density	density	dimensional
-property	specific_heat_capacity	specific-heat-capacity	dimensional
-property	specific_enthalpy	specific-enthalpy	dimensional
-property	thermal_conductivity	thermal-conductivity	thermal-conductivity
-property	dynamic_viscosity	dynamic-viscosity	dimensional
+property	specific_heat_capacity	specific_heat_capacity	dimensional
+property	specific_enthalpy	specific_enthalpy	dimensional
+property	thermal_conductivity	thermal_conductivity	thermal-conductivity
+property	dynamic_viscosity	dynamic_viscosity	dimensional
+property	volumetric_thermal_expansion_coefficient	volumetric_thermal_expansion_coefficient	dimensional
 axis	temperature	temperature	absolute-temperature
 axis	pressure	pressure	pressure
 axis	phase_liquid	phase-liquid	dimensional

@@ -135,6 +135,20 @@ Snapshot: **2026-09-10 UTC**, refreshed after the warm NASA 316 thermal table an
 
 Focused consumer evidence now includes actual source compilation, storage, material resolution and steady conduction for NIST 304/316/6061 and IAPWS liquid water. The water check covers 20–25 °C and 60–65 °C at exactly 0.1 MPa, retains liquid-phase receipts and refuses unsupported states. These manufactured temperature/flux and energy-balance checks exercise the declared interpolants; they do not establish experimental accuracy, flowing-water behavior, transient heat or phase changes. The executable cases are in [matdb_pack_cli.rs](../xtask/tests/matdb_pack_cli.rs).
 
+The IAPWS water bundle now also supplies instantaneous isobaric volumetric
+expansion from SR6-08 Eq. (2) and Tables 1–3. All six property outputs use the
+canonical material names, so the original liquid transport resolver consumes
+the pack directly. The expansion curve contains 15 source-equation knots at
+10–80 °C and exactly 0.1 MPa. Its sampled linear-interpolation discrepancy is
+0.83324715%; this is separate from source uncertainty and is not a global bound.
+Density and expansion are independently interpolated and are not a complete
+thermodynamically consistent EOS. The added [water buoyancy integration test](../xtask/tests/matdb_pack_cli/liquid_buoyancy.rs)
+connects compiled/stored material to the native 2D/3D thermal-flow solvers,
+retaining source selections and checking actual force and temperature histories.
+That new Rust regression is source/parser checked; native execution remains
+unverified in the current worker. Existing source-oracle coverage now includes
+all expansion knots and the independent IAPWS Table 8 reference.
+
 A new transient integration, `g1_g3_sourced_liquid_water_enthalpy_heating`,
 connects the existing IAPWS enthalpy data to the lumped enthalpy marcher through
 an explicit single-phase curve constructor. It models 0.1 kg of uniformly
@@ -561,7 +575,7 @@ A **metric** below means a distinct populated property name in a bundle. It does
 | [vocalfold-human-indentation-jvoice-pmc12180296](../data/matdb/seed-v1/vocalfold-human-indentation-jvoice-pmc12180296/manifest.tsv) | 3 | 3 | 0 | 0 | 1.91 | `young_modulus_effective_inferior` [kPa]; `young_modulus_effective_medial` [kPa]; `young_modulus_effective_superior` [kPa] |
 | [vocalfold-porcine-aspiration-mdpi-s21092923](../data/matdb/seed-v1/vocalfold-porcine-aspiration-mdpi-s21092923/manifest.tsv) | 4 | 4 | 0 | 0 | 2.18 | `young_modulus_dynamic_day_printed_range_high` [kPa]; `young_modulus_dynamic_day_printed_range_low` [kPa]; `young_modulus_dynamic_printed_range_high` [kPa]; `young_modulus_dynamic_printed_range_low` [kPa] |
 | [walnut-black-fpl-gtr282](../data/matdb/seed-v1/walnut-black-fpl-gtr282/manifest.tsv) | 15 | 15 | 0 | 0 | 3.97 | `density` [kg/m3]; `er_over_el` [1]; `et_over_el` [1]; `glr_over_el` [1]; `glt_over_el` [1]; `grt_over_el` [1]; `modulus_of_elasticity_bending` [MPa]; `nu_lr` [1]; `nu_lt` [1]; `nu_rl` [1]; `nu_rt` [1]; `nu_tl` [1]; `nu_tr` [1]; `specific_gravity` [1]; `young_modulus_longitudinal` [MPa] |
-| [water-liquid-iapws-sr6-08](../data/matdb/seed-v1/water-liquid-iapws-sr6-08/manifest.tsv) | 5 | 0 | 5 | 75 | 8.43 | `density` [kg/m3]; `dynamic-viscosity` [Pa*s]; `specific-enthalpy` [J/kg]; `specific-heat-capacity` [J/kg/K]; `thermal-conductivity` [W/m/K] |
+| [water-liquid-iapws-sr6-08](../data/matdb/seed-v1/water-liquid-iapws-sr6-08/manifest.tsv) | 6 | 0 | 6 | 90 | 10.74 | `density` [kg/m3]; `dynamic_viscosity` [Pa*s]; `specific_enthalpy` [J/kg]; `specific_heat_capacity` [J/kg/K]; `thermal_conductivity` [W/m/K]; `volumetric_thermal_expansion_coefficient` [K^-1, source-equation derived] |
 | [waterborne-preservative-treated-lumber-fpl-gtr282](../data/matdb/seed-v1/waterborne-preservative-treated-lumber-fpl-gtr282/manifest.tsv) | 4 | 4 | 0 | 0 | 4.97 | `post-treatment-redrying-standard-temperature-limit` [K]; `post-treatment-redrying-temperature-threshold` [K]; `waterborne-retention-high-reference` [kg/m3]; `waterborne-retention-low-threshold` [kg/m3] |
 | [wo2018-125520-formulation-8-5w30](../data/matdb/seed-v1/wo2018-125520-formulation-8-5w30/manifest.tsv) | 11 | 12 | 0 | 0 | 9.02 | `cold_cranking_simulator_dynamic_viscosity` [mPa*s]; `high_temperature_high_shear_dynamic_viscosity` [mPa*s]; `infineum_p6003_component_mass_fraction` [%]; `kinematic_viscosity` [mm^2/s]; `mini_rotary_viscometer_dynamic_viscosity` [mPa*s]; `noack_mass_loss_fraction` [%]; `pour_point_temperature` [degC]; `spectrasyn_4_component_mass_fraction` [%]; `spectrasyn_elite_150_component_mass_fraction` [%]; `synesstic_5_component_mass_fraction` [%]; `viscosity_index_scale_reading` [1] |
 | [yellow-poplar-fpl-gtr282](../data/matdb/seed-v1/yellow-poplar-fpl-gtr282/manifest.tsv) | 15 | 15 | 0 | 0 | 3.98 | `density` [kg/m3]; `er_over_el` [1]; `et_over_el` [1]; `glr_over_el` [1]; `glt_over_el` [1]; `grt_over_el` [1]; `modulus_of_elasticity_bending` [MPa]; `nu_lr` [1]; `nu_lt` [1]; `nu_rl` [1]; `nu_rt` [1]; `nu_tl` [1]; `nu_tr` [1]; `specific_gravity` [1]; `young_modulus_longitudinal` [MPa] |
