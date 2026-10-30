@@ -276,7 +276,7 @@ where
                 || law
                     .reference_state()
                     .transport_state()
-                    .map_err(FreeSurfaceEnthalpyError::from)?
+                    .map_err(|e| FreeSurfaceEnthalpyError::Flow(e.into()))?
                     != reference
             {
                 return Err(refused(

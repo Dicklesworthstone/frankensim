@@ -405,11 +405,13 @@ impl ResolvedScalarProperty {
         &self.source_axes
     }
 
-    /// Internal admission shared by source-bound mechanical and thermal owners.
+    /// Admission shared by source-bound mechanical and thermal owners, in this
+    /// crate and in fs-couple's native thermal expansion.
     /// The optional temperature owner excludes any second temperature axis.
     /// Frequency may describe applicability only when explicitly requested;
     /// the caller must still check its static/relaxed frequency coverage.
-    pub(crate) fn has_only_fixed_external_conditions(
+    #[must_use]
+    pub fn has_only_fixed_external_conditions(
         &self,
         temperature_axis: Option<&str>,
         allow_frequency_applicability: bool,

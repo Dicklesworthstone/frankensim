@@ -95,9 +95,11 @@ pub(super) fn prepare<E>(
         let query = source.material.state().query();
         let [low, high] = cell.temperature_interval_k;
         let lower = query
+            .clone()
             .with("T", low)
             .map_err(|_| invalid("invalid expansion lower source query"))?;
         let upper = query
+            .clone()
             .with("T", high)
             .map_err(|_| invalid("invalid expansion upper source query"))?;
         let accepted = resolve(source, cell, binding, &query)?;
