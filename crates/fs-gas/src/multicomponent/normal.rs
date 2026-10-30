@@ -209,7 +209,7 @@ impl MixtureGas {
             .is_ok_and(|q| self.admissible_cell(q))
     }
 
-    fn normal_reduction<'a>(&self, cell: NormalCell<'a>) -> Result<Cell<'a>, Error> {
+    pub(super) fn normal_reduction<'a>(&self, cell: NormalCell<'a>) -> Result<Cell<'a>, Error> {
         let (rho, _) = self.admit_densities(cell.partial_densities)?;
         if ![cell.normal_momentum, cell.transverse_momentum, cell.energy]
             .iter()

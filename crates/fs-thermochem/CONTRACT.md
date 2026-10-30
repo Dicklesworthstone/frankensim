@@ -885,6 +885,10 @@ uses affinity and `expm1` for reversible channels, with their ideal-mixture
 entropy-production boundary limits retained. Original source thermodynamics supplies the adiabatic
 instantaneous temperature rate, with formation energy included once.
 
+`KineticWorkspaceV1::workspace_bytes` exposes actual allocated numerical array
+capacities, including optional affinities, so higher-level coupled memory
+budgets include this original owner. Immutable source storage is excluded.
+
 Seven new native regressions cover Arrhenius scaling and heat release,
 dissociation equilibrium against the Gibbs owner, zero species and catalysts,
 400-decade rate scales near equilibrium, the complete constrained-UV Jacobian,

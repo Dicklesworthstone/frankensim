@@ -69,6 +69,27 @@ impl IsochoricReactor {
         self.reactor.controls
     }
 
+    /// Allocated numerical heap capacity, including original kinetics,
+    /// constrained Newton, stages and endpoint amounts. Immutable mechanism
+    /// storage, fixed-size owner values and bounded stack scratch are excluded.
+    pub fn workspace_bytes(&self) -> usize {
+        let scalars = [
+            &self.current,
+            &self.full,
+            &self.half,
+            &self.fine,
+            &self.stage_forcing,
+            &self.current_concentrations,
+            &self.full_concentrations,
+        ]
+        .iter()
+        .map(|values| values.capacity())
+        .sum::<usize>();
+        self.reactor.workspace_bytes()
+            + scalars * core::mem::size_of::<f64>()
+            + self.amounts.capacity() * core::mem::size_of::<Amount>()
+    }
+
     /// Advance dense canonical amounts from their original source energy at T.
     ///
     /// The endpoint borrows prepared storage until dropped. A subsequent call

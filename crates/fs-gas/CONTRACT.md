@@ -1268,3 +1268,37 @@ fixture uses 322 accepted SDIRK2 steps and 3714 Newton iterations versus
 4485 and 19983 for backward Euler; temperature errors against Cantera are
 0.01556 K and 0.04168 K respectively. These are fixture-specific work counts,
 not a universal speed or accuracy guarantee.
+
+## Shared chemical sources for axial and planar conserved cells
+
+`multicomponent::reactive::CellChemistry` binds the identical original
+`MixtureGas` species bank and `IdealGasKineticsV1` mechanism, retaining the
+reactor's selected time method and admitted source interval. Its axial
+`[rho_i..., px, E_ref]` and planar `[rho_i..., px, py, E_ref]` updates share
+the same conversion, original fixed-U,V reactor and endpoint reconstruction
+as existing one-dimensional and network chemistry. Both planar kinetic terms
+enter internal-energy admission; both momenta are preserved. Reaction changes
+the stored reference gauge by the negative original species-reference change.
+There is no additional heat-release source on physical chemical total energy.
+
+The conservative endpoint is independently reconstructed at the original
+reactor temperature. Caloric precision and the kinetic-energy consequence of
+any molecular-mass residual must fit the declared energy tolerance. Each cell
+and its accumulated report publish together only after the final cancellation
+poll. Source, energy, work-counter, dimension and cancellation refusals leave
+both unchanged. Numerical scratch is reusable after a refusal. Successful
+advances allocate no heap storage.
+
+The prepared reactor and cell source expose actual numerical heap capacities,
+including original kinetics, constrained Newton, stage and amount buffers.
+Immutable mechanisms, gas caloric preparation, fixed-size owners and bounded
+stack scratch are explicitly outside that numerical budget. Higher-level
+spatial owners can add these capacities to their own field workspaces before
+reserving a second complete field.
+
+Four focused regressions compare exothermic planar cells with the original
+homogeneous reactor for backward Euler and SDIRK2, check the exact axial limit,
+rotation and energy-datum invariance, and exercise late cancellation/replay,
+source/path mismatch and complete cell/report rollback. This chemical-source
+adapter alone supplies no spatial transport, molecular diffusion, ignition or
+flame validation, and no global splitting-order or entropy certificate.

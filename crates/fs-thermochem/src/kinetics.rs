@@ -731,6 +731,28 @@ impl KineticWorkspaceV1 {
             affinities: filled(nr, None)?,
         })
     }
+    /// Allocated numerical heap capacity in bytes, excluding immutable sources
+    /// and this fixed-size owner. Coupled solvers can include the original
+    /// kinetics workspace in their own explicit memory budget.
+    pub fn workspace_bytes(&self) -> usize {
+        let scalars = [
+            &self.u,
+            &self.cv,
+            &self.g,
+            &self.log_c,
+            &self.reaction_rates,
+            &self.species_rates,
+            &self.species_rate_correction,
+            &self.rate_jacobian,
+            &self.temperature_derivatives,
+            &self.log_equilibrium_constants,
+        ]
+        .iter()
+        .map(|values| values.capacity())
+        .sum::<usize>();
+        scalars * core::mem::size_of::<f64>()
+            + self.affinities.capacity() * core::mem::size_of::<Option<f64>>()
+    }
     /// Canonical signed net reaction progress, mol/(m3 s).
     pub fn reaction_rates(&self) -> &[f64] {
         &self.reaction_rates

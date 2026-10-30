@@ -29,6 +29,27 @@ pub(super) struct Reactor {
     pub stats: Statistics,
 }
 impl Reactor {
+    pub(super) fn workspace_bytes(&self) -> usize {
+        let scalars = [
+            &self.initial,
+            &self.nu,
+            &self.state.concentrations,
+            &self.trial,
+            &self.residual,
+            &self.delta,
+            &self.temperature_extent_derivatives,
+            &self.newton.matrix,
+            &self.newton.rhs,
+            &self.newton.row_scale,
+            &self.newton.refinement_residual,
+            &self.newton.refinement_delta,
+        ]
+        .iter()
+        .map(|values| values.capacity())
+        .sum::<usize>();
+        scalars * core::mem::size_of::<f64>() + self.state.kinetics.workspace_bytes()
+    }
+
     pub fn new(
         mechanism: IdealGasKineticsV1,
         controls: IsochoricKineticsSolve,

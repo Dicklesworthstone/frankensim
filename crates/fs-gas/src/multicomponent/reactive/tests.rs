@@ -1,10 +1,11 @@
 use super::*;
 
+mod cell;
 mod molecular;
 use crate::chemistry::advance_adiabatic;
 use crate::multicomponent::tests::{bank, source};
 use crate::multicomponent::{Boundaries, CaloricDomain, MixtureGas};
-use fs_qty::Length;
+use fs_qty::{Length, Temperature, Volume};
 use fs_thermochem::kinetics::{
     ArrheniusRateV1, ElementaryReactionV1, ReactionProgressRateQuantityV1,
 };
