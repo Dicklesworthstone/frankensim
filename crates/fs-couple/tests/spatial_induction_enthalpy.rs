@@ -3,6 +3,9 @@
 #[path = "../../fs-em/tests/winding_ohmic/common.rs"]
 mod source;
 
+#[path = "spatial_induction_enthalpy/nonlinear.rs"]
+mod nonlinear;
+
 use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyError, CircuitEnthalpySolve,
     material::MaterialCell,

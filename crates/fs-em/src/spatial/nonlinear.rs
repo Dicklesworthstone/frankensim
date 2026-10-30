@@ -48,6 +48,23 @@ impl SpatialNonlinearMaterial {
             Self::Recoil(law) => law.material().material(),
         }
     }
+
+    /// Admit a source-pinned temperature refresh without changing this magnetic
+    /// law, its entire field range, or recoil operating limits. Conductivity can
+    /// change independently; temperature-dependent magnetic storage needs its
+    /// own parameter-work and entropy owner.
+    pub fn admit_fixed_material_refresh(
+        &self,
+        refreshed: &ResolvedMaterialStatePoint,
+    ) -> core::result::Result<(), fs_material::field_storage::FieldStorageError> {
+        match self {
+            Self::Linear(material) => {
+                fs_material::field_storage::admit_fixed_magnetic_refresh(material, refreshed)
+            }
+            Self::Reversible(law) => law.admit_fixed_material_refresh(refreshed),
+            Self::Recoil(law) => law.material().admit_fixed_material_refresh(refreshed),
+        }
+    }
 }
 
 /// Bounded Newton/CG work with dimensional flux and energy acceptance.

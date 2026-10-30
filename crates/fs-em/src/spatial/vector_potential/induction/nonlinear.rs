@@ -11,9 +11,11 @@
 //! angular convexity, never by cancellation of large magnetic energies.
 //! delta_psi+Ohmic_heat+Lorentz_work+D=impressed_work is independently gated.
 //! D is NOT magnetic hysteresis or thermal heat. This first-order fixed-domain
-//! law supports reversible isotropic saturation and fixed recoil. Source laws,
-//! conductor coefficients and occupancy are held; no ALE, hysteresis,
-//! magnetic-temperature entropy, terminals or coupled motion is inferred.
+//! law supports reversible isotropic saturation and fixed recoil. Conductor
+//! coefficients may be refreshed from the same source at an owned temperature;
+//! the original magnetic laws and conducting occupancy remain fixed. No ALE,
+//! hysteresis, magnetic-temperature entropy, terminals or coupled motion is
+//! inferred. A thermal consumer owns local Joule deposition and temperature.
 
 use super::super::super::{
     SpatialMagneticError, dot, finite, invalid, nonlinear::SpatialNonlinearMaterial, poll,
@@ -36,7 +38,7 @@ use fs_feec::{
 };
 use fs_material::{
     conductor::ResolvedConductorState,
-    field_storage::{admit_fixed_magnetic_refresh, linear_magnetic_permeability},
+    field_storage::{admit_source_temperature_refresh, linear_magnetic_permeability},
 };
 use fs_qty::Dims;
 use fs_solver::{FgmresState, LinearOp, ResidualClaim, SolveReport, SolverRunProgress};
@@ -266,18 +268,9 @@ impl<'m> SpatialNonlinearInduction<'m> {
             limits,
             flux_tolerance_wb,
             |cell, source| {
-                match &problem.materials()[cell] {
-                    SpatialNonlinearMaterial::Linear(material) => {
-                        admit_fixed_magnetic_refresh(material, source.material())
-                    }
-                    SpatialNonlinearMaterial::Reversible(law) => {
-                        law.admit_fixed_material_refresh(source.material())
-                    }
-                    SpatialNonlinearMaterial::Recoil(law) => law
-                        .material()
-                        .admit_fixed_material_refresh(source.material()),
-                }
-                .map_err(SpatialMagneticError::Material)
+                problem.materials()[cell]
+                    .admit_fixed_material_refresh(source.material())
+                    .map_err(SpatialMagneticError::Material)
             },
             cancelled,
         )?;
@@ -355,9 +348,91 @@ impl<'m> SpatialNonlinearInduction<'m> {
         settings: SpatialNonlinearInductionControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialNonlinearInductionCandidate<'m>> {
+        self.step_prepared_candidate(
+            Arc::clone(&self.prepared),
+            endpoint_current_a_m2,
+            velocity_m_s,
+            duration_s,
+            settings,
+            cancelled,
+        )
+    }
+
+    /// Continue the SAME accepted field with source-resolved endpoint
+    /// conductivity, retaining every original conductor claim and quantity.
+    /// Only its owned temperature may change. The complete original magnetic
+    /// law must remain unchanged, including its full saturation/recoil range;
+    /// this is not a zero-work replacement of magnetic storage.
+    ///
+    /// The existing Whitney/charge operator is reassembled on its original
+    /// geometry, relative tree gauge and conducting support. No field is
+    /// re-equilibrated or restarted. A finite thermal owner must use the
+    /// returned local Joule heat; numerical dissipation remains separate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_conductors_candidate(
+        &self,
+        endpoint_current_a_m2: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        duration_s: f64,
+        conductors: Vec<Option<ResolvedConductorState>>,
+        settings: SpatialNonlinearInductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialNonlinearInductionCandidate<'m>> {
+        let coupling = self.prepared.coupling.refresh_sources(
+            geometry(self.problem),
+            conductors,
+            |cell, source| {
+                let original = self.conductors()[cell]
+                    .as_ref()
+                    .expect("unchanged conducting support");
+                admit_source_temperature_refresh(original.material(), source.material())
+                    .map_err(SpatialMagneticError::Material)?;
+                self.problem.materials()[cell]
+                    .admit_fixed_material_refresh(source.material())
+                    .map_err(SpatialMagneticError::Material)?;
+                if original.source_basis() != source.source_basis()
+                    || original.source_key() != source.source_key()
+                    || original
+                        .with_material(source.material().clone())
+                        .map_err(|_| {
+                            invalid("thermal induction left its original electrical source")
+                        })?
+                        != *source
+                {
+                    return Err(invalid(
+                        "thermal induction changed its original electrical basis or source",
+                    ));
+                }
+                Ok(())
+            },
+            cancelled,
+        )?;
+        self.step_prepared_candidate(
+            Arc::new(Prepared {
+                coupling,
+                permeability_bound: self.prepared.permeability_bound.clone(),
+            }),
+            endpoint_current_a_m2,
+            velocity_m_s,
+            duration_s,
+            settings,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_prepared_candidate(
+        &self,
+        prepared: Arc<Prepared>,
+        endpoint_current_a_m2: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        duration_s: f64,
+        settings: SpatialNonlinearInductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialNonlinearInductionCandidate<'m>> {
         poll(cancelled)?;
         let controls = settings.induction;
-        let c = &self.prepared.coupling;
+        let c = &prepared.coupling;
         let g = geometry(self.problem);
         let (time_s, restart) = admit_step(
             g,
@@ -392,7 +467,7 @@ impl<'m> SpatialNonlinearInduction<'m> {
             g,
             velocity_m_s,
             &before.field.flux_density_t,
-            &self.prepared.permeability_bound,
+            &prepared.permeability_bound,
             controls.maximum_cell_magnetic_peclet,
             cancelled,
         )?;
@@ -631,7 +706,7 @@ impl<'m> SpatialNonlinearInduction<'m> {
         Ok(SpatialNonlinearInductionCandidate {
             state: Self {
                 problem: self.problem,
-                prepared: Arc::clone(&self.prepared),
+                prepared,
                 potential_wb: value.potential,
                 impressed_current_a_m2: endpoint_current_a_m2.to_vec(),
                 time_s,

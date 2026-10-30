@@ -64,6 +64,9 @@ pub enum MagneticThermalError {
     NonlinearWinding(fs_em::winding::nonlinear::NonlinearWindingError),
     Induction(EddyError),
     SpatialInduction(fs_em::spatial::SpatialMagneticError),
+    SpatialNonlinearInduction(
+        fs_em::spatial::vector_potential::induction::nonlinear::SpatialNonlinearInductionError,
+    ),
     NonlinearInduction(NonlinearEddyError),
     Magnetic(FieldStorageError),
     Invalid(&'static str),

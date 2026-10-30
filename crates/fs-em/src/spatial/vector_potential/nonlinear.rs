@@ -135,6 +135,10 @@ impl SpatialNonlinearVectorMagnetostatics {
     pub fn mesh(&self) -> &TetComplex {
         &self.geometry.mesh
     }
+    /// Physical volume of an original admitted tetrahedron [m3].
+    pub fn cell_volume_m3(&self, cell: usize) -> Option<f64> {
+        self.geometry.geometry.vol_signed.get(cell).map(|v| v.abs())
+    }
     pub fn positions_m(&self) -> &[[f64; 3]] {
         &self.geometry.positions_m
     }

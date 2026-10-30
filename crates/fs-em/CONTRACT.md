@@ -1143,7 +1143,7 @@ positive original segment slopes and angular convexity. Reports separately
 retain signed magnetic storage change, physical Joule heat, Lorentz work,
 impressed work and nonnegative numerical dissipation. D is never thermal heat,
 hysteresis or a fitted core-loss term. This is first-order fixed-geometry,
-fixed-temperature MQS evolution; vector hysteresis, ALE, terminals, resolved
+fixed-magnetic-law MQS evolution; vector hysteresis, ALE, terminals, resolved
 displacement current and mechanical state advancement remain separate work.
 
 Seven new tests check an independently charge-eliminated BE mode, analytic
@@ -1167,6 +1167,19 @@ The endpoint field and source bundle are retained together; a static re-solve
 cannot discard induction memory. This lower owner does not choose temperature
 or deposit reversible heat: the finite-caloric consumer must account for
 magnetic entropy/internal energy and positive combined heat capacity.
+
+`SpatialNonlinearInduction::step_with_conductors_candidate` provides the same
+source-pinned conductivity refresh for retained saturating, linear and fixed-
+recoil magnetic histories. The complete original conductor bundle, electrical
+basis and selected claims stay fixed; only the source-owned absolute temperature
+may change. Original magnetic admission checks the whole H(B) or recoil range,
+so equal endpoint coefficients cannot conceal changed magnetic storage. These
+magnetic laws must remain temperature independent. Original relative gauges,
+conducting components, geometry and A history are retained while the shared
+conductivity operator is rebuilt. Local Joule heat, signed Lorentz work and
+positive backward-Euler numerical loss remain separate native transfers.
+The finite-enthalpy consumer in `fs-couple` determines temperature and deposits
+only physical heat; this lower owner never mutates a thermal receiver.
 
 ## Maxwell loads from retained three-dimensional induction
 

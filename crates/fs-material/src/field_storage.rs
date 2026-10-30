@@ -196,9 +196,13 @@ pub fn admit_magnetic_temperature_refresh(
     Ok(())
 }
 
-// One source/context continuity rule for linear and nonlinear field owners.
-// Constitutive admission and parameter work remain each caller's responsibility.
-pub(crate) fn admit_source_temperature_refresh(
+/// Admit a temperature-only refresh of one complete original source bundle.
+/// Card identity, quantity conventions, requirements and selected claims remain
+/// pinned; all nonthermal coordinates stay fixed. This shared check also covers
+/// electrical/thermal properties carried beside a nonlinear magnetic law.
+/// It does not admit a changed constitutive law or account for parameter work;
+/// the physical owner must separately enforce its storage and heat semantics.
+pub fn admit_source_temperature_refresh(
     prepared: &ResolvedMaterialStatePoint,
     refreshed: &ResolvedMaterialStatePoint,
 ) -> Result<(), FieldStorageError> {

@@ -7,11 +7,14 @@
 //! Actual local Ohmic heat and signed reversible heat have separate accounts;
 //! no fitted core loss is added. Geometry and conducting occupancy stay fixed.
 
+/// Source-pinned saturation/recoil and local conductivity-temperature feedback.
+pub mod nonlinear;
+
 use super::{
     CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients,
     DriverAccount, ThermalDriver, cell_driver_candidate, finite,
     magnetic::{
-        Error, MagneticRegion, MagneticThermalNetwork,
+        Error, MagneticRegion, MagneticRoutes, MagneticThermalNetwork,
         caloric::{MagneticEnergyCell, MagneticThermalLaw, PreparedMagneticCaloric},
         check, invalid, material, same_material,
     },
@@ -20,7 +23,8 @@ use super::{
 use fs_em::spatial::{
     SpatialMagneticError, SpatialMagneticMaterial,
     vector_potential::induction::{
-        SpatialInduction, SpatialInductionCandidate, SpatialInductionControls, SpatialInductionStep,
+        SpatialInduction, SpatialInductionCandidate, SpatialInductionCell,
+        SpatialInductionControls, SpatialInductionStep,
     },
 };
 use fs_feec::weighted::WeightedAssemblyLimits;
@@ -28,7 +32,7 @@ use fs_material::{
     field_storage::{FieldStorageError, admit_magnetic_temperature_refresh},
     state_point::ResolvedMaterialStatePoint,
 };
-use fs_thermal::enthalpy::{CellId, DepositionSimulation};
+use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
 use std::{cell::RefCell, collections::BTreeMap};
 
 pub use fs_material::field_storage::thermal::{
@@ -87,12 +91,13 @@ pub struct SpatialInductionThermalSource {
     pub reversible_heat_j: f64,
 }
 
-pub struct SpatialInductionThermalReport {
-    pub coupled: CircuitEnthalpyReport<SpatialInductionThermalSource, SpatialInductionStep>,
+pub struct SpatialInductionThermalReport<D = SpatialInductionStep> {
+    pub coupled: CircuitEnthalpyReport<SpatialInductionThermalSource, D>,
     /// Authored thermal sources, conduction/reservoir transfer and boundary heat.
     /// Internal reversible field heat is excluded from this external account.
     pub external_heat_j: f64,
-    /// Delta U_field + Delta H_caloric + W_mechanical - W_impressed - Q_external.
+    /// Delta U_field + Delta H_caloric + W_mechanical + numerical loss
+    /// - W_impressed - Q_external. Numerical loss is zero for the midpoint law.
     pub total_energy_residual_j: f64,
 }
 
@@ -155,6 +160,21 @@ fn induction(error: SpatialMagneticError) -> Error {
 }
 
 impl SpatialMagneticThermalNetwork<'_> {
+    fn regions(&self) -> Vec<MagneticRegion> {
+        self.magnetic_regions
+            .iter()
+            .map(|r| match *r {
+                SpatialMagneticRegion::Cell { tetrahedron, cell } => MagneticRegion::Cell {
+                    triangle: tetrahedron,
+                    cell,
+                },
+                SpatialMagneticRegion::Fixed { tetrahedron } => MagneticRegion::Fixed {
+                    triangle: tetrahedron,
+                },
+            })
+            .collect()
+    }
+
     /// Joint source-resolved sigma(T), mu(T), A–phi and finite enthalpy step.
     ///
     /// All original conducting cells need whole-volume solid caloric receivers.
@@ -196,19 +216,7 @@ impl SpatialMagneticThermalNetwork<'_> {
                 "matching spatial field/thermal clocks and complete cells required",
             ));
         }
-        let regions = self
-            .magnetic_regions
-            .iter()
-            .map(|r| match *r {
-                SpatialMagneticRegion::Cell { tetrahedron, cell } => MagneticRegion::Cell {
-                    triangle: tetrahedron,
-                    cell,
-                },
-                SpatialMagneticRegion::Fixed { tetrahedron } => MagneticRegion::Fixed {
-                    triangle: tetrahedron,
-                },
-            })
-            .collect::<Vec<_>>();
+        let regions = self.regions();
         let network = MagneticThermalNetwork {
             cells: self.cells,
             links: self.links,
@@ -391,31 +399,7 @@ impl SpatialMagneticThermalNetwork<'_> {
                 })
             },
             |proposal: &SpatialInductionCandidate<'_>, dt, checkpoint| {
-                if proposal.step().cells.len() != routes.conductors.len() {
-                    return Err(invalid("spatial heat omitted original conducting cells"));
-                }
-                let mut powers = BTreeMap::new();
-                for loss in &proposal.step().cells {
-                    checkpoint()?;
-                    let id = *routes.conductors.get(&loss.cell).ok_or_else(|| {
-                        invalid("spatial eddy heat lacks its original thermal receiver")
-                    })?;
-                    let power = finite(loss.heat_j / dt)?;
-                    if loss.heat_j < 0.0 || loss.heat_j != 0.0 && power == 0.0 {
-                        return Err(invalid(
-                            "spatial eddy heat is negative or lost in power conversion",
-                        ));
-                    }
-                    let previous = *powers.get(&id).unwrap_or(&0.0);
-                    let combined = finite(previous + power)?;
-                    if power != 0.0 && combined == previous {
-                        return Err(invalid(
-                            "spatial eddy heat disappeared in its thermal receiver",
-                        ));
-                    }
-                    powers.insert(id, combined);
-                }
-                Ok(powers)
+                deposit_cell_heat(&proposal.step().cells, &routes, dt, checkpoint)
             },
             || (*cancel.borrow_mut())(),
         )?;
@@ -444,4 +428,40 @@ impl SpatialMagneticThermalNetwork<'_> {
             },
         })
     }
+}
+
+// Linear and nonlinear induction recover the SAME original-cell current and
+// heat type. Share its exact receiving-cell account rather than reintegrating J.
+fn deposit_cell_heat(
+    losses: &[SpatialInductionCell],
+    routes: &MagneticRoutes,
+    dt: f64,
+    checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+) -> Result<BTreeMap<CellId, f64>, Error> {
+    if losses.len() != routes.conductors.len() {
+        return Err(invalid("spatial heat omitted original conducting cells"));
+    }
+    let mut powers = BTreeMap::new();
+    for loss in losses {
+        checkpoint()?;
+        let id = *routes
+            .conductors
+            .get(&loss.cell)
+            .ok_or_else(|| invalid("spatial eddy heat lacks its original thermal receiver"))?;
+        let power = finite(loss.heat_j / dt)?;
+        if loss.heat_j < 0.0 || loss.heat_j != 0.0 && power == 0.0 {
+            return Err(invalid(
+                "spatial eddy heat is negative or lost in power conversion",
+            ));
+        }
+        let previous = *powers.get(&id).unwrap_or(&0.0);
+        let combined = finite(previous + power)?;
+        if power != 0.0 && combined == previous {
+            return Err(invalid(
+                "spatial eddy heat disappeared in its thermal receiver",
+            ));
+        }
+        powers.insert(id, combined);
+    }
+    Ok(powers)
 }

@@ -3704,9 +3704,28 @@ None.
   window is unit-normalized so the point-pickup limit is EXACT; the
   window is what makes bridge-vs-neck voicing physical. v1 provenance:
   linearized flux with an authored dipole-like height profile
-  (Estimate, disclosed); the MAGNETOSTATIC BAKE (offline B-map lab,
-  the lips/jet authority pattern) is the recorded follow-up that
-  upgrades provenance without changing the runtime shape.
+  (Estimate, disclosed); the optional material field bake upgrades this
+  provenance without changing the runtime's Faraday operator.
+  `pickup::field` supplies that opt-in field-backed path: original planar cell
+  material states, fixed magnet orientation, signed winding turns and declared
+  moving mesh vertices feed `fs-em`'s existing fixed-remanence winding solves.
+  The bounded Hermite linkage map uses h/h2 derivative comparisons and fresh
+  midpoint field checks with explicit SI tolerances and field-evaluation limits.
+  All field samples retain native residual reports; these sampled comparisons
+  are numerical estimates, not continuum certificates. Invalid deformation,
+  moving winding/magnet cells, unsupported gaps and cancellation refuse.
+  `MaterialStringPickup` reads the existing homogeneous material-string owner's
+  mass-normalized state without allocation, field solves or a second integrator.
+  Sensed cells must share its material card and query state and translate rigidly;
+  material/geometry or basis replacement invalidates the binding, while gas-only
+  updates remain visible through the owner's motion. The generic map retains
+  the original Faraday observer and its reciprocal discrete-work force port.
+  This path is open-circuit magnetostatics: no static magnetic attraction,
+  electrical loading, induced-current losses or saturation is inferred. Planar
+  geometry and aperture reduction still require physical validation.
+  G1/G3/G4 `tests/pickup_field.rs` checks an independent exact layered field,
+  remanence/permeability data substitutions, reciprocal work, native-string
+  observation, stale-source refusal, numerical budgets and cancellation.
 
 - `speaker` module (bead 3ez8g.9.4): the Thiele-Small driver + sealed
   cabinet as ONE port-Hamiltonian — the Bl gyrator is an antisymmetric
@@ -11976,10 +11995,33 @@ eddy/enthalpy tests also pass; their thermal fixtures explicitly declare the
 absolute-temperature source type required by the original entropy owner.
 These are manufactured equation/discretization checks, not measured devices.
 
-The thermal path admits scalar conductivity and induced-linear globally affine
-source-backed mu(T), fixed geometry and prescribed velocity. Recoil, saturation,
-hysteresis, thermal expansion, moving interfaces and mechanical integration
-require compatible additional physical owners; they are not inferred here.
+The linear thermal path admits scalar conductivity and induced-linear globally
+affine source-backed mu(T), fixed geometry and prescribed velocity.
+
+`SpatialMagneticThermalNetwork::step_nonlinear_candidate` connects the original
+three-dimensional saturating/fixed-recoil A–phi owner to this same finite-cell
+residual, source preparation and whole-volume local heat routing. Every endpoint
+trial re-evaluates the original conductivity or resistivity claim at the actual
+local caloric temperature and continues the accepted magnetic history. Magnetic
+H(B), linear and recoil laws remain temperature independent over their complete
+source ranges, so field internal energy equals the existing magnetic storage.
+The physical account includes the original signed impressed and mechanical work
+and the positive backward-Euler Bregman loss. Only sigma E_conductor squared
+heats the finite stores; numerical magnetic loss is never credited as heat.
+
+Focused nonlinear regressions compare independent charge-eliminated cube
+solutions with linear and saturating material-data substitutions, both original
+electrical source bases, and continued field/thermal history. They separately
+check native Joule heat, finite-cell energy, numerical loss and full balance.
+A prescribed-motion reference also separates actual motional-current heat,
+signed Lorentz work and an independent external thermal source.
+Changed source identity, missing caloric receivers, lost conducting support,
+trial-budget exhaustion and late cancellation must leave both accepted owners
+unchanged. These are synthetic equation checks, not empirical material data.
+
+Temperature-dependent nonlinear/recoil magnetism, hysteresis, thermal expansion,
+moving interfaces and mechanical integration require compatible additional
+physical owners; they are not inferred by either thermal entry point.
 
 ## Nonlinear plate damping and physical port normalization
 

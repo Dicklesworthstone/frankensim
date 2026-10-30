@@ -9,16 +9,14 @@
 //! Reads borrow the string owner's coordinates; no string state or time
 //! integrator is duplicated here.
 //!
-//! Provenance honesty (v1): the height profile of the effective flux
-//! gain and the window shape are AUTHORED Estimate models; the
-//! MAGNETOSTATIC BAKE (an offline lab minting the position-dependent B
-//! map from magnet geometry, the lips/jet authority-lab pattern) is
-//! the RECORDED FOLLOW-UP that upgrades provenance without changing
-//! the runtime shape. The flux map is LINEARIZED — Estimate for large
-//! excursions, disclosed). `bind_flux_map` instead accepts a bounded,
+//! Provenance honesty: `bind` retains the authored height-dependent flux
+//! gain and aperture window; its flux law is linearized and remains an
+//! estimate for large excursions. `bind_flux_map` instead accepts a bounded,
 //! caller-supplied gap-to-linkage map from a measurement or field bake.
 //! It computes nonlinear Faraday voltage and reciprocal current force from
 //! the same map, without granting its inputs experimental authority.
+//! [`field`] compiles that same map from original material states, magnet
+//! geometry and winding turns through the native planar field solver.
 //!
 //! This is a one-coordinate aperture reduction: displacement is positive
 //! toward the pole and gap = rest height - window-weighted displacement.
@@ -29,6 +27,9 @@
 //! step current; it does not make an arbitrary partitioned solve passive.
 
 use fs_math::det;
+
+/// Material-resolved magnetic fields compiled into the same Faraday observer.
+pub mod field;
 
 /// Pickup pose along a string of speaking length `L` — geometry and
 /// setup parameters, never magic numbers.
@@ -353,7 +354,14 @@ impl Pickup {
     }
 
     fn linkage_and_gain(&self, q: &[f64]) -> Result<(f64, f64), PickupError> {
-        let displacement = self.project(q)?;
+        self.linkage_and_gain_at_displacement(self.project(q)?)
+    }
+
+    fn linkage_and_gain_at_displacement(
+        &self,
+        displacement: f64,
+    ) -> Result<(f64, f64), PickupError> {
+        finite(displacement)?;
         if let Some(map) = &self.flux_map {
             let (linkage, slope) = map.sample(self.pose.height_m - displacement)?;
             Ok((linkage, -slope))
@@ -378,8 +386,12 @@ impl Pickup {
     /// # Errors
     /// Refuses invalid modal state, unsupported gap, or nonfinite voltage.
     pub fn emf_at_v(&self, q: &[f64], velocities: &[f64]) -> Result<f64, PickupError> {
-        let gain = self.linkage_and_gain(q)?.1;
-        finite(-gain * self.project(velocities)?)
+        self.emf_at_displacement(self.project(q)?, self.project(velocities)?)
+    }
+
+    fn emf_at_displacement(&self, displacement: f64, velocity: f64) -> Result<f64, PickupError> {
+        let gain = self.linkage_and_gain_at_displacement(displacement)?.1;
+        finite(-gain * finite(velocity)?)
     }
 
     /// Reciprocal generalized force `i ∂λ/∂q_k` [N] on the string modes.
