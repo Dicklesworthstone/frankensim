@@ -64,6 +64,31 @@ pub fn size_and_snap(
     catalog: &[f64],
     prune_frac: f64,
 ) -> CatalogAudit {
+    size_and_snap_members(
+        gs,
+        lp,
+        x,
+        |_| (sigma_y, youngs),
+        catalog,
+        prune_frac,
+        ConstraintKind::Code {
+            standard: "aisc-class-member-checks".to_string(),
+        },
+    )
+}
+
+/// Shared sizing kernel: a material assignment supplies each member's yield
+/// stress and modulus to the same refit, buckling, snap and audit path.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn size_and_snap_members(
+    gs: &GroundStructure,
+    lp: &LayoutLp,
+    x: &[f64],
+    properties: impl Fn(usize) -> (f64, f64),
+    catalog: &[f64],
+    prune_frac: f64,
+    checks: ConstraintKind,
+) -> CatalogAudit {
     let m = gs.members().len();
     let forces: Vec<f64> = (0..m).map(|k| x[k] - x[m + k]).collect();
     let fmax = forces
@@ -85,11 +110,13 @@ pub fn size_and_snap(
         pruned,
         ..CatalogAudit::default()
     };
-    let code = ConstraintKind::Code {
-        standard: "aisc-class-member-checks".to_string(),
+    let check_description = match checks {
+        ConstraintKind::Code { standard } => format!("\"code\":\"{standard}\""),
+        _ => "\"physics\":\"symmetric-yield-and-pinned-euler\"".to_string(),
     };
     let mut all_pass = true;
     for (si, &k) in survivors.iter().enumerate() {
+        let (sigma_y, youngs) = properties(k);
         let q = q_refit[si];
         let l = gs.lengths()[k];
         let area_yield = q.abs() / sigma_y;
@@ -123,11 +150,7 @@ pub fn size_and_snap(
             row,
             "{{\"member\":{k},\"force\":{q:.4e},\"len\":{l:.3},\"a_yield\":{area_yield:.4e},\
              \"a_euler\":{area_buckling:.4e},\"a_catalog\":{area_catalog:.4e},\
-             \"code\":\"{}\",\"stress_ok\":{stress_ok},\"buckling_ok\":{buckling_ok}}}",
-            match &code {
-                ConstraintKind::Code { standard } => standard.as_str(),
-                _ => unreachable!(),
-            }
+             {check_description},\"stress_ok\":{stress_ok},\"buckling_ok\":{buckling_ok}}}"
         );
         audit.rows.push(row);
         audit.members.push(SizedMember {

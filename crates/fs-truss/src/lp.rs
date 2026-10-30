@@ -1023,6 +1023,26 @@ impl LayoutLp {
         limits: LayoutLimits,
         cx: &Cx<'_>,
     ) -> Result<LayoutLp, TrussConstructionError> {
+        if !sigma_y.is_finite() || sigma_y <= 0.0 {
+            return Err(TrussConstructionError::InvalidInput {
+                field: "sigma_y",
+                requirement: "must be finite and positive",
+            });
+        }
+        Self::assemble_member_yields(gs, case, |_| sigma_y, limits, cx)
+    }
+
+    /// Shared assembly for uniform and material-assigned members. Yield values
+    /// may be uniformly nondimensionalized by the material-driven caller; no
+    /// material name or second equilibrium operator enters the solver.
+    #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
+    pub(crate) fn assemble_member_yields(
+        gs: &GroundStructure,
+        case: &LayoutCase,
+        sigma_y: impl Fn(usize) -> f64,
+        limits: LayoutLimits,
+        cx: &Cx<'_>,
+    ) -> Result<LayoutLp, TrussConstructionError> {
         let nodes = gs.nodes();
         let members = gs.members();
         let lengths = gs.lengths();
@@ -1046,12 +1066,6 @@ impl LayoutLp {
                 field: "layout case nodes",
                 expected: n,
                 actual: case.node_count(),
-            });
-        }
-        if !sigma_y.is_finite() || sigma_y <= 0.0 {
-            return Err(TrussConstructionError::InvalidInput {
-                field: "sigma_y",
-                requirement: "must be finite and positive",
             });
         }
         let node_dofs = n.checked_mul(2).ok_or(TrussConstructionError::WorkBudget {
@@ -1313,7 +1327,14 @@ impl LayoutLp {
             if index % LAYOUT_POLL_STRIDE == 0 {
                 poll(cx, "layout cost assembly")?;
             }
-            let cost = length / sigma_y;
+            let strength = sigma_y(index);
+            if !strength.is_finite() || strength <= 0.0 {
+                return Err(TrussConstructionError::InvalidInput {
+                    field: "member yield stress",
+                    requirement: "must be finite and positive",
+                });
+            }
+            let cost = length / strength;
             if !cost.is_finite() || cost <= 0.0 {
                 return Err(TrussConstructionError::InvalidInput {
                     field: "layout objective costs",
@@ -1322,11 +1343,11 @@ impl LayoutLp {
             }
             c.push(cost);
         }
-        for (index, &length) in lengths.iter().enumerate() {
+        for index in 0..lengths.len() {
             if index % LAYOUT_POLL_STRIDE == 0 {
                 poll(cx, "layout cost assembly")?;
             }
-            c.push(length / sigma_y);
+            c.push(c[index]);
         }
         // Power iteration for ‖A‖ (deterministic start).
         let mut v = empty_with_capacity(variables, "layout norm input")?;

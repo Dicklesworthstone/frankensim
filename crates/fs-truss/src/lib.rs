@@ -34,6 +34,8 @@
 pub mod certificate;
 pub mod ground;
 pub mod lp;
+/// Source-bound material assignments shared by layout, sizing and mass.
+pub mod material;
 pub mod rodcheck;
 pub mod sizing;
 

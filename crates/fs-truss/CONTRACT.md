@@ -81,6 +81,33 @@ steel-and-concrete flagship's engine (§15.2).
 
 ## Invariants
 
+### Source-bound material assignments
+
+`material::TrussMaterial` resolves exactly density, axial Young's modulus and
+symmetric yield stress through `fs-material::state_point`, retaining the
+original card, physical query and selected claims. `MaterialLayout` binds one
+material row per ground member and reuses the ordinary equilibrium assembly,
+PDHG, force refit, Euler sizing and rod spot-check owners. Heterogeneous yield
+stress changes the actual layout objective; local modulus changes compression
+buckling, and density changes the mass of the actual snapped member geometry.
+No material names, default steel properties or guessed strengths select physics.
+
+The LP costs use one common positive reference-yield scaling for numerical
+conditioning. `lp()` and its optional certificates describe that normalized
+problem; `MaterialLayoutSolution::volume_m3` reports physical approximate volume.
+The source-bound catalog audit labels symmetric yield and pinned Euler as
+physical model checks, not building-code certification. Absent catalog sections
+leave mass/volume totals unavailable. Immutable geometry/material assignments
+prevent using a different ordering or temperature state during sizing.
+
+This is a frozen-state pin-jointed, symmetric-yield, solid-square model, not
+anisotropic/brittle failure, creep, thermally restrained strain or a mass-optimal
+layout objective. Self-weight remains an explicit load. The existing synchronous
+PDHG/refit/rod kernels retain their cancellation limitations; material admission
+and result publication poll `Cx`. `tests/material.rs` checks source-temperature
+substitution, heterogeneous optimal load-path changes, per-member Euler floors,
+snapped mass, unsupported states, malformed inputs and cancellation.
+
 1. Ground rules hold member-by-member and generation is bitwise
    reproducible. Exact-cap admission succeeds; cap-plus-one, malformed parallel
    vectors, noncanonical member identity, inconsistent lengths, unsafe numeric

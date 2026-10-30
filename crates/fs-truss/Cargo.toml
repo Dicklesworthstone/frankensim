@@ -17,11 +17,15 @@ fs-blake3 = { path = "../fs-blake3" }
 fs-constraint = { path = "../fs-constraint" }
 fs-exec = { path = "../fs-exec" }
 fs-ivl = { path = "../fs-ivl" }
+fs-matdb = { path = "../fs-matdb" }
+fs-material = { path = "../fs-material" }
+fs-qty = { path = "../fs-qty" }
 fs-solid = { path = "../fs-solid" }
 fs-sparse = { path = "../fs-sparse" }
 
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }
+fs-evidence = { path = "../fs-evidence" }
 
 [lints]
 workspace = true
