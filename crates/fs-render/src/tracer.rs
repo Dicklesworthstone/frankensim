@@ -132,6 +132,8 @@ use scattering::PathMedium;
 #[cfg(feature = "volumes")]
 mod medium_exposure;
 #[cfg(feature = "volumes")]
+mod volume_emission;
+#[cfg(feature = "volumes")]
 use medium_exposure::MediumInput;
 #[cfg(feature = "volumes")]
 pub use medium_exposure::{
@@ -417,6 +419,11 @@ struct BoundaryMedia {
 #[derive(Clone, Copy)]
 struct PreviousBsdf {
     pdf: DirectionalPdfPair,
+    /// Whether the previous ambient vertex also sampled the volume source.
+    /// This competitor acts on the complete source integral before free flight,
+    /// independently of the escape-weighted surface-light PDF below.
+    #[cfg(feature = "volumes")]
+    volume_emission_competitor: bool,
     /// Only opaque source vertices are covered by the parallel-slab NEE
     /// technique. Retaining the oriented geometric normal also lets reverse
     /// MIS replay the exact straight shadow-ray spawn used by forward NEE.
@@ -11868,6 +11875,8 @@ fn previous_after_dielectric_sample(
 ) -> Result<PreviousBsdf, TracerError> {
     let boundary = boundary_media(boundary_primitive, glass, frame.entering, medium_stack)?;
     let mut next = PreviousBsdf {
+        #[cfg(feature = "volumes")]
+        volume_emission_competitor: false,
         pdf: if sampled_delta {
             DirectionalPdfPair::delta()
         } else {
@@ -12806,6 +12815,9 @@ fn trace_path_with_medium(
     let allow_dielectric_connectors = medium.is_none();
     #[cfg(not(feature = "volumes"))]
     let allow_dielectric_connectors = true;
+    #[cfg(feature = "volumes")]
+    let has_volume_source_nee = s.strategy != DirectStrategy::BsdfOnly
+        && medium.is_some_and(|medium| medium.emission_grid().has_emission_proposal());
     let key = [(s.seed & 0xffff_ffff) as u32, (s.seed >> 32) as u32];
     let rng = PathRng {
         pixel,
@@ -12915,8 +12927,25 @@ fn trace_path_with_medium(
                 path_sobol,
                 depth,
             )?;
+            let source_weight = if transport
+                .emission_w_m2_sr_nm
+                .iter()
+                .any(|value| *value > 0.0)
+            {
+                volume_emission::continuation_weight(
+                    cx,
+                    s.strategy,
+                    medium,
+                    previous_bsdf,
+                    segment_origin,
+                    ray.dir,
+                )?
+            } else {
+                1.0
+            };
             for lane in 0..PACKET {
-                let emitted = throughput[lane] * transport.emission_w_m2_sr_nm[lane];
+                let emitted =
+                    throughput[lane] * transport.emission_w_m2_sr_nm[lane] * source_weight;
                 radiance[lane] += emitted;
                 if let Some(contributions) = &mut contribution_radiance {
                     contributions.record(emissive_contribution_class(depth), lane, emitted);
@@ -12930,6 +12959,34 @@ fn trace_path_with_medium(
                 let phase = medium.phase().ok_or(TracerError::InvalidInput)?;
                 if throughput.iter().all(|value| *value == 0.0) {
                     break;
+                }
+                if has_volume_source_nee {
+                    let direct = volume_emission::direct_contribution(
+                        scene,
+                        cx,
+                        ray_time,
+                        s,
+                        depth,
+                        medium,
+                        event.position,
+                        volume_emission::Receiver::Phase {
+                            phase,
+                            incoming_travel: direction,
+                        },
+                        &lambdas,
+                        &rng,
+                    )?;
+                    for lane in 0..PACKET {
+                        let contribution = throughput[lane] * direct[lane];
+                        radiance[lane] += contribution;
+                        if let Some(contributions) = &mut contribution_radiance {
+                            contributions.record(
+                                direct_contribution_class(depth),
+                                lane,
+                                contribution,
+                            );
+                        }
+                    }
                 }
                 if s.strategy != DirectStrategy::BsdfOnly {
                     let (u1, u2) = rng.path_pair(path_sobol, depth, 0);
@@ -12968,6 +13025,8 @@ fn trace_path_with_medium(
                 let next_direction = sampled_phase.direction;
                 let pdf = sampled_phase.pdf;
                 previous_bsdf = Some(PreviousBsdf {
+                    #[cfg(feature = "volumes")]
+                    volume_emission_competitor: has_volume_source_nee,
                     pdf: DirectionalPdfPair::continuous(pdf, pdf)
                         .ok_or(TracerError::InvalidInput)?,
                     opaque_source_geometric_normal: None,
@@ -13264,6 +13323,38 @@ fn trace_path_with_medium(
             | Material::Conductor { .. }
             | Material::BrushedConductor { .. } => None,
         };
+
+        #[cfg(feature = "volumes")]
+        if let Some(medium) = medium
+            && medium_stack.len() == 0
+            && dielectric_boundary.is_none()
+            && has_volume_source_nee
+        {
+            let direct = volume_emission::direct_contribution(
+                scene,
+                cx,
+                ray_time,
+                s,
+                depth,
+                medium,
+                hit.point,
+                volume_emission::Receiver::Surface {
+                    material: &prim.material,
+                    frame,
+                    outgoing: ray.dir.scale(-1.0),
+                    brushed: brushed_frame.as_ref(),
+                },
+                &lambdas,
+                &rng,
+            )?;
+            for lane in 0..PACKET {
+                let contribution = throughput[lane] * direct[lane];
+                radiance[lane] += contribution;
+                if let Some(contributions) = &mut contribution_radiance {
+                    contributions.record(direct_contribution_class(depth), lane, contribution);
+                }
+            }
+        }
 
         // Next-event estimation.
         if s.strategy != DirectStrategy::BsdfOnly {
@@ -14305,6 +14396,8 @@ fn trace_path_with_medium(
                         / pdf;
                 }
                 previous_bsdf = Some(PreviousBsdf {
+                    #[cfg(feature = "volumes")]
+                    volume_emission_competitor: medium_stack.len() == 0 && has_volume_source_nee,
                     pdf: DirectionalPdfPair::continuous(
                         pdf,
                         bsdf_pdf(&prim.material, n, wi, wo, brushed_frame.as_ref()),
@@ -17179,6 +17272,8 @@ mod tests {
                 cx,
                 None,
                 Some(PreviousBsdf {
+                    #[cfg(feature = "volumes")]
+                    volume_emission_competitor: false,
                     pdf: DirectionalPdfPair::delta(),
                     opaque_source_geometric_normal: None,
                     smooth_slab: Some(SmoothSlabPath::ManifoldEntered(PlanarManifoldEntry {
@@ -18549,6 +18644,8 @@ mod tests {
         let bsdf_pdf = 0.25;
         let nee_pdf = 0.75;
         let previous = Some(PreviousBsdf {
+            #[cfg(feature = "volumes")]
+            volume_emission_competitor: false,
             pdf: DirectionalPdfPair::continuous(bsdf_pdf, bsdf_pdf).unwrap(),
             opaque_source_geometric_normal: Some(Vec3::new(0.0, 0.0, 1.0)),
             smooth_slab: None,
@@ -18587,6 +18684,8 @@ mod tests {
             emissive_hit_weight(
                 DirectStrategy::NeeOnly,
                 Some(PreviousBsdf {
+                    #[cfg(feature = "volumes")]
+                    volume_emission_competitor: false,
                     pdf: DirectionalPdfPair::delta(),
                     opaque_source_geometric_normal: None,
                     smooth_slab: None,

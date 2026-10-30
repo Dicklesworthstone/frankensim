@@ -499,8 +499,8 @@ differentiable lift). Pure Rust throughout.
   including a single rectangular light. `AbsorbingFilm` binds the medium snapshot
   and all sample settings, caps progressive samples and commits whole ranges
   transactionally. Callers retain the same scene between appends. This surface
-  adds no volume-light NEE, dynamic-field exposure interpolation,
-  thermal-state debit or measured-property authority. G1/G3/G4/G5 tests compare
+  adds no dynamic-field interpolation, thermal-state debit or measured-property
+  authority. G1/G3/G4/G5 tests compare
   slabs, shadow paths and hot-cell emission to independent integrals, exercise
   boundary/refinement/unit changes, and verify replay and refusal rollback.
 - **Physical participating cells (`tracer,volumes`):**
@@ -523,15 +523,15 @@ differentiable lift). Pure Rust throughout.
   coefficients, phase and settings, and publishes each sample range atomically.
   Zero-scattering snapshots retain deterministic absorption; vacuum retains
   the original surface path. This is one finite, index-one grid with global
-  spectral coefficients/phase, not overlapping-medium composition, volume-emitter
-  NEE, polarization, or thermal-energy mutation. With nonzero ambient grids,
+  spectral coefficients/phase, not overlapping-medium composition, polarization,
+  or thermal-energy mutation. With nonzero ambient grids,
   every recursive Fresnel/spectral branch retains that same field after glass
   exit. Specialized surface-only refractive NEE and its reverse competitor are
   disabled together; complete interface random walks supply those paths.
   Ordinary rough-interface NEE uses the correct ambient or glass side, and
   rough Fresnel events have an independent random dimension from free flight.
   Thermal sources embedded in glass remain explicitly unsupported. Scattering
-  semantics v2 admits this coupling without changing volume-only/vacuum streams.
+  semantics v3 adds volume-source sampling while preserving cold/vacuum streams.
   Focused regressions cover independent single-scatter source integrals,
   thermal spectra, surface shadow extinction, spectral furnace conservation,
   phase normalization/moments, exact progressive replay and bounded refusals.
@@ -573,6 +573,28 @@ differentiable lift). Pure Rust throughout.
   coherence, exact split-range/tile replay and refusal rollback. This remains
   quasi-static exposure integration: no finite-light-travel-time effects,
   interpolation across missing simulation states, or thermal-energy debit.
+- **Physical volume-source lighting (`tracer,volumes`):**
+  Absorbing and scattering snapshots cache an emission-direction distribution
+  over their original temperature/density buffers. A visible-band Planck proxy
+  guides cell selection, with an explicit uniform component retaining cold
+  spectral-tail support. The bounded CDF stores one f64 per cell plus one;
+  fields with no representable visible source allocate no proposal. Sampling
+  selects a source point only to propose a direction. Exact cell crossings
+  marginalize radius into the complete solid-angle PDF, including cells behind
+  occluders, while source radiance is integrated only up to the first surface.
+  This removes the point estimator's inverse-square near-field singularity
+  without a distance clamp. Ambient opaque and phase vertices sample this source
+  alongside existing lights. Complementary balance/power MIS weights the source
+  integral before the stochastic free-flight outcome; surface-light survival
+  PDFs retain their separate meaning. Terminal vertices receive full direct
+  weight. Camera, dielectric and BSDF-only paths retain full source-integral
+  support. `ScatteringGrid::transport` shares its exact LTE cell integral with
+  free flights: absorption creates radiation, total extinction attenuates it.
+  A disjoint counter stream preserves existing flight/phase/light identities.
+  Physical exposures select the matching source distribution with each accepted
+  snapshot, and serial/tiled/progressive entries all use the same estimator.
+  Independent cube densities, hot-box irradiance and single-scattering integrals
+  cover normalization, visibility, source energy and replay.
 
 ## Invariants
 

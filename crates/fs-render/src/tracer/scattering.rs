@@ -16,9 +16,9 @@ pub use execution::{
 };
 
 /// Bit-affecting physical free-flight, phase and survival-aware MIS semantics.
-// v2 admits ambient grids around dielectric bodies and independently samples
-// rough Fresnel events; volume-only and vacuum streams remain unchanged.
-pub const SCATTERING_TRACER_SEMANTICS_VERSION: u32 = 2;
+// v3 adds directional LTE-source NEE with complementary source-integral MIS.
+// Cold/vacuum transport and its sampling streams remain unchanged.
+pub const SCATTERING_TRACER_SEMANTICS_VERSION: u32 = 3;
 
 /// Progressive film bound to one immutable participating-medium snapshot.
 ///
@@ -150,7 +150,33 @@ fn scattering_medium<'view, 'field>(
     }
 }
 
-impl PathMedium<'_, '_> {
+impl<'view, 'field> PathMedium<'view, 'field> {
+    pub(super) fn emission_grid(self) -> &'view AbsorbingGrid<'field> {
+        match self {
+            Self::Absorbing(medium) => medium,
+            Self::Scattering(medium) => medium.absorption_grid(),
+        }
+    }
+
+    pub(super) fn source_radiance(
+        self,
+        cx: &Cx<'_>,
+        origin: Point3,
+        direction: Vec3,
+        distance: f64,
+        wavelengths: &[f64; PACKET],
+    ) -> Result<[f64; PACKET], VolumeTransportError> {
+        let transport = match self {
+            Self::Absorbing(medium) => {
+                medium.transport(cx, origin, direction, distance, wavelengths)?
+            }
+            Self::Scattering(medium) => {
+                medium.transport(cx, origin, direction, distance, wavelengths)?
+            }
+        };
+        Ok(transport.emission_w_m2_sr_nm)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn sample_segment(
         self,
@@ -174,9 +200,8 @@ impl PathMedium<'_, '_> {
                 })
             }
             Self::Scattering(medium) => {
-                // The third independent bounce pair was previously reserved
-                // for dielectric events. Dielectrics are not admitted here,
-                // so light and phase dimensions remain disjoint from flight.
+                // Flight has its own pair. Rough dielectric event selection
+                // and source-emission proposals use separate counter domains.
                 let (lane, distance_sample) = rng.path_pair(sobol, depth, 2);
                 medium.sample_segment(
                     cx,
