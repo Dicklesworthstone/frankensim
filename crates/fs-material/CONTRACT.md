@@ -4832,10 +4832,13 @@ with its original absolute temperature and optional isobaric volumetric
 expansion. Density, Cp, conductivity and viscosity remain the same immutable
 checked tuple used by mechanical consumers. Original ideal-gas owners derive
 beta = 1/T at fixed composition after their EOS/caloric/acoustic coherence gate.
-Source-resolved liquids require one explicitly typed absolute-temperature
-coordinate. Four-property resolution retains unknown expansion; a missing
-coefficient never means zero expansion. `resolve_liquid_state_with_expansion`
-and `LiquidTemperatureLaw::try_new_with_expansion` opt into the original card's
+Source-resolved liquid snapshots use their explicitly admitted temperature axis;
+without a prepared density path, they require one explicitly typed
+absolute-temperature coordinate. Four-property resolution alone retains unknown
+expansion; a missing coefficient never means zero expansion.
+
+`resolve_liquid_state_with_expansion` and
+`LiquidTemperatureLaw::try_new_with_expansion` opt into the original card's
 instantaneous isobaric `volumetric_thermal_expansion_coefficient` [1/K]. The
 same immutable liquid bundle owns all five requirements and source receipts,
 including the explicit dynamic/kinematic viscosity basis. Full-query and
@@ -4848,8 +4851,50 @@ Independently declared density and expansion tables are not promoted into a
 thermodynamically consistent EOS, a phase-stability claim or a finite-temperature
 Boussinesq validity certificate. Focused `liquid_expansion` regressions cover
 source retention, both viscosity bases, signed coefficients and refusal.
-An explicit authored-state constructor can declare its own
-temperature and optional beta, without acquiring source-data authority.
+
+`LiquidTemperatureLaw::with_density_expansion` (or the corresponding
+`ResolvedLiquidState` method) prepares an explicitly bounded temperature line
+through the **same selected density claim**. The existing matdb line owner
+admits scalar plateaus with explicit temperature support, native linear curves,
+and fixed-pressure/composition slices through sampled surfaces. Every source
+breakpoint and receipt is retained in shared immutable storage. At each later
+temperature, `beta = -(d rho/dT)/rho` uses the local interpolation derivative
+and the actual refreshed density, alongside the same Cp, conductivity and
+viscosity. This follows directly from `V = mass/rho` at fixed mass. It adds no
+gas-law assumption, fitted coefficient, smoothing or finite-difference step.
+Tangents use original curve knots or the original triangle's analytic gradient,
+so clipping a path to nearly equal evaluated densities cannot manufacture zero
+expansion. Surface-cell selection reuses the canonical pinned point query;
+intervals without a representable interior query explicitly refuse.
+The prepared state feeds the existing thermal-fluid, natural-convection and
+immersed-body consumers without separately authored expansion numbers.
+
+The density-derived and independently declared coefficients are explicit source
+choices. Binding a density path to a state that already retains an independent
+expansion claim refuses, so no selected claim is silently overridden. The
+liquid's `volumetric_expansion_per_k` accessor and its thermal-transport snapshot
+return the same coefficient for either admitted source choice.
+
+Source intervals must be continuously supported. Discrete samples and an
+isolated density scalar cannot supply a derivative. Zero and negative
+expansion are preserved; interior source knots with unequal one-sided slopes
+refuse. Declared interval endpoints use the derivative from inside that
+interval. Updates retain the original source and all nonthermal coordinates;
+changing pressure or composition requires a newly admitted path rather than
+reusing its old tangent. A density interval does not extend any other transport
+claim or establish a finite-temperature convection approximation. Source-value
+uncertainty is retained and is not promoted to a derivative error bound.
+
+Focused G0/G1/G3 checks cover native curve and surface derivatives, independent
+specific-volume differentiation, zero/negative expansion, endpoint and kink
+semantics, missing/discrete support, and unchanged states on invalid refresh.
+`fs-airflow`'s `material_cell_convection::thermal_source` regressions change only
+the density source slope and verify the resulting Rayleigh number, heat-transfer
+coefficient, Robin boundary and accepted backward-Euler thermal history against
+independent formula/energy calculations.
+
+An explicit authored-state constructor can declare its own temperature and
+optional beta, without acquiring source-data authority.
 
 `ResolvedThermochemicalRealGasState` supplies the same thermal view from its
 original Peng-Robinson branch. Its local expansion is

@@ -13,6 +13,9 @@ use fs_matdb::{ClaimSet, MaterialCard, MaterialStateId};
 use fs_qty::{Length, Temperature};
 use fs_qty::semantic::{Composition, CompositionBasis};
 
+#[path = "material_cell_convection/thermal_source.rs"]
+mod thermal_source;
+
 const IDS: [CellId;2] = [CellId(30), CellId(10)];
 const AREA: f64 = 0.01;
 const MASS: f64 = 0.001;

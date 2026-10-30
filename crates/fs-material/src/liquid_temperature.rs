@@ -28,7 +28,10 @@ pub enum LiquidViscosityBasis {
 
 impl LiquidViscosityBasis {
     fn resolve(
-        self, card: &MaterialCard, point: &QueryPoint, selection: MaterialPropertySelection,
+        self,
+        card: &MaterialCard,
+        point: &QueryPoint,
+        selection: MaterialPropertySelection,
     ) -> Result<ResolvedLiquidState, MaterialStatePointError> {
         match self {
             Self::Dynamic => resolve_liquid_state(card, point, selection),
@@ -67,14 +70,20 @@ impl<'a> LiquidTemperatureLaw<'a> {
     /// # Errors
     /// Refuses a missing/mistyped temperature and all source-resolution errors.
     pub fn try_new(
-        card: &'a MaterialCard, point: &QueryPoint, temperature_axis: &str,
-        viscosity_basis: LiquidViscosityBasis, selection: MaterialPropertySelection,
+        card: &'a MaterialCard,
+        point: &QueryPoint,
+        temperature_axis: &str,
+        viscosity_basis: LiquidViscosityBasis,
+        selection: MaterialPropertySelection,
     ) -> Result<Self, MaterialStatePointError> {
         validate_temperature(point, temperature_axis)?;
         let reference_state = viscosity_basis.resolve(card, point, selection)?;
         Ok(Self {
-            card, reference_point: point.clone(), reference_state,
-            temperature_axis: temperature_axis.to_owned(), viscosity_basis,
+            card,
+            reference_point: point.clone(),
+            reference_state,
+            temperature_axis: temperature_axis.to_owned(),
+            viscosity_basis,
         })
     }
 
@@ -123,15 +132,46 @@ impl<'a> LiquidTemperatureLaw<'a> {
         viscosity_basis: LiquidViscosityBasis,
     ) -> Result<Self, MaterialStatePointError> {
         if material.card_identity() != card.content_hash() {
-            return Err(invalid("liquid temperature law requires the original material card"));
+            return Err(invalid(
+                "liquid temperature law requires the original material card",
+            ));
         }
         let reference_point = material.query();
         validate_temperature(&reference_point, temperature_axis)?;
         let reference_state = ResolvedLiquidState::try_from_material(material, viscosity_basis)?;
         Ok(Self {
-            card, reference_point, reference_state,
-            temperature_axis: temperature_axis.to_owned(), viscosity_basis,
+            card,
+            reference_point,
+            reference_state,
+            temperature_axis: temperature_axis.to_owned(),
+            viscosity_basis,
         })
+    }
+
+    /// Derive thermal expansion from this law's SAME selected density source.
+    ///
+    /// The interval admits a continuous fixed-pressure/composition source path;
+    /// it does not extend the other transport claims. Every later temperature
+    /// refresh carries its local density tangent into `ThermalFluidTransport`.
+    /// Source knots are preserved, without smoothing or numerical differences.
+    /// At a slope discontinuity the derivative refuses; interval endpoints use
+    /// the derivative from inside the declared interval.
+    ///
+    /// # Errors
+    /// Refuses missing temperature support, gaps, a changed source, invalid
+    /// bounds or a reference temperature without a unique admitted tangent.
+    pub fn with_density_expansion(
+        mut self,
+        lower: Temperature,
+        upper: Temperature,
+    ) -> Result<Self, MaterialStatePointError> {
+        self.reference_state = self.reference_state.with_density_expansion(
+            self.card,
+            &self.temperature_axis,
+            lower,
+            upper,
+        )?;
+        Ok(self)
     }
 
     /// Evaluate all transport properties at a new temperature, atomically.
@@ -140,49 +180,71 @@ impl<'a> LiquidTemperatureLaw<'a> {
     ///
     /// # Errors
     /// Refuses invalid temperature, out-of-support pins and inadmissible results.
-    pub fn at_temperature(&self, temperature: Temperature)
-        -> Result<ResolvedLiquidState, MaterialStatePointError>
-    {
+    pub fn at_temperature(
+        &self,
+        temperature: Temperature,
+    ) -> Result<ResolvedLiquidState, MaterialStatePointError> {
         if !temperature.value().is_finite() || temperature.value() <= 0.0 {
-            return Err(invalid("liquid evaluation temperature must be positive and finite"));
+            return Err(invalid(
+                "liquid evaluation temperature must be positive and finite",
+            ));
         }
-        let point = self.reference_point.clone().with(&self.temperature_axis, temperature.value())
+        let point = self
+            .reference_point
+            .clone()
+            .with(&self.temperature_axis, temperature.value())
             .map_err(|_| invalid("liquid temperature violates its retained quantity convention"))?;
         self.reference_state.at_query_point(self.card, &point)
     }
 
     /// The immutable card owning every evaluated state.
     #[must_use]
-    pub const fn card(&self) -> &'a MaterialCard { self.card }
+    pub const fn card(&self) -> &'a MaterialCard {
+        self.card
+    }
     /// Initial selected source state, before temperature updates.
     #[must_use]
-    pub const fn reference_state(&self) -> &ResolvedLiquidState { &self.reference_state }
+    pub const fn reference_state(&self) -> &ResolvedLiquidState {
+        &self.reference_state
+    }
     /// Complete initial query, including all nonthermal conditions.
     #[must_use]
-    pub const fn reference_point(&self) -> &QueryPoint { &self.reference_point }
+    pub const fn reference_point(&self) -> &QueryPoint {
+        &self.reference_point
+    }
     /// Explicit temperature coordinate used by both material and caloric owners.
     #[must_use]
-    pub fn temperature_axis(&self) -> &str { &self.temperature_axis }
+    pub fn temperature_axis(&self) -> &str {
+        &self.temperature_axis
+    }
     /// Original source viscosity convention.
     #[must_use]
-    pub const fn viscosity_basis(&self) -> LiquidViscosityBasis { self.viscosity_basis }
+    pub const fn viscosity_basis(&self) -> LiquidViscosityBasis {
+        self.viscosity_basis
+    }
 }
 
-fn validate_temperature(
+pub(crate) fn validate_temperature(
     point: &QueryPoint,
     temperature_axis: &str,
 ) -> Result<(), MaterialStatePointError> {
     let absolute = QuantitySpec::semantic(SemanticType::new(
-        QuantityKind::AbsoluteTemperature, ValueForm::Static,
+        QuantityKind::AbsoluteTemperature,
+        ValueForm::Static,
     ));
     let descriptor_ok = match point.axis_quantities().get(temperature_axis) {
         Some(q) => *q == absolute || *q == QuantitySpec::dimensional(Temperature::DIMS),
         None => temperature_axis == "T",
     };
-    if !descriptor_ok || !point.axes().get(temperature_axis)
-        .is_some_and(|t| t.is_finite() && *t > 0.0)
+    if !descriptor_ok
+        || !point
+            .axes()
+            .get(temperature_axis)
+            .is_some_and(|t| t.is_finite() && *t > 0.0)
     {
-        return Err(invalid("liquid temperature law needs an explicit positive absolute-temperature coordinate"));
+        return Err(invalid(
+            "liquid temperature law needs an explicit positive absolute-temperature coordinate",
+        ));
     }
     Ok(())
 }
@@ -209,20 +271,47 @@ mod tests {
     fn card(basis: LiquidViscosityBasis, split_viscosity: bool) -> MaterialCard {
         let mut claims = ClaimSet::new();
         for (name, dims, values) in [
-            (DENSITY_PROPERTY, Dims([-3,1,0,0,0,0]), [1000.0, 800.0]),
-            (SPECIFIC_HEAT_CAPACITY_PROPERTY, Dims([2,0,-2,-1,0,0]), [2000.0, 4000.0]),
-            (THERMAL_CONDUCTIVITY_PROPERTY, Dims([1,1,-3,-1,0,0]), [0.5, 1.0]),
-            (basis.property(), if basis == LiquidViscosityBasis::Dynamic {
-                Dims([-1,1,-1,0,0,0]) } else { Dims([2,0,-1,0,0,0]) },
-                if basis == LiquidViscosityBasis::Dynamic { [0.002, 0.001] } else { [2e-6, 1e-6] }),
+            (DENSITY_PROPERTY, Dims([-3, 1, 0, 0, 0, 0]), [1000.0, 800.0]),
+            (
+                SPECIFIC_HEAT_CAPACITY_PROPERTY,
+                Dims([2, 0, -2, -1, 0, 0]),
+                [2000.0, 4000.0],
+            ),
+            (
+                THERMAL_CONDUCTIVITY_PROPERTY,
+                Dims([1, 1, -3, -1, 0, 0]),
+                [0.5, 1.0],
+            ),
+            (
+                basis.property(),
+                if basis == LiquidViscosityBasis::Dynamic {
+                    Dims([-1, 1, -1, 0, 0, 0])
+                } else {
+                    Dims([2, 0, -1, 0, 0, 0])
+                },
+                if basis == LiquidViscosityBasis::Dynamic {
+                    [0.002, 0.001]
+                } else {
+                    [2e-6, 1e-6]
+                },
+            ),
         ] {
             let quantity = if name == THERMAL_CONDUCTIVITY_PROPERTY {
-                QuantitySpec::semantic(SemanticType::new(QuantityKind::ThermalConductivity, ValueForm::Static))
-            } else { QuantitySpec::dimensional(dims) };
+                QuantitySpec::semantic(SemanticType::new(
+                    QuantityKind::ThermalConductivity,
+                    ValueForm::Static,
+                ))
+            } else {
+                QuantitySpec::dimensional(dims)
+            };
             let mut claim = PropertyClaim {
                 key: PropertyKey::with_quantity(name, quantity),
-                value: PropertyValue::Curve { abscissa: "T".into(), abscissa_dims: Temperature::DIMS,
-                    knots: vec![(300.0, values[0]), (400.0, values[1])], dims },
+                value: PropertyValue::Curve {
+                    abscissa: "T".into(),
+                    abscissa_dims: Temperature::DIMS,
+                    knots: vec![(300.0, values[0]), (400.0, values[1])],
+                    dims,
+                },
                 validity: ValidityDomain::unconstrained()
                     .with_quantity(
                         "T",
@@ -234,9 +323,14 @@ mod tests {
                         400.0,
                     )
                     .with("pressure", 100000.0, 100000.0),
-                uncertainty: UncertaintyModel::Unstated, interpolation: InterpolationPolicy::LinearInside,
-                observations: vec![], provenance: Provenance {
-                    source: "synthetic liquid law, not measurements".into(), license: "test-only".into(), artifact: None },
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::LinearInside,
+                observations: vec![],
+                provenance: Provenance {
+                    source: "synthetic liquid law, not measurements".into(),
+                    license: "test-only".into(),
+                    artifact: None,
+                },
             };
             if split_viscosity && name == basis.property() {
                 claim.validity = claim.validity.with("T", 300.0, 350.0);
@@ -245,20 +339,44 @@ mod tests {
             }
             claims.insert_claim(claim).unwrap();
         }
-        MaterialCard::assemble(MaterialStateId { chemistry: "synthetic liquid".into(), phase: "liquid".into(),
-            process: "numerical fixture".into(), revision: 0 }, claims, vec![]).unwrap()
+        MaterialCard::assemble(
+            MaterialStateId {
+                chemistry: "synthetic liquid".into(),
+                phase: "liquid".into(),
+                process: "numerical fixture".into(),
+                revision: 0,
+            },
+            claims,
+            vec![],
+        )
+        .unwrap()
     }
     fn point() -> QueryPoint {
-        QueryPoint::new().with_quantity("T", QuantitySpec::semantic(SemanticType::new(
-            QuantityKind::AbsoluteTemperature, ValueForm::Static)), 300.0).unwrap()
-            .with("pressure", 100000.0).unwrap()
+        QueryPoint::new()
+            .with_quantity(
+                "T",
+                QuantitySpec::semantic(SemanticType::new(
+                    QuantityKind::AbsoluteTemperature,
+                    ValueForm::Static,
+                )),
+                300.0,
+            )
+            .unwrap()
+            .with("pressure", 100000.0)
+            .unwrap()
     }
 
     #[test]
     fn temperature_updates_transport_and_preserves_claims_and_context() {
         let card = card(LiquidViscosityBasis::Dynamic, false);
-        let law = LiquidTemperatureLaw::try_new(&card, &point(), "T", LiquidViscosityBasis::Dynamic,
-            MaterialPropertySelection::SingleClaimOnly).unwrap();
+        let law = LiquidTemperatureLaw::try_new(
+            &card,
+            &point(),
+            "T",
+            LiquidViscosityBasis::Dynamic,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
         let hot = law.at_temperature(Temperature::new(400.0)).unwrap();
         assert_eq!(
             hot,
@@ -278,9 +396,23 @@ mod tests {
         assert_eq!(hot.dynamic_viscosity_pa_s(), 0.001);
         assert_eq!(hot.thermal_conductivity_w_m_k(), 1.0);
         assert_eq!(hot.transport_state().unwrap().prandtl(), 4.0);
-        for name in [DENSITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_PROPERTY, THERMAL_CONDUCTIVITY_PROPERTY, DYNAMIC_VISCOSITY_PROPERTY] {
+        for name in [
+            DENSITY_PROPERTY,
+            SPECIFIC_HEAT_CAPACITY_PROPERTY,
+            THERMAL_CONDUCTIVITY_PROPERTY,
+            DYNAMIC_VISCOSITY_PROPERTY,
+        ] {
             let receipt = &hot.material().property(name).unwrap().answer().receipt;
-            assert_eq!(receipt.selected, law.reference_state().material().property(name).unwrap().answer().receipt.selected);
+            assert_eq!(
+                receipt.selected,
+                law.reference_state()
+                    .material()
+                    .property(name)
+                    .unwrap()
+                    .answer()
+                    .receipt
+                    .selected
+            );
             assert_eq!(receipt.axis_quantities, *point().axis_quantities());
             assert!(receipt.query_point.contains(&("pressure".into(), 100000.0)));
         }
@@ -291,21 +423,47 @@ mod tests {
     #[test]
     fn kinematic_basis_uses_the_updated_density() {
         let card = card(LiquidViscosityBasis::Kinematic, false);
-        let law = LiquidTemperatureLaw::try_new(&card, &point(), "T", LiquidViscosityBasis::Kinematic,
-            MaterialPropertySelection::SingleClaimOnly).unwrap();
+        let law = LiquidTemperatureLaw::try_new(
+            &card,
+            &point(),
+            "T",
+            LiquidViscosityBasis::Kinematic,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
         let hot = law.at_temperature(Temperature::new(400.0)).unwrap();
         assert!((hot.dynamic_viscosity_pa_s() - 0.0008).abs() < 1e-18);
-        assert!(hot.material().property(KINEMATIC_VISCOSITY_PROPERTY).is_some());
-        assert!(hot.material().property(DYNAMIC_VISCOSITY_PROPERTY).is_none());
+        assert!(
+            hot.material()
+                .property(KINEMATIC_VISCOSITY_PROPERTY)
+                .is_some()
+        );
+        assert!(
+            hot.material()
+                .property(DYNAMIC_VISCOSITY_PROPERTY)
+                .is_none()
+        );
     }
 
     #[test]
     fn updates_do_not_silently_switch_claims_at_a_source_boundary() {
         let card = card(LiquidViscosityBasis::Dynamic, true);
-        let law = LiquidTemperatureLaw::try_new(&card, &point(), "T", LiquidViscosityBasis::Dynamic,
-            MaterialPropertySelection::SingleClaimOnly).unwrap();
-        assert!(resolve_liquid_state(&card, &point().with("T", 375.0).unwrap(),
-            MaterialPropertySelection::SingleClaimOnly).is_ok());
+        let law = LiquidTemperatureLaw::try_new(
+            &card,
+            &point(),
+            "T",
+            LiquidViscosityBasis::Dynamic,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        assert!(
+            resolve_liquid_state(
+                &card,
+                &point().with("T", 375.0).unwrap(),
+                MaterialPropertySelection::SingleClaimOnly
+            )
+            .is_ok()
+        );
         assert!(law.at_temperature(Temperature::new(375.0)).is_err());
         assert!(law.at_temperature(Temperature::new(325.0)).is_ok());
     }
@@ -313,12 +471,34 @@ mod tests {
     #[test]
     fn invalid_temperature_semantics_and_source_domain_refuse() {
         let card = card(LiquidViscosityBasis::Dynamic, false);
-        let bad = point().with_quantity("T", QuantitySpec::semantic(SemanticType::new(
-            QuantityKind::TemperatureDifference, ValueForm::Static)), 300.0).unwrap();
-        assert!(LiquidTemperatureLaw::try_new(&card, &bad, "T", LiquidViscosityBasis::Dynamic,
-            MaterialPropertySelection::SingleClaimOnly).is_err());
-        let law = LiquidTemperatureLaw::try_new(&card, &point(), "T", LiquidViscosityBasis::Dynamic,
-            MaterialPropertySelection::SingleClaimOnly).unwrap();
+        let bad = point()
+            .with_quantity(
+                "T",
+                QuantitySpec::semantic(SemanticType::new(
+                    QuantityKind::TemperatureDifference,
+                    ValueForm::Static,
+                )),
+                300.0,
+            )
+            .unwrap();
+        assert!(
+            LiquidTemperatureLaw::try_new(
+                &card,
+                &bad,
+                "T",
+                LiquidViscosityBasis::Dynamic,
+                MaterialPropertySelection::SingleClaimOnly
+            )
+            .is_err()
+        );
+        let law = LiquidTemperatureLaw::try_new(
+            &card,
+            &point(),
+            "T",
+            LiquidViscosityBasis::Dynamic,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
         for t in [0.0, -1.0, f64::NAN, f64::INFINITY, 299.0, 401.0] {
             assert!(law.at_temperature(Temperature::new(t)).is_err());
         }

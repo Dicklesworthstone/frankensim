@@ -218,6 +218,43 @@ checks establish available, intact
 recordings; the TU-Note source does not provide measured bow force, bow speed or
 specimen geometry, and no material or excitation parameter was fitted to it.
 
+## Rechecked family coverage (2026-10-30)
+
+The existing baseline and supplement were reacquired as **69 original audio
+files, 280,543,511 bytes and 1,872.17214 seconds**. Every file matched its
+SHA-256 and byte-length pins and passed a complete FFmpeg decode. This selection
+covers all 22 documented families, plus piano, organ, steel-string guitar,
+timpani, splash cymbal and all nine drum-kit comparison states. It includes
+the three synchronized mdw cello performances; their three motion CSVs, original
+README and score were also retained and verified. The full source tar archives
+were checked before their selected members were published.
+
+This acquisition omitted the 20 TU-Note violin WAVs and their large ZIP;
+the three Iowa violin sequences already supply arco and pizzicato coverage.
+The larger 89-file selection above remains separately reproducible. To fetch
+the 69-file selection with the existing fetcher and an existing
+`FRANKENSIM_REFERENCE_DIR`:
+
+```sh
+python3 - <<'PY'
+import json, subprocess
+from pathlib import Path
+supplement = "data/instruments/references-supplemental.json"
+cohort = json.loads(Path(supplement).read_text())
+selections = [
+    ("data/instruments/references.json", cohort["baseline_ids"]),
+    (supplement, [f["id"] for f in cohort["files"]
+                  if f["id"] != "tu-note-violin-2018"]),
+]
+for manifest, ids in selections:
+    command = ["bash", "data/instruments/fetch-references.sh",
+               "--members", "--manifest", manifest]
+    for recording in ids:
+        command.extend(["--id", recording])
+    subprocess.run(command, check=True)
+PY
+```
+
 ## Recording limits and attribution
 
 The supplement has `gradable: false` throughout. It extends listening coverage;
@@ -271,6 +308,11 @@ Existing geometry sources include `geometry/violin-mclennan2009`,
 `geometry/loc-stradivari-family-bouts`. These are different specimens from the
 Iowa and TU-Note recordings; a shared family name does not establish geometric
 equivalence.
+
+For cello, the existing Library of Congress collection supplies back length and
+bout widths only. Its `unknowns.tsv` explicitly records the missing outline,
+arching and plate thickness. A physical cello shell assembly still needs those
+measurements and its internal parts; the acquired recordings cannot supply them.
 
 [Woodhouse's friction/rosin treatment](https://euphonics.org/9-6-friction-and-rosin-a-sticky-problem/)
 and [thermal-model discussion](https://euphonics.org/9-6-3-exploring-the-thermal-bowing-models/)

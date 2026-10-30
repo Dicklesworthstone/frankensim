@@ -117,6 +117,13 @@ impl ThermalFluidTransport for ResolvedThermochemicalGasState {
 }
 impl ThermalFluidTransport for ResolvedLiquidState {
     fn thermal_transport_state(&self) -> Result<ThermalFluidTransportState, MaterialError> {
+        if let Some(expansion) = self.density_expansion() {
+            return ThermalFluidTransportState::try_new(
+                self.transport_state()?,
+                expansion.temperature_k(),
+                self.volumetric_expansion_per_k(),
+            );
+        }
         let query = self.material().query();
         let absolute = QuantitySpec::semantic(SemanticType::new(
             QuantityKind::AbsoluteTemperature,

@@ -8,6 +8,8 @@
 //! chemistry-name default, corrosion model, or experimental-accuracy claim.
 
 pub mod surface;
+mod thermal;
+pub use thermal::ResolvedLiquidExpansion;
 
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
@@ -43,6 +45,7 @@ pub const VOLUMETRIC_EXPANSION_DIMS: Dims = Dims([0, 0, 0, -1, 0, 0]);
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedLiquidState {
     material: ResolvedMaterialStatePoint,
+    density_expansion: Option<ResolvedLiquidExpansion>,
     viscosity_is_kinematic: bool,
     density_kg_m3: f64,
     specific_heat_j_kg_k: f64,
@@ -77,7 +80,8 @@ impl ResolvedLiquidState {
             }
         };
         for required in liquid_requirements(name, dims)? {
-            if material.property(required.name())
+            if material
+                .property(required.name())
                 .is_none_or(|property| property.requirement() != &required)
             {
                 return Err(MaterialStatePointError::InvalidRequirement {
@@ -98,6 +102,8 @@ impl ResolvedLiquidState {
     ///
     /// # Errors
     /// Refuses any source-bundle refresh or derived-transport failure atomically.
+    /// A retained density-expansion path also requires its original nonthermal
+    /// context and a temperature with a unique tangent inside that path.
     /// This evaluates a constitutive state; it does not supply a fluid solver,
     /// phase stability, or a path-dependent rheological history.
     pub fn at_query_point(
@@ -105,10 +111,15 @@ impl ResolvedLiquidState {
         card: &MaterialCard,
         point: &QueryPoint,
     ) -> Result<Self, MaterialStatePointError> {
-        liquid_from_resolved_material(
+        let mut updated = liquid_from_resolved_material(
             self.material.at_query_point(card, point)?,
             self.viscosity_is_kinematic,
-        )
+        )?;
+        if let Some(expansion) = &self.density_expansion {
+            updated.density_expansion =
+                Some(expansion.at_material(&updated.material, updated.density_kg_m3)?);
+        }
+        Ok(updated)
     }
 
     /// The complete evidence-bearing source bundle and all retained receipts.
@@ -160,11 +171,16 @@ impl ResolvedLiquidState {
     }
 
     /// Source-resolved isobaric volumetric expansion [1/K] at this same point.
+    /// An explicitly admitted density path supplies its analytic local tangent;
+    /// otherwise the independently selected expansion claim supplies the value.
     /// Missing source information is `None`, distinct from known zero or
-    /// negative expansion. Density alone never supplies a derivative.
+    /// negative expansion. An isolated density value supplies no derivative.
     #[must_use]
     pub const fn volumetric_expansion_per_k(&self) -> Option<f64> {
-        self.volumetric_expansion_per_k
+        match &self.density_expansion {
+            Some(expansion) => Some(expansion.volumetric_expansion_per_k()),
+            None => self.volumetric_expansion_per_k,
+        }
     }
 }
 
@@ -330,6 +346,7 @@ fn liquid_from_resolved_material(
     )?;
     Ok(ResolvedLiquidState {
         material,
+        density_expansion: None,
         viscosity_is_kinematic,
         density_kg_m3,
         specific_heat_j_kg_k,
