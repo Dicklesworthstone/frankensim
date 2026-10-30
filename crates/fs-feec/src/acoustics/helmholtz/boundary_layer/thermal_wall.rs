@@ -113,6 +113,70 @@ impl ConductiveThermalWall {
         }
         Ok(())
     }
+
+    fn penetration_depth(
+        self,
+        medium: Medium,
+        geometry: BoundaryLayerGeometry,
+        frequency_hz: f64,
+    ) -> Result<f64, AcousticFeError> {
+        self.validate()?;
+        geometry.validate()?;
+        if !frequency_hz.is_finite()
+            || frequency_hz <= 0.0
+            || !medium.sound_speed_m_s.is_finite()
+            || medium.sound_speed_m_s <= 0.0
+        {
+            return Err(invalid("conductive wall frequency or sound speed"));
+        }
+        let t = self.transport;
+        let omega = 2.0 * core::f64::consts::PI * frequency_hz;
+        let delta =
+            det::sqrt(2.0 * (t.conductivity_w_m_k / t.volumetric_heat_capacity_j_m3_k) / omega);
+        let penetrated = match self.depth {
+            ThermalWallDepth::HalfSpace => delta,
+            ThermalWallDepth::Slab { thickness_m, .. } => delta.min(thickness_m),
+        };
+        let scale = geometry
+            .minimum_curvature_radius_m
+            .min(self.minimum_tangential_scale_m);
+        if !delta.is_finite()
+            || delta <= 0.0
+            || penetrated / scale > geometry.maximum_layer_ratio
+            || omega / medium.sound_speed_m_s * penetrated > geometry.maximum_layer_ratio
+        {
+            return Err(invalid(
+                "conductive wall normal diffusion violates local-layer geometry",
+            ));
+        }
+        Ok(delta)
+    }
+
+    /// Outward solid heat-flux admittance [W/(m² K)] under exp(+i omega t).
+    /// This is the same passive slab/half-space owner used by `ThermalWall::response`.
+    /// Resolved gas-temperature FE can use it directly without a second gas
+    /// boundary-layer approximation. Only the solid's local normal-profile
+    /// admission is applied here; the caller must resolve the gas field.
+    pub fn normal_admittance(
+        self,
+        medium: Medium,
+        geometry: BoundaryLayerGeometry,
+        frequency_hz: f64,
+    ) -> Result<[f64; 2], AcousticFeError> {
+        let delta = self.penetration_depth(medium, geometry, frequency_hz)?;
+        let y = match self.depth {
+            ThermalWallDepth::HalfSpace => [1.0, 1.0],
+            ThermalWallDepth::Slab {
+                thickness_m,
+                backing,
+            } => slab_admittance(thickness_m / delta, backing)?,
+        };
+        let result = y.map(|v| v * (self.transport.conductivity_w_m_k / delta));
+        if result.iter().any(|v| !v.is_finite()) {
+            return Err(invalid("conductive wall heat admittance overflow"));
+        }
+        Ok(result)
+    }
 }
 
 impl ThermalWall {
@@ -144,27 +208,8 @@ impl ThermalWall {
             }
             Self::Conductive(wall) => wall,
         };
-        wall.validate()?;
         let t = wall.transport;
-        let omega = 2.0 * core::f64::consts::PI * frequency_hz;
-        let delta =
-            det::sqrt(2.0 * (t.conductivity_w_m_k / t.volumetric_heat_capacity_j_m3_k) / omega);
-        let penetrated = match wall.depth {
-            ThermalWallDepth::HalfSpace => delta,
-            ThermalWallDepth::Slab { thickness_m, .. } => delta.min(thickness_m),
-        };
-        let scale = geometry
-            .minimum_curvature_radius_m
-            .min(wall.minimum_tangential_scale_m);
-        if !delta.is_finite()
-            || delta <= 0.0
-            || penetrated / scale > geometry.maximum_layer_ratio
-            || omega / medium.sound_speed_m_s * penetrated > geometry.maximum_layer_ratio
-        {
-            return Err(invalid(
-                "conductive wall normal diffusion violates local-layer geometry",
-            ));
-        }
+        let delta = wall.penetration_depth(medium, geometry, frequency_hz)?;
         if gas.thermal_conductivity_w_m_k == 0.0 {
             // No gas heat flux can drive the stationary solid; the entire
             // acoustic thermal coefficient is zero in the original operator.

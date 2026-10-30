@@ -7,6 +7,9 @@
 /// Source gas and duct composition for original spatial FE boundary modes.
 pub mod multiport;
 
+/// Joint molecular calorics and resolved temperature in the spatial pressure FE.
+pub mod molecular;
+
 use fs_feec::acoustics::helmholtz::boundary_layer::thermal_wall::{
     ConductiveThermalWall, ThermalWall, ThermalWallDepth, WallThermalTransport,
 };

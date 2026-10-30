@@ -1241,3 +1241,55 @@ cross-section eigenfunctions, curved geometry, resolved thin-gap LNS, transverse
 truncation bounds, port de-embedding, qualified tone-hole junctions and complete
 M2.4-W2 acceptance remain outside this extraction capability. Spatial traces,
 volume mesh/order and reduced basis require their own refinement.
+
+### Joint molecular calorics and resolved spatial heat conduction
+
+`acoustics::helmholtz::molecular::CaloricInterior` reuses the original pressure
+FE, consistent volume matrices, spatial port loads and cancellable multiport
+factor/loaded-scattering owners. Temperature occupies every original FE
+coordinate except exact isothermal wall trace constraints. The supplied
+pressure basis remains explicit; automatic static enrichment is not applied.
+With exp(+i omega t), the material supplies passive complex cp with Im(cp)<=0:
+
+`[kappa K_T + i omega rho cp M_T + Y_wall C_T] T = i omega H p`;
+`A_p = K - omega^2 rho/p0 M + omega^2 rho/T0 H^T T`.
+
+One heat factorization eliminates temperature and one original pressure
+factorization serves all simultaneous modal flow excitations per frequency.
+Direct loaded power scattering avoids forming a closed-cavity impedance pole.
+The pressure/temperature coupling has the same exact discrete work pairing;
+the thermal loss is
+`[kappa T* K_T T - omega rho Im(cp) T* M_T T + Re(Y_wall) T* C_T T]/(2 T0)`.
+Molecular, gas-conduction and solid-conduction terms are separately positive
+forms, with no clipped loss and no second complex bulk-modulus correction.
+The response exposes actual original-coordinate temperatures, pressure/flow
+coordinates and the separate loss terms. Optional viscosity uses only the
+original tangential Wentzell form, with its original thin-viscous-layer band;
+the original approximate gas thermal wall term is disabled in this lane.
+
+Thermal walls are isothermal, adiabatic, or a source-defined conductive slab or
+half-space. `ConductiveThermalWall::normal_admittance` reuses the existing slab
+series and solid normal-profile admission; it does not impose a thin gas
+thermal layer. Other faces, including acoustic mouths, have zero heat flux.
+Gas and solid share a fixed uniform equilibrium temperature. Thermal dimension
+is explicitly capped at 640; pressure/port caps and original LU cancellation
+remain in force. Assembly polls between wall faces and pressure modes; dense
+quadratic forms are bounded by the thermal cap. No partial prepared result is
+published after cancellation or a material/numerical refusal.
+
+Four focused tests cover independent uniform molecular compression, exact
+input/work closure, actual spatial modes and reciprocal real-reference power
+scattering, source/cp/cancellation refusal, and a P2 1/2/3 heat-mesh ladder
+against an independent analytic slab with complex molecular cp. Isothermal
+relative reaction errors decrease 0.00464670 -> 0.00197543 -> 0.000519832;
+finite insulated solid errors decrease 0.000254508 -> 0.000105061 -> 0.0000275360.
+The slab uses a declared uniform-pressure Galerkin coordinate; these numbers
+qualify that thermal fixture, not arbitrary three-dimensional wave accuracy.
+
+Overlapping thermal layers are represented when the temperature mesh resolves
+them. Viscous overlapping layers still require the resolved LNS owner. Volume
+mesh/order, thermal penetration depth, pressure basis and port traces require
+independent refinement. No curved isoparametric geometry, corner-layer
+acceptance, mean flow/heating, evolving composition, lateral solid conduction,
+time-domain realization, real-instrument validation or runtime performance
+benchmark follows from this frequency-domain extension.

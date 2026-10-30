@@ -14299,3 +14299,39 @@ shock validation require their own admitted physics.
 ## Authored interior molecular sources in material-string performances
 
 `material_strings` admits `cavity_molecular MAX_CALORIC_COORDINATES MAX_MEMORY_STATES LAW` after the original regional gas records. The existing inline molecular source grammar evaluates only against the selected cavity `GasRecord`, including attached species, NASA-9 and transport sources. The original FE/air-thermal binder selects the joint native caloric owner before preload; exterior observer absorption never supplies the interior source. Complete joint histories replace the heat-only allowance in the existing setup and state budgets. Missing thermal geometry, stale source state, a separate lumped cavity, prepared propagation and incomplete species data refuse before material I/O. Both mean atmospheres remain frozen; these acoustic histories do not evolve mean heat or species inventories. The authored integration checks cover independent interior/exterior gases, original thermochemical source identity, changed native pressure response, and refusals before material reads.
+
+### Source-owned molecular calorics in spatial pressure/heat interiors
+
+`cavity_modal::interior::molecular::MolecularInterior` owns the original
+`RelaxationState` and binds its gas density/sound speed bitwise to the original
+FE medium. The material evaluates cp once at the requested frequency; that
+exp(-i omega t) response is conjugated once into the FE convention. The joint
+pressure/heat owner determines molecular compression and gas thermal loss
+from the same cp. Total plane-wave absorption is never substituted as an
+independent bulk-viscosity or compression law.
+
+The optional conductive wall binds and retains the original
+`ThermalTransportSample`, including its source path identity. Common gas/solid
+equilibrium temperature, conductivity direction and chosen heat-capacity
+constraint retain the existing source adapters' admission. The native prepare
+method returns the original caloric FE factor for simultaneous modal flows,
+spatial pressure/temperature and separate positive molecular/gas/solid/viscous
+work. Material and FE refusals retain their typed underlying cause.
+
+`duct_scattering` exports the full original real-reference matrix by entrywise
+conjugation; modal pressure/flow normalization and inward-flow orientation are
+unchanged. `duct_two_port` requires exactly two retained coordinates and one
+common positive reference, returning the original `fs_duct::compose::TwoPort`.
+No evanescent coordinate is silently removed and no fit or auxiliary damping
+model is introduced. These remain power coordinates, not conventional
+evanescent traveling-wave amplitudes.
+
+Focused source tests use original evaluated reservoirs, independently compare
+uniform molecular compression against their bulk modulus, check the duct
+phase/conjugation convention, and distinguish zero and changed relaxation
+rates. Original prepared solid sources exercise conductivity/capacity-only
+changes, preserved source identity, full input/work closure and mismatched
+temperature refusal. This is uniform frozen-mean harmonic physics: thermal
+mesh/pressure-basis convergence, original thin viscous wall admission and
+solid normal-profile limits remain explicit. No mean thermal/species evolution,
+nonlinear excitation closure or time-domain realization is inferred.

@@ -50,7 +50,7 @@ impl BoundaryMode {
 
 /// Prepared spatial port projection on the existing Helmholtz reduction.
 pub struct InteriorMultiport {
-    reduced: ReducedHelmholtz,
+    pub(super) reduced: ReducedHelmholtz,
 }
 
 /// One factorization, reusable for arbitrary simultaneous modal excitations.
@@ -231,7 +231,7 @@ impl InteriorMultiport {
         &self.reduced.area
     }
 
-    fn operator(
+    pub(super) fn operator(
         &self,
         frequency_hz: f64,
         cancelled: &dyn Fn() -> bool,
@@ -271,6 +271,16 @@ impl InteriorMultiport {
         cancelled: &dyn Fn() -> bool,
     ) -> Result<PreparedInteriorMultiport<'_>, AcousticFeError> {
         let (a, omega_rho) = self.operator(frequency_hz, cancelled)?;
+        self.prepare_operator(a, omega_rho, frequency_hz, cancelled)
+    }
+
+    pub(super) fn prepare_operator(
+        &self,
+        a: Vec<C64>,
+        omega_rho: f64,
+        frequency_hz: f64,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<PreparedInteriorMultiport<'_>, AcousticFeError> {
         let factor = lu_complex_with_cancel(&a, self.dim(), cancelled)
             .map_err(|e| linear_error(e, frequency_hz))?;
         Ok(PreparedInteriorMultiport {
@@ -315,15 +325,21 @@ impl InteriorMultiport {
         reference_resistance: &[f64],
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Vec<C64>, AcousticFeError> {
+        self.validate_references(reference_resistance)?;
+        let (a, omega_rho) = self.operator(frequency_hz, cancelled)?;
+        self.scattering_operator(a, omega_rho, frequency_hz, reference_resistance, cancelled)
+    }
+
+    pub(super) fn scattering_operator(
+        &self,
+        mut a: Vec<C64>,
+        omega_rho: f64,
+        frequency_hz: f64,
+        reference_resistance: &[f64],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Vec<C64>, AcousticFeError> {
+        self.validate_references(reference_resistance)?;
         let ports = self.port_mode_count();
-        if reference_resistance.len() != ports
-            || reference_resistance
-                .iter()
-                .any(|r| !r.is_finite() || *r <= 0.0)
-        {
-            return Err(invalid("interior power-wave reference resistance"));
-        }
-        let (mut a, omega_rho) = self.operator(frequency_hz, cancelled)?;
         let n = self.dim();
         for (b, &resistance) in self.reduced.b_r.iter().zip(reference_resistance) {
             poll(cancelled)?;
@@ -362,6 +378,21 @@ impl InteriorMultiport {
         }
         poll(cancelled)?;
         Ok(scattering)
+    }
+
+    pub(super) fn validate_references(
+        &self,
+        reference_resistance: &[f64],
+    ) -> Result<(), AcousticFeError> {
+        let ports = self.port_mode_count();
+        if reference_resistance.len() != ports
+            || reference_resistance
+                .iter()
+                .any(|r| !r.is_finite() || *r <= 0.0)
+        {
+            return Err(invalid("interior power-wave reference resistance"));
+        }
+        Ok(())
     }
 
     /// Use the original wall work owner on amplitudes returned by this model.

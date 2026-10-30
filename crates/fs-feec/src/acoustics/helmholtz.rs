@@ -42,6 +42,9 @@ pub mod boundary_layer;
 /// Work-conjugate spatial port modes and multiport extraction.
 pub mod multiport;
 
+/// Joint molecular calorics and resolved gas heat conduction on this FE space.
+pub mod molecular;
+
 /// Highest element order accepted; `MAX_ORDER + 1` refuses.
 pub const MAX_ORDER: usize = 4;
 /// Most Neumann modes a window may hold; more refuses (the window is never truncated).

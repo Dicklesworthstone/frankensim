@@ -155,3 +155,111 @@ fn conductive_source_requires_one_gas_solid_equilibrium_temperature() {
     };
     assert!(conductive_wall_transport(&corrupt, &sample).is_err());
 }
+
+#[test]
+fn molecular_pressure_heat_field_retains_original_solid_source_and_work() {
+    use crate::cavity_modal::interior::molecular::{MolecularInterior, MolecularThermalWall};
+    use fs_feec::acoustics::helmholtz::multiport::BoundaryMode;
+    use fs_material::relaxation::{
+        InternalReservoir, RelaxationAbsorption, RelaxationProcess, RelaxationRateLaw,
+        RelaxingMedium, SpeciesRelaxation,
+    };
+    use fs_math::c64::C64;
+    use fs_thermochem::SpeciesId;
+    let spec = GasSpec {
+        gamma: 1.25,
+        ..GasSpec::dry_air_ussa1976()
+    };
+    let gas = GasState::try_new(&spec, 293.15, 101325.0).unwrap();
+    let species = SpeciesId::new("verification-gas").unwrap();
+    let state = RelaxationAbsorption::new(vec![SpeciesRelaxation {
+        species: species.clone(),
+        processes: vec![RelaxationProcess {
+            reservoir: InternalReservoir::Rotational {
+                degrees_of_freedom: 2,
+            },
+            rate: RelaxationRateLaw::PartnerIndependent {
+                p_tau_ref_pa_s: 0.001 * gas.pressure,
+                t_ref_k: gas.temperature,
+                exponent: 0.0,
+                t_min_k: 200.0,
+                t_max_k: 400.0,
+            },
+        }],
+    }])
+    .unwrap()
+    .evaluate(&RelaxingMedium::new(gas, vec![(species, 1.0)]).unwrap())
+    .unwrap();
+    let (complex, points) = single_tet();
+    let points: Vec<_> = points.iter().map(|p| p.map(|v| 0.2 * v)).collect();
+    let fe = HelmholtzFe::new(
+        &complex,
+        &points,
+        1,
+        Medium {
+            density_kg_m3: gas.density,
+            sound_speed_m_s: gas.sound_speed,
+        },
+    )
+    .unwrap();
+    let faces = fe.boundary_faces();
+    let ports = [BoundaryMode::uniform(&faces[..1])];
+    let mut pressures = Vec::new();
+    for (conductivity, capacity) in [(0.01, 1.0), (0.03, 1.0), (0.01, 3.0)] {
+        let source = material(conductivity, capacity);
+        let sample = source.at_temperature(gas.temperature).unwrap();
+        let model = MolecularInterior::new(
+            &fe,
+            &basis(&fe),
+            &ports,
+            &faces[1..],
+            state.clone(),
+            MolecularThermalWall::Conductive {
+                sample: &sample,
+                depth: ThermalWallDepth::Slab {
+                    thickness_m: 1e-4,
+                    backing: ThermalBacking::Adiabatic,
+                },
+                minimum_tangential_scale_m: 0.1,
+            },
+            GEOMETRY,
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(
+            model.wall_source().unwrap().path_identity(),
+            source.identity()
+        );
+        let response = model
+            .prepare(300.0, &|| false)
+            .unwrap()
+            .response(&[C64::from_re(1e-6)], &|| false)
+            .unwrap();
+        let input = response.acoustic.input_power_w();
+        assert!(
+            response.dissipation.molecular_w > 0.0 && response.dissipation.solid_conduction_w > 0.0
+        );
+        assert!((input - response.dissipation.total_w()).abs() < 2e-9 * input);
+        pressures.push(response.acoustic.pressure_pa[0]);
+        let wrong = source.at_temperature(294.15).unwrap();
+        assert!(
+            MolecularInterior::new(
+                &fe,
+                &basis(&fe),
+                &ports,
+                &faces[1..],
+                state.clone(),
+                MolecularThermalWall::Conductive {
+                    sample: &wrong,
+                    depth: ThermalWallDepth::HalfSpace,
+                    minimum_tangential_scale_m: 0.1
+                },
+                GEOMETRY,
+                &|| false
+            )
+            .is_err()
+        );
+    }
+    assert_ne!(pressures[0], pressures[1]);
+    assert_ne!(pressures[0], pressures[2]);
+}
