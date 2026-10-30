@@ -12,6 +12,9 @@
 //! energy-exact nor a variational/symplectic integrator. Refine the duration to
 //! resolve fast internal motion. Held link-frame wrenches rotate with the links.
 
+/// World-fixed loads and finite axial connections on original material points.
+pub mod spatial_loads;
+
 use super::{
     ArticulatedError, ArticulatedModel, ArticulatedMomentum, BaseState, FreeFloatingBaseState,
     Kinematics, SpatialInertia, forward_kinematics, free_floating_forward_dynamics,
@@ -20,6 +23,7 @@ use super::{
 };
 use core::fmt;
 use fs_ga::{GaError, Mat3, Se3, So3, So3Tangent, Twist, Vec3, Wrench};
+use std::borrow::Cow;
 
 /// Maximum model size admitted by one cancellable smooth-flight step.
 ///
@@ -72,7 +76,10 @@ pub struct FreeFloatingMotionStep {
     pub actuator_work: f64,
     /// Midpoint body-wrench work plus exact uniform-gravity displacement work.
     pub external_work: f64,
-    /// Actual kinetic change minus actuator/external work, in joules.
+    /// Midpoint work of internal spatial connections, in joules; zero in the
+    /// held-wrench API. Their storage and loss are owned by the connection lane.
+    pub internal_body_work: f64,
+    /// Actual kinetic change minus actuator/external/internal work, in joules.
     /// This is numerical integration error, not a physical dissipation channel.
     pub kinetic_work_residual: f64,
 }
@@ -82,6 +89,8 @@ pub struct FreeFloatingMotionStep {
 pub enum FreeFloatingMotionError {
     /// Duration must be finite and strictly positive.
     InvalidDuration,
+    /// A spatial load or connection violates its declared physical admission.
+    InvalidLoad(&'static str),
     /// The native non-interruptible tree passes exceed this lane's work bound.
     TooManyLinks {
         /// Supplied number of links.
@@ -101,6 +110,7 @@ impl fmt::Display for FreeFloatingMotionError {
             Self::InvalidDuration => {
                 f.write_str("free-flight duration must be finite and positive")
             }
+            Self::InvalidLoad(what) => write!(f, "free-flight load refused: {what}"),
             Self::TooManyLinks { got, maximum } => {
                 write!(f, "free-flight model has {got} links; maximum is {maximum}")
             }
@@ -154,7 +164,35 @@ pub fn step_free_floating(
     duration: f64,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<FreeFloatingMotionStep, FreeFloatingMotionError> {
-    poll(&mut cancelled)?;
+    Ok(step_evaluated(
+        model,
+        state,
+        loads,
+        duration,
+        &mut cancelled,
+        |map, base, cancelled| {
+            Ok(EvaluatedStage {
+                body_wrench: Cow::Borrowed(loads.external_body_wrench),
+                load: map.loads(base, loads, cancelled)?,
+            })
+        },
+    )?
+    .step)
+}
+
+fn step_evaluated<'a, C: FnMut() -> bool>(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: FreeFloatingMotionLoads<'a>,
+    duration: f64,
+    cancelled: &mut C,
+    mut evaluate: impl FnMut(
+        &MomentumMap,
+        FreeFloatingBaseState,
+        &mut C,
+    ) -> Result<EvaluatedStage<'a>, FreeFloatingMotionError>,
+) -> Result<EvaluatedStep, FreeFloatingMotionError> {
+    poll(cancelled)?;
     if !duration.is_finite() || duration <= 0.0 {
         return Err(FreeFloatingMotionError::InvalidDuration);
     }
@@ -175,16 +213,17 @@ pub fn step_free_floating(
         loads.external_body_wrench,
     )?;
     validate_external_wrenches(loads.external_body_wrench)?;
-    let initial_map = MomentumMap::new(model, state, &mut cancelled)?;
+    let initial_map = MomentumMap::new(model, state, cancelled)?;
     let initial = initial_map.coordinates(state.base)?;
-    poll(&mut cancelled)?;
+    poll(cancelled)?;
     let momentum_before = free_floating_momentum(
         model,
         state.base,
         &state.joint_position,
         &state.joint_velocity,
     )?;
-    poll(&mut cancelled)?;
+    poll(cancelled)?;
+    let initial_stage = evaluate(&initial_map, state.base, cancelled)?;
     let initial_dynamics = free_floating_forward_dynamics(
         model,
         state.base,
@@ -192,9 +231,9 @@ pub fn step_free_floating(
         &state.joint_velocity,
         loads.generalized_force,
         loads.gravity_world,
-        loads.external_body_wrench,
+        &initial_stage.body_wrench,
     )?;
-    let initial_load = initial_map.loads(state.base, loads, &mut cancelled)?;
+    let initial_load = initial_stage.load;
     let half = 0.5 * duration;
     let midpoint_coordinates = MomentumCoordinates {
         center_world: initial.center_world + initial.linear_world.scale(half / initial_map.mass()),
@@ -215,9 +254,10 @@ pub fn step_free_floating(
         state.base.twist_body.angular,
         half,
     )?;
-    let midpoint_map = MomentumMap::new(model, &midpoint, &mut cancelled)?;
+    let midpoint_map = MomentumMap::new(model, &midpoint, cancelled)?;
     midpoint.base = midpoint_map.reconstruct(midpoint_rotation, midpoint_coordinates)?;
-    poll(&mut cancelled)?;
+    poll(cancelled)?;
+    let midpoint_stage = evaluate(&midpoint_map, midpoint.base, cancelled)?;
     let midpoint_dynamics = free_floating_forward_dynamics(
         model,
         midpoint.base,
@@ -225,9 +265,9 @@ pub fn step_free_floating(
         &midpoint.joint_velocity,
         loads.generalized_force,
         loads.gravity_world,
-        loads.external_body_wrench,
+        &midpoint_stage.body_wrench,
     )?;
-    let midpoint_load = midpoint_map.loads(midpoint.base, loads, &mut cancelled)?;
+    let midpoint_load = midpoint_stage.load;
     let linear_impulse = midpoint_load.force_world.scale(duration);
     let angular_impulse = (midpoint_load.torque_com_world
         + midpoint_coordinates
@@ -256,9 +296,9 @@ pub fn step_free_floating(
         midpoint.base.twist_body.angular,
         duration,
     )?;
-    let final_map = MomentumMap::new(model, &state_after, &mut cancelled)?;
+    let final_map = MomentumMap::new(model, &state_after, cancelled)?;
     state_after.base = final_map.reconstruct(final_rotation, final_coordinates)?;
-    poll(&mut cancelled)?;
+    poll(cancelled)?;
     let momentum_after = free_floating_momentum(
         model,
         state_after.base,
@@ -277,28 +317,42 @@ pub fn step_free_floating(
             .gravity_world
             .dot(final_coordinates.center_world - initial.center_world);
     let external_work = duration * midpoint_load.body_wrench_power + gravity_work;
+    let internal_body_work = duration * midpoint_load.internal_body_power;
+    let dissipated_energy = duration * midpoint_load.dissipation_power;
     let kinetic_work_residual = momentum_after.kinetic_energy
         - momentum_before.kinetic_energy
         - actuator_work
-        - external_work;
+        - external_work
+        - internal_body_work;
     validate_vec3(linear_impulse, "free_floating_motion.linear_impulse")?;
     validate_vec3(angular_impulse, "free_floating_motion.angular_impulse")?;
     validate_slice(
-        &[actuator_work, external_work, kinetic_work_residual],
+        &[
+            actuator_work,
+            external_work,
+            internal_body_work,
+            dissipated_energy,
+            kinetic_work_residual,
+        ],
         "free_floating_motion.work",
     )?;
-    poll(&mut cancelled)?;
-    Ok(FreeFloatingMotionStep {
-        state_after,
-        center_of_mass_world_before: initial.center_world,
-        center_of_mass_world_after: final_coordinates.center_world,
-        momentum_before,
-        momentum_after,
-        external_linear_impulse_world: linear_impulse,
-        external_angular_impulse_world: angular_impulse,
-        actuator_work,
-        external_work,
-        kinetic_work_residual,
+    poll(cancelled)?;
+    Ok(EvaluatedStep {
+        stored_energy_before: initial_load.stored_energy,
+        dissipated_energy,
+        step: FreeFloatingMotionStep {
+            state_after,
+            center_of_mass_world_before: initial.center_world,
+            center_of_mass_world_after: final_coordinates.center_world,
+            momentum_before,
+            momentum_after,
+            external_linear_impulse_world: linear_impulse,
+            external_angular_impulse_world: angular_impulse,
+            actuator_work,
+            external_work,
+            internal_body_work,
+            kinetic_work_residual,
+        },
     })
 }
 
@@ -480,14 +534,32 @@ impl MomentumMap {
             force_world,
             torque_com_world,
             body_wrench_power,
+            internal_body_power: 0.0,
+            dissipation_power: 0.0,
+            stored_energy: 0.0,
         })
     }
 }
 
+#[derive(Clone, Copy)]
 struct StageLoad {
     force_world: Vec3,
     torque_com_world: Vec3,
     body_wrench_power: f64,
+    internal_body_power: f64,
+    dissipation_power: f64,
+    stored_energy: f64,
+}
+
+struct EvaluatedStage<'a> {
+    body_wrench: Cow<'a, [Wrench]>,
+    load: StageLoad,
+}
+
+struct EvaluatedStep {
+    step: FreeFloatingMotionStep,
+    stored_energy_before: f64,
+    dissipated_energy: f64,
 }
 
 fn advance(value: &[f64], rate: &[f64], duration: f64) -> Vec<f64> {

@@ -1749,3 +1749,52 @@ heat, full-tensor cross-patch response against a separate dense inverse,
 world/gauge/boost covariance, exact input-order canonicalization, energetic
 spectators, coefficient reuse, original single-patch reduction and atomic
 late-failure/cancellation retry.
+
+## Spatial point loading and finite articulated connections
+
+`articulated::motion::spatial_loads::step_free_floating_spatial` advances the
+original free-floating tree under held inertial point forces/free couples and
+finite central spring/damper connections between material points on distinct
+links. Every point retains its original link frame. Applied world vectors stay
+world-fixed while their material application points move; connection length,
+axis and strain rate are recomputed at both native Lie-midpoint stages. General
+revolute/prismatic/helical trees, noncoincident origins and COMs, and full native
+inertia tensors retain the existing ABA and locked-inertia momentum map.
+
+Connections obey `T = k (length-rest_length) + c length_rate`, acting as equal
+and opposite central forces with each endpoint's actual moment. They enter the
+original generalized acceleration solve but never become an external spatial
+impulse. Relative strain rate is assembled from shape velocities and base
+rotation directly, so a common translational velocity is not subtracted from
+two large endpoint velocities. Both external moments and connection geometry
+are assembled before world translation. No dense generalized mass matrix or
+new mechanical solver is introduced: work is O(links+loads+connections),
+with O(links) additional wrench storage. The original held-wrench API continues
+to borrow its wrench slice. Point-only loading skips the endpoint storage pass.
+
+`FreeFloatingMotionStep::internal_body_work` separates connection work from
+external and actuator work; it is zero for the original held-wrench owner.
+`SpatialMotionStep` additionally reports actual initial/final spring storage,
+nonnegative midpoint damping-loss quadrature, connection work/storage defect,
+and the complete kinetic-plus-spring work residual. The loss quadrature is not
+an exact continuous integral; its thermal destination is unspecified. This
+explicit second-order smooth lane requires steps resolving its attachment
+modes and does not establish finite-step nonlinear passivity, energy exactness,
+rigid constraints, collision response, or a stiff-limit solver.
+
+Admission retains native joint/inertia/state limits, at most 4096 links and
+16384 total point loads/connections. Rest lengths, stiffness and damping are
+finite and nonnegative. Invalid endpoints, same-link connections, and
+coincident/nonfinite attachment geometry at initial, midpoint or returned
+states refuse. New passes poll cancellation every 64 entries and the final
+poll precedes publication. Caller state and definitions remain unchanged on
+late refusal or cancellation.
+
+Seven new native cases independently check a full-inertia spinning body's
+world-fixed point-force moment and work; exact damped two-mass modal response
+and recoil under timestep refinement; changing-direction connections across a
+mixed articulated tree; frame covariance and distant admitted origins; loss
+under a 1e9 m/s common axial boost; bit-identical empty spatial loads; and
+invalid/late/cancelled refusal with exact retry. All eight existing continuous
+articulated trajectory cases also pass. Focused native checks are not a full
+Cargo/DSR or cross-ISA qualification.
