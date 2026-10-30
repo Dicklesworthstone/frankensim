@@ -1,0 +1,14 @@
+frankensim.matdb-manifest.v3
+pack_id	hematite-nist-shomate-caloric
+redistribution	permitted	Attributed numerical constants, independent equation evaluations and original notes only; no source document or table layout is redistributed
+citation	NIST Chemistry WebBook SRD 69, solid Shomate fit; Chase (1998), NIST-JANAF Thermochemical Tables, Fourth Edition; https://webbook.nist.gov/cgi/formula?ID=C1317608&Mask=2; standard-state convention https://janaf.nist.gov/pdf/JANAF-FourthEd-1998-1Vol1-Intro.pdf, section 4.4; accessed 2026-10-30
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	nist-mineral-caloric	properties.tsv	material-tsv-v1
+property	cp	specific-heat-capacity	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	standard_pressure	source-standard-pressure	pressure
+axis	standard_state	source-standard-state	dimensional
+axis	phase	source-phase-hematite	dimensional
+axis	branch	source-fit-branch	dimensional
+axis	reference	engineering-reference-model	dimensional
+axis	specimen	source-specimen-qualified	dimensional
