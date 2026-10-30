@@ -28,6 +28,9 @@ use fs_vfit::model::PoleTerm;
 #[path = "../src/render/schedule/reed/field_input/tests/support.rs"]
 mod gas_support;
 
+#[path = "dg_finite_gas/transport.rs"]
+mod transport;
+
 const DT: f64 = 1.0 / 96_000.0;
 const RADIUS: f64 = 0.001;
 const LENGTH: f64 = 0.05;

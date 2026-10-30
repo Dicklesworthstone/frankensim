@@ -35,6 +35,10 @@ pub use local::finite_gas::transport::{
     advance_finite_gas_dg_transport, FiniteGasDgTransportCandidate,
     finite_gas_dg_transport_candidate_with_paths, advance_finite_gas_dg_transport_with_paths,
 };
+pub(crate) use local::finite_gas::transport::{
+    FiniteGasTransportNode, advance_finite_gas_transport_with_paths,
+    finite_gas_transport_candidate_with_paths,
+};
 
 use fs_vfit::relaxation::RelaxationImpedanceSpec;
 use super::{WallPatch, invalid};

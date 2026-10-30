@@ -7,6 +7,9 @@
 //! source inversion, momentum transfer, acoustic integrator or root solver is
 //! duplicated here.
 
+/// Original multi-parcel transport through complete continuing acoustic loads.
+pub mod transport;
+
 use super::{DgGasRefresh, DgPortGasUpdate, DgPortLoad, DgTerminalChannelKind};
 use crate::acoustic_realize::AcousticRealizeError;
 pub use crate::bernoulli_aperture::wall::material::{

@@ -1,7 +1,9 @@
 //! One native material transport snapshot drives multiple continuing acoustic owners.
 //!
-//! Each duct remains a separate, uniform, finite gas volume. No common-pressure
-//! axial field, acoustic continuity across a restriction, or jet force is invented.
+//! Each acoustic owner remains a separate, uniform, finite gas volume. No common-
+//! pressure axial field, acoustic continuity across a restriction, or jet force
+//! is invented. Complete port loads use this same transaction through their
+//! original node adapter, including their represented channel/branch storage.
 //! Original nozzle, diffusion, porous and membrane laws run once before any endpoint
 //! work feedback. Every acoustic owner retains its native state and source wall.
 
@@ -56,6 +58,7 @@ pub struct FiniteGasDgTransportInput {
     /// Required exactly for parcels with a bound acoustic owner.
     pub acoustic: Option<FiniteGasDgSolve>,
     /// Original held physical volume-flow ports; reservoirs require an empty list.
+    /// A complete port load requires exactly its inlet, with flow in `effort`.
     pub ports: Vec<PortInput>,
 }
 
@@ -85,13 +88,13 @@ impl std::error::Error for FiniteGasDgTransportError {}
 
 /// Actual original-owner reports and independently measured enclosure storage.
 #[derive(Debug)]
-pub struct FiniteGasDgTransportStep {
+pub struct FiniteGasDgTransportStep<A = FiniteGasDgStep<GasCompositionStep>> {
     pub duration_s: f64,
     /// The single original-snapshot species/partial-enthalpy transport.
     /// Its entropy account belongs to that stage, not subsequent heat/wave work.
     pub transport: GasTransportStep,
     /// Same-clock acoustic endpoints and local gas/work closure, by parcel ID.
-    pub acoustics: BTreeMap<u64, FiniteGasDgStep<GasCompositionStep>>,
+    pub acoustics: BTreeMap<u64, A>,
     /// Original heating reports for parcels without an acoustic owner.
     pub reservoirs: BTreeMap<u64, GasHeatStep>,
     pub gas_storage_change_j: f64,
@@ -113,22 +116,121 @@ pub struct FiniteGasDgTransportStep {
 /// No accepted source binding, acoustic history or gas parcel changes until the
 /// corresponding advance API publishes this candidate's complete endpoint set.
 #[derive(Debug)]
-pub struct FiniteGasDgTransportCandidate {
+pub struct FiniteGasDgTransportCandidate<
+    N = FiniteGasDgNode,
+    A = FiniteGasDgStep<GasCompositionStep>,
+> {
     parcels: BTreeMap<u64, ClosedGasParcel>,
-    nodes: BTreeMap<u64, FiniteGasDgNode>,
-    step: FiniteGasDgTransportStep,
+    nodes: BTreeMap<u64, N>,
+    step: FiniteGasDgTransportStep<A>,
 }
-impl FiniteGasDgTransportCandidate {
+impl<N, A> FiniteGasDgTransportCandidate<N, A> {
     /// Proposed original gas parcels, keyed by their existing identities.
     pub fn parcels(&self) -> &BTreeMap<u64, ClosedGasParcel> { &self.parcels }
     /// Proposed original source bindings, states and propagators.
-    pub fn nodes(&self) -> &BTreeMap<u64, FiniteGasDgNode> { &self.nodes }
+    pub fn nodes(&self) -> &BTreeMap<u64, N> { &self.nodes }
     /// Original-owner reports and complete energy/mass account.
-    pub fn step(&self) -> &FiniteGasDgTransportStep { &self.step }
+    pub fn step(&self) -> &FiniteGasDgTransportStep<A> { &self.step }
     /// Consume the complete preview without advancing any external owner.
     pub fn into_parts(self) -> (
-        BTreeMap<u64, ClosedGasParcel>, BTreeMap<u64, FiniteGasDgNode>, FiniteGasDgTransportStep,
+        BTreeMap<u64, ClosedGasParcel>, BTreeMap<u64, N>, FiniteGasDgTransportStep<A>,
     ) { (self.parcels, self.nodes, self.step) }
+}
+
+/// Only acoustic ownership varies across the wall and complete-load adapters.
+/// Native transport, caloric feedback input, endpoint gates, global accounts
+/// and atomic publication stay in the single transaction below.
+pub(crate) trait FiniteGasTransportNode: Clone {
+    type Step;
+
+    fn dt(&self) -> f64;
+    fn step_count(&self) -> u64;
+    fn stored_energy_j(&self) -> f64;
+
+    fn admit<C: FnMut() -> bool>(
+        &self,
+        gas: &ClosedGasParcel,
+        input: &FiniteGasDgTransportInput,
+        cancelled: &mut C,
+    ) -> Result<(), FiniteGasDgError<GasEnergyError>>;
+
+    fn advance<C: FnMut() -> bool>(
+        &mut self,
+        gas: &mut ClosedGasParcel,
+        input: &FiniteGasDgTransportInput,
+        evolve: impl FnMut(&ClosedGasParcel, f64, f64, &mut C)
+            -> Result<FiniteGasDgBackground<GasCompositionStep>, GasEnergyError>,
+        cancelled: &mut C,
+    ) -> Result<Self::Step, FiniteGasDgError<GasEnergyError>>;
+
+    /// Net port work, exported acoustic loss and internal gas-to-wave work [J].
+    /// Net port work already accounts for any represented exterior terminal.
+    fn accounts(step: &Self::Step) -> [f64; 3];
+}
+
+impl FiniteGasTransportNode for FiniteGasDgNode {
+    type Step = FiniteGasDgStep<GasCompositionStep>;
+
+    fn dt(&self) -> f64 { self.propagator.dt() }
+    fn step_count(&self) -> u64 { self.state.step_count() }
+    fn stored_energy_j(&self) -> f64 { self.state.stored_energy_j() }
+
+    fn admit<C: FnMut() -> bool>(
+        &self,
+        gas: &ClosedGasParcel,
+        input: &FiniteGasDgTransportInput,
+        cancelled: &mut C,
+    ) -> Result<(), FiniteGasDgError<GasEnergyError>> {
+        super::check(cancelled)?;
+        super::admit_controls(input.acoustic.expect("validated acoustic input"))?;
+        let duct = self.binding.duct();
+        if duct.gas_field().and_then(|field| field.uniform_state()) != Some(gas.state()) {
+            return Err(FiniteGasDgError::Invalid(
+                "acoustic owner and finite gas require one complete original source",
+            ));
+        }
+        let radius = duct.uniform_circular_radius_m().ok_or(FiniteGasDgError::Invalid(
+            "finite background requires the original circular fixed geometry",
+        ))?;
+        let volume = core::f64::consts::PI * radius * radius * duct.total_length();
+        if !volume.is_finite() || volume <= 0.0
+            || (gas.volume_m3() / volume - 1.0).abs() > 64.0 * f64::EPSILON
+        {
+            return Err(FiniteGasDgError::Invalid(
+                "finite background volume must equal the actual duct volume",
+            ));
+        }
+        let mut sample = self.state.clone();
+        self.propagator.sync_nodal(&mut sample).map_err(super::native)?;
+        duct.port_pressures(&sample).map_err(super::native)?;
+        super::check(cancelled)
+    }
+
+    fn advance<C: FnMut() -> bool>(
+        &mut self,
+        gas: &mut ClosedGasParcel,
+        input: &FiniteGasDgTransportInput,
+        evolve: impl FnMut(&ClosedGasParcel, f64, f64, &mut C)
+            -> Result<FiniteGasDgBackground<GasCompositionStep>, GasEnergyError>,
+        cancelled: &mut C,
+    ) -> Result<Self::Step, FiniteGasDgError<GasEnergyError>> {
+        let solve = input.acoustic.expect("validated acoustic input");
+        match &mut self.binding {
+            FiniteGasDgBinding::Uniform(wall) => wall.step_with_finite_gas_controlled(
+                &mut self.state, &mut self.propagator, gas, &input.ports,
+                solve, evolve, cancelled,
+            ),
+            FiniteGasDgBinding::Regional(wall) => wall.step_with_finite_gas_controlled(
+                &mut self.state, &mut self.propagator, gas, &input.ports,
+                solve, evolve, cancelled,
+            ),
+        }
+    }
+
+    fn accounts(step: &Self::Step) -> [f64; 3] {
+        [step.acoustic.ledger.port_work_step_j, step.acoustic_dissipation_j,
+            step.refresh.parameter_work_j]
+    }
 }
 
 use FiniteGasDgTransportError as Error;
@@ -215,7 +317,22 @@ pub fn advance_finite_gas_dg_transport_with_paths<C: FnMut() -> bool>(
     controls: FiniteGasDgTransportSolve,
     cancelled: &mut C,
 ) -> Result<FiniteGasDgTransportStep, Error> {
-    let candidate = finite_gas_dg_transport_candidate_with_paths(
+    advance_finite_gas_transport_with_paths(
+        parcels, nodes, inputs, paths, duration_s, controls, cancelled)
+}
+
+/// Publish one complete original-owner transaction for either acoustic layout.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn advance_finite_gas_transport_with_paths<N: FiniteGasTransportNode, C: FnMut() -> bool>(
+    parcels: &mut BTreeMap<u64, ClosedGasParcel>,
+    nodes: &mut BTreeMap<u64, N>,
+    inputs: &BTreeMap<u64, FiniteGasDgTransportInput>,
+    paths: GasTransportPaths<'_>,
+    duration_s: f64,
+    controls: FiniteGasDgTransportSolve,
+    cancelled: &mut C,
+) -> Result<FiniteGasDgTransportStep<N::Step>, Error> {
+    let candidate = finite_gas_transport_candidate_with_paths(
         parcels, nodes, inputs, paths, duration_s, controls, cancelled)?;
     check(cancelled)?;
     let (next_parcels, next_nodes, report) = candidate.into_parts();
@@ -241,6 +358,22 @@ pub fn finite_gas_dg_transport_candidate_with_paths<C: FnMut() -> bool>(
     controls: FiniteGasDgTransportSolve,
     cancelled: &mut C,
 ) -> Result<FiniteGasDgTransportCandidate, Error> {
+    finite_gas_transport_candidate_with_paths(
+        parcels, nodes, inputs, paths, duration_s, controls, cancelled)
+}
+
+/// Shared physical transport/accounting kernel. The node adapter can only
+/// advance its original acoustic owner and report that owner's actual accounts.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn finite_gas_transport_candidate_with_paths<N: FiniteGasTransportNode, C: FnMut() -> bool>(
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    nodes: &BTreeMap<u64, N>,
+    inputs: &BTreeMap<u64, FiniteGasDgTransportInput>,
+    paths: GasTransportPaths<'_>,
+    duration_s: f64,
+    controls: FiniteGasDgTransportSolve,
+    cancelled: &mut C,
+) -> Result<FiniteGasDgTransportCandidate<N, N::Step>, Error> {
     check(cancelled)?;
     if parcels.is_empty() || parcels.len() > MAX_SNAPSHOT_PARCELS || nodes.is_empty()
         || !parcels.keys().eq(inputs.keys()) || nodes.keys().any(|id| !parcels.contains_key(id))
@@ -249,7 +382,7 @@ pub fn finite_gas_dg_transport_candidate_with_paths<C: FnMut() -> bool>(
     {
         return Err(Error::Invalid("bounded gas graph, complete inputs, acoustic nodes and positive clock/tolerance required"));
     }
-    let epoch = nodes.values().next().expect("nonempty acoustic map").state.step_count();
+    let epoch = nodes.values().next().expect("nonempty acoustic map").step_count();
     let mut endpoints = BTreeMap::new();
     for (&id, input) in inputs {
         check(cancelled)?;
@@ -264,17 +397,11 @@ pub fn finite_gas_dg_transport_candidate_with_paths<C: FnMut() -> bool>(
     }
     for (&id, node) in nodes.iter() {
         check(cancelled)?;
-        if node.propagator.dt() != duration_s || node.state.step_count() != epoch
-            || node.binding.duct().gas_field().and_then(|field| field.uniform_state())
-                != Some(parcels[&id].state())
-        {
-            return Err(Error::Invalid("all acoustic owners require one clock and their complete original finite gas"));
+        if node.dt() != duration_s || node.step_count() != epoch {
+            return Err(Error::Invalid("all acoustic owners require one clock"));
         }
-        let mut sample = node.state.clone();
-        node.propagator.sync_nodal(&mut sample)
-            .map_err(|error| acoustic_error(id, super::native(error)))?;
-        node.binding.duct().port_pressures(&sample)
-            .map_err(|error| acoustic_error(id, super::native(error)))?;
+        node.admit(&parcels[&id], &inputs[&id], cancelled)
+            .map_err(|error| acoustic_error(id, error))?;
     }
     let (transported, transport) = material::step_candidate_with_paths(
         parcels, paths, duration_s, &endpoints, controls.transport, &mut *cancelled,
@@ -308,18 +435,12 @@ pub fn finite_gas_dg_transport_candidate_with_paths<C: FnMut() -> bool>(
                     transported_enthalpy_j: enthalpy, source,
                 })
             };
-            let solve = input.acoustic.expect("validated acoustic input");
-            let step = match &mut node.binding {
-                FiniteGasDgBinding::Uniform(wall) => wall.step_with_finite_gas_controlled(
-                    &mut node.state, &mut node.propagator, &mut gas, &input.ports, solve, evolve, cancelled,
-                ),
-                FiniteGasDgBinding::Regional(wall) => wall.step_with_finite_gas_controlled(
-                    &mut node.state, &mut node.propagator, &mut gas, &input.ports, solve, evolve, cancelled,
-                ),
-            }.map_err(|error| acoustic_error(id, error))?;
-            port_work.add(step.acoustic.ledger.port_work_step_j)?;
-            losses.add(step.acoustic_dissipation_j)?;
-            parameter_work.add(step.refresh.parameter_work_j)?;
+            let step = node.advance(&mut gas, input, evolve, cancelled)
+                .map_err(|error| acoustic_error(id, error))?;
+            let [net_port_work, acoustic_loss, gas_work] = N::accounts(&step);
+            port_work.add(net_port_work)?;
+            losses.add(acoustic_loss)?;
+            parameter_work.add(gas_work)?;
             next_parcels.insert(id, gas);
             acoustics.insert(id, step);
         } else {
@@ -343,7 +464,7 @@ pub fn finite_gas_dg_transport_candidate_with_paths<C: FnMut() -> bool>(
     }
     for (&id, node) in &next_nodes {
         check(cancelled)?;
-        acoustic_storage.add(node.state.stored_energy_j()-nodes[&id].state.stored_energy_j())?;
+        acoustic_storage.add(node.stored_energy_j()-nodes[&id].stored_energy_j())?;
     }
     let residual = ((gas_storage.value+acoustic_storage.value)+losses.value)
         - heat.value - port_work.value;

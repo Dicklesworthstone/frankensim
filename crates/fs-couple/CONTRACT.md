@@ -8654,6 +8654,39 @@ independent paired-blade motion, exact retry after source refusal or final
 cancellation, and rejection of an unowned second inventory. Native execution
 and measured physical validation remain separate gates.
 
+## Finite transport networks drive complete acoustic loads
+
+`dg_port::finite_gas::transport` connects the original multi-parcel material
+transport transaction to `BTreeMap<u64, DgPortLoad>`. The original wall-DG and
+complete-load entry points share one private, statically dispatched transaction
+kernel. No second transport, caloric, work-feedback or conservation algorithm
+is introduced. Existing wall-node structs and their entry points remain usable.
+
+Nozzle, diffusion, porous and membrane paths consume one unchanged original
+species/enthalpy snapshot. Each complete load then advances once from its
+original medium and pays its actual bore/channel parameter work from the
+transported inventory. Finite reservoirs share the same source map and caloric
+owner. Final driving-force gates run after every endpoint's heat and acoustic
+work. Compensated sums independently close total mass and enclosing gas plus
+bore/branch/channel energy; native losses and net acoustic port work retain
+their original signs. Exterior exchange is already in net port work and is
+not charged again.
+
+Complete source, actual bore-plus-passage volume, controls, clock and the one
+original inlet flow are admitted before transport. Explicit candidates expose
+all proposed parcels, complete loads and original reports. The advance APIs
+publish both maps only after all endpoint, conservation and cancellation checks.
+Failed attempts retain every accepted source, channel momentum and causal pole.
+
+The gas volumes remain separate fixed-volume, well-mixed owners connected by
+native material transport. A restriction does not thereby gain a resolved
+acoustic scattering model, jet noise or static pressure force. Independent
+branch gases remain their original sources, and native composition/pressure,
+transport-domain and first-order partition limits remain active. Focused
+synthetic regressions cover actual transport into complete warm loads and
+transactional refusal/retry. Native execution and measured validation remain
+separate gates. This advances MR05/MR06/MR33/MR67.
+
 ## Continuing spatial dielectric charge through thermal phase change
 
 `ConductionThermalNetwork::step_dielectric_candidate` connects the native
