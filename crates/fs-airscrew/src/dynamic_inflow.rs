@@ -19,6 +19,9 @@
 
 use super::{MAX_BRAKING_INDUCTION, Refusal, Rotor, StationProblem, refuse};
 
+/// Mean and first spatial harmonics with physical modal air inertia.
+pub mod first_harmonic;
+
 /// Constant-density uniform disk, with SI geometry and physical air inertia.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UniformAxialInflow {

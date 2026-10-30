@@ -572,3 +572,58 @@ reconstruction, and reverse all mechanical shaft-axis sign conventions while
 retaining an identical physical trajectory. The existing dynamic, geared,
 spatial and coupled aerodynamic suites also remain applicable. No historical,
 full-workspace, browser, real-time or performance qualification is implied.
+
+## First harmonic disk wakes in native aircraft and shaft motion
+
+`spine::rotors::propulsion::dynamic::first_harmonic::HarmonicPropulsion`
+explicitly selects a normal-transport mean-plus-two-mode wake for each
+physical propeller. `HarmonicState` retains all six induction velocities
+alongside the original carrier pose, twist and generalized shaft momentum.
+`disk_frames` exposes the prepared body-fixed mode references so callers
+can specify the actual physical field. Mechanical shaft-axis sign choices
+do not change these mode directions or their physical forcing.
+
+One original wing solve per actual aerodynamic stage now consumes the
+local modal induction at each real wing-strip location inside the existing
+straight axial wash window. The same field reaches every native blade
+quadrature point. Blade thrust and actual transverse hub moments drive the
+three modal air-inertia ports; all body forces, lever arms, transverse hub
+moments and aerodynamic shaft torques pass through the original shared
+wrench and geared mechanics owners exactly once. No duplicate section,
+wing, mechanical or nonlinear wake solver is introduced.
+
+The initial force stage predicts aircraft, shaft and all wake modes to
+half time; the actual predicted-midpoint stage advances the original
+mechanics and each implicit transport step. The wake input work and the
+section induced work use their actual respective midpoint states.
+`coupling_work_residual_j` explicitly exposes their difference rather than
+calling a partitioned quadrature defect dissipation or silently claiming
+coupled passivity. The modal frame-rate term uses carrier rotation about
+the disk normal, never physical shaft spin. Original immutable-state and
+late-failure atomicity remain; callback effects are caller-owned.
+
+The selected wake closure is still a normal-flow, zero-skew transport
+approximation even when the blade law resolves incident crossflow. The
+existing straight wash geometry is a finite-window transfer approximation;
+it is not a free wake, skewed induction solution, full world-fluid momentum
+account, wake-distortion model or total fluid/body energy theorem. Incident
+air/wing-induced flow is still sampled at each disk center apart from actual
+carrier tilt kinematics. Finite blade phase, higher modes, flapping, cyclic
+pitch, swirl, direct inter-disk wake coupling and intradisk ambient wind
+gradients remain unimplemented. Apparent air inertia remains excluded from
+the aircraft's rigid inertia.
+
+Four native cases in `tests/harmonic_propulsion.rs` establish zero-mode
+parity with original oblique aircraft loads; nonuniform induction reaching
+real blades and wing strips; independent physical aircraft/shaft world
+momentum reconstruction over 24 canted-rotor ticks; full-state and coupling
+work refinement; mechanical-axis sign parity; and late-density refusal with
+deterministic retry. Measured 24-tick residuals are `8.73145e-13 N s` linear,
+`1.58448e-11 N m s` angular, `2.94253e-15 N s` modal and `2.10943e-15 J`
+within-wake storage/work. At 24/48/96 steps, the complete-state error against
+384 steps is `3.56045e-4`, `8.81038e-5`, `2.09938e-5`; accumulated absolute
+induced coupling-work defects are `1.45322e-3`, `3.65155e-4`, `9.15029e-5 J`.
+The state error is a numerical fixture norm, not a common physical unit or
+trajectory certificate. All ten new and 55 original propulsion/airscrew
+cases pass in the focused actual-source native build. This is not a full
+Cargo/DSR, cross-platform, browser, real-time or physical validation gate.

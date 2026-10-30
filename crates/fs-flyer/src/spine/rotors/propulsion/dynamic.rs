@@ -20,10 +20,25 @@ use super::{
     GearedPropulsion, GearedState, GearedStep, PropulsionInputs, Refusal, geared, reject,
     wing_error,
 };
+use fs_airscrew::dynamic_inflow::first_harmonic::HarmonicInduction;
 use fs_airscrew::dynamic_inflow::{InflowStep, RotorEvaluation, UniformAxialInflow};
 use fs_airscrew::oblique::{AzimuthQuadrature, DiskFrame, ObliqueLoads, SpinDirection};
 use fs_wing::induced_velocity_free;
 use fs_wing::nonlinear::solve_nonlinear_with_incident;
+
+/// Mean and first harmonic wakes coupled to the original aircraft/shaft motion.
+#[path = "dynamic/first_harmonic.rs"]
+pub mod first_harmonic;
+
+// One wing/wash solve shared by the uniform and harmonic blade owners.
+struct WingAtInduction {
+    disk_velocity_mps: [[f64; 3]; 2],
+    disk_axial_mps: [f64; 2],
+    gamma: Vec<f64>,
+    strip_velocity_mps: Vec<[f64; 3]>,
+    lift_n: f64,
+    residual: f64,
+}
 
 /// All physical memory of the dynamic propulsion step.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -179,11 +194,12 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
         self.inflow
     }
 
-    fn solve(
+    fn solve_wing(
         &self,
-        stage: AerodynamicStage<'_>,
+        stage: &AerodynamicStage<'_>,
         induced_mps: [f64; 2],
-    ) -> Result<DynamicAerodynamics, Refusal> {
+        harmonics: Option<&[HarmonicInduction; 2]>,
+    ) -> Result<WingAtInduction, Refusal> {
         let wash = self.axes.wash_map(
             stage.strips,
             stage.panels,
@@ -195,8 +211,37 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
             .strip_velocity_mps
             .iter()
             .zip(wash)
-            .map(|(&incident, factors)| self.axes.velocity(incident, factors, induced_mps))
-            .collect();
+            .enumerate()
+            .map(|(index, (&incident, factors))| {
+                let mut local = induced_mps;
+                if let Some(modes) = harmonics {
+                    let (_, frames) = self.oblique.as_ref().ok_or_else(|| {
+                        reject(
+                            "dynamic-propulsion-invalid",
+                            "harmonic wash requires disk frames",
+                        )
+                    })?;
+                    let panel = &stage.panels[stage.strips[index].panel_indices[0]];
+                    for k in 0..2 {
+                        if factors[k] != 0.0 {
+                            let offset: [f64; 3] = core::array::from_fn(|j| {
+                                (0.5 * panel.a[j] + 0.5 * panel.b[j] - stage.disks[k].center_m[j])
+                                    / self.propulsion.design.rotor.radius_m
+                            });
+                            let dot = |direction: [f64; 3]| {
+                                (offset[0] * direction[0] + offset[1] * direction[1])
+                                    + offset[2] * direction[2]
+                            };
+                            local[k] = modes[k].at(
+                                dot(frames[k].radial_reference()),
+                                dot(frames[k].azimuth_reference()),
+                            );
+                        }
+                    }
+                }
+                Ok(self.axes.velocity(incident, factors, local))
+            })
+            .collect::<Result<_, Refusal>>()?;
         let wing = solve_nonlinear_with_incident(
             stage.op,
             stage.panels,
@@ -222,13 +267,30 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
             self.axes
                 .axial(k, stage.incident.disk_velocity_mps[k], induced)
         });
+        Ok(WingAtInduction {
+            disk_velocity_mps,
+            disk_axial_mps,
+            gamma: wing.gamma,
+            strip_velocity_mps,
+            lift_n: wing.total_lift_n,
+            residual: wing.residual,
+        })
+    }
+
+    fn solve(
+        &self,
+        stage: AerodynamicStage<'_>,
+        induced_mps: [f64; 2],
+    ) -> Result<DynamicAerodynamics, Refusal> {
+        let wing = self.solve_wing(&stage, induced_mps, None)?;
+        let disk_axial_mps = wing.disk_axial_mps;
         let oblique = if let Some((rule, frames)) = &self.oblique {
             let loads = |k: usize| {
                 rule.evaluate(
                     &self.propulsion.design.rotor,
                     stage.rho,
                     frames[k],
-                    disk_velocity_mps[k],
+                    wing.disk_velocity_mps[k],
                     stage.carrier_angular_velocity_body_rad_s,
                     induced_mps[k],
                     stage.disks[k].omega_rad_s,
@@ -265,8 +327,8 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
             propellers: [propeller(0)?, propeller(1)?],
             oblique,
             gamma: wing.gamma,
-            strip_velocity_mps,
-            wing_lift_n: wing.total_lift_n,
+            strip_velocity_mps: wing.strip_velocity_mps,
+            wing_lift_n: wing.lift_n,
             wing_residual: wing.residual,
         })
     }

@@ -14,6 +14,7 @@
 //! skew-induced wake distribution, cyclic pitch or unsteady-airfoil memory.
 //! Induction is supplied by the caller, separately from this blade-load law.
 
+use super::dynamic_inflow::first_harmonic::HarmonicInduction;
 use super::{MAX_BRAKING_INDUCTION, Refusal, Rotor, StationProblem, refuse};
 use fs_math::det;
 
@@ -100,6 +101,57 @@ impl DiskFrame {
     pub fn thrust_axis(self) -> [f64; 3] {
         self.axis
     }
+
+    /// Nonspinning radial reference defining the cosine inflow mode.
+    #[must_use]
+    pub fn radial_reference(self) -> [f64; 3] {
+        self.radial
+    }
+
+    /// Positive sine direction, independent of physical blade handedness.
+    #[must_use]
+    pub fn azimuth_reference(self) -> [f64; 3] {
+        self.azimuth
+    }
+
+    /// Re-express the SAME induction field in another reference on this disk.
+    /// A changed normal requires a moving-disk model rather than a gauge change.
+    pub fn rebase_induction(
+        self,
+        other: Self,
+        induction: HarmonicInduction,
+    ) -> Result<HarmonicInduction, Refusal> {
+        if (dot(self.axis, other.axis) - 1.0).abs() > 1e-12
+            || !induction.modes().into_iter().all(f64::is_finite)
+        {
+            return Err(invalid("inflow rebase requires the same oriented disk"));
+        }
+        let gradient = core::array::from_fn(|j| {
+            induction.first_mps[0] * self.radial[j] + induction.first_mps[1] * self.azimuth[j]
+        });
+        let result = HarmonicInduction {
+            mean_mps: induction.mean_mps,
+            first_mps: [dot(gradient, other.radial), dot(gradient, other.azimuth)],
+        };
+        if !result.modes().into_iter().all(f64::is_finite) {
+            return Err(invalid("inflow rebase overflow"));
+        }
+        Ok(result)
+    }
+
+    /// Power-conjugate loads for `[mean, cosine, sine]` induction modes.
+    /// The two moment loads are divided by outer disk radius and have units N.
+    pub fn wake_force_n(self, loads: &ObliqueLoads, radius_m: f64) -> Result<[f64; 3], Refusal> {
+        let force = [
+            loads.thrust_n,
+            -dot(loads.hub_moment_nm, self.azimuth) / radius_m,
+            dot(loads.hub_moment_nm, self.radial) / radius_m,
+        ];
+        if !radius_m.is_finite() || radius_m <= 0.0 || !force.into_iter().all(f64::is_finite) {
+            return Err(invalid("invalid radius or harmonic wake force"));
+        }
+        Ok(force)
+    }
 }
 
 /// All loads are on the physical rotor, expressed in the input frame.
@@ -119,7 +171,8 @@ pub struct ObliqueLoads {
     /// Sum of section forces dotted with actual blade velocity relative to
     /// incident air, excluding the induced air velocity [W].
     pub kinematic_power_w: f64,
-    /// `thrust_n * induced_mps` [W], with its physical sign.
+    /// Sum of section thrust times its actual induction [W], with its sign.
+    /// In the uniform path this is exactly `thrust_n * induced_mps`.
     pub induced_work_w: f64,
     /// Hub force/tilt/absolute-spin power + induced work + profile loss [W].
     /// This is a section-law identity, not a whole-wake energy theorem.
@@ -184,7 +237,70 @@ impl AzimuthQuadrature {
         induced_mps: f64,
         omega_rad_s: f64,
     ) -> Result<ObliqueLoads, Refusal> {
+        self.evaluate_modes(
+            rotor,
+            density_kg_m3,
+            frame,
+            hub_velocity_mps,
+            carrier_angular_velocity_rad_s,
+            HarmonicInduction {
+                mean_mps: induced_mps,
+                first_mps: [0.0; 2],
+            },
+            omega_rad_s,
+            false,
+        )
+    }
+
+    /// Evaluate first spatial harmonics at every real radial/azimuth point.
+    /// Induced work is the actual sum `sum(dT * v_i)`, including the two
+    /// transverse hub-moment ports. It is not thrust times mean induction.
+    /// Exact zero harmonic amplitudes retain the uniform path's arithmetic.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_first_harmonic(
+        &self,
+        rotor: &Rotor,
+        density_kg_m3: f64,
+        frame: DiskFrame,
+        hub_velocity_mps: [f64; 3],
+        carrier_angular_velocity_rad_s: [f64; 3],
+        induction: HarmonicInduction,
+        omega_rad_s: f64,
+    ) -> Result<ObliqueLoads, Refusal> {
+        if !induction.modes().into_iter().all(f64::is_finite)
+            || induction.first_mps[0].hypot(induction.first_mps[1])
+                > dot(hub_velocity_mps, frame.axis) + induction.mean_mps
+        {
+            return Err(invalid(
+                "invalid harmonic induction or reversed disk throughflow",
+            ));
+        }
+        self.evaluate_modes(
+            rotor,
+            density_kg_m3,
+            frame,
+            hub_velocity_mps,
+            carrier_angular_velocity_rad_s,
+            induction,
+            omega_rad_s,
+            induction.first_mps != [0.0; 2],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_modes(
+        &self,
+        rotor: &Rotor,
+        density_kg_m3: f64,
+        frame: DiskFrame,
+        hub_velocity_mps: [f64; 3],
+        carrier_angular_velocity_rad_s: [f64; 3],
+        induction: HarmonicInduction,
+        omega_rad_s: f64,
+        distributed: bool,
+    ) -> Result<ObliqueLoads, Refusal> {
         rotor.admit()?;
+        let induced_mps = induction.mean_mps;
         let axial = dot(hub_velocity_mps, frame.axis);
         if !hub_velocity_mps
             .iter()
@@ -208,6 +324,7 @@ impl AzimuthQuadrature {
         let mut torque_nm = 0.0;
         let mut profile_dissipation_w = 0.0;
         let mut kinematic_power_w = 0.0;
+        let mut section_induced_work_w = 0.0;
         let mut maximum_spanwise_speed_mps: f64 = 0.0;
         let mut minimum_tangential_speed_mps = f64::INFINITY;
         let root_radius = rotor.stations[0].r_over_r * 0.8 * rotor.radius_m;
@@ -222,7 +339,12 @@ impl AzimuthQuadrature {
                 let incident = core::array::from_fn(|j| hub_velocity_mps[j] + tilt_velocity[j]);
                 let local_axial = dot(incident, frame.axis);
                 let tangential = omega_rad_s * radius + dot(incident, tangent);
-                let throughflow = local_axial + induced_mps;
+                let local_induced = if distributed {
+                    induction.at(station.r_over_r * c, station.r_over_r * s)
+                } else {
+                    induced_mps
+                };
+                let throughflow = local_axial + local_induced;
                 let alpha = station.beta_rad - det::atan2(throughflow, tangential);
                 if ![tangential, throughflow, alpha]
                     .into_iter()
@@ -249,7 +371,7 @@ impl AzimuthQuadrature {
                     radius,
                     root_radius,
                 }
-                .blade_loads(induced_mps)?;
+                .blade_loads(local_induced)?;
                 let d_thrust = loads.thrust * weight;
                 let d_torque = loads.torque * weight;
                 let d_tangential = d_torque / radius;
@@ -263,6 +385,9 @@ impl AzimuthQuadrature {
                     hub_moment_nm[j] += d_moment[j];
                 }
                 thrust_n += d_thrust;
+                if distributed {
+                    section_induced_work_w += d_thrust * local_induced;
+                }
                 torque_nm += d_torque;
                 let section_speed = (throughflow * throughflow + tangential * tangential).sqrt();
                 profile_dissipation_w += loads.profile_drag * section_speed * weight;
@@ -273,7 +398,11 @@ impl AzimuthQuadrature {
             }
         }
         let force_n = core::array::from_fn(|j| thrust_n * frame.axis[j] + transverse_force[j]);
-        let induced_work_w = thrust_n * induced_mps;
+        let induced_work_w = if distributed {
+            section_induced_work_w
+        } else {
+            thrust_n * induced_mps
+        };
         let power_residual_w = dot(force_n, hub_velocity_mps) + dot(hub_moment_nm, tilt)
             - torque_nm * omega_rad_s
             + induced_work_w

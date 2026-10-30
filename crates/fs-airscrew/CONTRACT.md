@@ -192,3 +192,68 @@ an independent attached-section midpoint quadrature and azimuth refinement,
 physical handedness parity, full frame rotation and shaft/carrier power, and
 bounded work/reversed-flow/angle/overflow refusals. This establishes numerical
 conformance of the declared Estimated section model, not propeller calibration.
+
+## Normal-flow first harmonic wake memory and distributed blade induction
+
+`dynamic_inflow::first_harmonic::{FirstHarmonicInflow, HarmonicInduction}`
+adds a physical mean plus two first spatial modes:
+`v_i(x,y) = u0 + hx x/R + hy y/R`, in metres per second. The radial
+reference and `axis cross reference` define the cosine/sine directions;
+they are independent of blade handedness and do not follow blade phase.
+Dimensional states avoid artificial wake-memory rescaling when shaft RPM changes.
+
+The selected transport closure is the **normal-flow, nonrigid-wake** limit
+of Chen, NASA TM-102219, equations (13b), (14), (17), (18) and (21):
+<https://ntrs.nasa.gov/api/citations/19900006622/downloads/19900006622.pdf>.
+The apparent modal masses are `m0=(8/3) rho R^3` and
+`m1=(16/45) rho R^3`. Mean transport remains the native
+`2 rho A u0 (V+u0)`; first-mode transport is
+`rho A (V+2u0) h/2`. This explicitly selects the nonrigid-wake harmonic
+gain; the alternative rigid-wake assumption has different gains/time scales.
+It does not implement the source's general skewed-flow matrix.
+
+Actual transverse hub moments supply the power-conjugate loads
+`Q=[T, -M dot e2/R, M dot e1/R]`, all in newtons. This follows directly
+from `M=sum(r cross n dT)` and `Q dot u=sum(dT v_i)`. The mean and two
+moment channels retain separate generalized impulse residuals. They are
+reduced modal balances, not a full world-fluid linear/angular momentum account.
+No apparent air mass is added to the solid rotor or aircraft inertia.
+
+The moving disk reference contributes `m1 omega_n J h`, where
+`J[hx,hy]=[-hy,hx]` and `omega_n` is the **carrier** axial rate, not rotor
+shaft speed. This is tangent-frame coordinate transport with zero power in
+real arithmetic. Its impulse and measured work are exposed separately; it
+is not a physical source. This tangent-plane transport does not represent
+far-wake geometry, tilt-induced wake distortion or a resolved air domain.
+
+`step_held` solves the original mean quadratic followed by the coupled
+two-mode implicit midpoint equations in closed form, with constant storage
+and work. It exposes actual modal kinetic storage, driving/transport/frame
+impulses, induced work, transport work, frame work and numerical residuals.
+Transport work is nonnegative on the admitted normal branch. Midpoint is
+second order for smooth held data and is not L-stable; a coarse transient
+still requires refinement. Initial, midpoint and final whole-disk normal
+throughflow must be nonnegative; overflow or inadmissible harmonic amplitude
+refuses rather than clipping or reverting to uniform flow.
+
+`oblique::AzimuthQuadrature::evaluate_first_harmonic` evaluates the SAME
+native section law at each actual radial/azimuth induction value. Induced
+work is summed as `sum(dT v_i)`, including both moment ports, instead of
+using thrust times mean induction. The zero-harmonic path preserves the
+original oblique arithmetic. Prepared 8–512 point quadrature remains
+allocation-free during evaluation, with O(radial stations times azimuth)
+work. `DiskFrame::rebase_induction` changes the reference of the same
+oriented disk; `wake_force_n` provides the conjugate load normalization.
+All original positive tangential-flow, normal-flow and angle-domain guards
+remain. Higher harmonics, general skew transport, swirl, flapping, cyclic
+pitch, wake contraction, ground effects, radial flow force and source
+calibration remain outside this model.
+
+Six native G0/G1/G3 cases in `tests/first_harmonic.rs` establish the analytic
+exponential modal response, second-order refinement, zero-work rotating-frame
+transport, original zero-mode arithmetic, independent attached-section force
+and work integration, full-scene rotation, disk-reference re-expression and
+domain/late-endpoint refusals. Harmonic response errors at 16/32/64 steps are
+`2.4097506965e-4`, `6.0192955857e-5`, `1.5045067779e-5`. These focused native
+results do not establish a full Cargo/DSR, cross-platform or physical
+calibration gate.
