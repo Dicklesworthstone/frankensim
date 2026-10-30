@@ -18,7 +18,7 @@ TS1="${IE_TS1:-ts1}"
 SSH="ssh -o ConnectTimeout=15"
 
 # Work-in-progress renders by lanes that have not committed or graded them yet. Edit when the lanes move them.
-KIT="/data/tmp/mb-phrases/kit15/"  # on TRJ: source.json (render commits), renders/, grade/ (kitgrade.py: data/kit.json, data/decays.json, audio/*.wav, img/*.webp)
+KIT="/data/tmp/mb-phrases/kit16/"  # on TRJ: source.json (render commits), renders/, grade/ (kitgrade.py: data/kit.json, data/decays.json, audio/*.wav, img/*.webp)
 VIOLIN_ASSEMBLED="/home/ubuntu/irp-verify/out-ProudBison/violin-g3-rung-v2/violin-g3-rung-2s.wav"  # on TS1
 FLUTE_EXTERIOR="/data/tmp/wa-inst/renders/flute-exterior/25a5514944ea/"             # on TRJ
 TIMPANI="/home/ubuntu/irp-verify/mb-timpani-land/render/timpani-2b.wav"  # on TS1: timpani/render.sh at a95d54fa4 (pexfp.376)
