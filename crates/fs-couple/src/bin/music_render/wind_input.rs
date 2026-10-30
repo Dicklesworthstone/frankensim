@@ -3,6 +3,8 @@
 mod attachments;
 #[path = "wind_input/gas_sources.rs"]
 mod gas_sources;
+#[path = "wind_input/finite_gas_heat.rs"]
+mod finite_gas_heat;
 use std::io::{Read, Write};
 use std::path::Path;
 use fs_blake3::ContentHash;
@@ -1250,7 +1252,8 @@ fn load_with_all_sources(
         let propagation=if matches!(p.renderer().system(),CoupledAperture::Dg(_)) {"gas-derived exact-Bessel viscous/thermal memory in the original DG exponential"}
             else if p.viscothermal_losses().is_empty() {"lossless propagating sections with explicit local loads"}
             else {"gas-derived viscothermal series/thermal memory distributed along selected sections"};
-        let gas_json=super::thermochemical::provenance(p.gas_records());
+        let gas_json=format!("{}{}", super::thermochemical::provenance(p.gas_records()),
+            finite_gas_heat::provenance(p.renderer(), i.sample_rate_hz));
         // Each section's pack, hash, state and query point, or its fixture label (pexfp.32).
         let section_sources=p.section_provenance().iter().map(|s|format!("\"{s}\"")).collect::<Vec<_>>().join(",");
         let source_json=format!("\"plate_valve_input\":{{\"schema\":\"{PLATE_VALVE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{}\",\"nodes\":{},\"triangles\":{},\"sections\":{},\"section_sources\":[{section_sources}],\"memory_branches\":{},\"compiled_controls\":{},\"pressure_point\":\"{observation}\",\"requested_tube_length_m\":{:e},\"represented_tube_length_m\":{:e},\"effective_mass_kg\":{:e},\"stiffness_n_m\":{:e},\"pressure_area_m2\":{:e},\"model_scope\":\"one linear plate mode; spatial lay and supplied material history; {propagation}; {scope}\"{receiver_json}{gas_json}}}",

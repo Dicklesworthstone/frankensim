@@ -25,6 +25,7 @@
 //! section's pack, hash, state and query point, or its fixture label, is kept
 //! in `section_provenance` for the render sidecar.
 mod force;
+mod finite_gas;
 /// Material-card multimode valves coupled to both ducts and one physical receiver.
 pub mod material_modal;
 use super::force::ApertureForceProgram;
@@ -80,6 +81,8 @@ pub enum PlateValveInputError {
     },
     /// Original stationary heat/species field refusal.
     SteadyGas { line: usize, source: fs_material::gas_field::steady::SteadyGasError },
+    /// Original finite thermochemical inventory or caloric refusal.
+    GasEnergy { line: usize, source: fs_material::thermochemical_gas::energy::GasEnergyError },
     /// Caller-supplied normalized material artifact could not be loaded.
     MaterialSource { /// One-based declaration line.
         line: usize, /// Original source refusal.
@@ -105,6 +108,7 @@ impl core::fmt::Display for PlateValveInputError {
             Self::Input { line, what } => write!(f,"plate-valve input line {line}: {what}"),
             Self::Gas { line, source } => write!(f,"plate-valve gas line {line}: {source}"),
             Self::SteadyGas { line, source } => write!(f,"plate-valve steady gas line {line}: {source}"),
+            Self::GasEnergy { line, source } => write!(f,"plate-valve finite gas line {line}: {source}"),
             Self::MaterialSource { line, source } => write!(f,"plate-valve material source line {line}: {source}"),
             Self::RadiationSource { line, source } => write!(f,"plate-valve radiation source line {line}: {source}"),
             Self::Material { line, source } => write!(f,"plate-valve material line {line}: {source}"),
@@ -119,6 +123,7 @@ impl std::error::Error for PlateValveInputError {
         match self {
             Self::Gas { source, .. } => Some(source),
             Self::SteadyGas { source, .. } => Some(source),
+            Self::GasEnergy { source, .. } => Some(source),
             Self::Material { source, .. } => Some(source),
             Self::RadiationSource { source, .. } => Some(source),
             _ => None,
@@ -240,7 +245,7 @@ impl PlateValvePerformance {
         mut load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
     ) -> Result<Self, PlateValveInputError> {
         checkpoint(gate)?;
-        let parsed = Parsed::read_with_gas_sources(bytes, max_block, gate, sources, &mut load_material)?;
+        let mut parsed = Parsed::read_with_gas_sources(bytes, max_block, gate, sources, &mut load_material)?;
         let dt=1.0/f64::from(parsed.config.sample_rate_hz);
         // One exterior declaration drives radiation; all internal media and
         // constitutive loads still come from their original regional states.
@@ -300,6 +305,9 @@ impl PlateValvePerformance {
         }.map_err(PlateValveInputError::Gesture)?;
         if let Some(program) = parsed.forces {
             renderer = renderer.with_plate_forces(program).map_err(PlateValveInputError::Gesture)?;
+        }
+        if let Some(heat) = parsed.finite_gas {
+            renderer = heat.bind(renderer, gate, &mut parsed.gas_records)?;
         }
         checkpoint(gate)?;
         let info=PlateValvePerformanceInfo {
@@ -376,6 +384,7 @@ struct Parsed {
     closure: PlateClosureSpec,
     relaxation: Option<(PlateRelaxationSpec, InitialApertureMemory)>,
     forces: Option<ApertureForceProgram>,
+    finite_gas: Option<finite_gas::FiniteGasInput>,
     max_angular_step: f64,
     schedule: GestureSchedule,
     nodes: usize,
@@ -427,6 +436,10 @@ impl Parsed {
             row.finish()?;Some(state)
         } else {None};
         let duct = DuctInput::read_with_gas_sources(&mut r, &air, gate, sources, &mut gas_records)?;
+        let finite_gas = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("finite_gas") {
+            Some(finite_gas::FiniteGasInput::read(&mut r, sources, gate)?)
+        } else { None };
         let mut row=r.row("observation")?;
         let observation=match row.word()? {
             "inlet"=>ApertureObservation::Inlet,"terminal"=>ApertureObservation::TubeTerminal,
@@ -610,7 +623,7 @@ impl Parsed {
         if r.lines.next().is_some() {return Err(bad(r.line+1,"unexpected trailing geometry record"));}
         let config=AperturePerformanceConfig{sample_rate_hz:rate,samples,max_block,max_compile_work,max_controls};
         let schedule=decode_schedule(gestures)?;
-        Ok(Self{gas_records,config,full_scale_pa,air,duct,exterior,observation,chart,plate,symmetry,slit_length_m,initial,closure,relaxation,forces,max_angular_step,
+        Ok(Self{gas_records,config,full_scale_pa,air,duct,exterior,observation,chart,plate,symmetry,slit_length_m,initial,closure,relaxation,forces,finite_gas,max_angular_step,
             schedule,nodes:node_count,triangles:triangle_count,sections:section_count,section_provenance})
     }
 }
