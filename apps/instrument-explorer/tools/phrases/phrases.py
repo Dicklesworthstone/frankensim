@@ -8,7 +8,8 @@ cello, double-bass and voice phrases of 2026-10-30: d49a124c2); nothing is tuned
           (a rigid stop, no finger), mode count scaled so the top mode stays where the open string's was,
           its own duration and a bow lift at the end. Double stops are two cards in one `ensemble` run.
   wind    the fingering's own file with its duration and attack/release moved; nothing else changes.
-  voice   the vowel/pitch yielding-wall file render.sh grades, with its duration and subglottal schedule moved.
+  voice   the vowel/pitch yielding-wall file render.sh grades, with its duration and subglottal schedule moved, and the
+          sung phrases' vibrato (a fold-tension gesture, VIBRATO below) added; the graded straight tones have none.
   lip     ONE render per phrase: the head plus a gesture schedule that steps lip pre-stress and tongues
           the mouth pressure per note (the pre-stress and pressures of render.sh's held notes).
 OUT_DIR/jobs.txt: `<mode> <out.wav> <args...>` per render; OUT_DIR/plan.json: how each phrase is joined.
@@ -253,6 +254,28 @@ plan["pan-pipes/arpeggio"] = dict(family="pan-pipes", kind="arpeggio", title="G 
 
 # ---------------------------------------------------------------- voice
 
+# Vibrato, on these sung phrases only: the graded straight-tone cards carry none. It is a cricothyroid tension gesture on
+# the fold (`tension_modulation <rate_hz> <amplitude>`: all three fold stiffnesses scaled by 1 + a sin(2 pi r t)). Rate and
+# extent are the means of 50 professional singers: 5.9 Hz, and +-70 cents (half their mean max-min f0 of 139 cents;
+# Prame's 1997 mean of 71 cents is quoted in the same paper) from Larrouy-Maestri, Magis and Morsomme 2014, J Voice,
+# doi:10.1016/j.jvoice.2013.10.019. The amplitude is derived, not fitted: f0 goes as sqrt(stiffness), so
+# a = 2 (2^(70/1200) - 1) = 0.082; the emergent extent is measured on each render, not iterated to the target. Measured on
+# the ten vowel cards (music_render at 92c3e3378): +-41 to +-68 cents, mean +-57, under the 70 the amplitude was derived for
+# (the fold's f0 goes as stiffness^0.48, not 0.5, and each vowel's tract loads the fold differently).
+VIBRATO = [
+    "# VIBRATO (sung phrases only): tension_modulation <rate_hz> <amplitude>, a cricothyroid gesture on the fold.",
+    "#   5.9 Hz and +-70 cents: the means of 50 professional singers, Larrouy-Maestri, Magis and Morsomme 2014, J Voice,",
+    "#   doi:10.1016/j.jvoice.2013.10.019 (Prame 1997's mean extent, 71 cents, is quoted there). Amplitude a = 2 (2^(70/1200) - 1)",
+    "#   = 0.082 from f0 ~ sqrt(stiffness): derived, not fitted.",
+    "tension_modulation 5.9 0.082",
+]
+VOICE_HOW = ("Each vowel is its own render (tract shape and fold settings are fixed within a render); consecutive "
+             "vowels are joined with 80 ms crossfades, the later vowel entering after its own onset. The fold's "
+             "tension is modulated at 5.9 Hz by +-8.2 %, the vibrato rate and extent (+-70 cents) of 50 professional "
+             "singers (Larrouy-Maestri, Magis and Morsomme 2014). Measured on these renders, the pitch swings by "
+             "+-57 cents on average (41 to 68 by vowel), less than the +-70 the tension swing was derived for. "
+             "The graded straight-tone notes carry no vibrato.")
+
 
 def voice_note(stem, dur):
     base = read(f"{SRC}/voice/{stem}.performance")
@@ -269,6 +292,7 @@ def voice_note(stem, dur):
                 done = True
         else:
             out.append(l)
+    out += VIBRATO
     name = f"voice/{stem}-d{dur:g}.performance"
     write(f"{OUT}/{name}", out)
     return name
@@ -285,7 +309,7 @@ for pitch in ["C3", "C4"]:
         notes.append(dict(wav=wav, at=round(t, 4), dur=d, note=f"/{v}/ {pitch}"))
         t += d
     plan[f"voice/vowels-{pitch}"] = dict(family="voice", kind="vowels", title=f"Five vowels on {pitch}",
-                                         notes=notes, join="legato")
+                                         notes=notes, join="legato", how=VOICE_HOW)
 
 # ---------------------------------------------------------------- lip valves: one render per phrase
 LIP = {
