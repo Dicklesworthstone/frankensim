@@ -1,6 +1,6 @@
 //! Physical chain rule on the original descriptor model, in a fixed state chart.
-//! With S=J-R and e=W*v: dA*v=(dJ-dR)*e+S*(dQ*v). These are matrix-vector
-//! products, not a cubic matrix product or an inverse of possibly singular Q.
+//! With S=J-R and e=W*v: dA*v=(dJ-dR)*e+S*(dQ*v)-dT*v. T is the optional
+//! total nonlinear resisting-flow derivative. No storage inverse is required.
 use super::*;
 
 /// Derivatives per unit of ONE caller-declared real parameter, evaluated at the
@@ -18,6 +18,11 @@ pub struct HarmonicParameterDirection<'a> {
     /// n*ports dG, used in BOTH source and observation semantics. Free-mode
     /// eigenvalues do not depend on G, but their observed output does.
     pub ports: Option<&'a [f64]>,
+    /// Full n*n TOTAL derivative of T=D_x+D_e W, not an extra R matrix.
+    /// No symmetry/PSD assumption. Include every constitutive, Hessian and
+    /// operating-point chain-rule term; None holds T fixed independently of Q.
+    /// A changing bias is not solved or differentiated automatically here.
+    pub resisting_flow: Option<&'a [f64]>,
 }
 
 /// Derivatives per unit of the declared parameter, in v[pivot]=1 gauge.
@@ -31,6 +36,7 @@ pub struct HarmonicPoleDerivative {
     pub effort: Vec<C64>,
     pub output: Vec<C64>,
     pub stored_energy_j: f64,
+    /// Includes the derivative of signed incremental work for nonlinear images.
     pub dissipated_power_w: f64,
     /// d(2 Re(s) H + D), independently formed, not used to invent loss.
     pub decay_power_residual_w: f64,
@@ -44,7 +50,7 @@ impl HarmonicParameterDirection<'_> {
         -> Result<(), HarmonicPoleResponseError>
     {
         let n = model.n;
-        for matrix in [self.interconnection, self.dissipation, self.storage].into_iter().flatten() {
+        for matrix in [self.interconnection, self.dissipation, self.storage, self.resisting_flow].into_iter().flatten() {
             check_cancel(cancelled)?;
             if matrix.len() != n*n || matrix.iter().any(|v| !v.is_finite()) {
                 return Err(invalid("complete finite n*n parameter matrices required"));
@@ -82,9 +88,9 @@ impl PreparedHarmonicPole<'_> {
     /// Differentiate free poles, full eigenstates, efforts and port outputs.
     /// Reuses this factor, with O(n^2+n*ports) work per direction. No perturbed
     /// model, finite-difference step, mode rematching or storage inverse.
-    /// The caller supplies the actual constitutive/circuit chain rule; changes
-    /// of state chart, topology, differential rank or nonlinear equilibrium are
-    /// outside this local fixed-chart API. Complete batches are transactional.
+    /// The caller supplies the complete constitutive/circuit chain rule,
+    /// including dT on nonlinear local models. No change of coordinates,
+    /// topology or differential rank is inferred. Batches are transactional.
     pub fn parameter_derivatives(
         &self, directions: &[HarmonicParameterDirection<'_>], mut cancelled: impl FnMut() -> bool,
     ) -> Result<Vec<HarmonicPoleDerivative>, HarmonicPoleResponseError> {
@@ -123,6 +129,10 @@ impl PreparedHarmonicPole<'_> {
                     accumulate(&mut action[i],&mut correction,-a);
                     envelope[i] += (dj.abs()+dr.abs())*self.effort[j].abs()
                         +model.structure[i*n+j].abs()*dq_envelope[j];
+                    if let Some(dt)=direction.resisting_flow {
+                        accumulate(&mut action[i],&mut correction,v[j].scale(dt[i*n+j]));
+                        envelope[i]+=dt[i*n+j].abs()*v[j].abs();
+                    }
                 }
             }
             if action.iter().chain(&dqv).any(|&z| !finite(z))
@@ -191,6 +201,12 @@ impl PreparedHarmonicPole<'_> {
                 for j in 0..n {
                     dd += 2.0*(effort[i].conj()*self.effort[j]).re*model.r[i*n+j]
                         +(self.effort[i].conj()*self.effort[j]).re*at(direction.dissipation,i*n+j);
+                    if let Some(t)=&model.resisting_tangent {
+                        dd += (effort[i].conj()*v[j]+self.effort[i].conj()*dv[j]).re*t[i*n+j];
+                    }
+                    if let Some(dt)=direction.resisting_flow {
+                        dd += (self.effort[i].conj()*v[j]).re*dt[i*n+j];
+                    }
                 }
             }
             let balance=2.0*ds.re*h+2.0*s.re*dh+dd;

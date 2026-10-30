@@ -1,13 +1,16 @@
 //! Small-signal response about an admitted equilibrium of the ORIGINAL storage.
 //!
 //! Constant J/R/G give E dx_dot = (J-R) W0 dx + G du, with
-//! W0=diag(H''(x0)_diff,I_alg). The exact analytic Hessian action is the same
-//! callback contract used by StepWorkspace::step_into_analytic_controlled.
+//! W0=diag(H''(x0)_diff,I_alg). Optional nonlinear resisting flow contributes
+//! -T dx, T=D_x+D_e W0, from the SAME exact action as prepared time stepping.
 //! No finite differences, fitted modal damping, descriptor elimination or
 //! replacement nonlinear law. All existing harmonic/pole/contour/residue owners
 //! consume the resulting complete linear image.
 use super::{HarmonicBudget, HarmonicError, HarmonicModel, MAX_HARMONIC_DIMENSION};
 use crate::{DescriptorPortHamiltonian, PortHamiltonian, Storage};
+
+mod dissipation;
+pub use dissipation::NonlinearDissipation;
 
 /// A stationary point and its held input in the source's ORIGINAL coordinates.
 #[derive(Debug, Clone, Copy)]
@@ -17,8 +20,8 @@ pub struct EquilibriumPoint<'a> {
     /// Positive reference magnitude for EACH original flow/constraint equation.
     /// The units are those of that equation, NOT state units or a common SI norm.
     pub balance_scales: &'a [f64],
-    /// Require max_i |((J-R)e0+G u0)_i|/balance_scales_i <= this value.
-    /// Scales are fixed caller data; they are never enlarged after failure.
+    /// Require max_i |((J-R)e0-D(x0,e0)+G u0)_i|/balance_scales_i <= this.
+    /// D is zero on the ordinary path. Scales are never enlarged after failure.
     pub relative_tolerance: f64,
 }
 
@@ -37,6 +40,10 @@ pub enum LinearizationError {
     Invalid { what: &'static str },
     NotEquilibrium { row: usize, scaled_residual: f64, tolerance: f64 },
     HessianRefused { column: usize },
+    /// None denotes the original resisting force; Some denotes its total tangent.
+    DissipationRefused { column: Option<usize> },
+    /// The ORIGINAL law supplies energy at this point, not a negative tangent.
+    ActiveDissipation { power_w: f64, roundoff_bound_w: f64 },
     Harmonic(HarmonicError),
     Cancelled,
 }
@@ -63,9 +70,10 @@ fn add(sum: &mut f64, correction: &mut f64, term: f64) {
 /// Immutable LOCAL image, with operating-point observations kept separate from
 /// perturbations. HarmonicResponse.state/output are dx/dy, not x0+dx/y0+dy.
 /// The image's quadratic energy is the second variation of H, NOT total energy.
-/// A symmetric indefinite Hessian is retained so saddles/unstable poles remain
-/// visible; it is NOT admitted as positive storage or repaired to stability.
-/// Validity for finite oscillation amplitude must be established by the source.
+/// Indefinite curvature and signed incremental loss are retained: a passive
+/// biased nonlinear law need not be incrementally passive. No stability repair.
+/// Local AC/mode dissipation fields include Re(de* T dx); they are incremental
+/// work, not total heating of the biased source. The actual D work is separate.
 /// This is not a periodic-orbit/Floquet, contact-switching or limit-cycle model.
 pub struct EquilibriumLinearization {
     model: HarmonicModel,
@@ -76,6 +84,8 @@ pub struct EquilibriumLinearization {
     balance: Vec<f64>,
     maximum_scaled_residual: f64,
     stored_energy_j: f64,
+    nonlinear_flow: Option<Vec<f64>>,
+    nonlinear_power_w: f64,
 }
 impl EquilibriumLinearization {
     /// Linearize a complete nonlinear ODE at a caller-resolved stationary point.
@@ -89,7 +99,7 @@ impl EquilibriumLinearization {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, LinearizationError> {
         Self::prepare(source.n, source.n, source.m, &source.j, &source.r, &source.g,
-            source.storage.as_ref(), point, budget, hessian, &mut cancelled)
+            source.storage.as_ref(), point, budget, hessian, None, &mut cancelled)
     }
 
     /// Same linearization with the original algebraic efforts retained. The
@@ -102,7 +112,7 @@ impl EquilibriumLinearization {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, LinearizationError> {
         Self::prepare(source.n, source.n_diff, source.m, &source.j, &source.r, &source.g,
-            source.storage.as_ref(), point, budget, hessian, &mut cancelled)
+            source.storage.as_ref(), point, budget, hessian, None, &mut cancelled)
     }
 
     /// All existing AC, isolated-pole, contour and participation APIs, in LOCAL
@@ -123,18 +133,20 @@ impl EquilibriumLinearization {
         n: usize, nd: usize, m: usize, j: &[f64], r: &[f64], g: &[f64], storage: &dyn Storage,
         point: EquilibriumPoint<'_>, budget: LinearizationBudget,
         hessian: &dyn Fn(&[f64], &[f64], &mut [f64]) -> bool,
+        dissipation: Option<NonlinearDissipation<'_>>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, LinearizationError> {
         poll(cancelled)?;
         let h = budget.harmonic;
-        // Use wide integer arithmetic only after the dense dimension hard cap.
         if n == 0 || nd > n || n > MAX_HARMONIC_DIMENSION || n > h.max_dimension
-            || n > budget.max_hessian_actions {
-            return Err(invalid("complete state exceeds the dimension or Hessian-action budget"));
+            || n > budget.max_hessian_actions
+            || dissipation.is_some_and(|law| n > law.max_tangent_actions) {
+            return Err(invalid("complete state exceeds dimension or analytic-action budgets"));
         }
         let (wide_n, wide_m) = (n as u128, m as u128);
-        let bytes = 112*wide_n*wide_n + 16*wide_n*wide_m + 512*wide_n + 128*wide_m;
-        let work = wide_n*wide_n*(wide_n+wide_m+16);
+        let payload = if dissipation.is_some() { 128 } else { 112 };
+        let bytes = payload*wide_n*wide_n + 16*wide_n*wide_m + 512*wide_n + 128*wide_m;
+        let work = wide_n*wide_n*(wide_n+wide_m+if dissipation.is_some() {24} else {16});
         if bytes > h.max_dense_bytes as u128 || work > h.max_dense_work as u128 {
             return Err(invalid("linearization exceeds complete preparation payload/work budget"));
         }
@@ -160,12 +172,17 @@ impl EquilibriumLinearization {
             return Err(invalid("algebraic coordinates cannot carry stored effort"));
         }
         effort[nd..].copy_from_slice(&point.state[nd..]);
+        let (nonlinear_flow, nonlinear_power_w) = match dissipation {
+            Some(law) => { let (flow,power)=law.evaluate(point.state,&effort,cancelled)?; (Some(flow),power) },
+            None => (None,0.0),
+        };
         let mut balance = vec![0.0;n];
         let mut maximum = 0.0_f64;
         for i in 0..n {
             poll(cancelled)?;
             let mut correction = 0.0;
             for k in 0..n { add(&mut balance[i],&mut correction,(j[i*n+k]-r[i*n+k])*effort[k]); }
+            if let Some(flow)=&nonlinear_flow { add(&mut balance[i],&mut correction,-flow[i]); }
             for p in 0..m { add(&mut balance[i],&mut correction,g[i*m+p]*point.input[p]); }
             let scaled = balance[i].abs()/point.balance_scales[i];
             if !balance[i].is_finite() || !scaled.is_finite() {
@@ -199,6 +216,8 @@ impl EquilibriumLinearization {
                 return Err(invalid("storage Hessian cannot couple algebraic coordinates"));
             }
         }}
+        let resisting_tangent = dissipation.map(|law|
+            law.total_tangent(point.state,&effort,&matrix,nd,cancelled)).transpose()?;
         let mut output=vec![0.0;m];
         for p in 0..m {
             poll(cancelled)?;
@@ -206,13 +225,23 @@ impl EquilibriumLinearization {
             for i in 0..n { add(&mut output[p],&mut correction,g[i*m+p]*effort[i]); }
         }
         if output.iter().any(|x|!x.is_finite()) { return Err(invalid("equilibrium port output overflow")); }
-        // This private transient adapter describes ONLY the local second variation.
-        // It never replaces the source storage and is never exposed for stepping.
         let tangent=LocalQuadratic { n, matrix };
-        let model=HarmonicModel::prepare(n,nd,m,j,r,g,&tangent,h,cancelled)?;
+        let mut model=HarmonicModel::prepare(n,nd,m,j,r,g,&tangent,h,cancelled)?;
+        if let Some(t)=resisting_tangent {
+            // Keep the independently assembled physical T for work observations
+            // and parameter actions, not just its difference from the generator.
+            for i in 0..n {
+                poll(cancelled)?;
+                for k in 0..n { model.generator[i*n+k]-=t[i*n+k]; }
+            }
+            if model.generator.iter().any(|x|!x.is_finite()) {
+                return Err(invalid("nonlinear incremental generator is not representable"));
+            }
+            model.resisting_tangent=Some(t);
+        }
         poll(cancelled)?;
         Ok(Self { model,state:point.state.to_vec(),input:point.input.to_vec(),effort,output,balance,
-            maximum_scaled_residual:maximum,stored_energy_j:energy })
+            maximum_scaled_residual:maximum,stored_energy_j:energy,nonlinear_flow,nonlinear_power_w })
     }
 }
 

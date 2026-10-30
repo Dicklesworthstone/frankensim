@@ -10,6 +10,7 @@
 //! are retained. No time-step warping, modal truncation, linewidth fitting or
 //! numerical damping is introduced. Ordinary constructors require exact linear
 //! storage; the explicit equilibrium adapter admits local nonlinear tangents.
+//! Its optional resisting-flow derivative T adds +T to the spectral pencil.
 //! An AC solution does not imply that free transients decay to it.
 
 use crate::{DescriptorPortHamiltonian, PortHamiltonian, Storage};
@@ -103,6 +104,9 @@ pub struct HarmonicModel {
     generator: Vec<f64>,
     // Original J-R, retained for constitutive chain rules without inverting Q.
     structure: Vec<f64>,
+    // Optional total D_x+D_e W; independent of the stored original R and Q.
+    // Allocated/admitted only by the explicit nonlinear equilibrium path.
+    resisting_tangent: Option<Vec<f64>>,
     r: Vec<f64>,
     g: Vec<f64>,
     budget: HarmonicBudget,
@@ -135,7 +139,9 @@ pub struct HarmonicResponse {
     pub port_power_w: Vec<f64>,
     /// Sum of supplied powers, signed into the system [W].
     pub supplied_power_w: f64,
-    /// Independently evaluated `Re(e* R e)/2` [W].
+    /// Independently evaluated Re(e* R e + e* T x)/2 [W]. T is present only
+    /// for explicit nonlinear equilibrium models. Then this is signed
+    /// INCREMENTAL work, not the total physical heat at the biased source.
     pub dissipated_power_w: f64,
     /// Dissipation minus supply; never used to manufacture physical loss [W].
     pub power_residual_w: f64,
@@ -290,6 +296,7 @@ impl HarmonicModel {
             q,
             generator,
             structure,
+            resisting_tangent: None,
             r: r.to_vec(),
             g: g.to_vec(),
             budget,
@@ -358,6 +365,8 @@ impl HarmonicModel {
 impl HarmonicFactor<'_> {
     /// Evaluate a new excitation with the already factored original operator.
     /// Phasors are peak amplitudes, not RMS. All work and loss are cycle means.
+    /// For explicit nonlinear local models these are perturbation quantities;
+    /// negative incremental loss does not mean the original resistor creates heat.
     pub fn response(
         &self,
         input: &[C64],
@@ -445,6 +454,9 @@ impl HarmonicFactor<'_> {
             let mut resistance = C64::ZERO;
             for k in 0..n {
                 resistance = resistance + effort[k].scale(model.r[i * n + k]);
+            }
+            if model.resisting_tangent.is_some() {
+                resistance = resistance + model.nonlinear_loss_row(i, &state);
             }
             loss += (effort[i].conj() * resistance).re * 0.5;
             for p in 0..m {

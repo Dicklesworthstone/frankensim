@@ -33,7 +33,9 @@ pub struct HarmonicPole {
     pub port_output: Vec<C64>,
     /// x* Q x / 2 for the returned amplitude; constraints store no energy.
     pub stored_energy_j: f64,
-    /// Re(e* R e) for the same amplitude.
+    /// Re(e* R e + e* T x) for the same amplitude. T is present only for
+    /// explicit nonlinear equilibrium models. Then this is signed incremental
+    /// work, not total biased-source heat; negative values are not clipped.
     pub dissipated_power_w: f64,
     /// 2 Re(s) H + D, independently evaluated from physical storage and loss.
     pub decay_power_residual_w: f64,
@@ -157,7 +159,8 @@ impl<'a> PolePencil<'a> {
 impl HarmonicModel {
     /// Refine one isolated finite free mode of the ORIGINAL continuous model.
     ///
-    /// The pencil is s*diag(I_diff,0) - (J-R)*diag(Q_diff,I_alg).
+    /// The pencil is s*diag(I_diff,0) - (J-R)*diag(Q_diff,I_alg), plus the
+    /// retained nonlinear resisting tangent on explicit equilibrium images.
     /// All Maxwell states, mutual storage and algebraic constraints remain in
     /// the solve; the singular descriptor matrix is never inverted. A nearby
     /// harmonic response's complete state is a useful seed for observable modes.
@@ -262,6 +265,9 @@ impl HarmonicModel {
             let mut row = C64::ZERO;
             for (j, &e) in effort.iter().enumerate() {
                 row = row + e.scale(self.r[i * n + j]);
+            }
+            if self.resisting_tangent.is_some() {
+                row = row + self.nonlinear_loss_row(i, &state);
             }
             dissipated_power_w += (effort[i].conj() * row).re;
         }
