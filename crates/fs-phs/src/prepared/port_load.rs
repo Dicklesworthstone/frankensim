@@ -40,7 +40,9 @@ impl PortHamiltonian {
             g[i*m+self.m..(i+1)*m]
                 .copy_from_slice(&columns[i*additional_ports..(i+1)*additional_ports]);
         }
-        Self::new(self.n, m, self.j, self.r, g, self.storage)
+        let mut system = Self::new(self.n, m, self.j, self.r, g, self.storage)?;
+        system.resistance_witness = self.resistance_witness;
+        Ok(system)
     }
 
     /// Read-only constitutive law. Physical histories belong to the explicit x.
@@ -63,13 +65,15 @@ impl PortHamiltonian {
         let r = self.r.clone();
         let g = self.g.clone();
         if let Some(storage)=self.storage.shared_clone() {
-            return Self { n:self.n, m:self.m, j, r, g, storage };
+            return Self { n:self.n, m:self.m, j, r, g, storage,
+                resistance_witness:self.resistance_witness.clone() };
         }
         let original = core::mem::replace(&mut self.storage,
             Box::new(crate::QuadraticStorage { n: 0, q: Vec::new() }));
         let shared: std::rc::Rc<dyn Storage> = std::rc::Rc::from(original);
         self.storage = Box::new(SharedStorage(shared.clone()));
-        Self { n:self.n, m:self.m, j, r, g, storage:Box::new(SharedStorage(shared)) }
+        Self { n:self.n, m:self.m, j, r, g, storage:Box::new(SharedStorage(shared)),
+            resistance_witness:self.resistance_witness.clone() }
     }
 
     /// Cold-append storage coordinates without moving any original state or
@@ -96,7 +100,10 @@ impl PortHamiltonian {
             r[i*n..i*n+self.n].copy_from_slice(&self.r[i*self.n..(i+1)*self.n]);
         }
         g[..self.g.len()].copy_from_slice(&self.g);
-        Self::new(n,self.m,j,r,g,wrap(self.storage,self.n))
+        let witness=crate::compose_resistance_witness(&[&self],n,&r)?;
+        let mut system=Self::new(n,self.m,j,r,g,wrap(self.storage,self.n))?;
+        system.resistance_witness=witness;
+        Ok(system)
     }
 
     /// Attach an admitted load while retaining every original external drive port.

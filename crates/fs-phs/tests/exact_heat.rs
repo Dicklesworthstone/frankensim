@@ -1,10 +1,11 @@
 //! G1/G3: positive, independently integrated physical heat at very small motion.
 use fs_phs::linear_exact::{
-    LinearSplitBudget, PreparedExactZoh, integrated_resistance_loss, split_quadratic, step_render,
+    LinearSplitBudget, PreparedCommonFlowZoh, PreparedExactZoh, integrated_resistance_loss,
+    split_quadratic, step_render,
 };
 use fs_phs::{
     AcousticSection, ChainOutlet, PortHamiltonian, QuadraticStorage, RelaxationBranch,
-    ViscothermalPin, acoustic_chain_outlet_wall, mass_spring_damper,
+    ViscothermalPin, acoustic_chain_outlet_wall, join_port, mass_spring_damper, transformer,
 };
 
 fn budget(n: usize) -> LinearSplitBudget {
@@ -447,4 +448,129 @@ fn actual_foster_duct_heat_matches_edge_power_quadrature_and_subdivision() {
         .map(|i| q[i * n + i] * (b.x[i] - record.x[i]).powi(2))
         .sum();
     assert!(subdivision_error < 1e-20 * energy);
+}
+
+fn sea_level_foster(inlets: usize) -> PortHamiltonian {
+    // Original dry-air source at 288.15 K and 101325 Pa, including its transport.
+    acoustic_chain_outlet_wall(
+        &[AcousticSection {
+            length: 0.5,
+            radius: 0.01,
+            outlet_radius: 0.0,
+            cells: 2,
+        }],
+        1.2249991558877122,
+        340.2941077869353,
+        ChainOutlet::PressureRelease,
+        inlets,
+        &[],
+        Some(&ViscothermalPin {
+            dynamic_viscosity: 1.7893802780775831e-5,
+            gamma: 1.4,
+            prandtl: 0.7098527545298142,
+            foster_branches: 3,
+        }),
+        None,
+    )
+    .unwrap()
+}
+
+#[test]
+fn source_foster_squares_survive_rounded_assembly_sharing_and_physical_composition() {
+    let mut source = sea_level_foster(1);
+    let n = source.state_dim();
+    assert_eq!(n, 16);
+    let q = source.storage().exact_quadratic_matrix().unwrap().to_vec();
+    let (j, r, g) = source.structure();
+    // The physical thermal star has no ground. Summing its positive resistor
+    // edges rounded its diagonal down by less than an ulp. A raw matrix cannot
+    // assert that physical provenance: its represented ground is negative.
+    let (mut ground, mut tail) = (r[0], 0.0);
+    for &edge in &r[1..n] {
+        let (sum, error) = fs_math::eft::two_sum(ground, edge);
+        ground = sum;
+        tail += error;
+    }
+    assert_eq!(ground + tail, -4.1359030627651384e-25);
+    let original_r = r.to_vec();
+    let raw = PortHamiltonian::new(
+        n,
+        1,
+        j.to_vec(),
+        r.to_vec(),
+        g.to_vec(),
+        Box::new(QuadraticStorage::new(q.clone(), n).unwrap()),
+    )
+    .unwrap();
+    let dt = 1.0 / 48_000.0;
+    assert!(
+        PreparedExactZoh::new(&raw, dt, budget(n)).is_err(),
+        "source witnesses must never relax admission of a caller's raw negative ground"
+    );
+    let shared = source.share_storage();
+    let initial_effort = [
+        30.0, 1e-4, -10.0, -0.5e-4, 0.4e-4, 0.1e-4, -0.3e-4, 10.0, -2.0, 3.0, -0.1e-4, 0.5e-4,
+        -0.6e-4, -1.0, 4.0, 2.0,
+    ];
+    let initial: [f64; 16] = core::array::from_fn(|i| initial_effort[i] / q[i * n + i]);
+    let input = 1e-5;
+    let record = PreparedExactZoh::new(&source, dt, budget(n))
+        .unwrap()
+        .step(&initial, &[input])
+        .unwrap();
+    let copy = PreparedExactZoh::new(&shared, dt, budget(n))
+        .unwrap()
+        .step(&initial, &[input])
+        .unwrap();
+    assert_eq!(record.x, copy.x);
+    assert_eq!(record.dissipated.to_bits(), copy.dissipated.to_bits());
+    assert_eq!(source.structure().1, original_r);
+    let (j, r, g) = source.structure();
+    let mut extended = [0.0; 18];
+    extended[..n].copy_from_slice(&initial);
+    let inertance = 1.2249991558877122 * 0.25 / (core::f64::consts::PI * 0.01_f64.powi(2));
+    let ground_resistance =
+        8.0 * 1.7893802780775831e-5 / (1.2249991558877122 * 0.01_f64.powi(2)) * inertance;
+    let oracle = rk4(extended, dt, 2048, |x| {
+        let e: [f64; 16] = core::array::from_fn(|i| q[i * n + i] * x[i]);
+        let mut dx = [0.0; 18];
+        for i in 0..n {
+            dx[i] = g[i] * input
+                + (0..n)
+                    .map(|k| (j[i * n + k] - r[i * n + k]) * e[k])
+                    .sum::<f64>();
+            dx[17] += input * g[i] * e[i];
+            for k in i + 1..n {
+                dx[16] += -r[i * n + k] * (e[i] - e[k]).powi(2);
+            }
+        }
+        dx[16] += ground_resistance * (e[1].powi(2) + e[3].powi(2));
+        dx
+    });
+    relative(record.dissipated, oracle[16], 3e-10);
+    let energy = source.hamiltonian(&initial);
+    assert!((record.supplied - oracle[17]).abs() < 2e-11 * energy);
+    let state_error: f64 = (0..n)
+        .map(|i| q[i * n + i] * (record.x[i] - oracle[i]).powi(2))
+        .sum();
+    assert!(state_error < 1e-20 * energy);
+
+    // Keep original full-C/Maxwell body, separate mechanical and acoustic
+    // source ports, then add the common-velocity junction. Neither composition
+    // may erase the source's physical resistor squares or any material state.
+    let body = material_body()
+        .with_additional_ports(1, &[0.0, 0.03, 0.0, -0.02, 0.0])
+        .unwrap();
+    let loaded = transformer(body, sea_level_foster(2), 1, 1, 1.0).unwrap();
+    let joined = join_port(mass_spring_damper(2.0, 3.0, 0.1).unwrap(), loaded, 0, 0).unwrap();
+    let n = joined.state_dim();
+    assert_eq!(n, 24);
+    let mut initial = vec![0.0; n];
+    initial[2] = 0.01;
+    initial[6] = 0.02;
+    let prepared = PreparedCommonFlowZoh::new_owned(joined, dt, budget(n)).unwrap();
+    let step = prepared.step(&initial, &[input]).unwrap();
+    assert!(step.dissipated > 0.0);
+    assert_eq!(step.x.len(), n);
+    assert!(step.balance_residual().abs() < 1e-12 * prepared.hamiltonian(&initial));
 }

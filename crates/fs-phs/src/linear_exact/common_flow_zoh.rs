@@ -48,6 +48,7 @@ struct Core {
     flow: Option<PreparedQuadraticFlow>,
     heat: Option<PositiveHeat>,
     constraint: Vec<f64>,
+    root_inverse_inertia: f64,
     reaction_state: Vec<f64>,
     reaction_input: Vec<f64>,
     dt: f64,
@@ -88,6 +89,7 @@ impl PreparedCommonFlowZoh {
             r,
             g,
             storage,
+            resistance_witness,
         } = system;
         if n_diff == 0
             || n_diff.checked_add(1) != Some(n)
@@ -105,6 +107,7 @@ impl PreparedCommonFlowZoh {
             r,
             g,
             storage,
+            resistance_witness,
         };
         let original_split = split_quadratic(&original, budget)?;
         let q = original_split.quadratic_matrix();
@@ -231,6 +234,7 @@ impl PreparedCommonFlowZoh {
             r,
             g,
             storage,
+            resistance_witness,
         } = original;
         Ok(Self {
             core: Core {
@@ -242,11 +246,13 @@ impl PreparedCommonFlowZoh {
                     r,
                     g,
                     storage,
+                    resistance_witness,
                 },
                 tangent,
                 flow,
                 heat,
                 constraint,
+                root_inverse_inertia: fs_math::det::sqrt(inertia),
                 reaction_state,
                 reaction_input,
                 dt: duration,
@@ -278,7 +284,8 @@ impl PreparedCommonFlowZoh {
     /// Original multiplier at this physical state and held external input.
     /// A finite incoming multiplier does not affect the differentiated constraint.
     pub fn instantaneous_reaction(&self, state: &[f64], input: &[f64]) -> Result<f64, PhsError> {
-        self.core.admit(state, input)?;
+        self.core
+            .admit(state, input, &mut vec![0.0; self.state_dim()])?;
         self.core.reaction(state, input)
     }
 
@@ -320,7 +327,7 @@ impl PreparedCommonFlowZoh {
 }
 
 impl Core {
-    fn constraint(&self, state: &[f64]) -> Result<(), PhsError> {
+    fn constraint(&self, state: &[f64], effort: &mut [f64]) -> Result<(), PhsError> {
         let mut residual = 0.0;
         let mut scale = 0.0;
         for (c, x) in self.constraint.iter().zip(state) {
@@ -328,6 +335,13 @@ impl Core {
             residual += term;
             scale += term.abs();
         }
+        // The prepared flow works in energy coordinates, where roundoff can
+        // transfer from potential/material storage into a small instantaneous
+        // velocity. Cauchy-Schwarz gives |B^T Q dx| <= sqrt(B^T Q B)
+        // ||Q^(1/2) dx||. The original datum-independent energy scale bounds
+        // that coordinate norm even at a common-velocity zero crossing.
+        let energy_scale = energetic_scale_into(&self.tangent, state, effort);
+        scale = scale.max(self.root_inverse_inertia * fs_math::det::sqrt(energy_scale));
         if !finite(&[residual, scale])
             || residual.abs() > 64.0 * f64::EPSILON * self.original.n as f64 * scale
         {
@@ -337,7 +351,7 @@ impl Core {
         }
         Ok(())
     }
-    fn admit(&self, state: &[f64], input: &[f64]) -> Result<(), PhsError> {
+    fn admit(&self, state: &[f64], input: &[f64], effort: &mut [f64]) -> Result<(), PhsError> {
         if state.len() != self.original.n
             || input.len() != self.original.m
             || !finite(state)
@@ -347,7 +361,7 @@ impl Core {
                 "common-flow requires complete finite state and input",
             ));
         }
-        self.constraint(state)
+        self.constraint(state, effort)
     }
     fn reaction(&self, state: &[f64], input: &[f64]) -> Result<f64, PhsError> {
         let value = self
@@ -373,7 +387,7 @@ impl Core {
         input: &[f64],
         scratch: &mut Scratch,
     ) -> Result<PreparedStepRecord, PhsError> {
-        self.admit(initial, input)?;
+        self.admit(initial, input, &mut scratch.effort)?;
         let (n, m) = (self.original.n, self.original.m);
         let (delta_h, dissipated, supplied) = if let Some(flow) = &self.flow {
             flow.evaluate_into(
@@ -422,7 +436,7 @@ impl Core {
             }
             (0.0, 0.0, 0.0)
         };
-        self.constraint(&scratch.endpoint)?;
+        self.constraint(&scratch.endpoint, &mut scratch.effort)?;
         scratch.endpoint[self.original.n_diff] = self.reaction(&scratch.endpoint, input)?;
         let scale = energetic_scale_into(&self.tangent, initial, &mut scratch.effort)
             .max(energetic_scale_into(

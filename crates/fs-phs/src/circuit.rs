@@ -461,6 +461,7 @@ pub fn assemble_circuit_with_mutual_inductance(
         r,
         g,
         storage,
+        resistance_witness: None,
     };
     let node_potential_index = (1..graph.node_count).map(|k| off_v + k - 1).collect();
     Ok(CircuitDae {

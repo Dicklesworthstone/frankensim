@@ -434,6 +434,37 @@ pub struct PortHamiltonian {
     r: Vec<f64>,
     g: Vec<f64>,
     storage: Box<dyn Storage>,
+    resistance_witness: Option<ResistanceWitness>,
+}
+
+// A physical source may supply its positive resistor squares before summing
+// them into R. Keep the exact represented matrix beside the factor: changing
+// a numerical working R cannot accidentally reuse a witness for another law.
+#[derive(Clone)]
+struct ResistanceWitness {
+    matrix: Vec<f64>,
+    root: Vec<f64>,
+}
+
+fn compose_resistance_witness(
+    systems: &[&PortHamiltonian], n: usize, matrix: &[f64],
+) -> Result<Option<ResistanceWitness>, PhsError> {
+    if !systems.iter().any(|s| s.resistance_witness.is_some()) { return Ok(None); }
+    let mut root = vec![0.0; n*n];
+    let mut offset = 0;
+    for system in systems {
+        let factor = match &system.resistance_witness {
+            Some(witness) if witness.matrix == system.r => witness.root.clone(),
+            _ => linear_exact::positive_heat::factor_resistance(&system.r, system.n)?,
+        };
+        for i in 0..system.n {
+            root[(offset+i)*n+offset..(offset+i)*n+offset+system.n]
+                .copy_from_slice(&factor[i*system.n..(i+1)*system.n]);
+        }
+        offset += system.n;
+    }
+    linear_exact::positive_heat::check_resistance_root(matrix, &root, n)?;
+    Ok(Some(ResistanceWitness { matrix: matrix.to_vec(), root }))
 }
 
 /// One Maxwell relaxation arm acting on `strain = projection dot x`.
@@ -593,15 +624,25 @@ impl PortHamiltonian {
             g[row * self.m..(row + 1) * self.m]
                 .copy_from_slice(&self.g[row * self.m..(row + 1) * self.m]);
         }
+        let mut resistance_witness = compose_resistance_witness(&[&self], dim, &r)?;
         for (k, rate) in rates.into_iter().enumerate() {
             r[(self.n + k) * dim + self.n + k] = rate;
+            if let Some(witness) = &mut resistance_witness {
+                witness.root[(self.n+k)*dim+self.n+k] = det::sqrt(rate);
+            }
+        }
+        if let Some(witness) = &mut resistance_witness {
+            witness.matrix = r.clone();
+            linear_exact::positive_heat::check_resistance_root(&r, &witness.root, dim)?;
         }
         let storage = RelaxationStorage {
             base: self.storage,
             base_dim: self.n,
             couplings,
         };
-        Self::new(dim, self.m, j, r, g, Box::new(storage))
+        let mut system = Self::new(dim, self.m, j, r, g, Box::new(storage))?;
+        system.resistance_witness = resistance_witness;
+        Ok(system)
     }
 
     /// Admit a system: `J` (`n x n`, skew), `R` (`n x n`, symmetric
@@ -632,6 +673,7 @@ impl PortHamiltonian {
             r,
             g,
             storage,
+            resistance_witness: None,
         })
     }
 
@@ -654,6 +696,7 @@ impl PortHamiltonian {
             r,
             g,
             storage,
+            resistance_witness: None,
         }
     }
 
@@ -724,6 +767,7 @@ pub struct DescriptorPortHamiltonian {
     r: Vec<f64>,
     g: Vec<f64>,
     storage: Box<dyn Storage>,
+    resistance_witness: Option<ResistanceWitness>,
 }
 
 // The caller's energy law never sees algebraic multipliers. Its optional
@@ -823,7 +867,7 @@ impl DescriptorPortHamiltonian {
                 what: "declared differential quadratic matrix size",
             }))
             .transpose()?;
-        Ok(Self { n, n_diff, m, j, r, g, storage: Box::new(DifferentialStorage {
+        Ok(Self { n, n_diff, m, j, r, g, resistance_witness: None, storage: Box::new(DifferentialStorage {
             inner: differential_storage, n, n_diff, exact_quadratic,
         }) })
     }
@@ -991,6 +1035,7 @@ pub fn join_port(
     require_skew(&j, n, "J")?;
     require_symmetric(&r, n, "R")?;
     require_psd(&r, n, "R")?;
+    let resistance_witness = compose_resistance_witness(&[&a, &b], n, &r)?;
     let inner = Box::new(SumStorage {
         a: (a.storage, na),
         b: (b.storage, nb),
@@ -1008,6 +1053,7 @@ pub fn join_port(
         r,
         g,
         storage,
+        resistance_witness,
     })
 }
 
@@ -1066,6 +1112,7 @@ pub fn common_effort_star(
     require_skew(&j, n, "J")?;
     require_symmetric(&r, n, "R")?;
     require_psd(&r, n, "R")?;
+    let resistance_witness = compose_resistance_witness(&systems.iter().collect::<Vec<_>>(), n, &r)?;
     let mut acc: Option<(Box<dyn Storage>, usize)> = None;
     for s in systems {
         let piece = (s.storage, s.n);
@@ -1094,6 +1141,7 @@ pub fn common_effort_star(
         r,
         g,
         storage,
+        resistance_witness,
     })
 }
 
@@ -1836,11 +1884,14 @@ pub fn interconnect(
             g[(na + i) * m + ext_a.len() + col] = b.g[i * b.m + p];
         }
     }
+    let resistance_witness = compose_resistance_witness(&[&a, &b], n, &r)?;
     let storage = Box::new(SumStorage {
         a: (a.storage, na),
         b: (b.storage, nb),
     });
-    PortHamiltonian::new(n, m, j, r, g, storage)
+    let mut system = PortHamiltonian::new(n, m, j, r, g, storage)?;
+    system.resistance_witness = resistance_witness;
+    Ok(system)
 }
 
 /// Transformer of ratio `n`: `u_a = n y_b`, `u_b = −n y_a`.
@@ -1910,11 +1961,14 @@ pub fn transformer(
     } else {
         g = Vec::new();
     }
+    let resistance_witness = compose_resistance_witness(&[&a, &b], n, &r)?;
     let storage = Box::new(SumStorage {
         a: (a.storage, na),
         b: (b.storage, nb),
     });
-    PortHamiltonian::new(n, m, j, r, g, storage)
+    let mut system = PortHamiltonian::new(n, m, j, r, g, storage)?;
+    system.resistance_witness = resistance_witness;
+    Ok(system)
 }
 
 /// Reduced storage: `H_r(xr) = H(V xr)`, gradient `V^T gradH(V xr)`.
@@ -2445,6 +2499,51 @@ fn apply_t_junction_series(q: &mut [f64], n: usize, flux: usize, l_add: f64) {
     q[flux * n + flux] = 1.0 / l_new;
 }
 
+// Record the physical positive squares while the acoustic owner stamps them.
+// A floating-point diagonal sum alone cannot distinguish a rounded graph
+// nullspace from an authored negative ground. The source witness can.
+struct SourceResistance {
+    n: usize,
+    matrix: Vec<f64>,
+    terms: Vec<(usize, Option<usize>, f64)>,
+}
+impl SourceResistance {
+    fn new(n: usize) -> Self {
+        Self { n, matrix: vec![0.0;n*n], terms: Vec::new() }
+    }
+    fn ground(&mut self, i: usize, value: f64) {
+        self.matrix[i*self.n+i] += value;
+        if value != 0.0 { self.terms.push((i,None,value)); }
+    }
+    fn edge(&mut self, i: usize, j: usize, value: f64) {
+        self.matrix[i*self.n+i] += value;
+        self.matrix[j*self.n+j] += value;
+        self.matrix[i*self.n+j] -= value;
+        self.matrix[j*self.n+i] -= value;
+        if value != 0.0 { self.terms.push((i,Some(j),value)); }
+    }
+    fn finish(self) -> Result<(Vec<f64>,Option<ResistanceWitness>),PhsError> {
+        // Pure diagonal sources need no extra witness or factor work.
+        if self.terms.iter().all(|(_,j,_)| j.is_none()) { return Ok((self.matrix,None)); }
+        let count=self.terms.len();
+        let mut rows=vec![0.0;count.max(self.n)*self.n];
+        for (row,(i,j,value)) in self.terms.into_iter().enumerate() {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(PhsError::NotPsd { what:"source resistor coefficient" });
+            }
+            let weight=det::sqrt(value);
+            rows[row*self.n+i]=weight;
+            if let Some(j)=j { rows[row*self.n+j]=-weight; }
+        }
+        let root=if count>self.n {
+            linear_exact::positive_heat::compress(&rows,count,self.n)?
+        } else { rows };
+        linear_exact::positive_heat::check_resistance_root(&self.matrix,&root,self.n)?;
+        let witness=ResistanceWitness { matrix:self.matrix.clone(),root };
+        Ok((self.matrix,Some(witness)))
+    }
+}
+
 /// Compact radiation on the last flux: series `R = Re Z` and
 /// added mass `L = −X/ω` from [`compact_radiation_impedance`].
 ///
@@ -2458,7 +2557,7 @@ fn apply_t_junction_series(q: &mut [f64], n: usize, flux: usize, l_add: f64) {
 #[allow(clippy::too_many_arguments)]// one coherent physics record/assembler
 fn apply_open_mouth_radiation(
     q: &mut [f64],
-    r: &mut [f64],
+    r: &mut SourceResistance,
     n: usize,
     last_flux: usize,
     density: f64,
@@ -2479,7 +2578,7 @@ fn apply_open_mouth_radiation(
         apply_foster_series_on_flux(q, r, n, last_flux, &terms, off);
         return Ok(());
     }
-    r[last_flux * n + last_flux] += rr * scale;
+    r.ground(last_flux, rr * scale);
     Ok(())
 }
 
@@ -2651,11 +2750,14 @@ pub fn series_impedance_ports(
     let mut g = vec![0.0; n];
     g[..na].copy_from_slice(&a.g[..na]);
     g[na..na + nb].copy_from_slice(&b.g[..nb]);
+    let resistance_witness = compose_resistance_witness(&[&a, &b], n, &r)?;
     let storage = Box::new(SumStorage {
         a: (a.storage, na),
         b: (b.storage, nb),
     });
-    PortHamiltonian::new(n, 1, j, r, g, storage)
+    let mut system = PortHamiltonian::new(n, 1, j, r, g, storage)?;
+    system.resistance_witness = resistance_witness;
+    Ok(system)
 }
 
 /// Two-port common-effort capacitor: both ports see the same pressure
@@ -3263,7 +3365,7 @@ fn spherical_cone_wall(
         + n_wall;
     let mut q = vec![0.0; n * n];
     let mut j = vec![0.0; n * n];
-    let mut r = vec![0.0; n * n];
+    let mut r = SourceResistance::new(n);
     for cell in 0..cells {
         let (qi, pi) = (2 * cell, 2 * cell + 1);
         q[qi * n + qi] = 1.0 / c_psi;
@@ -3289,7 +3391,7 @@ fn spherical_cone_wall(
             let (qi, pi) = (2 * cell, 2 * cell + 1);
             if foster {
                 let r0_psi = 8.0 * pin.dynamic_viscosity / (density * r_phys * r_phys) * l_psi;
-                r[pi * n + pi] += r0_psi.max(0.0);
+                r.ground(pi, r0_psi.max(0.0));
                 let l_phys = l_psi / x2.abs().max(1.0e-18);
                 let c_phys = c_psi * x2.abs();
                 let terms_r = foster_bessel_series(
@@ -3321,19 +3423,13 @@ fn spherical_cone_wall(
                     let lam = off + k;
                     let g_psi = gk * x2.abs();
                     q[lam * n + lam] = wk / g_psi;
-                    r[pi * n + pi] += g_psi;
-                    r[lam * n + lam] += g_psi;
-                    r[pi * n + lam] -= g_psi;
-                    r[lam * n + pi] -= g_psi;
+                    r.edge(pi, lam, g_psi);
                 }
                 for (k, &(gk, wk)) in terms_g.iter().enumerate() {
                     let eta = off + n_br + k;
                     let g_psi = gk / x2.abs().max(1.0e-18);
                     q[eta * n + eta] = wk / g_psi;
-                    r[qi * n + qi] += g_psi;
-                    r[eta * n + eta] += g_psi;
-                    r[qi * n + eta] -= g_psi;
-                    r[eta * n + qi] -= g_psi;
+                    r.edge(qi, eta, g_psi);
                 }
             } else {
                 let (r_series, g_shunt, l_scale, c_scale) = bessel_series_and_shunt(
@@ -3346,8 +3442,8 @@ fn spherical_cone_wall(
                 )?;
                 q[qi * n + qi] /= c_scale;
                 q[pi * n + pi] = 1.0 / (l_psi * l_scale);
-                r[qi * n + qi] += g_shunt / x2.abs().max(1.0e-18);
-                r[pi * n + pi] += r_series * x2.abs();
+                r.ground(qi, g_shunt / x2.abs().max(1.0e-18));
+                r.ground(pi, r_series * x2.abs());
             }
         }
     }
@@ -3492,7 +3588,10 @@ fn spherical_cone_wall(
     if inlets == 2 {
         g[1] = gin;
     }
-    PortHamiltonian::new(n, inlets, j, r, g, Box::new(QuadraticStorage::new(q, n)?))
+    let (r,resistance_witness)=r.finish()?;
+    let mut system=PortHamiltonian::new(n, inlets, j, r, g, Box::new(QuadraticStorage::new(q, n)?))?;
+    system.resistance_witness=resistance_witness;
+    Ok(system)
 }
 
 /// Concatenated LC waveguide, optionally wide-tube lossy.
@@ -3765,7 +3864,7 @@ pub fn acoustic_chain_outlet_wall(
     }
     let mut q = vec![0.0; n * n];
     let mut j = vec![0.0; n * n];
-    let mut r = vec![0.0; n * n];
+    let mut r = SourceResistance::new(n);
     for cell in 0..n_cells {
         let (qi, pi) = (2 * cell, 2 * cell + 1);
         q[qi * n + qi] = 1.0 / compliances[cell];
@@ -3797,7 +3896,7 @@ pub fn acoustic_chain_outlet_wall(
             if cell_foster[cell] {
                 let r0 = 8.0 * pin.dynamic_viscosity / (density * radii[cell] * radii[cell])
                     * inertances[cell];
-                r[pi * n + pi] += r0.max(0.0);
+                r.ground(pi, r0.max(0.0));
                 let terms_r = foster_bessel_series(
                     inertances[cell],
                     radii[cell],
@@ -3819,24 +3918,18 @@ pub fn acoustic_chain_outlet_wall(
                 for (k, &(gk, wk)) in terms_r.iter().enumerate() {
                     let lam = foster_off[cell] + k;
                     q[lam * n + lam] = wk / gk;
-                    r[pi * n + pi] += gk;
-                    r[lam * n + lam] += gk;
-                    r[pi * n + lam] -= gk;
-                    r[lam * n + pi] -= gk;
+                    r.edge(pi, lam, gk);
                 }
                 for (k, &(gk, wk)) in terms_g.iter().enumerate() {
                     let eta = foster_off[cell] + n_br + k;
                     q[eta * n + eta] = wk / gk;
-                    r[qi * n + qi] += gk;
-                    r[eta * n + eta] += gk;
-                    r[qi * n + eta] -= gk;
-                    r[eta * n + qi] -= gk;
+                    r.edge(qi, eta, gk);
                 }
             } else {
                 q[qi * n + qi] /= c_scale;
                 q[pi * n + pi] = 1.0 / (inertances[cell] * l_scale);
-                r[qi * n + qi] += g_shunt;
-                r[pi * n + pi] += r_series;
+                r.ground(qi, g_shunt);
+                r.ground(pi, r_series);
             }
         }
     }
@@ -3982,7 +4075,10 @@ pub fn acoustic_chain_outlet_wall(
     if inlets == 2 {
         g[1] = 1.0;
     }
-    PortHamiltonian::new(n, inlets, j, r, g, Box::new(QuadraticStorage::new(q, n)?))
+    let (r,resistance_witness)=r.finish()?;
+    let mut system=PortHamiltonian::new(n, inlets, j, r, g, Box::new(QuadraticStorage::new(q, n)?))?;
+    system.resistance_witness=resistance_witness;
+    Ok(system)
 }
 
 fn tap_valid(tap: &AcousticTap) -> bool {
@@ -4016,7 +4112,7 @@ fn tap_cell(station: f64, length: f64, cell_x0: &[f64]) -> usize {
 #[allow(clippy::too_many_arguments)]// one coherent physics record/assembler
 fn apply_closed_pad(
     q: &mut [f64],
-    r: &mut [f64],
+    r: &mut SourceResistance,
     n: usize,
     tap_q: usize,
     tap: &AcousticTap,
@@ -4057,7 +4153,7 @@ fn apply_closed_pad(
         }
         let (_, g, _, c_scale) = bessel_series_and_shunt(0.0, c_h, tap.neck_radius, density, omega, p)?;
         q[tap_q * n + tap_q] = 1.0 / (c0 + c_h * c_scale);
-        r[tap_q * n + tap_q] += g;
+        r.ground(tap_q, g);
     }
     Ok(())
 }
@@ -4116,7 +4212,7 @@ fn wall_state_count(n_cells: usize, wall: Option<&WallPin>) -> Result<usize, Phs
 fn apply_cell_wall(
     q: &mut [f64],
     j: &mut [f64],
-    r: &mut [f64],
+    r: &mut SourceResistance,
     n: usize,
     tap_q: usize,
     base: usize,
@@ -4144,7 +4240,7 @@ fn apply_cell_wall(
     j[w_p * n + tap_q] = junction_scale;
     j[w_q * n + w_p] = 1.0;
     j[w_p * n + w_q] = -1.0;
-    r[w_p * n + w_p] += r_w.max(0.0);
+    r.ground(w_p, r_w.max(0.0));
     Ok(())
 }
 
@@ -4162,7 +4258,7 @@ fn pad_foster_count(taps: &[AcousticTap], pin: Option<&ViscothermalPin>) -> usiz
 
 fn apply_foster_series_on_flux(
     q: &mut [f64],
-    r: &mut [f64],
+    r: &mut SourceResistance,
     n: usize,
     flux: usize,
     terms: &[(f64, f64)],
@@ -4171,10 +4267,7 @@ fn apply_foster_series_on_flux(
     for (k, &(gk, wk)) in terms.iter().enumerate() {
         let lam = off + k;
         q[lam * n + lam] = wk / gk;
-        r[flux * n + flux] += gk;
-        r[lam * n + lam] += gk;
-        r[flux * n + lam] -= gk;
-        r[lam * n + flux] -= gk;
+        r.edge(flux, lam, gk);
     }
 }
 
@@ -4240,7 +4333,7 @@ fn tap_open_budget(
 fn apply_tap_line(
     q: &mut [f64],
     j: &mut [f64],
-    r: &mut [f64],
+    r: &mut SourceResistance,
     n: usize,
     tap_q: usize,
     base: usize,
@@ -4293,7 +4386,7 @@ fn apply_tap_line(
                 if let Some(off0) = foster_off {
                     let off = off0 + cell * n_br * 2;
                     let r0 = 8.0 * p.dynamic_viscosity / (density * radius * radius) * l_cell;
-                    r[pi * n + pi] += r0.max(0.0);
+                    r.ground(pi, r0.max(0.0));
                     let terms_r = foster_bessel_series(
                         l_cell,
                         radius,
@@ -4320,8 +4413,8 @@ fn apply_tap_line(
                     bessel_series_and_shunt(l_cell, c_cell, radius, density, omega, p)?;
                 q[qi * n + qi] /= c_scale;
                 q[pi * n + pi] = 1.0 / (l_cell * l_scale);
-                r[qi * n + qi] += g_shunt;
-                r[pi * n + pi] += r_series;
+                r.ground(qi, g_shunt);
+                r.ground(pi, r_series);
             }
         }
     }
@@ -4345,7 +4438,7 @@ fn apply_tap_line(
 #[allow(clippy::too_many_arguments)]// one coherent physics record/assembler
 fn apply_tap_neck_wall(
     q: &mut [f64],
-    r: &mut [f64],
+    r: &mut SourceResistance,
     n: usize,
     phi: usize,
     l_h: f64,
@@ -4362,7 +4455,7 @@ fn apply_tap_neck_wall(
     {
         q[phi * n + phi] = 1.0 / l_h.max(1.0e-18);
         let r0 = 8.0 * p.dynamic_viscosity / (density * neck_radius * neck_radius) * l_h;
-        r[phi * n + phi] = r_ac + r0.max(0.0);
+        r.ground(phi, r_ac + r0.max(0.0));
         let terms = foster_bessel_series(
             l_h,
             neck_radius,
@@ -4377,7 +4470,7 @@ fn apply_tap_neck_wall(
     }
     let (r_wall, l_used) = tap_viscothermal(l_h, neck_radius, density, omega, pin)?;
     q[phi * n + phi] = 1.0 / l_used;
-    r[phi * n + phi] = r_ac + r_wall;
+    r.ground(phi, r_ac + r_wall);
     Ok(())
 }
 

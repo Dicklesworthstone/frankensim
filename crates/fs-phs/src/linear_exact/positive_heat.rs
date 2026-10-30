@@ -34,7 +34,10 @@ impl PositiveHeat {
         }
         // Passive resistance graphs have an explicit positive decomposition.
         // Their exact effort nullspaces must not depend on a rounded eigenvalue.
-        let root = factor_resistance(resistance, split.n)?;
+        let root = match &sys.resistance_witness {
+            Some(witness) if witness.matrix == resistance => witness.root.clone(),
+            _ => factor_resistance(resistance, split.n)?,
+        };
         Self::from_factor(sys, split, dt, resistance, root)
     }
 
@@ -236,7 +239,7 @@ impl PositiveHeat {
 // Exact zero entries separate independent resistance components. A general
 // full-C material block must not force a Foster graph's nullspace through an
 // eigensolve, or set the absolute scale of a physically weak thermal block.
-fn factor_resistance(resistance: &[f64], n: usize) -> Result<Vec<f64>, PhsError> {
+pub(crate) fn factor_resistance(resistance: &[f64], n: usize) -> Result<Vec<f64>, PhsError> {
     let mut root = vec![0.0; n * n];
     let mut seen = vec![false; n];
     for start in 0..n {
@@ -265,6 +268,8 @@ fn factor_resistance(resistance: &[f64], n: usize) -> Result<Vec<f64>, PhsError>
         let factor = if let Some(factor) = graph_root(&matrix, count)? {
             factor
         } else {
+            fs_la::eigen::admit_jacobi_eigh(count)
+                .map_err(|_| refuse("physical resistance factor exceeds Jacobi work capacity"))?;
             let scale = matrix.iter().fold(0.0_f64, |s, r| s.max(r.abs()));
             let normalized: Vec<_> = matrix.iter().map(|r| r / scale).collect();
             let (values, vectors) = checked_eigh(&normalized, count)?;
@@ -382,7 +387,7 @@ fn nonnegative_ground(resistance: &[f64], n: usize, i: usize) -> Option<f64> {
 // Both graph and eigen factors must resolve each represented nonzero entry;
 // a large unrelated diagonal or cancellation inside QR cannot hide its loss.
 // At structural zeros only, use the local product sum as the roundoff scale.
-fn check_resistance_root(resistance: &[f64], root: &[f64], n: usize) -> Result<(), PhsError> {
+pub(crate) fn check_resistance_root(resistance: &[f64], root: &[f64], n: usize) -> Result<(), PhsError> {
     for i in 0..n {
         for j in i..n {
             let mut gram = 0.0;
@@ -414,7 +419,7 @@ fn check_resistance_root(resistance: &[f64], root: &[f64], n: usize) -> Result<(
 // QR's factors retain exact zero rows/columns without asking for numerical
 // rank. A common scale protects its squared column norms from tiny absolute
 // loss magnitudes; it does not discard small directions relative to others.
-fn compress(rows: &[f64], height: usize, n: usize) -> Result<Vec<f64>, PhsError> {
+pub(crate) fn compress(rows: &[f64], height: usize, n: usize) -> Result<Vec<f64>, PhsError> {
     let scale = rows.iter().fold(0.0_f64, |s, x| s.max(x.abs()));
     if !scale.is_finite() {
         return Err(refuse("positive heat factor is nonfinite"));

@@ -984,3 +984,41 @@ join at 48 kHz beyond the midpoint admission band, check clock subdivision,
 and verify nonlinear/capacity/incompatible-state refusals without publishing
 partial outputs. This evidence covers these bounded quadratic fixtures; it
 is not a general DAE, nonlinear source, real-time, or workspace qualification.
+
+## Source-derived positive acoustic resistance factors
+
+Acoustic Foster assembly retains its original positive ground and branch
+coefficients as resistor-square factors while stamping the same represented
+J/R/G/storage. This distinguishes an explicitly authored passive graph from a
+matrix whose diagonal is genuinely smaller than its represented edge sum.
+Rounded accumulation of several branches can put a source graph's diagonal
+below that sum by a fraction of one ulp. No diagonal rounding-up, negative-mode
+clipping, added viscosity or weakened heat/energy gate is used to repair it.
+
+An internal optional witness binds the source factor to its exact represented
+R snapshot. It is accepted only by the existing componentwise reconstruction
+check. Cold sharing, added load ports, appended material states and the existing
+block interconnect/transformer/Dirac owners retain the factor; unwitnessed
+companions use the original strict factor owner. Prepared scattering and
+common-flow evolution integrate that original physical source factor along
+their complete trajectory, even when their numerical working R differs.
+Arbitrary matrix-only systems keep the existing exact-negative-ground and
+unresolved-negative-eigenvalue refusals. No generic numerical rank inference or
+new factorization kernel is introduced; any required row compression reuses QR.
+
+The actual 288.15 K dry-air, 0.5 m, two-cell Foster duct regression checks the
+formerly refused source against independent physical edge-power quadrature and
+original-equation RK4. Its identical matrix without the physical source witness
+still refuses. Shared storage, a full-C/Maxwell structural transformer and its
+complete common-flow join retain the witness and pass independent physical
+energy admission. The seven prior exact-heat regressions remain unchanged.
+
+Common-flow constraint roundoff is measured in the energy coordinates used by
+the existing complete propagator. Cauchy-Schwarz bounds an effort-constraint
+perturbation by sqrt(B^T Q B) times the energy-coordinate perturbation norm.
+The existing datum-independent sum(abs(x_i*gradient_i(H))) supplies a conservative
+squared norm, including potential and hereditary energy when instantaneous
+velocity crosses zero. The existing dimension/EPS coefficient is unchanged.
+This changes no physical state or reaction and adds no projection or drift
+repair. Original incompatible input and atomic-refusal regressions remain; an
+actual 73-state warm-radiation join now completes 128 audio-rate steps.
