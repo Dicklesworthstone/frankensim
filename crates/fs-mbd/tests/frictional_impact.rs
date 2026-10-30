@@ -10,6 +10,9 @@ mod redundant;
 #[path = "frictional_impact/normal_gauge.rs"]
 mod normal_gauge;
 
+#[path = "frictional_impact/elliptic.rs"]
+mod elliptic;
+
 fn close(a: f64, b: f64) {
     assert!(
         (a - b).abs() <= 2e-8 * a.abs().max(b.abs()).max(1.0),

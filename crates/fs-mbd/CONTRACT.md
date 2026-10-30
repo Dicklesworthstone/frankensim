@@ -1121,6 +1121,41 @@ This point-impact phase holds poses fixed, requires supplied geometry and
 coefficients, and makes no automatic finite-patch preload, torsional-friction,
 collision-discovery or impact-to-heat allocation claim.
 
+### Directional simultaneous rigid impacts
+
+`frictional_impact::elliptic::apply_rigid_elliptic_impacts` consumes a principal
+coefficient pair and tangent axis at every original contact. It shares the
+original body Gram assembly, canonical impulse application and complete
+endpoint/momentum/work admission with the circular entry point. Its receipt
+keeps physical impulses and velocities separate from the contact solver's
+explicitly transformed determinacy witness. An invertible tangent congruence
+preserves unique-impulse versus unique-velocity authority; redundant individual
+loads still do not become unique pressure or heat allocations. Common support
+translation remains admissible in the velocity-only lane, while independent
+support work retains the original refusal.
+
+`apply_rigid_elliptic_impacts_with` resolves each geometrically active source
+once, in canonical contact-ID order, from the original preimpact point velocity,
+exact assembled normal/tangent frame and both actual witness positions. The
+query retains the original input index. Inactive candidates are unqueried and
+retain their histories, although their endpoint velocities still include the
+other contacts' impulses. Source candidate states and original body momenta
+publish together only after the entire event passes; cancellation, source
+failure, solver limits and late angular/work refusal discard all candidates.
+No event duration, normal pressure, finite patch or frictional heat fraction is
+inferred. Coefficients are explicitly sampled before impact, not solved as an
+inner velocity-dependent impact law. A single zero principal coefficient is
+an unsupported singular ellipse; two zero coefficients are frictionless.
+
+Four focused native G1/G3/G4 groups cover a rotated ellipse with full body
+inertia and off-centre normal/tangent coupling against an independent endpoint
+law; moving-support/frame covariance; a simultaneous three-body chain and
+circular-limit identity; redundant directional support/work authority; and
+source-index/kinematics, inactive-history, cancellation/budget and late-audit
+rollback followed by retry. These remain frozen-configuration point events,
+without collision discovery, persistent directional time stepping or automatic
+impact-loss disposition.
+
 ## Configuration-admitted native rigid contact steps
 
 `frictional_impact::step::step_rigid_frictional_contacts` advances actual
