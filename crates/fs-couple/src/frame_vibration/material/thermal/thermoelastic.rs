@@ -159,7 +159,7 @@ pub struct FrameThermoelasticSystem<'n, 'a> {
     mechanical: CoupledModalSystem,
     prepared: PreparedMaterialNetwork<'n, 'a>,
     source: &'n MaterialNetwork<'a>,
-    electrical: Option<electrical::Binding>,
+    electrical: Option<electrical::Binding<'n, 'a>>,
     members: Vec<Member<'a>>,
     states: Vec<FrameThermoelasticMemberState>,
     origin_s: f64,
@@ -748,14 +748,9 @@ impl FrameThermoelasticSystem<'_, '_> {
                     thermal, target, controls.driver(), energy_guess_j,
                     |trial, _remaining| {
                         check(gate)?;
-                        let mut network_source = prepared.resolve(trial, || gate.is_requested()).map_err(network)?;
-                        let circuit = match (electrical.as_ref(), electrical_input) {
-                            (Some(binding), Some(input)) => Some(binding.circuit.step_candidate(
-                                network_source.resistors, input.ports, dt_heat, input.solve,
-                                || gate.is_requested())?),
-                            (None, None) if network_source.resistors.is_empty() => None,
-                            _ => return Err(invalid("frame electrical sources lack their original coupled owner")),
-                        };
+                        let (mut network_source, circuit) = electrical::resolve(
+                            electrical.as_ref(), electrical_input, prepared, trial, dt_heat, gate,
+                        )?;
                         // Capture independent sources before adding signed reversible exchange.
                         let mut independent_entropy = 0.0;
                         let mut has_independent = false;

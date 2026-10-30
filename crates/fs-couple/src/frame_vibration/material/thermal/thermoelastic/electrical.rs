@@ -1,4 +1,6 @@
 //! Kirchhoff storage and frame materials on the original shared heat residual.
+mod contact;
+
 use super::*;
 use crate::material_circuit::{
     MaterialCircuit, MaterialCircuitCandidate, MaterialCircuitSolve, MaterialCircuitStep,
@@ -13,7 +15,8 @@ pub struct FrameElectricalInput<'p> {
     pub solve: MaterialCircuitSolve,
 }
 
-pub(super) struct Binding {
+pub(super) struct Binding<'n, 'a> {
+    contacts: Option<contact::Binding<'n, 'a>>,
     pub(super) circuit: MaterialCircuit,
     destinations: BTreeMap<usize, CellId>,
 }
@@ -32,9 +35,10 @@ impl<'n, 'a> FrameThermoelasticSystem<'n, 'a> {
     ///
     /// The original charges and fluxes are retained. This is cold binding only:
     /// the frame sample clock must still be zero, and thermal cells must match
-    /// the accepted frame state. Electrical contacts and material-derived C/L
-    /// currently require their own reciprocal thermal laws and refuse here;
-    /// explicitly authored fixed C/L retain their native storage accounting.
+    /// the accepted frame state. Electrical contacts use
+    /// [`Self::with_material_contact_circuit`]; material-derived C/L currently
+    /// require their reciprocal thermal laws and refuse here. Explicitly
+    /// authored fixed C/L retain their native storage accounting.
     /// Fixed geometry means no motional EMF, magnetic force, or changing wire
     /// length is implied. The mechanical/thermal split remains first order.
     #[allow(clippy::too_many_arguments)]
@@ -46,25 +50,9 @@ impl<'n, 'a> FrameThermoelasticSystem<'n, 'a> {
         electrical_bases: &[(usize, ElectricalPropertyBasis)],
         gate: &CancelGate,
     ) -> Result<Self> {
-        check(gate)?;
-        if self.electrical.is_some() || self.mechanical.samples_rendered() != 0
-            || thermal.time_s().to_bits() != self.origin_s.to_bits()
-            || !core::ptr::eq(self.source.cells, source.cells)
-            || !core::ptr::eq(self.source.links, source.links)
-            || source.resistors.is_empty()
-            || !circuit.contacts().is_empty() || !circuit.storage().is_empty()
-        {
-            return Err(invalid(
-                "frame circuit requires one cold binding, original cell/link slices, bulk resistors and fixed authored C/L",
-            ));
-        }
-        for (member, state) in self.members.iter().zip(&self.states) {
-            check(gate)?;
-            if temperatures(&member.region, thermal)?.iter().zip(&state.layers)
-                .any(|(&t, layer)| t.to_bits() != layer.temperature_k.to_bits())
-            {
-                return Err(invalid("frame circuit starts from the jointly accepted material temperatures"));
-            }
+        self.admit_electrical_binding(thermal, source, &circuit, gate)?;
+        if !circuit.contacts().is_empty() {
+            return Err(invalid("contact-bound frames require their original electrical contact network"));
         }
         let prepared = source.prepare_with_bases(thermal, electrical_bases,
             || gate.is_requested()).map_err(network)?;
@@ -77,7 +65,7 @@ impl<'n, 'a> FrameThermoelasticSystem<'n, 'a> {
             (r.destination.branch, r.destination.cell)).collect();
         check(gate)?;
         self.prepared = prepared;
-        self.electrical = Some(Binding { circuit, destinations });
+        self.electrical = Some(Binding { circuit, destinations, contacts: None });
         Ok(self)
     }
 
@@ -108,7 +96,7 @@ impl<'n, 'a> FrameThermoelasticSystem<'n, 'a> {
     }
 }
 
-impl Binding {
+impl Binding<'_, '_> {
     pub(super) fn deposit(
         &self,
         candidate: &MaterialCircuitCandidate,
@@ -126,6 +114,13 @@ impl Binding {
             }
             let total = powers.entry(*cell).or_insert(0.0);
             *total = finite(*total + power)?;
+        }
+        if let Some(binding) = &self.contacts {
+            crate::circuit_enthalpy::contacts::deposit(
+                &candidate.step().contacts, &binding.routes, dt, powers, checkpoint,
+            )?;
+        } else if !candidate.step().contacts.is_empty() {
+            return Err(invalid("frame contact heat has no original two-sided receivers"));
         }
         Ok(())
     }
@@ -176,5 +171,47 @@ impl ThermalDriver for Driver {
             }
             None => (None, (mechanical, None)),
         }
+    }
+}
+
+// One constitutive/source-resolution seam for both bulk-only and contact-bearing
+// circuits. Resolve the entire material network once per trial, then use the
+// existing native source-continuity and circuit step. No nested thermal solve.
+pub(super) fn resolve(
+    binding: Option<&Binding<'_, '_>>,
+    input: Option<FrameElectricalInput<'_>>,
+    prepared: &PreparedMaterialNetwork<'_, '_>,
+    trial: &DepositionSimulation<'_>,
+    dt: f64,
+    gate: &CancelGate,
+) -> Result<(
+    crate::circuit_enthalpy::CircuitThermalCoefficients<MaterialNetworkSample>,
+    Option<MaterialCircuitCandidate>,
+)> {
+    check(gate)?;
+    match (binding, input) {
+        (Some(binding), Some(input)) => {
+            let (mut bulk, contacts) = match &binding.contacts {
+                Some(source) => {
+                    let value = source.prepared.resolve(trial, || gate.is_requested())
+                        .map_err(contact::source_error)?;
+                    (value.bulk, value.contacts)
+                }
+                None => (prepared.resolve(trial, || gate.is_requested()).map_err(network)?, Vec::new()),
+            };
+            let candidate = crate::circuit_enthalpy::contacts::advance_circuit(
+                &binding.circuit, core::mem::take(&mut bulk.resistors), contacts,
+                input.ports, dt, input.solve, || gate.is_requested(),
+            )?;
+            Ok((bulk, Some(candidate)))
+        }
+        (None, None) => {
+            let bulk = prepared.resolve(trial, || gate.is_requested()).map_err(network)?;
+            if !bulk.resistors.is_empty() {
+                return Err(invalid("frame electrical sources lack their original coupled owner"));
+            }
+            Ok((bulk, None))
+        }
+        _ => Err(invalid("frame electrical sources and held inputs disagree")),
     }
 }

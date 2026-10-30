@@ -1,11 +1,14 @@
 //! One material card drives structural motion, resistive heat and finite storage.
 //! Manufactured SI fixtures; not experimental validation of a measured alloy.
+#[path = "frame_electrical_thermal/contacts.rs"]
+mod contacts;
+
 use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyError, ResistorCell,
     material::{CellResistor, ConductionLink, MaterialCell, MaterialNetwork},
 };
 use fs_couple::frame_vibration::{
-    FrameVibrationBasis, FrameVibrationBudget,
+    FrameVibrationBasis, FrameVibrationBudget, FrameVibrationComponent,
     thermal::{FrameLayerCell, FrameThermalSolve},
     thermoelastic::{FrameElectricalInput, FrameThermoelasticSystem},
 };
@@ -58,7 +61,8 @@ fn card(s: Spec) -> MaterialCard {
         ("density", RHO, Density::DIMS, 0.0), ("young_modulus", E0, Pressure::DIMS, s.e_slope),
         ("eta", ETA, DynViscosity::DIMS, 0.0),
         (LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY, s.alpha, INVERSE_TEMPERATURE_DIMS, 0.0),
-        ("specific_heat_capacity", 1.0, SPECIFIC_HEAT_CAPACITY_DIMS, 0.0), electrical,
+        ("specific_heat_capacity", 1.0, SPECIFIC_HEAT_CAPACITY_DIMS, 0.0),
+        ("thermal_conductivity", 0.0, fs_material::state_point::THERMAL_CONDUCTIVITY_DIMS, 0.0), electrical,
     ] {
         let curved = slope != 0.0;
         let mut validity = ValidityDomain::unconstrained().with_quantity(
@@ -90,6 +94,24 @@ fn controls() -> FrameThermalSolve {
 fn input(ports: &[f64]) -> FrameElectricalInput<'_> {
     FrameElectricalInput { ports, solve: MaterialCircuitSolve { energy_tolerance_j: 1e-10, power_tolerance_w: 1e-10 } }
 }
+fn frame_component(card: &MaterialCard, context: &QueryPoint, displacement: f64) -> FrameVibrationComponent {
+    let requirements = [("density", Density::DIMS), ("young_modulus", Pressure::DIMS), ("eta", DynViscosity::DIMS),
+        (LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY, INVERSE_TEMPERATURE_DIMS)]
+        .map(|(name, dims)| ScalarPropertyRequirement::try_new(name, dims, ScalarAdmissibility::Finite).unwrap());
+    let section = ConcentricElasticSection::try_new(0.0, vec![ConcentricMaterialLayer {
+        outer_radius_m: RADIUS, material: resolve_material_state_point(card, context, &requirements,
+            MaterialPropertySelection::SingleClaimOnly).unwrap(),
+    }]).unwrap();
+    let mut frame = Frame2d::with_mass_formulation(Geometry::Linear, FrameMassFormulation::ConsistentReference);
+    frame.add_node(0.0, 0.0); frame.add_node(1.0, 0.0);
+    frame.fix(0, [true; 3]); frame.fix(1, [false, true, true]);
+    frame.add_material_viscous_element(0, 1, 5, FrameViscousSection::try_new(section, "eta", "eta").unwrap()).unwrap();
+    let basis = FrameVibrationBasis::from_frame(&frame, 1,
+        FrameVibrationBudget { max_frame_dofs: 6, max_dense_entries: 36 }, || false).unwrap();
+    let mut component = basis.coupled_component(RATE, &[0.0], ModalAcousticTimeBudget::audible_reference(), 18, || false).unwrap();
+    component.restore_states(&[ModalAcousticState { displacement_m_sqrt_kg: displacement / basis.modes()[0].displacement[3], velocity_m_sqrt_kg_per_s: 0.0 }]).unwrap();
+    component
+}
 fn fixture<R>(s: Spec, capacitor: bool, cached: bool,
     run: impl FnOnce(FrameThermoelasticSystem<'_, '_>, DepositionSimulation<'_>) -> R,
 ) -> R {
@@ -100,22 +122,7 @@ fn fixture<R>(s: Spec, capacitor: bool, cached: bool,
         density: &PropertyKey::new("density", Density::DIMS), temperature_axis: "T",
         lower: &self::context(200.0), upper: &self::context(600.0), selection: SelectionPolicy::SingleClaimOnly,
     }, SolidLiquidPhase::Solid, 0.0, 1e-7).unwrap();
-    let requirements = [("density", Density::DIMS), ("young_modulus", Pressure::DIMS), ("eta", DynViscosity::DIMS),
-        (LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY, INVERSE_TEMPERATURE_DIMS)]
-        .map(|(name, dims)| ScalarPropertyRequirement::try_new(name, dims, ScalarAdmissibility::Finite).unwrap());
-    let section = ConcentricElasticSection::try_new(0.0, vec![ConcentricMaterialLayer {
-        outer_radius_m: RADIUS, material: resolve_material_state_point(&card, &context, &requirements,
-            MaterialPropertySelection::SingleClaimOnly).unwrap(),
-    }]).unwrap();
-    let mut frame = Frame2d::with_mass_formulation(Geometry::Linear, FrameMassFormulation::ConsistentReference);
-    frame.add_node(0.0, 0.0); frame.add_node(1.0, 0.0);
-    frame.fix(0, [true; 3]); frame.fix(1, [false, true, true]);
-    frame.add_material_viscous_element(0, 1, 5, FrameViscousSection::try_new(section, "eta", "eta").unwrap()).unwrap();
-    let basis = FrameVibrationBasis::from_frame(&frame, 1,
-        FrameVibrationBudget { max_frame_dofs: 6, max_dense_entries: 36 }, || false).unwrap();
-    let mut component = basis.coupled_component(RATE, &[0.0], ModalAcousticTimeBudget::audible_reference(), 18, || false).unwrap();
-    let displacement = if capacitor { 0.01 } else { 0.0 };
-    component.restore_states(&[ModalAcousticState { displacement_m_sqrt_kg: displacement / basis.modes()[0].displacement[3], velocity_m_sqrt_kg_per_s: 0.0 }]).unwrap();
+    let component = frame_component(&card, &context, if capacitor { 0.01 } else { 0.0 });
     let laws = [(MaterialId(0), curve.curve() as &dyn ThermalLaw)];
     let thermal = DepositionSimulation::new(vec![TimedEvent { time_s: 0.0,
         event: Event::Birth(DepositedCell { id: CELL, segment_id: 0, body_id: 0, material_id: MaterialId(0),
