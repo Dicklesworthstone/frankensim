@@ -7,14 +7,17 @@
 //! neither E nor an isolated component impedance is inverted.
 //!
 //! The full declared quadratic storage, mutual coupling and relaxation states
-//! are retained. No time-step warping, modal truncation, linewidth fitting,
-//! numerical damping or nonlinear linearization is introduced. This is a
-//! particular AC solution, not a claim that free transients decay to it.
+//! are retained. No time-step warping, modal truncation, linewidth fitting or
+//! numerical damping is introduced. Ordinary constructors require exact linear
+//! storage; the explicit equilibrium adapter admits local nonlinear tangents.
+//! An AC solution does not imply that free transients decay to it.
 
 use crate::{DescriptorPortHamiltonian, PortHamiltonian, Storage};
 use fs_la::eigen_complex::{LuComplex, LuComplexError, lu_complex_with_cancel};
 use fs_math::c64::C64;
 
+/// Small-signal analysis at an admitted equilibrium of the original nonlinear storage.
+pub mod equilibrium;
 mod poles;
 pub use poles::{BeynOptions, HarmonicSpectrum, HarmonicSpectrumError, ResonanceRegion};
 pub use poles::{HarmonicPole, HarmonicPoleError, PoleOptions};
