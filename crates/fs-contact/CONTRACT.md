@@ -3,6 +3,34 @@
 > Status: ACTIVE (Stage 1, increment 1 — bead tqag). Capability-routed
 > body-to-body contact over certified motion.
 
+
+## Source-pinned directional impact coefficients
+
+`SourceThermalEllipticCoulomb::solve_preimpact_impulse` refreshes the original
+principal claims at actual incoming tangent speed. The caller explicitly selects
+kinetic or static source coefficients as one fixed impact ellipse, with no
+automatic branch switch or inferred compression history.
+
+Shared `SourceFrictionConditions` retains the complete query and explicit
+temperature/pressure boundaries. Existing guards enforce original schema, fixed
+external coordinates, claim pins, domains and matching physical conditions. Every
+declared speed uses incoming slip norm; every accumulated-distance coordinate
+retains its own accepted value exactly. Normal impulse does not define pressure.
+
+The native impulse owner uses a temporary equal-coefficient law. Its loss remains
+unallocated mechanical loss. The returned source candidate retains both refreshed
+static and kinetic coefficient pairs for subsequent supported contact; native
+accumulated slip, texture and last finite-step temperature do not advance. No
+fictitious duration or finite-displacement step is used.
+
+Both source bundles and the native result are admitted before returning a
+candidate. Cancellation is checked between source axes and around native work;
+all failures preserve borrowed history. Six focused groups cover analytic and
+oblique impacts, all speed/path coordinates, physical condition ownership, claim
+receipts, late refusal/cancellation, and subsequent static/kinetic support
+continuity. These synthetic reference cases do not establish experimental
+calibration of an impact coefficient model.
+
 ## Source-consistent physical segments for moving contact
 
 `advance_driven_motion_consistent_with_segments` resolves original directional

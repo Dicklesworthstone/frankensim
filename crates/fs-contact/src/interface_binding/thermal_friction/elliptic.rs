@@ -15,6 +15,10 @@ pub mod trajectory;
 /// Source-owned static hold, breakaway and driven directional sliding.
 pub mod driven;
 
+/// Explicit source roles for instantaneous impulses at actual preimpact speed.
+pub mod impulse;
+pub use impulse::SourceFrictionConditions;
+
 use fs_tribo::tangential::elliptic::{
     EllipticCoulomb, EllipticCoulombState, SymmetricTangentialCompliance,
 };

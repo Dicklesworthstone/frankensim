@@ -5,6 +5,9 @@ mod trajectory;
 #[path = "driven.rs"]
 mod driven;
 
+#[path = "impulse.rs"]
+mod impulse;
+
 use super::*;
 use fs_contact::interface_binding::thermal_friction::elliptic::motion::{
     MotionQueryError, MotionQuerySolve,
