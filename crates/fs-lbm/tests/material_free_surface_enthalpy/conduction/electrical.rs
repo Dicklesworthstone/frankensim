@@ -10,6 +10,9 @@ const CORE: [usize; 3] = [1, 3, 3];
 #[path = "electrical/magnetic.rs"]
 mod magnetic;
 
+#[path = "electrical/interfaces.rs"]
+mod interfaces;
+
 fn electrical_card(
     basis: ElectricalPropertyBasis,
     scale: f64,

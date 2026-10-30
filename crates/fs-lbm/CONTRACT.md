@@ -3877,6 +3877,46 @@ They cover equivalent source bases, conductivity substitution, B reversal,
 actual native motion and continuation, uniform-field polarization, zero-B
 isolation, forbidden physical electrodes and late current-budget rollback.
 
+### Original material interfaces on the moving-liquid current timeline
+
+`MaterialFreeSurfaceEnthalpy3::with_material_electrical_interfaces` binds one
+original ordered interface card and complete selected source bundle to each
+authored contact. The interface condition callback receives the same adjacent
+specific enthalpy, temperature, bulk source identities and declared texture
+frames used by current. It supplies an explicit physical query, connectivity
+and closed-contact heat partition. Resistance is refreshed by the original
+`ResolvedElectricalInterface::at_query_point` owner; copied coefficients or a
+freshly available fallback claim cannot replace the retained source selection.
+Actual surface material/process/phase identities and texture frames must match
+in order. Unsupported original source data refuses even for an open interface.
+
+The resolved contact or open face enters the existing stationary or moving
+current topology owner, including isolated component gauges. One current
+solution supplies bulk/contact Joule heat and reciprocal Lorentz force.
+Opening a face interrupts electrical loops without deleting liquid, mass,
+enthalpy, thermal links or retained physical velocity. Ordered interface heat
+is already included in native cell power and is deposited once. Applied and
+thermal-endpoint current reports retain their exact interface/source epochs;
+endpoint diagnostics add no heat or impulse.
+
+All existing liquid conduction, finite wall/atmosphere, radiation, rheology and
+wetting steps retain the binding. Callbacks must be pure across retries and
+endpoint queries. Original source, current, thermal, work and split-motion
+gates admit the whole liquid/wall/gas transaction or reject it unchanged.
+Geometry remains a fixed fully occupied current core; interface temperature,
+pressure, history, partition and switching conditions are explicit caller
+models. There is no new interface energy store, contact mechanics, induction,
+partial-cell electrical model or switching-event locator. Discontinuous laws
+must resolve their timing by declared substep refinement.
+
+Three synthetic regressions in
+`material_free_surface_enthalpy/conduction/electrical/interfaces.rs` cover
+an independent temperature-dependent series circuit and ordered heat recurrence,
+actual native motion under source substitution, static/moving current agreement,
+an isolated induced loop opening during heating and reclosing on retained flow,
+and atomic refusal of reversed surface assignments or late original-source
+failure despite an available fallback.
+
 ### Source-driven planar thermocapillary flow (MR26/MR27 increment)
 
 `MaterialFreeSurfaceScaling::free_surface3_from_cells_with_thermocapillarity`

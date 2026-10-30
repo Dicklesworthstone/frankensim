@@ -123,6 +123,8 @@ impl ElectricalTimeline {
         &self,
         temperature: &[f64],
         materials: &[ResolvedConductorState],
+        contacts: &[ElectricalContact],
+        openings: &[[usize; 2]],
         gate: &CancelGate,
     ) -> Result<(ElectricSolution, Option<FreeSurfaceMagneticState>), Error> {
         let core = &self.core;
@@ -146,20 +148,22 @@ impl ElectricalTimeline {
                 power_tolerance_w: core.input.power_tolerance_w,
             };
             let result = match core.current_boundary {
-                FreeSurfaceCurrentBoundary::Electrodes => core.input.setup.solve_with_cell_motion(
+                FreeSurfaceCurrentBoundary::Electrodes => core.input.setup.solve_with_cell_motion_topology(
                     &core.domain,
                     temperature,
-                    &core.input.contacts,
+                    contacts,
+                    openings,
                     motion,
                     |cell, _, _| Ok(Some(materials[cell].resistivity_ohm_m())),
                     gate,
                 )?,
                 FreeSurfaceCurrentBoundary::Isolated {
                     current_tolerance_a,
-                } => core.input.setup.solve_isolated_cell_motion(
+                } => core.input.setup.solve_isolated_cell_motion_topology(
                     &core.domain,
                     temperature,
-                    &core.input.contacts,
+                    contacts,
+                    openings,
                     motion,
                     current_tolerance_a,
                     |cell, _, _| Ok(Some(materials[cell].resistivity_ohm_m())),
@@ -175,10 +179,11 @@ impl ElectricalTimeline {
             Ok((result.electric, magnetic))
         } else {
             Ok((
-                core.input.setup.solve_with_cell_contacts(
+                core.input.setup.solve_with_cell_contact_topology(
                     &core.domain,
                     temperature,
-                    &core.input.contacts,
+                    contacts,
+                    openings,
                     |cell, _, _| Ok(Some(materials[cell].resistivity_ohm_m())),
                     gate,
                 )?,

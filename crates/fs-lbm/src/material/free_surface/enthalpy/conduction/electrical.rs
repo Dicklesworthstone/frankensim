@@ -14,6 +14,9 @@ use fs_material::conductor::ResolvedConductorState;
 pub mod magnetic;
 pub use magnetic::{FreeSurfaceMagneticInput, FreeSurfaceMagneticState, FreeSurfaceMagneticMotion};
 
+/// Original ordered material interface response and explicit electrical openings.
+pub mod interfaces;
+
 /// Electrical supply/reference convention, independent of liquid mechanics.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FreeSurfaceCurrentBoundary {
@@ -69,6 +72,9 @@ pub struct FreeSurfaceElectricalState {
     pub temperature_k: Vec<f64>,
     /// Complete original T/shear/thermal/electrical source bundles and receipts.
     pub materials: Vec<ResolvedConductorState>,
+    /// Exact ordered material interface responses used by this current solve.
+    /// None retains the original fixed authored contact coefficients.
+    pub interfaces: Option<std::sync::Arc<interfaces::FreeSurfaceElectricalInterfaceEpoch>>,
     pub solution: ElectricSolution,
     /// Electrode power minus Joule power minus sampled Lorentz power [W].
     pub power_defect_w: f64,
@@ -106,6 +112,7 @@ pub(crate) struct ElectricalCore {
     coordinates: Vec<[usize; 3]>,
     current_boundary: FreeSurfaceCurrentBoundary,
     magnetic: Option<FreeSurfaceMagneticInput>,
+    interfaces: Option<interfaces::MaterialInterfaces>,
 }
 
 impl ElectricalCore {
@@ -138,7 +145,7 @@ impl ElectricalCore {
             let p = domain.coords(cell);
             core::array::from_fn(|axis| input.origin[axis] + p[axis])
         }).collect();
-        Ok(Self { input, domain, coordinates, current_boundary, magnetic: None })
+        Ok(Self { input, domain, coordinates, current_boundary, magnetic: None, interfaces: None })
     }
 
     pub(crate) fn admit(
@@ -377,7 +384,12 @@ impl Conduction<'_, '_> {
             temperature.push(self.caloric.state_at_specific_enthalpy(h)?.temperature_k());
         }
         let core = &electrical.core;
-        let (solution, magnetic) = electrical.solve_current(&temperature, &materials, self.gate)?;
+        let interfaces = core.resolve_interfaces(
+            thermal.time_s(), &enthalpy, &temperature, &materials, self.gate,
+        )?;
+        let (solution, magnetic) = electrical.solve_current(
+            &temperature, &materials, &interfaces.contacts, &interfaces.openings, self.gate,
+        )?;
         let work = magnetic.as_ref().map_or(0.0, |state| state.mechanical_power_w);
         let defect = finite(solution.delivered_w - solution.total_joule_w - work)?;
         if defect.abs() > core.input.power_tolerance_w
@@ -393,6 +405,7 @@ impl Conduction<'_, '_> {
             specific_enthalpy_j_kg: enthalpy,
             temperature_k: temperature,
             materials,
+            interfaces: interfaces.epoch,
             solution,
             power_defect_w: defect,
             magnetic,
