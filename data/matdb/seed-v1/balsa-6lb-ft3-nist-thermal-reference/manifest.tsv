@@ -1,0 +1,20 @@
+frankensim.matdb-manifest.v3
+pack_id	balsa-6lb-ft3-nist-thermal-reference
+redistribution	permitted	Numerical fits from unmarked NIST public-information pages, with attribution and independently sampled evaluations; reuse policy https://www.nist.gov/copyrights-disclaimers
+citation	National Institute of Standards and Technology, Cryogenic Material Properties: Balsa, nominal 6 lb/ft3 source column; https://trc.nist.gov/cryogenics/materials/Balsa/Balsa_rev.htm; source references https://trc.nist.gov/cryogenics/materials/references.htm; accessed 2026-10-29.
+license	NIST-Public-Information-Attribution-Requested
+source	nist-composite-reference	properties.tsv	material-tsv-v1
+property	response	thermal-conductivity	thermal-conductivity
+property	nominal_density	nominal-source-density	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	reference	engineering-reference-model	dimensional
+axis	family	source-family-nist-balsa	dimensional
+axis	processing	source-processing-known	dimensional
+axis	pressure	source-pressure-known	dimensional
+axis	moisture	source-moisture-condition-known	dimensional
+axis	orientation	source-orientation-known	dimensional
+axis	matched	source-specimens-matched	dimensional
+axis	species	source-species-known	dimensional
+axis	moisture_basis	source-moisture-basis-known	dimensional
+axis	density_column	source-density-column-lb-ft3	dimensional
+axis	density_temperature	source-density-temperature-known	dimensional

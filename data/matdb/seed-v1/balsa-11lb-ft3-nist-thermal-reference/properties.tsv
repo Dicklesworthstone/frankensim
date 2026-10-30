@@ -1,0 +1,31 @@
+frankensim.matdb-source.v1
+observation	nist-context	Balsa, nominal 11 lb/ft3 source column	NIST source identity and physical context	Only the NIST balsa conductivity column labelled density 11 lb/ft3 is admitted. Species, moisture basis, grain direction, radial/tangential distinction, growth condition, treatment and matched specimen are not supplied. This is distinct from both the 6 lb/ft3 NIST column and the USDA clear-wood mechanical population; no cross-source property join is inferred. Source unknowns remain required coordinates. No density(T), matched heat-capacity/conductivity set, isotropy, elastic law, thermal strain, phase behavior, or experimental product qualification is inferred.
+observation	nist-equation	Balsa, nominal 11 lb/ft3 source column	Original equation and bounded authored sampling	log10(y)=sum(a_i*log10(T)^i); y is W/m/K; T is kelvin. Published coefficients in ascending/source order: 4815.4,-12969.63,14520.76,-8654.164,2895.712,-515.7272,38.19218,0,0. Data range 88-300 K; equation range 75-300 K. Admitted support is their intersection 88-300 K. NIST reports a fit error of 3 percent relative to data, without a confidence level; this is not a statistical confidence interval. Property uncertainty remains Unstated. 42 authored samples use70-digit arithmetic, with linear interpolation; quarter/mid/three-quarter comparisons are at most0.008 percent relative difference (maximum observed 0.0069703726359691521 percent). This finite comparison is not a continuous certified error bound.
+observation	nist-references	Balsa, nominal 11 lb/ft3 source column	https://trc.nist.gov/cryogenics/materials/references.htm	NIST reference list attributes balsa to LNG Materials and Fluids,ed.Douglas Mann,NBS Cryogenics Division,1977, without specifying direction on the fit page.
+observation	nist-density	Balsa, nominal 11 lb/ft3 source column	Nominal source-column density metadata	The source column density label is 11 lb/ft3. The scalar converts this label using1lb=0.45359237kg and1ft=0.3048m exactly, giving176.20309711356154kg/m3. No measurement temperature, moisture basis, density variability or method is supplied. The scalar has no temperature support and is not a density(T) or a measured match to any USDA balsa population. Conductivity populations must not interpolate across this density label.
+curve	thermal-response	nist-context,nist-equation,nist-references,nist-density	response	temperature	K	W/m/K	88.0:0.01739561026563738,89.5:0.017629584865525496,91.0:0.017872613596682249,92.5:0.01812339539304533,94.0:0.01838080269067338,95.5:0.01864385759042627,97.0:0.01891171193510606,98.5:0.01918363051385055,100.0:0.019458976787459637,101.75:0.019783816760084843,103.5:0.02011183230226644,107.0:0.020775002319182175,110.5:0.021444672015845556,114.0:0.022118283418024666,121.0:0.023471506201921424,128.0:0.024828752050771412,139.0:0.026970385848479681,144.5:0.028047983784706455,150.0:0.029132077937043023,156.25:0.030373441045724292,162.5:0.031626016251402878,168.75:0.032890348016975351,175.0:0.03416627753107986,181.25:0.035452988330488578,187.5:0.036749082634913388,200.0:0.039361486170877576,212.5:0.041984327493467148,225.0:0.044595374002191338,231.25:0.045889406731895262,237.5:0.047172213323289992,243.75:0.04844136778990177,250.0:0.049694712818340559,255.7875:0.050839606461551528,261.575:0.051968173998753434,267.3625:0.053079512371782247,273.15:0.054173021392475157,277.6125:0.055003815813621397,282.075:0.055823835648723688,286.5375:0.056633198285307828,291.0:0.057432138111351629,293.15:0.057813440308938698,300.0:0.059013289811635703	linear
+uncertainty	thermal-response	unstated	-	-	-	-
+validity	thermal-response	temperature	88	300	K
+validity	thermal-response	reference	1	1	1
+validity	thermal-response	family	1	1	1
+validity	thermal-response	processing	0	0	1
+validity	thermal-response	pressure	0	0	1
+validity	thermal-response	moisture	0	0	1
+validity	thermal-response	orientation	0	0	1
+validity	thermal-response	matched	0	0	1
+validity	thermal-response	species	0	0	1
+validity	thermal-response	moisture_basis	0	0	1
+validity	thermal-response	density_column	11	11	1
+scalar	nominal-density	nist-context,nist-density	nominal_density	176.20309711356154	kg/m3	constant
+uncertainty	nominal-density	unstated	-	-	-	-
+validity	nominal-density	reference	1	1	1
+validity	nominal-density	family	1	1	1
+validity	nominal-density	processing	0	0	1
+validity	nominal-density	pressure	0	0	1
+validity	nominal-density	moisture	0	0	1
+validity	nominal-density	orientation	0	0	1
+validity	nominal-density	matched	0	0	1
+validity	nominal-density	species	0	0	1
+validity	nominal-density	moisture_basis	0	0	1
+validity	nominal-density	density_column	11	11	1
+validity	nominal-density	density_temperature	0	0	1

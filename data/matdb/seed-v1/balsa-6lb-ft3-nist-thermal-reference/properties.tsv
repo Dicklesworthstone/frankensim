@@ -1,0 +1,31 @@
+frankensim.matdb-source.v1
+observation	nist-context	Balsa, nominal 6 lb/ft3 source column	NIST source identity and physical context	Only the NIST balsa conductivity column labelled density 6 lb/ft3 is admitted. Species, moisture basis, grain direction, radial/tangential distinction, growth condition, treatment and matched specimen are not supplied. This is distinct from both the 11 lb/ft3 NIST column and the USDA clear-wood mechanical population; no cross-source property join is inferred. Source unknowns remain required coordinates. No density(T), matched heat-capacity/conductivity set, isotropy, elastic law, thermal strain, phase behavior, or experimental product qualification is inferred.
+observation	nist-equation	Balsa, nominal 6 lb/ft3 source column	Original equation and bounded authored sampling	log10(y)=sum(a_i*log10(T)^i); y is W/m/K; T is kelvin. Published coefficients in ascending/source order: 4172.447,-11309.97,12745.09,-7647.584,2577.309,-462.538,34.5351,0,0. Data range 88-300 K; equation range 70-300 K. Admitted support is their intersection 88-300 K. NIST reports a fit error of 1.5 percent relative to data, without a confidence level; this is not a statistical confidence interval. Property uncertainty remains Unstated. 26 authored samples use70-digit arithmetic, with linear interpolation; quarter/mid/three-quarter comparisons are at most0.008 percent relative difference (maximum observed 0.0074190362205343011 percent). This finite comparison is not a continuous certified error bound.
+observation	nist-references	Balsa, nominal 6 lb/ft3 source column	https://trc.nist.gov/cryogenics/materials/references.htm	NIST reference list attributes balsa to LNG Materials and Fluids,ed.Douglas Mann,NBS Cryogenics Division,1977, without specifying direction on the fit page.
+observation	nist-density	Balsa, nominal 6 lb/ft3 source column	Nominal source-column density metadata	The source column density label is 6 lb/ft3. The scalar converts this label using1lb=0.45359237kg and1ft=0.3048m exactly, giving96.110780243760837kg/m3. No measurement temperature, moisture basis, density variability or method is supplied. The scalar has no temperature support and is not a density(T) or a measured match to any USDA balsa population. Conductivity populations must not interpolate across this density label.
+curve	thermal-response	nist-context,nist-equation,nist-references,nist-density	response	temperature	K	W/m/K	88.0:0.013118837381275299,89.5:0.013313924403807564,91.0:0.013513519996189022,92.5:0.013716886471783421,94.0:0.013923384138065887,97.0:0.014343630082476507,100.0:0.014770663353378209,103.5:0.015273929507336939,107.0:0.015779806057860164,114.0:0.016791995691966711,121.0:0.01779868993392956,128.0:0.018797917861891664,139.0:0.020356539333162402,150.0:0.021909917488283015,162.5:0.023680313129236222,175.0:0.02546351597894589,187.5:0.027260892139815307,200.0:0.029069046049869157,225.0:0.032693320995610246,237.5:0.034497767124931402,250.0:0.036292747250813347,273.15:0.039598534644950407,282.075:0.040874143845231423,291.0:0.042157105966485599,293.15:0.042467930723762193,300.0:0.043464600155856684	linear
+uncertainty	thermal-response	unstated	-	-	-	-
+validity	thermal-response	temperature	88	300	K
+validity	thermal-response	reference	1	1	1
+validity	thermal-response	family	1	1	1
+validity	thermal-response	processing	0	0	1
+validity	thermal-response	pressure	0	0	1
+validity	thermal-response	moisture	0	0	1
+validity	thermal-response	orientation	0	0	1
+validity	thermal-response	matched	0	0	1
+validity	thermal-response	species	0	0	1
+validity	thermal-response	moisture_basis	0	0	1
+validity	thermal-response	density_column	6	6	1
+scalar	nominal-density	nist-context,nist-density	nominal_density	96.110780243760837	kg/m3	constant
+uncertainty	nominal-density	unstated	-	-	-	-
+validity	nominal-density	reference	1	1	1
+validity	nominal-density	family	1	1	1
+validity	nominal-density	processing	0	0	1
+validity	nominal-density	pressure	0	0	1
+validity	nominal-density	moisture	0	0	1
+validity	nominal-density	orientation	0	0	1
+validity	nominal-density	matched	0	0	1
+validity	nominal-density	species	0	0	1
+validity	nominal-density	moisture_basis	0	0	1
+validity	nominal-density	density_column	6	6	1
+validity	nominal-density	density_temperature	0	0	1

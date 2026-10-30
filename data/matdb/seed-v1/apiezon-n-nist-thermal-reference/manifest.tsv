@@ -1,0 +1,18 @@
+frankensim.matdb-manifest.v3
+pack_id	apiezon-n-nist-thermal-reference
+redistribution	permitted	Numerical fits from unmarked NIST public-information pages, with attribution and independently sampled evaluations; reuse policy https://www.nist.gov/copyrights-disclaimers
+citation	National Institute of Standards and Technology, Cryogenic Material Properties: Apiezon N grease specific heat; https://trc.nist.gov/cryogenics/materials/Apiezon%20N/ApiezonN_rev.htm; source references https://trc.nist.gov/cryogenics/materials/references.htm; accessed 2026-10-29.
+license	NIST-Public-Information-Attribution-Requested
+source	nist-composite-reference	properties.tsv	material-tsv-v1
+property	response	specific-heat-capacity	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	reference	engineering-reference-model	dimensional
+axis	family	source-family-nist-apiezon-n	dimensional
+axis	processing	source-processing-known	dimensional
+axis	pressure	source-pressure-known	dimensional
+axis	moisture	source-moisture-condition-known	dimensional
+axis	orientation	source-orientation-known	dimensional
+axis	matched	source-specimens-matched	dimensional
+axis	formulation	source-formulation-known	dimensional
+axis	lot	source-lot-known	dimensional
+axis	caloric	source-caloric-constraint-known	dimensional
