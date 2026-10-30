@@ -141,10 +141,86 @@ impl Reactor {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn implicit_step(
         &mut self,
         base: &[f64],
         step: f64,
+        out: &mut [f64],
+        stage_forcing: &mut [f64],
+        base_state: KineticThermodynamicsV1,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<KineticThermodynamicsV1, IsochoricKineticsError> {
+        out.copy_from_slice(base);
+        if self.controls.method == IsochoricKineticsMethod::BackwardEuler {
+            return self.implicit_stage(
+                base,
+                step,
+                None,
+                out,
+                base_state.temperature.value(),
+                cancelled,
+            );
+        }
+        // Alexander SDIRK2: A = [[gamma,0],[1-gamma,gamma]], b = A[1].
+        // The accepted second stage is stiffly accurate. Keep the forcing
+        // separate from `base`: base+h*(1-gamma)*r(stage1) need not describe
+        // any admissible composition or caloric state.
+        const GAMMA: f64 = 1.0 - core::f64::consts::FRAC_1_SQRT_2;
+        let stage = self.implicit_stage(
+            base,
+            GAMMA * step,
+            None,
+            out,
+            base_state.temperature.value(),
+            cancelled,
+        )?;
+        self.stage_entropy(stage, base_state, step)?;
+        // Every successful implicit_stage exit has evaluated reaction rates
+        // at exactly the returned state. Reserve this sole extra vector once.
+        for (forcing, rate) in stage_forcing
+            .iter_mut()
+            .zip(self.state.kinetics.reaction_rates())
+        {
+            *forcing = ((1.0 - GAMMA) * step) * rate;
+            if !forcing.is_finite() {
+                return Err(failed(step, "unrepresentable SDIRK stage forcing"));
+            }
+        }
+        let endpoint = self.implicit_stage(
+            base,
+            GAMMA * step,
+            Some(stage_forcing),
+            out,
+            stage.temperature.value(),
+            cancelled,
+        )?;
+        self.stage_entropy(endpoint, base_state, step)?;
+        Ok(endpoint)
+    }
+
+    fn stage_entropy(
+        &self,
+        stage: KineticThermodynamicsV1,
+        base: KineticThermodynamicsV1,
+        step: f64,
+    ) -> Result<(), IsochoricKineticsError> {
+        let change = (stage.entropy_density_j_m3_k - base.entropy_density_j_m3_k) * self.volume;
+        if !change.is_finite() || change < -self.controls.entropy_tolerance_j_k {
+            return Err(failed(
+                step,
+                "SDIRK stage entropy decreases from its physical baseline",
+            ));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn implicit_stage(
+        &mut self,
+        base: &[f64],
+        step: f64,
+        forcing: Option<&[f64]>,
         out: &mut [f64],
         hint: f64,
         cancelled: &mut impl FnMut() -> bool,
@@ -152,7 +228,6 @@ impl Reactor {
         if !positive(step) {
             return Err(failed(step, "unrepresentable implicit stage duration"));
         }
-        out.copy_from_slice(base);
         let nr = base.len();
         let ns = self.initial.len();
         let mut state = self.resolve(out, hint, cancelled)?;
@@ -166,8 +241,9 @@ impl Reactor {
                 &mut *cancelled,
             )?;
             for j in 0..nr {
-                self.residual[j] =
-                    (out[j] - base[j]) - step * self.state.kinetics.reaction_rates()[j];
+                self.residual[j] = (out[j] - base[j])
+                    - forcing.map_or(0.0, |f| f[j])
+                    - step * self.state.kinetics.reaction_rates()[j];
             }
             let norm = residual_norm(
                 self.controls,
@@ -243,6 +319,7 @@ impl Reactor {
                             Ok(_) => {
                                 for j in 0..nr {
                                     self.residual[j] = (self.trial[j] - base[j])
+                                        - forcing.map_or(0.0, |f| f[j])
                                         - step * self.state.kinetics.reaction_rates()[j];
                                 }
                                 let trial_norm = residual_norm(

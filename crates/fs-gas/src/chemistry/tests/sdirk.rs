@@ -1,0 +1,249 @@
+use super::*;
+use fs_thermochem::kinetics::hydrogen::{HydrogenCalorics, cantera_h2o2};
+
+fn sdirk_controls(relative: f64) -> IsochoricKineticsSolve {
+    IsochoricKineticsSolve {
+        method: IsochoricKineticsMethod::Sdirk2,
+        ..controls(relative)
+    }
+}
+
+#[test]
+fn second_order_fixed_steps_match_independent_relaxation_and_stability_function() {
+    assert_eq!(
+        IsochoricKineticsSolve::default().method,
+        IsochoricKineticsMethod::BackwardEuler
+    );
+    let mechanism = isomers(0.0, 2.0);
+    let duration = 0.5;
+    let exact = 0.5 * (1.0 - (-4.0_f64 * duration).exp());
+    let mut errors = Vec::new();
+    for dt in [0.0625, 0.03125, 0.015625] {
+        let solve = IsochoricKineticsSolve {
+            initial_step_s: dt,
+            maximum_step_s: dt,
+            // Loose adaptation exposes the fixed-step truncation error. The
+            // single linear Newton correction still solves each stage exactly.
+            ..sdirk_controls(0.05)
+        };
+        let result = run(&mechanism, 500.0, duration, solve);
+        let steps = (duration / dt) as usize;
+        assert_eq!(result.balance().accepted_steps, steps);
+        assert_eq!(result.balance().rejected_steps, 0);
+        let gamma = 1.0 - 1.0 / 2.0_f64.sqrt();
+        let z = -4.0 * dt * 0.5;
+        let stability = (1.0 + (1.0 - 2.0 * gamma) * z) / (1.0 - gamma * z).powi(2);
+        let expected = 0.5 * (1.0 - stability.powi((2 * steps) as i32));
+        assert!((result.amounts()[1].value() - expected).abs() < 2e-14);
+        errors.push((result.amounts()[1].value() - exact).abs());
+    }
+    for pair in errors.windows(2) {
+        assert!(
+            pair[0] / pair[1] > 3.8 && pair[0] / pair[1] < 4.2,
+            "{errors:?}"
+        );
+    }
+}
+
+#[test]
+fn sdirk_stiff_relaxation_preserves_positive_state_and_damps_fast_modes() {
+    let result = run(&isomers(0.0, 1e8), 500.0, 0.1, sdirk_controls(1e-5));
+    assert!((result.amounts()[0].value() - 0.5).abs() < 2e-6);
+    assert!((result.amounts()[1].value() - 0.5).abs() < 2e-6);
+    assert!(result.amounts().iter().all(|n| n.value() >= 0.0));
+    assert!(
+        result.balance().accepted_steps < 100,
+        "{:?}",
+        result.balance()
+    );
+    assert!(result.balance().mass_residual_kg.abs() < 1e-15);
+    assert!(result.balance().maximum_relative_element_residual < 1e-14);
+    assert!(result.balance().energy_residual_j.abs() < 1e-8);
+    assert!(result.balance().entropy_change_j_k > 0.0);
+}
+
+fn exothermic(reference: f64) -> IdealGasKineticsV1 {
+    mechanism(
+        vec![
+            source("A", 0.01, 4.0, reference, 0.0),
+            source("B", 0.01, 4.0, reference - 12000.0, 0.0),
+        ],
+        vec![1, 1],
+        (0..8)
+            .map(|i| reaction(&format!("cycle-{i}"), &[("A", 1)], &[("B", 1)], 2.5))
+            .collect(),
+    )
+}
+
+#[test]
+fn sdirk_original_energy_reference_and_reusable_stage_storage_survive_cancellation() {
+    let control = IsochoricKineticsSolve {
+        energy_tolerance_j: 1e-6,
+        ..sdirk_controls(2e-7)
+    };
+    let plain = run(&exothermic(0.0), 300.0, 0.15, control);
+    let shifted = run(&exothermic(1e7), 300.0, 0.15, control);
+    for (a, b) in plain.amounts().iter().zip(shifted.amounts()) {
+        assert!((a.value() - b.value()).abs() < 2e-7);
+    }
+    for result in [&plain, &shifted] {
+        let expected = 300.0 + 12000.0 * result.amounts()[1].value() / (3.0 * R);
+        assert!((result.temperature().value() - expected).abs() < 2e-6);
+        assert!(result.balance().energy_residual_j.abs() <= control.energy_tolerance_j);
+        assert!(result.balance().maximum_relative_element_residual < 1e-14);
+        assert!(result.balance().entropy_change_j_k > 0.0);
+    }
+    let mechanism = exothermic(0.0);
+    let mut reactor = IsochoricReactor::new(mechanism, control, || false).unwrap();
+    let stage_storage = reactor.stage_forcing.as_ptr();
+    let amount_storage = reactor.amounts.as_ptr();
+    let feed = [Amount::new(1.0), Amount::new(0.0)];
+    let mut polls = 0;
+    let refused = reactor.advance_adiabatic(
+        &feed,
+        Volume::new(0.01),
+        Temperature::new(300.0),
+        Time::new(0.15),
+        || {
+            polls += 1;
+            polls > 500
+        },
+    );
+    assert!(matches!(refused, Err(IsochoricKineticsError::Cancelled)));
+    let replay = reactor
+        .advance_adiabatic(
+            &feed,
+            Volume::new(0.01),
+            Temperature::new(300.0),
+            Time::new(0.15),
+            || false,
+        )
+        .unwrap()
+        .to_owned(|| false)
+        .unwrap();
+    assert_eq!(replay, plain);
+    assert_eq!(stage_storage, reactor.stage_forcing.as_ptr());
+    assert_eq!(amount_storage, reactor.amounts.as_ptr());
+}
+
+#[test]
+fn sdirk_hydrogen_matches_real_cantera_with_less_stiff_integration_work() {
+    // Independent Cantera 3.2.0 adiabatic constant-V endpoints, regenerated by
+    // data/reference/thermochem/hydrogen_cantera32.py. The source's continuous
+    // h/s integration constants are selected identically; no radical seeds.
+    let mechanism = cantera_h2o2(HydrogenCalorics::ContinuousAt300K).unwrap();
+    let cases = [
+        (
+            1000.0,
+            1e-3,
+            2458.4913945555377,
+            228725.14079886756,
+            [
+                0.0,
+                6.840225672803266e-6,
+                2.1604586538868265e-5,
+                0.002027389303305023,
+                5.9750418141946714e-9,
+                1.2735377507825906e-7,
+                0.007955139300154143,
+                2.651343322649553e-5,
+                0.0010253989575270015,
+                0.0001264897653307908,
+            ],
+        ),
+        (
+            1200.0,
+            1e-4,
+            2490.1870891852154,
+            194714.2134198162,
+            [
+                0.0,
+                3.0514265490861635e-5,
+                5.43936166029164e-5,
+                0.001601192986638355,
+                4.0181079890848725e-9,
+                1.1665338714300007e-7,
+                0.006629282750128453,
+                6.862675824435062e-5,
+                0.000835875536851778,
+                0.00018440206721522228,
+            ],
+        ),
+    ];
+    for (initial, duration, temperature, pressure, amounts) in cases {
+        let unit = 101325.0 * 0.001 / (R * initial * 5.76);
+        let feed = [
+            (id("H2"), Amount::new(unit)),
+            (id("O2"), Amount::new(unit)),
+            (id("N2"), Amount::new(3.76 * unit)),
+        ];
+        let solve = IsochoricKineticsSolve {
+            method: IsochoricKineticsMethod::Sdirk2,
+            minimum_temperature_k: 300.0,
+            maximum_temperature_k: 3500.0,
+            energy_tolerance_j: 1e-8,
+            relative_tolerance: 1e-5,
+            absolute_amount_tolerance_mol: 1e-16,
+            initial_step_s: 1e-9,
+            maximum_step_s: 2e-5,
+            maximum_steps: 100000,
+            ..IsochoricKineticsSolve::default()
+        };
+        let advance = |control| {
+            advance_adiabatic(
+                &mechanism,
+                &feed,
+                Volume::new(0.001),
+                Temperature::new(initial),
+                Time::new(duration),
+                control,
+                || false,
+            )
+            .unwrap()
+        };
+        let actual = advance(solve);
+        let t_error = (actual.temperature().value() - temperature).abs();
+        assert!(
+            t_error < 1.0,
+            "initial {initial}, T error {t_error}, {:?}",
+            actual.balance()
+        );
+        assert!((actual.pressure().value() / pressure - 1.0).abs() < 0.001);
+        for (i, (n, reference)) in actual.amounts().iter().zip(amounts).enumerate() {
+            assert!(
+                (n.value() - reference).abs() < 1e-12 + 0.003 * reference,
+                "initial {initial}, species {i}, actual {}, reference {reference}, {:?}",
+                n.value(),
+                actual.balance()
+            );
+        }
+        assert!(
+            actual.balance().accepted_steps < 4000,
+            "{:?}",
+            actual.balance()
+        );
+        assert!(actual.balance().maximum_relative_element_residual < 1e-12);
+        assert!(actual.balance().energy_residual_j.abs() <= solve.energy_tolerance_j);
+        assert!(actual.balance().entropy_change_j_k > 0.1);
+        eprintln!(
+            "SDIRK H2 initial={initial}: T error={t_error:e}, {:?}",
+            actual.balance()
+        );
+        if initial == 1200.0 {
+            let first_order = advance(IsochoricKineticsSolve {
+                method: IsochoricKineticsMethod::BackwardEuler,
+                ..solve
+            });
+            let be_error = (first_order.temperature().value() - temperature).abs();
+            eprintln!(
+                "BE H2 initial={initial}: T error={be_error:e}, {:?}",
+                first_order.balance()
+            );
+            assert!(t_error < be_error);
+            assert!(actual.balance().accepted_steps * 3 < first_order.balance().accepted_steps);
+            assert!(
+                actual.balance().nonlinear_iterations < first_order.balance().nonlinear_iterations
+            );
+        }
+    }
+}

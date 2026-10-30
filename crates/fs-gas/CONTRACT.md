@@ -219,8 +219,8 @@ elapsed time, final pressure/temperature and balances remain in the result.
 This implements a bounded homogeneous reactor slice of
 `frankensim-ext-gas-chemistry-ladder-paqh`, not the complete combustion ladder.
 
-The solver advances reaction extents with damped implicit Euler and adaptive
-step doubling. Every candidate reconstructs amounts from the original feed
+The solver advances reaction extents with damped backward Euler (the default)
+or optional second-order L-stable SDIRK2, both with adaptive step doubling. Every candidate reconstructs amounts from the original feed
 plus the exact admitted stoichiometric matrix; there is no independent species
 clipping, positive trace seeding, or equilibrium projection. Temperature solves
 the original total internal energy at each candidate composition, with the
@@ -233,8 +233,9 @@ derivatives with `dT/dxi_j = -sum_i(nu_ij u_i)/sum_i(c_i Cv_i)`. A bounded scale
 partial-pivot solve and positivity/energy backtracking support stiff reactions.
 Stage, Newton and root scratch is allocated once and reused. Local error control
 compares the complete step with two half steps, covering species and temperature;
-the two-half-step result is accepted. This is a first-order, L-stable implicit
-base method with an estimated local error, not a global accuracy certificate.
+the two-half-step result is accepted without extrapolating species. Backward
+Euler is first order; SDIRK2 is second order for smooth homogeneous reactor
+ODEs. Both use estimated local errors rather than global accuracy certificates.
 
 Caller controls separately bound absolute energy, absolute amount, relative
 species/temperature error, relative element/mass balance, numerical entropy
@@ -707,8 +708,8 @@ checks of an isolated reaction, not an experimentally validated air mechanism.
 
 The transport law's dilute-neutral-gas, Eucken-conductivity, explicit bulk
 viscosity and constant-area restrictions remain in force. This symmetric
-composition does not promote the adaptive first-order chemistry base to a
-proved second-order method or establish a fully discrete entropy inequality.
+composition and either selected chemistry method do not by themselves
+establish global second-order accuracy or a fully discrete entropy inequality.
 
 ## Characteristic ports with distinct local compositions
 
@@ -822,8 +823,8 @@ workspace Cargo/DSR result; DSR is unavailable in this environment.
 This owner composes inviscid network transport with finite-rate chemistry.
 Molecular junction diffusion, wall heat/loss, valves and resolved mixing remain
 separate closures. The chemistry entropy diagnostic is not a network entropy
-certificate, and symmetric splitting does not prove second-order convergence
-for the adaptive first-order chemistry base.
+certificate, and the selected chemistry method combined with symmetric
+splitting does not establish global second-order convergence.
 
 
 ## Two-layer compartments with conservative moving-interface work
@@ -990,8 +991,8 @@ and rebuilt 16/64-cell molecular manifold consumers passed. This scoped
 validation does not claim tests added concurrently elsewhere on main or the
 unavailable workspace DSR gate.
 
-The symmetric composition retains the adaptive first-order chemistry base's
-limitations: it is not a global second-order or entropy certificate. The
+The selected chemistry method and symmetric composition do not by themselves
+establish global second-order accuracy or a discrete entropy certificate. The
 molecular operator's constant-area, continuum, explicit mixing-length and
 transport-law applicability limits remain unchanged.
 
@@ -1145,8 +1146,8 @@ when its homogeneous reactor endpoint was admissible. A shorter retry starts
 from the supplied accepted state, independent of previous workspace contents.
 
 The chemistry report retains original per-layer entropy, conservation, local
-error and adaptive-work diagnostics. This is first-order fixed-volume chemistry
-followed by mechanical relaxation; the homogeneous entropy check is not a
+error and adaptive-work diagnostics. The selected fixed-volume chemistry
+method is followed by first-order mechanical/source composition; the homogeneous entropy check is not a
 fully discrete theorem for the moving-interface or ventilated system. Supplied
 mechanisms retain their own source and validity limitations. No ignition,
 flame-structure, CO/soot-yield or experimental accuracy claim is inferred.
@@ -1185,3 +1186,39 @@ reduces the combined temperature/species endpoint error by over 70%.
 reference using a separately installed, pinned development-only Cantera.
 These are numerical source/integration comparisons, not experimental ignition
 validation, a fully discrete coupled entropy theorem, or a second-order claim.
+
+## Optional second-order L-stable homogeneous chemistry
+
+`IsochoricKineticsSolve::method` explicitly selects
+`IsochoricKineticsMethod::BackwardEuler` (unchanged default) or `Sdirk2`.
+The latter implements Alexander's two-stage stiffly accurate method with
+gamma = 1 - 1/sqrt(2), A = [[gamma, 0], [1-gamma, gamma]], b = A[1].
+Reference: R. Alexander, SIAM J. Numer. Anal. 14(6), 1006–1021 (1977),
+https://doi.org/10.1137/0714068. This is a second-order L-stable method for the
+smooth homogeneous reactor ODE, not an order claim for any surrounding split
+transport, radiation, pyrolysis or pressure-interface composition.
+
+Both stages reuse the original constrained extent Newton owner, source fixed
+U,V, smaller factorization, caloric inversion, positive-amount and work gates.
+The second stage keeps its known reaction forcing separate from the physical
+baseline and starts Newton from the admitted first-stage state; an explicit
+shifted baseline may be nonphysical and is never used as a state. Each stage
+must pass an entropy comparison with its physical step baseline. Stage two is
+not incorrectly required to exceed stage one's entropy. These are actual
+acceptance gates, not unconditional Runge–Kutta positivity/entropy theorems.
+
+One reaction-sized forcing vector is reserved only for SDIRK2 at construction;
+advances allocate no new stage storage. The two-half-step result is retained
+without Richardson extrapolation, with the error difference divided by three
+and a deterministic cube-root step controller. Backward-Euler behavior and its
+square-root controller remain the default.
+
+Four new native tests demonstrate fixed-step second-order convergence against
+analytic reversible relaxation and its independent stability function, stiff
+damping, physical energy/elemental datum invariance, cancellation with replay,
+and two independent Cantera 3.2.0 hydrogen endpoints. All 156 native gas tests
+pass. At identical local relative tolerance 1e-5, the 1200 K/0.1 ms hydrogen
+fixture uses 322 accepted SDIRK2 steps and 3714 Newton iterations versus
+4485 and 19983 for backward Euler; temperature errors against Cantera are
+0.01556 K and 0.04168 K respectively. These are fixture-specific work counts,
+not a universal speed or accuracy guarantee.

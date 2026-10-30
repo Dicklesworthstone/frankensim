@@ -13,6 +13,7 @@ pub struct IsochoricReactor {
     pub(super) full: Vec<f64>,
     pub(super) half: Vec<f64>,
     pub(super) fine: Vec<f64>,
+    pub(super) stage_forcing: Vec<f64>,
     pub(super) current_concentrations: Vec<f64>,
     pub(super) full_concentrations: Vec<f64>,
     pub(super) amounts: Vec<Amount>,
@@ -45,6 +46,11 @@ impl IsochoricReactor {
             full: zeros(nr)?,
             half: zeros(nr)?,
             fine: zeros(nr)?,
+            stage_forcing: zeros(if controls.method == IsochoricKineticsMethod::Sdirk2 {
+                nr
+            } else {
+                0
+            })?,
             current_concentrations: zeros(ns)?,
             full_concentrations: zeros(ns)?,
             amounts,

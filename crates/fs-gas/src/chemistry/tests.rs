@@ -14,12 +14,14 @@ use fs_thermochem::{
 };
 use std::collections::BTreeMap;
 
+#[path = "tests/hydrogen.rs"]
+mod hydrogen;
 #[path = "tests/prepared.rs"]
 mod prepared;
 #[path = "tests/reduced.rs"]
 mod reduced;
-#[path = "tests/hydrogen.rs"]
-mod hydrogen;
+#[path = "tests/sdirk.rs"]
+mod sdirk;
 
 fn id(name: &str) -> SpeciesId {
     SpeciesId::new(name).unwrap()

@@ -1,7 +1,8 @@
 //! Adaptive finite-rate chemistry in a sealed, rigid ideal-gas volume.
 //!
 //! The immutable L1 mechanism owns reaction laws and thermodynamics. This L3
-//! owner advances reaction extents with damped implicit Euler and step doubling.
+//! owner advances reaction extents with damped backward Euler or the optional
+//! two-stage, second-order L-stable SDIRK method, both with step doubling.
 //! Each trial inverts the same total internal energy, including formation energy
 //! exactly once. Analytic constrained Jacobians handle stiffness; no explicit
 //! positivity clipping, trace seeding or equilibrium projection is used.
@@ -23,9 +24,44 @@ mod solve;
 
 pub use prepared::{IsochoricKineticsView, IsochoricReactor};
 
+/// Time method for the homogeneous constrained reactor, not its outer coupling.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IsochoricKineticsMethod {
+    /// First-order backward Euler; retained as the default.
+    #[default]
+    BackwardEuler,
+    /// Alexander's two-stage, second-order L-stable SDIRK method, with
+    /// gamma = 1 - 1/sqrt(2). Both stages use the same original fixed U,V.
+    ///
+    /// Reference: R. Alexander, SIAM J. Numer. Anal. 14(6), 1006–1021 (1977),
+    /// <https://doi.org/10.1137/0714068>. The order is for the smooth reactor
+    /// ODE; it does not establish global order for split transport or fire
+    /// coupling. Positivity and entropy remain actual trial acceptance gates,
+    /// not unconditional properties of this Runge–Kutta formula.
+    Sdirk2,
+}
+
+impl IsochoricKineticsMethod {
+    fn error_divisor(self) -> f64 {
+        match self {
+            Self::BackwardEuler => 1.0,
+            Self::Sdirk2 => 3.0,
+        }
+    }
+
+    fn error_root(self, error: f64) -> f64 {
+        match self {
+            Self::BackwardEuler => fs_math::det::sqrt(error),
+            Self::Sdirk2 => fs_math::det::pow(error, 1.0 / 3.0),
+        }
+    }
+}
+
 /// Explicit physical tolerances and bounded adaptive integration work.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IsochoricKineticsSolve {
+    /// Reactor integration method; backward Euler unless explicitly selected.
+    pub method: IsochoricKineticsMethod,
     /// Common lower source-supported temperature, K.
     pub minimum_temperature_k: f64,
     /// Common upper source-supported temperature, K.
@@ -59,6 +95,7 @@ pub struct IsochoricKineticsSolve {
 impl Default for IsochoricKineticsSolve {
     fn default() -> Self {
         Self {
+            method: IsochoricKineticsMethod::BackwardEuler,
             minimum_temperature_k: 200.0,
             maximum_temperature_k: 6000.0,
             energy_tolerance_j: 1e-7,
@@ -348,6 +385,7 @@ fn advance_prepared<'a>(
         full,
         half,
         fine,
+        stage_forcing,
         current_concentrations,
         full_concentrations,
         amounts,
@@ -386,7 +424,8 @@ fn advance_prepared<'a>(
                 current,
                 step,
                 full,
-                accepted.temperature.value(),
+                stage_forcing,
+                accepted,
                 &mut cancelled,
             )?;
             full_concentrations.copy_from_slice(reactor.concentrations());
@@ -394,14 +433,16 @@ fn advance_prepared<'a>(
                 current,
                 step * 0.5,
                 half,
-                accepted.temperature.value(),
+                stage_forcing,
+                accepted,
                 &mut cancelled,
             )?;
             let fine_state = reactor.implicit_step(
                 half,
                 step * 0.5,
                 fine,
-                half_state.temperature.value(),
+                stage_forcing,
+                half_state,
                 &mut cancelled,
             )?;
             let mut error = ((fine_state.temperature.value() - full_state.temperature.value())
@@ -416,6 +457,10 @@ fn advance_prepared<'a>(
                     + controls.relative_tolerance * c.abs().max(current_concentrations[i]);
                 error = error.max((c - full_concentrations[i]).abs() / scale);
             }
+            // The two-half-step endpoint has estimated local error
+            // (fine - full)/(2^p - 1); no Richardson extrapolation is applied
+            // to the conserved state or its nonnegative species inventories.
+            error /= controls.method.error_divisor();
             let entropy_change = (fine_state.entropy_density_j_m3_k
                 - accepted.entropy_density_j_m3_k)
                 * volume.value();
@@ -456,14 +501,14 @@ fn advance_prepared<'a>(
                 let factor = if error == 0.0 {
                     2.0
                 } else {
-                    (0.85 / fs_math::det::sqrt(error)).clamp(0.5, 2.0)
+                    (0.85 / controls.method.error_root(error)).clamp(0.5, 2.0)
                 };
                 step = (step * factor).min(controls.maximum_step_s);
             }
             other => {
                 balance.rejected_steps += 1;
                 let factor = match other {
-                    Ok((_, error, _)) => (0.8 / fs_math::det::sqrt(error)).clamp(0.1, 0.5),
+                    Ok((_, error, _)) => (0.8 / controls.method.error_root(error)).clamp(0.1, 0.5),
                     _ => 0.5,
                 };
                 step *= factor;

@@ -2,7 +2,7 @@
 //!
 //! cargo run --release -p fs-airflow --features compartment-fire \
 //!   --example coupled_compartment_fire -- [all|closed|vented] [end_s=0.1] \
-//!   [max_dt_s=0.001] [solid_cells=12] [kinetic|frozen]
+//!   [max_dt_s=0.001] [solid_cells=12] [kinetic|frozen] [be|sdirk2]
 //!
 //! This numerical composition example uses the original complete Cantera h2o2
 //! mechanism, physical NASA formation energies, implicit receding pyrolysis,
@@ -16,7 +16,9 @@
 //! Molecular emission means are explicitly adopted as gray absorption; the
 //! source's 300..2500 K domain is enforced. Gas/opacity are frozen per interval,
 //! while radiation, solid reaction/conduction and surface temperatures are
-//! coupled implicitly. Overall gas/source composition remains first order.
+//! coupled implicitly. Backward Euler remains the chemistry default; optional
+//! SDIRK2 changes the reactor method, while overall gas/source composition
+//! remains first order.
 //! Recession does not change the fixed vessel volume or supply pressure work.
 
 use fs_airflow::compartment::pyrolysis::{VolatileMixture, VolatileTransferControl};
@@ -40,7 +42,7 @@ use fs_conduction::radiation::{
     EMISSIVITY_DIMS, SURFACE_EMISSIVITY_PROPERTY, SurfaceEmissivity, ViewFactorMatrix,
 };
 use fs_evidence::ValidityDomain;
-use fs_gas::chemistry::IsochoricKineticsSolve;
+use fs_gas::chemistry::{IsochoricKineticsMethod, IsochoricKineticsSolve};
 use fs_gas::multicomponent::compartment::kinetics::ZoneKinetics;
 use fs_gas::multicomponent::compartment::{Layer, TwoZone};
 use fs_gas::multicomponent::{CaloricDomain, MixtureGas};
@@ -307,6 +309,7 @@ fn run(
     maximum_dt: f64,
     cells: usize,
     kinetic: bool,
+    method: IsochoricKineticsMethod,
     out: &mut impl Write,
 ) -> Result<(), Box<dyn Error>> {
     let mechanism = cantera_h2o2(HydrogenCalorics::ContinuousAt300K)?;
@@ -352,6 +355,7 @@ fn run(
         &network.rooms()[0].gas,
         mechanism,
         IsochoricKineticsSolve {
+            method,
             minimum_temperature_k: 300.0,
             maximum_temperature_k: 3500.0,
             maximum_step_s: maximum_dt,
@@ -424,6 +428,10 @@ fn run(
     let mut next_output = 0.0;
     let name = if vented { "vented" } else { "closed" };
     let mode = if kinetic { "kinetic" } else { "frozen" };
+    let method_name = match method {
+        IsochoricKineticsMethod::BackwardEuler => "be",
+        IsochoricKineticsMethod::Sdirk2 => "sdirk2",
+    };
     while slab.time_s() < end {
         if steps >= 50_000 {
             return Err("coupled example accepted-step budget exhausted".into());
@@ -586,7 +594,7 @@ fn run(
                 .value();
             writeln!(
                 out,
-                "{name},{mode},{:.9},{:.9},{:.9},{slab_face:.9},{wall_face:.9},{:.12e},{emitted:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{opacity:.12e},{:.12e},{:.12e},{mass_defect:.12e},{energy_defect:.12e},{max_element:.12e}",
+                "{name},{mode},{method_name},{:.9},{:.9},{:.9},{slab_face:.9},{wall_face:.9},{:.12e},{emitted:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{opacity:.12e},{:.12e},{:.12e},{mass_defect:.12e},{energy_defect:.12e},{max_element:.12e}",
                 slab.time_s(),
                 room.layer(Layer::Upper).temperature().value(),
                 room.pressure().value(),
@@ -604,7 +612,7 @@ fn run(
         }
     }
     eprintln!(
-        "case={name} chemistry={mode} end_s={end} max_dt_s={maximum_dt} solid_cells={cells} accepted_steps={steps} network_halvings={halvings} accepted_chemical_steps={chemical_steps} chemical_rejections={chemical_rejections} remaps={remaps} emitted_H2_kg={emitted:.12e} net_chemical_H2_consumption_kg={:.12e} net_vent_mass_kg={:.12e} max_mass_residual_kg={max_mass:.12e} max_energy_residual_j={max_energy:.12e} max_element_residual_mol={max_element:.12e} max_pressure_residual_pa={max_pressure:.12e} max_surface_power_residual_w={max_surface_power:.12e}",
+        "case={name} chemistry={mode} method={method_name} end_s={end} max_dt_s={maximum_dt} solid_cells={cells} accepted_steps={steps} network_halvings={halvings} accepted_chemical_steps={chemical_steps} chemical_rejections={chemical_rejections} remaps={remaps} emitted_H2_kg={emitted:.12e} net_chemical_H2_consumption_kg={:.12e} net_vent_mass_kg={:.12e} max_mass_residual_kg={max_mass:.12e} max_energy_residual_j={max_energy:.12e} max_element_residual_mol={max_element:.12e} max_pressure_residual_pa={max_pressure:.12e} max_surface_power_residual_w={max_surface_power:.12e}",
         -chemical_species[H2],
         vent_species.iter().sum::<f64>()
     );
@@ -618,12 +626,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         .is_some_and(|a| matches!(a.as_str(), "-h" | "--help"))
     {
         println!(
-            "coupled_compartment_fire [all|closed|vented] [end_s=0.1] [max_dt_s=0.001] [solid_cells=12] [kinetic|frozen]\nManufactured H2-releasing solid, sourced 10-species/29-reaction chemistry, finite wall and approximate molecular gray radiation. Hot 1000 K, 10% O2 / 90% N2 (mole) initial gas; no ignition/radical seed. No experimental fire, material calibration, global entropy theorem or second-order claim."
+            "coupled_compartment_fire [all|closed|vented] [end_s=0.1] [max_dt_s=0.001] [solid_cells=12] [kinetic|frozen] [be|sdirk2]\nManufactured H2-releasing solid, sourced 10-species/29-reaction chemistry, finite wall and approximate molecular gray radiation. Hot 1000 K, 10% O2 / 90% N2 (mole) initial gas; no ignition/radical seed. Backward Euler is default; SDIRK2 changes only the reactor method. No experimental fire, material calibration, global entropy theorem or globally second-order coupling claim."
         );
         return Ok(());
     }
-    if args.len() > 5 {
-        return Err("expected at most five arguments".into());
+    if args.len() > 6 {
+        return Err("expected at most six arguments".into());
     }
     let selected = args.first().map(String::as_str).unwrap_or("all");
     let end = args
@@ -642,6 +650,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         .transpose()?
         .unwrap_or(12);
     let mode = args.get(4).map(String::as_str).unwrap_or("kinetic");
+    let method = match args.get(5).map(String::as_str).unwrap_or("be") {
+        "be" => IsochoricKineticsMethod::BackwardEuler,
+        "sdirk2" => IsochoricKineticsMethod::Sdirk2,
+        _ => return Err("chemistry method must be be or sdirk2".into()),
+    };
     if !["all", "closed", "vented"].contains(&selected)
         || !["kinetic", "frozen"].contains(&mode)
         || !end.is_finite()
@@ -659,11 +672,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut out = BufWriter::new(io::stdout().lock());
     writeln!(
         out,
-        "case,chemistry,time_s,gas_temperature_k,pressure_pa,solid_face_k,wall_face_k,solid_mass_kg,emitted_H2_kg,gas_H2_kg,gas_H2O_kg,gas_O2_kg,gas_H_kg,gas_OH_kg,endpoint_kappa_m_inv,recession_m,gas_radiation_heat_w,combined_mass_residual_kg,combined_energy_residual_j,max_element_residual_mol"
+        "case,chemistry,method,time_s,gas_temperature_k,pressure_pa,solid_face_k,wall_face_k,solid_mass_kg,emitted_H2_kg,gas_H2_kg,gas_H2O_kg,gas_O2_kg,gas_H_kg,gas_OH_kg,endpoint_kappa_m_inv,recession_m,gas_radiation_heat_w,combined_mass_residual_kg,combined_energy_residual_j,max_element_residual_mol"
     )?;
     for (name, vented) in [("closed", false), ("vented", true)] {
         if selected == "all" || selected == name {
-            run(vented, end, dt, cells, mode == "kinetic", &mut out)?;
+            run(vented, end, dt, cells, mode == "kinetic", method, &mut out)?;
         }
     }
     Ok(())

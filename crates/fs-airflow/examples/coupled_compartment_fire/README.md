@@ -5,15 +5,31 @@ ventilated gas and finite radiating walls:
 
 ```bash
 cargo run --release -p fs-airflow --features compartment-fire \
-  --example coupled_compartment_fire -- all 0.1 0.001 12 kinetic
+  --example coupled_compartment_fire -- all 0.1 0.001 12 kinetic be
 ```
 
 Arguments are `[all|closed|vented] [end_s=0.1] [max_dt_s=0.001]
-[solid_cells=12] [kinetic|frozen]`. CSV state histories go to stdout; work counts
+[solid_cells=12] [kinetic|frozen] [be|sdirk2]`. The default chemistry method is
+backward Euler (`be`). CSV state histories go to stdout; work counts
 and maximum conservation residuals go to stderr. The timestep is an upper bound:
 the original network and chemistry owners can retry shorter intervals. The
 example refuses an exhausted source domain or work budget instead of clipping
 temperatures, supplying seed species, or repairing physical balances.
+
+Select the optional two-stage SDIRK2 homogeneous reactor method with the sixth
+argument:
+
+```bash
+cargo run --release -p fs-airflow --features compartment-fire \
+  --example coupled_compartment_fire -- all 0.1 0.001 12 kinetic sdirk2
+```
+
+Both methods use the same original source, constrained Newton solver and
+physical acceptance checks. The CSV `method` column and summary log distinguish
+them. Frozen-chemistry mode does not advance the reactor, regardless of the
+selected method. SDIRK2 is a second-order reactor formula on smooth states; it
+does not upgrade the first-order surface/gas/network composition to global
+second order.
 
 ## Physical owners
 
@@ -117,16 +133,17 @@ cargo run --release -p fs-airflow --features compartment-fire \
 ```
 
 Gas temperature, opacity and optical paths are frozen over each surface-source
-interval. Chemistry uses the original first-order implicit method inside the
+interval. Chemistry uses the selected original implicit method inside the
 pressure solve. These compositions do not establish a globally second-order
 scheme or a fully discrete entropy theorem. The model is homogeneous ideal
 gas and authored condensed material, with no resolved flame structure,
 diffusive boundary layer, soot-production model, sprays, charring, pore flow,
 real-gas phase or experimental fire validation claim.
 
-## Executed native results
+## Executed backward-Euler baseline
 
-The following runs reached **0.1 s** with the optimized Rust binary, using the
+The following five runs used the default backward-Euler reactor and reached
+**0.1 s** with the optimized Rust binary, using the
 original production fire and chemistry modules through the focused native
 manifest. This is executed numerical integration evidence, not a full-workspace
 DSR gate, G2 validation, or comparison against an experimental fire. Each run
@@ -161,8 +178,8 @@ All runs used 100 accepted network intervals, except the smaller-step run's
 200. None needed a network halving. The maximum vent pressure residual was
 9.509e-6 Pa; the maximum surface-power residual over all five runs was
 4.318e-7 W. Chemistry counters describe the payloads of accepted network
-intervals; discarded pressure trials perform additional work. Detailed
-first-order stiff chemistry is still expensive, so use the optimized build.
+intervals; discarded pressure trials perform additional work. This
+backward-Euler stiff-chemistry baseline is expensive; use the optimized build.
 
 Halving the network step changes final gas temperature by 0.443407 K. That
 small bulk change does **not** establish convergence of trace species: final
@@ -174,3 +191,38 @@ resolve the early surface thermal transient well enough for an accurate
 surface-temperature or pyrolysis prediction. The runs expose that sensitivity;
 they do not claim a convergence order, a mesh-independent flame prediction,
 or that small balance residuals imply small modeling/discretization errors.
+
+## Executed optional SDIRK2 comparison
+
+The same source data, geometry, solid/wall owners and local chemistry controls
+were rerun with `kinetic sdirk2`. Both the closed and vented 0.1 s cases passed,
+followed by the single closed timestep refinement. All use 12 solid cells.
+Backward Euler remains the default; these are explicit method selections.
+
+| Case | Maximum step (s) | Gas T (K) | Pressure (Pa) | Gas H2O (kg) | Opacity (m⁻¹) | Accepted chemistry substeps | Rejected chemistry steps |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Closed, SDIRK2 | 0.001 | 1331.048718 | 137365.531842 | 1.620427281e-4 | 0.153803548 | 7310 | 106 |
+| Vented, SDIRK2 | 0.001 | 1295.158292 | 114614.581605 | 1.481052000e-4 | 0.144886016 | 6909 | 88 |
+| Closed, SDIRK2, smaller step | 0.0005 | 1330.605417 | 137322.731028 | 1.619125959e-4 | 0.153737145 | 9629 | 158 |
+
+At the original timestep, final temperature differs from the corresponding
+backward-Euler run by +0.000742 K closed and −0.000230 K vented. Accepted
+chemistry substeps drop from 79392 to 7310 closed and from 73235 to 6909
+vented. A SDIRK2 step contains more implicit stages, so a substep ratio is not
+a runtime-speedup measurement. The optimized two-case invocation took
+40.5295 s wall time in one observed run; the closed smaller-step invocation
+took 19.4146 s, excluding compilation. There was no paired wall-time benchmark
+of backward Euler, and these times are not a general performance guarantee.
+
+No network halvings were needed. Across these three SDIRK2 runs, maximum
+combined residuals were 4.670e-17 kg mass, 2.655e-10 J energy and 4.647e-14 mol
+elements. The vented pressure residual remained below 9.990e-6 Pa, and the
+largest surface-power residual was 2.191e-7 W. The same positivity, shared-clock,
+source-domain and physical-accounting checks remained active.
+
+The outer timestep sensitivity remains: halving it changes closed gas
+temperature by 0.443301 K, residual H2 from 3.2733e-9 to 9.9238e-9 kg, and OH
+from 3.9195e-7 to 5.2204e-7 kg. The higher-order reactor method does not resolve the
+surface/gas splitting or coarse solid mesh. No new global time-order,
+unconditional positivity, discrete entropy theorem or experimental-validation
+claim follows from selecting SDIRK2.
