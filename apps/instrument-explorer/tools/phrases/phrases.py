@@ -2,7 +2,8 @@
 
 usage: python3 phrases.py SRC_DESCRIPTIONS_DIR OUT_DIR
 
-Every input is derived from a committed description at eaf6e6539; nothing is tuned to a recording.
+Every input is derived from the committed descriptions under SRC_DESCRIPTIONS_DIR, a snapshot at one commit (the site's
+cello, double-bass and voice phrases of 2026-10-30: d49a124c2); nothing is tuned to a recording.
   bowed   one card per note: the open-string card with the string shortened to 2^(-n/12) of its length
           (a rigid stop, no finger), mode count scaled so the top mode stays where the open string's was,
           its own duration and a bow lift at the end. Double stops are two cards in one `ensemble` run.
@@ -105,11 +106,12 @@ RAMP = 0.08  # bow speed reaches its value in 80 ms (the committed cards use 150
 SET_DOWN = {"violin": (1, 1, 1, 1), "viola": (1, 1, 1, 1), "cello": (0.1, 0.7, 0.35, 1), "double-bass": (0.2, 0.1, 0.5, 0.2)}
 # Those lock times came from the audio, which cannot tell Helmholtz motion from a steady multiple slip. The solver's
 # own slip traces (one slip per period, slip time beta of the period) show the cello D string at 0.35 in multiple
-# slip for 0.9 s (D3 locks at 1.0 s) and the bass D and G strings out of Helmholtz motion for 0.3-0.5 s (bass F#2,
-# G2, A2, B2). On these strings the card's own onset leaves less time out of it in sum over their double-stop notes
-# (D3 0.25 s, F#2, G2, A2 0.15 s, B2 0.2 s; E3 0.5 s against 0.4 s; bass D2 0.3 s either way): the force constant from rest and the speed
-# ramp of the card (1 m/s^2, its sources.tsv bow_acceleration from Guettler 2002), the gesture its force was derived
-# for. Strings listed here keep the card's initial and first event as written; the others keep SET_DOWN and RAMP.
+# slip for 0.9 s (D3 locks at 1.0 s), and the bass D and G strings out of Helmholtz motion for 0.3-0.5 s (bass F#2,
+# G2, A2, B2). The card's own onset is the gesture its force was derived for: the force constant from rest and the
+# bow speed ramped at the card's 1 m/s^2 (its sources.tsv bow_acceleration, from Guettler 2002). Summed over those
+# strings' double-stop notes it leaves less time out of Helmholtz motion: D3 0.25 s, F#2, G2 and A2 0.15 s, B2 0.2 s
+# (E3 alone is longer, 0.5 s against 0.4 s, and bass D2 is 0.3 s either way). Strings listed here keep the card's
+# initial and first event as written; the others keep SET_DOWN and RAMP.
 CARD_ONSET = {"cello": (2,), "double-bass": (2, 3)}
 
 
