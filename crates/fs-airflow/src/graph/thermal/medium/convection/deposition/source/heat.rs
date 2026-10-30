@@ -6,6 +6,8 @@
 
 /// Complete heat transfer on the original explicit thermal timeline.
 pub mod observer;
+/// Source-resolved cooling on the shared material-memory/mechanical timeline.
+pub mod relaxation;
 
 use super::super::ConvectionSourceError;
 use super::links::{ResolvedLinkConvection, SourceConvectiveLink, evaluate_source_link_convection};

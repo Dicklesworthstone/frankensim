@@ -21,7 +21,10 @@ pub use material::thermal;
 pub use material::thermal::thermoelastic;
 
 use fs_math::c64::C64;
-use fs_solid::frame2d::{Frame2d, FrameMaterialDamping, FrameMode, FrameModeStatus};
+/// Original structural construction types for consumers of this coupled adapter.
+/// These are reexports, not replacement geometry, inertia or solver owners.
+pub use fs_solid::frame2d::{Frame2d, FrameMassFormulation, Geometry};
+use fs_solid::frame2d::{FrameMaterialDamping, FrameMode, FrameModeStatus};
 use fs_solid::SolidError;
 
 use crate::modal_acoustic_time::{
