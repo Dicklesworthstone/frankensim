@@ -18,6 +18,9 @@
 /// original material/finite-enthalpy transaction.
 pub mod trajectory;
 
+/// Static hold and driven directional friction with the original heat network.
+pub mod driven;
+
 use super::{
     FrictionHeatInput, FrictionHeatReport, FrictionHeatRoute, FrictionHeatStep,
     FrictionHeatTolerances,

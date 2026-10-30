@@ -26,21 +26,24 @@ use fs_mbd::tangential_friction::directional::trajectory::{
 use fs_tribo::tangential::elliptic::relaxation::EllipticRelaxationControls;
 
 #[derive(Debug)]
-pub enum DirectionalTrajectoryHeatError<E> {
+pub enum DirectionalTrajectoryHeatError<
+    E,
+    M = RigidDirectionalTrajectoryError<SourceRelaxationError>,
+> {
     Coupling(DirectionalHeatError<E>),
-    Mechanical(RigidDirectionalTrajectoryError<SourceRelaxationError>),
+    Mechanical(M),
 }
-impl<E> From<DirectionalHeatError<E>> for DirectionalTrajectoryHeatError<E> {
+impl<E, M> From<DirectionalHeatError<E>> for DirectionalTrajectoryHeatError<E, M> {
     fn from(error: DirectionalHeatError<E>) -> Self {
         Self::Coupling(error)
     }
 }
-impl<E> From<DepositionError> for DirectionalTrajectoryHeatError<E> {
+impl<E, M> From<DepositionError> for DirectionalTrajectoryHeatError<E, M> {
     fn from(error: DepositionError) -> Self {
         Self::Coupling(DirectionalHeatError::Thermal(error))
     }
 }
-impl<E> From<NewtonError> for DirectionalTrajectoryHeatError<E> {
+impl<E, M> From<NewtonError> for DirectionalTrajectoryHeatError<E, M> {
     fn from(error: NewtonError) -> Self {
         Self::Coupling(DirectionalHeatError::Newton(error))
     }
@@ -52,16 +55,21 @@ impl<E> From<RigidDirectionalTrajectoryError<SourceRelaxationError>>
         Self::Mechanical(error)
     }
 }
-impl<E: core::fmt::Debug> core::fmt::Display for DirectionalTrajectoryHeatError<E> {
+impl<E: core::fmt::Debug, M: core::fmt::Debug> core::fmt::Display
+    for DirectionalTrajectoryHeatError<E, M>
+{
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "sourced directional trajectory/heat: {self:?}")
     }
 }
-impl<E: std::error::Error + 'static> std::error::Error for DirectionalTrajectoryHeatError<E> {}
+impl<E: std::error::Error + 'static, M: core::fmt::Debug> std::error::Error
+    for DirectionalTrajectoryHeatError<E, M>
+{
+}
 
-/// One jointly accepted continuous mechanical phase and finite thermal endpoint.
-pub struct HeatedDirectionalTrajectoryReport<P> {
-    pub mechanical: RigidDirectionalTrajectoryReport,
+/// One jointly accepted mechanical phase and finite thermal endpoint.
+pub struct HeatedDirectionalTrajectoryReport<P, M = RigidDirectionalTrajectoryReport> {
+    pub mechanical: M,
     pub heat: FrictionHeatReport,
     pub phases: [EquilibriumPhaseState; 2],
     pub pressure_pa: f64,
@@ -73,17 +81,32 @@ pub struct HeatedDirectionalTrajectoryReport<P> {
     /// Unsigned travel of the native curve, not its net displacement norm.
     pub actual_distance_m: f64,
     pub source_motion_residual_m: f64,
-    /// Delta(K + H_cells) - Q_external; friction has one internal debit/credit.
+    /// Integrated tangent displacement; distinct from unsigned path.
+    pub net_slip_m: [f64; 2],
+    /// Work supplied through explicit mechanical drive, separate from heat.
+    pub external_mechanical_work_j: f64,
+    /// Delta(K + H_cells) - Q_external - W_drive; friction cancels internally.
     pub combined_energy_residual_j: f64,
 }
 
-struct StagedTrajectory<P> {
+/// Private bridge from the original mechanical owners to the one thermal solve.
+/// It is a transient work report, not another physical state or heat store.
+pub(super) struct DirectionalHeatMechanics<M> {
+    pub report: M,
+    pub kinetic_energy_change_j: f64,
+    pub external_work_j: f64,
+    pub dissipated_j: f64,
+    pub motion: [f64; 3],
+    pub net_slip_m: [f64; 2],
+    pub source_evaluations: usize,
+}
+
+struct StagedTrajectory<P, S, M> {
     bodies: [RigidBodyState; 2],
-    history: SourceThermalEllipticState,
-    mechanical: RigidDirectionalTrajectoryReport,
+    history: S,
+    mechanical: DirectionalHeatMechanics<M>,
     phases: [EquilibriumPhaseState; 2],
     source: P,
-    motion: [f64; 3],
 }
 
 /// Advance a sourced finite-body slide through arrest while closing finite heat.
@@ -122,6 +145,99 @@ pub fn apply_source_directional_trajectory_heat<'m, P, E>(
     ) -> Result<DirectionalHeatSource<P>, E>,
     gate: &CancelGate,
 ) -> Result<HeatedDirectionalTrajectoryReport<P>, DirectionalTrajectoryHeatError<E>> {
+    solve_directional_heat_phase(
+        bodies,
+        properties,
+        history,
+        law,
+        contact,
+        thermal,
+        route,
+        material,
+        dt_s,
+        controls,
+        energy_guess_j,
+        interface_temperature_guess_k,
+        |pair, properties, contact, history, dt, query| {
+            let mut motion = None;
+            let report = apply_rigid_directional_trajectory_with(
+                pair,
+                properties,
+                contact,
+                history,
+                dt,
+                controls.mechanical,
+                |accepted, input| {
+                    let source = law.relax_motion_consistent(
+                        accepted,
+                        input,
+                        query,
+                        controls.motion,
+                        relaxation,
+                        &mut || gate.is_requested(),
+                    )?;
+                    motion = Some((
+                        [
+                            source.queried_distance_m,
+                            source.actual_distance_m,
+                            source.distance_residual_m,
+                        ],
+                        source.evaluations,
+                    ));
+                    Ok::<_, SourceRelaxationError>((source.relaxation, source.state))
+                },
+                gate,
+            )?;
+            let (motion, source_evaluations) = motion.ok_or_else(|| {
+                RigidDirectionalTrajectoryError::Relaxation(SourceRelaxationError::Query(
+                    MotionQueryError::Invalid("missing source trajectory receipt"),
+                ))
+            })?;
+            Ok(DirectionalHeatMechanics {
+                kinetic_energy_change_j: report.kinetic_energy_change_j,
+                external_work_j: 0.0,
+                dissipated_j: report.relaxation.dissipated_j,
+                net_slip_m: report.relaxation.slip_increment_m,
+                report,
+                motion,
+                source_evaluations,
+            })
+        },
+        resolve,
+        gate,
+    )
+}
+
+/// Shared source/material, geometry, nonlinear and finite-heat transaction for
+/// unforced and driven original mechanics. Only the mechanics callback differs.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(super) fn solve_directional_heat_phase<'m, S: Clone, M, P, E, ME>(
+    bodies: &mut [RigidBodyState],
+    properties: &[MassProperties],
+    history: &mut S,
+    law: &SourceThermalEllipticCoulomb,
+    contact: RigidDirectionalContact,
+    thermal: &mut DepositionSimulation<'m>,
+    route: &FrictionHeatRoute,
+    material: DirectionalHeatMaterial<'_>,
+    dt_s: f64,
+    controls: DirectionalHeatSolve,
+    energy_guess_j: &[f64],
+    interface_temperature_guess_k: f64,
+    mechanics: impl Fn(
+        &mut [RigidBodyState; 2],
+        &[MassProperties; 2],
+        RigidDirectionalContact,
+        &mut S,
+        f64,
+        &QueryPoint,
+    ) -> Result<DirectionalHeatMechanics<M>, ME>,
+    resolve: impl Fn(
+        &DepositionSimulation<'m>,
+        [EquilibriumPhaseState; 2],
+    ) -> Result<DirectionalHeatSource<P>, E>,
+    gate: &CancelGate,
+) -> Result<HeatedDirectionalTrajectoryReport<P, M>, DirectionalTrajectoryHeatError<E, ME>> {
     let checkpoint = || {
         if gate.is_requested() {
             Err(DepositionError::Cancelled)
@@ -223,40 +339,23 @@ pub fn apply_source_directional_trajectory_heat<'m, P, E>(
                 resolved_contact.contact_temperature_k = Some(contact_temperature);
                 let mut next_bodies = initial_bodies;
                 let mut next_history = history.clone();
-                let mut motion = None;
-                let mechanical = apply_rigid_directional_trajectory_with(
+                let mechanical = mechanics(
                     &mut next_bodies,
                     &pair_properties,
                     resolved_contact,
                     &mut next_history,
                     dt_s,
-                    controls.mechanical,
-                    |accepted, input| {
-                        let resolved = law.relax_motion_consistent(
-                            accepted,
-                            input,
-                            &query,
-                            controls.motion,
-                            relaxation,
-                            &mut || gate.is_requested(),
-                        )?;
-                        source_evaluations.set(
-                            source_evaluations
-                                .get()
-                                .checked_add(resolved.evaluations)
-                                .ok_or(SourceRelaxationError::Query(MotionQueryError::Invalid(
-                                    "source evaluation count overflow",
-                                )))?,
-                        );
-                        motion = Some([
-                            resolved.queried_distance_m,
-                            resolved.actual_distance_m,
-                            resolved.distance_residual_m,
-                        ]);
-                        Ok::<_, SourceRelaxationError>((resolved.relaxation, resolved.state))
-                    },
-                    gate,
-                )?;
+                    &query,
+                )
+                .map_err(DirectionalTrajectoryHeatError::Mechanical)?;
+                source_evaluations.set(
+                    source_evaluations
+                        .get()
+                        .checked_add(mechanical.source_evaluations)
+                        .ok_or(DirectionalHeatError::Invalid(
+                            "source evaluation count overflow",
+                        ))?,
+                );
                 let DirectionalHeatSource {
                     conductivity_w_m_k,
                     transport,
@@ -266,8 +365,8 @@ pub fn apply_source_directional_trajectory_heat<'m, P, E>(
                     conductances_w_k,
                     payload,
                 } = transport;
-                Ok::<_, DirectionalTrajectoryHeatError<E>>(FrictionHeatInput {
-                    dissipated_j: mechanical.relaxation.dissipated_j,
+                Ok::<_, DirectionalTrajectoryHeatError<E, ME>>(FrictionHeatInput {
+                    dissipated_j: mechanical.dissipated_j,
                     conductivity_w_m_k,
                     transport: StepCoefficients {
                         sources_w,
@@ -278,9 +377,6 @@ pub fn apply_source_directional_trajectory_heat<'m, P, E>(
                             mechanical,
                             phases,
                             source: payload,
-                            motion: motion.ok_or(DirectionalHeatError::Invalid(
-                                "missing source trajectory receipt",
-                            ))?,
                         },
                     },
                 })
@@ -318,7 +414,8 @@ pub fn apply_source_directional_trajectory_heat<'m, P, E>(
     let heat = trial.report();
     let combined = finite(
         mechanical.kinetic_energy_change_j + heat.thermal.stored_energy_change_j
-            - heat.external_heat_j,
+            - heat.external_heat_j
+            - mechanical.external_work_j,
     )?;
     if combined.abs() > controls.combined_energy_tolerance_j {
         return Err(DirectionalHeatError::Invalid(
@@ -335,7 +432,12 @@ pub fn apply_source_directional_trajectory_heat<'m, P, E>(
     *history = staged.history;
     *thermal = next_thermal;
     Ok(HeatedDirectionalTrajectoryReport {
-        mechanical: staged.mechanical,
+        external_mechanical_work_j: staged.mechanical.external_work_j,
+        queried_distance_m: staged.mechanical.motion[0],
+        actual_distance_m: staged.mechanical.motion[1],
+        source_motion_residual_m: staged.mechanical.motion[2],
+        net_slip_m: staged.mechanical.net_slip_m,
+        mechanical: staged.mechanical.report,
         heat,
         phases: staged.phases,
         pressure_pa: pressure,
@@ -343,16 +445,13 @@ pub fn apply_source_directional_trajectory_heat<'m, P, E>(
         nonlinear: result.report,
         thermal_trials: trials.get(),
         source_evaluations: source_evaluations.get(),
-        queried_distance_m: staged.motion[0],
-        actual_distance_m: staged.motion[1],
-        source_motion_residual_m: staged.motion[2],
         combined_energy_residual_j: combined,
     })
 }
 
-fn trajectory_numerical<E>(
-    error: FiniteDifferenceError<DirectionalTrajectoryHeatError<E>>,
-) -> DirectionalTrajectoryHeatError<E> {
+fn trajectory_numerical<E, M>(
+    error: FiniteDifferenceError<DirectionalTrajectoryHeatError<E, M>>,
+) -> DirectionalTrajectoryHeatError<E, M> {
     match error {
         FiniteDifferenceError::Source(e) => e,
         FiniteDifferenceError::Invalid(message) => DirectionalHeatError::Invalid(message).into(),

@@ -10,8 +10,9 @@
 //! Poses, geometry and normal load remain fixed over this operation. Constitutive
 //! speed is phase-average unsigned speed, approaching instantaneous speed under
 //! time refinement. Temperature, path and original source receipts refresh at
-//! every accepted half phase. There is no imposed tangential drive or event
-//! scheduler; pending thermal events and unsupported source domains still refuse.
+//! every accepted half phase. The unforced and explicitly driven adapters share
+//! this controller and include mechanical supply separately from heat. Pending
+//! thermal events and unsupported source domains still refuse.
 
 use super::*;
 use fs_contact::interface_binding::thermal_friction::FrictionQueryAxisKind;
@@ -66,14 +67,14 @@ pub struct DirectionalMarchDefect {
     pub normalized: f64,
 }
 
-pub struct AcceptedDirectionalHeatPhase<P> {
+pub struct AcceptedDirectionalHeatPhase<P, M = RigidDirectionalTrajectoryReport> {
     pub start_s: f64,
     pub end_s: f64,
-    pub report: HeatedDirectionalTrajectoryReport<P>,
+    pub report: HeatedDirectionalTrajectoryReport<P, M>,
 }
 
-pub struct DirectionalHeatMarchReport<P> {
-    pub phases: Vec<AcceptedDirectionalHeatPhase<P>>,
+pub struct DirectionalHeatMarchReport<P, M = RigidDirectionalTrajectoryReport> {
+    pub phases: Vec<AcceptedDirectionalHeatPhase<P, M>>,
     pub attempts: usize,
     pub rejected_attempts: usize,
     /// Includes discarded full-step and rejected-comparison solve work.
@@ -85,6 +86,7 @@ pub struct DirectionalHeatMarchReport<P> {
     pub dissipated_j: f64,
     pub body_heat_j: [f64; 2],
     pub external_heat_j: f64,
+    pub external_mechanical_work_j: f64,
     pub kinetic_energy_change_j: f64,
     pub thermal_energy_change_j: f64,
     pub mechanical_energy_residual_j: f64,
@@ -94,9 +96,9 @@ pub struct DirectionalHeatMarchReport<P> {
 }
 
 #[derive(Debug)]
-pub enum DirectionalHeatMarchError<E> {
+pub enum DirectionalHeatMarchError<E, M = RigidDirectionalTrajectoryError<SourceRelaxationError>> {
     Invalid(&'static str),
-    Phase(DirectionalTrajectoryHeatError<E>),
+    Phase(DirectionalTrajectoryHeatError<E, M>),
     Dynamics(DynamicsError),
     Cancelled,
     AttemptBudget,
@@ -115,12 +117,17 @@ pub enum DirectionalHeatMarchError<E> {
         tolerance_m: f64,
     },
 }
-impl<E: core::fmt::Debug> core::fmt::Display for DirectionalHeatMarchError<E> {
+impl<E: core::fmt::Debug, M: core::fmt::Debug> core::fmt::Display
+    for DirectionalHeatMarchError<E, M>
+{
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "directional friction/heat march: {self:?}")
     }
 }
-impl<E: std::error::Error + 'static> std::error::Error for DirectionalHeatMarchError<E> {}
+impl<E: std::error::Error + 'static, M: core::fmt::Debug> std::error::Error
+    for DirectionalHeatMarchError<E, M>
+{
+}
 
 /// Advance a complete held-geometry span, publishing all original owners once.
 ///
@@ -150,6 +157,65 @@ pub fn advance_source_directional_heat<'m, P, E>(
     ) -> Result<DirectionalHeatSource<P>, E>,
     gate: &CancelGate,
 ) -> Result<DirectionalHeatMarchReport<P>, DirectionalHeatMarchError<E>> {
+    advance_directional_heat_phases(
+        bodies,
+        properties,
+        history,
+        law,
+        contact,
+        thermal,
+        duration_s,
+        phase_controls,
+        controls,
+        interface_temperature_guess_k,
+        |state| state,
+        |pair, properties, contact, state, thermal, dt, controls, guess, ti| {
+            apply_source_directional_trajectory_heat(
+                pair, properties, state, law, contact, thermal, route, material, dt, controls,
+                relaxation, guess, ti, &resolve, gate,
+            )
+        },
+        gate,
+    )
+}
+
+/// One refinement and atomic-publication owner for the unforced/driven phases.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(in crate::friction_heat::directional) fn advance_directional_heat_phases<
+    'm,
+    S: Clone,
+    M,
+    P,
+    E,
+    ME,
+>(
+    bodies: &mut [RigidBodyState],
+    properties: &[MassProperties],
+    history: &mut S,
+    law: &SourceThermalEllipticCoulomb,
+    contact: RigidDirectionalContact,
+    thermal: &mut DepositionSimulation<'m>,
+    duration_s: f64,
+    phase_controls: DirectionalHeatSolve,
+    controls: DirectionalMarchControls,
+    interface_temperature_guess_k: f64,
+    friction_history: fn(&S) -> &SourceThermalEllipticState,
+    advance_phase: impl Fn(
+        &mut [RigidBodyState; 2],
+        &[MassProperties; 2],
+        RigidDirectionalContact,
+        &mut S,
+        &mut DepositionSimulation<'m>,
+        f64,
+        DirectionalHeatSolve,
+        &[f64],
+        f64,
+    ) -> Result<
+        HeatedDirectionalTrajectoryReport<P, M>,
+        DirectionalTrajectoryHeatError<E, ME>,
+    >,
+    gate: &CancelGate,
+) -> Result<DirectionalHeatMarchReport<P, M>, DirectionalHeatMarchError<E, ME>> {
     let poll = || {
         if gate.is_requested() {
             Err(DirectionalHeatMarchError::Cancelled)
@@ -236,6 +302,7 @@ pub fn advance_source_directional_heat<'m, P, E>(
     let mut slip = [Sum::default(); 2];
     let mut heat = Sum::default();
     let mut external = Sum::default();
+    let mut drive_work = Sum::default();
     let mut body_heat = [Sum::default(); 2];
     while accepted_thermal.time_s() < target {
         poll()?;
@@ -275,13 +342,14 @@ pub fn advance_source_directional_heat<'m, P, E>(
         let mut fine_history = accepted_history.clone();
         let mut fine_thermal = accepted_thermal.clone();
         let mut phase = |b: &mut [RigidBodyState; 2],
-                         s: &mut SourceThermalEllipticState,
+                         s: &mut S,
                          h: &mut DepositionSimulation<'m>,
                          stop: f64,
                          ti: f64| {
             let dt = stop - h.time_s();
             let mut local_controls = phase_controls;
-            let speed_distance = controls.mean_speed_bracket_m_s.map(|v| v * dt);
+            let speed_domain = controls.mean_speed_bracket_m_s;
+            let mut speed_distance = speed_domain.map(|v| v * dt);
             if speed_distance.iter().any(|x| !x.is_finite())
                 || controls
                     .mean_speed_bracket_m_s
@@ -293,28 +361,39 @@ pub fn advance_source_directional_heat<'m, P, E>(
                     "source speed bracket has unrepresentable phase travel",
                 ));
             }
+            // Multiplication followed by division can reconstruct just outside
+            // a CLOSED source speed domain. Round the search interval inward
+            // according to the actual r/dt used by the source owner; do not
+            // clamp a queried speed or widen material applicability.
+            if speed_distance[0] / dt < speed_domain[0] {
+                speed_distance[0] = speed_distance[0].next_up();
+            }
+            if speed_distance[1] / dt > speed_domain[1] {
+                speed_distance[1] = speed_distance[1].next_down();
+            }
+            if speed_distance[0] > speed_distance[1] {
+                // A point/narrow speed domain may still admit one of the two
+                // adjacent distances through correctly rounded division.
+                let contains = |r: f64| {
+                    let speed = r / dt;
+                    speed >= speed_domain[0] && speed <= speed_domain[1]
+                };
+                if contains(speed_distance[1]) {
+                    speed_distance[0] = speed_distance[1];
+                } else if contains(speed_distance[0]) {
+                    speed_distance[1] = speed_distance[0];
+                } else {
+                    return Err(DirectionalHeatMarchError::Invalid(
+                        "source speed domain admits no represented phase travel",
+                    ));
+                }
+            }
             local_controls.motion.distance_bracket_m = [
                 phase_controls.motion.distance_bracket_m[0].max(speed_distance[0]),
                 phase_controls.motion.distance_bracket_m[1].min(speed_distance[1]),
             ];
-            let report = apply_source_directional_trajectory_heat(
-                b,
-                &props,
-                s,
-                law,
-                pair,
-                h,
-                route,
-                material,
-                dt,
-                local_controls,
-                relaxation,
-                &zero_energy,
-                ti,
-                &resolve,
-                gate,
-            )
-            .map_err(DirectionalHeatMarchError::Phase)?;
+            let report = advance_phase(b, &props, pair, s, h, dt, local_controls, &zero_energy, ti)
+                .map_err(DirectionalHeatMarchError::Phase)?;
             if h.time_s() != stop {
                 return Err(DirectionalHeatMarchError::Invalid(
                     "phase endpoints disagree with comparison clock",
@@ -326,7 +405,7 @@ pub fn advance_source_directional_heat<'m, P, E>(
             evaluations = evaluations.checked_add(report.source_evaluations).ok_or(
                 DirectionalHeatMarchError::Invalid("source evaluation count overflow"),
             )?;
-            Ok::<_, DirectionalHeatMarchError<E>>(report)
+            Ok::<_, DirectionalHeatMarchError<E, ME>>(report)
         };
         let coarse = phase(
             &mut coarse_bodies,
@@ -378,15 +457,22 @@ pub fn advance_source_directional_heat<'m, P, E>(
             distance.add(report.actual_distance_m);
             heat.add(report.heat.dissipated_j);
             external.add(report.heat.external_heat_j);
+            drive_work.add(report.external_mechanical_work_j);
             for i in 0..2 {
-                slip[i].add(report.mechanical.relaxation.slip_increment_m[i]);
+                slip[i].add(report.net_slip_m[i]);
                 body_heat[i].add(report.heat.body_heat_j[i]);
             }
         }
         checked(distance.value)?;
         checked(heat.value)?;
         checked(external.value)?;
-        let path_error = source_path_error(law, history, &fine_history, distance.value)?;
+        checked(drive_work.value)?;
+        let path_error = source_path_error(
+            law,
+            friction_history(history),
+            friction_history(&fine_history),
+            distance.value,
+        )?;
         if path_error > controls.source_path_tolerance_m {
             return Err(DirectionalHeatMarchError::SourcePath {
                 error_m: path_error,
@@ -456,9 +542,9 @@ pub fn advance_source_directional_heat<'m, P, E>(
         let new = &accepted_thermal.cells()[id];
         stored.add(old.mass_kg * (new.specific_h_j_kg - old.specific_h_j_kg));
     }
-    let mechanical_j = checked(kinetic.value + heat.value)?;
+    let mechanical_j = checked(kinetic.value + heat.value - drive_work.value)?;
     let thermal_j = checked(stored.value - external.value - heat.value)?;
-    let combined_j = checked(kinetic.value + stored.value - external.value)?;
+    let combined_j = checked(kinetic.value + stored.value - external.value - drive_work.value)?;
     if [mechanical_j, thermal_j, combined_j]
         .into_iter()
         .any(|x| x.abs() > controls.energy_tolerance_j)
@@ -469,7 +555,12 @@ pub fn advance_source_directional_heat<'m, P, E>(
             combined_j,
         });
     }
-    let source_path_error_m = source_path_error(law, history, &accepted_history, distance.value)?;
+    let source_path_error_m = source_path_error(
+        law,
+        friction_history(history),
+        friction_history(&accepted_history),
+        distance.value,
+    )?;
     let report = DirectionalHeatMarchReport {
         phases,
         attempts,
@@ -482,6 +573,7 @@ pub fn advance_source_directional_heat<'m, P, E>(
         dissipated_j: heat.value,
         body_heat_j: [checked(body_heat[0].value)?, checked(body_heat[1].value)?],
         external_heat_j: external.value,
+        external_mechanical_work_j: drive_work.value,
         kinetic_energy_change_j: checked(kinetic.value)?,
         thermal_energy_change_j: checked(stored.value)?,
         mechanical_energy_residual_j: mechanical_j,
@@ -510,7 +602,7 @@ impl Sum {
         self.value = next;
     }
 }
-fn checked<E>(x: f64) -> Result<f64, DirectionalHeatMarchError<E>> {
+fn checked<E, M>(x: f64) -> Result<f64, DirectionalHeatMarchError<E, M>> {
     if x.is_finite() {
         Ok(x)
     } else {
@@ -527,24 +619,24 @@ fn norm2(v: [f64; 2]) -> f64 {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn compare<P, E>(
+fn compare<P, M, E, ME>(
     old: [RigidBodyState; 2],
     coarse: [RigidBodyState; 2],
     fine: [RigidBodyState; 2],
     old_thermal: &DepositionSimulation<'_>,
     coarse_thermal: &DepositionSimulation<'_>,
     fine_thermal: &DepositionSimulation<'_>,
-    c: &HeatedDirectionalTrajectoryReport<P>,
-    a: &HeatedDirectionalTrajectoryReport<P>,
-    b: &HeatedDirectionalTrajectoryReport<P>,
+    c: &HeatedDirectionalTrajectoryReport<P, M>,
+    a: &HeatedDirectionalTrajectoryReport<P, M>,
+    b: &HeatedDirectionalTrajectoryReport<P, M>,
     tolerance: DirectionalMarchTolerance,
     gate: &CancelGate,
-) -> Result<DirectionalMarchDefect, DirectionalHeatMarchError<E>> {
+) -> Result<DirectionalMarchDefect, DirectionalHeatMarchError<E, ME>> {
     let mut out = DirectionalMarchDefect::default();
     let mut scale = |error: f64,
                      absolute: f64,
                      relative_scale: f64|
-     -> Result<(), DirectionalHeatMarchError<E>> {
+     -> Result<(), DirectionalHeatMarchError<E, ME>> {
         let denominator = checked(absolute + tolerance.relative * relative_scale)?;
         out.normalized = out.normalized.max(checked(error / denominator)?);
         Ok(())
@@ -600,10 +692,8 @@ fn compare<P, E>(
         tolerance.distance_m,
         c.actual_distance_m.max(fine_path),
     )?;
-    let coarse_slip = c.mechanical.relaxation.slip_increment_m;
-    let fine_slip = core::array::from_fn(|i| {
-        a.mechanical.relaxation.slip_increment_m[i] + b.mechanical.relaxation.slip_increment_m[i]
-    });
+    let coarse_slip = c.net_slip_m;
+    let fine_slip = core::array::from_fn(|i| a.net_slip_m[i] + b.net_slip_m[i]);
     out.net_slip_m = checked(norm2(core::array::from_fn(|i| {
         coarse_slip[i] - fine_slip[i]
     })))?;
@@ -622,12 +712,12 @@ fn compare<P, E>(
     Ok(out)
 }
 
-fn source_path_error<E>(
+fn source_path_error<E, M>(
     law: &SourceThermalEllipticCoulomb,
     initial: &SourceThermalEllipticState,
     next: &SourceThermalEllipticState,
     distance: f64,
-) -> Result<f64, DirectionalHeatMarchError<E>> {
+) -> Result<f64, DirectionalHeatMarchError<E, M>> {
     let mut error = 0.0_f64;
     for i in 0..2 {
         for axis in law.principal_sources()[i].query_axes() {

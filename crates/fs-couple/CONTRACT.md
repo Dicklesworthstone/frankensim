@@ -1,5 +1,46 @@
 # CONTRACT: fs-couple
 
+## Driven directional friction on the original finite thermal timeline
+
+`friction_heat::directional::driven::apply_source_directional_driven_heat`
+couples explicit external forces/torques, the full-tensor original rigid pair,
+source-owned directional static/kinetic friction and the existing finite
+enthalpy cells. The driven and unforced entry points share one material,
+geometry, source, nonlinear and heat transaction. They do not duplicate a
+thermal store, material law or interface heat-allocation rule.
+
+Original principal claims are evaluated at the solved surface/interface
+temperatures, load over actual contact area, mean unsigned speed and each
+owned accumulated path. Resting/Sliding mode is accepted state alongside body
+momenta and source history. Temperature-dependent static capacity can trigger
+breakaway. Finite-cell heat receives only physical frictional work; supplied
+mechanical work remains separate even when a stuck contact allows common-body
+acceleration. The joint balance is
+`delta(K + H_cells) - Q_external - W_mechanical`.
+
+`advance_source_directional_driven_heat` reuses the original adaptive
+full-step/two-half-step controller and retains original accepted transport
+payloads. Converted distance-search bounds are rounded inward when needed so
+reconstructed speeds stay inside the admitted closed source domain. The whole
+requested span publishes bodies, source history, mode and thermal state once.
+Compensated drive-work totals enter the independent
+whole-span mechanical and combined energy gates. A late source, numerical,
+budget or cancellation failure leaves every original owner unchanged.
+
+Phase tests cover static common-body work without heat, independently
+calculated breakaway work and body/cell energy, original temperature/speed/path
+feedback, zero-load acceleration with conduction, and atomic refusal/retry.
+Driven march tests cover analytic acceleration and arrest/hold, refinement of
+a changing source law, and rollback after successful private phases.
+
+Poses, inertia, arms, frame, load and explicit wrenches remain held during a
+span; normal recoil is reported, not silently constrained. General curved
+native motion is a bounded first-order discretization with its own
+`maximum_step_s`. Outer phase refinement controls source/thermal sampling and
+can share a fixed inner discretization error; both axes require refinement.
+These local estimates do not certify global accuracy, discontinuous branch
+uniqueness, spatial heat resolution or material calibration.
+
 ## Adaptive time refinement of sourced directional friction and heat
 
 `friction_heat::directional::trajectory::march::advance_source_directional_heat`
@@ -36,8 +77,8 @@ phase reports retain their exact start/end times and source transport payloads.
 This is local step-doubling error estimation for a fixed-pose, fixed-load,
 endpoint thermal/source discretization. It does not certify global error,
 source-root uniqueness, spatial thermal convergence or discontinuous-law
-convergence; no external drive, normal dynamics or thermal event scheduler is
-added. G1/G3/G4 tests include three time rungs against an independent continuous
+convergence. This unforced entry point adds no drive, normal dynamics or thermal
+event scheduler. G1/G3/G4 tests include three time rungs against an independent continuous
 temperature-dependent friction ODE, adaptive arrest followed by conduction,
 source-speed domain admission and whole-span rollback/retry after late source,
 cancellation and work-budget failures.

@@ -33,6 +33,8 @@ use fs_tribo::partial_slip::TangentFrame;
 use fs_tribo::{InputAuthority, TangentialLaw, TangentialSolveConfig};
 use std::collections::BTreeMap;
 
+#[path = "rigid_directional_heat/driven.rs"]
+mod driven;
 #[path = "rigid_directional_heat/trajectory.rs"]
 mod trajectory;
 
