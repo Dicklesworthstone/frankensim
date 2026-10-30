@@ -346,3 +346,6 @@ impl CoupledModalSystem {
         }
     }
 }
+
+/// Positive original-source material heat on the complete held-force trajectory.
+pub mod heat;
