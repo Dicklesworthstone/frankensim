@@ -119,8 +119,8 @@ fn binding<'a>(
     }
 }
 
-fn specimen(cards: &[MaterialCard; 2], interface: &InterfaceSystemCard) -> PlanarConduction {
-    let mesh = TriComplex2::from_indexed_triangles(
+fn contact_mesh() -> TriComplex2 {
+    TriComplex2::from_indexed_triangles(
         "two original bodies with matching finite-resistance traces",
         vec![
             [0.0, 0.0],
@@ -135,7 +135,11 @@ fn specimen(cards: &[MaterialCard; 2], interface: &InterfaceSystemCard) -> Plana
         vec![[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7]],
         Metric2::planar(1.0).unwrap(),
     )
-    .unwrap();
+    .unwrap()
+}
+
+fn specimen(cards: &[MaterialCard; 2], interface: &InterfaceSystemCard) -> PlanarConduction {
+    let mesh = contact_mesh();
     let sources = [0, 0, 1, 1]
         .map(|i| {
             resolve_conductor_state_with_basis(
@@ -185,6 +189,24 @@ fn g1_two_sided_contact_heat_and_temperature_feedback_match_independent_balance(
         let original = specimen(&cards, &interface);
         let context = point(300.0);
         let surface_context = interface_context(300.0);
+        // Re-querying pins the same physical claim; its policy receipt changes.
+        // Admission must check source/state identity without requiring that
+        // an initial SingleClaimOnly receipt already be a pinned receipt.
+        let pinned = original.contacts()[0]
+            .source
+            .at_query_point(&interface, &surface_context)
+            .unwrap();
+        assert_ne!(
+            pinned.resolved().identity(),
+            original.contacts()[0].source.resolved().identity()
+        );
+        assert_eq!(
+            pinned.resolved().properties()[0].answer().receipt.selected,
+            original.contacts()[0].source.resolved().properties()[0]
+                .answer()
+                .receipt
+                .selected
+        );
         let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
         let cells = cells(&cards, &curves, &context, &key);
         let layout = network(&cells);
@@ -480,6 +502,40 @@ fn g4_contact_source_partition_support_and_cancellation_refuse_transactionally()
         ),
         Err(CircuitEnthalpyError::Cancelled)
     ));
+    // Equal resistance is insufficient: the original surface temperatures
+    // still have to match the actual receiving bodies exactly.
+    let stale_context = surface_context.clone().with("Ta", 300.005).unwrap();
+    let stale = PlanarConduction::new_with_contacts(
+        original.mesh().clone(),
+        original.conductors().to_vec(),
+        vec![ConductionContact {
+            source: source.at_query_point(&interface, &stale_context).unwrap(),
+            ..original.contacts()[0].clone()
+        }],
+        limits(),
+        &mut || false,
+    )
+    .unwrap();
+    near(
+        stale.contacts()[0].source.resistance_ohm_m2(),
+        source.resistance_ohm_m2(),
+    );
+    assert!(
+        layout
+            .step_contact_candidate(
+                &thermal,
+                0.5,
+                &stale,
+                drive,
+                &contacts,
+                limits(),
+                field_controls(),
+                config(),
+                &[0.0; 2],
+                || false,
+            )
+            .is_err()
+    );
     assert_eq!(thermal.energy_j().to_bits(), energy.to_bits());
     assert_eq!(thermal.time_s(), 0.0);
     assert_eq!(original.contacts()[0].source, source);
@@ -502,4 +558,393 @@ fn g4_contact_source_partition_support_and_cancellation_refuse_transactionally()
             || false,
         )
         .unwrap();
+}
+
+#[test]
+fn g1_contact_phase_fractions_follow_latent_enthalpy_at_unchanged_temperature() {
+    use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve};
+    use fs_qty::Dims;
+    use fs_thermal::enthalpy::{
+        CellGeometry, DepositedCell, DepositionBudget, DepositionSimulation, Event, StepConfig,
+        ThermalLaw, TimedEvent,
+    };
+    let scalar = QuantitySpec::dimensional(Dims::NONE);
+    let bulk_point = QueryPoint::new()
+        .with_quantity("T", QuantitySpec::dimensional(Temperature::DIMS), 310.0)
+        .unwrap()
+        .with_quantity("f", scalar, 0.2)
+        .unwrap();
+    let mut claims = ClaimSet::new();
+    claims
+        .insert_claim(PropertyClaim {
+            key: PropertyKey::new(
+                "electrical_resistivity",
+                ElectricalPropertyBasis::Resistivity.dimensions(),
+            ),
+            value: PropertyValue::Curve {
+                abscissa: "f".into(),
+                abscissa_dims: Dims::NONE,
+                knots: vec![(0.0, 1.0), (1.0, 1.0)],
+                dims: ElectricalPropertyBasis::Resistivity.dimensions(),
+            },
+            validity: ValidityDomain::unconstrained()
+                .with_quantity(
+                    "T",
+                    QuantitySpec::dimensional(Temperature::DIMS),
+                    300.0,
+                    350.0,
+                )
+                .with_quantity("f", scalar, 0.0, 1.0),
+            interpolation: InterpolationPolicy::LinearInside,
+            uncertainty: UncertaintyModel::Unstated,
+            observations: vec![],
+            provenance: Provenance {
+                source: "synthetic constant-density phase conductor".into(),
+                license: "CC0-1.0".into(),
+                artifact: None,
+            },
+        })
+        .unwrap();
+    let card = MaterialCard::assemble(
+        fs_matdb::MaterialStateId {
+            chemistry: "synthetic".into(),
+            phase: "confined solid-liquid".into(),
+            process: "authored test".into(),
+            revision: 0,
+        },
+        claims,
+        vec![],
+    )
+    .unwrap();
+    let cards = [card.clone(), card];
+    let curve = EquilibriumEnthalpyPhaseCurve::try_new(
+        cards[0].content_hash(),
+        [
+            (0.0, 300.0, 0.0),
+            (20.0, 310.0, 0.0),
+            (120.0, 310.0, 1.0),
+            (200.0, 350.0, 1.0),
+        ]
+        .map(|(h, t, f)| EnthalpyPhaseKnot {
+            specific_enthalpy_j_kg: h,
+            temperature_k: t,
+            liquid_mass_fraction: f,
+            bulk_density_kg_m3: 1.0,
+        })
+        .to_vec(),
+    )
+    .unwrap();
+    let events = [CellId(30), CellId(10)]
+        .into_iter()
+        .enumerate()
+        .map(|(i, id)| TimedEvent {
+            time_s: 0.0,
+            event: Event::Birth(DepositedCell {
+                id,
+                segment_id: i as u64,
+                body_id: i as u64,
+                material_id: MaterialId(i as u64),
+                mass_kg: 1.0,
+                specific_h_j_kg: 40.0,
+                geometry: CellGeometry {
+                    start_m: [i as f64, 0.0, 0.0],
+                    end_m: [i as f64 + 1.0, 0.0, 0.0],
+                    volume_m3: 1.0,
+                    surface_area_m2: 6.0,
+                },
+                boundary: common::boundary(),
+            }),
+        })
+        .collect();
+    let thermal = DepositionSimulation::new(
+        events,
+        &[
+            (MaterialId(0), &curve as &dyn ThermalLaw),
+            (MaterialId(1), &curve as &dyn ThermalLaw),
+        ],
+        DepositionBudget {
+            max_cells: 2,
+            max_links: 0,
+            max_events: 2,
+            max_substeps: 100,
+        },
+    )
+    .unwrap()
+    .advance_to(
+        0.0,
+        StepConfig {
+            max_dt_s: 0.1,
+            energy_tolerance_j: 1e-8,
+        },
+        || Ok(()),
+    )
+    .unwrap()
+    .0;
+    let mut claims = ClaimSet::new();
+    claims
+        .insert_claim(PropertyClaim {
+            key: PropertyKey::new(
+                ELECTRICAL_CONTACT_RESISTANCE_PROPERTY,
+                ELECTRICAL_CONTACT_RESISTANCE_DIMS,
+            ),
+            value: PropertyValue::Curve {
+                abscissa: "fa".into(),
+                abscissa_dims: Dims::NONE,
+                knots: vec![(0.0, 1.0), (1.0, 3.0)],
+                dims: ELECTRICAL_CONTACT_RESISTANCE_DIMS,
+            },
+            validity: ValidityDomain::unconstrained()
+                .with("Ta", 300.0, 350.0)
+                .with("Tb", 300.0, 350.0)
+                .with_quantity("fa", scalar, 0.0, 1.0)
+                .with_quantity("fb", scalar, 0.0, 1.0),
+            interpolation: InterpolationPolicy::LinearInside,
+            uncertainty: UncertaintyModel::Unstated,
+            observations: vec![],
+            provenance: Provenance {
+                source: "synthetic phase-dependent interface".into(),
+                license: "CC0-1.0".into(),
+                artifact: None,
+            },
+        })
+        .unwrap();
+    let interface = InterfaceSystemCard::assemble(
+        SurfaceSpec {
+            material: cards[0].id().clone(),
+            texture_frame: "A".into(),
+        },
+        SurfaceSpec {
+            material: cards[1].id().clone(),
+            texture_frame: "B".into(),
+        },
+        SystemContext {
+            medium: "confined material interface".into(),
+            third_body: None,
+            environment: "fixed".into(),
+            history: "fixed".into(),
+        },
+        claims,
+        vec![],
+    )
+    .unwrap();
+    let ip = interface_context(310.0)
+        .with_quantity("fa", scalar, 0.2)
+        .unwrap()
+        .with_quantity("fb", scalar, 0.2)
+        .unwrap();
+    let conductor = resolve_conductor_state_with_basis(
+        &cards[0],
+        &bulk_point,
+        MaterialPropertySelection::SingleClaimOnly,
+        ElectricalPropertyBasis::Resistivity,
+    )
+    .unwrap()
+    .with_liquid_mass_fraction_axis("f")
+    .unwrap();
+    let contacts = vec![ConductionContact {
+        first_vertices: [1, 2],
+        second_vertices: [4, 7],
+        source: resolve_electrical_interface_state(
+            &interface,
+            &ip,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap(),
+    }];
+    // The original fixed-external API must still refuse unowned phase response.
+    assert!(
+        PlanarConduction::new_with_contacts(
+            contact_mesh(),
+            vec![conductor.clone(); 4],
+            contacts.clone(),
+            limits(),
+            &mut || false
+        )
+        .is_err()
+    );
+    let problem = PlanarConduction::new_with_phase_contacts(
+        contact_mesh(),
+        vec![conductor; 4],
+        contacts,
+        vec![[Some("fa".into()), Some("fb".into())]],
+        limits(),
+        &mut || false,
+    )
+    .unwrap();
+    let cells = [CellId(30), CellId(10)]
+        .into_iter()
+        .enumerate()
+        .map(|(i, cell)| MaterialCell {
+            cell,
+            material_id: MaterialId(i as u64),
+            curve: &curve,
+            point: ThermalMaterialPoint {
+                material: &cards[i],
+                context: &bulk_point,
+                temperature_axis: "T",
+                liquid_fraction_axis: Some("f"),
+            },
+            conductivity: None,
+        })
+        .collect::<Vec<_>>();
+    let network = ConductionThermalNetwork {
+        cells: &cells,
+        links: &[],
+        regions: &REGIONS,
+        volume_tolerance_m3: 1e-12,
+    };
+    let mut contact_binding = binding(&cards, &interface, &ip, 0.25);
+    contact_binding.point.liquid_fraction_axes = [Some("fa"), Some("fb")];
+    let next = network
+        .step_contact_candidate(
+            &thermal,
+            0.5,
+            &problem,
+            ConductionDrive::Current {
+                positive: &[5, 6],
+                negative: &[0, 3],
+                current_a: 2.0,
+            },
+            &[contact_binding],
+            limits(),
+            field_controls(),
+            config(),
+            &[0.0; 2],
+            || false,
+        )
+        .unwrap();
+    // Independent latent balance: 100*(fa-.2)=2*(1+.25*(1+2*fa)).
+    let fa = 22.5 / 99.0;
+    let fb = 0.2 + (3.5 + 3.0 * fa) / 100.0;
+    let resistance = 1.0 + 2.0 * fa;
+    near(next.thermal().temperature_k(CellId(30)).unwrap(), 310.0);
+    near(next.thermal().temperature_k(CellId(10)).unwrap(), 310.0);
+    let source = next.problem().contacts()[0].source.resolved();
+    near(source.state_coordinate("fa").unwrap(), fa);
+    near(source.state_coordinate("fb").unwrap(), fb);
+    near(
+        next.report().electrical.contacts[0].response.power_w,
+        4.0 * resistance,
+    );
+    near(
+        next.report().electrical.voltage_v[5],
+        2.0 * (2.0 + resistance),
+    );
+    near(
+        next.thermal().energy_j() - thermal.energy_j(),
+        100.0 * (fa + fb - 0.4),
+    );
+    near(next.report().deposited_joule_j, 2.0 * (2.0 + resistance));
+    let mut missing = contact_binding;
+    missing.point.liquid_fraction_axes = [Some("fa"), None];
+    assert!(
+        network
+            .step_contact_candidate(
+                &thermal,
+                0.5,
+                &problem,
+                ConductionDrive::Current {
+                    positive: &[5, 6],
+                    negative: &[0, 3],
+                    current_a: 2.0
+                },
+                &[missing],
+                limits(),
+                field_controls(),
+                config(),
+                &[0.0; 2],
+                || false
+            )
+            .is_err()
+    );
+
+    // The original circuit path must retain exactly the same phase ownership.
+    // Independent scalar balance for a 1 F capacitor starting at 9 C:
+    // I_mid=9/(R_total+dt/2), R_total=3+2*fa, dt=0.5 s.
+    // Only the surface-A fraction enters its latent-energy balance.
+    let residual = |f: f64| {
+        let current = 9.0 / (3.25 + 2.0 * f);
+        100.0 * (f - 0.2) - 0.5 * current * current * (1.25 + 0.5 * f)
+    };
+    let (mut low, mut high) = (0.2, 0.5);
+    assert!(residual(low) < 0.0 && residual(high) > 0.0);
+    for _ in 0..64 {
+        let middle = f64::midpoint(low, high);
+        if residual(middle) < 0.0 {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    let fa = f64::midpoint(low, high);
+    let resistance = 1.0 + 2.0 * fa;
+    let current = 9.0 / (2.25 + resistance);
+    let charge = 9.0 - 0.5 * current;
+    let fb = 0.2 + 0.5 * current * current * (1.0 + 0.75 * resistance) / 100.0;
+    let circuit = ConductionCircuit::new(
+        problem,
+        CircuitGraph {
+            node_count: 2,
+            branches: vec![
+                (1, 0, Branch::Resistor { ohms: 999.0 }),
+                (1, 0, Branch::Capacitor { farads: 1.0 }),
+            ],
+            transformers: vec![],
+        },
+        ConductionCircuitTerminal {
+            branch: 0,
+            positive: vec![5, 6],
+            negative: vec![0, 3],
+        },
+        0.0,
+        vec![],
+        vec![9.0],
+        &[],
+        field_controls(),
+        || false,
+    )
+    .unwrap();
+    let discharged = network
+        .step_contact_circuit_candidate(
+            &thermal,
+            0.5,
+            &circuit,
+            &[],
+            &[],
+            &[contact_binding],
+            limits(),
+            field_controls(),
+            config(),
+            &[0.0; 2],
+            || false,
+        )
+        .unwrap();
+    near(discharged.circuit().charges_c()[0], charge);
+    near(
+        discharged.thermal().temperature_k(CellId(30)).unwrap(),
+        310.0,
+    );
+    near(
+        discharged.thermal().temperature_k(CellId(10)).unwrap(),
+        310.0,
+    );
+    let source = discharged.circuit().problem().contacts()[0]
+        .source
+        .resolved();
+    near(source.state_coordinate("fa").unwrap(), fa);
+    near(source.state_coordinate("fb").unwrap(), fb);
+    near(
+        discharged.report().electrical.spatial.contacts[0]
+            .response
+            .power_w,
+        current * current * resistance,
+    );
+    near(
+        discharged.report().deposited_joule_j,
+        0.5 * (81.0 - charge * charge),
+    );
+    near(
+        discharged.thermal().energy_j() - thermal.energy_j(),
+        100.0 * (fa + fb - 0.4),
+    );
 }

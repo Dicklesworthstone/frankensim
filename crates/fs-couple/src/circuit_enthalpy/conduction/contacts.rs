@@ -4,6 +4,7 @@
 use super::*;
 use fs_em::conduction::{ConductionContact, ConductionContactResponse};
 use fs_material::electrical_interface::ELECTRICAL_CONTACT_RESISTANCE_PROPERTY;
+use fs_material::state_point::ResolvedInterfaceStatePoint;
 use fs_material::thermal::interface::ThermalInterfacePoint;
 
 /// Explicit thermal ownership of one original surface contact. Contact indices
@@ -33,6 +34,27 @@ pub struct ConductionContactHeat {
 pub(super) struct PreparedContacts<'a, 'm> {
     bindings: Vec<&'a ConductionContactThermal<'m>>,
     cells: Vec<[CellId; 2]>,
+}
+
+// A refresh pins the selected claim, changing the selection receipt even at
+// the same state. Compare its physical context and selected sources, retaining
+// both original receipts rather than treating policy equality as physics.
+fn same_interface(a: &ResolvedInterfaceStatePoint, b: &ResolvedInterfaceStatePoint) -> bool {
+    a.card_identity() == b.card_identity()
+        && a.surface_materials() == b.surface_materials()
+        && a.axis_quantities() == b.axis_quantities()
+        && a.query_point().len() == b.query_point().len()
+        && a.query_point()
+            .iter()
+            .zip(b.query_point())
+            .all(|((n, v), (m, w))| n == m && v.to_bits() == w.to_bits())
+        && a.properties().len() == b.properties().len()
+        && a.properties().iter().zip(b.properties()).all(|(p, q)| {
+            p.requirement() == q.requirement()
+                && p.source_axes() == q.source_axes()
+                && p.answer().receipt.selected == q.answer().receipt.selected
+                && p.value_si().to_bits() == q.value_si().to_bits()
+        })
 }
 
 impl<'a, 'm> PreparedContacts<'a, 'm> {
@@ -96,6 +118,15 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
         let mut cells = Vec::with_capacity(bindings.len());
         for (contact, binding) in problem.contacts().iter().zip(&bindings) {
             check(cancel)?;
+            if problem.contact_liquid_mass_fraction_axes()[binding.contact]
+                .each_ref()
+                .map(|axis| axis.as_deref())
+                != binding.point.liquid_fraction_axes
+            {
+                return Err(invalid(
+                    "contact phase coordinates must retain the original native source ownership",
+                ));
+            }
             let mut receivers = [CellId(0); 2];
             for (side, vertices) in [contact.first_vertices, contact.second_vertices]
                 .into_iter()
@@ -127,11 +158,11 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
         }
         let prepared = Self { bindings, cells };
         let refreshed = prepared.refresh(problem, accepted, cancel)?;
-        if refreshed
-            .iter()
-            .zip(problem.contacts())
-            .any(|(new, old)| new != old)
-        {
+        if refreshed.iter().zip(problem.contacts()).any(|(new, old)| {
+            new.first_vertices != old.first_vertices
+                || new.second_vertices != old.second_vertices
+                || !same_interface(new.source.resolved(), old.source.resolved())
+        }) {
             return Err(invalid(
                 "accepted electrical contacts must match both actual thermal states and original source context",
             ));
@@ -259,6 +290,9 @@ impl ConductionThermalNetwork<'_> {
     /// every finite-cell enthalpy through the original nonlinear residual.
     /// Interface temperature/phase axes and fixed pressure/history come from
     /// each explicit `ThermalInterfacePoint`; original source choices stay pinned.
+    /// Fraction axes must match the native `new_with_phase_contacts` ownership;
+    /// their exact values come from the original caloric charts, even when
+    /// temperatures remain constant throughout a latent-heat plateau.
     /// All bulk and surface Joule heat enters the receiving bodies exactly once.
     /// The accepted field and thermal history must be published together.
     ///

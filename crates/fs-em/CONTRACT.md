@@ -491,6 +491,20 @@ is supported. `tests/conduction/contacts.rs` checks analytic series resistance,
 pressure and bulk substitutions, current-controlled contact connectivity,
 nonuniform surface quadrature, total Joule balance and unsupported interfaces.
 
+`new_with_phase_contacts` retains that SAME operator and admits only explicitly
+owned liquid-mass-fraction axes in addition to its original fixed-external
+conditions. Each declared fraction is an existing dimensional scalar in [0,1];
+aliases, missing/type-mismatched axes and unowned response/applicability refuse.
+Axis rows follow their original ordered traces through canonical sorting and
+remain inspectable on the returned problem. The unchanged `new_with_contacts`
+entry does not acquire permission to freeze arbitrary phase or field axes.
+The composing thermal owner supplies the exact phase from its original enthalpy
+chart and refreshes pinned source snapshots. `fs-couple` now provides that
+explicit spatial-contact/enthalpy composition, including two-sided surface heat;
+the bulk-only adapters above still refuse contact losses they do not own.
+No phase fraction is inferred from temperature, and no phase-interface law,
+motion or automatic electrical mixing rule is invented by this constructor.
+
 Existing mesh/assembly and Krylov budgets bound work; cancellation is polled
 during material admission, assembly, elimination, field/heat recovery and branch
 reconstruction. Refusal never modifies an accepted source or field. G1/G3/G4

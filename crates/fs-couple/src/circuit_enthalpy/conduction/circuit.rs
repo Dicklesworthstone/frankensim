@@ -730,10 +730,11 @@ impl ConductionThermalNetwork<'_> {
                     .map_err(material)?;
                 let sources = self.materials_at(problem, &coefficients.source, &routes, &cancel)?;
                 let contact_sources = contacts.refresh(problem, &coefficients.source, &cancel)?;
-                let next = PlanarConduction::new_with_contacts(
+                let next = PlanarConduction::new_with_phase_contacts(
                     problem.mesh().clone(),
                     sources,
                     contact_sources,
+                    problem.contact_liquid_mass_fraction_axes().to_vec(),
                     assembly,
                     &mut || (*cancel.borrow_mut())(),
                 )

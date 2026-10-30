@@ -9,6 +9,7 @@ use crate::planar::{MagneticError, PlanarMagnetostatics};
 use fs_material::electrical_interface::{
     ELECTRICAL_CONTACT_RESISTANCE_PROPERTY, ResolvedElectricalInterface,
 };
+use fs_qty::{Dims, QuantitySpec};
 use fs_sparse::Coo;
 
 /// One ordered, zero-thickness material interface. The two original exterior
@@ -51,11 +52,45 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
     pub fn new_with_contacts(
         mesh: TriComplex2,
         conductors: Vec<C>,
-        mut contacts: Vec<ConductionContact>,
+        contacts: Vec<ConductionContact>,
         limits: WeightedAssemblyLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, ConductionError> {
         poll(cancelled)?;
+        if contacts.len() > limits.max_triplets / 16 {
+            return Err(ConductionError::Invalid(
+                "electrical contacts exceed the declared triplet capacity",
+            ));
+        }
+        let axes = vec![[None, None]; contacts.len()];
+        Self::new_with_phase_contacts(mesh, conductors, contacts, axes, limits, cancelled)
+    }
+
+    /// The SAME native surface operator with explicit externally owned liquid
+    /// mass fractions on either ordered side. Each declared coordinate must be
+    /// present as a dimensional scalar in [0,1]. Every other source response
+    /// and applicability coordinate retains the fixed-external admission rule.
+    ///
+    /// A thermal/phase owner must resolve these exact values from its accepted
+    /// caloric state before assembly, then refresh the same sources on every
+    /// proposed change. This method neither determines phase from temperature
+    /// nor adds phase mixing, motion, storage or an electrical source policy.
+    /// Axis rows correspond to INPUT contacts and are sorted with their traces;
+    /// returned axes use the same canonical order as `contacts()`.
+    pub fn new_with_phase_contacts(
+        mesh: TriComplex2,
+        conductors: Vec<C>,
+        contacts: Vec<ConductionContact>,
+        liquid_mass_fraction_axes: Vec<[Option<String>; 2]>,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ConductionError> {
+        poll(cancelled)?;
+        if liquid_mass_fraction_axes.len() != contacts.len() {
+            return Err(ConductionError::Invalid(
+                "one phase-coordinate row per electrical contact required",
+            ));
+        }
         let triplets = mesh.faces().len().checked_mul(9).and_then(|bulk| {
             contacts
                 .len()
@@ -79,12 +114,17 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
             .iter()
             .map(|edge| (edge_key(edge.oriented_vertices.map(|v| v as usize)), edge))
             .collect();
-        contacts.sort_by_key(|contact| {
+        let mut bound: Vec<_> = contacts
+            .into_iter()
+            .zip(liquid_mass_fraction_axes)
+            .collect();
+        bound.sort_by_key(|(contact, _)| {
             (
                 edge_key(contact.first_vertices),
                 edge_key(contact.second_vertices),
             )
         });
+        let (contacts, liquid_mass_fraction_axes): (Vec<_>, Vec<_>) = bound.into_iter().unzip();
         let n = problem.mesh.vertices().len();
         let mut matrix = Coo::new(n, n);
         for row in 0..n {
@@ -94,7 +134,7 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
                 matrix.push(row, column, value);
             }
         }
-        for contact in &contacts {
+        for (contact, axes) in contacts.iter().zip(&liquid_mass_fraction_axes) {
             poll(cancelled)?;
             let first = edge_key(contact.first_vertices);
             let second = edge_key(contact.second_vertices);
@@ -165,11 +205,35 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
                         "contact source must match both ordered adjacent material states",
                     )
                 })?;
+            let mut owned: Vec<(&str, QuantitySpec)> = Vec::new();
+            for axis in axes.iter().flatten() {
+                if axis.trim().is_empty()
+                    || owned.iter().any(|(previous, _)| *previous == axis.as_str())
+                    || contact.source.resolved().axis_quantities().get(axis)
+                        != Some(&QuantitySpec::dimensional(Dims::NONE))
+                    || !contact
+                        .source
+                        .resolved()
+                        .state_coordinate(axis)
+                        .is_some_and(|value| value.is_finite() && (0.0..=1.0).contains(&value))
+                {
+                    return Err(ConductionError::Invalid(
+                        "owned contact phase needs a unique existing dimensional mass fraction in [0,1]",
+                    ));
+                }
+                owned.push((axis.as_str(), QuantitySpec::dimensional(Dims::NONE)));
+            }
             if !contact
                 .source
                 .resolved()
                 .property(ELECTRICAL_CONTACT_RESISTANCE_PROPERTY)
-                .is_some_and(|property| property.is_static_at_fixed_external_conditions())
+                .is_some_and(|property| {
+                    if owned.is_empty() {
+                        property.is_static_at_fixed_external_conditions()
+                    } else {
+                        property.has_only_owned_coordinates_and_fixed_external_conditions(&owned)
+                    }
+                })
             {
                 return Err(ConductionError::Invalid(
                     "contact resistance requires static source support at fixed external conditions",
@@ -223,6 +287,7 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
             }
         }
         problem.contacts = contacts;
+        problem.contact_liquid_mass_fraction_axes = liquid_mass_fraction_axes;
         poll(cancelled)?;
         Ok(problem)
     }
@@ -230,6 +295,12 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
     /// Original ordered source bindings in canonical first/second edge order.
     pub fn contacts(&self) -> &[ConductionContact] {
         &self.contacts
+    }
+
+    /// Explicit phase-owner coordinates in the same canonical order as contacts.
+    /// The fixed-external constructor records two `None` entries per contact.
+    pub fn contact_liquid_mass_fraction_axes(&self) -> &[[Option<String>; 2]] {
+        &self.contact_liquid_mass_fraction_axes
     }
 
     pub(super) fn is_contact_edge(&self, vertices: [usize; 2]) -> bool {
