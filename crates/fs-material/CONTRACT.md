@@ -5152,3 +5152,61 @@ remains bounded by the prepared interval. A focused regression checks parity
 with ordinary node resolution, bundle preservation and foreign/out-of-range
 refusal. The `conductor_graph` integration target compiles; this check does not
 establish runtime execution of that regression.
+
+
+## Implicit spatial freezing with original source tangents
+
+`phase::water::freezing::transport::FreezingConductivityState` now retains
+analytic local dT/dh and dk/dh with its original material/transport response.
+Sensible branches use the reciprocal original Ice Ih or IF97 Cp and the
+original conductivity temperature derivative. Fusion retains exactly zero
+dT/dh. Its conductivity derivative follows the physical liquid VOLUME
+fraction, dphi/dh = vi*vl/(v_mix^2*L), through the caller's series or parallel
+closure. Both exact fusion endpoints select the plateau-side generalized
+derivative. No apparent heat capacity, smoothed transition, finite-difference
+runtime tangent, extra latent source or shifted energy reference is used.
+
+`FreezingWaterImplicitLaw` borrows the exact original caloric and transport
+objects, verifies chart equality, and provides one fused source query to the
+shared thermal chain adapter. Bounds and all source-domain refusals remain
+those of the original immutable material chart. The extra scalar tangents are
+computed during the existing query and add no allocation or inverse query to
+its getters.
+
+`freezing::spatial::FreezingSlab::advance_implicit_to` uses the original
+backward-Euler residual and the reusable `ImplicitConductionWorkspace`.
+Its endpoint conductances include the actual phase closure and face half-cell
+resistance. The same slab can continue with explicit or implicit transport.
+Both paths share independent original-source Delta H=Q and Delta U+p*Delta V=Q
+checks and retain original thermal/reservoir entropy. The nested implicit
+report repeats the physical energy account for comparison; callers must not
+add it a second time. Cancellation or failed nonlinear/work/energy admission
+leaves the original slab intact, and numerical scratch remains reusable.
+
+The existing `water_freezing_front` example accepts `--implicit`,
+`--cells N` and `--dt SECONDS`. For example,
+`cargo run -p fs-material --example water_freezing_front -- --implicit --cells 96 --dt 0.5`
+computes the 120-second 10 mm slab with 244 accepted intervals and a maximum
+independent energy residual about 1.1e-10 J in the native run. This is algebraic
+closure, not physical or time-discretization accuracy. At 120 seconds the
+frozen-reference equivalent length is 5.456292577 mm; halving the maximum
+step gives 5.449258361 mm. These are phase-inventory lengths on the fixed
+reference mesh, not mechanically resolved ice thicknesses.
+
+All 24 focused freezing-namespace tests pass against the actual updated
+thermochemistry and thermal libraries. New tests compare analytic source and
+phase-volume tangents with independent differences, verify exact borrowed
+bindings, resolve an actual source-backed front beyond the initial explicit
+CFL limit, compare three implicit timesteps with a fine explicit reference,
+reverse the bath at an exact authored time, reproduce chunked continuation
+bit-for-bit, and reuse scratch after cancellation/work refusal. Refinement
+errors remain separate from the much smaller joule acceptance tolerance.
+
+All previous physical limits remain: atmospheric source/transport overlap,
+declared phase morphology, fixed reference geometry and external pressure.
+This addition supplies no convection, stress, nucleation, supercooling,
+rigid-vessel coupling or moving surface. Implicit interval retries do not
+provide automatic temporal error control or unconditional nonlinear
+convergence. Full workspace/DSR qualification remains unavailable in the
+current checkout; the native validation compiles the original module sources
+against actual production dependency artifacts, without numerical stand-ins.

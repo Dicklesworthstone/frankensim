@@ -1,6 +1,8 @@
 //! A computed ice front in a one-dimensional water layer, using original calorics.
 //!
 //! Run: `cargo run -p fs-material --example water_freezing_front`.
+//! Implicit, finer mesh: `cargo run -p fs-material --example water_freezing_front
+//! -- --implicit --cells 96 --dt 0.5`. Refine time and space independently.
 //! A 10 mm reference layer begins just above its actual atmospheric melting
 //! point. The left surface is held at 253.15 K; the right and transverse faces
 //! are insulated. Cell-to-cell heat flow, temperature gradients and phase
@@ -25,12 +27,48 @@ use fs_material::phase::water::freezing::transport::{
 };
 use fs_material::phase::water::freezing::{FreezingWater, FreezingWaterControls};
 use fs_qty::{Pressure, Temperature};
+use fs_thermal::enthalpy::conduction::implicit::{
+    ImplicitConductionControls, ImplicitConductionWorkspace,
+};
 use fs_thermal::enthalpy::{DepositionBudget, StepConfig};
 use fs_thermochem::water::ice::IceMeltingSolve;
 use fs_thermochem::water::ice::bounds::IceIhHeatCapacityBoundSolve;
 use fs_thermochem::water::if97::bounds::If97HeatCapacityBoundSolve;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut implicit = false;
+    let mut cells = 24;
+    let mut timestep = None;
+    let mut arguments = std::env::args().skip(1);
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--implicit" => implicit = true,
+            "--cells" => {
+                cells = arguments
+                    .next()
+                    .ok_or("--cells needs a count")?
+                    .parse::<usize>()?
+            }
+            "--dt" => {
+                timestep = Some(
+                    arguments
+                        .next()
+                        .ok_or("--dt needs seconds")?
+                        .parse::<f64>()?,
+                )
+            }
+            _ => {
+                return Err(format!(
+                    "unknown option {argument}; use --implicit, --cells N, --dt SECONDS"
+                )
+                .into());
+            }
+        }
+    }
+    let maximum_dt_s = timestep.unwrap_or(if implicit { 1.0 } else { 0.2 });
+    if !(2..=4096).contains(&cells) || !maximum_dt_s.is_finite() || maximum_dt_s <= 0.0 {
+        return Err("example requires 2..4096 cells and positive finite timestep seconds".into());
+    }
     let chart = FreezingWater::new(
         Pressure::new(101_325.0),
         FreezingWaterControls {
@@ -69,7 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         FreezingSlabGeometry {
             thickness_m: 0.01,
             area_m2: 0.001,
-            cells: 24,
+            cells,
         },
         initial,
         [
@@ -81,16 +119,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ],
         &[],
         DepositionBudget {
-            max_cells: 24,
-            max_links: 23,
-            max_events: 47,
+            max_cells: cells,
+            max_links: cells - 1,
+            max_events: 2 * cells - 1,
             max_substeps: 100_000,
         },
         || Ok(()),
     )?;
     let config = StepConfig {
-        max_dt_s: 0.2,
+        max_dt_s: maximum_dt_s,
         energy_tolerance_j: 2e-6,
+    };
+    let implicit_controls = ImplicitConductionControls {
+        maximum_dt_s,
+        cell_tolerance_j: 1e-9,
+        total_tolerance_j: config.energy_tolerance_j,
+        ..ImplicitConductionControls::default()
+    };
+    let mut workspace = if implicit {
+        Some(ImplicitConductionWorkspace::new(cells)?)
+    } else {
+        None
     };
     let mut heat = 0.0;
     let mut enthalpy = 0.0;
@@ -99,7 +148,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut entropy = [0.0; 4];
     let mut max_residual = 0.0_f64;
     let mut steps = 0;
-    println!("# 10 mm reference layer, 24 cells, area=0.001 m2, pressure=101325 Pa");
+    let mut nonlinear_iterations = 0;
+    let mut residual_evaluations = 0;
+    let mut rejected_intervals = 0;
+    println!("# 10 mm reference layer, {cells} cells, area=0.001 m2, pressure=101325 Pa");
+    println!(
+        "# method={}; maximum_dt={maximum_dt_s} s",
+        if implicit {
+            "backward-Euler"
+        } else {
+            "explicit"
+        }
+    );
     println!(
         "# original IAPWS ice/IF97 calorics; SR6-08 liquid and Yen1981 ice conductivity; series mixed-cell closure"
     );
@@ -115,7 +175,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     for time in [0.0, 20.0, 60.0, 120.0] {
         if time > slab.time_s() {
-            let (next, audit) = slab.advance_to(time, config, || Ok(()))?;
+            let (next, audit) = if let Some(workspace) = &mut workspace {
+                let (next, result) =
+                    slab.advance_implicit_to(time, implicit_controls, workspace, || Ok(()))?;
+                nonlinear_iterations += result.solve.nonlinear_iterations;
+                residual_evaluations += result.solve.residual_evaluations;
+                rejected_intervals += result.solve.rejected_intervals;
+                (next, result.physical)
+            } else {
+                slab.advance_to(time, config, || Ok(()))?
+            };
             heat += audit.thermal.external_heat_j;
             enthalpy += audit.source_enthalpy_change_j;
             internal_energy += audit.internal_energy_change_j;
@@ -195,5 +264,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         entropy[0] - entropy[1],
         entropy[3]
     );
+    if implicit {
+        println!(
+            "# nonlinear_iterations={nonlinear_iterations}; residual_evaluations={residual_evaluations}; rejected_intervals={rejected_intervals}"
+        );
+    }
     Ok(())
 }

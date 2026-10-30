@@ -178,3 +178,207 @@ fn transport_domain_binding_and_cancellation_refuse_without_altering_source_stat
     assert_eq!(law.chart(), &original);
     assert_eq!(state.liquid_mass_fraction(), 0.5);
 }
+
+#[test]
+fn sensible_enthalpy_tangents_follow_original_cp_and_transport_derivatives() {
+    let chart = chart(NORMAL_PRESSURE_PA, 243.15, 303.15);
+    let transport =
+        FreezingWaterConductivity::new(chart, PhaseConductivityMixture::Series, || false).unwrap();
+    for t in [244.0, 253.15, 270.0, 274.0, 290.0, 302.0] {
+        let at_t = |t| {
+            let material = chart
+                .state_at_temperature(Temperature::new(t), || false)
+                .unwrap();
+            transport
+                .state_at_material_state(material, || false)
+                .unwrap()
+        };
+        let state = at_t(t);
+        assert_eq!(state.temperature_k(), t);
+        let cp = state
+            .material_state()
+            .ice_source()
+            .map(|source| source.cp().value())
+            .or_else(|| {
+                state
+                    .material_state()
+                    .liquid_source()
+                    .map(|source| source.cp().value())
+            })
+            .unwrap();
+        let dtdh = state.temperature_enthalpy_derivative_kg_k_j();
+        let dkdh = state.conductivity_enthalpy_derivative_kg_w_m_k_j();
+        assert_eq!(dtdh, 1.0 / cp);
+        let transport_derivative = state
+            .ice_source()
+            .or(state.liquid_source())
+            .unwrap()
+            .temperature_derivative()
+            .value();
+        assert_eq!(dkdh, transport_derivative * dtdh);
+        let lo = at_t(t - 0.002);
+        let hi = at_t(t + 0.002);
+        let dh = hi.material_state().specific_enthalpy_j_kg()
+            - lo.material_state().specific_enthalpy_j_kg();
+        let numerical_temperature = (hi.temperature_k() - lo.temperature_k()) / dh;
+        let numerical_conductivity = (hi.conductivity_w_m_k() - lo.conductivity_w_m_k()) / dh;
+        assert!((dtdh / numerical_temperature - 1.0).abs() < 2e-8);
+        assert!((dkdh / numerical_conductivity - 1.0).abs() < 2e-8);
+        assert!(dtdh > 0.0);
+        if t < chart.melting().temperature().value() {
+            assert!(dkdh < 0.0);
+        } else {
+            assert!(dkdh > 0.0);
+        }
+    }
+}
+
+#[test]
+fn latent_tangents_include_phase_volume_change_and_choose_plateau_side_at_corners() {
+    let chart = chart(NORMAL_PRESSURE_PA, 243.15, 303.15);
+    let latent = chart.melting().latent_enthalpy_j_kg();
+    for mixture in [
+        PhaseConductivityMixture::Series,
+        PhaseConductivityMixture::Parallel,
+    ] {
+        let law = FreezingWaterConductivity::new(chart, mixture, || false).unwrap();
+        let at_x = |x| {
+            law.state_at_material_state(
+                chart.state_at_liquid_fraction(x, || false).unwrap(),
+                || false,
+            )
+            .unwrap()
+        };
+        for x in [0.0, 0.1, 0.5, 0.9, 1.0] {
+            let state = at_x(x);
+            assert_eq!(state.temperature_enthalpy_derivative_kg_k_j(), 0.0);
+            assert_eq!(state.temperature_k(), chart.melting().temperature().value());
+            let delta = 1e-6;
+            let (lo, hi) = if x == 0.0 {
+                (state, at_x(delta))
+            } else if x == 1.0 {
+                (at_x(1.0 - delta), state)
+            } else {
+                (at_x(x - delta), at_x(x + delta))
+            };
+            let mass_fraction_change = hi.material_state().liquid_mass_fraction()
+                - lo.material_state().liquid_mass_fraction();
+            let numerical = (hi.conductivity_w_m_k() - lo.conductivity_w_m_k())
+                / (latent * mass_fraction_change);
+            let analytic = state.conductivity_enthalpy_derivative_kg_w_m_k_j();
+            assert!(analytic < 0.0);
+            assert!(
+                (analytic / numerical - 1.0).abs() < 4e-6,
+                "{mixture:?} at x={x}: analytic={analytic}, numerical={numerical}"
+            );
+        }
+        // The ice endpoint selects the latent-side slope; the adjacent admitted
+        // sensible ice has its original finite positive reciprocal Cp instead.
+        let ice_h = chart.melting().ice().specific_enthalpy().value();
+        let sensible = law
+            .state_at_specific_enthalpy(ice_h - 1.0, || false)
+            .unwrap();
+        let endpoint = law.state_at_specific_enthalpy(ice_h, || false).unwrap();
+        assert!(sensible.temperature_enthalpy_derivative_kg_k_j() > 0.0);
+        assert_eq!(endpoint.temperature_enthalpy_derivative_kg_k_j(), 0.0);
+        let liquid_h = chart.melting().liquid().specific_enthalpy().value();
+        let endpoint = law.state_at_specific_enthalpy(liquid_h, || false).unwrap();
+        let sensible = law
+            .state_at_specific_enthalpy(liquid_h + 1.0, || false)
+            .unwrap();
+        assert_eq!(endpoint.temperature_enthalpy_derivative_kg_k_j(), 0.0);
+        assert!(endpoint.conductivity_enthalpy_derivative_kg_w_m_k_j() < 0.0);
+        assert!(sensible.temperature_enthalpy_derivative_kg_k_j() > 0.0);
+        assert!(sensible.conductivity_enthalpy_derivative_kg_w_m_k_j() > 0.0);
+    }
+}
+
+#[test]
+fn implicit_binding_retains_original_objects_domain_and_fused_source_state() {
+    use crate::phase::water::freezing::thermal::FreezingThermalControls;
+    use fs_thermochem::water::ice::bounds::IceIhHeatCapacityBoundSolve;
+    use fs_thermochem::water::if97::bounds::If97HeatCapacityBoundSolve;
+
+    let chart = chart(NORMAL_PRESSURE_PA, 243.15, 303.15);
+    let caloric = FreezingWaterThermalLaw::new(
+        chart,
+        FreezingThermalControls {
+            ice_heat_capacity: IceIhHeatCapacityBoundSolve {
+                maximum_intervals: 8191,
+            },
+            liquid_heat_capacity: If97HeatCapacityBoundSolve {
+                maximum_intervals: 8191,
+            },
+        },
+        || false,
+    )
+    .unwrap();
+    let transport =
+        FreezingWaterConductivity::new(chart, PhaseConductivityMixture::Series, || false).unwrap();
+    let binding = FreezingWaterImplicitLaw::new(&caloric, &transport, || false).unwrap();
+    assert!(core::ptr::eq(binding.caloric(), &caloric));
+    assert!(core::ptr::eq(binding.transport(), &transport));
+    assert!(core::ptr::addr_eq(
+        binding.caloric_law(),
+        &caloric as &dyn ThermalLaw
+    ));
+    assert!(core::ptr::addr_eq(
+        binding.conductivity_law(),
+        &transport as &dyn ConductivityLaw
+    ));
+    assert_eq!(binding.enthalpy_bounds_j_kg(), chart.enthalpy_bounds_j_kg());
+    let pair = chart.melting();
+    for h in [
+        chart.enthalpy_bounds_j_kg()[0],
+        pair.ice().specific_enthalpy().value(),
+        pair.ice().specific_enthalpy().value() + 0.37 * pair.latent_enthalpy_j_kg(),
+        pair.liquid().specific_enthalpy().value(),
+        chart.enthalpy_bounds_j_kg()[1],
+    ] {
+        let direct = transport.state_at_specific_enthalpy(h, || false).unwrap();
+        let fused = binding.state_at_specific_enthalpy(h).unwrap();
+        assert_eq!(fused.temperature_k, direct.temperature_k());
+        assert_eq!(
+            fused.temperature_slope_kg_k_j,
+            direct.temperature_enthalpy_derivative_kg_k_j()
+        );
+        assert_eq!(fused.conductivity_w_m_k, direct.conductivity_w_m_k());
+        assert_eq!(
+            fused.conductivity_slope_kg_w_m_k_j,
+            direct.conductivity_enthalpy_derivative_kg_w_m_k_j()
+        );
+        assert_eq!(fused.temperature_k, caloric.temperature_k(h).unwrap());
+    }
+    for h in [
+        f64::NAN,
+        chart.enthalpy_bounds_j_kg()[0] - 1.0,
+        chart.enthalpy_bounds_j_kg()[1] + 1.0,
+    ] {
+        assert!(matches!(
+            binding.state_at_specific_enthalpy(h),
+            Err(DepositionError::MaterialDomain)
+        ));
+    }
+    let other = FreezingWaterConductivity::new(
+        super::tests::chart(NORMAL_PRESSURE_PA, 243.15, 313.15),
+        PhaseConductivityMixture::Series,
+        || false,
+    )
+    .unwrap();
+    assert!(matches!(
+        FreezingWaterImplicitLaw::new(&caloric, &other, || false),
+        Err(FreezingConductivityError::ChartMismatch)
+    ));
+    assert!(matches!(
+        FreezingWaterImplicitLaw::new(&caloric, &transport, || true),
+        Err(FreezingConductivityError::Cancelled)
+    ));
+    let mut checkpoints = 0;
+    assert!(matches!(
+        FreezingWaterImplicitLaw::new(&caloric, &transport, || {
+            checkpoints += 1;
+            checkpoints == 2
+        }),
+        Err(FreezingConductivityError::Cancelled)
+    ));
+}

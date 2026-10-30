@@ -15,8 +15,14 @@
 //! from the numerical energy gates.
 
 use super::thermal::FreezingWaterThermalLaw;
-use super::transport::FreezingWaterConductivity;
+use super::transport::{
+    FreezingConductivityError, FreezingWaterConductivity, FreezingWaterImplicitLaw,
+};
 use super::{FreezingWaterError, FreezingWaterState};
+use fs_thermal::enthalpy::conduction::implicit::{
+    ImplicitConductionChain, ImplicitConductionControls, ImplicitConductionError,
+    ImplicitConductionLaw, ImplicitConductionReport, ImplicitConductionWorkspace,
+};
 use fs_thermal::enthalpy::conduction::{
     ConductionObserver, ConductiveLink, ConductiveReservoir, ConductivityLaw,
 };
@@ -65,6 +71,8 @@ pub struct FreezingSlabTemperatureEvent {
 pub enum FreezingSlabError {
     Thermal(DepositionError),
     Material(FreezingWaterError),
+    Transport(FreezingConductivityError),
+    Implicit(ImplicitConductionError),
     Invalid(&'static str),
     EnergyBalance {
         maximum_residual_j: f64,
@@ -79,6 +87,16 @@ impl From<DepositionError> for FreezingSlabError {
 impl From<FreezingWaterError> for FreezingSlabError {
     fn from(error: FreezingWaterError) -> Self {
         Self::Material(error)
+    }
+}
+impl From<FreezingConductivityError> for FreezingSlabError {
+    fn from(error: FreezingConductivityError) -> Self {
+        Self::Transport(error)
+    }
+}
+impl From<ImplicitConductionError> for FreezingSlabError {
+    fn from(error: ImplicitConductionError) -> Self {
+        Self::Implicit(error)
     }
 }
 impl core::fmt::Display for FreezingSlabError {
@@ -134,6 +152,14 @@ pub struct FreezingSlabAudit {
     pub internal_energy_residual_j: f64,
 }
 
+/// Independent material calorimetry and original implicit solver diagnostics.
+/// Physical energy appears in both nested reports for comparison, not addition.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FreezingSlabImplicitAudit {
+    pub physical: FreezingSlabAudit,
+    pub solve: ImplicitConductionReport,
+}
+
 /// A reusable physical slab assembled from the existing caloric and transport
 /// owners. All advances return a candidate: failure leaves this state untouched.
 #[derive(Clone)]
@@ -141,6 +167,7 @@ pub struct FreezingSlab<'a> {
     thermal: DepositionSimulation<'a>,
     conduction: ConductionObserver<'a>,
     caloric: &'a FreezingWaterThermalLaw,
+    transport: &'a FreezingWaterConductivity,
     geometry: FreezingSlabGeometry,
 }
 
@@ -320,6 +347,7 @@ impl<'a> FreezingSlab<'a> {
             thermal,
             conduction,
             caloric,
+            transport,
             geometry,
         })
     }
@@ -414,17 +442,81 @@ impl<'a> FreezingSlab<'a> {
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(Self, FreezingSlabAudit), FreezingSlabError> {
         checkpoint()?;
-        let initial = self.profile(&mut checkpoint)?;
         let (thermal, conduction, energy, entropy) = self.thermal.advance_observed_with_entropy(
             &self.conduction,
             target_s,
             controls,
             &mut checkpoint,
         )?;
+        self.finish_advance(
+            thermal,
+            conduction,
+            energy,
+            entropy,
+            controls.energy_tolerance_j,
+            checkpoint,
+        )
+    }
+
+    /// Advance the SAME spatial material with endpoint-evaluated implicit heat
+    /// transport. Analytic source Cp and phase-volume conductivity tangents
+    /// retain the exact fusion plateau. The original thermal residual, local
+    /// and global joule gates, entropy and event owner determine acceptance.
+    ///
+    /// The reusable workspace has O(cells) storage and a pivoted tridiagonal
+    /// linear solve. Maximum timestep and refinement remain caller choices:
+    /// implicit stepping removes the explicit diffusion CFL restriction, not
+    /// time-discretization error or the fixed-reference-geometry assumptions.
+    /// Failure can change numerical scratch only; this physical slab is intact.
+    pub fn advance_implicit_to(
+        &self,
+        target_s: f64,
+        controls: ImplicitConductionControls,
+        workspace: &mut ImplicitConductionWorkspace,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, FreezingSlabImplicitAudit), FreezingSlabError> {
+        checkpoint()?;
+        let law = FreezingWaterImplicitLaw::new(self.caloric, self.transport, || false)?;
+        let chain = ImplicitConductionChain::new(
+            &self.thermal,
+            &self.conduction,
+            &[(MaterialId(0), &law as &dyn ImplicitConductionLaw)],
+            &mut checkpoint,
+        )?;
+        let (thermal, solve) = chain.advance_to(
+            &self.thermal,
+            target_s,
+            controls,
+            workspace,
+            &mut checkpoint,
+        )?;
+        let (next, physical) = self.finish_advance(
+            thermal,
+            self.conduction.clone(),
+            solve.energy,
+            solve.entropy,
+            controls.total_tolerance_j,
+            &mut checkpoint,
+        )?;
+        checkpoint()?;
+        Ok((next, FreezingSlabImplicitAudit { physical, solve }))
+    }
+
+    fn finish_advance(
+        &self,
+        thermal: DepositionSimulation<'a>,
+        conduction: ConductionObserver<'a>,
+        energy: EnergyAudit,
+        entropy: EntropyAudit,
+        energy_tolerance_j: f64,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, FreezingSlabAudit), FreezingSlabError> {
+        let initial = self.profile(&mut checkpoint)?;
         let next = Self {
             thermal,
             conduction,
             caloric: self.caloric,
+            transport: self.transport,
             geometry: self.geometry,
         };
         let final_cells = next.profile(&mut checkpoint)?;
@@ -450,10 +542,10 @@ impl<'a> FreezingSlab<'a> {
         let dh = h - energy.external_heat_j;
         let du = u + work - energy.external_heat_j;
         let residual = energy.residual_j.abs().max(dh.abs()).max(du.abs());
-        if !residual.is_finite() || residual > controls.energy_tolerance_j {
+        if !residual.is_finite() || residual > energy_tolerance_j {
             return Err(FreezingSlabError::EnergyBalance {
                 maximum_residual_j: residual,
-                tolerance_j: controls.energy_tolerance_j,
+                tolerance_j: energy_tolerance_j,
             });
         }
         checkpoint()?;
