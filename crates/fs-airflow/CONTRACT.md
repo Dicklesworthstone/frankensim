@@ -1361,3 +1361,50 @@ layer temperature by less than 3e-8 K. All six public runs complete with the
 final solver; upper-layer-rise errors remain +4.28% to +37.79%, and interfaces
 remain systematically too high. Numerical convergence is not promoted to
 physical validation, and no coefficient has been fitted to these observations.
+
+## Molecular absorption and reactive-surface radiation feedback
+
+`radiation::molecular::MolecularPlanck` binds the original immutable gas
+source and verifies the elemental/neutral identities of H2O, CO2, CO and CH4.
+The corrected TNF/RADCAL Planck fits (TNF radiation archive, 7 June 2000;
+Grosshandler NIST TN 1402) are evaluated on 300–2500 K without extrapolation,
+coefficient fitting or silent clipping. Actual original species amounts set
+partial pressures; Pa is converted to the source atm basis. Evaluation
+allocates no coefficient buffers, handles absent layers and zero absorbers
+exactly, and polls cancellation. A nonblank caller assumption explicitly
+accounts for every unrepresented species.
+
+These historical fits are local-temperature emission means. Using them as a
+gray enclosure opacity requires a separate explicit assumption; this does not
+supply spectral absorption under arbitrary incident spectra, a RADCAL solver,
+a measured error bound or current spectroscopic accuracy. The original
+spectral owner remains available for caller-supplied spectral data. Three
+focused tests cover published coefficients, pressure scaling, amount/mass
+conversion, the retained CO fit seam, domains, source identity and cancellation.
+
+`radiation::reactive` extends the SAME existing wall/radiation feedback
+iteration to original finite `Wall1d` and noncharring `RecedingSlab` owners.
+A slab trial advances its original implicit reaction/conduction and conservative
+remap. The current remapped half-cell resistance recovers the moving-face
+temperature, which closes against radiation, convection and separately
+prescribed absorbed external irradiation. Only the perturbed surface response
+is recomputed for a Jacobian column; original prepared workspaces are reused.
+
+An accepted candidate retains the same signed query powers in every condensed
+owner and opposite gas account. Endpoint face-temperature, optical-power,
+total-boundary-power and combined physical-energy residuals are checked
+separately. Original volatile mass and enthalpy remain outgoing in the slab
+report and must enter the gas through `VolatileMixture` exactly once;
+`report.add_gas_heat` contains only radiation and convection. Install all
+returned owners only with their accepted network interval, and warm-start from
+`candidate.input_powers`, which contains TOTAL slab front heat.
+
+Four focused reactive cases cover original inert-wall agreement, reactive
+mass/enthalpy/flux closure, actual NASA volatile transfer with network retry and
+deterministic replay, spectral coupling, work limits and cancellation. The
+native airflow library passes all 110 tests. Slab backs remain insulated;
+gas state/opacity and optical geometry are frozen over each interval. Recession
+does not infer gas-volume change or pressure work. This is first-order split
+coupling, not a guaranteed second-order or fully implicit gas integrator,
+a coupled entropy theorem, flame structure, soot production or experimental
+compartment-fire validation.

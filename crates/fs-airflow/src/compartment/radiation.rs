@@ -32,6 +32,12 @@ pub mod soot;
 /// Wavelength-resolved band/soot transfer through these same reciprocal paths.
 pub mod spectral;
 
+/// Source-bounded molecular Planck means from actual gas partial pressures.
+pub mod molecular;
+
+/// Participating radiation shared by finite walls and receding reactive slabs.
+pub mod reactive;
+
 /// Participating radiation coupled to original finite-wall endpoints.
 pub mod walls;
 
@@ -177,6 +183,11 @@ impl RadiationReport {
 pub enum RadiationError {
     /// Invalid source, geometry, extent, temperature or arithmetic.
     Invalid(&'static str),
+    /// A participating molecular gas lies outside the original fit domain.
+    MolecularTemperature {
+        /// Actual blackbody-weighting/local gas temperature [K].
+        temperature_k: f64,
+    },
     /// Original dense solver refusal.
     Linear(LuWorkspaceError),
     /// Original gas source addition refusal.

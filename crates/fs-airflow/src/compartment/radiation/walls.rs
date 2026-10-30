@@ -37,6 +37,7 @@ use fs_conduction::radiation::SurfaceEmissivity;
 use fs_gas::multicomponent::compartment::{Layer, LayerRates, TwoZone};
 use fs_la::prepared_lu::{LuWorkspace, LuWorkspaceError};
 use fs_qty::{Energy, Power, Temperature, Time};
+use fs_thermal::enthalpy::pyrolysis::slab::SlabError;
 
 /// Original, source-bearing optical closure, held over the candidate interval.
 #[derive(Clone, Copy)]
@@ -123,7 +124,7 @@ impl Default for EnclosureWallSolve {
 /// Actual work, including discarded numerical probes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EnclosureWallWork {
-    /// Calls to the original wall candidate solver.
+    /// Calls to original wall or reactive-slab candidate solvers.
     pub wall_evaluations: usize,
     /// Calls to the original gray or spectral enclosure solver.
     pub radiation_evaluations: usize,
@@ -149,6 +150,10 @@ pub struct EnclosureWallReport<'s> {
     pub surface_temperature_residual_k: Vec<f64>,
     /// Radiation reevaluated at returned faces minus applied radiation [W].
     pub surface_power_residual_w: Vec<f64>,
+    /// Actual endpoint radiation plus feedback heat minus applied boundary
+    /// input [W]. For ordinary walls this equals the radiation residual;
+    /// reactive surfaces additionally include their convective face feedback.
+    pub surface_boundary_power_residual_w: Vec<f64>,
     /// The same actual endpoint mismatch for `[lower, upper]` gas radiation [W].
     pub gas_power_residual_w: [f64; 2],
     /// Largest actual nonlinear surface-power or endpoint power residual [W].
@@ -160,13 +165,18 @@ pub struct EnclosureWallReport<'s> {
     pub gas_heat_power: [Power; 2],
     /// Those identical total gas powers integrated over the accepted interval.
     pub gas_heat_energy: [Energy; 2],
-    /// Sum of original wall storage changes [J].
+    /// Sum of original condensed surface storage changes (walls/slabs) [J].
     pub wall_storage_change: Energy,
+    /// Actual outgoing volatile enthalpy [J], zero for ordinary walls. This is
+    /// included in the open-solid energy audit, never added to gas heat here.
+    /// Transfer it with the original volatile mass through its gas adapter.
+    pub exported_volatile_enthalpy: Energy,
     /// Sum of original outer ambient exchanges, positive into walls [J].
     pub ambient_heat_energy: Energy,
     /// Sum of separately supplied external radiant input, positive into walls [J].
     pub external_radiant_energy: Energy,
-    /// Wall storage plus total gas heat minus ambient/external input [J].
+    /// Condensed storage plus volatile enthalpy plus total gas heat minus
+    /// ambient/external input [J].
     pub combined_energy_residual_j: f64,
     /// Bounded actual work used by the complete nonlinear call.
     pub work: EnclosureWallWork,
@@ -196,6 +206,11 @@ pub struct EnclosureWallCandidate<'m, 's> {
 /// Reusable numerical state; it owns no accepted thermal or gas history.
 pub struct EnclosureWallWorkspace {
     walls: Vec<WallWorkspace>,
+    feedback: FeedbackWorkspace,
+}
+
+/// One shared optical/thermal feedback solve for original surface owners.
+pub(super) struct FeedbackWorkspace {
     gray: RadiationWorkspace,
     spectral: SpectralWorkspace,
     power: Vec<f64>,
@@ -213,6 +228,8 @@ pub enum EnclosureWallError {
     Invalid(&'static str),
     /// Original wall/material refusal at the named enclosure surface.
     Wall { surface: usize, error: WallError },
+    /// Original reactive-slab candidate refused at this surface.
+    Slab { surface: usize, error: SlabError },
     /// Original material-card emissivity query refused at this surface.
     Emissivity {
         surface: usize,
@@ -302,6 +319,50 @@ fn charge(
     Ok(())
 }
 
+/// A thermal endpoint and its original extensive accounts. `feedback_power`
+/// augments optical power only for an owner whose input is total face heat.
+pub(super) struct SurfaceTrial<C> {
+    pub candidate: C,
+    pub temperature: Temperature,
+    pub elapsed: Time,
+    pub gas_heat_power: [Power; 2],
+    pub storage_change: Energy,
+    pub volatile_enthalpy: Energy,
+    pub ambient_heat_energy: Energy,
+    pub external_radiant_energy: Energy,
+    pub feedback_power: f64,
+}
+
+/// Physical exchanges at the optical query used to construct the accepted
+/// candidate. Re-evaluation at its returned face must pass the shared gates.
+#[derive(Clone, Copy)]
+pub(super) struct AppliedExchange {
+    pub radiation: Power,
+    pub temperature: Temperature,
+}
+
+pub(super) struct FeedbackCandidate<'s, C> {
+    pub surfaces: Vec<C>,
+    pub report: EnclosureWallReport<'s>,
+    pub input_powers: Vec<Power>,
+}
+
+impl FeedbackWorkspace {
+    pub(super) fn new(enclosure: &ParticipatingEnclosure) -> Result<Self, EnclosureWallError> {
+        let n = enclosure.geometry().len();
+        Ok(Self {
+            gray: enclosure.workspace()?,
+            spectral: enclosure.spectral_workspace()?,
+            power: vec![0.0; n],
+            probe: vec![0.0; n],
+            matrix: vec![0.0; n * n],
+            rhs: vec![0.0; n],
+            delta: vec![0.0; n],
+            lu: LuWorkspace::new(n)?,
+        })
+    }
+}
+
 impl ParticipatingEnclosure {
     /// Prepare the original per-wall and enclosure buffers plus the bounded
     /// coupling Jacobian. Wall reports and native thermal trials retain their
@@ -311,7 +372,6 @@ impl ParticipatingEnclosure {
         walls: &[Wall1d<'_>],
     ) -> Result<EnclosureWallWorkspace, EnclosureWallError> {
         self.admit_walls(walls)?;
-        let n = walls.len();
         let wall_work = walls
             .iter()
             .enumerate()
@@ -322,14 +382,7 @@ impl ParticipatingEnclosure {
             .collect::<Result<_, _>>()?;
         Ok(EnclosureWallWorkspace {
             walls: wall_work,
-            gray: self.workspace()?,
-            spectral: self.spectral_workspace()?,
-            power: vec![0.0; n],
-            probe: vec![0.0; n],
-            matrix: vec![0.0; n * n],
-            rhs: vec![0.0; n],
-            delta: vec![0.0; n],
-            lu: LuWorkspace::new(n)?,
+            feedback: FeedbackWorkspace::new(self)?,
         })
     }
 
@@ -408,7 +461,7 @@ impl ParticipatingEnclosure {
         boundaries: &[WallBoundary],
         gas_temperatures: [Temperature; 2],
         optics: WallOptics<'_, 's>,
-        mut emissivity: impl FnMut(usize, Temperature) -> Result<SurfaceEmissivity, ConductionError>,
+        emissivity: impl FnMut(usize, Temperature) -> Result<SurfaceEmissivity, ConductionError>,
         initial_surface_power: Option<&[Power]>,
         controls: EnclosureWallSolve,
         work: &mut EnclosureWallWorkspace,
@@ -417,8 +470,66 @@ impl ParticipatingEnclosure {
         check(&mut cancelled)?;
         self.admit_walls(walls)?;
         let n = walls.len();
-        if boundaries.len() != n
-            || work.walls.len() != n
+        if boundaries.len() != n || work.walls.len() != n {
+            return Err(EnclosureWallError::Invalid(
+                "wall coupling axes or workspace",
+            ));
+        }
+        for boundary in boundaries {
+            admit_contact_temperatures(&boundary.gas, gas_temperatures)?;
+        }
+        let result = self.candidate_feedback(
+            duration,
+            gas_temperatures,
+            optics,
+            emissivity,
+            initial_surface_power,
+            controls,
+            &mut work.feedback,
+            |i, power, _applied, cancel| {
+                let candidate = walls[i]
+                    .candidate_with_exchange(
+                        duration,
+                        boundaries[i],
+                        Power::new(power),
+                        controls.wall,
+                        &mut work.walls[i],
+                        cancel,
+                    )
+                    .map_err(|error| wall_error(i, error))?;
+                Ok(wall_trial(candidate))
+            },
+            cancelled,
+        )?;
+        Ok(EnclosureWallCandidate {
+            walls: result.surfaces,
+            report: result.report,
+        })
+    }
+
+    /// One shared feedback iteration. Surface owners supply thermal candidates
+    /// and extensive accounts; the original optics and LU remain shared.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn candidate_feedback<'s, C>(
+        &self,
+        duration: Time,
+        gas_temperatures: [Temperature; 2],
+        optics: WallOptics<'_, 's>,
+        mut emissivity: impl FnMut(usize, Temperature) -> Result<SurfaceEmissivity, ConductionError>,
+        initial_surface_power: Option<&[Power]>,
+        controls: EnclosureWallSolve,
+        work: &mut FeedbackWorkspace,
+        mut surface: impl FnMut(
+            usize,
+            f64,
+            Option<AppliedExchange>,
+            &mut dyn FnMut() -> bool,
+        ) -> Result<SurfaceTrial<C>, EnclosureWallError>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<FeedbackCandidate<'s, C>, EnclosureWallError> {
+        check(&mut cancelled)?;
+        let n = self.geometry().len();
+        if n == 0
             || work.power.len() != n
             || !positive(duration.value())
             || gas_temperatures.iter().any(|t| !positive(t.value()))
@@ -437,38 +548,21 @@ impl ParticipatingEnclosure {
                 "wall coupling axes, duration, workspace, guess or controls",
             ));
         }
-        for boundary in boundaries {
-            for (contact, gas_t) in boundary.gas.iter().zip(gas_temperatures) {
-                if contact.area.value() > 0.0
-                    && contact.htc.value() > 0.0
-                    && contact.temperature != gas_t
-                {
-                    return Err(EnclosureWallError::Invalid(
-                        "convective and radiative gas temperatures differ",
-                    ));
-                }
-            }
-        }
         for (i, q) in work.power.iter_mut().enumerate() {
             *q = initial_surface_power.map_or(0.0, |p| p[i].value());
         }
         let mut counts = EnclosureWallWork::default();
         for iteration in 0..controls.maximum_iterations {
             check(&mut cancelled)?;
-            let base_walls = solve_walls(
-                walls,
-                duration,
-                boundaries,
+            let base_walls = solve_surfaces(
                 &work.power,
+                None,
                 controls,
-                &mut work.walls,
+                &mut surface,
                 &mut counts,
                 &mut cancelled,
             )?;
-            let temperatures: Vec<_> = base_walls
-                .iter()
-                .map(|w| w.report.surface_temperatures[0])
-                .collect();
+            let temperatures: Vec<_> = base_walls.iter().map(|w| w.temperature).collect();
             let radiation = optical(
                 self,
                 &temperatures,
@@ -483,28 +577,37 @@ impl ParticipatingEnclosure {
             )?;
             let mut norm = 0.0_f64;
             for i in 0..n {
-                work.rhs[i] = finite(radiation.surface_heat_power()[i].value() - work.power[i])?;
+                work.rhs[i] = finite(
+                    radiation.surface_heat_power()[i].value() + base_walls[i].feedback_power
+                        - work.power[i],
+                )?;
                 norm = norm.max(work.rhs[i].abs());
             }
             if norm <= controls.power_tolerance_w {
                 // Apply this ONE conservative optical result to both owners.
                 for i in 0..n {
-                    work.probe[i] = radiation.surface_heat_power()[i].value();
+                    work.probe[i] = finite(
+                        radiation.surface_heat_power()[i].value() + base_walls[i].feedback_power,
+                    )?;
                 }
-                let accepted = solve_walls(
-                    walls,
-                    duration,
-                    boundaries,
+                let applied: Vec<_> = radiation
+                    .surface_heat_power()
+                    .iter()
+                    .zip(&temperatures)
+                    .map(|(&radiation, &temperature)| AppliedExchange {
+                        radiation,
+                        temperature,
+                    })
+                    .collect();
+                let accepted = solve_surfaces(
                     &work.probe,
+                    Some(&applied),
                     controls,
-                    &mut work.walls,
+                    &mut surface,
                     &mut counts,
                     &mut cancelled,
                 )?;
-                let endpoint: Vec<_> = accepted
-                    .iter()
-                    .map(|w| w.report.surface_temperatures[0])
-                    .collect();
+                let endpoint: Vec<_> = accepted.iter().map(|w| w.temperature).collect();
                 let endpoint_radiation = optical(
                     self,
                     &endpoint,
@@ -532,6 +635,15 @@ impl ParticipatingEnclosure {
                     endpoint_radiation.gas_heat_power()[i].value()
                         - radiation.gas_heat_power()[i].value()
                 });
+                let boundary_residual: Vec<_> = endpoint_radiation
+                    .surface_heat_power()
+                    .iter()
+                    .zip(&accepted)
+                    .zip(&work.probe)
+                    .map(|((radiation, thermal), applied)| {
+                        radiation.value() + thermal.feedback_power - applied
+                    })
+                    .collect();
                 let max_temperature = temperature_residual
                     .iter()
                     .map(|r| r.abs())
@@ -539,6 +651,7 @@ impl ParticipatingEnclosure {
                 let max_power = surface_residual
                     .iter()
                     .chain(gas_residual.iter())
+                    .chain(boundary_residual.iter())
                     .map(|r| r.abs())
                     .fold(norm, f64::max);
                 if max_temperature <= controls.temperature_tolerance_k
@@ -550,12 +663,14 @@ impl ParticipatingEnclosure {
                         temperatures,
                         temperature_residual,
                         surface_residual,
+                        boundary_residual,
                         gas_residual,
                         max_temperature,
                         max_power,
                         iteration + 1,
                         counts,
                         controls,
+                        work.probe.iter().copied().map(Power::new).collect(),
                         &mut cancelled,
                     );
                 }
@@ -575,14 +690,12 @@ impl ParticipatingEnclosure {
                             "unrepresentable surface-power increment",
                         ));
                     }
-                    let trial = solve_wall(
+                    let trial = solve_surface(
                         j,
-                        &walls[j],
-                        duration,
-                        boundaries[j],
                         q,
+                        None,
                         controls,
-                        &mut work.walls[j],
+                        &mut surface,
                         &mut counts,
                         &mut cancelled,
                     );
@@ -592,7 +705,7 @@ impl ParticipatingEnclosure {
                         Err(_) => continue,
                     };
                     let mut probe_temperatures = temperatures.clone();
-                    probe_temperatures[j] = trial.report.surface_temperatures[0];
+                    probe_temperatures[j] = trial.temperature;
                     match optical(
                         self,
                         &probe_temperatures,
@@ -606,18 +719,23 @@ impl ParticipatingEnclosure {
                         &mut cancelled,
                     ) {
                         Ok(r) => {
-                            column = Some((r, actual_increment));
+                            column = Some((r, actual_increment, trial.feedback_power));
                             break;
                         }
                         Err(e) if fatal_probe(&e) => return Err(e),
                         Err(_) => {}
                     }
                 }
-                let (probe, increment) = column.ok_or(EnclosureWallError::Iterations)?;
+                let (probe, increment, feedback) = column.ok_or(EnclosureWallError::Iterations)?;
                 for i in 0..n {
                     let derivative = finite(
                         (probe.surface_heat_power()[i].value()
-                            - radiation.surface_heat_power()[i].value())
+                            - radiation.surface_heat_power()[i].value()
+                            + if i == j {
+                                feedback - base_walls[i].feedback_power
+                            } else {
+                                0.0
+                            })
                             / increment,
                     )?;
                     work.matrix[i * n + j] = finite(if i == j {
@@ -637,13 +755,11 @@ impl ParticipatingEnclosure {
                 for i in 0..n {
                     work.probe[i] = finite(work.power[i] + scale * work.delta[i])?;
                 }
-                let trial = solve_walls(
-                    walls,
-                    duration,
-                    boundaries,
+                let trial = solve_surfaces(
                     &work.probe,
+                    None,
                     controls,
-                    &mut work.walls,
+                    &mut surface,
                     &mut counts,
                     &mut cancelled,
                 );
@@ -655,10 +771,7 @@ impl ParticipatingEnclosure {
                         continue;
                     }
                 };
-                let t: Vec<_> = trial
-                    .iter()
-                    .map(|w| w.report.surface_temperatures[0])
-                    .collect();
+                let t: Vec<_> = trial.iter().map(|w| w.temperature).collect();
                 match optical(
                     self,
                     &t,
@@ -676,7 +789,8 @@ impl ParticipatingEnclosure {
                             .surface_heat_power()
                             .iter()
                             .zip(&work.probe)
-                            .map(|(r, q)| (q - r.value()).abs())
+                            .zip(&trial)
+                            .map(|((r, q), t)| (q - r.value() - t.feedback_power).abs())
                             .fold(0.0, f64::max);
                         if next_norm < norm {
                             found = true;
@@ -716,64 +830,90 @@ impl ParticipatingEnclosure {
     }
 }
 
+pub(super) fn wall_error(surface: usize, error: WallError) -> EnclosureWallError {
+    if error == WallError::Cancelled {
+        EnclosureWallError::Cancelled
+    } else {
+        EnclosureWallError::Wall { surface, error }
+    }
+}
+
+pub(super) fn wall_trial<'m>(candidate: WallCandidate<'m>) -> SurfaceTrial<WallCandidate<'m>> {
+    SurfaceTrial {
+        temperature: candidate.report.surface_temperatures[0],
+        elapsed: candidate.report.elapsed,
+        gas_heat_power: candidate.report.gas_heat_power,
+        storage_change: Energy::new(candidate.report.audit.stored_energy_change_j),
+        volatile_enthalpy: Energy::new(0.0),
+        ambient_heat_energy: candidate.report.ambient_heat_energy,
+        external_radiant_energy: candidate.report.external_radiant_energy,
+        feedback_power: 0.0,
+        candidate,
+    }
+}
+
+pub(super) fn admit_contact_temperatures(
+    contacts: &[crate::compartment::wall::GasContact; 2],
+    gas_temperatures: [Temperature; 2],
+) -> Result<(), EnclosureWallError> {
+    for (contact, gas_t) in contacts.iter().zip(gas_temperatures) {
+        if contact.area.value() > 0.0 && contact.htc.value() > 0.0 && contact.temperature != gas_t {
+            return Err(EnclosureWallError::Invalid(
+                "convective and radiative gas temperatures differ",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
-fn solve_wall<'m>(
+fn solve_surface<C>(
     surface: usize,
-    wall: &Wall1d<'m>,
-    duration: Time,
-    boundary: WallBoundary,
     power: f64,
+    applied: Option<AppliedExchange>,
     controls: EnclosureWallSolve,
-    work: &mut WallWorkspace,
+    response: &mut impl FnMut(
+        usize,
+        f64,
+        Option<AppliedExchange>,
+        &mut dyn FnMut() -> bool,
+    ) -> Result<SurfaceTrial<C>, EnclosureWallError>,
     counts: &mut EnclosureWallWork,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<WallCandidate<'m>, EnclosureWallError> {
+) -> Result<SurfaceTrial<C>, EnclosureWallError> {
     check(cancelled)?;
     charge(
         &mut counts.wall_evaluations,
         controls.maximum_wall_evaluations,
         "wall",
     )?;
-    wall.candidate_with_exchange(
-        duration,
-        boundary,
-        Power::new(power),
-        controls.wall,
-        work,
-        cancelled,
-    )
-    .map_err(|error| {
-        if error == WallError::Cancelled {
-            EnclosureWallError::Cancelled
-        } else {
-            EnclosureWallError::Wall { surface, error }
-        }
-    })
+    response(surface, power, applied, cancelled)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn solve_walls<'m>(
-    walls: &[Wall1d<'m>],
-    duration: Time,
-    boundaries: &[WallBoundary],
+fn solve_surfaces<C>(
     powers: &[f64],
+    applied: Option<&[AppliedExchange]>,
     controls: EnclosureWallSolve,
-    work: &mut [WallWorkspace],
+    response: &mut impl FnMut(
+        usize,
+        f64,
+        Option<AppliedExchange>,
+        &mut dyn FnMut() -> bool,
+    ) -> Result<SurfaceTrial<C>, EnclosureWallError>,
     counts: &mut EnclosureWallWork,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<Vec<WallCandidate<'m>>, EnclosureWallError> {
-    walls
+) -> Result<Vec<SurfaceTrial<C>>, EnclosureWallError> {
+    powers
         .iter()
         .enumerate()
-        .map(|(i, w)| {
-            solve_wall(
+        .map(|(i, &power)| {
+            solve_surface(
                 i,
-                w,
-                duration,
-                boundaries[i],
-                powers[i],
+                power,
+                applied.map(|a| a[i]),
                 controls,
-                &mut work[i],
+                response,
                 counts,
                 cancelled,
             )
@@ -840,42 +980,46 @@ fn optical<'s>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn finish<'m, 's>(
-    walls: Vec<WallCandidate<'m>>,
+fn finish<'s, C>(
+    walls: Vec<SurfaceTrial<C>>,
     radiation: WallRadiation<'s>,
     temperatures: Vec<Temperature>,
     temperature_residual: Vec<f64>,
     surface_residual: Vec<f64>,
+    boundary_residual: Vec<f64>,
     gas_residual: [f64; 2],
     max_temperature: f64,
     max_power: f64,
     iterations: usize,
     counts: EnclosureWallWork,
     controls: EnclosureWallSolve,
+    input_powers: Vec<Power>,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<EnclosureWallCandidate<'m, 's>, EnclosureWallError> {
-    let elapsed = walls[0].report.elapsed;
+) -> Result<FeedbackCandidate<'s, C>, EnclosureWallError> {
+    let elapsed = walls[0].elapsed;
     let dt = elapsed.value();
     let mut gas = radiation.gas_heat_power().map(Power::value);
     let mut storage = 0.0;
+    let mut volatile = 0.0;
     let mut ambient = 0.0;
     let mut external = 0.0;
     for wall in &walls {
         check(cancelled)?;
-        if wall.report.elapsed != elapsed {
+        if wall.elapsed != elapsed {
             return Err(EnclosureWallError::Invalid(
                 "wall candidate intervals differ",
             ));
         }
-        for (power, convection) in gas.iter_mut().zip(wall.report.gas_heat_power) {
+        for (power, convection) in gas.iter_mut().zip(wall.gas_heat_power) {
             *power = finite(*power + convection.value())?;
         }
-        storage = finite(storage + wall.report.audit.stored_energy_change_j)?;
-        ambient = finite(ambient + wall.report.ambient_heat_energy.value())?;
-        external = finite(external + wall.report.external_radiant_energy.value())?;
+        storage = finite(storage + wall.storage_change.value())?;
+        volatile = finite(volatile + wall.volatile_enthalpy.value())?;
+        ambient = finite(ambient + wall.ambient_heat_energy.value())?;
+        external = finite(external + wall.external_radiant_energy.value())?;
     }
     let gas_energy = [finite(dt * gas[0])?, finite(dt * gas[1])?];
-    let residual = finite(storage + gas_energy[0] + gas_energy[1] - ambient - external)?;
+    let residual = finite(storage + volatile + gas_energy[0] + gas_energy[1] - ambient - external)?;
     if residual.abs() > controls.combined_energy_tolerance_j {
         return Err(EnclosureWallError::EnergyResidual {
             residual_j: residual,
@@ -883,8 +1027,9 @@ fn finish<'m, 's>(
         });
     }
     check(cancelled)?;
-    Ok(EnclosureWallCandidate {
-        walls,
+    Ok(FeedbackCandidate {
+        surfaces: walls.into_iter().map(|w| w.candidate).collect(),
+        input_powers,
         report: EnclosureWallReport {
             elapsed,
             iterations,
@@ -892,12 +1037,14 @@ fn finish<'m, 's>(
             radiation_surface_temperatures: temperatures,
             surface_temperature_residual_k: temperature_residual,
             surface_power_residual_w: surface_residual,
+            surface_boundary_power_residual_w: boundary_residual,
             gas_power_residual_w: gas_residual,
             maximum_power_residual_w: max_power,
             maximum_temperature_residual_k: max_temperature,
             gas_heat_power: gas.map(Power::new),
             gas_heat_energy: gas_energy.map(Energy::new),
             wall_storage_change: Energy::new(storage),
+            exported_volatile_enthalpy: Energy::new(volatile),
             ambient_heat_energy: Energy::new(ambient),
             external_radiant_energy: Energy::new(external),
             combined_energy_residual_j: residual,
