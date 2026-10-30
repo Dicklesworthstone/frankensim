@@ -1048,3 +1048,45 @@ mean-port prediction and still observes zero allocations.
 ## Original positive resistance factors through coupled heat
 
 Physical producers may retain their complete positive resistance source rows in a checked `ResistanceWitness` bound to the exact assembled R. `try_from_source_rows` uses the existing positive QR owner when necessary and checks both represented matrix triangles componentwise. `PortHamiltonian::with_resistance_witness` requires the exact original R; native material-memory and parallel-load composition preserve that witness. `integrated_resistance_loss_with_witness` integrates a declared channel along the same complete system trajectory without replacing the system resistance. Ordinary structural admission, the original matrices, reconstruction bounds, clock and energy checks remain unchanged. Rank-deficient physical loss no longer requires recovering a source-null direction from rounded eigenvalues. Raw matrices, unsupported entries and mismatched witnesses retain refusal behavior; no eigenvalue clipping or artificial damping is introduced.
+
+## Complete nonlinear storage with exponential discrete gradients
+
+`linear_exact::PreparedNonlinearZoh` retains the original declared decomposition
+`H(x)=x^T Q x/2+U(x)`, original J/R/G and every physical coordinate. It holds
+`f=DG U(x0,x1)` over one interval and uses the existing quadratic propagator
+for `x'=(J-R)(Qx+f)+Gu`. A bounded implicit endpoint solve closes f against the
+accepted endpoint. This is an exponential discrete-gradient discretization
+(Li and Wu, SIAM J. Sci. Comput. 2016, DOI 10.1137/15M1023257), with no modified
+Q, modal truncation, state projection, new exponential kernel or added damping.
+
+The original cancellation-stable constitutive numerator supplies the nonlinear
+remainder gradient. Newton uses an invertible complete energy coordinate map,
+retains null-Q directions, and reuses the existing LU workspace. Preparation
+admits the unchanged dense ceiling for 2*n+m+1 numerical coordinates. Warm
+state/output/selected-input publication is transactional after endpoint, finite
+value, original storage and independent positive loss/work checks. Controlled
+calls poll cancellation between bounded numerical trials. The default Newton
+cap is 50 and can be lowered; it controls solve work, not temporal accuracy.
+
+`step_with_port_into` supplies a selected-input callback with the SAME candidate's
+affine mean output `free+beta*u`, including the nonlinear effort contribution
+`G^T f`. The callback is reevaluated for every endpoint/Jacobian trial and finally
+at the accepted endpoint; callers must keep physical source state provisional.
+All other held ports retain their meaning.
+
+The positive heat owner now accepts the initial scheme effort `Qx0+f` and
+independently integrates its original-resistance square along the prepared
+trajectory. Together with original storage change and integrated discrete-effort
+port work, this closes the discrete energy balance. Heat and output are NOT
+asserted exact for the continuous nonlinear gradient `grad H(x(t))`; only the
+quadratic limit is exact. Nonlinear accuracy, contact switching, excitation
+bandwidth, root uniqueness and real-time throughput require separate evidence.
+
+Six focused tests cover full cross damping and stiff warm Maxwell memory,
+independent discrete-effort heat/output integration, exact quadratic reduction,
+same-window passive feedback, energy-datum invariance, and atomic refusal and
+cancellation. Smooth state errors for 8/16/32 steps are approximately
+3.751764e-6, 9.373143e-7 and 2.342425e-7 against independent fine RK4.
+A 1,000-step full nonlinear warm probe observes zero owner allocations. The
+original eight physical-heat, four scattering and four prepared exact-flow tests
+also pass after the shared heat extension. These are bounded numerical checks.

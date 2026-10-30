@@ -204,6 +204,62 @@ impl PositiveHeat {
             return Ok(0.0);
         }
         sys.storage.gradient(state, effort);
+        self.evaluate_effort_shifted_into(sys, effort, input, first_shift, derivative, coordinates)
+    }
+
+    /// Integrate the original positive resistance square for
+    /// `x' = (J-R)(Q x + held_effort) + G u`, with Q from preparation.
+    /// The caller supplies `Q*x_initial + held_effort`, not grad(H) at the
+    /// initial endpoint. For a held discrete gradient of the nonlinear
+    /// remainder, the initial derivative still evolves as f'=((J-R)Q)f;
+    /// the prepared loss factor and its complete physical nullspace therefore
+    /// remain valid. No heat is obtained by subtracting storage or port work.
+    ///
+    /// This path does not evaluate storage, allocate scratch, or alter any
+    /// factor. Inputs and both scratch extents must match the prepared owner.
+    pub(super) fn evaluate_with_effort_into(
+        &self,
+        sys: &PortHamiltonian,
+        initial_effort: &[f64],
+        input: &[f64],
+        derivative: &mut [f64],
+        coordinates: &mut [f64],
+    ) -> Result<f64, PhsError> {
+        self.evaluate_effort_shifted_into(sys, initial_effort, input, 0.0, derivative, coordinates)
+    }
+
+    fn evaluate_effort_shifted_into(
+        &self,
+        sys: &PortHamiltonian,
+        effort: &[f64],
+        input: &[f64],
+        first_shift: f64,
+        derivative: &mut [f64],
+        coordinates: &mut [f64],
+    ) -> Result<f64, PhsError> {
+        let n = self.n;
+        if sys.n != n
+            || sys.m != self.m
+            || effort.len() != n
+            || input.len() != self.m
+            || derivative.len() != n
+            || coordinates.len() != self.d
+            || !finite(effort)
+            || !finite(input)
+            || !first_shift.is_finite()
+        {
+            return Err(refuse(
+                "positive heat requires complete finite initial effort/input/scratch",
+            ));
+        }
+        if self.root.is_empty() {
+            if first_shift != 0.0 {
+                return Err(refuse(
+                    "constant shifted loss requires explicit interval power",
+                ));
+            }
+            return Ok(0.0);
+        }
         let root_rate = det::sqrt(self.rate);
         for i in 0..n {
             let force: f64 = (0..self.m).map(|p| sys.g[i * self.m + p] * input[p]).sum();
@@ -517,4 +573,47 @@ fn integral_root(
         }
     }
     Ok(root)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{QuadraticStorage, linear_exact::{LinearSplitBudget, split_quadratic}};
+
+    #[test]
+    fn held_effort_offset_integrates_the_original_resistance_square() {
+        // x'=-r*(q*x+fbar)+u, e=q*x+fbar. The physical effort follows
+        // e(t)=u/r+(e0-u/r)*exp(-r*q*t), regardless of the storage gradient
+        // at x0. Integrate this analytical square, not an energy remainder.
+        let (q, r, dt, input, effort0) = (2.0_f64, 0.3_f64, 0.7_f64, 0.5_f64, -2.0_f64);
+        let sys = PortHamiltonian::new(1, 1, vec![0.0], vec![r], vec![1.0],
+            Box::new(QuadraticStorage::new(vec![q], 1).unwrap())).unwrap();
+        let split = split_quadratic(&sys, LinearSplitBudget {
+            max_modes: 1, max_omega_dt: core::f64::consts::PI,
+        }).unwrap();
+        let heat = PositiveHeat::new(&sys, &split, dt, &[r]).unwrap();
+        let (mut derivative, mut coordinates) = ([0.0], [0.0; 2]);
+        let actual = heat.evaluate_with_effort_into(&sys, &[effort0], &[input],
+            &mut derivative, &mut coordinates).unwrap();
+        let equilibrium = input/r;
+        let deviation = effort0-equilibrium;
+        let rate = r*q;
+        let first = -(-rate*dt).exp_m1()/rate;
+        let second = -(-2.0*rate*dt).exp_m1()/(2.0*rate);
+        let expected = r*(equilibrium*equilibrium*dt
+            + 2.0*equilibrium*deviation*first + deviation*deviation*second);
+        assert!(actual >= 0.0);
+        assert!((actual-expected).abs() < 2e-12*expected);
+        assert_eq!(actual.to_bits(), heat.evaluate(&sys, &[effort0/q], &[input]).unwrap().to_bits());
+        assert!((actual-heat.evaluate(&sys, &[1.0], &[input]).unwrap()).abs() > 0.1*actual,
+            "endpoint storage gradient must not replace the held nonlinear effort");
+        assert_eq!(heat.evaluate_with_effort_into(&sys, &[0.0], &[0.0],
+            &mut derivative, &mut coordinates).unwrap(), 0.0);
+        for bad in [f64::NAN, f64::INFINITY] {
+            assert!(heat.evaluate_with_effort_into(&sys, &[bad], &[input],
+                &mut derivative, &mut coordinates).is_err());
+        }
+        assert!(heat.evaluate_with_effort_into(&sys, &[], &[input],
+            &mut derivative, &mut coordinates).is_err());
+    }
 }
