@@ -236,6 +236,80 @@ pub fn solve_backbone_harmonic_balance(
     result.map_err(PhsOrbitError::Orbit)
 }
 
+
+/// Physical whole-cycle observation of an HB orbit against the ORIGINAL pHS.
+/// This is an independent quadrature audit, not part of fs-orbit's Newton
+/// convergence test. Nonlinear storage may generate harmonics above the retained
+/// HB truncation, so callers should repeat with a sample ladder before treating
+/// a small residual as converged evidence.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PhsOrbitAudit {
+    pub samples: usize,
+    pub mean_stored_energy_j: f64,
+    pub minimum_stored_energy_j: f64,
+    pub maximum_stored_energy_j: f64,
+    pub mean_supplied_power_w: f64,
+    pub mean_resistance_loss_w: f64,
+    /// supply - native R loss; a periodic exact solution should approach zero.
+    pub cycle_power_residual_w: f64,
+    /// |residual| / mean(|instantaneous supply| + native loss), or zero at rest.
+    pub relative_power_residual: f64,
+}
+
+/// Audit one FORCED orbit using its exact authored Fourier input and original
+/// pHS energy/resistance. No damping or energy correction is applied.
+pub fn audit_forced_orbit(
+    system:&PortHamiltonian, input:&PeriodicPortInput, orbit:&HbOrbit, samples:usize,
+) -> Result<PhsOrbitAudit,PhsOrbitError> {
+    if system.port_dim()!=input.port_count() || orbit.coeffs.len()!=system.state_dim()
+        || orbit.omega.to_bits()!=input.omega_rad_s().to_bits()
+        || samples<32 || samples>65_536
+        || orbit.coeffs.iter().any(|row|row.is_empty())
+    { return Err(bad("cycle audit needs matching forced orbit and 32..=65536 samples")); }
+    let n=system.state_dim(); let m=system.port_dim();
+    let (_,r,g)=system.structure();
+    let mut x=vec![0.0;n]; let mut e=vec![0.0;n]; let mut u=vec![0.0;m];
+    let (mut energy_sum,mut supply_sum,mut loss_sum,mut scale_sum)=(0.0,0.0,0.0,0.0);
+    let (mut ce,mut cs,mut cl,mut cx)=(0.0,0.0,0.0,0.0);
+    let (mut emin,mut emax)=(f64::INFINITY,f64::NEG_INFINITY);
+    let add=|sum:&mut f64,c:&mut f64,value:f64| {let y=value-*c;let next=*sum+y;*c=(next-*sum)-y;*sum=next;};
+    for j in 0..samples {
+        let theta=core::f64::consts::TAU*j as f64/samples as f64;
+        for (k,value) in x.iter_mut().enumerate() {*value=orbit.sample(k,theta);}
+        e.fill(f64::NAN); system.storage().gradient(&x,&mut e);
+        if e.iter().any(|v|!v.is_finite()) {return Err(PhsOrbitError::SourceRefused);}
+        let time=theta/input.omega_rad_s();
+        if !input.sample_into(time,&mut u) {return Err(PhsOrbitError::SourceRefused);}
+        let h=system.hamiltonian(&x);
+        let mut supply=0.0; let mut loss=0.0;
+        for p in 0..m {
+            let y=(0..n).map(|i|g[i*m+p]*e[i]).sum::<f64>();
+            supply+=u[p]*y;
+        }
+        for i in 0..n {
+            let re=(0..n).map(|k|r[i*n+k]*e[k]).sum::<f64>();
+            loss+=e[i]*re;
+        }
+        if ![h,supply,loss].iter().all(|v|v.is_finite()) {
+            return Err(bad("cycle audit produced nonfinite physical work or storage"));
+        }
+        add(&mut energy_sum,&mut ce,h); add(&mut supply_sum,&mut cs,supply);
+        add(&mut loss_sum,&mut cl,loss); add(&mut scale_sum,&mut cx,supply.abs()+loss.abs());
+        emin=emin.min(h); emax=emax.max(h);
+    }
+    let inv=1.0/samples as f64;
+    let mean_h=energy_sum*inv; let mean_supply=supply_sum*inv; let mean_loss=loss_sum*inv;
+    let residual=mean_supply-mean_loss; let scale=scale_sum*inv;
+    let relative=if scale==0.0 {0.0}else{residual.abs()/scale};
+    if ![mean_h,mean_supply,mean_loss,residual,relative,emin,emax].iter().all(|v|v.is_finite()) {
+        return Err(bad("cycle audit reduction overflow"));
+    }
+    Ok(PhsOrbitAudit {samples,mean_stored_energy_j:mean_h,minimum_stored_energy_j:emin,
+        maximum_stored_energy_j:emax,mean_supplied_power_w:mean_supply,
+        mean_resistance_loss_w:mean_loss,cycle_power_residual_w:residual,
+        relative_power_residual:relative})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,6 +317,36 @@ mod tests {
 
     fn hb(n: usize) -> HbBudget {
         HbBudget { harmonics:n, max_newton:60, tolerance:1e-11, deflate_equilibrium:false }
+    }
+
+
+    #[test]
+    fn forced_cycle_audit_closes_original_source_and_resistance_work() {
+        let (m,k,d,w,f)=(2.0_f64,1000.0_f64,4.0_f64,15.0_f64,3.0_f64);
+        let system=fs_phs::mass_spring_damper(m,k,d).unwrap();
+        let input=PeriodicPortInput::new(w,vec![vec![C64::ZERO,C64::from_re(0.5*f)]]).unwrap();
+        let expected=f/det::sqrt((k-m*w*w).powi(2)+(d*w).powi(2));
+        let orbit=solve_forced_harmonic_balance(&system,&input,expected,&hb(3)).unwrap();
+        let a=audit_forced_orbit(&system,&input,&orbit,256).unwrap();
+        assert!(a.mean_supplied_power_w>0.0 && a.mean_resistance_loss_w>0.0);
+        assert!(a.relative_power_residual<2e-11,"{a:?}");
+        let b=audit_forced_orbit(&system,&input,&orbit,512).unwrap();
+        assert!((a.mean_supplied_power_w-b.mean_supplied_power_w).abs()<1e-12);
+        assert!(a.maximum_stored_energy_j>a.minimum_stored_energy_j);
+    }
+
+    #[test]
+    fn maxwell_cycle_audit_counts_internal_relaxation_loss_without_extra_law() {
+        let (k,kb,tau,w,f)=(60_000.0_f64,50_000.0_f64,1.0/300.0,240.0_f64,2.0_f64);
+        let system=fs_phs::mass_spring_damper(1.0,k,0.0).unwrap()
+            .with_relaxation_branches(vec![RelaxationBranch {
+                projection:vec![1.0,0.0],stiffness:kb,relaxation_time_s:tau,
+            }]).unwrap();
+        let input=PeriodicPortInput::new(w,vec![vec![C64::ZERO,C64::from_re(0.5*f)]]).unwrap();
+        let orbit=solve_forced_harmonic_balance(&system,&input,1e-4,&hb(3)).unwrap();
+        let audit=audit_forced_orbit(&system,&input,&orbit,512).unwrap();
+        assert!(audit.mean_resistance_loss_w>0.0);
+        assert!(audit.relative_power_residual<5e-10,"{audit:?}");
     }
 
     #[test]
