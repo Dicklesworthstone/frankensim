@@ -66,7 +66,9 @@ pub struct MaterialNetwork<'a> {
     pub cells: &'a [MaterialCell<'a>],
     /// One whole-cell binding per circuit resistor. Distinct resistor cells.
     pub resistors: &'a [CellResistor],
-    /// Exactly one material-conduction binding per active thermal link.
+    /// Exactly one material-conduction binding per active thermal link, except
+    /// links explicitly supplied to the additional-conductance methods.
+    /// Those methods require complete, disjoint ownership at every trial.
     pub links: &'a [ConductionLink],
 }
 /// Original failures remain distinguishable from missing bindings.
@@ -170,14 +172,48 @@ impl MaterialNetwork<'_> {
         bases: &BTreeMap<usize, ElectricalPropertyBasis>,
         pinned: Option<&BTreeMap<CellId, MaterialPropertySelection>>,
         electrical_axes: Option<&ElectricalAxes>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<CircuitThermalCoefficients<MaterialNetworkSample>, MaterialNetworkError> {
+        self.resolve_bound_with_links(thermal, bases, pinned, electrical_axes, None, cancelled)
+    }
+
+    // Additional physical link owners supply their actual step-local G here.
+    // They do not replace Fourier bindings or silently inherit authored G.
+    fn resolve_bound_with_links(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        bases: &BTreeMap<usize, ElectricalPropertyBasis>,
+        pinned: Option<&BTreeMap<CellId, MaterialPropertySelection>>,
+        electrical_axes: Option<&ElectricalAxes>,
+        additional_links: Option<&BTreeMap<u64, f64>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<CircuitThermalCoefficients<MaterialNetworkSample>, MaterialNetworkError> {
         let invalid=MaterialNetworkError::Invalid;
         let mut check=|| if cancelled() {Err(DepositionError::Cancelled)} else {Ok(())};
         check()?;
-        if self.cells.len()!=thermal.cells().len() || self.links.len()!=thermal.links().len()
+        if self.cells.len()!=thermal.cells().len()
+            || self.links.len().checked_add(additional_links.map_or(0, BTreeMap::len))
+                != Some(thermal.links().len())
             || self.resistors.len()>MAX_MATERIAL_CIRCUIT_BRANCHES {
             return Err(invalid("complete bounded cell/link bindings required"));
+        }
+        if let Some(additional) = additional_links {
+            let owned = self.links.iter().map(|link| link.link)
+                .collect::<std::collections::BTreeSet<_>>();
+            for (&id, &conductance) in additional {
+                check()?;
+                let link = thermal.links().get(&id)
+                    .ok_or(invalid("additional thermal link is inactive"))?;
+                if owned.contains(&id) {
+                    return Err(invalid("additional thermal links cannot replace material conduction"));
+                }
+                if link.conductance_w_k != 0.0
+                    || !conductance.is_finite() || conductance < 0.0 {
+                    return Err(invalid(
+                        "additional thermal links need zero authored and finite nonnegative resolved conductance",
+                    ));
+                }
+            }
         }
         let mut resistor_cells=BTreeMap::new(); let mut seen_branches=BTreeMap::new();
         for resistor in self.resistors {
@@ -273,7 +309,13 @@ impl MaterialNetwork<'_> {
                 .map_err(MaterialNetworkError::Conductor)?;
             resistors.push(MaterialResistor {branch:d.branch,conductor});
         }
-        let (conductances, links) = self.resolve_links(thermal, &bindings, &samples, &mut check)?;
+        let (mut conductances, links) = self.resolve_links(thermal, &bindings, &samples, &mut check)?;
+        if let Some(additional) = additional_links {
+            for (&id, &conductance) in additional {
+                check()?;
+                conductances.insert(id, conductance);
+            }
+        }
         check()?;
         Ok(CircuitThermalCoefficients {
             resistors,

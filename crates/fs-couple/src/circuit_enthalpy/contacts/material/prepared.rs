@@ -39,19 +39,58 @@ impl PreparedElectricalContactNetwork<'_,'_> {
         let bulk=self.bulk.resolve(thermal,&mut cancelled).map_err(ElectricalContactNetworkError::Bulk)?;
         self.network.resolve_contacts(thermal,bulk,Some(&self.pins),cancelled)
     }
+
+    /// Resolve original electrical contacts and bulk sources while another
+    /// physical owner supplies the remaining native thermal conductances.
+    /// The bulk owner enforces a complete, disjoint link partition.
+    pub fn resolve_with_link_conductances(
+        &self, thermal: &DepositionSimulation<'_>,
+        additional_links: &BTreeMap<u64, f64>, mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ContactThermalCoefficients<MaterialNetworkSample>, ElectricalContactNetworkError> {
+        if cancelled() { return Err(ElectricalContactNetworkError::Thermal(DepositionError::Cancelled)); }
+        self.admit_geometry(thermal, &mut cancelled)?;
+        let bulk = self.bulk.resolve_with_link_conductances(thermal, additional_links, &mut cancelled)
+            .map_err(ElectricalContactNetworkError::Bulk)?;
+        self.network.resolve_contacts(thermal, bulk, Some(&self.pins), cancelled)
+    }
 }
 impl<'a> ElectricalContactNetwork<'a> {
     /// Select each original bulk and interface claim once at the supplied state.
     /// Later evaluations query those pins through the existing material owners,
     /// including when competing claims overlap. Unsupported pinned states refuse.
     /// Cancellation returns no partially prepared object or physical endpoint.
-    pub fn prepare<'n>(&'n self,thermal:&DepositionSimulation<'_>,mut cancelled:impl FnMut()->bool)
+    pub fn prepare<'n>(&'n self,thermal:&DepositionSimulation<'_>,cancelled:impl FnMut()->bool)
         ->Result<PreparedElectricalContactNetwork<'n,'a>,ElectricalContactNetworkError> {
+        self.prepare_with_optional_links(thermal, None, cancelled)
+    }
+
+    /// Retain the same original electrical and interface source selections for
+    /// a heat assembly with additional, independently owned thermal links.
+    /// Ordinary resolution still requires complete Fourier coverage.
+    pub fn prepare_with_link_conductances<'n>(
+        &'n self, thermal: &DepositionSimulation<'_>,
+        additional_links: &BTreeMap<u64, f64>, cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedElectricalContactNetwork<'n, 'a>, ElectricalContactNetworkError> {
+        self.prepare_with_optional_links(thermal, Some(additional_links), cancelled)
+    }
+
+    fn prepare_with_optional_links<'n>(
+        &'n self, thermal: &DepositionSimulation<'_>,
+        additional_links: Option<&BTreeMap<u64, f64>>, mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedElectricalContactNetwork<'n, 'a>, ElectricalContactNetworkError> {
         use ElectricalContactNetworkError as Error;
         if cancelled() {return Err(Error::Thermal(DepositionError::Cancelled));}
         self.routes(thermal)?;
-        let bulk=self.bulk.prepare_with_bases(thermal,self.electrical_bases,&mut cancelled).map_err(Error::Bulk)?;
-        let sample=bulk.resolve(thermal,&mut cancelled).map_err(Error::Bulk)?;
+        let bulk = match additional_links {
+            Some(links) => self.bulk.prepare_with_link_conductances(
+                thermal, self.electrical_bases, links, &mut cancelled,
+            ),
+            None => self.bulk.prepare_with_bases(thermal, self.electrical_bases, &mut cancelled),
+        }.map_err(Error::Bulk)?;
+        let sample = match additional_links {
+            Some(links) => bulk.resolve_with_link_conductances(thermal, links, &mut cancelled),
+            None => bulk.resolve(thermal, &mut cancelled),
+        }.map_err(Error::Bulk)?;
         let initial=self.resolve_contacts(thermal,sample,None,&mut cancelled)?;
         let mut pins=BTreeMap::new();
         let mut geometry=BTreeMap::new();

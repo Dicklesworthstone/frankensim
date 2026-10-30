@@ -5,6 +5,7 @@
 //! drivers remain the only state and time-integration owners.
 
 use super::super::ConvectionSourceError;
+use super::links::{ResolvedLinkConvection, SourceConvectiveLink, evaluate_source_link_convection};
 use super::{
     ResolvedCellConvectionSources, SourceCellConvectionError, SourceConvectiveCell,
     evaluate_source_cell_convection,
@@ -63,9 +64,13 @@ impl<E: core::fmt::Debug> std::error::Error for ConvectionHeatError<E> {}
 
 /// Every heat-transfer source at the same accepted endpoint.
 #[derive(Debug)]
-pub struct ConvectionHeatSample<F> {
+pub struct ConvectionHeatSample<F, L = F> {
     pub heat: HeatNetworkSample,
+    /// Exchange with prescribed reservoirs, already in the source-power map.
     pub convection: ResolvedCellConvectionSources<F>,
+    /// Reciprocal exchange with actual finite fluid cells, already in the
+    /// native link-conductance map. This is never external heat supply.
+    pub finite_convection: Option<ResolvedLinkConvection<L>>,
 }
 
 /// A prepared heat assembly and physical fluid boundaries on its actual cells.
@@ -107,9 +112,58 @@ impl<R> SourceConvectionHeatNetwork<'_, '_, '_, '_, R> {
     where
         R: Fn(&SourceConvectiveCell, &DepositionSimulation<'_>, Temperature) -> Result<F, E>,
     {
+        self.resolve_combined::<F, F, E>(cx, thermal, None)
+    }
+
+    /// Resolve finite fluid links AND prescribed fluid reservoirs on the same
+    /// complete heat-network trial. A wall can exchange with either or both on
+    /// distinct native interface patches; original contact coverage remains
+    /// authoritative for its exposed reservoir area.
+    ///
+    /// Prepare `heat` with `prepare_with_link_conductances` using the original
+    /// links' initial resolved G. Its Fourier bindings must exclude these links.
+    /// Keep the source-pinned fluid laws in `resolve_links`; every trial gets
+    /// the actual wall/fluid enthalpy temperatures and the declared bulk/film
+    /// property temperature. The two finite cells keep their original caloric
+    /// laws, inventories and energy ownership. No bath or duplicate fluid state
+    /// is introduced. Empty `cells` permits a completely closed fluid network.
+    pub fn resolve_with_links<F: ThermalFluidTransport, L: ThermalFluidTransport, E>(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        links: &[SourceConvectiveLink],
+        maximum_links: usize,
+        resolve_links: impl Fn(
+            &SourceConvectiveLink, &DepositionSimulation<'_>, Temperature,
+        ) -> Result<L, E>,
+    ) -> Result<ContactThermalCoefficients<ConvectionHeatSample<F, L>>, ConvectionHeatError<E>>
+    where
+        R: Fn(&SourceConvectiveCell, &DepositionSimulation<'_>, Temperature) -> Result<F, E>,
+    {
+        cx.checkpoint().map_err(|_| ConvectionHeatError::Cancelled)?;
+        let finite = evaluate_source_link_convection(
+            thermal, links, maximum_links, resolve_links, || cx.checkpoint().is_err(),
+        )?;
+        self.resolve_combined(cx, thermal, Some(finite))
+    }
+
+    fn resolve_combined<F: ThermalFluidTransport, L, E>(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        finite_convection: Option<ResolvedLinkConvection<L>>,
+    ) -> Result<ContactThermalCoefficients<ConvectionHeatSample<F, L>>, ConvectionHeatError<E>>
+    where
+        R: Fn(&SourceConvectiveCell, &DepositionSimulation<'_>, Temperature) -> Result<F, E>,
+    {
         cx.checkpoint()
             .map_err(|_| ConvectionHeatError::Cancelled)?;
-        let mut coefficients = self.heat.resolve(cx, thermal)?;
+        let mut coefficients = match &finite_convection {
+            Some(finite) => self.heat.resolve_with_link_conductances(
+                cx, thermal, finite.conductances_w_k(),
+            ),
+            None => self.heat.resolve(cx, thermal),
+        }?;
         let convection = evaluate_source_cell_convection(
             thermal,
             self.cells,
@@ -135,6 +189,7 @@ impl<R> SourceConvectionHeatNetwork<'_, '_, '_, '_, R> {
                 source: ConvectionHeatSample {
                     heat: bulk.source,
                     convection,
+                    finite_convection,
                 },
             },
         })
@@ -176,6 +231,64 @@ impl<R> SourceConvectionHeatNetwork<'_, '_, '_, '_, R> {
     where
         R: Fn(&SourceConvectiveCell, &DepositionSimulation<'_>, Temperature) -> Result<F, E>,
     {
+        self.step_resolved(cx, thermal, target_s, circuit, ports, controls, guess_j,
+            |state| self.resolve(cx, state))
+    }
+
+    /// Evolve one original circuit and the same finite wall/fluid enthalpy
+    /// network, including all other authored heat paths and reservoirs.
+    ///
+    /// Finite convection is internal reciprocal exchange. Its G(Twall,Tfluid)
+    /// is re-resolved in every native residual alongside R(T), Joule/contact
+    /// heat, conduction and radiation. Thus changing fluid transport or caloric
+    /// data changes both temperatures and the actual circuit state.
+    /// All accepted inputs remain unchanged on source, budget or energy refusal.
+    ///
+    /// Cell masses, fixed geometry and prescribed relative flow are retained.
+    /// This does not infer fluid pressure work, advection, momentum or phase
+    /// front motion. The native endpoint scheme remains generally first order.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn step_candidate_with_links<'m, F: ThermalFluidTransport, L: ThermalFluidTransport, E>(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'m>,
+        target_s: f64,
+        circuit: &MaterialCircuit,
+        ports: &[f64],
+        controls: CircuitEnthalpySolve,
+        guess_j: &[f64],
+        links: &[SourceConvectiveLink],
+        maximum_links: usize,
+        resolve_links: impl Fn(
+            &SourceConvectiveLink, &DepositionSimulation<'_>, Temperature,
+        ) -> Result<L, E>,
+    ) -> Result<
+        CircuitEnthalpyCandidate<'m, ContactThermalSample<ConvectionHeatSample<F, L>>>,
+        CircuitEnthalpyError<ConvectionHeatError<E>>,
+    >
+    where
+        R: Fn(&SourceConvectiveCell, &DepositionSimulation<'_>, Temperature) -> Result<F, E>,
+    {
+        self.step_resolved(cx, thermal, target_s, circuit, ports, controls, guess_j,
+            |state| self.resolve_with_links(cx, state, links, maximum_links, &resolve_links))
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn step_resolved<'m, F, L, E>(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'m>,
+        target_s: f64,
+        circuit: &MaterialCircuit,
+        ports: &[f64],
+        controls: CircuitEnthalpySolve,
+        guess_j: &[f64],
+        resolve: impl Fn(&DepositionSimulation<'_>)
+            -> Result<ContactThermalCoefficients<ConvectionHeatSample<F, L>>, ConvectionHeatError<E>>,
+    ) -> Result<
+        CircuitEnthalpyCandidate<'m, ContactThermalSample<ConvectionHeatSample<F, L>>>,
+        CircuitEnthalpyError<ConvectionHeatError<E>>,
+    > {
         cx.checkpoint()
             .map_err(|_| CircuitEnthalpyError::Cancelled)?;
         let routes = self
@@ -195,7 +308,7 @@ impl<R> SourceConvectionHeatNetwork<'_, '_, '_, '_, R> {
             &routes,
             controls,
             guess_j,
-            |state| self.resolve(cx, state),
+            resolve,
             || cx.checkpoint().is_err(),
         );
         let proposal = match proposal {
