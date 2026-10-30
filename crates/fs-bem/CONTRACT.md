@@ -1091,3 +1091,54 @@ exclusions, work limits and cancellation refuse. The existing continuum and
 finite-band limitations remain; algebraic reciprocity does not establish
 measured acoustic accuracy. Focused original-owner equality regressions are
 authored; native execution remains pending.
+
+## Source-owned molecular exterior reaction and receivers
+
+`helmholtz::molecular::MolecularExterior` binds the original evaluated
+`RelaxationState` and an explicit positive angular-frequency band to the existing
+complex Helmholtz owner. The relaxing caloric response gives
+`k² = rho*omega²/K(omega)`; the physical Neumann trace remains
+`q = i*rho*omega*v` for exp(-i omega t). Molecular dispersion therefore changes
+both the boundary reaction and exterior propagation. No equilibrium-speed
+substitution into `rho*c*k`, attenuation-to-modulus conversion, duplicate
+molecular kernel or downstream absorption filter is used.
+
+One batch shares its boundary assembly and LU. The existing complex owner now
+has a values-only specialization with two dense matrices instead of four,
+omitting derivative evaluation/storage on identical quadrature. Original
+derivative APIs and real-frequency paths retain their arithmetic. Resolution
+admission uses |k|, including the absorption length. Explicit panel/matrix/work
+budgets and original field caps remain. Cancellation is checked at admission,
+each assembly/RHS row and between fields. The original cancellable LU polls
+at elimination and substitution boundaries, retaining its declared-worker block
+policy. Nothing is published on refusal.
+
+`MolecularRadiation` retains immutable source/frequency/geometry identity and
+uses the existing centroid Green representation for finite pressure and
+Cartesian gradient. Receiver geometry/clearance checks are unchanged. Its raw
+boundary work is neither clipped nor equated with distant radiated flux: it
+includes energy ultimately absorbed in the exterior gas.
+
+`aperture_response` reuses original aperture admission, force projection,
+reciprocity/Hermitian-part diagnostics and `ApertureImpedance::acoustic(0)`.
+This matrix is directly compatible with the existing `CoupledTermination` and
+molecular duct multiport closure, without another production dependency.
+`observe_volume_flows` superposes the retained boundary traces before a single
+receiver traversal; solved outward opening flows and their reaction see one
+source gas. Generalized shapes with zero net flow keep their mechanical matrix
+meaning but refuse conversion to plane-port flow observation.
+
+Focused tests cover values/derivative-owner bit parity and half-storage budget,
+a three-mesh absorbing-sphere impedance/receiver/gradient ladder, empty-source
+parity and source-rate liveness, original molecular duct/full-aperture closure,
+and band/geometry/work/cancellation refusal. Native execution results are
+recorded with the implementation; the test definitions alone are not a claim
+of full workspace or instrument qualification.
+
+This harmonic model has inviscid momentum and molecular relaxing compression
+in one spatially uniform, stationary exterior gas. It does not model exterior
+shear viscosity, conductive or viscous boundary layers, mean flow, evolving gas
+inventories, nonuniform exteriors, a rational time-domain load, or experimental
+source accuracy. The original centroid/disc Burton–Miller and triangle-CBIE
+accuracy limits remain. No passivity repair or BEM discretization-error bound
+is introduced, and receiver near-field convergence still requires refinement.

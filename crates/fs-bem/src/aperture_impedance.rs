@@ -65,7 +65,7 @@ pub struct ApertureRow {
     pub omega: f64,
     /// Row-major `apertures x apertures` impedance [N s/m].
     pub impedance: Vec<C64>,
-    /// `"dense"`, `"iterative"` or `"galerkin"`.
+    /// `"dense"`, `"iterative"`, `"galerkin"` or `"molecular-dense"`.
     pub route: &'static str,
     /// `||Z - Z^T||_F / ||Z||_F`, measured and never repaired.
     pub reciprocity_defect: f64,
@@ -158,7 +158,7 @@ fn finite(z: C64) -> bool {
     z.re.is_finite() && z.im.is_finite()
 }
 
-fn mix(hash: u64, word: u64) -> u64 {
+pub(super) fn mix(hash: u64, word: u64) -> u64 {
     (hash ^ word).wrapping_mul(0x0000_0100_0000_01b3)
 }
 
@@ -178,33 +178,7 @@ pub fn aperture_impedance(
 ) -> Result<ApertureImpedance, ApertureError> {
     let panels = surface.areas().len();
     let n = apertures.len();
-    if n == 0 || n > MAX_RADIATION_FIELDS_PER_BATCH {
-        return Err(
-            bad("aperture set must be nonempty and within MAX_RADIATION_FIELDS_PER_BATCH").into(),
-        );
-    }
-    for aperture in apertures {
-        if aperture.shape.len() != panels {
-            return Err(HelmholtzError::ShapeMismatch {
-                what: "aperture shape length must equal the panel count",
-            }
-            .into());
-        }
-        if aperture.shape.iter().any(|v| !v.is_finite()) || aperture.shape.iter().all(|&v| v == 0.0)
-        {
-            return Err(bad("aperture shapes must be finite and not identically zero").into());
-        }
-        let m = aperture.normal;
-        let norm2 = m[0] * m[0] + m[1] * m[1] + m[2] * m[2];
-        if aperture.reference_point.iter().any(|v| !v.is_finite())
-            || !norm2.is_finite()
-            || (norm2 - 1.0).abs() > 1.0e-12
-        {
-            return Err(
-                bad("aperture reference planes need a finite point and a unit normal").into(),
-            );
-        }
-    }
+    admit_apertures(surface, apertures)?;
     if omegas.is_empty()
         || omegas.iter().any(|w| !(w.is_finite() && *w > 0.0))
         || omegas.windows(2).any(|w| w[1] <= w[0])
@@ -218,17 +192,7 @@ pub fn aperture_impedance(
     {
         return Err(bad("medium density and sound speed must be positive and finite").into());
     }
-    let mut declaration = surface_fingerprint(surface);
-    for aperture in apertures {
-        for &v in aperture
-            .shape
-            .iter()
-            .chain(&aperture.reference_point)
-            .chain(&aperture.normal)
-        {
-            declaration = mix(declaration, v.to_bits());
-        }
-    }
+    let mut declaration = aperture_declaration(surface, apertures);
     for &v in omegas.iter().chain([&medium.density, &medium.sound_speed]) {
         declaration = mix(declaration, v.to_bits());
     }
@@ -288,21 +252,8 @@ pub fn aperture_impedance(
                         (solutions.into_iter().map(|s| s.pressure).collect(), "dense")
                     }
                 };
-                let mut impedance = vec![C64::ZERO; n * n];
-                for (b, pressure) in pressures.iter().enumerate() {
-                    for (a, aperture) in apertures.iter().enumerate() {
-                        let mut force = C64::ZERO;
-                        for ((&shape, &p), &area) in
-                            aperture.shape.iter().zip(pressure).zip(surface.areas())
-                        {
-                            force = force + p.scale(area * shape);
-                        }
-                        if !finite(force) {
-                            return Err(bad("nonfinite aperture force projection").into());
-                        }
-                        impedance[a * n + b] = force;
-                    }
-                }
+                let pressure_refs: Vec<_> = pressures.iter().map(Vec::as_slice).collect();
+                let impedance = project_pressures(surface, apertures, &pressure_refs)?;
                 rows.push(row(omega, impedance, n, label));
             }
         }
@@ -341,7 +292,80 @@ pub fn aperture_impedance(
     })
 }
 
-fn row(omega: f64, impedance: Vec<C64>, n: usize, route: &'static str) -> ApertureRow {
+pub(super) fn admit_apertures(
+    surface: &SpherePanels,
+    apertures: &[Aperture],
+) -> Result<(), HelmholtzError> {
+    let panels = surface.areas().len();
+    if apertures.is_empty() || apertures.len() > MAX_RADIATION_FIELDS_PER_BATCH {
+        return Err(bad(
+            "aperture set must be nonempty and within MAX_RADIATION_FIELDS_PER_BATCH",
+        ));
+    }
+    for aperture in apertures {
+        if aperture.shape.len() != panels {
+            return Err(HelmholtzError::ShapeMismatch {
+                what: "aperture shape length must equal the panel count",
+            });
+        }
+        if aperture.shape.iter().any(|v| !v.is_finite()) || aperture.shape.iter().all(|&v| v == 0.0)
+        {
+            return Err(bad(
+                "aperture shapes must be finite and not identically zero",
+            ));
+        }
+        let m = aperture.normal;
+        let norm2 = m[0] * m[0] + m[1] * m[1] + m[2] * m[2];
+        if aperture.reference_point.iter().any(|v| !v.is_finite())
+            || !norm2.is_finite()
+            || (norm2 - 1.0).abs() > 1.0e-12
+        {
+            return Err(bad(
+                "aperture reference planes need a finite point and a unit normal",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn aperture_declaration(surface: &SpherePanels, apertures: &[Aperture]) -> u64 {
+    let mut declaration = surface_fingerprint(surface);
+    for aperture in apertures {
+        for &v in aperture
+            .shape
+            .iter()
+            .chain(&aperture.reference_point)
+            .chain(&aperture.normal)
+        {
+            declaration = mix(declaration, v.to_bits());
+        }
+    }
+    declaration
+}
+
+pub(super) fn project_pressures(
+    surface: &SpherePanels,
+    apertures: &[Aperture],
+    pressures: &[&[C64]],
+) -> Result<Vec<C64>, HelmholtzError> {
+    let n = apertures.len();
+    let mut impedance = vec![C64::ZERO; n * n];
+    for (b, pressure) in pressures.iter().enumerate() {
+        for (a, aperture) in apertures.iter().enumerate() {
+            let mut force = C64::ZERO;
+            for ((&shape, &p), &area) in aperture.shape.iter().zip(*pressure).zip(surface.areas()) {
+                force = force + p.scale(area * shape);
+            }
+            if !finite(force) {
+                return Err(bad("nonfinite aperture force projection"));
+            }
+            impedance[a * n + b] = force;
+        }
+    }
+    Ok(impedance)
+}
+
+pub(super) fn row(omega: f64, impedance: Vec<C64>, n: usize, route: &'static str) -> ApertureRow {
     let (reciprocity_defect, passivity_margin) = reciprocity_and_passivity(&impedance, n);
     ApertureRow {
         omega,

@@ -13,8 +13,8 @@
 //! an arbitrary complex contour contains no fictitious representation roots.
 //! Spatial/formulation convergence and physical mode identification remain with
 //! the caller. No fitting, damping floor, symmetrization or passivity repair.
-use super::DampedWaveNumber;
 use super::super::*;
+use super::DampedWaveNumber;
 
 // The continuation evaluates both values and derivatives on one fixed geometric
 // traversal. The real-frequency owner is left untouched; tests compare the
@@ -28,7 +28,8 @@ use quadrature::{triangle_remainder_rule, triangle_self_rule};
 pub struct ComplexOptions {
     /// Additional panel cap, no greater than the parent's dense hard cap.
     pub max_panels: usize,
-    /// Payload ceiling for the four dense complex matrices (64*n*n bytes).
+    /// Payload ceiling: four dense complex matrices (64*n*n bytes) with
+    /// derivatives, or two (32*n*n bytes) for [`assemble_values_with_cancel`].
     /// Excludes caller geometry, allocator overhead and any later factorization.
     pub max_bytes: usize,
     /// Conservative kernel-evaluation units: 512*n*n for triangle CBIE,
@@ -107,6 +108,15 @@ pub struct ComplexOperator {
     pub db_dk: Vec<C64>,
 }
 
+/// The same boundary pair without derivative storage or derivative evaluation.
+/// Frequency-domain material solves need only A p=B q.
+#[derive(Debug, Clone)]
+pub struct ComplexBoundaryPair {
+    pub dimension: usize,
+    pub a: Vec<C64>,
+    pub b: Vec<C64>,
+}
+
 fn finite(z: C64) -> bool {
     z.re.is_finite() && z.im.is_finite()
 }
@@ -136,6 +146,34 @@ fn zeros(n: usize) -> Result<Vec<C64>, ComplexError> {
 /// Zero/nonfinite k, invalid surface/options, insufficient resolution at |k|,
 /// budgets, allocation, nonfinite kernels or cancellation.
 pub fn assemble_with_cancel(
+    surface: &SpherePanels,
+    k: C64,
+    formulation: Formulation,
+    options: &ComplexOptions,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ComplexOperator, ComplexError> {
+    assemble::<true>(surface, k, formulation, options, cancelled)
+}
+
+/// Assemble only the original A/B values, on identical quadrature and with
+/// identical admission/cancellation to [`assemble_with_cancel`]. The requested
+/// matrix payload is halved; the conservative work ceiling is unchanged.
+pub fn assemble_values_with_cancel(
+    surface: &SpherePanels,
+    k: C64,
+    formulation: Formulation,
+    options: &ComplexOptions,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ComplexBoundaryPair, ComplexError> {
+    let out = assemble::<false>(surface, k, formulation, options, cancelled)?;
+    Ok(ComplexBoundaryPair {
+        dimension: out.dimension,
+        a: out.a,
+        b: out.b,
+    })
+}
+
+fn assemble<const DERIVATIVES: bool>(
     surface: &SpherePanels,
     k: C64,
     formulation: Formulation,
@@ -171,7 +209,7 @@ pub fn assemble_with_cancel(
         .checked_mul(n)
         .ok_or_else(|| invalid("matrix dimension overflow"))?;
     let required_bytes = entries
-        .checked_mul(4 * core::mem::size_of::<C64>())
+        .checked_mul((if DERIVATIVES { 4 } else { 2 }) * core::mem::size_of::<C64>())
         .ok_or_else(|| invalid("matrix payload overflow"))?;
     let required_work = (entries as u64)
         .checked_mul(if triangles.is_some() { 512 } else { 8 })
@@ -188,8 +226,16 @@ pub fn assemble_with_cancel(
         dimension: n,
         a: zeros(entries)?,
         b: zeros(entries)?,
-        da_dk: zeros(entries)?,
-        db_dk: zeros(entries)?,
+        da_dk: if DERIVATIVES {
+            zeros(entries)?
+        } else {
+            Vec::new()
+        },
+        db_dk: if DERIVATIVES {
+            zeros(entries)?
+        } else {
+            Vec::new()
+        },
     };
     let sign = match formulation {
         Formulation::PlainCbie => 0.0,
@@ -229,10 +275,10 @@ pub fn assemble_with_cancel(
         for j in 0..n {
             let (value, derivative) = if i == j {
                 let (s, nr, ds, dnr) = if let Some(ts) = triangles {
-                    let (s, ds) = triangle_single_self(k, xi, ts[i]);
+                    let (s, ds) = triangle_single_self::<DERIVATIVES>(k, xi, ts[i]);
                     (s, C64::ZERO, ds, C64::ZERO)
                 } else {
-                    disc_with_derivative(k, areas[i])
+                    disc_with_derivative::<DERIVATIVES>(k, areas[i])
                 };
                 let dself = if sign == 0.0 {
                     C64::ZERO
@@ -245,13 +291,14 @@ pub fn assemble_with_cancel(
                 )
             } else if let Some(ts) = triangles {
                 let (s, d, ds, dd) = if triangle_is_near(xi, centroids[j], ts[j]) {
-                    triangle_weak(k, xi, ts[j], normals[j], (&GL8_X, &GL8_W))
+                    triangle_weak::<DERIVATIVES, 8>(k, xi, ts[j], normals[j], (&GL8_X, &GL8_W))
                 } else {
-                    triangle_weak(k, xi, ts[j], normals[j], (&GL4_X, &GL4_W))
+                    triangle_weak::<DERIVATIVES, 4>(k, xi, ts[j], normals[j], (&GL4_X, &GL4_W))
                 };
                 ([s, d, C64::ZERO, C64::ZERO], [ds, dd, C64::ZERO, C64::ZERO])
             } else {
-                let (v, d) = point_with_derivative(k, xi, ni, centroids[j], normals[j]);
+                let (v, d) =
+                    point_with_derivative::<DERIVATIVES>(k, xi, ni, centroids[j], normals[j]);
                 (v.map(|x| x.scale(areas[j])), d.map(|x| x.scale(areas[j])))
             };
             let [s, d, dp, hyp] = value;
@@ -265,14 +312,16 @@ pub fn assemble_with_cancel(
                 bv = bv + alpha * half;
                 db = db + dalpha * half;
             }
-            if [av, bv, da, db].into_iter().any(|z| !finite(z)) {
+            if !finite(av) || !finite(bv) || (DERIVATIVES && (!finite(da) || !finite(db))) {
                 return Err(invalid("nonfinite complex boundary kernel or derivative"));
             }
             let ij = i * n + j;
             out.a[ij] = av;
             out.b[ij] = bv;
-            out.da_dk[ij] = da;
-            out.db_dk[ij] = db;
+            if DERIVATIVES {
+                out.da_dk[ij] = da;
+                out.db_dk[ij] = db;
+            }
         }
     }
     if cancelled() {
@@ -288,7 +337,7 @@ fn wave(k: C64) -> DampedWaveNumber {
     }
 }
 
-fn point_with_derivative(
+fn point_with_derivative<const DERIVATIVES: bool>(
     k: C64,
     x: [f64; 3],
     nx: [f64; 3],
@@ -300,6 +349,9 @@ fn point_with_derivative(
     } else {
         kernels(wave(k), x, nx, y, ny)
     };
+    if !DERIVATIVES {
+        return ([g, dy, dx, hyp], [C64::ZERO; 4]);
+    }
     let d = sub(x, y);
     let r = norm(d);
     let imaginary = C64::new(0.0, 1.0);
@@ -336,12 +388,15 @@ fn exp_minus_one(z: C64) -> C64 {
     }
 }
 
-fn disc_with_derivative(k: C64, area: f64) -> (C64, C64, C64, C64) {
+fn disc_with_derivative<const DERIVATIVES: bool>(k: C64, area: f64) -> (C64, C64, C64, C64) {
     let (s, nr) = if k.im == 0.0 {
         self_terms(k.re, area)
     } else {
         self_terms(wave(k), area)
     };
+    if !DERIVATIVES {
+        return (s, nr, C64::ZERO, C64::ZERO);
+    }
     let a = det::sqrt(area / core::f64::consts::PI);
     let imaginary = C64::new(0.0, 1.0);
     let z = (imaginary * k).scale(a);
@@ -397,16 +452,22 @@ fn double_remainder(k: C64, r: f64) -> C64 {
     }
 }
 
-fn triangle_single_self(k: C64, x: [f64; 3], triangle: [[f64; 3]; 3]) -> (C64, C64) {
+fn triangle_single_self<const DERIVATIVES: bool>(
+    k: C64,
+    x: [f64; 3],
+    triangle: [[f64; 3]; 3],
+) -> (C64, C64) {
     let mut s = C64::from_re(triangle_self_static(x, triangle));
     let mut ds = C64::ZERO;
     triangle_self_rule(x, triangle, |r, weight| {
         s = s + single_remainder(k, r).scale(weight);
-        ds = ds + single_derivative(k, r).scale(weight);
+        if DERIVATIVES {
+            ds = ds + single_derivative(k, r).scale(weight);
+        }
     });
     (s, ds)
 }
-fn triangle_weak<const N: usize>(
+fn triangle_weak<const DERIVATIVES: bool, const N: usize>(
     k: C64,
     x: [f64; 3],
     triangle: [[f64; 3]; 3],
@@ -427,7 +488,9 @@ fn triangle_weak<const N: usize>(
         let dgdny = double_remainder(k, r).scale(normal_offset);
         s = s + g.scale(weight);
         d = d + dgdny.scale(weight);
-        ds = ds + single_derivative(k, r).scale(weight);
+        if DERIVATIVES {
+            ds = ds + single_derivative(k, r).scale(weight);
+        }
     });
     (s, d, ds, (k * s).scale(normal_offset))
 }

@@ -75,6 +75,10 @@ use crate::panel3d::SpherePanels;
 #[path = "helmholtz_laplace.rs"]
 pub mod laplace;
 
+/// One source-owned molecular gas for radiation reaction and finite receivers.
+#[path = "helmholtz_molecular.rs"]
+pub mod molecular;
+
 #[path = "cbie_geometry.rs"]
 mod cbie_geometry;
 pub use cbie_geometry::PreparedCbieGeometry;
@@ -4002,3 +4006,4 @@ mod tests {
         );
     }
 }
+

@@ -163,7 +163,7 @@ pub struct PointField {
 // This is the centroid Green representation already exposed by the parent.
 // Both Fourier bakes and damped CQ use these same analytic normal derivatives.
 // No near-field quadrature accuracy is claimed for a centroid receiver row.
-fn fields_from_traces(
+pub(super) fn fields_from_traces(
     surface: &SpherePanels,
     pressure: &[C64],
     velocity: &[C64],
@@ -310,3 +310,4 @@ mod tests {
         }
     }
 }
+
