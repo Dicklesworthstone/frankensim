@@ -1,0 +1,40 @@
+frankensim.matdb-manifest.v3
+pack_id	fsri-homasote-dried-2021
+redistribution	permitted	Selected attributed numerical facts with original annotations and explicit arithmetic reductions. No source photographs, instrument files, prose or table layouts are redistributed; public access does not grant a source-document license.
+citation	McKinnon, Weinschenk, Dow, DiDomizio and Madrzykowski, Materials and Products Database, FSRI, UL Research Institutes (2023); Homasote Dry HFM population; https://materials.fsri.org/materialdetail/homasote; pinned primary source https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Homasote; method https://materials.fsri.org/experimentalmethodology; reduction https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/02_Scripts/plot_HFM_data_html.py; accessed 2026-10-30.
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	fsri-hfm	properties.tsv	material-tsv-v1
+property	volumetric_capacity	volumetric-heat-capacity	dimensional
+property	specific_heat	specific-heat-capacity	dimensional
+property	apparent_conductivity	apparent-thermal-conductivity	thermal-conductivity
+property	local_conductivity	thermal-conductivity	thermal-conductivity
+property	conductivity_sd	reported-apparent-thermal-conductivity-standard-deviation	dimensional
+property	normalization_density	reference-normalization-density	dimensional
+property	capacity_sd	computed-volumetric-heat-capacity-sample-standard-deviation	dimensional
+property	specific_heat_sd	reported-specific-heat-capacity-standard-deviation	dimensional
+axis	family	source-fsri-homasote	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	test_mean_temperature	test-mean-temperature	absolute-temperature
+axis	local_model	mean-test-temperature-as-local-model	dimensional
+axis	unconditioned	source-unconditioned	dimensional
+axis	dried	source-dried	dimensional
+axis	grade_known	source-grade-known	dimensional
+axis	formulation_known	source-formulation-known	dimensional
+axis	moisture_known	source-moisture-content-known	dimensional
+axis	pressure_known	source-contact-pressure-known	dimensional
+axis	axis_known	source-material-axis-known	dimensional
+axis	fraction_known	source-filler-fraction-known	dimensional
+axis	layers_known	source-layer-construction-known	dimensional
+axis	matched	source-specimens-matched	dimensional
+axis	stock_matched	source-stock-coupon-equivalence-known	dimensional
+axis	unique_specimens	source-unique-specimen-count-confirmed	dimensional
+axis	labels	source-header-labels-reconciled	dimensional
+axis	statistic	source-statistic-is-mean	dimensional
+axis	capacity_runs	source-capacity-run-count	dimensional
+axis	conductivity_runs	source-conductivity-run-count	dimensional
+axis	density_runs	source-density-run-count	dimensional
+axis	stock_thickness	source-stock-thickness	dimensional
+axis	through_thickness	source-hfm-through-thickness	dimensional
+axis	upward	source-hfm-upward-heat-flow	dimensional
+axis	plate_delta	source-hfm-temperature-difference	temperature-difference
+axis	density_temperature_known	source-density-temperature-known	dimensional
