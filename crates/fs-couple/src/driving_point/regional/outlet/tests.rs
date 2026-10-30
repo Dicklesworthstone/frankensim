@@ -187,7 +187,9 @@ fn open_hole_shunt_line_is_port_scale_invariant_passive_at_small_amplitude_and_u
     // orifice flow U_h(t) and reflected reed wave delta p^-(t) invariant to < 1e-9.
     let mut shunt_double_drive = shunt_1.clone();
     let mut shunt_soft = shunt_1.clone();
+    let mut shunt_soft_half = shunt_1.clone();
     let mut shunt_no_vortex = shunt_1.without_vortex_loss();
+    let mut shunt_no_vortex_half = shunt_1.without_vortex_loss();
 
     let mut max_dp_1: f64 = 0.0;
     let mut max_dp_diff_half: f64 = 0.0;
@@ -199,6 +201,8 @@ fn open_hole_shunt_line_is_port_scale_invariant_passive_at_small_amplitude_and_u
     let mut energy_double = 0.0;
     let mut max_soft_u: f64 = 0.0;
     let mut max_soft_diff: f64 = 0.0;
+    let mut max_soft_half_u: f64 = 0.0;
+    let mut max_soft_half_diff: f64 = 0.0;
 
     for n in 0..512 {
         let phase = 2.0 * std::f64::consts::PI * 900.0 * n as f64 / 48000.0;
@@ -224,13 +228,20 @@ fn open_hole_shunt_line_is_port_scale_invariant_passive_at_small_amplitude_and_u
         energy_single += dp1 * dp1;
         energy_double += dp_dbl_drive * dp_dbl_drive;
 
-        // Gate 3: small-amplitude limit matches the vortex-free model to rounding.
+        // Gate 3: small-amplitude quadratic deviation from vortex-free model is < 1e-6 at 1 mPa
+        // and scales linearly with amplitude (halving p_soft halves rel within 1%).
         let p_soft = 1.0e-3 * phase.sin();
         let u_soft = shunt_soft.step(p_soft).unwrap();
         let u_lin = shunt_no_vortex.step(p_soft).unwrap();
         assert_eq!(shunt_no_vortex.s12_history(), 0.0);
         max_soft_u = max_soft_u.max(u_lin.abs());
         max_soft_diff = max_soft_diff.max((u_soft - u_lin).abs());
+
+        let p_soft_half = 0.5 * p_soft;
+        let u_soft_half = shunt_soft_half.step(p_soft_half).unwrap();
+        let u_lin_half = shunt_no_vortex_half.step(p_soft_half).unwrap();
+        max_soft_half_u = max_soft_half_u.max(u_lin_half.abs());
+        max_soft_half_diff = max_soft_half_diff.max((u_soft_half - u_lin_half).abs());
     }
 
     assert!(
@@ -245,10 +256,11 @@ fn open_hole_shunt_line_is_port_scale_invariant_passive_at_small_amplitude_and_u
         max_u_diff_half / max_u_1,
         max_u_diff_double / max_u_1
     );
+    let rel_soft = max_soft_diff / max_soft_u;
+    let rel_soft_half = max_soft_half_diff / max_soft_half_u;
     assert!(
-        max_soft_diff / max_soft_u < 1.0e-9,
-        "small-amplitude orifice flow diverged from vortex-free model: rel={}",
-        max_soft_diff / max_soft_u
+        rel_soft < 1.0e-6 && (rel_soft_half / (0.5 * rel_soft) - 1.0).abs() < 0.01,
+        "small-amplitude orifice flow deviation failed linear-scaling gate: rel_1mPa={rel_soft}, rel_0.5mPa={rel_soft_half}"
     );
     assert!(
         energy_double > 4.0 * energy_single,
