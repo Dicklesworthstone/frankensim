@@ -415,10 +415,14 @@ impl ResolvedDgFilePerformance {
         let boundary_kind = match row.fields.clone().next() {
             Some("pressure") => { row.word()?; 1 }
             Some("upstream-pressure") => { row.word()?; 2 }
+            Some("reservoir") => { row.word()?; 3 }
             Some("characteristic") => { row.word()?; 0 }
             _ => 0,
         };
-        if upstream.is_some() != (boundary_kind == 2) {
+        if boundary_kind == 3 && reservoir_aperture.is_none() {
+            return Err(bad(row.line, "reservoir controls require the declared transverse aperture"));
+        }
+        if boundary_kind != 3 && upstream.is_some() != (boundary_kind == 2) {
             return Err(bad(row.line, "upstream-pressure requires its declared upstream DG load; face controls require an unloaded source face"));
         }
         let boundary_segments: usize = row.number()?;
@@ -433,15 +437,23 @@ impl ResolvedDgFilePerformance {
             let mut row = rows.row("hold")?;
             let end: usize = row.number()?;
             let value = row.scalar()?;
+            let control = match boundary_kind {
+                3 => {
+                    let temperature_k = row.scalar()?;
+                    if value <= 0.0 || temperature_k <= 0.0 {
+                        return Err(bad(row.line, "reservoir controls require positive absolute pressure and temperature"));
+                    }
+                    NsfDgDrive::Reservoir { pressure_pa: value, temperature_k }
+                }
+                2 => NsfDgDrive::UpstreamPressureRise(value),
+                1 => NsfDgDrive::Boundary(NsfBoundaryDrive::PressureOffset(value)),
+                _ => NsfDgDrive::Boundary(NsfBoundaryDrive::IncomingCharacteristic(value)),
+            };
             row.end()?;
             if end <= previous_end || end > samples {
                 return Err(bad(rows.line, "boundary endpoints must increase inside the declared sample window"));
             }
-            boundaries.push((end, match boundary_kind {
-                2 => NsfDgDrive::UpstreamPressureRise(value),
-                1 => NsfDgDrive::Boundary(NsfBoundaryDrive::PressureOffset(value)),
-                _ => NsfDgDrive::Boundary(NsfBoundaryDrive::IncomingCharacteristic(value)),
-            }));
+            boundaries.push((end, control));
             previous_end = end;
         }
         if previous_end != samples { return Err(bad(rows.line, "boundary history must cover the complete declared window")); }

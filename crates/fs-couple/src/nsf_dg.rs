@@ -22,7 +22,7 @@ use fs_exec::CancelGate;
 use fs_lbm::lattice3::Lattice3;
 use fs_lbm::nsf3::{
     EnergyLedger, NsfBoundaryDrive, NsfBoundaryExchange, NsfCharacteristicPatch,
-    NsfCharacteristicTrial, NsfError, NsfGrid3,
+    NsfCharacteristicTrial, NsfError, NsfGrid3, NsfOpenState,
 };
 use fs_material::gas::GasState;
 
@@ -39,12 +39,19 @@ pub enum NsfDgDrive {
     /// Ideal held pressure rise from a finite upstream DG load into the zone
     /// [Pa]. This is a series effort, not prescribed absolute face pressure.
     UpstreamPressureRise(f64),
+    /// Absolute pressure [Pa] and temperature [K] at the existing transverse
+    /// reservoir. Density comes from the original gas source; its declared
+    /// ghost velocity is retained. Both finite acoustic loads, when present,
+    /// solve with zero series effort. Otherwise the other face has J-=0.
+    Reservoir { pressure_pa: f64, temperature_k: f64 },
 }
 impl NsfDgDrive {
     pub fn is_finite(self) -> bool {
         match self {
             Self::Boundary(value) => value.is_finite(),
             Self::UpstreamPressureRise(value) => value.is_finite(),
+            Self::Reservoir { pressure_pa, temperature_k } =>
+                pressure_pa.is_finite() && temperature_k.is_finite(),
         }
     }
 }
@@ -320,6 +327,32 @@ impl<L: Lattice3<27>> NsfDg<L> {
         match drive {
             NsfDgDrive::Boundary(value) => self.step_with_boundary(value, gate),
             NsfDgDrive::UpstreamPressureRise(value) => self.step_with_upstream_pressure_rise(value, gate),
+            NsfDgDrive::Reservoir { pressure_pa, temperature_k } =>
+                self.step_with_reservoir(pressure_pa, temperature_k, gate),
+        }
+    }
+
+    /// Blow through the transverse aperture independently of the two axial
+    /// acoustic loads. Held absolute pressure and temperature select the SAME
+    /// material-owned reservoir state used by populations, force and energy.
+    /// No jet speed, source waveform or extra pressure rise is synthesized.
+    ///
+    /// Both ends retain finite DG feedback when an upstream load is attached;
+    /// otherwise the unused end receives its unperturbed incoming acoustic
+    /// characteristic. Reservoir conditions publish only with the complete
+    /// accepted fluid and acoustic interval, including on failed root solves.
+    pub fn step_with_reservoir(
+        &mut self, pressure_pa: f64, temperature_k: f64, gate: &CancelGate,
+    ) -> Result<NsfDgFrame, NsfDgError> {
+        poll(gate)?;
+        let state = self.zone.reservoir_aperture_state_at(pressure_pa, temperature_k)
+            .map_err(NsfDgError::Flow)?;
+        let drive = NsfDgDrive::Reservoir { pressure_pa, temperature_k };
+        if self.upstream.is_some() {
+            self.step_with_upstream_conditions(0.0, Some(state), drive, gate)
+        } else {
+            self.step_with_boundary_conditions(NsfBoundaryDrive::IncomingCharacteristic(0.0),
+                Some(state), drive, gate)
         }
     }
 
@@ -342,6 +375,14 @@ impl<L: Lattice3<27>> NsfDg<L> {
     pub fn step_with_boundary(&mut self, external_boundary: NsfBoundaryDrive, gate: &CancelGate)
         -> Result<NsfDgFrame, NsfDgError>
     {
+        self.step_with_boundary_conditions(external_boundary, None,
+            NsfDgDrive::Boundary(external_boundary), gate)
+    }
+
+    fn step_with_boundary_conditions(
+        &mut self, external_boundary: NsfBoundaryDrive, reservoir_state: Option<NsfOpenState>,
+        control: NsfDgDrive, gate: &CancelGate,
+    ) -> Result<NsfDgFrame, NsfDgError> {
         poll(gate)?;
         if self.upstream.is_some() {
             return Err(NsfDgError::Input("a finite upstream load requires an explicit series pressure-rise control"));
@@ -363,7 +404,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
             let mut drive = [external_boundary; 2];
             drive[side] = NsfBoundaryDrive::IncomingCharacteristic(incoming);
             let candidate = preview_interval(&mut self.zone, drive, side,
-                self.patch_background, limits, gate)?;
+                self.patch_background, reservoir_state, limits, gate)?;
             let face = coupled_exchange(&candidate, side, self.patch_background.is_some())?;
             let flow = face.normal_volume_flow_m3_s;
             let residual = face.mean_acoustic_pressure_pa
@@ -377,7 +418,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
                 + limits.pressure_relative_tolerance * scale;
             if residual.abs() <= allowance {
                 let frame = accept_candidate(candidate, &mut self.load, side, relation,
-                    self.reference, limits, incoming, external_boundary,
+                    self.reference, limits, incoming, control,
                     evaluation, self.steps + 1, self.patch_background.is_some(), gate)?;
                 self.steps += 1;
                 return Ok(frame);
@@ -417,11 +458,18 @@ impl<L: Lattice3<27>> NsfDg<L> {
 
 fn preview_interval<'a, L: Lattice3<27>>(
     zone: &'a mut NsfGrid3<L>, mut drives: [NsfBoundaryDrive; 2], side: usize,
-    patch_background: Option<NsfBoundaryDrive>, limits: NsfDgLimits, gate: &CancelGate,
+    patch_background: Option<NsfBoundaryDrive>, reservoir_state: Option<NsfOpenState>,
+    limits: NsfDgLimits, gate: &CancelGate,
 ) -> Result<NsfCharacteristicTrial<'a, L>, NsfDgError> {
-    let result = if let Some(background) = patch_background {
+    let patch_drive = patch_background.map(|background| {
         let aperture = drives[side];
         drives[side] = background;
+        aperture
+    });
+    let result = if let Some(state) = reservoir_state {
+        zone.preview_boundary_interval_with_reservoir(drives, patch_drive, state,
+            limits.substeps, limits.maximum_cell_steps, || gate.is_requested())
+    } else if let Some(aperture) = patch_drive {
         zone.preview_boundary_interval_with_patch(drives, aperture, limits.substeps,
             limits.maximum_cell_steps, || gate.is_requested())
     } else {
@@ -445,7 +493,7 @@ fn coupled_exchange<L: Lattice3<27>>(
 fn accept_candidate<L: Lattice3<27>>(
     fluid: NsfCharacteristicTrial<'_, L>, load: &mut DgPortLoad, side: usize,
     relation: DgPortResponse, reference: GasState, limits: NsfDgLimits,
-    incoming: f64, external_boundary: NsfBoundaryDrive,
+    incoming: f64, control: NsfDgDrive,
     evaluations: usize, step: u64, use_patch: bool, gate: &CancelGate,
 ) -> Result<NsfDgFrame, NsfDgError> {
     let face = coupled_exchange(&fluid, side, use_patch)?;
@@ -496,7 +544,7 @@ fn accept_candidate<L: Lattice3<27>>(
     let duct = acoustic.accept();
     Ok(NsfDgFrame {
         step, evaluations, incoming_characteristic_m_s: incoming,
-        drive: NsfDgDrive::Boundary(external_boundary), upstream: None, faces, coupled_patch,
+        drive: control, upstream: None, faces, coupled_patch,
         reservoir_mass_out_kg, reservoir_flows, flow,
         flow_mass_change_kg: mass_change, flow_energy_change_j: energy_change, duct, terminals,
         inlet_flow_m3_s: q, inlet_pressure_pa: p, pressure_residual_pa: pressure_residual,

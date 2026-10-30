@@ -469,6 +469,8 @@ pub(super) fn resolved_provenance(
             ",\"external_boundary\":{\"kind\":\"incoming-characteristic\",\"units\":\"m/s\",\"definition\":\"delta outward normal velocity minus delta pressure over reference material impedance\"}",
         fs_couple::nsf_dg::NsfDgDrive::UpstreamPressureRise(_) =>
             ",\"external_boundary\":{\"kind\":\"upstream-series-pressure-rise\",\"units\":\"Pa\",\"definition\":\"resolved face pressure minus finite upstream duct pressure\",\"flow\":\"both original acoustic loads and resolved faces solved on the same physical interval\",\"source_work\":\"minus pressure rise times outward upstream volume flow times physical interval\"}",
+        fs_couple::nsf_dg::NsfDgDrive::Reservoir { .. } =>
+            ",\"external_boundary\":{\"kind\":\"transverse-reservoir-pressure-temperature\",\"pressure_units\":\"Pa absolute\",\"temperature_units\":\"K\",\"definition\":\"original gas derives density and energy at held pressure and temperature; declared ghost velocity retained\",\"flow\":\"resolved fluid and both attached acoustic loads respond together with zero axial series effort; an unloaded other face receives its unperturbed incoming characteristic\"}",
     };
     let upstream = system.upstream_load().map_or_else(String::new, |upstream| {
         let duct = upstream.duct();

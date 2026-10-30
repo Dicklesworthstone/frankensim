@@ -105,6 +105,14 @@ impl<L: Lattice3<27>> NsfDg<L> {
         pressure_rise_pa: f64,
         gate: &CancelGate,
     ) -> Result<NsfDgFrame, NsfDgError> {
+        self.step_with_upstream_conditions(pressure_rise_pa, None,
+            NsfDgDrive::UpstreamPressureRise(pressure_rise_pa), gate)
+    }
+
+    pub(super) fn step_with_upstream_conditions(
+        &mut self, pressure_rise_pa: f64, reservoir_state: Option<NsfOpenState>,
+        control: NsfDgDrive, gate: &CancelGate,
+    ) -> Result<NsfDgFrame, NsfDgError> {
         poll(gate)?;
         if !pressure_rise_pa.is_finite() || self.steps >= self.limits.maximum_steps {
             return Err(NsfDgError::Input(
@@ -142,7 +150,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
             evaluations += 1;
             let trial = preview_interval(zone,
                 incoming.map(NsfBoundaryDrive::IncomingCharacteristic), side,
-                patch_background, limits, gate)?;
+                patch_background, reservoir_state, limits, gate)?;
             let mut residuals = [0.0; 2];
             let mut scales = [0.0; 2];
             for face in 0..2 {
@@ -180,7 +188,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
         evaluations += 1;
         let fluid = preview_interval(zone,
             incoming.map(NsfBoundaryDrive::IncomingCharacteristic), side,
-            patch_background, limits, gate)?;
+            patch_background, reservoir_state, limits, gate)?;
         let dt = self.load.propagator().dt();
         let main_inlet = self.load.inlet();
         let upstream_inlet = upstream.load.inlet();
@@ -254,7 +262,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
             step: self.steps,
             evaluations,
             incoming_characteristic_m_s: downstream_incoming,
-            drive: NsfDgDrive::UpstreamPressureRise(pressure_rise_pa),
+            drive: control,
             upstream: Some(NsfDgUpstreamFrame {
                 face: other,
                 incoming_characteristic_m_s: upstream_incoming,

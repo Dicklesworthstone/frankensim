@@ -171,12 +171,18 @@ pub(super) fn dg_radiation_provenance(load: &fs_couple::dg_port::DgPortLoad) -> 
             let band = duct.viscothermal_band_rad_s().map_or_else(|| "null".into(), |band|
                 format!("[{:e},{:e}]", band[0], band[1]));
             let molecular = dg_molecular_provenance(duct);
-            format!("{{\"port\":{},\"operator_identity\":\"{}\",\"length_m\":{:e},\"inlet_area_m2\":{:e},\"outlet_area_m2\":{:e},\"inlet_gas\":{},\"outlet_gas\":{},\"elements\":{},\"order\":{},\"total_dofs\":{},\"wall_band_rad_s\":{band}{molecular}}}",
+            let outlet_boundary = match duct.outlet() {
+                fs_duct::dg::DgBoundary::Closed => "closed",
+                fs_duct::dg::DgBoundary::IdealOpen => "ideal-open",
+                fs_duct::dg::DgBoundary::Matched => "matched",
+                fs_duct::dg::DgBoundary::Port(_) => "flow-port",
+            };
+            format!("{{\"port\":{},\"operator_identity\":\"{}\",\"outlet_boundary\":\"{outlet_boundary}\",\"length_m\":{:e},\"inlet_area_m2\":{:e},\"outlet_area_m2\":{:e},\"inlet_gas\":{},\"outlet_gas\":{},\"elements\":{},\"order\":{},\"total_dofs\":{},\"wall_band_rad_s\":{band}{molecular}}}",
                 branch.port().0, duct.operator_identity().to_hex(), duct.total_length(),
                 duct.inlet_area_m2(), duct.outlet_area_m2(), gas_state(duct.inlet_gas()),
                 gas_state(duct.outlet_gas()), mesh.elements, mesh.order, duct.total_dofs())
         }).collect::<Vec<_>>().join(",");
-        output.push_str(&format!(",\"terminal_port_order\":[{ports}],\"side_ports\":[{sides}],\"finite_chimneys\":[{chimneys}],\"side_opening_scope\":\"original DG face junctions and explicitly declared finite DG chimneys; branch outlets own exterior geometry and accepted radiated flow; complete mutual terminal radiation; no moving pad or three-dimensional junction correction\""));
+        output.push_str(&format!(",\"terminal_port_order\":[{ports}],\"side_ports\":[{sides}],\"finite_chimneys\":[{chimneys}],\"side_opening_scope\":\"original DG face junctions and explicitly declared finite DG chimneys; open branch outlets own exterior geometry and accepted radiated flow; capped chimneys retain internal acoustic and material storage without an exterior row; complete mutual terminal radiation; no moving pad or three-dimensional junction correction\""));
     }
     output
 }

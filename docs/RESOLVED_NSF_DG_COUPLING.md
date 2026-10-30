@@ -159,6 +159,36 @@ plane-mode connection require refinement and physical validation. The example
 contains no jet card or synthetic noise source; it does not establish
 self-sustained edge tone, a converged turbulent jet or realistic flute sound.
 
+### Time-varying transverse breath conditions
+
+`NsfDgDrive::Reservoir { pressure_pa, temperature_k }` and
+`NsfDg::step_with_reservoir` change the held **absolute** pressure and temperature
+of an attached transverse aperture. The original gas source derives density,
+calorics and transport at those conditions; the aperture retains its declared
+Cartesian ghost velocity. Pressure is not translated into an authored jet-speed
+curve. The original population, pressure-force and conservative energy owners
+determine the response.
+
+The main bore and an optional finite upstream duct remain coupled. With both
+attached, their axial interfaces solve together with zero additional series
+pressure rise. This permits a side source between a bore and a closed cavity.
+With only the main load, the other face receives zero incoming characteristic.
+Changing reservoir conditions rebases the force and flux history while retaining
+the fluid's stored physical state. Conditions are staged on each private trial;
+failed root solves, source refusals and cancellation preserve the accepted ghost,
+fluid and both acoustic histories. The normal reservoir mass and energy accounts
+include the resulting exchange.
+
+`examples/resolved-dg-transverse-drive.performance` combines a changing side
+pressure/temperature, a closed upstream cavity, the bore's computed radiation,
+and the original per-tile reservoir observer at the same microphone. The declared
+common baffle places the reservoir tiles with origin `[-0.05, 0]` m and zero
+rotation; the selected gas-propagation law reaches both sets of paths. This is
+one-way observation and a coarse synthetic integration example, not a measured
+mouth or a qualified sounding flute. The reservoir has no finite
+mass/heat inventory and retains the grid's original composition; changing its
+temperature does not add a new species-transport or anatomical airway model.
+
 ### Physical pressure control
 
 `NsfBoundaryDrive::PressureOffset(delta_p)` fixes the other face's pressure
@@ -463,6 +493,12 @@ Alternatives use the same original parsers and owners:
   chimney records. `dg_wall` retains material-card identities and selected
   constitutive sources for the bore/chimney wall layout. The original load
   checks inlet area, complete inlet gas, material bands and work admission.
+  `dg_terminal_closed PORT_ID` on a finite `dg_side_chimney` makes its distal
+  end an actual closed DG boundary. Its air column, material and wall memory
+  remain in the coupled bore, harmonic response and continuous renderer, while
+  its capped endpoint has no exterior-radiation row or microphone flow. The
+  shared 32-side-port bound counts internal sites independently of exterior
+  openings. A flush-site closure retains the existing terminal-channel law.
 - `dg_molecular` selects the existing causal molecular-relaxation law for the
   original DG gas region, using exactly the same grammar as native reed/flue
   sources. Its species composition comes from the original thermochemical
@@ -487,6 +523,11 @@ Alternatives use the same original parsers and owners:
   value. `boundary characteristic COUNT` explicitly names the original m/s
   condition. The existing bare `boundary COUNT` has the same characteristic
   meaning and arithmetic. Unknown kinds and trailing fields refuse.
+- `boundary reservoir COUNT` selects the existing transverse aperture instead
+  of an axial actuator. Each record is `hold END_OBSERVATION_SAMPLE P_ABSOLUTE_PA
+  TEMPERATURE_K`, with positive pressure and temperature in the original gas
+  domain. It requires `reservoir_aperture` and may coexist with `upstream_dg`;
+  neither axial face then receives an added series-pressure source.
 - `upstream_dg dg_tube ...` or `upstream_dg dg_bore ...` attaches the second
   original load. Its subsidiary geometry, regional gas, chimney and radiation
   records use the same shared parser as the main load. `upstream_molecular` and
@@ -501,7 +542,8 @@ Alternatives use the same original parsers and owners:
 Cell indices are zero-based. Axes are `0`, `1`, `2`; periodic flags are `0` or
 `1`, and the characteristic axis must be nonperiodic. The `low|high` field
 selects the face coupled to the DG inlet. The `hold` history drives the opposite
-face. Endpoints are exclusive indices on the **observation** clock and must
+face, its explicit upstream series actuator, or the explicitly selected
+transverse reservoir. Endpoints are exclusive indices on the **observation** clock and must
 cover the declared window exactly. Each physical interval uses the held value
 at its start, so a discontinuous control can incur up to one physical interval
 of event timing error; that error refines with the original discretization.

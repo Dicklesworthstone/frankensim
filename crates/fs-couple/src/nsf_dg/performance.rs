@@ -184,8 +184,11 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
             || boundary.is_empty()
             || boundary.len() as u64 > system.limits().maximum_steps
             || !boundary.iter().all(|x| x.is_finite())
-            || boundary.iter().any(|drive| system.upstream_load().is_some()
-                != matches!(drive, NsfDgDrive::UpstreamPressureRise(_)))
+            || boundary.iter().any(|drive| match drive {
+                NsfDgDrive::Boundary(_) => system.upstream_load().is_some(),
+                NsfDgDrive::UpstreamPressureRise(_) => system.upstream_load().is_none(),
+                NsfDgDrive::Reservoir { .. } => system.zone().reservoir_aperture().is_none(),
+            })
             || output_samples == 0
         {
             return Err(sizing("resolved performance requires a cold matching clock and finite boundary samples/capacity"));
