@@ -8,8 +8,8 @@
 use super::*;
 
 pub(super) struct UpstreamLoad {
-    load: DgPortLoad,
-    reference: GasState,
+    pub(super) load: DgPortLoad,
+    pub(super) reference: GasState,
 }
 
 /// Finite upstream acoustic state and its independently declared source work.
@@ -120,6 +120,9 @@ impl<L: Lattice3<27>> NsfDg<L> {
         control: NsfDgDrive, gate: &CancelGate,
     ) -> Result<NsfDgFrame, NsfDgError> {
         poll(gate)?;
+        if self.reservoir_radiation.is_some() {
+            return self.step_with_reservoir_drive(control, gate);
+        }
         if !pressure_rise_pa.is_finite() || self.steps >= self.limits.maximum_steps {
             return Err(NsfDgError::Input(
                 "upstream pressure rise is nonfinite or the horizon is exhausted",
@@ -137,7 +140,8 @@ impl<L: Lattice3<27>> NsfDg<L> {
             ))?;
             accepted.map(|drive| Some(match drive {
                 NsfBoundaryDrive::IncomingCharacteristic(value) => value,
-                NsfBoundaryDrive::PressureOffset(_) => f64::midpoint(
+                NsfBoundaryDrive::PressureOffset(_)
+                | NsfBoundaryDrive::PressureTemperature { .. } => f64::midpoint(
                     self.limits.incoming_bracket_m_s[0], self.limits.incoming_bracket_m_s[1]),
             }))
         } else {
@@ -312,6 +316,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
             source_patch,
             reservoir_mass_out_kg,
             reservoir_flows,
+            reservoir_radiation: None,
             flow,
             flow_mass_change_kg: mass_change,
             flow_energy_change_j: energy_change,
@@ -330,12 +335,29 @@ impl<L: Lattice3<27>> NsfDg<L> {
 
 // Numerical root only: constitutive evaluation, pressure, time and work remain
 // with the original owners. The bracket is a caller-declared domain, not a clamp.
-fn solve_scalar<T>(
+pub(super) fn solve_scalar<T>(
     limits: NsfDgLimits,
     initial: Option<f64>,
+    evaluate: impl FnMut(f64) -> Result<(f64, f64, T), NsfDgError>,
+) -> Result<(f64, T), NsfDgError> {
+    solve_in_domain(limits, limits.incoming_bracket_m_s, initial, false, evaluate)
+}
+
+pub(super) fn solve_pressure<T>(
+    limits: NsfDgLimits,
+    pressure_bracket_pa: [f64; 2],
+    evaluate: impl FnMut(f64) -> Result<(f64, f64, T), NsfDgError>,
+) -> Result<(f64, T), NsfDgError> {
+    solve_in_domain(limits, pressure_bracket_pa, None, true, evaluate)
+}
+
+fn solve_in_domain<T>(
+    limits: NsfDgLimits,
+    mut bracket: [f64; 2],
+    initial: Option<f64>,
+    pressure_coordinate: bool,
     mut evaluate: impl FnMut(f64) -> Result<(f64, f64, T), NsfDgError>,
 ) -> Result<(f64, T), NsfDgError> {
-    let mut bracket = limits.incoming_bracket_m_s;
     let seed = if let Some(initial) = initial {
         let incoming = if initial.is_finite() && initial > bracket[0] && initial < bracket[1] {
             initial
@@ -406,27 +428,32 @@ fn solve_scalar<T>(
             f64::midpoint(bracket[0], bracket[1])
         };
         if incoming <= bracket[0] || incoming >= bracket[1] {
-            return Err(NsfDgError::Resolution {
-                incoming_bracket_m_s: bracket,
-                residual_pa: residuals,
+            return Err(if pressure_coordinate {
+                NsfDgError::PressureResolution {
+                    pressure_bracket_pa: bracket, residual_pa: residuals,
+                }
+            } else {
+                NsfDgError::Resolution {
+                    incoming_bracket_m_s: bracket, residual_pa: residuals,
+                }
             });
         }
     }
     Err(NsfDgError::Input(
-        "two-sided incoming-characteristic solve exhausted its local evaluation allowance",
+        "coupled scalar solve exhausted its local evaluation allowance",
     ))
 }
 
-struct Audit {
-    pressure: f64,
-    covariance: f64,
-    work: f64,
-    port: f64,
-    mass: f64,
-    source_work: f64,
+pub(super) struct Audit {
+    pub(super) pressure: f64,
+    pub(super) covariance: f64,
+    pub(super) work: f64,
+    pub(super) port: f64,
+    pub(super) mass: f64,
+    pub(super) source_work: f64,
 }
 #[allow(clippy::too_many_arguments)]
-fn audit(
+pub(super) fn audit(
     face: NsfBoundaryExchange,
     pressure: f64,
     inlet_work: f64,

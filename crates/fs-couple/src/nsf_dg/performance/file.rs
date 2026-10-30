@@ -11,7 +11,7 @@ use super::{NsfDgPerformance, ReservoirObservation, source_intervals_for};
 use crate::bernoulli_aperture::performance::ApertureObservation;
 use crate::dg_port::input::{DgSourceError, DgSourceInput};
 use crate::dg_port::input::wall::regions::{DgMaterialWallLayout, DgMaterialWallLayoutInput};
-use crate::nsf_dg::{NsfDg, NsfDgDrive, NsfDgError, NsfDgLimits, same_clock};
+use crate::nsf_dg::{NsfDg, NsfDgDrive, NsfDgError, NsfDgLimits, NsfDgReservoirRadiation, same_clock};
 use crate::pcm_wav::baffled::CircularOutletReceiver;
 use crate::pcm_wav::baffled::gas::GasPropagation;
 use crate::render::RenderError;
@@ -407,6 +407,26 @@ impl ResolvedDgFilePerformance {
             row.end()?;
             Some(input)
         } else { None };
+        let reservoir_feedback = if rows.next_is("reservoir_feedback") {
+            let mut row = rows.row("reservoir_feedback")?;
+            let placement = reservoir_observation.ok_or_else(|| bad(row.line,
+                "reservoir_feedback requires the explicit reservoir_observation placement"))?;
+            let ApertureObservation::TubeBaffled(receiver) = observation else {
+                return Err(bad(row.line, "reservoir_feedback requires the common baffled exterior"));
+            };
+            if placement.angle_rad != 0.0 {
+                return Err(bad(row.line, "the original rectangular radiation source requires zero placement rotation"));
+            }
+            let input = NsfDgReservoirRadiation {
+                origin_m: placement.origin_m,
+                pressure_bracket_pa: [row.scalar()?, row.scalar()?],
+                cells: [row.number()?, row.number()?],
+                terminal_radial_rings: receiver.radial_rings,
+                terminal_angular_points: receiver.angular_points,
+            };
+            row.end()?;
+            Some(input)
+        } else { None };
         let observer_gas = if rows.next_is("observer_gas") {
             let mut row = rows.row("observer_gas")?;
             let exterior = source.exterior_gas_record()
@@ -427,6 +447,10 @@ impl ResolvedDgFilePerformance {
             Some("characteristic") => { row.word()?; 0 }
             _ => 0,
         };
+        if boundary_kind == 3 && reservoir_feedback.is_some() {
+            return Err(bad(row.line,
+                "reservoir_feedback requires axial breath control; the same opening cannot prescribe reservoir pressure and passive radiation pressure"));
+        }
         if boundary_kind == 3 && reservoir_aperture.is_none() {
             return Err(bad(row.line, "reservoir controls require the declared transverse aperture"));
         }
@@ -543,6 +567,9 @@ impl ResolvedDgFilePerformance {
             system = system.with_upstream_load(load, &gate).map_err(ResolvedDgInputError::Coupling)?;
             Some(wall)
         } else { None };
+        if let Some(input) = reservoir_feedback {
+            system = system.with_reservoir_radiation(input, &gate).map_err(ResolvedDgInputError::Coupling)?;
+        }
         let mut renderer = NsfDgPerformance::new_resampled_with_drives(system, observation, sample_rate_hz,
             boundary, samples as u64, maximum_block, Arc::clone(&gate)).map_err(ResolvedDgInputError::Render)?;
         if let Some(input) = reservoir_observation {

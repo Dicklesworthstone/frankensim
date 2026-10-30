@@ -616,11 +616,67 @@ aligned before their pressure sum. The native sidecar identifies original
 cell coordinates, placement, flow convention, path material and latency.
 `resolved-dg-side-aperture.performance` selects this complete observation.
 
-This is one-way observation of a prescribed-reservoir opening. It adds no
+Without the optional `reservoir_feedback` row below, this is one-way
+observation of a prescribed-reservoir opening. Observation alone adds no
 reaction to the fluid, no transparent boundary, no acoustic/hydrodynamic
 decomposition, no free-field body scattering, and no separate observation of
 the complementary region of a characteristic patch. Source and boundary
 placement/refinement remain necessary; this is not measured flute validation.
+
+### Joint reaction of the resolved mouth and bore outlets
+
+After the explicit reservoir observation placement, an optional native row
+selects the same-interval exterior feedback:
+
+```text
+reservoir_feedback PRESSURE_LO_PA PRESSURE_HI_PA QUAD_NX QUAD_NY
+```
+
+The pressure bounds are ghost-pressure offsets relative to the original source
+reference, in Pa. The two positive quadrature counts refine the existing
+rectangular radiation source independently of the fluid grid. This selection
+requires zero placement rotation and a complete rectangular set of actual
+reservoir cells. Its dimensions come from those cells; the reader never
+rescales an aperture to match an acoustic section. The original full-band
+surface, fit, causality, state and passivity admissions still apply.
+
+The source may use the original axial characteristic, pressure or
+pressure/temperature control, or the finite upstream duct's pressure rise.
+`boundary reservoir` cannot prescribe the same transverse opening that the
+passive exterior must solve; this conflicting pair refuses before construction.
+The typed `step_with_reservoir` likewise refuses without advancing any owner.
+Separate breath and escape openings require separate physical boundaries.
+
+The typed equivalent is `NsfDg::with_reservoir_radiation` with an explicit
+`NsfDgReservoirRadiation`. The original joint radiation model receives two
+independent coordinates: flow into the bore and flow out through the reservoir.
+The same matrix retains every mouth/outlet and outlet/outlet interaction.
+No equality between bore flow and escaping flow is imposed on a resolved
+volume that can store and redirect gas.
+
+At each physical interval, bounded nested solves match both the bore face and
+the reservoir's actual mean acoustic pressure to the original coupled acoustic
+response. An attached finite upstream duct adds its existing pressure-rise
+equation to this same transaction. Every numerical candidate starts from the
+accepted physical state; cancellation, unbracketed roots, exhausted total work
+budgets and excessive pressure/work errors publish none of the participants.
+The accepted frame exposes the reservoir pressure, independent flow, radiation
+work and signed projection discrepancy. Original streamed mass and conservative
+total-energy flux remain separate.
+
+The microphone still observes each original reservoir tile and each circular
+bore outlet once, at their actual positions, with the selected shared gas law.
+The radiation load uses a uniform mouth-pressure projection. Differences from
+the spatially and temporally resolved pressure work remain measured covariance;
+they are not heat, manufactured damping or an extra acoustic source. This
+optional reaction does not establish a transparent reservoir boundary, resolved
+external hydrodynamics, free-field body scattering or measured flute accuracy.
+Physical interface, geometry, quadrature and clock refinement remain required.
+
+`resolved-dg-radiating-mouth.performance` is a native integration fixture that
+selects the joint feedback and material observation paths. It retains twelve
+original NSF steps per 8 kHz acoustic interval and is a numerical example,
+not a measured instrument or a realism preset.
 
 ## Scope and refinement
 

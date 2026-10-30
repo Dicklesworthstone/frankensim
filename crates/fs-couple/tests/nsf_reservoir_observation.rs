@@ -192,3 +192,219 @@ fn incompatible_or_late_reservoir_observation_refuses_before_an_output() {
     late.block(&mut [0.0]).unwrap();
     assert!(late.with_reservoir_observation(placement).is_err());
 }
+
+// Same physical grid as the observation fixture, with twelve original NSF
+// steps per 8 kHz acoustic interval. The complete mixed radiation source is
+// then resolved by the original terminal surface quadrature over its 4 kHz band.
+const FEEDBACK: &str = "reservoir_feedback -20 20 16 16\n";
+
+fn feedback_source(gas: bool) -> String {
+    observed(&source(gas))
+        .replace(ROW, &format!("{ROW}{FEEDBACK}"))
+        .replace("clock 96000 1", "clock 8000 12")
+        .replace("output 256 20", "output 64 20")
+        .replace("hold 64 20", "hold 16 2")
+        .replace("hold 128 -20", "hold 32 -2")
+        .replace("hold 256 0", "hold 64 0")
+        .replace("coupling 64 9216", "coupling 256 442368")
+}
+
+#[test]
+fn resolved_mouth_reaction_changes_original_flow_and_audits_both_acoustic_ports() {
+    let text = feedback_source(false);
+    let mut baseline = read(&text.replace(FEEDBACK, ""), 1).into_renderer();
+    let mut coupled = read(&text, 1).into_renderer();
+    let relation = coupled
+        .system()
+        .load()
+        .independent_mouth_response()
+        .unwrap();
+    assert_ne!(relation.impedance_pa_s_m3[0][1], 0.0);
+    assert_ne!(relation.impedance_pa_s_m3[1][0], 0.0);
+    let mut independent_flow = false;
+    let mut changed_flow = false;
+    let mut reacted = false;
+    for _ in 0..64 {
+        let mass = coupled.system().zone().total_mass_kg();
+        let energy = coupled.system().zone().total_energy_j();
+        baseline.block(&mut [0.0]).unwrap();
+        coupled.block(&mut [0.0]).unwrap();
+        let frame = coupled.last_frame().unwrap();
+        let mouth = frame.reservoir_radiation.as_ref().unwrap();
+        let dt = coupled.system().load().propagator().dt();
+        let q: f64 = frame
+            .reservoir_flows
+            .iter()
+            .map(|tile| tile.outward_volume_flow_m3_s)
+            .sum();
+        let resolved_work: f64 = frame
+            .reservoir_flows
+            .iter()
+            .map(|tile| tile.acoustic_pressure_work_out_j)
+            .sum();
+        assert_eq!(mouth.outward_flow_m3_s, q);
+        assert!(frame.pressure_residual_pa.abs() < 1e-5);
+        assert!(mouth.pressure_residual_pa.abs() < 1e-5);
+        assert_eq!(
+            mouth.acoustic_work_residual_j,
+            resolved_work - mouth.radiation_work_j
+        );
+        let projected_work = mouth.mean_acoustic_pressure_pa * (q * dt);
+        assert_eq!(
+            mouth.projection_covariance_j,
+            resolved_work - projected_work
+        );
+        assert!(
+            (mouth.radiation_work_j - mouth.radiation_pressure_pa * (q * dt)).abs()
+                <= 64.0 * f64::EPSILON * mouth.radiation_work_j.abs().max(1e-30)
+        );
+        // Mass and total energy still use the original conservative accounts,
+        // never the acoustic projection or reference-density volume flow.
+        let mass_residual = frame.flow_mass_change_kg
+            + frame.reservoir_mass_out_kg
+            + frame.faces.iter().map(|face| face.mass_out_kg).sum::<f64>();
+        assert!(mass_residual.abs() < 5e-12 * mass);
+        let supplied = frame.flow.open_energy_j
+            + frame.flow.open_boundary_energy_j
+            + frame.flow.wall_heat_j
+            + frame.flow.source_energy_j;
+        assert!((frame.flow_energy_change_j - supplied).abs() < 5e-11 * energy.abs());
+        independent_flow |=
+            (q + frame.inlet_flow_m3_s).abs() > 1e-6 * (q.abs() + frame.inlet_flow_m3_s.abs());
+        changed_flow |= frame.inlet_flow_m3_s != baseline.last_frame().unwrap().inlet_flow_m3_s;
+        reacted |= mouth.radiation_pressure_pa.abs() > 1e-9;
+    }
+    assert!(
+        independent_flow,
+        "resolved storage must not impose Q_mouth = -Q_bore"
+    );
+    assert!(
+        changed_flow,
+        "computed exterior reaction must reach the original source"
+    );
+    assert!(reacted);
+}
+
+#[test]
+fn feedback_with_finite_upstream_and_material_observation_replays_across_callbacks() {
+    let text = feedback_source(true)
+        .replace("clock 8000 12", "clock 12000 12")
+        .replace("output 64 20", "output 96 20")
+        .replace("hold 16 2", "hold 24 2")
+        .replace("hold 32 -2", "hold 48 -2")
+        .replace("hold 64 0", "hold 96 0")
+        .replace("observation baffled 0 0 0.2 8 32 2000",
+            "upstream_dg dg_tube 0.03 0.00896143253443043 closed 1 2 32 50 2000 0.01 1e-11 512\nobservation baffled 0 0 0.2 8 32 2000")
+        .replace("boundary pressure 3", "boundary upstream-pressure 3");
+    let first = read(&text, 13);
+    let bore = first.renderer().observer_gas().unwrap();
+    let escape = first.renderer().reservoir_observer_gas().unwrap();
+    assert_eq!(bore.gas, escape.gas);
+    assert_eq!(bore.law, escape.law);
+    assert_eq!(
+        bore.additional_latency_samples,
+        escape.additional_latency_samples
+    );
+    let run = |file: ResolvedDgFilePerformance, block| {
+        let mut pressure = vec![0.0; file.info().samples as usize];
+        let mut renderer = file.into_renderer();
+        for chunk in pressure.chunks_mut(block) {
+            renderer.block(chunk).unwrap();
+        }
+        (pressure, renderer)
+    };
+    let (a, whole) = run(first, 13);
+    let (b, parts) = run(read(&text, 5), 5);
+    assert_eq!(a, b);
+    assert!(a.iter().any(|value| value.abs() > 1e-12));
+    assert_eq!(
+        whole.system().zone().state_hash(),
+        parts.system().zone().state_hash()
+    );
+    assert_eq!(whole.system().load().state(), parts.system().load().state());
+    assert_eq!(
+        whole.system().upstream_load().unwrap().state(),
+        parts.system().upstream_load().unwrap().state()
+    );
+    assert_eq!(whole.system().accepted_steps(), 64);
+    let frame = whole.last_frame().unwrap();
+    assert!(
+        frame
+            .reservoir_radiation
+            .as_ref()
+            .unwrap()
+            .pressure_residual_pa
+            .abs()
+            < 1e-5
+    );
+    assert!(frame.upstream.as_ref().unwrap().pressure_residual_pa.abs() < 1e-5);
+    assert!(frame.pressure_residual_pa.abs() < 1e-5);
+}
+
+#[test]
+fn feedback_geometry_domains_and_cancelled_or_unbracketed_solves_preserve_owners() {
+    let text = feedback_source(false);
+    for invalid in [
+        text.replace(FEEDBACK, "reservoir_feedback 1 1 16 16\n"),
+        text.replace(FEEDBACK, "reservoir_feedback -20 20 0 16\n"),
+        text.replace(ROW, "reservoir_observation baffled -0.08 0 0.2\n"),
+        // The original aperture remains a valid pair of fluid tiles, but its
+        // missing middle tile cannot silently become a filled rectangular port.
+        text.replace("300 3\nreservoir_cell", "300 2\nreservoir_cell")
+            .replace("reservoir_cell 4 2 1\n", ""),
+        text.replace(ROW, ""),
+        text.replace("boundary pressure 3", "boundary reservoir 3")
+            .replace("hold 16 2", "hold 16 100002 300")
+            .replace("hold 32 -2", "hold 32 99998 300")
+            .replace("hold 64 0", "hold 64 100000 300"),
+    ] {
+        assert!(
+            ResolvedDgFilePerformance::from_bytes(
+                invalid.as_bytes(),
+                1,
+                Arc::new(CancelGate::new_clock_free())
+            )
+            .is_err()
+        );
+    }
+    let gate = Arc::new(CancelGate::new_clock_free());
+    let file =
+        ResolvedDgFilePerformance::from_bytes(text.as_bytes(), 2, Arc::clone(&gate)).unwrap();
+    let mut renderer = file.into_renderer();
+    renderer.block(&mut [0.0; 2]).unwrap();
+    let before = (
+        renderer.system().zone().state_hash(),
+        renderer.system().zone().cumulative_ledger(),
+        renderer.system().zone().last_reservoir_flows().to_vec(),
+        renderer.system().load().state().clone(),
+        renderer.system().accepted_steps(),
+    );
+    gate.request();
+    assert!(renderer.block(&mut [0.0]).is_err());
+    assert_eq!(
+        before,
+        (
+            renderer.system().zone().state_hash(),
+            renderer.system().zone().cumulative_ledger(),
+            renderer.system().zone().last_reservoir_flows().to_vec(),
+            renderer.system().load().state().clone(),
+            renderer.system().accepted_steps()
+        )
+    );
+
+    let unreachable = text.replace(FEEDBACK, "reservoir_feedback 500 600 16 16\n");
+    let mut refused = read(&unreachable, 1).into_renderer();
+    let before = (
+        refused.system().zone().state_hash(),
+        refused.system().load().state().clone(),
+    );
+    assert!(refused.block(&mut [0.0]).is_err());
+    assert_eq!(refused.system().accepted_steps(), 0);
+    assert_eq!(
+        before,
+        (
+            refused.system().zone().state_hash(),
+            refused.system().load().state().clone()
+        )
+    );
+}

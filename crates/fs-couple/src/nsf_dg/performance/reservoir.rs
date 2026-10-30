@@ -88,6 +88,13 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
                 "reservoir observation needs one cold finite placement before gas preparation",
             ));
         }
+        if self.system.reservoir_radiation().is_some_and(|reaction|
+            reaction.origin_m != input.origin_m || input.angle_rad != 0.0)
+        {
+            return Err(sizing(
+                "reservoir observation must retain the original joint radiation placement",
+            ));
+        }
         let ApertureObservation::TubeBaffled(location) = self.observation else {
             return Err(sizing(
                 "reservoir observation requires the original exterior microphone",

@@ -30,6 +30,8 @@ use fs_material::gas::GasState;
 pub mod performance;
 mod upstream;
 pub use upstream::NsfDgUpstreamFrame;
+mod reservoir;
+pub use reservoir::{NsfDgReservoirFrame, NsfDgReservoirRadiation};
 
 /// Physical drive location and units remain explicit in the coupled source.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -78,6 +80,14 @@ pub enum NsfDgError {
         /// Remaining incoming-characteristic interval [m/s].
         incoming_bracket_m_s: [f64; 2],
         /// Actual pressure residual at each remaining endpoint [Pa].
+        residual_pa: [f64; 2],
+    },
+    /// Adjacent representable reservoir ghost pressures still straddle a
+    /// nonzero pressure residual gap. No physical owner accepts this trial.
+    PressureResolution {
+        /// Remaining ghost-pressure offsets from the source reference [Pa].
+        pressure_bracket_pa: [f64; 2],
+        /// Actual effort residual at each remaining endpoint [Pa].
         residual_pa: [f64; 2],
     },
     /// The original owners did not meet the pressure budget within bounded work.
@@ -190,6 +200,8 @@ pub struct NsfDgFrame {
     /// Original per-tile reservoir continuum volume flow, averaged over all
     /// original substeps. Kept separate from compressible streamed mass.
     pub reservoir_flows: Vec<fs_lbm::nsf3::NsfReservoirFlow>,
+    /// Live self/mutual exterior reaction at the independent escape opening.
+    pub reservoir_radiation: Option<NsfDgReservoirFrame>,
     /// Original NSF energy accounts, including reservoir energy in `open_energy_j`.
     /// Mixed-boundary unresolved exchange retains its original classification;
     /// it is never relabeled as resolved viscous heat by this adapter.
@@ -232,6 +244,7 @@ pub struct NsfDg<L: Lattice3<27>> {
     steps: u64,
     upstream: Option<upstream::UpstreamLoad>,
     patch_background: Option<NsfBoundaryDrive>,
+    reservoir_radiation: Option<reservoir::ReservoirRadiation>,
 }
 
 fn poll(gate: &CancelGate) -> Result<(), NsfDgError> {
@@ -326,7 +339,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
             return Err(NsfDgError::Input("NSF/DG requires cold matching gas, area and clock, zero reference flow and finite complete work/projection budgets"));
         }
         Ok(Self { zone, load, limits, high, reference, area_m2: area, steps: 0,
-            upstream: None, patch_background })
+            upstream: None, patch_background, reservoir_radiation: None })
     }
     /// Original resolved fluid state and thermochemical source.
     pub const fn zone(&self) -> &NsfGrid3<L> { &self.zone }
@@ -426,6 +439,9 @@ impl<L: Lattice3<27>> NsfDg<L> {
         control: NsfDgDrive, gate: &CancelGate,
     ) -> Result<NsfDgFrame, NsfDgError> {
         poll(gate)?;
+        if self.reservoir_radiation.is_some() {
+            return self.step_with_reservoir_drive(control, gate);
+        }
         if self.upstream.is_some() {
             return Err(NsfDgError::Input("a finite upstream load requires an explicit series pressure-rise control"));
         }
@@ -596,7 +612,7 @@ fn accept_candidate<L: Lattice3<27>>(
     Ok(NsfDgFrame {
         step, evaluations, incoming_characteristic_m_s: incoming,
         drive: control, upstream: None, faces, coupled_patch, source_patch,
-        reservoir_mass_out_kg, reservoir_flows, flow,
+        reservoir_mass_out_kg, reservoir_flows, reservoir_radiation: None, flow,
         flow_mass_change_kg: mass_change, flow_energy_change_j: energy_change, duct, terminals,
         inlet_flow_m3_s: q, inlet_pressure_pa: p, pressure_residual_pa: pressure_residual,
         projection_covariance_j: covariance, acoustic_work_residual_j: work_residual,
