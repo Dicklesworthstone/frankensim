@@ -9,6 +9,8 @@
 pub mod planar;
 /// Pinned scalar transport at explicitly owned electric/current magnitudes.
 pub mod response;
+/// Source-bound electrothermal law nodes for the shared constitutive graph.
+pub mod graph;
 
 use core::fmt;
 
