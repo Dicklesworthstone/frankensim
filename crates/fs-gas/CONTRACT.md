@@ -1612,3 +1612,23 @@ constant-Cp isentrope and reversible round trip, variable calorics with +/-1e18
 formation-energy gauges, and source-domain/cancellation atomicity. Native
 Rust/Cargo execution is unavailable in the current executor, so these tests are
 committed as source evidence rather than claimed runtime evidence.
+
+## Original material calorics in finite gas walls
+
+`MaterialWallCaloric` binds the existing `PreparedHeatStorage` to finite branch-cell
+and plenum walls. Its explicit caloric constraint declares fixed-volume
+internal-energy capacity or the stationary-solid negligible-expansion approximation;
+Cp is never silently converted to Cv. Original source lines, fixed constituent
+amounts and temperature support remain attached.
+
+The existing safeguarded wall solve uses exchanged energy, with a bracket
+intersecting both gas and wall domains. Actual wall storage comes from the source
+integral; contact capacity is a refreshed tangent cache only. Original gas calorics,
+drag-to-gas heating, evolving transport binding and reacting/dissipating network
+transactions retain ownership and atomic publication. Three new tests cover an
+independent nonlinear calorimetric reference, source-only substitutions and
+reaction/cancellation rollback. New modules pass formatting and whitespace checks;
+native execution remains unverified after unchanged asupersync was SIGKILLed in
+the authoring worker. This model has fixed geometry and constituent amounts,
+sensible lumped storage, and no inferred phase change, wall deformation, spatial
+wall conduction or pressure work.

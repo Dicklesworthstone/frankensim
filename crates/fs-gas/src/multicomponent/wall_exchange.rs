@@ -9,6 +9,11 @@ use super::{Cell, Error as FlowError, MixtureGas, positive};
 use fs_math::det;
 use fs_qty::{DynViscosity, Length, Time};
 
+#[cfg(feature = "material")]
+mod caloric;
+#[cfg(feature = "material")]
+pub use caloric::{MaterialWallCaloric, WallCaloricConstraint, exchange_cell_with_heat_storage};
+
 /// Stationary radial wall drag; its lost kinetic energy stays in the gas.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum WallDrag {
@@ -75,11 +80,14 @@ pub enum WallThermal {
         /// Complete nonnegative exposed h*A [W/K].
         conductance_w_per_k: f64,
     },
-    /// Finite constant-capacity wall; its heat is internal to gas plus wall.
+    /// Finite wall; its heat is internal to gas plus wall. The authored path
+    /// uses constant capacity. An explicit material heat-storage binding uses
+    /// its original energy integral and keeps the capacity below as a tangent.
     Lumped {
         /// Current positive wall temperature [K].
         temperature_k: f64,
-        /// Positive complete wall heat capacity [J/K].
+        /// Positive complete wall heat capacity [J/K], or the refreshed local
+        /// tangent when this contact has a retained material storage binding.
         heat_capacity_j_per_k: f64,
         /// Complete nonnegative exposed h*A [W/K].
         conductance_w_per_k: f64,
@@ -156,6 +164,9 @@ pub enum WallExchangeError {
     Flow(FlowError),
     /// Original source-bound molecular or material transport law refused.
     Transport(super::dissipation::DissipationError),
+    /// Original fixed-amount wall heat-storage source refused.
+    #[cfg(feature = "material")]
+    Caloric(fs_material::thermal::transport::ThermalTransportError),
     /// Actual cell state is outside the declared developed-wall approximation.
     TransportDomain {
         /// Physical quantity whose applicability interval was exceeded.
@@ -199,6 +210,12 @@ impl From<super::dissipation::DissipationError> for WallExchangeError {
             super::dissipation::DissipationError::Cancelled => Self::Cancelled,
             other => Self::Transport(other),
         }
+    }
+}
+#[cfg(feature = "material")]
+impl From<fs_material::thermal::transport::ThermalTransportError> for WallExchangeError {
+    fn from(value: fs_material::thermal::transport::ThermalTransportError) -> Self {
+        Self::Caloric(value)
     }
 }
 
@@ -322,9 +339,9 @@ pub fn exchange_cell(
             });
             let target = state.energy - kinetic;
             let domain = gas.domain();
-            let mut lo = primitive.temperature.min(wall_t).max(domain.minimum_temperature);
-            let mut hi = primitive.temperature.max(wall_t).min(domain.maximum_temperature);
-            let equation = |t: f64| -> Result<(f64, f64, f64), WallExchangeError> {
+            let lo = primitive.temperature.min(wall_t).max(domain.minimum_temperature);
+            let hi = primitive.temperature.max(wall_t).min(domain.maximum_temperature);
+            let equation = |t: f64, _: &mut dyn FnMut() -> bool| -> Result<(f64, f64, f64), WallExchangeError> {
                 let (thermal, cv) = gas.caloric(state.partial_densities, t)?;
                 let change = (thermal - target) * volume_m3;
                 let heat = effective * (wall_t - t);
@@ -335,34 +352,10 @@ pub fn exchange_cell(
                 }
                 Ok((residual, slope, change.abs().max(heat.abs())))
             };
-            let lower = equation(lo)?;
-            let upper = equation(hi)?;
-            if lower.0 > control.tolerance(lower.2) || upper.0 < -control.tolerance(upper.2) {
-                return Err(FlowError::EnergyDomain.into());
-            }
-            let mut temperature = primitive.temperature.clamp(lo, hi);
-            let mut converged = false;
-            for iteration in 1..=control.maximum_iterations {
-                poll(&mut cancelled)?;
-                let (residual, slope, scale) = equation(temperature)?;
-                report.iterations = iteration;
-                if residual.abs() <= control.tolerance(scale) {
-                    converged = true;
-                    break;
-                }
-                if residual < 0.0 { lo = temperature; } else { hi = temperature; }
-                let newton = temperature - residual / slope;
-                let next = if newton.is_finite() && newton > lo && newton < hi {
-                    newton
-                } else {
-                    0.5 * lo + 0.5 * hi
-                };
-                if next == temperature { break; }
-                temperature = next;
-            }
-            if !converged {
-                return Err(WallExchangeError::TemperatureIterations);
-            }
+            let (temperature, iterations) = solve_scalar(
+                lo, hi, primitive.temperature, control, equation, &mut cancelled,
+            )?;
+            report.iterations = iterations;
             let (thermal, _) = gas.caloric(state.partial_densities, temperature)?;
             energy = state.energy + (thermal - target);
             let actual = gas.primitive(
@@ -415,6 +408,41 @@ pub fn exchange_cell(
     }
     poll(&mut cancelled)?;
     Ok(WallUpdate { momentum, energy, contact: updated, report })
+}
+
+// The same safeguarded scalar owner serves constant capacity in temperature
+// coordinates and source storage in exchanged-energy coordinates.
+fn solve_scalar(
+    mut lo: f64,
+    mut hi: f64,
+    initial: f64,
+    control: WallControl,
+    mut equation: impl FnMut(f64, &mut dyn FnMut() -> bool) -> Result<(f64, f64, f64), WallExchangeError>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(f64, usize), WallExchangeError> {
+    let lower = equation(lo, cancelled)?;
+    let upper = equation(hi, cancelled)?;
+    if lower.0 > control.tolerance(lower.2) || upper.0 < -control.tolerance(upper.2) {
+        return Err(FlowError::EnergyDomain.into());
+    }
+    let mut value = initial.clamp(lo, hi);
+    for iteration in 1..=control.maximum_iterations {
+        poll(cancelled)?;
+        let (residual, slope, scale) = equation(value, cancelled)?;
+        if residual.abs() <= control.tolerance(scale) {
+            return Ok((value, iteration));
+        }
+        if residual < 0.0 { lo = value; } else { hi = value; }
+        let newton = value - residual / slope;
+        let next = if newton.is_finite() && newton > lo && newton < hi {
+            newton
+        } else {
+            0.5 * lo + 0.5 * hi
+        };
+        if next == value { break; }
+        value = next;
+    }
+    Err(WallExchangeError::TemperatureIterations)
 }
 
 fn nonnegative(value: f64) -> bool {

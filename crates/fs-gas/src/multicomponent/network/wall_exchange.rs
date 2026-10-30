@@ -24,6 +24,11 @@ mod transport;
 pub use transport::CircularLaminarWall;
 use transport::CircularWallTransport;
 
+#[cfg(feature = "material")]
+mod caloric;
+#[cfg(feature = "material")]
+use crate::multicomponent::wall_exchange::MaterialWallCaloric;
+
 /// Source-only exchanges over a complete interval, or both composed wall halves.
 ///
 /// Heat is positive into gas. Stationary-wall drag retains total gas energy:
@@ -73,6 +78,8 @@ struct BranchShape {
 /// bulk momentum and therefore admit only `WallDrag::None`.
 /// [`Self::with_circular_laminar_transport`] derives selected branch coefficients
 /// from current source-owned gas properties instead of retaining authored values.
+/// With the `material` feature, `with_material_heat_storage` additionally binds
+/// original nonlinear wall calorics without adding a second temperature history.
 pub struct NetworkWallOperator {
     gas: MixtureGas,
     branches: Vec<BranchShape>,
@@ -88,9 +95,27 @@ pub struct NetworkWallOperator {
     trial_report: Option<NetworkWallReport>,
     trial_active: bool,
     transport: Option<CircularWallTransport>,
+    #[cfg(feature = "material")]
+    caloric: Vec<Option<MaterialWallCaloric>>,
 }
 
 impl NetworkWallOperator {
+    #[allow(clippy::too_many_arguments)]
+    fn exchange_for(
+        &self, index: usize, state: Cell<'_>, volume_m3: f64, duration: Time,
+        contact: WallContact, controls: WallControl, cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<crate::multicomponent::wall_exchange::WallUpdate, WallExchangeError> {
+        #[cfg(feature = "material")]
+        if let Some(wall) = &self.caloric[index] {
+            return crate::multicomponent::wall_exchange::exchange_cell_with_heat_storage(
+                &self.gas, state, volume_m3, duration, contact, wall, controls, cancelled,
+            );
+        }
+        #[cfg(not(feature = "material"))]
+        let _ = index;
+        exchange_cell(&self.gas, state, volume_m3, duration, contact, controls, cancelled)
+    }
+
     /// Prepare one contact per original branch cell and finite plenum.
     ///
     /// Conductance is the complete exposed `h*A` in W/K for that cell, not a
@@ -179,6 +204,8 @@ impl NetworkWallOperator {
             trial_report: None,
             trial_active: false,
             transport: None,
+            #[cfg(feature = "material")]
+            caloric: allocated(count, None)?,
         };
         poll(&mut cancelled)?;
         Ok(result)
@@ -309,8 +336,8 @@ impl NetworkWallOperator {
                     )?,
                     None => self.candidate_contacts[index],
                 };
-                let update = exchange_cell(
-                    &self.gas,
+                let update = self.exchange_for(
+                    index,
                     state,
                     shape.mesh.volumes()[i],
                     duration,
@@ -341,8 +368,8 @@ impl NetworkWallOperator {
                 return Err(WallExchangeError::Invalid("wall plenum geometry changed"));
             }
             let index = self.plenum_start + i;
-            let update = exchange_cell(
-                &self.gas,
+            let update = self.exchange_for(
+                index,
                 plenum.state(),
                 plenum.volume_m3,
                 duration,
