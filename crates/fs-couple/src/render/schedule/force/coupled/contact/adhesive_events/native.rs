@@ -9,6 +9,9 @@ use crate::modal_acoustic_time::{ModalAcousticState, ModalAcousticTimeModel};
 use crate::port_adoption::{PortTransfer, StepAccount};
 use fs_exec::CancelGate;
 
+/// Shared restoration and independent work accounting for complete networks.
+pub(crate) mod linear_network;
+
 #[derive(Clone, Copy)]
 pub(crate) struct EventNativeMotion {
     pub modal_energy_before_j: f64,

@@ -12725,3 +12725,34 @@ memory, or acoustic back-reaction. G1/G3/G4 tests exercise analytic nonorthogona
 stops and release, independent dense-ODE work, simultaneous/hidden events,
 contact-unit and time-partition covariance, conditioning and ambiguity refusal,
 limits, cancellation and deterministic retry.
+
+
+## Simultaneous sourced adhesive events in the original network
+
+`contact::adhesive_network_events::multiple::MultipleAdhesiveNetworkEventModalSystem`
+retains up to eight independently sourced scalar junctions on one complete
+original modal network. Each site supplies its own ordered normal/shear source,
+held indentation and complete work column. Original DMT real area and junction
+strength determine its static and kinetic capacities. Coupled event propagation
+selects holding reactions, stops and releases jointly; contacts are not advanced
+as separate pairwise mechanical steps. Per-contact phase, accumulated slip,
+friction loss, impulse and time moment remain available alongside global work.
+
+Single and multiple owners share one original native-state transaction. It
+restores every original component under its budgets, independently evaluates
+pressure and storage, retains every spring/damper/rest extension, and computes
+each original connection's force and work port. All individual source, slip and
+interval-speed limits and the original energy budget, including propagated
+numerical work uncertainty, must pass before any accepted body, phase, frame or
+clock changes. Late original-body or energy refusal and cancellation preserve
+all junction histories for identical retry.
+
+The fixed scalar work columns must be independent under the admitted normalized
+Gram pivot. Dependent constraints are refused without regularization or silent
+merging. Two scalar contacts are not a vector Coulomb disk. Normal geometry,
+source conditions and external force are held during a step; evolving frames,
+normal contact, nonlinear memories and radiation feedback remain separate
+physical owners. G1/G3/G4 tests include simultaneous three-body stopping and
+restart, constrained internal elastic motion, per-site order covariance,
+zero-strength recovery of the original complete prepared network, reduction
+to the single-junction owner, source/rank admission and joint rollback.
