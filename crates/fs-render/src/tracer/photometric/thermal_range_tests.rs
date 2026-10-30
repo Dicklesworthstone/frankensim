@@ -76,6 +76,7 @@ fn reflected_thermal_nee_obeys_calibrated_physical_range() {
                 &settings,
                 0,
                 PathMedium::Absorbing(&grid),
+                None,
                 point,
                 volume_emission::Receiver::Surface {
                     material: &material,
@@ -86,6 +87,7 @@ fn reflected_thermal_nee_obeys_calibrated_physical_range() {
                     },
                     outgoing: normal,
                     brushed: None,
+                    incident_glass: None,
                 },
                 &[450.0, 550.0, 650.0, 750.0],
                 &rng,

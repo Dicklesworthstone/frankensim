@@ -132,6 +132,18 @@ use scattering::PathMedium;
 #[cfg(feature = "volumes")]
 mod medium_exposure;
 #[cfg(feature = "volumes")]
+mod medium_region;
+#[cfg(feature = "volumes")]
+use medium_region::MediumRegion;
+#[cfg(feature = "volumes")]
+mod scene_media;
+#[cfg(feature = "volumes")]
+pub use scene_media::{
+    InteriorMedium, SceneMedia, SceneMediaBudget, SceneMediaError, SceneMediaFilm,
+    render_scene_media, render_scene_media_range, render_scene_media_range_with_execution,
+    render_scene_media_with_execution,
+};
+#[cfg(feature = "volumes")]
 mod volume_emission;
 #[cfg(feature = "volumes")]
 use medium_exposure::MediumInput;
@@ -2980,6 +2992,9 @@ pub enum TracerError {
     Lighting(LightingError),
     /// Accepted scene states or their exposure/preparation budget were invalid.
     SceneExposure(SceneExposureError),
+    /// A physical field could not be bound to its dielectric region.
+    #[cfg(feature = "volumes")]
+    SceneMedia(SceneMediaError),
     /// A calibrated fixture connection exceeded its admitted physical domain.
     #[cfg(feature = "photometry")]
     FixtureConnection {
@@ -3104,6 +3119,8 @@ impl core::fmt::Display for TracerError {
             Self::Conductor(error) => write!(formatter, "conductor transport refused: {error}"),
             Self::Lighting(error) => write!(formatter, "scene lighting refused: {error}"),
             Self::SceneExposure(error) => write!(formatter, "scene exposure refused: {error}"),
+            #[cfg(feature = "volumes")]
+            Self::SceneMedia(error) => write!(formatter, "scene media refused: {error}"),
             #[cfg(feature = "photometry")]
             Self::FixtureConnection { source, reason } => {
                 write!(formatter, "fixture {source} connection refused: {reason}")
@@ -4000,6 +4017,8 @@ fn render_range_with_medium_impl(
         medium,
         has_medium_emission,
         None,
+        #[cfg(feature = "volumes")]
+        None,
     )
 }
 
@@ -4016,8 +4035,12 @@ fn render_range_with_scene_exposure_impl(
     #[cfg(feature = "volumes")] medium: Option<MediumInput<'_, '_>>,
     has_medium_emission: bool,
     scene_exposure: Option<&SceneExposure<'_>>,
+    #[cfg(feature = "volumes")] scene_media: Option<&SceneMedia<'_, '_>>,
 ) -> Result<(), TracerError> {
-    let (owned_lighting, requested_mode) = if scene_exposure.is_some() {
+    let prepared_lighting = scene_exposure.is_some();
+    #[cfg(feature = "volumes")]
+    let prepared_lighting = prepared_lighting || scene_media.is_some();
+    let (owned_lighting, requested_mode) = if prepared_lighting {
         (
             None,
             preflight_render_buffers(cx, s, Some(film), from, to, shutter, camera_path)?,
@@ -4038,6 +4061,8 @@ fn render_range_with_scene_exposure_impl(
     };
     let lighting = match &owned_lighting {
         Some(lighting) => lighting,
+        #[cfg(feature = "volumes")]
+        None if scene_media.is_some() => &scene_media.ok_or(TracerError::InvalidInput)?.lighting,
         None => {
             scene_exposure
                 .ok_or(TracerError::InvalidInput)?
@@ -4088,6 +4113,8 @@ fn render_range_with_scene_exposure_impl(
                     #[cfg(feature = "volumes")]
                     medium,
                     scene_exposure,
+                    #[cfg(feature = "volumes")]
+                    scene_media,
                 )?
                 .xyz;
                 slot[0] += xyz[0];
@@ -4120,6 +4147,8 @@ struct ParallelRenderKernel<'run, 'assets> {
     scene: &'assets Scene,
     lighting: &'run SceneLighting<'assets>,
     scene_exposure: Option<&'run SceneExposure<'assets>>,
+    #[cfg(feature = "volumes")]
+    scene_media: Option<&'run SceneMedia<'run, 'assets>>,
     settings: &'run Settings,
     base_xyz: Option<&'run [[f64; 3]]>,
     staging: &'run Mutex<Vec<[f64; 3]>>,
@@ -4231,6 +4260,8 @@ impl ParallelRenderKernel<'_, '_> {
                         #[cfg(feature = "volumes")]
                         self.medium,
                         self.scene_exposure,
+                        #[cfg(feature = "volumes")]
+                        self.scene_media,
                     ) {
                         Ok(sample) => sample.xyz,
                         Err(TracerError::Cancelled) => {
@@ -5876,6 +5907,8 @@ fn render_range_parallel_with_medium_impl<R: RenderPoolRunner>(
         medium,
         has_medium_emission,
         None,
+        #[cfg(feature = "volumes")]
+        None,
     )
 }
 
@@ -5895,6 +5928,7 @@ fn render_range_parallel_with_scene_exposure_impl<R: RenderPoolRunner>(
     #[cfg(feature = "volumes")] medium: Option<MediumInput<'_, '_>>,
     has_medium_emission: bool,
     scene_exposure: Option<&SceneExposure<'_>>,
+    #[cfg(feature = "volumes")] scene_media: Option<&SceneMedia<'_, '_>>,
 ) -> Result<ParallelRenderResult, RenderExecutionError> {
     let setup_started = Instant::now();
     if sample_plan.is_some() && (base_film.is_some() || from != 0 || to != settings.spp) {
@@ -5902,7 +5936,10 @@ fn render_range_parallel_with_scene_exposure_impl<R: RenderPoolRunner>(
             "fixed sample plan is valid only for a fresh complete production render",
         ));
     }
-    let (owned_lighting, requested_mode) = if scene_exposure.is_some() {
+    let prepared_lighting = scene_exposure.is_some();
+    #[cfg(feature = "volumes")]
+    let prepared_lighting = prepared_lighting || scene_media.is_some();
+    let (owned_lighting, requested_mode) = if prepared_lighting {
         (
             None,
             preflight_render_buffers(cx, settings, base_film, from, to, shutter, camera_path)?,
@@ -5923,6 +5960,8 @@ fn render_range_parallel_with_scene_exposure_impl<R: RenderPoolRunner>(
     };
     let lighting = match &owned_lighting {
         Some(lighting) => lighting,
+        #[cfg(feature = "volumes")]
+        None if scene_media.is_some() => &scene_media.ok_or(TracerError::InvalidInput)?.lighting,
         None => {
             scene_exposure
                 .ok_or(TracerError::InvalidInput)?
@@ -6050,6 +6089,8 @@ fn render_range_parallel_with_scene_exposure_impl<R: RenderPoolRunner>(
         scene,
         lighting,
         scene_exposure,
+        #[cfg(feature = "volumes")]
+        scene_media,
         settings,
         base_xyz: base_film.map(|film| film.xyz.as_slice()),
         staging: &staging,
@@ -9888,6 +9929,8 @@ fn trace_pixel_sample_with_primary_and_medium(
         #[cfg(feature = "volumes")]
         medium,
         None,
+        #[cfg(feature = "volumes")]
+        None,
     )
 }
 
@@ -9908,6 +9951,7 @@ fn trace_pixel_sample_with_scene_exposure(
     capture_primary: bool,
     #[cfg(feature = "volumes")] medium: Option<MediumInput<'_, '_>>,
     scene_exposure: Option<&SceneExposure<'_>>,
+    #[cfg(feature = "volumes")] scene_media: Option<&SceneMedia<'_, '_>>,
 ) -> Result<PathTraceSample, TracerError> {
     // Pool seeds control scheduling/placement only. Bind downstream chart,
     // camera, and intersection work to the public render seed while retaining
@@ -9964,7 +10008,7 @@ fn trace_pixel_sample_with_scene_exposure(
         })
         .transpose()?
         .flatten();
-    trace_path_with_medium(
+    trace_path_with_regions(
         scene,
         lighting,
         &render_cx,
@@ -9982,6 +10026,10 @@ fn trace_pixel_sample_with_scene_exposure(
         None,
         #[cfg(feature = "volumes")]
         medium,
+        #[cfg(feature = "photometry")]
+        None,
+        #[cfg(feature = "volumes")]
+        scene_media,
     )
 }
 
@@ -13203,22 +13251,65 @@ fn trace_path_with_emitters(
     #[cfg(feature = "volumes")] medium: Option<PathMedium<'_, '_>>,
     #[cfg(feature = "photometry")] fixtures: Option<&photometric::FixtureLighting<'_>>,
 ) -> Result<PathTraceSample, TracerError> {
+    trace_path_with_regions(
+        scene,
+        lighting,
+        cx,
+        s,
+        kn,
+        pixel,
+        sample,
+        jx,
+        jy,
+        ul,
+        ray_time,
+        camera_path,
+        capture_primary,
+        path_sobol,
+        resume,
+        #[cfg(feature = "volumes")]
+        medium,
+        #[cfg(feature = "photometry")]
+        fixtures,
+        #[cfg(feature = "volumes")]
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn trace_path_with_regions(
+    scene: &Scene,
+    lighting: &SceneLighting<'_>,
+    cx: &Cx<'_>,
+    s: &Settings,
+    kn: f64,
+    pixel: u32,
+    sample: u32,
+    jx: f64,
+    jy: f64,
+    ul: f64,
+    ray_time: Option<&PathTime>,
+    camera_path: CameraPath<'_>,
+    capture_primary: bool,
+    path_sobol: Option<&Sobol>,
+    resume: Option<SpectralPathState>,
+    #[cfg(feature = "volumes")] medium: Option<PathMedium<'_, '_>>,
+    #[cfg(feature = "photometry")] fixtures: Option<&photometric::FixtureLighting<'_>>,
+    #[cfg(feature = "volumes")] scene_media: Option<&SceneMedia<'_, '_>>,
+) -> Result<PathTraceSample, TracerError> {
     let legacy_light_weights = lighting.is_legacy_compatibility_path() && lighting.moving.is_none();
     // The frozen surface-only estimator predates terminal-vertex NEE weights.
     // Physical media are a new estimator and must not inherit its missing
     // energy when the final vertex has no evaluated BSDF continuation.
     #[cfg(feature = "volumes")]
-    let legacy_light_weights = legacy_light_weights && medium.is_none();
+    let legacy_light_weights = legacy_light_weights && medium.is_none() && scene_media.is_none();
     // Existing finite-interface NEE connectors omit physical-field segments.
     // Their reverse competitor must be disabled together with the proposal;
     // the ordinary refractive random walk retains all of those paths.
     #[cfg(feature = "volumes")]
-    let allow_dielectric_connectors = medium.is_none();
+    let allow_dielectric_connectors = medium.is_none() && scene_media.is_none();
     #[cfg(not(feature = "volumes"))]
     let allow_dielectric_connectors = true;
-    #[cfg(feature = "volumes")]
-    let has_volume_source_nee = s.strategy != DirectStrategy::BsdfOnly
-        && medium.is_some_and(|medium| medium.emission_grid().has_emission_proposal());
     let key = [(s.seed & 0xffff_ffff) as u32, (s.seed >> 32) as u32];
     let rng = PathRng {
         pixel,
@@ -13305,6 +13396,10 @@ fn trace_path_with_emitters(
     let remaining_smooth_dielectric_splits = state.remaining_smooth_dielectric_splits;
     for depth in state.next_depth..s.max_depth {
         cx.checkpoint()?;
+        #[cfg(feature = "volumes")]
+        let active_region = MediumRegion::incident(&medium_stack, medium, scene_media);
+        #[cfg(feature = "volumes")]
+        let has_volume_source_nee = active_region.has_source_proposal(s.strategy);
         #[cfg(feature = "photometry")]
         let intersection = if fixtures.is_some() {
             // Calibrated mesh instances must not inherit the legacy 10 km
@@ -13329,12 +13424,10 @@ fn trace_path_with_emitters(
             })
             .transpose()?;
         #[cfg(feature = "volumes")]
-        if let Some(medium) = medium
-            && medium_stack.len() == 0
-        {
-            // A closed dielectric displaces the ambient grid. Interior paths
-            // use the glass owner's homogeneous spectral absorption below;
-            // neither ambient LTE sources nor ambient collisions exist there.
+        if let Some(medium) = active_region.volume {
+            // The top nested boundary selects exactly one physical owner.
+            // Explicit interiors replace the host's homogeneous extinction;
+            // unbound glass still displaces the ambient field as before.
             // The numerical ray starts off the surface to avoid self-hits.
             // Integrate between the retained physical endpoints, including
             // thin cells next to the terminal surface, rather than extending
@@ -13378,8 +13471,13 @@ fn trace_path_with_emitters(
                 1.0
             };
             for lane in 0..PACKET {
-                let emitted =
-                    throughput[lane] * transport.emission_w_m2_sr_nm[lane] * source_weight;
+                let emitted = throughput[lane]
+                    * volume_emission::lte_radiance_in_host(
+                        transport.emission_w_m2_sr_nm[lane],
+                        active_region.host,
+                        lambdas[lane],
+                    )?
+                    * source_weight;
                 radiance[lane] += emitted;
                 if let Some(contributions) = &mut contribution_radiance {
                     contributions.record(emissive_contribution_class(depth), lane, emitted);
@@ -13454,6 +13552,7 @@ fn trace_path_with_emitters(
                         s,
                         depth,
                         medium,
+                        active_region.host,
                         event.position,
                         volume_emission::Receiver::Phase {
                             phase,
@@ -13487,6 +13586,7 @@ fn trace_path_with_emitters(
                             s,
                             depth,
                             medium,
+                            active_region.host,
                             phase,
                             event.position,
                             direction,
@@ -13514,6 +13614,7 @@ fn trace_path_with_emitters(
                             s,
                             depth,
                             medium,
+                            active_region.host,
                             phase,
                             event.position,
                             direction,
@@ -13664,13 +13765,19 @@ fn trace_path_with_emitters(
             hit,
             instance_hit,
         } = intersection;
-        attenuate_segment(
-            &mut throughput,
-            &lambdas,
-            &medium_stack,
-            segment_origin,
-            &hit,
-        )?;
+        #[cfg(feature = "volumes")]
+        let use_homogeneous_absorption = !active_region.replaces_host_extinction;
+        #[cfg(not(feature = "volumes"))]
+        let use_homogeneous_absorption = true;
+        if use_homogeneous_absorption {
+            attenuate_segment(
+                &mut throughput,
+                &lambdas,
+                &medium_stack,
+                segment_origin,
+                &hit,
+            )?;
+        }
         let prim = &scene.primitives[prim_idx];
         let frame = surface_frame(&hit, &ray)?;
         if capture_primary && depth == 0 {
@@ -13879,6 +13986,10 @@ fn trace_path_with_emitters(
             | Material::Conductor { .. }
             | Material::BrushedConductor { .. } => None,
         };
+        #[cfg(feature = "volumes")]
+        let transmitted_region = dielectric_boundary.map(|boundary| {
+            MediumRegion::transmitted(&medium_stack, boundary.transition, medium, scene_media)
+        });
 
         #[cfg(feature = "photometry")]
         if let Some(fixtures) = fixtures {
@@ -13929,38 +14040,50 @@ fn trace_path_with_emitters(
             }
         }
         #[cfg(feature = "volumes")]
-        if let Some(medium) = medium
-            && has_volume_source_nee
-        {
-            let receiver = match (&prim.material, dielectric_boundary) {
-                (Material::Dielectric { surface, .. }, Some(boundary))
-                    if boundary.incident.is_none() || boundary.transmitted.is_none() =>
-                {
-                    surface
+        for (source_region, source_side) in [
+            (Some(active_region), volume_emission::SourceSide::Incident),
+            (transmitted_region, volume_emission::SourceSide::Transmitted),
+        ] {
+            let Some(source_region) = source_region else {
+                continue;
+            };
+            let Some(source_medium) = source_region.volume else {
+                continue;
+            };
+            if source_region.has_source_proposal(s.strategy) {
+                let receiver = match (&prim.material, dielectric_boundary) {
+                    (Material::Dielectric { surface, .. }, Some(boundary)) => surface
                         .roughness_alpha()
                         .map(|alpha| volume_emission::Receiver::Dielectric {
                             frame,
                             outgoing: ray.dir.scale(-1.0),
                             boundary,
                             alpha,
-                        })
-                }
-                (_, None) if medium_stack.len() == 0 => Some(volume_emission::Receiver::Surface {
-                    material: &prim.material,
-                    frame,
-                    outgoing: ray.dir.scale(-1.0),
-                    brushed: brushed_frame.as_ref(),
-                }),
-                _ => None,
-            };
-            if let Some(receiver) = receiver {
+                            source_side,
+                        }),
+                    (_, None) => Some(volume_emission::Receiver::Surface {
+                        material: &prim.material,
+                        frame,
+                        outgoing: ray.dir.scale(-1.0),
+                        brushed: brushed_frame.as_ref(),
+                        incident_glass: source_region.host,
+                    }),
+                    _ => None,
+                };
+                let Some(receiver) = receiver else {
+                    continue;
+                };
+                // Each side has its own complete source proposal. Hemisphere
+                // supports are disjoint, so there is no factor of one half
+                // and a continuation competes only with its outgoing region.
                 let direct = volume_emission::direct_contribution(
                     scene,
                     cx,
                     ray_time,
                     s,
                     depth,
-                    medium,
+                    source_medium,
+                    source_region.host,
                     hit.point,
                     receiver,
                     &lambdas,
@@ -14086,6 +14209,12 @@ fn trace_path_with_emitters(
                                     } else {
                                         boundary.transmitted
                                     };
+                                    #[cfg(feature = "volumes")]
+                                    let shadow_region = if n.dot(wi) > 0.0 {
+                                        active_region
+                                    } else {
+                                        transmitted_region.ok_or(TracerError::InvalidInput)?
+                                    };
                                     if matches!(direct.target, DirectLightTarget::Environment)
                                         && shadow_medium.is_some()
                                     {
@@ -14103,8 +14232,8 @@ fn trace_path_with_emitters(
                                         ));
                                     }
                                     #[cfg(feature = "volumes")]
-                                    let volume_transmittance = if let Some(medium) = medium
-                                        && shadow_medium.is_none()
+                                    let volume_transmittance = if let Some(medium) =
+                                        shadow_region.volume
                                     {
                                         let distance = match direct.target {
                                             DirectLightTarget::Rectangle { distance_m, .. } => {
@@ -14138,7 +14267,7 @@ fn trace_path_with_emitters(
                                         let competing_pdf = evaluation.pdf;
                                         #[cfg(feature = "volumes")]
                                         let competing_pdf = competing_pdf
-                                            * medium.map_or(1.0, |medium| {
+                                            * shadow_region.volume.map_or(1.0, |medium| {
                                                 medium.escape_probability(&volume_transmittance)
                                             });
                                         let weight = match s.strategy {
@@ -14159,10 +14288,14 @@ fn trace_path_with_emitters(
                                                 return Err(TracerError::InvalidInput);
                                             }
                                         };
+                                        #[cfg(feature = "volumes")]
+                                        let absorption_medium = shadow_region.homogeneous_host();
+                                        #[cfg(not(feature = "volumes"))]
+                                        let absorption_medium = shadow_medium;
                                         let attenuation = match direct.target {
                                             DirectLightTarget::Rectangle { distance_m, .. } => {
                                                 medium_transmittance(
-                                                    shadow_medium,
+                                                    absorption_medium,
                                                     lambda,
                                                     distance_m,
                                                 )?
@@ -14379,8 +14512,8 @@ fn trace_path_with_emitters(
                                 let bsdf_pdf =
                                     bsdf_pdf(&prim.material, n, wo, wi, brushed_frame.as_ref());
                                 #[cfg(feature = "volumes")]
-                                let volume_transmittance = if let Some(medium) = medium
-                                    && medium_stack.len() == 0
+                                let volume_transmittance = if let Some(medium) =
+                                    active_region.volume
                                 {
                                     let distance = match direct.target {
                                         DirectLightTarget::Rectangle { distance_m, .. } => {
@@ -14394,7 +14527,7 @@ fn trace_path_with_emitters(
                                 };
                                 #[cfg(feature = "volumes")]
                                 let bsdf_pdf = bsdf_pdf
-                                    * medium.map_or(1.0, |medium| {
+                                    * active_region.volume.map_or(1.0, |medium| {
                                         medium.escape_probability(&volume_transmittance)
                                     });
                                 let weight = match s.strategy {
@@ -14426,11 +14559,18 @@ fn trace_path_with_emitters(
                                                 Some(active.glass),
                                                 brushed_frame.as_ref(),
                                             )?;
+                                            #[cfg(feature = "volumes")]
+                                            let absorption_medium =
+                                                active_region.homogeneous_host();
+                                            #[cfg(not(feature = "volumes"))]
+                                            let absorption_medium = Some(active.glass);
                                             let attenuation = medium_transmittance(
-                                                Some(active.glass),
+                                                absorption_medium,
                                                 l,
                                                 distance_m,
                                             )?;
+                                            #[cfg(feature = "volumes")]
+                                            let attenuation = attenuation * volume_transmittance[k];
                                             let before = radiance[k];
                                             radiance[k] += throughput[k]
                                                 * f
@@ -14697,7 +14837,7 @@ fn trace_path_with_emitters(
                          child_previous_bsdf: PreviousBsdf,
                          child_medium_stack: MediumStack,
                          child_active_lane: Option<usize>| {
-                            trace_path_with_medium(
+                            trace_path_with_regions(
                                 scene,
                                 lighting,
                                 cx,
@@ -14734,6 +14874,10 @@ fn trace_path_with_emitters(
                                 }),
                                 #[cfg(feature = "volumes")]
                                 medium,
+                                #[cfg(feature = "photometry")]
+                                fixtures,
+                                #[cfg(feature = "volumes")]
+                                scene_media,
                             )
                         };
 
@@ -14927,11 +15071,13 @@ fn trace_path_with_emitters(
                         )?;
                         #[cfg(feature = "volumes")]
                         let child_previous_bsdf = PreviousBsdf {
-                            volume_emission_competitor: has_volume_source_nee
-                                && !continuation.delta
+                            volume_emission_competitor: !continuation.delta
                                 && match continuation.event {
-                                    DielectricEvent::Reflection => boundary.incident.is_none(),
-                                    DielectricEvent::Transmission => boundary.transmitted.is_none(),
+                                    DielectricEvent::Reflection => has_volume_source_nee,
+                                    DielectricEvent::Transmission => transmitted_region
+                                        .is_some_and(|region| {
+                                            region.has_source_proposal(s.strategy)
+                                        }),
                                 },
                             ..child_previous_bsdf
                         };
@@ -14941,7 +15087,7 @@ fn trace_path_with_emitters(
                         }
                         let mut child_throughput = [0.0; PACKET];
                         child_throughput[lane] = throughput[lane] * continuation.weight;
-                        let child = trace_path_with_medium(
+                        let child = trace_path_with_regions(
                             scene,
                             lighting,
                             cx,
@@ -14977,6 +15123,10 @@ fn trace_path_with_emitters(
                             }),
                             #[cfg(feature = "volumes")]
                             medium,
+                            #[cfg(feature = "photometry")]
+                            fixtures,
+                            #[cfg(feature = "volumes")]
+                            scene_media,
                         )?;
                         add_xyz(&mut resumed_xyz, child.xyz);
                         if let Some(total) = &mut resumed_contribution_split {
@@ -15027,11 +15177,11 @@ fn trace_path_with_emitters(
                 )?;
                 #[cfg(feature = "volumes")]
                 let next_previous_bsdf = PreviousBsdf {
-                    volume_emission_competitor: has_volume_source_nee
-                        && !sampled.delta
+                    volume_emission_competitor: !sampled.delta
                         && match sampled.event {
-                            DielectricEvent::Reflection => boundary.incident.is_none(),
-                            DielectricEvent::Transmission => boundary.transmitted.is_none(),
+                            DielectricEvent::Reflection => has_volume_source_nee,
+                            DielectricEvent::Transmission => transmitted_region
+                                .is_some_and(|region| region.has_source_proposal(s.strategy)),
                         },
                     ..next_previous_bsdf
                 };
@@ -15075,7 +15225,7 @@ fn trace_path_with_emitters(
                 }
                 previous_bsdf = Some(PreviousBsdf {
                     #[cfg(feature = "volumes")]
-                    volume_emission_competitor: medium_stack.len() == 0 && has_volume_source_nee,
+                    volume_emission_competitor: has_volume_source_nee,
                     pdf: DirectionalPdfPair::continuous(
                         pdf,
                         bsdf_pdf(&prim.material, n, wi, wo, brushed_frame.as_ref()),

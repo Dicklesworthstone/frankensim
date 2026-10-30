@@ -568,6 +568,39 @@ differentiable lift). Pure Rust throughout.
   Memory, traversal, cancellation and nonfinite-radiance refusals publish no
   partial film. This adds parallel static-field rendering, not adaptive media,
   dynamic-field shutter interpolation or a separate executor.
+- **Participating dielectric interiors (`tracer,volumes`):**
+  `SceneMedia` binds borrowed absorbing/scattering grids to sorted dielectric
+  primitive IDs, together with an optional ambient grid. The top of the existing
+  boundary stack selects one physical owner; nested entry displaces the outer
+  field and exit restores it. A bound field replaces the host glass's complete
+  homogeneous absorption, even when the field is vacuum. The host's spectral
+  phase index and smooth/rough Fresnel law remain in force. Grids use world
+  metres and vacuum wavelengths; their finite support is clipped at each next
+  surface, with vacuum outside the grid. No density/temperature buffer is copied.
+  Exact DDA attenuation, free flight, phase scattering, source integration,
+  rectangle/environment lighting and both MIS directions use the selected
+  region. Every recursive spectral/Fresnel branch retains the binding.
+  LTE source radiance inside a host is `n(lambda)^2 * B_lambda(T)`, consistently
+  paired with the existing radiance-mode interface factors. Rough boundaries
+  sample emitting incident and transmitted regions on disjoint hemispheres;
+  each continuation competes only with its outgoing source proposal. Opaque
+  receivers evaluate conductor Fresnel response against the actual host index.
+  Specialized surface-only refractive NEE is disabled with its reverse
+  competitor for these jobs; complete boundary random walks retain the paths.
+  Admission bounds binding/primitive/source-triangle metadata, hashes numeric
+  scene and field identities, and prepares lighting once. Region lookup is
+  allocation-free binary search. `SceneMediaFilm` binds the scene, all supplied
+  fields and settings, and fresh/progressive serial/tile entries reuse the
+  existing bounded executor and transactional publication. Tests cover replaced
+  absorption, explicit vacuum, heterogeneous and nested paths, refractive LTE,
+  phase transport, direct-source laws, execution replay and refusal rollback.
+  This is static geometry with held world-space fields and spatially constant
+  host index. It does not certify boundary closure, initialize cameras inside
+  bodies, admit arbitrary overlaps, implement gradient-index rays, or debit
+  thermal energy. Surface thermal-emission laws inside glass remain refused,
+  including phase-to-surface connections; the implemented interior thermal
+  source is the participating field. The `n^2` source convention follows
+  [Siegel and Spuckler (1992)](https://ntrs.nasa.gov/citations/20150021009).
 - **Accepted medium history (`tracer,volumes`):**
   `MediumTimeline` borrows contiguous physical-state intervals and their
   already admitted absorbing/scattering grids without copying fields or
@@ -976,7 +1009,8 @@ original light-selection draws and estimator. Tracer bit-semantics v2
 deliberately changes reflective GGX sample/PDF bits from NDF sampling to
 isotropic visible-normal sampling while preserving the same BSDF integral in
 expectation.
-Current no-claims: no participating-grid interiors in glass, no Russian roulette, reflective GGX
+Current no-claims: no gradient-index propagation or arbitrary overlapping media,
+no Russian roulette, reflective GGX
 and conductor sampling is isotropic-only, conductor and rough-dielectric GGX
 are single-scattering without multiple-scattering compensation, and standalone
 RGB emitters do not reflect. Thermal emitters retain their reciprocal diffuse
@@ -1197,7 +1231,7 @@ its prior 872c freeze was four-quadrant, and 8ll9 requires current-tree replay.
   itself is time-invariant.
 - v1 includes the scalar-BVH spectral path tracer. Wide-BVH SIMD traversal,
   watertight ray-triangle tests, a LIGHT-BVH for large emitter populations,
-  heterogeneous scattering/dielectric coupling, ray-stream sorting, and
+  moving participating-grid interiors, ray-stream sorting, and
   progressive tile streaming to HELM remain staged.
 - The free `render_*_with_execution` functions and
   `render_cinematic_with_aovs_execution` are one-job convenience APIs and
@@ -1357,10 +1391,11 @@ its prior 872c freeze was four-quadrant, and 8ll9 requires current-tree replay.
 - Progressive live tiles with ledger artifact pinning (frame-consistent
   snapshots of evolving fields) — staged with the vessel flagship's
   render lane; the smoke tier renders a paused simulation's buffer.
-- Refractive free-surface rendering (fill-fraction interface reconstruction),
-  dielectric/volume connectors and MIS integration of phase functions into the
-  full tracer remain successors. The borrowed absorption/emission scene path
-  above is implemented; the separate phase samplers retain their moment gates.
+- Refractive free-surface reconstruction from fill fractions and specialized
+  refractive volume-source connectors remain successors. The shared path tracer
+  implements borrowed absorption/emission/scattering in ambient and explicitly
+  bound dielectric regions, with phase/source MIS; interface random walks
+  supply paths that cross boundaries.
 - The zero-copy claim at smoke tier is BORROW SEMANTICS (the API takes
   `&[f64]`; the battery binds a live `FreeSurface` mass buffer); the
   FrankenNumpy membrane view protocol is the fuller deliverable.

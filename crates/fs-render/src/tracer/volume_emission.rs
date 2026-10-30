@@ -32,21 +32,33 @@ fn angular_weight(own: f64, other: f64, power: bool) -> f64 {
     }
 }
 
-/// Straight source connections at ambient opaque/phase vertices and the ambient
-/// side of a rough dielectric. Closed glass displaces the physical grid, so a
-/// source connection cannot integrate the grid on an interior-facing ray.
+/// Hemisphere occupied by one accepted source region at a rough boundary.
+/// Each side has its own grid proposal and complete angular density. Keeping
+/// their support disjoint avoids treating a source behind the boundary as a
+/// straight connection through that boundary.
+#[derive(Clone, Copy)]
+pub(super) enum SourceSide {
+    Incident,
+    Transmitted,
+}
+
+/// Straight source connections within one selected physical region. The first
+/// surface terminates the line integral; refraction is handled by the boundary
+/// response and ordinary path continuation, never by crossing a shadow blocker.
 pub(super) enum Receiver<'a> {
     Surface {
         material: &'a Material,
         frame: SurfaceFrame,
         outgoing: Vec3,
         brushed: Option<&'a crate::surface_detail::ShadingFrame>,
+        incident_glass: Option<DielectricGlass>,
     },
     Dielectric {
         frame: SurfaceFrame,
         outgoing: Vec3,
         boundary: BoundaryMedia,
         alpha: f64,
+        source_side: SourceSide,
     },
     Phase {
         phase: PhaseFunction,
@@ -59,11 +71,13 @@ impl Receiver<'_> {
         match self {
             Self::Surface { frame, .. } => frame.oriented.dot(direction) > 0.0,
             Self::Dielectric {
-                frame, boundary, ..
+                frame, source_side, ..
             } => {
                 let cosine = frame.oriented.dot(direction);
-                (cosine > 0.0 && boundary.incident.is_none())
-                    || (cosine < 0.0 && boundary.transmitted.is_none())
+                match source_side {
+                    SourceSide::Incident => cosine > 0.0,
+                    SourceSide::Transmitted => cosine < 0.0,
+                }
             }
             Self::Phase { .. } => true,
         }
@@ -88,6 +102,7 @@ impl Receiver<'_> {
                 frame,
                 outgoing,
                 brushed,
+                ..
             } => Ok(Some(bsdf_pdf(
                 material,
                 frame.oriented,
@@ -118,6 +133,7 @@ impl Receiver<'_> {
                 frame,
                 outgoing,
                 brushed,
+                incident_glass,
             } => {
                 let cosine = frame.oriented.dot(direction).max(0.0);
                 if cosine == 0.0 {
@@ -130,7 +146,7 @@ impl Receiver<'_> {
                         *outgoing,
                         direction,
                         wavelength,
-                        None,
+                        *incident_glass,
                         *brushed,
                     )? * cosine,
                     common_pdf.ok_or(TracerError::InvalidInput)?,
@@ -141,6 +157,7 @@ impl Receiver<'_> {
                 outgoing,
                 boundary,
                 alpha,
+                ..
             } => {
                 let evaluation = evaluate_rough_dielectric(
                     frame.oriented,
@@ -160,6 +177,32 @@ impl Receiver<'_> {
                 Ok((value, value))
             }
         }
+    }
+}
+
+/// LTE radiance in a homogeneous refractive host at a vacuum wavelength.
+///
+/// The grid owns the index-one Planck source and extinction in SI units. The
+/// optical host changes equilibrium radiance to `n(lambda)^2 B_lambda(T)`;
+/// applying the same factor here and on continuation preserves `L / n^2`
+/// across lossless interfaces without changing absorption or scattering.
+pub(super) fn lte_radiance_in_host(
+    radiance: f64,
+    host: Option<DielectricGlass>,
+    wavelength: f64,
+) -> Result<f64, TracerError> {
+    let scaled = if let Some(host) = host {
+        let index = host.ior().eval(wavelength)?;
+        radiance * (index * index)
+    } else {
+        radiance
+    };
+    if scaled.is_finite() && scaled >= 0.0 {
+        Ok(scaled)
+    } else {
+        Err(TracerError::Volume(
+            crate::volumes::transport::VolumeTransportError::Unrepresentable,
+        ))
     }
 }
 
@@ -207,6 +250,7 @@ pub(super) fn direct_contribution(
     settings: &Settings,
     depth: u32,
     medium: PathMedium<'_, '_>,
+    source_glass: Option<DielectricGlass>,
     point: Point3,
     receiver: Receiver<'_>,
     wavelengths: &[f64; PACKET],
@@ -305,7 +349,8 @@ pub(super) fn direct_contribution(
                 DirectStrategy::BsdfOnly => return Err(TracerError::InvalidInput),
             }
         };
-        result[lane] = response * source[lane] / source_pdf * weight;
+        let emitted = lte_radiance_in_host(source[lane], source_glass, wavelength)?;
+        result[lane] = response * emitted / source_pdf * weight;
         if !result[lane].is_finite() || result[lane] < 0.0 {
             return Err(TracerError::InvalidInput);
         }
@@ -321,6 +366,7 @@ mod tests {
     fn dielectric_receiver(
         incident: Option<DielectricGlass>,
         transmitted: Option<DielectricGlass>,
+        source_side: SourceSide,
     ) -> Receiver<'static> {
         let normal = Vec3::new(0.0, 0.0, 1.0);
         Receiver::Dielectric {
@@ -338,35 +384,40 @@ mod tests {
                 },
             },
             alpha: 0.3,
+            source_side,
         }
     }
 
     #[test]
-    fn g0_rough_source_connections_stay_on_the_ambient_side() {
+    fn g0_rough_source_connections_partition_nested_boundary_hemispheres() {
         let glass = DielectricGlass::representative_crown();
         let positive = Vec3::new(0.0, 0.0, 1.0);
         let negative = positive.scale(-1.0);
-        let entry = dielectric_receiver(None, Some(glass));
-        let exit = dielectric_receiver(Some(glass), None);
-        let nested = dielectric_receiver(Some(glass), Some(glass));
-        assert!(entry.admits(positive));
-        assert!(!entry.admits(negative));
-        assert!(!exit.admits(positive));
-        assert!(exit.admits(negative));
-        assert!(!nested.admits(positive));
-        assert!(!nested.admits(negative));
-        for receiver in [entry, exit, nested] {
-            assert!(!receiver.admits(Vec3::new(1.0, 0.0, 0.0)));
+        for (incident, transmitted) in [
+            (None, Some(glass)),
+            (Some(glass), None),
+            (Some(glass), Some(glass)),
+        ] {
+            let incident_source = dielectric_receiver(incident, transmitted, SourceSide::Incident);
+            let transmitted_source =
+                dielectric_receiver(incident, transmitted, SourceSide::Transmitted);
+            assert!(incident_source.admits(positive));
+            assert!(!incident_source.admits(negative));
+            assert!(!transmitted_source.admits(positive));
+            assert!(transmitted_source.admits(negative));
+            for receiver in [incident_source, transmitted_source] {
+                assert!(!receiver.admits(Vec3::new(1.0, 0.0, 0.0)));
+            }
         }
         let origin = Point3::new(0.0, 0.0, 0.0);
         assert!(
-            dielectric_receiver(None, Some(glass))
+            dielectric_receiver(None, Some(glass), SourceSide::Incident)
                 .shadow_origin(origin, positive)
                 .z
                 > 0.0
         );
         assert!(
-            dielectric_receiver(Some(glass), None)
+            dielectric_receiver(Some(glass), None, SourceSide::Transmitted)
                 .shadow_origin(origin, negative)
                 .z
                 < 0.0
@@ -380,8 +431,8 @@ mod tests {
             BeerLambertAbsorption::try_constant(0.0).unwrap(),
             GlassProvenance::Custom,
         );
-        let reflection = dielectric_receiver(None, Some(glass));
-        let transmission = dielectric_receiver(Some(glass), None);
+        let reflection = dielectric_receiver(None, Some(glass), SourceSide::Incident);
+        let transmission = dielectric_receiver(Some(glass), None, SourceSide::Transmitted);
         let d = 1.0 / (core::f64::consts::PI * 0.3_f64.powi(2));
         let mut previous_pdf = None;
         for wavelength in [450.0, 550.0, 650.0, 750.0] {
@@ -430,7 +481,7 @@ mod tests {
             BeerLambertAbsorption::try_constant(0.0).unwrap(),
             GlassProvenance::Custom,
         );
-        let exit = dielectric_receiver(Some(glass), None);
+        let exit = dielectric_receiver(Some(glass), None, SourceSide::Transmitted);
         assert!(exit.admits(Vec3::new(0.0, 0.0, -1.0)));
         assert_eq!(
             exit.evaluation(Vec3::new(0.0, 0.0, -1.0), 550.0, None)
@@ -451,6 +502,79 @@ mod tests {
         .unwrap();
         assert!(sample.delta);
         assert_eq!(sample.radiance_weight, 1.0);
+    }
+
+    #[test]
+    fn g1_refractive_lte_source_preserves_reduced_spectral_radiance() {
+        let glass = DielectricGlass::new(
+            CauchyIor::try_new(1.4, 0.012, 0.0).unwrap(),
+            BeerLambertAbsorption::try_constant(0.0).unwrap(),
+            GlassProvenance::Custom,
+        );
+        for wavelength in [380.0, 450.0, 650.0, 780.0] {
+            let radiance =
+                crate::thermal_surface::planck_radiance_w_m2_sr_nm(1800.0, wavelength).unwrap();
+            let wavelength_um = wavelength * 1.0e-3;
+            let index = 1.4 + 0.012 / (wavelength_um * wavelength_um);
+            let inside = lte_radiance_in_host(radiance, Some(glass), wavelength).unwrap();
+            assert!((inside / radiance / (index * index) - 1.0).abs() < 3.0e-15);
+            // A lossless exit's inverse radiance eta factor removes the host
+            // density-of-states factor. The observable vacuum Planck law is
+            // unchanged; using an in-medium wavelength here would not cancel.
+            assert!((inside / (index * index) / radiance - 1.0).abs() < 3.0e-15);
+            assert_eq!(
+                lte_radiance_in_host(radiance, None, wavelength)
+                    .unwrap()
+                    .to_bits(),
+                radiance.to_bits(),
+            );
+            assert_eq!(
+                lte_radiance_in_host(0.0, Some(glass), wavelength).unwrap(),
+                0.0
+            );
+        }
+        assert!(matches!(
+            lte_radiance_in_host(f64::MAX, Some(glass), 550.0),
+            Err(TracerError::Volume(
+                crate::volumes::transport::VolumeTransportError::Unrepresentable
+            ))
+        ));
+    }
+
+    #[test]
+    fn g1_opaque_source_receiver_uses_its_incident_refractive_index() {
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let optics = ConductorOptics::representative_tungsten();
+        let alpha = 0.3;
+        let material = Material::Conductor {
+            optics,
+            surface: ConductorSurface::try_rough(alpha).unwrap(),
+        };
+        let glass = DielectricGlass::new(
+            CauchyIor::try_constant(1.5).unwrap(),
+            BeerLambertAbsorption::try_constant(0.0).unwrap(),
+            GlassProvenance::Custom,
+        );
+        for (incident_glass, index) in [(None, 1.0), (Some(glass), 1.5)] {
+            let receiver = Receiver::Surface {
+                material: &material,
+                frame: SurfaceFrame {
+                    oriented: normal,
+                    geometric: normal,
+                    entering: true,
+                },
+                outgoing: normal,
+                brushed: None,
+                incident_glass,
+            };
+            let common_pdf = receiver.common_pdf(normal).unwrap();
+            let (response, _) = receiver.evaluation(normal, 550.0, common_pdf).unwrap();
+            let nk = optics.complex_ior(550.0).unwrap();
+            let fresnel = ((nk.eta() - index).powi(2) + nk.k().powi(2))
+                / ((nk.eta() + index).powi(2) + nk.k().powi(2));
+            let expected = fresnel / (4.0 * PI * alpha * alpha);
+            assert!((response / expected - 1.0).abs() < 3.0e-14);
+        }
     }
 
     #[test]

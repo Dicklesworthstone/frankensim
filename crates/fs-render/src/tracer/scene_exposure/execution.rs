@@ -114,6 +114,8 @@ pub fn render_scene_exposure_range(
         exposure.medium,
         true,
         Some(exposure),
+        #[cfg(feature = "volumes")]
+        None,
     )
 }
 
@@ -144,6 +146,8 @@ pub fn render_scene_exposure_with_execution(
         exposure.medium,
         true,
         Some(exposure),
+        #[cfg(feature = "volumes")]
+        None,
     )?;
     let publication_started = Instant::now();
     let film = Film {
@@ -190,6 +194,8 @@ pub fn render_scene_exposure_range_with_execution(
         exposure.medium,
         true,
         Some(exposure),
+        #[cfg(feature = "volumes")]
+        None,
     )?;
     let mut report = result.report;
     if let Some(xyz) = result.xyz {

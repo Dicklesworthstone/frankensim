@@ -198,7 +198,10 @@ fn g1_dielectric_interior_replaces_instead_of_double_counting_ambient_extinction
         for channel in 0..3 {
             assert!(
                 (with_glass.xyz[0][channel] / continuous.xyz[0][channel] - 1.0).abs() < 2.0e-13,
-                "null-index glass with equal extinction must reproduce the displaced field"
+                "null-index glass with equal extinction must reproduce the displaced field: channel {channel}, glass {}, continuous {}, ratio {}",
+                with_glass.xyz[0][channel],
+                continuous.xyz[0][channel],
+                with_glass.xyz[0][channel] / continuous.xyz[0][channel],
             );
         }
     });

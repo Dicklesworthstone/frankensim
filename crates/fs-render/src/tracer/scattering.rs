@@ -344,6 +344,7 @@ pub(super) fn direct_contribution(
     settings: &Settings,
     depth: u32,
     medium: PathMedium<'_, '_>,
+    incident_glass: Option<DielectricGlass>,
     phase: PhaseFunction,
     point: Point3,
     incoming_travel: Vec3,
@@ -395,6 +396,12 @@ pub(super) fn direct_contribution(
     };
     if !visible {
         return Ok(result);
+    }
+    // The admitted thermal surface laws describe emission into index one.
+    // Only a visible same-region connection can establish an embedded source;
+    // an unrelated thermal emitter behind a glass boundary remains occluded.
+    if incident_glass.is_some() && matches!(light, LightSample::ThermalSurface(_)) {
+        return Err(TracerError::ThermalSurfaceMediumUnsupported);
     }
     let transmittance = medium.transmittance(cx, point, direction, distance, wavelengths)?;
     let phase_value = phase.eval_cos(incoming_travel.dot(direction))?;
