@@ -17,6 +17,9 @@
 #[path = "sphere_plane/rolling.rs"]
 pub mod rolling;
 
+/// Source-compatible directional support on the original moving sphere.
+pub mod directional;
+
 use crate::{DynamicsError, MassProperties, Pose, RigidBodyState, Vec3};
 use core::fmt;
 use fs_contact::ballistic::{
@@ -260,6 +263,7 @@ struct Ledger {
     force_work: f64,
     plane_work: f64,
     loss: f64,
+    impact_loss: f64,
     impulse_scale: f64,
     angular_scale: f64,
 }
@@ -480,6 +484,9 @@ impl Engine {
             finite(self.ledger.plane_work + impulse.dot(self.scene.velocity_world))?;
         self.ledger.loss =
             finite(self.ledger.loss + normal.dissipated_energy + friction.dissipated_energy)?;
+        self.ledger.impact_loss = finite(
+            self.ledger.impact_loss + normal.dissipated_energy + friction.dissipated_energy,
+        )?;
         self.ledger.impulse_scale = finite(self.ledger.impulse_scale + norm(impulse)?)?;
         self.ledger.angular_scale = finite(self.ledger.angular_scale + norm(angular)?)?;
         let (actual_normal, actual_slip) = self.kinematics(result.state_after)?;
@@ -664,7 +671,18 @@ impl Engine {
             return Err(SpherePlaneError::Unresolved("curved sliding friction work"));
         }
         self.ledger.loss = finite(self.ledger.loss + loss)?;
+        self.admit_supported_path(body, next, time, h, tangent_force)?;
+        Ok((next, h, arrested))
+    }
 
+    fn admit_supported_path(
+        &self,
+        body: RigidBodyState,
+        next: RigidBodyState,
+        time: f64,
+        h: f64,
+        tangent_force: Vec3,
+    ) -> Result<(), SpherePlaneError> {
         // Normal support is exact in the declared equations. Also bound the
         // complete native quadratic path's floating geometry residual, not
         // merely its endpoint, without changing the pose or momentum.
@@ -688,11 +706,9 @@ impl Engine {
             .geometry_allowance(body, time)?
             .max(self.geometry_allowance(next, finite(time + h)?)?);
         if maximum_gap > geometry_allowance {
-            return Err(SpherePlaneError::Unresolved(
-                "curved sliding supported path",
-            ));
+            return Err(SpherePlaneError::Unresolved("supported segment path"));
         }
-        Ok((next, h, arrested))
+        Ok(())
     }
 }
 
@@ -761,8 +777,48 @@ pub fn advance_sphere_plane_with_support_friction(
     support_friction: &FrictionLaw,
     duration_s: f64,
     config: SpherePlaneConfig,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<SpherePlaneAdvance, SpherePlaneError> {
+    advance_with_support(
+        scene,
+        state,
+        support_friction,
+        duration_s,
+        config,
+        None,
+        cancelled,
+        |_, _, _, _, _, _, _| Ok(None),
+    )
+    .map(|(motion, _)| motion)
+}
+
+/// Private support substitution; all flight, impact, geometry and global
+/// physical admission below remain owned by the original trajectory engine.
+struct SupportAdvance {
+    body: RigidBodyState,
+    mode: SpherePlaneMode,
+    duration_s: f64,
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn advance_with_support<C: FnMut() -> bool>(
+    scene: &SpherePlane,
+    state: SpherePlaneState,
+    support_friction: &FrictionLaw,
+    duration_s: f64,
+    config: SpherePlaneConfig,
+    frame: Option<fs_tribo::partial_slip::TangentFrame>,
+    mut cancelled: C,
+    mut support: impl FnMut(
+        &mut Engine,
+        RigidBodyState,
+        f64,
+        f64,
+        f64,
+        SpherePlaneMode,
+        &mut C,
+    ) -> Result<Option<SupportAdvance>, SpherePlaneError>,
+) -> Result<(SpherePlaneAdvance, f64), SpherePlaneError> {
     poll(&mut cancelled)?;
     if !(duration_s.is_finite() && duration_s > 0.0) {
         return Err(SpherePlaneError::Invalid(
@@ -774,6 +830,18 @@ pub fn advance_sphere_plane_with_support_friction(
         return Err(SpherePlaneError::NoProgress);
     }
     let mut engine = Engine::new(*scene, config, support_friction)?;
+    if let Some(frame) = frame {
+        let world = |v: [f64; 3]| Vec3::new(v[0], v[1], v[2]);
+        if norm(world(frame.normal()).sub(engine.n))? > 256.0 * f64::EPSILON {
+            return Err(SpherePlaneError::Invalid(
+                "directional texture frame must have the original plane normal",
+            ));
+        }
+        engine.tangent = [world(frame.longitudinal()), world(frame.lateral())];
+        engine.acceleration_tangent = engine
+            .tangent
+            .map(|t| engine.force_tangent_world.dot(t) / engine.mass);
+    }
     engine.velocity_scale = state.velocity_scale;
     let initial_energy = state.body.kinetic_energy(scene.properties)?;
     let mut body = state.body;
@@ -823,6 +891,29 @@ pub fn advance_sphere_plane_with_support_friction(
                 engine.event(time, SpherePlaneEventKind::Support, 0.0, Vec3::ZERO)?;
             }
             let normal_force = finite(-scene.force_world.dot(engine.n))?;
+            if let Some(accepted) = support(
+                &mut engine,
+                body,
+                time,
+                remaining,
+                normal_force,
+                mode,
+                &mut cancelled,
+            )? {
+                if accepted.duration_s > remaining {
+                    return Err(SpherePlaneError::Invalid("support phase exceeds horizon"));
+                }
+                progress(elapsed, accepted.duration_s)?;
+                progress(time, accepted.duration_s)?;
+                body = accepted.body;
+                mode = accepted.mode;
+                elapsed = if accepted.duration_s == remaining {
+                    duration_s
+                } else {
+                    elapsed + accepted.duration_s
+                };
+                continue;
+            }
             let rolling = slip_speed == 0.0
                 || (mode == SpherePlaneMode::Rolling && slip_speed <= velocity_allowance);
             let acceleration = engine.acceleration_tangent;
@@ -1099,27 +1190,30 @@ pub fn advance_sphere_plane_with_support_friction(
             "global momentum or energy balance",
         ));
     }
-    Ok(SpherePlaneAdvance {
-        state_after: SpherePlaneState {
-            body,
-            time_s: end_time,
-            mode,
-            contact_known: touching,
-            zero_normal,
-            velocity_scale: engine.velocity_scale,
+    Ok((
+        SpherePlaneAdvance {
+            state_after: SpherePlaneState {
+                body,
+                time_s: end_time,
+                mode,
+                contact_known: touching,
+                zero_normal,
+                velocity_scale: engine.velocity_scale,
+            },
+            events: engine.events,
+            contact_impulse_world: ledger.contact,
+            contact_angular_impulse_world: ledger.contact_angular,
+            external_force_work: ledger.force_work,
+            plane_work: ledger.plane_work,
+            dissipated_energy: ledger.loss,
+            energy_balance_residual,
+            linear_momentum_residual,
+            angular_momentum_residual,
+            gap_after,
+            sliding_substeps: engine.sliding_steps,
         },
-        events: engine.events,
-        contact_impulse_world: ledger.contact,
-        contact_angular_impulse_world: ledger.contact_angular,
-        external_force_work: ledger.force_work,
-        plane_work: ledger.plane_work,
-        dissipated_energy: ledger.loss,
-        energy_balance_residual,
-        linear_momentum_residual,
-        angular_momentum_residual,
-        gap_after,
-        sliding_substeps: engine.sliding_steps,
-    })
+        ledger.impact_loss,
+    ))
 }
 // Compare directions, not dimensionful products: a common length or mass
 // rescaling must not turn noncommuting angular motion into a zero cross product.

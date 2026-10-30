@@ -1,5 +1,45 @@
 # CONTRACT: fs-mbd
 
+## Directional friction on moving sphere/plane trajectories
+
+`sphere_plane::directional` advances the original sphere's position,
+attitude and world momenta through the native directional law's accepted
+held-traction segments. Its native and source-callback entry points reuse
+the original sphere/plane engine for normal support, flight, impact,
+lift-off/recontact, supported-path geometry and whole-trajectory momentum
+and energy checks. Normal reaction follows the applied force; changing that
+force between calls can release or restore contact.
+
+The plane owns a fixed texture frame. Each supported phase supplies its
+actual contact velocity, sphere mobility, driving acceleration and normal
+reaction to the constitutive owner. The callback resolves source trials
+privately and replays only accepted native segments. Source-phase duration,
+native curved-sliding resolution and attitude resolution have independent
+controls; refining one does not establish accuracy of the others. Constant-
+direction intervals retain native analytic arrest, while curved sliding
+requires timestep refinement.
+
+Actual point kinematics, integrated impulses, displacement and traction-slip
+work are checked against every accepted segment and the aggregate report.
+Only complete trajectory acceptance publishes the returned body state and
+caller-owned constitutive history. Source failure, exhausted budgets or
+cancellation leave the caller's history unchanged. Sustained friction heat
+and instantaneous impact loss have separate directly accumulated outputs;
+external-force and prescribed-plane work remain with the original engine.
+
+The ideal sphere has no inferred contact area or pressure. A source callback
+may obtain temperature and pressure from declared external owners; this
+module does not assign heat to thermal cells. Plane texture does not rotate
+with sphere attitude. Impact friction retains the original scene law, and
+normal spin has no torsional resistance. This is a single sphere against a
+prescribed plane, with constant forces and plane velocity within each call.
+
+Six moving-sphere groups cover analytic arrest/pose/work, static hold and
+breakaway, covariance, curved-path refinement, flight/impact loss separation,
+and atomic failure/retry. Cross-crate source tests exercise speed-dependent
+material claims through actual motion, lift-off/recontact and late source
+failure without changing the source/history owner.
+
 ## Explicit drive in directional rigid contact
 
 `tangential_friction::directional::driven` applies held external world forces
