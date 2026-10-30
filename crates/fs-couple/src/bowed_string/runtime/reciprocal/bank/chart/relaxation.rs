@@ -36,6 +36,11 @@ impl MaterialStringBankSource {
             image.validate_band(system.linear_frequency_upper_bound_rad_s(),
                 1.0 / f64::from(self.options.sample_rate_hz))?;
         }
+        if let Some(image) = self.longitudinal_waves.as_ref()
+            .and_then(|axial| axial.material_relaxation()) {
+            image.validate_band(system.linear_frequency_upper_bound_rad_s(),
+                1.0 / f64::from(self.options.sample_rate_hz))?;
+        }
         if let Some(image)=&self.material_chart_tensor_relaxation {
             image.validate_band(system.linear_frequency_upper_bound_rad_s(),
                 1.0/f64::from(self.options.sample_rate_hz)).map_err(ReciprocalStringError::Material)?;

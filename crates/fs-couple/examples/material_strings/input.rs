@@ -208,6 +208,7 @@ pub struct Spec {
     pub geometric_stretching: Option<(f64, NonlinearModalConfig)>,
     pub longitudinal_waves: Option<(LongitudinalStringResolution, NonlinearModalConfig)>,
     pub longitudinal_loss: LongitudinalMaterialLoss,
+    pub longitudinal_memory: Option<longitudinal_memory::Input>,
     pub axial_bearings: axial_bearings::Inputs,
     pub bending_memory: Option<bending_memory::Input>,
     pub body_radiation: Option<BodyRadiation>,
@@ -221,8 +222,6 @@ pub struct Spec {
     pub cavity: Option<MaterialBodyCavity>, pub friction: bow_interfaces::Inputs,
     /// The explicit contact-thermal profile requires original film density.
     pub contact_thermal: bool,
-    /// An explicit profile routes dry heat through original material-coordinate strips.
-    pub dry_contact_thermal: bool,
     pub bow_ribbon: Option<(f64, usize)>, pub forces: Option<MaterialForceProgram>,
     pub bow_fibers: Option<fibers::Input>,
     /// Prescribed position along the string, separate from tangential speed/load.
@@ -540,6 +539,25 @@ impl Spec {
             row.end()?;
             loss
         } else { LongitudinalMaterialLoss::Elastic };
+        let longitudinal_memory = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("longitudinal-memory") {
+            let mut row = r.row("longitudinal-memory")?;
+            let max_states = row.count(256)?;
+            let equilibrium_modulus = row.word()?.to_string();
+            let count = row.count(8)?;
+            let mut branches = Vec::with_capacity(count);
+            for _ in 0..count {
+                branches.push((row.word()?.to_string(), row.word()?.to_string()));
+            }
+            row.end()?;
+            let memory = longitudinal_memory::Input { max_states,
+                properties: fs_material::section::relaxation::LayerRelaxationProperties {
+                    equilibrium_modulus, branches,
+                },
+            };
+            memory.validate()?;
+            Some(memory)
+        } else { None };
         let mut axial_declarations = Vec::new();
         if r.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next()) == Some("axial-bearings") {
             use fs_couple::bowed_string::runtime::reciprocal::bank::nonlinear::longitudinal::{
@@ -818,12 +836,23 @@ impl Spec {
                 let mut declarations=Vec::with_capacity(count);
                 for _ in 0..count {
                     let mut row=r.row("shear-layer")?;
-                    let declaration=shear_layers::Declaration {
+                    let mut declaration=shear_layers::Declaration {
                         track:row.word()?.to_string(), pack:row.path()?,
                         area_m2:row.positive()?, thickness_m:row.positive()?,
                         maximum_elastic_shear_strain:row.positive()?,
+                        relaxation: Vec::new(),
                     };
                     row.end()?;
+                    if r.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next())
+                        == Some("shear-memory") {
+                        let mut row = r.row("shear-memory")?;
+                        let arms = row.count(fs_material::state_point::MAX_SHEAR_RELAXATION_ARMS)?;
+                        if arms == 0 { return Err("shear-memory requires at least one source arm".into()); }
+                        for _ in 0..arms {
+                            declaration.relaxation.push((row.word()?.to_string(), row.word()?.to_string()));
+                        }
+                        row.end()?;
+                    }
                     declarations.push(declaration);
                 }
                 bow_interfaces::Inputs::layers(declarations)?
@@ -1000,7 +1029,7 @@ impl Spec {
         let spec = Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
             gas, gas_record, cavity_gas_record, cavity_molecular, body, strings, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
             rotational_bridges, translational_bridges, cylinder_gas_loading, prepared_linear, residual_flexibility, geometric_stretching,
-            longitudinal_waves, longitudinal_loss, axial_bearings, bending_memory, body_radiation, shell_bem_angular_refinement,
+            longitudinal_waves, longitudinal_loss, longitudinal_memory, axial_bearings, bending_memory, body_radiation, shell_bem_angular_refinement,
             plate_observer, shell_observer, shell_receiver_quadrature, one_way_observer, cavity, friction, contact_thermal: false, dry_contact_thermal: false, bow_ribbon, bow_fibers,
             bow_station_motion, forces, schedule };
         spec.bow_station_program(&CancelGate::new_clock_free())?;
@@ -1159,22 +1188,19 @@ impl Spec {
     {
         self.string_memory_states()?;
         if let Some(memory)=&self.bending_memory { memory.preflight(self)?; }
+        if let Some(memory)=&self.longitudinal_memory { memory.preflight(self)?; }
         let mut modes = self.body.modes.checked_add(usize::from(self.cavity.is_some()))
             .and_then(|n| n.checked_add(additional_body_modes))
             .ok_or("complete mode count overflow")?;
         if let Some(fibers) = &self.bow_fibers {
             modes = modes.checked_add(fibers.mode_count(self)?).ok_or("complete fiber mode count overflow")?;
         }
-        let mut fluid_loaded_string_modes = 0usize;
+        let mut transverse = 0usize;
         for wire in &self.strings {
             let planes = if wire.polarizations.is_some() { 2 } else { 1 };
             let bending = wire.bending_modes.checked_mul(planes)
                 .ok_or("transverse mode count overflow")?;
-            // Every transverse and torsional coordinate has its own causal
-            // cylinder-fluid memory. Count both before enforcing exact budgets.
-            fluid_loaded_string_modes = fluid_loaded_string_modes.checked_add(bending)
-                .and_then(|n| n.checked_add(wire.twist_modes))
-                .ok_or("fluid-loaded string mode count overflow")?;
+            transverse = transverse.checked_add(bending).ok_or("transverse mode count overflow")?;
             modes = modes.checked_add(bending).and_then(|n| n.checked_add(wire.twist_modes))
                 .ok_or("complete string/body mode count overflow")?;
         }
@@ -1189,7 +1215,7 @@ impl Spec {
             .ok_or("complete connection count overflow")?;
         if let Some(resolution) = self.cylinder_gas_loading {
             resolution.validate()?;
-            let memory = fluid_loaded_string_modes.checked_mul(resolution.intervals)
+            let memory = transverse.checked_mul(resolution.intervals)
                 .ok_or("fluid memory dimension overflow")?;
             modes = modes.checked_add(memory).ok_or("complete fluid mode count overflow")?;
             links = links.checked_add(memory).ok_or("complete fluid connection count overflow")?;

@@ -147,7 +147,7 @@ fn authored_flush_side_openings_keep_original_faces_ids_and_independent_areas() 
     assert!(read(&baffled_tube_input(RADIATION_EXTERIOR)).unwrap().side_openings.is_empty());
     for invalid in [
         text.replace("dg_side_openings 1", "dg_side_openings 0"),
-        text.replace("dg_side_openings 1", "dg_side_openings 33"),
+        text.replace("dg_side_openings 1", "dg_side_openings 8"),
         text.replace("dg_side_opening 7 1", "dg_side_opening 0 1"),
         text.replace("dg_side_opening 7 1", "dg_side_opening 1 1"),
         text.replace("dg_side_opening 7 1", "dg_side_opening 7 0"),
@@ -286,5 +286,113 @@ mod chimneys;
 
 mod terminal_channels;
 
-mod many_ports;
+fn branched_steady_input() -> String {
+    format!(concat!(
+        "dg_bore 1 baffled 2 1 12 50 2000 0.01 1e-11 228 3\n",
+        "dg_segment cylinder 0.001 0.05\n",
+        "dg_side_openings 1\n",
+        "dg_side_chimney 7 1 0.01 0 0.0004 0.01 1 1\n",
+        "dg_chimney_gas 293.15 101325 0\n",
+        "dg_gas_network mole 2 dga dgb\n",
+        "gas_inlet 0.000001 330 0.75 0.25\n",
+        "gas_bore 2 0.0000005\n",
+        "gas_cell 0.025 0.0005 290 300\n",
+        "gas_cell 0.05 0.0005 290 300\n",
+        "gas_side 7 0.025 0.0000005 1\n",
+        "gas_cell 0.01 0.00025 290 300\n",
+        "gas_solve 250 360 0.0000001 64 0.01 5000 200000 0.00000001 0.00000001 0.05\n",
+        "dg_radiation computed-baffled {}\n",
+        "dg_exterior 293.15 101325 0"
+    ), COMPUTED_CONTROLS)
+}
+
+#[test]
+fn g3_branched_steady_gas_changes_bore_cooling_and_original_chimney_operator() {
+    use fs_material::gas_species::input::ThermochemicalPhase;
+    let a = radiation_gas_support::packs("dga", 0.028, 3.5, 200.0);
+    let b = radiation_gas_support::packs("dgb", 0.044, 4.5, 200.0);
+    let bindings = [a.binding(), b.binding()];
+    let sources = ThermochemicalSources {
+        species: &bindings, water_species: None, phase: ThermochemicalPhase::FrozenGas,
+    };
+    let text = branched_steady_input();
+    let (source, records) = read_receipted(&text, Some(&sources)).unwrap();
+    let network = source.steady_gas_network().unwrap();
+    let solution = network.solution();
+    assert_eq!(solution.mass_flow_kg_s(), &[1e-6, 5e-7, 5e-7]);
+    assert!(solution.species().maximum_residual_kg_s() < 1e-20);
+    assert!(solution.maximum_power_residual_bound_w() <= 1e-8);
+    assert!(solution.maximum_energy_residual_j() <= 1e-8);
+    assert_eq!(network.problem().cells.len(), 3);
+    assert_eq!(network.problem().flows.len(), 2);
+    assert_eq!(network.junctions(), &[(7, 0.025)]);
+    let main = network.main_field();
+    let branch = network.branches()[0].field();
+    assert_eq!(main.stations_m(), &[0.0, 0.025, 0.05]);
+    assert_eq!(branch.stations_m(), &[0.0, 0.01]);
+    assert_eq!(branch.state_at(0.0).unwrap(), main.state_at(0.025).unwrap());
+    assert!(branch.state_at(0.01).unwrap().state().temperature
+        < branch.state_at(0.0).unwrap().state().temperature);
+    assert_eq!(records.len(), 7); // Old homogeneous declaration, five field knots, exterior.
+    let branches = source.prepare_chimneys(&CancelGate::new_clock_free()).unwrap();
+    let duct = &branches[0].duct;
+    assert_eq!(duct.total_dofs(), 76);
+    assert_eq!(duct.inlet_gas(), branch.state_at(0.0).unwrap().state());
+    assert_eq!(duct.outlet_gas(), branch.state_at(0.01).unwrap().state());
+    assert!(duct.spatial_viscothermal_admission().is_some());
+    assert!(duct.viscothermal_model().is_none());
+    let main_duct = DgDuct::new_with_gas_field(&source.geometry, main, source.mesh,
+        DgBoundary::Port(PortId(0)), source.outlet).unwrap()
+        .with_side_ports(&[source.side_openings[0].0]).unwrap();
+    assert_eq!(main_duct.side_port_source(PortId(7)).unwrap().station_m, 0.025);
+    assert_eq!(main_duct.side_port_source(PortId(7)).unwrap().gas, *duct.inlet_gas());
+    // Same inlet and walls: sending less gas out the side leaves more warm
+    // breath downstream in the main bore, while the side chimney cools more.
+    let other_text = text.replace("gas_bore 2 0.0000005", "gas_bore 2 0.00000075")
+        .replace("gas_side 7 0.025 0.0000005", "gas_side 7 0.025 0.00000025");
+    let (other, _) = read_receipted(&other_text, Some(&sources)).unwrap();
+    let other_network = other.steady_gas_network().unwrap();
+    assert!(other_network.main_field().state_at(0.05).unwrap().state().temperature
+        > main.state_at(0.05).unwrap().state().temperature + 0.1);
+    assert!(other_network.branches()[0].field().state_at(0.01).unwrap().state().temperature
+        < branch.state_at(0.01).unwrap().state().temperature - 0.1);
+    let other_branches = other.prepare_chimneys(&CancelGate::new_clock_free()).unwrap();
+    assert_ne!(other_branches[0].duct.operator_identity(), duct.operator_identity());
+}
+
+#[test]
+fn g0_branched_steady_gas_refuses_unbalanced_unlocated_or_unrepresented_paths() {
+    use fs_material::gas_species::input::ThermochemicalPhase;
+    let a = radiation_gas_support::packs("dga", 0.028, 3.5, 200.0);
+    let b = radiation_gas_support::packs("dgb", 0.044, 4.5, 200.0);
+    let bindings = [a.binding(), b.binding()];
+    let sources = ThermochemicalSources {
+        species: &bindings, water_species: None, phase: ThermochemicalPhase::FrozenGas,
+    };
+    let valid = branched_steady_input();
+    for invalid in [
+        valid.replace("gas_inlet 0.000001", "gas_inlet 0.000002"),
+        valid.replace("gas_bore 2 0.0000005", "gas_bore 2 0"),
+        valid.replace("gas_side 7", "gas_side 9"),
+        valid.replace("gas_side 7 0.025", "gas_side 7 0.02"),
+        valid.replace("gas_side 7 0.025", "gas_side 7 0.05"),
+        valid.replace("gas_side 7 0.025 0.0000005 1", "gas_side 7 0.025 0.0000005 0"),
+        valid.replace("gas_bore 2", "gas_bore 65"),
+        valid.replace("1e-11 228", "1e-11 227"),
+        valid.replace("\ndg_gas_network", "\ndg_terminal_channels 1 4\ndg_terminal_slit 7 0.001 0.0004 0.001 4 0.1\ndg_gas_network"),
+        valid.replace("\ndg_gas_network", "\ndg_terminal_channels 1 0\ndg_terminal_closed 1\ndg_gas_network"),
+    ] {
+        assert!(read_receipted(&invalid, Some(&sources)).is_err(), "admitted {invalid}");
+    }
+    // A thermal boundary does not silently relocate an existing acoustic port.
+    let displaced = valid.replace("gas_cell 0.025", "gas_cell 0.02")
+        .replace("gas_side 7 0.025", "gas_side 7 0.02")
+        .replace("dg_side_chimney 7 1", "dg_side_chimney 7 2")
+        .replace("baffled 2 1", "baffled 3 1").replace("1e-11 228", "1e-11 256")
+        .replace(" 12 50", " 8 50");
+    let (source, _) = read_receipted(&displaced, Some(&sources)).unwrap();
+    assert!(matches!(source.prepare(&ambient(), 1.0 / 96000.0,
+        &CancelGate::new_clock_free()), Err(DgSourceError::Input { what, .. })
+        if what.contains("thermal side junction")));
+}
 

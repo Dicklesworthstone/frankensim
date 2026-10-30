@@ -201,3 +201,6 @@ fn heat_admission_enforces_original_clock_shared_storage_work_and_solver_domains
     advanced.block(&mut [0.0]).unwrap();
     assert!(advanced.with_finite_gas_heat(gas(&cold), program(), Arc::new(CancelGate::new())).is_err());
 }
+
+#[path = "finite_performance/wall.rs"]
+mod wall;

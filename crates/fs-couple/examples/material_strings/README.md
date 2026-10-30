@@ -222,6 +222,35 @@ frequency-dependent coefficients require a more general constitutive owner
 and refuse here. Oscillatory viscosity and friction coefficients cannot
 substitute for plastic shear viscosity.
 
+An optional source-memory row immediately after each `shear-layer` adds the
+material's retained Maxwell shear arms to that same contact:
+
+```text
+shear-layer bow coating.fsmatpk 0.000001 0.0001 0.05
+shear-memory 2 shear_delta_g_1 shear_tau_1 shear_delta_g_2 shear_tau_2
+```
+
+Each pair names measured or explicitly manufactured `DeltaG` [Pa] and `tau`
+[s] properties in the original pack. `shear_modulus` is the equilibrium
+modulus, and each arm stiffness is `area * DeltaG / thickness`. Ribbon cells
+partition the area once and retain separate shear histories. Arms relax even
+below plastic yield and at held total slip; their spring energy and physical
+dashpot heat enter the original simultaneous string/fiber/body solve and
+pressure observer. No modal damping ratio or audio filter supplies this loss.
+The source must provide positive values and DC-through-Nyquist applicability.
+The physical clock must resolve every arm with `dt <= 2*tau`; increasing
+sample rate supplies the temporal refinement. There are at most 64 arms per
+contact, subject also to the original resolved-property budget.
+
+The existing `--contact-thermal` route deposits both plastic and Maxwell heat
+into each original film cell. It retains every arm on temperature refresh,
+including temperature-dependent relaxation times. Arm moduli must be constant
+over the full thermal interval; affine equilibrium modulus retains the existing
+mechanical-entropy account. A temperature-dependent arm modulus refuses because
+its additional entropy is not supplied by this rung. These source declarations
+describe a constitutive material model; they do not identify real rosin data or
+remove the fixed-film, retained-compression and geometry limitations below.
+
 This first layer model requires retained positive compression, fixed layer
 geometry/tangent frame, and an elastic shear limit in `(0, 0.1]`. Prescribed
 bow loads must stay positive; contact-loaded bows instead author zero extra
@@ -1491,29 +1520,20 @@ cylinder-gas-loading 0.001 30 12
 ```
 
 The fields are `X_MIN X_MAX INTERVALS`. This selects the shared unsteady-Stokes
-cylinder operators for every selected bending and twist mode in every string.
-The original homogeneous or bonded section supplies its **actual outer radius**, and the
+cylinder operator for every transverse mode in every string. The original
+homogeneous or bonded section supplies its **actual outer radius**, and the
 performance's existing gas supplies density and dynamic viscosity. No second
 radius, gas record, material name switch or per-mode air-loss coefficient is
 accepted here. Changing pressure, the species fractions or a layer pack therefore
 rebuilds the mechanical response through those original physical sources.
 
-The transverse operator adds the surrounding gas's potential-flow inertia and a positive
+The operator adds the surrounding gas's potential-flow inertia and a positive
 spectral approximation of its viscous memory. Each memory branch is a real
 inertial coordinate connected to the string by a dashpot. Both transverse planes,
 the string/body reactions, fluid kinetic energy and viscous work participate in
 the existing coupled solve. The old sampled string-air resistance is replaced,
 so it is not counted twice; the original material bending viscosity and sourced
-torsion remain attached.
-
-For every selected twist mode, the rotational Stokes operator adds the steady
-viscous torque and positive angular diffusion-memory branches from that same
-gas and section radius. The original material polar inertia stays unchanged;
-there is no instantaneous rotary potential-flow inertia. Both angular sides
-exchange work through the existing surface-velocity and torque ports. The
-rotary loss and all memory energy enter the same network energy account.
-
-This selection precedes additional bows, optional
+torsion remain attached. This selection precedes additional bows, optional
 `--stop-profile` contacts, static preload and the canonical schedule. Memory
 positions are unforced static gauges; a released preload accelerates the fluid
 through the actual string coupling.
@@ -1530,8 +1550,8 @@ A finer memory grid alone does not establish instrument fidelity.
 
 The supplied `cylinder-flow.material-strings` fixture selects a V3 bonded string
 with one bending mode in each of two planes, one twist mode, a two-mode body and
-a cavity neck. Twelve memory branches per bending or twist mode add 36 coordinates,
-for **42 complete-network coordinates**. Build its independent sleeve pack using
+a cavity neck. Twelve memory branches per transverse mode add 24 coordinates,
+for **30 complete-network coordinates**. Build its independent sleeve pack using
 the earlier copied TSV files, then render it:
 
 ```bash
@@ -1557,10 +1577,10 @@ operator supplies the same inertia and dispersion in both planes; their physical
 coupling directions determine which motions reach contacts and the shared body.
 
 The executable counts **all** requested material, body, neck and fluid
-coordinates against its 1024-mode bound. It computes a connection allowance for
+coordinates against its 128-mode bound. It computes a connection allowance for
 every string bridge, additional directed translation, angular joint, memory dashpot, body tensor column and cavity
 compression/neck-loss channel. The original setup estimate
-`N * (L + 1)^2` remains bounded by 67,634,176 work units and the shared connection
+`N * (L + 1)^2` remains bounded by 16,777,216 work units and the shared connection
 ceiling is 4096. A zero body-viscosity tensor may consume fewer columns than the
 declared allowance. The ordinary exact propagator additionally admits at most
 **42 modes in each connected linear island**; this stricter computational bound
@@ -1568,11 +1588,10 @@ can refuse a model that fits the file-level counts. No requested mode or memory
 branch is silently removed. The render report includes the declared resolution
 and complete numerical allocation.
 
-The continua assume small transverse motion and small-angle rotation of a long,
-isolated circular cylinder in an unconfined incompressible Newtonian gas, using
-local two-dimensional flow along the string. They do not resolve finite-amplitude
-wakes, nonlinear swirl, neighboring strings, end/axial flow, rarefaction or
-compressible radiation.
+The continuum assumes small transverse motion of a long, isolated circular
+cylinder in an unconfined incompressible Newtonian gas, using local two-dimensional
+flow along the string. It does not resolve finite-amplitude wakes, neighboring
+strings, end/axial flow, rotary drag, rarefaction or compressible radiation.
 The atmosphere remains fixed during one realization. Body/neck observation keeps
 its existing compact-radiation approximation.
 
@@ -1600,18 +1619,18 @@ their existing owners. The ordinary path remains selected when the row is absent
 
 `prepared-cylinder-flow.material-strings` has one layered two-plane string with
 both bridge-direction components nonzero, one twist mode, two body modes and a
-cavity. It requests 24 fluid branches per bending or twist mode: **78 coordinates**
-and 75 linear connections. Its declaration is:
+cavity. It requests 24 fluid branches per transverse mode: **54 coordinates**
+and 51 linear connections. Its declaration is:
 
 ```text
 cylinder-gas-loading 0.001 30 24
-prepared-linear 96 134217728 1000000000000
+prepared-linear 64 67108864 200000000000
 ```
 
 For the supplied positive-loss materials, the final operator's conservative
-preflight estimate is about **89.4 MB of additional dense storage and
-722.1 billion scalar multiply-add terms**, within its explicit 128 MiB and
-one-trillion-term budgets. The work estimate reserves worst-case Taylor products
+preflight estimate is about **37.6 MB of additional dense storage and
+161.2 billion scalar multiply-add terms**, within its explicit 64 MiB and
+200-billion-term budgets. The work estimate reserves worst-case Taylor products
 and scaling levels; it is not elapsed runtime or a real-time performance claim.
 Preparation can be expensive even though the accepted fixed-period transition is
 cached. The native regression therefore performs one such construction and only
@@ -1729,7 +1748,7 @@ cargo run --release -p fs-couple --example material_strings -- \
   "$demo/longitudinal-cylinder-bow.material-strings" "$demo/longitudinal-cylinder-bow.wav"
 ```
 
-The axial extension is explicitly elastic and lossless. Original bending,
+The default axial extension is explicitly elastic and lossless. Original bending,
 torsional, bridge, body and gas losses remain active; bending viscosity is not
 reused as an unsupported axial loss law. Unretained axial channels equilibrate
 statically, so a two-mode selection is not a fully resolved longitudinal wave
@@ -1739,6 +1758,43 @@ or independent longitudinal end-force port into the
 body. Axial strain reaches the receiver through its reciprocal effect on
 transverse motion and the original bridge connections. This is not a claim of
 measured violin/cello/bass equivalence.
+
+### Source-derived longitudinal material memory
+
+After `longitudinal-waves` and the optional `longitudinal-loss` record, an
+explicit uniaxial relaxation spectrum can be selected from the original string
+material packs:
+
+```text
+longitudinal-memory MAX_STATES EQUILIBRIUM_MODULUS_PROPERTY ARMS DELTA_E_PROPERTY TAU_PROPERTY ...
+```
+
+The native input applies these property roles to every original homogeneous or
+bonded layer. Each layer retains its own values and relaxation times; the Rust
+API `with_material_longitudinal_relaxation` also supports independent per-string
+and per-layer selections. Every equilibrium claim must equal that layer's
+original `young_modulus`. Modulus increments are nonnegative pascals and times
+are positive seconds, with explicit source frequency support. Missing data,
+inconsistent quantities, source-band escape, an insufficient complete history
+budget or a prepared backend without this input's exact state owner refuses.
+
+For axial sine index `n`, each layer and arm contributes
+`Delta_E * A_layer * (n*pi/L)^2 / mu_solid` to the instantaneous stiffness.
+The same coupled Maxwell owner integrates its independent history and physical
+loss. The projection uses the actual layer area and original solid inertia;
+transverse gas-added mass and bending area moments do not enter it. A material
+change therefore changes axial force and its reciprocal interaction with the
+transverse strings, bearings, body, cavity and observed pressure. No axial loss
+factor or sound filter is inferred. Existing body, bending, torsional and fluid
+histories survive, and `MAX_STATES` is counted in the shared setup budget.
+
+This is linear hereditary stress in `u_x` about the maintained preload. The
+existing finite-slope **elastic** strain coupling remains; this addition does
+not supply finite-slope hereditary stress, preload creep, self-heating, evolving
+temperature or a resolved winding. Unretained axial modes still equilibrate
+elastically. A separately selected axial Kelvin–Voigt viscosity is a distinct
+parallel physical mechanism and must not count the same relaxation twice.
+Numerical and measured-instrument convergence remain separate obligations.
 
 `nonlinear-cylinder-bow.material-strings` combines a bonded string's two
 transverse planes and material torsion with causal cylinder-gas memory, the

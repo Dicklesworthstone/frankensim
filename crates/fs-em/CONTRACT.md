@@ -1303,3 +1303,23 @@ admission rejects mismatched law/operator pairs. The original conductivity,
 current-density and local-power defect gates and cancellation behavior remain
 unchanged. The conduction regressions compare direct and coupled execution and
 check source continuity and cancellation after a native trial.
+
+## Original surface contacts inside nonlinear bulk response
+
+`PlanarConductionResponse` now assembles its original scalar E/J-dependent bulk
+sources and source-backed surface contacts through the same native FEEC operator.
+Each actual-amplitude voltage, total-current or external-circuit trial preserves
+the contact traces, voltage jumps, current continuity and exact surface heat.
+Contact losses remain separate from bulk E.J in the report and are included
+once in total terminal power. Ordinary static bulk admission is unchanged.
+
+The coupled material/contact-context method retains original surface cards,
+selected claims, ordered material assignments and coordinate meanings. A thermal
+owner may refresh its explicitly owned temperatures and phase fractions; no
+source replacement or electrical-field-dependent interface law is inferred.
+The same original sources and contact geometry survive continuation. Focused
+manufactured regressions compare independent nonlinear series equations under
+voltage and current control, surface-source changes, both polarities, local and
+total heat, and missing/replaced-source refusal. Interfaces remain stationary,
+Ohmic at each supplied context and without storage; nonlinear or hysteretic
+contact laws require their own physical state and closure.

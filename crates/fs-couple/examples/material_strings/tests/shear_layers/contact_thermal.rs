@@ -28,11 +28,12 @@ fn thermal_pack(cp: f64, omit: Option<&str>, band: f64) -> NormalizedPack {
         ("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS, cp),
         ("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS, 0.2),
         (PLASTIC_SHEAR_VISCOSITY_PROPERTY, DynViscosity::DIMS, 4.0),
+        ("shear_memory_thermal_time", fs_qty::Time::DIMS, 0.002),
     ] {
         if omit == Some(name) {
             continue;
         }
-        let variable = name == PLASTIC_SHEAR_VISCOSITY_PROPERTY;
+        let variable = name == PLASTIC_SHEAR_VISCOSITY_PROPERTY || name == "shear_memory_thermal_time";
         claims
             .insert_claim(PropertyClaim {
                 key: PropertyKey::new(name, dims),
@@ -40,7 +41,9 @@ fn thermal_pack(cp: f64, omit: Option<&str>, band: f64) -> NormalizedPack {
                     PropertyValue::Curve {
                         abscissa: "T".into(),
                         abscissa_dims: Temperature::DIMS,
-                        knots: vec![(280.0, 5.315), (320.0, 1.315)],
+                        knots: if name == "shear_memory_thermal_time" {
+                            vec![(280.0, 0.003), (320.0, 0.001)]
+                        } else { vec![(280.0, 5.315), (320.0, 1.315)] },
                         dims,
                     }
                 } else {
@@ -279,5 +282,42 @@ fn thermal_profiles_refuse_missing_sources_wrong_film_volume_and_unbound_materia
             assert!(invalid.prepare(&ready, gate).is_err(), "{to}");
             assert_eq!(ready.performance.samples_rendered(), 0);
         }
+    });
+}
+
+#[test]
+fn source_shear_memory_heat_and_temperature_dependent_relaxation_survive_cli_thermal_rendering() {
+    scoped(|cx, gate| {
+        let profile = Profile::parse(PROFILE.as_bytes()).unwrap();
+        let text = String::from_utf8(thermal_spec().bytes).unwrap()
+            .replace("forces retain", "shear-memory 1 shear_memory_modulus shear_memory_thermal_time\nforces retain");
+        let build = |cp| {
+            let mut spec = input::Spec::parse(text.as_bytes()).unwrap();
+            spec.contact_thermal = true;
+            spec.compile(cx, gate, |name| Ok(if name == "manufactured-shear-layer.fsmatpk" {
+                thermal_pack(cp, None, 200_000.0)
+            } else { pack(name, 7800.0, 200_000.0, None) })).unwrap()
+        };
+        let mut warm = build(10.0);
+        let mut cool = build(1000.0);
+        let original = warm.performance.bank().bow_shear_layer(0).unwrap().clone();
+        let first = profile.prepare(&warm, gate).unwrap();
+        let second = profile.prepare(&cool, gate).unwrap();
+        let (wav, _) = first.write(&mut warm, Cursor::new(Vec::new()), None, gate).unwrap();
+        second.write(&mut cool, Cursor::new(Vec::new()), None, gate).unwrap();
+        let source = warm.performance.bank().bow_shear_layer(0).unwrap();
+        let cool_source = cool.performance.bank().bow_shear_layer(0).unwrap();
+        assert_eq!(source.relaxation_properties(), original.relaxation_properties());
+        assert_eq!(source.resolved().card_identity(), original.resolved().card_identity());
+        assert_eq!(source.relaxation()[0].0, original.relaxation()[0].0);
+        assert!(source.temperature_kelvin() > cool_source.temperature_kelvin());
+        assert!(cool_source.temperature_kelvin() > original.temperature_kelvin());
+        assert!(source.relaxation()[0].1 < cool_source.relaxation()[0].1);
+        let frame = warm.performance.bank().system().last_frame().unwrap();
+        assert!(frame.ports[0].shear_layer.as_ref().unwrap().relaxation_dissipated_j > 0.0);
+        assert_eq!(warm.performance.bank().system().material_shear_state(0).unwrap().relaxation_slip_m().len(), 1);
+        assert_ne!(frame.observer_pressure_pa,
+            cool.performance.bank().system().last_frame().unwrap().observer_pressure_pa);
+        assert_eq!(wav.into_inner().len(), 44+512*2);
     });
 }

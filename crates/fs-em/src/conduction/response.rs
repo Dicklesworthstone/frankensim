@@ -238,6 +238,12 @@ impl PlanarConductionResponse {
                 || next.source.surfaces() != original.source.surfaces()
                 || before.card_identity() != after.card_identity()
                 || before.axis_quantities() != after.axis_quantities()
+                || before.query_point().len() != after.query_point().len()
+                || before
+                    .query_point()
+                    .iter()
+                    .zip(after.query_point())
+                    .any(|((a, _), (b, _))| a != b)
                 || before.properties().len() != after.properties().len()
                 || before
                     .properties()

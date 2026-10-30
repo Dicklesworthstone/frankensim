@@ -12,6 +12,10 @@ use fs_material::state_point::{
 use std::io::Cursor;
 
 fn layer_pack(viscosity: f64, band: f64, omit: Option<&str>) -> NormalizedPack {
+    layer_pack_with_memory(viscosity, band, omit, 200_000.0, 0.002)
+}
+fn layer_pack_with_memory(viscosity: f64, band: f64, omit: Option<&str>,
+    memory_modulus: f64, relaxation_time: f64) -> NormalizedPack {
     let mut claims = ClaimSet::new();
     let artifact = fs_blake3::ContentHash([17; 32]);
     let provenance = Provenance {
@@ -36,6 +40,8 @@ fn layer_pack(viscosity: f64, band: f64, omit: Option<&str>) -> NormalizedPack {
             DynViscosity::DIMS,
             viscosity,
         ),
+        ("shear_memory_modulus", Pressure::DIMS, memory_modulus),
+        ("shear_memory_time", fs_qty::Time::DIMS, relaxation_time),
     ] {
         if omit == Some(name) {
             continue;
@@ -165,6 +171,67 @@ fn layer_history_and_pcm_are_identical_across_callback_boundaries() {
         assert_eq!(wav.into_inner(), expected);
         assert_eq!(summary.clipped_samples, clipped as u64);
         assert_eq!(summary.samples, 1024);
+    });
+}
+
+#[test]
+fn source_shear_memory_reaches_original_pressure_history_and_callback_rendering() {
+    scoped(|cx, gate| {
+        let text = include_str!("../shear-layer-bow.material-strings")
+            .replace("48000 4096 0.01 128", "48000 256 0.01 128")
+            .replace("bow_ribbon", "shear-memory 1 shear_memory_modulus shear_memory_time\nbow_ribbon");
+        let build = |modulus, tau| input::Spec::parse(text.as_bytes()).unwrap()
+            .compile(cx, gate, |name| Ok(if name == "manufactured-shear-layer.fsmatpk" {
+                layer_pack_with_memory(4.0, 200_000.0, None, modulus, tau)
+            } else { pack(name, 7800.0, 200_000.0, None) })).unwrap();
+        let mut a = build(200_000.0, 0.002);
+        let mut replay = build(200_000.0, 0.002);
+        let mut changed = build(600_000.0, 0.004);
+        assert_eq!(a.spec.bytes, changed.spec.bytes);
+        for port in 0..3 {
+            let source = a.performance.bank().bow_shear_layer(port).unwrap();
+            assert_eq!(source.relaxation().len(), 1);
+            assert_eq!(source.relaxation_properties()[0],
+                ("shear_memory_modulus".into(), "shear_memory_time".into()));
+            assert!((source.relaxation()[0].0*3.0/2000.0-1.0).abs() < 1e-14);
+        }
+        let p = pressure(&mut a, 1);
+        assert_eq!(p, pressure(&mut replay, 37));
+        assert!(p.iter().any(|value| value.abs() > 1e-12));
+        assert!(p.iter().zip(pressure(&mut changed, 128)).any(|(a,b)| (a-b).abs() > 1e-12));
+        for port in 0..3 {
+            let history = a.performance.bank().system().material_shear_state(port).unwrap();
+            assert_eq!(history.relaxation_slip_m().len(), 1);
+            assert_eq!(Some(history), replay.performance.bank().system().material_shear_state(port));
+        }
+        let frame = a.performance.bank().system().last_frame().unwrap();
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        assert!(frame.ports.iter().any(|port|
+            port.shear_layer.as_ref().unwrap().relaxation_dissipated_j > 0.0));
+        let mut output = build(200_000.0, 0.002);
+        let (wav, _) = output.write(Cursor::new(Vec::new()), gate).unwrap();
+        assert_eq!(wav.into_inner(), fs_couple::pcm_wav::encode_pcm16_wav(&p, 48_000, 0.01).unwrap().0);
+    });
+}
+
+#[test]
+fn shear_memory_missing_sources_duplicate_roles_and_unresolved_times_refuse() {
+    let text = include_str!("../shear-layer-bow.material-strings");
+    for memory in [
+        "shear-memory 0", "shear-memory 1 shear_modulus shear_memory_time",
+        "shear-memory 2 shear_memory_modulus shear_memory_time shear_memory_modulus shear_memory_time",
+    ] {
+        assert!(input::Spec::parse(text.replace("bow_ribbon", &format!("{memory}\nbow_ribbon")).as_bytes()).is_err());
+    }
+    scoped(|cx, gate| {
+        for (name, tau) in [("missing", 0.002), ("shear_memory_modulus", 1e-9)] {
+            let text = text.replace("bow_ribbon",
+                &format!("shear-memory 1 {name} shear_memory_time\nbow_ribbon"));
+            assert!(input::Spec::parse(text.as_bytes()).unwrap().compile(cx, gate, |name|
+                Ok(if name == "manufactured-shear-layer.fsmatpk" {
+                    layer_pack_with_memory(4.0, 200_000.0, None, 200_000.0, tau)
+                } else { pack(name, 7800.0, 200_000.0, None) })).is_err());
+        }
     });
 }
 

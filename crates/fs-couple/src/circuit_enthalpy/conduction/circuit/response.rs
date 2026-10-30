@@ -21,7 +21,8 @@ pub struct ConductionResponseCircuit {
 }
 
 /// Actual circuit/field work plus separately reported constitutive defects.
-/// The native spatial E.J integrals are the only spatial Joule heat account.
+/// Native bulk E.J and exact surface-contact losses are the spatial heat
+/// account; neither constitutive defects nor circuit reduction add more heat.
 #[derive(Clone, Debug)]
 pub struct ConductionResponseCircuitStep {
     /// Native charge/flux storage, port work and local field/graph heat.
@@ -162,6 +163,11 @@ impl ConductionResponseCircuit {
     pub fn conductors(&self) -> &[ResolvedConductorState] {
         self.circuit.problem.conductors()
     }
+    /// Original complete bulk laws; changing circuit amplitude never replaces
+    /// their selected source claims or their explicitly owned E/J coordinates.
+    pub fn sources(&self) -> &[ScalarConductorResponse] {
+        &self.sources
+    }
     /// Original source-bound contacts in canonical native trace order.
     pub fn contacts(&self) -> &[fs_em::conduction::ConductionContact] {
         self.circuit.problem.contacts()
@@ -299,12 +305,12 @@ impl ConductionResponseCircuit {
 
 /// A single proposal for the nonlinear spatial law, electrical storage, local
 /// thermal material state and finite enthalpy. Refusal publishes none of them.
-pub struct ConductionResponseCircuitEnthalpyCandidate<'t> {
+pub struct ConductionResponseCircuitEnthalpyCandidate<'t, S = MaterialNetworkSample> {
     thermal: DepositionSimulation<'t>,
     circuit: ConductionResponseCircuit,
-    report: CircuitEnthalpyReport<MaterialNetworkSample, ConductionResponseCircuitStep>,
+    report: CircuitEnthalpyReport<S, ConductionResponseCircuitStep>,
 }
-impl<'t> ConductionResponseCircuitEnthalpyCandidate<'t> {
+impl<'t, S> ConductionResponseCircuitEnthalpyCandidate<'t, S> {
     /// Proposed original finite-enthalpy state.
     pub fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
@@ -314,9 +320,7 @@ impl<'t> ConductionResponseCircuitEnthalpyCandidate<'t> {
         &self.circuit
     }
     /// Independent native electrical, thermal and combined balance accounts.
-    pub fn report(
-        &self,
-    ) -> &CircuitEnthalpyReport<MaterialNetworkSample, ConductionResponseCircuitStep> {
+    pub fn report(&self) -> &CircuitEnthalpyReport<S, ConductionResponseCircuitStep> {
         &self.report
     }
     /// Publish all coupled state with its original balance report.
@@ -325,7 +329,7 @@ impl<'t> ConductionResponseCircuitEnthalpyCandidate<'t> {
     ) -> (
         DepositionSimulation<'t>,
         ConductionResponseCircuit,
-        CircuitEnthalpyReport<MaterialNetworkSample, ConductionResponseCircuitStep>,
+        CircuitEnthalpyReport<S, ConductionResponseCircuitStep>,
     ) {
         (self.thermal, self.circuit, self.report)
     }
@@ -397,25 +401,6 @@ impl ConductionThermalNetwork<'_> {
     ) -> Result<ConductionResponseCircuitEnthalpyCandidate<'t>, Error> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
-        if !(1..=MAX_RESPONSE_ITERATIONS).contains(&response.maximum_iterations)
-            || circuit.time_s().to_bits() != thermal.time_s().to_bits()
-        {
-            return Err(invalid(
-                "matching circuit/thermal clocks and bounded response iterations required",
-            ));
-        }
-        let problem = circuit.response(&cancel)?;
-        self.admit_mesh_step(
-            thermal,
-            target_s,
-            problem.mesh(),
-            assembly,
-            controls,
-            initial_energy_increments_j,
-        )?;
-        let routes = self.admit_mesh_routes(thermal, problem.mesh(), &cancel)?;
-        let graph_routes = graph_heat_routes(thermal, &circuit.circuit, graph_resistors, &cancel)?;
-        self.admit_response_caloric(&problem, &cancel)?;
         let network = MaterialNetwork {
             cells: self.cells,
             resistors: &[],
@@ -424,11 +409,77 @@ impl ConductionThermalNetwork<'_> {
         let prepared = network
             .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
             .map_err(material)?;
+        self.step_response_circuit_resolved_candidate(
+            thermal,
+            target_s,
+            circuit,
+            ports,
+            graph_resistors,
+            contact_bindings,
+            assembly,
+            field,
+            response,
+            controls,
+            initial_energy_increments_j,
+            |state| {
+                prepared
+                    .resolve(state, || (*cancel.borrow_mut())())
+                    .map_err(material)
+            },
+            |source| source,
+            &cancel,
+        )
+    }
+
+    // Original plain and complete heat networks enter this SAME continuing
+    // circuit/material/enthalpy residual. Source observations remain typed and
+    // retained; no contact or radiation owner is flattened into fitted heat.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::circuit_enthalpy::conduction) fn step_response_circuit_resolved_candidate<
+        't,
+        S,
+    >(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        circuit: &ConductionResponseCircuit,
+        ports: &[f64],
+        graph_resistors: &[ResistorCell],
+        contact_bindings: &[contacts::ConductionContactThermal<'_>],
+        assembly: WeightedAssemblyLimits,
+        field: ConductionControls,
+        response: ConductionResponseControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        resolve_sources: impl Fn(
+            &DepositionSimulation<'_>,
+        ) -> Result<CircuitThermalCoefficients<S>, Error>,
+        sample: impl Fn(&S) -> &MaterialNetworkSample,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<ConductionResponseCircuitEnthalpyCandidate<'t, S>, Error> {
+        check(cancel)?;
+        if !(1..=MAX_RESPONSE_ITERATIONS).contains(&response.maximum_iterations)
+            || circuit.time_s().to_bits() != thermal.time_s().to_bits()
+        {
+            return Err(invalid(
+                "matching circuit/thermal clocks and bounded response iterations required",
+            ));
+        }
+        let problem = circuit.response(cancel)?;
+        self.admit_mesh_step(
+            thermal,
+            target_s,
+            problem.mesh(),
+            assembly,
+            controls,
+            initial_energy_increments_j,
+        )?;
+        let routes = self.admit_mesh_routes(thermal, problem.mesh(), cancel)?;
+        let graph_routes = graph_heat_routes(thermal, &circuit.circuit, graph_resistors, cancel)?;
+        self.admit_response_caloric(&problem, cancel)?;
         let resolve = |state: &DepositionSimulation<'_>| {
-            let coefficients = prepared
-                .resolve(state, || (*cancel.borrow_mut())())
-                .map_err(material)?;
-            self.admit_response_heat(&coefficients.source, &cancel)?;
+            let coefficients = resolve_sources(state)?;
+            self.admit_response_heat(sample(&coefficients.source), cancel)?;
             Ok::<_, Error>(coefficients)
         };
         let accepted = resolve(thermal)?;
@@ -439,10 +490,11 @@ impl ConductionThermalNetwork<'_> {
             problem.contact_liquid_mass_fraction_axes(),
             contact_bindings,
             &routes,
-            &accepted.source,
-            &cancel,
+            sample(&accepted.source),
+            cancel,
         )?;
-        let initial = self.response_materials_at(&problem, &accepted.source, &routes, &cancel)?;
+        let initial =
+            self.response_materials_at(&problem, sample(&accepted.source), &routes, cancel)?;
         if initial.iter().zip(problem.conductors()).any(|(a, b)| {
             !a.has_same_electrical_source(b) || !same_material(a.material(), b.material())
         }) {
@@ -457,10 +509,17 @@ impl ConductionThermalNetwork<'_> {
             initial_energy_increments_j,
             |state, remaining| {
                 let coefficients = resolve(state)?;
-                let sources =
-                    self.response_materials_at(&problem, &coefficients.source, &routes, &cancel)?;
-                let contact_sources =
-                    contacts.refresh_contacts(problem.contacts(), &coefficients.source, &cancel)?;
+                let sources = self.response_materials_at(
+                    &problem,
+                    sample(&coefficients.source),
+                    &routes,
+                    cancel,
+                )?;
+                let contact_sources = contacts.refresh_contacts(
+                    problem.contacts(),
+                    sample(&coefficients.source),
+                    cancel,
+                )?;
                 let bounded = ConductionResponseControls {
                     maximum_iterations: response.maximum_iterations.min(remaining),
                     ..response
@@ -477,7 +536,7 @@ impl ConductionThermalNetwork<'_> {
                         bounded,
                         controls.circuit,
                         Some(&contacts),
-                        &cancel,
+                        cancel,
                     )
                     .map_err(|error| match error {
                         CircuitEnthalpyError::Source(ConductionThermalError::Response(
@@ -523,7 +582,7 @@ impl ConductionThermalNetwork<'_> {
             },
             || (*cancel.borrow_mut())(),
         )?;
-        check(&cancel)?;
+        check(cancel)?;
         Ok(ConductionResponseCircuitEnthalpyCandidate {
             thermal,
             circuit,

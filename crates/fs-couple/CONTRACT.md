@@ -15360,9 +15360,30 @@ The conduction-enthalpy regressions use independent two-layer thermal balances
 and midpoint RC/RLC equations, covering material-only source changes, both
 polarities, continuing charge/flux, local heating and refusal/retry. Bounds are
 fixed geometry/topology, scalar memoryless conduction and fixed ideal graph
-R/L/C. The nonlinear wrapper accepts bulk-conductor problems; electrical
-interface fields require their prepared contact owner and refuse on this path.
-The existing contact-capable circuit keeps its original source and heat routing.
+R/L/C. `step_response_contact_circuit_candidate` also retains the original
+prepared contact owner inside every nonlinear bulk trial. Actual endpoint
+temperatures and phase fractions refresh the same ordered interface sources;
+native surface voltage jumps and exact interface Joule heat feed the original
+two receiving thermal cells with the authored heat fraction. Interface heat,
+bulk E.J and graph-resistor heat enter the same finite-enthalpy residual once.
+Independent RLC/two-cell calorimetry regressions cover bulk and interface data
+changes, both polarities, accepted history, source-domain and missing-owner
+refusal, common work exhaustion and late cancellation/replay. Omitting a
+required prepared contact owner refuses; fixed-context bulk-only stepping
+cannot silently freeze a contact or discard its heat.
+
+`PreparedHeatNetwork::step_conduction_response_contact_circuit_candidate`
+passes the complete original material heat assembly into that same continuing
+circuit residual. Thermal-interface resistance, source-integrated layer fluxes
+and enclosure radiosity refresh at every shared endpoint, with their original
+samples retained in the generic candidate report. Closed-enclosure radiation
+is internal exchange; its numerical net receives the existing combined-energy
+check. Original E/J-dependent thermal boundary response or applicability refuses
+instead of freezing the initial field slice. The focused circuit/heat regression
+compares continuing charge/flux, two-sided electrical-contact heat, thermal
+contact transfer and radiative exchange against independent energy and RLC
+equations, including data-only emissivity and thermal-interface substitutions.
+
 This adds no displacement current, moving material, hysteresis, nonlinear
 storage or reversible field-caloric coupling. The first-order coupled thermal
 scheme and bounded Picard closure retain their refinement/convergence limits.
@@ -15634,3 +15655,43 @@ Focused regressions in
 physical-strain integration and thermal balance, exercise shared conductive
 feedback under companion-material substitution, and preserve accepted state
 through unsupported laws, domain exit, context mismatch, and cancellation.
+
+## Finite material-wall heat during coupled aperture performance
+
+`ApertureDg::step_with_finite_wall_heat_controlled` advances the original
+moving mechanics and complete downstream load once at the initial material
+state. The same held-flow trial can integrate physical Kelvin/Maxwell wall heat
+using its actual inlet, terminal and finite-branch junction inputs. The main
+bore's own native loss bounds that deposition; unrelated branch, gas, terminal,
+mechanical or numerical loss cannot be relabeled as solid heat.
+
+One original enthalpy chart then closes `body storage change + wall parameter
+work = external heat + native wall heat`. Every endpoint work trial starts from
+the same marched acoustic state and the original body. It refreshes the retained
+uniform or regional wall source and the complete mean-port relation without
+resetting displacement, momentum, material memories, branches, finite passages,
+rational terminal poles or accepted clocks. The moving source receives that
+same final load impedance.
+
+The acoustic frame retains its original native dissipation and signed parameter
+work. The enclosing body account exports native dissipation minus the heat
+already deposited in the solid, measures complete final represented storage,
+and checks body, source and combined energy residuals before publishing any
+participant. Native terminal exchange remains explicit; no rational storage
+function is invented. Refusal and cancellation preserve every accepted owner.
+
+`AperturePerformance::with_finite_wall_heat` owns the original chart, material
+card and finite body and schedules signed external power on the physical sample
+clock. Heat controls share existing control/work budgets and advance with the
+accepted observation. The accepted body and last complete energy account remain
+inspectable. Diagnostic observation failure retains the renderer's existing
+poisoning semantics.
+
+This is a first-order frozen-material partition for one complete main-bore wall
+body, one temperature and caloric chart, an all-solid phase, fixed geometry and
+constant density. Regional thicknesses and restraint/source distinctions remain
+explicit. Side-branch walls keep their independent materials. Physical time-step
+convergence remains separate from exponential/source integration budgets.
+Expansion, phase transfer, gas/body conduction, an independently heated upstream
+tract and simultaneous finite-gas/wall playback require their own joint
+transactions and are not supplied by this route.

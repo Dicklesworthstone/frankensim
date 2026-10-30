@@ -4,6 +4,8 @@ use super::*;
 mod loss;
 #[path = "longitudinal/bending_memory.rs"]
 mod bending_memory;
+#[path = "longitudinal/axial_memory.rs"]
+mod axial_memory;
 const RECORD: &str = "longitudinal-waves 0.2 0.01 64 100000 1e-11 1e-10 2 1 2";
 fn text() -> String {
     include_str!("../longitudinal-cylinder-bow.material-strings")

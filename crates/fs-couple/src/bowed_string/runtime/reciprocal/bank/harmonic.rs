@@ -212,6 +212,12 @@ impl MaterialStringBankSource {
                 intersect(&mut band, support)?;
             }
         }
+        if let Some(memory) = self.longitudinal_waves.as_ref()
+            .and_then(|axial| axial.material_relaxation()) {
+            for section in memory.sections() {
+                intersect(&mut band, section.omega_band_rad_s())?;
+            }
+        }
         if let Some(fluid) = &self.fluid_loading {
             for string in fluid.strings() {
                 poll(gate)?;

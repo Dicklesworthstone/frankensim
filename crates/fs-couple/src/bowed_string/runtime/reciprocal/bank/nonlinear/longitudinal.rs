@@ -25,6 +25,8 @@ mod loss;
 pub use loss::LongitudinalMaterialLoss;
 pub mod bearings;
 pub use bearings::{AxialBearingGeometry, MaterialAxialBearing};
+/// Source-bound axial material histories in the original coupled owner.
+pub mod relaxation;
 
 /// Explicit retained physics and constitutive domain, independent of instrument.
 #[derive(Clone, Debug, PartialEq)]
@@ -154,6 +156,7 @@ pub struct StringBankLongitudinal {
     strings: Vec<MaterialLongitudinalString>,
     config: NonlinearModalConfig,
     bearings: Vec<MaterialAxialBearing>,
+    material_relaxation: Option<relaxation::StringBankLongitudinalRelaxation>,
 }
 impl StringBankLongitudinal {
     /// Original material-string declaration order.
@@ -166,6 +169,10 @@ impl StringBankLongitudinal {
     /// Original axial bearing geometry and complete resolved surface laws.
     pub fn bearings(&self) -> &[MaterialAxialBearing] {
         &self.bearings
+    }
+    /// Independent layer spectra and their retained axial strain histories.
+    pub const fn material_relaxation(&self) -> Option<&relaxation::StringBankLongitudinalRelaxation> {
+        self.material_relaxation.as_ref()
     }
 }
 impl MaterialStringBankSource {
@@ -513,7 +520,9 @@ impl ReciprocalStringBank {
             self.source.validate_material_bridge_frequencies(&self.system, gate)
                 .map_err(|e| ImpactError::Owner(e.to_string()))?;
         }
-        self.source.longitudinal_waves = Some(StringBankLongitudinal { strings, config, bearings });
+        self.source.longitudinal_waves = Some(StringBankLongitudinal {
+            strings, config, bearings, material_relaxation: None,
+        });
         if gate.is_requested() {
             return Err(ImpactError::Cancelled);
         }

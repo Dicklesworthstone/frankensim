@@ -18,6 +18,9 @@ use fs_matdb::{ClaimSelection, InterfaceSystemCard};
 use fs_material::thermal::interface::ThermalInterfacePoint;
 use fs_thermal::enthalpy::DepositionSimulation;
 
+#[path = "heat/circuit.rs"]
+mod circuit;
+
 const RHO: [f64; 2] = [1.0, 3.0];
 const BETA: [f64; 2] = [0.03, 0.04];
 
