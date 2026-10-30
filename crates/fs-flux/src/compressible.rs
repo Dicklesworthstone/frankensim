@@ -11,8 +11,12 @@ pub use fs_gas::dynamics::{Error, FrozenGas, Reconstruction, StepControl};
 use fs_gas::dynamics::{MAX_EULER_CELLS, NormalConserved, NormalFaceFlux, NormalPrimitive};
 use fs_qty::Time;
 
+mod cartesian;
+/// Evolving canonical species in the same conservative Cartesian discretization.
+pub mod mixture;
 /// Original-source Fourier heat transport and complete planar Newtonian stress.
 pub mod molecular;
+use cartesian::StageStats;
 
 /// Conservative density, Cartesian momentum and full referenced total energy.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -277,6 +281,15 @@ pub struct Totals {
     pub energy: f64,
 }
 impl Totals {
+    fn component_mut(&mut self, component: usize) -> &mut f64 {
+        match component {
+            0 => &mut self.mass,
+            1 => &mut self.momentum[0],
+            2 => &mut self.momentum[1],
+            3 => &mut self.energy,
+            _ => unreachable!("four-component frozen state"),
+        }
+    }
     fn array(self) -> [f64; 4] {
         [self.mass, self.momentum[0], self.momentum[1], self.energy]
     }
@@ -324,7 +337,7 @@ pub struct StepReport {
 
 struct Workspace {
     primitive: Vec<Primitive>,
-    slopes: Vec<[[f64; 4]; 2]>,
+    slopes: Vec<f64>,
     x_flux: Vec<NormalFaceFlux>,
     y_flux: Vec<NormalFaceFlux>,
     stage: Vec<State>,
@@ -383,7 +396,7 @@ impl Euler2d {
             boundary_impulses: allocated(2 * (nx + ny), Totals::default())?,
             work: Workspace {
                 primitive,
-                slopes: allocated(n, [[0.0; 4]; 2])?,
+                slopes: allocated(8 * n, 0.0)?,
                 x_flux: allocated((nx + 1) * ny, NormalFaceFlux::default())?,
                 y_flux: allocated(nx * (ny + 1), NormalFaceFlux::default())?,
                 stage: allocated(n, State::default())?,
@@ -450,95 +463,71 @@ impl Euler2d {
                     + (p.velocity[1].abs() + p.sound_speed) / self.grid.spacing[1],
             );
         }
-        let mut dt = maximum_duration.value().min(controls.cfl / rate);
         let before = checked_totals(&self.states, self.grid.cell_volume(), &mut cancelled)?;
-        let mut reconstruction = controls.reconstruction;
-        for halvings in 0..=controls.maximum_halvings {
-            poll(&mut cancelled)?;
-            if !positive(dt)
-                || !self.time.is_finite()
-                || self.time + dt <= self.time
-                || !(self.time + dt).is_finite()
-            {
-                return Err(Error::Invalid("unrepresentable Cartesian time increment"));
-            }
-            let trial = attempt(
-                &self.gas,
-                &self.grid,
-                self.boundaries,
-                &self.states,
-                &mut self.work,
-                dt,
-                controls.cfl,
-                reconstruction,
-                &mut cancelled,
-            );
-            match trial {
-                Ok(stats) => {
-                    let after = checked_totals(
-                        &self.work.candidate,
-                        self.grid.cell_volume(),
-                        &mut cancelled,
-                    )?;
-                    let outward = sum_arrays(
-                        self.work.boundary_trial.iter().map(|v| v.array()),
-                        &mut cancelled,
-                    )?;
-                    let boundary_change = Totals::from_array(outward.map(|x| -x));
-                    let a = after.array();
-                    let b = before.array();
-                    let c = boundary_change.array();
-                    let report = StepReport {
-                        elapsed: Time::new(dt),
-                        maximum_cfl: stats.rate * dt,
-                        halvings,
-                        hll_fallback_faces: stats.fallback,
-                        limited_cells: stats.limited,
-                        first_order_retry: reconstruction != controls.reconstruction,
-                        before,
-                        after,
-                        boundary_change,
-                        conservation_residual: Totals::from_array(std::array::from_fn(|k| {
-                            a[k] - b[k] - c[k]
-                        })),
-                    };
-                    if !a.into_iter().chain(b).chain(c).all(f64::is_finite) {
-                        return Err(Error::Invalid(
-                            "unrepresentable Cartesian extensive balance",
-                        ));
-                    }
-                    poll(&mut cancelled)?;
-                    std::mem::swap(&mut self.states, &mut self.work.candidate);
-                    self.boundary_impulses
-                        .copy_from_slice(&self.work.boundary_trial);
-                    self.time += dt;
-                    self.last_step = Some(report);
-                    return Ok(report);
-                }
-                Err(Error::Cancelled) => return Err(Error::Cancelled),
-                Err(error) => {
-                    if halvings == controls.maximum_halvings {
-                        return Err(Error::StepRetries {
-                            attempts: halvings + 1,
-                            last: Box::new(error),
-                        });
-                    }
-                    if !matches!(error, Error::CflExceeded { .. }) {
-                        reconstruction = Reconstruction::FirstOrder;
-                    }
-                    dt *= 0.5;
-                }
-            }
+        let accepted = cartesian::advance(
+            maximum_duration.value(),
+            self.time,
+            rate,
+            controls,
+            &mut cancelled,
+            |dt, reconstruction, cancelled| {
+                attempt(
+                    &self.gas,
+                    &self.grid,
+                    self.boundaries,
+                    &self.states,
+                    &mut self.work,
+                    dt,
+                    controls.cfl,
+                    reconstruction,
+                    cancelled,
+                )
+            },
+        )?;
+        let cartesian::AcceptedStep {
+            dt,
+            halvings,
+            reconstruction,
+            stats,
+        } = accepted;
+        let after = checked_totals(
+            &self.work.candidate,
+            self.grid.cell_volume(),
+            &mut cancelled,
+        )?;
+        let outward = sum_arrays(
+            self.work.boundary_trial.iter().map(|v| v.array()),
+            &mut cancelled,
+        )?;
+        let boundary_change = Totals::from_array(outward.map(|x| -x));
+        let a = after.array();
+        let b = before.array();
+        let c = boundary_change.array();
+        let report = StepReport {
+            elapsed: Time::new(dt),
+            maximum_cfl: stats.rate * dt,
+            halvings,
+            hll_fallback_faces: stats.fallback,
+            limited_cells: stats.limited,
+            first_order_retry: reconstruction != controls.reconstruction,
+            before,
+            after,
+            boundary_change,
+            conservation_residual: Totals::from_array(std::array::from_fn(|k| a[k] - b[k] - c[k])),
+        };
+        if !a.into_iter().chain(b).chain(c).all(f64::is_finite) {
+            return Err(Error::Invalid(
+                "unrepresentable Cartesian extensive balance",
+            ));
         }
-        unreachable!("bounded step attempts return on the last attempt")
+        poll(&mut cancelled)?;
+        std::mem::swap(&mut self.states, &mut self.work.candidate);
+        self.boundary_impulses
+            .copy_from_slice(&self.work.boundary_trial);
+        self.time += dt;
+        self.last_step = Some(report);
+        Ok(report)
     }
-}
-
-#[derive(Default)]
-struct StageStats {
-    rate: f64,
-    fallback: usize,
-    limited: usize,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -553,87 +542,58 @@ fn attempt(
     reconstruction: Reconstruction,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<StageStats, Error> {
-    let first = spatial(
-        gas,
-        grid,
-        boundaries,
-        states,
-        &mut work.primitive,
-        &mut work.slopes,
-        &mut work.x_flux,
-        &mut work.y_flux,
-        reconstruction,
-        cancelled,
-    )?;
-    check_cfl(first.rate * dt, cfl)?;
-    update(
-        gas,
-        grid,
-        states,
-        states,
-        &work.x_flux,
-        &work.y_flux,
-        &mut work.stage,
-        dt,
-        false,
-        cancelled,
-    )?;
-    capture_boundaries(
-        grid,
-        &work.x_flux,
-        &work.y_flux,
-        0.5 * dt,
-        &mut work.boundary_trial,
-        false,
-        cancelled,
-    )?;
-    let second = spatial(
-        gas,
-        grid,
-        boundaries,
-        &work.stage,
-        &mut work.primitive,
-        &mut work.slopes,
-        &mut work.x_flux,
-        &mut work.y_flux,
-        reconstruction,
-        cancelled,
-    )?;
-    check_cfl(second.rate * dt, cfl)?;
-    update(
-        gas,
-        grid,
-        states,
-        &work.stage,
-        &work.x_flux,
-        &work.y_flux,
-        &mut work.candidate,
-        dt,
-        true,
-        cancelled,
-    )?;
-    capture_boundaries(
-        grid,
-        &work.x_flux,
-        &work.y_flux,
-        0.5 * dt,
-        &mut work.boundary_trial,
-        true,
-        cancelled,
-    )?;
-    Ok(StageStats {
-        rate: first.rate.max(second.rate),
-        fallback: first.fallback + second.fallback,
-        limited: first.limited + second.limited,
+    cartesian::rk2(cancelled, |final_stage, cancelled| {
+        let stats = spatial(
+            gas,
+            grid,
+            boundaries,
+            if final_stage { &work.stage } else { states },
+            &mut work.primitive,
+            &mut work.slopes,
+            &mut work.x_flux,
+            &mut work.y_flux,
+            reconstruction,
+            cancelled,
+        )?;
+        cartesian::check_cfl::<Error>(stats.rate * dt, cfl)?;
+        if final_stage {
+            update(
+                gas,
+                grid,
+                states,
+                &work.stage,
+                &work.x_flux,
+                &work.y_flux,
+                &mut work.candidate,
+                dt,
+                final_stage,
+                cancelled,
+            )?;
+        } else {
+            update(
+                gas,
+                grid,
+                states,
+                states,
+                &work.x_flux,
+                &work.y_flux,
+                &mut work.stage,
+                dt,
+                false,
+                cancelled,
+            )?;
+        }
+        capture_boundaries(
+            grid,
+            &work.x_flux,
+            &work.y_flux,
+            0.5 * dt,
+            &mut work.boundary_trial,
+            final_stage,
+            cancelled,
+        )?;
+        Ok(stats)
     })
-}
-
-fn check_cfl(observed: f64, maximum: f64) -> Result<(), Error> {
-    if !observed.is_finite() || observed > maximum * (1.0 + 16.0 * f64::EPSILON) {
-        Err(Error::CflExceeded { observed, maximum })
-    } else {
-        Ok(())
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -643,7 +603,7 @@ fn spatial(
     boundaries: Boundaries2d,
     states: &[State],
     primitive: &mut [Primitive],
-    slopes: &mut [[[f64; 4]; 2]],
+    slopes: &mut [f64],
     x_flux: &mut [NormalFaceFlux],
     y_flux: &mut [NormalFaceFlux],
     reconstruction: Reconstruction,
@@ -653,174 +613,116 @@ fn spatial(
     for (p, q) in primitive.iter_mut().zip(states) {
         *p = q.primitive(gas, &mut *cancelled)?;
     }
-    let [nx, ny] = grid.shape;
-    for j in 0..ny {
-        for i in 0..nx {
-            let k = j * nx + i;
-            if k % 64 == 0 {
-                poll(cancelled)?;
-            }
-            slopes[k] = [[0.0; 4]; 2];
-            if reconstruction == Reconstruction::FirstOrder {
-                continue;
-            }
+    stats.limited = cartesian::slopes::<Error>(
+        grid,
+        boundaries,
+        4,
+        [1, 2],
+        reconstruction,
+        |k, d| primitive[k].array()[d],
+        slopes,
+        |k, _, sign, slope| {
             let center = primitive[k].array();
-            for axis in 0..2 {
-                let lower = neighbour(primitive, grid, boundaries, i, j, axis, false);
-                let upper = neighbour(primitive, grid, boundaries, i, j, axis, true);
-                slopes[k][axis] =
-                    std::array::from_fn(|d| mc(center[d] - lower[d], upper[d] - center[d]));
-            }
-            let mut theta = 1.0;
-            for _ in 0..32 {
-                let valid = (0..2).all(|axis| {
-                    [-0.5, 0.5].into_iter().all(|sign| {
-                        let p: [f64; 4] =
-                            std::array::from_fn(|d| center[d] + sign * theta * slopes[k][axis][d]);
-                        let t = p[3] / (gas.gas_constant() * p[0]);
-                        p.into_iter().all(f64::is_finite)
-                            && positive(p[0])
-                            && positive(p[3])
-                            && t >= gas.domain().minimum_temperature
-                            && t <= gas.domain().maximum_temperature
-                    })
-                });
-                if valid {
-                    break;
-                }
-                theta *= 0.5;
-            }
-            if theta < 1.0 {
-                stats.limited += 1;
-                if theta <= 2.0_f64.powi(-32) {
-                    theta = 0.0;
-                }
-                for axis in &mut slopes[k] {
-                    for s in axis {
-                        *s *= theta;
-                    }
-                }
-            }
+            let p: [f64; 4] = std::array::from_fn(|d| center[d] + sign * slope[d]);
+            let t = p[3] / (gas.gas_constant() * p[0]);
+            p.into_iter().all(f64::is_finite)
+                && positive(p[0])
+                && positive(p[3])
+                && t >= gas.domain().minimum_temperature
+                && t <= gas.domain().maximum_temperature
+        },
+        cancelled,
+    )?;
+    cartesian::faces::<Error, _>(grid, boundaries, cancelled, |face, cancelled| {
+        let axis = face.axis;
+        if let cartesian::FaceKind::PeriodicCopy { first } = face.kind {
+            let flux = if axis == 0 {
+                &mut *x_flux
+            } else {
+                &mut *y_flux
+            };
+            flux[face.index] = flux[first];
+            return Ok(());
         }
-    }
-    for axis in 0..2 {
-        let count = grid.shape[axis];
-        let lines = grid.shape[1 - axis];
-        for line in 0..lines {
-            for face in 0..=count {
-                if face % 64 == 0 {
-                    poll(cancelled)?;
+        let reconstruct = |k: usize, sign: f64| -> NormalPrimitive {
+            let center = primitive[k].array();
+            let p: [f64; 4] =
+                std::array::from_fn(|d| center[d] + sign * slopes[(2 * k + axis) * 4 + d]);
+            NormalPrimitive {
+                density: p[0],
+                normal_velocity: p[axis + 1],
+                transverse_velocity: p[2 - axis],
+                pressure: p[3],
+            }
+        };
+        let first_order = reconstruction == Reconstruction::FirstOrder;
+        let flux = if let cartesian::FaceKind::Interior { left, right } = face.kind {
+            if first_order {
+                gas.hllc_normal_flux(
+                    states[left].normal(axis),
+                    states[right].normal(axis),
+                    &mut *cancelled,
+                )?
+            } else {
+                gas.hllc_normal_flux_from_primitive(
+                    reconstruct(left, 0.5),
+                    reconstruct(right, -0.5),
+                    &mut *cancelled,
+                )?
+            }
+        } else {
+            let cartesian::FaceKind::Boundary {
+                cell: k,
+                sign,
+                condition: boundary,
+            } = face.kind
+            else {
+                unreachable!()
+            };
+            match (first_order, boundary) {
+                (true, BoundaryCondition::Reflecting) => {
+                    gas.stationary_wall_normal_flux(states[k].normal(axis), sign, &mut *cancelled)?
                 }
-                let pair = boundaries.axis(axis);
-                if face == count && pair == AxisBoundaries::Periodic {
-                    let first = face_index(grid, axis, 0, line);
-                    let last = face_index(grid, axis, count, line);
-                    if axis == 0 {
-                        x_flux[last] = x_flux[first];
-                    } else {
-                        y_flux[last] = y_flux[first];
-                    }
-                    continue;
+                (true, BoundaryCondition::Transmissive) => {
+                    let q = states[k].normal(axis);
+                    gas.hllc_normal_flux(q, q, &mut *cancelled)?
                 }
-                let cell_index = |position| {
-                    if axis == 0 {
-                        line * nx + position
-                    } else {
-                        position * nx + line
-                    }
-                };
-                let reconstruct = |k: usize, sign: f64| -> NormalPrimitive {
-                    let center = primitive[k].array();
-                    let p: [f64; 4] =
-                        std::array::from_fn(|d| center[d] + sign * slopes[k][axis][d]);
-                    NormalPrimitive {
-                        density: p[0],
-                        normal_velocity: p[axis + 1],
-                        transverse_velocity: p[2 - axis],
-                        pressure: p[3],
-                    }
-                };
-                let first_order = reconstruction == Reconstruction::FirstOrder;
-                let flux = if face > 0 && face < count || pair == AxisBoundaries::Periodic {
-                    let (left, right) = if face > 0 && face < count {
-                        (cell_index(face - 1), cell_index(face))
-                    } else {
-                        (cell_index(count - 1), cell_index(0))
-                    };
-                    if first_order {
-                        gas.hllc_normal_flux(
-                            states[left].normal(axis),
-                            states[right].normal(axis),
-                            &mut *cancelled,
-                        )?
-                    } else {
-                        gas.hllc_normal_flux_from_primitive(
-                            reconstruct(left, 0.5),
-                            reconstruct(right, -0.5),
-                            &mut *cancelled,
-                        )?
-                    }
-                } else {
-                    let AxisBoundaries::Ends { lower, upper } = pair else {
-                        unreachable!()
-                    };
-                    let at_lower = face == 0;
-                    let boundary = if at_lower { lower } else { upper };
-                    let sign = if at_lower { -1.0 } else { 1.0 };
-                    let k = cell_index(if at_lower { 0 } else { count - 1 });
-                    match (first_order, boundary) {
-                        (true, BoundaryCondition::Reflecting) => gas.stationary_wall_normal_flux(
-                            states[k].normal(axis),
-                            sign,
-                            &mut *cancelled,
-                        )?,
-                        (true, BoundaryCondition::Transmissive) => {
-                            let q = states[k].normal(axis);
-                            gas.hllc_normal_flux(q, q, &mut *cancelled)?
-                        }
-                        (false, BoundaryCondition::Reflecting) => gas
-                            .stationary_wall_normal_flux_from_primitive(
-                                reconstruct(k, 0.5 * sign),
-                                sign,
-                                &mut *cancelled,
-                            )?,
-                        (false, BoundaryCondition::Transmissive) => {
-                            let p = reconstruct(k, 0.5 * sign);
-                            gas.hllc_normal_flux_from_primitive(p, p, &mut *cancelled)?
-                        }
-                    }
-                };
-                stats.fallback += usize::from(flux.used_hll_fallback);
-                let index = face_index(grid, axis, face, line);
-                if axis == 0 {
-                    x_flux[index] = flux;
-                } else {
-                    y_flux[index] = flux;
+                (false, BoundaryCondition::Reflecting) => gas
+                    .stationary_wall_normal_flux_from_primitive(
+                        reconstruct(k, 0.5 * sign),
+                        sign,
+                        &mut *cancelled,
+                    )?,
+                (false, BoundaryCondition::Transmissive) => {
+                    let p = reconstruct(k, 0.5 * sign);
+                    gas.hllc_normal_flux_from_primitive(p, p, &mut *cancelled)?
                 }
             }
+        };
+        stats.fallback += usize::from(flux.used_hll_fallback);
+        if axis == 0 {
+            x_flux[face.index] = flux;
+        } else {
+            y_flux[face.index] = flux;
         }
-    }
-    for j in 0..ny {
-        for i in 0..nx {
-            if i % 64 == 0 {
-                poll(cancelled)?;
+        Ok(())
+    })?;
+    stats.rate = cartesian::rate::<Error>(
+        grid,
+        |axis, index| {
+            if axis == 0 {
+                x_flux[index].signal_speed
+            } else {
+                y_flux[index].signal_speed
             }
-            let x = j * (nx + 1) + i;
-            let y = j * nx + i;
-            let rate = x_flux[x].signal_speed.max(x_flux[x + 1].signal_speed) / grid.spacing[0]
-                + y_flux[y].signal_speed.max(y_flux[y + nx].signal_speed) / grid.spacing[1];
-            stats.rate = stats.rate.max(rate);
-        }
-    }
+        },
+        cancelled,
+    )?;
     Ok(stats)
 }
 
 fn face_index(grid: &CartesianGrid, axis: usize, face: usize, line: usize) -> usize {
-    if axis == 0 {
-        line * (grid.shape[0] + 1) + face
-    } else {
-        face * grid.shape[0] + line
-    }
+    cartesian::face_index(grid, axis, face, line)
 }
 
 fn neighbour(
@@ -832,44 +734,13 @@ fn neighbour(
     axis: usize,
     upper: bool,
 ) -> [f64; 4] {
-    let index = if axis == 0 { i } else { j };
-    let length = grid.shape[axis];
-    let edge = if upper {
-        index + 1 == length
-    } else {
-        index == 0
-    };
-    let mut q = p[j * grid.shape[0] + i].array();
-    let next = if !edge {
-        Some(if upper { index + 1 } else { index - 1 })
-    } else if boundaries.axis(axis) == AxisBoundaries::Periodic {
-        Some(if upper { 0 } else { length - 1 })
-    } else {
-        None
-    };
-    if let Some(next) = next {
-        q = p[if axis == 0 {
-            j * grid.shape[0] + next
-        } else {
-            next * grid.shape[0] + i
-        }]
-        .array();
-    } else if let AxisBoundaries::Ends { lower, upper: high } = boundaries.axis(axis) {
-        if (if upper { high } else { lower }) == BoundaryCondition::Reflecting {
-            q[axis + 1] = -q[axis + 1];
-        }
+    let (index, reflected) =
+        cartesian::neighbour(grid, boundaries, j * grid.shape[0] + i, axis, upper);
+    let mut q = p[index].array();
+    if reflected {
+        q[axis + 1] = -q[axis + 1];
     }
     q
-}
-
-fn mc(left: f64, right: f64) -> f64 {
-    if left > 0.0 && right > 0.0 {
-        (0.5 * left + 0.5 * right).min(2.0 * left).min(2.0 * right)
-    } else if left < 0.0 && right < 0.0 {
-        (0.5 * left + 0.5 * right).max(2.0 * left).max(2.0 * right)
-    } else {
-        0.0
-    }
 }
 
 fn flux_array(f: NormalFaceFlux, axis: usize) -> [f64; 4] {
@@ -893,30 +764,30 @@ fn update(
     final_stage: bool,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), Error> {
-    let [nx, ny] = grid.shape;
-    for j in 0..ny {
-        for i in 0..nx {
-            let k = j * nx + i;
-            let x = j * (nx + 1) + i;
-            let left = flux_array(x_flux[x], 0);
-            let right = flux_array(x_flux[x + 1], 0);
-            let lower = flux_array(y_flux[k], 1);
-            let upper = flux_array(y_flux[k + nx], 1);
-            let old = original[k].array();
-            let current = stage[k].array();
-            output[k] = State::from_array(std::array::from_fn(|d| {
-                let delta = dt / grid.spacing[0] * (left[d] - right[d])
-                    + dt / grid.spacing[1] * (lower[d] - upper[d]);
-                if final_stage {
-                    0.5 * old[d] + 0.5 * current[d] + 0.5 * delta
+    cartesian::update::<4, Error, _>(
+        grid,
+        4,
+        dt,
+        final_stage,
+        |k, d| original[k].array()[d],
+        |k, d| stage[k].array()[d],
+        |axis, face, d| {
+            flux_array(
+                if axis == 0 {
+                    x_flux[face]
                 } else {
-                    current[d] + delta
-                }
-            }));
+                    y_flux[face]
+                },
+                axis,
+            )[d]
+        },
+        cancelled,
+        |k, row, cancelled| {
+            output[k] = State::from_array([row[0], row[1], row[2], row[3]]);
             output[k].primitive(gas, &mut *cancelled)?;
-        }
-    }
-    Ok(())
+            Ok(())
+        },
+    )
 }
 
 fn capture_boundaries(
@@ -928,32 +799,27 @@ fn capture_boundaries(
     add: bool,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), Error> {
-    for side in SIDES {
-        let axis = side.axis();
-        let face = if side.sign() < 0.0 {
-            0
-        } else {
-            grid.shape[axis]
-        };
-        let scale = side.sign() * duration * grid.face_area(side);
-        for (line, target) in output[grid.boundary_range(side)].iter_mut().enumerate() {
-            if line % 64 == 0 {
-                poll(cancelled)?;
-            }
-            let index = face_index(grid, axis, face, line);
-            let flux = flux_array(
+    cartesian::capture::<Error>(
+        grid,
+        4,
+        duration,
+        add,
+        |axis, face, d| {
+            flux_array(
                 if axis == 0 {
-                    x_flux[index]
+                    x_flux[face]
                 } else {
-                    y_flux[index]
+                    y_flux[face]
                 },
                 axis,
-            );
-            let previous = if add { target.array() } else { [0.0; 4] };
-            *target = Totals::from_array(std::array::from_fn(|d| previous[d] + scale * flux[d]));
-        }
-    }
-    Ok(())
+            )[d]
+        },
+        |boundary, d, delta, add| {
+            let target = output[boundary].component_mut(d);
+            *target = (if add { *target } else { 0.0 }) + delta;
+        },
+        cancelled,
+    )
 }
 
 fn sum_arrays(

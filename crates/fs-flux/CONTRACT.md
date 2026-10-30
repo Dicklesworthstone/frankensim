@@ -948,3 +948,35 @@ species diffusion, chemistry, Soret/Dufour effects, no-slip boundaries, turbulen
 rarefied gas, physical shock-thickness validation or mutual fluid/solid thermal
 evolution. Those capabilities require their original owners and additional
 admitted source data, rather than inferred closures.
+
+### Evolving composition on the shared Cartesian discretization
+
+`compressible::mixture::MixtureEuler2d` advances every canonical species mass
+density, x/y momentum and full species-referenced total energy on the existing
+stationary `CartesianGrid`. Density is derived from the species equations.
+The original `MixtureGas` owns composition-dependent calorics, formation-energy
+references and planar HLLC/HLL/wall closures. No separate equation of state,
+passive-scalar wave solver, trace seed or species normalization is introduced.
+
+Frozen and evolving-species consumers share the private Cartesian MC/common-
+theta reconstruction, face topology, combined CFL, SSP RK2, retry, conservative
+divergence and boundary-integration core. Concrete views are monomorphized.
+Flat buffers are prepared once under a checked total byte budget, including
+caller state-vector excess capacity, and a 1 GiB hard ceiling. Successful steps
+allocate no per-cell or per-step vectors. Original source storage and bounded
+stack scratch are separate from the numerical-buffer budget.
+
+Accepted reports retain per-species mass, vector momentum, energy and per-face
+outward transfers. Physical-energy residuals use the original species-reference
+transform without subtracting two large absolute formation-energy totals.
+Failed source, budget or cancellation checks publish no cells, clock, report or
+boundary impulse. Six added native tests exercise oblique material-contact
+refinement, evolving local calorics, source-data-dependent shocks, original 1-D
+and frozen-2-D compatibility, axis rotation, closed-wall balances, complete
+workspace admission, late cancellation/replay and shear-heating source refusal.
+All 18 compressible tests, including the existing molecular path, pass.
+
+This increment is Estimated stationary inviscid evolving-composition flow.
+It does not compose chemistry or molecular species diffusion, move the domain,
+preserve pressure exactly at moving unequal-caloric contacts, or establish a
+fully discrete entropy inequality or experimental validation.
