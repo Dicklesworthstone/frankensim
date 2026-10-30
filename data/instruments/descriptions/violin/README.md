@@ -165,13 +165,34 @@ target/release/material_strings \
   --loaded-body-response-only /path/to/new-varnished-violin-run/G3/loaded-response.tsv 101 2000 128 0
 ```
 
-The logarithmic report includes complex receiver pressure in Pa/N, every
+The logarithmic v2 report includes native and selected receiver pressure in Pa/N, every
 bridge mobility, shell volume velocities, coating heat and stored energy,
 other component/material/connection/radiation loss, and solve/power residuals.
-It uses the original coupled harmonic solver and the same native pressure
-observer as the time calculation. All retained strings remain connected;
+It uses the original coupled harmonic solver and retains the native pressure
+observer from the time calculation. All retained strings remain connected;
 bow/contact traction is released for this linear transfer. This is not a
 harmonic approximation to nonlinear bowed playing.
+
+Replace the final `0` with `all` to obtain every bridge-drive column in one
+sweep. Rows are ordered by frequency and then declared bridge; `drive_bridge`
+identifies the 1 N peak input. A single dynamic-stiffness factorization serves
+all columns at each frequency. The library also accepts coherent complex
+forces across bridges and computes their interference in power and coating
+heat; those quadratic quantities cannot be reconstructed by adding isolated
+column losses.
+
+When the performance explicitly selects `shell_observer`, this report uses
+its original reciprocal closed-shell BEM observation owner. With an explicit
+`one_way_observer` and profile acoustic skin, it uses the original ruled
+Burton–Miller producer, all retained body modes and the actual aperture-flow
+shares. Both evaluate the producer at the forcing frequency, preserve raw
+propagation phase, and share one acoustic sample across bridge columns. They
+do not build a FIR, add playback latency or taper, or add another reaction or
+loss debit. The report records the actual receiver, formulation, source
+identities, pass band and loaded versus one-way mode scope, and includes the
+three complex pressure gradients. The native pressure remains a separate
+column. The default violin recipe still uses its compact pressure observer;
+an exterior microphone requires these explicit performance/profile records.
 
 The loaded response evaluates the actual passive Prony film realization
 used for playback; the structural report evaluates the original fitted film
@@ -197,9 +218,12 @@ response before an ordinary WAV render, supply the new-WAV positional path and
 use `--loaded-body-response` instead. That option still prepares playback.
 
 Unsupported nonlinear/contact attachments, residual-flexibility extensions
-without full direct force columns, and additional frontend microphone filters
-refuse. Pressure retains the selected observer's existing physical scope;
-the compact default is not a converged exterior-wave solution.
+without full direct force columns, and plate microphone selections refuse.
+Receiver boundary/quadrature work is part of the same complete sweep allowance;
+its frequency-sample limit and pass band also remain binding. Pressure retains
+the selected observer's existing physical scope; neither the compact default
+nor partial/one-way skin feedback is certified as a converged exterior-wave
+solution.
 
 Compare bare and coated runs with the same inputs and pressure scale,
 including pressure phase, bridge mobility and dissipated power at common

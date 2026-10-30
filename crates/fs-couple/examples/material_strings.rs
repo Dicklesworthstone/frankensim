@@ -724,8 +724,8 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     let mut spec=input::Spec::parse_with_gas_sources(
         &read_bounded(path,input::MAX_INPUT_BYTES)?,gas_registry.as_ref())?;
     if response_options.as_ref().is_some_and(body_response::Options::loaded)
-        && (spec.plate_observer.is_some() || spec.shell_observer.is_some() || spec.one_way_observer.is_some()) {
-        return Err("--loaded-body-response uses the original coupled pressure observer; additional plate, shell or one-way microphone filters need their own frequency-response transfer".into());
+        && spec.plate_observer.is_some() {
+        return Err("loaded shell response requires its shell or acoustic-skin receiver; a planar microphone is incompatible".into());
     }
     spec.contact_thermal=thermal_profile.is_some();
     let gate=CancelGate::new_clock_free();let pool=fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
@@ -793,7 +793,7 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
         }
         eprintln!("loaded_response_preparation=harmonic_only; time_propagator=absent; state_clock=unadvanced");
         return response_options.as_ref().expect("loaded response-only option checked")
-            .write_loaded(&bound.bank,work,&gate);
+            .write_loaded_for_spec(&bound.bank,&bound.spec,bound.body_profile.as_ref(),work,&gate);
     }
     let mut ready=bound.into_performance(&gate)?;
     let contact_heat=thermal_profile.as_ref().map(|profile|profile.prepare(&ready,&gate)).transpose()?;
@@ -957,7 +957,8 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     if let Some(response)=response_options {
         if response.loaded() {
             let work=ready.spec.prepared_linear.map_or(input::MAX_WORK,|budget|budget.max_multiply_terms);
-            response.write_loaded(ready.performance.bank(),work,&gate)?;
+            response.write_loaded_for_spec(ready.performance.bank(),&ready.spec,
+                ready.body_profile.as_ref(),work,&gate)?;
         } else {
             let source=ready.performance.bank().source().bank();
             response.write(source.material_shell_image(),source.material_shell_assembly_image(),&gate)?;

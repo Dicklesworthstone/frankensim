@@ -153,3 +153,50 @@ fn listener_source_refuses_unmatched_bands_cavities_and_unbounded_fft_before_mat
     let ordinary = input::Spec::parse(include_bytes!("../closed-shell-pluck.material-strings")).unwrap();
     assert!(ordinary.shell_observer.is_none());
 }
+
+#[test]
+fn loaded_harmonic_receiver_reaches_the_declared_microphone_without_a_fir_or_clock_step() {
+    use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::observation::harmonic::{
+        ShellHarmonicReceiver, ShellHarmonicReceiverSelection,
+    };
+    use fs_math::c64::C64;
+    scoped(|cx, gate| {
+        let mut spec = observed_source();
+        spec.prepared_linear = Some(PreparedModalBudget {
+            max_modes: 64, max_dense_bytes: 268_435_456, max_multiply_terms: 1_000_000_000_000,
+        });
+        let bound = spec.compile_bank_with_profiles(cx, gate,
+            Some(body::Profile::parse(include_bytes!("../closed-shell.body")).unwrap()),
+            None, true, |name| Ok(if name == "closed-shell.fsmatpk" {
+                shell_pack(name)
+            } else { pack(name, 7800.0, 200_000.0, None) })).unwrap();
+        let options = bound.spec.shell_observer.as_ref().unwrap();
+        let receiver = ShellHarmonicReceiver::new(&bound.bank,
+            ShellHarmonicReceiverSelection::Loaded {
+                options, quadrature: bound.spec.shell_receiver_quadrature,
+            }, 2, gate).unwrap();
+        let prepared = receiver.prepare(gate).unwrap();
+        let omega = core::f64::consts::TAU * 60.0;
+        let before: Vec<_> = bound.bank.system().components().iter()
+            .map(|model| model.states().to_vec()).collect();
+        let matrix = prepared.bridge_harmonic_matrix(omega, 500_000_000_000, gate).unwrap();
+        assert_eq!(matrix.len(), 1);
+        assert!(matrix[0].receiver_pressure_pa.abs() > 0.0);
+        assert!(matrix[0].receiver_gradient_pa_per_m.iter().all(|z| z.re.is_finite() && z.im.is_finite()));
+        let force = C64::new(0.3, -0.7);
+        let coherent = prepared.bridge_forces_harmonic_response(omega, &[force],
+            500_000_000_000, gate).unwrap();
+        let expected = matrix[0].receiver_pressure_pa * force;
+        assert!((coherent.receiver_pressure_pa - expected).abs() <= 1e-10 * expected.abs().max(1e-20));
+        let native = bound.bank.material_shell_bridge_harmonic_response(omega, 0, force,
+            100_000_000, gate).unwrap();
+        assert_eq!(coherent.body.released.dynamics, native.released.dynamics,
+            "receiver observation must not debit another radiation load");
+        assert!(prepared.bridge_harmonic_response(omega, 0, force, 1, gate).is_err());
+        assert!(prepared.bridge_harmonic_response(core::f64::consts::TAU * 121.0,
+            0, force, 500_000_000_000, gate).is_err(), "retain the receiver's pass band");
+        assert_eq!(before, bound.bank.system().components().iter()
+            .map(|model| model.states().to_vec()).collect::<Vec<_>>());
+        assert_eq!(bound.bank.system().samples_rendered(), 0);
+    });
+}

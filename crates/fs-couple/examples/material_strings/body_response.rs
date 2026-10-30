@@ -18,7 +18,8 @@ pub(super) struct Options {
     minimum_hz: f64,
     maximum_hz: f64,
     points: usize,
-    bridge: usize,
+    /// None requests every unit-force column of the loaded bridge matrix.
+    bridge: Option<usize>,
 }
 
 impl Options {
@@ -54,24 +55,29 @@ impl Options {
                 .to_str()
                 .ok_or("invalid body-response point count")?
                 .parse()?;
-            let bridge: usize = values[4]
-                .to_str()
-                .ok_or("invalid body-response bridge index")?
-                .parse()?;
+            let loaded = args[index] == "--loaded-body-response"
+                || args[index] == "--loaded-body-response-only";
+            let bridge = if values[4] == "all" {
+                if !loaded {
+                    return Err("bridge selection 'all' requires a loaded body-response command".into());
+                }
+                None
+            } else {
+                Some(values[4].to_str().ok_or("invalid body-response bridge index")?.parse::<usize>()?)
+            };
             if !minimum_hz.is_finite()
                 || !maximum_hz.is_finite()
                 || minimum_hz <= 0.0
                 || maximum_hz <= minimum_hz
                 || !(2..=1024).contains(&points)
-                || bridge >= 8
+                || bridge.is_some_and(|bridge| bridge >= 8)
             {
-                return Err("body-response requires finite 0 < MIN_HZ < MAX_HZ, 2..=1024 points and a bridge index in 0..8".into());
+                return Err("body-response requires finite 0 < MIN_HZ < MAX_HZ, 2..=1024 points and a bridge index in 0..8 (or 'all' for a loaded response)".into());
             }
             selected = Some(Self {
                 analysis_only: args[index] == "--body-response-only"
                     || args[index] == "--loaded-body-response-only",
-                loaded: args[index] == "--loaded-body-response"
-                    || args[index] == "--loaded-body-response-only",
+                loaded,
                 output: PathBuf::from(&values[0]),
                 minimum_hz,
                 maximum_hz,
@@ -112,6 +118,7 @@ impl Options {
         if self.loaded {
             return Err("loaded body-response requires the actual coupled performer".into());
         }
+        let bridge = self.bridge.ok_or("the unloaded structural response requires one bridge")?;
         let (ports, memory) = if let Some(image) = shell {
             (image.force_ports(), image.coating_relaxation())
         } else if let Some(image) = assembly {
@@ -120,7 +127,7 @@ impl Options {
             return Err("body-response requires a curved shell or assembled shell body".into());
         };
         let force: Vec<_> = ports
-            .get(self.bridge)
+            .get(bridge)
             .ok_or("body-response bridge index is absent from this body")?
             .iter()
             .map(|&value| C64::from_re(value))
@@ -156,7 +163,7 @@ impl Options {
         writeln!(
             text,
             "# peak phasors: exp(-i omega t); linear transfer normalized to a 1 N peak force at bridge {}\n# amplitude range: no per-element strain certificate\n# film law: exact source response at each admitted frequency; wood/glue: fixed reduced viscosity",
-            self.bridge
+            bridge
         )?;
         writeln!(
             text,
@@ -246,7 +253,7 @@ impl Options {
             .write_all(text.as_bytes())?;
         eprintln!(
             "body_response={:?}; frequencies={}; drive_bridge={}; normalization_peak_force_N=1; scope=linear_unloaded_structural_response",
-            self.output, self.points, self.bridge
+            self.output, self.points, bridge
         );
         Ok(())
     }
@@ -357,5 +364,31 @@ mod tests {
         ]));
         assert!(Options::extract(&repeated).is_err());
         assert!(Options::extract(&words(&first[..7])).is_err());
+    }
+
+    #[test]
+    fn all_bridges_selects_a_loaded_matrix_without_changing_source_arguments() {
+        for command in ["--loaded-body-response", "--loaded-body-response-only"] {
+            let args = words(&[
+                "renderer", "performance", command, "matrix.tsv", "101", "2000", "32", "all",
+                "--body-profile", "body.profile",
+            ]);
+            let (retained, option) = Options::extract(&args).unwrap();
+            let option = option.unwrap();
+            assert!(option.loaded());
+            assert_eq!(option.bridge, None);
+            assert_eq!(retained, words(&["renderer", "performance", "--body-profile", "body.profile"]));
+        }
+        for command in ["--body-response", "--body-response-only"] {
+            assert!(Options::extract(&words(&[
+                "renderer", "performance", command, "matrix.tsv", "101", "2000", "32", "all",
+            ])).is_err());
+        }
+        for bridge in ["-1", "8", "ALL", "0,1", ""] {
+            assert!(Options::extract(&words(&[
+                "renderer", "performance", "--loaded-body-response-only", "matrix.tsv",
+                "101", "2000", "32", bridge,
+            ])).is_err());
+        }
     }
 }

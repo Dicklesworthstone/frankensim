@@ -308,6 +308,22 @@ frequency. G1 tests compare resonant amplitudes with the anchored one-mode law,
 and a three-clock ladder converges to the same response through the original
 prepared time owner with a nonproportional two-mode connection.
 
+`CoupledModalSystem::harmonic_responses` shares one dynamic-stiffness assembly
+and factorization across 1..64 peak-force right-hand sides at a common forcing
+frequency. It reuses the original cancellable complex LU solves, original-
+equation residual gate, observer and physical accounting for every column.
+For d mechanical-plus-air coordinates, G constant-loss links, C connections,
+M Maxwell branches and r inputs, the admitted work is d^2*[d+G+r*(C+M+3)];
+r=1 retains the scalar allowance. Retained response arrays and struct headers
+are bounded at 8 MiB with checked arithmetic before allocation. No coordinate
+is truncated and no accepted state changes on success or refusal. Both friction
+owners expose the same released batch path. Four production batch tests pass
+natively for scalar parity, coherent cross terms, reciprocity, phase cancellation,
+work/storage bounds and unchanged state. The complete harmonic module reports
+13/14 passing; its unchanged two-body test fails during initial time stepping
+before any harmonic call. The same heat-resistance setup failure was reproduced
+with pre-batch source c72b13d1881ace6718aefc3c4937ef2a5358b25f.
+
 `ModalPreparation::HarmonicOnly(PreparedModalBudget)` constructs these same
 continuous equations without a coupled time propagator, quadratic heat-integral
 matrices or held-step friction compliance. `Ordinary` and `Prepared` preserve
@@ -5450,7 +5466,15 @@ Maxwell history and selected exterior radiation pole. Contacts are explicitly
 released; this is not a linearization of nonlinear bowed playing. The pressure
 readout is exactly the original time-owner observation: acceleration rows use
 -omega^2*q and real modal transfer rows use Re(T)*v + Im(T)*omega_mode*q.
-No extra receiver transfer, normalization or pressure gain is introduced.
+No extra receiver transfer, normalization or pressure gain is introduced into
+this native pressure. An explicitly selected exterior receiver is separate.
+
+`material_shell_bridge_harmonic_matrix` on both banks returns one unit-peak-
+force column per physical bridge and all observed bridge velocities, sharing
+the original harmonic factor. `material_shell_bridge_forces_harmonic_response`
+combines one coherent complex force per bridge before solving and accounting;
+pressure superposes, while power, branch heat and stored energy retain cross
+terms and cannot be obtained by adding isolated column losses.
 
 The harmonic owner retains branch ordering in per-Maxwell mean storage and
 heat arrays, respectively |c^T*q-z|^2/4 and |c^T*q-z|^2/(2*tau). The bank
@@ -5467,18 +5491,42 @@ without complete direct bridge-force columns refuse. Queries change no accepted
 state, history or sample clock. Source admission is not an amplitude or
 mesh/modal convergence certificate.
 
+`ShellHarmonicReceiver` borrows the actual multi-bow bank and owns the original
+receiver geometry and source traces. Its prepared queries perform the bank's
+harmonic solve internally; foreign same-sized response arrays cannot be bound.
+A selected `shell_observer` uses the original reciprocal P1/P0 observation owner
+with the same complete closed-shell load, gas, basis and surface/mouth map.
+A selected `one_way_observer` uses the profile's original ruled Burton-Miller
+skin producer, every retained body mode and the actual aperture-flow shares.
+Playback and harmonic observation share source-coordinate conversion, including
+spatial-mouth inverse normalization and split neck-flow shares. The producer is
+evaluated at the forcing frequency with raw complex pressure and gradient;
+no FIR latency, taper, normalization, second mechanical reaction or extra loss
+debit enters. One BEM frequency sample serves all bridge matrix columns. The
+report records receiver/gas/formulation/operator/loading/skin identities,
+source counts, pass band, observation work and loaded versus one-way body-mode
+scope. Omitted feedback is not certified negligible. Boundary, quadrature and
+projection work are reserved before mechanics; skin work counts every actual
+256-source batch. Three focused production-helper native tests pass for phase,
+source mapping, invalid inputs and combined/batched work; they do not execute
+a BEM solve. Full bank/microphone integration tests remain authored and unrun.
+
 The frontend `--loaded-body-response` exports bridge mobilities, signed shell
-volume velocities, complex native pressure in Pa/N, supplied and component/
-connection/coating/other-material/radiation power, stored energy and solve/power
-residuals before the ordinary WAV render. The existing prepared multiply-work
-declaration bounds the entire sweep, divided across frequencies; nonprepared
-runs retain their existing allowance. All samples pass before a create-new
-write, with the same 2..1024 point and 8 MiB limits. This selection still builds
-the complete performer/prepared propagator. Additional frontend plate/shell/
-one-way microphone filters refuse because they lie outside the returned native
-observer. Focused production harmonic/pressure and report-writer native checks
-pass; their small container facades do not validate complete bank construction.
-Normal-Cargo bank and projection integration regressions remain unexecuted.
+volume velocities, native and selected receiver pressure in Pa/N, supplied and
+component/connection/coating/other-material/radiation power, stored energy and
+solve/power residuals before the ordinary WAV render. The v2 TSV identifies
+`drive_bridge`; a final bridge argument of `all` exports the complete matrix in
+frequency-then-bridge order. A selected exterior receiver adds three complex
+pressure gradients; without one, receiver pressure equals native pressure.
+The existing prepared multiply-work declaration bounds the entire sweep,
+including all columns and receiver work, divided across frequencies; small
+nonprepared runs retain their allowance. All samples pass before a create-new
+write, with the same 2..1024 point and 8 MiB limits. Receiver sample allowances
+and pass bands remain binding alongside all source supports. This selection
+still builds the complete performer/prepared propagator. Plate microphones
+remain unsupported by this shell-specific report. Focused native containers
+do not validate complete bank construction. Normal-Cargo bank and projection
+integration regressions remain unexecuted.
 
 `--loaded-body-response-only` takes the same report arguments without a WAV
 positional path. The frontend shares physical bank construction with playback,
@@ -5491,9 +5539,15 @@ playback still refuses those backends before material I/O, while harmonic-only
 construction can retain admitted shell BEM or skin loading. The library's
 Rayleigh binding likewise distinguishes preparation purpose; this shell-only
 CLI does not admit a planar body. Source identity, geometry, gas, fit-band and
-resource gates remain unchanged. Playback-only options and additional microphone
-filters refuse. Two production option-parser tests pass natively; the added
-closed-shell BEM bank integration regression remains authored and unrun.
+resource gates remain unchanged. Playback-only options and plate microphone
+selections refuse. Existing shell/skin microphone declarations instead select
+their original continuous frequency producers without building playback FIRs.
+Three production option-parser tests pass natively, including `all` selection;
+three exact-production v2 writer tests retain original coupled numerics behind
+small bank/receiver transport facades and verify native/selected pressure,
+gradient units, matrix row order and create-new/refusal behavior. These do not
+validate a BEM solve or complete CLI build. Closed-shell BEM and skin bank/receiver
+regressions remain authored and unrun.
 
 `SharedMaterialShellBody` and
 `ReciprocalStringBank::from_material_shear_shell` connect that image to every

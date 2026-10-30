@@ -717,7 +717,7 @@ not a harmonic approximation to nonlinear bowed playing. Unsupported nonlinear
 or adhesive attachments refuse through the original owner.
 
 The report includes all bridge mobilities, structural exterior/cavity volume
-velocities, the original coupled pressure observer in Pa/N, supplied power,
+velocities, the native and selected receiver pressures in Pa/N, supplied power,
 component/connection loss, coating and other material loss, radiation loss,
 mean stored energy and solve/power residuals. Coating heat comes from the
 actual retained Maxwell branches. The unloaded structural report evaluates
@@ -731,12 +731,35 @@ limits and create-new semantics remain binding. Every solve passes before a
 report file is created, and the query does not advance accepted state or
 material histories. The normal WAV then continues through the performer.
 
-Additional `plate_observer`, `shell_observer` and `one_way_observer` microphone
-filters are outside the bank's native pressure transfer, so this loaded
-export explicitly refuses those selections. Its pressure retains the native
-observer's compact or admitted physical scope and provides no exterior-wave
-convergence or finite-amplitude strain certificate. Structural and loaded
-response options are mutually exclusive on one invocation.
+An existing `shell_observer` declaration selects the original reciprocal
+P1/P0 finite-distance observation owner, tied to the same complete closed-shell
+BEM load, gas, basis and body/mouth traces. An existing `one_way_observer`
+declaration selects the original ruled Burton–Miller producer on the profile's
+acoustic skin, including every retained body mode and actual aperture-flow
+share. Its report distinguishes loaded body modes from modes observed one-way;
+partial or absent acoustic feedback is not certified negligible.
+
+These receivers evaluate the original acoustic producer at the forcing
+frequency. They preserve raw propagation phase without building a playback
+FIR, adding its latency or taper, or charging another acoustic loss. The v2
+TSV keeps `native_pressure` separate from `receiver_pressure` and adds the
+three complex receiver pressure gradients when an exterior receiver is
+selected. With no receiver declaration, both pressure columns contain the
+native observer's pressure. `plate_observer` remains unsupported by this
+shell-specific export. No exterior-wave convergence or finite-amplitude
+strain certificate is implied. Structural and loaded response options remain
+mutually exclusive on one invocation.
+
+Set `BRIDGE_INDEX` to `all` to export the complete bridge transfer matrix.
+Each frequency has one row per declared bridge, in physical bridge order;
+`drive_bridge` identifies the column driven by a 1 N peak force. All bridge
+velocities and both pressures retain complex phase. The original mechanics
+owner factors once per frequency and solves each right-hand side against that
+factor; the selected receiver also shares one BEM frequency sample across the
+columns. The library's `material_shell_bridge_forces_harmonic_response` and
+prepared receiver's `bridge_forces_harmonic_response` accept coherent complex
+forces at all bridges and compute power and heat from their combined response.
+Individual unit-column losses cannot be added to obtain coherent-drive heat.
 
 For the same connected response without constructing a time propagator or
 rendering a WAV, select `--loaded-body-response-only` and omit the WAV
@@ -766,9 +789,16 @@ budget and does not prepare a time exponential. All original source and
 physical admission checks remain active. A declared shell BEM or skin load
 still binds its geometry-derived passive air reaction; a resource record alone
 does not select the prepared playback backend. Unsupported contact/nonlinear
-attachments and additional microphone filters still refuse; no connected
+attachments and plate microphone selections still refuse; no connected
 physics is silently removed to make the analysis fit. The original
 `--loaded-body-response` option continues to prepare playback and render a WAV.
+
+The complete sweep allowance includes every requested drive column and, when
+selected, the receiver's boundary solve, quadrature and complex projection.
+Receiver work is reserved before mechanics. Its declared frequency-sample
+allowance and pass band also remain binding; use the intersection with the
+body/material source bands. Matrix output remains subject to the same 8 MiB
+report bound, so a many-bridge run can require fewer frequency points.
 
 ## Separate exterior and cavity pressure surfaces
 

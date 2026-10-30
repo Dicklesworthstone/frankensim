@@ -88,6 +88,20 @@ fn loaded_analysis_keeps_the_playback_bank_without_a_time_propagator() {
             let y = b.released.observer_pressure_pa;
             assert!((x-y).abs() <= 1e-10 * x.abs().max(y.abs()).max(1e-20));
             assert_eq!(a.source_band_rad_s, b.source_band_rad_s);
+            let matrix = bound.bank.material_shell_bridge_harmonic_matrix(omega, 100_000_000, gate).unwrap();
+            assert_eq!(matrix.len(), body.force_ports().len());
+            let drives: Vec<_> = (0..matrix.len()).map(|index| C64::new(0.2, -0.1 * (index + 1) as f64)).collect();
+            let coherent = bound.bank.material_shell_bridge_forces_harmonic_response(
+                omega, &drives, 100_000_000, gate).unwrap();
+            let mut expected_pressure = C64::ZERO;
+            for (bridge, column) in matrix.iter().enumerate() {
+                let single = bound.bank.material_shell_bridge_harmonic_response(
+                    omega, bridge, C64::from_re(1.0), 100_000_000, gate).unwrap();
+                assert_eq!(*column, single, "matrix columns must retain the single-drive physical path");
+                expected_pressure = expected_pressure + column.released.observer_pressure_pa * drives[bridge];
+            }
+            assert!((coherent.released.observer_pressure_pa - expected_pressure).abs()
+                <= 1e-10 * expected_pressure.abs().max(1e-20));
         }
         assert_eq!(before, bound.bank.system().components().iter()
             .map(|model| model.states().to_vec()).collect::<Vec<_>>());

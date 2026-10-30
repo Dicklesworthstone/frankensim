@@ -390,6 +390,41 @@ fn compiled(text: &str, skin: &str, cx: &Cx<'_>, gate: &CancelGate) -> Ready {
 }
 
 #[test]
+fn harmonic_skin_receiver_retains_the_actual_neck_flow_and_raw_propagation_phase() {
+    use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::observation::harmonic::{
+        ShellHarmonicReceiver, ShellHarmonicReceiverSelection,
+    };
+    use fs_math::c64::C64;
+    scoped(|cx, gate| {
+        let text = source("prepared-linear 512 4294967296 1000000000000000\n")
+            .replace("cavity none", "cavity neck 0.004 0.004 0.03 0 1");
+        let bound = input::Spec::parse(text.as_bytes()).unwrap()
+            .compile_bank_with_profiles(cx, gate, Some(profile(&capped_skin())), None, true,
+                |name| Ok(if name == "closed-shell.fsmatpk" { shell_pack(name) }
+                    else { pack(name, 7800.0, 200_000.0, None) })).unwrap();
+        let skin = bound.body_profile.as_ref().unwrap().acoustic_skin(&bound.spec).unwrap();
+        let options = bound.spec.one_way_observer.as_ref().unwrap();
+        let receiver = ShellHarmonicReceiver::new(&bound.bank,
+            ShellHarmonicReceiverSelection::Skin { options, skin: &skin }, 2, gate).unwrap();
+        let prepared = receiver.prepare(gate).unwrap();
+        let omega = core::f64::consts::TAU * 60.0;
+        let value = prepared.bridge_harmonic_response(omega, 0, C64::from_re(1.0),
+            500_000_000_000, gate).unwrap();
+        assert!(value.receiver_pressure_pa.abs() > 0.0);
+        let mut changed = options.clone();
+        changed.filter_latency_samples += 1;
+        let second = ShellHarmonicReceiver::new(&bound.bank,
+            ShellHarmonicReceiverSelection::Skin { options: &changed, skin: &skin }, 2, gate).unwrap();
+        let same = second.prepare(gate).unwrap().bridge_harmonic_response(omega, 0,
+            C64::from_re(1.0), 500_000_000_000, gate).unwrap();
+        assert_eq!(same.receiver_pressure_pa, value.receiver_pressure_pa,
+            "a playback reconstruction delay must not rotate physical harmonic pressure");
+        assert_eq!(same.receiver_gradient_pa_per_m, value.receiver_gradient_pa_per_m);
+        assert_eq!(bound.bank.system().samples_rendered(), 0);
+    });
+}
+
+#[test]
 fn the_skin_s_own_two_way_load_reacts_on_the_mechanics_its_observer_hears() {
     scoped(|cx, gate| {
         // BARE's own 48 kHz clock: at source()'s 8 kHz the level-2 load's coupling exceeds the
