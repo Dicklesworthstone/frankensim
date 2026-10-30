@@ -8,11 +8,16 @@
 //! reference, while the original frozen sound speed sets the wavefront delay.
 //!
 //! This retains the owner's frozen homogeneous plane-wave model and explicit
-//! rigid/slip or diffusive wall choice. Compact finite tone-hole chimneys use
+//! gas shear/thermal diffusion choice. Compact finite tone-hole chimneys use
 //! those SAME reservoirs and wall law. Their independent flanged mouth loads
-//! and the terminal radiation use the explicitly bound exterior gas. Compliant
-//! walls, nonlinear vortices and mutual exterior radiation remain unsupported.
+//! and the terminal radiation use the explicitly bound exterior gas. An
+//! optional source-resolved material wall supplies its original local membrane
+//! impedance to that same gas operator, including every finite chimney. The
+//! feedback and outlet observation therefore share the wall's storage and
+//! hereditary loss. Nonlocal shell motion, external wall radiation, nonlinear
+//! vortices and mutual exterior radiation remain outside this consumer.
 
+use super::regional::material_wall::LocalMaterialWall;
 use super::{
     DrivingPointError, LineDc, LineLadder, LineRealization, bulk_delay_pole_state,
     duct_axial_length, realize_characteristic_response,
@@ -24,6 +29,7 @@ use fs_material::gas::GasState;
 use fs_material::relaxation::RelaxationState;
 use fs_math::c64::C64;
 use fs_vfit::discretize::DelayedFilter;
+use std::sync::Arc;
 
 mod outlet;
 pub use outlet::MAX_MOLECULAR_OUTLET_BINS;
@@ -37,6 +43,7 @@ pub struct MolecularDrivingPoint {
     composition: ComposeOptions,
     one_way_wavefront_s: f64,
     open_hole_sites: Vec<MolecularHoleSite>,
+    material_wall: Option<Arc<LocalMaterialWall>>,
 }
 
 impl MolecularDrivingPoint {
@@ -48,6 +55,55 @@ impl MolecularDrivingPoint {
         geometry: &Duct,
         state: RelaxationState,
         wall: Option<MolecularWallResolution>,
+        cones: ConeSlices,
+        composition: ComposeOptions,
+        exterior: GasState,
+    ) -> Result<Self, DrivingPointError> {
+        Self::build(geometry, state, wall, None, cones, composition, exterior)
+    }
+
+    /// Bind molecular gas and a source-resolved deformable wall to the same
+    /// pressure feedback and physical mouth-flow observations.
+    ///
+    /// The existing wall owner retains the material identity, thickness,
+    /// axial constraint, anisotropy and supported elastic/viscous/Maxwell law.
+    /// Each actual bore, profile and chimney radius must satisfy that owner's
+    /// local membrane admission. This is one material over the complete duct;
+    /// no regional shell coupling or radiation from the solid wall is inferred.
+    ///
+    /// `wall` is the separate gas shear/thermal resolution. Its coupled
+    /// molecular heat law remains unchanged: mechanical wall motion adds only
+    /// the original pressure/normal-velocity shunt. The material's positive
+    /// surface mass leaves the gas's frozen high-frequency wavefront intact.
+    /// Every evaluated frequency, including the near-DC realization probe,
+    /// must lie in both source domains. Missing low-frequency material data
+    /// refuses instead of silently substituting a rigid wall.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_material_wall(
+        geometry: &Duct,
+        state: RelaxationState,
+        wall: Option<MolecularWallResolution>,
+        material_wall: LocalMaterialWall,
+        cones: ConeSlices,
+        composition: ComposeOptions,
+        exterior: GasState,
+    ) -> Result<Self, DrivingPointError> {
+        Self::build(
+            geometry,
+            state,
+            wall,
+            Some(Arc::new(material_wall)),
+            cones,
+            composition,
+            exterior,
+        )
+    }
+
+    fn build(
+        geometry: &Duct,
+        state: RelaxationState,
+        wall: Option<MolecularWallResolution>,
+        material_wall: Option<Arc<LocalMaterialWall>>,
         cones: ConeSlices,
         composition: ComposeOptions,
         exterior: GasState,
@@ -67,8 +123,17 @@ impl MolecularDrivingPoint {
                 what: "molecular characteristic playback requires axial inlet and terminal segments",
             });
         }
-        let material =
-            MolecularDuct::new(geometry, state, wall, cones, composition.maximum_blocks)?;
+        let material = match &material_wall {
+            Some(material) => MolecularDuct::new_with_compliant_wall(
+                geometry,
+                state,
+                wall,
+                material.clone(),
+                cones,
+                composition.maximum_blocks,
+            )?,
+            None => MolecularDuct::new(geometry, state, wall, cones, composition.maximum_blocks)?,
+        };
         let open_hole_sites = material.open_hole_sites();
         let one_way_wavefront_s =
             duct_axial_length(geometry) / material.state().frozen_sound_speed_m_s();
@@ -84,6 +149,7 @@ impl MolecularDrivingPoint {
             composition,
             one_way_wavefront_s,
             open_hole_sites,
+            material_wall,
         })
     }
 
@@ -96,6 +162,11 @@ impl MolecularDrivingPoint {
     #[must_use]
     pub const fn material(&self) -> &MolecularDuct {
         &self.material
+    }
+    /// Original wall source used by feedback, terminal flow and every chimney.
+    #[must_use]
+    pub fn material_wall(&self) -> Option<&LocalMaterialWall> {
+        self.material_wall.as_deref()
     }
     /// Equilibrium inlet state shared by the pressure/flow and exciter owners.
     #[must_use]
@@ -215,3 +286,6 @@ impl MolecularDrivingPoint {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod material_wall_tests;

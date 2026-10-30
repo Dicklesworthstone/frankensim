@@ -12145,9 +12145,9 @@ before any listener absorption. G1/G3 tests cover the independent analytical
 cylinder response, the existing lossless limit and its impedance pole, actual
 reed pressure sensitivity, exact block replay and source-domain refusals.
 The adapter retains frozen homogeneous linear plane-wave acoustics, explicit
-rigid/slip or diffusive walls, the sampled FIR approximation and the existing
-compact-jet observer. It adds no nonlinear gas evolution, compliant walls,
-measured molecular data or experimental instrument claim.
+gas shear/thermal resolution, optional source-owned local membrane walls, the
+sampled FIR approximation and the existing compact-jet observer. It adds no
+nonlinear gas evolution, measured molecular data or experimental instrument claim.
 
 The molecular path also supplies actual flanged outlet flow to the existing
 `OutletPressure` observer. Its original chain and radiation load determine
@@ -12834,3 +12834,35 @@ late body-budget rollback with bit-identical retry.
 `DgGasRefresh::UniformMolecularDiffusion` selects the native uniform-background molecular/thermal entropy-and-compression transfer in the existing `prepare_dg_gas` transaction. It supports the original exact-mass and spatial wall routes, including the explicit spatial quadrature used by `DgSourceInput` gas fields; it never flattens spatial histories. The original molecular source law, species fractions, geometry and reservoir support remain bound. The same option is forwarded by existing one- and two-sided Bernoulli/DG gas-refresh APIs.
 
 The complete port transaction rebuilds the native propagator and algebraic port relations while preserving independently sourced branches, terminal channels and every original exterior MIMO pole state. Existing equilibrium-pressure and total absolute parameter-work checks still apply. Interior material changes do not reidentify the exterior medium. Parameter work is charged once, separately from molecular/thermal dissipation; this operation does not itself solve background heating or species transport. A regression in `dg_port::gas::tests::molecular` exercises nonzero molecular histories with an independently sourced branch/channel and full mutual rational terminal. Its full-crate integration execution remains separate from the focused native DG constitutive/continuation tests.
+
+### Source-material walls in molecular pressure feedback
+
+`MolecularDrivingPoint::new_with_material_wall` retains one
+`Arc<LocalMaterialWall>` and passes that same immutable source law into
+`MolecularDuct::new_with_compliant_wall`. The material identity, thickness,
+axial constraint, supported anisotropy and elastic/viscous/Maxwell response
+remain with the existing wall owner. Feedback, terminal flow and all finite
+chimney observations therefore consume the same jointly loaded gas operator.
+`material_wall()` exposes the original binding for inspection.
+
+The optional gas shear/thermal resolution remains independent of mechanical
+wall displacement. The existing characteristic FIR ladder and pressure
+reflection, finite-hole loads, opening fractions, wavefront factoring and
+Rayleigh outlet observation are unchanged. The positive material surface
+mass makes its high-frequency admittance decay as 1/omega, so the leading
+wavefront remains the original frozen molecular gas wavefront.
+
+Every actual radius and queried frequency must satisfy the material wall's
+domain. The existing near-DC probe also requires material support; missing
+data cannot fall back to a rigid wall. The caller still declares the exterior
+gas independently. This is a single local membrane material over the admitted
+duct and chimneys, without nonlocal shell coupling, exterior wall radiation,
+nonlinear gas evolution or a new performance-file grammar.
+
+The focused integration tests independently assemble a Debye caloric law and
+a membrane-loaded cylinder, compare pressure reflection and physical outlet
+flow, vary gas and solid relaxation independently in the receiver response,
+and check common source-band refusals. These tests are retained for the
+canonical coupling build; the session's executed native slice verifies the
+underlying molecular/compliant-wall operator but does not execute these
+coupling/FIR tests.
