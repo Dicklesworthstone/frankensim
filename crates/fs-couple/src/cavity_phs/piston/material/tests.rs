@@ -23,7 +23,7 @@ fn card(density: f64) -> MaterialCard {
     MaterialCard::assemble(MaterialStateId { chemistry: "synthetic specimen".into(),
         phase: "solid".into(), process: "authored".into(), revision: 0 }, claims, vec![]).unwrap()
 }
-fn body(density: f64) -> ResolvedBody {
+pub(in crate::cavity_phs::piston) fn body(density: f64) -> ResolvedBody {
     let card = card(density);
     let point = QueryPoint::new().with("T",300.0).unwrap();
     resolve_body(&[RegionBinding { key: "wall", material: &card, point: &point,

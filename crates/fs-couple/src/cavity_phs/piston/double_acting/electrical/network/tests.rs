@@ -16,10 +16,14 @@ use fs_phs::circuit::CircuitGraph;
 use fs_qty::{Density, Temperature};
 use fs_thermal::enthalpy::*;
 
-fn point(t: f64) -> QueryPoint {
+pub(in crate::cavity_phs::piston::double_acting) fn point(t: f64) -> QueryPoint {
     QueryPoint::new().with("T", t).unwrap()
 }
-fn card(k: f64, r: f64, slope: f64) -> (MaterialCard, ResolvedHeatCapacityCurve) {
+pub(in crate::cavity_phs::piston::double_acting) fn card(
+    k: f64,
+    r: f64,
+    slope: f64,
+) -> (MaterialCard, ResolvedHeatCapacityCurve) {
     let mut claims = ClaimSet::new();
     for (name, dims, a, b) in [
         (
@@ -86,7 +90,7 @@ fn card(k: f64, r: f64, slope: f64) -> (MaterialCard, ResolvedHeatCapacityCurve)
     .unwrap();
     (card, curve)
 }
-fn cells<'a>(
+pub(in crate::cavity_phs::piston::double_acting) fn cells<'a>(
     cards: &'a [MaterialCard; 2],
     curves: &'a [ResolvedHeatCapacityCurve; 2],
     p: &'a QueryPoint,
@@ -105,7 +109,9 @@ fn cells<'a>(
         conductivity: Some((key, MaterialPropertySelection::SingleClaimOnly)),
     })
 }
-fn initial<'a>(curves: &'a [ResolvedHeatCapacityCurve; 2]) -> DepositionSimulation<'a> {
+pub(in crate::cavity_phs::piston::double_acting) fn initial<'a>(
+    curves: &'a [ResolvedHeatCapacityCurve; 2],
+) -> DepositionSimulation<'a> {
     let events = [0, 1]
         .map(|i| TimedEvent {
             time_s: 0.0,
@@ -156,7 +162,7 @@ fn initial<'a>(curves: &'a [ResolvedHeatCapacityCurve; 2]) -> DepositionSimulati
     .unwrap()
     .0
 }
-fn resistor() -> [CellResistor; 1] {
+pub(in crate::cavity_phs::piston::double_acting) fn resistor() -> [CellResistor; 1] {
     [CellResistor {
         destination: ResistorCell {
             branch: 1,
@@ -167,7 +173,10 @@ fn resistor() -> [CellResistor; 1] {
         area_m2: 0.000025,
     }]
 }
-fn circuit(binding: &MaterialNetwork<'_>, thermal: &DepositionSimulation<'_>) -> MaterialCircuit {
+pub(in crate::cavity_phs::piston::double_acting) fn circuit(
+    binding: &MaterialNetwork<'_>,
+    thermal: &DepositionSimulation<'_>,
+) -> MaterialCircuit {
     MaterialCircuit::new(
         CircuitGraph {
             node_count: 3,
@@ -185,7 +194,7 @@ fn circuit(binding: &MaterialNetwork<'_>, thermal: &DepositionSimulation<'_>) ->
     )
     .unwrap()
 }
-fn controls() -> NetworkGasSolve {
+pub(in crate::cavity_phs::piston::double_acting) fn controls() -> NetworkGasSolve {
     NetworkGasSolve {
         network: CircuitEnthalpySolve {
             maximum_cells: 2,
@@ -208,7 +217,9 @@ fn controls() -> NetworkGasSolve {
         total_energy_tolerance_j: 1e-6,
     }
 }
-fn drive(area: f64) -> ElectromagneticNetworkDrive {
+pub(in crate::cavity_phs::piston::double_acting) fn drive(
+    area: f64,
+) -> ElectromagneticNetworkDrive {
     ElectromagneticNetworkDrive {
         gas: DoubleNetworkDrive {
             cells: [CellId(0), CellId(1)],

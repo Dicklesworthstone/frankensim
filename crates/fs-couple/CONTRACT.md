@@ -8968,6 +8968,59 @@ independent paired-blade motion, exact retry after source refusal or final
 cancellation, and rejection of an unowned second inventory. Native execution
 and measured physical validation remain separate gates.
 
+## Acoustic loading through finite electrothermal material networks
+
+`DoubleActingGasPiston::electroacoustic_network_candidate` closes the same
+acoustic reaction through the original `MaterialNetwork`,
+`circuit_enthalpy::driven_candidate`, electromagnetic velocity residual and
+paired gas/thermal boundary owner. Each thermal trial uses its own resolved
+material resistance for both native circuit current and Joule heat. Acoustic
+back-pressure changes that trial's motion, back-emf, gas temperatures and
+interface transfers before the finite-cell residual is admitted.
+
+The additional affine resistance reaches every original heat/momentum trial.
+DG histories remain immutable throughout the nested electrical and thermal
+searches; complete acoustic loads advance once at the final displacement
+flows. Existing total circuit-trial, boundary-solve, heat and gas proposal
+budgets remain effective, including rejected trials and final admission.
+There is no second circuit, gas, heat or acoustic integration engine.
+
+The original circuit/enthalpy owner deposits resistor heat into its authored
+finite cells once. Both gas-contact heats debit their actual counterpart
+cells, including shared-cell accumulation. Native non-electromagnetic work
+uses actual wall work after removing electrical transfer, allowing the
+surrounding acoustic account to cancel only acoustic reaction. The enclosing
+balance sums electrical, finite thermal, gas, kinetic and acoustic storage,
+native acoustic losses and signed terminal work against external supplies.
+It neither adds deposited Joule heat again nor manufactures heat from
+unmodeled acoustic loss. The smaller native/acoustic energy tolerance gates
+the complete candidate.
+
+The `MaterialDoubleActingGasPiston` entry point retains the original
+source-resolved specimen and canonical inertia. Its private binding preserves
+the complete proposed dynamics owner and checks unchanged mass and face
+geometry. The existing material electromagnetic network path uses this same
+binding, fixing reconstruction that reset accepted port clocks and cumulative
+history. Subsequent acoustic intervals therefore see the original continuing
+mechanical clock, not a newly initialized piston.
+
+All endpoints return together; late source, energy, global-work or cancellation
+failure returns none. Zero-area faces reproduce the original finite network
+while acoustic history continues freely. The moving specimen's source state
+remains frozen; finite thermal cells are explicitly authored counterparts.
+Fixed thermal/acoustic geometry, the native first-order thermal discretization,
+held interval acoustic flow, uniform closed gas chambers and frozen linear
+transducer assumptions remain. This is not a valve jet, a moving-mesh duct,
+magnetic saturation or an inferred thermal-deformation model.
+
+Four native G1/G3/G4 regression groups cover independent capacitor, caloric,
+finite-cell, kinetic and DG energy over multiple steps; current/Joule/heat
+feedback; exact zero-area reduction; source/budget/cancellation refusal and
+retry; and two-step source-bound continuation with original port histories.
+These tests are authored but unexecuted: DSR/RCH, the pinned toolchain and the
+required constellation checkouts are unavailable. Parser/formatter checks
+provide source-level evidence only.
+
 ## Reciprocal electrical and acoustic drive on one shared piston
 
 `DoubleActingGasPiston::electroacoustic_candidate` composes the original

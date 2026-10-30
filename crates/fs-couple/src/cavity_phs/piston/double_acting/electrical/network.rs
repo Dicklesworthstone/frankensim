@@ -127,13 +127,26 @@ impl DoubleActingGasPiston {
         circuit:&MaterialCircuit,inputs:&[f64],drive:ElectromagneticNetworkDrive,
         controls:NetworkGasSolve,guess_j:&[f64],cancelled:impl FnMut()->bool,
     )->Result<DrivenNetworkCandidate<'m>,DrivenNetworkError> {
+        self.electromagnetic_network_candidate_with_midpoint_resistance(binding,thermal,target_s,
+            circuit,inputs,drive,controls,guess_j,0.0,cancelled)
+    }
+
+    /// Shared acoustic/mechanical composition: retain the same endpoint
+    /// resistance, heat and velocity solves, with a native affine load on motion.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::cavity_phs::piston) fn electromagnetic_network_candidate_with_midpoint_resistance<'m>(
+        &self,binding:&MaterialNetwork<'_>,thermal:&DepositionSimulation<'m>,target_s:f64,
+        circuit:&MaterialCircuit,inputs:&[f64],drive:ElectromagneticNetworkDrive,
+        controls:NetworkGasSolve,guess_j:&[f64],resistance_n_s_m:f64,cancelled:impl FnMut()->bool,
+    )->Result<DrivenNetworkCandidate<'m>,DrivenNetworkError> {
         let cancel=RefCell::new(cancelled);
         let check=||if (*cancel.borrow_mut())(){Err(DepositionError::Cancelled)}else{Ok(())};
         check()?;
         let dt=target_s-thermal.time_s();
         if !positive(dt) || drive.gas.input.duration_s!=dt || controls.maximum_boundary_solves==0
             || !positive(controls.total_energy_tolerance_j) || drive.motion.circuit!=controls.network.circuit
-            || binding.resistors.len()>crate::material_circuit::MAX_MATERIAL_CIRCUIT_BRANCHES {
+            || binding.resistors.len()>crate::material_circuit::MAX_MATERIAL_CIRCUIT_BRANCHES
+            || !resistance_n_s_m.is_finite() || resistance_n_s_m<0.0 {
             return Err(CircuitEnthalpyError::Invalid("one clock, one electrical policy and bounded coupled work required"));
         }
         let mut coverage=BTreeMap::new();
@@ -166,8 +179,8 @@ impl DoubleActingGasPiston {
                         if !total_force.is_finite() || (force!=0.0 && total_force==drive.gas.input.external_force_n) {
                             return Err(ThermalPistonError::Invalid("electromagnetic force vanished in boundary load"));
                         }
-                        let boundary=self.thermal_boundaries_candidate(DoublePistonInput {external_force_n:total_force,..drive.gas.input},
-                            drive.gas.piston,drive.gas.exchange,temperatures,|gases|Ok([
+                        let boundary=self.thermal_boundaries_candidate_with_midpoint_resistance(DoublePistonInput {external_force_n:total_force,..drive.gas.input},
+                            drive.gas.piston,drive.gas.exchange,temperatures,resistance_n_s_m,|gases|Ok([
                                 resolve_contact(binding,drive.gas.cells[0],state,&coefficients.source,&gases[0],drive.geometry[0])?,
                                 resolve_contact(binding,drive.gas.cells[1],state,&coefficients.source,&gases[1],drive.geometry[1])?,
                             ]),||(*cancel.borrow_mut())())?;
@@ -200,10 +213,18 @@ impl DoubleActingGasPiston {
                     source:DrivenNetworkSource {material:coefficients.source,boundary:coupled.mechanical,motion:coupled.step,external_heat_j}})
             },||(*cancel.borrow_mut())())?;
         let r=candidate.report();let source=&r.source;let p=&source.boundary.step().piston;
+        // The additional load is outside this native circuit/thermal boundary.
+        // Keep its ACTUAL mechanical work so a surrounding acoustic account can
+        // cancel it. The zero-resistance path retains its original arithmetic.
+        let mechanical_work=if resistance_n_s_m==0.0 {
+            drive.gas.input.external_force_n*p.displacement_m
+        } else {
+            p.external_force_work_j-source.motion.mechanical_work_j
+        };
         let total=(r.electrical.stored_after_j-r.electrical.stored_before_j)+r.thermal.stored_energy_change_j
             +p.gas[0].stored_energy_change_j+p.gas[1].stored_energy_change_j+p.kinetic_energy_change_j
             -source.motion.external_electrical_work_j-source.external_heat_j-drive.gas.input.heat_j[0]-drive.gas.input.heat_j[1]
-            -drive.gas.input.external_force_n*p.displacement_m;
+            -mechanical_work;
         if !source.external_heat_j.is_finite() || !total.is_finite() || total.abs()>controls.total_energy_tolerance_j {
             return Err(CircuitEnthalpyError::Invalid("electrical, finite thermal, gas and mechanical storage do not close external supply"));
         }
@@ -224,6 +245,16 @@ pub struct MaterialDrivenNetworkCandidate<'m> {
     report: DrivenNetworkReport,
 }
 impl<'m> MaterialDrivenNetworkCandidate<'m> {
+    /// Attach the unchanged material body to the complete proposed dynamics.
+    /// Keeping the owner intact preserves its accepted port clocks and history.
+    pub(in crate::cavity_phs::piston) fn from_native(
+        original:&MaterialDoubleActingGasPiston,candidate:DrivenNetworkCandidate<'m>,
+    )->Result<Self,DrivenNetworkError> {
+        let (thermal,circuit,next,report)=candidate.into_parts();
+        let piston=original.bind_piston_candidate(next)
+            .map_err(|e|motion_error(ElectricalMotionError::Mechanical(ThermalPistonError::from(e))))?;
+        Ok(Self {thermal,circuit,piston,report})
+    }
     /// Original finite thermal timeline at the proposed endpoint.
     pub const fn thermal(&self)->&DepositionSimulation<'m> {&self.thermal}
     /// Original electrical graph and accepted-candidate charges/fluxes.
@@ -249,14 +280,11 @@ impl MaterialDoubleActingGasPiston {
     )->Result<MaterialDrivenNetworkCandidate<'m>,DrivenNetworkError> {
         let candidate=self.piston().electromagnetic_network_candidate(binding,thermal,target_s,circuit,inputs,
             drive,controls,guess_j,&mut cancelled)?;
-        let (thermal,circuit,next,report)=candidate.into_parts();
-        let piston=Self::new(next.primary().gas().clone(),next.opposing().clone(),self.body().clone(),
-            [next.primary().area_m2(),next.opposing_area_m2()],next.primary().velocity_m_s())
-            .map_err(|e|motion_error(ElectricalMotionError::Mechanical(ThermalPistonError::from(e))))?;
+        let candidate=MaterialDrivenNetworkCandidate::from_native(self,candidate)?;
         if cancelled(){return Err(CircuitEnthalpyError::Cancelled);}
-        Ok(MaterialDrivenNetworkCandidate {thermal,circuit,piston,report})
+        Ok(candidate)
     }
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::cavity_phs::piston::double_acting) mod tests;

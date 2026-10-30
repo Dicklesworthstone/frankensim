@@ -383,6 +383,21 @@ impl MaterialDoubleActingGasPiston {
     /// One accepted shared dynamics owner; cannot independently step either gas.
     #[must_use]
     pub const fn piston(&self) -> &DoubleActingGasPiston { &self.piston }
+
+    // Preserve the complete accepted-candidate owner, including both port clocks
+    // and cumulative histories. Reconstructing from gas/velocity snapshots would
+    // reset that history and detach continuation from its coupled acoustic clock.
+    pub(in crate::cavity_phs::piston) fn bind_piston_candidate(
+        &self, piston: DoubleActingGasPiston,
+    ) -> Result<Self, PistonError> {
+        if piston.primary().mass_kg().to_bits() != self.piston.primary().mass_kg().to_bits()
+            || piston.primary().area_m2().to_bits() != self.piston.primary().area_m2().to_bits()
+            || piston.opposing_area_m2().to_bits() != self.piston.opposing_area_m2().to_bits() {
+            return Err(PistonError::Invalid("a material piston candidate must retain its original inertia and face geometry"));
+        }
+        Ok(Self { body: self.body.clone(), piston })
+    }
+
     /// Source-bearing [primary, opposing] gas states for existing thermal,
     /// transport and acoustic consumers. No duplicate coefficient cache.
     #[must_use]
@@ -466,5 +481,5 @@ impl MaterialDoubleActingGasPiston {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 

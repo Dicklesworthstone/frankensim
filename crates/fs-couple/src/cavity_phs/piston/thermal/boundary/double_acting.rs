@@ -78,6 +78,21 @@ impl DoubleActingGasPiston {
     pub fn thermal_boundaries_candidate<S, E>(
         &self, input: DoublePistonInput, controls: DoublePistonSolve,
         exchange: DoubleHeatExchangeSolve, boundary_temperature_k: [f64; 2],
+        resolve: impl FnMut(&[ResolvedThermochemicalGasState; 2])
+            -> Result<[ConductanceSample<S>; 2], E>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<DoubleBoundaryCandidate<S>, ThermalPistonError<E>> {
+        self.thermal_boundaries_candidate_with_midpoint_resistance(input, controls,
+            exchange, boundary_temperature_k, 0.0, resolve, cancelled)
+    }
+
+    /// Shared composition seam: every thermal trial sees the same affine
+    /// mechanical load, while the original impulse owner supplies its tangent.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::cavity_phs::piston) fn thermal_boundaries_candidate_with_midpoint_resistance<S, E>(
+        &self, input: DoublePistonInput, controls: DoublePistonSolve,
+        exchange: DoubleHeatExchangeSolve, boundary_temperature_k: [f64; 2],
+        resistance_n_s_m: f64,
         mut resolve: impl FnMut(&[ResolvedThermochemicalGasState; 2])
             -> Result<[ConductanceSample<S>; 2], E>,
         mut cancelled: impl FnMut() -> bool,
@@ -85,7 +100,8 @@ impl DoubleActingGasPiston {
         poll(&mut cancelled)?;
         for face in exchange.faces { feedback::admit::<E>(face)?; }
         if !positive(input.duration_s) || !boundary_temperature_k.iter().all(|t| positive(*t))
-            || !input.heat_j.iter().all(|q| q.is_finite()) || exchange.maximum_joint_trials == 0 {
+            || !input.heat_j.iter().all(|q| q.is_finite()) || exchange.maximum_joint_trials == 0
+            || !resistance_n_s_m.is_finite() || resistance_n_s_m < 0.0 {
             return Err(ThermalPistonError::Invalid("finite paired boundary temperatures, heat, clock and work bound required"));
         }
         let tolerance = exchange.faces[0].energy_tolerance_j.min(exchange.faces[1].energy_tolerance_j);
@@ -104,7 +120,8 @@ impl DoubleActingGasPiston {
                     return Err(ThermalPistonError::Invalid("boundary heat vanishes or overflows in paired gas input"));
                 }
                 let mut next = self.clone();
-                let piston = next.step(DoublePistonInput { heat_j, ..input }, controls, &mut *cancelled)?;
+                let piston = next.step_with_midpoint_resistance(DoublePistonInput { heat_j, ..input },
+                    controls, resistance_n_s_m, &mut *cancelled)?;
                 material_trials = material_trials.checked_add(piston.material_trials)
                     .ok_or(ThermalPistonError::Invalid("paired material proposal count overflow"))?;
                 poll(cancelled)?;

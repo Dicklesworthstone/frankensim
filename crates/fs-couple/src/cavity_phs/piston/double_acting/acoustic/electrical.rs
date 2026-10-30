@@ -4,6 +4,9 @@
 //! reaction in every native momentum proposal. Acoustic histories advance only
 //! once, after current, back emf and loaded motion have converged together.
 
+/// Finite material heat, electrical feedback and acoustic pressure together.
+pub mod network;
+
 use super::{
     AcousticMotionError, AcousticMotionFace, AcousticMotionSolve, AcousticMotionStep, finish,
     prepare,
