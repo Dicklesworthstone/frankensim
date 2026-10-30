@@ -1086,8 +1086,8 @@ workspace admission, late cancellation/replay and shear-heating source refusal.
 All 18 compressible tests, including the existing molecular path, pass.
 
 This field is Estimated stationary inviscid evolving-composition transport.
-The reactive adapter below composes chemistry; molecular species diffusion,
-moving domains, exact pressure preservation at moving unequal-caloric contacts,
+The reactive and molecular adapters below compose chemistry and species/heat/
+momentum diffusion. Moving domains, exact pressure preservation at moving unequal-caloric contacts,
 fully discrete entropy inequalities and experimental validation remain outside
 this lane.
 
@@ -1107,8 +1107,8 @@ Each accepted interval is chemistry(dt/2), shared Cartesian advection(dt),
 chemistry(dt/2). The post-reaction face CFL still owns the admissible acoustic
 step. If it shortens the interval, the whole trial restarts from the original
 field before either chemistry half step is accepted. The two existing full
-Cartesian workspaces and the original prepared reactor are reused. Their
-combined numerical heap capacity, including caller state-vector excess
+Cartesian workspaces, original prepared reactor and combined boundary buffers
+are reused. Their combined numerical heap capacity, including caller state-vector excess
 capacity, is checked against an explicit byte budget and the existing 1 GiB
 ceiling. Immutable sources/prepared caloric coefficients and bounded stack
 scratch are excluded. Accepted steps allocate no new numerical arrays.
@@ -1117,9 +1117,10 @@ The coupled report includes both chemistry halves, the original transport
 report, per-species source changes, both momentum balances, referenced energy,
 total mass and physical chemical/thermal/kinetic energy. Physical energy is
 formed from conservative differences and original reference changes, avoiding
-subtraction of large absolute totals. Chemistry has no boundary flux, so the
-original advective per-face impulses are also the complete physical boundary
-exchange. The borrowed field's Euler metadata describes only the middle
+subtraction of large absolute totals. Chemistry has no boundary flux; without
+molecular transport the original advective impulses are the complete boundary
+exchange. With it, the reactive owner integrates both molecular half intervals
+and advection into its combined loads. The borrowed field's Euler metadata describes only the middle
 advection phase; the reactive owner's `last_step` describes the full interval.
 Failed source, chemistry-work, coupling-retry or cancellation checks preserve
 all accepted cells, clock, both reports and face impulses.
@@ -1136,11 +1137,71 @@ a calibrated chemical mechanism or measured combustion behavior.
 The original reactor's selected backward Euler or SDIRK2 method is retained.
 Symmetric composition alone does not establish coupled temporal order;
 limiting and first-order retries may also reduce observed order. No fully
-discrete entropy theorem follows from splitting. This rung remains stationary
-and inviscid: it does not add
-molecular species diffusion, flame-speed/thickness calibration, turbulence,
-moving boundaries, finite-rate chemistry in the 3-D field or experimental
-validation.
+discrete entropy theorem follows from splitting. This rung remains stationary;
+the explicit molecular extension below supplies viscous/thermal/species
+transport. Flame-speed/thickness calibration, turbulence, moving boundaries
+and experimental validation remain separate work.
+
+### Evolving-species molecular transport and reacting diffusion in two dimensions
+
+`compressible::mixture::molecular::MolecularTransport2d` prepares the original
+`fs-gas::multicomponent::dissipation::PlanarTransport` on the exact field source
+and caloric interval. The source owner supplies mass-averaged Maxwell--Stefan
+species diffusion, original partial enthalpies relative to the same species
+energy references, Fourier heat and the complete planar Newtonian stress.
+Normal and tangential momentum and full viscous work share the conservative
+energy flux. Neither chemistry nor viscous dissipation adds a second heat source.
+Every actual face temperature, pressure and changing mole composition reaches
+the original constant, kinetic or material transport law.
+
+The existing Cartesian face traversal, reflected/periodic neighbor lookup,
+conservative divergence and RK boundary integration are reused. Primitive
+inversion and four velocity derivatives are cached once per cell/stage. The
+source kernel re-admits face primitives without repeating energy inversion.
+One stored face flux transfers equal and opposite amounts to its neighbors;
+periodic duplicates copy the identical bits. The first prepared face pass also
+sets the initial parabolic interval and supplies the first SSP stage, avoiding
+a duplicate pass on successful substeps. Both stages enforce the original
+source domain and a conservative engineering diffusion-scale estimate. This
+is not an unconditional positivity, entropy or stability theorem.
+
+Periodic axes and stationary adiabatic impermeable slip walls are admitted.
+At a wall, both normal velocity and tangential divergence contribute to its
+normal viscous traction; species, tangential traction, heat and wall work are
+zero. Transmissive Euler ends refuse, since they do not supply a molecular
+reservoir's composition/temperature boundary law. Normal support traction
+includes signed `p-tau_nn` when composed with advection.
+
+The operator advances a complete requested duration through bounded SSP RK2
+substeps without changing the Euler clock or advection metadata. Its field,
+report and integrated face loads publish only after the final cancellation
+check. Flat state/stage/face/gradient/MS/boundary buffers are prepared under an
+explicit combined field/operator byte budget and the existing 1 GiB ceiling.
+Caller state-vector excess capacity is counted and follows its actual owner
+during O(1) buffer exchanges. Immutable source/prepared coefficients, bounded
+stack scratch and supplied transport-law storage/evaluation allocations are
+outside this numerical-buffer budget. No whole-process/provider memory or
+generic material-law allocation-free claim is made.
+
+`ReactingEuler2d::step_with_dissipation` composes D(dt/2), C(dt/2), A(dt),
+C(dt/2), D(dt/2). Heat-driven acoustic shortening restarts all five phases at
+one common interval. Final molecular heating must retain the chemistry source
+temperature interval. One explicit combined budget covers both owners.
+Complete physical loads and source/energy balances include all phases; the
+molecular owner's own last report describes the second half interval.
+Rejected complete trials preserve both owners' accepted reports and loads,
+including cancellation after the final molecular half interval.
+
+Seven added G0/G1/G3/G4 regression groups exercise oblique species-diffusion
+refinement with unequal heat capacities and formation references, data-only
+diffusivity changes, independent oblique vector stress symbols and viscous
+heating, the original 1-D molecular owner and x/y rotation, stationary wall
+impulses, complete memory/excess-capacity admission, transmissive refusal,
+requested-duration work/cancellation/replay, uniform reacting-field recovery
+with heat-driven CFL restarts, and atomic full reacting/molecular wall loads.
+These manufactured cases do not establish a measured chemical mechanism,
+flame speed or thickness, Soret/Dufour transport, no-slip boundary layers,
+rarefaction, turbulence or experimental validation.
 
 ### Volumetric evolving-species shock fields
 

@@ -5,10 +5,13 @@
 //! with the shared conservative Cartesian transport. No reaction, thermodynamic
 //! conversion, heat-release law or second spatial discretization is introduced.
 
+use super::molecular::{DissipationControl, MolecularReport, MolecularTransport2d, TransportLaw};
 use super::{
     BoundaryImpulse, BoundarySide, MAX_MIXTURE_WORKSPACE_BYTES, MixtureEuler2d, StepControl,
-    StepReport as TransportStepReport, Totals, WIDTH_LIMIT, allocated, cell, checked_totals, sum,
+    StepReport as TransportStepReport, Totals, WIDTH_LIMIT, allocated, boundary_view, cell,
+    checked_totals, copy_values, sum, sum_rows,
 };
+use fs_gas::multicomponent::dissipation::ConstantTransport;
 pub use fs_gas::multicomponent::reactive::{CellChemistry, ChemistryReport, ReactiveError};
 use fs_qty::{Time, Volume};
 
@@ -41,6 +44,8 @@ pub struct ReactiveStepReport {
     pub transport: TransportStepReport,
     /// Accepted chemistry changes, excluding every rejected complete attempt.
     pub chemistry: ChemistryReport,
+    /// Original molecular half intervals when explicitly composed with chemistry.
+    pub dissipation: Option<SplitDissipationReport>,
     /// Complete original field.
     pub before: Totals,
     /// Complete final field.
@@ -58,6 +63,15 @@ pub struct ReactiveStepReport {
     pub absolute_energy_residual_j: f64,
 }
 
+/// Accepted molecular evolution before and after the reaction/advection split.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SplitDissipationReport {
+    /// Complete molecular half interval before chemistry/advection.
+    pub first: MolecularReport,
+    /// Complete molecular half interval after chemistry/advection.
+    pub second: MolecularReport,
+}
+
 /// Source-owned reactions coupled to the shared two-dimensional gas field.
 ///
 /// All buffers are prepared once. Complete-step retries restore the original
@@ -69,19 +83,21 @@ pub struct ReactiveStepReport {
 /// Symmetric composition alone is not a coupled temporal-order certificate;
 /// limiting and first-order advection retries may also reduce observed order.
 /// No global accuracy, entropy, flame or experimental-validation certificate is
-/// implied. This stationary inviscid lane does not include species diffusion.
+/// implied. [`Self::step_with_dissipation`] adds original-source species
+/// diffusion, Fourier heat and full planar viscous work to the same interval.
 pub struct ReactingEuler2d {
     accepted: MixtureEuler2d,
     trial: MixtureEuler2d,
     chemistry: CellChemistry,
-    workspace_bytes: usize,
+    boundary_impulses: Vec<f64>,
+    boundary_trial: Vec<f64>,
     last_step: Option<ReactiveStepReport>,
 }
 impl ReactingEuler2d {
     /// Total numerical heap requirement: both full Cartesian workspaces,
     /// including existing accepted-vector excess capacity, and the prepared
-    /// chemistry workspace. Immutable sources/prepared caloric coefficients and
-    /// bounded stack scratch are excluded, as in the original owners.
+    /// chemistry workspace and combined boundary buffers. Immutable sources/
+    /// prepared caloric coefficients and bounded stack scratch are excluded.
     pub fn required_workspace_bytes(
         flow: &MixtureEuler2d,
         chemistry: &CellChemistry,
@@ -92,6 +108,13 @@ impl ReactingEuler2d {
                 flow.grid(),
             )?)
             .and_then(|bytes| bytes.checked_add(chemistry.workspace_bytes()))
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    flow.boundary_impulses
+                        .len()
+                        .checked_mul(2 * size_of::<f64>())?,
+                )
+            })
             .ok_or(ReactiveError::Invalid(
                 "reacting Cartesian workspace size overflow",
             ))
@@ -149,12 +172,20 @@ impl ReactingEuler2d {
             &mut trial.boundary_impulses,
             &mut cancelled,
         )?;
+        let mut boundary_impulses = allocated(flow.boundary_impulses.len(), 0.0)?;
+        copy_values(
+            &flow.boundary_impulses,
+            &mut boundary_impulses,
+            &mut cancelled,
+        )?;
+        let boundary_trial = allocated(flow.boundary_impulses.len(), 0.0)?;
         poll(&mut cancelled)?;
         Ok(Self {
             accepted: flow,
             trial,
             chemistry,
-            workspace_bytes: bytes,
+            boundary_impulses,
+            boundary_trial,
             last_step: None,
         })
     }
@@ -170,20 +201,30 @@ impl ReactingEuler2d {
         &self.chemistry
     }
     /// Actual combined prepared numerical heap requirement in bytes.
-    pub const fn workspace_bytes(&self) -> usize {
-        self.workspace_bytes
+    pub fn workspace_bytes(&self) -> usize {
+        self.accepted.workspace_bytes()
+            + self.trial.workspace_bytes()
+            + self.chemistry.workspace_bytes()
+            + (self.boundary_impulses.capacity() + self.boundary_trial.capacity())
+                * size_of::<f64>()
     }
     /// Most recent completely accepted chemistry/transport interval.
     pub const fn last_step(&self) -> Option<&ReactiveStepReport> {
         self.last_step.as_ref()
     }
-    /// Complete outward exchange through each physical face. Chemistry has no
-    /// boundary flux, so these are the original integrated advective transfers.
+    /// Complete outward exchange through each physical face, including both
+    /// molecular half intervals when enabled. The borrowed flow's own face
+    /// report still describes only the middle advective stage.
     pub fn boundary_impulses(
         &self,
         side: BoundarySide,
     ) -> impl ExactSizeIterator<Item = BoundaryImpulse<'_>> {
-        self.accepted.boundary_impulses(side)
+        boundary_view(
+            &self.boundary_impulses,
+            self.accepted.grid(),
+            self.accepted.gas().species_count(),
+            side,
+        )
     }
     /// Release the accepted conservative field after all completed reactions.
     pub fn into_flow(self) -> MixtureEuler2d {
@@ -197,9 +238,72 @@ impl ReactingEuler2d {
         &mut self,
         maximum_duration: Time,
         controls: ReactiveStepControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveStepReport, ReactiveError> {
+        self.step_impl::<ConstantTransport>(
+            maximum_duration,
+            controls,
+            None,
+            DissipationControl::default(),
+            MAX_MIXTURE_WORKSPACE_BYTES,
+            cancelled,
+        )
+    }
+
+    /// Compose D(dt/2), C(dt/2), A(dt), C(dt/2), D(dt/2) over one accepted
+    /// physical interval. The original transport law sees each actual evolving
+    /// local composition, temperature and pressure. Its source and grid must
+    /// match. The explicit total byte limit includes this owner and operator;
+    /// immutable/provider storage retains the molecular owner's exclusions.
+    ///
+    /// A failed complete trial leaves both owners' accepted reports and loads
+    /// unchanged. On success the operator's own report describes the last
+    /// molecular half interval; this owner's report/loads combine all phases.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_dissipation<L: TransportLaw>(
+        &mut self,
+        operator: &mut MolecularTransport2d<L>,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: DissipationControl,
+        maximum_workspace_bytes: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveStepReport, ReactiveError> {
+        self.step_impl(
+            maximum_duration,
+            controls,
+            Some(operator),
+            dissipation_controls,
+            maximum_workspace_bytes,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_impl<L: TransportLaw>(
+        &mut self,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        mut operator: Option<&mut MolecularTransport2d<L>>,
+        dissipation_controls: DissipationControl,
+        maximum_workspace_bytes: usize,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ReactiveStepReport, ReactiveError> {
         poll(&mut cancelled)?;
+        let bytes = self
+            .workspace_bytes()
+            .checked_add(operator.as_ref().map_or(0, |op| op.workspace_bytes()))
+            .ok_or(ReactiveError::Invalid(
+                "reacting molecular workspace size overflow",
+            ))?;
+        if bytes > maximum_workspace_bytes || bytes > MAX_MIXTURE_WORKSPACE_BYTES {
+            return Err(ReactiveError::Invalid(
+                "reacting molecular total workspace budget",
+            ));
+        }
+        if operator.is_some() {
+            dissipation_controls.validate()?;
+        }
         if !positive(maximum_duration.value())
             || controls.maximum_coupling_retries > 32
             || !positive(controls.transport.cfl)
@@ -246,6 +350,24 @@ impl ReactingEuler2d {
             let mut chemistry = ChemistryReport::default();
             let mut shortened = None;
             let attempt = (|| {
+                let first = match operator.as_deref_mut() {
+                    Some(operator) => {
+                        let report = operator.advance_unpublished(
+                            &mut self.trial,
+                            Time::new(0.5 * dt),
+                            dissipation_controls,
+                            maximum_workspace_bytes,
+                            &mut cancelled,
+                        )?;
+                        copy_values(
+                            operator.trial_impulses(),
+                            &mut self.boundary_trial,
+                            &mut cancelled,
+                        )?;
+                        Some(report)
+                    }
+                    None => None,
+                };
                 react_cells(
                     &mut self.trial,
                     &mut self.chemistry,
@@ -262,6 +384,19 @@ impl ReactingEuler2d {
                         "Euler shortened the reacting interval",
                     ));
                 }
+                if first.is_some() {
+                    add_impulses(
+                        &self.trial.boundary_impulses,
+                        &mut self.boundary_trial,
+                        &mut cancelled,
+                    )?;
+                } else {
+                    copy_values(
+                        &self.trial.boundary_impulses,
+                        &mut self.boundary_trial,
+                        &mut cancelled,
+                    )?;
+                }
                 react_cells(
                     &mut self.trial,
                     &mut self.chemistry,
@@ -269,9 +404,45 @@ impl ReactingEuler2d {
                     &mut chemistry,
                     &mut cancelled,
                 )?;
+                let second = match operator.as_deref_mut() {
+                    Some(operator) => {
+                        let report = operator.advance_unpublished(
+                            &mut self.trial,
+                            Time::new(0.5 * dt),
+                            dissipation_controls,
+                            maximum_workspace_bytes,
+                            &mut cancelled,
+                        )?;
+                        add_impulses(
+                            operator.trial_impulses(),
+                            &mut self.boundary_trial,
+                            &mut cancelled,
+                        )?;
+                        // Viscous heat can leave a narrower chemistry interval,
+                        // despite remaining in the broader admitted gas domain.
+                        let chemistry_controls = self.chemistry.controls();
+                        for row in self.trial.states.chunks_exact(n + 3) {
+                            let p = cell(row, n).primitive(&self.trial.gas, &mut cancelled)?;
+                            if !(chemistry_controls.minimum_temperature_k
+                                ..=chemistry_controls.maximum_temperature_k)
+                                .contains(&p.temperature)
+                            {
+                                return Err(ReactiveError::Invalid(
+                                    "final molecular state is outside chemistry interval",
+                                ));
+                            }
+                        }
+                        Some(report)
+                    }
+                    None => None,
+                };
+                let dissipation = first
+                    .zip(second)
+                    .map(|(first, second)| SplitDissipationReport { first, second });
                 let after =
                     checked_totals(&self.trial.states, &self.trial.grid, n, &mut cancelled)?;
-                let boundary_change = transport.boundary_change;
+                let outward = sum_rows(&self.boundary_trial, n + 3, 1.0, &mut cancelled)?;
+                let boundary_change = Totals::from_row(&outward.map(|value| -value), n);
                 let mut residual = [0.0; WIDTH_LIMIT];
                 for k in 0..n {
                     residual[k] = after.species_masses[k]
@@ -317,6 +488,7 @@ impl ReactingEuler2d {
                     coupling_retries: retry,
                     transport,
                     chemistry,
+                    dissipation,
                     before,
                     after,
                     boundary_change,
@@ -328,6 +500,12 @@ impl ReactingEuler2d {
             match attempt {
                 Ok(report) => {
                     std::mem::swap(&mut self.accepted, &mut self.trial);
+                    std::mem::swap(&mut self.boundary_impulses, &mut self.boundary_trial);
+                    if let (Some(operator), Some(dissipation)) =
+                        (operator.as_deref_mut(), report.dissipation)
+                    {
+                        operator.publish(dissipation.second);
+                    }
                     self.last_step = Some(report);
                     return Ok(report);
                 }
@@ -361,14 +539,16 @@ fn copy_physical(
     Ok(())
 }
 
-fn copy_values(
+fn add_impulses(
     source: &[f64],
     target: &mut [f64],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), ReactiveError> {
     for (source, target) in source.chunks(4096).zip(target.chunks_mut(4096)) {
         poll(cancelled)?;
-        target.copy_from_slice(source);
+        for (source, target) in source.iter().zip(target) {
+            *target += source;
+        }
     }
     Ok(())
 }

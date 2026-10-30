@@ -5,8 +5,11 @@
 //! species energy references and planar HLLC/HLL/wall physics. All runtime
 //! arrays are flat and prepared once; no cell owns a heap-allocated species Vec.
 //! [`reactive`] composes the original finite-rate chemistry with this field.
-//! Molecular diffusion is not yet composed with this evolving-species lane.
+//! [`molecular`] transports species, heat and both momentum components through
+//! the original Maxwell--Stefan and material transport owners.
 
+/// Original-source Maxwell--Stefan diffusion, Fourier heat and planar viscous stress.
+pub mod molecular;
 /// Source-owned finite-rate chemistry on the same conservative Cartesian field.
 pub mod reactive;
 
@@ -333,16 +336,12 @@ impl MixtureEuler2d {
         &self,
         side: BoundarySide,
     ) -> impl ExactSizeIterator<Item = BoundaryImpulse<'_>> {
-        let n = self.gas.species_count();
-        let width = n + 3;
-        let range = self.grid.boundary_range(side);
-        self.boundary_impulses[range.start * width..range.end * width]
-            .chunks_exact(width)
-            .map(move |q| BoundaryImpulse {
-                species_masses: &q[..n],
-                momentum: [q[n], q[n + 1]],
-                energy: q[n + 2],
-            })
+        boundary_view(
+            &self.boundary_impulses,
+            &self.grid,
+            self.gas.species_count(),
+            side,
+        )
     }
     /// Compensated extensive sums in fixed canonical cell/component order.
     pub fn totals(&self) -> Totals {
@@ -717,6 +716,33 @@ fn cell(q: &[f64], n: usize) -> Cell<'_> {
         momentum: [q[n], q[n + 1]],
         energy: q[n + 2],
     }
+}
+fn boundary_view<'a>(
+    values: &'a [f64],
+    grid: &CartesianGrid,
+    species: usize,
+    side: BoundarySide,
+) -> impl ExactSizeIterator<Item = BoundaryImpulse<'a>> {
+    let width = species + 3;
+    let range = grid.boundary_range(side);
+    values[range.start * width..range.end * width]
+        .chunks_exact(width)
+        .map(move |q| BoundaryImpulse {
+            species_masses: &q[..species],
+            momentum: [q[species], q[species + 1]],
+            energy: q[species + 2],
+        })
+}
+fn copy_values(
+    source: &[f64],
+    target: &mut [f64],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), Error> {
+    for (source, target) in source.chunks(4096).zip(target.chunks_mut(4096)) {
+        cartesian::poll::<Error>(cancelled)?;
+        target.copy_from_slice(source);
+    }
+    Ok(())
 }
 pub(super) fn sum(values: impl Iterator<Item = f64>) -> f64 {
     let (mut total, mut correction) = (0.0, 0.0);

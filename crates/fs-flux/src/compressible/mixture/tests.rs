@@ -1,5 +1,6 @@
 use super::*;
 
+mod molecular;
 mod reactive;
 use crate::compressible::{AxisBoundaries, Euler2d, FrozenGas, SIDES, State};
 use fs_evidence::ValidityDomain;

@@ -1,4 +1,5 @@
 use super::*;
+mod molecular;
 use crate::compressible::mixture::reactive::{
     CellChemistry, ReactingEuler2d, ReactiveError, ReactiveStepControl, ReactiveStepReport,
 };
@@ -439,6 +440,7 @@ fn g0_complete_workspace_source_and_chemistry_work_limits_are_admitted() {
         flow.workspace_bytes()
             + MixtureEuler2d::required_workspace_bytes(flow.gas(), flow.grid()).unwrap()
             + prepared.workspace_bytes()
+            + 2 * flow.boundary_impulses.len() * size_of::<f64>()
     );
     assert!(matches!(
         ReactingEuler2d::new(flow, prepared, required - 1, || false),
