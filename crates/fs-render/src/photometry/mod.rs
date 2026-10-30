@@ -20,10 +20,12 @@
 
 use crate::charts::Ray;
 use crate::instances::SharedGeometry;
-use crate::tracer::{Material, Primitive, Shape, TracerError, photometric_intersect};
+use crate::tracer::photometric::geometry::PreparedGeometry;
+use crate::tracer::{Material, Primitive, Shape, TracerError};
 use fs_evidence::NumericalCertificate;
 use fs_exec::{Cancelled, Cx};
 use fs_geom::{Point3, Vec3};
+use std::sync::Arc;
 
 pub mod area;
 pub mod image;
@@ -320,8 +322,12 @@ pub struct IlluminanceEstimate {
 /// intentional: advance fixture transforms by constructing a new scene/job.
 /// Point emitters can represent every emitter in a multi-emitter fixture.
 /// Material optics are used by the image path; direct lux depends on visibility.
+/// A prepared scene index reuses the native mesh/instance intersections and is
+/// shared by calibrated path jobs. Its broad phase preserves original leaf
+/// order; it changes neither the physical estimator nor its uncertainty.
 pub struct PhotometricScene<'a> {
     primitives: &'a [Primitive],
+    geometry: Arc<PreparedGeometry>,
     sources: &'a [PhotometricSource],
     medium: PhotometricMedium<'a>,
     options: TransportOptions,
@@ -477,10 +483,20 @@ impl<'a> PhotometricScene<'a> {
         }
         Ok(Self {
             primitives,
+            geometry: Arc::new(PreparedGeometry::try_new(primitives, cx)?),
             sources,
             medium,
             options,
         })
+    }
+
+    pub(crate) fn prepared_geometry(&self) -> Arc<PreparedGeometry> {
+        Arc::clone(&self.geometry)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn disable_acceleration_for_test(&mut self) {
+        self.geometry = Arc::new(PreparedGeometry::linear_for_test());
     }
 
     /// Direct lux from every source, in caller order with compensated summation.
@@ -597,7 +613,10 @@ impl<'a> PhotometricScene<'a> {
             dir: connection.towards_source.scale(-1.0),
         };
         let end = connection.distance_m - self.options.ray_epsilon_m;
-        Ok(photometric_intersect(self.primitives, cx, &ray, end)?.is_none())
+        Ok(self
+            .geometry
+            .intersect(self.primitives, cx, &ray, end)?
+            .is_none())
     }
 }
 

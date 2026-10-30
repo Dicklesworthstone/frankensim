@@ -20,7 +20,11 @@ use crate::volumes::transport::AbsorbingGrid;
 use crate::volumes::transport::scattering::{PhaseFunction, ScatteringGrid};
 
 pub(super) mod area;
+pub(crate) mod geometry;
 mod point_sampling;
+
+#[cfg(test)]
+mod geometry_tests;
 
 #[cfg(test)]
 mod thermal_range_tests;
@@ -39,6 +43,7 @@ pub enum FixtureMedium<'view, 'field> {
 /// Immutable fixture state and finite transport support for one render job.
 pub(super) struct FixtureLighting<'a> {
     sources: &'a [PhotometricSource],
+    pub(super) geometry: std::sync::Arc<geometry::PreparedGeometry>,
     pub(super) areas: area::AreaLighting<'a>,
     options: TransportOptions,
     medium_bounds_m: Option<([f64; 3], [f64; 3])>,
@@ -180,12 +185,14 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
         ];
         let sobol = pixel_sobol(settings.sampler, settings.seed);
         let path_sobol = path_sobol(settings.sampler);
+        let geometry = direct_scene.prepared_geometry();
         cx.checkpoint()?;
         Ok(Self {
             scene,
             direct_scene,
             fixtures: FixtureLighting {
                 sources,
+                geometry,
                 areas,
                 options,
                 medium_bounds_m,
@@ -212,6 +219,12 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
 
     pub(crate) fn point_sampling(&self) -> PointFixtureSampling {
         self.fixtures.point_sampling
+    }
+
+    #[cfg(test)]
+    pub(crate) fn disable_acceleration_for_test(&mut self) {
+        self.direct_scene.disable_acceleration_for_test();
+        self.fixtures.geometry = self.direct_scene.prepared_geometry();
     }
 
     /// Return one unaccumulated absolute photometric XYZ sample. Y is cd/m²;
@@ -658,13 +671,15 @@ fn contribution(
             origin: source.position_m(),
             dir: from_source,
         };
-        if photometric_intersect(
-            &scene.primitives,
-            cx,
-            &ray,
-            distance - fixtures.options.ray_epsilon_m,
-        )?
-        .is_some()
+        if fixtures
+            .geometry
+            .intersect(
+                &scene.primitives,
+                cx,
+                &ray,
+                distance - fixtures.options.ray_epsilon_m,
+            )?
+            .is_some()
         {
             continue;
         }

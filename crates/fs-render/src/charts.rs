@@ -2446,12 +2446,12 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 }
 
 #[allow(clippy::float_cmp)] // Zero direction is an exact parallel-slab case.
-fn slab_hit(ray: &Ray, lo: [f64; 3], hi: [f64; 3], t_best: f64) -> bool {
+pub(crate) fn slab_hit(ray: &Ray, lo: [f64; 3], hi: [f64; 3], t_best: f64) -> bool {
     let o = [ray.origin.x, ray.origin.y, ray.origin.z];
     let d = [ray.dir.x, ray.dir.y, ray.dir.z];
-    // The only caller supplies the finite, nonzero result of
-    // `scaled_parameter_ray`; keep node validity in the hot loop without
-    // redundantly revalidating the same ray for every visited BVH node.
+    // Callers supply a finite, nonzero ray, either from
+    // `scaled_parameter_ray` or the admitted scene broad phase. Keep node
+    // validity in the hot loop without revalidating the ray at every node.
     debug_assert!(o.into_iter().chain(d).all(f64::is_finite));
     if lo.into_iter().chain(hi).any(|value| !value.is_finite())
         || t_best.is_nan()

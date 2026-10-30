@@ -296,8 +296,10 @@ pub(super) fn direct_contribution(
         dir: direction,
     };
     #[cfg(feature = "photometry")]
-    let intersection = if fixtures.is_some() {
-        intersect_primitives(&scene.primitives, cx, &ray, ray_time, Some(f64::MAX))?
+    let intersection = if let Some(fixtures) = fixtures {
+        fixtures
+            .geometry
+            .intersect_scene(&scene.primitives, cx, &ray, f64::MAX)?
     } else {
         intersect(scene, cx, &ray, ray_time)?
     };

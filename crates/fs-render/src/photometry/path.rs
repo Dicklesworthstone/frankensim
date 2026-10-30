@@ -229,6 +229,12 @@ impl<'scene, 'field> PathLuminanceJob<'scene, 'field> {
         self.transport.point_sampling()
     }
 
+    #[cfg(test)]
+    pub(crate) fn disable_acceleration_for_test(&mut self) {
+        assert_eq!(self.completed, 0);
+        self.transport.disable_acceleration_for_test();
+    }
+
     /// Commit at most `max_path_samples` additional complete paths.
     ///
     /// No partially traced path or partially updated moment becomes visible.

@@ -495,6 +495,7 @@ impl<'a> AreaLighting<'a> {
         };
         if !visible_endpoint(
             scene,
+            &fixtures.geometry,
             cx,
             point,
             shadow_origin,
@@ -942,6 +943,7 @@ fn triangle_key(vertices: [Point3; 3]) -> [[u64; 3]; 3] {
 
 fn visible_endpoint(
     scene: &Scene,
+    geometry: &geometry::PreparedGeometry,
     cx: &Cx<'_>,
     source: Point3,
     shadow_origin: Point3,
@@ -954,7 +956,7 @@ fn visible_endpoint(
         origin: shadow_origin,
         dir: displacement.scale(1.0 / distance),
     };
-    let Some(hit) = intersect_primitives(&scene.primitives, cx, &ray, None, Some(f64::MAX))? else {
+    let Some(hit) = geometry.intersect_scene(&scene.primitives, cx, &ray, f64::MAX)? else {
         return Ok(false);
     };
     let scale = [source.x, source.y, source.z, target.x, target.y, target.z]

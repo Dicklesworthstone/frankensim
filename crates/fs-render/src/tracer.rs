@@ -13425,12 +13425,14 @@ fn trace_path_with_regions(
         #[cfg(feature = "volumes")]
         let has_volume_source_nee = active_region.has_source_proposal(s.strategy);
         #[cfg(feature = "photometry")]
-        let intersection = if fixtures.is_some() {
+        let intersection = if let Some(fixtures) = fixtures {
             // Calibrated mesh instances must not inherit the legacy 10 km
             // traversal ceiling. Find the actual first surface, then enforce
             // the caller's physical range in admit_segment below. Instances
             // require a finite traversal bound, even for this unbounded search.
-            intersect_primitives(&scene.primitives, cx, &ray, ray_time, Some(f64::MAX))?
+            fixtures
+                .geometry
+                .intersect_scene(&scene.primitives, cx, &ray, f64::MAX)?
         } else {
             intersect(scene, cx, &ray, ray_time)?
         };
@@ -15818,104 +15820,11 @@ fn intersect_primitives(
 ) -> Result<Option<SceneIntersection>, TracerError> {
     let mut best: Option<SceneIntersection> = None;
     for (i, prim) in primitives.iter().enumerate() {
-        cx.checkpoint()?;
         let current_best_t = best.as_ref().map(|current| current.hit.t);
-        let candidate = match &prim.shape {
-            Shape::Mesh(mesh) => mesh
-                .intersect_with_cx_bounded(
-                    cx,
-                    ray,
-                    current_best_t.unwrap_or(distance_limit.unwrap_or(f64::INFINITY)),
-                )?
-                .map(|hit| SceneIntersection {
-                    primitive_index: i,
-                    hit,
-                    instance_hit: None,
-                }),
-            Shape::Chart(chart) => {
-                let (hit, audit) = sphere_trace(
-                    chart.as_ref(),
-                    cx,
-                    ray,
-                    distance_limit.unwrap_or(1e4),
-                    TRACE_EPS,
-                    1.0,
-                );
-                if matches!(
-                    audit.termination,
-                    TraceTermination::Hit
-                        | TraceTermination::ResidualLimit
-                        | TraceTermination::Miss
-                ) && !audit.certified
-                {
-                    return Err(TracerError::UncertifiedTrace);
-                }
-                match audit.termination {
-                    TraceTermination::Cancelled => return Err(TracerError::Cancelled),
-                    TraceTermination::Miss => None,
-                    TraceTermination::Hit => Some(SceneIntersection {
-                        primitive_index: i,
-                        hit: hit.ok_or(TracerError::BackendFailure(TraceTermination::Hit))?,
-                        instance_hit: None,
-                    }),
-                    termination => return Err(TracerError::BackendFailure(termination)),
-                }
-            }
-            Shape::Instance(instance) => {
-                let limit = distance_limit.unwrap_or(1e4);
-                let t_max = match instance.geometry() {
-                    SharedGeometry::Mesh(_) => current_best_t.map_or(limit, |t| t.min(limit)),
-                    SharedGeometry::Chart(_) => limit,
-                };
-                instance
-                    .intersect(cx, ray, t_max, TRACE_EPS)?
-                    .map(|instance_hit| SceneIntersection {
-                        primitive_index: i,
-                        hit: instance_hit.hit,
-                        instance_hit: Some(instance_hit),
-                    })
-            }
-            Shape::AnimatedInstance(instance) => {
-                let time = ray_time.ok_or(TracerError::MissingRayTime)?;
-                let limit = distance_limit.unwrap_or(1e4);
-                let t_max = match instance.geometry() {
-                    SharedGeometry::Mesh(_) => current_best_t.map_or(limit, |t| t.min(limit)),
-                    SharedGeometry::Chart(_) => limit,
-                };
-                let instance_hit = if let Some(cached) = time
-                    .cached_animated
-                    .iter()
-                    .flatten()
-                    .find(|cached| cached.primitive_index == i)
-                {
-                    cached.instance.intersect(cx, ray, t_max, TRACE_EPS)?
-                } else {
-                    let timed_ray = TimedRay::at_normalized(*ray, time.interval, time.normalized);
-                    instance.intersect(cx, &timed_ray, t_max, TRACE_EPS)?
-                };
-                instance_hit.map(|instance_hit| SceneIntersection {
-                    primitive_index: i,
-                    hit: instance_hit.hit,
-                    instance_hit: Some(instance_hit),
-                })
-            }
-        };
-        if let Some(candidate) = candidate {
-            let replace = match best.as_ref() {
-                None => true,
-                Some(best_hit) if candidate.hit.t < best_hit.hit.t => true,
-                Some(best_hit)
-                    if candidate.hit.t.total_cmp(&best_hit.hit.t) == core::cmp::Ordering::Equal =>
-                {
-                    instance_object_id(&prim.shape)
-                        .zip(instance_object_id(
-                            &primitives[best_hit.primitive_index].shape,
-                        ))
-                        .is_some_and(|(candidate, current)| candidate < current)
-                }
-                Some(_) => false,
-            };
-            if replace {
+        if let Some(candidate) =
+            intersect_primitive(i, prim, cx, ray, ray_time, distance_limit, current_best_t)?
+        {
+            if scene_hit_precedes(primitives, &candidate, best.as_ref()) {
                 best = Some(candidate);
             }
         }
@@ -15923,7 +15832,122 @@ fn intersect_primitives(
     Ok(best)
 }
 
-#[cfg(feature = "photometry")]
+/// The native leaf is shared by linear and prepared traversal. Keeping its
+/// current-best bound and its caller's primitive order preserves mesh hit
+/// diagnostics, material frames and coincident-instance tie behavior.
+fn intersect_primitive(
+    i: usize,
+    prim: &Primitive,
+    cx: &Cx<'_>,
+    ray: &Ray,
+    ray_time: Option<&PathTime>,
+    distance_limit: Option<f64>,
+    current_best_t: Option<f64>,
+) -> Result<Option<SceneIntersection>, TracerError> {
+    cx.checkpoint()?;
+    let candidate = match &prim.shape {
+        Shape::Mesh(mesh) => mesh
+            .intersect_with_cx_bounded(
+                cx,
+                ray,
+                current_best_t.unwrap_or(distance_limit.unwrap_or(f64::INFINITY)),
+            )?
+            .map(|hit| SceneIntersection {
+                primitive_index: i,
+                hit,
+                instance_hit: None,
+            }),
+        Shape::Chart(chart) => {
+            let (hit, audit) = sphere_trace(
+                chart.as_ref(),
+                cx,
+                ray,
+                distance_limit.unwrap_or(1e4),
+                TRACE_EPS,
+                1.0,
+            );
+            if matches!(
+                audit.termination,
+                TraceTermination::Hit | TraceTermination::ResidualLimit | TraceTermination::Miss
+            ) && !audit.certified
+            {
+                return Err(TracerError::UncertifiedTrace);
+            }
+            match audit.termination {
+                TraceTermination::Cancelled => return Err(TracerError::Cancelled),
+                TraceTermination::Miss => None,
+                TraceTermination::Hit => Some(SceneIntersection {
+                    primitive_index: i,
+                    hit: hit.ok_or(TracerError::BackendFailure(TraceTermination::Hit))?,
+                    instance_hit: None,
+                }),
+                termination => return Err(TracerError::BackendFailure(termination)),
+            }
+        }
+        Shape::Instance(instance) => {
+            let limit = distance_limit.unwrap_or(1e4);
+            let t_max = match instance.geometry() {
+                SharedGeometry::Mesh(_) => current_best_t.map_or(limit, |t| t.min(limit)),
+                SharedGeometry::Chart(_) => limit,
+            };
+            instance
+                .intersect(cx, ray, t_max, TRACE_EPS)?
+                .map(|instance_hit| SceneIntersection {
+                    primitive_index: i,
+                    hit: instance_hit.hit,
+                    instance_hit: Some(instance_hit),
+                })
+        }
+        Shape::AnimatedInstance(instance) => {
+            let time = ray_time.ok_or(TracerError::MissingRayTime)?;
+            let limit = distance_limit.unwrap_or(1e4);
+            let t_max = match instance.geometry() {
+                SharedGeometry::Mesh(_) => current_best_t.map_or(limit, |t| t.min(limit)),
+                SharedGeometry::Chart(_) => limit,
+            };
+            let instance_hit = if let Some(cached) = time
+                .cached_animated
+                .iter()
+                .flatten()
+                .find(|cached| cached.primitive_index == i)
+            {
+                cached.instance.intersect(cx, ray, t_max, TRACE_EPS)?
+            } else {
+                let timed_ray = TimedRay::at_normalized(*ray, time.interval, time.normalized);
+                instance.intersect(cx, &timed_ray, t_max, TRACE_EPS)?
+            };
+            instance_hit.map(|instance_hit| SceneIntersection {
+                primitive_index: i,
+                hit: instance_hit.hit,
+                instance_hit: Some(instance_hit),
+            })
+        }
+    };
+    Ok(candidate)
+}
+
+fn scene_hit_precedes(
+    primitives: &[Primitive],
+    candidate: &SceneIntersection,
+    current: Option<&SceneIntersection>,
+) -> bool {
+    match current {
+        None => true,
+        Some(best_hit) if candidate.hit.t < best_hit.hit.t => true,
+        Some(best_hit)
+            if candidate.hit.t.total_cmp(&best_hit.hit.t) == core::cmp::Ordering::Equal =>
+        {
+            instance_object_id(&primitives[candidate.primitive_index].shape)
+                .zip(instance_object_id(
+                    &primitives[best_hit.primitive_index].shape,
+                ))
+                .is_some_and(|(candidate, current)| candidate < current)
+        }
+        Some(_) => false,
+    }
+}
+
+#[cfg(all(feature = "photometry", test))]
 pub(crate) fn photometric_intersect(
     primitives: &[Primitive],
     cx: &Cx<'_>,

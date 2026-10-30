@@ -141,6 +141,12 @@ impl<'scene, 'field> PathIlluminanceJob<'scene, 'field> {
         self.transport.point_sampling()
     }
 
+    #[cfg(test)]
+    pub(crate) fn disable_acceleration_for_test(&mut self) {
+        assert_eq!(self.completed, 0);
+        self.transport.disable_acceleration_for_test();
+    }
+
     /// Admit a nonempty set of one-sided receiver points. Supported geometry,
     /// materials, fixtures and media match [`super::PathLuminanceJob`].
     #[allow(clippy::too_many_arguments)]

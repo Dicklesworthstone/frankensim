@@ -9,7 +9,7 @@
 
 use crate::camera::{LensSample, PhysicalCamera};
 use crate::charts::Ray;
-use crate::tracer::{photometric_brdf, photometric_intersect};
+use crate::tracer::photometric_brdf;
 use fs_exec::Cx;
 
 use super::medium::{
@@ -96,7 +96,9 @@ impl PhotometricScene<'_> {
     ) -> Result<LuminanceEstimate, PhotometryError> {
         cx.checkpoint()?;
         validate_camera_ray(self, ray, distance_m)?;
-        let primary = photometric_intersect(self.primitives, cx, ray, distance_m)?;
+        let primary = self
+            .geometry
+            .intersect(self.primitives, cx, ray, distance_m)?;
         let limit = primary.as_ref().map_or(distance_m, |(_, hit)| hit.t);
         if !limit.is_finite() || limit < 0.0 || limit > distance_m {
             return Err(PhotometryError::NonFiniteResult);
@@ -235,7 +237,9 @@ impl PhotometricScene<'_> {
     ) -> Result<SurfaceLuminanceEstimate, PhotometryError> {
         cx.checkpoint()?;
         validate_camera_ray(self, ray, distance_m)?;
-        let primary = photometric_intersect(self.primitives, cx, ray, distance_m)?;
+        let primary = self
+            .geometry
+            .intersect(self.primitives, cx, ray, distance_m)?;
         let Some((primitive_index, hit)) = primary else {
             return Ok(SurfaceLuminanceEstimate {
                 surface_cd_m2: 0.0,

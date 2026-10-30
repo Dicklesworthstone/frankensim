@@ -224,13 +224,15 @@ pub(super) fn contribution(
             origin: source.position_m(),
             dir: candidate.direction.scale(-1.0),
         };
-        if photometric_intersect(
-            &scene.primitives,
-            cx,
-            &ray,
-            candidate.distance - fixtures.options.ray_epsilon_m,
-        )?
-        .is_some()
+        if fixtures
+            .geometry
+            .intersect(
+                &scene.primitives,
+                cx,
+                &ray,
+                candidate.distance - fixtures.options.ray_epsilon_m,
+            )?
+            .is_some()
         {
             continue;
         }

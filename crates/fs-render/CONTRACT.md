@@ -2022,3 +2022,30 @@ traversal claim. The proposal does not predict visibility, colored attenuation
 or sharp material lobes, so variance and error per second remain scene-dependent.
 Path semantics version 6 adds this policy. The headless stage example accepts
 `--point-connections K` with either path mode; omitted means `All`.
+
+### Prepared geometry for calibrated transport
+
+Each immutable photometric scene prepares a spatial index over its admitted
+native meshes and rigid mesh instances. Calibrated path jobs share this index
+with their direct-lux scene. Direct/image queries, point-fixture connections,
+finite-emitter visibility, path continuation and thermal-volume source queries
+use the same original geometry and material witnesses.
+
+The index is a broad phase: surviving primitive indices are visited in their
+original order through the existing native intersection and tie rules. This
+retains closest-hit arithmetic, coincident mesh/instance behavior, material
+frames and per-hit backend diagnostics. The original mesh BVHs remain borrowed;
+no mesh copy, per-query index allocation or random draw is introduced.
+
+Admission and traversal poll cancellation. Metadata allocation is fallible.
+Tiny scenes and scenes beyond the bounded candidate-bitmap capacity use the
+linear traversal; uncertain bounds remain candidates, and rays outside the
+index's numerical admission use the native traversal. Bounds reuse the rigid
+motion enclosure and outward-rounded mesh slab test with additional broad-phase
+roundoff padding. This is not a numerical error certificate.
+
+The physical estimator, source-selection policy and reported uncertainty are
+unchanged. Bitwise comparisons against the native linear traversal cover direct
+lux, image/probe paths, rigid instances, endpoint/tie cases and progressive
+parallel replay. The paired dense-stage benchmark reports index construction
+separately from repeated connection evaluation, with identical lux outputs.
