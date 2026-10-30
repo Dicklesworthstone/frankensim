@@ -184,9 +184,17 @@ pub(crate) fn prepare_dg_gas(
         ));
     }
     poll(cancelled)?;
-    let stepping = candidate
-        .propagator(propagator.dt(), propagator.tolerance())
-        .map_err(duct_error)?;
+    // Native identity covers the operator, physical mass transforms, geometry
+    // and typed boundaries. An unchanged operator keeps its already-certified
+    // exponential at the same clock/tolerance after full source/transfer admission.
+    // This avoids another matrix exponential for unchanged finite-gas trials.
+    let stepping = if candidate.operator_identity() == duct.operator_identity() {
+        propagator.clone()
+    } else {
+        candidate
+            .propagator(propagator.dt(), propagator.tolerance())
+            .map_err(duct_error)?
+    };
     poll(cancelled)?;
     Ok((candidate, state, stepping, report))
 }

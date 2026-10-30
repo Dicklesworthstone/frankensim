@@ -31,6 +31,9 @@ mod gas_support;
 #[path = "dg_finite_gas/transport.rs"]
 mod transport;
 
+#[path = "dg_finite_gas/molecular.rs"]
+mod molecular;
+
 const DT: f64 = 1.0 / 96_000.0;
 const RADIUS: f64 = 0.001;
 const LENGTH: f64 = 0.05;
@@ -82,16 +85,20 @@ fn volume(circular: bool) -> f64 {
 }
 
 fn fixture(circular: bool) -> (DgPortLoad, ClosedGasParcel) {
+    fixture_with_composition(circular, composition(0.8))
+}
+
+fn fixture_with_composition(circular: bool, mixture: Composition) -> (DgPortLoad, ClosedGasParcel) {
     let a = gas_support::packs("A", 0.028, 3.5, 200.0);
     let b = gas_support::packs("B", 0.044, 4.5, 200.0);
-    let model = from_packs(&[a.binding(), b.binding()], composition(0.8), None).unwrap();
+    let model = from_packs(&[a.binding(), b.binding()], mixture.clone(), None).unwrap();
     let field = AxialGasField::new(
         vec![0.0, LENGTH],
         101325.0,
         vec![
             PrimitiveGasState {
                 temperature_k: 300.0,
-                composition: composition(0.8)
+                composition: mixture
             };
             2
         ],

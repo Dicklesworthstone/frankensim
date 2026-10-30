@@ -164,14 +164,7 @@ pub(crate) fn admitted_volume<E>(
 }
 
 pub(crate) fn refresh_kind(loss: FiniteGasDgLoss) -> DgGasRefresh {
-    match loss {
-        FiniteGasDgLoss::Lossless => DgGasRefresh::Lossless,
-        FiniteGasDgLoss::UniformViscothermal {
-            maximum_relative_error,
-        } => DgGasRefresh::UniformDiffusion {
-            maximum_relative_error,
-        },
-    }
+    loss.into()
 }
 
 /// The original finite gas must close its actual caloric/transport/work account

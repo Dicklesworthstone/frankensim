@@ -8693,6 +8693,34 @@ independent paired-blade motion, exact retry after source refusal or final
 cancellation, and rejection of an unowned second inventory. Native execution
 and measured physical validation remain separate gates.
 
+## Finite gas feedback retains spatial and molecular histories
+
+`FiniteGasDgLoss::SpatialViscothermal` and
+`FiniteGasDgLoss::UniformMolecularDiffusion` connect the existing native memory
+transfers to finite-gas stepping. One conversion selects the same native owner
+for source-wall loads, complete port loads, transport networks, and one- or
+two-tract moving apertures. Spatial quadrature and radial sections remain bound
+to their original geometry. Molecular transfers retain source laws, species
+fractions and reservoir support while preserving physical entropy perturbations,
+compression and momentum; their actual storage work is paid by the finite gas.
+
+The background remains uniform and the original geometry-volume admission
+remains active. Molecular composition changes refuse while the original
+acoustic species histories are retained. Same-composition inventory transport
+and heating use the existing caloric and species/enthalpy owners. These choices
+do not create a memory realization or discard an existing one.
+
+After native source, memory and work admission, `prepare_dg_gas` retains the
+certified propagator when the complete native operator identity is unchanged.
+That identity includes physical mass transforms, geometry and typed boundaries.
+Changed operators rebuild at the original clock and tolerance.
+
+Focused public regressions cover spatial and molecular finite heating against
+the original native transfer, unchanged-medium continuation, same-composition
+transport, source/control refusals and final cancellation with exact retry.
+They are authored but not executed in this environment; newer-toolchain
+formatting/parser checks do not establish native compilation or numerical proof.
+
 ## One finite gas inventory through the two-sided moving aperture
 
 `LoadedApertureDg::step_with_shared_finite_gas_controlled` advances the original

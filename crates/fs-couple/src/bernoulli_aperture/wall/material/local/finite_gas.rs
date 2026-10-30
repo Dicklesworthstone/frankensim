@@ -26,6 +26,31 @@ pub enum FiniteGasDgLoss {
     Lossless,
     /// Existing uniform circular diffusion realization, retaining its pole identities.
     UniformViscothermal { maximum_relative_error: f64 },
+    /// Existing spatial circular diffusion, retaining the original weak basis,
+    /// quadrature and every local radial section even for a uniform background.
+    SpatialViscothermal { maximum_relative_error: f64 },
+    /// Existing molecular and thermal reservoirs with their original source law,
+    /// species fractions and exact-mass or spatial diffusion support. Native
+    /// transfer preserves entropy perturbations, compression and momentum;
+    /// changing composition is refused while these histories are present.
+    UniformMolecularDiffusion { maximum_relative_error: f64 },
+}
+
+// Every finite owner selects the SAME native transfer. Keeping this conversion
+// here prevents wall, complete-port, network and moving-source paths from
+// silently supporting different memory models as native owners grow.
+impl From<FiniteGasDgLoss> for GasRefresh {
+    fn from(loss: FiniteGasDgLoss) -> Self {
+        match loss {
+            FiniteGasDgLoss::Lossless => Self::Lossless,
+            FiniteGasDgLoss::UniformViscothermal { maximum_relative_error } =>
+                Self::UniformDiffusion { maximum_relative_error },
+            FiniteGasDgLoss::SpatialViscothermal { maximum_relative_error } =>
+                Self::SpatialDiffusion { maximum_relative_error },
+            FiniteGasDgLoss::UniformMolecularDiffusion { maximum_relative_error } =>
+                Self::UniformMolecularDiffusion { maximum_relative_error },
+        }
+    }
 }
 
 /// Explicit physical work, partition-step and nonlinear acceptance limits.
@@ -169,7 +194,9 @@ pub(crate) fn admit_controls<E>(controls: FiniteGasDgSolve) -> Result<(), Finite
     {
         return Err(FiniteGasDgError::Invalid("finite ordered work bracket, tolerances and step limits required"));
     }
-    if let FiniteGasDgLoss::UniformViscothermal { maximum_relative_error } = controls.loss
+    if let FiniteGasDgLoss::UniformViscothermal { maximum_relative_error }
+        | FiniteGasDgLoss::SpatialViscothermal { maximum_relative_error }
+        | FiniteGasDgLoss::UniformMolecularDiffusion { maximum_relative_error } = controls.loss
         && !positive(maximum_relative_error)
     {
         return Err(FiniteGasDgError::Invalid("positive diffusion error admission required"));
@@ -239,13 +266,8 @@ fn prepare<S, E, C: FnMut() -> bool>(
                 return Err(FiniteGasDgError::Invalid("background endpoint does not close heat, enthalpy and trial work"));
             }
             let replacement = field(original, &background.gas)?;
-            let refresh_kind = match controls.loss {
-                FiniteGasDgLoss::Lossless => GasRefresh::Lossless,
-                FiniteGasDgLoss::UniformViscothermal { maximum_relative_error } =>
-                    GasRefresh::UniformDiffusion { maximum_relative_error },
-            };
             let (next_duct, mut next_state, next_propagator, refresh) = prepare_gas(
-                duct, &marched, propagator, &replacement, refresh_kind, maximum_work, cancelled,
+                duct, &marched, propagator, &replacement, controls.loss.into(), maximum_work, cancelled,
             ).map_err(acoustic)?;
             next_propagator.sync_nodal(&mut next_state).map_err(native)?;
             let residual = work - refresh.parameter_work_j;
