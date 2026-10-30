@@ -12,6 +12,9 @@ use fs_qty::{MolarMass, Pressure, Temperature};
 
 use crate::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
 
+/// Bounded PT vapor-liquid equilibrium on this same cubic EOS.
+pub mod flash;
+
 /// Maximum number of components in one bounded mixture.
 pub const MAX_PENG_ROBINSON_COMPONENTS_V1: usize = 64;
 /// Fixed operation-tree version.
