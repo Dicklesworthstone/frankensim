@@ -51,6 +51,47 @@ impl BoundaryMode {
 /// Prepared spatial port projection on the existing Helmholtz reduction.
 pub struct InteriorMultiport {
     pub(super) reduced: ReducedHelmholtz,
+    pub(crate) physical_modes: Vec<Vec<PhysicalTrace>>,
+}
+
+/// Original source traces retained for an exactly identified hybrid interface.
+/// Coordinates use normalized-zero bits, so vertex numbering and winding may
+/// differ across the interface without accepting a substituted trace shape.
+#[derive(Clone)]
+pub(crate) struct PhysicalTrace {
+    pub vertices: [[u64; 3]; 3],
+    pub values: [f64; 3],
+    pub outward_normal: [f64; 3],
+    pub area_m2: f64,
+}
+
+pub(crate) fn physical_trace(
+    fe: &HelmholtzFe<'_>,
+    mode: &BoundaryMode,
+) -> Result<Vec<PhysicalTrace>, AcousticFeError> {
+    mode.traces
+        .iter()
+        .map(|&(face, values)| {
+            let (_, outward_normal, area_m2) = fe.boundary_geometry(face)?;
+            let mut vertices = std::array::from_fn::<_, 3, _>(|i| {
+                let point = fe.positions()[face[i] as usize].map(|x| {
+                    if x == 0.0 {
+                        0.0_f64.to_bits()
+                    } else {
+                        x.to_bits()
+                    }
+                });
+                (point, values[i])
+            });
+            vertices.sort_by_key(|&(point, _)| point);
+            Ok(PhysicalTrace {
+                vertices: vertices.map(|(point, _)| point),
+                values: vertices.map(|(_, value)| value),
+                outward_normal,
+                area_m2,
+            })
+        })
+        .collect()
 }
 
 /// One factorization, reusable for arbitrary simultaneous modal excitations.
@@ -60,6 +101,18 @@ pub struct PreparedInteriorMultiport<'a> {
     model: &'a InteriorMultiport,
     frequency_hz: f64,
     omega_rho: f64,
+    factor: LuComplex,
+}
+
+/// Original pressure FE operator with real-reference Robin loads, factored
+/// once for arbitrary simultaneous incident power waves. This remains usable
+/// at a pole of the unloaded impedance whenever the loaded operator is regular.
+pub struct PreparedInteriorScattering<'a> {
+    model: &'a InteriorMultiport,
+    frequency_hz: f64,
+    omega_rho: f64,
+    reference: Vec<f64>,
+    roots: Vec<f64>,
     factor: LuComplex,
 }
 
@@ -203,7 +256,14 @@ impl InteriorMultiport {
             return Err(invalid("interior reduction discards a supplied port mode"));
         }
         poll(cancelled)?;
-        Ok(Self { reduced })
+        let physical_modes = ports
+            .iter()
+            .map(|port| physical_trace(fe, port))
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
+            reduced,
+            physical_modes,
+        })
     }
 
     /// Bind the original conductive/adiabatic thermal wall to this same port
@@ -229,6 +289,12 @@ impl InteriorMultiport {
     #[must_use]
     pub fn port_areas_m2(&self) -> &[f64] {
         &self.reduced.area
+    }
+
+    /// Uniform medium used by the original pressure operator.
+    #[must_use]
+    pub const fn medium(&self) -> super::Medium {
+        self.reduced.medium
     }
 
     pub(super) fn operator(
@@ -330,16 +396,52 @@ impl InteriorMultiport {
         self.scattering_operator(a, omega_rho, frequency_hz, reference_resistance, cancelled)
     }
 
+    /// Retain the loaded factorization for field recovery and network closure.
+    /// Incident coordinates are a=(P+RQ)/(2 sqrt(R)); flow is inward.
+    pub fn prepare_scattering(
+        &self,
+        frequency_hz: f64,
+        reference_resistance: &[f64],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<PreparedInteriorScattering<'_>, AcousticFeError> {
+        self.validate_references(reference_resistance)?;
+        let (a, omega_rho) = self.operator(frequency_hz, cancelled)?;
+        self.prepare_scattering_operator(
+            a,
+            omega_rho,
+            frequency_hz,
+            reference_resistance,
+            cancelled,
+        )
+    }
+
     pub(super) fn scattering_operator(
+        &self,
+        a: Vec<C64>,
+        omega_rho: f64,
+        frequency_hz: f64,
+        reference_resistance: &[f64],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Vec<C64>, AcousticFeError> {
+        self.prepare_scattering_operator(
+            a,
+            omega_rho,
+            frequency_hz,
+            reference_resistance,
+            cancelled,
+        )?
+        .scattering(cancelled)
+    }
+
+    fn prepare_scattering_operator(
         &self,
         mut a: Vec<C64>,
         omega_rho: f64,
         frequency_hz: f64,
         reference_resistance: &[f64],
         cancelled: &dyn Fn() -> bool,
-    ) -> Result<Vec<C64>, AcousticFeError> {
+    ) -> Result<PreparedInteriorScattering<'_>, AcousticFeError> {
         self.validate_references(reference_resistance)?;
-        let ports = self.port_mode_count();
         let n = self.dim();
         for (b, &resistance) in self.reduced.b_r.iter().zip(reference_resistance) {
             poll(cancelled)?;
@@ -356,28 +458,15 @@ impl InteriorMultiport {
         let factor =
             lu_complex_with_cancel(&a, n, cancelled).map_err(|e| linear_error(e, frequency_hz))?;
         let roots: Vec<_> = reference_resistance.iter().map(|r| det::sqrt(*r)).collect();
-        let mut scattering = vec![C64::ZERO; ports * ports];
-        for col in 0..ports {
-            poll(cancelled)?;
-            let mut rhs: Vec<_> = self.reduced.b_r[col]
-                .iter()
-                .map(|b| C64::new(0.0, 2.0 * omega_rho / roots[col] * b))
-                .collect();
-            factor
-                .solve_with_cancel(&mut rhs, cancelled)
-                .map_err(|e| linear_error(e, frequency_hz))?;
-            for row in 0..ports {
-                let pressure = project(&self.reduced.b_r[row], &rhs);
-                let reflected = pressure.scale(1.0 / roots[row])
-                    - if row == col { C64::ONE } else { C64::ZERO };
-                if !finite(reflected) {
-                    return Err(invalid("interior scattering overflow"));
-                }
-                scattering[row * ports + col] = reflected;
-            }
-        }
         poll(cancelled)?;
-        Ok(scattering)
+        Ok(PreparedInteriorScattering {
+            model: self,
+            frequency_hz,
+            omega_rho,
+            reference: reference_resistance.to_vec(),
+            roots,
+            factor,
+        })
     }
 
     pub(super) fn validate_references(
@@ -450,6 +539,85 @@ impl PreparedInteriorMultiport<'_> {
             inward_flow_m3_s: inward_flow_m3_s.to_vec(),
             amplitudes: rhs.into_iter().map(|z| [z.re, z.im]).collect(),
         })
+    }
+}
+
+impl PreparedInteriorScattering<'_> {
+    /// Declared positive real resistances [Pa s/m^3], in original mode order.
+    #[must_use]
+    pub fn reference_resistance(&self) -> &[f64] {
+        &self.reference
+    }
+
+    /// Resolve simultaneous incident waves with the retained original LU.
+    /// Both pressure and inward flow are recovered; no impedance inversion
+    /// or separate unloaded solve is needed to recover the original FE field.
+    pub fn response(
+        &self,
+        incident: &[C64],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<InteriorPortResponse, AcousticFeError> {
+        poll(cancelled)?;
+        if incident.len() != self.reference.len() || incident.iter().any(|&a| !finite(a)) {
+            return Err(invalid("interior incident wave shape or nonfinite value"));
+        }
+        let mut rhs = vec![C64::ZERO; self.model.dim()];
+        for (port, &wave) in incident.iter().enumerate() {
+            poll(cancelled)?;
+            let scale = C64::new(-wave.im, wave.re).scale(2.0 * self.omega_rho / self.roots[port]);
+            for (entry, &weight) in rhs.iter_mut().zip(&self.model.reduced.b_r[port]) {
+                *entry = *entry + scale.scale(weight);
+            }
+        }
+        self.factor
+            .solve_with_cancel(&mut rhs, cancelled)
+            .map_err(|e| linear_error(e, self.frequency_hz))?;
+        let pressure_pa = self
+            .model
+            .reduced
+            .b_r
+            .iter()
+            .map(|b| project(b, &rhs))
+            .collect::<Vec<_>>();
+        let inward_flow_m3_s = pressure_pa
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| {
+                (incident[i].scale(2.0 * self.roots[i]) - p).scale(1.0 / self.reference[i])
+            })
+            .collect::<Vec<_>>();
+        if rhs
+            .iter()
+            .chain(&pressure_pa)
+            .chain(&inward_flow_m3_s)
+            .any(|&z| !finite(z))
+        {
+            return Err(invalid("interior loaded response overflow"));
+        }
+        poll(cancelled)?;
+        Ok(InteriorPortResponse {
+            pressure_pa,
+            inward_flow_m3_s,
+            amplitudes: rhs.into_iter().map(|z| [z.re, z.im]).collect(),
+        })
+    }
+
+    /// Full power scattering from the same loaded factorization.
+    pub fn scattering(&self, cancelled: &dyn Fn() -> bool) -> Result<Vec<C64>, AcousticFeError> {
+        let m = self.reference.len();
+        let mut scattering = vec![C64::ZERO; m * m];
+        let mut incident = vec![C64::ZERO; m];
+        for col in 0..m {
+            incident[col] = C64::ONE;
+            let response = self.response(&incident, cancelled)?;
+            incident[col] = C64::ZERO;
+            for row in 0..m {
+                scattering[row * m + col] = response.pressure_pa[row].scale(1.0 / self.roots[row])
+                    - if row == col { C64::ONE } else { C64::ZERO };
+            }
+        }
+        poll(cancelled)?;
+        Ok(scattering)
     }
 }
 

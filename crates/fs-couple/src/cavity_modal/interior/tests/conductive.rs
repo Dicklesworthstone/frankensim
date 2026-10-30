@@ -263,3 +263,152 @@ fn molecular_pressure_heat_field_retains_original_solid_source_and_work() {
     assert_ne!(pressures[0], pressures[1]);
     assert_ne!(pressures[0], pressures[2]);
 }
+
+fn resolved_wall_fixture<'c>(
+    mesh: &'c fs_rep_mesh::TetComplex,
+    points: &[[f64; 3]],
+    gas: &GasState,
+) -> (
+    fs_feec::acoustics::thermoviscous::ThermoviscousFe<'c>,
+    Vec<[u32; 3]>,
+) {
+    use fs_feec::acoustics::helmholtz::multiport::BoundaryMode;
+    use fs_feec::acoustics::thermoviscous::{
+        ThermoviscousBoundary, ThermoviscousFe, ThermoviscousLimits,
+    };
+    let fe = HelmholtzFe::new(
+        mesh,
+        points,
+        2,
+        Medium {
+            density_kg_m3: gas.density,
+            sound_speed_m_s: gas.sound_speed,
+        },
+    )
+    .unwrap();
+    let faces = fe.boundary_faces();
+    let ports: Vec<_> = faces
+        .iter()
+        .copied()
+        .filter(|face| face.iter().all(|&i| points[i as usize][0] == 0.0))
+        .collect();
+    let walls: Vec<_> = faces.into_iter().filter(|f| !ports.contains(f)).collect();
+    let model = ThermoviscousFe::new(
+        mesh,
+        points,
+        super::super::thermoviscous::source_medium(gas, 0.0).unwrap(),
+        &ThermoviscousBoundary {
+            no_slip_faces: walls.clone(),
+            isothermal_faces: vec![],
+            ports: vec![BoundaryMode::uniform(&ports)],
+        },
+        ThermoviscousLimits::default(),
+        &mut || false,
+    )
+    .unwrap();
+    (model, walls)
+}
+
+#[test]
+fn resolved_finite_walls_keep_original_material_and_joint_molecular_work() {
+    use super::super::thermoviscous::{ThermoviscousInterior, wall::MaterialWallRegion};
+    use fs_feec::fixtures::kuhn_cube;
+    use fs_material::relaxation::{RelaxingMedium, input::read_relaxation};
+    use fs_math::c64::C64;
+
+    let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101325.0).unwrap();
+    let law = read_relaxation(
+        &mut "declared 1 synthetic 1 vibration 1 900 1 power 101.325 293.15 0 200 500"
+            .split_ascii_whitespace(),
+    )
+    .unwrap();
+    let source = law
+        .evaluate(&RelaxingMedium::new(gas, vec![(law.species()[0].species.clone(), 1.0)]).unwrap())
+        .unwrap();
+    let (mesh, unit) = kuhn_cube(2);
+    let points: Vec<_> = unit.iter().map(|p| p.map(|x| 0.02 * x)).collect();
+    let mut flows = Vec::new();
+    for (conductivity, capacity) in [(0.01, 1.0), (0.03, 1.0), (0.01, 3.0)] {
+        let prepared = material(conductivity, capacity);
+        let sample = prepared.at_temperature(gas.temperature).unwrap();
+        let (fe, walls) = resolved_wall_fixture(&mesh, &points, &gas);
+        let model = ThermoviscousInterior::from_relaxation(fe, source.clone(), [100.0, 1000.0])
+            .unwrap()
+            .with_conductive_walls(
+                &[MaterialWallRegion {
+                    faces: &walls,
+                    sample: &sample,
+                    depth: ThermalWallDepth::Slab {
+                        thickness_m: 1e-4,
+                        backing: ThermalBacking::Adiabatic,
+                    },
+                    minimum_tangential_scale_m: 0.02,
+                    geometry: GEOMETRY,
+                }],
+                &mut || false,
+            )
+            .unwrap();
+        assert_eq!(model.wall_sources()[0].path_identity(), prepared.identity());
+        assert_eq!(model.inner().conductive_walls().len(), 1);
+        let response = model
+            .response(300.0, &[C64::new(1.0, 0.2)], &mut || false)
+            .unwrap();
+        let power = response.power;
+        println!("resolved source solid k={conductivity} cp={capacity} power={power:?}");
+        assert!(power.viscous_w > 0.0 && power.conductive_w > 0.0);
+        assert!(power.caloric_w > 0.0 && power.solid_conductive_w > 0.0);
+        assert!(power.balance_residual_w().abs() < 2e-8 * power.input_w);
+        flows.push(response.inward_flow_m3_s[0]);
+    }
+    for changed in &flows[1..] {
+        assert!((*changed - flows[0]).abs() > 1e-7 * flows[0].abs());
+    }
+}
+
+#[test]
+fn resolved_solid_binding_refuses_wrong_temperature_and_unowned_numeric_wall() {
+    use super::super::thermoviscous::{ThermoviscousInterior, wall::MaterialWallRegion};
+    use fs_feec::acoustics::thermoviscous::wall::ConductiveWallRegion;
+    use fs_feec::fixtures::kuhn_cube;
+
+    let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101325.0).unwrap();
+    let (mesh, unit) = kuhn_cube(1);
+    let points: Vec<_> = unit.iter().map(|p| p.map(|x| 0.02 * x)).collect();
+    let prepared = material(0.01, 1.0);
+    let wrong = prepared.at_temperature(294.15).unwrap();
+    let (fe, walls) = resolved_wall_fixture(&mesh, &points, &gas);
+    let model = ThermoviscousInterior::from_gas(fe, gas, [100.0, 1000.0]).unwrap();
+    assert!(
+        model
+            .with_conductive_walls(
+                &[MaterialWallRegion {
+                    faces: &walls,
+                    sample: &wrong,
+                    depth: ThermalWallDepth::HalfSpace,
+                    minimum_tangential_scale_m: 0.02,
+                    geometry: GEOMETRY,
+                }],
+                &mut || false,
+            )
+            .is_err()
+    );
+
+    let sample = prepared.at_temperature(gas.temperature).unwrap();
+    let (fe, walls) = resolved_wall_fixture(&mesh, &points, &gas);
+    let numerical = fe
+        .with_conductive_walls(
+            &[ConductiveWallRegion {
+                faces: walls,
+                wall: ConductiveThermalWall {
+                    transport: conductive_wall_transport(&gas, &sample).unwrap(),
+                    depth: ThermalWallDepth::HalfSpace,
+                    minimum_tangential_scale_m: 0.02,
+                },
+                geometry: GEOMETRY,
+                temperature_k: gas.temperature,
+            }],
+            &mut || false,
+        )
+        .unwrap();
+    assert!(ThermoviscousInterior::from_gas(numerical, gas, [100.0, 1000.0]).is_err());
+}

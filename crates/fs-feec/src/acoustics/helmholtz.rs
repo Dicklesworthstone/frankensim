@@ -186,7 +186,7 @@ struct FaceRule {
 }
 
 /// Triangle quadrature by the collapsed (Duffy) Gauss-Legendre map: barycentric points and weights summing to 1/2.
-fn tri_quadrature(n: usize) -> Vec<([f64; 3], f64)> {
+pub(super) fn tri_quadrature(n: usize) -> Vec<([f64; 3], f64)> {
     let (nodes, weights) = gauss_legendre(n);
     let map = |x: f64| f64::midpoint(1.0, x);
     let mut out = Vec::with_capacity(n * n);

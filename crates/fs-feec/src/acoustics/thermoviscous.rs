@@ -10,8 +10,10 @@
 //! replaces their volume operators. See Kampinga, *Viscothermal acoustics using
 //! finite elements* (2010), section 2.4.
 //!
-//! Walls are stationary no-slip, with an explicit isothermal subset; remaining
-//! walls and all pressure ports have zero normal conductive heat flux. A port
+//! Walls are stationary no-slip, with explicit isothermal and finite conductive
+//! subsets; remaining walls and all pressure ports have zero normal conductive
+//! heat flux. Finite solids use the original local normal conduction owner;
+//! the gas temperature and velocity fields remain fully resolved. A port
 //! shape psi prescribes TOTAL traction `-P psi n`, including viscous stress.
 //! Its work-conjugate inward flow is `Q = -integral(psi v.n)`. Shapes reuse
 //! [`BoundaryMode`]'s real P1 traces, but they are traction shapes here, rather
@@ -27,7 +29,7 @@
 //! columns of a multiport response. Hard limits bound this dense local-domain
 //! owner; it is not a large-domain iterative solver or a geometry error bound.
 
-use super::helmholtz::multiport::{BoundaryMode, MAX_PORT_MODES};
+use super::helmholtz::multiport::{BoundaryMode, MAX_PORT_MODES, PhysicalTrace, physical_trace};
 use super::helmholtz::{AcousticFeError, HelmholtzFe, Medium};
 use crate::highorder::simplex::{SimplexSpace, duffy_quadrature};
 use crate::whitney::{ElementGeometry, try_element_geometry};
@@ -35,6 +37,9 @@ use fs_la::eigen_complex::{LuComplex, LuComplexError, lu_complex_with_cancel};
 use fs_math::{c64::C64, dd::Dd, det};
 use fs_rep_mesh::TetComplex;
 use std::collections::BTreeSet;
+
+pub mod wall;
+use wall::PreparedWallTraces;
 
 /// Hard dense-solver cap, independent of the caller's smaller budget.
 pub const MAX_LNS_DOFS: usize = 1536;
@@ -208,6 +213,10 @@ pub struct ThermoviscousFe<'c> {
     loads: Vec<Vec<f64>>,
     areas: Vec<f64>,
     max_aspect: f64,
+    wall_faces: BTreeSet<[u32; 3]>,
+    isothermal_faces: BTreeSet<[u32; 3]>,
+    conductive: PreparedWallTraces,
+    pub(crate) physical_modes: Vec<Vec<PhysicalTrace>>,
 }
 
 /// One reusable factorization at a single frequency and caloric state.
@@ -218,6 +227,16 @@ pub struct PreparedThermoviscous<'a, 'c> {
     factor: LuComplex,
     rows: Vec<f64>,
     columns: Vec<f64>,
+    wall_admittances: Vec<C64>,
+}
+
+/// Original mixed operator with positive-real-reference loads, retaining its
+/// scaled LU, physical residual correction and prepared solid admittances.
+/// Drives are incident power waves, distinct from prescribed traction drives.
+pub struct PreparedThermoviscousScattering<'a, 'c> {
+    inner: PreparedThermoviscous<'a, 'c>,
+    reference: Vec<f64>,
+    roots: Vec<f64>,
 }
 
 /// Cycle-averaged work [W]; no clipping of loss or residual is performed.
@@ -231,16 +250,19 @@ pub struct ThermoviscousPower {
     pub bulk_w: f64,
     /// Resolved heat-conduction dissipation.
     pub conductive_w: f64,
+    /// Conduction in finite or semi-infinite stationary solids, evaluated from
+    /// their original heat-flux admittance and the resolved wall temperature.
+    pub solid_conductive_w: f64,
     /// Molecular/caloric relaxation from passive complex heat capacity.
     pub caloric_w: f64,
 }
 impl ThermoviscousPower {
-    /// Sum of physical volume dissipation.
+    /// Sum of gas-volume and solid-wall dissipation.
     #[must_use]
     pub fn dissipated_w(self) -> f64 {
-        self.viscous_w + self.bulk_w + self.conductive_w + self.caloric_w
+        self.viscous_w + self.bulk_w + self.conductive_w + self.solid_conductive_w + self.caloric_w
     }
-    /// Input minus physical volume dissipation [W].
+    /// Input minus gas-volume and solid-wall dissipation [W].
     #[must_use]
     pub fn balance_residual_w(self) -> f64 {
         self.input_w - self.dissipated_w()
@@ -459,6 +481,10 @@ impl<'c> ThermoviscousFe<'c> {
             loads: Vec::new(),
             areas: Vec::new(),
             max_aspect,
+            wall_faces: walls,
+            isothermal_faces: thermal,
+            conductive: PreparedWallTraces::default(),
+            physical_modes: Vec::new(),
         };
         model.assemble(cancelled)?;
         for mode in &boundary.ports {
@@ -488,6 +514,7 @@ impl<'c> ThermoviscousFe<'c> {
             }
             model.loads.push(load);
             model.areas.push(area);
+            model.physical_modes.push(physical_trace(&model.fe, mode)?);
         }
         poll(cancelled)?;
         Ok(model)
@@ -639,9 +666,12 @@ impl<'c> ThermoviscousFe<'c> {
         cp: C64,
         reference: Option<&[f64]>,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<(LuComplex, Vec<f64>, Vec<f64>), ThermoviscousError> {
+    ) -> Result<(LuComplex, Vec<f64>, Vec<f64>, Vec<C64>), ThermoviscousError> {
         poll(cancelled)?;
         let omega = self.validate_frequency_cp(frequency_hz, cp)?;
+        let wall_admittances =
+            self.conductive
+                .admittances(self.fe.medium(), frequency_hz, cancelled)?;
         if let Some(reference) = reference {
             if reference.len() != self.loads.len()
                 || reference.iter().any(|r| !r.is_finite() || *r <= 0.0)
@@ -658,6 +688,11 @@ impl<'c> ThermoviscousFe<'c> {
             for col in 0..n {
                 let i = row * n + col;
                 a[i] = self.operator_entry(row, col, omega, cp);
+            }
+            for entry in self.conductive.row(row) {
+                let coefficient =
+                    wall_admittances[entry.region].scale(self.medium.temperature_k * entry.mass);
+                a[row * n + entry.col] = a[row * n + entry.col] + coefficient;
             }
         }
         if let Some(reference) = reference {
@@ -713,7 +748,7 @@ impl<'c> ThermoviscousFe<'c> {
         }
         let factor = lu_complex_with_cancel(&a, n, &mut *cancelled)?;
         poll(cancelled)?;
-        Ok((factor, rows, columns))
+        Ok((factor, rows, columns, wall_admittances))
     }
 
     fn operator_entry(&self, row: usize, col: usize, omega: f64, cp: C64) -> C64 {
@@ -739,6 +774,7 @@ impl<'c> ThermoviscousFe<'c> {
         columns: &[f64],
         omega: f64,
         cp: C64,
+        wall_admittances: &[C64],
         reference: Option<&[f64]>,
         rhs: &[C64],
         cancelled: &mut impl FnMut() -> bool,
@@ -789,6 +825,20 @@ impl<'c> ThermoviscousFe<'c> {
                     if a.re == 0.0 && a.im == 0.0 {
                         continue;
                     }
+                    re = re
+                        - (Dd::from_f64(a.re) * Dd::from_f64(v.re)
+                            - Dd::from_f64(a.im) * Dd::from_f64(v.im));
+                    im = im
+                        - (Dd::from_f64(a.re) * Dd::from_f64(v.im)
+                            + Dd::from_f64(a.im) * Dd::from_f64(v.re));
+                    scale += a.abs() * v.abs();
+                }
+                // Retain the original unscaled solid boundary operator in the
+                // same extended-precision residual as every gas-volume term.
+                for entry in self.conductive.row(i) {
+                    let a = wall_admittances[entry.region]
+                        .scale(self.medium.temperature_k * entry.mass);
+                    let v = x[entry.col];
                     re = re
                         - (Dd::from_f64(a.re) * Dd::from_f64(v.re)
                             - Dd::from_f64(a.im) * Dd::from_f64(v.im));
@@ -855,7 +905,8 @@ impl<'c> ThermoviscousFe<'c> {
         cp: C64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedThermoviscous<'a, 'c>, ThermoviscousError> {
-        let (factor, rows, columns) = self.factor(frequency_hz, cp, None, cancelled)?;
+        let (factor, rows, columns, wall_admittances) =
+            self.factor(frequency_hz, cp, None, cancelled)?;
         Ok(PreparedThermoviscous {
             model: self,
             frequency_hz,
@@ -863,6 +914,7 @@ impl<'c> ThermoviscousFe<'c> {
             factor,
             rows,
             columns,
+            wall_admittances,
         })
     }
 
@@ -899,35 +951,35 @@ impl<'c> ThermoviscousFe<'c> {
         reference: &[f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<C64>, ThermoviscousError> {
-        let (factor, rows, columns) = self.factor(frequency_hz, cp, Some(reference), cancelled)?;
-        let m = self.loads.len();
-        let mut s = vec![C64::ZERO; m * m];
-        for col in 0..m {
-            poll(cancelled)?;
-            let rhs = self.loads[col]
-                .iter()
-                .map(|&b| C64::new(2.0 * det::sqrt(reference[col]) * b, 0.0))
-                .collect::<Vec<_>>();
-            let solution = self.solve_system(
-                &factor,
-                &rows,
-                &columns,
-                std::f64::consts::TAU * frequency_hz,
-                cp,
-                Some(reference),
-                &rhs,
-                cancelled,
-            )?;
-            for row in 0..m {
-                s[row * m + col] = C64::new(if row == col { 1.0 } else { 0.0 }, 0.0)
-                    - self.flow(&solution, row).scale(det::sqrt(reference[row]));
-            }
-        }
-        if s.iter().any(|z| !finite(*z)) {
-            return Err(ThermoviscousError::NonFinite);
-        }
+        self.prepare_scattering(frequency_hz, cp, reference, cancelled)?
+            .scattering(cancelled)
+    }
+
+    /// Factor once for real-reference incident waves and subsequent original
+    /// field/work recovery, including finite-wall and molecular losses.
+    pub fn prepare_scattering<'a>(
+        &'a self,
+        frequency_hz: f64,
+        cp: C64,
+        reference: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedThermoviscousScattering<'a, 'c>, ThermoviscousError> {
+        let (factor, rows, columns, wall_admittances) =
+            self.factor(frequency_hz, cp, Some(reference), cancelled)?;
         poll(cancelled)?;
-        Ok(s)
+        Ok(PreparedThermoviscousScattering {
+            inner: PreparedThermoviscous {
+                model: self,
+                frequency_hz,
+                cp,
+                factor,
+                rows,
+                columns,
+                wall_admittances,
+            },
+            reference: reference.to_vec(),
+            roots: reference.iter().map(|&r| det::sqrt(r)).collect(),
+        })
     }
 
     fn flow(&self, x: &[C64], port: usize) -> C64 {
@@ -959,6 +1011,7 @@ impl PreparedThermoviscous<'_, '_> {
             &self.columns,
             std::f64::consts::TAU * self.frequency_hz,
             self.cp,
+            &self.wall_admittances,
             None,
             &rhs,
             cancelled,
@@ -973,6 +1026,15 @@ impl PreparedThermoviscous<'_, '_> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ThermoviscousField, ThermoviscousError> {
         let x = self.solve(drive, cancelled)?;
+        self.field(drive, &x, cancelled)
+    }
+
+    fn field(
+        &self,
+        drive: &[C64],
+        x: &[C64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ThermoviscousField, ThermoviscousError> {
         let model = self.model;
         let nv = model.velocity_count;
         let pressure_pa = x[model.pressure_start..model.temperature_start].to_vec();
@@ -1004,6 +1066,12 @@ impl PreparedThermoviscous<'_, '_> {
             viscous_w: 0.0,
             bulk_w: 0.0,
             conductive_w: 0.0,
+            solid_conductive_w: model.conductive.dissipated_w(
+                &temperature_k,
+                model.medium.temperature_k,
+                &self.wall_admittances,
+                cancelled,
+            )?,
             caloric_w: 0.0,
         };
         let quad = duffy_quadrature(4);
@@ -1065,6 +1133,7 @@ impl PreparedThermoviscous<'_, '_> {
             power.viscous_w,
             power.bulk_w,
             power.conductive_w,
+            power.solid_conductive_w,
             power.caloric_w,
         ]
         .iter()
@@ -1081,6 +1150,93 @@ impl PreparedThermoviscous<'_, '_> {
             temperature_k,
             power,
         })
+    }
+}
+
+impl PreparedThermoviscousScattering<'_, '_> {
+    /// Positive real reference resistances [Pa s/m^3], in original mode order.
+    #[must_use]
+    pub fn reference_resistance(&self) -> &[f64] {
+        &self.reference
+    }
+
+    fn solve(
+        &self,
+        incident: &[C64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<C64>, ThermoviscousError> {
+        poll(cancelled)?;
+        if incident.len() != self.reference.len() || incident.iter().any(|&a| !finite(a)) {
+            return Err(ThermoviscousError::InvalidInput("incident power waves"));
+        }
+        let prepared = &self.inner;
+        let model = prepared.model;
+        let mut rhs = vec![C64::ZERO; model.n];
+        for (port, &a) in incident.iter().enumerate() {
+            poll(cancelled)?;
+            let scale = a.scale(2.0 * self.roots[port]);
+            for (entry, &load) in rhs.iter_mut().zip(&model.loads[port]) {
+                *entry = *entry + scale.scale(load);
+            }
+        }
+        model.solve_system(
+            &prepared.factor,
+            &prepared.rows,
+            &prepared.columns,
+            std::f64::consts::TAU * prepared.frequency_hz,
+            prepared.cp,
+            &prepared.wall_admittances,
+            Some(&self.reference),
+            &rhs,
+            cancelled,
+        )
+    }
+
+    /// Full resolved fields from simultaneous incident waves. Reconstructs
+    /// actual traction P=2 sqrt(R) a-R Q and uses the original independent
+    /// volume/surface work integration, with no second factorization.
+    pub fn response(
+        &self,
+        incident: &[C64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ThermoviscousField, ThermoviscousError> {
+        let x = self.solve(incident, cancelled)?;
+        let drive = incident
+            .iter()
+            .enumerate()
+            .map(|(i, &a)| {
+                a.scale(2.0 * self.roots[i]) - self.inner.model.flow(&x, i).scale(self.reference[i])
+            })
+            .collect::<Vec<_>>();
+        if drive.iter().any(|&p| !finite(p)) {
+            return Err(ThermoviscousError::NonFinite);
+        }
+        self.inner.field(&drive, &x, cancelled)
+    }
+
+    /// Full power scattering from the same loaded LU. Field quadrature is
+    /// unnecessary for matrix extraction; no independent loss fit is applied.
+    pub fn scattering(
+        &self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<C64>, ThermoviscousError> {
+        let m = self.reference.len();
+        let mut scattering = vec![C64::ZERO; m * m];
+        let mut incident = vec![C64::ZERO; m];
+        for col in 0..m {
+            incident[col] = C64::ONE;
+            let x = self.solve(&incident, cancelled)?;
+            incident[col] = C64::ZERO;
+            for row in 0..m {
+                scattering[row * m + col] = C64::new(if row == col { 1.0 } else { 0.0 }, 0.0)
+                    - self.inner.model.flow(&x, row).scale(self.roots[row]);
+            }
+        }
+        if scattering.iter().any(|&z| !finite(z)) {
+            return Err(ThermoviscousError::NonFinite);
+        }
+        poll(cancelled)?;
+        Ok(scattering)
     }
 }
 

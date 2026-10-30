@@ -1353,3 +1353,18 @@ circular-tube Bessel and asymptotic overlap acceptance, automatic conforming
 Helmholtz/LNS interface assembly, curved geometry, finite conductive solid walls
 in this owner, moving walls, mean flow, nonlinear acoustics, a sequential LNS
 variant, time stepping and large-domain iterative solves are not supplied.
+
+
+## Resolved thermoviscous gas with finite conductive solid patches
+
+The original `acoustics::thermoviscous` P2 velocity/P1 pressure/P2 temperature owner now accepts `wall::ConductiveWallRegion` through `ThermoviscousFe::with_conductive_walls`. Each region retains original no-slip faces, the original `ConductiveThermalWall`, solid profile geometry and common mean temperature. Multiple solids may have different conductivity, capacity, depth and backing. Patches must be disjoint from ports, exact isothermal faces and each other. Unassigned walls remain insulated; replacing the numeric patch set by an empty set restores insulation. Source material binding belongs to fs-couple.
+
+For the original exp(+i omega t) convention and theta=T'/T0, the thermal weak term is `T0 Y_w(omega) C_w theta`. The original normal solid profile evaluates Y_w once per region/frequency. Sparse original P2 trace masses retain region identity; no extra dense matrix or gas boundary-layer approximation is added. The same equilibrated LU and double-double unscaled residual include the solid term. Independent pointwise integration reports `solid_conductive_w = Re(Y_w)/(2 T0) integral |T'|^2 dS`, separately from gas conduction, shear/bulk viscosity and molecular calorics; no loss clipping.
+
+`PreparedThermoviscousScattering` and `PreparedInteriorScattering` retain original real-reference loaded factors for arbitrary simultaneous incident waves and actual original fields. They avoid inversion of an unloaded impedance/admittance at its poles. Existing scattering entry points reuse these owners. Original physical face coordinates, outward normals and spatial shape values are retained internally for subsequent verified trace matching.
+
+Face partition/common-temperature admission occurs at construction. Original solid conductivity/capacity/depth/profile admission occurs at the requested frequency. Cancellation remains bounded at face, quadrature, row and original solver boundaries. Dense limits are unchanged; trace storage is sparse and bounded by the original admitted mesh.
+
+Focused native fallback: three new `thermoviscous::tests::conductive` cases passed, with four retained full-LNS and four retained spatial multiport cases. The full-LNS thermal slab ladder with 2/4/8 elements gives relative compliance errors 2.1337053211184807e-4 / 1.2150913899507234e-5 / 1.0970749045440163e-6 for an isothermal-backed finite solid, and 2.2647154985204132e-4 / 1.4463910901272932e-5 / 1.9246113513980495e-6 for an insulated-backed solid. Finest gate 2e-4; work closure 2e-8; reciprocity/loaded wave work 1e-9. These are low-kL thermal slab results with finite-length/traction-stress defect retained, not the infinite-slit propagation acceptance. Rust 1.100.0-nightly (2026-08-19) original-source focused seam; pinned toolchain and full constellation gate unavailable.
+
+Scope: stationary ideal gas, fixed common mean temperature, perfect thermal contact and original local normal homogeneous solid conduction. No lateral/interpatch conduction, multilayer solid mesh, contact resistance, evolving mean temperature, moving wall or time-domain realization is inferred. IRP M2.4-W1c remains open for its separate propagation and interface qualifications.

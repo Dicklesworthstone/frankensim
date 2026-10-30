@@ -18,8 +18,12 @@ use fs_duct::{DuctError, compose::TwoPort};
 use fs_feec::acoustics::thermoviscous::{
     ThermoviscousError, ThermoviscousFe, ThermoviscousField, ThermoviscousMedium,
 };
+use fs_material::thermal::transport::ThermalTransportSample;
 use fs_material::{MaterialError, gas::GasState, relaxation::RelaxationState};
 use fs_math::c64::C64;
+
+/// Finite solid-wall patches evaluated by the original material owner.
+pub mod wall;
 
 /// Retains the original material, finite-element and duct-composition refusals.
 #[derive(Debug)]
@@ -91,6 +95,7 @@ pub struct ThermoviscousInterior<'c> {
     gas: GasState,
     relaxation: Option<RelaxationState>,
     band_hz: [f64; 2],
+    wall_sources: Vec<ThermalTransportSample>,
 }
 
 impl<'c> ThermoviscousInterior<'c> {
@@ -101,6 +106,11 @@ impl<'c> ThermoviscousInterior<'c> {
         gas: GasState,
         band_hz: [f64; 2],
     ) -> Result<Self, ThermoviscousSourceError> {
+        if !fe.conductive_walls().is_empty() {
+            return Err(invalid(
+                "bind the source gas before attaching source-evaluated conductive walls",
+            ));
+        }
         let actual = fe.medium();
         let expected = source_medium(&gas, actual.bulk_viscosity_pa_s)?;
         for (a, b) in [
@@ -133,6 +143,7 @@ impl<'c> ThermoviscousInterior<'c> {
             gas,
             relaxation: None,
             band_hz,
+            wall_sources: Vec::new(),
         })
     }
 
@@ -160,6 +171,12 @@ impl<'c> ThermoviscousInterior<'c> {
     }
     pub const fn band_hz(&self) -> [f64; 2] {
         self.band_hz
+    }
+    /// Original source samples in the same order as the finite wall regions.
+    /// Their conductivity direction and caloric constraint are selected when
+    /// preparing the material, not inferred by the acoustic adapter.
+    pub fn wall_sources(&self) -> &[ThermalTransportSample] {
+        &self.wall_sources
     }
 
     fn heat_capacity(

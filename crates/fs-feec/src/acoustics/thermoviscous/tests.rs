@@ -1,5 +1,7 @@
 use super::*;
 
+mod conductive;
+
 fn air() -> ThermoviscousMedium {
     let temperature = 293.15;
     let pressure = 101325.0;
@@ -101,7 +103,11 @@ fn limits() -> ThermoviscousLimits {
 fn assert_work(field: &ThermoviscousField) {
     let p = field.power;
     assert!(
-        p.viscous_w >= 0.0 && p.bulk_w >= 0.0 && p.conductive_w >= 0.0 && p.caloric_w >= 0.0,
+        p.viscous_w >= 0.0
+            && p.bulk_w >= 0.0
+            && p.conductive_w >= 0.0
+            && p.solid_conductive_w >= 0.0
+            && p.caloric_w >= 0.0,
         "{p:?}"
     );
     let scale = p.input_w.abs().max(p.dissipated_w());
