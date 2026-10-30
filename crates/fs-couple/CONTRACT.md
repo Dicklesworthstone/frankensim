@@ -15924,3 +15924,43 @@ and late mechanical refusal/cancellation with deterministic retry. These native
 regressions are authored but unrun in this implementation environment. Separate
 synthetic arithmetic checks and syntax review are not native execution or
 experimental validation.
+
+## Authored finite wall and reciprocal gas-wall thermal performance
+
+The original plate-valve input now accepts a finite_wall solid block after
+optional finite_gas records and before observation. Its wall_caloric record
+selects original dimensional heat-capacity and density properties under
+single-claim selection and the existing T temperature coordinate. The original
+source-derived enthalpy chart retains its claims, query receipts and identity.
+The explicit initial specific enthalpy must reconstruct the original wall
+temperature. All selected main-bore regions must have the same material card
+and condition point; mechanical restraints and thicknesses can remain distinct.
+
+wall_inventory supplies mass, volume and surface area. wall_feedback supplies
+the signed parameter-work bracket, source/energy tolerances, iterations and
+absolute work allowance. wall_dissipation none or native with dimension, byte
+and multiply-term budgets selects the original native solid heat treatment.
+wall_heat and wall_power records prescribe bounded signed external powers on
+the mechanical sample clock; the final assignment remains held.
+
+A simultaneous finite gas inventory requires explicit gas_wall_conduction and
+gas_wall_feedback records. The adapter reuses the original finite-gas parser
+and complete-port admitted volume. It validates both original power lists
+before merging their sample union, retaining both actual held powers and
+charging two shared control/work slots per pair. The existing joint runtime
+owns gas/wall energy exchange and both native parameter-work corrections.
+Neither inventory is attached independently or advanced twice.
+
+The supported model is one fixed-density all-solid wall body, fixed geometry,
+and, when selected, a closed fixed-composition fixed-volume gas inventory.
+Original cold/step admissions reject incompatible sources, phases, clocks,
+topology, loss owners or resource budgets. Failed/cancelled playback retains
+the existing accepted-history and poisoned-callback semantics. No melting,
+expansion, advection or resolved convection is inferred. The input grammar is
+documented in performance/file/thermal_wall.rs, and the existing CLI records
+initial inventories, original chart receipts, paired powers and solve budgets.
+
+Focused authored/manual attachment, unequal-temperature exchange, source
+refresh, block partition, budget/refusal and cancellation cases live in
+performance/file/wall/tests/thermal.rs. Their runtime assertions require actual
+execution; syntax parsing alone is not numerical or experimental validation.

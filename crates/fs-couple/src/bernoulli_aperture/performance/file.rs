@@ -31,8 +31,15 @@
 //! assembly. Its native solid state joins the same acoustic propagator before
 //! the moving plate is bound. Wall and plate declarations share one immutable
 //! artifact cache; their different material conditions remain independent.
+//!
+//! Optional `finite_wall solid` records follow finite gas, if present, and precede
+//! observation. They select source-derived wall caloric properties, a finite
+//! inventory and signed sample-addressed powers. Finite gas and wall together
+//! require an explicit reciprocal conduction interface. The complete grammar
+//! and its fixed-geometry all-solid scope are documented in `thermal_wall`.
 mod force;
 mod finite_gas;
+mod thermal_wall;
 mod wall;
 /// Material-card multimode valves coupled to both ducts and one physical receiver.
 pub mod material_modal;
@@ -92,6 +99,8 @@ pub enum PlateValveInputError {
     SteadyGas { line: usize, source: fs_material::gas_field::steady::SteadyGasError },
     /// Original finite thermochemical inventory or caloric refusal.
     GasEnergy { line: usize, source: fs_material::thermochemical_gas::energy::GasEnergyError },
+    /// Original source-derived wall caloric chart or enthalpy refusal.
+    Phase { line: usize, source: fs_material::phase::PhaseStateError },
     /// Caller-supplied normalized material artifact could not be loaded.
     MaterialSource { /// One-based declaration line.
         line: usize, /// Original source refusal.
@@ -118,6 +127,7 @@ impl core::fmt::Display for PlateValveInputError {
             Self::Gas { line, source } => write!(f,"plate-valve gas line {line}: {source}"),
             Self::SteadyGas { line, source } => write!(f,"plate-valve steady gas line {line}: {source}"),
             Self::GasEnergy { line, source } => write!(f,"plate-valve finite gas line {line}: {source}"),
+            Self::Phase { line, source } => write!(f,"plate-valve wall caloric line {line}: {source}"),
             Self::MaterialSource { line, source } => write!(f,"plate-valve material source line {line}: {source}"),
             Self::RadiationSource { line, source } => write!(f,"plate-valve radiation source line {line}: {source}"),
             Self::Material { line, source } => write!(f,"plate-valve material line {line}: {source}"),
@@ -133,6 +143,7 @@ impl std::error::Error for PlateValveInputError {
             Self::Gas { source, .. } => Some(source),
             Self::SteadyGas { source, .. } => Some(source),
             Self::GasEnergy { source, .. } => Some(source),
+            Self::Phase { source, .. } => Some(source),
             Self::Material { source, .. } => Some(source),
             Self::RadiationSource { source, .. } => Some(source),
             _ => None,
@@ -316,7 +327,9 @@ impl PlateValvePerformance {
         if let Some(program) = parsed.forces {
             renderer = renderer.with_plate_forces(program).map_err(PlateValveInputError::Gesture)?;
         }
-        if let Some(heat) = parsed.finite_gas {
+        if let Some(wall) = parsed.finite_wall {
+            renderer = wall.bind(renderer, parsed.finite_gas, gate, &mut parsed.gas_records)?;
+        } else if let Some(heat) = parsed.finite_gas {
             renderer = heat.bind(renderer, gate, &mut parsed.gas_records)?;
         }
         checkpoint(gate)?;
@@ -401,6 +414,7 @@ struct Parsed {
     relaxation: Option<(PlateRelaxationSpec, InitialApertureMemory)>,
     forces: Option<ApertureForceProgram>,
     finite_gas: Option<finite_gas::FiniteGasInput>,
+    finite_wall: Option<thermal_wall::FiniteWallInput>,
     max_angular_step: f64,
     schedule: GestureSchedule,
     nodes: usize,
@@ -458,6 +472,14 @@ impl Parsed {
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("finite_gas") {
             Some(finite_gas::FiniteGasInput::read(&mut r, sources, gate)?)
         } else { None };
+        let finite_wall = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("finite_wall") {
+            Some(thermal_wall::FiniteWallInput::read(&mut r, dg_wall.as_ref(), gate)?)
+        } else { None };
+        if finite_wall.as_ref().is_some_and(|wall| wall.requires_gas() != finite_gas.is_some()) {
+            return Err(bad(r.line,
+                "finite gas and wall heat require an explicit reciprocal conduction interface"));
+        }
         let mut row=r.row("observation")?;
         let observation=match row.word()? {
             "inlet"=>ApertureObservation::Inlet,"terminal"=>ApertureObservation::TubeTerminal,
@@ -635,7 +657,7 @@ impl Parsed {
         if r.lines.next().is_some() {return Err(bad(r.line+1,"unexpected trailing geometry record"));}
         let config=AperturePerformanceConfig{sample_rate_hz:rate,samples,max_block,max_compile_work,max_controls};
         let schedule=decode_schedule(gestures)?;
-        Ok(Self{gas_records,config,full_scale_pa,air,duct,dg_wall,exterior,observation,chart,plate,symmetry,slit_length_m,initial,closure,relaxation,forces,finite_gas,max_angular_step,
+        Ok(Self{gas_records,config,full_scale_pa,air,duct,dg_wall,exterior,observation,chart,plate,symmetry,slit_length_m,initial,closure,relaxation,forces,finite_gas,finite_wall,max_angular_step,
             schedule,nodes:node_count,triangles:triangle_count,sections:section_count,section_provenance})
     }
 }

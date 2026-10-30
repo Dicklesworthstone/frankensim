@@ -67,8 +67,10 @@ impl FiniteGasInput {
                 maximum_iterations, maximum_temperature_increment_k, loss } } })
     }
 
-    pub(super) fn bind(self, renderer: AperturePerformance, gate: &CancelGate,
-        records: &mut Vec<GasRecord>) -> Result<AperturePerformance, PlateValveInputError>
+    /// Resolve the original closed inventory against the complete DG volume.
+    /// Wall-only and reciprocal playback reuse this same source/geometry owner.
+    pub(super) fn into_inventory(self, renderer: &AperturePerformance,
+        gate: &CancelGate) -> Result<(ClosedGasParcel, FiniteGasHeatProgram), PlateValveInputError>
     {
         checkpoint(gate)?;
         let CoupledAperture::Dg(system) = renderer.system() else {
@@ -84,11 +86,19 @@ impl FiniteGasInput {
                 AcousticRealizeError::Nonlinear(error.to_string())))?;
         let gas = ClosedGasParcel::new(probe.model().clone(), probe.point().clone(), volume)
             .map_err(|source| PlateValveInputError::GasEnergy { line: self.line, source })?;
+        checkpoint(gate)?;
+        Ok((gas, self.program))
+    }
+
+    pub(super) fn bind(self, renderer: AperturePerformance, gate: &CancelGate,
+        records: &mut Vec<GasRecord>) -> Result<AperturePerformance, PlateValveInputError>
+    {
+        let (gas, program) = self.into_inventory(&renderer, gate)?;
         let initial = GasRecord::Thermochemical(gas.state().clone());
         // The borrowed input gate belongs to cold construction. Playback owns a
         // separately accessible gate, so callers can retain it after moving the
         // renderer into an existing pressure/PCM consumer.
-        let renderer = renderer.with_finite_gas_heat(gas, self.program,
+        let renderer = renderer.with_finite_gas_heat(gas, program,
             Arc::new(CancelGate::new_clock_free())).map_err(PlateValveInputError::Gesture)?;
         checkpoint(gate)?;
         records.push(initial);

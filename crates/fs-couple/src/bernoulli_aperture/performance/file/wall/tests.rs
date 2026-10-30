@@ -328,3 +328,5 @@ fn incompatible_or_malformed_walls_refuse_before_any_physical_step() {
     );
     assert_eq!(loads, 0);
 }
+
+mod thermal;
