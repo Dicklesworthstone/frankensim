@@ -35,10 +35,12 @@ use std::collections::BTreeMap;
 
 #[path = "rigid_directional_heat/driven.rs"]
 mod driven;
-#[path = "rigid_directional_heat/trajectory.rs"]
-mod trajectory;
+#[path = "rigid_directional_heat/impacts.rs"]
+mod impacts;
 #[path = "rigid_directional_heat/sphere_plane.rs"]
 mod sphere_plane;
+#[path = "rigid_directional_heat/trajectory.rs"]
+mod trajectory;
 
 const CELLS: [CellId; 2] = [CellId(30), CellId(10)];
 const CAPACITY: [f64; 2] = [0.02, 0.06];

@@ -34,6 +34,20 @@ pub enum SourceImpulseCoefficientRole {
     Static,
 }
 
+/// Original coefficient claims sampled before a simultaneous contact solve.
+///
+/// No normal impulse or mobility is needed to sample the declared impact law.
+/// The consuming mechanical owner must solve and admit the full event before
+/// publishing this candidate history. The retained texture is expressed in the
+/// same tangent coordinates as `velocity_before_m_s` supplied to the sampler.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourceImpulseSample {
+    pub state: SourceThermalEllipticState,
+    pub coefficient_role: SourceImpulseCoefficientRole,
+    pub coefficients_mu: [f64; 2],
+    pub queried_speed_m_s: f64,
+}
+
 /// Accepted native impulse and original source candidate; no borrowed mutation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SourceImpulseReport {
@@ -77,47 +91,32 @@ impl core::fmt::Display for SourceImpulseError {
 impl std::error::Error for SourceImpulseError {}
 
 impl SourceThermalEllipticCoulomb {
-    /// Resolve original claims at preimpact speed and apply their chosen ellipse.
+    /// Resolve one source-held impact ellipse without presupposing its impulse.
     ///
-    /// Every declared SlidingSpeed coordinate uses the norm of the supplied
-    /// actual preimpact tangent velocity. Every AccumulatedDistance coordinate
-    /// retains its own accepted value exactly; template motion entries are only
-    /// placeholders. The original query schema, fixed external coordinates,
-    /// temperature/pressure agreement, source domains and claim pins are checked
-    /// by the existing complete-query owner.
-    ///
-    /// Both principal source bundles are refreshed before the allocation-free
-    /// native impulse solve. A temporary equal-coefficient native law expresses
-    /// the explicitly selected impact role. The returned source state retains
-    /// BOTH refreshed coefficient pairs for future sustained contact, along with
-    /// unchanged native slip, texture and last finite-step temperature.
-    ///
-    /// No time interval, displacement, pressure from normal impulse, or impact
-    /// heat allocation is inferred. Source and native failures or cancellation
-    /// publish no candidate. Normal/tangent-coupled restitution remains the
-    /// consuming mechanical owner's responsibility.
-    #[allow(clippy::too_many_arguments)]
-    pub fn solve_preimpact_impulse(
+    /// Simultaneous normal/tangential contact owners can sample every ordered
+    /// interface from its actual incoming velocity, then solve all contact
+    /// impulses together. This performs the same original claim refresh as
+    /// `solve_preimpact_impulse`; it neither invokes a mechanical solver nor
+    /// synthesizes a normal load, pressure, time interval or travel distance.
+    /// Every accepted path coordinate and native slip/texture history survive
+    /// unchanged. The complete source state remains a private candidate until
+    /// the caller admits the complete coupled mechanical response.
+    pub fn sample_preimpact_coefficients(
         &self,
         state: &SourceThermalEllipticState,
-        input: &EllipticImpulseInput,
+        velocity_before_m_s: [f64; 2],
         conditions: &SourceFrictionConditions,
         coefficient_role: SourceImpulseCoefficientRole,
-        controls: EllipticImpulseControls,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<SourceImpulseReport, SourceImpulseError> {
+    ) -> Result<SourceImpulseSample, SourceImpulseError> {
         poll(cancelled)?;
         self.check(state)?;
-        if input
-            .velocity_before_m_s
-            .into_iter()
-            .any(|v| !v.is_finite())
-        {
+        if velocity_before_m_s.into_iter().any(|v| !v.is_finite()) {
             return Err(SourceImpulseError::Invalid(
                 "finite preimpact velocity required",
             ));
         }
-        let speed = fs_math::det::hypot(input.velocity_before_m_s[0], input.velocity_before_m_s[1]);
+        let speed = fs_math::det::hypot(velocity_before_m_s[0], velocity_before_m_s[1]);
         if !speed.is_finite() {
             return Err(SourceImpulseError::Invalid(
                 "representable preimpact speed required",
@@ -154,12 +153,8 @@ impl SourceThermalEllipticCoulomb {
             SourceImpulseCoefficientRole::Kinetic => kinetic_mu,
             SourceImpulseCoefficientRole::Static => static_mu,
         };
-        let (impact_law, impact_history) =
-            law.continue_coefficients(&history, coefficients_mu, coefficients_mu)?;
-        let impulse = impact_law.solve_impulse(&impact_history, input, controls, cancelled)?;
         poll(cancelled)?;
-        Ok(SourceImpulseReport {
-            impulse,
+        Ok(SourceImpulseSample {
             state: SourceThermalEllipticState {
                 owner: self.identity,
                 law,
@@ -169,6 +164,58 @@ impl SourceThermalEllipticCoulomb {
             coefficient_role,
             coefficients_mu,
             queried_speed_m_s: speed,
+        })
+    }
+
+    /// Resolve original claims at preimpact speed and apply their chosen ellipse.
+    ///
+    /// Every declared SlidingSpeed coordinate uses the norm of the supplied
+    /// actual preimpact tangent velocity. Every AccumulatedDistance coordinate
+    /// retains its own accepted value exactly; template motion entries are only
+    /// placeholders. The original query schema, fixed external coordinates,
+    /// temperature/pressure agreement, source domains and claim pins are checked
+    /// by the existing complete-query owner.
+    ///
+    /// Both principal source bundles are refreshed before the allocation-free
+    /// native impulse solve. A temporary equal-coefficient native law expresses
+    /// the explicitly selected impact role. The returned source state retains
+    /// BOTH refreshed coefficient pairs for future sustained contact, along with
+    /// unchanged native slip, texture and last finite-step temperature.
+    ///
+    /// No time interval, displacement, pressure from normal impulse, or impact
+    /// heat allocation is inferred. Source and native failures or cancellation
+    /// publish no candidate. Normal/tangent-coupled restitution remains the
+    /// consuming mechanical owner's responsibility.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_preimpact_impulse(
+        &self,
+        state: &SourceThermalEllipticState,
+        input: &EllipticImpulseInput,
+        conditions: &SourceFrictionConditions,
+        coefficient_role: SourceImpulseCoefficientRole,
+        controls: EllipticImpulseControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SourceImpulseReport, SourceImpulseError> {
+        let sample = self.sample_preimpact_coefficients(
+            state,
+            input.velocity_before_m_s,
+            conditions,
+            coefficient_role,
+            cancelled,
+        )?;
+        let (impact_law, impact_history) = sample.state.law.continue_coefficients(
+            &sample.state.constitutive,
+            sample.coefficients_mu,
+            sample.coefficients_mu,
+        )?;
+        let impulse = impact_law.solve_impulse(&impact_history, input, controls, cancelled)?;
+        poll(cancelled)?;
+        Ok(SourceImpulseReport {
+            impulse,
+            state: sample.state,
+            coefficient_role: sample.coefficient_role,
+            coefficients_mu: sample.coefficients_mu,
+            queried_speed_m_s: sample.queried_speed_m_s,
         })
     }
 }

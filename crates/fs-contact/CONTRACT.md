@@ -38,6 +38,17 @@ experimental friction calibration is claimed.
 
 ## Source-pinned directional impact coefficients
 
+`sample_preimpact_coefficients` exposes the same complete original-source
+refresh before a simultaneous mechanical owner knows any normal impulse or
+mobility. Its candidate carries the selected impact coefficients and both
+refreshed static/kinetic continuation laws. The existing single-contact impulse
+entry point delegates to this sampler; neither route advances accepted path
+coordinates, native slip, texture or finite-step temperature. Cancellation is
+polled before, between and after the source work. A focused regression checks
+normal-impulse-independent sampling, complete history preservation and every
+sampler cancellation boundary. The mechanical consumer owns final admission
+and publication of these private candidates.
+
 `SourceThermalEllipticCoulomb::solve_preimpact_impulse` refreshes the original
 principal claims at actual incoming tangent speed. The caller explicitly selects
 kinetic or static source coefficients as one fixed impact ellipse, with no

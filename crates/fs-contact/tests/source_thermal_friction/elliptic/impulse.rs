@@ -441,7 +441,7 @@ fn second_source_failure_foreign_history_and_late_cancellation_publish_no_candid
             )
             .is_err()
     );
-    for target_poll in [1, 2, 3, 4, 5, 6, 7] {
+    for target_poll in 1..=8 {
         let mut polls = 0;
         let result = law.solve_preimpact_impulse(
             &state,
@@ -479,6 +479,69 @@ fn second_source_failure_foreign_history_and_late_cancellation_publish_no_candid
         .unwrap();
     assert_eq!(first, retry);
     assert_eq!(state, saved);
+}
+
+#[test]
+fn coefficient_sampling_needs_no_guessed_normal_impulse_and_remains_transactional() {
+    let card = motion_card([0.3, 0.5], [0.2, 0.4]);
+    let (law, template) = multiple_motion_sources(&card);
+    let state = law.initial_state();
+    let original = state.clone();
+    let conditions = boundary(template, 320.0, Some(2e5));
+    let sample = law
+        .sample_preimpact_coefficients(
+            &state,
+            [0.6, 0.8],
+            &conditions,
+            SourceImpulseCoefficientRole::Kinetic,
+            &mut || false,
+        )
+        .unwrap();
+    close(sample.queried_speed_m_s, 1.0);
+    close(sample.coefficients_mu[0], 0.4);
+    close(sample.coefficients_mu[1], 0.225);
+    for source in sample.state.friction_sources() {
+        close(source.state_coordinate("path").unwrap(), 0.25);
+        close(source.state_coordinate("path_aux").unwrap(), 1.25);
+        close(source.state_coordinate("speed").unwrap(), 1.0);
+        close(source.state_coordinate("speed_aux").unwrap(), 1.0);
+    }
+    unchanged_history(&state, &sample.state);
+    original_claims(&card, &state, &sample.state);
+    // The same source sample can feed mechanics with very different normal
+    // impulses. Its claimed coordinates remain the actual incoming state.
+    for normal_impulse_ns in [0.0, 0.1, 10.0] {
+        let response = law
+            .solve_preimpact_impulse(
+                &state,
+                &EllipticImpulseInput {
+                    normal_impulse_ns,
+                    ..collision([0.6, 0.8])
+                },
+                &conditions,
+                SourceImpulseCoefficientRole::Kinetic,
+                controls(),
+                &mut || false,
+            )
+            .unwrap();
+        assert_eq!(response.state, sample.state);
+        assert_eq!(response.coefficients_mu, sample.coefficients_mu);
+    }
+    for target in 1..=4 {
+        let mut polls = 0;
+        let result = law.sample_preimpact_coefficients(
+            &state,
+            [0.6, 0.8],
+            &conditions,
+            SourceImpulseCoefficientRole::Kinetic,
+            &mut || {
+                polls += 1;
+                polls == target
+            },
+        );
+        assert!(matches!(result, Err(SourceImpulseError::Cancelled)));
+        assert_eq!(state, original);
+    }
 }
 
 #[test]

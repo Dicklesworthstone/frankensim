@@ -24,6 +24,9 @@ pub mod driven;
 /// Original source claims through moving-sphere impacts and sustained contact.
 pub mod sphere_plane;
 
+/// Original interface sources through simultaneous normal/directional impacts.
+pub mod impact;
+
 use super::{
     FrictionHeatInput, FrictionHeatReport, FrictionHeatRoute, FrictionHeatStep,
     FrictionHeatTolerances,

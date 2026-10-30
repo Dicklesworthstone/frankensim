@@ -1,5 +1,43 @@
 # CONTRACT: fs-couple
 
+## Sourced simultaneous directional rigid impacts
+
+`friction_heat::directional::impact::apply_source_rigid_elliptic_impacts`
+binds each original ordered material interface to the existing simultaneous
+rigid-body contact owner. Every geometrically active source is sampled once at
+its actual incoming tangent speed and caller-owned local thermal/pressure
+conditions, before normal and tangent impulses are solved together. Original
+body masses, rotated inertia, material arms, normal/tangent coupling and
+shared-body cross-contact response remain in the native mechanical assembly.
+
+Source callbacks receive the exact normalized contact frame, both actual
+witness positions, stable contact ID and original input index. A prescribed
+plane's source point is the normal projection of the body witness, not an
+arbitrary plane anchor. Canonical contact-ID ordering retains the original
+binding/history mapping; inactive contacts neither query nor advance sources.
+
+The source sampler retains claim pins, accepted accumulated distances, texture,
+native slip and complete static/kinetic continuation state. Source receipts,
+body momenta and candidate histories belong to one accepted event. Source
+failure, cancellation, native non-admission or a late physical momentum/work
+audit leaves both public state arrays unchanged. Callbacks must stage any
+external state themselves. A changed tangent frame requires the existing
+objective history transport before the next event.
+
+Four new G1/G3/G4 groups cover analytical off-centre normal/tangent coupling,
+heterogeneous three-body friction with independent impulse/endpoint references,
+caller permutation and inactive histories, later-source refusal/cancellation,
+and late angular-balance refusal with deterministic retry. All eleven sourced
+sphere and general-impact groups pass. The stronger-anisotropy shared-contact
+fixture retains explicit unresolved-determinacy refusal and complete rollback;
+positive coefficients alone do not imply native uniqueness admission.
+
+This is a source-held instantaneous impact law, with an explicit static or
+kinetic coefficient role. It does not infer pressure from impulse, a fictitious
+duration, finite travel, collision discovery or thermal allocation. Impact loss
+remains unallocated mechanical loss. These synthetic source references do not
+establish experimental calibration.
+
 ## Material-bound finite bodies under spatial follower pressure
 
 `finite_solid::FiniteSolidBody` accepts the original pressure owner's

@@ -23,7 +23,7 @@ use std::cell::Cell;
 mod impacts;
 
 /// Pressure-free source: an ideal rigid point contact does not define an area.
-fn source_fixture(
+pub(super) fn source_fixture(
     kinetic_x: PropertyValue,
 ) -> (
     InterfaceSystemCard,
@@ -241,7 +241,7 @@ fn sourced(
     )
 }
 
-fn original_claims(
+pub(super) fn original_claims(
     card: &InterfaceSystemCard,
     original: &SourceThermalEllipticState,
     current: &SourceThermalEllipticState,
