@@ -5351,6 +5351,18 @@ basis and measured violin/cello/bass fidelity remain separate requirements.
 
 `ReedPerformance` accepts an optional authored `gas_field` block after segments, selecting the existing continuous Magnus or midpoint field owner with explicit resolution, station positions, temperatures, canonical source IDs and mole fractions. Numeric resolution remains midpoint shorthand. Only caller-loaded species/NASA-9/transport packs supply the material model; declared components may be exactly zero at the inlet or throughout the field. A positive dyadic composition is used solely to admit the complete source catalogue and is never evaluated physically. Original knots and pack identities remain retained, with active knot receipts on the existing gas-record/provenance surface. The same field supplies acoustic propagation, exact inlet reed coupling and default exterior loading/pressure observation. Existing exact-length, common-pressure, source-domain, phase, geometry and aggregate-work refusals remain, and explicit segment or injected-field coexistence is refused. Wind and ensemble sidecars distinguish continuous steps per smooth span from midpoint cells and authored segment samples. Regression coverage includes source/order/zero/seed invariance through actual midpoint and continuous pressure, callback parity and the unchanged absent-block path. This remains a prescribed frozen field through the existing compact reed/duct/radiation model, not a transport/reaction solution or measured instrument qualification. The checked-in N2/CO2 example includes the existing source-pack construction and rendering commands.
 
+The same performance grammar admits exponential, power and measured spline
+`profile` segments with explicit integration steps through `RadiusProfile`.
+`gas_steady` derives their cell volumes and sloped lateral wall areas from that
+same geometry, using the original fourth-order profile measure owner with a
+65536-panel aggregate cap. Cylinder/cone geometry retains its exact arithmetic.
+The stationary heat/species solver, NASA-9 source admission, common pressure,
+mean-flow ceiling and original acoustic/microphone owners remain shared; varying
+profile fields require continuous propagation. Focused G1/G3 tests cover true
+profile volume, generated-field/direct-binding pressure parity and callback
+invariance, with invalid geometry and work refusing before rendering. This
+does not add condensation, transient gas evolution or branching mean flow.
+
 ### Material fluid films and finite heat
 
 `render::plate::impact::squeeze::material::MaterialSqueezeFilm` resolves the same `FluidTransport` snapshot used by flow and heat, retains the concrete source and its receipts, and compiles viscosity into the original `fs-tribo::ResistiveFilm`. Its pressure and analytic tangent remain inside the existing joint mechanical equation. `HeatedImpactSystem::new_with_films` routes selected contact and incompressible-film work to the same finite caloric stores. Film heat is evaluated by the original pressure owner at the actual discrete-gradient velocity and midpoint geometry, then deposited once before mechanical acceptance. Existing thermal-network subcycling, conduction, external sources and rollback apply unchanged. Network reports distinguish `deposited_heat_j` from true combined-system `external_heat_j`.

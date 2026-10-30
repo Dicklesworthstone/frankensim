@@ -185,7 +185,7 @@ fn thermal_cell_geometry_is_the_exact_authored_frustum_even_across_segments() {
             length: 0.25,
         },
     ];
-    let (v, a) = geometry(&segments, 0.0, 0.5, 1).unwrap();
+    let (v, a) = geometry(&segments, 0.0, 0.5, 1, &mut 0).unwrap();
     let expected_v = core::f64::consts::PI
         * 0.25
         * (0.002_f64.powi(2) + (0.002_f64.powi(2) + 0.002 * 0.004 + 0.004_f64.powi(2)) / 3.0);
@@ -193,10 +193,86 @@ fn thermal_cell_geometry_is_the_exact_authored_frustum_even_across_segments() {
         + core::f64::consts::PI * 0.006 * 0.25_f64.hypot(0.002);
     assert!((v - expected_v).abs() < expected_v * 1e-14);
     assert!((a - expected_a).abs() < expected_a * 1e-14);
-    let (v0, a0) = geometry(&segments, 0.0, 0.375, 1).unwrap();
-    let (v1, a1) = geometry(&segments, 0.375, 0.5, 1).unwrap();
+    let (v0, a0) = geometry(&segments, 0.0, 0.375, 1, &mut 0).unwrap();
+    let (v1, a1) = geometry(&segments, 0.375, 0.5, 1, &mut 0).unwrap();
     assert!((v0 + v1 - v).abs() < v * 1e-14);
     assert!((a0 + a1 - a).abs() < a * 1e-14);
+}
+
+#[test]
+fn smooth_profile_geometry_generates_the_same_field_used_by_pressure_rendering() {
+    // G1/G3: all three profile constructors reach the original thermal/species
+    // and acoustic owners. An independent analytic exponential-volume check
+    // prevents substituting the endpoint cone for the true profile.
+    let (a, b) = (packs("N2", 0.028, 3.5, 200.0), packs("CO2", 0.044, 4.5, 200.0));
+    let bindings = [a.binding(), b.binding()];
+    let sources = ThermochemicalSources {
+        species: &bindings, water_species: None, phase: ThermochemicalPhase::FrozenGas,
+    };
+    for row in [
+        "profile exponential 16 0.0015 0.4 0.57",
+        "profile power 16 0.0015 10 1 0.57",
+        "profile spline 16 natural 3 0 0.0015 0.285 0.0016 0.57 0.00155",
+        "profile spline 16 clamped 0 0 3 0 0.0015 0.285 0.0016 0.57 0.00155",
+    ] {
+        let input = INPUT.replace("cylinder 0.0015 0.57", row);
+        let performance = load(&input, &sources, 37);
+        let generated = performance.steady_gas().unwrap();
+        let cells = &generated.problem().cells;
+        assert_eq!(cells.len(), 2);
+        if row.contains("exponential") {
+            for (index, cell) in cells.iter().enumerate() {
+                let left = index as f64 * 0.285;
+                let right = left + 0.285;
+                let exact = core::f64::consts::PI * 0.0015_f64.powi(2)
+                    * ((0.4 * right).exp() - (0.4 * left).exp()) / 0.4;
+                assert!((cell.volume_m3 / exact - 1.0).abs() < 2e-12);
+            }
+        }
+        let direct = ReedPerformance::from_bytes_with_field_resolution(
+            without_steady(&input).as_bytes(), 37, ObservationPolicy::Diagnostic,
+            Some(&sources), generated.solution().field().clone(),
+            performance.gas_field_resolution().unwrap(),
+        ).unwrap();
+        let expected = render(performance, 37);
+        assert!(expected.0.iter().any(|p| p.abs() > 1e-12));
+        assert_eq!(expected, render(direct, 37));
+        assert_eq!(expected, render(load(&input, &sources, 113), 113));
+    }
+}
+
+#[test]
+fn smooth_profile_cells_keep_exact_junctions_and_share_one_work_budget() {
+    // G0/G1: thermal cells may cross profile/ordinary segment boundaries, and
+    // the integration cap bounds the complete binding instead of each cell.
+    let segments = [
+        Segment::Cylinder { radius: 0.002, length: 0.2 },
+        Segment::Profile {
+            profile: std::sync::Arc::new(fs_duct::RadiusProfile::power(0.002, 0.2, 1.0, 0.3).unwrap()),
+            steps: fs_duct::RiccatiSteps(4),
+        },
+    ];
+    let ordinary = [
+        segments[0].clone(),
+        Segment::Cone { inlet_radius: 0.002, outlet_radius: 0.005, length: 0.3 },
+    ];
+    let mut work = 0;
+    for (start, end) in [(0.1, 0.35), (0.35, 0.5)] {
+        let actual = geometry(&segments, start, end, 1, &mut work).unwrap();
+        let exact = geometry(&ordinary, start, end, 1, &mut 0).unwrap();
+        assert!((actual.0 / exact.0 - 1.0).abs() < 2e-14);
+        assert!((actual.1 / exact.1 - 1.0).abs() < 2e-14);
+    }
+    assert_eq!(work, 8);
+    let mut exhausted = fs_duct::profile::MAX_RICCATI_STEPS - 7;
+    geometry(&segments, 0.2, 0.35, 1, &mut exhausted).unwrap();
+    assert_eq!(exhausted, fs_duct::profile::MAX_RICCATI_STEPS - 3);
+    let error = geometry(&segments, 0.35, 0.5, 1, &mut exhausted).unwrap_err();
+    assert!(matches!(error, ReedPerformanceError::Input {
+        what: "thermal profile geometry exceeds MAX_RICCATI_STEPS", ..
+    }));
+    assert_eq!(exhausted, fs_duct::profile::MAX_RICCATI_STEPS,
+        "the second cell must stop before executing an over-budget panel");
 }
 
 #[test]
@@ -218,6 +294,9 @@ fn conflicts_unbalanced_flow_and_exhausted_work_refuse_before_rendering() {
         INPUT.replace("mole 2 N2 CO2", "mole 2 N2 N2"),
         INPUT.replace("0.1 2000 100000", "0.1 1 100000"),
         INPUT.replace("gas_inlet 0.000001", "gas_inlet 0.01"),
+        INPUT.replace("cylinder 0.0015 0.57", "profile exponential 0 0.0015 0.4 0.57"),
+        INPUT.replace("cylinder 0.0015 0.57", "profile spline 16 natural 2 0 0.0015 0 0.0016"),
+        INPUT.replace("cylinder 0.0015 0.57", "profile power 16 0.0015 0 1 0.57"),
         INPUT.replace(
             "segments 1\ncylinder 0.0015 0.57",
             "segments 3\ncylinder 0.0015 0.25\nhole 0.001 0.001 0.0015 1\ncylinder 0.0015 0.32",

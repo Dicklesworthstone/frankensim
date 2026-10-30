@@ -677,6 +677,7 @@ impl ReedPerformance {
                     outlet_radius: row.positive()?,
                     length: row.positive()?,
                 },
+                "profile" => row.profile_segment()?,
                 "hole" => {
                     let hole_radius = row.positive()?;
                     let chimney_height = row.positive()?;
@@ -703,7 +704,7 @@ impl ReedPerformance {
                         state,
                     }
                 }
-                _ => return Err(bad(r.line, "expected cylinder, cone or hole geometry")),
+                _ => return Err(bad(r.line, "expected cylinder, cone, profile or hole geometry")),
             };
             let gas = match row.words.next() {
                 None => air,
@@ -1267,6 +1268,39 @@ impl<'a> Row<'a> {
             return Err(bad(self.line, "physical dimension/scale must be positive"));
         }
         Ok(x)
+    }
+    /// Shared radius data and an explicit per-smooth-span integration axis.
+    /// Constructor refusals preserve the original duct error and never fall back
+    /// to a cylinder or an endpoint cone.
+    fn profile_segment(&mut self) -> Result<Segment, ReedPerformanceError> {
+        use fs_duct::profile::{MAX_PROFILE_STATIONS, MAX_RICCATI_STEPS, RadiusProfile, RiccatiSteps};
+        let kind = self.word()?;
+        let steps = RiccatiSteps(self.count(MAX_RICCATI_STEPS)?);
+        let owner_error = |source| ReedPerformanceError::Model(AcousticRealizeError::Duct(source));
+        steps.validate().map_err(owner_error)?;
+        let profile = match kind {
+            "exponential" => RadiusProfile::exponential(
+                self.positive()?, self.scalar()?, self.positive()?,
+            ),
+            "power" => RadiusProfile::power(
+                self.positive()?, self.positive()?, self.scalar()?, self.positive()?,
+            ),
+            "spline" => {
+                let slopes = match self.word()? {
+                    "natural" => None,
+                    "clamped" => Some([self.scalar()?, self.scalar()?]),
+                    _ => return Err(bad(self.line, "profile spline needs natural or clamped end slopes")),
+                };
+                let count = self.count(MAX_PROFILE_STATIONS)?;
+                let mut stations = Vec::with_capacity(count);
+                for _ in 0..count {
+                    stations.push((self.scalar()?, self.positive()?));
+                }
+                RadiusProfile::spline(stations, slopes)
+            }
+            _ => return Err(bad(self.line, "profile must be exponential, power or spline")),
+        }.map_err(owner_error)?;
+        Ok(Segment::Profile { profile: std::sync::Arc::new(profile), steps })
     }
     fn count(&mut self, cap: usize) -> Result<usize, ReedPerformanceError> {
         let n = self.parse()?;

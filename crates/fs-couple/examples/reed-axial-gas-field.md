@@ -73,8 +73,10 @@ boundaries. The step count applies to each smooth span, and the existing
 `fs-duct` owner limits the complete binding to 65536 steps. Midpoint mode
 samples the field at cell midpoints and permits at most 64 generated cells.
 Both modes preserve the original geometry and operation order for a uniform
-field. The file admits cylinder/cone geometry; nonuniform tone holes are
-refused. The underlying continuous duct API also supports smooth profiles.
+field. The file admits cylinder/cone geometry and the shared smooth radius
+profiles described below. Nonuniform midpoint fields still refuse profiles;
+select continuous propagation for a varying medium in a smooth bore. Tone-hole
+field combinations retain the original continuous duct owner's restrictions.
 
 Cold field input is bounded to 2..=4096 stations, 1..=128 species and 16384
 station/species pairs. Midpoint resolution must be 1..=64 cells per segment;
@@ -179,8 +181,8 @@ canonicalized with the source IDs once, retaining exact zero components and the
 original species, NASA-9 and transport pack identities.
 
 Cell ends must increase from zero to the exact complete bore length. The loader
-integrates each cell's volume and lateral wall area from the original cylinder
-and cone records, including cells that cross geometry boundaries. The format
+integrates each cell's volume and lateral wall area from the original cylinder,
+cone and smooth-profile records, including cells that cross geometry boundaries. The format
 does not duplicate bore radii or volumes. `WALL_CONDUCTANCE_W_K` is the explicitly
 supplied total wall-to-gas conductance of that cell; it is not a guessed heat
 transfer coefficient. `WALL_T_K` is a prescribed wall temperature and
@@ -191,7 +193,7 @@ The inlet mass flow is a prescribed stationary throughflow, independent of the
 oscillatory reed flow. It sets enthalpy/species transport and the admitted mean
 Mach number; this does not solve a steady pressure drop from the blowing
 gesture. Acoustic propagation uses the generated frozen field at the ambient
-static pressure. This route requires an unbranched cylinder/cone bore: its
+static pressure. This route requires an unbranched bore: its
 stationary mass balance does not infer leakage through tone holes or their
 chimneys. A separately solved branch field can still use the prescribed route
 where admitted by the original duct owner.
@@ -223,3 +225,39 @@ between its emitted faces. The existing thermal tests establish first-order
 spatial convergence. Diffusion, reaction, condensation, transient atmosphere,
 mean-flow acoustic correction and measured instrument qualification require
 their own existing-owner extensions and validation.
+
+## Smooth bore geometry in the same performance
+
+Each of these records occupies one entry in the existing `segments` list:
+
+```text
+profile exponential STEPS R0_M AREA_FLARE_PER_M LENGTH_M
+profile power STEPS R0_M X0_M EXPONENT LENGTH_M
+profile spline STEPS natural COUNT X_M R_M ...
+profile spline STEPS clamped LEFT_SLOPE RIGHT_SLOPE COUNT X_M R_M ...
+```
+
+They use the same `fs-duct::RadiusProfile` constructors as the acoustic API:
+`r(x) = R0 exp(AREA_FLARE*x/2)`, `r(x) = R0 ((X0+x)/X0)^EXPONENT`, or a C2
+cubic through the supplied stations. Spline abscissae retain their original
+values; the first is the local origin and the last minus the first is the
+segment length. Slopes are `dr/dx`. Nonpositive/unresolved profiles, invalid
+station order, failed positivity admission and invalid step budgets return the
+original constructor refusal; no endpoint cone is substituted.
+
+For example, replace `cylinder 0.0015 0.57` in the steady example with:
+
+```text
+profile exponential 16 0.0015 0.4 0.57
+```
+
+The existing `music_render wind` and ensemble commands then generate the
+heat/species field and microphone pressure using that same smooth bore.
+`STEPS` is the declared profile integration resolution. Thermal geometry uses
+fourth-order two-node Gauss panels, split at measured spline knots and thermal
+cell boundaries, to integrate volume and the sloped lateral wall area. The
+complete thermal binding admits at most 65536 panels. Cylinder/cone measures
+retain their exact formulas. Refine profile `STEPS`, thermal cells and
+`gas_steady continuous STEPS_PER_SPAN` separately: they control geometry,
+stationary transport and acoustic field integration, respectively. No geometric
+error enclosure, condensation law or additional material data is implied.

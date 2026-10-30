@@ -1,11 +1,12 @@
 //! Performance data for the existing conservative stationary gas generator.
-//! Geometry comes from the SAME cylinder/cone records used by acoustics.
+//! Geometry comes from the SAME axial segment records used by acoustics.
 
 use super::{
     GasFieldResolution, GasRecord, Reader, ReedPerformanceError, SourceColumns,
     ThermochemicalSources, bad, column_error, read_resolution,
 };
 use fs_duct::Segment;
+use crate::acoustic_realize::AcousticRealizeError;
 use fs_matdb::QueryPoint;
 use fs_material::gas_field::steady::{
     AxialGasCell, GasInjection, MAX_STEADY_GAS_CELLS, MAX_STEADY_GAS_INJECTIONS, SteadyAxialGas,
@@ -65,10 +66,9 @@ pub(in super::super) fn read(
     row.finish()?;
     let length = segments.iter().try_fold(0.0, |sum, segment| match segment {
         Segment::Cylinder { length, .. } | Segment::Cone { length, .. } => Ok(sum + length),
+        Segment::Profile { profile, .. } => Ok(sum + profile.length()),
         Segment::ToneHole { .. } => Err(bad(line,
-            "gas_steady needs an unbranched cylinder/cone bore; side-branch mean flow is not specified")),
-        Segment::Profile { .. } => Err(bad(line,
-            "gas_steady needs a cylinder/cone bore; cell volumes and wall areas of a smooth radius profile are not integrated")),
+            "gas_steady needs an unbranched bore; side-branch mean flow is not specified")),
     })?;
     if !length.is_finite() || length <= 0.0 {
         return Err(bad(
@@ -83,6 +83,7 @@ pub(in super::super) fn read(
     row.finish()?;
     let mut cells = Vec::with_capacity(count);
     let mut start = 0.0;
+    let mut geometry_steps = 0;
     for _ in 0..count {
         let mut row = reader.row("gas_cell")?;
         let end_m = row.positive()?;
@@ -92,7 +93,7 @@ pub(in super::super) fn read(
                 "gas cell ends must increase within the authored bore",
             ));
         }
-        let (volume_m3, wall_area_m2) = geometry(segments, start, end_m, row.line)?;
+        let (volume_m3, wall_area_m2) = geometry(segments, start, end_m, row.line, &mut geometry_steps)?;
         let cell = AxialGasCell {
             end_m,
             volume_m3,
@@ -174,36 +175,56 @@ pub(in super::super) fn read(
     ))
 }
 
-/// Integrate exact circular frusta over each cell/segment intersection. This
-/// admits thermal cells crossing acoustic segment boundaries without copying
-/// lengths, radii, volumes or wall areas into the performance format.
+/// Exact circular frusta and the profile owner's refinable Gauss measures over
+/// each cell/segment intersection. The complete thermal-cell binding is bounded
+/// by the original profile work cap. No bore geometry is copied into the file.
 fn geometry(
     segments: &[Segment],
     start: f64,
     end: f64,
     line: usize,
+    geometry_steps: &mut usize,
 ) -> Result<(f64, f64), ReedPerformanceError> {
     let (mut offset, mut volume, mut area) = (0.0_f64, 0.0_f64, 0.0_f64);
     for segment in segments {
-        let (inlet, outlet, length) = match *segment {
-            Segment::Cylinder { radius, length } => (radius, radius, length),
-            Segment::Cone {
-                inlet_radius,
-                outlet_radius,
-                length,
-            } => (inlet_radius, outlet_radius, length),
-            Segment::ToneHole { .. } | Segment::Profile { .. } => {
-                return Err(bad(line, "gas cell geometry requires cylinder/cone segments"));
-            }
-        };
+        if matches!(segment, Segment::ToneHole { .. }) {
+            return Err(bad(line, "gas cell geometry requires an unbranched bore"));
+        }
+        let length = segment.axial_length();
         let lo = start.max(offset);
         let hi = end.min(offset + length);
         if hi > lo {
-            let r0 = inlet + (outlet - inlet) * ((lo - offset) / length);
-            let r1 = inlet + (outlet - inlet) * ((hi - offset) / length);
-            let dx = hi - lo;
-            volume += core::f64::consts::PI * dx * (r0 * r0 + r0 * r1 + r1 * r1) / 3.0;
-            area += core::f64::consts::PI * (r0 + r1) * dx.hypot(r1 - r0);
+            if let Segment::Profile { profile, steps } = segment {
+                // Preserve exact local endpoints under accumulated segment
+                // offsets: subtracting them can round outside the support.
+                let local_start = if lo == offset { 0.0 } else { lo - offset };
+                let local_end = if hi == offset + length { length } else { hi - offset };
+                let mut exhausted = false;
+                let measures = profile.geometry_controlled(local_start, local_end, *steps, &mut || {
+                    if *geometry_steps >= fs_duct::profile::MAX_RICCATI_STEPS {
+                        exhausted = true;
+                        true
+                    } else {
+                        *geometry_steps += 1;
+                        false
+                    }
+                });
+                if exhausted {
+                    return Err(bad(line, "thermal profile geometry exceeds MAX_RICCATI_STEPS"));
+                }
+                let measures = measures
+                    .map_err(|source| ReedPerformanceError::Model(AcousticRealizeError::Duct(source)))?;
+                volume += measures.volume_m3;
+                area += measures.lateral_area_m2;
+            } else {
+                let inlet = segment.inlet_radius();
+                let outlet = segment.outlet_radius();
+                let r0 = inlet + (outlet - inlet) * ((lo - offset) / length);
+                let r1 = inlet + (outlet - inlet) * ((hi - offset) / length);
+                let dx = hi - lo;
+                volume += core::f64::consts::PI * dx * (r0 * r0 + r0 * r1 + r1 * r1) / 3.0;
+                area += core::f64::consts::PI * (r0 + r1) * dx.hypot(r1 - r0);
+            }
         }
         offset += length;
     }
