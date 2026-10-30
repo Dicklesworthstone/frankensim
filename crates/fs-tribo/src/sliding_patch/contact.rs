@@ -13,6 +13,9 @@ use fs_math::det;
 use super::{HertzSlidingPatch, HertzSlidingPatchParameters, shape_factors};
 use crate::TriboError;
 
+/// Simultaneous original Hertz patches with full cross-contact response.
+pub mod multiple;
+
 type Vector = [f64; 3];
 type Matrix = [[f64; 3]; 3];
 const SPIN_RADIUS: f64 = 3.0 * PI / 16.0;
