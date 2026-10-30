@@ -50,6 +50,9 @@ pub struct PartialSaturationBodiesExchange3<const N: usize> {
     /// Imposed fluid body-force impulse, torque and local midpoint work once
     /// over the whole fluid, including retained interior populations.
     pub forcing: PartialSaturationForcing3,
+    /// Unresolved normal sphere-gap resistance, separate from the populations.
+    /// Zero for the original uncorrected entry points.
+    pub lubrication: SphereLubricationExchange3<N>,
     /// Actual rounded composite correction minus summed per-body corrections.
     pub population_mass_residual: f64,
     /// Composite versus summed corrections, for world linear momentum.
@@ -59,7 +62,7 @@ pub struct PartialSaturationBodiesExchange3<const N: usize> {
 }
 
 #[derive(Clone, Copy, Default)]
-struct Response {
+pub(super) struct Response {
     weight: f64,
     first: [f64; 3],
     rotary: [[f64; 3]; 3],
@@ -82,7 +85,7 @@ impl Response {
         }
     }
 
-    fn solve(mut self, body: PartialSaturationBody3) -> Result<PartialSaturationBody3> {
+    pub(super) fn factor(self, body: PartialSaturationBody3) -> Result<fs_la::factor::Cholesky> {
         let mut matrix = [0.0; 36];
         for i in 0..3 {
             matrix[i * 6 + i] = body.mass + 0.5 * self.weight;
@@ -105,13 +108,25 @@ impl Response {
             return Err(invalid("assembly spatial response overflowed"));
         }
         fs_la::factor::cholesky(&matrix, 6)
-            .map_err(|_| invalid("assembly coupled inertia is not positive definite"))?
-            .solve(&mut self.increment);
+            .map_err(|_| invalid("assembly coupled inertia is not positive definite"))
+    }
+
+    pub(super) fn increment(self) -> [f64; 6] {
+        self.increment
+    }
+
+    pub(super) fn solve(mut self, body: PartialSaturationBody3) -> Result<PartialSaturationBody3> {
+        self.factor(body)?.solve(&mut self.increment);
+        Self::apply(body, self.increment)
+    }
+
+    pub(super) fn apply(
+        body: PartialSaturationBody3,
+        increment: [f64; 6],
+    ) -> Result<PartialSaturationBody3> {
         let proposed = PartialSaturationBody3 {
-            velocity: core::array::from_fn(|i| body.velocity[i] + self.increment[i]),
-            angular_velocity: core::array::from_fn(|i| {
-                body.angular_velocity[i] + self.increment[i + 3]
-            }),
+            velocity: core::array::from_fn(|i| body.velocity[i] + increment[i]),
+            angular_velocity: core::array::from_fn(|i| body.angular_velocity[i] + increment[i + 3]),
             ..body
         };
         if !low_mach(proposed.velocity)
@@ -184,9 +199,35 @@ impl BoundaryGrid3 {
             &PartialSaturationBodiesExchange3<N>,
         ) -> Result<T>,
     ) -> Result<(PartialSaturationBodiesExchange3<N>, T)> {
+        self.step_with_partial_saturation_resistance_checked(
+            fractions, bodies, external, origin, gate, None, finish,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(in crate::d3q19::boundary) fn step_with_partial_saturation_resistance_checked<
+        const N: usize,
+        T,
+    >(
+        &mut self,
+        fractions: [&[f64]; N],
+        bodies: &mut [PartialSaturationBody3; N],
+        external: [[f64; 6]; N],
+        origin: [f64; 3],
+        gate: &CancelGate,
+        lubrication: Option<(SphereLubrication3, [f64; N])>,
+        finish: impl FnOnce(
+            &Self,
+            &[PartialSaturationBody3; N],
+            &PartialSaturationBodiesExchange3<N>,
+        ) -> Result<T>,
+    ) -> Result<(PartialSaturationBodiesExchange3<N>, T)> {
         checkpoint(gate)?;
         if N == 0 {
             return Err(invalid("immersed assembly must contain at least one body"));
+        }
+        if let Some((model, radii)) = lubrication {
+            model.admit(radii)?;
         }
         if N == 1 {
             let mut proposed = *bodies;
@@ -203,6 +244,7 @@ impl BoundaryGrid3 {
                         bodies: [(*exchange).into(); N],
                         walls: exchange.walls,
                         forcing: exchange.forcing,
+                        lubrication: SphereLubricationExchange3::default(),
                         population_mass_residual: 0.0,
                         population_impulse_residual: [0.0; 3],
                         population_angular_impulse_residual: [0.0; 3],
@@ -295,13 +337,21 @@ impl BoundaryGrid3 {
             bodies: [PartialSaturationBodyResponse3::default(); N],
             walls: WallMomentumExchange3::default(),
             forcing: PartialSaturationForcing3::default(),
+            lubrication: SphereLubricationExchange3::default(),
             population_mass_residual: 0.0,
             population_impulse_residual: [0.0; 3],
             population_angular_impulse_residual: [0.0; 3],
         };
+        if let Some((model, radii)) = lubrication {
+            report.lubrication =
+                lubrication::solve(model, radii, bodies, &response, &mut proposed, origin, gate)?;
+        } else {
+            for a in 0..N {
+                checkpoint(gate)?;
+                proposed[a] = response[a].solve(bodies[a])?;
+            }
+        }
         for a in 0..N {
-            checkpoint(gate)?;
-            proposed[a] = response[a].solve(bodies[a])?;
             report.bodies[a].velocity_midpoint =
                 core::array::from_fn(|i| 0.5 * (bodies[a].velocity[i] + proposed[a].velocity[i]));
             report.bodies[a].angular_velocity_midpoint = core::array::from_fn(|i| {
@@ -463,7 +513,10 @@ impl BoundaryGrid3 {
             );
             response.momentum_residual = core::array::from_fn(|i| {
                 if i < 3 {
-                    dp[i] - external[a][i] - response.hydrodynamic.body_impulse[i]
+                    dp[i]
+                        - external[a][i]
+                        - response.hydrodynamic.body_impulse[i]
+                        - report.lubrication.body_impulses[a][i]
                 } else {
                     dl[i - 3]
                         - external[a][i]

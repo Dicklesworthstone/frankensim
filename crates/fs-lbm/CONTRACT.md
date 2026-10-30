@@ -4718,3 +4718,56 @@ walls and arbitrary origin, moving geometry with shared cells, singleton
 equality, late force overflow, cancellation and exact retry. Existing unforced
 fluid/body suites remain applicable. No sedimentation calibration, rheology,
 lubrication, contact, remap/GCL or continuum-force accuracy is established.
+
+
+### Simultaneous normal lubrication for moving spherical assemblies
+
+`SphereLubrication3` supplies the unresolved normal Stokes resistance between
+strictly separated spheres. For actual positive midpoint gap `h`,
+`R_eff = Ra Rb/(Ra+Rb)` and `h_eff = max(h, roughness_gap)`, the added
+resistance is `zeta = 6 pi mu R_eff^2 (1/h_eff - 1/cutoff_gap)` below the
+cutoff and zero above. `mu` is constant dynamic viscosity in lattice
+mass/(length*time), not kinematic viscosity. The caller must match the fluid
+viscosity and calibrate the resolved-grid cutoff. The explicit positive
+roughness floor must not exceed the cutoff; it does not admit solid overlap.
+The normal correction follows the leading Stokes gap asymptotic (Janoschek,
+Harting and Toschi, 2013, equation 11 for equal spheres,
+<https://arxiv.org/abs/1308.6482>; Nguyen and Ladd, 2002,
+<https://doi.org/10.1103/PhysRevE.66.046708>). This implementation does not
+claim those papers validate its partial-saturation cutoff or trajectories.
+
+`step_with_lubricated_spheres` samples the supplied spherical geometry at the
+original native midpoint pose and adds the correction inside the simultaneous
+fluid/body solve. The geometry-free
+`step_with_lubricated_partial_saturation_bodies` exposes the same operator;
+its caller owns consistency between sphere radii and occupied fractions.
+Each original six-by-six body block is factored once. Only three translational
+impulse columns are needed to form the active-pair Schur matrix
+`diag(1/zeta) + J A^-1 J^T/2`; native Cholesky solves all normal impulses
+together, including pairs that share a body. There is no sequential pair kick,
+new numerical solver, dense six-times-body-count matrix, grid-sized buffer or
+additional collision/streaming pass. At most 64 bodies and 64 active pairs are
+admitted, with an explicit caller pair cap. Pair search is quadratic in body
+count and Schur storage is quadratic in active-pair count.
+
+`coupling.lubrication` owns each body's central impulse, its orbital torque
+about the requested origin, work from the actual returned midpoint velocity,
+nonnegative sum `zeta * slip_mid^2`, and measured constitutive/work defects.
+Its impulses are not attributed again to fluid populations. Native Guo forces,
+solid external loads, full-tensor spin, wall exchange and moving-body balances
+retain their owners; all per-body residuals include the additional lubrication
+impulse/work. No thermal destination is implied for the model viscous loss.
+No active pairs and a singleton retain the original uncorrected arithmetic.
+Every endpoint and cancellation check completes before joint body/fluid
+publication; a refusal may change scratch only.
+
+This is normal sphere-sphere creeping-flow correction with retained interior
+fluid and additional solid inertia. It adds no wall/tangential lubrication,
+cavitation, contact, displaced-fluid closure or calibrated suspension
+rheology. The midpoint law is passive in real arithmetic but not L-stable;
+stiff under-resolved relaxation can reverse endpoint slip. Positive-gap
+admission and balance diagnostics do not certify temporal resolution or
+prevent every discretization artifact. The native tests retain this stiff
+case explicitly, verify unequal-radius asymptotics and both three-body chain
+modes, roughness/cutoff behavior, rotation/permutation/boost covariance,
+forced moving full-tensor world momentum/work and atomic failure/retry.

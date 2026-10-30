@@ -1,13 +1,14 @@
 //! Joint publication of several moving immersed bodies and one fluid tick.
 
-use super::super::PartialSaturationBodiesExchange3;
+use super::super::{PartialSaturationBodiesExchange3, SphereLubrication3};
 use super::*;
 
 /// Accepted assembly trajectory with per-body pose, impulse and work accounts.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[must_use]
 pub struct MovingPartialSaturationBodiesExchange3<const N: usize> {
-    /// Simultaneous cell-law response and stationary walls, each counted once.
+    /// Simultaneous cell-law response, optional normal lubrication and stationary
+    /// walls, each counted once. Gap work/impulses belong to `coupling.lubrication`.
     pub coupling: PartialSaturationBodiesExchange3<N>,
     /// Per-body trajectory accounts in stable input order. The nested
     /// `coupling.walls` and `coupling.forcing` fields are zero; use the assembly
@@ -48,6 +49,61 @@ impl BoundaryGrid3 {
         external: [[f64; 6]; N],
         origin: [f64; 3],
         gate: &CancelGate,
+    ) -> Result<MovingPartialSaturationBodiesExchange3<N>> {
+        self.step_with_moving_partial_saturation_resistance(
+            samplers, shapes, bodies, external, origin, gate, None,
+        )
+    }
+
+    /// Advance actual separated spherical geometries with simultaneous normal
+    /// lubrication, native fluid exchange, and the original rigid half-drifts.
+    ///
+    /// The supplied radii define the sampled spheres; they are not independent
+    /// curvature hints for arbitrary shapes. Resistance uses actual midpoint
+    /// gaps. Original swept nonintersection and wall/halo admission remain.
+    /// Missing-film impulses and viscous work are separate from resolved-fluid
+    /// exchange in `coupling.lubrication`; all per-body balance residuals include
+    /// both. The model is retained-interior-fluid plus additional solid inertia.
+    ///
+    /// # Errors
+    /// Inherits original moving-assembly and [`SphereLubrication3`] admission.
+    /// All body/fluid publication remains atomic, including late endpoint or
+    /// cancellation failures. Sampler and fluid scratch may change on refusal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_lubricated_spheres<const N: usize>(
+        &mut self,
+        samplers: &mut [BodyFrameSampler3; N],
+        radii: [f64; N],
+        bodies: &mut [MovingPartialSaturationBody3; N],
+        external: [[f64; 6]; N],
+        model: SphereLubrication3,
+        origin: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<MovingPartialSaturationBodiesExchange3<N>> {
+        model.admit(radii)?;
+        let spheres = radii
+            .map(|r| BodyFrameEllipsoid3::sphere(r).expect("lubrication admitted every radius"));
+        self.step_with_moving_partial_saturation_resistance(
+            samplers,
+            core::array::from_fn(|a| &spheres[a] as &dyn BodyFrameShape3),
+            bodies,
+            external,
+            origin,
+            gate,
+            Some(model),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn step_with_moving_partial_saturation_resistance<const N: usize>(
+        &mut self,
+        samplers: &mut [BodyFrameSampler3; N],
+        shapes: [&dyn BodyFrameShape3; N],
+        bodies: &mut [MovingPartialSaturationBody3; N],
+        external: [[f64; 6]; N],
+        origin: [f64; 3],
+        gate: &CancelGate,
+        lubrication: Option<SphereLubrication3>,
     ) -> Result<MovingPartialSaturationBodiesExchange3<N>> {
         checkpoint(gate)?;
         if N == 0 || !origin.into_iter().all(f64::is_finite) {
@@ -136,12 +192,13 @@ impl BoundaryGrid3 {
         )?;
         let frozen_before = frozen;
         let fields = core::array::from_fn(|a| samplers[a].fractions.as_slice());
-        let (_, (accepted, report)) = self.step_with_partial_saturation_bodies_checked(
+        let (_, (accepted, report)) = self.step_with_partial_saturation_resistance_checked(
             fields,
             &mut frozen,
             external,
             origin,
             gate,
+            lubrication.map(|model| (model, radii)),
             |grid, exchanged, coupling| {
                 let mut accepted = initial;
                 let mut reports = [None; N];
@@ -193,11 +250,13 @@ impl BoundaryGrid3 {
                             body.mass * (accepted[a].velocity[i] - body.velocity[i])
                                 - external[a][i]
                                 - response.hydrodynamic.body_impulse[i]
+                                - coupling.lubrication.body_impulses[a][i]
                         } else {
                             after_h[i - 3]
                                 - before_h[i - 3]
                                 - external_angular_impulse[i - 3]
                                 - response.hydrodynamic.body_angular_impulse[i - 3]
+                                - coupling.lubrication.body_angular_impulses[a][i - 3]
                         }
                     });
                     let spin_before = rotational_energy(body.inertia, body.angular_momentum_body)?;
@@ -215,6 +274,7 @@ impl BoundaryGrid3 {
                     let work_residual = kinetic_energy_change
                         - response.external_work
                         - response.hydrodynamic.body_work
+                        - coupling.lubrication.body_work[a]
                         - free_rotation_energy_change;
                     if !volumes[a]
                         .into_iter()
