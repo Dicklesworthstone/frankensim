@@ -191,19 +191,33 @@ pub struct AcousticMedium {
 }
 
 impl AcousticMedium {
+    /// View one original gas, mixture, liquid or nonideal EOS acoustic state.
+    /// The material owns density and adiabatic sound speed; the coupled cavity
+    /// uses their bulk modulus without substituting an ideal-gas relation.
+    /// Source receipts and phase/domain authority remain with that material.
+    ///
+    /// # Errors
+    /// Refuses the original owner's invalid or incoherent acoustic snapshot.
+    pub fn try_from_material<M: fs_material::fluid_acoustics::FluidAcoustics + ?Sized>(
+        material: &M,
+    ) -> Result<Self, VibroError> {
+        let state = material
+            .acoustic_state()
+            .map_err(|_| VibroError::BadParameter {
+                what: "acoustic medium requires one coherent material state",
+            })?;
+        Ok(Self {
+            rho0: state.density_kg_m3(),
+            c0: state.sound_speed_m_s(),
+        })
+    }
+
     /// View one complete material-owned gas without reevaluating its state.
     ///
     /// # Errors
     /// Refuses an incoherent numerical gas snapshot.
     pub fn try_from_gas(gas: &GasState) -> Result<Self, VibroError> {
-        gas.validate_coherence()
-            .map_err(|_| VibroError::BadParameter {
-                what: "acoustic medium requires one coherent gas state",
-            })?;
-        Ok(Self {
-            rho0: gas.density,
-            c0: gas.sound_speed,
-        })
+        Self::try_from_material(gas)
     }
 
     /// Dry USSA-1976 air at the declared room state of 293.15 K and 101325 Pa.

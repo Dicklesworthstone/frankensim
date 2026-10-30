@@ -39,6 +39,74 @@ use material_packs::{
 
 const PI: f64 = core::f64::consts::PI;
 
+#[test]
+fn original_fluid_material_drives_cavity_modes_and_reciprocal_structural_loading() {
+    use fs_material::fluid_acoustics::FluidAcoustics;
+    use fs_material::gas::{GasSpec, GasState};
+    use fs_thermochem::water::if97::region3::If97DenseState;
+    use fs_thermochem::water::if97::{If97Region, If97State};
+
+    let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 300.0, 100_000.0).unwrap();
+    let water = If97State::at_pressure_temperature(
+        fs_qty::Pressure::new(3e6),
+        Temperature::new(300.0),
+        If97Region::Region1,
+    )
+    .unwrap();
+    let dense = If97DenseState::at_density_temperature(
+        fs_qty::Density::new(500.0),
+        Temperature::new(650.0),
+    )
+    .unwrap();
+    // One mass-normalized piston, fixed geometry and excitation. Only the
+    // original material/EOS changes; no gas gamma is assigned to either liquid.
+    let structure = StructuralModes {
+        omegas: vec![200.0],
+        shapes: vec![vec![1.0]],
+        loss_factor: 0.02,
+    };
+    let (area, volume, omega) = (0.01_f64, 0.001_f64, 100.0_f64);
+    let mut displacements = Vec::new();
+    for source in [&gas as &dyn FluidAcoustics, &water, &dense] {
+        let state = source.acoustic_state().unwrap();
+        let medium = AcousticMedium::try_from_material(source).unwrap();
+        let radiation = fs_bem::helmholtz::Medium::from_material(source).unwrap();
+        assert_eq!(medium.rho0.to_bits(), radiation.density.to_bits());
+        assert_eq!(medium.c0.to_bits(), radiation.sound_speed.to_bits());
+        let cavity =
+            rectangular_cavity_modes(0.1, 0.1, 0.1, medium, 0.0, 2, &[[0.05, 0.05]]).unwrap();
+        assert!((cavity.omegas[1] / (PI * state.sound_speed_m_s() / 0.1) - 1.0).abs() < 1e-13);
+        let sealed = CavityModes {
+            omegas: vec![cavity.omegas[0]],
+            lambdas: vec![cavity.lambdas[0]],
+            interface: vec![cavity.interface[0].clone()],
+            loss_factor: 0.0,
+            rho0: medium.rho0,
+            c0: medium.c0,
+        };
+        let coupling = assemble_coupling(&structure, &sealed, &[area]).unwrap();
+        let model = VibroacousticModel::try_new(&structure, &sealed, coupling, None).unwrap();
+        // Independent piston law: F = (k - m omega² + K_s A²/V)x.
+        let bulk = state.adiabatic_bulk_modulus_pa();
+        let stiffness = 200.0_f64.powi(2) + bulk * area.powi(2) / volume;
+        let roots = model.undamped_natural_frequencies().unwrap();
+        assert!(roots[0].abs() < 1e-9);
+        assert!((roots[1] / stiffness.sqrt() - 1.0).abs() < 1e-12);
+        let response = model.frf(omega, &[C64::ONE]).unwrap();
+        let exact = C64::new(stiffness - omega.powi(2), -200.0_f64.powi(2) * 0.02).recip();
+        assert!((response.b[0] - exact).abs() / exact.abs() < 1e-11);
+        let pressure = exact.scale(-bulk * area / volume);
+        assert!((response.a[0] - pressure).abs() / pressure.abs() < 1e-11);
+        assert!(response.power.balance_residual.abs() < 1e-10);
+        displacements.push(response.b[0].abs());
+    }
+    assert!(displacements[1] < displacements[0] / 100.0);
+    assert_ne!(displacements[1].to_bits(), displacements[2].to_bits());
+    let mut incoherent = gas;
+    incoherent.sound_speed *= 1.01;
+    assert!(AcousticMedium::try_from_material(&incoherent).is_err());
+}
+
 /// Aluminum 2024-T3 from the pack aluminum-2024-t3-nasa-tn-d6448 (NASA
 /// TN D-6448 page 15 property set, 300 K): Young's modulus [Pa], Poisson
 /// ratio and density [kg/m^3], each at its measured state.

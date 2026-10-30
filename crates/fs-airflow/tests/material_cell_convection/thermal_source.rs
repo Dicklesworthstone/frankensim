@@ -38,6 +38,7 @@ fn liquid_card(density_drop_per_k: f64) -> MaterialCard {
             0.5,
         ),
         (DYNAMIC_VISCOSITY_PROPERTY, DYNAMIC_VISCOSITY_DIMS, 0.001),
+        ("sound_speed", fs_qty::Velocity::DIMS, 1500.0),
     ] {
         let density = name == DENSITY_PROPERTY;
         let quantity = if name == THERMAL_CONDUCTIVITY_PROPERTY {
@@ -112,6 +113,122 @@ fn liquid_law(card: &MaterialCard) -> LiquidTemperatureLaw<'_> {
         MaterialPropertySelection::SingleClaimOnly,
     )
     .unwrap()
+}
+
+#[test]
+fn acoustic_liquid_binding_reaches_actual_convection_without_losing_its_density_law() {
+    use fs_couple::vibroacoustic::{AcousticMedium, rectangular_cavity_modes};
+    use fs_material::fluid_acoustics::{
+        FluidAcousticParameter, FluidAcoustics, ResolvedAcousticLiquidState,
+        resolve_acoustic_liquid_state,
+    };
+
+    let chart = curve();
+    let heat = initial(&chart, [310.0, 290.0], 0.0, 0.0);
+    let mut endpoints = Vec::new();
+    for slope in [0.2, 1.0] {
+        let card = liquid_card(slope);
+        let point = QueryPoint::new()
+            .with_quantity("T", temperature_quantity(), 300.0)
+            .unwrap();
+        let parameter = FluidAcousticParameter::sound_speed().unwrap();
+        let acoustic = resolve_acoustic_liquid_state(
+            &card,
+            &point,
+            &parameter,
+            LiquidViscosityBasis::Dynamic,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let liquid = acoustic
+            .liquid()
+            .clone()
+            .with_density_expansion(&card, "T", Temperature::new(280.0), Temperature::new(320.0))
+            .unwrap();
+        let medium = ResolvedAcousticLiquidState::try_from_liquid(liquid, &parameter).unwrap();
+        let convection = evaluate_vertical_plate_from_thermal_material(
+            &medium,
+            9.81,
+            Temperature::new(310.0),
+            Length::new(0.1),
+        )
+        .unwrap();
+        near(
+            convection.coefficient().value.value(),
+            expected_coefficient(slope, 310.0),
+            1e-8,
+        );
+        assert!(std::ptr::eq(convection.fluid(), &medium));
+        let cavity = rectangular_cavity_modes(
+            0.2,
+            0.1,
+            0.1,
+            AcousticMedium::try_from_material(&medium).unwrap(),
+            0.0,
+            2,
+            &[[0.0, 0.0]],
+        )
+        .unwrap();
+        near(cavity.omegas[1], core::f64::consts::PI * 1500.0 / 0.2, 1e-9);
+        assert_eq!(
+            cavity.rho0,
+            medium.acoustic_state().unwrap().density_kg_m3()
+        );
+
+        let dt = 0.1;
+        let step = BackwardEulerStep::new(&heat, dt, || Ok(())).unwrap();
+        let increments = step
+            .cell_ids()
+            .iter()
+            .map(|&id| {
+                let old = heat.temperature_k(id).unwrap();
+                MASS * CP * (expected_endpoint(slope, old, dt) - old)
+            })
+            .collect::<Vec<_>>();
+        let trial = step
+            .evaluate(
+                &increments,
+                |endpoint| {
+                    let mut sources = BTreeMap::new();
+                    for id in IDS {
+                        let wall = endpoint.temperature_k(id).unwrap();
+                        let convection = evaluate_vertical_plate_from_thermal_material(
+                            &medium,
+                            9.81,
+                            Temperature::new(wall),
+                            Length::new(0.1),
+                        )
+                        .map_err(ConvectionSourceError::Material)?;
+                        sources.insert(
+                            id,
+                            endpoint.exposed_area_m2(id).unwrap()
+                                * convection.coefficient().value.value()
+                                * (300.0 - wall),
+                        );
+                    }
+                    Ok::<_, ConvectionSourceError>(StepCoefficients {
+                        sources_w: sources,
+                        conductances_w_k: BTreeMap::new(),
+                        payload: (),
+                    })
+                },
+                || Ok(()),
+            )
+            .unwrap();
+        let (next, (), audit) = trial.accept(1e-8, 1e-8, || Ok(())).unwrap();
+        near(
+            next.energy_j() - heat.energy_j(),
+            audit.external_heat_j,
+            1e-8,
+        );
+        near(
+            next.temperature_k(IDS[0]).unwrap(),
+            expected_endpoint(slope, 310.0, dt),
+            1e-10,
+        );
+        endpoints.push(next.temperature_k(IDS[0]).unwrap());
+    }
+    assert!(endpoints[1] < endpoints[0] && endpoints[1] > 300.0);
 }
 
 fn expected_coefficient(slope: f64, wall: f64) -> f64 {
