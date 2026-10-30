@@ -85,7 +85,8 @@ pub struct BrassMouthSequence {
 }
 impl BrassMouthSequence {
     /// Bind output transfers to exactly the same original sources as the voice.
-    /// Analytic or strict tabulated loads are admitted; diagnostic splices and
+    /// Analytic, complete flanged modal (the exterior gas owns the radiation
+    /// matrix) or strict tabulated loads are admitted; diagnostic splices and
     /// matched continuations refuse. The original input bank and this output
     /// each keep their own convergence test. No scalar mouth-flow replacement.
     ///
@@ -107,7 +108,8 @@ impl BrassMouthSequence {
         let mut receipts: Vec<MouthFlowReceipt> = Vec::with_capacity(ducts.len());
         for (combo, duct) in ducts.iter().enumerate() {
             let (path, receipt) = realize::path(duct, labels[combo], gas,
-                realize::load_at(loads, combo), line, source.voice().port_impedance(), output)?;
+                realize::load_at(loads, combo), line, source.voice().port_impedance(), output,
+                line.n_modes)?;
             if receipts.first().is_some_and(|r| r.mouth_radius_m != receipt.mouth_radius_m) {
                 return Err(invalid("mouth-mode crossfades require the same discrete aperture basis"));
             }

@@ -180,3 +180,175 @@ fn failed_physical_prefix_cannot_continue_with_stale_output_history() {
     assert!(matches!(sequence.block(&mut [0.0], &mut [0.0], &mut [0.0; 2]),
         Err(RenderError::Poisoned)));
 }
+
+// ---- complete flanged modal bell load (the lip performer's `flanged_modal` mouth) -------------------------------
+// Manufactured flare, no instrument claimed. Gauntlet: G0 closed form, G1 plane-wave limit, G2 FIR vs direct solve.
+use fs_duct::Termination;
+use fs_duct::modal::outlet;
+
+fn air_at(temperature: f64) -> GasState {
+    GasState::try_new(&GasSpec::dry_air_ussa1976(), temperature, 101325.0).unwrap()
+}
+/// Cylinder of 12 mm radius, then a cone to `mouth_radius`.
+fn flare(mouth_radius: f64) -> Duct {
+    Duct { segments: vec![
+        Segment::Cylinder { radius: 0.012, length: 0.25 },
+        Segment::Cone { inlet_radius: 0.012, outlet_radius: mouth_radius, length: 0.15 },
+    ] }
+}
+
+#[test]
+fn flanged_matrix_plane_entry_is_the_closed_form_baffled_piston_at_any_mode_count() {
+    // The same quantity the nonlinear bore's causal radiation weights pin from the other side (fs-duct
+    // `piston_weights_sum_to_one_and_reproduce_the_struve_impedance`): Z00/(rho c/S) = 1 - J1(2ka)/ka -/+ i H1(2ka)/ka,
+    // the imaginary sign being this crate's e^{-i omega t} convention (a mass-like load has Im Z < 0).
+    // J1 and H1 come from their own power series here, independent of fs_phs (ka <= 0.4 keeps 2ka <= 0.8).
+    let gas = air_at(293.15);
+    let radius = 0.03;
+    let z0 = gas.density * gas.sound_speed / (core::f64::consts::PI * radius * radius);
+    for ka in [0.02, 0.05, 0.1, 0.2, 0.4] {
+        let x: f64 = 2.0 * ka;
+        let q = (x / 2.0) * (x / 2.0);
+        let (mut j1, mut tj) = (0.0, x / 2.0);
+        let (mut h1, mut th) = (0.0, 8.0 * q / (3.0 * core::f64::consts::PI));
+        for m in 0..16 {
+            j1 += tj;
+            h1 += th;
+            let m = f64::from(m);
+            tj *= -q / ((m + 1.0) * (m + 2.0));
+            th *= -q / ((m + 1.5) * (m + 2.5));
+        }
+        let expected = C64::new(1.0 - j1 / ka, -h1 / ka).scale(z0);
+        let omega = ka * gas.sound_speed / radius;
+        for modes in [1, 3, 8] {
+            let z = fs_duct::flanged::flanged_modal_impedance(&gas, radius, omega, modes).unwrap();
+            assert!((z[0] - expected).abs() < 1e-9 * z0, "ka {ka}, modes {modes}: {:?} vs {expected:?}", z[0]);
+        }
+    }
+}
+
+#[test]
+fn flanged_modal_bore_reduces_to_todays_flanged_load_in_the_plane_wave_limit() {
+    // Stated before the first run. A uniform tube many radii long: every higher mode is evanescent
+    // (kappa L = 76 at ka = 0.4), so the complete 8-mode matrix and today's `FlangedOpen` (Zorumski, the 16-mode
+    // Schur-reduced plane load) are the same physics up to mode truncation, which only moves the end correction
+    // (fs-duct `flanged_mode_ladder_converges_to_0p8216`: 0.8488 a at one mode to 0.8216 a, so at eight modes
+    // the residual is below 0.01 a). Phase error of the inlet reflectance is then 2 ka (dl/a) <= 2 ka 1e-2.
+    let gas = air_at(293.15);
+    let radius = 0.03;
+    let duct = Duct { segments: vec![Segment::Cylinder { radius, length: 0.6 }] };
+    let z_in = C64::from_re(gas.density * gas.sound_speed / (core::f64::consts::PI * radius * radius));
+    let reflectance = |z: C64| (z - z_in) / (z + z_in);
+    let mut errors = Vec::new();
+    for ka in [0.02, 0.05, 0.1, 0.2, 0.4] {
+        let omega = ka * gas.sound_speed / radius;
+        let full = outlet::mouth_response_flanged(&duct, &gas, &gas, omega, LossModel::Lossless, 8, 1).unwrap();
+        let today = outlet::mouth_response(&duct, &gas, omega, LossModel::Lossless,
+            Termination::FlangedOpen, 8, 1).unwrap();
+        let error = (reflectance(full.input.plane_impedance) - reflectance(today.input.plane_impedance)).abs();
+        eprintln!("FLANGED_PLANE_LIMIT ka={ka} error={error:e} bound={:e}", 2.0 * ka * 1e-2);
+        assert!(error <= 2.0 * ka * 1e-2, "ka {ka}: {error:e}");
+        errors.push(error);
+    }
+    assert!(errors.windows(2).all(|pair| pair[1] > pair[0]), "the difference must shrink with ka: {errors:?}");
+    assert!(errors[0] < 0.2 * errors[4], "{errors:?}");
+}
+
+#[test]
+fn flanged_mouth_fir_reproduces_the_coupled_mouth_flow_between_dft_bins() {
+    // Same property as the analytic outlet FIR test, for the complete radiation matrix and every retained mode.
+    let gas = air_at(293.15);
+    let duct = flare(0.05);
+    let line = MmLineConfig { sample_rate_hz: 48000, n_modes: 3, extra_slices: 1, loss: LossModel::Bessel };
+    let reference = gas.density * gas.sound_speed / (core::f64::consts::PI * 0.012 * 0.012);
+    // Where the refusal used to fire: admission and the realized path both accept the flanged load now.
+    let output = MouthFlowConfig::default();
+    realize::admit(core::slice::from_ref(&duct), &["flare"], &gas, MmBankLoad::Shared(MmLoad::FlangedModal(&gas)),
+        &line, output).unwrap();
+    // Mode zero (total flow) is the observed one: it meets the 1e-10 / 1e-5 gates on this flare, while the higher
+    // modes' own time images do not at 65536 taps (measured 5e-7 and 9e-7), and no on-axis receiver sees them.
+    let (filters, receipt) = realize::path(&duct, "flare", &gas, MmLoad::FlangedModal(&gas), &line, reference,
+        output, 1).unwrap();
+    assert_eq!(filters.len(), 1);
+    assert!(realize::path(&duct, "flare", &gas, MmLoad::FlangedModal(&gas), &line, reference, output, 0).is_err());
+    assert!(realize::path(&duct, "flare", &gas, MmLoad::FlangedModal(&gas), &line, reference, output, 4).is_err());
+    assert!(receipt.rungs.len() >= 2);
+    // The staircase's actual last station (the flare's mouth side, not the 12 mm inlet), never beyond the cone's outlet.
+    assert!(receipt.mouth_radius_m > 0.03 && receipt.mouth_radius_m <= 0.05, "{}", receipt.mouth_radius_m);
+    let last = receipt.rungs.last().unwrap();
+    assert!(last.tail_energy.iter().all(|x| *x < 1e-10) && last.tap_change.iter().all(|x| *x < 1e-5));
+    let dt = 1.0 / f64::from(line.sample_rate_hz);
+    let frequencies = [1.0, 7.0, 310.0, 1013.0, 2207.0, 3119.0, 9100.0];
+    let direct: Vec<Vec<C64>> = frequencies.iter().map(|f| outlet::mouth_response_flanged(&duct, &gas, &gas,
+        core::f64::consts::TAU * f, LossModel::Bessel, 3, 1).unwrap()
+        .per_incident_plane_pressure(reference).unwrap()).collect();
+    for (mode, filter) in filters.iter().enumerate() {
+        let (_, taps) = filter.quiescent_fir().unwrap();
+        let scale = direct.iter().map(|row| row[mode].abs()).fold(0.0, f64::max);
+        assert!(scale > 0.0, "mode {mode} carries no flow");
+        let mut worst = 0.0_f64;
+        for (f, row) in frequencies.iter().zip(&direct) {
+            let omega = core::f64::consts::TAU * f;
+            let (mut re, mut im) = (0.0, 0.0);
+            for (n, h) in taps.iter().enumerate() {
+                let phase = omega * n as f64 * dt;
+                re += h * phase.cos();
+                im += h * phase.sin();
+            }
+            worst = worst.max((C64::new(re, im) - row[mode]).abs());
+        }
+        eprintln!("FLANGED_MOUTH_FIR mode={mode} taps={} worst={worst:e} scale={scale:e} ratio={:e}",
+            taps.len(), worst / scale);
+        assert!(worst < 5e-5 * scale, "mode {mode}: {worst:e} against scale {scale:e}");
+    }
+}
+
+#[test]
+fn flanged_admission_ceiling_tracks_the_mouth_radius_and_one_static_pressure() {
+    // Planted negative: the exterior ka ceiling (FLANGED_MAX_KA = 24 at Nyquist) belongs to the MOUTH radius.
+    // The admitted clock must scale as 1/R and sit at 24 c / (pi R); a code path that read the 12 mm inlet radius
+    // instead would admit clocks five times too high and fail both checks.
+    let gas = air_at(293.15);
+    let admitted = |mouth: f64, rate: u32| {
+        let line = MmLineConfig { sample_rate_hz: rate, n_modes: 2, extra_slices: 1, loss: LossModel::Lossless };
+        realize::admit(&[flare(mouth)], &["flare"], &gas, MmBankLoad::Shared(MmLoad::FlangedModal(&gas)),
+            &line, MouthFlowConfig::default()).is_ok()
+    };
+    let boundary = |mouth: f64| {
+        let (mut lo, mut hi) = (8_000_u32, 192_000_u32);
+        assert!(admitted(mouth, lo) && !admitted(mouth, hi));
+        while hi - lo > 1 {
+            let mid = lo + (hi - lo) / 2;
+            if admitted(mouth, mid) { lo = mid } else { hi = mid }
+        }
+        lo
+    };
+    let (small, large) = (boundary(0.05), boundary(0.06));
+    for (mouth, found) in [(0.05, small), (0.06, large)] {
+        let predicted = 24.0 * gas.sound_speed / (core::f64::consts::PI * mouth);
+        assert!((f64::from(found) - predicted).abs() <= 1.0, "R {mouth}: {found} vs {predicted}");
+    }
+    assert!((f64::from(small) / f64::from(large) - 1.2).abs() < 1e-3, "{small} / {large}");
+    let other_pressure = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 90_000.0).unwrap();
+    let line = MmLineConfig { sample_rate_hz: 32_000, n_modes: 2, extra_slices: 1, loss: LossModel::Lossless };
+    assert!(realize::admit(&[flare(0.05)], &["flare"], &gas, MmBankLoad::Shared(MmLoad::FlangedModal(&other_pressure)),
+        &line, MouthFlowConfig::default()).is_err(), "interface needs one static pressure");
+    // The other refusals of the same function still fire for the flanged load, and for the loads it still refuses.
+    let flanged = MmBankLoad::Shared(MmLoad::FlangedModal(&gas));
+    assert!(realize::admit(&[flare(0.05)], &["flare"], &gas, flanged, &line, MouthFlowConfig::default()).is_ok());
+    for config in [MouthFlowConfig { max_total_taps: 0, ..MouthFlowConfig::default() },
+        MouthFlowConfig { max_taps: 300, ..MouthFlowConfig::default() },
+        MouthFlowConfig { tail_tolerance: 0.0, ..MouthFlowConfig::default() }] {
+        assert!(realize::admit(&[flare(0.05)], &["flare"], &gas, flanged, &line, config).is_err());
+    }
+    let too_many = MmLineConfig { sample_rate_hz: 32_000, n_modes: 9, extra_slices: 1, loss: LossModel::Lossless };
+    assert!(realize::admit(&[flare(0.05)], &["flare"], &gas, flanged, &too_many, MouthFlowConfig::default())
+        .is_err(), "more modes than the staircase image keeps");
+    assert!(realize::admit(&[flare(0.05), flare(0.05)], &["a"], &gas, flanged, &line,
+        MouthFlowConfig::default()).is_err(), "one label per path");
+    assert!(realize::admit(&[flare(0.05)], &["flare"], &gas, MmBankLoad::Shared(MmLoad::Matched), &line,
+        MouthFlowConfig::default()).is_err(), "a matched continuation is still refused");
+    // A bore too short for its clock still refuses before any load is evaluated.
+    let stub = Duct { segments: vec![Segment::Cylinder { radius: 0.02, length: 1e-4 }] };
+    assert!(realize::admit(&[stub], &["stub"], &gas, flanged, &line, MouthFlowConfig::default()).is_err());
+}

@@ -51,7 +51,19 @@ pub(super) fn admit(ducts: &[Duct], labels: &[&str], gas: &GasState,
                         / (output.max_taps as f64 * dt)).map_err(physical)?;
                 }
             }
-            _ => return Err(invalid("modal mouth output needs an analytic or strict tabulated load")),
+            MmLoad::FlangedModal(exterior) => {
+                // The input bank's own preflight (mm_line::validate_mouth_load): one static
+                // pressure across the interface, and the exterior ka ceiling must cover the
+                // whole Nyquist band, since every later DFT rung evaluates this same matrix.
+                if gas.pressure != exterior.pressure {
+                    return Err(invalid("flanged modal mouth needs the bore and exterior at one static pressure"));
+                }
+                let radius = duct.segments.last().ok_or_else(|| invalid("empty mouth path"))?
+                    .outlet_radius();
+                fs_duct::flanged::flanged_modal_impedance(exterior, radius,
+                    core::f64::consts::PI * f64::from(line.sample_rate_hz), 1).map_err(physical)?;
+            }
+            _ => return Err(invalid("modal mouth output needs an analytic, flanged modal or strict tabulated load")),
         }
     }
     Ok(())
@@ -72,6 +84,10 @@ fn response(duct: &Duct, gas: &GasState, load: MmLoad<'_>, line: &MmLineConfig,
         }
         MmLoad::Tabulated(table) => outlet::mouth_response_tabulated(
             duct, gas, omega, loss, table, line.n_modes, line.extra_slices),
+        // Same coupled matrix as the input bank (mm_line::resolve_load), including its quasi-static
+        // probe: no scalar fallback at DC, so `dc` needs no separate arm.
+        MmLoad::FlangedModal(exterior) => outlet::mouth_response_flanged(
+            duct, gas, exterior, omega, loss, line.n_modes, line.extra_slices),
         _ => Err(DuctError::BadParameter { what: "unsupported modal output load" }),
     };
     // This is the original input bank's loss admission, not an analytic
@@ -102,11 +118,18 @@ fn metrics(ir: &[f64], previous: &[f64]) -> (f64, f64) {
     (tail / total, change)
 }
 
+/// `observed` is how many LEADING modes get a FIR and a convergence gate (mode zero is total flow). The whole
+/// `line.n_modes` image is still solved at every bin, so each observed flow is the coupled one; only the unobserved
+/// modes' time images are skipped. A sequence observes every mode. A caller whose receiver cannot see the higher
+/// modes (an on-axis point in the far field: every mode n >= 1 integrates to zero over the aperture) observes one.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn path(duct: &Duct, label: &str, gas: &GasState, load: MmLoad<'_>,
-    line: &MmLineConfig, reference: f64, output: MouthFlowConfig)
+    line: &MmLineConfig, reference: f64, output: MouthFlowConfig, observed: usize)
     -> Result<(Vec<DelayedFilter>, MouthFlowReceipt), RenderError>
 {
+    if !(1..=line.n_modes).contains(&observed) {
+        return Err(invalid("modal mouth output observes between one and all retained modes"));
+    }
     let dt = 1.0 / f64::from(line.sample_rate_hz);
     let length: f64 = duct.segments.iter().map(Segment::axial_length).sum();
     let transit = length / gas.sound_speed / dt;
@@ -118,11 +141,11 @@ pub(super) fn path(duct: &Duct, label: &str, gas: &GasState, load: MmLoad<'_>,
     let radius = dc.mouth_radius_m;
     let static_flow = dc.per_incident_plane_pressure(reference).map_err(physical)?;
     let mut spectra: Vec<Vec<C64>> = Vec::new();
-    let mut previous = vec![Vec::<f64>::new(); line.n_modes];
+    let mut previous = vec![Vec::<f64>::new(); observed];
     let mut rungs = Vec::new();
     loop {
         let half = n_fft / 2;
-        let mut next = vec![vec![C64::ZERO; half + 1]; line.n_modes];
+        let mut next = vec![vec![C64::ZERO; half + 1]; observed];
         if !spectra.is_empty() {
             for (new, old) in next.iter_mut().zip(&spectra) {
                 for (k, &value) in old.iter().enumerate() { new[2*k] = value; }
