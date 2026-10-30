@@ -20,32 +20,34 @@ pub struct DielectricCaloricSample {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct DielectricCaloricSource {
-    pub material: MaterialNetworkSample,
+pub struct DielectricCaloricSource<S = MaterialNetworkSample> {
+    pub material: S,
     pub fields: Vec<DielectricCaloricSample>,
     pub field_internal_energy_j: [f64; 2],
     pub reversible_heat_j: f64,
 }
 
-pub struct DielectricCaloricReport {
+pub struct DielectricCaloricReport<S = MaterialNetworkSample> {
     /// Native Helmholtz/parameter-work account and original enthalpy residual.
-    pub coupled: CircuitEnthalpyReport<DielectricCaloricSource, DielectricRelaxationStep>,
+    pub coupled: CircuitEnthalpyReport<DielectricCaloricSource<S>, DielectricRelaxationStep>,
     /// Original prescribed/environmental heat, excluding internal Qrev/Joule.
     pub external_heat_j: f64,
+    /// Computed net of internal enclosure exchange, excluded from external heat.
+    pub closed_radiation_net_j: f64,
     pub total_energy_residual_j: f64,
 }
 
-pub struct DielectricCaloricCandidate<'t, C = ResolvedConductorState> {
+pub struct DielectricCaloricCandidate<'t, C = ResolvedConductorState, S = MaterialNetworkSample> {
     thermal: DepositionSimulation<'t>,
     field: PlanarLeakyDielectric<C>,
-    report: DielectricCaloricReport,
+    report: DielectricCaloricReport<S>,
 }
-impl<'t, C> DielectricCaloricCandidate<'t, C> {
+impl<'t, C, S> DielectricCaloricCandidate<'t, C, S> {
     pub fn thermal(&self) -> &DepositionSimulation<'t> { &self.thermal }
     pub fn field(&self) -> &PlanarLeakyDielectric<C> { &self.field }
-    pub fn report(&self) -> &DielectricCaloricReport { &self.report }
+    pub fn report(&self) -> &DielectricCaloricReport<S> { &self.report }
     /// Both histories publish together; all thermal transfers are already paid.
-    pub fn into_parts(self) -> (DepositionSimulation<'t>, PlanarLeakyDielectric<C>, DielectricCaloricReport) {
+    pub fn into_parts(self) -> (DepositionSimulation<'t>, PlanarLeakyDielectric<C>, DielectricCaloricReport<S>) {
         (self.thermal, self.field, self.report)
     }
 }
@@ -91,6 +93,34 @@ impl ConductionThermalNetwork<'_> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
         super::super::super::admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
+        let network = MaterialNetwork { cells: self.cells, resistors: &[], links: self.links };
+        let prepared = network.prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
+            .map_err(material)?;
+        self.step_dielectric_thermal_resolved_candidate(
+            thermal, target_s, field, endpoint_voltage_v, maximum_displacement_c_m2,
+            assembly, field_controls, controls, initial_energy_increments_j,
+            |trial| prepared.resolve(trial, || (*cancel.borrow_mut())()).map_err(material),
+            |sample| sample, |_| 0.0, &cancel,
+        )
+    }
+
+    // Complete heat assemblies use the same native charge and thermodynamic
+    // receipts. Only their existing material/heat resolver enters the residual.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn step_dielectric_thermal_resolved_candidate<'t, C: PlanarConductorMaterial, S>(
+        &self,
+        thermal: &DepositionSimulation<'t>, target_s: f64,
+        field: &PlanarLeakyDielectric<C>, endpoint_voltage_v: &[(usize, f64)],
+        maximum_displacement_c_m2: &[f64], assembly: WeightedAssemblyLimits,
+        field_controls: DielectricRelaxationControls, controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        resolve: impl Fn(&DepositionSimulation<'t>) -> Result<CircuitThermalCoefficients<S>, Error>,
+        sample: impl Fn(&S) -> &MaterialNetworkSample,
+        radiation_net_w: impl Fn(&S) -> f64,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<DielectricCaloricCandidate<'t, C, S>, Error> {
+        check(cancel)?;
+        super::super::super::admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
         let laws = field.thermal_dielectric_laws()
             .ok_or_else(|| invalid("native dielectric must retain its original thermal derivative laws"))?;
         if field.time_s().to_bits() != thermal.time_s().to_bits()
@@ -99,13 +129,10 @@ impl ConductionThermalNetwork<'_> {
         {
             return Err(invalid("matching dielectric/thermal clocks, complete cells and one displacement envelope per original triangle required"));
         }
-        let network = MaterialNetwork { cells: self.cells, resistors: &[], links: self.links };
-        let prepared = network.prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
-            .map_err(material)?;
         let problem = field.conduction();
-        let routes = self.admit_routes(thermal, problem, &cancel)?;
-        let sample = prepared.resolve(thermal, || (*cancel.borrow_mut())()).map_err(material)?;
-        let sources = self.materials_at(problem, &sample.source, &routes, &cancel)?;
+        let routes = self.admit_routes(thermal, problem, cancel)?;
+        let initial_source = resolve(thermal)?;
+        let sources = self.materials_at(problem, sample(&initial_source.source), &routes, cancel)?;
         if sources.iter().zip(problem.conductors()).any(|(a, b)| {
             !a.has_same_electrical_source(b) || a.frame() != b.frame()
                 || !same_material(a.material(), b.material())
@@ -118,7 +145,7 @@ impl ConductionThermalNetwork<'_> {
         let mut capacities = BTreeMap::<CellId, f64>::new();
         let mut ranges = BTreeMap::<CellId, [f64; 2]>::new();
         for (triangle, law) in laws.iter().enumerate() {
-            check(&cancel)?;
+            check(cancel)?;
             let cell = routes[triangle];
             let binding = bindings[&cell];
             let temperature_k = thermal.temperature_k(cell)?;
@@ -161,13 +188,13 @@ impl ConductionThermalNetwork<'_> {
             initial.push(Initial { cell, temperature_k, volume_m3: volume, displacement_c_m2: d, state });
         }
         for (&cell, &range) in &ranges {
-            check(&cancel)?;
+            check(cancel)?;
             if range[0] >= range[1] {
                 return Err(invalid("dielectric cell requires a common nonempty thermal source interval"));
             }
             let mut minimum = f64::INFINITY;
             for pair in bindings[&cell].curve.knots().windows(2) {
-                check(&cancel)?;
+                check(cancel)?;
                 let dt = pair[1].temperature_k - pair[0].temperature_k;
                 if dt <= 0.0 {
                     return Err(invalid("dielectric caloric chart requires strictly increasing temperature"));
@@ -185,9 +212,9 @@ impl ConductionThermalNetwork<'_> {
         let (thermal, field, report) = cell_driver_candidate(
             thermal, target_s, controls, initial_energy_increments_j,
             |trial, _| {
-                check(&cancel)?;
-                let mut coefficients = prepared.resolve(trial, || (*cancel.borrow_mut())()).map_err(material)?;
-                let sources = self.materials_at(problem, &coefficients.source, &routes, &cancel)?;
+                check(cancel)?;
+                let mut coefficients = resolve(trial)?;
+                let sources = self.materials_at(problem, sample(&coefficients.source), &routes, cancel)?;
                 let proposal = field.step_to_candidate(target_s, sources, endpoint_voltage_v,
                     assembly, field_controls, &mut || (*cancel.borrow_mut())()).map_err(dielectric)?;
                 if proposal.step().electric_cells.len() != initial.len() {
@@ -197,7 +224,7 @@ impl ConductionThermalNetwork<'_> {
                 let mut field_internal_energy_j = [0.0; 2];
                 let mut reversible_heat_j = 0.0;
                 for (triangle, before) in initial.iter().enumerate() {
-                    check(&cancel)?;
+                    check(cancel)?;
                     let receipt = &proposal.step().electric_cells[triangle];
                     let d = receipt.displacement_c_m2[1];
                     if receipt.triangle != triangle || !d[0].hypot(d[1]).is_finite()
@@ -250,16 +277,19 @@ impl ConductionThermalNetwork<'_> {
             },
             || (*cancel.borrow_mut())(),
         )?;
-        let external_heat_j = finite(report.non_electrical_heat_j - report.source.reversible_heat_j)?;
+        let closed_radiation_net_j = finite(dt * radiation_net_w(&report.source.material))?;
+        let external_heat_j = finite(report.non_electrical_heat_j
+            - report.source.reversible_heat_j - closed_radiation_net_j)?;
         let total_energy_residual_j = finite(report.source.field_internal_energy_j[1]
             - report.source.field_internal_energy_j[0] + report.thermal.stored_energy_change_j
             - report.electrical.supplied_work_j - external_heat_j)?;
         if total_energy_residual_j.abs() > controls.total_energy_tolerance_j {
             return Err(invalid("physical dielectric and caloric internal energy do not close external supply"));
         }
-        check(&cancel)?;
+        check(cancel)?;
         Ok(DielectricCaloricCandidate { thermal, field,
-            report: DielectricCaloricReport { coupled: report, external_heat_j, total_energy_residual_j },
+            report: DielectricCaloricReport { coupled: report, external_heat_j,
+                closed_radiation_net_j, total_energy_residual_j },
         })
     }
 }

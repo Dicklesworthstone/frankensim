@@ -1,6 +1,8 @@
 //! Independent thermodynamic and native spatial electrical/thermal references.
 //! These constitutive numbers are synthetic, not qualified dielectric data.
 use super::*;
+#[path = "thermal/heat.rs"]
+mod heat;
 use fs_material::field_storage::{
     planar::{PlanarDielectricLaw, PRINCIPAL_ELECTRIC_PERMITTIVITY_PROPERTIES},
     thermal::electric::ThermalPlanarDielectricMaterial,

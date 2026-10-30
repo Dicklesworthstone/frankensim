@@ -15,14 +15,16 @@ use fs_em::electrostatic::relaxation::{
 
 /// Source-backed reversible dielectric thermal work on the same charge owner.
 pub mod thermal;
+// Complete thermal interfaces, layer transport and radiation use this owner.
+mod heat;
 
 /// One jointly accepted charge/potential history, material state and enthalpy.
-pub struct DielectricEnthalpyCandidate<'t, C = ResolvedConductorState> {
+pub struct DielectricEnthalpyCandidate<'t, C = ResolvedConductorState, S = MaterialNetworkSample> {
     thermal: DepositionSimulation<'t>,
     field: PlanarLeakyDielectric<C>,
-    report: CircuitEnthalpyReport<MaterialNetworkSample, DielectricRelaxationStep>,
+    report: CircuitEnthalpyReport<S, DielectricRelaxationStep>,
 }
-impl<'t, C: PlanarConductorMaterial> DielectricEnthalpyCandidate<'t, C> {
+impl<'t, C: PlanarConductorMaterial, S> DielectricEnthalpyCandidate<'t, C, S> {
     pub fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
@@ -31,7 +33,7 @@ impl<'t, C: PlanarConductorMaterial> DielectricEnthalpyCandidate<'t, C> {
     }
     pub fn report(
         &self,
-    ) -> &CircuitEnthalpyReport<MaterialNetworkSample, DielectricRelaxationStep> {
+    ) -> &CircuitEnthalpyReport<S, DielectricRelaxationStep> {
         &self.report
     }
     pub fn into_parts(
@@ -39,7 +41,7 @@ impl<'t, C: PlanarConductorMaterial> DielectricEnthalpyCandidate<'t, C> {
     ) -> (
         DepositionSimulation<'t>,
         PlanarLeakyDielectric<C>,
-        CircuitEnthalpyReport<MaterialNetworkSample, DielectricRelaxationStep>,
+        CircuitEnthalpyReport<S, DielectricRelaxationStep>,
     ) {
         (self.thermal, self.field, self.report)
     }
@@ -125,6 +127,37 @@ impl ConductionThermalNetwork<'_> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
         super::super::admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
+        let network = MaterialNetwork {
+            cells: self.cells,
+            resistors: &[],
+            links: self.links,
+        };
+        let prepared = network
+            .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
+            .map_err(material)?;
+        self.step_dielectric_resolved_candidate(
+            thermal, target_s, field, endpoint_voltage_v, assembly, field_controls,
+            controls, initial_energy_increments_j,
+            |trial| prepared.resolve(trial, || (*cancel.borrow_mut())()).map_err(material),
+            |sample| sample, &cancel,
+        )
+    }
+
+    // The source resolver changes; the actual charge history, field operators,
+    // local E.J, caloric Newton residual and publication stay with one owner.
+    #[allow(clippy::too_many_arguments)]
+    fn step_dielectric_resolved_candidate<'t, C: PlanarConductorMaterial, S>(
+        &self,
+        thermal: &DepositionSimulation<'t>, target_s: f64,
+        field: &PlanarLeakyDielectric<C>, endpoint_voltage_v: &[(usize, f64)],
+        assembly: WeightedAssemblyLimits, field_controls: DielectricRelaxationControls,
+        controls: CircuitEnthalpySolve, initial_energy_increments_j: &[f64],
+        resolve: impl Fn(&DepositionSimulation<'t>) -> Result<CircuitThermalCoefficients<S>, Error>,
+        sample: impl Fn(&S) -> &MaterialNetworkSample,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<DielectricEnthalpyCandidate<'t, C, S>, Error> {
+        check(cancel)?;
+        super::super::admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
         if field.thermal_dielectric_laws().is_some() {
             return Err(invalid("temperature-dependent dielectric storage requires step_dielectric_thermal_candidate"));
         }
@@ -135,20 +168,10 @@ impl ConductionThermalNetwork<'_> {
                 "matching dielectric/thermal clocks and complete material bindings required",
             ));
         }
-        let network = MaterialNetwork {
-            cells: self.cells,
-            resistors: &[],
-            links: self.links,
-        };
-        let prepared = network
-            .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
-            .map_err(material)?;
         let problem = field.conduction();
-        let routes = self.admit_routes(thermal, problem, &cancel)?;
-        let initial = prepared
-            .resolve(thermal, || (*cancel.borrow_mut())())
-            .map_err(material)?;
-        let sources = self.materials_at(problem, &initial.source, &routes, &cancel)?;
+        let routes = self.admit_routes(thermal, problem, cancel)?;
+        let initial = resolve(thermal)?;
+        let sources = self.materials_at(problem, sample(&initial.source), &routes, cancel)?;
         if sources.iter().zip(problem.conductors()).any(|(a, b)| {
             !a.has_same_electrical_source(b)
                 || a.frame() != b.frame()
@@ -164,11 +187,9 @@ impl ConductionThermalNetwork<'_> {
             controls,
             initial_energy_increments_j,
             |state, _| {
-                check(&cancel)?;
-                let coefficients = prepared
-                    .resolve(state, || (*cancel.borrow_mut())())
-                    .map_err(material)?;
-                let sources = self.materials_at(problem, &coefficients.source, &routes, &cancel)?;
+                check(cancel)?;
+                let coefficients = resolve(state)?;
+                let sources = self.materials_at(problem, sample(&coefficients.source), &routes, cancel)?;
                 let proposal = field
                     .step_to_candidate(
                         target_s,
@@ -192,7 +213,7 @@ impl ConductionThermalNetwork<'_> {
             },
             || (*cancel.borrow_mut())(),
         )?;
-        check(&cancel)?;
+        check(cancel)?;
         Ok(DielectricEnthalpyCandidate {
             thermal,
             field,
