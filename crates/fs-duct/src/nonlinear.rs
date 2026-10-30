@@ -22,6 +22,9 @@ pub use fs_gas::dynamics::{
 use fs_gas::dynamics::{Conserved, Error as GasError, Euler1d, Mesh1d};
 use fs_qty::Time;
 
+/// Source-owned molecular stress, heat and species transport in a nonlinear bore.
+pub mod transport;
+
 /// Explicit allocation bound for this geometric image; excess requests refuse.
 pub const MAX_NONLINEAR_DUCT_CELLS: usize = fs_gas::dynamics::MAX_EULER_CELLS;
 /// Bound on composite four-point Gaussian refinement of one smooth profile span.

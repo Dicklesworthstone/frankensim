@@ -12,6 +12,9 @@ use fs_thermochem::{
 };
 use std::sync::Arc;
 
+#[path = "transport_tests.rs"]
+mod transport_tests;
+
 fn gas(cp_linear: f64, specific_gas_constant: f64) -> FrozenGas {
     // Manufactured source cards exercise the production NASA-9 owner and its
     // bounded inversion. They are analytic fixtures, not measured gas data.

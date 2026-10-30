@@ -1581,6 +1581,55 @@ temperature-dependent heat capacities, shock heating and bidirectional
 reflections are evolved together. No separate instrument-specific gas law is
 introduced.
 
+### Conservative molecular transport in nonlinear bores
+
+`NonlinearDuct::with_molecular_transport(law, cancelled)` attaches the original
+gas `TransportLaw` before the first accepted step and returns
+`nonlinear::transport::DissipatingDuct<L>`. This is an executable nonlinear
+Navier--Stokes--Fourier/Maxwell--Stefan propagation image: axial Newtonian
+stress, Fourier conduction and species enthalpy diffusion accompany the same
+conservative shock-capturing gas step. Viscous stress work enters total energy
+through its shared flux; no separate heating term double-counts the loss of
+kinetic energy.
+
+The duct keeps its original geometry, exact face areas and volumes. The law's
+NASA-9 models must match the frozen source exactly, including canonical
+species order and source cards. The initial mole fractions supply the partial
+mass densities, with the density remainder assigned to the largest constituent
+instead of a trace species. Both caloric owners use the same Tmin sensible
+energy convention; momentum and stored energy transfer unchanged. This avoids
+subtracting large rounded formation-energy references and corrupting a small
+sensible-energy signal. The original frozen source remains inspectable and
+the evolving species fields stay available through `solver().branches()`.
+
+Every accepted step delegates the existing `DissipatingNetwork1d` single-branch
+composition. Molecular halves cover the actual accepted advective duration;
+shortening restarts the complete attempt. Prepared workspaces are reused.
+Failure or cancellation preserves field, time and last accepted report. The
+report exposes both molecular halves, the intervening hyperbolic step, species
+balances and physical-energy residuals. `sample` and `samples` recover pressure,
+temperature, sound speed and flow from the actual evolving composition.
+
+This image requires constant area and the molecular owner's admitted endpoint
+conditions. Tapers and frozen reservoir boundaries refuse; attachment after an
+accepted inviscid step also refuses rather than resetting time. Longitudinal
+molecular loss is not radial viscothermal boundary-layer loss or ZK memory.
+No entropy theorem, high-order nonlinear DG, converged physical shock thickness,
+chemical reaction, moving wall or validated instrument-render claim follows.
+
+Five focused integration tests retain mixed-source geometry and physical
+energy, preserve the inviscid shock in the zero-coefficient limit, propagate a
+finite shock with conservative molecular exchange, exercise atomic refusal,
+and compare pressure/velocity attenuation and phase with the independent exact
+linearized viscous Fourier mode. For 16/32/64 cells, the combined relative mode
+errors were 0.0222769, 0.00580902 and 0.00154474 (observed orders 1.94 and 1.91).
+All thirteen original-plus-molecular nonlinear tests pass against the complete
+production duct and gas libraries in a narrow native diagnostic build. The
+repository-wide DSR gate and unrelated external oracle dependencies remain a
+separate verification boundary.
+
+### Original inviscid image and geometric preparation
+
 Each original segment boundary is a mesh face. Cylinder and cone cell volumes
 are integrated analytically. Profile areas use the original radius evaluator;
 four-point Gaussian quadrature is split at original spline knots and refined
