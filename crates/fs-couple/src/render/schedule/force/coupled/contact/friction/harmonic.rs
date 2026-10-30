@@ -36,6 +36,26 @@ impl FrictionModalSystem {
         maximum_work: usize,
         gate: &CancelGate,
     ) -> Result<ReleasedHarmonicResponse, ModalFrictionError> {
+        self.admit_released_harmonic(gate)?;
+        let dynamics = self
+            .network
+            .harmonic_response(omega_rad_s, force, maximum_work, gate)?;
+        self.observe_released_harmonic(dynamics, gate)
+    }
+
+    /// Independent released-contact load cases sharing one original operator
+    /// factorization. Each retains the same physical pressure observation and
+    /// its own complete power account; powers are not superposed across cases.
+    pub fn released_harmonic_responses(
+        &self, omega_rad_s: f64, forces: &[&[C64]], maximum_work: usize,
+        gate: &CancelGate,
+    ) -> Result<Vec<ReleasedHarmonicResponse>, ModalFrictionError> {
+        self.admit_released_harmonic(gate)?;
+        self.network.harmonic_responses(omega_rad_s, forces, maximum_work, gate)?
+            .into_iter().map(|dynamics| self.observe_released_harmonic(dynamics, gate)).collect()
+    }
+
+    fn admit_released_harmonic(&self, gate: &CancelGate) -> Result<(), ModalFrictionError> {
         poll(Some(gate))?;
         if self.nonlinear.is_some() || self.adhesive.is_some() {
             return Err(invalid(
@@ -43,9 +63,14 @@ impl FrictionModalSystem {
             )
             .into());
         }
-        let dynamics = self
-            .network
-            .harmonic_response(omega_rad_s, force, maximum_work, gate)?;
+        Ok(())
+    }
+
+    fn observe_released_harmonic(
+        &self, dynamics: ModalHarmonicResponse, gate: &CancelGate,
+    ) -> Result<ReleasedHarmonicResponse, ModalFrictionError> {
+        poll(Some(gate))?;
+        let omega_rad_s = dynamics.omega_rad_s;
         let mut pressure = C64::ZERO;
         if let Some(weights) = &self.acceleration_pressure {
             if weights.len() != dynamics.displacement_m_sqrt_kg.len() {

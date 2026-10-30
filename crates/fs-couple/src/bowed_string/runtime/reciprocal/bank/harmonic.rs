@@ -32,6 +32,7 @@ pub struct ShellBridgeHarmonicResponse {
     pub source_band_rad_s: (f64, f64),
 }
 
+#[derive(Clone, Copy)]
 struct Trace<'a> {
     ports: &'a [Vec<f64>],
     exterior: &'a [f64],
@@ -283,6 +284,51 @@ fn prepare_force(
     Ok((start, force))
 }
 
+fn prepare_bridge_forces(
+    source: &MaterialStringBankSource, components: &[ModalAcousticTimeModel], modes: usize,
+    trace: &Trace<'_>, peak_forces_n: &[C64],
+) -> Result<(usize, Vec<C64>), ReciprocalStringError> {
+    if peak_forces_n.is_empty() || peak_forces_n.len() != trace.ports.len()
+        || peak_forces_n.iter().any(|f| !f.re.is_finite() || !f.im.is_finite())
+    {
+        return Err(invalid("coherent shell forcing needs one finite complex force per original bridge"));
+    }
+    let (start, mut force) = prepare_force(source, components, modes, trace, 0, peak_forces_n[0])?;
+    let n = trace.exterior.len();
+    for (&drive, row) in peak_forces_n[1..].iter().zip(&trace.ports[1..]) {
+        for (out, &shape) in force[start..start + n].iter_mut().zip(row) {
+            *out = *out + drive.scale(shape);
+        }
+    }
+    if force.iter().any(|f| !f.re.is_finite() || !f.im.is_finite()) {
+        return Err(invalid("coherent shell force superposition is not representable"));
+    }
+    Ok((start, force))
+}
+
+fn prepare_force_matrix(
+    source: &MaterialStringBankSource, components: &[ModalAcousticTimeModel], modes: usize,
+    trace: &Trace<'_>, gate: &CancelGate,
+) -> Result<(usize, Vec<Vec<C64>>), ReciprocalStringError> {
+    use crate::render::schedule::force::coupled::harmonic::{
+        MAX_HARMONIC_RIGHT_HAND_SIDES, MAX_HARMONIC_UNKNOWNS,
+    };
+    if trace.ports.is_empty() || trace.ports.len() > MAX_HARMONIC_RIGHT_HAND_SIDES
+        || modes > MAX_HARMONIC_UNKNOWNS
+    {
+        return Err(invalid("complete bridge matrix exceeds the original harmonic source capacity"));
+    }
+    let mut forces = Vec::with_capacity(trace.ports.len());
+    let mut start = 0;
+    for bridge in 0..trace.ports.len() {
+        poll(gate)?;
+        let (offset, force) = prepare_force(source, components, modes, trace, bridge, C64::ONE)?;
+        start = offset;
+        forces.push(force);
+    }
+    Ok((start, forces))
+}
+
 fn finish(
     source: &MaterialStringBankSource,
     cards: &[BowedStringCard],
@@ -376,6 +422,38 @@ impl ReciprocalStringBank {
             .map_err(ReciprocalStringError::Friction)?;
         finish(&self.source, &self.cards, trace, start, response, gate)
     }
+
+    /// Coherent physical peak forces in original bridge order. Their signed
+    /// complex columns are combined BEFORE solving and accounting, preserving
+    /// interference in pressure, stored energy and every heat channel.
+    pub fn material_shell_bridge_forces_harmonic_response(
+        &self, omega_rad_s: f64, peak_forces_n: &[C64], maximum_work: usize,
+        gate: &CancelGate,
+    ) -> Result<ShellBridgeHarmonicResponse, ReciprocalStringError> {
+        let trace = self.source.harmonic_trace(omega_rad_s, gate)?;
+        let (start, force) = prepare_bridge_forces(&self.source, self.system.components(),
+            self.system.mode_count(), &trace, peak_forces_n)?;
+        let response = self.system.released_harmonic_response(omega_rad_s, &force, maximum_work, gate)
+            .map_err(ReciprocalStringError::Friction)?;
+        finish(&self.source, &self.cards, trace, start, response, gate)
+    }
+
+    /// Unit-peak-force columns of the full physical bridge response matrix.
+    /// Column j drives original bridge j by 1 N and observes EVERY bridge plus
+    /// pressure and losses. All columns share one operator assembly/LU; source
+    /// admission, contact refusals and accounting are the single-drive rules.
+    /// Losses belong to individual unit load cases and cannot be superposed.
+    pub fn material_shell_bridge_harmonic_matrix(
+        &self, omega_rad_s: f64, maximum_work: usize, gate: &CancelGate,
+    ) -> Result<Vec<ShellBridgeHarmonicResponse>, ReciprocalStringError> {
+        let trace = self.source.harmonic_trace(omega_rad_s, gate)?;
+        let (start, forces) = prepare_force_matrix(&self.source, self.system.components(),
+            self.system.mode_count(), &trace, gate)?;
+        let rows: Vec<_> = forces.iter().map(Vec::as_slice).collect();
+        self.system.released_harmonic_responses(omega_rad_s, &rows, maximum_work, gate)
+            .map_err(ReciprocalStringError::Friction)?.into_iter()
+            .map(|response| finish(&self.source, &self.cards, trace, start, response, gate)).collect()
+    }
 }
 
 impl MultiBowStringBank {
@@ -405,5 +483,38 @@ impl MultiBowStringBank {
             .released_harmonic_response(omega_rad_s, &force, maximum_work, gate)
             .map_err(ReciprocalStringError::Friction)?;
         finish(source, self.cards(), trace, start, response, gate)
+    }
+
+    /// Coherent drive of every original bridge on the actual multiple-bow bank.
+    /// Combined phasors are solved once, so cross terms in loss and power remain
+    /// physical. Contacts are released with the same admission as a single drive.
+    pub fn material_shell_bridge_forces_harmonic_response(
+        &self, omega_rad_s: f64, peak_forces_n: &[C64], maximum_work: usize,
+        gate: &CancelGate,
+    ) -> Result<ShellBridgeHarmonicResponse, ReciprocalStringError> {
+        let source = self.source().bank();
+        let trace = source.harmonic_trace(omega_rad_s, gate)?;
+        let (start, force) = prepare_bridge_forces(source, self.system().components(),
+            self.system().mode_count(), &trace, peak_forces_n)?;
+        let response = self.system().released_harmonic_response(omega_rad_s, &force, maximum_work, gate)
+            .map_err(ReciprocalStringError::Friction)?;
+        finish(source, self.cards(), trace, start, response, gate)
+    }
+
+    /// Full bridge mobility/pressure matrix on the complete multiple-bow bank.
+    /// Returned unit-drive columns retain declaration order and share one LU.
+    /// The allowance covers the entire frequency's batch; no mode or port is
+    /// omitted to meet it. Each column retains its own source and power checks.
+    pub fn material_shell_bridge_harmonic_matrix(
+        &self, omega_rad_s: f64, maximum_work: usize, gate: &CancelGate,
+    ) -> Result<Vec<ShellBridgeHarmonicResponse>, ReciprocalStringError> {
+        let source = self.source().bank();
+        let trace = source.harmonic_trace(omega_rad_s, gate)?;
+        let (start, forces) = prepare_force_matrix(source, self.system().components(),
+            self.system().mode_count(), &trace, gate)?;
+        let rows: Vec<_> = forces.iter().map(Vec::as_slice).collect();
+        self.system().released_harmonic_responses(omega_rad_s, &rows, maximum_work, gate)
+            .map_err(ReciprocalStringError::Friction)?.into_iter()
+            .map(|response| finish(source, self.cards(), trace, start, response, gate)).collect()
     }
 }

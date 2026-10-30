@@ -209,6 +209,21 @@ impl MultiFrictionModalSystem {
         &self, omega_rad_s: f64, force: &[fs_math::c64::C64],
         maximum_work: usize, gate: &CancelGate,
     ) -> Result<super::harmonic::ReleasedHarmonicResponse, ModalFrictionError> {
+        self.admit_released_harmonic(gate)?;
+        self.core.released_harmonic_response(omega_rad_s, force, maximum_work, gate)
+    }
+
+    /// Independent load cases on the same admitted released-contact network,
+    /// sharing its original harmonic factorization and preserving RHS order.
+    pub fn released_harmonic_responses(
+        &self, omega_rad_s: f64, forces: &[&[fs_math::c64::C64]],
+        maximum_work: usize, gate: &CancelGate,
+    ) -> Result<Vec<super::harmonic::ReleasedHarmonicResponse>, ModalFrictionError> {
+        self.admit_released_harmonic(gate)?;
+        self.core.released_harmonic_responses(omega_rad_s, forces, maximum_work, gate)
+    }
+
+    fn admit_released_harmonic(&self, gate: &CancelGate) -> Result<(), ModalFrictionError> {
         poll(Some(gate))?;
         if self.obstacles.is_some()
             || self.contact_loads.iter().any(Option::is_some)
@@ -219,7 +234,7 @@ impl MultiFrictionModalSystem {
                 "released harmonic response requires no bound normal contact, shear layer or compliant drive",
             ).into());
         }
-        self.core.released_harmonic_response(omega_rad_s, force, maximum_work, gate)
+        Ok(())
     }
 
     fn from_single(core: FrictionModalSystem, additional: Vec<(ModalFrictionPort, ModalFrictionConfig)>,

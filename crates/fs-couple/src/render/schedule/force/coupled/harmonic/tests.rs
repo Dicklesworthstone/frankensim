@@ -125,6 +125,160 @@ fn material_and_air(zeta:f64)->CoupledModalSystem {
         }]},&[0],1,&gate).unwrap()
 }
 
+fn harmonic_batch_network(air_loss: f64) -> CoupledModalSystem {
+    let gate = CancelGate::new_clock_free();
+    CoupledModalSystem::new_with_columns_preparation(
+        vec![mode(500.0, 0.02), mode(900.0, 0.03)],
+        vec![ModalColumnConnection {
+            column: vec![1.0, -0.4], stiffness_n_m: 50_000.0,
+            damping_n_s_m: 12.0, rest_extension_m: 1e-5,
+        }],
+        &[ConstantLossConnection { connection: 0, reference_omega_rad_s: 700.0 }],
+        config(), ModalPreparation::HarmonicOnly(prepared_budget(2)), &gate,
+    ).unwrap().with_material_relaxation(vec![
+        fs_phs::RelaxationBranch {
+            projection: vec![1.0, 0.0, -0.3, 0.0], stiffness: 30_000.0,
+            relaxation_time_s: 0.002,
+        },
+        fs_phs::RelaxationBranch {
+            projection: vec![0.4, 0.0, 0.8, 0.0], stiffness: 8_000.0,
+            relaxation_time_s: 0.0007,
+        },
+    ], Some(vec![0.004, -0.007]), &gate).unwrap()
+        .with_radiation_load(&Model { ports: 2, poles: vec![Pole {
+            omega: 700.0, zeta: air_loss, coupling: vec![100.0, -30.0],
+        }] }, &[0, 1], 1, &gate).unwrap()
+}
+
+#[test]
+fn harmonic_batch_matches_individual_and_coherent_physical_response() {
+    // G1/G3: exact scalar parity on anchored damping, signed Maxwell branches
+    // and explicit air; coherent pressure/state superposition but quadratic
+    // power including the independently calculated cross terms.
+    let gate = CancelGate::new_clock_free();
+    let system = harmonic_batch_network(0.1);
+    let f1 = [C64::new(0.3, 0.1), C64::ZERO];
+    let f2 = [C64::ZERO, C64::new(-0.2, 0.05)];
+    let combined = [f1[0] + f2[0], f1[1] + f2[1]];
+    let forces: [&[C64]; 3] = [&f1, &f2, &combined];
+    for omega in [70.0, 550.0, 700.0, 1500.0] {
+        let batch = system.harmonic_responses(omega, &forces, 10_000, &gate).unwrap();
+        for (response, force) in batch.iter().zip(forces) {
+            assert_eq!(response, &system.harmonic_response(omega, force, 10_000, &gate).unwrap());
+            power_closes(response);
+        }
+        for i in 0..2 {
+            close(batch[2].displacement_m_sqrt_kg[i],
+                batch[0].displacement_m_sqrt_kg[i] + batch[1].displacement_m_sqrt_kg[i]);
+        }
+        let cross_power = 0.5 * (f1[0] * batch[1].velocity_m_sqrt_kg_per_s[0].conj()
+            + f2[1] * batch[0].velocity_m_sqrt_kg_per_s[1].conj()).re;
+        let independent = batch[0].external_power_w + batch[1].external_power_w;
+        assert!((batch[2].external_power_w - independent - cross_power).abs()
+            <= 3e-12 * batch[2].external_power_w.abs() + 1e-20);
+        assert!(cross_power.abs() > 1e-6 * independent.abs());
+        for (j, arm) in system.relaxation_branches.iter().enumerate() {
+            let mismatch = |response: &ModalHarmonicResponse| {
+                response.displacement_m_sqrt_kg.iter().zip(arm.projection.iter().step_by(2))
+                    .fold(C64::ZERO, |sum, (&q, &b)| sum + q.scale(b * arm.stiffness.sqrt()))
+                    - response.material_memory[j]
+            };
+            let cross_heat = (mismatch(&batch[0]) * mismatch(&batch[1]).conj()).re
+                / arm.relaxation_time_s;
+            let expected = batch[0].material_branch_dissipation_w[j]
+                + batch[1].material_branch_dissipation_w[j] + cross_heat;
+            assert!((batch[2].material_branch_dissipation_w[j] - expected).abs()
+                <= 3e-12 * expected.abs() + 1e-20);
+        }
+    }
+}
+
+#[test]
+fn harmonic_batch_reciprocity_and_phase_cancellation() {
+    // G1/G3: a reciprocal damped network has complex TRANSPOSE reciprocity,
+    // including at a bare lossless air pole. Opposite coherent forces cancel
+    // every field and loss, even though each separate excitation dissipates.
+    let gate = CancelGate::new_clock_free();
+    let system = harmonic_batch_network(0.0);
+    let e0 = [C64::ONE, C64::ZERO];
+    let e1 = [C64::ZERO, C64::ONE];
+    let force = [C64::new(0.3, -0.1), C64::new(-0.2, 0.4)];
+    let opposite = [-force[0], -force[1]];
+    let zero = [force[0] + opposite[0], force[1] + opposite[1]];
+    let rotated = [C64::new(0.0, 1.0) * force[0], C64::new(0.0, 1.0) * force[1]];
+    let batch = system.harmonic_responses(700.0,
+        &[&e0, &e1, &force, &opposite, &zero, &rotated], 10_000, &gate).unwrap();
+    close(batch[0].velocity_m_sqrt_kg_per_s[1], batch[1].velocity_m_sqrt_kg_per_s[0]);
+    assert!(batch[2].total_dissipation_w() > 0.0);
+    assert_eq!(batch[4].total_dissipation_w(), 0.0);
+    assert_eq!(batch[4].mean_stored_energy_j, 0.0);
+    for i in 0..2 {
+        close(batch[2].displacement_m_sqrt_kg[i], -batch[3].displacement_m_sqrt_kg[i]);
+        close(batch[5].displacement_m_sqrt_kg[i],
+            C64::new(0.0, 1.0) * batch[2].displacement_m_sqrt_kg[i]);
+        assert_eq!(batch[4].displacement_m_sqrt_kg[i], C64::ZERO);
+    }
+    assert!((batch[5].total_dissipation_w() - batch[2].total_dissipation_w()).abs()
+        <= 3e-12 * batch[2].total_dissipation_w());
+    for response in &batch { power_closes(response); }
+}
+
+#[test]
+fn harmonic_batch_budget_counts_one_factor_and_bounds_retained_storage() {
+    // G0: d=3, one anchored connection and two Maxwell branches. Three RHS
+    // cost 3²*(3+1+3*(1+2+3))=198; three independent solves cost 270.
+    let gate = CancelGate::new_clock_free();
+    let system = harmonic_batch_network(0.1);
+    let force = [C64::new(0.3, 0.1), C64::new(-0.2, 0.05)];
+    assert!(system.harmonic_response(650.0, &force, 90, &gate).is_ok());
+    assert!(system.harmonic_response(650.0, &force, 89, &gate).is_err());
+    assert!(system.harmonic_responses(650.0, &[force.as_slice(); 3], 198, &gate).is_ok());
+    assert!(system.harmonic_responses(650.0, &[force.as_slice(); 3], 197, &gate).is_err());
+    assert!(198 < 3 * 90);
+
+    // A legitimate one-mode source with many material histories has a cheap
+    // operator but expensive OUTPUT. Its 63 complete results fit 8 MiB; 64 do
+    // not, despite fitting the same arithmetic allowance and RHS-count limit.
+    let mut cfg = config();
+    cfg.max_setup_terms = 20_000_000;
+    let memory = CoupledModalSystem::new_with_preparation(vec![mode(500.0, 0.02)],
+        vec![], &[], cfg, ModalPreparation::HarmonicOnly(prepared_budget(1)), &gate).unwrap()
+        .with_material_relaxation(vec![fs_phs::RelaxationBranch {
+            projection: vec![1.0, 0.0], stiffness: 1.0, relaxation_time_s: 0.002,
+        }; 4096], None, &gate).unwrap();
+    let zero = [C64::ZERO];
+    assert_eq!(memory.harmonic_responses(650.0, &[zero.as_slice(); 63], 1_000_000, &gate).unwrap().len(), 63);
+    assert!(memory.harmonic_responses(650.0, &[zero.as_slice(); 64], 1_000_000, &gate).is_err());
+    assert!(harmonic_response_bytes(usize::MAX, 0, 0, 0, 2).is_err());
+}
+
+#[test]
+fn harmonic_batch_refusals_leave_original_state_unchanged() {
+    // G0/G4: late malformed inputs, insufficient total work and cancellation
+    // publish neither a partial response vector nor accepted physical state.
+    let gate = CancelGate::new_clock_free();
+    let system = harmonic_batch_network(0.1);
+    let states: Vec<_> = system.components().iter().map(|m| m.states().to_vec()).collect();
+    let histories = system.material_memory().to_vec();
+    let air = system.radiation_state().to_vec();
+    let force = [C64::new(0.3, 0.1), C64::new(-0.2, 0.05)];
+    let invalid_force = [C64::ZERO, C64::new(f64::NAN, 0.0)];
+    assert!(system.harmonic_responses(650.0, &[], 10_000, &gate).is_err());
+    assert!(system.harmonic_responses(650.0, &[force.as_slice(); 65], 10_000, &gate).is_err());
+    assert!(system.harmonic_responses(650.0, &[&force, &invalid_force], 10_000, &gate).is_err());
+    assert!(system.harmonic_responses(650.0, &[&force, &force[..1]], 10_000, &gate).is_err());
+    assert!(system.harmonic_responses(0.0, &[&force], 10_000, &gate).is_err());
+    assert!(system.harmonic_responses(650.0, &[&force, &force], 1, &gate).is_err());
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    assert!(matches!(system.harmonic_responses(650.0, &[&force], 10_000, &cancelled),
+        Err(ModalCouplingError::Cancelled)));
+    assert_eq!(histories, system.material_memory());
+    assert_eq!(air, system.radiation_state());
+    assert_eq!(states, system.components().iter().map(|m| m.states().to_vec()).collect::<Vec<_>>());
+    assert_eq!(system.samples_rendered(), 0);
+}
+
 #[test]
 fn harmonic_maxwell_and_air_match_analytic_impedances_without_changing_histories() {
     // G1/G3: eliminate the Maxwell ODE and air oscillator independently.

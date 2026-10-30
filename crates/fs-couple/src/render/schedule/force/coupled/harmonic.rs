@@ -1,13 +1,19 @@
 //! Continuous forced response of the original coupled linear system.
 //! Peak phasors use exp(-i omega t); averages therefore carry a factor 1/2.
 use super::*;
-use fs_la::eigen_complex::{LuComplexError, lu_complex_with_cancel};
+use fs_la::eigen_complex::{LuComplex, LuComplexError, lu_complex_with_cancel};
 use fs_math::{c64::C64, det};
 
 pub mod dg;
 
 /// Dense response capacity; no retained mode or acoustic pole is truncated.
 pub const MAX_HARMONIC_UNKNOWNS: usize = 1024;
+/// A batch retains complete responses, including every material/air history.
+pub const MAX_HARMONIC_RIGHT_HAND_SIDES: usize = 64;
+/// Retained response vectors and their struct headers, checked before assembly.
+/// Operator/factor workspace remains bounded by MAX_HARMONIC_UNKNOWNS and the
+/// original construction budget; caller-owned input vectors are not included.
+pub const MAX_HARMONIC_BATCH_RESPONSE_BYTES: usize = 8 * 1_048_576;
 
 /// AC particular solution, independent of accepted histories and DC preload.
 #[derive(Clone, Debug, PartialEq)]
@@ -119,74 +125,121 @@ struct HarmonicOperator {
     original_dimension: usize,
 }
 
-fn solve_harmonic(
-    matrix: &[C64],
+/// Borrow the original equations while sharing only their scaled LU. The
+/// borrowing lifetime prevents a factor from outliving its source operator.
+struct HarmonicFactor<'a> {
+    matrix: &'a [C64],
     dimension: usize,
-    force: &[C64],
-    tolerance: f64,
-    gate: &CancelGate,
-) -> Result<(Vec<C64>, f64), ModalCouplingError> {
-    if matrix.iter().any(|&a| !complex_finite(a)) {
-        return Err(invalid("harmonic operator overflow"));
-    }
-    let scale = matrix.iter().map(|a| a.abs()).fold(0.0_f64, f64::max);
-    if !scale.is_finite() || scale == 0.0 {
-        return Err(invalid("harmonic operator has no finite scale"));
-    }
-    let scaled: Vec<_> = matrix
-        .iter()
-        .map(|a| C64::new(a.re / scale, a.im / scale))
-        .collect();
-    let factor =
-        lu_complex_with_cancel(&scaled, dimension, || gate.is_requested()).map_err(lu_error)?;
-    let mut state = vec![C64::ZERO; dimension];
-    for (x, f) in state.iter_mut().zip(force) {
-        *x = C64::new(f.re / scale, f.im / scale);
-    }
-    if state.iter().any(|&x| !complex_finite(x)) {
-        return Err(invalid("harmonic force scaling overflow"));
-    }
-    factor
-        .solve_with_cancel(&mut state, || gate.is_requested())
-        .map_err(lu_error)?;
-    if state.iter().any(|&x| !complex_finite(x)) {
-        return Err(invalid("harmonic response is not representable"));
-    }
-    let mut residual_norm = 0.0_f64;
-    let mut operator_norm = 0.0_f64;
-    let state_norm = state.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
-    let force_norm = force.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
-    for i in 0..dimension {
+    scale: f64,
+    factor: LuComplex,
+}
+impl<'a> HarmonicFactor<'a> {
+    fn new(matrix: &'a [C64], dimension: usize, gate: &CancelGate)
+        -> Result<Self, ModalCouplingError>
+    {
         poll(Some(gate))?;
-        let rhs = force.get(i).copied().unwrap_or(C64::ZERO);
-        let mut residual = -rhs;
-        let mut row_norm = 0.0;
-        for (j, &x) in state.iter().enumerate() {
-            residual = residual + matrix[i * dimension + j] * x;
-            row_norm += matrix[i * dimension + j].abs();
+        if matrix.iter().any(|&a| !complex_finite(a)) {
+            return Err(invalid("harmonic operator overflow"));
         }
-        if !complex_finite(residual) || !row_norm.is_finite() {
-            return Err(invalid("harmonic residual overflow"));
+        let scale = matrix.iter().map(|a| a.abs()).fold(0.0_f64, f64::max);
+        if !scale.is_finite() || scale == 0.0 {
+            return Err(invalid("harmonic operator has no finite scale"));
         }
-        residual_norm = residual_norm.max(residual.abs());
-        operator_norm = operator_norm.max(row_norm);
+        let scaled: Vec<_> = matrix.iter()
+            .map(|a| C64::new(a.re / scale, a.im / scale)).collect();
+        let factor = lu_complex_with_cancel(&scaled, dimension, || gate.is_requested())
+            .map_err(lu_error)?;
+        Ok(Self { matrix, dimension, scale, factor })
     }
-    let denominator = operator_norm * state_norm + force_norm;
-    if !denominator.is_finite() {
-        return Err(invalid("harmonic residual scale overflow"));
+
+    fn solve(&self, force: &[C64], tolerance: f64, gate: &CancelGate)
+        -> Result<(Vec<C64>, f64), ModalCouplingError>
+    {
+        poll(Some(gate))?;
+        let Self { matrix, dimension, scale, factor } = self;
+        let dimension = *dimension;
+        let mut state = vec![C64::ZERO; dimension];
+        for (x, f) in state.iter_mut().zip(force) {
+            *x = C64::new(f.re / scale, f.im / scale);
+        }
+        if state.iter().any(|&x| !complex_finite(x)) {
+            return Err(invalid("harmonic force scaling overflow"));
+        }
+        factor.solve_with_cancel(&mut state, || gate.is_requested()).map_err(lu_error)?;
+        if state.iter().any(|&x| !complex_finite(x)) {
+            return Err(invalid("harmonic response is not representable"));
+        }
+        let mut residual_norm = 0.0_f64;
+        let mut operator_norm = 0.0_f64;
+        let state_norm = state.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+        let force_norm = force.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+        for i in 0..dimension {
+            poll(Some(gate))?;
+            let rhs = force.get(i).copied().unwrap_or(C64::ZERO);
+            let mut residual = -rhs;
+            let mut row_norm = 0.0;
+            for (j, &x) in state.iter().enumerate() {
+                residual = residual + matrix[i * dimension + j] * x;
+                row_norm += matrix[i * dimension + j].abs();
+            }
+            if !complex_finite(residual) || !row_norm.is_finite() {
+                return Err(invalid("harmonic residual overflow"));
+            }
+            residual_norm = residual_norm.max(residual.abs());
+            operator_norm = operator_norm.max(row_norm);
+        }
+        let denominator = operator_norm * state_norm + force_norm;
+        if !denominator.is_finite() {
+            return Err(invalid("harmonic residual scale overflow"));
+        }
+        let relative = if denominator == 0.0 { 0.0 } else { residual_norm / denominator };
+        if relative > tolerance {
+            return Err(ModalCouplingError::SolveResidual { relative, tolerance });
+        }
+        Ok((state, relative))
     }
-    let relative = if denominator == 0.0 {
-        0.0
-    } else {
-        residual_norm / denominator
-    };
-    if relative > tolerance {
-        return Err(ModalCouplingError::SolveResidual {
-            relative,
-            tolerance,
-        });
-    }
-    Ok((state, relative))
+}
+
+fn solve_harmonic(matrix: &[C64], dimension: usize, force: &[C64], tolerance: f64,
+    gate: &CancelGate) -> Result<(Vec<C64>, f64), ModalCouplingError>
+{
+    HarmonicFactor::new(matrix, dimension, gate)?.solve(force, tolerance, gate)
+}
+
+fn harmonic_work(dimension: usize, connections: usize, constant_loss: usize,
+    memories: usize, allowance: usize, responses: usize) -> Result<usize, ModalCouplingError>
+{
+    // The first response keeps the original complete-operator allowance. Each
+    // later response pays for triangular solves, residuals and all physical
+    // observations; only factorization/assembly are shared. Full-support costs
+    // remain conservative even when rank assembly touches a small local body.
+    let per_response = connections.checked_add(memories)
+        .and_then(|v| v.checked_add(allowance));
+    dimension.checked_mul(dimension)
+        .and_then(|square| {
+            per_response.and_then(|per| per.checked_mul(responses))
+                .and_then(|v| v.checked_add(dimension))
+                .and_then(|v| v.checked_add(constant_loss))
+                .and_then(|v| square.checked_mul(v))
+        })
+        .ok_or_else(|| invalid("harmonic work overflow"))
+}
+
+fn harmonic_response_bytes(modes: usize, connections: usize, memories: usize,
+    poles: usize, responses: usize) -> Result<usize, ModalCouplingError>
+{
+    // Count every retained output array: q, v and generalized reaction; three
+    // connection efforts; Maxwell histories and heat/storage; paired air states.
+    // Struct size includes Vec headers, scalar diagnostics and alignment.
+    modes.checked_mul(3)
+        .and_then(|v| v.checked_add(connections.checked_mul(3)?))
+        .and_then(|v| v.checked_add(memories))
+        .and_then(|v| v.checked_add(poles.checked_mul(2)?))
+        .and_then(|v| v.checked_mul(core::mem::size_of::<C64>()))
+        .and_then(|v| v.checked_add(memories.checked_mul(2 * core::mem::size_of::<f64>())?))
+        .and_then(|v| v.checked_add(core::mem::size_of::<ModalHarmonicResponse>()))
+        .and_then(|v| v.checked_mul(responses))
+        .ok_or_else(|| invalid("harmonic response storage overflow"))
 }
 
 impl CoupledModalSystem {
@@ -229,6 +282,59 @@ impl CoupledModalSystem {
         self.observe_harmonic_state(omega_rad_s, force, &state, relative, gate)
     }
 
+    /// Complete responses to several independent peak-force vectors at ONE
+    /// frequency, in the caller's order. The original operator is assembled and
+    /// factored once; each RHS retains its own original-equation residual,
+    /// Maxwell/air histories and full physical power/storage accounting.
+    ///
+    /// For d unknowns, C connections, G anchored-loss links, M Maxwell branches
+    /// and r force vectors, `maximum_work` bounds d²*(d+G+r*(C+M+3)). This is the
+    /// existing single-RHS allowance when r=1. Retained result storage is checked
+    /// before assembly against MAX_HARMONIC_BATCH_RESPONSE_BYTES; 1..=64 RHS are
+    /// admitted. Input vectors contain exactly one finite force per original
+    /// mechanical mode. No partial result or accepted-state change is published.
+    ///
+    /// Responses are independent load cases, NOT incoherent power components.
+    /// For coherent excitation, sum force phasors before solving: powers and
+    /// stored energies are quadratic and must not be linearly superposed.
+    pub fn harmonic_responses(
+        &self, omega_rad_s: f64, forces: &[&[C64]], maximum_work: usize,
+        gate: &CancelGate,
+    ) -> Result<Vec<ModalHarmonicResponse>, ModalCouplingError> {
+        poll(Some(gate))?;
+        if forces.is_empty() || forces.len() > MAX_HARMONIC_RIGHT_HAND_SIDES {
+            return Err(invalid("harmonic batch requires 1..=64 complete force vectors"));
+        }
+        let n = self.mode_count();
+        let poles = self.radiation.as_ref().map_or(0, |r| r.model.poles.len());
+        let dimension = n.checked_add(poles).ok_or_else(|| invalid("harmonic dimension overflow"))?;
+        let work = harmonic_work(dimension, self.connections.len(),
+            self.connections.iter().filter(|c| c.constant_loss_reference_omega_rad_s.is_some()).count(),
+            self.relaxation_branches.len(), 3, forces.len())?;
+        let bytes = harmonic_response_bytes(n, self.connections.len(),
+            self.relaxation_branches.len(), poles, forces.len())?;
+        if dimension > MAX_HARMONIC_UNKNOWNS || work > maximum_work
+            || bytes > MAX_HARMONIC_BATCH_RESPONSE_BYTES
+        {
+            return Err(invalid("complete harmonic batch exceeds its work or retained-response storage bound"));
+        }
+        for force in forces {
+            poll(Some(gate))?;
+            if force.len() != n || force.iter().any(|&f| !complex_finite(f)) {
+                return Err(invalid("harmonic batch requires one finite force per original mode in every RHS"));
+            }
+        }
+        let operator = self.harmonic_operator(omega_rad_s, forces[0], 0, maximum_work, gate)?;
+        let factor = HarmonicFactor::new(&operator.values, operator.dimension, gate)?;
+        let mut responses = Vec::with_capacity(forces.len());
+        for &force in forces {
+            let (state, relative) = factor.solve(force, self.config.solve_relative_tolerance, gate)?;
+            responses.push(self.observe_harmonic_state(omega_rad_s, force, &state, relative, gate)?);
+        }
+        poll(Some(gate))?;
+        Ok(responses)
+    }
+
     fn harmonic_operator(
         &self,
         omega_rad_s: f64,
@@ -254,20 +360,9 @@ impl CoupledModalSystem {
         let square = dimension
             .checked_mul(dimension)
             .ok_or_else(|| invalid("harmonic matrix overflow"))?;
-        let work = dimension
-            .checked_add(self.connections.len())
-            .and_then(|v| {
-                v.checked_add(
-                    self.connections
-                        .iter()
-                        .filter(|c| c.constant_loss_reference_omega_rad_s.is_some())
-                        .count(),
-                )
-            })
-            .and_then(|v| v.checked_add(self.relaxation_branches.len()))
-            .and_then(|v| v.checked_add(if additional == 0 { 3 } else { 5 }))
-            .and_then(|v| square.checked_mul(v))
-            .ok_or_else(|| invalid("harmonic work overflow"))?;
+        let work = harmonic_work(dimension, self.connections.len(),
+            self.connections.iter().filter(|c| c.constant_loss_reference_omega_rad_s.is_some()).count(),
+            self.relaxation_branches.len(), if additional == 0 { 3 } else { 5 }, 1)?;
         if dimension > MAX_HARMONIC_UNKNOWNS || work > maximum_work {
             return Err(invalid(
                 "complete harmonic solve exceeds its explicit dense work budget",
