@@ -1,0 +1,15 @@
+frankensim.specimen.v1
+key	value
+specimen_id	organpipe-tin-principal-castellengo2004
+maker	unstated (a laboratory organ pipe); measured by M. Castellengo, Laboratoire d'Acoustique Musicale, CNRS, Universite Paris 6, Ministere de la Culture
+model	open cylindrical flue organ pipe made of tin, whose foot and mouth separate from the rest of the pipe (paper Sec. 2); stop name and scale series not stated
+serial	unstated
+year	2004 (measurement paper)
+system	open cylindrical metal flue pipe: foot, flue between languid and lower lip, rectangular mouth, cylindrical body open at the top
+holder	none: published measurements of one pipe
+reference_state	played on a small organ chest through a pallet whose opening rate is controlled (paper Sec. 3); the foot pressure is measured during the transient
+environment	laboratory organ system; air temperature, humidity and static pressure unstated
+source_ids	castellengo-isma2004-organ-pipe;castellengo-isma2004-organ-pipe-wind;castellengo-isma2004-organ-pipe-resonance;castellengo-1999-acustica-metal-principals
+target_relation	one real pipe with published geometry, foot pressure, threshold pressure and first passive resonance; there is no recording of this pipe. The U4 organ references are registrations at Eb3, A2 and Gb6, none within an octave of this pipe, so renders are checked against this pipe's own measurements and not graded
+axial_frame	x along the bore axis from the centre of the mouth toward the open end
+pitch_standard	the paper gives the first passive resonance of the whole pipe (475 Hz, noise excitation at the mouth) and not the played frequency

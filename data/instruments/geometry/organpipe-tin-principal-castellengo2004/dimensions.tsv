@@ -1,0 +1,9 @@
+frankensim.specimen-dimensions.v1
+part	feature	quantity	value_si	unit	sigma_si	route	source_id	note
+body	bore	inner-diameter	0.027	m	unstated	published-measured	castellengo-isma2004-organ-pipe	paper Sec. 2: internal diameter = 27 mm
+body	bore	length	0.312	m	unstated	published-measured	castellengo-isma2004-organ-pipe	paper Sec. 2: length = 312 mm; the point it is measured from is not stated (u-length-reference)
+body	bore	length-mouth-centre-to-open-end	0.3085	m	unstated	published-measured	castellengo-isma2004-organ-pipe	DERIVED, not stated: 312 mm from the mouth's lower edge less half the 7 mm cut-up (u-length-reference)
+mouth	window	width	0.021	m	unstated	published-measured	castellengo-isma2004-organ-pipe	paper Sec. 2: mouth dimensions l x L = 21 x 7 mm, l the width across the pipe
+mouth	window	cut-up	0.007	m	unstated	published-measured	castellengo-isma2004-organ-pipe	paper Sec. 2: mouth dimensions l x L = 21 x 7 mm, L the height from the flue to the upper lip
+mouth	flue	height	0.00025	m	0.00005	published-measured	castellengo-isma2004-organ-pipe	paper Sec. 2: flue width 0.2 < h < 0.3, no unit printed (millimetres by context: every other length in the paragraph is in mm); the value is the centre and sigma the half range of the paper's own bracket (u-flue-height)
+mouth	flue	width	0.021	m	unstated	published-measured	castellengo-isma2004-organ-pipe	DERIVED, not stated: the flue spans the mouth width, the usual construction of a flue pipe mouth; the paper gives only the mouth width

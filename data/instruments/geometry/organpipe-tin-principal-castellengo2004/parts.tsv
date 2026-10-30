@@ -1,0 +1,5 @@
+frankensim.specimen-parts.v1
+part	material	state	joins	note
+body	tin (paper Sec. 2: a circular organ pipe made of tin); no material card attached, the wall loss is the generic viscothermal law of the gas	played	mouth	cylindrical body open at the top; wall thickness not stated (u-wall-thickness)
+mouth	tin	played	body;foot	rectangular mouth 21 mm wide with a 7 mm cut-up, the flue between the languid and the lower lip; upper lip shape, labium offset and languid not stated
+foot	tin	played	mouth	separable with the mouth (paper Sec. 2); length, shape and toe hole not stated. Not on the route: the cards' blowing pressure is the measured foot pressure (u-foot)

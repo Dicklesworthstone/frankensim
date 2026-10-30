@@ -1,0 +1,4 @@
+frankensim.specimen-frames.v1
+part	origin	axis_x	axis_y	axis_z	note
+body	centre of the mouth on the bore axis	+x along the bore axis toward the open end	unstated	unstated	the stated 312 mm length is taken from the mouth's lower edge (the languid), so the open end is 308.5 mm from the mouth centre (u-length-reference)
+mouth	centre of the mouth on the bore axis	+x along the bore axis toward the open end	unstated	unstated	the 7 mm cut-up runs along +x and the 21 mm width runs around the bore
