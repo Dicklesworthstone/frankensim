@@ -3,11 +3,11 @@
  "family": "cello",
  "title": "Cello",
  "reference_instrument": "Cello (University of Iowa MIS)",
- "summary": "A labelled diagnostic baseline, not a cello: open-string arco cards for the C, G, D and A strings, written from published string properties, a Schelleng-range bow and a published rosin friction curve, each number with a source row. They run through the one-string point-bow reader with a one-way one-oscillator body, which is reduced physics. The oscillator is the existing baseline oscillator, kept only as a placeholder because no measured cello body or string loss was retrieved.",
+ "summary": "A reduced engine, not a cello. Each string drives a single body mode (a 0.15 kg mass on a spring at 280 Hz, damping ratio 0.02) that radiates as a baffled piston of 0.003 m², in place of the cello's bridge, arched plates, ribs, bass bar, soundpost and enclosed air. On the four graded open strings this leaves 11 to 20 dB too much of each note's energy above 8 kHz, and 2 to 18 dB too little between 0.5 and 3 kHz, where a real cello's body resonates. No open, measured cello geometry was found on 2026-10-30, so the physical body waits on a scanned or measured cello. The open-string arco cards for the C, G, D and A strings are written from published string properties, a Schelleng-range bow and a published rosin friction curve, each number with a source row, and run through the one-string point-bow reader.",
  "physics_present": [
   "fs-couple bowed_string: pinned Euler-Bernoulli string modes from vibrating length, tension and mass per length; tension is set from the table so the open-string pitch is a result of the card",
   "fs-couple stribeck_friction on the shared fs-tribo law with event stiction: static cap, then a Gaussian drop to the kinetic coefficient",
-  "a one-way compact radiating body at a 1 m observer; modal damping from the fundamental's measured Q where one was retrieved",
+  "a reduced body: one mode (0.15 kg, 280 Hz, damping ratio 0.02) radiating one way as a baffled piston of 0.003 m² to a 1 m observer; the same placeholder serves viola, cello and double bass. Modal damping from the fundamental's measured Q where one was retrieved",
   "a point bow driven by a canonical gesture schedule (on the string at rest, constant acceleration to the bow speed, constant force, lift); the bow force is chosen from the card's own bow-force sweep, in the middle of its longest run of Helmholtz motion, with no recording involved",
   "bow-force sweeps of every card with a rigid bridge (bowed_card_sweep): one flyback per period with slip fraction near the bow-to-bridge ratio over a band of forces, interleaved with doubled-slip and raucous forces, so the playable map is multistable; receipts are in data/instruments/grades"
  ],
