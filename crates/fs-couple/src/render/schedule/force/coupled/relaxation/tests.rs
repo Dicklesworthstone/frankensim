@@ -78,6 +78,12 @@ fn first_order_memory_joins_disconnected_masses_and_matches_analytic_maxwell_mot
         close(pair[1].velocity_m_sqrt_kg_per_s, -relative_v/2.0);
         close(system.material_memory()[0], z);
         close(frame.material_energy_j, 0.5*(c*relative_q-z).powi(2));
+        let work = system.material_relaxation_observation_work(0..1).unwrap();
+        let observed = system.material_relaxation_observation(0..1, work, &gate).unwrap();
+        assert_eq!(observed.branch_count, 1);
+        assert_eq!(observed.stored_energy_j, system.material_energy_j().unwrap());
+        close(observed.stored_energy_j, frame.material_energy_j);
+        close(observed.dissipated_power_w, (c*relative_q-z).powi(2)/tau);
         assert_eq!(frame.component_dissipation_j, 0.0);
         assert_eq!(frame.connection_dissipation_j, 0.0);
         assert!(frame.material_dissipation_j > 0.0);
@@ -98,6 +104,91 @@ fn coupled(rate: u32) -> CoupledModalSystem {
             arm(vec![1.0, 0.0, -0.4, 0.0], 3e4, 0.002),
             arm(vec![0.6, 0.0, 1.0, 0.0], 2e4, 0.005),
         ], Some(vec![0.007, -0.004]), &gate).unwrap()
+}
+
+#[test]
+fn material_observation_preserves_coherent_projection_and_disjoint_source_ranges() {
+    let gate = CancelGate::new_clock_free();
+    let q = 1.0 / 1024.0;
+    let system = CoupledModalSystem::new(vec![
+        model(48_000, 100.0, 0.0, q, 0.0),
+        model(48_000, 100.0, 0.0, q, 0.0),
+    ], vec![], config(), &gate).unwrap().with_material_relaxation(vec![
+        arm(vec![1.0, 0.0, -1.0, 0.0], 4.0, 0.5),
+        arm(vec![1.0, 0.0, 1.0, 0.0], 9.0, 0.25),
+    ], Some(vec![0.0, q]), &gate).unwrap();
+    let observe = |range: core::ops::Range<usize>| {
+        let work = system.material_relaxation_observation_work(range.clone()).unwrap();
+        system.material_relaxation_observation(range, work, &gate).unwrap()
+    };
+    let cancelled_projection = observe(0..1);
+    assert_eq!(cancelled_projection.stored_energy_j, 0.0);
+    assert_eq!(cancelled_projection.dissipated_power_w, 0.0);
+    let constructive = observe(1..2);
+    // The signed sum is formed before squaring, and supplied memory is retained.
+    let mismatch = 5.0*q;
+    assert_eq!(constructive.stored_energy_j, 0.5*mismatch*mismatch);
+    assert_eq!(constructive.dissipated_power_w, mismatch*mismatch/0.25);
+    let all = observe(0..2);
+    assert_eq!(all.branch_count, 2);
+    assert_eq!(all.stored_energy_j,
+        cancelled_projection.stored_energy_j + constructive.stored_energy_j);
+    assert_eq!(all.dissipated_power_w,
+        cancelled_projection.dissipated_power_w + constructive.dissipated_power_w);
+    assert_eq!(all.stored_energy_j, system.material_energy_j().unwrap());
+    assert_eq!(observe(2..2), MaterialRelaxationObservation::default());
+    assert_eq!(system.material_relaxation_observation_work(2..2).unwrap(), 0);
+}
+
+#[test]
+fn material_observation_distinguishes_relaxed_and_unrelaxed_initial_history() {
+    let gate = CancelGate::new_clock_free();
+    let branch = arm(vec![1.0, 0.0], 4e4, 0.002);
+    let relaxed = mechanical(48_000, 300.0, 1e-4)
+        .with_material_relaxation(vec![branch.clone()], None, &gate).unwrap();
+    let unrelaxed = mechanical(48_000, 300.0, 1e-4)
+        .with_material_relaxation(vec![branch], Some(vec![0.0]), &gate).unwrap();
+    let work = relaxed.material_relaxation_observation_work(0..1).unwrap();
+    let settled = relaxed.material_relaxation_observation(0..1, work, &gate).unwrap();
+    assert_eq!(settled.stored_energy_j, 0.0);
+    assert_eq!(settled.dissipated_power_w, 0.0);
+    let initial = unrelaxed.material_relaxation_observation(0..1, work, &gate).unwrap();
+    close(initial.stored_energy_j, 0.0002);
+    close(initial.dissipated_power_w, 0.2);
+    assert_eq!(states(&relaxed), states(&unrelaxed));
+    assert_eq!(relaxed.samples_rendered(), 0);
+    assert_eq!(unrelaxed.samples_rendered(), 0);
+}
+
+#[test]
+fn bounded_or_cancelled_observation_never_changes_the_accepted_state_or_next_step() {
+    let gate = CancelGate::new_clock_free();
+    let stopped = CancelGate::new_clock_free();
+    stopped.request();
+    let (mut observed, mut control) = (coupled(48_000), coupled(48_000));
+    observed.step(&[0.02, -0.01]).unwrap();
+    control.step(&[0.02, -0.01]).unwrap();
+    let before = states(&observed);
+    let memory = observed.material_memory().to_vec();
+    let frame = observed.last_frame().unwrap().clone();
+    let work = observed.material_relaxation_observation_work(0..2).unwrap();
+    assert!(work > 0);
+    let good = observed.material_relaxation_observation(0..2, work, &gate).unwrap();
+    assert!(observed.material_relaxation_observation(0..2, work-1, &gate).is_err());
+    assert!(matches!(observed.material_relaxation_observation(0..2, work, &stopped),
+        Err(ModalCouplingError::Cancelled)));
+    assert!(observed.material_relaxation_observation_work(
+        core::ops::Range { start: 2, end: 1 }).is_err());
+    assert!(observed.material_relaxation_observation(0..3, usize::MAX, &gate).is_err());
+    assert_eq!(states(&observed), before);
+    assert_eq!(observed.material_memory(), memory);
+    assert_eq!(observed.last_frame(), Some(&frame));
+    assert_eq!(good.stored_energy_j, observed.material_energy_j().unwrap());
+    assert_eq!(observed.samples_rendered(), 1);
+    let after = observed.step(&[0.02, -0.01]).unwrap().clone();
+    assert_eq!(after, control.step(&[0.02, -0.01]).unwrap().clone());
+    assert_eq!(states(&observed), states(&control));
+    assert_eq!(observed.material_memory(), control.material_memory());
 }
 
 #[test]

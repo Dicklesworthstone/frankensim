@@ -21,7 +21,7 @@ mod exact;
 mod preparation;
 pub use preparation::ModalPreparation;
 mod relaxation;
-pub use relaxation::ModalPlaneStressPoint;
+pub use relaxation::{MaterialRelaxationObservation, ModalPlaneStressPoint};
 pub(crate) mod dg;
 pub mod harmonic;
 pub mod radiation;

@@ -24,7 +24,7 @@ use fs_tribo::{FrictionLaw, TriboError};
 use crate::modal_acoustic_time::ModalAcousticTimeModel;
 use crate::stribeck_friction::{ContactBranch, ImplicitFrictionError, StribeckLoadLine};
 use super::effective_compliance;
-use super::super::{CoupledModalSystem, ModalAttachment, ModalCouplingError,
+use super::super::{CoupledModalSystem, MaterialRelaxationObservation, ModalAttachment, ModalCouplingError,
     dot, finite, invalid, limit, poll};
 
 /// Signed tangential attachment; a missing right side is a prescribed surface.
@@ -326,6 +326,19 @@ impl FrictionModalSystem {
     /// Current independent constitutive storage [J].
     pub fn material_energy_j(&self) -> Result<f64, ModalCouplingError> {
         self.network.material_energy_j()
+    }
+    /// Work required to observe an original range of accepted material arms.
+    pub fn material_relaxation_observation_work(&self, branches: core::ops::Range<usize>)
+        -> Result<usize, ModalCouplingError>
+    {
+        self.network.material_relaxation_observation_work(branches)
+    }
+    /// Accepted arm storage and instantaneous dissipation in the SAME network.
+    pub fn material_relaxation_observation(&self, branches: core::ops::Range<usize>,
+        maximum_work: usize, gate: &CancelGate)
+        -> Result<MaterialRelaxationObservation, ModalCouplingError>
+    {
+        self.network.material_relaxation_observation(branches, maximum_work, gate)
     }
     /// Attach the SAME passive exterior load to the original held-force network
     /// and refresh the bow compliance including all acoustic reactions. Existing

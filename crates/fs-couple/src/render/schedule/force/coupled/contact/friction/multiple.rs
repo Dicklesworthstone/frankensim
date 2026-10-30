@@ -305,6 +305,19 @@ impl MultiFrictionModalSystem {
     /// Accepted first-order material history, with no mutable admission bypass.
     #[must_use]
     pub fn material_memory(&self) -> &[f64] { self.core.material_memory() }
+    /// Work required to observe an original range of accepted material arms.
+    pub fn material_relaxation_observation_work(&self, branches: core::ops::Range<usize>)
+        -> Result<usize, ModalCouplingError>
+    {
+        self.core.material_relaxation_observation_work(branches)
+    }
+    /// Accepted arm storage and instantaneous power after the joint solve.
+    pub fn material_relaxation_observation(&self, branches: core::ops::Range<usize>,
+        maximum_work: usize, gate: &CancelGate)
+        -> Result<MaterialRelaxationObservation, ModalCouplingError>
+    {
+        self.core.material_relaxation_observation(branches, maximum_work, gate)
+    }
     /// Last accepted linear account, including independent material storage/loss.
     #[must_use]
     pub fn coupled_frame(&self) -> Option<&super::super::super::CoupledModalFrame> {

@@ -4,6 +4,19 @@ use super::*;
 use fs_math::det;
 use fs_phs::RelaxationBranch;
 
+/// Accepted Maxwell-arm storage and instantaneous irreversible power.
+/// Equilibrium stiffness belongs to the mechanical model and is excluded.
+/// Power is evaluated at one endpoint; it is not a time-integrated heat account.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MaterialRelaxationObservation {
+    /// Number of original branches included, in their retained order.
+    pub branch_count: usize,
+    /// Sum of `(sqrt(k) * b.q - z)^2 / 2` [J].
+    pub stored_energy_j: f64,
+    /// Sum of `(sqrt(k) * b.q - z)^2 / tau` [W].
+    pub dissipated_power_w: f64,
+}
+
 /// A full source tensor tied to original mechanical and material coordinates.
 /// This observes the accepted candidate; it introduces no additional storage,
 /// forces or integration. `strain_scale` maps an energy quadrature point to
@@ -225,6 +238,62 @@ impl CoupledModalSystem {
         stored_energy(&self.relaxation_branches, &self.models, &self.material_memory)
     }
 
+    /// Checked scalar-work allowance for one accepted-state range observation.
+    /// This constant-time preflight uses the retained extents; it does not scan
+    /// projections or allocate. Empty ranges are valid and require zero work.
+    pub fn material_relaxation_observation_work(
+        &self, branches: core::ops::Range<usize>,
+    ) -> Result<usize, ModalCouplingError> {
+        if branches.start > branches.end || branches.end > self.relaxation_branches.len()
+            || self.material_memory.len() != self.relaxation_branches.len() {
+            return Err(invalid("material observation requires an original complete branch range"));
+        }
+        // Projection products, finite arithmetic, component traversal and
+        // per-branch storage/power reductions, including cancellation checks.
+        self.mode_count().checked_mul(8)
+            .and_then(|work| self.models.len().checked_mul(2).and_then(|n| work.checked_add(n)))
+            .and_then(|work| work.checked_add(32))
+            .and_then(|work| work.checked_mul(branches.len()))
+            .ok_or_else(|| invalid("material observation work extent overflows"))
+    }
+
+    /// Observe a source-selected range without changing mechanics or memory.
+    /// Uses accepted q and z, including explicit initial unrelaxed history and
+    /// contact-constrained endpoints. Signed projections are summed BEFORE
+    /// squaring, retaining all cross terms. No staged candidate is inspected.
+    ///
+    /// The existing exact stepper owns integrated heat. This query returns
+    /// instantaneous power only, with cancellation at each branch and at most
+    /// 64 modal coordinates between polls. No per-query buffers are allocated.
+    pub fn material_relaxation_observation(
+        &self, branches: core::ops::Range<usize>, maximum_work: usize, gate: &CancelGate,
+    ) -> Result<MaterialRelaxationObservation, ModalCouplingError> {
+        poll(Some(gate))?;
+        if self.material_relaxation_observation_work(branches.clone())? > maximum_work {
+            return Err(invalid("complete material observation exceeds its work allowance"));
+        }
+        let mut out = MaterialRelaxationObservation {
+            branch_count: branches.len(), ..MaterialRelaxationObservation::default()
+        };
+        let dimension = self.mode_count().checked_mul(2)
+            .ok_or_else(|| invalid("material observation state extent overflows"))?;
+        for (branch, &z) in self.relaxation_branches[branches.clone()].iter()
+            .zip(&self.material_memory[branches]) {
+            poll(Some(gate))?;
+            if branch.projection.len() != dimension {
+                return Err(invalid("material observation lost its complete original projection"));
+            }
+            let mismatch = finite(branch_relaxed_memory(branch, &self.models, Some(gate))? - z)?;
+            out.stored_energy_j = finite(out.stored_energy_j + 0.5 * mismatch * mismatch)?;
+            // Divide one factor first: the power can be representable even
+            // when the unscaled square would overflow for a slow branch.
+            out.dissipated_power_w = finite(out.dissipated_power_w
+                + finite(mismatch * (mismatch / branch.relaxation_time_s))?)?;
+        }
+        poll(Some(gate))?;
+        Ok(out)
+    }
+
     // Stage material history and its actual endpoint restoring load together.
     // `forces` then serves the existing acceleration-pressure observation.
     pub(super) fn stage_material_state(&mut self, endpoint: &[f64]) -> Result<f64, ModalCouplingError> {
@@ -252,18 +321,28 @@ impl CoupledModalSystem {
 pub(super) fn relaxed_memory(branches: &[RelaxationBranch], models: &[ModalAcousticTimeModel])
     -> Result<Vec<f64>, ModalCouplingError>
 {
-    branches.iter().map(|branch| {
-        let root = det::sqrt(branch.stiffness);
-        branch.projection.iter().step_by(2).zip(models.iter().flat_map(|m| m.states()))
-            .try_fold(0.0, |sum, (b, state)| finite(sum + root * b * state.displacement_m_sqrt_kg))
-    }).collect()
+    branches.iter().map(|branch| branch_relaxed_memory(branch, models, None)).collect()
+}
+
+fn branch_relaxed_memory(branch: &RelaxationBranch, models: &[ModalAcousticTimeModel],
+    gate: Option<&CancelGate>) -> Result<f64, ModalCouplingError>
+{
+    let root = det::sqrt(branch.stiffness);
+    branch.projection.iter().step_by(2).zip(models.iter().flat_map(|m| m.states()))
+        .enumerate().try_fold(0.0, |sum, (mode, (b, state))| {
+            if mode % 64 == 0 { poll(gate)?; }
+            finite(sum + root * b * state.displacement_m_sqrt_kg)
+        })
 }
 
 fn stored_energy(branches: &[RelaxationBranch], models: &[ModalAcousticTimeModel], memory: &[f64])
     -> Result<f64, ModalCouplingError>
 {
-    let relaxed = relaxed_memory(branches, models)?;
-    relaxed.iter().zip(memory).try_fold(0.0, |sum, (strain, z)| {
+    // Read each accepted arm directly. This preserves the original projection
+    // and reduction order without allocating a temporary history vector on
+    // every total-energy query in the mechanical loop.
+    branches.iter().zip(memory).try_fold(0.0, |sum, (branch, z)| {
+        let strain = branch_relaxed_memory(branch, models, None)?;
         let mismatch = finite(strain - z)?;
         finite(sum + 0.5 * mismatch * mismatch)
     })
