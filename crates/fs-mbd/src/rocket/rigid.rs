@@ -1,7 +1,7 @@
 //! Variable-mass rocket attitude on the original native rigid-body algebra.
 //!
-//! The declared mass distribution has a fixed common centre of mass and fixed
-//! principal axes, with I = I_dry + m_propellant * K_propellant. The angular
+//! The declared mass distribution has a fixed common centre of mass, with
+//! I = I_dry + m_propellant * K_propellant. The angular
 //! momentum equation is
 //! dH_body/dt + omega cross H_body = torque_body - mdot*(K_exit*omega + j_swirl).
 //! The exit co-rotation moment is an explicit input, independent of tank inertia:
@@ -9,14 +9,16 @@
 //! nozzle jet-damping moment are different physical models.
 //!
 //! Symmetric torque/outflow kicks surround the original momentum-preserving
-//! free-rotation map at midpoint inertia. Each outflow kick integrates the
-//! linear-in-propellant inertia exactly. Translation reuses the original
+//! free-rotation map at midpoint inertia. The original common-axis outflow kick
+//! integrates linear-in-propellant inertia exactly; [`tensor`] adds full tensors
+//! with a simultaneous implicit midpoint outflow update. Translation reuses the original
 //! analytic rocket step along the midpoint body attitude. The smooth forced
 //! composition is second order; timestep refinement is still required.
 //! Work is bounded by an explicit substep limit, with burnout as an exact event.
 //! No heap allocation, new orientation representation, or atmospheric law is
-//! introduced. Internal slosh/circulation, shifting COM/principal axes and
-//! non-diagonal outflow moments require a more general open-system model.
+//! introduced. Internal slosh/circulation and shifting COM require a more general
+//! open-system model. The tensor lane retains moving principal axes in a fixed
+//! material body frame; it does not infer internal fluid momentum or engine work.
 //! See Eke, NASA/CR-1998-208246, https://ntrs.nasa.gov/citations/19980210404.
 
 use super::{RocketError, RocketForcing, RocketState};
@@ -25,6 +27,40 @@ use crate::{DynamicsError, MassProperties, Pose, RigidBodyState, UnitQuaternion,
 /// Instantaneous two-body separation with conserved mass and momenta.
 #[path = "rigid/staging.rs"]
 pub mod staging;
+
+/// Full-tensor mass depletion and angular exhaust flux in a fixed material frame.
+#[path = "rigid/tensor.rs"]
+pub mod tensor;
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// The two admitted fixed-COM mass distributions used by the shared rocket step.
+///
+/// This sealed interface keeps the native translation, burnout and rotational
+/// composition identical for the common-principal-axis and full-tensor models.
+pub trait RocketInertiaModel: sealed::Sealed + Copy + core::fmt::Debug + PartialEq {
+    /// Prepared specific co-rotation inertia of the exported mass, in m².
+    type ExhaustInertia: Copy + core::fmt::Debug + PartialEq;
+
+    /// Validate and assemble native mass properties at this propellant inventory.
+    fn mass_properties(self, translation: RocketState) -> Result<MassProperties, RigidRocketError>;
+
+    /// Validate the declared angular outflow law before any advancement.
+    fn validate_exhaust(self, exhaust: Self::ExhaustInertia) -> Result<(), RigidRocketError>;
+
+    /// Advance one frozen-attitude outflow submap, returning retained and exported
+    /// body spin. The supplied native endpoint inertias include actual depletion.
+    fn exhaust_spin_step(
+        self,
+        momentum: Vec3,
+        before: MassProperties,
+        after: MassProperties,
+        exhaust: Self::ExhaustInertia,
+        exported_mass: f64,
+    ) -> Result<(Vec3, Vec3), RigidRocketError>;
+}
 
 /// Declared concentric dry and propellant mass distributions in common axes.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -72,16 +108,16 @@ impl RigidRocketInertia {
 
 /// Native translation plus native body-to-world attitude and body spin momentum.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RigidRocketState {
+pub struct RigidRocketState<I = RigidRocketInertia> {
     translation: RocketState,
     orientation: UnitQuaternion,
     angular_momentum_body_kg_m2_s: Vec3,
-    inertia: RigidRocketInertia,
+    inertia: I,
 }
 
 /// Explicit forcing, fixed in its stated frame during a requested interval.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RigidRocketForcing {
+pub struct RigidRocketForcing<E = Vec3> {
     /// Propellant consumption rate during powered flight [kg/s].
     pub mass_flow_kg_s: f64,
     /// Total thrust divided by mass flow, pointing thrustward in the body [m/s].
@@ -89,12 +125,13 @@ pub struct RigidRocketForcing {
     pub effective_exhaust_velocity_body_m_s: Vec3,
     /// Thrust application point relative to the common COM, in body axes [m].
     pub thrust_application_arm_body_m: Vec3,
-    /// Diagonal outflow mass-weighted co-rotation moment per mass [m²].
+    /// Outflow mass-weighted co-rotation moment per mass [m²].
     /// The exported spin is mdot * K_exit * omega; this is not tank inertia.
     /// For a uniform circular exit normal to x, centred at x=-l, it is
     /// (R²/2, l²+R²/4, l²+R²/4). Supply zero only for zero such spin flux.
-    /// This diagonal convention does not describe an arbitrary off-axis outlet.
-    pub co_rotating_exhaust_specific_inertia_m2: Vec3,
+    /// The default Vec3 gives common-axis diagonal entries. The full-tensor
+    /// lane uses [`tensor::SpecificInertia`] in the actual material body axes.
+    pub co_rotating_exhaust_specific_inertia_m2: E,
     /// Additional exported body angular momentum per mass [m²/s], e.g. swirl.
     /// Excludes co-rotation and relative jet momentum already in thrust.
     pub exhaust_swirl_specific_angular_momentum_body_m2_s: Vec3,
@@ -117,9 +154,9 @@ pub struct RigidRocketSolve {
 
 /// One complete trajectory candidate, with actual native-state accounting.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RigidRocketStep {
+pub struct RigidRocketStep<I = RigidRocketInertia> {
     /// Complete new state; never returned on a refusal or cancellation.
-    pub state_after: RigidRocketState,
+    pub state_after: RigidRocketState<I>,
     /// Sum of the actual native translation steps' consumed propellant [kg].
     pub burned_propellant_mass_kg: f64,
     /// Initial minus final inventory minus accepted consumed mass [kg].
@@ -234,13 +271,44 @@ impl ScalarSum {
     }
 }
 
-impl RigidRocketState {
+impl sealed::Sealed for RigidRocketInertia {}
+impl RocketInertiaModel for RigidRocketInertia {
+    type ExhaustInertia = Vec3;
+
+    fn mass_properties(self, translation: RocketState) -> Result<MassProperties, RigidRocketError> {
+        RigidRocketInertia::mass_properties(self, translation)
+    }
+
+    fn validate_exhaust(self, exhaust: Vec3) -> Result<(), RigidRocketError> {
+        physical_diagonal(exhaust, "co-rotating exhaust specific inertia")
+    }
+
+    fn exhaust_spin_step(
+        self,
+        momentum: Vec3,
+        before: MassProperties,
+        after: MassProperties,
+        exhaust: Vec3,
+        exported_mass: f64,
+    ) -> Result<(Vec3, Vec3), RigidRocketError> {
+        exhaust_spin_step(
+            momentum,
+            before.principal_inertia_body(),
+            after.principal_inertia_body(),
+            self.propellant_specific_principal_m2,
+            exhaust,
+            exported_mass,
+        )
+    }
+}
+
+impl<I: RocketInertiaModel> RigidRocketState<I> {
     /// Assemble validated native owners without an independent propellant inventory.
     pub fn new(
         translation: RocketState,
         orientation: UnitQuaternion,
         angular_momentum_body_kg_m2_s: Vec3,
-        inertia: RigidRocketInertia,
+        inertia: I,
     ) -> Result<Self, RigidRocketError> {
         translation.advance(zero_forcing(), 0.0, || false)?;
         let result = Self {
@@ -265,14 +333,14 @@ impl RigidRocketState {
     pub const fn orientation(&self) -> UnitQuaternion {
         self.orientation
     }
-    /// Native principal-body-frame spin angular momentum [kg m²/s].
+    /// Native material-body-frame spin angular momentum [kg m²/s].
     #[must_use]
     pub const fn angular_momentum_body_kg_m2_s(&self) -> Vec3 {
         self.angular_momentum_body_kg_m2_s
     }
-    /// Declared fixed-COM, common-principal-axis inertia model.
+    /// Declared fixed-COM inertia model, in the original material body axes.
     #[must_use]
-    pub const fn inertia(&self) -> RigidRocketInertia {
+    pub const fn inertia(&self) -> I {
         self.inertia
     }
     /// Actual mass and inertia at the remaining propellant inventory.
@@ -298,11 +366,11 @@ impl RigidRocketState {
     /// Cancellation or exhausted work returns no partially accepted state.
     pub fn advance(
         &self,
-        forcing: RigidRocketForcing,
+        forcing: RigidRocketForcing<I::ExhaustInertia>,
         duration_s: f64,
         controls: RigidRocketSolve,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<RigidRocketStep, RigidRocketError> {
+    ) -> Result<RigidRocketStep<I>, RigidRocketError> {
         poll(&mut cancelled)?;
         if !duration_s.is_finite()
             || duration_s < 0.0
@@ -324,10 +392,8 @@ impl RigidRocketState {
             0.0,
             &mut cancelled,
         )?;
-        physical_diagonal(
-            forcing.co_rotating_exhaust_specific_inertia_m2,
-            "co-rotating exhaust specific inertia",
-        )?;
+        self.inertia
+            .validate_exhaust(forcing.co_rotating_exhaust_specific_inertia_m2)?;
         for vector in [
             forcing.thrust_application_arm_body_m,
             forcing.exhaust_swirl_specific_angular_momentum_body_m2_s,
@@ -417,11 +483,10 @@ impl RigidRocketState {
                 .sub(swirl);
             applied.add(current.orientation.rotate_body_to_world(half_torque));
             exported.add(current.orientation.rotate_body_to_world(swirl));
-            let (momentum, loss) = exhaust_spin_step(
+            let (momentum, loss) = current.inertia.exhaust_spin_step(
                 momentum,
-                before_properties.principal_inertia_body(),
-                midpoint_properties.principal_inertia_body(),
-                current.inertia.propellant_specific_principal_m2,
+                before_properties,
+                midpoint_properties,
                 forcing.co_rotating_exhaust_specific_inertia_m2,
                 0.5 * burned,
             )?;
@@ -439,11 +504,10 @@ impl RigidRocketState {
                 midpoint_properties,
                 0.5 * h,
             )?;
-            let (momentum, loss) = exhaust_spin_step(
+            let (momentum, loss) = current.inertia.exhaust_spin_step(
                 momentum,
-                midpoint_properties.principal_inertia_body(),
-                after_properties.principal_inertia_body(),
-                current.inertia.propellant_specific_principal_m2,
+                midpoint_properties,
+                after_properties,
                 forcing.co_rotating_exhaust_specific_inertia_m2,
                 0.5 * burned,
             )?;

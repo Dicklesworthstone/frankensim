@@ -1845,3 +1845,47 @@ Cayley chart is a second-order angular-phase approximation, not exact spin.
 `tests/cayley_work.rs` checks original default behavior, nonprincipal and
 spherical inertia, finite kinematic/work identities, spatial torque impulse,
 and long free-rotation energy/momentum retention.
+
+## Full-tensor propellant depletion and angular exhaust flux
+
+`rocket::rigid::tensor::{TensorRocketInertia, SpecificInertia, TensorRocketState,
+TensorRocketForcing}` extends the original native rocket trajectory to independently
+oriented dry, retained-propellant and angular-outflow inertia tensors. The body
+frame remains a fixed material frame. `I(m) = I_dry + m K_propellant` can change
+principal axes during depletion; no body orientation, momentum, thrust arm or
+swirl vector is silently moved into the changing eigensystem. The original
+common-axis API retains its exact scalar outflow map and existing default types.
+
+Both models use one generic implementation of the original burnout splitting,
+analytic variable-mass translation, torque/swirl kicks and native full-inertia
+free rotation. A tensor outflow half-map solves the simultaneous 3-by-3 system
+`(I_mid + dm K_exit/2) omega_mid = H_before`, then exports
+`dm K_exit omega_mid`. This is implicit midpoint in body angular momentum with
+the actual endpoint inertias. It reuses the native fixed-size rotational linear
+solve, requires no new dependency or heap workspace, and does not replace a
+noncommuting tensor product with three componentwise exponentials. Prepared
+specific inertias admit physical semidefinite principal distributions; native
+mass properties admit the positive-definite dry and assembled full tensors.
+Dry coasting and zero-specific-inertia mass distributions reuse prepared axes.
+
+Returned world angular-impulse/export balances belong to the actual discrete
+maps. Smooth forced motion is second order, with timestep refinement required;
+implicit midpoint is not an exact noncommuting mass integral or an L-stable
+exhaust filter. No complete open-system energy/passivity claim is made. These
+are prescribed equivalent thrust, angular co-rotation flux and swirl inputs,
+not a derivation of an arbitrary nozzle's internal relative-flow momentum,
+Coriolis force, shifting COM, slosh, combustion work or plume dynamics. The
+physical distinction between inertia variation and exported angular momentum
+follows Eke, *Dynamics of Variable Mass Systems*, NASA/CR-1998-208246,
+chapters 2–3: https://ntrs.nasa.gov/citations/19980210404.
+
+Six new focused original-source native test groups and all nine original rigid
+rocket groups pass. They cover oblique analytic co-rotation/burnout, independent
+noncommuting tensor submap identities, zero-export world-spin retention through
+moving principal axes, body-coordinate/world-frame/boost equivalence, and late
+budget/cancellation rollback with deterministic retry. A separately integrated
+raw-quaternion continuous ODE with a cofactor inertia inverse gives maximum
+state errors `2.517403282442654e-5`, `6.292077779579408e-6`, and
+`1.5729300554268022e-6` at 8/16/32 steps; its 2048/4096-step references agree
+within `2e-13`. This proves the named focused behavior, not a full Cargo/DSR,
+experimental validation, cross-platform determinism or performance gate.
