@@ -10,6 +10,11 @@
 //! no valve mass flow is inferred from acoustic volume flow, and no density
 //! equality is required between independently sourced acoustic environments.
 
+/// One finite material/phase body exchanging heat under the same acoustic load.
+pub mod thermal;
+/// Original metering and shared finite-body heat on the same loaded motion.
+pub mod valve;
+
 use super::{DoubleActingGasPiston, DoublePistonInput, DoublePistonSolve, DoublePistonStep};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::cavity_phs::piston::PistonError;

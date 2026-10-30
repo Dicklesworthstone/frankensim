@@ -6,14 +6,14 @@ use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 use fs_material::thermochemical_gas::energy::parcel::transfer::GasMassTransferSolve;
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
-pub(super) fn controls() -> DoublePistonSolve {
+pub(in crate::cavity_phs::piston::double_acting) fn controls() -> DoublePistonSolve {
     DoublePistonSolve {
         piston: single_controls(),
         opposing_gas: single_controls().gas,
         volume_tolerance_m3: 1e-18,
     }
 }
-pub(super) fn exchange() -> GasNozzleStepSolve {
+pub(in crate::cavity_phs::piston::double_acting) fn exchange() -> GasNozzleStepSolve {
     GasNozzleStepSolve {
         nozzle: single_controls().gas,
         transfer: GasMassTransferSolve {
@@ -25,14 +25,14 @@ pub(super) fn exchange() -> GasNozzleStepSolve {
         maximum_donor_fraction: 0.1,
     }
 }
-pub(super) fn input() -> DoublePistonInput {
+pub(in crate::cavity_phs::piston::double_acting) fn input() -> DoublePistonInput {
     DoublePistonInput {
         duration_s: drive(0.0).duration_s,
         heat_j: [0.0; 2],
         external_force_n: 0.0,
     }
 }
-pub(super) fn geometry() -> RectangularMeteringValve {
+pub(in crate::cavity_phs::piston::double_acting) fn geometry() -> RectangularMeteringValve {
     RectangularMeteringValve {
         reference_primary_volume_m3: 0.001,
         edge_height_at_reference_m: 0.001,
@@ -42,7 +42,7 @@ pub(super) fn geometry() -> RectangularMeteringValve {
         discharge_coefficient: 0.8,
     }
 }
-pub(super) fn pair(heat: [f64; 2], slopes: [f64; 2], velocity: f64) -> DoubleActingGasPiston {
+pub(in crate::cavity_phs::piston::double_acting) fn pair(heat: [f64; 2], slopes: [f64; 2], velocity: f64) -> DoubleActingGasPiston {
     let mut parcels = [gas(0.75, slopes[0]), gas(0.25, slopes[1])];
     for (parcel, heat) in parcels.iter_mut().zip(heat) {
         if heat != 0.0 {
@@ -59,19 +59,19 @@ pub(super) fn pair(heat: [f64; 2], slopes: [f64; 2], velocity: f64) -> DoubleAct
     )
     .unwrap()
 }
-pub(super) fn near(actual: f64, expected: f64, tolerance: f64) {
+pub(in crate::cavity_phs::piston::double_acting) fn near(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() <= tolerance,
         "{actual:.16e} != {expected:.16e}"
     );
 }
-pub(super) fn assert_unchanged(actual: &DoubleActingGasPiston, expected: &DoubleActingGasPiston) {
+pub(in crate::cavity_phs::piston::double_acting) fn assert_unchanged(actual: &DoubleActingGasPiston, expected: &DoubleActingGasPiston) {
     assert_eq!(actual, expected);
     // The owner intentionally excludes accounting history from physical PartialEq.
     assert_eq!(actual.ports, expected.ports);
     assert_eq!(actual.primary().ports, expected.primary().ports);
 }
-pub(super) fn species_masses(parcel: &ClosedGasParcel) -> [f64; 2] {
+pub(in crate::cavity_phs::piston::double_acting) fn species_masses(parcel: &ClosedGasParcel) -> [f64; 2] {
     let x = parcel
         .model()
         .thermodynamics()
@@ -85,7 +85,7 @@ pub(super) fn species_masses(parcel: &ClosedGasParcel) -> [f64; 2] {
 }
 // Integrate the fixture's Cp/R polynomials directly, including both species.
 // No reported energy change or production caloric inversion enters this reference.
-pub(super) fn internal_energy(parcel: &ClosedGasParcel, slope: f64) -> f64 {
+pub(in crate::cavity_phs::piston::double_acting) fn internal_energy(parcel: &ClosedGasParcel, slope: f64) -> f64 {
     let x = parcel
         .model()
         .thermodynamics()

@@ -8965,6 +8965,51 @@ history, exact decoupled reduction, refusal/cancellation and retry/suffix
 continuation. They are authored but unexecuted in the unavailable native
 workspace; parser/formatter checks are not numerical or experimental proof.
 
+## Acoustic back-pressure through metering and finite-body heat
+
+`DoubleActingGasPiston::acoustic_valve_candidate` and
+`acoustic_thermal_valve_candidate` use the same reciprocal acoustic-load
+preparation and finalization as the original closed two-gas acoustic adapter.
+They compose the existing metering and finite-enthalpy owners; no alternative
+gas, nozzle, heat-transfer or acoustic solver is introduced.
+
+`acoustic_thermal_candidate` connects the closed two-gas finite-body owner
+straight to the same loads; it requires no artificial valve. Its
+`acoustic_thermal_layers_candidate` variant resolves the existing source-bound
+material conduction layers at the actual loaded gas/body midpoints.
+
+Native species and donor total enthalpy are transferred once at the accepted
+metering opening. Every subsequent gas/momentum or two-face thermal proposal
+uses those same post-transfer inventories. The affine acoustic reaction enters
+each original momentum solve, so both gas temperatures, pressure work and the
+shared body heat laws respond to the acoustically loaded displacement.
+Acoustic, branch, channel and terminal histories advance only once after the
+original bounded thermal/momentum solve has converged.
+
+The original valve finalization receives the actual accepted total wall force
+and gas heats. Its source-stable caloric/species balance therefore remains
+valid under velocity-dependent acoustic reaction. The shared body's actual
+enthalpy change encloses both face heats exactly once. The final acoustic
+account cancels actual mechanical reaction work and retains native acoustic
+storage, loss and exterior exchange. No transported flow work, jet energy,
+latent heat or emitted acoustic work is deposited twice.
+
+Returned candidates contain the original valve or thermal-valve candidate
+alongside all original acoustic loads and the measured enclosing energy
+residual. Source refusal, nested work exhaustion, final pressure reversal,
+acoustic refusal or cancellation returns no partially advanced participant.
+Callers consume all returned endpoints together. Zero-area loading
+reduces to the original native valve/thermal behavior.
+
+The original first-order frozen-opening transport split, fixed finite-body
+enthalpy geometry and separate acoustic-domain assumptions remain. There is no
+new jet recoil, thermal deformation, moving-mesh duct or heterogeneous mass-flow
+acoustic junction. Three focused native regression groups cover both donor
+directions, independent species/caloric/acoustic work, sensible/latent body
+feedback, exact native reductions and late refusal/retry/continuation. These
+tests are authored but unexecuted; source/format checks do not establish
+numerical or measured physical validation.
+
 ## One finite thermal body on the moving two-gas valve
 
 `DoubleActingGasPiston::thermal_valve_candidate` composes the metering valve

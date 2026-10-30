@@ -9,9 +9,9 @@ use fs_material::phase::{
     EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState, SolidLiquidPhase,
 };
 
-type Source = (ResolvedThermochemicalGasState, EquilibriumPhaseState);
+pub(in crate::cavity_phs::piston::double_acting) type Source = (ResolvedThermochemicalGasState, EquilibriumPhaseState);
 
-fn exchange() -> DoubleHeatExchangeSolve {
+pub(in crate::cavity_phs::piston::double_acting) fn exchange() -> DoubleHeatExchangeSolve {
     DoubleHeatExchangeSolve {
         faces: [HeatExchangeSolve {
             heat_bracket_j: [-0.5, 0.5],
@@ -23,7 +23,7 @@ fn exchange() -> DoubleHeatExchangeSolve {
     }
 }
 
-fn curve(latent: bool) -> EquilibriumEnthalpyPhaseCurve {
+pub(in crate::cavity_phs::piston::double_acting) fn curve(latent: bool) -> EquilibriumEnthalpyPhaseCurve {
     let knot = |h, t, x| EnthalpyPhaseKnot {
         specific_enthalpy_j_kg: h,
         temperature_k: t,
@@ -51,7 +51,7 @@ fn curve(latent: bool) -> EquilibriumEnthalpyPhaseCurve {
     }
 }
 
-fn body(curve: &EquilibriumEnthalpyPhaseCurve, latent: bool) -> UniformEnthalpyStepInput<'_> {
+pub(in crate::cavity_phs::piston::double_acting) fn body(curve: &EquilibriumEnthalpyPhaseCurve, latent: bool) -> UniformEnthalpyStepInput<'_> {
     UniformEnthalpyStepInput {
         curve,
         initial: curve
@@ -66,7 +66,7 @@ fn body(curve: &EquilibriumEnthalpyPhaseCurve, latent: bool) -> UniformEnthalpyS
 }
 
 // Synthetic state-dependent conductances keep the physical midpoint feedback live.
-fn conductance(
+pub(in crate::cavity_phs::piston::double_acting) fn conductance(
     base: f64,
     gas: &ResolvedThermochemicalGasState,
     body: EquilibriumPhaseState,
@@ -74,7 +74,7 @@ fn conductance(
     base * gas.state().temperature / 400.0 * (1.0 + 0.1 * body.liquid_mass_fraction())
 }
 
-fn links(
+pub(in crate::cavity_phs::piston::double_acting) fn links(
     base: [f64; 2],
 ) -> impl FnMut(
     &[ResolvedThermochemicalGasState; 2],

@@ -117,6 +117,31 @@ impl DoubleActingGasPiston {
             &[ResolvedThermochemicalGasState; 2],
             EquilibriumPhaseState,
         ) -> Result<[ConductanceSample<S>; 2], E>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<DoubleThermalValveCandidate<S>, ThermalPistonError<E>> {
+        self.thermal_valve_candidate_with_midpoint_resistance(
+            geometry, input, body, controls, flow, exchange,
+            total_energy_tolerance_j, 0.0, resolve, cancelled,
+        )
+    }
+
+    // The original post-transfer heat solver includes the affine acoustic
+    // reaction without replaying transport or marching an acoustic history.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::cavity_phs::piston) fn thermal_valve_candidate_with_midpoint_resistance<S, E>(
+        &self,
+        geometry: RectangularMeteringValve,
+        input: DoublePistonInput,
+        body: UniformEnthalpyStepInput<'_>,
+        controls: DoublePistonSolve,
+        flow: GasNozzleStepSolve,
+        exchange: DoubleHeatExchangeSolve,
+        total_energy_tolerance_j: f64,
+        resistance_n_s_m: f64,
+        resolve: impl FnMut(
+            &[ResolvedThermochemicalGasState; 2],
+            EquilibriumPhaseState,
+        ) -> Result<[ConductanceSample<S>; 2], E>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<DoubleThermalValveCandidate<S>, ThermalPistonError<E>> {
         if cancelled() {
@@ -124,6 +149,8 @@ impl DoubleActingGasPiston {
         }
         if !total_energy_tolerance_j.is_finite()
             || total_energy_tolerance_j <= 0.0
+            || !resistance_n_s_m.is_finite()
+            || resistance_n_s_m < 0.0
             || body.duration_s != input.duration_s
         {
             return Err(ThermalPistonError::Invalid(
@@ -132,11 +159,12 @@ impl DoubleActingGasPiston {
         }
         let (transported, transfer) =
             self.prepare_valve(geometry, input.duration_s, flow, &mut cancelled)?;
-        let candidate = transported.thermal_candidate(
+        let candidate = transported.thermal_candidate_with_midpoint_resistance(
             input,
             body,
             controls,
             exchange,
+            resistance_n_s_m,
             resolve,
             &mut cancelled,
         )?;
@@ -153,6 +181,9 @@ impl DoubleActingGasPiston {
         } = native;
         let actual_input = DoublePistonInput {
             heat_j: std::array::from_fn(|i| input.heat_j[i] + exchanged_heat_j[i]),
+            external_force_n: super::super::midpoint_force_n(
+                input, resistance_n_s_m, piston.displacement_m,
+            )?,
             ..input
         };
         let accepted = self.finish_valve(
@@ -214,4 +245,4 @@ impl DoubleActingGasPiston {
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::cavity_phs::piston::double_acting) mod tests;

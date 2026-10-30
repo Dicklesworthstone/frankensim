@@ -93,11 +93,31 @@ impl DoubleActingGasPiston {
     pub fn thermal_candidate<S, E>(
         &self, input: DoublePistonInput, body: UniformEnthalpyStepInput<'_>,
         controls: DoublePistonSolve, exchange: DoubleHeatExchangeSolve,
+        resolve: impl FnMut(&[ResolvedThermochemicalGasState; 2], EquilibriumPhaseState)
+            -> Result<[ConductanceSample<S>; 2], E>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<DoubleThermalPistonCandidate<S>, ThermalPistonError<E>> {
+        self.thermal_candidate_with_midpoint_resistance(
+            input, body, controls, exchange, 0.0, resolve, cancelled,
+        )
+    }
+
+    // The exact mean acoustic law is affine in the SAME displacement velocity.
+    // Every heat trial retains this load in the original momentum solve; no
+    // acoustic candidate advances inside the nested thermal search.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::cavity_phs::piston) fn thermal_candidate_with_midpoint_resistance<S, E>(
+        &self, input: DoublePistonInput, body: UniformEnthalpyStepInput<'_>,
+        controls: DoublePistonSolve, exchange: DoubleHeatExchangeSolve,
+        resistance_n_s_m: f64,
         mut resolve: impl FnMut(&[ResolvedThermochemicalGasState; 2], EquilibriumPhaseState)
             -> Result<[ConductanceSample<S>; 2], E>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<DoubleThermalPistonCandidate<S>, ThermalPistonError<E>> {
         poll(&mut cancelled)?;
+        if !resistance_n_s_m.is_finite() || resistance_n_s_m < 0.0 {
+            return Err(ThermalPistonError::Invalid("invalid shared midpoint force resistance"));
+        }
         for face in exchange.faces { feedback::admit::<E>(face)?; }
         if exchange.maximum_joint_trials == 0 || !positive(body.mass_kg)
             || !positive(body.volume_m3) || !positive(body.surface_area_m2)
@@ -132,7 +152,10 @@ impl DoubleActingGasPiston {
                 let midpoint = body.curve.state_at_specific_enthalpy(hm)?;
                 let endpoint = body.curve.state_at_specific_enthalpy(h1)?;
                 let mut next = self.clone();
-                let piston = next.step(DoublePistonInput { heat_j: gas_heat, ..input }, controls, &mut *cancelled)?;
+                let piston = next.step_with_midpoint_resistance(
+                    DoublePistonInput { heat_j: gas_heat, ..input }, controls,
+                    resistance_n_s_m, &mut *cancelled,
+                )?;
                 material_trials = material_trials.checked_add(piston.material_trials)
                     .ok_or(ThermalPistonError::Invalid("material proposal count overflow"))?;
                 poll(cancelled)?;

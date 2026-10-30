@@ -422,9 +422,30 @@ impl DoubleActingGasPiston {
         exchange: GasNozzleStepSolve,
         controls: DoublePistonSolve,
         total_energy_tolerance_j: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<DoublePistonValveCandidate, PistonError> {
+        self.valve_candidate_with_midpoint_resistance(
+            geometry, input, exchange, controls, total_energy_tolerance_j, 0.0, cancelled,
+        )
+    }
+
+    // Same once-only transport and final inventory audit with the affine
+    // acoustic load retained in every native momentum proposal.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::cavity_phs::piston) fn valve_candidate_with_midpoint_resistance(
+        &self,
+        geometry: RectangularMeteringValve,
+        input: DoublePistonInput,
+        exchange: GasNozzleStepSolve,
+        controls: DoublePistonSolve,
+        total_energy_tolerance_j: f64,
+        resistance_n_s_m: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<DoublePistonValveCandidate, PistonError> {
         poll(&mut cancelled)?;
+        if !resistance_n_s_m.is_finite() || resistance_n_s_m < 0.0 {
+            return Err(invalid("invalid metered midpoint force resistance"));
+        }
         if !positive(total_energy_tolerance_j) {
             return Err(invalid(
                 "positive finite metering-valve total energy tolerance required",
@@ -432,10 +453,18 @@ impl DoubleActingGasPiston {
         }
         let (mut next, transfer) =
             self.prepare_valve(geometry, input.duration_s, exchange, &mut cancelled)?;
-        let piston = next.step(input, controls, &mut cancelled)?;
+        let piston = next.step_with_midpoint_resistance(
+            input, controls, resistance_n_s_m, &mut cancelled,
+        )?;
+        let actual_input = DoublePistonInput {
+            external_force_n: super::midpoint_force_n(
+                input, resistance_n_s_m, piston.displacement_m,
+            )?,
+            ..input
+        };
         self.finish_valve(
             geometry,
-            input,
+            actual_input,
             exchange,
             total_energy_tolerance_j,
             transfer,
@@ -473,4 +502,4 @@ impl DoubleActingGasPiston {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
