@@ -4705,6 +4705,22 @@ material impedance dependence, original integrated work/mass/energy accounts,
 typed characteristic identity and atomic refusals. They do not establish a
 reflection bound or measured-instrument accuracy.
 
+`reservoir_aperture_state_at(P, T)` resolves held absolute pressure and
+temperature through the grid's original material source while retaining the
+attached transverse aperture's declared Cartesian ghost velocity. The warm
+`set_reservoir_aperture_state` path preserves stored fluid density, velocity,
+stress and total energy and rebases the original force and flux history.
+Source-domain or boundary refusal restores the previous held conditions.
+
+`preview_boundary_interval_with_reservoir` stages those conditions together
+with the two original characteristic controls and optional selected patch.
+No reservoir, field, material or ledger state is published on a dropped,
+cancelled or refused trial. The mutable accepted ghost participates in the
+original state hash. G0/G3 cases in `nsf3::open::tests` compare stored
+physical state, warm-source refusal, exact replay and independent mass/energy
+balances. The source remains a prescribed reservoir of the grid's original
+composition, with no finite inventory, moving topology or new radiation owner.
+
 
 ## Original phase conductivity through moving-liquid release
 

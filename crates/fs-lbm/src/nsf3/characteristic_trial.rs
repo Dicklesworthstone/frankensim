@@ -3,7 +3,7 @@
 //! topology already excludes manufactured volume sources. Every physical state,
 //! boundary force chart, source material and cumulative ledger remains retained.
 
-use super::{EnergyLedger, NsfBoundaryDrive, NsfBoundaryExchange, NsfError, NsfGrid3};
+use super::{EnergyLedger, NsfBoundaryDrive, NsfBoundaryExchange, NsfError, NsfGrid3, NsfOpenState};
 use crate::lattice3::Lattice3;
 
 /// A complete unpublished interval. Dropping it changes no accepted field,
@@ -73,7 +73,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         maximum_cell_steps: usize,
         cancelled: impl Fn() -> bool,
     ) -> Result<NsfCharacteristicTrial<'_, L>, NsfError> {
-        self.preview_boundary_interval_inner(drives, None, steps, maximum_cell_steps, cancelled)
+        self.preview_boundary_interval_inner(drives, None, None, steps, maximum_cell_steps, cancelled)
     }
 
     /// Preview a selected aperture control and its complementary face controls
@@ -83,12 +83,26 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         &mut self, drives: [NsfBoundaryDrive; 2], patch_drive: NsfBoundaryDrive,
         steps: usize, maximum_cell_steps: usize, cancelled: impl Fn() -> bool,
     ) -> Result<NsfCharacteristicTrial<'_, L>, NsfError> {
-        self.preview_boundary_interval_inner(drives, Some(patch_drive), steps, maximum_cell_steps, cancelled)
+        self.preview_boundary_interval_inner(drives, Some(patch_drive), None, steps, maximum_cell_steps, cancelled)
+    }
+
+    /// Hold a new state at the original transverse reservoir while solving
+    /// the two characteristic controls and optional selected patch together.
+    /// The ghost and its force/energy-flux history change only on the candidate;
+    /// dropping or refusing the trial also rolls back the reservoir control.
+    pub fn preview_boundary_interval_with_reservoir(
+        &mut self, drives: [NsfBoundaryDrive; 2], patch_drive: Option<NsfBoundaryDrive>,
+        reservoir_state: NsfOpenState, steps: usize, maximum_cell_steps: usize,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<NsfCharacteristicTrial<'_, L>, NsfError> {
+        self.preview_boundary_interval_inner(drives, patch_drive, Some(reservoir_state),
+            steps, maximum_cell_steps, cancelled)
     }
 
     fn preview_boundary_interval_inner(
         &mut self, drives: [NsfBoundaryDrive; 2], patch_drive: Option<NsfBoundaryDrive>,
-        steps: usize, maximum_cell_steps: usize, cancelled: impl Fn() -> bool,
+        reservoir_state: Option<NsfOpenState>, steps: usize, maximum_cell_steps: usize,
+        cancelled: impl Fn() -> bool,
     ) -> Result<NsfCharacteristicTrial<'_, L>, NsfError> {
         if cancelled() {
             return Err(NsfError::Input("characteristic interval cancelled"));
@@ -102,6 +116,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let mass_before_kg = self.total_mass_kg();
         let energy_before_j = self.total_energy_j();
         let mut candidate = self.characteristic_copy();
+        if let Some(state) = reservoir_state {
+            candidate.set_reservoir_aperture_state(state)?;
+        }
         match patch_drive {
             Some(drive) => candidate.set_boundary_drives_with_patch(drives, drive)?,
             None => candidate.set_boundary_drives(drives)?,

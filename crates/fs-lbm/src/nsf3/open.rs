@@ -151,6 +151,56 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         self.reservoir_aperture.as_ref().map(|bound| &bound.source)
     }
 
+    /// Resolve an attached reservoir at absolute pressure [Pa] and temperature
+    /// [K] using this grid's original gas source. Its declared Cartesian ghost
+    /// velocity is retained; pressure is not converted into a prescribed jet
+    /// speed. Composition, caloric and transport support remain source-owned.
+    /// This query changes no boundary or fluid state.
+    pub fn reservoir_aperture_state_at(
+        &self, pressure_pa: f64, temperature_k: f64,
+    ) -> Result<NsfOpenState, NsfError> {
+        let aperture = self.reservoir_aperture.as_ref().ok_or(NsfError::Input(
+            "reservoir conditions require an attached aperture",
+        ))?;
+        let gas = self.spec.gas.at(temperature_k, pressure_pa)?;
+        let state = NsfOpenState {
+            density_kg_m3: gas.density,
+            velocity_m_s: aperture.source.state.velocity_m_s,
+            temperature_k: gas.temperature,
+        };
+        self.admit_open_state(state)?;
+        Ok(state)
+    }
+
+    /// Change an existing aperture's held ghost state without changing its
+    /// geometry or the fluid's physical density, velocity, stress or energy.
+    /// The original force chart and energy-flux history are rebound together.
+    /// Material/boundary refusal leaves every accepted field and control intact.
+    /// Topology remains cold-only; an accepted warm grid may change conditions.
+    pub fn set_reservoir_aperture_state(&mut self, state: NsfOpenState) -> Result<(), NsfError> {
+        let aperture = self.reservoir_aperture.as_ref().ok_or(NsfError::Input(
+            "reservoir state control requires an attached aperture",
+        ))?;
+        if aperture.source.state == state { return Ok(()); }
+        let previous = (aperture.source.state, aperture.ghost);
+        let ghost = self.admit_open_state(state)?;
+        let drives = self.boundary_drives().ok_or(NsfError::Input(
+            "reservoir state control requires its original characteristic axis",
+        ))?;
+        let aperture = self.reservoir_aperture.as_mut().expect("checked aperture");
+        aperture.source.state = state;
+        aperture.ghost = ghost;
+        // The existing rebind stages its populations, force and fluxes before
+        // publication. Restore only our staged ghost if that owner refuses.
+        if let Err(error) = self.set_boundary_drives(drives) {
+            let aperture = self.reservoir_aperture.as_mut().expect("retained aperture");
+            aperture.source.state = previous.0;
+            aperture.ghost = previous.1;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Actual streamed mass leaving the localized reservoir aperture in the
     /// last accepted step [kg]. Positive is outward; `None` means no aperture.
     /// Zero before the first step. Counted from original population links,
@@ -620,6 +670,115 @@ mod tests {
         assert_eq!(grid.steps(), 3);
         assert_eq!(grid.reservoir_aperture(), Some(&source));
         assert!(candidate_ledger.unwrap().open_energy_j > 0.0);
+    }
+
+    #[test]
+    fn g0_warm_reservoir_conditions_preserve_fluid_and_refuse_invalid_sources() {
+        let mut grid = aperture_grid(0, 1)
+            .with_reservoir_aperture(aperture(1, false, 293.35)).unwrap();
+        for _ in 0..3 { grid.step().unwrap(); }
+        let cells: Vec<_> = (0..grid.n).map(|i| grid.cell(grid.at(i))).collect();
+        let stored = (grid.total_energy_j(), grid.steps(), grid.cumulative_ledger(),
+            grid.last_reservoir_mass_out_kg());
+        let hash = grid.state_hash();
+        let state = grid.reservoir_aperture_state_at(101345.0, 293.45).unwrap();
+        let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.45, 101345.0).unwrap();
+        assert_eq!(state.density_kg_m3, gas.density);
+        assert_eq!(state.velocity_m_s, [0.0; 3]);
+        assert_eq!(grid.state_hash(), hash, "resolving conditions must be read-only");
+        grid.set_reservoir_aperture_state(state).unwrap();
+        assert_eq!(grid.reservoir_aperture().unwrap().state, state);
+        assert_ne!(grid.state_hash(), hash, "accepted reservoir conditions are part of replay");
+        assert_eq!((grid.total_energy_j(), grid.steps(), grid.cumulative_ledger(),
+            grid.last_reservoir_mass_out_kg()), stored);
+        for (i, expected) in cells.iter().enumerate() {
+            let actual = grid.cell(grid.at(i));
+            assert!((actual.0 - expected.0).abs() < 2e-14);
+            assert_eq!(actual.2, expected.2);
+            for a in 0..3 { assert!((actual.1[a] - expected.1[a]).abs() < 2e-14); }
+        }
+        let before = (grid.state_hash(), grid.reservoir_aperture().cloned(),
+            grid.cumulative_ledger(), grid.boundary_drives());
+        for (pressure, temperature) in [(0.0, 293.15), (101325.0, 400.0),
+            (f64::NAN, 293.15), (101325.0, f64::NAN)]
+        {
+            assert!(grid.reservoir_aperture_state_at(pressure, temperature).is_err());
+        }
+        for invalid in [NsfOpenState { density_kg_m3: 0.0, ..state },
+            NsfOpenState { velocity_m_s: [1000.0, 0.0, 0.0], ..state },
+            NsfOpenState { temperature_k: 400.0, ..state }]
+        {
+            assert!(grid.set_reservoir_aperture_state(invalid).is_err());
+            assert_eq!((grid.state_hash(), grid.reservoir_aperture().cloned(),
+                grid.cumulative_ledger(), grid.boundary_drives()), before);
+        }
+        let mut closed = aperture_grid(0, 1);
+        assert!(closed.reservoir_aperture_state_at(101325.0, 293.15).is_err());
+        assert!(closed.set_reservoir_aperture_state(state).is_err());
+    }
+
+    #[test]
+    fn g3_reservoir_control_trials_replay_mass_energy_and_roll_back_conditions() {
+        reservoir_control_replay(false);
+        reservoir_control_replay(true);
+    }
+
+    fn reservoir_control_replay(modeled_transport: bool) {
+        let build = || {
+            let grid = aperture_grid(0, 1)
+                .with_reservoir_aperture(aperture(1, false, 293.15)).unwrap();
+            if modeled_transport {
+                grid.with_sgs(crate::nsf3::NsfSgsConfig {
+                    closure: crate::sgs3::SgsConfig {
+                        model: crate::sgs3::SgsModel::Smagorinsky { cs: 0.17 },
+                        filter_width_lu: 1.0,
+                        maximum_eddy_to_molecular: 100.0,
+                        usage: crate::sgs3::SgsUse::Exploration,
+                    },
+                    turbulent_prandtl: 0.9,
+                }).unwrap()
+            } else { grid }
+        };
+        let mut grid = build();
+        let mut original = build();
+        for _ in 0..2 { grid.step().unwrap(); original.step().unwrap(); }
+        let before = (grid.state_hash(), grid.steps(), grid.reservoir_aperture().cloned(),
+            grid.cumulative_ledger(), grid.last_reservoir_mass_out_kg(), grid.sgs_transport.clone());
+        let state = grid.reservoir_aperture_state_at(101345.0, 293.35).unwrap();
+        let drives = grid.boundary_drives().unwrap();
+        let first = grid.preview_boundary_interval_with_reservoir(
+            drives, None, state, 3, 3 * 729, || false).unwrap();
+        let expected = (first.grid().state_hash(), *first.energy_ledger(), first.reservoir_mass_out_kg());
+        let mass_error = first.grid().total_mass_kg() - first.previous_mass_kg()
+            + first.reservoir_mass_out_kg()
+            + first.boundary_exchange().iter().map(|face| face.mass_out_kg).sum::<f64>();
+        assert!(mass_error.abs() / first.previous_mass_kg() < 2e-12);
+        assert!(first.energy_ledger().residual_rel < 2e-12);
+        assert!(first.energy_ledger().open_energy_j.abs() > 0.0);
+        drop(first);
+        assert_eq!((grid.state_hash(), grid.steps(), grid.reservoir_aperture().cloned(),
+            grid.cumulative_ledger(), grid.last_reservoir_mass_out_kg(), grid.sgs_transport.clone()), before);
+        let calls = std::cell::Cell::new(0);
+        assert!(grid.preview_boundary_interval_with_reservoir(
+            drives, None, state, 3, 3 * 729, || {
+                calls.set(calls.get() + 1); calls.get() == 3
+            }).is_err());
+        assert_eq!((grid.state_hash(), grid.steps(), grid.reservoir_aperture().cloned(),
+            grid.cumulative_ledger(), grid.last_reservoir_mass_out_kg(), grid.sgs_transport.clone()), before);
+        let retry = grid.preview_boundary_interval_with_reservoir(
+            drives, None, state, 3, 3 * 729, || false).unwrap();
+        assert_eq!((retry.grid().state_hash(), *retry.energy_ledger(), retry.reservoir_mass_out_kg()), expected);
+        retry.accept();
+        original.set_reservoir_aperture_state(state).unwrap();
+        original.set_boundary_drives(drives).unwrap();
+        for _ in 0..3 { original.step().unwrap(); }
+        assert_eq!(grid.state_hash(), original.state_hash());
+        assert_eq!(grid.cumulative_ledger(), original.cumulative_ledger());
+        assert_eq!(grid.reservoir_aperture(), original.reservoir_aperture());
+        assert_eq!(grid.sgs_transport, original.sgs_transport);
+        if modeled_transport {
+            assert!(grid.sgs_transport.iter().any(|t| t.eddy_viscosity_lu > 0.0));
+        }
     }
 
     #[test]

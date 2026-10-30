@@ -1835,6 +1835,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     }
     /// FNV-1a hash of every population and energy bit (bitwise invariance checks).
     /// An attached characteristic patch also contributes its shape, side and accepted drive.
+    /// An attached reservoir contributes its mutable accepted ghost state.
     #[must_use]
     pub fn state_hash(&self) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -1860,6 +1861,13 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 NsfBoundaryDrive::IncomingCharacteristic(value) => { feed(0.0); feed(value); }
                 NsfBoundaryDrive::PressureOffset(value) => { feed(1.0); feed(value); }
             }
+        }
+        if let Some(aperture) = &self.reservoir_aperture {
+            feed(2.0);
+            let state = aperture.source.state;
+            feed(state.density_kg_m3);
+            for velocity in state.velocity_m_s { feed(velocity); }
+            feed(state.temperature_k);
         }
         h
     }
