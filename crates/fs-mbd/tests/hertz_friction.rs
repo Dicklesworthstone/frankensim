@@ -662,3 +662,222 @@ fn exact_rest_and_zero_load_do_not_create_heat_or_discard_any_body_momentum() {
     assert_eq!(report.force_impulse_world_ns, Vec3::ZERO);
     assert_eq!(report.spin_angular_impulse_world_nms, Vec3::ZERO);
 }
+
+#[test]
+fn prepared_anisotropic_pair_reuses_the_original_snapshot_and_matches_native_publication() {
+    let dt = 0.005;
+    let (f, force, moment) = coupled(dt);
+    let expected = independent_endpoint(&f, force, moment, dt);
+    let expected_mobility = mobility(&f);
+    let mut original = f.bodies;
+    let prepared = PreparedRigidHertzPair::new(
+        &original,
+        &f.properties,
+        f.contact(),
+        dt,
+        controls(),
+        &CancelGate::new(),
+    )
+    .unwrap();
+    let first = prepared.advance(&f.law, &CancelGate::new()).unwrap();
+    assert_eq!(original, f.bodies);
+    for i in 0..2 {
+        close_vec(
+            first.bodies_after[i].linear_momentum_world(),
+            expected[i].linear_momentum_world(),
+            2e-11,
+        );
+        close_vec(
+            first.bodies_after[i].angular_momentum_body(),
+            expected[i].angular_momentum_body(),
+            5e-12,
+        );
+        close_vec(
+            prepared.contact_points_world()[i],
+            Vec3::new(0.4, -0.3, 0.2),
+            2e-16,
+        );
+    }
+    for i in 0..3 {
+        for j in 0..3 {
+            close(
+                prepared.scaled_mobility_per_kg()[i][j],
+                expected_mobility[i][j],
+                1e-15,
+            );
+            close(
+                prepared.scaled_compliance_m_per_n()[i][j],
+                0.5 * dt * dt * expected_mobility[i][j],
+                1e-20,
+            );
+        }
+    }
+    assert_eq!(prepared.binding().body_a, f.binding.body_a);
+    assert_eq!(prepared.binding().body_b, f.binding.body_b);
+    assert_eq!(prepared.binding().arm_a_body, f.binding.arm_a_body);
+    assert_eq!(prepared.binding().arm_b_body, f.binding.arm_b_body);
+    assert_eq!(prepared.frame(), f.frame);
+    assert_eq!(prepared.duration_s(), dt);
+    assert_eq!(prepared.normal_force_n(), 10.0);
+    assert_eq!(prepared.contact_radius_m(), RADIUS);
+    assert_eq!(prepared.controls().contact, controls().contact);
+
+    // Caller containers are not retained: later changes cannot mutate the
+    // admitted native snapshot or silently alter its cached mechanical response.
+    original[0] = RigidBodyState::new(original[0].pose(), Vec3::ZERO, Vec3::ZERO).unwrap();
+    assert_eq!(prepared.advance(&f.law, &CancelGate::new()).unwrap(), first);
+    let mut published = f.bodies;
+    let report = f.advance(&mut published, dt, controls()).unwrap();
+    assert_eq!(published, first.bodies_after);
+    assert_eq!(report, first.report);
+}
+
+#[test]
+fn prepared_coefficient_trials_keep_one_interval_and_match_independent_finite_recoil_heat() {
+    let f = axial(1.0, 0.0);
+    let dt = 0.02;
+    let prepared = PreparedRigidHertzPair::new(
+        &f.bodies,
+        &f.properties,
+        f.contact(),
+        dt,
+        controls(),
+        &CancelGate::new(),
+    )
+    .unwrap();
+    let w = 1.0 / 2.0 + 1.0 / 3.0 + 0.2 * 0.2 / 0.10 + 0.15 * 0.15 / 0.20;
+    let saved = f.bodies;
+    let mut first = None;
+    for (i, mu) in [0.4, 0.2, 0.5, 0.4].into_iter().enumerate() {
+        let law = HertzWrenchContact::new(HertzWrenchParameters {
+            static_mu: mu + 0.1,
+            kinetic_mu: mu,
+            ..f.law.parameters()
+        })
+        .unwrap();
+        let trial = prepared.advance(&law, &CancelGate::new()).unwrap();
+        let force = 10.0 * mu;
+        close(trial.report.contact.force_n[0], -force, 1e-15);
+        close(
+            trial.report.slip_velocity_after_m_s[0],
+            1.0 - dt * w * force,
+            2e-15,
+        );
+        close(
+            trial.report.dissipated_energy_j,
+            force * dt * (1.0 - 0.5 * dt * w * force),
+            2e-15,
+        );
+        close(
+            trial.bodies_after[0].linear_momentum_world().x,
+            2.0 - dt * force,
+            1e-15,
+        );
+        close(
+            trial.bodies_after[1].linear_momentum_world().x,
+            dt * force,
+            1e-15,
+        );
+        assert_eq!(
+            trial.report.scaled_mobility_per_kg,
+            *prepared.scaled_mobility_per_kg()
+        );
+        assert_eq!(
+            trial.report.scaled_compliance_m_per_n,
+            *prepared.scaled_compliance_m_per_n()
+        );
+        if i == 0 {
+            first = Some(trial);
+        } else if i == 3 {
+            assert_eq!(Some(trial), first);
+        }
+        assert_eq!(f.bodies, saved);
+    }
+}
+
+#[test]
+fn prepared_patch_effort_event_and_cancellation_refusals_leave_exact_retry() {
+    let f = axial(1.0, 0.0);
+    let prepared = PreparedRigidHertzPair::new(
+        &f.bodies,
+        &f.properties,
+        f.contact(),
+        0.1,
+        controls(),
+        &CancelGate::new(),
+    )
+    .unwrap();
+    let gentle = HertzWrenchContact::new(HertzWrenchParameters {
+        static_mu: 0.3,
+        kinetic_mu: 0.2,
+        ..f.law.parameters()
+    })
+    .unwrap();
+    let expected = prepared.advance(&gentle, &CancelGate::new()).unwrap();
+    for parameters in [
+        HertzWrenchParameters {
+            normal_force_n: 11.0,
+            ..gentle.parameters()
+        },
+        HertzWrenchParameters {
+            contact_radius_m: 1.01 * RADIUS,
+            ..gentle.parameters()
+        },
+    ] {
+        assert!(matches!(
+            prepared.advance(
+                &HertzWrenchContact::new(parameters).unwrap(),
+                &CancelGate::new()
+            ),
+            Err(RigidHertzError::Invalid(
+                "prepared Hertz normal force and radius must remain unchanged"
+            ))
+        ));
+    }
+    // The same physical interval is too coarse at the stronger coefficients.
+    // An admitted midpoint-static wrench must not bypass endpoint reversal.
+    let strong = HertzWrenchContact::new(HertzWrenchParameters {
+        static_mu: 1.5,
+        kinetic_mu: 1.0,
+        ..f.law.parameters()
+    })
+    .unwrap();
+    assert!(matches!(
+        prepared.advance(&strong, &CancelGate::new()),
+        Err(RigidHertzError::UnresolvedSlipEvent { .. })
+    ));
+    let gate = CancelGate::new();
+    gate.request();
+    assert!(matches!(
+        prepared.advance(&gentle, &gate),
+        Err(RigidHertzError::Cancelled)
+    ));
+    assert_eq!(
+        prepared.advance(&gentle, &CancelGate::new()).unwrap(),
+        expected
+    );
+
+    let mut bounded = controls();
+    bounded.contact.maximum_force_n = 3.0;
+    let bounded = PreparedRigidHertzPair::new(
+        &f.bodies,
+        &f.properties,
+        f.contact(),
+        0.1,
+        bounded,
+        &CancelGate::new(),
+    )
+    .unwrap();
+    let before = bounded.advance(&gentle, &CancelGate::new()).unwrap();
+    assert!(matches!(
+        bounded.advance(&f.law, &CancelGate::new()),
+        Err(RigidHertzError::Native(
+            HertzWrenchError::EffortBudget { .. }
+        ))
+    ));
+    assert_eq!(
+        bounded.advance(&gentle, &CancelGate::new()).unwrap(),
+        before
+    );
+    assert_eq!(f.bodies, axial(1.0, 0.0).bodies);
+}

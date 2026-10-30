@@ -1476,6 +1476,24 @@ retry; and static/frictionless limits. The three original rigid tangential and
 seven two-axis rolling groups also pass against the same original-source build.
 This focused result is separate from a full Cargo/DSR workspace gate.
 
+### Repeated source-coefficient trials on one original rigid pair
+
+`PreparedRigidHertzPair` snapshots only the bound native A/B states, mass
+properties, actual contact points/frame, interval, and full radius-scaled W/C.
+Repeated coefficient trials reuse those original rates and energy/momentum
+totals. Each returns `RigidHertzCandidate` with both native endpoint states and
+the original physical report. Normal load and radius remain bit-identical;
+original-source static/kinetic coefficients may vary. Source identity and
+applicability remain with their original owner. Trials never accumulate another
+proposal or change accepted bodies. Actual endpoint work, native Hertz heat and
+effort, momentum, reversal and cancellation gates run for every candidate.
+`apply_rigid_hertz` delegates to preparation and candidate before its sole final
+publication. Three new groups cover independent anisotropic snapshot response,
+legacy parity, temperature-coefficient-dependent recoil/heat, held-patch and
+effort/reversal/cancellation refusal with exact retry. All three and the seven
+prior Hertz groups, including nonprincipal body-coordinate covariance, pass in
+the original-source native target.
+
 
 ## Rigid assembly, release and inelastic latching
 
