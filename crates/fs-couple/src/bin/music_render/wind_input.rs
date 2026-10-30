@@ -437,13 +437,16 @@ pub(super) fn resolved_provenance(
             config.turbulent_prandtl, system.zone().sgs_config().is_some())
     });
     let aperture = system.coupled_patch().map_or_else(String::new, |patch| {
-        let (kind, value, units) = match system.patch_background_drive().expect("explicit patch background") {
-            fs_lbm::nsf3::NsfBoundaryDrive::PressureOffset(value) => ("prescribed-pressure-offset", value, "Pa"),
-            fs_lbm::nsf3::NsfBoundaryDrive::IncomingCharacteristic(value) => ("incoming-characteristic", value, "m/s"),
+        let (kind, value, units, temperature) = match system.patch_background_drive().expect("explicit patch background") {
+            fs_lbm::nsf3::NsfBoundaryDrive::PressureOffset(value) => ("prescribed-pressure-offset", value, "Pa", String::new()),
+            fs_lbm::nsf3::NsfBoundaryDrive::IncomingCharacteristic(value) => ("incoming-characteristic", value, "m/s", String::new()),
+            fs_lbm::nsf3::NsfBoundaryDrive::PressureTemperature { pressure_offset_pa, inflow_temperature_k } =>
+                ("prescribed-pressure-and-inflow-temperature", pressure_offset_pa, "Pa",
+                    format!(",\"inflow_temperature_k\":{inflow_temperature_k:e},\"temperature_scope\":\"prescribed only at inward flow; outgoing entropy remains fluid-owned\"")),
         };
         let open = system.zone().characteristic_axis().expect("original characteristic axis");
         let (high, _) = system.zone().characteristic_patch().expect("declared coupled patch");
-        format!(",\"coupled_patch\":{{\"normal_axis\":{},\"high_face\":{},\"start\":[{},{}],\"end\":[{},{}],\"bounds\":\"half-open original cells on increasing tangential axes\",\"remainder_boundary\":{{\"kind\":\"{kind}\",\"value\":{value:e},\"units\":\"{units}\"}},\"scope\":\"selected aperture pressure, volume flow and acoustic work feed the bore; complete face mass and energy include escaping flow; no exterior radiation observer on the remainder\"}}",
+        format!(",\"coupled_patch\":{{\"normal_axis\":{},\"high_face\":{},\"start\":[{},{}],\"end\":[{},{}],\"bounds\":\"half-open original cells on increasing tangential axes\",\"remainder_boundary\":{{\"kind\":\"{kind}\",\"value\":{value:e},\"units\":\"{units}\"{temperature}}},\"scope\":\"selected aperture pressure, volume flow and acoustic work feed the bore; complete face mass and energy include escaping flow; no exterior radiation observer on the remainder\"}}",
             open.axis, high, patch.start[0], patch.start[1], patch.end[0], patch.end[1])
     });
     let reservoir = system.zone().reservoir_aperture().map_or_else(String::new, |opening| {
@@ -465,6 +468,8 @@ pub(super) fn resolved_provenance(
             microphone.delay_samples.0, microphone.delay_samples.1, microphone.filter_delay_samples())
     });
     let boundary = match renderer.drive_history().first().expect("finite native drive history") {
+        fs_couple::nsf_dg::NsfDgDrive::Boundary(fs_lbm::nsf3::NsfBoundaryDrive::PressureTemperature { .. }) =>
+            ",\"external_boundary\":{\"kind\":\"prescribed-pressure-and-inflow-temperature\",\"pressure_units\":\"Pa offset from source reference\",\"inflow_temperature_units\":\"K\",\"flow\":\"determined by the live outgoing characteristic at every original face reconstruction\",\"temperature\":\"held physical source temperature for inward flow; outgoing fluid entropy is retained\",\"material\":\"original source equation of state, caloric and transport laws; fixed composition\"}",
         fs_couple::nsf_dg::NsfDgDrive::Boundary(fs_lbm::nsf3::NsfBoundaryDrive::PressureOffset(_)) =>
             ",\"external_boundary\":{\"kind\":\"prescribed-pressure-offset\",\"units\":\"Pa\",\"reference\":\"original source-face material pressure\",\"flow\":\"determined by the live outgoing characteristic at every original face reconstruction\"}",
         fs_couple::nsf_dg::NsfDgDrive::Boundary(fs_lbm::nsf3::NsfBoundaryDrive::IncomingCharacteristic(_)) =>

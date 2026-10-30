@@ -289,9 +289,16 @@ impl ResolvedDgFilePerformance {
             let end1 = row.number()?;
             let background = match row.word()? {
                 "pressure" => NsfBoundaryDrive::PressureOffset(row.scalar()?),
+                "pressure-temperature" => NsfBoundaryDrive::PressureTemperature {
+                    pressure_offset_pa: row.scalar()?,
+                    inflow_temperature_k: row.scalar()?,
+                },
                 "characteristic" => NsfBoundaryDrive::IncomingCharacteristic(row.scalar()?),
-                _ => return Err(bad(row.line, "patch remainder requires pressure PA or characteristic M_S")),
+                _ => return Err(bad(row.line, "patch remainder requires pressure PA, pressure-temperature PA K, or characteristic M_S")),
             };
+            if !background.is_finite() {
+                return Err(bad(row.line, "patch controls require finite pressure and positive inflow temperature"));
+            }
             row.end()?;
             Some((NsfCharacteristicPatch { start: [start0, start1], end: [end0, end1] }, background))
         } else { None };
@@ -416,6 +423,7 @@ impl ResolvedDgFilePerformance {
             Some("pressure") => { row.word()?; 1 }
             Some("upstream-pressure") => { row.word()?; 2 }
             Some("reservoir") => { row.word()?; 3 }
+            Some("pressure-temperature") => { row.word()?; 4 }
             Some("characteristic") => { row.word()?; 0 }
             _ => 0,
         };
@@ -437,14 +445,23 @@ impl ResolvedDgFilePerformance {
             let mut row = rows.row("hold")?;
             let end: usize = row.number()?;
             let value = row.scalar()?;
-            let control = match boundary_kind {
+            let drive = match boundary_kind {
+                4 => {
+                    let temperature = row.scalar()?;
+                    if !(temperature_window_k[0]..=temperature_window_k[1]).contains(&temperature) {
+                        return Err(bad(row.line, "source inflow temperature lies outside the declared fluid window"));
+                    }
+                    NsfDgDrive::Boundary(NsfBoundaryDrive::PressureTemperature {
+                        pressure_offset_pa: value, inflow_temperature_k: temperature,
+                    })
+                },
                 3 => {
                     let temperature_k = row.scalar()?;
                     if value <= 0.0 || temperature_k <= 0.0 {
                         return Err(bad(row.line, "reservoir controls require positive absolute pressure and temperature"));
                     }
                     NsfDgDrive::Reservoir { pressure_pa: value, temperature_k }
-                }
+                },
                 2 => NsfDgDrive::UpstreamPressureRise(value),
                 1 => NsfDgDrive::Boundary(NsfBoundaryDrive::PressureOffset(value)),
                 _ => NsfDgDrive::Boundary(NsfBoundaryDrive::IncomingCharacteristic(value)),
@@ -453,7 +470,7 @@ impl ResolvedDgFilePerformance {
             if end <= previous_end || end > samples {
                 return Err(bad(rows.line, "boundary endpoints must increase inside the declared sample window"));
             }
-            boundaries.push((end, control));
+            boundaries.push((end, drive));
             previous_end = end;
         }
         if previous_end != samples { return Err(bad(rows.line, "boundary history must cover the complete declared window")); }

@@ -220,6 +220,26 @@ integrated work. A uniform held pressure has source acoustic work
 `delta_p * Q_out * interval`; the original quadrature computes that work.
 The existing `step(incoming_m_s)` remains the incoming-characteristic route.
 
+`NsfBoundaryDrive::PressureTemperature { pressure_offset_pa,
+inflow_temperature_k }` adds a physical inflow temperature at that same source
+face. Pressure and the live returning characteristic still determine flow.
+Where flow enters the resolved volume, the face temperature is the supplied
+value in kelvin. Where it leaves, the adjacent fluid retains its original
+outgoing entropy. The original material source supplies density, caloric state,
+transport and conservative energy flux; composition remains fixed. The held
+temperature is admitted even during outflow, and failed changes or trials
+preserve the previous controls, fields and histories.
+
+The native selection is `boundary pressure-temperature COUNT`, followed by
+`hold END_OBSERVATION_SAMPLE PRESSURE_OFFSET_PA INFLOW_TEMPERATURE_K` rows.
+Both controls follow the original physical interval clock. An independently
+controlled patch remainder accepts `pressure-temperature PA K` as well.
+The manufactured `crates/fs-couple/examples/resolved-dg-warm-source.performance`
+demonstrates a warm source through the original constriction, live DG bore and
+material exterior observer. Its temperatures are numerical inputs, not measured
+player data. This feature does not add humidity/species transport, finite airway
+thermal capacity or mean enthalpy transport into the acoustic DG bore.
+
 This source is an **ideal prescribed-pressure boundary in the admitted local
 linear characteristic domain**. It is neither stagnation pressure nor a finite
 airway/reservoir's compliance, thermal capacity or mass inventory. It reflects
@@ -523,6 +543,10 @@ Alternatives use the same original parsers and owners:
   value. `boundary characteristic COUNT` explicitly names the original m/s
   condition. The existing bare `boundary COUNT` has the same characteristic
   meaning and arithmetic. Unknown kinds and trailing fields refuse.
+- `boundary pressure-temperature COUNT` adds an inflow temperature in kelvin
+  after each pressure offset. Temperatures outside the declared fluid window,
+  missing temperature fields and extra fields refuse. The original material
+  and characteristic-domain checks apply to every physical reconstruction.
 - `boundary reservoir COUNT` selects the existing transverse aperture instead
   of an axial actuator. Each record is `hold END_OBSERVATION_SAMPLE P_ABSOLUTE_PA
   TEMPERATURE_K`, with positive pressure and temperature in the original gas

@@ -562,6 +562,7 @@ pub struct NsfGrid3<L: Lattice3<27>> {
     wall_out: f64,
     open: Option<NsfCharacteristicAxis>,
     characteristic_pressure_offset_pa: [Option<f64>; 2],
+    characteristic_inflow_temperature_k: [Option<f64>; 2],
     characteristic_patch: Option<CharacteristicPatchBinding>,
     open_faces: Option<OpenFaces>,
     reservoir_faces: [[Option<open::OpenGhost>; 2]; 3],
@@ -762,6 +763,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             wall_out: 0.0,
             open: None,
             characteristic_pressure_offset_pa: [None; 2],
+            characteristic_inflow_temperature_k: [None; 2],
             characteristic_patch: None,
             open_faces: None,
             reservoir_faces: [[None; 2]; 3],
@@ -1442,6 +1444,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         for _ in 0..COUPLING_PASSES {
             let faces1 = self.resolve_open_faces(
                 self.open.as_ref(), self.characteristic_pressure_offset_pa,
+                self.characteristic_inflow_temperature_k,
                 self.characteristic_patch, &rho1, &u_guess, &th1,
             )?;
             let mut f1 = self.force_field(&rho1, &th1, faces1.as_ref());
@@ -1553,6 +1556,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         // predictor faces that supplied its force and conservative FV flux.
         let endpoint_faces = self.resolve_open_faces(
             self.open.as_ref(), self.characteristic_pressure_offset_pa,
+            self.characteristic_inflow_temperature_k,
             self.characteristic_patch, &rho1, &u1, &th1,
         )?;
         // The next collision must use the actual accepted force-corrected
@@ -1844,6 +1848,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// FNV-1a hash of every population and energy bit (bitwise invariance checks).
     /// An attached characteristic patch also contributes its shape, side and accepted drive.
     /// An attached reservoir contributes its mutable accepted ghost state.
+    /// Explicit incoming thermal controls contribute their location and values.
     #[must_use]
     pub fn state_hash(&self) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -1868,6 +1873,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             match patch.drive {
                 NsfBoundaryDrive::IncomingCharacteristic(value) => { feed(0.0); feed(value); }
                 NsfBoundaryDrive::PressureOffset(value) => { feed(1.0); feed(value); }
+                NsfBoundaryDrive::PressureTemperature { pressure_offset_pa, inflow_temperature_k } => {
+                    feed(2.0); feed(pressure_offset_pa); feed(inflow_temperature_k);
+                }
             }
         }
         if let Some(aperture) = &self.reservoir_aperture {
@@ -1876,6 +1884,14 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             feed(state.density_kg_m3);
             for velocity in state.velocity_m_s { feed(velocity); }
             feed(state.temperature_k);
+        }
+        for (side, temperature) in self.characteristic_inflow_temperature_k.iter().enumerate() {
+            if let Some(temperature) = temperature {
+                feed(3.0);
+                feed(side as f64);
+                feed(self.characteristic_pressure_offset_pa[side].expect("thermal pressure drive"));
+                feed(*temperature);
+            }
         }
         h
     }

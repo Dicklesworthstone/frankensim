@@ -85,6 +85,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         self.rebind_characteristics(
             open,
             self.characteristic_pressure_offset_pa,
+            self.characteristic_inflow_temperature_k,
             Some(CharacteristicPatchBinding {
                 high,
                 shape: patch,

@@ -25,6 +25,9 @@ mod patch;
 pub use patch::NsfCharacteristicPatch;
 pub(super) use patch::CharacteristicPatchBinding;
 
+#[cfg(test)]
+mod thermal_tests;
+
 /// Source-bound reference and one incoming plane-normal acoustic characteristic.
 /// Both faces use their own outward normal; low is negative, high positive.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -44,7 +47,8 @@ pub struct NsfCharacteristicBoundary {
 ///
 /// Pressure is relative to that face's retained material/reference pressure.
 /// It is a uniform prescribed pressure, not a finite reservoir's dynamics,
-/// stagnation pressure, imposed velocity or an independent thermodynamic state.
+/// stagnation pressure or imposed velocity. Explicit inflow temperature supplies
+/// the incoming entropy characteristic through the same retained gas source.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum NsfBoundaryDrive {
     /// Hold J- = delta u_n - delta p/(rho_ref*c_ref) [m/s].
@@ -52,6 +56,15 @@ pub enum NsfBoundaryDrive {
     /// Hold the reconstructed face pressure minus its reference pressure [Pa].
     /// Each local outgoing characteristic determines the resulting flow.
     PressureOffset(f64),
+    /// Hold pressure offset [Pa] and incoming gas temperature [K]. Temperature
+    /// is imposed only where the reconstructed normal flow is inward; outgoing
+    /// and stationary faces retain the adjacent fluid's entropy characteristic.
+    /// This is an ideal thermal source of the original fixed composition, not
+    /// stagnation temperature, a finite player inventory or species injection.
+    PressureTemperature {
+        pressure_offset_pa: f64,
+        inflow_temperature_k: f64,
+    },
 }
 
 impl NsfBoundaryDrive {
@@ -59,6 +72,8 @@ impl NsfBoundaryDrive {
     pub const fn is_finite(self) -> bool {
         match self {
             Self::IncomingCharacteristic(value) | Self::PressureOffset(value) => value.is_finite(),
+            Self::PressureTemperature { pressure_offset_pa, inflow_temperature_k } =>
+                pressure_offset_pa.is_finite() && inflow_temperature_k.is_finite(),
         }
     }
 }
@@ -210,7 +225,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 ));
             }
         }
-        self.rebind_characteristics(open, [None; 2], None)?;
+        self.rebind_characteristics(open, [None; 2], [None; 2], None)?;
         Ok(self)
     }
 
@@ -228,8 +243,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// A pressure drive fixes each reconstructed quadrature pressure throughout
     /// the original predictor/corrector. It does not freeze the incoming wave:
     /// the live outgoing wave determines its value and the normal flow. Inflow
-    /// entropy/tangential data retain the original material reference; outflow
-    /// retains the adjacent cell. Pressure, temperature, Mach and source-domain
+    /// tangential data retain the original material reference. Incoming entropy
+    /// retains that reference unless an explicit inflow temperature is supplied;
+    /// outflow retains the adjacent cell. Pressure, temperature, Mach and source-domain
     /// refusals apply before any physical state or control is published.
     /// An attached aperture retains its own drive; these controls apply to the
     /// complementary cells of its face and every cell of the opposite face.
@@ -244,6 +260,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             .open
             .ok_or(NsfError::Input("no characteristic axis is attached"))?;
         let mut pressure = [None; 2];
+        let mut temperature = [None; 2];
         for (side, drive) in drives.into_iter().enumerate() {
             if !drive.is_finite() {
                 return Err(NsfError::Input("characteristic boundary drive must be finite"));
@@ -258,9 +275,14 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     open.faces[side].incoming_characteristic_m_s = 0.0;
                     pressure[side] = Some(value);
                 }
+                NsfBoundaryDrive::PressureTemperature { pressure_offset_pa, inflow_temperature_k } => {
+                    open.faces[side].incoming_characteristic_m_s = 0.0;
+                    pressure[side] = Some(pressure_offset_pa);
+                    temperature[side] = Some(inflow_temperature_k);
+                }
             }
         }
-        self.rebind_characteristics(open, pressure, patch)
+        self.rebind_characteristics(open, pressure, temperature, patch)
     }
 
     /// Actual accepted controls, low then high, with their physical units.
@@ -273,7 +295,12 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 NsfBoundaryDrive::IncomingCharacteristic(
                     open.faces[side].incoming_characteristic_m_s,
                 ),
-                NsfBoundaryDrive::PressureOffset,
+                |pressure_offset_pa| self.characteristic_inflow_temperature_k[side].map_or(
+                    NsfBoundaryDrive::PressureOffset(pressure_offset_pa),
+                    |inflow_temperature_k| NsfBoundaryDrive::PressureTemperature {
+                        pressure_offset_pa, inflow_temperature_k,
+                    },
+                ),
             )
         }))
     }
@@ -371,6 +398,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
 
     fn rebind_characteristics(
         &mut self, open: NsfCharacteristicAxis, pressure_offset_pa: [Option<f64>; 2],
+        inflow_temperature_k: [Option<f64>; 2],
         patch: Option<CharacteristicPatchBinding>,
     ) -> Result<(), NsfError> {
         let bound = open.maximum_relative_perturbation;
@@ -381,7 +409,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         }
         let (rho, mom) = self.macro_fields(&self.f);
         let u = self.velocity_field(&rho, &mom, &self.force);
-        let faces = self.resolve_open_faces(Some(&open), pressure_offset_pa, patch, &rho, &u, &self.theta)?;
+        let faces = self.resolve_open_faces(Some(&open), pressure_offset_pa,
+            inflow_temperature_k, patch, &rho, &u, &self.theta)?;
         let force = self.force_field(&rho, &self.theta, faces.as_ref());
         let mut f = self.f.clone();
         for i in 0..self.n {
@@ -399,6 +428,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             self.flux_divergence(&self.e, &rho, &u, &self.theta, &sig, &transport, faces.as_ref())?;
         self.open = Some(open);
         self.characteristic_pressure_offset_pa = pressure_offset_pa;
+        self.characteristic_inflow_temperature_k = inflow_temperature_k;
         self.characteristic_patch = patch;
         self.open_faces = faces;
         self.f = f;
@@ -416,6 +446,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         &self,
         open: Option<&NsfCharacteristicAxis>,
         pressure_offset_pa: [Option<f64>; 2],
+        inflow_temperature_k: [Option<f64>; 2],
         patch: Option<CharacteristicPatchBinding>,
         rho: &[f64],
         u: &[[f64; 3]],
@@ -457,6 +488,35 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             let alpha = (reference.gamma - 1.0) / reference.gamma * reference.temperature
                 / reference.pressure;
             let normal_reference = sign * boundary.reference_velocity_m_s[open.axis];
+            // Admit a declared thermal source even while this face is outgoing:
+            // a reversal must not activate previously hidden invalid material.
+            // Legacy controls perform no additional material query.
+            let admit_temperature = |offset: f64, temperature: f64| -> Result<(), NsfError> {
+                if !temperature.is_finite()
+                    || temperature < self.spec.temperature_window_k[0]
+                    || temperature > self.spec.temperature_window_k[1]
+                    || (temperature / reference.temperature - 1.0).abs()
+                        > open.maximum_relative_perturbation
+                {
+                    return Err(NsfError::Input(
+                        "characteristic inflow temperature leaves its declared source domain",
+                    ));
+                }
+                self.spec.gas.at(temperature, reference.pressure + offset)?;
+                Ok(())
+            };
+            if let Some(temperature) = inflow_temperature_k[side] {
+                admit_temperature(pressure_offset_pa[side].ok_or(NsfError::Input(
+                    "characteristic inflow temperature requires an explicit pressure control",
+                ))?, temperature)?;
+            }
+            if let Some(patch) = patch.filter(|patch| usize::from(patch.high) == side) {
+                if let NsfBoundaryDrive::PressureTemperature {
+                    pressure_offset_pa, inflow_temperature_k,
+                } = patch.drive {
+                    admit_temperature(pressure_offset_pa, inflow_temperature_k)?;
+                }
+            }
             for i in 0..self.n {
                 let x = self.at(i);
                 if x[open.axis] != edge {
@@ -467,14 +527,17 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 let ui = u[i].map(|v| v * velocity_unit);
                 let outgoing =
                     sign * ui[open.axis] - normal_reference + (pi - reference.pressure) / impedance;
-                let (incoming, pressure_offset) = match patch.filter(|patch|
+                let (incoming, pressure_offset, inflow_temperature) = match patch.filter(|patch|
                     usize::from(patch.high) == side && patch.shape.contains(x, open.axis))
                 {
                     Some(patch) => match patch.drive {
-                        NsfBoundaryDrive::IncomingCharacteristic(value) => (value, None),
-                        NsfBoundaryDrive::PressureOffset(value) => (0.0, Some(value)),
+                        NsfBoundaryDrive::IncomingCharacteristic(value) => (value, None, None),
+                        NsfBoundaryDrive::PressureOffset(value) => (0.0, Some(value), None),
+                        NsfBoundaryDrive::PressureTemperature { pressure_offset_pa, inflow_temperature_k } =>
+                            (0.0, Some(pressure_offset_pa), Some(inflow_temperature_k)),
                     },
-                    None => (boundary.incoming_characteristic_m_s, pressure_offset_pa[side]),
+                    None => (boundary.incoming_characteristic_m_s, pressure_offset_pa[side],
+                        inflow_temperature_k[side]),
                 };
                 let (normal, pressure) = match pressure_offset {
                     Some(offset) => {
@@ -496,9 +559,12 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 } else {
                     0.0
                 };
-                let temperature = reference.temperature
-                    + alpha * (pressure - reference.pressure)
-                    + entropy_temperature;
+                let temperature = match inflow_temperature.filter(|_| normal < 0.0) {
+                    Some(temperature) => temperature,
+                    None => reference.temperature
+                        + alpha * (pressure - reference.pressure)
+                        + entropy_temperature,
+                };
                 let mut velocity = if normal >= 0.0 {
                     ui
                 } else {
