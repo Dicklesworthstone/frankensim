@@ -20,8 +20,8 @@
 //! a dense `n x n` complex solve per frequency. The static vectors matter: a boundary-forced expansion in Neumann modes alone converges
 //! only like `1/N`, because the loaded boundary is where the modes are least able to represent the field.
 //!
-//! Limits, stated: straight-sided elements (no isoparametric map, so a curved wall has an `O(h^2)` geometric floor), no viscothermal
-//! boundary-layer admittance (that is M2.4-W1b), a uniform impedance law per boundary, one-way coupling (an admittance is an
+//! Limits, stated: straight-sided elements (no isoparametric map, so a curved wall has an `O(h^2)` geometric floor), first-order
+//! viscothermal boundary layers only inside their explicit thin-layer band, a uniform impedance law per boundary, one-way coupling (an admittance is an
 //! input law, not a radiation solve). Refusals: order above [`MAX_ORDER`], a degenerate tet, a face that is not a boundary face,
 //! a window holding more than [`MAX_MODES`] modes, a reduced basis above [`MAX_REDUCED_DIM`]; never a silent truncation.
 
@@ -35,6 +35,9 @@ use std::fmt;
 
 /// Heat-diffusion modes on this same hierarchical volume space.
 pub mod diffusion;
+
+/// Viscous and thermal boundary layers on the original pressure traces.
+pub mod boundary_layer;
 
 /// Highest element order accepted; `MAX_ORDER + 1` refuses.
 pub const MAX_ORDER: usize = 4;
@@ -584,6 +587,7 @@ pub struct ReducedHelmholtz {
     c_r: Vec<Vec<f64>>,
     b_r: Vec<Vec<f64>>,
     area: Vec<f64>,
+    boundary_layer: Option<boundary_layer::ReducedBoundaryLayer>,
 }
 
 /// The solution of the reduced driven problem at one frequency.
@@ -673,6 +677,20 @@ impl ReducedHelmholtz {
         ports: &[&[[u32; 3]]],
         static_vectors: bool,
     ) -> Result<Self, AcousticFeError> {
+        Self::build(fe, modes, ports, static_vectors, None)
+    }
+
+    fn build(
+        fe: &HelmholtzFe<'_>,
+        modes: &HelmholtzModes,
+        ports: &[&[[u32; 3]]],
+        static_vectors: bool,
+        wall: Option<(
+            &[[u32; 3]],
+            boundary_layer::BoundaryLayerTransport,
+            boundary_layer::BoundaryLayerGeometry,
+        )>,
+    ) -> Result<Self, AcousticFeError> {
         let mut loads = Vec::with_capacity(ports.len());
         let mut cs = Vec::with_capacity(ports.len());
         let mut area = Vec::with_capacity(ports.len());
@@ -732,6 +750,13 @@ impl ReducedHelmholtz {
             .iter()
             .map(|b| basis.iter().map(|phi| dot(phi, b)).collect::<Vec<f64>>())
             .collect();
+        let boundary_layer = wall
+            .map(|(faces, transport, geometry)| {
+                boundary_layer::ReducedBoundaryLayer::new(
+                    fe, faces, ports, transport, geometry, &project,
+                )
+            })
+            .transpose()?;
         Ok(Self {
             medium: fe.medium,
             n,
@@ -740,6 +765,7 @@ impl ReducedHelmholtz {
             c_r,
             b_r,
             area,
+            boundary_layer,
         })
     }
 
@@ -779,6 +805,9 @@ impl ReducedHelmholtz {
         let mut a = vec![[0.0, 0.0]; n * n];
         for i in 0..n * n {
             a[i][0] = self.k_r[i] - k * k * self.m_r[i];
+        }
+        if let Some(wall) = &self.boundary_layer {
+            wall.add_operator(self.medium, frequency_hz, &mut a)?;
         }
         for (p, y) in admittances.iter().enumerate() {
             if p == source {
@@ -1163,4 +1192,5 @@ mod tests {
         }
     }
 }
+
 

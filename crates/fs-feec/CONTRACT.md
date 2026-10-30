@@ -1106,3 +1106,45 @@ current compatibility and flux-preserving gauge recovery. Its six focused
 physics tests include a multiply connected source refusal, field refinement,
 and bounded solver/cancellation behavior. Existing cohomology interfaces and
 algorithms retain their owners.
+
+### Thermoviscous wall layers on the original interior pressure space
+
+`acoustics::helmholtz::boundary_layer` adds the frequency-domain Wentzell
+wall form of Berggren, Bernland and Noreland (JCP 371, 2018, 633–650;
+https://arxiv.org/abs/1801.04177). With the existing `exp(+i omega t)`
+convention, the operator contribution is
+`(-1+i)/2 [delta_v S + k^2 (gamma-1) delta_t C]`. `S` integrates the
+tangential gradient of the original hierarchical pressure trace using exact
+barycentric derivatives and the original face quadrature; `C` is the original
+boundary mass. Normal gradients and zero-trace volume bubbles do not create
+wall loss. No scalar impedance substitutes for the surface derivative.
+
+`ReducedHelmholtz::new_with_boundary_layers` assembles and projects those
+two matrices once into the existing modes/static-enrichment basis. Its
+ordinary `response` then includes both wall mechanisms. The lossless
+constructor retains its arithmetic, and zero transport gives bitwise-identical
+responses in the focused test. `boundary_layer_power` returns separate
+viscous and thermal power from the Hermitian quadratic forms, nonnegative up
+to roundoff, without clipping or repairing the calculated energy, and
+the physical factor `1/(2 omega rho)`. This closes input work together with
+the pointwise acoustic-port power, including nonuniform port pressures.
+
+Transport is supplied by the source material owner; density and sound speed
+are the original FE medium. Geometry must supply the actual minimum smooth
+curvature radius and half-gap, independently of the mesh. The computed
+frequency interval enforces `delta/min(radius,half_gap)` and `k delta` below
+the caller's declared ratio, itself at most 0.05. This is an asymptotic
+admission condition, not a certified bound on impedance, resonances or Q.
+Invalid or overlapping/duplicate wall and acoustic-port faces refuse.
+The standalone surface assembly also offers cancellation between faces;
+reduction and eigensolver cancellation retain their existing granularity.
+
+Tests exercise exact affine triangle energies for every admitted polynomial
+order, normal-gradient exclusion and face orientation, layer scaling and band
+refusal, full-FE input/work closure, the zero-loss limit, and an axial box-mode
+ladder against analytic viscous/thermal surface integrals. The M2.4-W1b bead
+remains open: no curved isoparametric map, narrow-gap LNS, molecular wall/gas
+coupling, finite wall heat capacity, corner-layer resolution, Bessel-cylinder
+acceptance or final instrument-accuracy claim is made. Patch edges use natural
+zero tangential conormal flux. This frequency-domain wall approximation is not
+advertised as a passive time-domain realization.

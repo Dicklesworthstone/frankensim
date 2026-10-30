@@ -287,3 +287,6 @@ mod tests;
 
 /// One shared gas volume for multiple independently retained moving surfaces.
 pub mod shared;
+/// Source-gas binding for the original spatial Helmholtz pressure solver.
+pub mod interior;
+

@@ -13143,3 +13143,20 @@ late source failure/cancellation/budget retry, and two distinct deforming
 spheres with nontrivial native/patch/link ordering and independent per-cell
 heat destinations. All 23 existing groups in the original articulated-friction
 heat test target continue to pass, for 29 groups in that target.
+
+### Source gas in spatial thermoviscous interiors
+
+`cavity_modal::interior::thermoviscous_interior` binds the original spatial
+Helmholtz pressure solver and its viscous/thermal wall form to one coherent
+`GasState`. Density and sound speed must match the FE volume medium bitwise;
+viscosity, thermal conductivity, isobaric heat capacity and gamma are copied
+from that same material evaluation. No dry-air constants or alternate gas law
+are substituted. The original FE owner retains geometry, reduction, frequency
+band and boundary-work semantics, including raw wall power up to roundoff.
+This is a quiescent homogeneous frequency-domain interior with stationary
+isothermal thin boundary layers. It does not add molecular relaxation,
+finite-conductivity walls or narrow-gap linearized Navier–Stokes.
+
+Six focused new native cases passed against actual FE/sparse/modal/material
+source owners: four boundary-layer cases and two source-gas integration cases.
+The complete Cargo workspace was not built in this environment.
