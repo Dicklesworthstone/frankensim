@@ -26,13 +26,14 @@ mod profile;
 pub use profile::{BoundaryProfileError3, InletFlux3, VelocityProfileReport3};
 mod partial_saturation;
 pub use partial_saturation::{
-    PartialSaturationBodiesExchange3, PartialSaturationBody3, PartialSaturationBodyExchange3,
-    PartialSaturationBodyResponse3, PartialSaturationError3, PartialSaturationExchange3,
-    PartialSaturationForcing3, SphereLubrication3, SphereLubricationExchange3,
+    LubricatedPlanesExchange3, LubricationPlane3, PartialSaturationBodiesExchange3,
+    PartialSaturationBody3, PartialSaturationBodyExchange3, PartialSaturationBodyResponse3,
+    PartialSaturationError3, PartialSaturationExchange3, PartialSaturationForcing3,
+    PlaneLubricationExchange3, SphereLubrication3, SphereLubricationExchange3,
 };
 mod body_motion;
 pub use body_motion::{
-    BodyFrameEllipsoid3, BodyFrameSampler3, BodyFrameShape3,
+    BodyFrameEllipsoid3, BodyFrameSampler3, BodyFrameShape3, MovingLubricatedPlanesExchange3,
     MovingPartialSaturationBodiesExchange3, MovingPartialSaturationBody3,
     MovingPartialSaturationExchange3,
 };

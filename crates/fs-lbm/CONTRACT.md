@@ -4771,3 +4771,87 @@ prevent every discretization artifact. The native tests retain this stiff
 case explicitly, verify unequal-radius asymptotics and both three-body chain
 modes, roughness/cutoff behavior, rotation/permutation/boost covariance,
 forced moving full-tensor world momentum/work and atomic failure/retry.
+
+### Simultaneous sphere/plane squeeze films and prescribed surface work
+
+`BoundaryGrid3::step_with_lubricated_partial_saturation_planes` and
+`step_with_lubricated_spheres_and_planes` extend the original body/fluid
+response with prescribed infinite planar surfaces. `LubricationPlane3` carries
+a world point, an admitted unit normal into the permitted half-space, a constant
+low-Mach translation, and independently specified wall cutoff and roughness
+scales. The moving entry point interprets the point at the tick start, samples
+the plane at the same midpoint as the original spherical bodies, and admits
+both complete affine relative half-drifts by checking their endpoint gaps.
+`translated` provides the next window's prescribed geometry. No body pose or
+velocity is projected to repair contact.
+
+For a sphere of radius R and actual positive plane gap h, the additional
+normal resistance is `zeta = 6*pi*mu*R^2*(1/max(h,h_rough)-1/h_cut)` below the
+cutoff and zero above it. This is the leading Stokes squeeze term, not the
+complete Brenner resistance or its logarithmic corrections. Dynamic lattice
+viscosity mu comes from `SphereLubrication3`; each wall has independent cutoff
+and roughness inputs because wall and sphere-pair resolution errors need not
+agree. This normal leading term and cutoff/roughness construction follow the
+sphere-wall asymptotics in Costa, Westerweel, Breugem and Boersma (2015),
+section III, equation 33, <https://arxiv.org/pdf/1506.01880>. Their higher-order
+terms and collision model are not implemented by this owner. Calibration to
+the native partial-saturation grid remains the caller's responsibility.
+
+Sphere-pair and sphere-plane rows enter the SAME original small Schur solve.
+For a plane row the relative midpoint speed is `(v_body_mid-v_plane).n`; only
+the body's response contributes to that row's mobility. A single factorization
+of each native six-velocity response supplies the three translational columns.
+The shared-body off-diagonal terms are retained across wall and particle films;
+there are no sequential plane kicks, giant generalized mass matrix, extra fluid
+collision pass, or population correction that counts the film twice. At most
+64 bodies, 64 declared planes, and 64 TOTAL active films are admitted, with the
+existing caller-selected active-film cap. Discovery is O(N^2+N*planes), small
+Schur storage O(active_films^2), and per-plane reaction storage O(planes).
+Empty plane lists retain the original APIs' arithmetic and results.
+
+`SphereLubricationExchange3` now includes aggregate plane impulse, angular
+impulse, prescribed-plane work and the active sphere-plane count. New wrapper
+results also return `PlaneLubricationExchange3` in exactly the input plane
+order, including zero reactions for inactive planes. Normal impulses pass
+through each sphere center; the opposite plane reaction is applied at its
+actual projected footpoint. Both angular impulses use the caller's same fixed
+world origin. Plane work is work RECEIVED by the prescribed surface, so its
+driving source supplies the negative. The measured identity is total body film
+work plus total plane work plus nonnegative modeled viscous loss equals the
+reported work residual. A driven plane can supply positive body work without
+being misclassified as negative dissipation. Individual body and moving-body
+momentum/work accounts include the complete film impulse once.
+
+Planes define ONLY the unresolved-film component. They neither create solid
+voxel cells nor impose or move a resolved no-slip fluid boundary. The complete
+stationary-wall integration uses an existing matching halfway voxel wall;
+translating-plane results describe the prescribed film port, not a complete
+moving-wall fluid-displacement model. Existing stationary wall/halo admission,
+retained interior fluid plus additional solid inertia, and actual sphere
+sampling remain authoritative. All physical gaps must be positive even outside
+the correction cutoff. Exact duplicate planes, overlap, exhausted limits,
+nonfinite solves and cancellation refuse atomically, including final geometry
+failure after fluid streaming has been prepared. Only private fluid/sampler
+scratch may change before successful finalization.
+
+Six new focused native groups pass alongside all 32 existing related groups.
+Independent checks include the analytic forced sphere/translated-plane impulse
+and source work under scene rotations and common translation; an independent
+two-body velocity solve with one sphere pair and two different driven plane
+films; independent wall cutoffs/roughness; exact empty-plane continuation;
+24 ticks of two sampled full-tensor bodies beside an actual voxel wall with
+Guo forcing and external loads; and strict overlap/combined-film/plane-count
+admission, cancellation, late translated-plane crossing and deterministic
+retry. The sampled trajectory's independently reconstructed maximum world
+linear/angular momentum defect is `3.748246288001744e-13` lattice units, with
+modeled viscous loss `1.3701980928724615e-5`. These source-selected native checks
+do not establish the full Cargo/DSR gate, ISA parity or experimental calibration.
+
+Normal-only creeping-flow resistance, fixed plane normals and constant
+translation are the admitted model. Tangential/rolling film forces, plane
+rotation, finite wall recoil, solid contact, cavitation, deformable surfaces,
+thermal allocation and complete moving resolved-fluid boundaries remain
+outside this increment. Midpoint damping retains its existing passivity
+interpretation and unresolved endpoint reversal; it is not L-stable or a claim
+that arbitrarily small-gap trajectories are temporally resolved. The broad
+moving-boundary bead remains open.

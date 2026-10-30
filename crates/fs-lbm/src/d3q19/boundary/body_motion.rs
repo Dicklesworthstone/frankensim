@@ -17,7 +17,7 @@ use super::{
 type Result<T> = core::result::Result<T, PartialSaturationError3>;
 
 mod multiple;
-pub use multiple::MovingPartialSaturationBodiesExchange3;
+pub use multiple::{MovingLubricatedPlanesExchange3, MovingPartialSaturationBodiesExchange3};
 
 /// Fixed geometry expressed relative to the body's center in BODY axes.
 ///

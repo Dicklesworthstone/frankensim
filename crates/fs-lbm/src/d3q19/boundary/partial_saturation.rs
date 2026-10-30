@@ -20,8 +20,11 @@ use super::{
 
 mod multiple;
 pub use multiple::{PartialSaturationBodiesExchange3, PartialSaturationBodyResponse3};
-mod lubrication;
-pub use lubrication::{SphereLubrication3, SphereLubricationExchange3};
+pub(super) mod lubrication;
+pub use lubrication::{
+    LubricatedPlanesExchange3, LubricationPlane3, PlaneLubricationExchange3, SphereLubrication3,
+    SphereLubricationExchange3,
+};
 
 /// Frozen spatial rigid-body state in lattice units (`dx = dt = 1`).
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -202,6 +202,7 @@ impl BoundaryGrid3 {
         self.step_with_partial_saturation_resistance_checked(
             fractions, bodies, external, origin, gate, None, finish,
         )
+        .map(|(report, value, _)| (report, value))
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -215,21 +216,26 @@ impl BoundaryGrid3 {
         external: [[f64; 6]; N],
         origin: [f64; 3],
         gate: &CancelGate,
-        lubrication: Option<(SphereLubrication3, [f64; N])>,
+        lubrication: Option<(SphereLubrication3, [f64; N], &[LubricationPlane3])>,
         finish: impl FnOnce(
             &Self,
             &[PartialSaturationBody3; N],
             &PartialSaturationBodiesExchange3<N>,
         ) -> Result<T>,
-    ) -> Result<(PartialSaturationBodiesExchange3<N>, T)> {
+    ) -> Result<(
+        PartialSaturationBodiesExchange3<N>,
+        T,
+        Vec<PlaneLubricationExchange3>,
+    )> {
         checkpoint(gate)?;
         if N == 0 {
             return Err(invalid("immersed assembly must contain at least one body"));
         }
-        if let Some((model, radii)) = lubrication {
+        if let Some((model, radii, planes)) = lubrication {
             model.admit(radii)?;
+            lubrication::planes::admit_planes(planes)?;
         }
-        if N == 1 {
+        if N == 1 && lubrication.is_none_or(|(_, _, planes)| planes.is_empty()) {
             let mut proposed = *bodies;
             let mut single = proposed[0];
             let (_, (receipt, value)) = self.step_with_partial_saturation_body_checked(
@@ -254,7 +260,7 @@ impl BoundaryGrid3 {
                 },
             )?;
             *bodies = proposed;
-            return Ok((receipt, value));
+            return Ok((receipt, value, Vec::new()));
         }
         let CollisionModel3::Bgk { tau } = self.collision_model else {
             return Err(invalid("immersed assembly requires BGK"));
@@ -342,10 +348,20 @@ impl BoundaryGrid3 {
             population_impulse_residual: [0.0; 3],
             population_angular_impulse_residual: [0.0; 3],
         };
-        if let Some((model, radii)) = lubrication {
-            report.lubrication =
-                lubrication::solve(model, radii, bodies, &response, &mut proposed, origin, gate)?;
+        let plane_reports;
+        if let Some((model, radii, planes)) = lubrication {
+            (report.lubrication, plane_reports) = lubrication::solve(
+                model,
+                radii,
+                planes,
+                bodies,
+                &response,
+                &mut proposed,
+                origin,
+                gate,
+            )?;
         } else {
+            plane_reports = Vec::new();
             for a in 0..N {
                 checkpoint(gate)?;
                 proposed[a] = response[a].solve(bodies[a])?;
@@ -605,7 +621,7 @@ impl BoundaryGrid3 {
         self.next = Some(next);
         self.topology_locked = true;
         *bodies = proposed;
-        Ok((report, value))
+        Ok((report, value, plane_reports))
     }
 }
 
