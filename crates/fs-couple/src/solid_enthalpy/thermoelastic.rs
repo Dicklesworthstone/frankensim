@@ -24,6 +24,9 @@ pub mod dynamic;
 /// Local isentropic wave/modal tangent from the same accepted thermal history.
 pub mod acoustic;
 
+/// Complete original material heat transport on the same reciprocal trajectory.
+pub mod heat;
+
 use super::*;
 use std::convert::Infallible;
 use fs_material::elastic::thermal::{

@@ -43,7 +43,7 @@ pub struct SolidHeatAudit {
     pub combined_residual_j: f64,
 }
 
-fn closed_account(external: f64, thermal: f64, combined: f64, radiation: f64,
+pub(crate) fn closed_account(external: f64, thermal: f64, combined: f64, radiation: f64,
     tolerance: f64) -> Result<SolidHeatAudit, &'static str> {
     if !tolerance.is_finite() || tolerance <= 0.0
         || [external, thermal, combined, radiation].iter().any(|x| !x.is_finite()) {

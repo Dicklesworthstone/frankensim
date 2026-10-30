@@ -18,7 +18,7 @@ use fs_solid::loads3::transient::{
 
 /// Original source laws plus the actual loaded inertial and caloric history.
 pub struct DynamicThermoelasticSolid<'s, 'm> {
-    source: &'s SolidEnthalpy<'m>,
+    pub(super) source: &'s SolidEnthalpy<'m>,
     laws: Vec<AffineIsotropicThermoelastic>,
     state: SolidEnthalpyState<'m>,
     motion: TetTransientCheckpoint3<'s, 'm>,

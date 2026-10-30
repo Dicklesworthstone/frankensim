@@ -15746,3 +15746,32 @@ refinement. Rejected or cancelled candidates leave accepted mechanical and
 thermal histories unchanged. Five focused regressions cover continuing
 memory and physical U balance, lossless cooling, full anisotropic rotated
 entropy, orthotropic common-scale admission and non-affine/late refusal.
+
+## Complete heat networks on reciprocal elastic trajectories
+
+`ThermoelasticSolid::advance_heat_network_candidate` and
+`DynamicThermoelasticSolid::advance_heat_network_candidate` compose the existing
+prepared material heat observer with the original reciprocal tetrahedral solver.
+Bulk conductivity, source-integrated layers, thermal interface resistance and
+enclosure emissivity use one prepared heat network; actual equilibrium or
+continuing Newmark motion retains the original reversible-heat iteration,
+material potentials, nodal work, inertia and finite caloric history.
+The shared thermoplastic `SolidHeatAudit` gate excludes integrated closed
+radiation roundoff from external supply and checks both corrected residuals
+against the original energy tolerance. No thermal or mechanical state is stepped
+again for this admission.
+
+Every structural cell must retain its exact caloric object, immutable material
+card, material-table binding and complete physical query context in the heat
+network. Electrical bindings refuse without their work owner. Candidates publish
+the original motion, heat and caller-observer histories together; continuation
+retains the returned observer's `second` member. Fixed reference geometry and
+supports, the existing small-strain sub-solidus constitutive intervals, and the
+explicit thermal timestep/refinement requirements remain unchanged. This does
+not supply deformation-dependent contact area/view factors or phase mechanics.
+
+`tests/solid_enthalpy/thermoelastic/heat.rs` defines independent two-cell
+thermal/Newmark references, original conductivity/contact/emissivity swaps,
+source-integrated conduction, continuing loaded motion, and source/domain/budget/
+late-cancellation refusal with deterministic retry. Fixture values are numerical
+test data, not measured material validation.
