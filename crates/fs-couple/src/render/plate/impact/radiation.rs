@@ -15,9 +15,10 @@ pub mod fit;
 /// (the joint impact solve admits poles only within `MAX_JOINT_STATES`).
 pub const MAX_PORTS: usize = 128;
 
-/// The joint impact solve's work envelope: at most 1024 scalar states, mechanical
-/// and acoustic together, in its dense step. Each pole adds two of them, so this
-/// envelope, not a separate pole count, is the load's admission ceiling.
+/// The joint impact solve's work envelope: at most 1024 scalar states, mechanical,
+/// acoustic, material-memory and gas-film together, in its dense step. Each pole
+/// adds two of them, so this envelope, not a separate pole count, is the load's
+/// admission ceiling; relaxation and gas-film attachment refuse beyond it too.
 pub const MAX_JOINT_STATES: usize = 1024;
 
 /// Maximum acoustic oscillators in one model. A travel-time-resolved fit of a

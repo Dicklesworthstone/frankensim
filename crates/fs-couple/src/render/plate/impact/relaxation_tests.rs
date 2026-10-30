@@ -168,3 +168,15 @@ fn material_arm_heat_refuses_bad_coordinates_and_unrepresentable_power() {
     assert_eq!(memory.branch_dissipated_power(&[0.0;3],0).unwrap(),0.0);
     assert_eq!(memory.branch_dissipated_power(&[0.0,0.0,-0.2,7.0],0).unwrap(),0.2);
 }
+
+#[test]
+fn memory_stays_inside_the_joint_state_envelope_after_air() {
+    use super::super::radiation::{Model,Pole,MAX_JOINT_STATES};
+    let air=||{let load=Model{ports:1,poles:(0..510).map(|k|Pole{omega:100.+k as f64,zeta:0.1,coupling:vec![0.1]}).collect()};
+        bare(1e-5).with_radiation_load(&load,&[0],MAX_JOINT_STATES/2).unwrap()};
+    let arms=|count:usize|(0..count).map(|_|{let mut projection=vec![0.0;1022];projection[0]=2.0;
+        RelaxationBranch {projection,..arm()}}).collect::<Vec<_>>();
+    // 2 mechanical + 2*510 acoustic states leave room for two memories, not three.
+    assert!(air().with_relaxation_branches(arms(2),InitialMemory::Unrelaxed,2).is_ok());
+    assert!(air().with_relaxation_branches(arms(3),InitialMemory::Unrelaxed,3).is_err());
+}

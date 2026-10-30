@@ -1,7 +1,7 @@
 frankensim-kettle-v1
 # Tp-S1 timpani (pexfp.376): Fleischer's Kolberg Pauke Nr. 2 with kettle B, a 0.2 mm PET head and
 # Rhaouti, Chaigne and Joly's measured timpani mallet, tuned to the principal of VCSL Timpani 2B.
-# Sources are rows of data/instruments/sources/ledger.tsv (fleischer-2008-kolberg-kettle-b,
+# Sources are rows of data/instruments/ledger.tsv (fleischer-2008-kolberg-kettle-b,
 # rhaouti-chaigne-joly-1999-timpani-mallet, timpani-tps1-recipe); every gap is a row of unknowns.tsv.
 #
 # Kettle B inner (air) surface, z up from the kettle bottom and r from the axis [m]: Fleischer,

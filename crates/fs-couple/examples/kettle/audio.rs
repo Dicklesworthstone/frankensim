@@ -174,8 +174,9 @@ pub fn bake(spec:&Spec,film:&TensionedDisk,modes:&[ModePair],settings:Settings,g
     let mut values=vec![vec![C64::ZERO;samples];n];
     let mut impedance=vec![vec![C64::ZERO;n*n];samples];
     let mut ppw=f64::INFINITY;
-    // Largest asymmetry, and the power eigenvalue with the least headroom above -asymmetry.
-    let (mut asymmetry,mut worst)=(0.0_f64,(f64::INFINITY,0.0,0.0));
+    // Largest asymmetry, the band's lowest power eigenvalue, and the least headroom above
+    // a frequency's own -asymmetry refusal: the last two need not fall at one frequency.
+    let (mut asymmetry,mut lowest_seen,mut headroom)=(0.0_f64,(f64::INFINITY,0.0),(f64::INFINITY,0.0));
     for index in (0..samples).rev() {
         if gate.is_requested() { return Err("exterior frequency sweep cancelled".into()); }
         let w=omega[index]; let k=w/medium.sound_speed;
@@ -203,10 +204,11 @@ pub fn bake(spec:&Spec,film:&TensionedDisk,modes:&[ModePair],settings:Settings,g
         }
         let (skew,lowest)=reciprocal_part(&mut impedance[index],n).map_err(|e|format!("{e} at {:.2} Hz",w/TAU))?;
         asymmetry=asymmetry.max(skew);
-        if lowest+skew<worst.0 { worst=(lowest+skew,lowest,w/TAU); }
+        if lowest<lowest_seen.0 { lowest_seen=(lowest,w/TAU); }
+        if lowest+skew<headroom.0 { headroom=(lowest+skew,w/TAU); }
     }
-    eprintln!("exterior reciprocity: max |Z-Z^T|/|Z|={asymmetry:.3e} (refused above 0.02); reciprocal part Re((Z+Z^T)/2) lowest eigenvalue {:.3e}|Z| at {:.2} Hz, {:.3e}|Z| above that frequency's -|Z-Z^T|/|Z| refusal",
-        worst.1,worst.2,worst.0);
+    eprintln!("exterior reciprocity: max |Z-Z^T|/|Z|={asymmetry:.3e} (refused above 0.02); reciprocal part Re((Z+Z^T)/2): lowest eigenvalue over the band {:.3e}|Z| at {:.2} Hz; least headroom {:.3e}|Z| above a frequency's own -|Z-Z^T|/|Z| refusal, at {:.2} Hz",
+        lowest_seen.0,lowest_seen.1,headroom.0,headroom.1);
     if gate.is_requested() { return Err("exterior fit cancelled".into()); }
     // The fixed log-spaced dictionary cannot follow that detail over the band; the
     // travel-time dictionary does, under the same unchanged error limits.

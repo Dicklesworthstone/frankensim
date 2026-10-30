@@ -14,7 +14,7 @@
   ],
   "physics_missing": [
     "Head loss: film internal loss and bearing-edge friction are zero (no measured drum-head loss exists for this film), so every decay is radiation and felt only, an upper bound",
-    "Head modes above 380 Hz in vacuo ((1,3), (3,2), (6,1), (0,4) and higher): absent. Above the (5,1) pair, about 2.94 times the principal, the only partials are the kettle's air modes heard through the head (near 360, 550, 565, 690 and 730 Hz)",
+    "Head modes above 380 Hz in vacuo ((1,3), (3,2), (6,1), (0,4) and higher): absent. Above the (5,1) pair, about 2.94 times the principal, the only partials are the kettle's air modes heard through the head (near 360, 550, 565, 690 and 730 Hz). The exterior load and the receiver transfer are fitted only from 40 to 400 Hz, so above 400 Hz those lines' levels and radiation damping are extrapolations",
     "Duration: 0.5 s of one strike; the exterior load's poles make each step cost about 50x the mechanics (pexfp.376.2)",
     "The vent: the kettle is sealed",
     "Kettle, stand and counterhoop are rigid and silent",

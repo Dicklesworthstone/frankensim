@@ -25,6 +25,12 @@ cp "${D}/timpani-2b.fsk" .
 # --wav FULL_SCALE_PA MIN_HZ MAX_HZ INTERVALS ORDER X_M Y_M Z_M (receiver in the kettle's frame,
 # z up from the kettle bottom; the head plane is z = 0.53 m). The 40..400 Hz band covers every
 # retained head mode's coupled frequency (the highest, (5,1), near 330 Hz).
-nice -n 10 "${BIN}" timpani-2b.fsk 24000 --wav 20 40 400 20 10 1.0 0 1.53 \
-  > timpani-2b.wav 2> timpani-2b.log
+# The WAV is published only whole: a refusal leaves timpani-2b.wav.part and prints the log's end.
+if ! nice -n 10 "${BIN}" timpani-2b.fsk 24000 --wav 20 40 400 20 10 1.0 0 1.53 \
+  > timpani-2b.wav.part 2> timpani-2b.log; then
+  tail -n 4 timpani-2b.log >&2
+  echo "render.sh: the kettle refused; see ${OUT}/timpani-2b.log" >&2
+  exit 1
+fi
+mv timpani-2b.wav.part timpani-2b.wav
 tail -n 4 timpani-2b.log

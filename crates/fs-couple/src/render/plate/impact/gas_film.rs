@@ -10,6 +10,7 @@ use fs_phs::Storage;
 use fs_material::gas_species::input::GasRecord;
 use std::rc::Rc;
 use super::{ImpactError, ImpactSystem, MAX_IMPACT_MODES, invalid};
+use super::radiation::MAX_JOINT_STATES;
 
 pub(super) struct Memory {
     pub(super) base_dim: usize,
@@ -143,7 +144,7 @@ impl ImpactSystem {
         }
         let base_dim=self.x.len();
         let dim=base_dim.checked_add(geometry.cell_count()).ok_or_else(||invalid("gas state overflow"))?;
-        if dim>1024 {return Err(invalid("gas film exceeds joint 1024-state work ceiling"));}
+        if dim>MAX_JOINT_STATES {return Err(invalid("gas film exceeds joint 1024-state work ceiling"));}
         let mut q=[0.0;MAX_IMPACT_MODES];for i in 0..self.modes {q[i]=self.x[2*i];}
         let law=IsothermalFilm::at_ambient(geometry,&q[..self.modes],gas).map_err(|e|invalid(e.0))?;
         let memory=Rc::new(Memory{base_dim,modes:self.modes,law,source});

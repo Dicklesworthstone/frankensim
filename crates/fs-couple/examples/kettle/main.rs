@@ -56,10 +56,11 @@ fn main() -> Result<(), Error> {
     write!(out,"time_s,mallet_down_m,mallet_velocity_m_s,head_down_m,uniform_internal_pa,point_internal_pa,energy_j,loss_j,felt_crush_j,balance_j")?;
     if model.mechanics.dilation_force_port(1).is_some() {write!(out,",edge_outward_m,edge_baseline_tension_n_m,supplied_work_j")?;}
     writeln!(out)?;
+    // One slot per retained cavity mode: the meridian basis keeps up to 256 (model.rs), not the 8 it once did.
+    let mut pressure = vec![0.0;model.cavity.cavity_modes()];
     for _ in 0..steps {
         let frame=model.step(&gate)?;
-        let mut pressure = [0.0;8];
-        model.cavity.pressures_into(model.mechanics.state(),&mut pressure[..model.cavity.cavity_modes()])?;
+        model.cavity.pressures_into(model.mechanics.state(),&mut pressure)?;
         let local = model.cavity.pressure_at(model.mechanics.state(),&observation)?;
         write!(out,"{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e}",
             frame.time_s, model.tip_weight*model.mechanics.state()[0], model.tip_weight*model.mechanics.state()[1],

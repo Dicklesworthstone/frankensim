@@ -15,9 +15,9 @@ cargo run --release -p fs-couple --example kettle -- \
 cargo test --release -p fs-couple --example kettle -- --test-threads=1
 ```
 
-These are execution requests, not claims of completed or calibrated renders.
-Native Rust execution, listening tests and deadline benchmarks have not been
-performed locally. The existing percussion CI lane includes this example.
+These are execution requests, not claims of calibrated renders. The audio
+command's native run is recorded below; listening tests and deadline benchmarks
+have not been performed. The existing percussion CI lane includes this example.
 
 ## One physical composition, existing numerical owners
 
@@ -81,13 +81,16 @@ shapes); collocation breaks it by its discretisation error, about 0.5 % on the
 illustrative card, and the skew part of the large reactance then shows up as
 +/- eigenvalue pairs of the Hermitian form. The load and the power form
 therefore use the reciprocal part Z_r = (Z+Z^T)/2, whose whole power form
-Re Z_r is checked. The receipt states the largest asymmetry |Z-Z^T|/|Z| and
-the lowest power eigenvalue. A sweep refuses when the asymmetry exceeds 0.02,
-the load fit's own complex RMS limit, or when that eigenvalue lies below
--asymmetry*|Z|; nothing is clipped. `--reciprocal-air` is symmetric by
-construction. The shared positive-real matrix fitter retains all accepted
-residues. Its dictionary is the travel-time one (`fit_resolved`): resonators
-every c/(6D) across the band, D the closed surface's largest extent, because a
+Re Z_r is checked. A sweep refuses when the asymmetry exceeds 0.02, the load
+fit's own complex RMS limit, or when a frequency's lowest power eigenvalue lies
+below -asymmetry*|Z| at that frequency; nothing is clipped. The receipt states
+the largest asymmetry |Z-Z^T|/|Z|, the band's lowest power eigenvalue, and the
+least headroom above that refusal (the two need not share a frequency).
+`--reciprocal-air` is symmetric by construction, but it still fits the fixed
+32-term dictionary named below. On the `--wav` path the shared positive-real
+matrix fitter retains all accepted residues. Its dictionary is the travel-time
+one (`fit_resolved`): resonators every c/(6D) across the band, D the closed
+surface's largest extent, because a
 kettle's load has detail every c/D in frequency that the fixed 32-term
 log-spaced dictionary cannot follow (on the illustrative card it refuses at
 complex RMS 0.033 against the unchanged 0.02 limit). `attach_exterior_radiation`
@@ -146,10 +149,12 @@ inner/outer head flux agreed to 2.78e-17 in a kinematic fixture. These are NOT
 execution of the Rust implementation or measurements. Authored native tests
 cover input/rim/enclosure refusal, uniform pressure work, felt impact/retry,
 complete source power, transfer phase/audits, zero-load parity and passive load
-state/history integration. The audio command above rendered natively on trj
-(single-threaded, 8602 s; 29b7a3088 plus this example's pexfp.376 changes):
-4800 frames, peak 0.586 Pa, max |Z-Z^T|/|Z| = 8.06e-3, lowest power
-eigenvalue +1.03e-6|Z| at 305.9 Hz, 230 load poles at complex RMS 0.0071.
+state/history integration. The audio command above rendered natively at
+5cf1fd1fe on ts1 (single-threaded, 1442 s): 4800 frames, peak 0.593 Pa, max
+|Z-Z^T|/|Z| = 8.06e-3, lowest power eigenvalue +1.03e-6|Z| at 305.9 Hz,
+246 load poles at complex RMS 0.0187 against the 0.02 limit. The margin is
+thin since 88b352677 damped the fit's off-band storage poles; before it the
+same impedance fitted with 230 poles at 0.0071.
 `data/instruments/descriptions/timpani/` holds the measured card.
 
 ## Preserved zero-thickness comparison surface

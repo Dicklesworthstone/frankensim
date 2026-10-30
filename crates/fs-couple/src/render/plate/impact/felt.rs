@@ -110,6 +110,16 @@ mod tests {
         let next=p.history_at(0.5);
         assert!(p.path_energy(0.5,&h)-p.recovered(0.5,&next)>0.0);
     }
+    #[test]
+    fn crush_zero_is_admitted_only_as_the_hysteresis_free_limit() {
+        // A struct-built law bypasses WoolFelt::new, so the pad itself must refuse crush 0 with q != p.
+        let mut p=pad();
+        assert!(p.validate(1).is_ok());
+        p.law=WoolFelt {crush_fraction:0.0,q:p.law.p,..p.law.clone()};
+        assert!(p.validate(1).is_ok());
+        p.law.q=3.0;
+        assert!(p.validate(1).is_err());
+    }
 }
 
 /// Shared finite-inertia backings for geometry-derived, preloaded felt supports.

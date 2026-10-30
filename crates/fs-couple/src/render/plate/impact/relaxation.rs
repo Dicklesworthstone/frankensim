@@ -2,6 +2,7 @@
 //! The equilibrium solid remains in the original mechanical storage. Additional
 //! Maxwell arms use the existing owner's internal-strain storage and resistance.
 use super::{ImpactError, ImpactSystem, invalid};
+use super::radiation::MAX_JOINT_STATES;
 use fs_math::det;
 use fs_phs::RelaxationBranch;
 
@@ -102,8 +103,10 @@ impl ImpactSystem {
     ///
     /// # Errors
     /// Refuses invalid projections/coefficients/budgets, repeated attachment,
-    /// or attachment after motion has started. This is not an in-flight material
-    /// replacement with work accounting. Empty arms preserve the original image.
+    /// attachment after motion has started, or memory beyond the joint
+    /// `MAX_JOINT_STATES` envelope (states already attached included). This is
+    /// not an in-flight material replacement with work accounting. Empty arms
+    /// preserve the original image.
     pub fn with_relaxation_branches(mut self, branches: Vec<RelaxationBranch>,
         initial: InitialMemory, maximum_branches: usize) -> Result<Self, ImpactError>
     {
@@ -113,6 +116,9 @@ impl ImpactSystem {
             return Err(invalid("material relaxation requires one cold attachment within its declared 256-arm ceiling"));
         }
         let base_dim=self.x.len();
+        if base_dim+branches.len()>MAX_JOINT_STATES {
+            return Err(invalid("material relaxation exceeds the joint 1024-state work envelope"));
+        }
         let mut rows=Vec::with_capacity(branches.len());
         let mut rates=Vec::with_capacity(branches.len());
         let mut memories=Vec::with_capacity(branches.len());
