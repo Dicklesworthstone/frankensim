@@ -100,7 +100,7 @@ fn material_frame() -> Frame2d {
     let values = vec![("density",Density::DIMS,1000.0),("young_modulus",Pressure::DIMS,2e6),
         ("eta",DynViscosity::DIMS,500.0)];
     let requirements = values.iter().map(|(n,d,_)|
-        ScalarPropertyRequirement::try_new(n,*d,ScalarAdmissibility::Finite).unwrap()).collect::<Vec<_>>();
+        ScalarPropertyRequirement::try_new(*n,*d,ScalarAdmissibility::Finite).unwrap()).collect::<Vec<_>>();
     let card = source_card("solid",values);
     let point = QueryPoint::new().with("T",300.0).unwrap().with("omega",1.0).unwrap();
     let material = resolve_material_state_point(&card,&point,&requirements,MaterialPropertySelection::SingleClaimOnly).unwrap();
