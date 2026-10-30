@@ -11,6 +11,7 @@ use fs_qty::{QuantitySpec, Temperature};
 
 use crate::liquid::{
     ResolvedLiquidState, resolve_liquid_state, resolve_liquid_state_from_kinematic,
+    resolve_liquid_state_with_expansion,
 };
 use crate::state_point::{
     MaterialPropertySelection, MaterialStatePointError, ResolvedMaterialStatePoint,
@@ -74,6 +75,34 @@ impl<'a> LiquidTemperatureLaw<'a> {
         Ok(Self {
             card, reference_point: point.clone(), reference_state,
             temperature_axis: temperature_axis.to_owned(), viscosity_basis,
+        })
+    }
+
+    /// Bind transport and a sourced isobaric volumetric-expansion law together.
+    ///
+    /// All five original claims refresh at the same temperature and unchanged
+    /// pressure/composition context. Missing expansion refuses instead of
+    /// silently producing a four-property state or an ideal-gas approximation.
+    ///
+    /// # Errors
+    /// Refuses an invalid temperature coordinate or any five-property source
+    /// resolution failure, including missing or unsupported expansion.
+    pub fn try_new_with_expansion(
+        card: &'a MaterialCard,
+        point: &QueryPoint,
+        temperature_axis: &str,
+        viscosity_basis: LiquidViscosityBasis,
+        selection: MaterialPropertySelection,
+    ) -> Result<Self, MaterialStatePointError> {
+        validate_temperature(point, temperature_axis)?;
+        let reference_state =
+            resolve_liquid_state_with_expansion(card, point, viscosity_basis, selection)?;
+        Ok(Self {
+            card,
+            reference_point: point.clone(),
+            reference_state,
+            temperature_axis: temperature_axis.to_owned(),
+            viscosity_basis,
         })
     }
 

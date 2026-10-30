@@ -4833,8 +4833,22 @@ expansion. Density, Cp, conductivity and viscosity remain the same immutable
 checked tuple used by mechanical consumers. Original ideal-gas owners derive
 beta = 1/T at fixed composition after their EOS/caloric/acoustic coherence gate.
 Source-resolved liquids require one explicitly typed absolute-temperature
-coordinate and retain unknown expansion; a missing coefficient never means
-zero expansion. An explicit authored-state constructor can declare its own
+coordinate. Four-property resolution retains unknown expansion; a missing
+coefficient never means zero expansion. `resolve_liquid_state_with_expansion`
+and `LiquidTemperatureLaw::try_new_with_expansion` opt into the original card's
+instantaneous isobaric `volumetric_thermal_expansion_coefficient` [1/K]. The
+same immutable liquid bundle owns all five requirements and source receipts,
+including the explicit dynamic/kinematic viscosity basis. Full-query and
+temperature refresh pin and reevaluate the whole bundle; loss of expansion
+support refuses the update without publishing a partial transport state.
+Known negative and zero expansion remain distinct from missing data. Existing
+thermal-fluid consumers receive this coefficient through the original liquid
+type; there is no separate convection material or substituted gas law.
+Independently declared density and expansion tables are not promoted into a
+thermodynamically consistent EOS, a phase-stability claim or a finite-temperature
+Boussinesq validity certificate. Focused `liquid_expansion` regressions cover
+source retention, both viscosity bases, signed coefficients and refusal.
+An explicit authored-state constructor can declare its own
 temperature and optional beta, without acquiring source-data authority.
 
 `ResolvedThermochemicalRealGasState` supplies the same thermal view from its

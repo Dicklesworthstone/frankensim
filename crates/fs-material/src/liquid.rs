@@ -1,9 +1,10 @@
 //! Source-resolved single-phase liquid thermal and transport tuple.
 //!
 //! The caller's material card and complete query point define the liquid-phase
-//! conditions. This adapter resolves exactly the four required bulk claims and
-//! derives kinematic viscosity, thermal diffusivity, and Prandtl number. It
-//! supplies no equation of state, phase boundary, concentration conversion,
+//! conditions. This adapter resolves four required bulk claims and, when
+//! requested, an independent isobaric volumetric-expansion claim. It derives
+//! kinematic viscosity, thermal diffusivity, and Prandtl number, but supplies
+//! no equation of state, phase boundary, concentration conversion,
 //! chemistry-name default, corrosion model, or experimental-accuracy claim.
 
 pub mod surface;
@@ -27,11 +28,17 @@ pub const DYNAMIC_VISCOSITY_DIMS: Dims = Dims([-1, 1, -1, 0, 0, 0]);
 pub const KINEMATIC_VISCOSITY_PROPERTY: &str = "kinematic_viscosity";
 /// Kinematic-viscosity dimensions `[L, M, t, T, I, N]` for m²/s.
 pub const KINEMATIC_VISCOSITY_DIMS: Dims = Dims([2, 0, -1, 0, 0, 0]);
+/// Canonical source property for instantaneous isobaric volumetric expansion.
+/// This is `beta = -(1/rho) (d rho/dT)_p` at fixed composition, not a linear
+/// expansion coefficient or a mean coefficient over a temperature interval.
+pub const VOLUMETRIC_EXPANSION_PROPERTY: &str = "volumetric_thermal_expansion_coefficient";
+/// Isobaric volumetric-expansion dimensions [1/K].
+pub const VOLUMETRIC_EXPANSION_DIMS: Dims = Dims([0, 0, 0, -1, 0, 0]);
 
 /// One source-resolved liquid transport state at its complete query point.
 ///
-/// The retained material bundle contains all four selected property-use
-/// receipts and the exact query identity. It does not certify that the source
+/// The retained material bundle contains every selected property-use
+/// receipt and the exact query identity. It does not certify that the source
 /// conditions remain single phase beyond the claims' own validity envelopes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedLiquidState {
@@ -44,14 +51,16 @@ pub struct ResolvedLiquidState {
     kinematic_viscosity_m2_s: f64,
     thermal_diffusivity_m2_s: f64,
     prandtl: f64,
+    volumetric_expansion_per_k: Option<f64>,
 }
 
 impl ResolvedLiquidState {
     /// Adopt an already resolved complete bundle without selecting new claims.
     ///
     /// All original properties, query meanings and receipts are retained. The
-    /// four liquid requirements must match this consumer exactly; additional
-    /// coupled properties are refreshed with them at every later query.
+    /// four liquid requirements must match this consumer exactly. An optional
+    /// volumetric-expansion claim must match its finite signed requirement too;
+    /// additional coupled properties refresh with them at every later query.
     ///
     /// # Errors
     /// Refuses missing or incompatible requirements and invalid derived transport.
@@ -102,7 +111,7 @@ impl ResolvedLiquidState {
         )
     }
 
-    /// The complete evidence-bearing source bundle and its four receipts.
+    /// The complete evidence-bearing source bundle and all retained receipts.
     #[must_use]
     pub const fn material(&self) -> &ResolvedMaterialStatePoint {
         &self.material
@@ -148,6 +157,14 @@ impl ResolvedLiquidState {
     #[must_use]
     pub const fn prandtl(&self) -> f64 {
         self.prandtl
+    }
+
+    /// Source-resolved isobaric volumetric expansion [1/K] at this same point.
+    /// Missing source information is `None`, distinct from known zero or
+    /// negative expansion. Density alone never supplies a derivative.
+    #[must_use]
+    pub const fn volumetric_expansion_per_k(&self) -> Option<f64> {
+        self.volumetric_expansion_per_k
     }
 }
 
@@ -202,6 +219,38 @@ pub fn resolve_liquid_state_from_kinematic(
     )
 }
 
+/// Resolve transport and isobaric volumetric expansion from five sourced claims.
+///
+/// Every property is selected at the SAME complete query and retained in the
+/// original liquid bundle. The explicitly selected viscosity basis never falls
+/// back to the other basis. Expansion may be positive, zero or negative; it is
+/// neither inferred from density samples nor replaced by ideal-gas `1/T`.
+/// This admits the declared source laws, not an independent thermodynamic
+/// consistency or liquid-phase-stability certification of those laws.
+///
+/// # Errors
+/// Refuses a missing, ambiguous, wrong-quantity or unsupported expansion claim
+/// as well as every failure of the four-property transport resolution.
+pub fn resolve_liquid_state_with_expansion(
+    card: &MaterialCard,
+    point: &QueryPoint,
+    viscosity_basis: crate::liquid_temperature::LiquidViscosityBasis,
+    selection: MaterialPropertySelection,
+) -> Result<ResolvedLiquidState, MaterialStatePointError> {
+    let (name, dims, kinematic) = match viscosity_basis {
+        crate::liquid_temperature::LiquidViscosityBasis::Dynamic => {
+            (DYNAMIC_VISCOSITY_PROPERTY, DYNAMIC_VISCOSITY_DIMS, false)
+        }
+        crate::liquid_temperature::LiquidViscosityBasis::Kinematic => {
+            (KINEMATIC_VISCOSITY_PROPERTY, KINEMATIC_VISCOSITY_DIMS, true)
+        }
+    };
+    let mut requirements = liquid_requirements(name, dims)?.to_vec();
+    requirements.push(expansion_requirement()?);
+    let material = resolve_material_state_point(card, point, &requirements, selection)?;
+    liquid_from_resolved_material(material, kinematic)
+}
+
 fn resolve_liquid_state_with_viscosity(
     card: &MaterialCard,
     point: &QueryPoint,
@@ -252,6 +301,7 @@ fn liquid_from_resolved_material(
     material: ResolvedMaterialStatePoint,
     viscosity_is_kinematic: bool,
 ) -> Result<ResolvedLiquidState, MaterialStatePointError> {
+    let volumetric_expansion_per_k = sourced_expansion(&material)?;
     let viscosity_property = if viscosity_is_kinematic {
         KINEMATIC_VISCOSITY_PROPERTY
     } else {
@@ -288,7 +338,35 @@ fn liquid_from_resolved_material(
         kinematic_viscosity_m2_s,
         thermal_diffusivity_m2_s,
         prandtl,
+        volumetric_expansion_per_k,
     })
+}
+
+fn expansion_requirement() -> Result<ScalarPropertyRequirement, MaterialStatePointError> {
+    ScalarPropertyRequirement::try_new(
+        VOLUMETRIC_EXPANSION_PROPERTY,
+        VOLUMETRIC_EXPANSION_DIMS,
+        ScalarAdmissibility::Finite,
+    )
+}
+
+fn sourced_expansion(
+    material: &ResolvedMaterialStatePoint,
+) -> Result<Option<f64>, MaterialStatePointError> {
+    let mut candidates = material
+        .properties()
+        .iter()
+        .filter(|property| property.requirement().name() == VOLUMETRIC_EXPANSION_PROPERTY);
+    let Some(property) = candidates.next() else {
+        return Ok(None);
+    };
+    if candidates.next().is_some() || property.requirement() != &expansion_requirement()? {
+        return Err(MaterialStatePointError::InvalidRequirement {
+            property: VOLUMETRIC_EXPANSION_PROPERTY.to_owned(),
+            reason: "retained liquid expansion must be one exact finite isobaric volumetric coefficient",
+        });
+    }
+    Ok(Some(property.value_si()))
 }
 
 fn dynamic_viscosity_from_kinematic(

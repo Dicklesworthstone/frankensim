@@ -137,9 +137,13 @@ impl ThermalFluidTransport for ResolvedLiquidState {
                 "liquid source has ambiguous absolute-temperature coordinates",
             ));
         }
-        // Four bulk transport claims do not supply an EOS derivative. A
-        // liquid's expansion remains unknown until an owner actually supplies it.
-        ThermalFluidTransportState::try_new(self.transport_state()?, temperature, None)
+        // Only the optional, explicitly sourced isobaric expansion of this
+        // SAME bundle may supply beta. Four transport claims alone leave it unknown.
+        ThermalFluidTransportState::try_new(
+            self.transport_state()?,
+            temperature,
+            self.volumetric_expansion_per_k(),
+        )
     }
 }
 
