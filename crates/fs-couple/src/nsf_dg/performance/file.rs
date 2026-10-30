@@ -323,7 +323,10 @@ impl ResolvedDgFilePerformance {
         row.end()?;
         let observer_gas = if rows.next_is("observer_gas") {
             let mut row = rows.row("observer_gas")?;
-            let value = GasPropagation::read_record(&mut row.fields).map_err(|what| bad(row.line, what))?;
+            let exterior = source.exterior_gas_record()
+                .ok_or_else(|| bad(row.line, "observer_gas requires the original DG exterior gas record"))?;
+            let value = GasPropagation::read_record_for_gas(&mut row.fields, exterior)
+                .map_err(|error| ResolvedDgInputError::Gas(GasInputError::Material(error)))?;
             row.end()?;
             Some(value)
         } else { None };

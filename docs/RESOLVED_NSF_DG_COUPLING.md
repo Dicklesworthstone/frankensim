@@ -326,6 +326,11 @@ Alternatives use the same original parsers and owners:
   have explicitly different temperatures/compositions at their admitted common
   equilibrium pressure; changing the whole atmosphere requires changing each
   explicitly authored region/exterior declaration.
+  `observer_gas molecular MAX_PATHS MAX_FILTER_TAPS MAX_KERNEL_TERMS LAW`
+  uses the shared material-relaxation grammar and the original `dg_exterior`
+  species record. It does not borrow the resolved volume's composition or the
+  upstream duct's exterior. A legacy exterior snapshot, missing species or an
+  out-of-domain constitutive law refuses before preparing either physical owner.
 - `boundary pressure COUNT` selects pressure offsets in Pa for each `hold`
   value. `boundary characteristic COUNT` explicitly names the original m/s
   condition. The existing bare `boundary COUNT` has the same characteristic
