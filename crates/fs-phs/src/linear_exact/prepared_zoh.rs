@@ -8,7 +8,7 @@ use crate::{PhsError, PortHamiltonian, PreparedStepRecord, StepRecord, storage_e
 pub(crate) fn energetic_scale(system: &PortHamiltonian, state: &[f64]) -> f64 {
     energetic_scale_into(system, state, &mut vec![0.0; state.len()])
 }
-fn energetic_scale_into(system: &PortHamiltonian, state: &[f64], effort: &mut [f64]) -> f64 {
+pub(super) fn energetic_scale_into(system: &PortHamiltonian, state: &[f64], effort: &mut [f64]) -> f64 {
     effort.fill(0.0);
     system.storage.gradient(state, effort);
     let mut scale = 0.0;

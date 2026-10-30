@@ -27,7 +27,9 @@ use gramian::{accumulate, identity, product};
 pub mod prepared;
 mod prepared_zoh;
 mod positive_heat;
+mod scattering;
 pub use prepared_zoh::PreparedExactZoh;
+pub use scattering::{PreparedScatteringZoh, ScatteringStep, ScatteringStepRecord};
 pub(crate) use prepared_zoh::energetic_scale;
 
 /// Conservative midpoint angular-rate band. For a damped oscillatory pole

@@ -29,13 +29,39 @@ impl PositiveHeat {
         dt: f64,
         resistance: &[f64],
     ) -> Result<Self, PhsError> {
+        if resistance.len() != split.n * split.n || !finite(resistance) {
+            return Err(refuse("positive heat requires complete finite resistance"));
+        }
+        // Passive resistance graphs have an explicit positive decomposition.
+        // Their exact effort nullspaces must not depend on a rounded eigenvalue.
+        let root = factor_resistance(resistance, split.n)?;
+        Self::from_factor(sys, split, dt, resistance, root)
+    }
+
+    // A physical port already supplies its rank-one factor. Keep that factor
+    // instead of reconstructing its exact nullspace through eigendecomposition.
+    // The same entrywise reconstruction admission still checks the supplied R.
+    pub(super) fn from_factor(
+        sys: &PortHamiltonian,
+        split: &LinearSplit,
+        dt: f64,
+        resistance: &[f64],
+        resistance_root: Vec<f64>,
+    ) -> Result<Self, PhsError> {
         let (n, m) = (split.n, split.m);
         let d = 2 * n;
-        if resistance.len() != n * n || !finite(resistance) || !dt.is_finite() || dt <= 0.0 {
+        if resistance.len() != n * n
+            || resistance_root.len() != n * n
+            || !finite(resistance)
+            || !finite(&resistance_root)
+            || !dt.is_finite()
+            || dt <= 0.0
+        {
             return Err(refuse(
                 "positive heat requires finite resistance and a positive clock",
             ));
         }
+        check_resistance_root(resistance, &resistance_root, n)?;
         let mut forward = vec![0.0; n * n];
         let mut inverse = vec![0.0; n * n];
         for i in 0..n {
@@ -61,10 +87,6 @@ impl PositiveHeat {
                 root: Vec::new(),
             });
         }
-        // Passive resistance graphs have an explicit positive decomposition.
-        // Their exact effort nullspaces must not depend on the rounded sign of
-        // a numerical eigenvalue, especially beside much stronger loss blocks.
-        let resistance_root = factor_resistance(resistance, n)?;
         let mut original = vec![0.0; n * n];
         for i in 0..n {
             for k in 0..n {
@@ -139,6 +161,23 @@ impl PositiveHeat {
         derivative: &mut [f64],
         coordinates: &mut [f64],
     ) -> Result<f64, PhsError> {
+        self.evaluate_shifted_into(sys, state, input, 0.0, effort, derivative, coordinates)
+    }
+
+    // Integrate the same positive square after subtracting one HELD scalar
+    // from its first factor row. Its derivative is unchanged. This preserves
+    // nearly matched outgoing wave energy without subtracting large energies.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn evaluate_shifted_into(
+        &self,
+        sys: &PortHamiltonian,
+        state: &[f64],
+        input: &[f64],
+        first_shift: f64,
+        effort: &mut [f64],
+        derivative: &mut [f64],
+        coordinates: &mut [f64],
+    ) -> Result<f64, PhsError> {
         let n = self.n;
         if state.len() != n
             || input.len() != self.m
@@ -147,12 +186,18 @@ impl PositiveHeat {
             || coordinates.len() != self.d
             || !finite(state)
             || !finite(input)
+            || !first_shift.is_finite()
         {
             return Err(refuse(
                 "positive heat requires complete finite state/input/scratch",
             ));
         }
         if self.root.is_empty() {
+            if first_shift != 0.0 {
+                return Err(refuse(
+                    "constant shifted loss requires explicit interval power",
+                ));
+            }
             return Ok(0.0);
         }
         sys.storage.gradient(state, effort);
@@ -162,10 +207,10 @@ impl PositiveHeat {
             let conservative: f64 = (0..n).map(|j| sys.j[i * n + j] * effort[j]).sum();
             let resistive: f64 = (0..n).map(|j| sys.r[i * n + j] * effort[j]).sum();
             derivative[i] = (force + conservative) - resistive;
-            coordinates[i] = (0..n)
+            let loss = (0..n)
                 .map(|j| self.resistance_root[i * n + j] * effort[j])
-                .sum::<f64>()
-                / root_rate;
+                .sum::<f64>();
+            coordinates[i] = (loss - if i == 0 { first_shift } else { 0.0 }) / root_rate;
         }
         for i in 0..n {
             coordinates[n + i] = (0..n)

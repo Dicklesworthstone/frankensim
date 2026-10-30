@@ -386,6 +386,36 @@ impl PreparedQuadraticFlow {
         Ok(PreparedQuadraticStep { state: endpoint, integrals })
     }
 
+    // Recover a declared linear observation's cached integral in ORIGINAL
+    // coordinates. Its Gramian has only the constant row/column: no trial
+    // physical state, constitutive probe or second exponential is needed.
+    pub(super) fn linear_integral_map(
+        &self,
+        index: usize,
+    ) -> Result<(Vec<f64>, Vec<f64>), PhsError> {
+        let w = self.integrals.get(index)
+            .ok_or_else(|| refuse("prepared linear observation index"))?;
+        let last = self.d - 1;
+        if w[last * self.d + last] != 0.0
+            || (0..last).any(|i| (0..last).any(|j| w[i * self.d + j] != 0.0))
+        {
+            return Err(refuse("prepared observation is not a linear form"));
+        }
+        let balanced: Vec<f64> = (0..self.n)
+            .map(|i| w[i * self.d + last] + w[last * self.d + i])
+            .collect();
+        let state: Vec<f64> = (0..self.n)
+            .map(|j| (0..self.n).map(|i| balanced[i] * self.forward[i * self.n + j]).sum())
+            .collect();
+        let input: Vec<f64> = (0..self.m)
+            .map(|p| w[(self.n + p) * self.d + last] + w[last * self.d + self.n + p])
+            .collect();
+        if !finite(&state) || !finite(&input) {
+            return Err(refuse("prepared linear observation map is nonfinite"));
+        }
+        Ok((state, input))
+    }
+
     // Shared contractions for allocating evaluation and a prepared exact owner.
     // Output is numerical scratch; the public caller publishes only on success.
     #[allow(clippy::too_many_arguments)]

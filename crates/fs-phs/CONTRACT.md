@@ -911,3 +911,41 @@ constructor retains its arithmetic, including the gamma=1 thermal limit.
 Focused tests check bitwise direct/basis equality across material scales, exact
 diffusion-time scaling and refusal of an unresolved band after an admitted
 binding. Nonuniform molecular ducts reuse this basis across local samples.
+
+### Prepared selected-port scattering with original physical accounts
+
+`linear_exact::PreparedScatteringZoh` owns the complete original quadratic
+system and one fixed positive-clock cache. At an explicitly selected port,
+the input slot holds an incident wave `a` in original output units and the
+boundary law is `u = (2a-y)/Z`, `b = y-a`, with `Z` in original `y/u` units.
+All other inputs and every returned mean output retain their original order
+and meaning. Storage, physical R, complete material memory and all state
+coordinates are retained. Nonlinear storage is refused through its declared
+quadratic classification; no unit-state probe infers a different material law.
+
+The existing `PreparedQuadraticFlow` supplies the complete transition and
+original output integrals. Its cached linear form gives the current-window
+relation `y_bar = free + beta*a` without trial trajectories, constitutive
+probes or new exponentials. This lets an exciter close the SAME window rather
+than relying on a delayed reflected pressure or a fabricated priming source.
+
+Original physical heat and reference-boundary exchange are integrated
+separately. The existing positive-factor owner admits the explicit rank-one
+reference factor against its represented matrix; shifting that same factor
+by the held incident wave independently integrates nonnegative outgoing
+energy, including nearly matched boundaries. Neither physical heat nor
+outgoing energy comes from a storage/source remainder. Original physical
+energy closes with unselected-port work plus signed boundary work, and the
+wave account independently checks incident minus outgoing energy. Reference
+loading is never reported as material viscosity or heat.
+
+`step_into` publishes both complete caller buffers only after all physical
+and wave checks succeed. It reuses numerical scratch, and a focused native
+test observes zero owner allocations over 1,000 steps and current-window
+predictions. Four focused tests also cover full nonproportional damping and
+Maxwell memory against independent equations, selected-port and other-source
+work, clock subdivision, exact/tiny outgoing energy, and atomic/nonlinear
+refusal. Seven existing heat regressions remain green. Preparation retains
+the shared dense capacity; held-wave bandwidth, nonlinear exciter convergence
+and cancellation at caller boundaries remain consumer responsibilities. No
+full-workspace or measured real-time performance claim is made.
