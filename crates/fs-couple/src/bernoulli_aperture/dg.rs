@@ -26,6 +26,8 @@ use crate::dg_port::{DgTerminalFrame, sum_terminal_work};
 pub mod loaded;
 /// Finite thermochemical energy feedback through the complete moving source and load.
 pub mod finite_gas;
+/// Finite-body wall heat and signed material work on the original moving load.
+pub mod thermal_wall;
 mod tract;
 mod gas;
 /// Actual upstream tract exchange and cold preparation of the series load.
@@ -206,6 +208,21 @@ fn accept_acoustic_candidate(
     spatial_pressure: [MaterialPressureFrame; 2],
     drive: TubeDrive,
 ) -> Result<DgApertureFrame, AcousticRealizeError> {
+    accept_acoustic_candidate_observed(load, relation, aperture, spatial_pressure, drive, |_| Ok(()))
+        .map(|(frame, ())| frame)
+}
+
+// The optional physical source integral observes the SAME solved main-port
+// inputs and immutable native trial before publication. Ordinary callers keep
+// their original arithmetic and allocate no additional source operator.
+fn accept_acoustic_candidate_observed<T>(
+    load: &mut ApertureDgLoad,
+    relation: DgPortResponse,
+    aperture: ApertureFrame,
+    spatial_pressure: [MaterialPressureFrame; 2],
+    drive: TubeDrive,
+    observe: impl FnOnce(&crate::dg_port::DgPortTrial<'_>) -> Result<T, AcousticRealizeError>,
+) -> Result<(DgApertureFrame, T), AcousticRealizeError> {
     let dt = load.propagator().dt();
     let acoustic = load.preview_step(aperture.bore_flow_m3_s)?;
     let duct = acoustic.output();
@@ -244,11 +261,12 @@ fn accept_acoustic_candidate(
             "DG aperture candidate left the finite energy/work domain",
         ));
     }
+    let observed = observe(&acoustic)?;
     let duct = acoustic.accept();
-    Ok(DgApertureFrame {
+    Ok((DgApertureFrame {
         aperture, spatial_pressure, duct, upstream: None, terminal, terminals, stored_energy_j, storage_change_j, parameter_work_j: 0.0, inferred_total_dissipation_j,
         upstream_work_j, body_work_j, port_work_residual_j,
-    })
+    }, observed))
 }
 
 #[cfg(test)]

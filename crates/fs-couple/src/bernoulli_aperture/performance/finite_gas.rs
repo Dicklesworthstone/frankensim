@@ -104,8 +104,10 @@ impl AperturePerformance {
         program: FiniteGasHeatProgram, gate: Arc<CancelGate>)
         -> Result<Self, GestureCompileError>
     {
-        if self.poisoned || self.system.aperture().accepted_steps() != 0 || self.finite_gas.is_some() {
-            return Err(invalid("finite gas heat must bind once before performance playback"));
+        if self.poisoned || self.system.aperture().accepted_steps() != 0
+            || self.finite_gas.is_some() || self.finite_wall.is_some()
+        {
+            return Err(invalid("finite gas heat must bind once before playback; combined finite gas/body heat needs a joint transaction"));
         }
         let (assignments, work) = self.remaining_control_budgets()?;
         if program.controls.is_empty() || program.controls.len() > assignments

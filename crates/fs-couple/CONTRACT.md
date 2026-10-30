@@ -15655,3 +15655,43 @@ Focused regressions in
 physical-strain integration and thermal balance, exercise shared conductive
 feedback under companion-material substitution, and preserve accepted state
 through unsupported laws, domain exit, context mismatch, and cancellation.
+
+## Finite material-wall heat during coupled aperture performance
+
+`ApertureDg::step_with_finite_wall_heat_controlled` advances the original
+moving mechanics and complete downstream load once at the initial material
+state. The same held-flow trial can integrate physical Kelvin/Maxwell wall heat
+using its actual inlet, terminal and finite-branch junction inputs. The main
+bore's own native loss bounds that deposition; unrelated branch, gas, terminal,
+mechanical or numerical loss cannot be relabeled as solid heat.
+
+One original enthalpy chart then closes `body storage change + wall parameter
+work = external heat + native wall heat`. Every endpoint work trial starts from
+the same marched acoustic state and the original body. It refreshes the retained
+uniform or regional wall source and the complete mean-port relation without
+resetting displacement, momentum, material memories, branches, finite passages,
+rational terminal poles or accepted clocks. The moving source receives that
+same final load impedance.
+
+The acoustic frame retains its original native dissipation and signed parameter
+work. The enclosing body account exports native dissipation minus the heat
+already deposited in the solid, measures complete final represented storage,
+and checks body, source and combined energy residuals before publishing any
+participant. Native terminal exchange remains explicit; no rational storage
+function is invented. Refusal and cancellation preserve every accepted owner.
+
+`AperturePerformance::with_finite_wall_heat` owns the original chart, material
+card and finite body and schedules signed external power on the physical sample
+clock. Heat controls share existing control/work budgets and advance with the
+accepted observation. The accepted body and last complete energy account remain
+inspectable. Diagnostic observation failure retains the renderer's existing
+poisoning semantics.
+
+This is a first-order frozen-material partition for one complete main-bore wall
+body, one temperature and caloric chart, an all-solid phase, fixed geometry and
+constant density. Regional thicknesses and restraint/source distinctions remain
+explicit. Side-branch walls keep their independent materials. Physical time-step
+convergence remains separate from exponential/source integration budgets.
+Expansion, phase transfer, gas/body conduction, an independently heated upstream
+tract and simultaneous finite-gas/wall playback require their own joint
+transactions and are not supplied by this route.
