@@ -368,6 +368,8 @@ impl<L: Lattice3<27>> NsfDg<L> {
     pub const fn reference_gas(&self) -> &GasState { &self.reference }
     /// Actual coupled area [m²]: the selected aperture or complete face.
     pub const fn area_m2(&self) -> f64 { self.area_m2 }
+    /// Physical face carrying the downstream DG inlet; the source is opposite.
+    pub const fn coupled_face_is_high(&self) -> bool { self.high }
     /// Original downstream aperture bounds, if explicitly selected for the bore.
     pub fn coupled_patch(&self) -> Option<NsfCharacteristicPatch> {
         self.zone.characteristic_patch_on(self.high)
