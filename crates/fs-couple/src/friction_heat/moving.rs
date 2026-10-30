@@ -3,8 +3,10 @@
 //! Two planar material strips translate along one common tangent. Their original
 //! cells retain all heat and conduct it through the existing network. Every
 //! intersected cell pair has its own massless common-temperature interface.
-//! The overlap area is integrated exactly along a linear path, including every
-//! cell-edge crossing; no endpoint sampling, nearest-cell deposition, global
+//! The overlap area is integrated along linear or explicitly quadratic paths,
+//! including every cell-edge crossing and interior reversal. Affine physical
+//! power uses the same residence's first time moment; no endpoint sampling,
+//! nearest-cell deposition, global
 //! isothermal patch, body heat fraction or additional thermal store is used.
 //!
 //! The footprint has fixed width and length. Flux/temperature/material data are
@@ -13,7 +15,9 @@
 //! not inferred from contact coefficients. Curved surfaces, changing width,
 //! large rotations and nonuniform transverse temperature require a spatially
 //! resolved surface owner; this strip model does not silently approximate them.
-use super::{FrictionHeatEntropy, FrictionHeatTolerances, entropy::InterfaceEntropy, finite, invalid};
+use super::{
+    FrictionHeatEntropy, FrictionHeatTolerances, entropy::InterfaceEntropy, finite, invalid,
+};
 use fs_thermal::enthalpy::backward_euler::{
     BackwardEulerStep, BackwardEulerTrial, StepCoefficients,
 };
@@ -25,6 +29,18 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Material-coordinate partial-slip history and its original moving heat network.
 pub mod partial_slip;
+
+/// Accelerated strip motion and time-resolved physical work residence.
+pub mod trajectory;
+
+impl From<trajectory::TrajectoryError> for DepositionError {
+    fn from(error: trajectory::TrajectoryError) -> Self {
+        match error {
+            trajectory::TrajectoryError::Invalid(message) => invalid(message),
+            trajectory::TrajectoryError::Arithmetic => Self::Arithmetic,
+        }
+    }
+}
 
 /// One fixed plane and a unit tangent; normal points from body A to body B.
 #[derive(Clone, Copy, Debug)]
@@ -386,16 +402,57 @@ pub struct MovingFrictionHeatReport {
 pub struct MovingFrictionHeatStep<'s, 'm> {
     thermal: BackwardEulerStep<'s, 'm>,
     patches: Vec<SweptContactPatch>,
+    first_time_area_m2: Vec<f64>,
     area: f64,
     end: MovingContactPosition,
     covered: BTreeMap<CellId, f64>,
 }
 impl<'s, 'm> MovingFrictionHeatStep<'s, 'm> {
+    /// Linear material/footprint motion through the original thermal owner.
     pub fn new(
         thermal: &'s DepositionSimulation<'m>,
         target_s: f64,
         route: &MovingFrictionRoute,
         path: MovingContactPath,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
+        Self::from_trajectory(
+            thermal,
+            target_s,
+            route,
+            trajectory::ContactCurves::linear(path)?,
+            checkpoint,
+        )
+    }
+
+    /// Actual quadratic material/footprint motion, including interior reversals.
+    ///
+    /// All three placements belong to the same interval. Complete-path coverage
+    /// is checked, including extrema between samples. The route retains its
+    /// original planar uniform-prism assumptions; no rotating/spherical map is
+    /// inferred. Geometry, cell storage, interface residual and entropy all use
+    /// the same owner as the linear entry point.
+    pub fn new_quadratic(
+        thermal: &'s DepositionSimulation<'m>,
+        target_s: f64,
+        route: &MovingFrictionRoute,
+        path: trajectory::QuadraticContactPath,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
+        Self::from_trajectory(
+            thermal,
+            target_s,
+            route,
+            trajectory::ContactCurves::quadratic(path)?,
+            checkpoint,
+        )
+    }
+
+    fn from_trajectory(
+        thermal: &'s DepositionSimulation<'m>,
+        target_s: f64,
+        route: &MovingFrictionRoute,
+        path: trajectory::ContactCurves,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, DepositionError> {
         route.validate(thermal, &mut checkpoint)?;
@@ -404,71 +461,49 @@ impl<'s, 'm> MovingFrictionHeatStep<'s, 'm> {
             route.surfaces.iter().flatten().map(|f| f.face.cell),
             &mut checkpoint,
         )?;
-        for point in [path.start, path.end] {
-            if point
-                .body_offsets_m
-                .iter()
-                .chain(std::iter::once(&point.footprint_offset_m))
-                .any(|v| !v.is_finite())
-            {
-                return Err(invalid("finite moving contact placements required"));
-            }
-            let f = edges(
+        for side in 0..2 {
+            let cells = &route.surfaces[side];
+            if !path.contained(
+                side,
                 route.footprint_m,
-                point.footprint_offset_m,
-                point.footprint_offset_m,
-            )?;
-            for side in 0..2 {
-                let cells = &route.surfaces[side];
-                let lo = finite(cells[0].face.span_m[0] + point.body_offsets_m[side])?;
-                let hi = finite(cells.last().unwrap().face.span_m[1] + point.body_offsets_m[side])?;
-                if f[0][0] < lo || f[1][0] > hi {
-                    return Err(invalid(
-                        "the complete moving footprint must remain on both material surfaces",
-                    ));
-                }
+                [
+                    cells[0].face.span_m[0],
+                    cells.last().unwrap().face.span_m[1],
+                ],
+            )? {
+                return Err(invalid(
+                    "the complete moving footprint must remain on both material surfaces",
+                ));
             }
         }
-        let foot = edges(
-            route.footprint_m,
-            path.start.footprint_offset_m,
-            path.end.footprint_offset_m,
-        )?;
-        let fb = bounds(foot);
-        let a = route.surfaces[0]
-            .iter()
-            .map(|c| {
-                edges(
-                    c.face.span_m,
-                    path.start.body_offsets_m[0],
-                    path.end.body_offsets_m[0],
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let b = route.surfaces[1]
-            .iter()
-            .map(|c| {
-                edges(
-                    c.face.span_m,
-                    path.start.body_offsets_m[1],
-                    path.end.body_offsets_m[1],
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let foot = trajectory::edges(route.footprint_m, path.footprint)?;
+        let fb = trajectory::bounds(foot)?;
+        let prepare = |side: usize| {
+            route.surfaces[side]
+                .iter()
+                .map(|cell| {
+                    let edges = trajectory::edges(cell.face.span_m, path.bodies[side])?;
+                    Ok((edges, trajectory::bounds(edges)?))
+                })
+                .collect::<Result<Vec<_>, trajectory::TrajectoryError>>()
+        };
+        let a = prepare(0)?;
+        let b = prepare(1)?;
         let mut patches = Vec::new();
+        let mut first_time_area_m2 = Vec::new();
         let mut tested = 0usize;
         let mut first = 0;
-        for (i, ae) in a.into_iter().enumerate() {
+        for (i, (ae, ab)) in a.into_iter().enumerate() {
             checkpoint()?;
-            let ab = bounds(ae);
             if ab[1] <= fb[0] || ab[0] >= fb[1] {
                 continue;
             }
-            while first < b.len() && bounds(b[first])[1] <= ab[0] {
+            // Every face on one body shares its offset polynomial, so swept
+            // bounds remain sorted even through acceleration and reversal.
+            while first < b.len() && b[first].1[1] <= ab[0] {
                 first += 1;
             }
-            for (j, &be) in b.iter().enumerate().skip(first) {
-                let bb = bounds(be);
+            for (j, &(be, bb)) in b.iter().enumerate().skip(first) {
                 if bb[0] >= ab[1] {
                     break;
                 }
@@ -480,10 +515,10 @@ impl<'s, 'm> MovingFrictionHeatStep<'s, 'm> {
                 if tested > route.budget.maximum_overlap_tests {
                     return Err(DepositionError::Budget("moving footprint overlap tests"));
                 }
-                let area = finite(
-                    route.frame.width_m
-                        * swept_overlap([ae[0], ae[1], be[0], be[1], foot[0], foot[1]])?,
-                )?;
+                let moment =
+                    trajectory::swept_moments([ae[0], ae[1], be[0], be[1], foot[0], foot[1]])?;
+                let area = finite(route.frame.width_m * moment.area)?;
+                let time_area = finite(route.frame.width_m * moment.time_area)?;
                 if area == 0.0 {
                     continue;
                 }
@@ -498,17 +533,23 @@ impl<'s, 'm> MovingFrictionHeatStep<'s, 'm> {
                     mean_area_m2: area,
                     distances_m: [route.surfaces[0][i].distance, route.surfaces[1][j].distance],
                 });
+                first_time_area_m2.push(time_area);
             }
         }
         let total = patches
             .iter()
             .try_fold(0.0, |s, p| finite(s + p.mean_area_m2))?;
+        let first_moment = first_time_area_m2
+            .iter()
+            .try_fold(0.0, |s, p| finite(s + p))?;
         let area = route.footprint_area_m2();
+        let tolerance = 1024.0 * f64::EPSILON * area * (patches.len() as f64).sqrt();
         if patches.is_empty()
-            || (total - area).abs() > 1024.0 * f64::EPSILON * area * (patches.len() as f64).sqrt()
+            || (total - area).abs() > tolerance
+            || (first_moment - 0.5 * area).abs() > tolerance
         {
             return Err(invalid(
-                "swept contact area failed full-footprint conservation",
+                "swept contact area/time moment failed full-footprint conservation",
             ));
         }
         // Geometry is fixed for this residual. Prepare coverage once instead
@@ -524,12 +565,15 @@ impl<'s, 'm> MovingFrictionHeatStep<'s, 'm> {
         for (&id, &covered_area) in &covered {
             checkpoint()?;
             if covered_area > exposed[&id] * (1.0 + 1024.0 * f64::EPSILON) {
-                return Err(invalid("moving contact overlaps an already covered surface"));
+                return Err(invalid(
+                    "moving contact overlaps an already covered surface",
+                ));
             }
         }
         Ok(Self {
             thermal: BackwardEulerStep::new(thermal, target_s, checkpoint)?,
             patches,
+            first_time_area_m2,
             area,
             end: path.end,
             covered,
@@ -569,6 +613,33 @@ impl<'s, 'm> MovingFrictionHeatStep<'s, 'm> {
             remaining = finite(remaining - value)?;
         }
         Ok(result)
+    }
+
+    /// Spatially uniform friction power with an affine time history.
+    ///
+    /// Supply the actual physical powers at this interval's two endpoints.
+    /// Held traction and affine slip velocity have exactly this form. Negative
+    /// endpoint power refuses rather than depositing active or numerical work.
+    /// Each patch receives the integral of power times its actual residence,
+    /// so an accelerating footprint need not share work in mean-area fractions.
+    /// This distributes work spatially; the original interface solve still
+    /// determines heat exchange between the two finite bodies.
+    pub fn affine_power_work_j(
+        &self,
+        endpoint_power_w: [f64; 2],
+    ) -> Result<Vec<f64>, DepositionError> {
+        Ok(trajectory::affine_work(
+            self.area,
+            self.duration_s(),
+            endpoint_power_w,
+            self.patches
+                .iter()
+                .zip(&self.first_time_area_m2)
+                .map(|(patch, &time_area)| trajectory::Moments {
+                    area: patch.mean_area_m2,
+                    time_area,
+                }),
+        )?)
     }
 
     pub fn evaluate<P, E: From<DepositionError>>(
@@ -697,7 +768,8 @@ impl<'s, 'm> MovingFrictionHeatStep<'s, 'm> {
             Ok(StepCoefficients { sources_w,conductances_w_k,payload:(payload,report) })
         };
         let trial = if with_entropy {
-            self.thermal.evaluate_with_entropy(energy_j, coefficients, &check)?
+            self.thermal
+                .evaluate_with_entropy(energy_j, coefficients, &check)?
         } else {
             self.thermal.evaluate(energy_j, coefficients, &check)?
         };
@@ -706,8 +778,13 @@ impl<'s, 'm> MovingFrictionHeatStep<'s, 'm> {
             report.entropy = Some(FrictionHeatEntropy::from_interfaces(
                 trial.entropy_audit().ok_or(DepositionError::Arithmetic)?,
                 interface,
-                report.patches.iter().map(|patch| (patch.dissipated_j,
-                    patch.interface_temperature_k, patch.interface_residual_j)),
+                report.patches.iter().map(|patch| {
+                    (
+                        patch.dissipated_j,
+                        patch.interface_temperature_k,
+                        patch.interface_residual_j,
+                    )
+                }),
                 &check,
             )?);
             check()?;

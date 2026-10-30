@@ -1,5 +1,35 @@
 # CONTRACT: fs-couple
 
+## Accelerated moving-contact friction heat
+
+`friction_heat::moving::trajectory::QuadraticContactPath` supplies actual
+material-grid and footprint placements at the start, midpoint and end of a
+thermal interval. `MovingFrictionHeatStep::new_quadratic` and the linear
+constructor share the original finite-cell thermal, massless-interface,
+ambient-coverage, entropy and acceptance owners.
+
+Every quadratic edge crossing splits the swept overlap into polynomial
+intervals. Area and its first normalized-time moment are integrated with
+bounded work per cell pair, retaining the original sweep and patch budgets.
+Whole-path containment includes extrema between supplied samples, so agreeing
+endpoints cannot conceal an excursion beyond the material surface.
+
+`affine_power_work_j` consumes nonnegative physical friction powers at the
+interval endpoints and distributes their integral by actual spatial
+residence. Held traction and affine slip velocity supply this power history.
+For a unit footprint moving as `x=t²` with `P=2t`, mean patch areas are
+`[2/3,1/3]` but deposited work is `[1/2,1/2]`. Mean area still owns thermal
+conductance and ambient coverage; it is not substituted for power-weighted
+work. Area, first-moment and total-work checks admit only roundoff correction.
+
+Native traction-to-finite-storage tests use the original friction, enthalpy
+and entropy paths, with analytical cell energies and failure/retry checks.
+Geometry tests cover acceleration, reversal, unsampled extrema, linear
+reduction and common accelerating translation. Exact residence integration
+does not remove endpoint thermal-coefficient time error. The route remains
+a fixed-width planar strip with uniform spatial friction power; curved or
+rotating spherical material surfaces require their own admitted geometry.
+
 ## Driven directional friction on the original finite thermal timeline
 
 `friction_heat::directional::driven::apply_source_directional_driven_heat`
