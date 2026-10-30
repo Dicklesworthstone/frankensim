@@ -12,6 +12,9 @@
 //! each panel analytically. Successive refinements report their discrepancy as
 //! a numerical estimate, never as a certified error bound. Shadow boundaries,
 //! narrow beams, or unresolved source variation can evade that estimate.
+//! The scene entry point supplies declared angular-profile boundaries and
+//! refines their intervals independently; a bare callback supplies no such
+//! support information.
 
 use core::{f64::consts::PI, fmt};
 
@@ -170,6 +173,8 @@ pub struct ScatterSettings {
     /// Panels in the first midpoint evaluation; must be positive.
     pub initial_panels: u32,
     /// Largest panel count in a refinement, at least `initial_panels`.
+    /// Scene-level angular partitions share this total, rather than each
+    /// receiving a separate budget. Every known interval needs at least one.
     /// Total callback evaluations are less than four times this limit.
     pub max_panels: u32,
     /// Requested absolute discrepancy between refinements, in cd/m².
@@ -189,12 +194,25 @@ impl Default for ScatterSettings {
     }
 }
 
+impl ScatterSettings {
+    pub(crate) fn is_valid(self) -> bool {
+        self.initial_panels > 0
+            && self.max_panels >= self.initial_panels
+            && self.absolute_tolerance_cd_m2.is_finite()
+            && self.absolute_tolerance_cd_m2 >= 0.0
+            && self.relative_tolerance.is_finite()
+            && self.relative_tolerance >= 0.0
+    }
+}
+
 /// Photopic single-scattered radiance and its explicitly limited uncertainty.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScatterEstimate {
     /// Single-scattered photopic radiance, cd/m²; no tone map or exposure.
     pub luminance_cd_m2: f64,
     /// Absolute difference between the last two quadratures, in cd/m².
+    /// For scene-level angular partitions this is the sum of each interval's
+    /// discrepancy after camera transmission, with no cancellation of errors.
     /// `None` means no refinement comparison was possible. This is a heuristic
     /// numerical estimate, not an enclosure or a bound on unmodeled physics.
     pub estimated_quadrature_error_cd_m2: Option<f64>,
@@ -265,13 +283,7 @@ pub fn single_scattered_luminance<E>(
     medium
         .transmittance(distance_m)
         .map_err(ScatterError::Medium)?;
-    if settings.initial_panels == 0
-        || settings.max_panels < settings.initial_panels
-        || !settings.absolute_tolerance_cd_m2.is_finite()
-        || settings.absolute_tolerance_cd_m2 < 0.0
-        || !settings.relative_tolerance.is_finite()
-        || settings.relative_tolerance < 0.0
-    {
+    if !settings.is_valid() {
         return Err(ScatterError::Settings);
     }
     let endpoint = ray.at(distance_m);
@@ -357,6 +369,113 @@ pub fn single_scattered_luminance<E>(
         previous = Some(sum);
         panels = panels.saturating_mul(2).min(settings.max_panels);
     }
+}
+
+/// Integrate each declared angular interval with its own actual refinements.
+/// Knots are sorted, distinct normalized ray parameters strictly inside (0,1).
+/// Even allocation gives narrow angular features a useful share of the work;
+/// allocation by metric interval length would starve precisely those features.
+/// The public callback-only integrator remains unchanged when there are no knots.
+pub(crate) fn single_scattered_luminance_partitioned<E>(
+    medium: &HomogeneousMedium,
+    ray: &Ray,
+    distance_m: f64,
+    settings: ScatterSettings,
+    cx: &Cx<'_>,
+    knots: &[f64],
+    mut incident: impl FnMut(Point3, Vec3) -> Result<f64, E>,
+) -> Result<ScatterEstimate, ScatterError<E>> {
+    cx.checkpoint().map_err(|_| ScatterError::Cancelled)?;
+    if !settings.is_valid()
+        || knots
+            .iter()
+            .any(|u| !u.is_finite() || *u <= 0.0 || *u >= 1.0)
+        || knots.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(ScatterError::Settings);
+    }
+    if knots.is_empty() || distance_m == 0.0 || medium.scattering_per_m == 0.0 {
+        return single_scattered_luminance(medium, ray, distance_m, settings, cx, incident);
+    }
+    medium
+        .transmittance(distance_m)
+        .map_err(ScatterError::Medium)?;
+    let segments = u32::try_from(knots.len())
+        .ok()
+        .and_then(|n| n.checked_add(1))
+        .filter(|n| *n <= settings.max_panels)
+        .ok_or(ScatterError::Settings)?;
+    let initial_total = settings.initial_panels.max(segments);
+    let share = |total: u32, index: u32| total / segments + u32::from(index < total % segments);
+    let mut sums = [0.0_f64; 2];
+    let mut compensation = [0.0_f64; 2];
+    let mut compared_every_segment = true;
+    let mut evaluations = 0_u64;
+    let mut panels = 0_u32;
+    let mut start_m = 0.0;
+    for index in 0..segments {
+        cx.checkpoint().map_err(|_| ScatterError::Cancelled)?;
+        let end_m = knots
+            .get(index as usize)
+            .map_or(distance_m, |u| distance_m * u);
+        let length_m = end_m - start_m;
+        if !length_m.is_finite() || length_m <= 0.0 {
+            return Err(ScatterError::Arithmetic);
+        }
+        let segment_ray = Ray {
+            origin: ray.at(start_m),
+            dir: ray.dir,
+        };
+        let result = single_scattered_luminance(
+            medium,
+            &segment_ray,
+            length_m,
+            ScatterSettings {
+                initial_panels: share(initial_total, index),
+                max_panels: share(settings.max_panels, index),
+                absolute_tolerance_cd_m2: settings.absolute_tolerance_cd_m2 / f64::from(segments),
+                relative_tolerance: settings.relative_tolerance,
+            },
+            cx,
+            &mut incident,
+        )?;
+        let transmission = medium
+            .transmittance(start_m)
+            .map_err(ScatterError::Medium)?;
+        compared_every_segment &= result.estimated_quadrature_error_cd_m2.is_some();
+        for (channel, value) in [
+            result.luminance_cd_m2 * transmission,
+            result.estimated_quadrature_error_cd_m2.unwrap_or(0.0) * transmission,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let adjusted = value - compensation[channel];
+            let next = sums[channel] + adjusted;
+            compensation[channel] = (next - sums[channel]) - adjusted;
+            sums[channel] = next;
+            if !next.is_finite() || next < 0.0 {
+                return Err(ScatterError::Arithmetic);
+            }
+        }
+        evaluations += result.evaluations;
+        panels += result.panels;
+        start_m = end_m;
+    }
+    let discrepancy = compared_every_segment.then_some(sums[1]);
+    let tolerance_met = discrepancy.is_some_and(|error| {
+        error <= settings.absolute_tolerance_cd_m2
+            || error / sums[0].max(f64::MIN_POSITIVE) <= settings.relative_tolerance
+    });
+    cx.checkpoint().map_err(|_| ScatterError::Cancelled)?;
+    Ok(ScatterEstimate {
+        luminance_cd_m2: sums[0],
+        estimated_quadrature_error_cd_m2: discrepancy,
+        evaluations,
+        panels,
+        tolerance_met,
+        omitted_multiple_scattering_bound_cd_m2: None,
+    })
 }
 
 #[cfg(test)]
@@ -555,6 +674,101 @@ mod tests {
             assert!(!coarse.tolerance_met);
             assert_eq!(coarse.evaluations, 16);
             assert_eq!(fine, integrate(32));
+        });
+    }
+
+    #[test]
+    fn g1_partitioned_slab_preserves_camera_extinction_and_total_work_budget() {
+        with_cx(|_, cx| {
+            let medium = HomogeneousMedium::try_new(0.1, 0.2, PhaseFunction::Isotropic).unwrap();
+            let settings = ScatterSettings {
+                initial_panels: 2,
+                max_panels: 64,
+                absolute_tolerance_cd_m2: 1.0e-12,
+                relative_tolerance: 1.0e-12,
+            };
+            let result = single_scattered_luminance_partitioned(
+                &medium,
+                &ray(),
+                10.0,
+                settings,
+                cx,
+                &[0.01, 0.8],
+                |_, _| Ok::<_, Infallible>(40.0),
+            )
+            .unwrap();
+            let expected = 40.0 * (0.2 / 0.3) * -(-3.0_f64).exp_m1();
+            assert!((result.luminance_cd_m2 / expected - 1.0).abs() < 2.0e-14);
+            assert!(result.tolerance_met);
+            assert!(result.panels <= settings.max_panels);
+            assert!(result.evaluations < 4 * u64::from(settings.max_panels));
+            assert_eq!(result.omitted_multiple_scattering_bound_cd_m2, None);
+        });
+    }
+
+    #[test]
+    fn g1_declared_support_is_refined_and_one_panel_is_not_a_comparison() {
+        with_cx(|_, cx| {
+            let medium = HomogeneousMedium::try_new(0.05, 0.1, PhaseFunction::Isotropic).unwrap();
+            let settings = ScatterSettings {
+                initial_panels: 2,
+                max_panels: 128,
+                absolute_tolerance_cd_m2: 0.0,
+                relative_tolerance: 1.0e-12,
+            };
+            let field = |p: Point3, _: Vec3| {
+                Ok::<_, Infallible>(if (0.05..0.07).contains(&p.z) {
+                    100.0
+                } else {
+                    0.0
+                })
+            };
+            let result = single_scattered_luminance_partitioned(
+                &medium,
+                &ray(),
+                1.0,
+                settings,
+                cx,
+                &[0.05, 0.07],
+                field,
+            )
+            .unwrap();
+            let expected =
+                100.0 * (0.1 / 0.15) * (-0.15_f64 * 0.05).exp() * -(-0.15_f64 * 0.02).exp_m1();
+            assert!((result.luminance_cd_m2 / expected - 1.0).abs() < 2.0e-14);
+            assert!(result.tolerance_met);
+            let unrefined = single_scattered_luminance_partitioned(
+                &medium,
+                &ray(),
+                1.0,
+                ScatterSettings {
+                    initial_panels: 1,
+                    max_panels: 3,
+                    ..settings
+                },
+                cx,
+                &[0.05, 0.07],
+                field,
+            )
+            .unwrap();
+            assert_eq!(unrefined.panels, 3);
+            assert_eq!(unrefined.evaluations, 3);
+            assert_eq!(unrefined.estimated_quadrature_error_cd_m2, None);
+            assert!(!unrefined.tolerance_met);
+            for knots in [&[-0.1][..], &[1.0][..], &[0.2, 0.2][..], &[0.3, 0.2][..]] {
+                assert_eq!(
+                    single_scattered_luminance_partitioned(
+                        &medium,
+                        &ray(),
+                        1.0,
+                        settings,
+                        cx,
+                        knots,
+                        field,
+                    ),
+                    Err(ScatterError::Settings)
+                );
+            }
         });
     }
 

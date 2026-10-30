@@ -25,6 +25,8 @@ use fs_math::det;
 use crate::instances::RigidTransform;
 use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN, QUAD_BINS};
 
+mod ray_partition;
+
 /// Spectral bins shared with the existing spectral renderer.
 pub const SPECTRAL_BINS: usize = QUAD_BINS;
 /// Width of each spectral bin, in nanometres.
@@ -540,6 +542,103 @@ impl PhotometricSource {
             .world_to_local_rotation
             .transform_vector(unit(world_direction)?);
         Ok(self.emitted_flux_lm * self.distribution.intensity_per_steradian(local)?)
+    }
+
+    /// Split a camera segment at represented angular-profile boundaries.
+    /// Knots are sorted, exactly deduplicated fractions in `(0,1)`, shared
+    /// across fixtures. They guide quadrature but do not certify geometry,
+    /// resolve shadow boundaries, or bound phase/smooth-profile variation.
+    pub(crate) fn append_scattering_breakpoints(
+        &self,
+        ray: &crate::charts::Ray,
+        distance_m: f64,
+        max_panels: u32,
+        knots: &mut Vec<f64>,
+        cx: &fs_exec::Cx<'_>,
+    ) -> Result<(), super::PhotometryError> {
+        use super::PhotometryError;
+        use ray_partition::{KnotError, azimuth_crossing, cone_crossings, insert_knot};
+
+        cx.checkpoint()?;
+        if self.emitted_flux_lm == 0.0
+            || distance_m == 0.0
+            || matches!(&self.distribution.law, AngularLaw::Isotropic)
+            || matches!(&self.distribution.law, AngularLaw::Cone { cosine_cutoff } if *cosine_cutoff == -1.0)
+        {
+            return Ok(());
+        }
+        let limit = max_panels
+            .checked_sub(1)
+            .ok_or(PhotometryError::ScatteringPartitionBudgetExceeded { max_panels })?
+            as usize;
+        if knots.len() > limit {
+            return Err(PhotometryError::ScatteringPartitionBudgetExceeded { max_panels });
+        }
+        let offset = ray.origin.delta_from(self.position_m());
+        let scale = offset
+            .x
+            .abs()
+            .max(offset.y.abs())
+            .max(offset.z.abs())
+            .max(distance_m);
+        if !scale.is_finite() || scale <= 0.0 || !distance_m.is_finite() || distance_m < 0.0 {
+            return Err(PhotometryError::NonFiniteResult);
+        }
+        // Rotate after scaling: both the displacement and offset remain
+        // representable even for very large metric input coordinates.
+        let origin = self.world_to_local_rotation.transform_vector(Vec3::new(
+            offset.x / scale,
+            offset.y / scale,
+            offset.z / scale,
+        ));
+        let delta = self
+            .world_to_local_rotation
+            .transform_vector(ray.dir.scale(distance_m / scale));
+        let origin = [origin.x, origin.y, origin.z];
+        let delta = [delta.x, delta.y, delta.z];
+        if origin.iter().chain(&delta).any(|value| !value.is_finite()) {
+            return Err(PhotometryError::NonFiniteResult);
+        }
+        let mut insert = |value: f64| {
+            insert_knot(knots, value, limit).map_err(|error| match error {
+                KnotError::Budget => {
+                    PhotometryError::ScatteringPartitionBudgetExceeded { max_panels }
+                }
+                KnotError::Allocation => PhotometryError::AllocationRefused,
+            })
+        };
+        match &self.distribution.law {
+            AngularLaw::Isotropic => {}
+            AngularLaw::Cone { cosine_cutoff } | AngularLaw::CosinePower { cosine_cutoff, .. } => {
+                for root in cone_crossings(origin, delta, *cosine_cutoff)
+                    .into_iter()
+                    .flatten()
+                {
+                    insert(root)?;
+                }
+            }
+            AngularLaw::Table(table) => {
+                for cosine in &table.cosine[1..table.cosine.len() - 1] {
+                    cx.checkpoint()?;
+                    for root in cone_crossings(origin, delta, *cosine).into_iter().flatten() {
+                        insert(root)?;
+                    }
+                }
+                // A two-column seam table is axisymmetric. Otherwise include
+                // the 0/2pi seam once and retain only each actual azimuth ray.
+                if table.phi.len() > 2 {
+                    for phi in &table.phi[..table.phi.len() - 1] {
+                        cx.checkpoint()?;
+                        let (sine, cosine) = det::sin_cos(*phi);
+                        if let Some(root) = azimuth_crossing(origin, delta, sine, cosine) {
+                            insert(root)?;
+                        }
+                    }
+                }
+            }
+        }
+        cx.checkpoint()?;
+        Ok(())
     }
 
     /// Spectral radiant intensity in W/(sr nm). Use `I*cos(theta)/r²` for

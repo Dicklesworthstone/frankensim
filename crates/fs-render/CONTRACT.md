@@ -1698,14 +1698,37 @@ is not substituted for the physical transport distance.
 inverse-metre absorption/scattering and isotropic, HG or Rayleigh scattering.
 The single-scattering integrator analytically integrates camera-path extinction
 within midpoint panels and refines under an explicit panel budget. Its returned
-quadrature discrepancy is an estimate, never an enclosure; discontinuous shadows
-or narrow beams can remain unresolved. Omitted multiple scattering has no finite
-bound. Gray coefficients are an explicit wavelength-independent approximation.
+quadrature discrepancy is an estimate, never an enclosure. The scene image
+entry point partitions a camera segment at fixture cone/cosine cutoffs and
+tabulated polar/azimuth boundaries, including the azimuth seam. Intersections
+use the original rigid fixture frames and represented angular laws. Opposite
+cone nappes and azimuth half-planes are excluded by their geometric signs,
+retaining ambiguous zeros; distinct roots are never epsilon-merged. Each
+angular interval then receives its own midpoint refinements,
+so a narrow known beam cannot evade all sampling merely by lying between the
+original uniform grid's nodes.
+
+The intervals share `ScatterSettings::max_panels`, with at least one panel per
+interval and equal shares of the remaining capacity. Exceeding that capacity
+returns `ScatteringPartitionBudgetExceeded`; no angular interval is discarded.
+Total callback evaluations remain less than four times the total cap. A missing
+refinement comparison in any interval leaves the aggregate discrepancy unknown
+and `tolerance_met` false. Otherwise the discrepancy is the sum of transmitted
+interval discrepancies, checked against the requested global tolerance.
+Unpartitioned scenes retain the original integration arithmetic. Photometry
+semantics version 3 records this change.
+
+This partition is not a certified intersection or integration enclosure.
+Unresolved shadow boundaries, phase peaks, smooth within-cell variation and
+floating-point geometry can still defeat a refinement estimate. The public
+callback-only integrator has no fixture-profile metadata and retains its stated
+aliasing limitation. Omitted multiple scattering has no finite bound. Gray
+coefficients are an explicit wavelength-independent approximation.
 
 Source spectra use the published CIE 1931 2-degree observer (CIE dataset
 `10.25039/CIE.DS.xvudnb9b`) linearly interpolated at 80 five-nanometre midpoints
-over 380--780 nm, with the 683 lm/W photopic conversion. Photometry semantics
-version 2 and path semantics version 9 use this observer consistently for
+over 380--780 nm, with the 683 lm/W photopic conversion. Since photometry semantics
+version 2 and path semantics version 9, this observer is used consistently for
 source normalization, filtering, direct response, all path XYZ and probe area
 NEE. The legacy display renderer retains its analytic fit. The original CIE
 CSV, metadata, published checksum and separately licensed CC BY-SA 4.0 adapted
@@ -1772,8 +1795,10 @@ progressive replay tests remain in the photometry batteries.
 - `photometric_image::scattering_reference` compares three non-collinear
   fixtures with an independent angle-space airlight integral for isotropic,
   forward/backward HG and Rayleigh phases. It checks passive extinction and SI
-  scale covariance. A deliberately unresolved narrow cone demonstrates why a
-  zero refinement discrepancy is not an enclosure.
+  scale covariance. Independent narrow-cone, annular polar-profile and azimuth
+  seam integrals check angular partitioning and rigid-frame equivalence. A raw
+  callback counterexample retains the distinction between zero refinement
+  discrepancy and a genuine enclosure.
 - A conservative-scattering diffuse-cube furnace tests all-order radiance and
   energy balance at two path depths. Its acceptance tolerance does not provide
   a general bound on scattering-order truncation.

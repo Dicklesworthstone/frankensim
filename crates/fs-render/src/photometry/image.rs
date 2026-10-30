@@ -15,6 +15,7 @@ use fs_exec::Cx;
 
 use super::medium::{
     HomogeneousMedium, ScatterError, ScatterEstimate, ScatterSettings, single_scattered_luminance,
+    single_scattered_luminance_partitioned,
 };
 use super::source::{LUMINOUS_EFFICACY_LM_W, SPECTRAL_BINS, photopic_weight_nm, wavelength_nm};
 use super::transport::gray_transmittance;
@@ -102,6 +103,9 @@ impl PhotometricScene<'_> {
         medium: HomogeneousMedium,
     ) -> Result<LuminanceEstimate, PhotometryError> {
         cx.checkpoint()?;
+        if !scatter.is_valid() {
+            return Err(PhotometryError::InvalidScatterSettings);
+        }
         validate_camera_ray(self, ray, distance_m)?;
         let primary = self
             .geometry
@@ -113,6 +117,7 @@ impl PhotometricScene<'_> {
         // Point-source irradiance is singular at the source. Midpoint samples
         // can miss that singularity entirely, so admit the whole visible
         // camera segment before estimating its in-scattered radiance.
+        let mut scattering_knots = Vec::new();
         if medium.scattering_per_m() > 0.0 && limit > 0.0 {
             for (index, source) in self.sources.iter().enumerate() {
                 cx.checkpoint()?;
@@ -135,6 +140,13 @@ impl PhotometricScene<'_> {
                 if distance <= self.options.ray_epsilon_m {
                     return Err(PhotometryError::SourceTooClose { source: index });
                 }
+                source.append_scattering_breakpoints(
+                    ray,
+                    limit,
+                    scatter.max_panels,
+                    &mut scattering_knots,
+                    cx,
+                )?;
             }
         }
         let mut surface_sum = CompensatedSum::default();
@@ -191,12 +203,13 @@ impl PhotometricScene<'_> {
             }
         }
         let surface_cd_m2 = surface_sum.finish()? * medium.transmittance(limit)?;
-        let single_scatter = single_scattered_luminance(
+        let single_scatter = single_scattered_luminance_partitioned(
             &medium,
             ray,
             limit,
             scatter,
             cx,
+            &scattering_knots,
             |point, towards_camera| {
                 let mut incident = CompensatedSum::default();
                 for (index, source) in self.sources.iter().enumerate() {

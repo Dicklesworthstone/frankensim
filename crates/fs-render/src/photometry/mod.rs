@@ -40,9 +40,9 @@ use source::{PhotometricSource, SourceError};
 use transport::{PhotometricMedium, photopic_transmittance};
 
 /// Version of the calibrated transport model and output interpretation.
-/// Version 2 uses the published CIE 1931 2-degree observer at the existing
-/// spectral midpoints, replacing the display renderer's analytic fit.
-pub const PHOTOMETRY_SEMANTICS_VERSION: u32 = 2;
+/// Version 3 partitions homogeneous haze quadrature at declared fixture
+/// angular boundaries. Version 2's published CIE observer remains in use.
+pub const PHOTOMETRY_SEMANTICS_VERSION: u32 = 3;
 
 /// Explicit geometric and output budgets for an offline calculation.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -84,6 +84,12 @@ pub enum PhotometryError {
     InvalidCameraRay,
     /// Single-scattering quadrature settings are invalid.
     InvalidScatterSettings,
+    /// The declared fixture angular intervals need more panels than the
+    /// caller permits. No unresolved interval is silently discarded.
+    ScatteringPartitionBudgetExceeded {
+        /// Increase this total panel cap to admit the known angular intervals.
+        max_panels: u32,
+    },
     /// The output count exceeds the explicit job budget.
     OutputBudgetExceeded,
     /// Output storage could not be reserved.
