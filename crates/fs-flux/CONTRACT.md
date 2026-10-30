@@ -1141,3 +1141,48 @@ and inviscid: it does not add
 molecular species diffusion, flame-speed/thickness calibration, turbulence,
 moving boundaries, finite-rate chemistry in the 3-D field or experimental
 validation.
+
+### Volumetric evolving-species shock fields
+
+`compressible::spatial::mixture::MixtureEuler3d` advances the original canonical
+species partial densities, three Cartesian momenta and full referenced total
+energy on the physical 3-D grid. Density is their compensated species sum;
+local gas constant, heat capacity, pressure and sound speed follow the evolving
+original composition. Both transverse momenta participate in the same
+source-owned HLLC/HLL energy and admissibility checks as the normal momentum.
+
+The frozen and evolving-species 3-D fields now share the original volumetric
+topology, MC/common-theta six-face reconstruction, face traversal, combined
+numerical CFL, conservative divergence and RK boundary integration. The
+existing molecular field consumes that same conservative update. No second
+spatial shock solver or separate passive-scalar species transport is introduced.
+All axes use physical face areas and cell volumes; periodic endpoints reuse
+the exact stored flux. Source refusal contracts traces or retries the whole
+step, without clipping cell averages or renormalizing species.
+
+Flat accepted, stage, slope, face, primitive and boundary arrays are prepared
+once under an explicit checked byte budget and the shared 1 GiB ceiling.
+Excess capacity in the supplied state vector is included. Source-model storage
+and bounded stack scratch remain separate. Successful steps allocate no
+per-cell vectors. A final cancellation check precedes publication of field,
+clock, report and loads. Reports include species masses, three-axis momentum,
+energy and original per-face transfers; the physical-energy residual applies
+the source reference transform to differences rather than subtracting two
+large absolute formation-energy totals.
+
+Six focused G0/G1/G2/G3/G4 tests cover original 1-D shock equivalence on each
+axis, full two-dimensional extrusion, oblique species contact refinement,
+closed-wall species/energy/support impulse, complete workspace and last-poll
+cancellation/replay, and combined two-shear source refusal. The smooth contact
+L1 errors at 12³ and 24³ are 2.48975629e-3 and 5.64993110e-4 (observed order
+2.140). All twelve pre-existing volumetric Euler and molecular tests retain
+their results, including the previously reported contact and heat errors.
+
+The `mixture_shock_box_3d` example uses the original pinned nitrogen and oxygen
+NASA9 sources, a hot nitrogen-rich pocket in an oxygen-rich surrounding gas,
+and six reflecting walls. It writes all three velocities, temperature,
+pressure and both species fractions, and reports actual support impulse and
+species/physical-energy balances. This stationary inviscid species owner does
+not itself integrate chemistry or molecular species diffusion, preserve
+pressure exactly at moving unequal-caloric contacts, move the geometry, or
+establish an entropy/invariant-domain or experimental combustion claim.

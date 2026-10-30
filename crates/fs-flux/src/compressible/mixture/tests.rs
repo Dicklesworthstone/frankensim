@@ -28,7 +28,7 @@ const OPEN: AxisBoundaries = AxisBoundaries::Ends {
     upper: BoundaryCondition::Transmissive,
 };
 
-fn source(
+pub(crate) fn source(
     name: &str,
     mass: f64,
     cp: f64,
@@ -81,7 +81,7 @@ fn source(
     )
     .unwrap()
 }
-fn gas(models: Vec<Nasa9StandardStateModelV1>) -> MixtureGas {
+pub(crate) fn gas(models: Vec<Nasa9StandardStateModelV1>) -> MixtureGas {
     let ids: Vec<_> = models.iter().map(|model| model.species().clone()).collect();
     let bank = IdealGasEquilibriumV1::new(
         ElementalMatrix::new(
@@ -101,7 +101,7 @@ fn gas(models: Vec<Nasa9StandardStateModelV1>) -> MixtureGas {
     )
     .unwrap()
 }
-fn standard(linear: f64) -> MixtureGas {
+pub(crate) fn standard(linear: f64) -> MixtureGas {
     gas(vec![
         source("A", R, 3.5, 0.0, 30.0),
         source("B", 2.0 * R, 3.5, linear, -60.0),
@@ -122,7 +122,7 @@ fn field(
     let bytes = MixtureEuler2d::required_workspace_bytes(&gas, &grid).unwrap();
     MixtureEuler2d::new(gas, grid, states, boundaries, bytes, || false).unwrap()
 }
-fn close(actual: f64, expected: f64, tolerance: f64) {
+pub(crate) fn close(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() <= tolerance * (1.0 + expected.abs()),
         "{actual:e} != {expected:e}"
