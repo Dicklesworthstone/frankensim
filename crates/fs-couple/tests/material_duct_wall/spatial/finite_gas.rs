@@ -1,6 +1,8 @@
 //! Native finite gas storage, source transport and live duct/wall memory.
 #[path = "finite_gas/transport.rs"]
 mod transport;
+#[path = "finite_gas/molecular_heat.rs"]
+mod molecular_heat;
 use super::*;
 use fs_couple::bernoulli_aperture::wall::material::{
     FiniteGasDgBackground, FiniteGasDgError, FiniteGasDgLoss, FiniteGasDgSolve,

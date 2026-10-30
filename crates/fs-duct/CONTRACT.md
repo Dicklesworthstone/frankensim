@@ -1930,3 +1930,9 @@ Two new native tests pass: uniform parity and an independent Simpson integral
 with live fourth-order 4/8/16-step refinement, local chimney timing and terminal
 relative error below 2e-8. The same primitive state and retained molecular law
 remain the single source of density, frozen calorics and relaxation.
+
+## Original molecular source heat on a complete DG interval
+
+`DgDuct::prepare_molecular_heat` creates `DgMolecularHeat` from the original molecular reservoir slip squares and the complete native generator. Each row retains its source pressure projection, radial histories, reservoir rate and storage scale. `integrated_heat_j` observes the accepted initial state and the native held ports without advancing state or decomposing the rounded generator. The cache pins operator identity, interval and port ordering. It reuses `fs-phs::linear_exact::PreparedSourceLoss`; it does not estimate heat from endpoint power or assign a fraction of total acoustic loss.
+
+The source integral admits at most 128 complete native states and enforces explicit dimension, byte and work budgets. No pressure, velocity, gas, wall or memory coordinate is truncated. An absent molecular source returns exactly zero. Thermal wall conduction, viscous, structural and boundary losses are excluded from this channel. Source, identity, capacity and cancellation refusals preserve the original owners. `tests/molecular_heat.rs` adds independent physical-power quadrature with absent, uniform and spatial diffusion. Those new native regressions are pending execution: the authoring environment could not compile its unchanged pinned runtime dependency before shared memory and disk limits intervened.

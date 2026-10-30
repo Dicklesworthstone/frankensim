@@ -18,6 +18,7 @@ use fs_material::thermochemical_gas::energy::{GasEnergyError, GasEnergySolve};
 use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 use fs_material::thermochemical_gas::energy::parcel::composition::GasCompositionStep;
 use fs_matdb::QueryPoint;
+use fs_phs::linear_exact::DenseExponentialBudget;
 
 /// Select the original realized loss owner; this never introduces or drops memory.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -117,10 +118,18 @@ pub struct FiniteGasDgStep<S> {
     pub work_by_gas_j: f64,
     pub work_residual_j: f64,
     pub gas_energy_residual_j: f64,
-    /// Original unpartitioned acoustic/wall/boundary loss. It leaves this combined
-    /// accounting boundary; it is NOT automatically deposited into the gas.
+    /// Original total acoustic/wall/boundary decrement, unchanged and unclamped.
+    /// `molecular_heat_j` is its independently integrated internal transfer when
+    /// the source-positive heat path is selected.
     pub acoustic_dissipation_j: f64,
-    /// Measured gas + native storage + original loss - heat - enthalpy - port work.
+    /// Actual molecular slip-square integral deposited once into this finite gas.
+    /// Zero for the generic callback path, whose losses remain explicit exports.
+    pub molecular_heat_j: f64,
+    /// Total native decrement minus the internal molecular transfer. Other
+    /// gas/wall/boundary losses retain their existing exported-energy meaning.
+    /// Roundoff is left visible; no negative remainder is silently clipped.
+    pub exported_acoustic_dissipation_j: f64,
+    /// Measured gas + native storage + exported loss - heat - enthalpy - port work.
     pub combined_energy_residual_j: f64,
     pub trials: usize,
 }
@@ -208,12 +217,16 @@ pub(crate) fn admit_controls<E>(controls: FiniteGasDgSolve) -> Result<(), Finite
 fn prepare<S, E, C: FnMut() -> bool>(
     duct: &DgDuct, state: &DgState, propagator: &DgPropagator,
     gas: &ClosedGasParcel, ports: &[PortInput], controls: FiniteGasDgSolve,
+    molecular_heat_j: f64,
     mut evolve: impl FnMut(&ClosedGasParcel, f64, f64, &mut C)
         -> Result<FiniteGasDgBackground<S>, E>,
     cancelled: &mut C,
 ) -> Result<Candidate<S>, FiniteGasDgError<E>> {
     check(cancelled)?;
     admit_controls(controls)?;
+    if !molecular_heat_j.is_finite() || molecular_heat_j < 0.0 {
+        return Err(FiniteGasDgError::Invalid("molecular heat must be the finite nonnegative original source integral"));
+    }
     let [lo, hi] = controls.work_bracket_j;
     let original = duct.gas_field().ok_or(FiniteGasDgError::Invalid(
         "finite gas coupling requires an original complete source field",
@@ -239,6 +252,10 @@ fn prepare<S, E, C: FnMut() -> bool>(
     if !dissipation.is_finite() {
         return Err(FiniteGasDgError::Invalid("native acoustic loss increment is unrepresentable"));
     }
+    let exported_dissipation = dissipation - molecular_heat_j;
+    if molecular_heat_j > 0.0 && exported_dissipation < -controls.energy_tolerance_j {
+        return Err(FiniteGasDgError::Invalid("source molecular heat exceeds the native total decrement beyond its energy allowance"));
+    }
     check(cancelled)?;
     let maximum_work = lo.abs().max(hi.abs());
     let candidate = feedback::solve_scalar(
@@ -258,7 +275,7 @@ fn prepare<S, E, C: FnMut() -> bool>(
                 ));
             }
             let gas_change = stored_change(gas, &background.gas);
-            let gas_residual = ((gas_change + work) - background.supplied_heat_j)
+            let gas_residual = ((gas_change + work - molecular_heat_j) - background.supplied_heat_j)
                 - background.transported_enthalpy_j;
             if !gas_change.is_finite() || !gas_residual.is_finite()
                 || gas_residual.abs() > controls.energy_tolerance_j
@@ -278,7 +295,9 @@ fn prepare<S, E, C: FnMut() -> bool>(
                 transported_enthalpy_j: background.transported_enthalpy_j,
                 gas_energy_change_j: gas_change, work_by_gas_j: work,
                 work_residual_j: residual, gas_energy_residual_j: gas_residual,
-                acoustic_dissipation_j: dissipation, combined_energy_residual_j: 0.0, trials,
+                acoustic_dissipation_j: dissipation, molecular_heat_j,
+                exported_acoustic_dissipation_j: exported_dissipation,
+                combined_energy_residual_j: 0.0, trials,
             };
             Ok((Candidate {
                 duct: next_duct, state: next_state, propagator: next_propagator,
@@ -297,7 +316,7 @@ fn prepare<S, E, C: FnMut() -> bool>(
     let mut candidate = candidate;
     let residual = ((candidate.step.gas_energy_change_j
         + (candidate.state.stored_energy_j() - state.stored_energy_j())
-        + dissipation) - acoustic_step.ledger.port_work_step_j
+        + exported_dissipation) - acoustic_step.ledger.port_work_step_j
         - candidate.step.supplied_heat_j) - candidate.step.transported_enthalpy_j;
     if !residual.is_finite() || residual.abs() > controls.energy_tolerance_j {
         return Err(FiniteGasDgError::Invalid("independent gas plus wave/wall endpoint energy balance failed"));
@@ -334,6 +353,36 @@ pub(crate) fn heated<C: FnMut() -> bool>(
     Ok(FiniteGasDgBackground { gas, supplied_heat_j: heat_j, transported_enthalpy_j: 0.0, source })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn prepare_molecular_heated<C: FnMut() -> bool>(
+    duct: &DgDuct, state: &DgState, propagator: &DgPropagator,
+    gas: &ClosedGasParcel, ports: &[PortInput], external_heat_j: f64,
+    gas_solve: GasEnergySolve, controls: FiniteGasDgSolve,
+    heat_budget: DenseExponentialBudget, cancelled: &mut C,
+) -> Result<Candidate<GasCompositionStep>, FiniteGasDgError<GasEnergyError>> {
+    check(cancelled)?;
+    admit_controls(controls)?;
+    if !matches!(controls.loss, FiniteGasDgLoss::UniformMolecularDiffusion { .. }) {
+        return Err(FiniteGasDgError::Invalid("molecular heat requires the original molecular-diffusion refresh owner"));
+    }
+    // One source observation of the frozen acoustic sample, outside the
+    // nonlinear work stencil. It neither advances nor changes any accepted owner.
+    let channel = duct.prepare_molecular_heat(propagator, heat_budget, cancelled).map_err(native)?;
+    let molecular_heat_j = channel.integrated_heat_j(state, ports, cancelled).map_err(native)?;
+    let total_heat = external_heat_j + molecular_heat_j;
+    if !external_heat_j.is_finite() || !total_heat.is_finite() {
+        return Err(FiniteGasDgError::Invalid("external and molecular heat must have a finite sum"));
+    }
+    prepare(duct, state, propagator, gas, ports, controls, molecular_heat_j,
+        |old, _, work, cancel| {
+            let mut background = heated(old, total_heat, work, gas_solve, cancel)?;
+            // The original gas report retains ALL heat. The enclosing account
+            // keeps only the caller's heat external; molecular heat cancels once.
+            background.supplied_heat_j = external_heat_j;
+            Ok(background)
+        }, cancelled)
+}
+
 impl MaterialWallDg {
     /// Advance the native sample and a finite source gas atomically.
     ///
@@ -359,7 +408,7 @@ impl MaterialWallDg {
             -> Result<FiniteGasDgBackground<S>, E>,
         cancelled: &mut C,
     ) -> Result<FiniteGasDgStep<S>, FiniteGasDgError<E>> {
-        let candidate = prepare(&self.duct, state, propagator, gas, ports, controls, evolve, cancelled)?;
+        let candidate = prepare(&self.duct, state, propagator, gas, ports, controls, 0.0, evolve, cancelled)?;
         self.duct = candidate.duct;
         *state = candidate.state;
         *propagator = candidate.propagator;
@@ -378,6 +427,36 @@ impl MaterialWallDg {
         self.step_with_finite_gas_controlled(state, propagator, gas, ports, controls,
             |old, _, work, cancel| heated(old, heat_j, work, gas_solve, cancel), cancelled)
     }
+
+    /// Deposit the original DG molecular heat into its finite source gas once,
+    /// alongside caller-supplied heat and reciprocal acoustic parameter work.
+    ///
+    /// A source-positive cache integrates the COMPLETE frozen-medium native
+    /// trajectory under the actual held ports, before the work-feedback trials.
+    /// Gas heating uses the original NASA-9/EOS inversion; no heat store or time
+    /// integrator is added. The declared integration budget covers all native
+    /// wave, molecular and wall states (at most 128); no mode is discarded.
+    ///
+    /// Only `UniformMolecularDiffusion` is admitted. Thermal wall conduction,
+    /// viscous gas/wall loss, solid viscosity and boundary absorption remain
+    /// explicit exports. The same fixed-volume, well-mixed, fixed-composition,
+    /// first-order partition and temperature/energy admissions still apply.
+    /// A failure preserves the gas, duct, acoustic state and propagator together.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_finite_gas_molecular_heat_controlled<C: FnMut() -> bool>(
+        &mut self, state: &mut DgState, propagator: &mut DgPropagator,
+        gas: &mut ClosedGasParcel, ports: &[PortInput], heat_j: f64,
+        gas_solve: GasEnergySolve, controls: FiniteGasDgSolve,
+        heat_budget: DenseExponentialBudget, cancelled: &mut C,
+    ) -> Result<FiniteGasDgStep<GasCompositionStep>, FiniteGasDgError<GasEnergyError>> {
+        let candidate = prepare_molecular_heated(&self.duct, state, propagator, gas,
+            ports, heat_j, gas_solve, controls, heat_budget, cancelled)?;
+        self.duct = candidate.duct;
+        *state = candidate.state;
+        *propagator = candidate.propagator;
+        *gas = candidate.gas;
+        Ok(candidate.step)
+    }
 }
 
 impl RegionalMaterialWallDg {
@@ -391,7 +470,7 @@ impl RegionalMaterialWallDg {
             -> Result<FiniteGasDgBackground<S>, E>,
         cancelled: &mut C,
     ) -> Result<FiniteGasDgStep<S>, FiniteGasDgError<E>> {
-        let candidate = prepare(&self.duct, state, propagator, gas, ports, controls, evolve, cancelled)?;
+        let candidate = prepare(&self.duct, state, propagator, gas, ports, controls, 0.0, evolve, cancelled)?;
         self.duct = candidate.duct;
         *state = candidate.state;
         *propagator = candidate.propagator;
@@ -408,6 +487,24 @@ impl RegionalMaterialWallDg {
     ) -> Result<FiniteGasDgStep<GasCompositionStep>, FiniteGasDgError<GasEnergyError>> {
         self.step_with_finite_gas_controlled(state, propagator, gas, ports, controls,
             |old, _, work, cancel| heated(old, heat_j, work, gas_solve, cancel), cancelled)
+    }
+
+    /// The same molecular-heat transaction with every regional material source
+    /// and Kelvin/Maxwell history retained. See the homogeneous owner's method.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_finite_gas_molecular_heat_controlled<C: FnMut() -> bool>(
+        &mut self, state: &mut DgState, propagator: &mut DgPropagator,
+        gas: &mut ClosedGasParcel, ports: &[PortInput], heat_j: f64,
+        gas_solve: GasEnergySolve, controls: FiniteGasDgSolve,
+        heat_budget: DenseExponentialBudget, cancelled: &mut C,
+    ) -> Result<FiniteGasDgStep<GasCompositionStep>, FiniteGasDgError<GasEnergyError>> {
+        let candidate = prepare_molecular_heated(&self.duct, state, propagator, gas,
+            ports, heat_j, gas_solve, controls, heat_budget, cancelled)?;
+        self.duct = candidate.duct;
+        *state = candidate.state;
+        *propagator = candidate.propagator;
+        *gas = candidate.gas;
+        Ok(candidate.step)
     }
 }
 

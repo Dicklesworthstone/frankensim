@@ -41,6 +41,7 @@ use fs_material::relaxation::{RelaxationAbsorption, RelaxationState};
 
 mod field;
 mod update;
+pub(super) mod heat;
 
 #[derive(Clone, Debug)]
 pub(super) struct MolecularMemory {

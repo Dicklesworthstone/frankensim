@@ -189,6 +189,8 @@ pub enum DuctError {
         /// Axial position of the refusing point [m].
         x_m: f64,
     },
+    /// The source-positive molecular heat integral retained its original refusal.
+    MolecularHeatUnresolved { reason: fs_phs::PhsError },
 }
 
 impl core::fmt::Display for DuctError {
@@ -227,6 +229,8 @@ impl core::fmt::Display for DuctError {
             DuctError::NonTerrestrialAir(refusal) => write!(f, "FS-DUCT-NON-TERRESTRIAL-AIR: {refusal}"),
             DuctError::WallDiffusionUnresolved { reason, radius_m, x_m } => write!(f,
                 "FS-DUCT-WALL-DIFFUSION: at x = {x_m:.6e} m, radius {radius_m:.6e} m: {reason}"),
+            DuctError::MolecularHeatUnresolved { reason } => write!(f,
+                "FS-DUCT-MOLECULAR-HEAT: {reason}"),
         }
     }
 }

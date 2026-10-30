@@ -94,6 +94,7 @@ pub use side_ports::{DgSidePort, DgSidePortSource, MAX_DG_SIDE_PORTS};
 mod gas_update;
 pub use gas_update::DgGasMaterialUpdate;
 mod molecular;
+pub use molecular::heat::DgMolecularHeat;
 
 /// Maximum admitted nodal polynomial order $p$ per element.
 pub const MAX_DG_ORDER: usize = 8;

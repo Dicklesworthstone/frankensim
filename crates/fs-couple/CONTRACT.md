@@ -14465,3 +14465,11 @@ plan and three monitor checks compile the exact production owners with original
 numerical/cancellation kernels and explicit source/accepted-state containers.
 Four exact CLI parser checks and ten launcher tests also pass. These transport
 checks do not claim a full coupled-bank, thermal, BEM or violin WAV execution.
+
+## Molecular acoustic heat returns to the same finite source gas
+
+`MaterialWallDg` and `RegionalMaterialWallDg` expose `step_with_finite_gas_molecular_heat_controlled`. Before the scalar acoustic-work residual trials, the original DG trajectory supplies one independently integrated molecular source heat. The existing `ClosedGasParcel` caloric inversion receives external heat plus this internal transfer, while its reciprocal acoustic parameter work remains in the original coupled transaction. The accepted gas then refreshes the same source-derived acoustic operator and original material and molecular memories. Every residual trial starts from the committed owners; failure or late cancellation publishes none of them.
+
+`FiniteGasDgStep::molecular_heat_j` reports the internal source transfer. `exported_acoustic_dissipation_j` is the unchanged native total decrement minus that source integral; roundoff stays visible, and a molecular transfer exceeding the native decrement beyond the declared energy allowance refuses. The combined gas/wave/wall energy residual counts only exported loss and external heat. Generic callback and transport paths retain their previous explicit-export behavior with zero internal molecular transfer.
+
+This path requires the existing `UniformMolecularDiffusion` refresh owner, preserves uniform or spatial radial histories, and retains the fixed-volume, fixed-composition, well-mixed gas and first-order frozen-medium partition. The complete source integral is limited to 128 DG states. Wall heat conduction, viscosity and boundary absorption remain separate exports. The `material_duct_wall` molecular-heat cases cover continuing heating, regional Kelvin/Maxwell memories, independent accounting, source parity and all-owner rollback. New native test execution is pending the unchanged dependency/environment build blocker.
