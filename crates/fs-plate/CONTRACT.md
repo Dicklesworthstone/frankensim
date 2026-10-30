@@ -720,3 +720,14 @@ facades. They cover physical norms/plane stress, coherent phase, both layer
 faces, tensor order, curved varying directors with nonzero coupled A/B/D,
 polynomial reproduction/enclosure, cached-map storage and cold/warm refusal.
 This does not establish a complete Cargo workspace or whole-instrument result.
+
+`PreparedElementStrain::real_field` also observes an actual real displacement
+snapshot through the same cached map. `RealElementStrain::isotropic_layer_bound`
+uses the same plane-stress tensor, signed film faces and spatial convex hull;
+one real product and scaled Frobenius norm replace the two complex components
+and cycle maximization. Its work ceilings are 4,096 field units and 2,048 layer
+units. This bounds space at the supplied instant, including any retained mean
+displacement in the input, without asserting a bound between time endpoints or
+reconstructing missing prestress/cure strain. The original six focused tests and
+two new real-snapshot equivalence/refusal tests pass against the original
+numerical owners; a complete instrument render remains a separate check.
