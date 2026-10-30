@@ -135,10 +135,12 @@ impl FrameThermoelasticSystem<'_, '_> {
             &destinations, &routes, thermal, gate)?;
         drop(initial);
         trial.checkpoint(gate)?;
+        let previous_geometry = self.refresh_conductor_geometry(gate)?;
         // The callback has the original frame error type. Retain a typed source
         // error across that seam; never replace it with a fabricated fallback.
         let result = self.step_inner(thermal, external_modal_forces, electrical_input,
             Some(&trial), controls, energy_guess_j, gate);
+        if result.is_err() { self.restore_conductor_geometry(previous_geometry); }
         match result {
             Err(CircuitEnthalpyError::Invalid(SOURCE_REFUSAL)) => {
                 match trial.failure.into_inner() {

@@ -133,6 +133,7 @@ impl<'n, 'a> FrameThermoelasticSystem<'n, 'a> {
         check(gate)?;
         self.electrical = Some(super::Binding {
             circuit, destinations, contacts: Some(Binding { prepared, routes }), fields,
+            conductor_paths: Vec::new(), conductor_geometry: Vec::new(),
         });
         Ok(self)
     }

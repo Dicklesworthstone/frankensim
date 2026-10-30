@@ -12,7 +12,7 @@ use fs_couple::circuit_enthalpy::{
 use fs_couple::frame_vibration::{
     FrameVibrationBasis, FrameVibrationBudget, FrameVibrationComponent,
     thermal::{FrameLayerCell, FrameThermalSolve},
-    thermoelastic::{FrameElectricalInput, FrameThermoelasticSystem},
+    thermoelastic::{FrameConductorPath, FrameElectricalInput, FrameThermoelasticSystem},
 };
 use fs_couple::material_circuit::{MaterialCircuit, MaterialCircuitSolve};
 use fs_couple::modal_acoustic_time::{ModalAcousticState, ModalAcousticTimeBudget};
@@ -316,4 +316,88 @@ fn refusal_keeps_motion_charge_heat_and_clock_together_and_retry_matches_uninter
         (state(&owner), thermal.cells().clone(), owner.electrical().unwrap().clone(), thermal.time_s())
     });
     assert_eq!(run(false), run(true));
+}
+
+
+#[test]
+fn accepted_frame_geometry_drives_the_same_material_resistor() {
+    let s = Spec { alpha: 0.001, e_slope: -1.0, ..spec() };
+    fixture(s, false, true, |owner, mut thermal| {
+        let gate = CancelGate::new_clock_free();
+        let mut owner = owner.with_deforming_conductors(
+            vec![FrameConductorPath { branch: 0, member: 0, layer: 0 }], &gate,
+        ).unwrap();
+        let mut saw_axial_motion = false;
+        for _ in 0..24 {
+            let report = owner.step_electrical(
+                &mut thermal, &[0.0], input(&[1.0]), controls(), &[0.0], &gate,
+            ).unwrap();
+            let geometry = owner.electrical_conductor_geometry()[0];
+            let conductor = &report.electrical.as_ref().unwrap().resistors[0].material.conductor;
+            near(conductor.length_m(), geometry.length_m, 2e-12);
+            near(conductor.area_m2(), geometry.area_m2, 2e-12 * area());
+            near(geometry.length_m, 1.0 + geometry.axial_extension_m, 2e-12);
+            near(
+                geometry.area_m2,
+                area() * (1.0 + geometry.transverse_free_strain).powi(2),
+                2e-12 * area(),
+            );
+            let temperature = thermal.temperature_k(CELL).unwrap();
+            let resistivity = s.resistance * area() * (1.0 + s.beta * (temperature - 300.0));
+            near(
+                conductor.resistance_ohm(),
+                resistivity * geometry.length_m / geometry.area_m2,
+                2e-9,
+            );
+            saw_axial_motion |= geometry.axial_extension_m.abs() > 1e-8;
+        }
+        assert!(saw_axial_motion);
+    });
+}
+
+#[test]
+fn geometric_feedback_changes_heating_and_a_refusal_keeps_all_accepted_histories() {
+    fn run(deforming: bool) -> (f64, [f64; 2], f64) {
+        let s = Spec { alpha: 0.001, e_slope: -1.0, ..spec() };
+        fixture(s, false, true, |owner, mut thermal| {
+            let gate = CancelGate::new_clock_free();
+            let mut owner = if deforming {
+                owner.with_deforming_conductors(
+                    vec![FrameConductorPath { branch: 0, member: 0, layer: 0 }], &gate,
+                ).unwrap()
+            } else { owner };
+            for _ in 0..32 {
+                owner.step_electrical(
+                    &mut thermal, &[0.0], input(&[1.0]), controls(), &[0.0], &gate,
+                ).unwrap();
+            }
+            let before = owner.electrical().unwrap().clone();
+            let motion = state(&owner);
+            let cells = thermal.cells().clone();
+            let time = thermal.time_s();
+            let geometry = owner.electrical_conductor_geometry().to_vec();
+            if deforming {
+                let mut exhausted = controls();
+                exhausted.maximum_material_trials = 1;
+                assert!(owner.step_electrical(
+                    &mut thermal, &[0.0], input(&[1.0]), exhausted, &[0.0], &gate,
+                ).is_err());
+                assert_eq!(owner.electrical(), Some(&before));
+                assert_eq!(state(&owner), motion);
+                assert_eq!(thermal.cells(), &cells);
+                assert_eq!(thermal.time_s(), time);
+                assert_eq!(owner.electrical_conductor_geometry(), geometry.as_slice());
+            }
+            (
+                thermal.temperature_k(CELL).unwrap(),
+                state(&owner),
+                owner.electrical().unwrap().resistors()[0].conductor.resistance_ohm(),
+            )
+        })
+    }
+    let fixed = run(false);
+    let deformed = run(true);
+    assert!((fixed.0 - deformed.0).abs() > 1e-5);
+    assert!((fixed.1[0] - deformed.1[0]).abs() > 1e-9);
+    assert!((fixed.2 - deformed.2).abs() > 1e-6);
 }

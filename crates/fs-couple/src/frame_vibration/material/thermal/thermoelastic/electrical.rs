@@ -1,7 +1,9 @@
 //! Kirchhoff storage and frame materials on the original shared heat residual.
 mod contact;
 mod field;
+mod geometry;
 pub use field::FrameFieldStorageReport;
+pub use geometry::{FrameConductorGeometry, FrameConductorPath};
 pub(super) use field::prepare_fields;
 use crate::circuit_enthalpy::field_storage::{FieldThermalBinding, PreparedFieldThermal};
 
@@ -24,6 +26,8 @@ pub(super) struct Binding<'n, 'a> {
     pub(super) circuit: MaterialCircuit,
     destinations: BTreeMap<usize, CellId>,
     fields: Vec<FieldThermalBinding>,
+    pub(super) conductor_paths: Vec<geometry::BoundConductorPath>,
+    pub(super) conductor_geometry: Vec<FrameConductorGeometry>,
 }
 
 impl<'n, 'a> FrameThermoelasticSystem<'n, 'a> {
@@ -83,7 +87,8 @@ impl<'n, 'a> FrameThermoelasticSystem<'n, 'a> {
             (r.destination.branch, r.destination.cell)).collect();
         check(gate)?;
         self.prepared = prepared;
-        self.electrical = Some(Binding { circuit, destinations, contacts: None, fields });
+        self.electrical = Some(Binding { circuit, destinations, contacts: None, fields,
+            conductor_paths: Vec::new(), conductor_geometry: Vec::new() });
         Ok(self)
     }
 
@@ -110,7 +115,12 @@ impl<'n, 'a> FrameThermoelasticSystem<'n, 'a> {
         energy_guess_j: &[f64],
         gate: &CancelGate,
     ) -> Result<FrameThermoelasticReport> {
-        self.step_inner(thermal, external_modal_forces, Some(input), None, controls, energy_guess_j, gate)
+        let previous = self.refresh_conductor_geometry(gate)?;
+        let result = self.step_inner(
+            thermal, external_modal_forces, Some(input), None, controls, energy_guess_j, gate,
+        );
+        if result.is_err() { self.restore_conductor_geometry(previous); }
+        result
     }
 }
 
@@ -245,7 +255,10 @@ pub(super) fn advance_resolved(
     gate: &CancelGate,
 ) -> Result<ResolvedElectrical> {
     check(gate)?;
-    let crate::circuit_enthalpy::contacts::ContactThermalCoefficients { bulk, contacts } = coefficients;
+    let crate::circuit_enthalpy::contacts::ContactThermalCoefficients { mut bulk, contacts } = coefficients;
+    if let Some(binding) = binding {
+        geometry::apply(&binding.conductor_geometry, &mut bulk.resistors, gate)?;
+    }
     match (binding, input) {
         (Some(binding), Some(input)) =>
             field::advance(binding, input, fields, bulk, contacts, trial, dt, tolerance_j, gate),
@@ -274,9 +287,11 @@ pub(super) fn admit_heat_sources<S>(
     check(gate)?;
     match binding {
         Some(binding) => {
-            crate::circuit_enthalpy::field_storage::admit_circuit_sources(
-                &binding.circuit, &mut coefficients.bulk.resistors, &mut coefficients.contacts,
-                || gate.is_requested(),
+            geometry::admit_heat_resistors(
+                binding, &mut coefficients.bulk.resistors, gate,
+            )?;
+            crate::circuit_enthalpy::contacts::admit_sources(
+                &binding.circuit, &coefficients.contacts, || gate.is_requested(),
             )?;
             let map: BTreeMap<_, _> = destinations.iter().map(|r| (r.branch, r.cell)).collect();
             if map.len() != destinations.len() || map != binding.destinations {
