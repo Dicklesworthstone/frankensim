@@ -430,3 +430,247 @@ impl MagneticTsDriver {
 
 #[cfg(test)]
 mod tests;
+
+/// Bias-dependent small-signal analysis of the original reversible motor energy.
+pub mod resonance {
+    //! With i=(lambda-psi(x))/L(x), B=psi'(x), and C=B+i*L', the magnetic
+    //! Hessian is [1/L, -C/L; -C/L, C^2/L-i*B'-(i^2/2)*L'']. These cross
+    //! terms retain reciprocal back EMF, reluctance force and magnetic softening.
+    //! Freezing only Bl/Le in a replacement TS card would lose the bias curvature.
+    use super::{CoilStorage, MagneticTsDriver, Storage};
+    use fs_phs::harmonic::equilibrium::{
+        EquilibriumLinearization, EquilibriumPoint, LinearizationBudget, LinearizationError,
+    };
+
+    impl CoilStorage {
+        fn magnetic_curvature(&self, state: &[f64]) -> Option<[f64; 3]> {
+            if state.len()<3 || state.iter().any(|x|!x.is_finite()) {return None;}
+            let x=state[1];
+            let local=self.profile.sample(x).ok()?;
+            let scale=self.profile.displacement_scale_m;
+            let xi=x/scale;
+            let current=(state[0]-local.permanent_linkage_wb)/local.inductance_h;
+            let b_gradient=(self.profile.force_factor_tm[1]+2.0*xi*self.profile.force_factor_tm[2])/scale;
+            let l_curvature=(2.0*self.profile.inductance_h[2]/scale)/scale;
+            let coupled=local.force_factor_tm+current*local.inductance_gradient_h_per_m;
+            let q00=1.0/local.inductance_h;
+            let q01=-coupled/local.inductance_h;
+            let q11=(coupled/local.inductance_h)*coupled-current*b_gradient
+                -0.5*current*current*l_curvature;
+            let block=[q00,q01,q11];
+            if !current.is_finite() || block.iter().any(|x|!x.is_finite()) {None} else {Some(block)}
+        }
+
+        fn apply_curvature(&self, block:[f64;3], direction:&[f64], out:&mut[f64])->bool {
+            let n=direction.len();
+            if n<3 || out.len()!=n || n.checked_mul(n)!=Some(self.mechanical.matrix().len())
+                || direction.iter().any(|v|!v.is_finite()) {return false;}
+            self.mechanical.gradient(direction,out);
+            out[0]+=block[0]*direction[0]+block[1]*direction[1];
+            out[1]+=block[1]*direction[0]+block[2]*direction[1];
+            out.iter().all(|x|x.is_finite())
+        }
+    }
+
+    impl MagneticTsDriver {
+        /// Read-only accepted [total linkage, cone displacement, cone momentum,
+        /// optional panel displacement, optional panel momentum]. This is not
+        /// [current, displacement, velocity]. No accepted state is changed.
+        pub fn accepted_state(&self)->&[f64] {&self.x}
+
+        /// Small-signal resonances and responses at a resolved original equilibrium.
+        /// point.input is the held terminal voltage; state follows accepted_state().
+        /// The source's actual resistance (including an admitted thermal refresh),
+        /// complete mechanical storage, sealed cavity and panel coupling are retained.
+        /// This does not solve for the bias or reset the accepted driver trajectory.
+        ///
+        /// Displacement must be strictly inside the source profile interval for a
+        /// two-sided neighborhood. The original stationary equations must pass.
+        /// Negative incremental stiffness is retained, not repaired to stability.
+        /// Finite-amplitude harmonics, thermal perturbation dynamics, nonlinear
+        /// suspension, saturation and moving acoustic geometry are not supplied.
+        pub fn linearize_equilibrium(
+            &self, point:EquilibriumPoint<'_>, budget:LinearizationBudget,
+            mut cancelled:impl FnMut()->bool,
+        )->Result<EquilibriumLinearization,LinearizationError> {
+            if cancelled() {return Err(LinearizationError::Cancelled);}
+            let limits=self.profile.displacement_limits_m;
+            if point.state.len()!=self.phs.state_dim() || point.input.len()!=1
+                || !point.state[1].is_finite() || point.state[1]<=limits[0] || point.state[1]>=limits[1] {
+                return Err(LinearizationError::Invalid {
+                    what:"complete magnetic-driver coordinates and an interior profile displacement required",
+                });
+            }
+            let block=self.storage.magnetic_curvature(point.state).ok_or(LinearizationError::Invalid {
+                what:"original magnetic-energy curvature is not representable",
+            })?;
+            // One constitutive evaluation for all columns; source and point are immutable.
+            EquilibriumLinearization::from_descriptor(&self.phs,point,budget,
+                &|_,direction,out|self.storage.apply_curvature(block,direction,out),&mut cancelled)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use super::super::{PanelMode,TsCard,VoiceCoilMagnetics};
+        use fs_math::c64::C64;
+        use fs_phs::harmonic::{HarmonicBudget,HarmonicModel,PoleOptions};
+        use std::cell::Cell;
+
+        fn card()->TsCard {TsCard {re_ohm:0.8,le_h:0.6,bl:1.2,mms_kg:0.7,
+            cms_m_per_n:0.9,rms_n_s_m:0.1,sd_m2:0.001,x_max_m:0.1}}
+        fn profile(nonlinear:bool)->VoiceCoilMagnetics {
+            VoiceCoilMagnetics::new([-0.05,0.05],0.01,
+                if nonlinear {[1.2,-0.4,-0.2]} else {[1.2,0.,0.]},
+                if nonlinear {[0.6,0.15,0.08]} else {[0.6,0.,0.]},).unwrap()
+        }
+        fn budget()->LinearizationBudget {LinearizationBudget {
+            harmonic:HarmonicBudget {max_dimension:16,max_dense_bytes:2_000_000,
+                max_dense_work:10_000_000,relative_residual_tolerance:1e-11},max_hessian_actions:16,
+        }}
+        fn close(a:C64,b:C64,tol:f64) {assert!((a-b).abs()<tol*(1.+b.abs()),"{a:?} vs {b:?}");}
+
+        // Resolve a manufactured DC fixture from original static force and panel balance.
+        fn bias(driver:&MagneticTsDriver,displacement:f64)->(Vec<f64>,f64,f64) {
+            let n=driver.phs.state_dim();let q=driver.storage.mechanical.matrix();
+            let mut state=vec![0.;n];state[1]=displacement;
+            if driver.has_panel {state[3]=-q[3*n+1]*displacement/q[3*n+3];}
+            let force=(0..n).map(|j|q[n+j]*state[j]).sum::<f64>();
+            let local=driver.profile.sample(displacement).unwrap();
+            let disc=(local.force_factor_tm.powi(2)+2.*local.inductance_gradient_h_per_m*force).sqrt();
+            let current=2.*force/(local.force_factor_tm+disc);
+            state[0]=local.permanent_linkage_wb+local.inductance_h*current;
+            (state,driver.coil_resistance_ohm()*current,current)
+        }
+        fn snapshot(driver:&MagneticTsDriver,x:f64)->EquilibriumLinearization {
+            let (state,voltage,_)=bias(driver,x);
+            driver.linearize_equilibrium(EquilibriumPoint {state:&state,input:&[voltage],
+                balance_scales:&vec![1.;state.len()],relative_tolerance:1e-10},budget(),||false).unwrap()
+        }
+
+        #[test]
+        fn g1_original_energy_hessian_retains_reciprocal_and_curvature_terms() {
+            let driver=MagneticTsDriver::new(card(),None,None,profile(true)).unwrap();
+            for x in [-0.007,0.,0.009] {for current in [-0.2,0.,0.3] {
+                let local=driver.profile.sample(x).unwrap();
+                let state=[local.permanent_linkage_wb+local.inductance_h*current,x,0.1];
+                let block=driver.storage.magnetic_curvature(&state).unwrap();
+                for j in 0..3 {
+                    let mut direction=[0.;3];direction[j]=1.;let mut exact=[0.;3];
+                    assert!(driver.storage.apply_curvature(block,&direction,&mut exact));
+                    let h=if j==1 {1e-8} else {1e-7};
+                    let mut a=state;let mut b=state;a[j]+=h;b[j]-=h;
+                    let mut ga=[0.;3];let mut gb=[0.;3];
+                    driver.storage.gradient(&a,&mut ga);driver.storage.gradient(&b,&mut gb);
+                    for i in 0..3 {
+                        let difference=(ga[i]-gb[i])/(2.*h);
+                        assert!((difference-exact[i]).abs()<2e-7*(1.+exact[i].abs()));
+                    }
+                }
+            }}
+        }
+
+        #[test]
+        fn g1_bias_response_matches_independent_current_coordinate_electromechanics() {
+            let driver=MagneticTsDriver::new(card(),None,None,profile(true)).unwrap();
+            let mut sampled=Vec::new();
+            for x in [-0.005,0.,0.005] {
+                let (_,_,current)=bias(&driver,x);let local=driver.profile.sample(x).unwrap();
+                let scale=driver.profile.displacement_scale_m;let xi=x/scale;
+                let bp=(driver.profile.force_factor_tm[1]+2.*xi*driver.profile.force_factor_tm[2])/scale;
+                let lpp=2.*driver.profile.inductance_h[2]/(scale*scale);
+                let coupled=local.force_factor_tm+current*local.inductance_gradient_h_per_m;
+                let k=driver.storage.mechanical.matrix()[4]-current*bp-0.5*current*current*lpp;
+                let mass=driver.moving_mass_kg;let damping=driver.phs.structure().1[8];
+                let tangent=snapshot(&driver,x);
+                assert_eq!(tangent.equilibrium_state().len(),3);
+                assert!((tangent.equilibrium_output()[0]-current).abs()<1e-13);
+                for w in [0.3,1.,3.,10.] {
+                    let s=C64::new(0.,-w);let voltage=C64::new(0.2,-0.1);
+                    let mechanics=(s*s).scale(mass)+s.scale(damping)+C64::from_re(k);
+                    let z=s.scale(local.inductance_h)+C64::from_re(driver.coil_resistance_ohm());
+                    let denominator=z*mechanics+s.scale(coupled*coupled);
+                    let displacement=voltage.scale(coupled)/denominator;
+                    let amps=voltage*mechanics/denominator;
+                    let r=tangent.model().factor(w,||false).unwrap().response(&[voltage],||false).unwrap();
+                    close(r.state[0],amps.scale(local.inductance_h)+displacement.scale(coupled),1e-11);
+                    close(r.state[1],displacement,1e-11);
+                    close(r.state[2],s.scale(mass)*displacement,1e-11);
+                    close(r.output[0],amps,1e-11);
+                }
+                sampled.push(tangent.tangent_storage_matrix()[4]);
+            }
+            assert!((sampled[0]-sampled[1]).abs()>1e-3 && (sampled[2]-sampled[1]).abs()>1e-3);
+        }
+
+        #[test]
+        fn g1_all_three_biased_poles_match_independent_current_coordinate_generator() {
+            let driver=MagneticTsDriver::new(card(),None,None,profile(true)).unwrap();
+            for x in [-0.005,0.,0.005] {
+                let (_,_,current)=bias(&driver,x);let sample=driver.profile.sample(x).unwrap();
+                let length=driver.profile.displacement_scale_m;let xi=x/length;
+                let bp=(driver.profile.force_factor_tm[1]+2.*xi*driver.profile.force_factor_tm[2])/length;
+                let lpp=2.*driver.profile.inductance_h[2]/(length*length);
+                let coupled=sample.force_factor_tm+current*sample.inductance_gradient_h_per_m;
+                let k=driver.storage.mechanical.matrix()[4]-current*bp-0.5*current*current*lpp;
+                let mass=driver.moving_mass_kg;let loss=driver.phs.structure().1[8];
+                let r=driver.coil_resistance_ohm();let l=sample.inductance_h;
+                let a=[-r/l,0.,-coupled/l,0.,0.,1.,coupled/mass,-k/mass,-loss/mass].map(C64::from_re);
+                let reference=fs_la::eigen_complex::eig(&a,3).unwrap();let local=snapshot(&driver,x);
+                for s in reference {
+                    let amps=((s*s).scale(mass)+s.scale(loss)+C64::from_re(k)).scale(1./coupled);
+                    let seed=[amps.scale(l)+C64::from_re(coupled),C64::ONE,s.scale(mass)];
+                    let pole=local.model().resonance_pole(s,&seed,&PoleOptions {
+                        spectral_scale:5.,step_tolerance:1e-12,residual_tolerance:1e-12,max_iterations:32,
+                        max_dimension:16,max_dense_bytes:2_000_000,max_work:10_000_000,
+                    },||false).unwrap();
+                    close(pole.laplace_pole_per_s,s,1e-10);
+                    assert_eq!(pole.state.len(),3);
+                }
+            }
+        }
+
+        #[test]
+        fn g3_original_cavity_and_panel_couplings_are_retained_at_zero_bias() {
+            let panel=PanelMode {frequency_hz:2.,mass_kg:0.05,area_m2:0.001,damping_ratio:0.02};
+            let nonlinear=MagneticTsDriver::new(card(),Some(0.02),Some(panel),profile(true)).unwrap();
+            let constant=MagneticTsDriver::new(card(),Some(0.02),Some(panel),profile(false)).unwrap();
+            let tangent=snapshot(&nonlinear,0.);
+            let original=HarmonicModel::from_descriptor(&constant.phs,budget().harmonic,||false).unwrap();
+            assert_eq!(tangent.tangent_storage_matrix().len(),25);
+            assert!(tangent.tangent_storage_matrix()[1*5+3].abs()>0.);
+            for w in [0.5,2.,6.,12.] {
+                let a=tangent.model().factor(w,||false).unwrap().response(&[C64::ONE],||false).unwrap();
+                let b=original.factor(w,||false).unwrap().response(&[C64::ONE],||false).unwrap();
+                assert_eq!(a.state.len(),5);
+                for (&x,&y) in a.state.iter().zip(&b.state) {close(x,y,1e-11);}
+                close(a.output[0],b.output[0],1e-11);
+            }
+        }
+
+        #[test]
+        fn g0_g4_source_domain_equilibrium_and_late_cancellation_leave_driver_unchanged() {
+            let driver=MagneticTsDriver::new(card(),None,None,profile(true)).unwrap();
+            let before=driver.accepted_state().to_vec();let time=driver.time_s();
+            let (state,voltage,_)=bias(&driver,0.005);let input=[voltage];let scales=[1.;3];
+            let point=EquilibriumPoint {state:&state,input:&input,balance_scales:&scales,relative_tolerance:1e-10};
+            let polls=Cell::new(0);
+            let reference=driver.linearize_equilibrium(point,budget(),||{polls.set(polls.get()+1);false}).unwrap();
+            let total=polls.get();
+            for cut in [1,total/2,total] {
+                let count=Cell::new(0);
+                assert!(driver.linearize_equilibrium(point,budget(),||{count.set(count.get()+1);count.get()>=cut}).is_err());
+            }
+            let bad_input=[voltage+0.01];
+            assert!(driver.linearize_equilibrium(EquilibriumPoint{input:&bad_input,..point},budget(),||false).is_err());
+            for x in [-0.05,0.05,0.051] {
+                let mut bad=state.clone();bad[1]=x;
+                assert!(driver.linearize_equilibrium(EquilibriumPoint{state:&bad,..point},budget(),||false).is_err());
+            }
+            let replay=driver.linearize_equilibrium(point,budget(),||false).unwrap();
+            assert_eq!(reference.tangent_storage_matrix(),replay.tangent_storage_matrix());
+            assert_eq!(before.as_slice(),driver.accepted_state());assert_eq!(time,driver.time_s());
+        }
+    }
+}
