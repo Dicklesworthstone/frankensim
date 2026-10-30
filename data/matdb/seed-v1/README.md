@@ -4256,3 +4256,67 @@ separate spatial refinement at 2/4/8/16 cells from backward-Euler refinement at
 1/2/4/8 steps; a six-cell FSRI wall and material substitution exercise real source
 data in the distributed model. Full workspace Cargo validation remains blocked
 by seven missing sibling repositories.
+
+## Mineral caloric references, wood models and sparse thermal tangents (2026-10-29)
+
+This increment adds **8 source/model profiles, 8 property claims, 1,298 numerical
+response values and 29 provenance observations**: five NIST mineral references
+(643 values, 20 observations) and three USDA wood models (655 values, 9
+observations). Sampled correlation values are not independent experiments.
+
+| Profile | Claims | Source-supported additions |
+| --- | ---: | --- |
+| [Alpha quartz](quartz-alpha-nist-shomate-caloric/manifest.tsv) | 1 | Mass-based Cp, first solid branch, 298–847 K |
+| [Alpha alumina](alumina-alpha-nist-shomate-caloric/manifest.tsv) | 1 | Mass-based Cp, alpha phase, 298–2327 K |
+| [Solid magnesium oxide](magnesium-oxide-solid-nist-shomate-caloric/manifest.tsv) | 1 | Mass-based Cp, source solid phase, 298–3105 K |
+| [Rutile](rutile-nist-shomate-caloric/manifest.tsv) | 1 | Mass-based Cp, rutile phase, 298–2000 K |
+| [Hematite](hematite-nist-shomate-caloric/manifest.tsv) | 1 | Mass-based Cp, first solid branch, 298–950 K |
+| [General dry wood](wood-dry-heat-capacity-fpl-gtr282-model/manifest.tsv) | 1 | Empirical Cp(T), 280–420 K, per kilogram of oven-dry wood |
+| [General moist wood](wood-moist-heat-capacity-fpl-gtr282-model/manifest.tsv) | 1 | Empirical Cp(T, moisture), 280–420 K, 0–20% dry-basis moisture |
+| [Wood across the grain](wood-cross-grain-conductivity-fpl-gtr282-model/manifest.tsv) | 1 | Empirical k(specific gravity, moisture), nominal 297.15 K only |
+
+The NIST WebBook Shomate equations use their published molecular weights to
+convert molar Cp to J/(kg K). Each profile retains its selected solid phase and
+first admitted branch. Quartz's 847 K and hematite's 950 K endpoints belong to
+the lower branch; adjacent branches, other alumina polymorphs and liquid states
+are excluded. The one-bar JANAF standard state is a thermodynamic reference,
+not an attributed experimental specimen pressure. These caloric references
+support fixed-mass sensible heating, energy, entropy and temperature inversion;
+they do not supply density, conductivity, latent heat or specimen qualification.
+
+The [USDA Wood Handbook, Chapter 4](https://research.fs.usda.gov/download/treesearch/62243.pdf)
+models preserve Equations 4–17 through 4–20. Temperature in the capacity
+formulas is kelvin; moisture is water mass divided by oven-dry wood mass, with
+the source percentage equal to 100 times that ratio. Moist Cp is per kilogram
+of total wood plus retained water, so fixed-moisture storage uses the supplied
+moist mass. Its 0–20% domain is an authored subset that still requires an
+explicit below-fiber-saturation condition. The two capacity profiles are general
+empirical models, not measured species cards or drying/sorption-transfer laws.
+
+Cross-grain conductivity admits specific gravity 0.31–0.78 and dry-basis
+moisture 0–24%, satisfying the source's Gx > 0.3 and moisture < 25% conditions.
+Gx uses oven-dry mass and volume at the current moisture content. Only nominal
+24 C is admitted; no temperature interval or longitudinal/isotropic law is
+inferred. The two authored triangulated surfaces retain their model identity;
+finite interpolation checks below 0.06 percent do not certify continuous error
+or replace the source's unstated empirical uncertainty. No missing density or
+thermal property is invented.
+
+`thermal::transport::stack::transient::implicit::LayeredThermalStep` now attaches
+an exact sparse linearization to the original `BackwardEulerStep` energy
+residual: `J = I - dt (dQ/dT) diag(1/C)`. Original material capacities and
+conductivity/contact derivatives produce three diagonals, with O(cells) storage
+and work after flux evaluation. Forward, transpose and Jacobi inverse-diagonal
+actions allocate nothing and preserve outputs on refusal or cancellation.
+The original trial still owns residuals, sensible entropy and local/total energy
+acceptance; this adds no time integrator or nonlinear solver.
+
+All **10 focused native tests pass: three mineral, three wood and four implicit
+tangent tests**. They cover the actual compiler, independent source equations,
+phase/context/domain refusals, fixed-moisture storage, analytic and nonlinear
+Jacobian checks, transpose identities and cancellation. A test-local Newton
+iteration using the existing prepared LU converges for a real six-cell FSRI
+wall at a 3,000-second implicit step and passes original acceptance; that is
+algebraic convergence evidence, not a time-discretization accuracy claim.
+Full workspace Cargo validation remains blocked by seven missing sibling
+repositories.

@@ -972,3 +972,49 @@ derivatives, a real six-cell FSRI wall with material substitution, source
 reductions, heating, refusal and cancellation cases also pass. Full workspace
 Cargo validation remains blocked by seven required sibling repositories;
 these are bounded compiler and production-model results.
+
+## 2026-10-29 mineral, wood-model and sparse thermal-tangent increment
+
+Added **8 source/model profiles / 8 property claims / 1,298 numerical response
+values / 29 provenance observations**. Five NIST mineral Cp references contribute
+643 values and 20 observations; three USDA wood thermal models contribute 655
+values and 9 observations. Exact manifests and supported responses are in the
+[seed catalog](../data/matdb/seed-v1/README.md#mineral-caloric-references-wood-models-and-sparse-thermal-tangents-2026-10-29).
+
+The admitted mineral ranges are alpha quartz 298–847 K, alpha alumina
+298–2327 K, solid MgO 298–3105 K, rutile 298–2000 K and hematite 298–950 K.
+Published molecular weights convert the selected NIST molar Shomate Cp fits to
+mass-based capacity. First-branch endpoints, phase identity and the one-bar
+standard-state reference remain explicit; the reference pressure is not a
+measured specimen pressure. Other polymorphs, later branches, liquid states,
+latent heat, missing density/conductivity and specimen qualification are not
+inferred. The references reach production fixed-mass heating, sensible entropy
+and temperature inversion without those additional properties.
+
+USDA dry and moist Cp models span 280–420 K. Moisture is the water-to-oven-dry
+wood mass ratio; the stored 0–0.20 interval corresponds to 0–20% dry-basis
+moisture and still requires below-fiber-saturation and fixed-moisture conditions.
+Dry Cp uses dry mass; moist Cp uses total retained wood-plus-water mass. These
+are reusable empirical models, with sampled equation evaluations rather than
+independent measured species observations. Cross-grain k is restricted to
+nominal 297.15 K, specific gravity 0.31–0.78 and moisture ratio 0–0.24; its
+specific gravity uses oven-dry mass and current-moisture volume. No drying,
+sorption-transfer, density, isotropy or finite-temperature conductivity law is
+supplied. Finite triangulation checks below 0.06 percent remain numerical
+comparisons, separate from continuous certification and empirical uncertainty.
+
+`LayeredThermalStep` supplies the exact sparse Jacobian of the existing layered
+body's energy residual, including the original capacity and conductivity/contact
+derivatives. Three diagonals support O(cells) forward, transpose and Jacobi
+inverse-diagonal actions after flux evaluation, without allocation in those
+actions. Bound source context, original residuals, energy/entropy acceptance,
+and cancellation semantics remain with the existing thermal owners. No separate
+time integrator or production nonlinear solver is introduced.
+
+All **10 focused native tests pass (3 mineral + 3 wood + 4 core)**, covering
+source equations, physical storage, domain/basis refusals, nonlinear tangents,
+transpose actions and cancellation. The test-local Newton iteration uses the
+existing prepared LU and reaches original acceptance for a six-cell FSRI wall
+at a 3,000-second step; this demonstrates algebraic convergence at that step,
+not temporal accuracy. Full workspace Cargo validation remains blocked by
+seven required sibling repositories.

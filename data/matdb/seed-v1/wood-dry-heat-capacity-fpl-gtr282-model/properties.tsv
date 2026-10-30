@@ -1,0 +1,16 @@
+frankensim.matdb-source.v3
+observation	fpl-context	USDA general oven-dry wood heat-capacity model	Source population, moisture convention and scope	General wood engineering correlation from Chapter 4, not a measured species, product or specimen card. The handbook describes specific heat as practically independent of density and species; no species qualification or source pressure is supplied. Moisture content is x=100*m_water/m_oven_dry_wood (Equations 4-1 and 4-2); the admitted moisture axis is the dimensionless dry-basis mass ratio m=x/100, not wet-mass fraction or relative humidity. The source states validity below fiber saturation from 280 to 420 K. Fiber saturation varies with species and specimen; no universal 30 percent boundary is inferred. A fixed-moisture sensible-capacity interpretation is explicit; there is no drying, moisture transport, latent heat, sorption transfer, density or species-specific thermal law. This profile is oven-dry wood at m=0, and capacity is per kilogram of oven-dry wood.
+observation	fpl-equation	USDA general oven-dry wood heat-capacity model	Handbook Equation 4-18a, printed page 4-14	c_p0=0.1031+0.003867*T, with T in kelvin and c_p0 in kJ/(kg K); stored values multiply by 1000 to give J/(kg K). The Celsius or Fahrenheit numerical temperature must not be used as the SI argument. This is an approximate empirical source equation; uncertainty is unstated.
+observation	model-evaluation	USDA general oven-dry wood heat-capacity model	Two authored evaluations of the source equation	The two endpoint samples at 280 and 420 K use 70-digit decimal arithmetic. Linear interpolation reproduces this affine-in-temperature source equation, subject to floating-point rounding. These samples are evaluations of one published correlation, not two independently measured observations. No statistical sample count or confidence interval is inferred.
+curve	thermal-response	fpl-context,fpl-equation,model-evaluation	response	temperature	K	J/kg/K	280:1185.860000,420:1727.240000	linear
+uncertainty	thermal-response	unstated	-	-	-	-
+validity	thermal-response	temperature	280	420	K
+validity	thermal-response	moisture	0	0	1
+validity	thermal-response	reference	1	1	1
+validity	thermal-response	family	1	1	1
+validity	thermal-response	species	0	0	1
+validity	thermal-response	pressure	0	0	1
+validity	thermal-response	drybasis	1	1	1
+validity	thermal-response	belowfsp	1	1	1
+validity	thermal-response	fixedmoisture	1	1	1
+validity	thermal-response	massbasis	0	0	1

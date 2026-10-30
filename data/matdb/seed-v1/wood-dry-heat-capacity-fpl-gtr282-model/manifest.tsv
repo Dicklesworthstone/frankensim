@@ -1,0 +1,17 @@
+frankensim.matdb-manifest.v9
+pack_id	wood-dry-heat-capacity-fpl-gtr282-model
+redistribution	permitted	United States Government work (USDA Forest Service Forest Products Laboratory); public domain in the United States; retain attribution, chapter, equation numbers and source URL
+citation	Samuel V. Glass and Samuel L. Zelinka (2021), Moisture Relations and Physical Properties of Wood, Chapter 4 in Wood Handbook - Wood as an Engineering Material, FPL-GTR-282; https://research.fs.usda.gov/download/treesearch/62243.pdf; USDA Treesearch 62243; accessed 2026-10-30.
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	fpl-wood-model	properties.tsv	material-tsv-v1
+property	response	specific-heat-capacity	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	moisture	moisture-content-dry-basis	dimensional
+axis	reference	engineering-reference-model	dimensional
+axis	family	source-family-fpl-wood-thermal-model	dimensional
+axis	species	source-species-qualified	dimensional
+axis	pressure	source-pressure-known	dimensional
+axis	drybasis	source-moisture-basis-dry-mass	dimensional
+axis	belowfsp	source-below-fiber-saturation	dimensional
+axis	fixedmoisture	fixed-moisture-state	dimensional
+axis	massbasis	capacity-mass-basis-total-moist-mass	dimensional
